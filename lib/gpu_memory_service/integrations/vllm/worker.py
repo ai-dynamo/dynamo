@@ -271,10 +271,32 @@ class GMSWorker(Worker):
         if is_scratch_kv_enabled():
             # Client-local scratch only — no GMS server session at init.
             # wake_up will connect RW and allocate fresh server backing.
-            get_or_create_scratch_manager(socket, device, tag="kv_cache")
+            scratch_mgr = get_or_create_scratch_manager(socket, device, tag="kv_cache")
             # The scratch pool is scoped to the KV tensors by
             # patch_kv_cache_pool_scope(), not the whole initialize_kv_cache.
             self.model_runner.initialize_kv_cache(kv_cache_config)
+            # Visible summary of scratch engagement (GMS worker logs are routed
+            # through vLLM's handler by configure_gms_worker_logging()).
+            n_scratch, virtual_bytes, physical_bytes = scratch_mgr.scratch_summary()
+            logger.info(
+                "[GMS] Scratch-KV engaged: %d allocations, %.2f GiB virtual "
+                "reserved, %.2f GiB physical backing on device %d",
+                n_scratch,
+                virtual_bytes / (1 << 30),
+                physical_bytes / (1 << 30),
+                device,
+            )
+            # Fail closed: KV tensors expected but none scratch-aliased means the
+            # shadow fully backed its KV (defeats colocation, risks ~2x KV OOM).
+            # kv_cache_tensors is the list _allocate_kv_cache iterates to emit the
+            # torch.zeros, so it is the direct signal that KV backing was expected.
+            if n_scratch == 0 and kv_cache_config.kv_cache_tensors:
+                raise RuntimeError(
+                    "[GMS] Scratch-KV enabled but no KV allocation was routed "
+                    "through scratch; the shadow would fully back its KV cache. "
+                    "Check that initialize_kv_cache allocates under "
+                    "gms_use_mem_pool."
+                )
         elif self.vllm_config.model_config.enable_sleep_mode:
             get_or_create_gms_client_memory_manager(
                 socket,

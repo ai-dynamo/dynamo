@@ -685,9 +685,10 @@ mod tests {
     #[tokio::test]
     async fn replica_dispatch_rejects_self_and_requires_matching_registered_worker() {
         let (outbound_tx, _outbound_rx) = mpsc::channel(1);
+        let cancel_token = CancellationToken::new();
         let registry = SlotTrackerRegistry::new_with_replica_sync(
-            CancellationToken::new(),
-            ReplicaSyncConfig::new(7, outbound_tx),
+            cancel_token.clone(),
+            ReplicaSyncConfig::new(7, outbound_tx, cancel_token),
         );
         let key = key("default");
         registry.register(key.clone(), 1, 16, 0, 1).unwrap();

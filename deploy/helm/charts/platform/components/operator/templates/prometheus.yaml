@@ -75,6 +75,36 @@ spec:
       sourceLabels:
       - __meta_kubernetes_pod_label_nvidia_com_dynamo_component_type
       targetLabel: dynamo_component_type
+  # Intra-pod GMS shadow-failover packs two engines into one pod, so each engine's
+  # system port is renamed system-<engineID> (system-0, system-1) to avoid a clash
+  # (see deploy/operator/internal/dynamo/failover.go). The default `system` endpoint
+  # above never matches those, so scrape them explicitly. On non-failover pods these
+  # named ports don't exist, so no extra targets are generated.
+  - interval: 5s
+    path: /metrics
+    port: system-0
+    relabelings:
+    - action: replace
+      sourceLabels:
+      - __meta_kubernetes_pod_label_nvidia_com_dynamo_component_type
+      targetLabel: dynamo_component_type
+    # Expose the DGD name so the failover dashboard can select among deployments.
+    - action: replace
+      sourceLabels:
+      - __meta_kubernetes_pod_label_nvidia_com_dynamo_graph_deployment_name
+      targetLabel: dynamo_graph_deployment
+  - interval: 5s
+    path: /metrics
+    port: system-1
+    relabelings:
+    - action: replace
+      sourceLabels:
+      - __meta_kubernetes_pod_label_nvidia_com_dynamo_component_type
+      targetLabel: dynamo_component_type
+    - action: replace
+      sourceLabels:
+      - __meta_kubernetes_pod_label_nvidia_com_dynamo_graph_deployment_name
+      targetLabel: dynamo_graph_deployment
 {{- if .Values.dynamo.metrics.podMonitors.nixlTelemetry }}
   - interval: 5s
     path: /metrics

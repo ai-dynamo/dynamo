@@ -1,8 +1,9 @@
+import { SiteStyles } from "./SiteStyles";
+
 /**
- * Custom footer for HEAVY.AI docs (Fern native header/footer).
- * Markup and class names match the original custom-app footer 1:1 so that
- * fern/docs/main.css (footer + Built with Fern styles) applies correctly:
- * dark mode logo, responsive layout, and Built with Fern tooltip.
+ * Custom footer for Dynamo docs (Fern native header/footer).
+ * Site chrome CSS loads via SiteStyles (not docs.yml `css:`) so the NVIDIA
+ * global theme is not overwritten at publish.
  */
 export default function CustomFooter() {
   const currentYear = new Date().getFullYear();
@@ -10,7 +11,9 @@ export default function CustomFooter() {
     "https://fern-image-hosting.s3.us-east-1.amazonaws.com/nvidia/NVIDIA_Logo_0.svg";
 
   return (
-    <footer className="bd-footer">
+    <>
+      <SiteStyles />
+      <footer className="bd-footer">
       <div className="bd-footer__inner">
         <div className="footer-items__start">
           <div className="footer-item">
@@ -84,6 +87,7 @@ export default function CustomFooter() {
           </div>
         </div>
       </div>
-    </footer>
+      </footer>
+    </>
   );
 }
