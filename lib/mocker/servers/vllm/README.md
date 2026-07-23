@@ -71,9 +71,10 @@ cargo run -p dynamo-vllm-sidecar --bin dynamo-vllm-sidecar -- \
 ```
 
 The prefill endpoint returns an opaque vLLM-shaped `kv_transfer_params`
-payload, and the decode endpoint validates that the sidecar forwarded it. No
-NIXL connection or KV data movement occurs; this mode tests the sidecar and
-Dynamo handoff wire-flow only.
+payload, and the decode endpoint validates that the sidecar forwarded it
+verbatim — including a non-rendezvous sentinel field, so a dropped opaque field
+fails the round trip. No NIXL connection or KV data movement occurs; this mode
+tests the sidecar and Dynamo handoff wire-flow only.
 
 ## Deliberate limitations
 
@@ -81,6 +82,10 @@ Dynamo handoff wire-flow only.
 - Deterministic placeholder text, token IDs, and synthetic logprobs rather
   than vLLM sampling.
 - One output sequence (`n <= 1`).
+- At most 20 logprob candidates per token; larger top-N, explicit token-ID, or
+  "all" candidate requests are truncated to 20 rather than returning the full
+  set. (vLLM's default `max_logprobs` is also 20, but rejects over-limit
+  requests instead of truncating.)
 - Length termination only; stop strings, EOS, and structured decoding are
   accepted on the wire but are not simulated.
 - Prefix-cache bypass and cache-salt controls are rejected because the Mocker

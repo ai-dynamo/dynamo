@@ -31,6 +31,12 @@ pub(super) const DECODE_RENDEZVOUS_FIELDS: [&str; 4] = [
     "remote_block_ids",
 ];
 
+/// Non-rendezvous field the prefill role stamps into every handoff. The decode
+/// role explicitly requires it so the disaggregated round trip fails loudly if
+/// the sidecar ever drops opaque KV-transfer fields instead of forwarding the
+/// payload verbatim.
+pub(super) const HANDOFF_SENTINEL_FIELD: &str = "mocker_request_id";
+
 pub(super) trait SequenceOutputExt {
     fn with_total_output_tokens(self, count: usize) -> Self;
 }
@@ -288,7 +294,7 @@ impl PreparedRequest {
         }
     }
 
-    fn handoff(&self) -> Struct {
+    pub(super) fn handoff(&self) -> Struct {
         let remote_block_ids = self
             .prompt_tokens
             .chunks(64)
@@ -316,7 +322,7 @@ impl PreparedRequest {
                     },
                 ),
                 (
-                    "mocker_request_id".to_string(),
+                    HANDOFF_SENTINEL_FIELD.to_string(),
                     string_value(self.request_id.clone()),
                 ),
             ]),
@@ -354,6 +360,10 @@ impl KvTransferRole {
                 require_string(params, "remote_host")?;
                 require_port(params, "remote_port")?;
                 require_block_ids(params, "remote_block_ids")?;
+                // The prefill role always stamps this opaque sentinel; requiring
+                // it here proves the sidecar forwarded the handoff verbatim
+                // rather than silently dropping non-rendezvous fields.
+                require_string(params, HANDOFF_SENTINEL_FIELD)?;
                 Ok(Self::Decode)
             }
             _ => {
@@ -389,8 +399,9 @@ fn synthetic_token_seed(seed: u64, request_id: &str) -> u64 {
     let mut hasher = blake3::Hasher::new();
     hasher.update(&seed.to_le_bytes());
     hasher.update(request_id.as_bytes());
-    let bytes = hasher.finalize();
-    u64::from_le_bytes(bytes.as_bytes()[..8].try_into().unwrap())
+    let mut seed_bytes = [0u8; 8];
+    seed_bytes.copy_from_slice(&hasher.finalize().as_bytes()[..8]);
+    u64::from_le_bytes(seed_bytes)
 }
 
 fn deterministic_token_id(seed: u64, position: usize) -> u32 {

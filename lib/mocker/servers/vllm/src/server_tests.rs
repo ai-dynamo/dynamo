@@ -3,8 +3,22 @@
 
 use super::request::*;
 use super::*;
+use futures::StreamExt;
 use prost_types::Struct;
 use std::collections::BTreeMap;
+
+/// Engine arguments with ample capacity and instant simulated timing, for
+/// tests that need requests to be admitted and run to completion quickly.
+fn admitting_args() -> MockEngineArgs {
+    MockEngineArgs::builder()
+        .block_size(4)
+        .num_gpu_blocks(4096)
+        .max_num_seqs(Some(64))
+        .max_num_batched_tokens(Some(1024))
+        .speedup_ratio(0.0)
+        .build()
+        .unwrap()
+}
 
 fn request(id: &str) -> pb::GenerateRequest {
     pb::GenerateRequest {
@@ -254,4 +268,151 @@ async fn concurrent_request_limit_rejects_a_stalled_stream() {
     assert_eq!(error.code(), tonic::Code::ResourceExhausted);
     drop(queued);
     drop(first);
+}
+
+#[test]
+fn decode_rejects_a_handoff_missing_the_opacity_sentinel() {
+    // A decode payload carrying every rendezvous field but missing the
+    // non-rendezvous sentinel emulates a sidecar that failed to forward the
+    // opaque handoff verbatim; the decode role must reject it.
+    let prefill_config = MockerServerConfig {
+        mode: ServerMode::Prefill,
+        ..Default::default()
+    };
+    let mut prefill_request = request("sentinel-source");
+    prefill_request.kv = Some(pb::KvCacheParameters {
+        kv_transfer_params: Some(Struct {
+            fields: BTreeMap::from([("do_remote_decode".to_string(), bool_value(true))]),
+        }),
+        ..Default::default()
+    });
+    let prepared = PreparedRequest::new(prefill_request, &prefill_config).unwrap();
+    let mut handoff = prepared.handoff();
+    assert!(
+        handoff.fields.remove(HANDOFF_SENTINEL_FIELD).is_some(),
+        "prefill handoff should stamp the opacity sentinel"
+    );
+
+    let mut decode_request = request("dropped-sentinel");
+    decode_request.kv = Some(pb::KvCacheParameters {
+        kv_transfer_params: Some(handoff),
+        ..Default::default()
+    });
+    let decode_config = MockerServerConfig {
+        mode: ServerMode::Decode,
+        ..Default::default()
+    };
+    let error = PreparedRequest::new(decode_request, &decode_config).unwrap_err();
+    assert_eq!(error.code(), tonic::Code::InvalidArgument);
+    assert!(error.message().contains(HANDOFF_SENTINEL_FIELD));
+}
+
+#[tokio::test]
+async fn unary_generate_accumulates_output_and_terminal_metadata() {
+    let service = VllmMockerService::new(MockerServerConfig::default(), admitting_args()).unwrap();
+
+    let response =
+        pb::generate_server::Generate::generate(&service, Request::new(request("unary")))
+            .await
+            .unwrap()
+            .into_inner();
+
+    assert!(response.prompt_info.is_some());
+    let outputs = response
+        .outputs
+        .expect("unary response accumulates a single sequence output");
+    // request() sets max_new_tokens = 2 and output_token_ids = true.
+    assert_eq!(outputs.num_tokens, 2);
+    assert_eq!(outputs.token_ids.len(), 2);
+    let finish = outputs
+        .finish_info
+        .expect("unary response carries terminal finish info");
+    assert_eq!(
+        finish.finish_reason,
+        pb::finish_info::FinishReason::Length as i32
+    );
+    assert_eq!(finish.num_output_tokens, 2);
+    assert_eq!(service.active_request_count(), 0);
+}
+
+#[tokio::test]
+async fn streaming_generate_maps_capacity_rejection_to_resource_exhausted() {
+    // Same undersized KV cache as the unary case, but exercised through the
+    // streaming RPC the production sidecar uses: the call opens successfully and
+    // the rejection arrives as a later stream item after prompt info.
+    let args = MockEngineArgs::builder()
+        .block_size(4)
+        .num_gpu_blocks(1)
+        .max_num_seqs(Some(8))
+        .max_num_batched_tokens(Some(64))
+        .speedup_ratio(0.0)
+        .build()
+        .unwrap();
+    let service = VllmMockerService::new(MockerServerConfig::default(), args).unwrap();
+    let mut oversized = request("oversized-stream");
+    oversized.prompt = Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
+        ids: vec![1, 2, 3, 4, 5],
+    }));
+
+    let mut stream =
+        pb::generate_server::Generate::generate_stream(&service, Request::new(oversized))
+            .await
+            .expect("streaming RPC opens before the scheduler rejects")
+            .into_inner();
+
+    let prompt = stream
+        .next()
+        .await
+        .expect("prompt info precedes the rejection")
+        .expect("prompt info is not an error");
+    assert!(prompt.prompt_info.is_some());
+
+    let status = stream
+        .next()
+        .await
+        .expect("a rejection stream item follows prompt info")
+        .expect_err("capacity rejection surfaces as a stream error");
+    assert_eq!(status.code(), tonic::Code::ResourceExhausted);
+}
+
+#[tokio::test]
+async fn streaming_survives_a_producer_that_outruns_a_stalled_consumer() {
+    // The producer runs instantly while the consumer stalls, so the request
+    // races far past LiveEngine's fixed per-request buffer. The server's pump
+    // must absorb the burst instead of shedding the stream into an INTERNAL.
+    let service = VllmMockerService::new(MockerServerConfig::default(), admitting_args()).unwrap();
+    let mut bursty = request("bursty");
+    bursty.stopping.as_mut().unwrap().max_new_tokens = 50;
+
+    let mut stream = pb::generate_server::Generate::generate_stream(&service, Request::new(bursty))
+        .await
+        .unwrap()
+        .into_inner();
+
+    // Stall the consumer so the instant producer fills and overflows the fixed
+    // per-request buffer before we read anything.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let prompt = stream.next().await.unwrap().unwrap();
+    assert!(prompt.prompt_info.is_some());
+
+    let mut tokens = 0usize;
+    let mut terminal = None;
+    while let Some(item) = stream.next().await {
+        let response = item.expect("a stalled consumer must not be shed into an INTERNAL error");
+        if let Some(output) = response.outputs {
+            tokens += output.num_tokens as usize;
+            if let Some(finish) = output.finish_info {
+                terminal = Some(finish);
+            }
+        }
+    }
+    assert_eq!(tokens, 50);
+    let finish = terminal.expect("the stream must terminate");
+    assert_eq!(
+        finish.finish_reason,
+        pb::finish_info::FinishReason::Length as i32
+    );
+    assert_eq!(finish.num_output_tokens, 50);
+    assert_eq!(service.active_request_count(), 0);
 }
