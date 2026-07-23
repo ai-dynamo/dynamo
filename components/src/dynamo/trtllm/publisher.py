@@ -395,6 +395,7 @@ class Publisher:
         enable_local_indexer: bool = False,
         metrics_collector: Any = None,
         kv_state_endpoint: Optional[str] = None,
+        image_token_id: Optional[int] = None,
     ) -> None:
         self.endpoint = endpoint
         self.engine = engine
@@ -409,6 +410,7 @@ class Publisher:
         self.enable_local_indexer = enable_local_indexer
         self.metrics_collector = metrics_collector
         self.kv_state_endpoint = kv_state_endpoint
+        self.image_token_id = image_token_id
         self.attention_dp_size = engine.get_attention_dp_size()
 
         # The first few kv events from the model engine are always "created" type events.
@@ -517,6 +519,7 @@ class Publisher:
                     dp_rank=rank,
                     enable_local_indexer=self.enable_local_indexer,
                     kv_state_endpoint=self.kv_state_endpoint,
+                    image_token_id=self.image_token_id,
                 )
             logging.info(
                 f"Created {self.attention_dp_size} KV event publisher(s) for attention DP ranks"
@@ -1090,6 +1093,7 @@ async def get_publisher(
     enable_local_indexer: bool = False,
     metrics_collector: Any = None,
     kv_state_endpoint: Optional[str] = None,
+    image_token_id: Optional[int] = None,
 ) -> AsyncGenerator[Publisher, None]:
     publisher = Publisher(
         endpoint,
@@ -1104,6 +1108,7 @@ async def get_publisher(
         enable_local_indexer=enable_local_indexer,
         metrics_collector=metrics_collector,
         kv_state_endpoint=kv_state_endpoint,
+        image_token_id=image_token_id,
     )
     try:
         publisher.initialize()

@@ -20,7 +20,9 @@ use crate::Endpoint;
 ))]
 use clap::Parser;
 #[cfg(feature = "select-service")]
-use dynamo_kv_router::config::kv_router_config_from_dynamo_env;
+use dynamo_kv_router::TrackingHashAlgorithm;
+#[cfg(feature = "select-service")]
+use dynamo_kv_router::config::try_kv_router_config_from_dynamo_env;
 use dynamo_kv_router::config::{KvRouterConfig, RouterConfigOverride};
 use dynamo_kv_router::protocols::compute_block_hash_for_seq;
 use dynamo_kv_router::protocols::*;
@@ -305,6 +307,39 @@ struct SelectServiceCli {
     /// Approximate byte budget across resident pending selections
     #[arg(long)]
     selection_cache_max_bytes: Option<usize>,
+
+    /// Assume KV cache reuse when deriving active-sequence identities
+    #[arg(long, conflicts_with = "no_router_assume_kv_reuse")]
+    router_assume_kv_reuse: bool,
+
+    /// Generate random active-sequence identities instead of assuming KV reuse
+    #[arg(long, conflicts_with = "router_assume_kv_reuse")]
+    no_router_assume_kv_reuse: bool,
+
+    /// Hash function for router-derived active-sequence identities
+    #[arg(long)]
+    router_tracking_hash: Option<TrackingHashAlgorithm>,
+
+    /// File containing the 32-byte provider tracking key
+    #[arg(long)]
+    router_tracking_key_file: Option<std::path::PathBuf>,
+
+    /// Provider-managed tracking-key epoch identifier
+    #[arg(long)]
+    router_tracking_key_id: Option<String>,
+}
+
+#[cfg(feature = "select-service")]
+impl SelectServiceCli {
+    fn router_assume_kv_reuse_override(&self) -> Option<bool> {
+        if self.router_assume_kv_reuse {
+            Some(true)
+        } else if self.no_router_assume_kv_reuse {
+            Some(false)
+        } else {
+            None
+        }
+    }
 }
 
 #[cfg(all(test, feature = "select-service"))]
@@ -366,6 +401,32 @@ mod select_service_cli_tests {
         assert_eq!(config.max_entries, 100);
         assert_eq!(config.max_bytes, 1_048_576);
     }
+
+    #[test]
+    fn parses_router_assume_kv_reuse_overrides() {
+        let default = SelectServiceCli::try_parse_from(["dynamo.select_service"]).unwrap();
+        assert_eq!(default.router_assume_kv_reuse_override(), None);
+
+        let enabled =
+            SelectServiceCli::try_parse_from(["dynamo.select_service", "--router-assume-kv-reuse"])
+                .unwrap();
+        assert_eq!(enabled.router_assume_kv_reuse_override(), Some(true));
+
+        let disabled = SelectServiceCli::try_parse_from([
+            "dynamo.select_service",
+            "--no-router-assume-kv-reuse",
+        ])
+        .unwrap();
+        assert_eq!(disabled.router_assume_kv_reuse_override(), Some(false));
+
+        let conflict = SelectServiceCli::try_parse_from([
+            "dynamo.select_service",
+            "--router-assume-kv-reuse",
+            "--no-router-assume-kv-reuse",
+        ])
+        .unwrap_err();
+        assert_eq!(conflict.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
 }
 
 pub fn run_select_service_cli<I, T>(args: I) -> anyhow::Result<()>
@@ -383,13 +444,27 @@ where
         init_standalone_logging();
 
         let rt = tokio::runtime::Runtime::new()?;
+        let mut kv_router_config =
+            try_kv_router_config_from_dynamo_env().map_err(anyhow::Error::msg)?;
+        if let Some(assume_kv_reuse) = cli.router_assume_kv_reuse_override() {
+            kv_router_config.router_assume_kv_reuse = assume_kv_reuse;
+        }
+        if let Some(algorithm) = cli.router_tracking_hash {
+            kv_router_config.router_tracking_hash = algorithm;
+        }
+        if let Some(key_file) = cli.router_tracking_key_file {
+            kv_router_config.router_tracking_key_file = Some(key_file);
+        }
+        if let Some(key_id) = cli.router_tracking_key_id {
+            kv_router_config.router_tracking_key_id = Some(key_id);
+        }
         rt.block_on(selection::run_server(SelectionServiceConfig {
             port: cli.port,
             threads: cli.threads,
             indexer_peers: cli.indexer_peers,
             replica_sync_port: cli.replica_sync_port,
             replica_sync_peers: cli.replica_sync_peers,
-            kv_router_config: kv_router_config_from_dynamo_env(),
+            kv_router_config,
             selection_cache: selection_cache_config_from_overrides(
                 cli.selection_cache_ttl_secs,
                 cli.selection_cache_max_entries,
@@ -497,7 +572,9 @@ impl SelectionService {
                 "replica_sync_peers requires replica_sync_port",
             ));
         }
-        let mut builder = SelectionServiceBuilder::new(kv_router_config_from_dynamo_env())
+        let kv_router_config =
+            try_kv_router_config_from_dynamo_env().map_err(PyValueError::new_err)?;
+        let mut builder = SelectionServiceBuilder::new(kv_router_config)
             .indexer_threads(indexer_threads)
             .indexer_peers(indexer_peers.unwrap_or_default())
             .selection_cache(selection_cache.unwrap_or_default().inner);
@@ -949,6 +1026,7 @@ pub(crate) struct KvEventPublisher {
     kv_block_size: usize,
     dp_rank: DpRank,
     warning_count: Arc<AtomicU32>,
+    image_token_id: Option<u32>,
 }
 
 impl KvEventPublisher {
@@ -968,6 +1046,10 @@ impl KvEventPublisher {
             kv_block_size,
             dp_rank,
             warning_count: Arc::new(AtomicU32::new(0)),
+            // The unified backend does not run TRT-LLM multimodal, so this bridge
+            // carries no image marker; the non-unified path sets it via the
+            // constructor.
+            image_token_id: None,
         }
     }
 }
@@ -1043,6 +1125,7 @@ impl KvEventPublisher {
             kv_block_size,
             dp_rank,
             warning_count: Arc::new(AtomicU32::new(0)),
+            image_token_id,
         })
     }
 
@@ -1064,6 +1147,7 @@ impl KvEventPublisher {
         let dp_rank = self.dp_rank;
         let warning_count = self.warning_count.clone();
         let inner = self.inner.clone();
+        let image_token_id = self.image_token_id;
 
         let event_id = inner.next_event_id();
 
@@ -1089,7 +1173,7 @@ impl KvEventPublisher {
                         &warning_count,
                         mm_infos.as_deref(),
                         is_eagle,
-                        None, // image_token_id: publish path keeps caller-supplied mm_infos
+                        image_token_id,
                     ),
                 }),
                 dp_rank,
