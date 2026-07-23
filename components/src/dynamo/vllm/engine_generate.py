@@ -5,7 +5,6 @@
 
 import base64
 import io
-from functools import lru_cache
 from typing import Any
 
 import msgspec
@@ -19,6 +18,18 @@ from vllm.multimodal.inputs import (
 )
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 
+try:
+    from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
+        decode_mm_kwargs_item,
+    )
+    from vllm.entrypoints.scale_out.token_in_token_out.protocol import GenerateRequest
+except ModuleNotFoundError as exc:
+    expected_module = "vllm.entrypoints.scale_out.token_in_token_out"
+    if exc.name is None or not expected_module.startswith(exc.name):
+        raise
+    from vllm.entrypoints.serve.disagg.mm_serde import decode_mm_kwargs_item
+    from vllm.entrypoints.serve.disagg.protocol import GenerateRequest
+
 from .constants import DYNAMO_CACHE_SALT_PREFIX
 
 GENERATE_CAPABILITY = "vllm_inference_v1_generate"
@@ -31,26 +42,6 @@ def serialize_routed_experts(routed_experts: Any) -> str | None:
     buffer = io.BytesIO()
     np.save(buffer, routed_experts)
     return base64.b64encode(buffer.getvalue()).decode("ascii")
-
-
-@lru_cache(maxsize=1)
-def _native_generate_api() -> tuple[Any, Any]:
-    """Load the vLLM-native endpoint adapter only when `/generate` is used."""
-    try:
-        from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
-            decode_mm_kwargs_item,
-        )
-        from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
-            GenerateRequest,
-        )
-    except ModuleNotFoundError as exc:
-        expected_module = "vllm.entrypoints.scale_out.token_in_token_out"
-        if exc.name is None or not expected_module.startswith(exc.name):
-            raise
-        from vllm.entrypoints.serve.disagg.mm_serde import decode_mm_kwargs_item
-        from vllm.entrypoints.serve.disagg.protocol import GenerateRequest
-
-    return decode_mm_kwargs_item, GenerateRequest
 
 
 def payload(request: dict[str, Any]) -> dict[str, Any] | None:
@@ -145,7 +136,6 @@ def build_prompt(request: dict[str, Any]) -> Any:
 
     mm_kwargs: dict[str, list[MultiModalKwargsItem | None]] = {}
     if isinstance(kwargs_data, dict):
-        decode_mm_kwargs_item, _ = _native_generate_api()
         for modality, items in kwargs_data.items():
             mm_kwargs[modality] = [
                 decode_mm_kwargs_item(item) if item is not None else None
@@ -173,8 +163,7 @@ def build_sampling_params(
     if generate_request is None:
         raise ValueError("extra_args.vllm_tito is missing from token-native request")
 
-    _, generate_request_type = _native_generate_api()
-    parsed = generate_request_type.model_validate(generate_request)
+    parsed = GenerateRequest.model_validate(generate_request)
     sampling_params = parsed.sampling_params
     if isinstance(sampling_params, dict):
         sampling_params = msgspec.convert(sampling_params, type=SamplingParams)
