@@ -41,6 +41,32 @@ The Dynamo Platform Helm chart deploys the complete Dynamo Kubernetes Platform i
 
 ## 🔄 Upgrading Notes
 
+### Runtime version override for custom runtime images (v1.4.0+)
+
+Each `DynamoGraphDeployment` (DGD) or standalone `DynamoComponentDeployment` (DCD)
+component now resolves its Dynamo runtime compatibility version from its main container image.
+Use a semantic-version image tag such as `:1.4.0`, or set
+`runtimeVersionOverride` to the compatible Dynamo runtime version when the image has a custom,
+SHA, or other non-semantic-version tag. The override takes precedence over the image-derived
+version, so set it when a semantic-version tag does not identify the Dynamo runtime version.
+
+```yaml
+components:
+  - name: worker
+    runtimeVersionOverride: 1.4.0
+    podTemplate:
+      spec:
+        containers:
+          - name: main
+            image: registry.example/my-runtime:build-20260723
+```
+
+The main container image is required even when `runtimeVersionOverride` is set. For the served
+`v1alpha1` API, set the image at `extraPodSpec.mainContainer.image` instead. After upgrading the
+CRDs and operator, add an override to every component that uses a non-semantic-version main-image
+tag before its next update. Existing resources are not modified by the upgrade, but an update
+without the override is rejected.
+
 ### Bundled NATS is now disabled by default
 
 The bundled NATS subchart is no longer installed by default because Dynamo's default request and
