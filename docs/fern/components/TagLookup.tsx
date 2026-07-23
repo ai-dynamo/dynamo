@@ -28,6 +28,7 @@ import {
   type GaPath,
   type ModelEaBuild,
 } from "./releases.data";
+import { UpgradePanelStyles } from "./UpgradePanel";
 
 interface StableTagEntry {
   kind: "stable";
@@ -83,12 +84,9 @@ function versionAnchor(version: string): string {
 /* Per-tag :checked selectors are generated from the entry list so the CSS
    always matches the rendered radios. */
 const TG_CSS = `
-.dynref-tg-input {
-    /* display:none, not visually-hidden positioning — focusable inputs would
-       scroll the page on pill click; label activation still toggles them.
-       Same rationale as .dynref-ab-filter in ArtifactBrowser. */
-    display: none;
-}
+/* Inputs are hidden by the shared .dynref-vh (visually hidden, focusable)
+   class so the tag rail stays keyboard-operable; generated :focus-visible
+   rules below paint the ring on the matching pill. */
 
 .dynref-tg-rail {
     display: flex;
@@ -122,6 +120,18 @@ ${ENTRIES.map((_, i) => `#tg-t${i}:checked ~ .dynref-tg-rail label[for="tg-t${i}
     box-shadow: 0 0 0 1px var(--nv-color-green, #76B900);
     background: rgba(118, 185, 0, 0.08);
     font-weight: 700;
+}
+
+${ENTRIES.map((_, i) => `#tg-t${i}:focus-visible ~ .dynref-tg-rail label[for="tg-t${i}"]`).join(",\n")} {
+    outline: 2px solid var(--nv-color-green, #76B900);
+    outline-offset: 1px;
+}
+
+/* The default "none" radio has no pill — while it holds keyboard focus the
+   hint row carries the ring so focus is never invisible. */
+#tg-none:focus-visible ~ .dynref-tg-cards > .dynref-tg-hint {
+    outline: 2px solid var(--nv-color-green, #76B900);
+    outline-offset: 1px;
 }
 
 .dynref-tg-card {
@@ -214,33 +224,14 @@ ${ENTRIES.map((_, i) => `#tg-t${i}:checked ~ .dynref-tg-cards > [data-tg="t${i}"
     margin: 0;
 }
 
+/* Chip visuals come from .dynref-up-read (UpgradePanelStyles) so the
+   breaking-changes/known-issues links read identically to the Deprecations
+   reading list; only the container layout lives here. */
 .dynref-tg-chips {
     display: flex;
     flex-wrap: wrap;
     gap: 6px;
     margin-top: 10px;
-}
-
-.dynref-tg-chip {
-    display: inline-flex;
-    align-items: center;
-    padding: 3px 10px;
-    border: 1px solid var(--border, var(--grayscale-a5));
-    border-radius: 8px;
-    color: var(--pst-color-text-muted);
-    font-size: 12px;
-    line-height: 1.2;
-    text-decoration: none;
-}
-
-.dynref-tg-chip:hover {
-    border-color: var(--nv-color-green, #76B900);
-    color: var(--pst-color-text-base);
-}
-
-.dark .dynref-tg-chip {
-    border-color: #333;
-    background: #1c1c1c;
 }
 `;
 
@@ -280,10 +271,10 @@ function StableCard({ entry }: { entry: StableTagEntry }) {
       </div>
       {stats && (
         <div className="dynref-tg-chips">
-          <a className="dynref-tg-chip" href={`/dynamo/dev/reference/deprecations#${anchor}`}>
+          <a className="dynref-up-read" href={`/dynamo/dev/reference/deprecations#${anchor}`}>
             {stats.breaking} breaking changes
           </a>
-          <a className="dynref-tg-chip" href={`/dynamo/dev/reference/known-issues#${anchor}`}>
+          <a className="dynref-up-read" href={`/dynamo/dev/reference/known-issues#${anchor}`}>
             {stats.knownIssues} known issues
           </a>
         </div>
@@ -344,13 +335,14 @@ function EaCard({ entry }: { entry: EaTagEntry }) {
 export function TagLookup() {
   return (
     <>
+      <UpgradePanelStyles />
       <style>{TG_CSS}</style>
       <section className="dynref-panel">
-        <input className="dynref-tg-input" type="radio" id="tg-none" name="dynref-tg-tag" defaultChecked />
+        <input className="dynref-tg-input dynref-vh" type="radio" id="tg-none" name="dynref-tg-tag" defaultChecked />
         {ENTRIES.map((entry, i) => (
           <input
             key={entry.tag}
-            className="dynref-tg-input"
+            className="dynref-tg-input dynref-vh"
             type="radio"
             id={`tg-t${i}`}
             name="dynref-tg-tag"

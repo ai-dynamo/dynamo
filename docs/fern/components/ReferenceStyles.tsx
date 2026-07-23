@@ -90,6 +90,25 @@ const REFERENCE_CSS = `
     --dynref-violet-fg: #C4B5FD;
 }
 
+/* Visually-hidden but focusable — the hiding rule for the CSS-only filter/
+   switch radios. NOT display:none: undisplayed inputs can never receive
+   keyboard focus, which made the pill rails mouse-only. A clipped 1px input
+   keeps keyboard support (Tab reaches the group's checked radio, arrow keys
+   switch within the group) while each component's generated :focus-visible
+   sibling rules paint the focus ring on the matching label pill. */
+.dynref-vh {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    border: 0;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    clip-path: inset(50%);
+    white-space: nowrap;
+}
+
 /* Card container shared by every reference component. */
 .dynref-panel {
     margin: 24px 0;

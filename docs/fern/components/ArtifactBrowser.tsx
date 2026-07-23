@@ -26,14 +26,9 @@ import {
 } from "./releases.data";
 
 const AB_CSS = `
-.dynref-ab-filter {
-    /* display:none (not visually-hidden positioning): if the inputs can
-       receive focus, clicking a filter pill scrolls the page back to the
-       inputs. Label activation still toggles undisplayed inputs, and the
-       :checked sibling selectors still match — same rationale as
-       .dynamo-filter-input in RecipeStyles. */
-    display: none;
-}
+/* Inputs are hidden by the shared .dynref-vh (visually hidden, focusable)
+   class so the filter rail stays keyboard-operable; the :focus-visible rules
+   below paint the ring on the matching pill. */
 
 .dynref-ab-note {
     margin: 0;
@@ -108,6 +103,15 @@ const AB_CSS = `
     box-shadow: 0 0 0 1px var(--nv-color-green, #76B900);
     background: rgba(118, 185, 0, 0.08);
     font-weight: 700;
+}
+
+#ab-all:focus-visible ~ .dynref-ab-rail label[for="ab-all"],
+#ab-container:focus-visible ~ .dynref-ab-rail label[for="ab-container"],
+#ab-wheel:focus-visible ~ .dynref-ab-rail label[for="ab-wheel"],
+#ab-helm:focus-visible ~ .dynref-ab-rail label[for="ab-helm"],
+#ab-crate:focus-visible ~ .dynref-ab-rail label[for="ab-crate"] {
+    outline: 2px solid var(--nv-color-green, #76B900);
+    outline-offset: 1px;
 }
 
 #ab-container:checked ~ .dynref-ab-list > [data-cat]:not([data-cat="container"]),
@@ -362,11 +366,11 @@ export function ArtifactBrowser() {
     <>
       <style>{AB_CSS}</style>
       <section className="dynref-panel">
-        <input className="dynref-ab-filter" type="radio" id="ab-all" name="dynref-ab-filter" defaultChecked />
-        <input className="dynref-ab-filter" type="radio" id="ab-container" name="dynref-ab-filter" />
-        <input className="dynref-ab-filter" type="radio" id="ab-wheel" name="dynref-ab-filter" />
-        <input className="dynref-ab-filter" type="radio" id="ab-helm" name="dynref-ab-filter" />
-        <input className="dynref-ab-filter" type="radio" id="ab-crate" name="dynref-ab-filter" />
+        <input className="dynref-ab-filter dynref-vh" type="radio" id="ab-all" name="dynref-ab-filter" defaultChecked />
+        <input className="dynref-ab-filter dynref-vh" type="radio" id="ab-container" name="dynref-ab-filter" />
+        <input className="dynref-ab-filter dynref-vh" type="radio" id="ab-wheel" name="dynref-ab-filter" />
+        <input className="dynref-ab-filter dynref-vh" type="radio" id="ab-helm" name="dynref-ab-filter" />
+        <input className="dynref-ab-filter dynref-vh" type="radio" id="ab-crate" name="dynref-ab-filter" />
 
         <div className="dynref-panel-header">
           <div>

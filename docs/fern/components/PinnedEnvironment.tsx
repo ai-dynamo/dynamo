@@ -24,12 +24,9 @@
 import { ARTIFACTS, CURRENT_VERSION, CURRENT_WHEEL, CURRENT_TAG } from "./releases.data";
 
 const PE_CSS = `
-.dynref-pe-input {
-    /* display:none, not visually-hidden positioning — focusable inputs would
-       scroll the page on pill click; label activation still toggles them.
-       Same rationale as .dynref-ab-filter in ArtifactBrowser. */
-    display: none;
-}
+/* Inputs are hidden by the shared .dynref-vh (visually hidden, focusable)
+   class so the backend rail stays keyboard-operable; the :focus-visible
+   rules below paint the ring on the matching pill. */
 
 .dynref-pe-rail {
     display: flex;
@@ -63,6 +60,13 @@ const PE_CSS = `
     box-shadow: 0 0 0 1px var(--nv-color-green, #76B900);
     background: rgba(118, 185, 0, 0.08);
     font-weight: 700;
+}
+
+#pe-sglang:focus-visible ~ .dynref-pe-rail label[for="pe-sglang"],
+#pe-trtllm:focus-visible ~ .dynref-pe-rail label[for="pe-trtllm"],
+#pe-vllm:focus-visible ~ .dynref-pe-rail label[for="pe-vllm"] {
+    outline: 2px solid var(--nv-color-green, #76B900);
+    outline-offset: 1px;
 }
 
 /* Pre-rendered script blocks and Copy-all buttons: hidden by default, the
@@ -146,14 +150,23 @@ function containerPull(name: string): string | null {
   return tag ? `docker pull ${tag.clipboard}` : null;
 }
 
+/** Break the long helm install one-liner with a shell line continuation so
+ *  the script block fits without horizontal clipping. Applied to the shared
+ *  string, so the visible pre and the Copy-all payload stay byte-identical —
+ *  a backslash-continued command is still paste-safe shell. */
+function wrapHelmInstall(line: string): string {
+  return line.replace(/^(helm install \S+) (oci:)/, "$1 \\\n  $2");
+}
+
 /** Full multi-line pinned-install script for one backend. */
 function buildScript(backend: Backend): string {
   const helm = ARTIFACTS.find((a) => a.category === "helm" && a.name === "dynamo-platform");
+  const helmLine = helm?.tags[0]?.clipboard;
   const lines: (string | null)[] = [
     containerPull(backend.runtime),
     containerPull("dynamo-frontend"),
     containerPull("kubernetes-operator"),
-    helm?.tags[0]?.clipboard ?? null,
+    helmLine ? wrapHelmInstall(helmLine) : null,
     backend.extra
       ? `uv pip install "ai-dynamo[${backend.extra}]==${CURRENT_WHEEL}"`
       : "# TensorRT-LLM ships via the NGC container",
@@ -168,9 +181,9 @@ export function PinnedEnvironment() {
     <>
       <style>{PE_CSS}</style>
       <section className="dynref-panel">
-        <input className="dynref-pe-input" type="radio" id="pe-sglang" name="dynref-pe-backend" />
-        <input className="dynref-pe-input" type="radio" id="pe-trtllm" name="dynref-pe-backend" />
-        <input className="dynref-pe-input" type="radio" id="pe-vllm" name="dynref-pe-backend" defaultChecked />
+        <input className="dynref-pe-input dynref-vh" type="radio" id="pe-sglang" name="dynref-pe-backend" />
+        <input className="dynref-pe-input dynref-vh" type="radio" id="pe-trtllm" name="dynref-pe-backend" />
+        <input className="dynref-pe-input dynref-vh" type="radio" id="pe-vllm" name="dynref-pe-backend" defaultChecked />
 
         <div className="dynref-panel-header">
           <div>

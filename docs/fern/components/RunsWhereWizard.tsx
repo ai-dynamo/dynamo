@@ -107,12 +107,9 @@ function rowsFor(backend: BackendOption, major: string): WizardRow[] {
 }
 
 const WW_CSS = `
-.dynref-ww-filter {
-    /* display:none, not visually-hidden positioning — focusable inputs would
-       scroll the page back to them on pill click; label activation still
-       toggles undisplayed inputs (same rationale as .dynref-ab-filter). */
-    display: none;
-}
+/* Inputs are hidden by the shared .dynref-vh (visually hidden, focusable)
+   class so the rails stay keyboard-operable; focus rules are generated in
+   filterCss alongside the :checked rules. */
 
 .dynref-ww-rails {
     display: flex;
@@ -196,7 +193,9 @@ const WW_CSS = `
 
 .dynref-ww-pullslot {
     display: flex;
+    align-items: center;
     justify-content: flex-end;
+    gap: 8px;
 }
 
 .dynref-ww-empty {
@@ -204,6 +203,10 @@ const WW_CSS = `
     border-bottom: 1px solid var(--border, var(--grayscale-a5));
     color: var(--pst-color-text-muted);
     font-size: 13px;
+}
+
+.dynref-ww-emptyhint {
+    font-size: 12px;
 }
 
 .dynref-ww-empty:last-child {
@@ -222,10 +225,11 @@ const WW_CSS = `
 }
 `;
 
-/** :checked rules are generated from the option lists so the selectors always
- *  match the rendered inputs — active-pill highlight per input, plus the two
- *  independent hide rules whose intersection leaves only rows matching both
- *  the checked backend and the checked CUDA major. */
+/** :checked and :focus-visible rules are generated from the option lists so
+ *  the selectors always match the rendered inputs — active-pill highlight and
+ *  keyboard focus ring per input, plus the two independent hide rules whose
+ *  intersection leaves only rows matching both the checked backend and the
+ *  checked CUDA major. */
 function filterCss(cuda: CudaOption[]): string {
   const inputs = [
     ...BACKENDS.map((b) => ({ id: `ww-b-${b.id}`, attr: "data-backend", value: b.id })),
@@ -233,6 +237,9 @@ function filterCss(cuda: CudaOption[]): string {
   ];
   const pillRules = inputs
     .map((i) => `#${i.id}:checked ~ .dynref-ww-rails label[for="${i.id}"]`)
+    .join(",\n");
+  const focusRules = inputs
+    .map((i) => `#${i.id}:focus-visible ~ .dynref-ww-rails label[for="${i.id}"]`)
     .join(",\n");
   const hideRules = inputs
     .map(
@@ -247,6 +254,10 @@ ${pillRules} {
     background: rgba(118, 185, 0, 0.08);
     font-weight: 700;
 }
+${focusRules} {
+    outline: 2px solid var(--nv-color-green, #76B900);
+    outline-offset: 1px;
+}
 ${hideRules}
 `;
 }
@@ -258,7 +269,6 @@ function WizardDataRow({ row, backendLabel }: { row: WizardRow; backendLabel: st
         <a className="dynref-mono dynref-ww-link" href={row.href}>
           {row.version}
         </a>
-        {row.isCurrent && <span className="dynref-badge dynref-badge--green">Current</span>}
       </span>
       <span>
         {row.toolkits.map((toolkit) => (
@@ -286,6 +296,9 @@ function WizardDataRow({ row, backendLabel }: { row: WizardRow; backendLabel: st
             {row.pull.replace(/^.*\//, "")}
           </button>
         )}
+        {/* Trails the row so the fixed 96px version column never has to absorb
+            it — keeps the CUDA chips column-aligned across rows. */}
+        {row.isCurrent && <span className="dynref-badge dynref-badge--green">Current</span>}
       </span>
     </div>
   );
@@ -300,6 +313,18 @@ export function RunsWhereWizard() {
     cuda.map((option) => ({ backend, option, rows: rowsFor(backend, option.major) })),
   );
 
+  /* CUDA majors (newest first, cudaOptions order) that DO have qualifying
+     releases per backend — drives the empty-state "switch the driver filter"
+     hint, so it always reflects the data. */
+  const shippedMajors = new Map<string, string[]>(
+    BACKENDS.map((backend) => [
+      backend.id,
+      combos
+        .filter((combo) => combo.backend.id === backend.id && combo.rows.length > 0)
+        .map((combo) => combo.option.major),
+    ]),
+  );
+
   return (
     <>
       <style>{WW_CSS + filterCss(cuda)}</style>
@@ -307,7 +332,7 @@ export function RunsWhereWizard() {
         {BACKENDS.map((backend) => (
           <input
             key={backend.id}
-            className="dynref-ww-filter"
+            className="dynref-ww-filter dynref-vh"
             type="radio"
             id={`ww-b-${backend.id}`}
             name="dynref-ww-backend"
@@ -317,7 +342,7 @@ export function RunsWhereWizard() {
         {cuda.map((option) => (
           <input
             key={option.major}
-            className="dynref-ww-filter"
+            className="dynref-ww-filter dynref-vh"
             type="radio"
             id={`ww-c-${option.major}`}
             name="dynref-ww-cuda"
@@ -373,6 +398,14 @@ export function RunsWhereWizard() {
                 data-cuda={option.major}
               >
                 No release ships {backend.label} for a CUDA {option.major} driver.
+                {(shippedMajors.get(backend.id) ?? []).length > 0 && (
+                  <span className="dynref-ww-emptyhint">
+                    {" "}
+                    {backend.label} ships CUDA{" "}
+                    {(shippedMajors.get(backend.id) ?? []).join(" and CUDA ")} images only —
+                    switch the driver filter.
+                  </span>
+                )}
               </div>
             ),
           )}

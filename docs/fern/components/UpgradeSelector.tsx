@@ -34,12 +34,9 @@ import {
 } from "./UpgradePanel";
 
 const US_CSS = `
-.dynref-us-radio {
-    /* display:none (not visually-hidden positioning): focusable inputs make
-       pill clicks scroll back to the inputs — same rationale as
-       .dynref-ab-filter in ArtifactBrowser. */
-    display: none;
-}
+/* Inputs are hidden by the shared .dynref-vh (visually hidden, focusable)
+   class so the from-line rail stays keyboard-operable; per-line
+   :focus-visible rules are generated in wiringCss alongside :checked. */
 
 .dynref-us-rail {
     display: flex;
@@ -149,8 +146,9 @@ export function UpgradeSelector() {
   const fromLines = buildFromLines();
   if (!current || fromLines.length === 0) return null;
 
-  /* :checked wiring is per-line, so the selectors are generated from the same
-     derived list that renders the radios, pills, and panels. */
+  /* :checked and :focus-visible wiring is per-line, so the selectors are
+     generated from the same derived list that renders the radios, pills, and
+     panels. */
   const wiringCss = fromLines
     .map(
       (line) => `
@@ -159,6 +157,11 @@ export function UpgradeSelector() {
     box-shadow: 0 0 0 1px var(--nv-color-green, #76B900);
     background: rgba(118, 185, 0, 0.08);
     font-weight: 700;
+}
+
+#${line.id}:focus-visible ~ .dynref-panel-header label[for="${line.id}"] {
+    outline: 2px solid var(--nv-color-green, #76B900);
+    outline-offset: 1px;
 }
 
 #${line.id}:checked ~ #${line.id}-panel {
@@ -175,7 +178,7 @@ export function UpgradeSelector() {
       <section className="dynref-panel">
         {fromLines.map((line, index) => (
           <input
-            className="dynref-us-radio"
+            className="dynref-us-radio dynref-vh"
             type="radio"
             id={line.id}
             name="dynref-us-from"
