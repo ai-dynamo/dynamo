@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: "Vanilla vLLM GAIE On-ramp"
-sidebar-title: "Vanilla vLLM On-ramp without Dynamo runtime"
+sidebar-title: "Vanilla vLLM On-ramp"
 subtitle: Dynamo EPP routing for existing GAIE deployments that run stock vLLM pods.
 ---
 This on-ramp is for Kubernetes stacks that already use
@@ -157,7 +157,7 @@ kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=<your-toke
 Now that Gateway and GAIE is installed, we can create an InferencePool and an accompanying Dynamo EPP.
 
 Point the `InferencePool` at your vLLM workers (see the
-[`vllm-qwen-pool` InferencePool in `agg.yaml`](../../../deploy/inference-gateway/ext-proc/examples/onramp/agg.yaml#L254) for a complete example):
+[`vllm-qwen-pool` InferencePool in `agg.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/inference-gateway/ext-proc/examples/onramp/agg.yaml#L254) for a complete example):
 
 Specifically, these fields depend on the model you deploy, so make sure the settings below are adjusted to match your workers.
 
@@ -184,7 +184,7 @@ Specifically, these fields depend on the model you deploy, so make sure the sett
 ```
 
 Attach the `HTTPRoute` to the gateway and target the pool (see the
-[`vllm-qwen-route` HTTPRoute in `agg.yaml`](../../../deploy/inference-gateway/ext-proc/examples/onramp/agg.yaml#L270) for a complete example):
+[`vllm-qwen-route` HTTPRoute in `agg.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/inference-gateway/ext-proc/examples/onramp/agg.yaml#L270) for a complete example):
 
 - `spec.rules[].backendRefs[]` — targets the `InferencePool`.
 ```yaml
@@ -232,7 +232,7 @@ kubectl -n <ns> label deployment <vllm-deployment> app=vllm-qwen --overwrite
 
 Remove the vLLM router (if you have it already installed) and replace it with the EPP (Dynamo Router).
 Add the EPP as a `Deployment` + `Service` (see the
-[`dynamo-epp` Deployment in `agg.yaml`](../../../deploy/inference-gateway/ext-proc/examples/onramp/agg.yaml#L146) for a complete example) and set:
+[`dynamo-epp` Deployment in `agg.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/inference-gateway/ext-proc/examples/onramp/agg.yaml#L146) for a complete example) and set:
 
 ```yaml
 kind: Deployment

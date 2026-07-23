@@ -153,6 +153,9 @@ navigation:
                     path: kubernetes/gateway-api/README.mdx
                   - page: Quickstart
                     path: kubernetes/gateway-api/quickstart.mdx
+                  - page: Vanilla vLLM On-ramp
+                    path: kubernetes/gateway-api/vanilla-vllm-onramp.mdx
+                    slug: vanilla-vllm-onramp
                   - page: Reference
                     path: kubernetes/gateway-api/reference.mdx
           - section: Model Loading
