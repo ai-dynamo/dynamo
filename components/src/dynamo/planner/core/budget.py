@@ -362,6 +362,23 @@ def apply_power_budget(
         # Ceiling never raises a proposed count (decode-no-upscale invariant).
         new_p = min(new_p, proposed_p)
         new_d = min(new_d, proposed_d)
+        # The clamp itself can synthesize an opposing rebalance vs current even
+        # when the proposal was not one (e.g. current (4,1), proposal (5,5) ->
+        # clamped (2,3)): the settled target fits, but parallel actuation peaks
+        # at (4,3). Stage that peak the same way as a proposed rebalance by
+        # holding the scale-up leg(s) at current so the transient stays under
+        # the ceiling; the scale-up is admitted on a later stable tick.
+        if (
+            _is_opposing_rebalance(new_p, new_d, current_p, current_d)
+            and peak_parallel_watts(
+                current_p, current_d, new_p, new_d, p_watts, d_watts
+            )
+            > total_budget
+        ):
+            staged_p, capped_p = _hold_at_current(new_p, current_p)
+            staged_d, capped_d = _hold_at_current(new_d, current_d)
+            if capped_p or capped_d:
+                return staged_p, staged_d, "power_rebalance_staged"
         return new_p, new_d, "power_budget_clamped"
 
     if p_adjustable != d_adjustable:
