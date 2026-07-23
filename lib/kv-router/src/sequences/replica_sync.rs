@@ -13,6 +13,7 @@ use super::multi_worker::{
     ActiveSequencesMultiWorker, ReplicaWorkerPolicy, SequencePublisher, SequenceSubscriber,
 };
 use super::prompt_registry::WorkerLoadSnapshot;
+use super::single::{RequestCleanupPolicy, RequestTiming};
 use crate::protocols::{
     ActiveSequenceEvent, ActiveSequenceEventData, MAX_REPLICA_BATCH_DURATION,
     MAX_REPLICA_BATCH_EVENTS, WorkerWithDpRank,
@@ -195,13 +196,20 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 let (expired_request_ids, load) = {
                     let slot = &table.slots[idx];
                     let mut seq = slot.sequences.write();
-                    let outcome = seq.add_request_with_prefill_tracking(
+                    let cleanup_policy = self.replica_sync_orphan_timeout.map_or(
+                        RequestCleanupPolicy::LifecycleOwned,
+                        RequestCleanupPolicy::ReplicaOrphanGuarded,
+                    );
+                    let outcome = seq.add_request_with_cleanup_policy(
                         request_id,
                         token_sequence,
                         expected_output_tokens,
                         track_prefill_tokens,
                         prefill_load_hint,
-                        decay_now,
+                        RequestTiming {
+                            cleanup_policy,
+                            decay_now,
+                        },
                     );
                     let load = seq.worker_load_snapshot();
                     self.prompt_registry
