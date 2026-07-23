@@ -111,18 +111,17 @@ class TestDiffusionParallelConfigCoverage:
 
         assert handler._resolve_lora_capacity(config) is None
 
-    def test_lora_enabled_defaults_to_single_slot(self):
+    def test_lora_enabled_with_unset_max_loras_resolves_no_capacity_limit(self):
         config = _make_config()
         config.engine_args.enable_lora = True
         handler = BaseOmniHandler.__new__(BaseOmniHandler)
 
-        assert handler._resolve_lora_capacity(config) == 1
+        assert handler._resolve_lora_capacity(config) is None
 
-    def test_lora_enabled_rejects_oversized_capacity(self):
+    def test_lora_enabled_uses_configured_max_loras(self):
         config = _make_config()
         config.engine_args.enable_lora = True
         config.engine_args.max_loras = 2
         handler = BaseOmniHandler.__new__(BaseOmniHandler)
 
-        with pytest.raises(ValueError, match="at most one loaded LoRA adapter"):
-            handler._resolve_lora_capacity(config)
+        assert handler._resolve_lora_capacity(config) == 2

@@ -33,6 +33,13 @@ logger = logging.getLogger(__name__)
 shutdown_endpoints: list = []
 
 
+def _base_model_lora_capacity(config: OmniConfig, lora_enabled: bool) -> int | None:
+    """Return LoRA capacity advertised on the base model registration card."""
+    if not lora_enabled:
+        return None
+    return getattr(config.engine_args, "max_loras", None)
+
+
 def _register_lora_engine_routes(runtime, handler) -> None:
     route_handlers = {
         "load_lora": handler.load_lora,
@@ -142,7 +149,7 @@ async def init_omni(
             # frontend, so they register as Aggregated.
             worker_type=WorkerType.Aggregated,
             needs=[],
-            max_gpu_lora_count=1 if engine_lora_enabled else None,
+            max_gpu_lora_count=_base_model_lora_capacity(config, lora_enabled),
         )
 
         logger.info("Starting to serve Omni worker endpoint...")
