@@ -1,0 +1,108 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Generate the sliding-window benchmark dataset into the shared PVC.
+# 30 users × 8 turns × window=5 → 240 requests, 5 images/request,
+# 8000-token ISL, 2400×1080 base64-encoded. Each row has session_id=user_<N>
+# for causal ordering (aiperf single_turn mode).
+#
+# The 8-turn sliding window exercises cache hit rates: from turn 2 onward
+# each turn reuses 4 of 5 images from the prior window.
+#
+# Idempotent — re-run safely; skips generation only if a complete dataset
+# (correct row count) already exists, and writes atomically otherwise.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: qwen35-122b-generate-datasets
+  labels:
+    app.kubernetes.io/name: qwen3.5-122b-a10b
+    app.kubernetes.io/component: data-gen
+    app.kubernetes.io/managed-by: dynamo-recipe
+spec:
+  backoffLimit: 1
+  completions: 1
+  parallelism: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: qwen3.5-122b-a10b
+        app.kubernetes.io/component: data-gen
+    spec:
+      restartPolicy: Never
+      # runAsUser:0 is required so the job can write into the shared-model-cache
+      # PVC (FSx Lustre mounts root-owned); matches the rest of the recipe suite.
+      securityContext:
+        runAsUser: 0
+        runAsGroup: 0
+        fsGroup: 0
+      containers:
+        - name: generate-datasets
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.0
+          imagePullPolicy: IfNotPresent
+          # No privilege escalation, drop all Linux caps, default seccomp.
+          # Complements the pod-level root requirement above without removing it.
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          env:
+            - name: DYNAMO_REF
+              value: "e2f63d01e07b6deadf4c0912269564503846d204"
+          command:
+            - /bin/bash
+            - -lc
+            - |
+              set -euo pipefail
+              OUTPUT_DIR="/perf-cache/datasets"
+              OUTPUT_FILE="${OUTPUT_DIR}/30u_8t_5w_8000word_base64.jsonl"
+              EXPECTED_ROWS=240   # 30 users × 8 turns
+              # Skip only if a complete dataset (correct row count) already exists.
+              # A truncated file from an interrupted prior run is regenerated.
+              if [[ -s "$OUTPUT_FILE" ]] && [[ "$(wc -l < "$OUTPUT_FILE")" -eq "$EXPECTED_ROWS" ]]; then
+                echo "Dataset already exists: $(ls -lh $OUTPUT_FILE)"
+                exit 0
+              fi
+              GEN_SRC=/tmp/dynamo-jsonl
+              rm -rf "$GEN_SRC"
+              git init -q "$GEN_SRC"
+              git -C "$GEN_SRC" remote add origin https://github.com/ai-dynamo/dynamo.git
+              git -C "$GEN_SRC" fetch --depth=1 origin "$DYNAMO_REF"
+              git -C "$GEN_SRC" checkout -q FETCH_HEAD
+              cd "$GEN_SRC/benchmarks/multimodal/jsonl"
+              echo "[gen] dynamo @ $(git -C $GEN_SRC rev-parse --short HEAD)"
+              IMAGE_DIR="/perf-cache/images/2400x1080"
+              mkdir -p "${OUTPUT_DIR}" "${IMAGE_DIR}"
+              # Generate to a temp file, validate row count, then atomically
+              # rename so a failed run never leaves a partial dataset behind.
+              TMP_OUTPUT_FILE="${OUTPUT_DIR}/.$(basename "${OUTPUT_FILE}").tmp"
+              rm -f "${TMP_OUTPUT_FILE}"
+              python3 main.py sliding-window \
+                --num-users 30 \
+                --turns-per-user 8 \
+                --window-size 5 \
+                --image-size 2400 1080 \
+                --image-mode base64 \
+                --image-dir "${IMAGE_DIR}" \
+                --user-text-tokens 8000 \
+                -o "${TMP_OUTPUT_FILE}"
+              ROWS="$(wc -l < "${TMP_OUTPUT_FILE}")"
+              if [[ "${ROWS}" -ne "${EXPECTED_ROWS}" ]]; then
+                echo "ERROR: expected ${EXPECTED_ROWS} rows, got ${ROWS}" >&2
+                rm -f "${TMP_OUTPUT_FILE}"
+                exit 1
+              fi
+              mv -f "${TMP_OUTPUT_FILE}" "${OUTPUT_FILE}"
+              ls -lh "${OUTPUT_FILE}"
+              echo "Dataset generation complete"
+          volumeMounts:
+            - name: shared-model-cache
+              mountPath: /perf-cache
+              subPath: qwen35-122b-bench/perf-cache
+      volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache
