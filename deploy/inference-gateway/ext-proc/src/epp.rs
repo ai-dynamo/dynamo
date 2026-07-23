@@ -872,19 +872,11 @@ fn pod_endpoint_address(pod: &k8s_openapi::api::core::v1::Pod) -> Option<String>
     Some(SocketAddr::new(ip, port).to_string())
 }
 
-/// An externally supplied [`Endpoint`] rendered the way [`WorkerEndpointIndex`]
-/// stores addresses, so the two can be compared.
+/// Formats an external IP endpoint the same way as [`WorkerEndpointIndex`].
 ///
-/// [`Endpoint::address_port`] builds its string with `format!("{ip}:{port}")`,
-/// which leaves an IPv6 literal unbracketed (`fd00::2:8000`), while the index
-/// stores `SocketAddr`-rendered addresses (`[fd00::2]:8000`). Comparing the two
-/// forms directly matches on IPv4 and silently never matches on IPv6, so both
-/// sides go through `SocketAddr` here. Returns `None` for an address or port
-/// that does not parse, which is not a routable endpoint either way.
+/// Hostnames and invalid values return `None`; the index only stores pod IPs.
 fn indexed_endpoint_address(endpoint: &Endpoint) -> Option<String> {
-    let ip: IpAddr = endpoint.address.parse().ok()?;
-    let port: u16 = endpoint.port.parse().ok()?;
-    Some(SocketAddr::new(ip, port).to_string())
+    endpoint.socket_addr().map(|address| address.to_string())
 }
 
 /// The worker instance IDs `pod` is currently known under, per discovery mode:
@@ -1283,11 +1275,24 @@ fn apply_subset_filter<'a>(
     }
 
     let candidates: HashSet<&str> = candidate_subset.iter().map(|s| s.as_str()).collect();
+    let candidate_ips: HashSet<IpAddr> = candidate_subset
+        .iter()
+        .filter_map(|candidate| candidate.parse().ok())
+        .collect();
     endpoints
         .iter()
         .filter(|ep| {
-            candidates.contains(ep.address_port().as_str())
-                || candidates.contains(ep.address.as_str())
+            if candidates.contains(ep.address.as_str()) {
+                return true;
+            }
+
+            match ep.socket_addr() {
+                Some(address) => {
+                    candidate_ips.contains(&address.ip())
+                        || candidates.contains(address.to_string().as_str())
+                }
+                None => candidates.contains(format!("{}:{}", ep.address, ep.port).as_str()),
+            }
         })
         .collect()
 }
@@ -2466,12 +2471,8 @@ mod tests {
         );
     }
 
-    /// `Endpoint::address_port` does not bracket IPv6, while the index stores
-    /// `SocketAddr`-rendered addresses. Comparing the raw forms matches on
-    /// IPv4 and silently never matches on IPv6, so the normalization has to
-    /// agree with what the index stores.
     #[test]
-    fn indexed_endpoint_address_brackets_ipv6_to_match_the_index() {
+    fn external_ipv6_endpoint_matches_subset_and_index() {
         let endpoint = Endpoint {
             pod_name: "worker-0".to_string(),
             address: "fd00::2".to_string(),
@@ -2479,15 +2480,20 @@ mod tests {
             labels: HashMap::new(),
         };
 
+        let expected = "[fd00::2]:8000";
+        assert_eq!(endpoint.address_port(), expected);
         assert_eq!(
             indexed_endpoint_address(&endpoint).as_deref(),
-            Some("[fd00::2]:8000")
+            Some(expected)
         );
-        assert_ne!(
-            endpoint.address_port(),
-            "[fd00::2]:8000",
-            "guards the reason this helper exists: the raw form is unbracketed"
-        );
+
+        for candidate in ["fd00::2", "FD00:0:0:0:0:0:0:2", expected] {
+            let subset = [candidate.to_string()];
+            assert_eq!(
+                apply_subset_filter(std::slice::from_ref(&endpoint), &subset).len(),
+                1
+            );
+        }
 
         let mut index = WorkerEndpointIndex::default();
         index.upsert(&simple_pod("worker-0", "fd00::2"));
@@ -2496,6 +2502,24 @@ mod tests {
             indexed_endpoint_address(&endpoint),
             "normalized endpoint must equal what the index stored"
         );
+    }
+
+    #[test]
+    fn external_hostname_endpoint_matches_bare_or_full_subset() {
+        let endpoint = Endpoint {
+            pod_name: "worker-0".to_string(),
+            address: "worker.example".to_string(),
+            port: "8000".to_string(),
+            labels: HashMap::new(),
+        };
+
+        for candidate in ["worker.example", "worker.example:8000"] {
+            let subset = [candidate.to_string()];
+            assert_eq!(
+                apply_subset_filter(std::slice::from_ref(&endpoint), &subset).len(),
+                1
+            );
+        }
     }
 
     /// A minimal pod exposing an `http`-named port, for

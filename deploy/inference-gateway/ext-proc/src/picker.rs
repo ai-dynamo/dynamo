@@ -7,6 +7,7 @@
 //! routing decision.
 
 use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
 
 use bytes::Bytes;
 
@@ -24,9 +25,23 @@ pub struct Endpoint {
 }
 
 impl Endpoint {
-    /// Returns the endpoint in "ip:port" format.
+    /// Parses a numeric IP and port. IPv6 may be bracketed or bare.
+    pub(crate) fn socket_addr(&self) -> Option<SocketAddr> {
+        let address = self
+            .address
+            .strip_prefix('[')
+            .and_then(|value| value.strip_suffix(']'))
+            .unwrap_or(&self.address);
+        let ip: IpAddr = address.parse().ok()?;
+        let port: u16 = self.port.parse().ok()?;
+        Some(SocketAddr::new(ip, port))
+    }
+
+    /// Returns `host:port`, adding brackets around IPv6 addresses.
     pub fn address_port(&self) -> String {
-        format!("{}:{}", self.address, self.port)
+        self.socket_addr()
+            .map(|address| address.to_string())
+            .unwrap_or_else(|| format!("{}:{}", self.address, self.port))
     }
 }
 
@@ -145,4 +160,28 @@ pub enum PickError {
     /// multiplexing means the connection cap does not bound concurrent requests.
     #[error("endpoint picker overloaded")]
     Overloaded,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn endpoint_address_port_formats_ipv4_ipv6_and_hostname() {
+        for (address, expected) in [
+            ("10.0.0.1", "10.0.0.1:8000"),
+            ("fd00::10", "[fd00::10]:8000"),
+            ("[fd00::10]", "[fd00::10]:8000"),
+            ("worker.example", "worker.example:8000"),
+        ] {
+            let endpoint = Endpoint {
+                pod_name: "worker-0".to_string(),
+                address: address.to_string(),
+                port: "8000".to_string(),
+                labels: HashMap::new(),
+            };
+
+            assert_eq!(endpoint.address_port(), expected);
+        }
+    }
 }
