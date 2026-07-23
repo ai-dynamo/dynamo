@@ -57,6 +57,15 @@ const REFERENCE_CSS = `
     --dynref-blue-bg: rgba(37, 99, 235, 0.1);
     --dynref-blue-border: rgba(37, 99, 235, 0.28);
     --dynref-blue-fg: #1D4ED8;
+    --dynref-teal-bg: rgba(13, 148, 136, 0.12);
+    --dynref-teal-border: rgba(13, 148, 136, 0.3);
+    --dynref-teal-fg: #0F766E;
+    --dynref-orange-bg: rgba(233, 84, 32, 0.12);
+    --dynref-orange-border: rgba(233, 84, 32, 0.3);
+    --dynref-orange-fg: #C7401C;
+    --dynref-violet-bg: rgba(124, 58, 237, 0.12);
+    --dynref-violet-border: rgba(124, 58, 237, 0.3);
+    --dynref-violet-fg: #6D28D9;
 }
 
 .dark {
@@ -70,6 +79,15 @@ const REFERENCE_CSS = `
     --dynref-blue-bg: rgba(59, 130, 246, 0.18);
     --dynref-blue-border: rgba(59, 130, 246, 0.42);
     --dynref-blue-fg: #93C5FD;
+    --dynref-teal-bg: rgba(13, 148, 136, 0.2);
+    --dynref-teal-border: rgba(13, 148, 136, 0.45);
+    --dynref-teal-fg: #5EEAD4;
+    --dynref-orange-bg: rgba(233, 84, 32, 0.2);
+    --dynref-orange-border: rgba(233, 84, 32, 0.42);
+    --dynref-orange-fg: #FF9068;
+    --dynref-violet-bg: rgba(139, 92, 246, 0.2);
+    --dynref-violet-border: rgba(139, 92, 246, 0.42);
+    --dynref-violet-fg: #C4B5FD;
 }
 
 /* Card container shared by every reference component. */
@@ -160,29 +178,19 @@ const REFERENCE_CSS = `
 
 /* Ubuntu — brand orange. */
 .dynref-chip--ubuntu {
-    background: rgba(233, 84, 32, 0.12);
-    color: #C7401C;
-    border-color: rgba(233, 84, 32, 0.3);
+    background: var(--dynref-orange-bg);
+    color: var(--dynref-orange-fg);
+    border-color: var(--dynref-orange-border);
 }
 
-.dark .dynref-chip--ubuntu {
-    background: rgba(233, 84, 32, 0.2);
-    color: #FF9068;
-    border-color: rgba(233, 84, 32, 0.42);
-}
 
 /* CentOS — violet. */
 .dynref-chip--centos {
-    background: rgba(124, 58, 237, 0.12);
-    color: #6D28D9;
-    border-color: rgba(124, 58, 237, 0.3);
+    background: var(--dynref-violet-bg);
+    color: var(--dynref-violet-fg);
+    border-color: var(--dynref-violet-border);
 }
 
-.dark .dynref-chip--centos {
-    background: rgba(139, 92, 246, 0.2);
-    color: #C4B5FD;
-    border-color: rgba(139, 92, 246, 0.42);
-}
 
 /* CPU architecture — blue. */
 .dynref-chip--arch {
@@ -210,16 +218,11 @@ const REFERENCE_CSS = `
 
 /* CUDA toolkit — teal. */
 .dynref-chip--cuda {
-    background: rgba(13, 148, 136, 0.12);
-    color: #0F766E;
-    border-color: rgba(13, 148, 136, 0.3);
+    background: var(--dynref-teal-bg);
+    color: var(--dynref-teal-fg);
+    border-color: var(--dynref-teal-border);
 }
 
-.dark .dynref-chip--cuda {
-    background: rgba(13, 148, 136, 0.2);
-    color: #5EEAD4;
-    border-color: rgba(13, 148, 136, 0.45);
-}
 
 /* Semantic badges — green = stable/promoted/supported, amber = early-access/
    caveat, gray = neutral/patch, red = deprecated, blue = info/version-tag. */

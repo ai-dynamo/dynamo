@@ -180,28 +180,19 @@ const AB_CSS = `
 }
 
 .dynref-ab-glyph--wheel {
-    color: #0F766E;
+    color: var(--dynref-teal-fg);
 }
 
-.dark .dynref-ab-glyph--wheel {
-    color: #5EEAD4;
-}
 
 .dynref-ab-glyph--helm {
-    color: #1D4ED8;
+    color: var(--dynref-blue-fg);
 }
 
-.dark .dynref-ab-glyph--helm {
-    color: #93C5FD;
-}
 
 .dynref-ab-glyph--crate {
-    color: #6D28D9;
+    color: var(--dynref-violet-fg);
 }
 
-.dark .dynref-ab-glyph--crate {
-    color: #C4B5FD;
-}
 
 .dynref-ab-link {
     color: var(--pst-color-text-base);

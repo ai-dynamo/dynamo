@@ -8,7 +8,10 @@
  * mono text — deliberately NOT chip-styled, so it does not read as an
  * interactive filter), a migration strip computed from releases.data
  * (backend pins, NIXL pins, CUDA toolkits + discontinuation badge, minimum
- * driver), and a "Read before upgrading" reading list of link chips.
+ * driver), and a "Read before upgrading" reading list of link chips. Reading
+ * list items are (version, kind) pairs — labels and counts derive from
+ * RELEASE_STATS in releases.data, and hrefs from the shared vXYZ anchor rule;
+ * items whose version has no RELEASE_STATS entry are skipped.
  *
  * Server component (no "use client"); shared vocabulary comes from
  * ReferenceStyles — place <ReferenceStyles /> on the page alongside this
@@ -18,7 +21,7 @@
  * (no false green).
  */
 
-import { RELEASES, CUDA_HISTORY, type BackendPins } from "./releases.data";
+import { RELEASES, CUDA_HISTORY, RELEASE_STATS, type BackendPins } from "./releases.data";
 
 const UP_CSS = `
 .dynref-up-from {
@@ -209,12 +212,33 @@ function buildRows(
 export function UpgradePanel(props: {
   toVersion: string;
   fromVersion: { version: string; label: string };
-  readingList: { label: string; href: string }[];
+  readingList: { version: string; kind: "breaking" | "known-issues" }[];
 }) {
   const from = RELEASES.find((r) => r.version === props.fromVersion.version);
   const to = RELEASES.find((r) => r.version === props.toVersion);
 
   const rows = buildRows(props.fromVersion.version, props.toVersion, from?.pins, to?.pins);
+
+  /* Labels and hrefs derive from RELEASE_STATS + the shared "v1.3.0" -> "v130"
+     anchor rule (same as ReleaseHeader); versions without stats are skipped. */
+  const readingChips = props.readingList.flatMap((item) => {
+    const stats = RELEASE_STATS[item.version];
+    if (!stats) return [];
+    const anchor = item.version.replace(/\./g, "");
+    return item.kind === "breaking"
+      ? [
+          {
+            label: `${item.version} breaking changes (${stats.breaking})`,
+            href: `/dynamo/dev/reference/deprecations#${anchor}`,
+          },
+        ]
+      : [
+          {
+            label: `${item.version} known issues (${stats.knownIssues})`,
+            href: `/dynamo/dev/reference/known-issues#${anchor}`,
+          },
+        ];
+  });
 
   return (
     <>
@@ -258,10 +282,10 @@ export function UpgradePanel(props: {
           </div>
         )}
 
-        {props.readingList.length > 0 && (
+        {readingChips.length > 0 && (
           <div className="dynref-up-footer">
             <span className="dynref-up-footerlabel">Read before upgrading</span>
-            {props.readingList.map((item) => (
+            {readingChips.map((item) => (
               <a className="dynref-up-read" href={item.href} key={item.href}>
                 {item.label}
               </a>

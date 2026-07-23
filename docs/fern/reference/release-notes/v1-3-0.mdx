@@ -12,14 +12,7 @@ import { UpgradePanel } from "@/components/UpgradePanel";
 
 <ReferenceStyles />
 
-<ReleaseHeader
-  version="v1.3.0"
-  prs={930}
-  contributors={125}
-  firstTimers={23}
-  breakingCount={24}
-  knownIssuesCount={10}
-/>
+<ReleaseHeader version="v1.3.0" />
 
 Dynamo v1.3.0 is the 16th feature release of the open-source distributed inference platform. It delivers the largest **Dynamo Router** buildout to date (a standalone selection service, the **Branch-Sharded KV Indexer**, compressed-radix-tree hot-path speedups, and topology-aware routing), overhauls **tool-calling and reasoning** into a configurable parser layer aligned to vLLM and SGLang across the model fleet, and deepens **Kubernetes deployment** around a production **GPU Memory Service** and DynamoGraphDeployment (DGD) `v1beta1` admission. It also expands **performance modeling and replay** with AIC latency prediction and Mooncake trace replay, and moves the platform to **CUDA 13** with refreshed vLLM, SGLang, and TensorRT-LLM engines and **NIXL v1.x**.
 
@@ -31,9 +24,9 @@ Breaking changes and deprecations for this release are tracked on the [Deprecati
   toVersion="v1.3.0"
   fromVersion={{ version: "v1.2.1", label: "v1.2.x" }}
   readingList={[
-    { label: "v1.3.0 breaking changes (24)", href: "/dynamo/dev/reference/deprecations#v130" },
-    { label: "v1.3.0 known issues (10)", href: "/dynamo/dev/reference/known-issues#v130" },
-    { label: "v1.2.0 breaking changes (5)", href: "/dynamo/dev/reference/deprecations#v120" }
+    { version: "v1.3.0", kind: "breaking" },
+    { version: "v1.3.0", kind: "known-issues" },
+    { version: "v1.2.0", kind: "breaking" }
   ]}
 />
 

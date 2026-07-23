@@ -6,9 +6,12 @@
  *
  * Renders the release title row (version, GA badge, date from releases.data),
  * GitHub / Artifacts link chips, and a stat-tile strip (PRs merged,
- * contributors, first-time contributors, breaking changes, known issues).
- * Optional stats simply drop their tiles when absent; breaking-changes and
- * known-issues tiles deep-link into the Deprecations / Known Issues pages.
+ * contributors, first-time contributors, breaking changes, known issues)
+ * driven entirely by RELEASE_STATS[version] in releases.data — pages pass
+ * only the version. Optional stats simply drop their tiles when absent;
+ * a version without a RELEASE_STATS entry renders the header with no tiles.
+ * Breaking-changes and known-issues tiles deep-link into the Deprecations /
+ * Known Issues pages.
  *
  * Server component (no "use client"); shared vocabulary (panel, eyebrow,
  * badges, muted text) comes from ReferenceStyles — place <ReferenceStyles />
@@ -17,7 +20,7 @@
  * lives only in the number (amber for breaking changes / known issues).
  */
 
-import { RELEASES } from "./releases.data";
+import { RELEASES, RELEASE_STATS } from "./releases.data";
 
 const RH_CSS = `
 .dynref-rh-header {
@@ -123,44 +126,42 @@ interface StatTile {
   href?: string;
 }
 
-export function ReleaseHeader(props: {
-  version: string;
-  prs?: number;
-  contributors?: number;
-  firstTimers?: number;
-  breakingCount: number;
-  knownIssuesCount: number;
-}) {
+export function ReleaseHeader(props: { version: string }) {
   const release = RELEASES.find((r) => r.version === props.version);
+  /* All counts come from RELEASE_STATS in releases.data — the single source
+     shared with UpgradePanel and the ledger accordion titles. */
+  const stats = RELEASE_STATS[props.version];
   /* v1.3.0 -> "v130" — anchor shape shared with the Deprecations and Known
      Issues pages' per-version section ids. */
   const versionAnchor = props.version.replace(/\./g, "");
 
   const tiles: StatTile[] = [];
-  if (typeof props.prs === "number") {
-    tiles.push({ label: "PRs merged", value: props.prs, amber: false });
+  if (stats) {
+    if (typeof stats.prs === "number") {
+      tiles.push({ label: "PRs merged", value: stats.prs, amber: false });
+    }
+    if (typeof stats.contributors === "number") {
+      tiles.push({ label: "Contributors", value: stats.contributors, amber: false });
+    }
+    if (typeof stats.firstTimers === "number") {
+      tiles.push({ label: "First-time contributors", value: stats.firstTimers, amber: false });
+    }
+    tiles.push({
+      label: "Breaking changes",
+      value: stats.breaking,
+      amber: true,
+      href: `/dynamo/dev/reference/deprecations#${versionAnchor}`,
+    });
+    tiles.push({
+      label: "Known issues",
+      value: stats.knownIssues,
+      amber: true,
+      href:
+        stats.knownIssues > 0
+          ? `/dynamo/dev/reference/known-issues#${versionAnchor}`
+          : undefined,
+    });
   }
-  if (typeof props.contributors === "number") {
-    tiles.push({ label: "Contributors", value: props.contributors, amber: false });
-  }
-  if (typeof props.firstTimers === "number") {
-    tiles.push({ label: "First-time contributors", value: props.firstTimers, amber: false });
-  }
-  tiles.push({
-    label: "Breaking changes",
-    value: props.breakingCount,
-    amber: true,
-    href: `/dynamo/dev/reference/deprecations#${versionAnchor}`,
-  });
-  tiles.push({
-    label: "Known issues",
-    value: props.knownIssuesCount,
-    amber: true,
-    href:
-      props.knownIssuesCount > 0
-        ? `/dynamo/dev/reference/known-issues#${versionAnchor}`
-        : undefined,
-  });
 
   return (
     <>
@@ -187,6 +188,7 @@ export function ReleaseHeader(props: {
           </div>
         </div>
 
+        {tiles.length > 0 && (
         <div className="dynref-rh-tiles">
           {tiles.map((tile) => {
             const body = (
@@ -208,6 +210,7 @@ export function ReleaseHeader(props: {
             );
           })}
         </div>
+        )}
       </section>
     </>
   );

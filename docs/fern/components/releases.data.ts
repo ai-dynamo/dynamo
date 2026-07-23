@@ -12,12 +12,13 @@
  * PER-RELEASE BUMP CHECKLIST (a release touches more than this file):
  *   1. This file: add the RELEASES entry (pins, date, delta, notesSummary,
  *      notesHref), CUDA_HISTORY rows, ARTIFACTS tags/versions, MAIN_TOT,
- *      CURRENT_* consts, MODEL_EA_BUILDS as applicable.
+ *      CURRENT_* consts, MODEL_EA_BUILDS, and the RELEASE_STATS entry
+ *      (counts from the GitHub body) as applicable.
  *   2. New page reference/release-notes/vX-Y-Z.mdx (ingest the GitHub body;
- *      counts in ReleaseHeader props and the UpgradePanel readingList are
- *      ingestion-time constants — count them from the body).
+ *      ReleaseHeader and the UpgradePanel readingList read their counts
+ *      from RELEASE_STATS — no per-page count props).
  *   3. reference/known-issues.mdx + reference/deprecations.mdx: new vXYZ
- *      section + accordion retitles ("vX.Y.Z — N entries").
+ *      section + accordion retitles (titles read RELEASE_STATS).
  *   4. Nav: docs/fern/index.yml Release Notes section (+ explicit slug).
  *   5. Regenerate agent twins: python3 scripts/gen_llms_tables.py
  *      (--check must pass afterwards).
@@ -958,6 +959,24 @@ export const CRATES_FIRST_PUBLISHED = [
   { crate: "dynamo-protocols", version: "1.1.0", date: "2026-05-04" },
   { crate: "dynamo-tokenizers", version: "1.2.0", date: "2026-06-02" },
 ];
+
+/* Per-release ingestion-time stats for the Release Notes pages (ReleaseHeader
+   tiles, UpgradePanel reading list) and the Deprecations / Known Issues
+   accordion titles. Counted from each release's GitHub body at ingestion. */
+export interface ReleaseStats {
+  prs?: number;
+  contributors?: number;
+  firstTimers?: number;
+  breaking: number;
+  knownIssues: number;
+}
+
+export const RELEASE_STATS: Record<string, ReleaseStats> = {
+  "v1.3.0": { prs: 930, contributors: 125, firstTimers: 23, breaking: 24, knownIssues: 10 },
+  "v1.2.0": { prs: 603, contributors: 82, breaking: 5, knownIssues: 11 },
+  "v1.1.0": { prs: 896, contributors: 113, firstTimers: 12, breaking: 8, knownIssues: 20 },
+  "v1.0.0": { contributors: 90, firstTimers: 34, breaking: 41, knownIssues: 14 },
+};
 
 export const NIGHTLIES_NOTE =
   "ai-dynamo and ai-dynamo-runtime nightly builds from main publish wheels tagged *.devYYYYMMDD (since Apr 24, 2026). Install with pip or uv using --pre and the NVIDIA extra-index pattern shown above.";

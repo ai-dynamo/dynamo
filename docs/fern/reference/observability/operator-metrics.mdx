@@ -5,7 +5,7 @@ title: Operator Metrics
 subtitle: Kubernetes-only dynamo_operator_* metrics and the annotations and Helm values that enable metrics collection.
 ---
 
-The Dynamo Operator exposes its own Prometheus metrics for controller reconciliation, webhook validation, and resource inventory. These are **Kubernetes-scoped** — they exist only where the operator runs, and are separate from the application metrics emitted by frontends and workers (see [Metrics Catalog](metrics-catalog.mdx)). For setup and dashboards, see the [Operator Metrics guide](../../kubernetes/observability/operator-metrics.md).
+The Dynamo Operator exposes its own Prometheus metrics for controller reconciliation, webhook validation, and resource inventory. These are **Kubernetes-scoped** — they exist only where the operator runs, and are separate from the application metrics emitted by frontends and workers (see [Metrics Catalog](metrics-catalog.mdx)). For enablement and dashboards (including the operator dashboard), see the [Kubernetes observability guide](../../kubernetes/observability/metrics.md).
 
 All operator metrics use the `dynamo_operator` prefix. Unlike application metrics (which use a PodMonitor), the operator is scraped via a ServiceMonitor created by the Helm chart.
 
@@ -130,7 +130,7 @@ spec:
 
 ## Related
 
-- [Operator Metrics guide](../../kubernetes/observability/operator-metrics.md) — setup, example queries, and the operator Grafana dashboard.
+- [Kubernetes observability guide](../../kubernetes/observability/metrics.md) — signal enablement and the operator Grafana dashboard.
 - [Kubernetes Metrics guide](../../kubernetes/observability/metrics.md) — PodMonitor and Prometheus walkthrough for application metrics.
 - [Metrics Catalog](metrics-catalog.mdx) — application `dynamo_*` metrics.
 - [Metric Labels](metric-labels.mdx) — application metric label dimensions.

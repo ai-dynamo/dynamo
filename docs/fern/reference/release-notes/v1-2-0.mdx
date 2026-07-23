@@ -11,13 +11,7 @@ import { ReleaseSummaryCards } from "@/components/ReleaseSummaryCards";
 
 <ReferenceStyles />
 
-<ReleaseHeader
-  version="v1.2.0"
-  prs={603}
-  contributors={82}
-  breakingCount={5}
-  knownIssuesCount={11}
-/>
+<ReleaseHeader version="v1.2.0" />
 
 Dynamo v1.2.0 is the 15th feature release of the open-source distributed inference platform. It expands **multimodal serving** (text-to-image on TensorRT-LLM, formalized audio/video streaming, and media-aware KV routing), scales the standalone KV indexer to **branch-sharded, anchor-aware** routing, and promotes the **DynamoGraphDeployment (DGD)** Kubernetes API to served `v1beta1`. It also productizes the **inter-pod GPU Memory Service**, extends **Dynamo Snapshot** to OpenShift and multi-namespace deployments, and adds **DeepSeek-V4 (Flash and Pro) recipes**, native on vLLM 0.20.1 and on SGLang via an upstream preview image.
 
