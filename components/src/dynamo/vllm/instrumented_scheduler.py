@@ -3790,8 +3790,13 @@ class InstrumentedScheduler(AsyncScheduler):
             },
             "capacity": {
                 "common": (
-                    asdict(self._bench_negotiated_capacity)
-                    if getattr(self, "_bench_negotiated_capacity", None) is not None
+                    asdict(negotiated_capacity)
+                    if (
+                        negotiated_capacity := getattr(
+                            self, "_bench_negotiated_capacity", None
+                        )
+                    )
+                    is not None
                     else None
                 ),
             },
