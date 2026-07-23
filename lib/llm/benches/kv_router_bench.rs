@@ -612,9 +612,14 @@ async fn discover_worker_ids(frontend_url: &str) -> Result<Vec<WorkerId>> {
         .await
         .context("Failed to parse health response")?;
 
-    let worker_ids: Vec<WorkerId> = health.instances.iter().map(|i| i.instance_id).collect();
+    let worker_ids: Vec<WorkerId> = health
+        .instances
+        .iter()
+        .filter(|i| i.endpoint == "generate")
+        .map(|i| i.instance_id)
+        .collect();
 
-    // Deduplicate (in case of multiple endpoints per worker)
+    // Deduplicate (in case of multiple generate endpoints per worker)
     let mut unique_ids: Vec<WorkerId> = worker_ids.clone();
     unique_ids.sort_unstable();
     unique_ids.dedup();
