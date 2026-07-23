@@ -5,6 +5,7 @@ import asyncio
 import logging
 import os
 import signal
+import sys
 from typing import Any, Callable, Coroutine, Iterable, Optional
 
 from dynamo._core import DistributedRuntime
@@ -16,7 +17,44 @@ _DEFAULT_GRACE_PERIOD_SECS = 5.0
 _DEFAULT_DRAIN_TIMEOUT_SECS = 30.0
 _DEFAULT_CLEANUP_TIMEOUT_SECS = 30.0
 _GRACE_PERIOD_ENV = "DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS"
+_FAST_FAILOVER_EXIT_ENV = "DYN_GMS_FAILOVER_FAST_EXIT_ON_SIGTERM"
+_FAILOVER_UNREGISTER_TIMEOUT_ENV = "DYN_GMS_FAILOVER_UNREGISTER_TIMEOUT_SECS"
 _shutdown_started = asyncio.Event()
+
+
+def is_shutdown_in_progress() -> bool:
+    """Return whether this process is already handling graceful shutdown."""
+    return _shutdown_started.is_set()
+
+
+def fast_failover_exit_enabled() -> bool:
+    value = os.getenv(_FAST_FAILOVER_EXIT_ENV)
+    if value is None:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
+
+
+def failover_unregister_timeout_secs() -> float:
+    try:
+        return max(0.0, float(os.getenv(_FAILOVER_UNREGISTER_TIMEOUT_ENV, "5")))
+    except ValueError:
+        return 5.0
+
+
+def _fast_exit_after_failover_unregister(
+    shutdown_event: Optional[asyncio.Event],
+) -> None:
+    if shutdown_event is not None:
+        shutdown_event.set()
+    logger.warning(
+        "GMS failover fast-exit enabled; exiting after discovery unregister "
+        "so the kernel releases failover ownership immediately"
+    )
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    finally:
+        os._exit(0)
 
 
 def get_grace_period_seconds() -> float:
@@ -104,7 +142,27 @@ async def graceful_shutdown_with_discovery(
         grace_period_s = get_grace_period_seconds()
 
     logger.info("Received shutdown signal; unregistering endpoints from discovery")
-    await _unregister_endpoints(list(endpoints))
+    fast_failover_exit = fast_failover_exit_enabled()
+    if fast_failover_exit:
+        # A wedged discovery backend must not hold the process-owned failover
+        # lock indefinitely. Normal shutdown keeps its existing unlimited
+        # unregister semantics so it cannot silently leave stale registrations.
+        unregister_timeout = failover_unregister_timeout_secs()
+        try:
+            await asyncio.wait_for(
+                _unregister_endpoints(list(endpoints)), timeout=unregister_timeout
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Discovery unregister did not complete within %.1fs; proceeding so "
+                "failover ownership is released promptly",
+                unregister_timeout,
+            )
+    else:
+        await _unregister_endpoints(list(endpoints))
+
+    if fast_failover_exit:
+        _fast_exit_after_failover_unregister(shutdown_event)
 
     if grace_period_s > 0:
         logger.info("Grace period %.2fs before stopping endpoints", grace_period_s)
