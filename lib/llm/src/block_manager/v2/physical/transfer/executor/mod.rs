@@ -267,26 +267,23 @@ fn execute_two_hop_transfer(params: TwoHopTransferParams) -> Result<TransferComp
     let ctx_clone = ctx.clone();
     handle.spawn(async move {
         let Some(ref bounce_buffer_spec) = options_clone.bounce_buffer else {
-            tx.send(Err(anyhow::anyhow!(
+            let _ = tx.send(Err(anyhow::anyhow!(
                 "Two-hop transfers require a bounce buffer."
-            )))
-            .unwrap();
+            )));
             return;
         };
 
         if bounce_buffer_spec.layout().location() != bounce_location {
-            tx.send(Err(anyhow::anyhow!(
+            let _ = tx.send(Err(anyhow::anyhow!(
                 "Bounce buffer layout does not match bounce location."
-            )))
-            .unwrap();
+            )));
             return;
         }
 
         if bounce_buffer_spec.block_ids().is_empty() {
-            tx.send(Err(anyhow::anyhow!(
+            let _ = tx.send(Err(anyhow::anyhow!(
                 "Bounce buffer must have at least one block."
-            )))
-            .unwrap();
+            )));
             return;
         }
 
@@ -313,7 +310,7 @@ fn execute_two_hop_transfer(params: TwoHopTransferParams) -> Result<TransferComp
                     return;
                 }
             }
-            tx.send(Ok(())).unwrap();
+            let _ = tx.send(Ok(()));
         } else {
             if let Err(e) = handle_buffered_transfer(
                 &src_clone,
