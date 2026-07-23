@@ -47,7 +47,8 @@ These recipes demonstrate aggregated or disaggregated serving:
 | **[GLM-5.2](glm-5.2/)** | SGLang | Aggregated + Disaggregated | 16x/20x B200 or 24x/16x H200 | ✅ | ✅ | B200 NVFP4 or H200 FP8 with FP8 KV, KV-aware routing, EAGLE, B200 HiCache CPU offload, agentic trace profile | ❌ |
 | **[DeepSeek-R1](deepseek-r1/sglang/disagg-8gpu/)** | SGLang | Disagg WideEP | 16x H200 | ✅ | ❌ | TP=8, single-node. Use `model-download-sglang.yaml` | ❌ |
 | **[DeepSeek-R1](deepseek-r1/sglang/disagg-16gpu/)** | SGLang | Disagg WideEP | 32x H200 | ✅ | ❌ | TP=16, multi-node. Use `model-download-sglang.yaml` | ❌ |
-| **[DeepSeek-R1](deepseek-r1/trtllm/disagg/wide_ep/gb200/)** | TensorRT-LLM | Disagg WideEP (GB200) | 36x GB200 | ✅ | ✅ | Multi-node: 8 decode + 1 prefill nodes | ❌ |
+| **[DeepSeek-R1](deepseek-r1/trtllm/agg/b200/)** | TensorRT-LLM | Aggregated (B200) | 8x B200 | ✅ | ✅ | Single-node TP8 EP8 ADP, NVFP4, no spec, tuned for 1K/1K | ❌ |
+| **[DeepSeek-R1](deepseek-r1/trtllm/disagg/wide_ep/gb200/)** | TensorRT-LLM | Disagg WideEP (GB200) | 40x GB200 | ✅ | ✅ | Multi-node: 2 prefill (DEP4) + 1 decode (DEP32 WideEP), MTP/1, EPLB, tuned for 8K/1K | ❌ |
 | **[DeepSeek-R1](deepseek-r1/)** | vLLM | Disagg DEP16 | 32x H200 | ✅ | ❌ | Multi-node, data-expert parallel | ❌ |
 | **[DeepSeek-V4-Flash](deepseek-v4/deepseek-v4-flash/)** | vLLM | Agg + Disagg | 4x B200 / 4x H200 | ✅ | ✅ | Text — MoE 284B / 13B active, NVFP4 (B200) / public FP8 (H200) + FP8 KV, agg TP4 (B200) / DP4+TP1+EP (H200), MTP (H200), KV-aware routing, agentic trace profile, reasoning + tool calling; plus disagg 2P1D (12x B200) / 4P3D (28x H200) | ❌ |
 | **[DeepSeek-V4-Pro](deepseek-v4/deepseek-v4-pro/)** | vLLM | Agg + Disagg | 8x B200 / 8x H200 | ✅ | ✅ | Text — MoE 1.6T / 49B active (1M ctx; 86k on H200), NVFP4 (B200) / public FP8 (H200) + FP8 KV, TP8 + EP, MTP-2 (B200), KV-aware routing, agentic trace profile, reasoning + tool calling; plus disagg 1P1D (16x B200) / 1P3D (32x H200) | ❌ |
@@ -261,7 +262,7 @@ kubectl apply -R -f "$DEPLOY_PATH/gaie/k8s-manifests" -n "$NAMESPACE"
 
 ### DeepSeek-R1 on GB200 (Multi-node)
 
-See [deepseek-r1/trtllm/disagg/wide_ep/gb200/deploy.yaml](deepseek-r1/trtllm/disagg/wide_ep/gb200/deploy.yaml) for the complete multi-node WideEP configuration.
+See [deepseek-r1/trtllm/disagg/wide_ep/gb200/deploy.yaml](deepseek-r1/trtllm/disagg/wide_ep/gb200/deploy.yaml) for the complete multi-node WideEP configuration (40x GB200, 8K/1K, MTP/1, EPLB).
 
 ## Customization
 

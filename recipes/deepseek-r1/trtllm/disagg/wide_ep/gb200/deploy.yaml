@@ -1,35 +1,28 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-
-# Instructions:
-# 1. First, create the model cache PersistentVolumeClaim:
-#    kubectl apply -f model-cache.yaml -n <namespace>
-# 2. Download the model to the model cache:
-#    kubectl apply -f model-download.yaml -n <namespace>
-# 3. Once the above steps are complete, deploy the prefill and decode workers via this yaml:
-#    kubectl apply -f deploy.yaml -n <namespace>
-# 4. To benchmark the service, run:
-#    kubectl apply -f perf.yaml -n <namespace>
+# DeepSeek-R1 NVFP4 disaggregated WideEP on 10x GB200 (40 GPUs), tuned for ISL/OSL=8192/1024.
 #
-# NOTE (empty /v1/models): If the frontend returns "data": [] from /v1/models, check frontend logs.
-#    The frontend discovery watcher may treat the workers' --model-path (a local path like
-#    /model-cache/deepseek-r1-fp4) as a HuggingFace model ID and fail with 404. Mounting the
-#    model-cache on the Frontend with HF_HOME allows the frontend to resolve local paths when
-#    the runtime supports it. Otherwise use a HuggingFace model ID for --model-path and HF_HOME
-#    on workers (with model downloaded in HF cache layout).
+# Topology: 2 prefill (CTX) workers, each on 1 GB200 node, DEP4 (TP=4 EP=4 ADP).
+#           1 decode  (GEN) worker on 8 GB200 nodes, DEP32 (TP=32 EP=32 ADP).
+# GEN MoE: TRTLLM with EPLB. CTX MoE: default backend.
+# KV cache: FP8. Speculative decoding: MTP with 1 next-N predict layer.
+#
+# Instructions:
+# 1. kubectl apply -f ../../../../model-cache/model-cache.yaml -n <namespace>
+# 2. kubectl apply -f ../../../../model-cache/model-download.yaml -n <namespace>
+# 3. kubectl apply -f deploy.yaml -n <namespace>
+# 4. kubectl apply -f perf.yaml -n <namespace>
 
-# ConfigMap for prefill engine configuration
-# This configuration sets up a DEP 4 prefill worker
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: prefill-config
 data:
   prefill_config.yaml: |
-    max_batch_size: 4
-    max_num_tokens: 4608
-    max_seq_len: 1227
+    max_batch_size: 1
+    max_num_tokens: 8448
+    max_seq_len: 9423
     tensor_parallel_size: 4
     moe_expert_parallel_size: 4
     enable_attention_dp: true
@@ -39,15 +32,16 @@ data:
     disable_overlap_scheduler: true
     kv_cache_config:
       enable_block_reuse: false
-      free_gpu_memory_fraction: 0.85
+      free_gpu_memory_fraction: 0.75
       dtype: fp8
     cache_transceiver_config:
-      max_tokens_in_buffer: 4608
+      max_tokens_in_buffer: 8448
       backend: DEFAULT
+    speculative_config:
+      decoding_type: MTP
+      num_nextn_predict_layers: 1
 ---
 
-# ConfigMap for decode engine configuration
-# This configuration sets up a DEP 32 decode worker
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -57,10 +51,11 @@ data:
     tensor_parallel_size: 32
     moe_expert_parallel_size: 32
     enable_attention_dp: true
+    enable_lm_head_tp_in_adp: true
     pipeline_parallel_size: 1
-    max_batch_size: 32
-    max_num_tokens: 32
-    max_seq_len: 2251
+    max_batch_size: 256
+    max_num_tokens: 512
+    max_seq_len: 9423
     cuda_graph_config:
       enable_padding: true
       batch_sizes:
@@ -73,33 +68,33 @@ data:
       - 64
       - 128
       - 256
-      - 384
-      - 512
-      - 768
-      - 1024
-      - 2048
     print_iter_log: true
     kv_cache_config:
       enable_block_reuse: false
-      free_gpu_memory_fraction: 0.7
+      free_gpu_memory_fraction: 0.6
       dtype: fp8
     moe_config:
-      backend: WIDEEP
+      backend: TRTLLM
+      load_balancer:
+        num_slots: 288
+        layer_updates_per_iter: 1
     cache_transceiver_config:
-      max_tokens_in_buffer: 4608
+      max_tokens_in_buffer: 8448
       backend: DEFAULT
-    stream_interval: 20
+    stream_interval: 100
+    num_postprocess_workers: 4
+    speculative_config:
+      decoding_type: MTP
+      num_nextn_predict_layers: 1
 ---
 
-# NOTE: The numNodes value should equal the total number of nodes across prefill and decode
-#       as specified in their respective sections below (prefill.multinode.nodeCount + decode.multinode.nodeCount).
-#       For autoscaling deployments, the compute domain will automatically adjust as needed.
+# numNodes = prefill_replicas + decode_nodeCount = 2 + 8 = 10.
 apiVersion: resource.nvidia.com/v1beta1
 kind: ComputeDomain
 metadata:
   name: trtllm-test-compute-domain
 spec:
-  numNodes: 9
+  numNodes: 10
   channel:
     resourceClaimTemplate:
       name: trtllm-test-compute-domain-channel
@@ -124,6 +119,12 @@ spec:
       value: "1"
     - name: TRTLLM_ENABLE_PDL
       value: "1"
+    - name: TRTLLM_SERVER_DISABLE_GC
+      value: "1"
+    - name: TRTLLM_WORKER_DISABLE_GC
+      value: "1"
+    - name: MIMALLOC_PURGE_DELAY
+      value: "0"
   backendFramework: trtllm
   services:
     Frontend:
@@ -149,9 +150,7 @@ spec:
     prefill:
       componentType: worker
       subComponentType: prefill
-      replicas: 1
-      # NOTE: Prefill uses 1 node (no multinode section = single node)
-      #       and contributes to ComputeDomain.numNodes (see above)
+      replicas: 2
       volumeMounts:
         - name: model-cache
           mountPoint: /model-cache
@@ -173,8 +172,6 @@ spec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0
           workingDir: /workspace/components/backends/trtllm
-          # NOTE: If your PVCs (Persistent Volume Claims) are really slow,
-          #       you might need to increase 'failureThreshold' below to allow more time for startup
           startupProbe:
             httpGet:
               path: /live
@@ -211,7 +208,6 @@ spec:
         - name: model-cache
           mountPoint: /model-cache
       multinode:
-        # NOTE: This nodeCount contributes to ComputeDomain.numNodes (see above)
         nodeCount: 8
       sharedMemory:
         size: 800Gi
@@ -231,8 +227,6 @@ spec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0
           workingDir: /workspace/components/backends/trtllm
-          # NOTE: If your PVCs (Persistent Volume Claims) are really slow,
-          #       you might need to increase 'failureThreshold' below to allow more time for startup
           startupProbe:
             httpGet:
               path: /live
