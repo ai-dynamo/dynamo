@@ -89,8 +89,14 @@ class BaseOmniHandler(BaseWorkerHandler[Dict[str, Any], Dict[str, Any]]):
         if not getattr(config.engine_args, "enable_lora", False):
             return None
 
-        requested_capacity = getattr(config.engine_args, "max_loras", None)
-        return requested_capacity
+        # Resident adapter budget should follow vLLM max_cpu_loras when set.
+        # max_loras controls per-batch active adapter concurrency, not total
+        # registration capacity.
+        resident_capacity = getattr(config.engine_args, "max_cpu_loras", None)
+        if resident_capacity is not None:
+            return resident_capacity
+
+        return getattr(config.engine_args, "max_loras", None)
 
     def _build_omni_kwargs(self, config) -> Dict[str, Any]:
         """Build keyword arguments for AsyncOmni constructor."""

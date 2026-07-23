@@ -109,7 +109,13 @@ class OmniHandler(BaseOmniHandler):
 
         for sp in sampling_params_list:
             if isinstance(sp, OmniDiffusionSamplingParams):
-                sp.lora_request = lora_request
+                try:
+                    sp.lora_request = lora_request
+                except (AttributeError, TypeError) as exc:
+                    raise RuntimeError(
+                        "OmniDiffusionSamplingParams no longer exposes "
+                        "'lora_request'; cannot apply diffusion LoRA"
+                    ) from exc
 
     def _resolve_and_apply_lora(
         self,

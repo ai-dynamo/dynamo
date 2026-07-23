@@ -52,6 +52,7 @@ def _make_config(**parallel_overrides):
     cfg.output_modalities = None
     cfg.engine_args.trust_remote_code = False
     cfg.engine_args.enable_lora = False
+    cfg.engine_args.max_cpu_loras = None
     cfg.engine_args.max_loras = None
     cfg.diffusion = OmniDiffusionKwargs()
     cfg.parallel = dataclasses.replace(OmniParallelKwargs(), **parallel_overrides)
@@ -118,9 +119,18 @@ class TestDiffusionParallelConfigCoverage:
 
         assert handler._resolve_lora_capacity(config) is None
 
-    def test_lora_enabled_uses_configured_max_loras(self):
+    def test_lora_enabled_uses_configured_max_cpu_loras(self):
         config = _make_config()
         config.engine_args.enable_lora = True
+        config.engine_args.max_cpu_loras = 3
+        handler = BaseOmniHandler.__new__(BaseOmniHandler)
+
+        assert handler._resolve_lora_capacity(config) == 3
+
+    def test_lora_enabled_falls_back_to_max_loras_when_max_cpu_loras_unset(self):
+        config = _make_config()
+        config.engine_args.enable_lora = True
+        config.engine_args.max_cpu_loras = None
         config.engine_args.max_loras = 2
         handler = BaseOmniHandler.__new__(BaseOmniHandler)
 

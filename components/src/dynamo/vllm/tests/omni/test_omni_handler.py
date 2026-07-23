@@ -397,6 +397,57 @@ class TestLoraCapacity:
         assert "LoRA capacity exceeded" in results[-1]["message"]
         handler.engine_client.add_lora.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_new_adapter_still_rejected_at_capacity_when_hot_swap_enabled(self):
+        handler = _make_handler()
+        handler._lora_capacity = 1
+        handler._lora_state.loaded_loras = {
+            "adapterA": LoRAInfo(id=123, path="/cache/adapterA")
+        }
+        handler.loaded_loras = handler._lora_state.loaded_loras
+
+        with patch.dict("os.environ", {"DYN_LORA_HOTSWAP_ENABLED": "true"}):
+            results = [
+                result
+                async for result in handler.load_lora(
+                    {"lora_name": "adapterB", "source": {"uri": "file:///adapter-b"}}
+                )
+            ]
+
+        assert results[-1]["status"] == "error"
+        assert "LoRA capacity exceeded" in results[-1]["message"]
+        handler.engine_client.add_lora.assert_not_called()
+
+
+class TestDiffusionLoraAttachment:
+    def test_apply_lora_to_diffusion_sampling_params_sets_lora_request(self):
+        diffusion_sp = OmniDiffusionSamplingParams()
+        llm_sp = SamplingParams()
+        lora_request = MagicMock()
+
+        OmniHandler._apply_lora_to_sampling_params(
+            [llm_sp, diffusion_sp],
+            lora_request,
+        )
+
+        assert diffusion_sp.lora_request is lora_request
+
+    def test_apply_lora_to_diffusion_sampling_params_raises_when_attr_missing(self):
+        class _NoLoraRequestSamplingParams(OmniDiffusionSamplingParams):
+            def __setattr__(self, name, value):
+                if name == "lora_request" and value is not None:
+                    raise AttributeError("lora_request is not supported")
+                super().__setattr__(name, value)
+
+        diffusion_sp = _NoLoraRequestSamplingParams()
+        lora_request = MagicMock()
+
+        with pytest.raises(
+            RuntimeError,
+            match="OmniDiffusionSamplingParams no longer exposes 'lora_request'",
+        ):
+            OmniHandler._apply_lora_to_sampling_params([diffusion_sp], lora_request)
+
 
 class TestBuildOriginalPrompt:
     """build_original_prompt only carries prompt/negative_prompt/multi_modal_data.

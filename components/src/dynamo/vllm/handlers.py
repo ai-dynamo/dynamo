@@ -2209,7 +2209,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     lora_capacity = getattr(self, "_lora_capacity", None)
                     if (
                         old_info is None
-                        and not hot_swap_enabled
                         and lora_capacity is not None
                         and len(self._lora_state.loaded_loras) >= lora_capacity
                     ):
