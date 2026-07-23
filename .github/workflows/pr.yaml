@@ -596,6 +596,11 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           fetch-depth: 0
+      - name: Set up Go
+        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00  # v6.0.0
+        with:
+          go-version-file: deploy/operator/go.mod
+          cache-dependency-path: deploy/operator/go.sum
       - name: Log in to ECR
         uses: ./.github/actions/docker-login
         with:
