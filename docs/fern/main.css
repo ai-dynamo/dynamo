@@ -3184,8 +3184,8 @@ body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group-level-1 a[href$
 body:has(.dynamo-blog-home) #fern-sidebar .fern-sidebar-group-level-1 a[href$="/flash-indexer"]::before,
 body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group-level-1 a[href$="/flash-indexer"]::before { content: "FEB 23"; }
 
-body:has(.dynamo-blog-home) #fern-sidebar .fern-sidebar-group-level-1 a[href*="/dynamo/dev/digest/"]::before,
-body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group-level-1 a[href*="/dynamo/dev/digest/"]::before {
+body:has(.dynamo-blog-home) #fern-sidebar .fern-sidebar-group-level-1 a[href*="/digest/"]::before,
+body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group-level-1 a[href*="/digest/"]::before {
   display: block;
   margin-bottom: 0.18rem;
   color: var(--dynamo-blog-green);
@@ -3225,8 +3225,8 @@ body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group {
   gap: 0.35rem;
 }
 
-body:has(.dynamo-blog-home) #fern-sidebar .fern-sidebar-group > li > a[href="/dynamo/dev/digest"],
-body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group > li > a[href="/dynamo/dev/digest"] {
+body:has(.dynamo-blog-home) #fern-sidebar .fern-sidebar-group > li > a[href$="/digest"],
+body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group > li > a[href$="/digest"] {
   position: relative;
   min-height: 4.2rem;
   align-items: flex-start;
@@ -3241,8 +3241,8 @@ body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group > li > a[href="
   color: var(--dynamo-blog-ink);
 }
 
-body:has(.dynamo-blog-home) #fern-sidebar a[href="/dynamo/dev/digest"] > svg,
-body:has(.dynamo-blog-article) #fern-sidebar a[href="/dynamo/dev/digest"] > svg {
+body:has(.dynamo-blog-home) #fern-sidebar a[href$="/digest"] > svg,
+body:has(.dynamo-blog-article) #fern-sidebar a[href$="/digest"] > svg {
   width: 1.15rem;
   height: 1.15rem;
   margin-top: 0.08rem;
@@ -3253,8 +3253,8 @@ body:has(.dynamo-blog-article) #fern-sidebar a[href="/dynamo/dev/digest"] > svg 
   color: #0b1400;
 }
 
-body:has(.dynamo-blog-home) #fern-sidebar a[href="/dynamo/dev/digest"] .fern-sidebar-link-title-inner,
-body:has(.dynamo-blog-article) #fern-sidebar a[href="/dynamo/dev/digest"] .fern-sidebar-link-title-inner {
+body:has(.dynamo-blog-home) #fern-sidebar a[href$="/digest"] .fern-sidebar-link-title-inner,
+body:has(.dynamo-blog-article) #fern-sidebar a[href$="/digest"] .fern-sidebar-link-title-inner {
   display: flex;
   flex-direction: column;
   gap: 0.28rem;
@@ -3263,8 +3263,8 @@ body:has(.dynamo-blog-article) #fern-sidebar a[href="/dynamo/dev/digest"] .fern-
   letter-spacing: -0.015em;
 }
 
-body:has(.dynamo-blog-home) #fern-sidebar a[href="/dynamo/dev/digest"] .fern-sidebar-link-title-inner::after,
-body:has(.dynamo-blog-article) #fern-sidebar a[href="/dynamo/dev/digest"] .fern-sidebar-link-title-inner::after {
+body:has(.dynamo-blog-home) #fern-sidebar a[href$="/digest"] .fern-sidebar-link-title-inner::after,
+body:has(.dynamo-blog-article) #fern-sidebar a[href$="/digest"] .fern-sidebar-link-title-inner::after {
   content: "2026  ·  ENGINEERING STORIES";
   color: var(--dynamo-blog-muted);
   font-size: 0.58rem;
@@ -3828,8 +3828,8 @@ article:has(.dynamo-community-page) > header {
 }
 
 /* Blog archive refinement: remove the literal timeline and use soft editorial rows. */
-body:has(.dynamo-blog-home) #fern-sidebar .fern-sidebar-group > li > a[href="/dynamo/dev/digest"],
-body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group > li > a[href="/dynamo/dev/digest"] {
+body:has(.dynamo-blog-home) #fern-sidebar .fern-sidebar-group > li > a[href$="/digest"],
+body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group > li > a[href$="/digest"] {
   border-color: transparent;
   background:
     radial-gradient(circle at 92% 5%, rgba(118, 185, 0, 0.18), transparent 46%),
@@ -3840,8 +3840,8 @@ body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group > li > a[href="
   backdrop-filter: blur(14px);
 }
 
-.dark body:has(.dynamo-blog-home) #fern-sidebar .fern-sidebar-group > li > a[href="/dynamo/dev/digest"],
-.dark body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group > li > a[href="/dynamo/dev/digest"] {
+.dark body:has(.dynamo-blog-home) #fern-sidebar .fern-sidebar-group > li > a[href$="/digest"],
+.dark body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group > li > a[href$="/digest"] {
   background:
     radial-gradient(circle at 92% 5%, rgba(118, 185, 0, 0.2), transparent 46%),
     linear-gradient(135deg, rgba(118, 185, 0, 0.1), rgba(255, 255, 255, 0.025));
@@ -4540,8 +4540,8 @@ article:has(.dynamo-blog-article) {
 }
 
 /* The landing page is a normal nav entry; the archive year supplies hierarchy. */
-body:has(.dynamo-blog-home) #fern-sidebar a[href="/dynamo/dev/digest"],
-body:has(.dynamo-blog-article) #fern-sidebar a[href="/dynamo/dev/digest"] {
+body:has(.dynamo-blog-home) #fern-sidebar a[href$="/digest"],
+body:has(.dynamo-blog-article) #fern-sidebar a[href$="/digest"] {
   min-height: 2.8rem;
   align-items: center;
   margin: 0.2rem 0.35rem 0.65rem;
@@ -4553,21 +4553,21 @@ body:has(.dynamo-blog-article) #fern-sidebar a[href="/dynamo/dev/digest"] {
   backdrop-filter: none;
 }
 
-body:has(.dynamo-blog-home) #fern-sidebar a[href="/dynamo/dev/digest"]:hover,
-body:has(.dynamo-blog-article) #fern-sidebar a[href="/dynamo/dev/digest"]:hover,
-body:has(.dynamo-blog-home) #fern-sidebar a[href="/dynamo/dev/digest"][data-state="active"],
-body:has(.dynamo-blog-article) #fern-sidebar a[href="/dynamo/dev/digest"][data-state="active"] {
+body:has(.dynamo-blog-home) #fern-sidebar a[href$="/digest"]:hover,
+body:has(.dynamo-blog-article) #fern-sidebar a[href$="/digest"]:hover,
+body:has(.dynamo-blog-home) #fern-sidebar a[href$="/digest"][data-state="active"],
+body:has(.dynamo-blog-article) #fern-sidebar a[href$="/digest"][data-state="active"] {
   background: linear-gradient(90deg, rgba(118, 185, 0, 0.12), rgba(118, 185, 0, 0.025));
   box-shadow: inset 2px 0 0 rgba(118, 185, 0, 0.8);
 }
 
-body:has(.dynamo-blog-home) #fern-sidebar a[href="/dynamo/dev/digest"] > svg,
-body:has(.dynamo-blog-article) #fern-sidebar a[href="/dynamo/dev/digest"] > svg {
+body:has(.dynamo-blog-home) #fern-sidebar a[href$="/digest"] > svg,
+body:has(.dynamo-blog-article) #fern-sidebar a[href$="/digest"] > svg {
   display: none;
 }
 
-body:has(.dynamo-blog-home) #fern-sidebar a[href="/dynamo/dev/digest"] .fern-sidebar-link-title-inner,
-body:has(.dynamo-blog-article) #fern-sidebar a[href="/dynamo/dev/digest"] .fern-sidebar-link-title-inner {
+body:has(.dynamo-blog-home) #fern-sidebar a[href$="/digest"] .fern-sidebar-link-title-inner,
+body:has(.dynamo-blog-article) #fern-sidebar a[href$="/digest"] .fern-sidebar-link-title-inner {
   display: block;
   font-size: 0.8rem;
   font-weight: 720;
@@ -4575,8 +4575,8 @@ body:has(.dynamo-blog-article) #fern-sidebar a[href="/dynamo/dev/digest"] .fern-
   letter-spacing: 0;
 }
 
-body:has(.dynamo-blog-home) #fern-sidebar a[href="/dynamo/dev/digest"] .fern-sidebar-link-title-inner::after,
-body:has(.dynamo-blog-article) #fern-sidebar a[href="/dynamo/dev/digest"] .fern-sidebar-link-title-inner::after {
+body:has(.dynamo-blog-home) #fern-sidebar a[href$="/digest"] .fern-sidebar-link-title-inner::after,
+body:has(.dynamo-blog-article) #fern-sidebar a[href$="/digest"] .fern-sidebar-link-title-inner::after {
   content: none;
 }
 
@@ -4606,23 +4606,23 @@ body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-link-title-inner {
 }
 
 /* Keep Latest visibly clickable without presenting it as another section masthead. */
-body:has(.dynamo-blog-home) #fern-sidebar .fern-sidebar-group > li > a[href="/dynamo/dev/digest"],
-body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group > li > a[href="/dynamo/dev/digest"] {
+body:has(.dynamo-blog-home) #fern-sidebar .fern-sidebar-group > li > a[href$="/digest"],
+body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group > li > a[href$="/digest"] {
   background: transparent !important;
   box-shadow: none !important;
 }
 
-body:has(.dynamo-blog-home) #fern-sidebar .fern-sidebar-group > li > a[href="/dynamo/dev/digest"]:hover,
-body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group > li > a[href="/dynamo/dev/digest"]:hover,
-body:has(.dynamo-blog-home) #fern-sidebar .fern-sidebar-group > li > a[href="/dynamo/dev/digest"][data-state="active"],
-body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group > li > a[href="/dynamo/dev/digest"][data-state="active"] {
+body:has(.dynamo-blog-home) #fern-sidebar .fern-sidebar-group > li > a[href$="/digest"]:hover,
+body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group > li > a[href$="/digest"]:hover,
+body:has(.dynamo-blog-home) #fern-sidebar .fern-sidebar-group > li > a[href$="/digest"][data-state="active"],
+body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group > li > a[href$="/digest"][data-state="active"] {
   background: linear-gradient(90deg, rgba(118, 185, 0, 0.11), rgba(118, 185, 0, 0.02)) !important;
   box-shadow: inset 2px 0 0 rgba(118, 185, 0, 0.78) !important;
 }
 
 /* Nested Fern links use their anchor ::before for the active indicator; dates live with the title. */
-body:has(.dynamo-blog-home) #fern-sidebar a[href*="/dynamo/dev/digest/"]::before,
-body:has(.dynamo-blog-article) #fern-sidebar a[href*="/dynamo/dev/digest/"]::before {
+body:has(.dynamo-blog-home) #fern-sidebar a[href*="/digest/"]::before,
+body:has(.dynamo-blog-article) #fern-sidebar a[href*="/digest/"]::before {
   content: "" !important;
 }
 
@@ -4639,8 +4639,8 @@ body:has(.dynamo-blog-article) #fern-sidebar a[href$="/agentic-inference"] .fern
 body:has(.dynamo-blog-home) #fern-sidebar a[href$="/flash-indexer"] .fern-sidebar-link-title-inner::before,
 body:has(.dynamo-blog-article) #fern-sidebar a[href$="/flash-indexer"] .fern-sidebar-link-title-inner::before { content: "FEB 23"; }
 
-body:has(.dynamo-blog-home) #fern-sidebar a[href*="/dynamo/dev/digest/"] .fern-sidebar-link-title-inner,
-body:has(.dynamo-blog-article) #fern-sidebar a[href*="/dynamo/dev/digest/"] .fern-sidebar-link-title-inner {
+body:has(.dynamo-blog-home) #fern-sidebar a[href*="/digest/"] .fern-sidebar-link-title-inner,
+body:has(.dynamo-blog-article) #fern-sidebar a[href*="/digest/"] .fern-sidebar-link-title-inner {
   display: flex !important;
   overflow: visible !important;
   flex-direction: column;
@@ -4650,8 +4650,8 @@ body:has(.dynamo-blog-article) #fern-sidebar a[href*="/dynamo/dev/digest/"] .fer
   -webkit-line-clamp: unset;
 }
 
-body:has(.dynamo-blog-home) #fern-sidebar a[href*="/dynamo/dev/digest/"] .fern-sidebar-link-title-inner::before,
-body:has(.dynamo-blog-article) #fern-sidebar a[href*="/dynamo/dev/digest/"] .fern-sidebar-link-title-inner::before {
+body:has(.dynamo-blog-home) #fern-sidebar a[href*="/digest/"] .fern-sidebar-link-title-inner::before,
+body:has(.dynamo-blog-article) #fern-sidebar a[href*="/digest/"] .fern-sidebar-link-title-inner::before {
   display: block;
   color: var(--dynamo-blog-green);
   font-size: 0.57rem;

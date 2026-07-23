@@ -876,10 +876,12 @@ navigation:
 
   - tab: blog
     layout:
-      - section: Blog
-        icon: newspaper
+      - page: Latest
         path: digest/index.mdx
         slug: digest
+      - section: "2026"
+        slug: digest
+        collapsed: open-by-default
         contents:
           # Keep this archive in reverse chronological order. Publication dates are
           # rendered in each article header and on the custom landing page.
