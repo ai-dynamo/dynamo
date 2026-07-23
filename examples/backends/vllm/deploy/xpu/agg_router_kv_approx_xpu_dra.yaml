@@ -89,8 +89,6 @@ spec:
           args:
             - --model
             - Qwen/Qwen3-0.6B
-            - --block-size
-            - "64"
             # Disable KV events - router will use local prediction
             - --kv-events-config
             - '{"enable_kv_cache_events": false}'

@@ -85,8 +85,6 @@ spec:
             - decode
             - --kv-transfer-config
             - '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_buffer_device":"xpu"}'
-            - --block-size
-            - "64"
     VllmPrefillWorker:
       envFromSecret: hf-token-secret
       componentType: worker
@@ -130,5 +128,3 @@ spec:
             # NOTE: kv_buffer_device must be "xpu" for Intel GPU
             - --kv-transfer-config
             - '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"xpu"}'
-            - --block-size
-            - "64"
