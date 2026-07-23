@@ -73,13 +73,17 @@ COPY --from=dynamo_base $CARGO_HOME $CARGO_HOME
 RUN wget -O- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | tee /usr/share/keyrings/oneapi-archive-keyring.gpg > /dev/null && \
     echo "deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main" | tee /etc/apt/sources.list.d/oneAPI.list
 
+ADD --checksum=sha256:f60e802b6f41350393e34b24793db888a8be514054769bd17e7a6e9c0c058b87 \
+    https://github.com/intel/xpumanager/releases/download/v1.3.6/xpu-smi_1.3.6_20260206.143628.1004f6cb.u24.04_amd64.deb \
+    /tmp/xpu-smi.deb
+
 # Fetch UCX patch
 RUN wget --tries=3 --waitretry=5 https://raw.githubusercontent.com/intel/llm-scaler/35a14cbc08d714f460a29b7a7328df5620c8530f/vllm/patches/ai-dynamo-xpu/patches/ucx-v1.12.0.patch -O /tmp/ucx.patch
 
-# Install Intel GPU runtime packages
-RUN apt update -y && \
-    apt-get install -y intel-opencl-icd  \
-    libze-intel-gpu-raytracing intel-ocloc intel-oneapi-compiler-dpcpp-cpp-2025.3 && \
+# Install xpu-smi without explicitly changing the Intel compute runtime stack.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends /tmp/xpu-smi.deb && \
+    rm -f /tmp/xpu-smi.deb && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 {% endif %}
 
