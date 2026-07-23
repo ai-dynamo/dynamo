@@ -175,7 +175,7 @@ func TestNewCheckpointJobDisablesServiceMeshInjection(t *testing.T) {
 		annotations map[string]string
 	}{
 		{
-			name:        "nil annotations",
+			name:        "no user annotations",
 			annotations: nil,
 		},
 		{
@@ -242,6 +242,19 @@ func TestNewCheckpointJobDisablesServiceMeshInjection(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestDisableCheckpointJobSidecarInjectionNilMap(t *testing.T) {
+	got := DisableCheckpointJobSidecarInjection(nil)
+	if got == nil {
+		t.Fatal("expected non-nil map, got nil")
+	}
+	if got[linkerdInjectAnnotation] != linkerdInjectDisabled {
+		t.Errorf("linkerd annotation = %q, want %q", got[linkerdInjectAnnotation], linkerdInjectDisabled)
+	}
+	if got[istioSidecarInjectAnnotation] != istioSidecarInjectDisabled {
+		t.Errorf("istio annotation = %q, want %q", got[istioSidecarInjectAnnotation], istioSidecarInjectDisabled)
 	}
 }
 
