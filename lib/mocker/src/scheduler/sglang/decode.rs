@@ -63,12 +63,8 @@ pub(super) fn cache_materialized_prefix(
         );
     }
 
-    if aligned_tokens <= req.prompt_tokens.len() {
-        kv_manager.extend_cached_prefix(&req.prompt_tokens[..aligned_tokens], &mut req.kv_lease);
-    } else {
-        let sequence = req.sequence_prefix(aligned_tokens).into_owned();
-        kv_manager.extend_cached_prefix(&sequence, &mut req.kv_lease);
-    }
+    let sequence = &req.sequence_tokens[..aligned_tokens];
+    kv_manager.extend_cached_prefix(sequence, &mut req.kv_lease);
     req.debug_assert_invariants(config.block_size);
 }
 
@@ -170,12 +166,7 @@ pub(super) fn cleanup_completed_request(
         return;
     }
     let lease = std::mem::take(&mut request.kv_lease);
-    if tokens_to_cache <= request.prompt_len() {
-        kv_manager.finish(&request.prompt_tokens[..tokens_to_cache], lease);
-    } else {
-        let sequence = request.sequence_tokens().into_owned();
-        kv_manager.finish(&sequence[..tokens_to_cache], lease);
-    }
+    kv_manager.finish(request.sequence_prefix(tokens_to_cache), lease);
 }
 
 pub(super) fn simulate_decode_step_with_sampler(
@@ -290,23 +281,18 @@ pub(super) fn simulate_decode_step_with_sampler(
         };
     };
 
-    let sampled_bursts = running
-        .iter()
-        .map(|req| {
-            let remaining = req.remaining_output_tokens();
-            if config.worker_type == crate::common::protocols::WorkerType::Prefill {
-                remaining.min(1)
-            } else if let Some(sampler) = sampler.as_deref_mut() {
-                sampler.sample_output_tokens(remaining)
-            } else {
-                remaining.min(1)
-            }
-        })
-        .collect::<Vec<_>>();
-    output_signals.reserve(sampled_bursts.iter().copied().sum::<usize>());
+    output_signals.reserve(running.len());
     let mut completed_indices = Vec::new();
 
-    for (idx, (req, burst)) in running.iter_mut().zip(sampled_bursts).enumerate() {
+    for (idx, req) in running.iter_mut().enumerate() {
+        let remaining = req.remaining_output_tokens();
+        let burst = if config.worker_type == crate::common::protocols::WorkerType::Prefill {
+            remaining.min(1)
+        } else if let Some(sampler) = sampler.as_deref_mut() {
+            sampler.sample_output_tokens(remaining)
+        } else {
+            remaining.min(1)
+        };
         for _ in 0..burst {
             let crossing_page_boundary = req.current_sequence_len() + 1 > req.allocated_tokens;
             kv_manager.extend_decode(&mut req.kv_lease, &mut reservation);

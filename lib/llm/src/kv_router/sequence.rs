@@ -10,8 +10,8 @@
 mod direct_zmq;
 
 pub use dynamo_kv_router::multi_worker_sequence::{
-    ActiveSequencesMultiWorker, SequenceError, SequencePublisher, SequenceRequest,
-    SequenceSubscriber,
+    ActiveSequencesMultiWorker, SequenceError, SequencePublishQueueError, SequencePublisher,
+    SequenceRequest, SequenceSubscriber,
 };
 use dynamo_kv_router::protocols::{
     ActiveLoad, ActiveSequenceEvent, ActiveSequenceEventBatch, MAX_REPLICA_BATCH_DURATION,
@@ -26,6 +26,7 @@ use dynamo_runtime::transports::event_plane::{
     EventPublisher, EventSubscriber, EventTransportKind, TypedEventSubscriber,
 };
 use std::collections::{HashMap, VecDeque};
+use std::future::Future;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::sync::mpsc;
@@ -40,8 +41,8 @@ use dynamo_kv_router::protocols::PrefillLoadHint;
 #[cfg(test)]
 use dynamo_runtime::transports::event_plane::MsgpackCodec;
 
-// Match the existing standalone replica-sync queue. Senders wait asynchronously when it is full,
-// preserving the pre-existing fire-and-forget behavior rather than dropping lifecycle events.
+// Match the existing standalone replica-sync queue. Lifecycle callers enqueue without awaiting;
+// if the queue is full, the newest event is dropped without blocking the local mutation.
 const REPLICA_EVENT_CHANNEL_CAPACITY: usize = 100_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,40 +60,68 @@ fn active_sequence_event_wire_format(
     }
 }
 
-enum ActiveSequenceEventPublisher {
-    Nats(Box<EventPublisher>),
-    Zmq(mpsc::Sender<ActiveSequenceEvent>),
+struct ActiveSequenceEventSender {
+    event_tx: mpsc::Sender<ActiveSequenceEvent>,
+    cancellation_token: CancellationToken,
 }
 
-/// Concrete [`SequencePublisher`] backed by the runtime event plane and Prometheus gauges.
-pub struct RuntimeSequencePublisher {
-    event_publisher: Option<ActiveSequenceEventPublisher>,
-    metrics_publisher: Arc<EventPublisher>,
-    worker_status_metrics: Arc<RouterWorkerStatusMetrics>,
-}
+impl ActiveSequenceEventSender {
+    fn channel(
+        capacity: usize,
+        cancellation_token: CancellationToken,
+    ) -> (Self, mpsc::Receiver<ActiveSequenceEvent>) {
+        let (event_tx, event_rx) = mpsc::channel(capacity);
+        (
+            Self {
+                event_tx,
+                cancellation_token,
+            },
+            event_rx,
+        )
+    }
 
-impl RuntimeSequencePublisher {
-    async fn publish_owned_event(&self, event: ActiveSequenceEvent) -> anyhow::Result<()> {
-        let Some(event_publisher) = &self.event_publisher else {
-            return Ok(());
-        };
-        match event_publisher {
-            ActiveSequenceEventPublisher::Nats(publisher) => publisher.publish(&event).await,
-            ActiveSequenceEventPublisher::Zmq(event_tx) => event_tx
-                .send(event)
-                .await
-                .map_err(|_| anyhow::anyhow!("active-sequence replica publisher is closed")),
+    fn enqueue(&self, event: ActiveSequenceEvent) -> anyhow::Result<()> {
+        match self.event_tx.try_send(event) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(event)) => {
+                Err(SequencePublishQueueError::full(event, self.event_tx.max_capacity()).into())
+            }
+            Err(mpsc::error::TrySendError::Closed(event)) => {
+                Err(SequencePublishQueueError::closed(
+                    event,
+                    self.event_tx.max_capacity(),
+                    self.cancellation_token.is_cancelled(),
+                )
+                .into())
+            }
         }
     }
 }
 
-impl SequencePublisher for RuntimeSequencePublisher {
-    async fn publish_event(&self, event: &ActiveSequenceEvent) -> anyhow::Result<()> {
-        self.publish_owned_event(event.clone()).await
-    }
+fn active_sequence_event_channel(
+    enabled: bool,
+    capacity: usize,
+    cancellation_token: &CancellationToken,
+) -> Option<(
+    ActiveSequenceEventSender,
+    mpsc::Receiver<ActiveSequenceEvent>,
+)> {
+    enabled.then(|| ActiveSequenceEventSender::channel(capacity, cancellation_token.child_token()))
+}
 
-    async fn publish_event_owned(&self, event: ActiveSequenceEvent) -> anyhow::Result<()> {
-        self.publish_owned_event(event).await
+/// Concrete [`SequencePublisher`] backed by the runtime event plane and Prometheus gauges.
+pub struct RuntimeSequencePublisher {
+    event_sender: Option<ActiveSequenceEventSender>,
+    metrics_publisher: Arc<EventPublisher>,
+    worker_status_metrics: Arc<RouterWorkerStatusMetrics>,
+}
+
+impl SequencePublisher for RuntimeSequencePublisher {
+    fn enqueue_event(&self, event: ActiveSequenceEvent) -> anyhow::Result<()> {
+        let Some(event_sender) = &self.event_sender else {
+            return Ok(());
+        };
+        event_sender.enqueue(event)
     }
 
     fn publish_load(&self, load: ActiveLoad) {
@@ -147,6 +176,49 @@ impl SequencePublisher for RuntimeSequencePublisher {
     fn observe_worker_removed(&self, worker: &WorkerWithDpRank, worker_type: &str) {
         self.worker_status_metrics
             .remove_worker(worker.worker_id, worker.dp_rank, worker_type);
+    }
+}
+
+trait SingletonEventPublisher: Send + Sync {
+    fn publish_event(
+        &self,
+        event: &ActiveSequenceEvent,
+    ) -> impl Future<Output = anyhow::Result<()>> + Send;
+}
+
+impl SingletonEventPublisher for EventPublisher {
+    async fn publish_event(&self, event: &ActiveSequenceEvent) -> anyhow::Result<()> {
+        self.publish(event).await
+    }
+}
+
+async fn run_replica_singleton_publisher<P: SingletonEventPublisher>(
+    publisher: P,
+    mut event_rx: mpsc::Receiver<ActiveSequenceEvent>,
+    cancellation_token: CancellationToken,
+) {
+    loop {
+        let event = tokio::select! {
+            _ = cancellation_token.cancelled() => break,
+            event = event_rx.recv() => match event {
+                Some(event) => event,
+                None => break,
+            },
+        };
+        // Replica sync is best-effort, so cancellation drops an in-flight publish rather than
+        // delaying shutdown on transport backpressure.
+        let publish_result = tokio::select! {
+            _ = cancellation_token.cancelled() => break,
+            result = publisher.publish_event(&event) => result,
+        };
+        if let Err(error) = publish_result {
+            tracing::error!(
+                request_id = %event.request_id,
+                worker = ?event.worker,
+                error = %error,
+                "Failed to publish active-sequence replica event"
+            );
+        }
     }
 }
 
@@ -320,7 +392,12 @@ pub async fn create_multi_worker_sequences(
     cancellation_token: CancellationToken,
 ) -> Result<Arc<ActiveSequencesMulti>> {
     let transport_kind = endpoint.drt().default_event_transport_kind();
-    let event_publisher = if replica_sync {
+    let event_sender = if let Some((event_sender, event_rx)) = active_sequence_event_channel(
+        replica_sync,
+        REPLICA_EVENT_CHANNEL_CAPACITY,
+        &cancellation_token,
+    ) {
+        let publisher_cancellation_token = event_sender.cancellation_token.clone();
         let event_publisher = EventPublisher::for_endpoint_with_transport(
             &endpoint,
             ACTIVE_SEQUENCES_SUBJECT,
@@ -328,19 +405,22 @@ pub async fn create_multi_worker_sequences(
         )
         .await?;
         match active_sequence_event_wire_format(transport_kind) {
-            ActiveSequenceEventWireFormat::Singleton => Some(ActiveSequenceEventPublisher::Nats(
-                Box::new(event_publisher),
-            )),
+            ActiveSequenceEventWireFormat::Singleton => {
+                tokio::spawn(run_replica_singleton_publisher(
+                    event_publisher,
+                    event_rx,
+                    publisher_cancellation_token,
+                ));
+            }
             ActiveSequenceEventWireFormat::Batch => {
-                let (event_tx, event_rx) = mpsc::channel(REPLICA_EVENT_CHANNEL_CAPACITY);
                 tokio::spawn(run_replica_batch_publisher(
                     event_publisher,
                     event_rx,
-                    cancellation_token.child_token(),
+                    publisher_cancellation_token,
                 ));
-                Some(ActiveSequenceEventPublisher::Zmq(event_tx))
             }
         }
+        Some(event_sender)
     } else {
         None
     };
@@ -349,7 +429,7 @@ pub async fn create_multi_worker_sequences(
     let worker_status_metrics = RouterWorkerStatusMetrics::from_component(endpoint.component());
 
     let publisher = RuntimeSequencePublisher {
-        event_publisher,
+        event_sender,
         metrics_publisher,
         worker_status_metrics,
     };
@@ -418,6 +498,197 @@ mod tests {
             router_id: 7,
             lora_name: None,
         }
+    }
+
+    fn add_event(request_id: impl Into<String>) -> ActiveSequenceEvent {
+        ActiveSequenceEvent {
+            request_id: request_id.into(),
+            worker: WorkerWithDpRank::new(1, 0),
+            data: ActiveSequenceEventData::AddRequest {
+                token_sequence: None,
+                track_prefill_tokens: false,
+                expected_output_tokens: None,
+                prefill_load_hint: None,
+            },
+            router_id: 7,
+            lora_name: None,
+        }
+    }
+
+    fn mark_event(request_id: impl Into<String>) -> ActiveSequenceEvent {
+        ActiveSequenceEvent {
+            request_id: request_id.into(),
+            worker: WorkerWithDpRank::new(1, 0),
+            data: ActiveSequenceEventData::MarkPrefillCompleted,
+            router_id: 7,
+            lora_name: None,
+        }
+    }
+
+    struct BlockingSingletonPublisher {
+        attempted_tx: mpsc::UnboundedSender<&'static str>,
+        release_add: Arc<tokio::sync::Notify>,
+        active: Arc<std::sync::atomic::AtomicUsize>,
+        max_active: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl SingletonEventPublisher for BlockingSingletonPublisher {
+        async fn publish_event(&self, event: &ActiveSequenceEvent) -> anyhow::Result<()> {
+            let event_name = match &event.data {
+                ActiveSequenceEventData::AddRequest { .. } => "add",
+                ActiveSequenceEventData::MarkPrefillCompleted => "mark",
+                ActiveSequenceEventData::Free => "free",
+            };
+            let active = self
+                .active
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            self.max_active
+                .fetch_max(active, std::sync::atomic::Ordering::SeqCst);
+            self.attempted_tx.send(event_name).unwrap();
+
+            if event_name == "add" {
+                self.release_add.notified().await;
+            }
+
+            self.active
+                .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+
+            if event_name == "mark" {
+                anyhow::bail!("synthetic singleton publish failure");
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn active_sequence_publish_sender_preserves_lifecycle_order() {
+        let (sender, mut event_rx) =
+            ActiveSequenceEventSender::channel(3, CancellationToken::new());
+        sender.enqueue(add_event("ordered")).unwrap();
+        sender.enqueue(mark_event("ordered")).unwrap();
+        sender.enqueue(free_event("ordered")).unwrap();
+
+        assert!(matches!(
+            event_rx.try_recv().unwrap().data,
+            ActiveSequenceEventData::AddRequest { .. }
+        ));
+        assert!(matches!(
+            event_rx.try_recv().unwrap().data,
+            ActiveSequenceEventData::MarkPrefillCompleted
+        ));
+        assert!(matches!(
+            event_rx.try_recv().unwrap().data,
+            ActiveSequenceEventData::Free
+        ));
+    }
+
+    #[test]
+    fn active_sequence_publish_sender_drops_newest_when_full() {
+        let (sender, mut event_rx) =
+            ActiveSequenceEventSender::channel(1, CancellationToken::new());
+        sender.enqueue(add_event("accepted")).unwrap();
+
+        let error = sender
+            .enqueue(free_event("dropped"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("queue full"));
+        assert!(error.contains("request_id=dropped"));
+        assert!(error.contains("capacity=1"));
+        assert_eq!(event_rx.len(), 1);
+        assert_eq!(event_rx.try_recv().unwrap().request_id, "accepted");
+    }
+
+    #[test]
+    fn active_sequence_publish_channel_is_absent_when_replica_sync_disabled() {
+        assert!(active_sequence_event_channel(false, 1, &CancellationToken::new()).is_none());
+    }
+
+    #[test]
+    fn active_sequence_publish_sender_classifies_closed_queue_by_cancellation() {
+        let cancellation_token = CancellationToken::new();
+        let (sender, event_rx) = ActiveSequenceEventSender::channel(1, cancellation_token.clone());
+        drop(event_rx);
+
+        let unexpected = sender.enqueue(free_event("unexpected")).unwrap_err();
+        assert!(matches!(
+            unexpected.downcast_ref::<SequencePublishQueueError>(),
+            Some(SequencePublishQueueError::Closed {
+                during_shutdown: false,
+                ..
+            })
+        ));
+
+        cancellation_token.cancel();
+        let shutdown = sender.enqueue(free_event("shutdown")).unwrap_err();
+        assert!(matches!(
+            shutdown.downcast_ref::<SequencePublishQueueError>(),
+            Some(SequencePublishQueueError::Closed {
+                during_shutdown: true,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn active_sequence_singleton_publisher_serializes_and_stops_on_cancellation() {
+        let (attempted_tx, mut attempted_rx) = mpsc::unbounded_channel();
+        let release_add = Arc::new(tokio::sync::Notify::new());
+        let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let max_active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let publisher = BlockingSingletonPublisher {
+            attempted_tx,
+            release_add: Arc::clone(&release_add),
+            active,
+            max_active: Arc::clone(&max_active),
+        };
+        let (event_tx, event_rx) = mpsc::channel(3);
+        event_tx.send(add_event("ordered")).await.unwrap();
+        event_tx.send(mark_event("ordered")).await.unwrap();
+        event_tx.send(free_event("ordered")).await.unwrap();
+
+        let cancellation_token = CancellationToken::new();
+        let task = tokio::spawn(run_replica_singleton_publisher(
+            publisher,
+            event_rx,
+            cancellation_token.clone(),
+        ));
+
+        let first = tokio::time::timeout(std::time::Duration::from_secs(1), attempted_rx.recv())
+            .await
+            .expect("AddRequest publish should start")
+            .expect("attempt channel should remain open");
+        assert_eq!(first, "add");
+        assert!(attempted_rx.try_recv().is_err());
+        assert_eq!(max_active.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        release_add.notify_one();
+        let mut attempted = vec![first];
+        for _ in 0..2 {
+            attempted.push(
+                tokio::time::timeout(std::time::Duration::from_secs(1), attempted_rx.recv())
+                    .await
+                    .expect("all queued publishes should be attempted")
+                    .expect("attempt channel should remain open"),
+            );
+        }
+
+        assert_eq!(attempted, ["add", "mark", "free"]);
+        assert_eq!(max_active.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        event_tx.send(add_event("blocked")).await.unwrap();
+        let blocked = tokio::time::timeout(std::time::Duration::from_secs(1), attempted_rx.recv())
+            .await
+            .expect("blocked AddRequest publish should start")
+            .expect("attempt channel should remain open");
+        assert_eq!(blocked, "add");
+
+        cancellation_token.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(1), task)
+            .await
+            .expect("singleton publisher should stop after cancellation")
+            .expect("singleton publisher task should not panic");
     }
 
     #[tokio::test(start_paused = true)]
