@@ -49,11 +49,13 @@ Use a semantic-version image tag such as `:1.4.0`, or set
 `runtimeVersionOverride` to the compatible Dynamo runtime version when the image has a custom,
 SHA, or other non-semantic-version tag. The override takes precedence over the image-derived
 version, so set it when a semantic-version tag does not identify the Dynamo runtime version.
+The value declares the version of the Dynamo runtime packaged in the image, not the CUDA,
+inference-engine, operator, Git, or image-build version.
 
 ```yaml
 components:
   - name: worker
-    runtimeVersionOverride: 1.4.0
+    runtimeVersionOverride: "1.4.0"
     podTemplate:
       spec:
         containers:
@@ -61,19 +63,38 @@ components:
             image: registry.example/my-runtime:build-20260723
 ```
 
+The image tag itself must be a semantic version. Tags such as `1.4.0`, `v1.4.0`, and
+`1.4.0-cuda13` can provide the runtime version. Tags such as `latest`, `main`, `sha-abc`,
+`cuda13-1.4.0`, and digest-only image references require an override. The override accepts only
+the canonical `MAJOR.MINOR.PATCH` form, such as `"1.4.0"`; do not include a `v` prefix,
+prerelease suffix, or build metadata. Each numeric segment may contain at most four digits.
+Admission can verify that an image tag is parseable, but it cannot determine whether that tag
+actually represents the Dynamo runtime version. Set the override when a valid semantic-version
+tag describes another part of the image stack.
+
 Admission now requires every component's main-container image. In `v1beta1`, set
 `spec.components[*].podTemplate.spec.containers[name=main].image` for a DGD, or
 `spec.podTemplate.spec.containers[name=main].image` for a standalone DCD. In `v1alpha1`, set
-`spec.components[*].extraPodSpec.mainContainer.image` for a DGD, or
+`spec.services.<service-name>.extraPodSpec.mainContainer.image` for a DGD, or
 `spec.extraPodSpec.mainContainer.image` for a standalone DCD. These fields were not previously
 required by Dynamo admission, but were effectively required: Kubernetes rejects the rendered Pod
 specification when its main container has no image.
 
-After upgrading the CRDs and operator, admission denies a new DGD, or an update to a pre-existing
-DGD, when a component's main-image tag is not a semantic version and `runtimeVersionOverride` is
-unset. This includes custom and SHA-tagged images. Set `runtimeVersionOverride` to the Dynamo
-runtime compatibility version for that image before creating or updating the DGD. Existing resources
-are not changed or revalidated solely by the upgrade.
+Although `runtimeVersionOverride` is optional in the CRD schema, admission requires it when the
+main-image tag cannot provide the Dynamo runtime version. This applies independently to every DGD
+component and to every standalone DCD. The main image remains required when an override is set;
+sidecar image tags are not used for runtime-version detection.
+
+After upgrading the CRDs and operator, admission denies a new DGD or DCD, or an update to a
+pre-existing DGD or DCD, when a component's main-image tag is not a semantic version and
+`runtimeVersionOverride` is unset. Set the override before creating or updating the resource.
+Existing resources are not changed or revalidated solely by the upgrade.
+
+`runtimeVersionOverride` is a compatibility declaration only. It does not rewrite the container
+image or change the rendered Pod, and changing only this field does not trigger a worker rollout.
+
+For build and deployment examples, see
+[Runtime Containers](../../../../docs/development/custom-containers.md#declare-the-runtime-version-for-kubernetes).
 
 ### Bundled NATS is now disabled by default
 
