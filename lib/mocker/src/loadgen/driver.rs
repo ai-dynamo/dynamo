@@ -74,13 +74,13 @@ enum PromptTokens {
     // generated output to already-materialized session history.
     Deferred {
         input_length: usize,
-        hash_ids: Vec<u64>,
+        hash_ids: Vec<u32>,
     },
     Materialized(Vec<u32>),
 }
 
 impl PromptTokens {
-    fn deferred(input_length: usize, hash_ids: Vec<u64>, trace_block_size: usize) -> Result<Self> {
+    fn deferred(input_length: usize, hash_ids: Vec<u32>, trace_block_size: usize) -> Result<Self> {
         validate_synthesizable_prompt(input_length, &hash_ids, trace_block_size)?;
         Ok(Self::Deferred {
             input_length,
@@ -95,7 +95,7 @@ impl PromptTokens {
         }
     }
 
-    fn take_deferred(&mut self) -> (usize, Vec<u64>) {
+    fn take_deferred(&mut self) -> (usize, Vec<u32>) {
         match self {
             Self::Deferred {
                 input_length,

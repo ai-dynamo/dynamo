@@ -94,7 +94,7 @@ pub struct TurnTrace {
     pub max_output_tokens: usize,
     pub output_token_ids: Option<Vec<u32>>,
     pub replay_key: Option<String>,
-    pub hash_ids: Vec<u64>,
+    pub hash_ids: Vec<u32>,
     pub delay_after_previous_ms: f64,
     pub priority: i32,
     pub strict_priority: u32,
@@ -109,7 +109,7 @@ pub struct AgenticTurnTrace {
     pub max_output_tokens: usize,
     pub output_token_ids: Option<Vec<u32>>,
     pub replay_key: Option<String>,
-    pub hash_ids: Vec<u64>,
+    pub hash_ids: Vec<u32>,
     pub first_ready_timestamp_ms: Option<f64>,
     pub delay_after_dependencies_ms: f64,
     pub priority: i32,
@@ -214,7 +214,7 @@ pub(crate) enum ReplayRequestPayload {
     Deferred {
         request_metadata: DirectRequest,
         input_length: usize,
-        hash_ids: Vec<u64>,
+        hash_ids: Vec<u32>,
         trace_block_size: usize,
     },
 }
@@ -227,7 +227,7 @@ impl ReplayRequestPayload {
     pub(super) fn deferred(
         request_metadata: DirectRequest,
         input_length: usize,
-        hash_ids: Vec<u64>,
+        hash_ids: Vec<u32>,
         trace_block_size: usize,
     ) -> Self {
         debug_assert!(request_metadata.tokens.is_empty());

@@ -103,7 +103,7 @@ TensorRT-LLM delivers maximum inference performance and optimization, with full 
 
 > **Notes:**
 > 1. **Multimodal Disaggregation**: Supports **EP/D** (Traditional) and **E/P/D** (Full Disaggregation) image flows, including image URLs and pre-computed embeddings. ([Source][mm-trtllm])
-> 2. **Multimodal + KV-Aware Routing**: Image-aware KV routing is supported through the dedicated TRT-LLM MM Router Worker. It requires KV event publishing on the TRT-LLM workers. ([Source][mm-kv-routing])
+> 2. **Multimodal + KV-Aware Routing**: The native Rust frontend routes supported models using image-aware KV overlap. TRT-LLM workers must publish KV events with block reuse enabled. ([Source][mm-kv-routing])
 > 3. **Request Cancellation**: Due to known issues, the TensorRT-LLM engine is temporarily not notified of request cancellations, meaning allocated resources for cancelled requests are not freed.
 
 ---

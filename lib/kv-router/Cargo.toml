@@ -33,6 +33,7 @@ dynamo-truthy = { workspace = true }
 anyhow = { workspace = true }
 arc-swap = "1.9.1"
 async-trait = { workspace = true }
+blake3 = { workspace = true }
 dashmap = { workspace = true }
 indexmap = { workspace = true }
 ordered-float = { workspace = true }
@@ -50,6 +51,7 @@ tracing = { workspace = true }
 zmq = { version = "0.10", optional = true }
 uuid = { workspace = true }
 xxhash-rust = { workspace = true }
+zeroize = { workspace = true }
 
 # dependencies
 crossbeam-queue = "0.3"
@@ -85,4 +87,8 @@ tower = { version = "0.5", features = ["util"] }
 
 [[bench]]
 name = "policy_queue"
+harness = false
+
+[[bench]]
+name = "tracking_hash"
 harness = false

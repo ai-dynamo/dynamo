@@ -2442,6 +2442,7 @@ dependencies = [
  "arc-swap",
  "async-trait",
  "axum 0.8.4",
+ "blake3",
  "chrono",
  "criterion",
  "crossbeam-queue",
@@ -2476,6 +2477,7 @@ dependencies = [
  "tracing-appender",
  "uuid",
  "xxhash-rust",
+ "zeroize",
  "zmq",
 ]
 

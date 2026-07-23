@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,8 +23,9 @@ use dynamo_kv_router::scheduling::{
 };
 use dynamo_kv_router::sequences::topology::WorkerDpRange;
 use dynamo_kv_router::{
-    ActiveSequencesMultiWorker, DefaultWorkerSelector, RadixTree, SchedulingRequest,
-    SequenceRequest, WorkerLoadProjection, WorkerSelector, scheduling::TierOverlapBlocks,
+    ActiveSequencesMultiWorker, DefaultWorkerSelector, RadixTree, RoutingPartitionRef,
+    SchedulingRequest, SequenceRequest, TrackingHashAlgorithm, TrackingHashContext,
+    TrackingHashScope, WorkerLoadProjection, WorkerSelector, scheduling::TierOverlapBlocks,
 };
 use dynamo_tokens::SequenceHash;
 use rustc_hash::FxHashMap;
@@ -233,6 +235,7 @@ pub(crate) struct OfflineReplayRouter {
     indexer: SyncReplayIndexer,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     decay_time_epoch: Instant,
+    tracking_hash: TrackingHashContext,
 }
 
 pub(in crate::replay) struct KvRouterPlacement {
@@ -285,7 +288,7 @@ impl KvRouterPlacement {
 trait PlacementRequestView {
     fn metadata(&self) -> &DirectRequest;
     fn input_length(&self) -> usize;
-    fn materialized_tokens(&self) -> Option<&[u32]>;
+    fn prompt_tokens(&self) -> Cow<'_, [u32]>;
 }
 
 impl PlacementRequestView for DirectRequest {
@@ -297,8 +300,8 @@ impl PlacementRequestView for DirectRequest {
         self.tokens.len()
     }
 
-    fn materialized_tokens(&self) -> Option<&[u32]> {
-        Some(&self.tokens)
+    fn prompt_tokens(&self) -> Cow<'_, [u32]> {
+        Cow::Borrowed(&self.tokens)
     }
 }
 
@@ -311,8 +314,11 @@ impl PlacementRequestView for ReplayRequestPayload {
         self.input_length()
     }
 
-    fn materialized_tokens(&self) -> Option<&[u32]> {
-        self.materialized_tokens()
+    fn prompt_tokens(&self) -> Cow<'_, [u32]> {
+        match self.materialized_tokens() {
+            Some(tokens) => Cow::Borrowed(tokens),
+            None => Cow::Owned(ReplayRequestPayload::prompt_tokens(self)),
+        }
     }
 }
 
@@ -411,6 +417,7 @@ impl OfflineReplayRouter {
         num_workers: usize,
     ) -> Result<Self> {
         let config = replay_router_config(args, router_config);
+        let tracking_hash = TrackingHashContext::from_config(&config)?;
         let worker_config_template = replay_worker_config(args);
         let workers_with_configs = replay_workers_with_configs(args, num_workers);
         let slots = replay_slots(args, &workers_with_configs);
@@ -435,6 +442,7 @@ impl OfflineReplayRouter {
             // synthetic `Instant`s. All subsequent decay/accounting uses virtual replay
             // time derived from this epoch, not wall-clock progression.
             decay_time_epoch: Instant::now(),
+            tracking_hash,
         })
     }
 
@@ -473,14 +481,8 @@ impl OfflineReplayRouter {
         session_id: Option<String>,
         now_ms: f64,
     ) -> Result<RouterEffects> {
-        let pending = self.build_pending_request(
-            request.metadata(),
-            request.input_length(),
-            max_output_tokens,
-            request.materialized_tokens(),
-            replay_hashes,
-            session_id,
-        )?;
+        let pending =
+            self.build_pending_request(request, max_output_tokens, replay_hashes, session_id)?;
         let decay_now = self.decay_now(now_ms);
         let (class_index, snapshot) = match self
             .profile
@@ -699,15 +701,15 @@ impl OfflineReplayRouter {
         self.decay_time_epoch + Duration::from_secs_f64(now_ms.max(0.0) / 1000.0)
     }
 
-    fn build_pending_request(
+    fn build_pending_request<Request: PlacementRequestView>(
         &self,
-        request: &DirectRequest,
-        input_length: usize,
+        request_view: &Request,
         max_output_tokens: usize,
-        materialized_tokens: Option<&[u32]>,
         replay_hashes: Option<ReplayRequestHashes>,
         session_id: Option<String>,
     ) -> Result<PendingRequest> {
+        let request = request_view.metadata();
+        let input_length = request_view.input_length();
         let uuid = request
             .uuid
             .ok_or_else(|| anyhow!("offline replay requires requests to have stable UUIDs"))?;
@@ -719,22 +721,33 @@ impl OfflineReplayRouter {
                     .find_matches_for_hashes(replay_hashes.local_block_hashes);
                 let token_seq = if !self.config.router_track_active_blocks {
                     None
-                } else if self.config.router_assume_kv_reuse {
+                } else if self.config.router_assume_kv_reuse
+                    && self.tracking_hash.algorithm() == TrackingHashAlgorithm::PublicXxh3V1
+                {
                     Some(replay_hashes.sequence_hashes)
-                } else {
+                } else if !self.config.router_assume_kv_reuse {
                     self.config
                         .random_seq_hashes_for_tracking(input_length / self.block_size as usize)
+                } else {
+                    let tokens = request_view.prompt_tokens();
+                    self.config.compute_seq_hashes_for_tracking_with_context(
+                        &self.tracking_hash,
+                        self.tracking_hash_scope(),
+                        &tokens,
+                        None,
+                        BlockHashOptions::default(),
+                        None,
+                    )
                 };
                 (overlaps, token_seq)
             }
             None => {
-                let tokens = materialized_tokens.ok_or_else(|| {
-                    anyhow!("offline replay requires prompt tokens when replay hashes are absent")
-                })?;
-                let overlaps = self.indexer.find_matches_for_request(tokens, None);
-                let token_seq = self.config.compute_seq_hashes_for_tracking(
-                    tokens,
-                    self.block_size,
+                let tokens = request_view.prompt_tokens();
+                let overlaps = self.indexer.find_matches_for_request(&tokens, None);
+                let token_seq = self.config.compute_seq_hashes_for_tracking_with_context(
+                    &self.tracking_hash,
+                    self.tracking_hash_scope(),
+                    &tokens,
                     None,
                     BlockHashOptions::default(),
                     None,
@@ -758,6 +771,13 @@ impl OfflineReplayRouter {
             policy_class: request.policy_class.clone(),
             session_id,
         })
+    }
+
+    fn tracking_hash_scope(&self) -> TrackingHashScope<'_> {
+        TrackingHashScope {
+            partition: RoutingPartitionRef::new("replay", "default"),
+            block_size: self.block_size,
+        }
     }
 
     fn admit_request(
@@ -918,16 +938,19 @@ impl OfflineReplayRouter {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
     use std::sync::Arc;
     use std::time::Duration;
 
-    use dynamo_kv_router::PrefillLoadEstimator;
     use dynamo_kv_router::config::{KvRouterConfig, RouterPrefillLoadModel, RouterQueuePolicy};
     use dynamo_kv_router::protocols::{
-        ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
-        KvCacheStoredBlockData, LocalBlockHash, RouterEvent, StorageTier, WorkerId,
+        BlockHashOptions, ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData,
+        KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash, RouterEvent, StorageTier,
+        WorkerId,
     };
+    use dynamo_kv_router::{PrefillLoadEstimator, TrackingHashAlgorithm};
     use rustc_hash::FxHashMap;
+    use tempfile::NamedTempFile;
     use uuid::Uuid;
 
     use super::{OfflineReplayRouter, ReplayRequestHashes, SyncReplayIndexer, WorkerAdmission};
@@ -1055,9 +1078,7 @@ mod tests {
         let pending = router
             .build_pending_request(
                 &request,
-                request.tokens.len(),
                 request.max_output_tokens,
-                Some(&request.tokens),
                 None,
                 Some("session-a".to_string()),
             )
@@ -1065,6 +1086,41 @@ mod tests {
         let scheduling_request = pending.scheduling_request(64, FxHashMap::default());
 
         assert_eq!(scheduling_request.session_id.as_deref(), Some("session-a"));
+    }
+
+    #[test]
+    fn keyed_replay_hashes_derive_tracking_identities_from_tokens() {
+        let mut key_file = NamedTempFile::new().unwrap();
+        key_file.write_all(&[0x39; 32]).unwrap();
+        let config = KvRouterConfig {
+            router_tracking_hash: TrackingHashAlgorithm::KeyedXxh3V1,
+            router_tracking_key_file: Some(key_file.path().to_path_buf()),
+            router_tracking_key_id: Some("2026-01".to_string()),
+            ..Default::default()
+        };
+        let router = OfflineReplayRouter::new(&replay_args(), Some(config), None, 1).unwrap();
+        let request = request(1, 7);
+        let replay_hashes = ReplayRequestHashes::from_tokens(&request.tokens, router.block_size);
+        let expected = router.config.compute_seq_hashes_for_tracking_with_context(
+            &router.tracking_hash,
+            router.tracking_hash_scope(),
+            &request.tokens,
+            None,
+            BlockHashOptions::default(),
+            None,
+        );
+
+        let pending = router
+            .build_pending_request(
+                &request,
+                request.max_output_tokens,
+                Some(replay_hashes.clone()),
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(pending.token_seq, expected);
+        assert_ne!(pending.token_seq, Some(replay_hashes.sequence_hashes));
     }
 
     #[test]
