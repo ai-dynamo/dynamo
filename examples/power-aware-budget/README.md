@@ -72,11 +72,7 @@ the `dynamo_planner_power_budget_utilization` gauge reports the ratio.
 ## Changing a cap
 
 > [!IMPORTANT]
-> Editing a worker `podTemplate` cap can roll that worker (the template hash
-> changes). While a rollout produces a mixed old/new Pod population, the Planner
-> cannot prove the effective per-replica power, so it holds the conservative
-> per-role maximum, **suppresses scale-up**, and sets
-> `dynamo_planner_power_config_scale_up_blocked` to 1 with a restart-required
-> warning. Wait for the rollout to finish, then restart the Planner to adopt the
-> new cap. Online cap retargeting without a restart is deferred to a dedicated
-> dynamic-control design.
+> Editing a worker `podTemplate` cap rolls that worker (the template hash
+> changes). After the rollout completes, **restart the Planner** so it re-reads
+> the settled annotation at startup. Online cap retargeting without a restart is
+> deferred to a dedicated dynamic-control design.

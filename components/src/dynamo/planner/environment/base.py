@@ -109,16 +109,14 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
         )
         # wait_for_deployment_ready(include_planner=False) blocks until the
         # worker rollout is stable, so a planner that (re)starts after a DGD
-        # template cap change reads the settled desired cap here — this is what
-        # makes restart adoption of a changed static cap safe. The first
-        # deployment-state read below therefore runs under the strict
-        # initialization policy (any power-resolve failure is fatal).
+        # template cap change reads the settled desired cap once at startup.
         await self.controller.wait_for_deployment_ready(include_planner=False)
         if self.runtime_namespace_source is not None:
             await self.runtime_namespace_source.refresh_runtime_namespace()
-        await self._refresh_deployment_state(is_initialization=True)
+        await self._refresh_deployment_state()
+        self._load_static_power_caps_at_startup()
         await self.fpm_provider.async_init(self._runtime_namespace_or_none())
-        await self._refresh_deployment_state(is_initialization=True)
+        await self._refresh_deployment_state()
 
     async def refresh(self) -> DeploymentState:
         namespace_changed = False
@@ -127,10 +125,10 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
                 await self.runtime_namespace_source.refresh_runtime_namespace()
             )
 
-        await self._refresh_deployment_state(is_initialization=False)
+        await self._refresh_deployment_state()
         if namespace_changed:
             await self.fpm_provider.async_init(self._runtime_namespace_or_none())
-            await self._refresh_deployment_state(is_initialization=False)
+            await self._refresh_deployment_state()
         await self.fpm_provider.refresh(self._state)
         return self._state
 
@@ -165,29 +163,10 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
     async def shutdown(self) -> None:
         await self.fpm_provider.shutdown()
 
-    async def _refresh_deployment_state(self, *, is_initialization: bool) -> None:
+    async def _refresh_deployment_state(self) -> None:
         self._refresh_worker_info()
         self._refresh_gpu_counts()
-        self._refresh_power_configs(is_initialization=is_initialization)
-        try:
-            await self._refresh_replica_counts()
-        except Exception as exc:
-            # Replica counts are a separate DGD GET. A transport / apiserver
-            # failure here must not undo the power conservative path above or
-            # terminate the tick loop — keep last-good counts and, when power
-            # awareness is on, latch scale-up suppression. Init still fails
-            # closed: startup cannot proceed without known inventory.
-            if is_initialization:
-                raise
-            logger.warning(
-                "Replica count refresh failed (%s); keeping last-good counts",
-                exc,
-            )
-            if self.config.enable_power_awareness:
-                self._mark_power_scale_up_blocked(
-                    f"replica count refresh failed ({exc}); keeping last-good "
-                    "inventory and suppressing scale-up"
-                )
+        await self._refresh_replica_counts()
         self._refresh_model_name()
 
     def _refresh_worker_info(self) -> None:
@@ -245,27 +224,12 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
                 require_prefill=self.require_prefill,
                 require_decode=self.require_decode,
             )
-        except Exception as exc:
-            # Transient apiserver / transport errors must not terminate the
-            # whole refresh — that would skip the power-config conservative
-            # path below. Catch broadly (not only ApiException): urllib3
-            # timeouts and connection errors often escape the typed wrapper.
-            # Fall back to last observed / configured GPU counts; a genuinely
-            # missing value still fails closed via the errors check. Stale
-            # GPU topology can under-enforce max_gpu_budget when caps change
-            # while total watts stay flat, so latch scale-up suppression when
-            # power awareness is on.
+        except DeploymentValidationError as exc:
             logger.warning(
-                "Could not read GPU counts from deployment (%s: %s), "
+                "Could not read GPU counts from deployment (%s), "
                 "falling back to last observed or configured values",
-                type(exc).__name__,
                 exc,
             )
-            if self.config.enable_power_awareness:
-                self._mark_power_scale_up_blocked(
-                    f"GPU count refresh failed ({exc}); keeping last-good "
-                    "topology and suppressing scale-up"
-                )
             prefill_gpus = state.prefill.num_gpus
             decode_gpus = state.decode.num_gpus
 
@@ -291,68 +255,45 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
         if self.require_decode:
             state.decode.num_gpus = decode_gpus
 
-    def _refresh_power_configs(self, *, is_initialization: bool) -> None:
-        """Resolve DGD-owned per-GPU caps into deployment state.
+    def _load_static_power_caps_at_startup(self) -> None:
+        """Read DGD-owned per-GPU caps once at startup; fail closed if bad.
 
-        No-op when power awareness is off. Policy differs by phase:
-
-        * Initialization (strict / fail closed): any resolve failure raises
-          ``DeploymentValidationError`` and aborts planner startup — power math
-          must not run on guessed caps. ``initialize()`` waits for worker
-          readiness first, so this reads the settled DGD-desired cap.
-        * Runtime (conservative): a resolve failure or a changed valid cap
-          keeps the last-good per-role watts (taking the per-role maximum of
-          old/new — over-estimating projected watts is safe under a power
-          ceiling), sets the deployment-scoped scale-up-blocked flag, and
-          leaves adoption of the new cap to a post-rollout planner restart.
-          It never mutates Pods.
+        The annotation is treated as static for the planner lifetime. Cap
+        changes take effect after the worker rollout completes and the planner
+        restarts (re-running this hook).
         """
         if not self.config.enable_power_awareness:
             return
 
-        state = self.deployment_state()
+        get_configs = getattr(self.controller, "get_component_power_configs", None)
+        if not callable(get_configs):
+            raise DeploymentValidationError(
+                [
+                    "Power awareness requires a connector that can resolve "
+                    "DGD-owned per-GPU caps; this connector does not implement "
+                    "get_component_power_configs."
+                ]
+            )
+
         prefill_name, decode_name = self._power_component_names()
         try:
-            prefill_cfg, decode_cfg = self.controller.get_component_power_configs(
+            prefill_cfg, decode_cfg = get_configs(
                 require_prefill=self.require_prefill,
                 require_decode=self.require_decode,
                 prefill_component_name=prefill_name,
                 decode_component_name=decode_name,
             )
         except Exception as exc:
-            # Transient apiserver / transport errors and malformed/missing caps
-            # both land here. Startup fails closed; runtime keeps the last-good
-            # caps and blocks scale-up rather than terminating refresh. Catch
-            # broadly so urllib3 timeouts that are not wrapped as ApiException
-            # still take the conservative path.
-            if is_initialization:
-                raise DeploymentValidationError(
-                    [f"Failed to resolve DGD-owned power caps at startup: {exc}"]
-                ) from exc
-            self._mark_power_scale_up_blocked(
-                f"power cap refresh failed ({exc}); keeping last-good caps and "
-                "suppressing scale-up"
-            )
-            return
+            raise DeploymentValidationError(
+                [f"Failed to resolve DGD-owned power caps at startup: {exc}"]
+            ) from exc
 
-        reasons: list[str] = []
+        state = self.deployment_state()
         if self.require_prefill and prefill_cfg is not None:
-            reason = self._apply_power_config_for_role(
-                state.prefill, prefill_cfg, is_initialization=is_initialization
-            )
-            if reason:
-                reasons.append(reason)
+            self._adopt_power_config(state.prefill, prefill_cfg)
         if self.require_decode and decode_cfg is not None:
-            reason = self._apply_power_config_for_role(
-                state.decode, decode_cfg, is_initialization=is_initialization
-            )
-            if reason:
-                reasons.append(reason)
-        if reasons:
-            self._mark_power_scale_up_blocked("; ".join(reasons))
-
-        if is_initialization:
-            self._validate_minimum_power_footprint(prefill_cfg, decode_cfg)
+            self._adopt_power_config(state.decode, decode_cfg)
+        self._validate_minimum_power_footprint(prefill_cfg, decode_cfg)
 
     def _power_component_names(self) -> tuple[Optional[str], Optional[str]]:
         """Backend-default component names used as explicit-name fallbacks.
@@ -374,53 +315,12 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
         )
         return prefill_name, decode_name
 
-    def _apply_power_config_for_role(
-        self,
-        component_state: ComponentState,
-        cfg: ComponentPowerConfig,
-        *,
-        is_initialization: bool,
-    ) -> Optional[str]:
-        """Update one component's power fields; return a block reason or None.
-
-        Returns a non-empty reason string only when a *changed* valid cap is
-        observed at runtime (the caller then suppresses scale-up). Init and
-        first-observation always adopt the DGD-desired value with no block.
-        """
-        new_watts = cfg.watts_per_replica
-        old_watts = component_state.power_watts_per_replica
-
-        if is_initialization or old_watts is None:
-            component_state.power_gpu_limit_watts = cfg.gpu_power_limit_watts
-            component_state.power_watts_per_replica = new_watts
-            return None
-
-        if new_watts == old_watts:
-            # Unchanged desired cap: keep the (identical) per-GPU value fresh.
-            component_state.power_gpu_limit_watts = cfg.gpu_power_limit_watts
-            return None
-
-        # Changed valid cap mid-run. A DGD template change produces a mixed
-        # old/new Pod population while the DGD exposes only the new desired
-        # value, so the planner cannot prove the effective per-replica power.
-        # Hold the conservative per-role maximum and block scale-up; only raise
-        # the stored value (never lower it) so projected watts over-estimate.
-        if new_watts > old_watts:
-            component_state.power_gpu_limit_watts = cfg.gpu_power_limit_watts
-            component_state.power_watts_per_replica = new_watts
-        return (
-            f"{cfg.role} per-replica power changed {old_watts}W -> {new_watts}W; "
-            f"holding {max(old_watts, new_watts)}W and suppressing scale-up until "
-            "the worker rollout completes and the planner restarts"
-        )
-
-    def _mark_power_scale_up_blocked(self, reason: str) -> None:
-        """Latch the deployment-scoped scale-up block (sticky until restart)."""
-        state = self.deployment_state()
-        if not state.power_scale_up_blocked:
-            logger.warning("Power scale-up blocked: %s", reason)
-        state.power_scale_up_blocked = True
-        state.power_scale_up_blocked_reason = reason
+    @staticmethod
+    def _adopt_power_config(
+        component_state: ComponentState, cfg: ComponentPowerConfig
+    ) -> None:
+        component_state.power_gpu_limit_watts = cfg.gpu_power_limit_watts
+        component_state.power_watts_per_replica = cfg.watts_per_replica
 
     def _validate_minimum_power_footprint(
         self,

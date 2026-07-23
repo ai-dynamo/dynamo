@@ -63,15 +63,4 @@ def deployment_state_changed(
         != new_state.decode.power_watts_per_replica
     ):
         return True
-    # Deployment-scoped scale-up block: a malformed refresh can flip this while
-    # leaving the last-good watts unchanged, so compare it explicitly — else the
-    # blocked transition would skip update_capabilities() and never reach the
-    # final budget boundary or the diagnostic gauge.
-    if old_state.power_scale_up_blocked != new_state.power_scale_up_blocked:
-        return True
-    if (
-        old_state.power_scale_up_blocked_reason
-        != new_state.power_scale_up_blocked_reason
-    ):
-        return True
     return False

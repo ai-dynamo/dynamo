@@ -133,7 +133,6 @@ def test_resolve_project_clamp_never_patches_pods(k8s):
         decode=EngineCapabilities(
             num_gpu=4, power_watts_per_replica=decode_cfg.watts_per_replica
         ),
-        power_scale_up_blocked=False,
     )
     adapter = _bare_adapter(caps)
     # Stable deployment: pin expected == ready so this exercises the power
