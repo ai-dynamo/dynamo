@@ -224,7 +224,7 @@ ENV VIRTUAL_ENV=/workspace/.venv
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=shared \
     export UV_CACHE_DIR=/root/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv venv ${VIRTUAL_ENV} --python $PYTHON_VERSION && \
-    uv pip install --upgrade meson pybind11 patchelf maturin[patchelf] tomlkit pyyaml
+    uv pip install --upgrade meson pybind11 patchelf maturin[patchelf] tomlkit pyyaml auditwheel
 
 ARG NIXL_UCX_REF
 
@@ -693,6 +693,8 @@ RUN echo "$NIXL_LIB_DIR" > /etc/ld.so.conf.d/nixl.conf && \
     ldconfig
 
 # Build NIXL wheel → /opt/dynamo/dist/nixl/nixl*.whl (C++ transport library, all targets)
+# Uses contrib/build-wheel.sh approach: build wheel then auditwheel repair to bundle
+# shared libraries (libnixl, UCX plugins, NIXL plugins) into the wheel.
 ARG PYTHON_VERSION
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
     --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
@@ -703,8 +705,19 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     if [ "$USE_SCCACHE" = "true" ]; then \
         eval $(/tmp/use-sccache.sh setup-env); \
     fi && \
+    source ${VIRTUAL_ENV}/bin/activate && \
     cd /workspace/nixl && \
-    uv build . --wheel --out-dir /opt/dynamo/dist/nixl --python $PYTHON_VERSION
+    ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64") && \
+    WHL_PLATFORM="manylinux_2_28_${ARCH_ALT}" && \
+    UCX_PLUGINS_DIR="/usr/local/ucx/lib/ucx" && \
+    chmod +x contrib/build-wheel.sh contrib/wheel_add_ucx_plugins.py contrib/tomlutil.py && \
+    mkdir -p /opt/dynamo/dist/nixl && \
+    contrib/build-wheel.sh \
+        --python-version $PYTHON_VERSION \
+        --platform "$WHL_PLATFORM" \
+        --output-dir /opt/dynamo/dist/nixl \
+        --ucx-plugins-dir "$UCX_PLUGINS_DIR" \
+        --nixl-plugins-dir "$NIXL_PLUGIN_DIR"
 
 {% if target not in ("dev", "local-dev") %}
 # Copy source code (order matters for layer caching)
