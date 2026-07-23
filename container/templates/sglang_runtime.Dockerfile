@@ -115,6 +115,19 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export PIP_CACHE_DIR=/root/.cache/pip && \
     pip install --break-system-packages --no-deps "distro==1.9.0"
 
+# When ENABLE_NIXL_WHEEL_OVERRIDE is true, install the NIXL wheels built in
+# wheel_builder (nixl-cu* + nixl-meta) instead of using the upstream nixl
+# packages pre-installed in the lmsysorg/sglang base image.
+COPY --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
+COPY --chown=dynamo:0 --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
+ARG ENABLE_NIXL_WHEEL_OVERRIDE
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    if [ "${ENABLE_NIXL_WHEEL_OVERRIDE}" = "true" ]; then \
+        export PIP_CACHE_DIR=/root/.cache/pip && \
+        pip install --break-system-packages --force-reinstall --no-deps \
+            /opt/dynamo/wheelhouse/nixl/nixl*.whl; \
+    fi
+
 # Install gpu_memory_service wheel if enabled (all targets)
 ARG ENABLE_GPU_MEMORY_SERVICE
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \

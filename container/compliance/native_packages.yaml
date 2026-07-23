@@ -126,14 +126,6 @@ packages:
       - sglang-runtime-efa
       - trtllm-runtime-efa
 
-  - name: NIXL LIBFABRIC plugin
-    # NIXL 1.3.0 with a release/1.3 backport of ai-dynamo/nixl PR #1966.
-    version: 1.3.0-pr1966-ff04fa81
-    license: Apache-2.0
-    source: https://github.com/ai-dynamo/nixl
-    images:
-      - sglang-runtime-efa
-
   # --- From-source binaries built in wheel_builder / dynamo_base and copied
   # into the runtime images (no apt/pip/cargo metadata, so the python/rust/dpkg
   # generators miss them). Image filters are best-effort by build config; the

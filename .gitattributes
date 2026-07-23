@@ -12,10 +12,6 @@
 *.fatbin            binary
 *.mp4               binary
 
-# Unified diffs require a single space on otherwise-blank context lines.
-container/deps/sglang/nixl/*.patch -whitespace
-container/compliance/osrb/modifications/native/nixl-*/*.patch -whitespace
-
 # Exclude test data files from linguist language detection
 lib/llm/tests/data/** linguist-vendored
 lib/llm/tests/snapshots/** linguist-vendored

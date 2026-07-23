@@ -32,8 +32,7 @@ Each entry here is required for:
 
 ## Current modifications
 
-- `native/nixl-1.3.0`: release/1.3 backport of the NIXL LIBFABRIC fix tracked
-  by ai-dynamo/nixl#1966.
+None.
 
 The OSRB packager (`container/compliance/osrb/package.py`) walks this
 directory and includes every patch + README in the submission bundle
