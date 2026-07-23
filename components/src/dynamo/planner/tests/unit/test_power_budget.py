@@ -16,6 +16,7 @@ import pytest
 from dynamo.planner.core.budget import (
     apply_power_budget,
     minimum_power_footprint_fits,
+    peak_parallel_watts,
     project_watts,
 )
 from dynamo.planner.core.types import (
@@ -111,6 +112,20 @@ def test_scale_up_blocked_holds_at_current():
 def test_scale_up_blocked_still_allows_scale_down():
     # Blocked: a scale-down (1,1 vs current 3,3) is honored.
     assert apply_power_budget(1, 1, 3, 3, 700, 1200, 100000, 1, True) == (1, 1, None)
+
+
+def test_peak_parallel_watts_rebalance_example():
+    assert peak_parallel_watts(1, 4, 4, 1, 1000, 1000) == 8000
+    assert project_watts(4, 1, 1000, 1000) == 5000
+
+
+def test_apply_power_budget_rebalance_stages_scale_down_first():
+    # Ted P1: settled (4,1)=5000W fits, but parallel peak (4,4)=8000W does not.
+    assert apply_power_budget(4, 1, 1, 4, 1000, 1000, 5000, 1, False) == (
+        1,
+        1,
+        "power_rebalance_staged",
+    )
 
 
 def test_already_over_budget_baseline_with_no_proposal_is_left_alone():
@@ -495,6 +510,64 @@ def test_project_scale_to_partial_decode_proposal_does_not_scale_prefill():
     # 2*700 + 3*1200 = 5000; prefill stays None.
     assert decision.num_prefill is None
     assert decision.num_decode == 3
+
+
+def test_project_scale_to_rebalance_emits_decode_only_tick1():
+    """Stable (1P,4D) -> (4P,1D) must stage decode scale-down before prefill up."""
+    caps = WorkerCapabilities(
+        prefill=EngineCapabilities(num_gpu=1, power_watts_per_replica=1000),
+        decode=EngineCapabilities(num_gpu=1, power_watts_per_replica=1000),
+        power_scale_up_blocked=False,
+    )
+    adapter = _bare_adapter(_mode_config("disagg", total_gpu_power_limit=5000), caps)
+    wc = WorkerCounts(
+        ready_num_prefill=1,
+        ready_num_decode=4,
+        expected_num_prefill=1,
+        expected_num_decode=4,
+    )
+    outcome = SimpleNamespace(
+        execute_action="apply",
+        final_proposal=SimpleNamespace(
+            targets=[
+                SimpleNamespace(sub_component_type="prefill", replicas=4),
+                SimpleNamespace(sub_component_type="decode", replicas=1),
+            ]
+        ),
+    )
+    decision = adapter._project_scale_to(outcome, wc)
+    assert decision is not None
+    assert decision.num_prefill is None
+    assert decision.num_decode == 1
+
+
+def test_project_scale_to_rebalance_prefill_up_after_decode_stable():
+    """Tick 2: once decode is at 1, prefill scale-up to 4 is safe."""
+    caps = WorkerCapabilities(
+        prefill=EngineCapabilities(num_gpu=1, power_watts_per_replica=1000),
+        decode=EngineCapabilities(num_gpu=1, power_watts_per_replica=1000),
+        power_scale_up_blocked=False,
+    )
+    adapter = _bare_adapter(_mode_config("disagg", total_gpu_power_limit=5000), caps)
+    wc = WorkerCounts(
+        ready_num_prefill=1,
+        ready_num_decode=1,
+        expected_num_prefill=1,
+        expected_num_decode=1,
+    )
+    outcome = SimpleNamespace(
+        execute_action="apply",
+        final_proposal=SimpleNamespace(
+            targets=[
+                SimpleNamespace(sub_component_type="prefill", replicas=4),
+                SimpleNamespace(sub_component_type="decode", replicas=1),
+            ]
+        ),
+    )
+    decision = adapter._project_scale_to(outcome, wc)
+    assert decision is not None
+    assert decision.num_prefill == 4
+    assert decision.num_decode is None
 
 
 def test_project_scale_to_partial_scale_down_does_not_mutate_unproposed_role():
