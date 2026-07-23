@@ -71,6 +71,7 @@ ignore:
   - '.github/allurerc.mjs'
   - 'container/Dockerfile.docs'
   - 'container/run.sh'
+  - 'container/run_xpu.sh'
   - 'container/use-sccache.sh'
   - 'container/dev/**'
   - 'container/templates/local_dev.Dockerfile'
