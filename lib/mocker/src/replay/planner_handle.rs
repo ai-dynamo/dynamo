@@ -26,7 +26,7 @@ use crate::loadgen::{Trace, WorkloadDriver};
 use anyhow::Result;
 
 #[allow(clippy::large_enum_variant)]
-enum RuntimeKind {
+pub(in crate::replay) enum RuntimeKind {
     AggRoundRobin(RoundRobinAggRuntime),
     AggKv(AggRuntime),
     DisaggRoundRobin(RoundRobinDisaggRuntime),
@@ -80,6 +80,13 @@ fn prepare_mooncake_trace(
 }
 
 impl PlannerReplayHandle {
+    /// Consume this single-deployment handle into the runtime facade used by
+    /// [`super::planner_world::ReplayWorldHandle`]. The construction paths stay
+    /// shared with the legacy bridge while the world owns control-plane stepping.
+    pub(in crate::replay) fn into_runtime_kind(self) -> RuntimeKind {
+        self.runtime
+    }
+
     /// Build an aggregated handle from an **already-prepared** workload trace.
     ///
     /// Trace preparation is the caller's job: Mooncake callers normalize session

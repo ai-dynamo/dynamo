@@ -237,7 +237,7 @@ def test_replay_engine_caps_aggregates_attention_dp_capacity_and_gpu_width():
         MockEngineArgs(
             num_gpu_blocks=100,
             block_size=16,
-            dp_size=4,
+            aic_attention_dp_size=4,
             aic_tp_size=2,
         )
     )

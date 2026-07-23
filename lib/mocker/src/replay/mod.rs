@@ -7,6 +7,7 @@ mod entrypoints;
 pub(crate) mod offline;
 mod online;
 mod planner_handle;
+mod planner_world;
 mod router_shared;
 mod validate;
 
@@ -99,6 +100,10 @@ pub use offline::planner_hook::{
 #[doc(hidden)]
 pub use offline::run_offline_handoff_conformance;
 pub use planner_handle::PlannerReplayHandle;
+pub use planner_world::{
+    ReplayWorldHandle, ReplayWorldReport, WorldPlannerDecision, WorldPlannerHook,
+    WorldScalingAction,
+};
 pub use validate::validate_replay_args_mode;
 
 pub(crate) fn normalize_trace_requests(
