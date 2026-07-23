@@ -1133,7 +1133,14 @@ class OrchestratorEngineAdapter:
         num_d: Optional[int],
         worker_counts: WorkerCounts,
     ) -> tuple[Optional[int], Optional[int]]:
-        """Clamp proposed counts to the GPU budget band."""
+        """Clamp proposed counts to the GPU budget band.
+
+        Disagg proposals that name both roles use a joint proportional clamp.
+        When exactly one role is proposed, the peer is charged at its ready
+        count and the adjustable role is sized against the residual GPU
+        ceiling/floor — never jointly shrunk and then discarded, which can
+        leave the applied state over ``max_gpu_budget``.
+        """
         min_endpoint = self._config.min_endpoint
         min_gpus = self._config.min_gpu_budget
         max_gpus = self._config.max_gpu_budget
@@ -1184,13 +1191,60 @@ class OrchestratorEngineAdapter:
                 max(base_d, min_endpoint) if proposed_d else None,
             )
 
-        clamped_p, clamped_d = proportional_clamp_pair(
-            max(base_p, min_endpoint),
-            max(base_d, min_endpoint),
-            p_gpu,
-            d_gpu,
-            min_gpus,
-            max_gpus,
-            min_endpoint,
+        # Both roles proposed: joint proportional clamp (unchanged).
+        if proposed_p and proposed_d:
+            clamped_p, clamped_d = proportional_clamp_pair(
+                max(base_p, min_endpoint),
+                max(base_d, min_endpoint),
+                p_gpu,
+                d_gpu,
+                min_gpus,
+                max_gpus,
+                min_endpoint,
+            )
+            return clamped_p, clamped_d
+
+        if not proposed_p and not proposed_d:
+            return None, None
+
+        # Exactly one role proposed: treat the peer as fixed at its ready
+        # count and size the adjustable role against the residual GPU band.
+        # Joint-then-discard would assume the peer was also reduced and can
+        # emit an over-ceiling applied state (e.g. current (7,1), decode-only
+        # proposal 7, ceiling 8 → joint (4,4) discarded to (None,4) → applied
+        # (7,4)=11 GPUs).
+        if proposed_p:
+            fixed_gpus = ready_d * d_gpu
+            residual_max = max(0, max_gpus - fixed_gpus) if max_gpus >= 0 else -1
+            residual_min = (
+                -1
+                if min_gpus < 0 or (min_gpus - fixed_gpus) <= 0
+                else (min_gpus - fixed_gpus)
+            )
+            return (
+                proportional_clamp_single(
+                    max(base_p, min_endpoint),
+                    p_gpu,
+                    residual_min,
+                    residual_max,
+                    min_endpoint,
+                ),
+                None,
+            )
+        fixed_gpus = ready_p * p_gpu
+        residual_max = max(0, max_gpus - fixed_gpus) if max_gpus >= 0 else -1
+        residual_min = (
+            -1
+            if min_gpus < 0 or (min_gpus - fixed_gpus) <= 0
+            else (min_gpus - fixed_gpus)
         )
-        return clamped_p if proposed_p else None, clamped_d if proposed_d else None
+        return (
+            None,
+            proportional_clamp_single(
+                max(base_d, min_endpoint),
+                d_gpu,
+                residual_min,
+                residual_max,
+                min_endpoint,
+            ),
+        )
