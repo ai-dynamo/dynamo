@@ -12,12 +12,10 @@
 use std::path::Path;
 use std::time::Instant;
 
-use anyhow::Result;
-use dynamo_kv_router::config::KvRouterConfig;
-
-use super::offline::agg::AggRuntime;
+use super::offline::agg::RoundRobinAggRuntime;
 use super::offline::components::ReplayMode;
-use super::offline::disagg::DisaggRuntime;
+use super::offline::disagg::RoundRobinDisaggRuntime;
+use super::offline::extensions::kv_router::{AggRuntime, DisaggRuntime, ReplayKvRouterConfig};
 use super::offline::planner_hook::PlannerHook;
 use super::{
     OfflineDisaggReplayConfig, ReplayPrefillLoadEstimator, ReplayRouterMode, SlaThresholds,
@@ -25,11 +23,14 @@ use super::{
 };
 use crate::common::protocols::MockEngineArgs;
 use crate::loadgen::{Trace, WorkloadDriver};
+use anyhow::Result;
 
 #[allow(clippy::large_enum_variant)]
 enum RuntimeKind {
-    Agg(AggRuntime),
-    Disagg(DisaggRuntime),
+    AggRoundRobin(RoundRobinAggRuntime),
+    AggKv(AggRuntime),
+    DisaggRoundRobin(RoundRobinDisaggRuntime),
+    DisaggKv(DisaggRuntime),
 }
 
 pub struct PlannerReplayHandle {
@@ -90,7 +91,7 @@ impl PlannerReplayHandle {
     #[allow(clippy::too_many_arguments)]
     pub fn from_trace(
         args: MockEngineArgs,
-        router_config: Option<KvRouterConfig>,
+        router_config: Option<ReplayKvRouterConfig>,
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         trace: Trace,
         num_workers: usize,
@@ -100,18 +101,31 @@ impl PlannerReplayHandle {
     ) -> Result<Self> {
         let args = args.normalized()?;
         let mode = replay_mode(max_in_flight)?;
-        let runtime = AggRuntime::new_workload(
-            &args,
-            router_config,
-            prefill_load_estimator,
-            workload_driver(trace, args.block_size, mode)?,
-            num_workers,
-            mode,
-            router_mode,
-        )?
-        .with_sla_thresholds(sla);
+        let runtime = match router_mode {
+            ReplayRouterMode::RoundRobin => RuntimeKind::AggRoundRobin(
+                RoundRobinAggRuntime::new_round_robin_workload(
+                    &args,
+                    workload_driver(trace, args.block_size, mode)?,
+                    num_workers,
+                    mode,
+                )?
+                .with_sla_thresholds(sla),
+            ),
+            ReplayRouterMode::KvRouter => RuntimeKind::AggKv(
+                AggRuntime::new_workload(
+                    &args,
+                    router_config,
+                    prefill_load_estimator,
+                    workload_driver(trace, args.block_size, mode)?,
+                    num_workers,
+                    mode,
+                    router_mode,
+                )?
+                .with_sla_thresholds(sla),
+            ),
+        };
         Ok(Self {
-            runtime: RuntimeKind::Agg(runtime),
+            runtime,
             started_at: Instant::now(),
         })
     }
@@ -121,7 +135,7 @@ impl PlannerReplayHandle {
     #[allow(clippy::too_many_arguments)]
     pub fn from_trace_file(
         args: MockEngineArgs,
-        router_config: Option<KvRouterConfig>,
+        router_config: Option<ReplayKvRouterConfig>,
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         trace_path: &Path,
         trace_block_size: usize,
@@ -154,7 +168,7 @@ impl PlannerReplayHandle {
     #[allow(clippy::too_many_arguments)]
     pub fn from_trace_disagg(
         config: OfflineDisaggReplayConfig,
-        router_config: Option<KvRouterConfig>,
+        router_config: Option<ReplayKvRouterConfig>,
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         trace: Trace,
         max_in_flight: Option<usize>,
@@ -163,17 +177,29 @@ impl PlannerReplayHandle {
     ) -> Result<Self> {
         let config = config.normalized()?;
         let mode = replay_mode(max_in_flight)?;
-        let runtime = DisaggRuntime::new_workload(
-            &config,
-            router_config,
-            prefill_load_estimator,
-            workload_driver(trace, config.prefill_args.block_size, mode)?,
-            mode,
-            router_mode,
-        )?
-        .with_sla_thresholds(sla);
+        let runtime = match router_mode {
+            ReplayRouterMode::RoundRobin => RuntimeKind::DisaggRoundRobin(
+                RoundRobinDisaggRuntime::new_round_robin_workload(
+                    &config,
+                    workload_driver(trace, config.prefill_args.block_size, mode)?,
+                    mode,
+                )?
+                .with_sla_thresholds(sla),
+            ),
+            ReplayRouterMode::KvRouter => RuntimeKind::DisaggKv(
+                DisaggRuntime::new_workload(
+                    &config,
+                    router_config,
+                    prefill_load_estimator,
+                    workload_driver(trace, config.prefill_args.block_size, mode)?,
+                    mode,
+                    router_mode,
+                )?
+                .with_sla_thresholds(sla),
+            ),
+        };
         Ok(Self {
-            runtime: RuntimeKind::Disagg(runtime),
+            runtime,
             started_at: Instant::now(),
         })
     }
@@ -183,7 +209,7 @@ impl PlannerReplayHandle {
     #[allow(clippy::too_many_arguments)]
     pub fn from_trace_file_disagg(
         config: OfflineDisaggReplayConfig,
-        router_config: Option<KvRouterConfig>,
+        router_config: Option<ReplayKvRouterConfig>,
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         trace_path: &Path,
         trace_block_size: usize,
@@ -217,8 +243,10 @@ impl PlannerReplayHandle {
     pub fn run(self, hook: Box<dyn PlannerHook>) -> Result<TraceSimulationReport> {
         let started_at = self.started_at;
         let collector = match self.runtime {
-            RuntimeKind::Agg(rt) => rt.with_planner_hook(hook).run()?.0,
-            RuntimeKind::Disagg(rt) => rt.with_planner_hook(hook).run()?.0,
+            RuntimeKind::AggRoundRobin(rt) => rt.with_planner_hook(hook).run()?.0,
+            RuntimeKind::AggKv(rt) => rt.with_planner_hook(hook).run()?.0,
+            RuntimeKind::DisaggRoundRobin(rt) => rt.with_planner_hook(hook).run()?.0,
+            RuntimeKind::DisaggKv(rt) => rt.with_planner_hook(hook).run()?.0,
         };
         let wall_time_ms = started_at.elapsed().as_secs_f64() * 1000.0;
         Ok(collector.finish().with_wall_time_ms(wall_time_ms))
