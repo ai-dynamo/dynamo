@@ -109,8 +109,6 @@ class TestResolveDisaggregationModeFromLegacyMultimodalFlags:
     def test_pd_alias_resolves_to_aggregated(self):
         config = create_config()
         config.disaggregation_mode = "pd"
-        config.is_prefill_worker = False
-        config.is_decode_worker = False
 
         config._resolve_disaggregation_mode()
 
