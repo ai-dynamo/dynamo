@@ -967,3 +967,30 @@ jobs:
             exit 1
           fi
           echo "Posted GitLab trigger reply"
+  # ============================================================================
+  # LINEAR RELEASE SYNC
+  # ============================================================================
+
+  linear-release-sync:
+    name: Sync to Linear Release
+    needs: [prepare-release, release-publish]
+    # Skip on nightly: prepare-release sets version=nightly, which would create a
+    # spurious "Dynamo vnightly" release in Linear. Only sync for RC/release runs.
+    if: needs.release-publish.result == 'success' && needs.prepare-release.outputs.nightly != 'true'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout at source commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare-release.outputs.commit_sha }}
+          fetch-depth: 0
+
+      - name: Sync issues to Linear release
+        # Pinned to an audited commit SHA (not a mutable @v0 tag) since this step
+        # receives LINEAR_ACCESS_KEY. Bump deliberately after reviewing upstream.
+        uses: linear/linear-release-action@c0cb8354a362c24c6d3e0948f37fd66d07588e3f # v0.14.5
+        with:
+          access_key: ${{ secrets.LINEAR_ACCESS_KEY }}
+          version: ${{ needs.prepare-release.outputs.version }}
+          name: Dynamo v${{ needs.prepare-release.outputs.version }}
