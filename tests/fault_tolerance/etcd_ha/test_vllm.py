@@ -20,7 +20,7 @@ from tests.fault_tolerance.etcd_ha.utils import (
     send_inference_request,
     wait_for_processes_to_terminate,
 )
-from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
+from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME, DynamoPortRange
 from tests.utils.device import (
     build_nixl_kv_transfer_config,
     get_default_vllm_block_size,
@@ -28,6 +28,7 @@ from tests.utils.device import (
 from tests.utils.engine_process import FRONTEND_PORT
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.payloads import check_health_generate, check_models_api
+from tests.utils.port_utils import allocate_port, deallocate_port
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,11 @@ class DynamoWorkerProcess(ManagedProcess):
         etcd_endpoints: list,
         mode: WorkerMode = WorkerMode.AGGREGATED,
     ):
+        # Allocate system port for this worker.
+        self.system_port = allocate_port(DynamoPortRange.SERVE.value)
+        # Register port cleanup early so partially constructed workers still release ports.
+        request.addfinalizer(self._release_worker_ports)
+
         command = [
             "python3",
             "-m",
@@ -67,10 +73,9 @@ class DynamoWorkerProcess(ManagedProcess):
             str(get_default_vllm_block_size()),
         ]
 
-        # Set port based on worker type
-        port = "8082" if mode == WorkerMode.PREFILL else "8081"
+        port = str(self.system_port)
 
-        # Configure disaggregation mode, KV transfer, and health checks per worker type
+        # Configure disaggregation mode, KV transfer, and health checks per worker type.
         if mode == WorkerMode.PREFILL:
             command.extend(["--disaggregation-mode", "prefill"])
             health_check_urls = [(f"http://localhost:{port}/health", self.is_ready)]
@@ -98,9 +103,13 @@ class DynamoWorkerProcess(ManagedProcess):
                     json.dumps(build_nixl_kv_transfer_config()),
                 ]
             )
+            self.fpm_port = allocate_port(DynamoPortRange.FPM.value)
+            env["DYN_FORWARDPASS_METRIC_PORT"] = str(self.fpm_port)
 
         # KV events config and NIXL side channel port only for prefill worker
         if mode == WorkerMode.PREFILL:
+            self.kv_event_port = allocate_port(DynamoPortRange.SERVE.value)
+            self.nixl_side_channel_port = allocate_port(DynamoPortRange.NIXL.value)
             command.extend(
                 [
                     "--kv-events-config",
@@ -108,15 +117,15 @@ class DynamoWorkerProcess(ManagedProcess):
                         {
                             "publisher": "zmq",
                             "topic": "kv-events",
-                            "endpoint": "tcp://*:20082",
+                            "endpoint": f"tcp://*:{self.kv_event_port}",
                             "enable_kv_cache_events": True,
                         }
                     ),
                 ]
             )
-            env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = "5601"
+            env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(self.nixl_side_channel_port)
 
-        # Set log directory based on worker type
+        # Set log directory based on worker type.
         worker_type = "prefill_worker" if mode == WorkerMode.PREFILL else "worker"
         log_dir = f"{request.node.name}_{worker_type}"
 
@@ -125,6 +134,7 @@ class DynamoWorkerProcess(ManagedProcess):
             shutil.rmtree(log_dir)
             logger.info(f"Cleaned up existing log directory: {log_dir}")
         except FileNotFoundError:
+            # Directory doesn't exist, which is fine.
             pass
 
         super().__init__(
@@ -134,16 +144,37 @@ class DynamoWorkerProcess(ManagedProcess):
             timeout=120,
             display_output=True,
             terminate_all_matching_process_names=False,
-            stragglers=[
-                "VLLM::EngineCore",
-            ],
-            straggler_commands=[
-                "-m dynamo.vllm",
-            ],
+            # Ensure any orphaned vLLM engine cores or child helpers are cleaned up
+            stragglers=["VLLM::EngineCore"],
+            straggler_commands=["-m dynamo.vllm"],
             log_dir=log_dir,
         )
 
         self.mode = mode
+
+    def _release_worker_ports(self):
+        """Release all worker ports allocated by this test helper."""
+        cleanup_errors = []
+        for port_attr in (
+            "system_port",
+            "fpm_port",
+            "kv_event_port",
+            "nixl_side_channel_port",
+        ):
+            port = getattr(self, port_attr, None)
+            if port is None:
+                continue
+
+            try:
+                deallocate_port(port)
+            except Exception as exc:
+                logger.exception("Failed to release %s=%s", port_attr, port)
+                cleanup_errors.append(exc)
+            else:
+                setattr(self, port_attr, None)
+
+        if cleanup_errors:
+            raise cleanup_errors[0]
 
     def is_ready(self, response) -> bool:
         """Check the health of the worker process"""

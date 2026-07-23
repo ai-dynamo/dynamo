@@ -118,6 +118,36 @@
       "from_image": "nvcr.io/nvidia/distroless/go",
       "from_tag": "v4.0.3",
       "platform": "linux/arm64"
+    },
+    {
+      "baseline_digest": "sha256:7291df3657ecfcf05332af183b373994eb2cf328c7914944b09e6c437bf2edf8",
+      "baseline_image": "nvcr.io/nvidia/base/ubuntu",
+      "baseline_sbom": "ubuntu@7291df36-amd64.cdx.json",
+      "baseline_tag": "noble-20250619",
+      "from_digest": "sha256:7291df3657ecfcf05332af183b373994eb2cf328c7914944b09e6c437bf2edf8",
+      "from_image": "nvcr.io/nvidia/base/ubuntu",
+      "from_tag": "noble-20250619",
+      "platform": "linux/amd64"
+    },
+    {
+      "baseline_digest": "sha256:7291df3657ecfcf05332af183b373994eb2cf328c7914944b09e6c437bf2edf8",
+      "baseline_image": "nvcr.io/nvidia/base/ubuntu",
+      "baseline_sbom": "ubuntu@7291df36-arm64.cdx.json",
+      "baseline_tag": "noble-20250619",
+      "from_digest": "sha256:7291df3657ecfcf05332af183b373994eb2cf328c7914944b09e6c437bf2edf8",
+      "from_image": "nvcr.io/nvidia/base/ubuntu",
+      "from_tag": "noble-20250619",
+      "platform": "linux/arm64"
+    },
+    {
+      "baseline_digest": "sha256:8315e2455736c4f9b597f15c5fb4d31f834e798e0c6b66bbdbdbac491ce26bd1",
+      "baseline_image": "nvcr.io/nvidia/cuda-dl-base",
+      "baseline_sbom": "cuda-dl-base@8315e245-amd64.cdx.json",
+      "baseline_tag": "25.11-cuda13.0-devel-ubuntu24.04",
+      "from_digest": "sha256:8315e2455736c4f9b597f15c5fb4d31f834e798e0c6b66bbdbdbac491ce26bd1",
+      "from_image": "nvcr.io/nvidia/cuda-dl-base",
+      "from_tag": "25.11-cuda13.0-devel-ubuntu24.04",
+      "platform": "linux/amd64"
     }
   ],
   "entry_schema": {
@@ -132,6 +162,6 @@
     "platform": "platform pinned for layer-prefix verification, e.g. linux/amd64"
   },
   "format": "CycloneDX 1.6 JSON, slim filter (drop properties/hashes/dependencies; keep evidence). Hard cap 5 MB per file.",
-  "generated_at": "2026-07-09T16:26:09+00:00",
+  "generated_at": "2026-07-10T14:53:03+00:00",
   "schema_version": 2
 }

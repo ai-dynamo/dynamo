@@ -4,7 +4,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fmt::Display,
-    sync::Arc,
+    sync::{Arc, LazyLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -23,7 +23,7 @@ use axum::{
 };
 use base64::Engine as _;
 use bytes::Bytes;
-use dynamo_runtime::config::environment_names::llm as env_llm;
+use dynamo_runtime::config::{env_is_truthy, environment_names::llm as env_llm};
 use dynamo_runtime::{
     pipeline::{AsyncEngineContextProvider, Context},
     protocols::annotated::AnnotationsProvider,
@@ -59,6 +59,7 @@ use crate::protocols::openai::{
         NvCreateChatCompletionStreamResponse,
     },
     completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
+    delta_common,
     embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
     images::{NvCreateImageRequest, NvImagesResponse},
     responses::{NvCreateResponse, NvResponse, ResponseParams, chat_completion_to_response},
@@ -80,6 +81,9 @@ pub const DYNAMO_REQUEST_ID_HEADER: &str = "x-dynamo-request-id";
 pub const ANNOTATION_REQUEST_ID: &str = "request_id";
 
 const VALIDATION_PREFIX: &str = "Validation: ";
+
+static FORCE_INCLUDE_USAGE: LazyLock<bool> =
+    LazyLock::new(|| env_is_truthy(env_llm::DYN_ENABLE_FORCE_INCLUDE_USAGE));
 
 use super::error::{SanitizedError, overload_status_code};
 
@@ -630,6 +634,9 @@ async fn handler_completions(
 ) -> Result<Response, ErrorResponse> {
     ensure_json_content_type(&headers)?;
     let mut request: NvCreateCompletionRequest = parse_json_request("completions", &body)?;
+    if *FORCE_INCLUDE_USAGE && request.inner.stream.unwrap_or(false) {
+        delta_common::force_include_usage(&mut request.inner.stream_options);
+    }
 
     // return a 503 if the service or model is not ready
     check_ready(&state)?;
@@ -873,6 +880,86 @@ async fn completions_single(
     }
 }
 
+fn add_optional_token_count(total: &mut Option<u32>, value: Option<u32>) {
+    if let Some(value) = value {
+        *total = Some(total.unwrap_or_default().saturating_add(value));
+    }
+}
+
+fn merge_completion_usage(
+    total: &mut dynamo_protocols::types::CompletionUsage,
+    usage: dynamo_protocols::types::CompletionUsage,
+) {
+    total.prompt_tokens = total.prompt_tokens.saturating_add(usage.prompt_tokens);
+    total.completion_tokens = total
+        .completion_tokens
+        .saturating_add(usage.completion_tokens);
+    total.total_tokens = total.total_tokens.saturating_add(usage.total_tokens);
+
+    if let Some(details) = usage.prompt_tokens_details {
+        let total_details = total.prompt_tokens_details.get_or_insert_default();
+        add_optional_token_count(&mut total_details.audio_tokens, details.audio_tokens);
+        add_optional_token_count(&mut total_details.cached_tokens, details.cached_tokens);
+    }
+
+    if let Some(details) = usage.completion_tokens_details {
+        let total_details = total.completion_tokens_details.get_or_insert_default();
+        add_optional_token_count(
+            &mut total_details.accepted_prediction_tokens,
+            details.accepted_prediction_tokens,
+        );
+        add_optional_token_count(&mut total_details.audio_tokens, details.audio_tokens);
+        add_optional_token_count(
+            &mut total_details.reasoning_tokens,
+            details.reasoning_tokens,
+        );
+        add_optional_token_count(
+            &mut total_details.rejected_prediction_tokens,
+            details.rejected_prediction_tokens,
+        );
+    }
+}
+
+/// Combine the terminal usage-only chunks from per-prompt streams into one
+/// request-level chunk. Continuous usage attached to content chunks passes
+/// through unchanged because those values are cumulative snapshots.
+fn aggregate_batch_completion_usage(
+    stream: impl futures::Stream<Item = Annotated<NvCreateCompletionResponse>>,
+    request_id: String,
+) -> impl futures::Stream<Item = Annotated<NvCreateCompletionResponse>> {
+    async_stream::stream! {
+        let mut stream = Box::pin(stream);
+        let mut aggregate_usage = dynamo_protocols::types::CompletionUsage::default();
+        let mut final_usage_chunk = None;
+
+        while let Some(mut response) = stream.next().await {
+            let terminal_usage = response.data.as_mut().and_then(|data| {
+                data.inner
+                    .choices
+                    .is_empty()
+                    .then(|| data.inner.usage.take())
+                    .flatten()
+            });
+
+            if let Some(usage) = terminal_usage {
+                merge_completion_usage(&mut aggregate_usage, usage);
+                final_usage_chunk = Some(response);
+                continue;
+            }
+
+            yield response;
+        }
+
+        if let Some(mut response) = final_usage_chunk {
+            if let Some(data) = response.data.as_mut() {
+                data.inner.id = format!("cmpl-{request_id}");
+                data.inner.usage = Some(aggregate_usage);
+            }
+            yield response;
+        }
+    }
+}
+
 /// Handle batch prompt completions (multiple prompts with n choices each)
 #[tracing::instrument(skip_all)]
 async fn completions_batch(
@@ -977,6 +1064,7 @@ async fn completions_batch(
 
     // Merge all streams
     let merged_stream = stream::select_all(all_streams);
+    let merged_stream = aggregate_batch_completion_usage(merged_stream, request_id.clone());
 
     // capture the context to cancel the stream if the client disconnects
     let ctx = first_ctx.expect("At least one stream should be generated");
@@ -1251,6 +1339,9 @@ async fn handler_chat_completions(
 ) -> Result<Response, ErrorResponse> {
     ensure_json_content_type(&headers)?;
     let mut request: NvCreateChatCompletionRequest = parse_json_request("chat completions", &body)?;
+    if *FORCE_INCLUDE_USAGE && request.inner.stream.unwrap_or(false) {
+        delta_common::force_include_usage(&mut request.inner.stream_options);
+    }
 
     // return a 503 if the service is not ready (process-level + per-model
     // serving readiness). An aggregated request to a decode-only namespace
@@ -6221,6 +6312,139 @@ mod tests {
             !is_empty_completion_stream_response(&make_completion_chunk("", None, Some(usage))),
             "usage present → not empty",
         );
+    }
+
+    fn make_completion_usage_chunk(
+        id: &str,
+        usage: dynamo_protocols::types::CompletionUsage,
+    ) -> NvCreateCompletionResponse {
+        NvCreateCompletionResponse {
+            inner: CreateCompletionResponse {
+                id: id.to_string(),
+                choices: vec![],
+                created: 0,
+                model: "m".to_string(),
+                system_fingerprint: None,
+                object: "text_completion".to_string(),
+                usage: Some(usage),
+            },
+            nvext: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_completion_usage_is_aggregated_once() {
+        use dynamo_protocols::types::{
+            CompletionTokensDetails, CompletionUsage, PromptTokensDetails,
+        };
+
+        let continuous_usage = CompletionUsage {
+            prompt_tokens: 3,
+            completion_tokens: 1,
+            total_tokens: 4,
+            prompt_tokens_details: None,
+            completion_tokens_details: None,
+        };
+        let first_usage = CompletionUsage {
+            prompt_tokens: 3,
+            completion_tokens: 2,
+            total_tokens: 5,
+            prompt_tokens_details: Some(PromptTokensDetails {
+                audio_tokens: Some(1),
+                cached_tokens: Some(2),
+            }),
+            completion_tokens_details: Some(CompletionTokensDetails {
+                accepted_prediction_tokens: Some(1),
+                audio_tokens: None,
+                reasoning_tokens: Some(2),
+                rejected_prediction_tokens: Some(0),
+            }),
+        };
+        let second_usage = CompletionUsage {
+            prompt_tokens: 4,
+            completion_tokens: 1,
+            total_tokens: 5,
+            prompt_tokens_details: Some(PromptTokensDetails {
+                audio_tokens: Some(2),
+                cached_tokens: Some(3),
+            }),
+            completion_tokens_details: Some(CompletionTokensDetails {
+                accepted_prediction_tokens: Some(2),
+                audio_tokens: Some(1),
+                reasoning_tokens: None,
+                rejected_prediction_tokens: Some(1),
+            }),
+        };
+
+        let chunks = vec![
+            Annotated::from_data(make_completion_chunk(
+                "first",
+                None,
+                Some(continuous_usage.clone()),
+            )),
+            Annotated::from_data(make_completion_usage_chunk("cmpl-request-0", first_usage)),
+            Annotated::from_data(make_completion_chunk("second", None, None)),
+            Annotated::from_data(make_completion_usage_chunk("cmpl-request-1", second_usage)),
+        ];
+
+        let output: Vec<_> =
+            aggregate_batch_completion_usage(futures::stream::iter(chunks), "request".to_string())
+                .collect()
+                .await;
+
+        assert_eq!(output.len(), 3, "two content chunks and one usage chunk");
+        assert_eq!(
+            output[0]
+                .data
+                .as_ref()
+                .and_then(|data| data.inner.usage.as_ref()),
+            Some(&continuous_usage),
+            "continuous usage must pass through unchanged",
+        );
+
+        let final_response = output[2].data.as_ref().expect("final data chunk");
+        assert_eq!(final_response.inner.id, "cmpl-request");
+        assert!(final_response.inner.choices.is_empty());
+        let usage = final_response
+            .inner
+            .usage
+            .as_ref()
+            .expect("aggregate usage");
+        assert_eq!(usage.prompt_tokens, 7);
+        assert_eq!(usage.completion_tokens, 3);
+        assert_eq!(usage.total_tokens, 10);
+        let prompt_details = usage
+            .prompt_tokens_details
+            .as_ref()
+            .expect("prompt token details");
+        assert_eq!(prompt_details.audio_tokens, Some(3));
+        assert_eq!(prompt_details.cached_tokens, Some(5));
+        let completion_details = usage
+            .completion_tokens_details
+            .as_ref()
+            .expect("completion token details");
+        assert_eq!(completion_details.accepted_prediction_tokens, Some(3));
+        assert_eq!(completion_details.audio_tokens, Some(1));
+        assert_eq!(completion_details.reasoning_tokens, Some(2));
+        assert_eq!(completion_details.rejected_prediction_tokens, Some(1));
+    }
+
+    #[tokio::test]
+    async fn batch_completion_without_usage_is_unchanged() {
+        let chunks = vec![Annotated::from_data(make_completion_chunk(
+            "content", None, None,
+        ))];
+
+        let output: Vec<_> =
+            aggregate_batch_completion_usage(futures::stream::iter(chunks), "request".to_string())
+                .collect()
+                .await;
+
+        assert_eq!(output.len(), 1);
+        let response = output[0].data.as_ref().expect("content chunk");
+        assert_eq!(response.inner.id, "test");
+        assert_eq!(response.inner.choices[0].text, "content");
+        assert!(response.inner.usage.is_none());
     }
 
     // ── decode_base64_embedding_to_floats ────────────────────────────────

@@ -42,6 +42,11 @@ products:
     versions:
       - display-name: dev
         path: ../docs/index.yml
+  # External product: links out to the published AIPerf docs from the header
+  # product switcher. Text-only (no icon/image) by design.
+  - display-name: AIPerf
+    href: https://docs.nvidia.com/aiperf/
+    target: _blank
 
 redirects:
   - source: "/dynamo/index.html"
@@ -315,5 +320,3 @@ favicon: ../docs/assets/NVIDIA_symbol.svg
 js:
   - url: https://assets.adobedtm.com/5d4962a43b79/c1061d2c5e7b/launch-191c2462b890.min.js
     strategy: beforeInteractive
-css:
-  - ./main.css

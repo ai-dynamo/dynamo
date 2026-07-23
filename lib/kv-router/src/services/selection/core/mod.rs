@@ -341,11 +341,8 @@ impl SelectionCore {
 
         let queueing_enabled = self
             .kv_router_config
-            .policy_profile(Some(&record.model_name))
-            .map_err(|error| SelectionError::BadRequest(error.to_string()))?
-            .classes()
-            .iter()
-            .any(|class| class.queueing_enabled());
+            .queueing_enabled(Some(&record.model_name))
+            .map_err(|error| SelectionError::BadRequest(error.to_string()))?;
         let reasons = record
             .missing_schedulable_metadata(queueing_enabled, self.kv_router_config.use_kv_events);
         if !reasons.is_empty() {
@@ -485,6 +482,7 @@ impl SelectionCore {
             self.cancel_token.child_token(),
             WORKER_TYPE,
             true,
+            Default::default(),
         )?;
         let entry = Arc::new(SelectionEntry {
             key: key.clone(),

@@ -25,8 +25,8 @@ global:
     # -- Whether this chart should install the bundled NATS subchart.
     # When true, deploys NATS and auto-configures the operator with its address.
     # When false, NATS is not deployed. Use dynamo-operator.natsAddr to point at an external instance if you are bringing your own NATS.
-    # Defaults to true (since release 1.1.0) because the Dynamo runtime's event plane (DYN_EVENT_PLANE) defaults to NATS for distributed backends (etcd/kubernetes).
-    install: true
+    # NATS is optional because the default request and event planes use TCP and ZMQ, respectively.
+    install: false
 
   kai-scheduler:
     # -- Whether this chart should install the bundled kai-scheduler subchart.
@@ -73,7 +73,7 @@ dynamo-operator:
   # Environment variables to pass to operator Deployment.
   env: []
 
-  # -- NATS server address for operator communication (leave empty to use the bundled NATS chart). Format: `nats://hostname:4222`
+  # -- NATS server address for operator communication. When empty, the operator uses bundled NATS only if global.nats.install=true; otherwise NATS is not configured. Format: `nats://hostname:4222`
   natsAddr: ""
 
   # -- etcd server address for an external etcd instance. Only needed when using external etcd without the bundled subchart. Format: `http://hostname:2379` or `https://hostname:2379`
