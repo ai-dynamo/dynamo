@@ -26,6 +26,12 @@ from gpu_memory_service.server import rpc as rpc_module
 from gpu_memory_service.server.rpc import GMSRPCServer
 from gpu_memory_service.server.session import GMSSessionManager, OperationNotAllowed
 
+pytestmark = [
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+    pytest.mark.gpu_0,
+]
+
 
 @pytest.mark.parametrize(
     "message",
