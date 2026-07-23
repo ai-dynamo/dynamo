@@ -83,6 +83,15 @@ spec:
         spec:
           imagePullSecrets:
             - name: nvcr-secret
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: nvidia.com/gpu.product
+                        operator: In
+                        values:
+                          - NVIDIA-H200
           tolerations:
             - key: nvidia.com/gpu
               operator: Equal
