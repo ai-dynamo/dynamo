@@ -38,9 +38,10 @@ import (
 // sharedValidation carries request-wide dependencies and accumulation used by
 // validation for API types shared by multiple resources.
 type sharedValidation struct {
-	ctx      context.Context
-	mgr      ctrl.Manager
-	warnings admission.Warnings
+	ctx                  context.Context
+	mgr                  ctrl.Manager
+	warnings             admission.Warnings
+	runtimeVersionSource runtimeVersionValidationSource
 }
 
 func (v *sharedValidation) warn(message string) {
@@ -126,8 +127,10 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 		)...)
 	}
 
-	if err := runtimeVersionOverrideError(spec, fldPath); err != nil {
-		allErrs = append(allErrs, err)
+	if v.validatesRuntimeVersionFor(runtimeVersionSourceV1Beta1) {
+		if err := runtimeVersionOverrideError(spec, fldPath); err != nil {
+			allErrs = append(allErrs, err)
+		}
 	}
 
 	return allErrs

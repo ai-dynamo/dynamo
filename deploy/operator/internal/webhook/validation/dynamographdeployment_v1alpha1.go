@@ -26,7 +26,8 @@ import (
 func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentV1alpha1(
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
 ) field.ErrorList {
-	if !hasV1Alpha1CompatibilityFields(dgd) {
+	if !hasV1Alpha1CompatibilityFields(dgd) &&
+		!v.validatesRuntimeVersionFor(runtimeVersionSourceV1Alpha1) {
 		return nil
 	}
 	return v.validateDynamoGraphDeploymentSpecV1alpha1(
