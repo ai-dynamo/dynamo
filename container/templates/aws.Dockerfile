@@ -42,10 +42,19 @@ FROM aws_base AS aws
 {% if framework == "sglang" and device == "cuda" and target == "runtime" %}
 # The SGLang EFA image replaces the upstream NIXL wheel with a wheel built from
 # NIXL 1.3.2. The LIBFABRIC plugin must resolve the EFA installer libfabric,
-# not a source-built overlay.
+# not a source-built overlay. The wheel installs native libs under a Python
+# site-packages private directory, so expose a stable NIXL_PREFIX-style alias
+# for SGLang's runtime NIXL plugin discovery.
 RUN set -eux; \
     python3 -c 'import importlib.metadata as m; assert m.version("nixl") == "1.3.2"; assert m.version("nixl-cu13") == "1.3.2"'; \
     site_packages=$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])'); \
+    wheel_nixl_libs="${site_packages}/.nixl_cu13.mesonpy.libs"; \
+    test -d "${wheel_nixl_libs}/plugins"; \
+    rm -rf /opt/nvidia/nvda_nixl; \
+    mkdir -p /opt/nvidia/nvda_nixl; \
+    ln -s "${wheel_nixl_libs}" /opt/nvidia/nvda_nixl/lib64; \
+    ln -s /opt/nvidia/nvda_nixl/lib64/plugins /opt/nvidia/nvda_nixl/plugins; \
+    test -d /opt/nvidia/nvda_nixl/lib64/plugins; \
     plugins=$(find "${site_packages}" -path '*nixl*' -name libplugin_LIBFABRIC.so -print); \
     test -n "${plugins}"; \
     mkdir -p /tmp/cuda-stubs; \
@@ -58,6 +67,10 @@ RUN set -eux; \
         if grep -Fq "not found" /tmp/nixl-libfabric.ldd; then exit 1; fi; \
         grep -F "libfabric.so.1 => /opt/amazon/efa/lib/libfabric.so.1" /tmp/nixl-libfabric.ldd; \
     done
+ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
+ENV NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib64
+ENV NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib64/plugins
+ENV LD_LIBRARY_PATH=/opt/nvidia/nvda_nixl/lib64:/opt/nvidia/nvda_nixl/lib64/plugins:${LD_LIBRARY_PATH}
 {% endif %}
 
 {% if framework == "trtllm" %}
