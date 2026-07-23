@@ -401,16 +401,6 @@ def create_kv_events_config(
     dynamo_config: Config, engine_config: AsyncEngineArgs
 ) -> Optional[KVEventsConfig]:
     """Create KVEventsConfig for prefix caching if needed."""
-    if (
-        dynamo_config.disaggregation_mode == DisaggregationMode.DECODE
-        and not dynamo_config.enable_conditional_disagg
-    ):
-        logger.info(
-            "Decode worker detected (disaggregation_mode=decode): "
-            "kv_events_config disabled (pass --enable-conditional-disagg to opt in)"
-        )
-        return None
-
     # If prefix caching is not enabled, no events config needed
     if not engine_config.enable_prefix_caching:
         logger.info("No kv_events_config required: prefix caching is disabled")

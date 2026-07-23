@@ -47,9 +47,9 @@ def _raise_if_conditional_disagg_bypass(request: Dict[str, Any]) -> None:
     if BYPASS_REMOTE_PREFILL_ANNOTATION not in (request.get("annotations") or []):
         return
     raise RuntimeError(
-        "SGLang backend does not support conditional-disagg bypass yet. "
-        "Disable --router-conditional-disagg or use a backend with "
-        "decode-side local prefill support."
+        "Detected request annotation 'x-bypass-remote-prefill', but "
+        "SGLang backend does not support conditional disaggregation yet. "
+        "Use vLLM or TensorRT-LLM for conditional disaggregation."
     )
 
 

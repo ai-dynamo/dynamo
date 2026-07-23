@@ -1012,9 +1012,11 @@ class HandlerBase(BaseGenerativeHandler):
             and BYPASS_REMOTE_PREFILL_ANNOTATION in (request.get("annotations") or [])
         )
         if bypass_remote_prefill:
+            request_id = request.get("id") or request.get("request_id", "unknown-id")
             logging.debug(
                 "DECODE: conditional-disagg bypass annotation present; "
-                "running request as AGG (prefill+decode on this worker)."
+                "running request %s as AGG (prefill+decode on this worker).",
+                request_id,
             )
             request["disaggregated_params"] = {"request_type": "context_and_generation"}
 
