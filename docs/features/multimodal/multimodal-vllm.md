@@ -131,6 +131,67 @@ curl http://localhost:8000/v1/chat/completions \
     }' | jq
 ```
 
+### Reuse vLLM multimodal processor cache entries
+
+vLLM can cache processed multimodal inputs under a client-provided opaque UUID.
+Dynamo currently exposes this behavior for images only. The extension is
+specific to vLLM; it is not part of the OpenAI Chat Completions API and is not
+supported by Dynamo's other backends. Dynamo rejects UUIDs on audio or video,
+and its SGLang and TensorRT-LLM backends reject image UUIDs rather than silently
+ignoring unsupported cache semantics.
+
+To enable the cache, pass a nonzero `--mm-processor-cache-gb` value to the vLLM
+worker.
+
+For an aggregated worker, enable Dynamo's CPU embedding cache alongside the
+vLLM processor cache:
+
+```bash
+bash launch/agg_multimodal.sh --model Qwen/Qwen3-VL-2B-Instruct \
+  --mm-processor-cache-gb 4 \
+  --multimodal-embedding-cache-capacity-gb 1
+```
+
+The caches store different data. The vLLM processor cache retains the processed
+media metadata required to resolve a UUID-only request. Dynamo's embedding cache
+retains encoder output and can restore it after eviction from vLLM's GPU encoder
+cache. Keep both caches enabled; the embedding cache alone cannot reconstruct a
+UUID-only input. Both caches are local to one vLLM engine, so the fill and reuse
+requests must reach the same aggregated worker.
+
+Populate an entry by adding `uuid` beside the media field:
+
+```json
+{
+  "type": "image_url",
+  "image_url": {
+    "url": "https://example.com/image.png"
+  },
+  "uuid": "catalog-image-42"
+}
+```
+
+Reuse that entry in a later request by setting the media field to `null` and
+sending the same top-level UUID:
+
+```json
+{
+  "type": "image_url",
+  "image_url": null,
+  "uuid": "catalog-image-42"
+}
+```
+
+UUIDs are opaque nonempty strings and must use the top-level field shown above.
+A UUID-only request fails on a cache miss because it contains no media payload
+to process. Dynamo also rejects a media content part that has neither a URL nor
+a UUID.
+
+When KV-aware routing is enabled, requests with client UUIDs use text-prefix
+routing. Dynamo cannot convert an opaque client key into its content-derived
+multimodal routing hash without risking different cache identities at the
+router and worker.
+
 ### P/D Serving
 
 Use the P/D launcher to separate prefill and decode without deploying a
