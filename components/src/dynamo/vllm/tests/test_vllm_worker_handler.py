@@ -1979,6 +1979,36 @@ class TestClassifyPoolingWorkerHandler:
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(5)
+    async def test_classify_forwards_tokenization_kwargs(self):
+        """truncate_prompt_tokens + add_special_tokens are forwarded to the
+        engine's tokenization_kwargs for raw-text inputs."""
+        handler = self._make_handler()
+        context = self._make_context()
+        captured: dict = {}
+
+        async def fake_encode(prompt, pooling_params, request_id, **kwargs):
+            captured["tokenization_kwargs"] = kwargs.get("tokenization_kwargs")
+            output = MagicMock()
+            output.outputs.data = torch.tensor([0.5, 0.5])
+            output.prompt_token_ids = [1, 2]
+            yield output
+
+        handler.engine_client.encode = fake_encode
+
+        request = {
+            "input": "text",
+            "model": "test-model",
+            "truncate_prompt_tokens": 64,
+            "add_special_tokens": False,
+        }
+        [_] = [r async for r in handler.generate(request, context)]
+        assert captured["tokenization_kwargs"] == {
+            "truncate_prompt_tokens": 64,
+            "add_special_tokens": False,
+        }
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
     async def test_classify_accepts_pretokenized_input(self):
         """Pre-tokenized inputs (list[int] / list[list[int]]) are wrapped in
         TokensPrompt, mirroring vLLM's CompletionRequestMixin input contract."""

@@ -1261,6 +1261,15 @@ async fn classify(
         request.nvext = None;
     }
 
+    // `truncation_side` reaches vLLM's tokenizer through TokenizeParams, not the
+    // raw `tokenization_kwargs` this worker forwards, so it cannot be honored —
+    // reject it rather than silently truncating from the default side.
+    if let Some(side) = request.truncation_side.as_deref() {
+        return Err(pooling_or_classify_bad_request(format!(
+            "Unsupported 'truncation_side' value {side:?}; not currently supported"
+        )));
+    }
+
     // Resolve alias → primary served name before wrapping the request, so
     // engine routing, metrics, and the response model all use the canonical
     // primary (mirrors `embeddings` / `completions_single`).
@@ -1342,7 +1351,7 @@ async fn classify(
     Ok(Json(response).into_response())
 }
 
-fn pooling_bad_request(message: String) -> ErrorResponse {
+fn pooling_or_classify_bad_request(message: String) -> ErrorResponse {
     let code = StatusCode::BAD_REQUEST;
     (
         code,
@@ -1374,32 +1383,44 @@ async fn pooling(
     // unsupported `dimensions` and unknown encodings here with a 400 instead
     // of a worker-side failure.
     if request.dimensions.is_some() {
-        return Err(pooling_bad_request(
+        return Err(pooling_or_classify_bad_request(
             "dimensions is currently not supported".to_string(),
         ));
     }
     if request.encoding_format != "float" && request.encoding_format != "base64" {
-        return Err(pooling_bad_request(format!(
+        return Err(pooling_or_classify_bad_request(format!(
             "Invalid 'encoding_format' value {:?}; expected 'float' or 'base64'",
             request.encoding_format
         )));
     }
-    // The worker always packs base64 as little-endian float32. Reject any
-    // non-default embed_dtype/endianness rather than silently returning a
-    // float32/little-endian payload the caller would misinterpret.
-    if let Some(dtype) = request.embed_dtype.as_deref()
-        && dtype != "float32"
-    {
-        return Err(pooling_bad_request(format!(
-            "Unsupported 'embed_dtype' value {dtype:?}; only 'float32' is supported"
-        )));
+    // `embed_dtype`/`endianness` only affect base64 packing; for a float JSON
+    // response vLLM ignores them, so only validate under `encoding_format:
+    // "base64"`. There, the worker always packs little-endian float32, so a
+    // non-default value is rejected rather than silently returning a mislabeled
+    // payload.
+    if request.encoding_format == "base64" {
+        if let Some(dtype) = request.embed_dtype.as_deref()
+            && dtype != "float32"
+        {
+            return Err(pooling_or_classify_bad_request(format!(
+                "Unsupported 'embed_dtype' value {dtype:?}; only 'float32' is supported"
+            )));
+        }
+        if let Some(endianness) = request.endianness.as_deref()
+            && endianness != "native"
+            && endianness != "little"
+        {
+            return Err(pooling_or_classify_bad_request(format!(
+                "Unsupported 'endianness' value {endianness:?}; only 'native'/'little' are supported"
+            )));
+        }
     }
-    if let Some(endianness) = request.endianness.as_deref()
-        && endianness != "native"
-        && endianness != "little"
-    {
-        return Err(pooling_bad_request(format!(
-            "Unsupported 'endianness' value {endianness:?}; only 'native'/'little' are supported"
+    // `truncation_side` reaches vLLM's tokenizer through TokenizeParams, not the
+    // raw `tokenization_kwargs` this worker forwards, so it cannot be honored
+    // here — reject it rather than silently truncating from the default side.
+    if let Some(side) = request.truncation_side.as_deref() {
+        return Err(pooling_or_classify_bad_request(format!(
+            "Unsupported 'truncation_side' value {side:?}; not currently supported"
         )));
     }
 

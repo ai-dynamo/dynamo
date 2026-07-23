@@ -12,7 +12,11 @@
 //! data:[{index, object: "pooling", data}], usage}`.
 //!
 //! The completion-style request (`input`) is supported; vLLM's chat-messages
-//! and IOProcessor-plugin request variants are not.
+//! and IOProcessor-plugin request variants are not. Supported request options:
+//! `task`, `use_activation`, `encoding_format`, `add_special_tokens`,
+//! `truncate_prompt_tokens` (forwarded); `dimensions`, `truncation_side`, and
+//! non-default `embed_dtype`/`endianness` (base64) are rejected with a 400
+//! rather than silently ignored.
 //!
 //! `task` is forwarded verbatim and resolved by the vLLM engine: `None`
 //! defaults to `token_embed` → `token_classify` → `plugin` (first supported),
@@ -76,6 +80,19 @@ pub struct NvCreatePoolingRequest {
     /// output. `None` uses the pooler's default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub use_activation: Option<bool>,
+
+    /// Whether to add the tokenizer's special tokens (BOS/CLS/SEP). `None`
+    /// uses the tokenizer default (`true`). Forwarded to the worker's
+    /// tokenization, mirroring vLLM's `CompletionRequestMixin.add_special_tokens`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub add_special_tokens: Option<bool>,
+
+    /// Which side to truncate from. Not currently honored (it reaches vLLM via
+    /// `TokenizeParams`, not the raw `tokenization_kwargs` the worker forwards);
+    /// captured so a value can be rejected with a 400 instead of silently
+    /// truncating from the default side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncation_side: Option<String>,
 
     /// Matryoshka dimensionality reduction. vLLM's `/pooling` rejects this
     /// parameter ("dimensions is currently not supported"); accepted here so
@@ -285,6 +302,21 @@ mod tests {
         assert!(request.embed_dtype.is_none() && request.endianness.is_none());
         let value = serde_json::to_value(&request).unwrap();
         assert!(value.get("embed_dtype").is_none() && value.get("endianness").is_none());
+    }
+
+    #[test]
+    fn tokenization_options_round_trip() {
+        let request: NvCreatePoolingRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "input": "hi",
+            "add_special_tokens": false,
+            "truncate_prompt_tokens": 64,
+            "truncation_side": "left"
+        }))
+        .unwrap();
+        assert_eq!(request.add_special_tokens, Some(false));
+        assert_eq!(request.truncate_prompt_tokens, Some(64));
+        assert_eq!(request.truncation_side.as_deref(), Some("left"));
     }
 
     #[test]

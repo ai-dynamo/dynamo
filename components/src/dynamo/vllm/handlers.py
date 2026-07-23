@@ -3958,6 +3958,10 @@ class ClassifyWorkerHandler(EmbeddingWorkerHandler):
             classify_pooling_kwargs["use_activation"] = use_activation
         pooling_params = PoolingParams(**classify_pooling_kwargs)
 
+        # Forward supported tokenization options (truncate_prompt_tokens,
+        # add_special_tokens) so classification matches vLLM's tokenization.
+        tokenization_kwargs = _build_tokenization_kwargs(request)
+
         base_request_id = context.id()
 
         async def _encode_one(idx: int, prompt: Any):
@@ -3969,11 +3973,15 @@ class ClassifyWorkerHandler(EmbeddingWorkerHandler):
             )
             final_output = None
             async with self._abort_monitor(context, request_id):
-                async for out in self.engine_client.encode(
-                    prompt=encode_arg,
-                    pooling_params=pooling_params,
-                    request_id=request_id,
-                ):
+                encode_kwargs: dict[str, Any] = {
+                    "prompt": encode_arg,
+                    "pooling_params": pooling_params,
+                    "request_id": request_id,
+                }
+                # tokenization only applies to raw-text prompts.
+                if tokenization_kwargs is not None and isinstance(encode_arg, str):
+                    encode_kwargs["tokenization_kwargs"] = tokenization_kwargs
+                async for out in self.engine_client.encode(**encode_kwargs):
                     final_output = out
             if final_output is None:
                 raise RuntimeError(
@@ -4063,24 +4071,7 @@ class ClassifyWorkerHandler(EmbeddingWorkerHandler):
                 "expected 'float' or 'base64'"
             )
 
-        truncate_prompt_tokens = request.get("truncate_prompt_tokens")
-        tokenization_kwargs: dict[str, Any] | None = None
-        if truncate_prompt_tokens is not None:
-            if not isinstance(truncate_prompt_tokens, int) or isinstance(
-                truncate_prompt_tokens, bool
-            ):
-                raise TypeError(
-                    "Invalid 'truncate_prompt_tokens' type "
-                    f"{type(truncate_prompt_tokens).__name__}; expected int"
-                )
-            if truncate_prompt_tokens < -1:
-                raise ValueError(
-                    "truncate_prompt_tokens must be >= -1, "
-                    f"got {truncate_prompt_tokens}"
-                )
-            tokenization_kwargs = {
-                "truncate_prompt_tokens": truncate_prompt_tokens,
-            }
+        tokenization_kwargs = _build_tokenization_kwargs(request)
 
         pooling_kwargs: dict[str, Any] = {"task": request.get("task")}
         use_activation = request.get("use_activation")
@@ -4158,6 +4149,46 @@ class ClassifyWorkerHandler(EmbeddingWorkerHandler):
                 "completion_tokens": 0,
             },
         }
+
+
+def _build_tokenization_kwargs(request: dict) -> "dict[str, Any] | None":
+    """Collect the supported tokenization options into the dict vLLM's
+    ``encode`` forwards to the tokenizer (``tokenization_kwargs``).
+
+    Covers the completion-request fields that flow through that path:
+    ``truncate_prompt_tokens`` and ``add_special_tokens`` (vLLM pops the latter
+    from ``tokenization_kwargs``). ``truncation_side`` is intentionally absent —
+    it reaches vLLM via ``TokenizeParams``, not this dict, so it is rejected at
+    the frontend rather than silently ignored here. Returns ``None`` when the
+    caller set no option (so the engine tokenizes with its defaults).
+    """
+    kwargs: dict[str, Any] = {}
+
+    truncate_prompt_tokens = request.get("truncate_prompt_tokens")
+    if truncate_prompt_tokens is not None:
+        if not isinstance(truncate_prompt_tokens, int) or isinstance(
+            truncate_prompt_tokens, bool
+        ):
+            raise TypeError(
+                "Invalid 'truncate_prompt_tokens' type "
+                f"{type(truncate_prompt_tokens).__name__}; expected int"
+            )
+        if truncate_prompt_tokens < -1:
+            raise ValueError(
+                f"truncate_prompt_tokens must be >= -1, got {truncate_prompt_tokens}"
+            )
+        kwargs["truncate_prompt_tokens"] = truncate_prompt_tokens
+
+    add_special_tokens = request.get("add_special_tokens")
+    if add_special_tokens is not None:
+        if not isinstance(add_special_tokens, bool):
+            raise TypeError(
+                "Invalid 'add_special_tokens' type "
+                f"{type(add_special_tokens).__name__}; expected bool"
+            )
+        kwargs["add_special_tokens"] = add_special_tokens
+
+    return kwargs or None
 
 
 def _is_token_id(x: Any) -> bool:

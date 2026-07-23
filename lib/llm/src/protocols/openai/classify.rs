@@ -8,8 +8,14 @@
 //! which wraps `dynamo_protocols::types::CreateEmbeddingRequest` — these types
 //! are defined fully in-repo. The wire shape mirrors vLLM's `/classify`
 //! endpoint (`vllm/entrypoints/pooling/classify/protocol.py`, vLLM 0.24.0):
-//! request `{model, input}` → response
+//! request `{model, input, ...}` → response
 //! `{id, object, created, model, data:[{index, label, probs, num_classes}], usage}`.
+//!
+//! Only the **completion-style** request (`input`) is supported. vLLM also
+//! accepts a chat-style variant (`messages`) that renders a chat template;
+//! that is out of scope here. Supported request options: `use_activation`,
+//! `add_special_tokens`, `truncate_prompt_tokens` (forwarded); `truncation_side`
+//! is rejected with a 400 rather than silently ignored.
 
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
@@ -52,6 +58,24 @@ pub struct NvCreateClassifyRequest {
     /// to `PoolingParams`, mirroring vLLM's `ClassifyRequestMixin`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub use_activation: Option<bool>,
+
+    /// Whether to add the tokenizer's special tokens (BOS/CLS/SEP). `None`
+    /// uses the tokenizer default (`true`). Forwarded to the worker's
+    /// tokenization, mirroring vLLM's `CompletionRequestMixin.add_special_tokens`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub add_special_tokens: Option<bool>,
+
+    /// Truncate the tokenized prompt to this many tokens (`-1` = model max).
+    /// Forwarded to the worker's tokenizer path for raw-text inputs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncate_prompt_tokens: Option<i64>,
+
+    /// Which side to truncate from. Not currently honored (it reaches vLLM via
+    /// `TokenizeParams`, not the raw `tokenization_kwargs` the worker forwards);
+    /// captured so a value can be rejected with a 400 instead of silently
+    /// truncating from the default side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncation_side: Option<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<NvExt>,
@@ -208,6 +232,32 @@ mod tests {
             serde_json::to_value(&request).unwrap()["use_activation"],
             serde_json::json!(false)
         );
+    }
+
+    #[test]
+    fn tokenization_options_round_trip() {
+        let request: NvCreateClassifyRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "input": "hello",
+            "add_special_tokens": false,
+            "truncate_prompt_tokens": 128,
+            "truncation_side": "left"
+        }))
+        .unwrap();
+        assert_eq!(request.add_special_tokens, Some(false));
+        assert_eq!(request.truncate_prompt_tokens, Some(128));
+        assert_eq!(request.truncation_side.as_deref(), Some("left"));
+
+        // All omitted → None, none serialized onto the worker wire.
+        let request: NvCreateClassifyRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "input": "hello"
+        }))
+        .unwrap();
+        let value = serde_json::to_value(&request).unwrap();
+        assert!(value.get("add_special_tokens").is_none());
+        assert!(value.get("truncate_prompt_tokens").is_none());
+        assert!(value.get("truncation_side").is_none());
     }
 
     #[test]
