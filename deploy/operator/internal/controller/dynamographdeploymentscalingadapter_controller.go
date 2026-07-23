@@ -97,6 +97,12 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) Reconcile(ctx context.Co
 			"availableComponents", getComponentNames(dgd.Spec.Components))
 		return ctrl.Result{}, nil
 	}
+	if component.ScalingAdapter == nil {
+		logger.V(1).Info("Component no longer uses a scaling adapter; skipping replica propagation",
+			"component", componentName,
+			"dgd", dgd.Name)
+		return ctrl.Result{}, nil
+	}
 
 	// Get current replicas from DGD (default to 1 if not set)
 	currentReplicas := int32(1)

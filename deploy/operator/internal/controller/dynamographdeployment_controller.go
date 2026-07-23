@@ -2568,47 +2568,68 @@ func (r *DynamoGraphDeploymentReconciler) buildCheckpointJobPodTemplate(
 func (r *DynamoGraphDeploymentReconciler) reconcileScalingAdapters(ctx context.Context, dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment) error {
 	logger := log.FromContext(ctx)
 
-	// Process each component - SyncResource handles create, update, and delete via toDelete flag.
+	// Process each component. The DGD controller owns the adapter lifecycle and
+	// identity, while the adapter owns its replica count after creation.
 	for i := range dynamoDeployment.Spec.Components {
 		component := &dynamoDeployment.Spec.Components[i]
 		componentName := component.ComponentName
-		// Check if scaling adapter is enabled for this component (disabled by default).
-		scalingAdapterEnabled := component.ScalingAdapter != nil
-
-		// Get current replicas (default to 1 if not set)
-		currentReplicas := int32(1)
-		if component.Replicas != nil {
-			currentReplicas = *component.Replicas
+		adapterName := generateAdapterName(dynamoDeployment.Name, componentName)
+		adapter := &nvidiacomv1alpha1.DynamoGraphDeploymentScalingAdapter{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      adapterName,
+				Namespace: dynamoDeployment.Namespace,
+			},
 		}
 
-		// Use SyncResource to handle creation/updates/deletion
-		// When toDelete=true, SyncResource will delete the existing resource if it exists
-		_, _, err := commoncontroller.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*nvidiacomv1alpha1.DynamoGraphDeploymentScalingAdapter, bool, error) {
-			adapterName := generateAdapterName(dynamoDeployment.Name, componentName)
-			adapter := &nvidiacomv1alpha1.DynamoGraphDeploymentScalingAdapter{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      adapterName,
-					Namespace: dynamoDeployment.Namespace,
-					Labels: map[string]string{
-						consts.KubeLabelDynamoGraphDeploymentName: dynamoDeployment.Name,
-						consts.KubeLabelDynamoComponent:           componentName,
-					},
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentScalingAdapterSpec{
-					Replicas: currentReplicas,
-					DGDRef: nvidiacomv1alpha1.DynamoGraphDeploymentServiceRef{
-						Name:        dynamoDeployment.Name,
-						ServiceName: componentName,
-					},
-				},
+		if component.ScalingAdapter == nil {
+			if err := r.Delete(ctx, adapter); err != nil {
+				if errors.IsNotFound(err) {
+					continue
+				}
+				logger.Error(err, "Failed to delete DynamoGraphDeploymentScalingAdapter", "component", componentName)
+				return err
 			}
-			// Return toDelete=true if scaling adapter is not enabled
-			return adapter, !scalingAdapterEnabled, nil
+			logger.Info("Deleted DynamoGraphDeploymentScalingAdapter", "adapter", adapterName, "component", componentName)
+			r.Recorder.Eventf(dynamoDeployment, corev1.EventTypeNormal, "AdapterDeleted",
+				"Deleted scaling adapter %s for component %s", adapterName, componentName)
+			continue
+		}
+
+		initialReplicas := ptr.Deref(component.Replicas, int32(1))
+		operation, err := controllerutil.CreateOrPatch(ctx, r.Client, adapter, func() error {
+			if adapter.Labels == nil {
+				adapter.Labels = map[string]string{}
+			}
+			adapter.Labels[consts.KubeLabelDynamoGraphDeploymentName] = dynamoDeployment.Name
+			adapter.Labels[consts.KubeLabelDynamoComponent] = componentName
+			adapter.Spec.DGDRef = nvidiacomv1alpha1.DynamoGraphDeploymentServiceRef{
+				Name:        dynamoDeployment.Name,
+				ServiceName: componentName,
+			}
+
+			// The DGD replica count seeds a new adapter. Once created, the
+			// adapter is the sole source of truth for desired replicas.
+			if adapter.GetResourceVersion() == "" {
+				adapter.Spec.Replicas = initialReplicas
+			}
+
+			return controllerutil.SetControllerReference(dynamoDeployment, adapter, r.Scheme())
 		})
 
 		if err != nil {
-			logger.Error(err, "Failed to sync DynamoGraphDeploymentScalingAdapter", "component", componentName)
+			logger.Error(err, "Failed to reconcile DynamoGraphDeploymentScalingAdapter", "component", componentName)
 			return err
+		}
+
+		switch operation {
+		case controllerutil.OperationResultCreated:
+			logger.Info("Created DynamoGraphDeploymentScalingAdapter", "adapter", adapterName, "component", componentName)
+			r.Recorder.Eventf(dynamoDeployment, corev1.EventTypeNormal, "AdapterCreated",
+				"Created scaling adapter %s for component %s", adapterName, componentName)
+		case controllerutil.OperationResultUpdated:
+			logger.Info("Updated DynamoGraphDeploymentScalingAdapter", "adapter", adapterName, "component", componentName)
+			r.Recorder.Eventf(dynamoDeployment, corev1.EventTypeNormal, "AdapterUpdated",
+				"Updated scaling adapter %s for component %s", adapterName, componentName)
 		}
 	}
 
