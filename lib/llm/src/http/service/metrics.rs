@@ -400,6 +400,7 @@ pub struct Metrics {
     images_per_request: HistogramVec,
     videos_per_request: HistogramVec,
     audio_per_request: HistogramVec,
+    image_tokens_per_request: HistogramVec,
 
     // Runtime configuration metrics. Note: Some of these metrics represent counter-like values from
     // source systems, but are implemented as gauges because they are copied/synchronized from upstream
@@ -544,6 +545,7 @@ pub struct ResponseMetricCollector {
     images_per_request: prometheus::Histogram,
     videos_per_request: prometheus::Histogram,
     audio_per_request: prometheus::Histogram,
+    image_tokens_per_request: prometheus::Histogram,
     // Latched per-request counts (for the tracing span fields recorded in `Drop`).
     image_count_val: usize,
     video_count_val: usize,
@@ -851,6 +853,24 @@ impl Metrics {
         )
         .unwrap();
 
+        // Image placeholder-token buckets: powers of two cover the common
+        // single-image range and multi-image request totals.
+        let image_token_buckets = vec![
+            4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0, 2048.0, 4096.0, 8192.0,
+            16384.0, 32768.0, 65536.0,
+        ];
+        let image_tokens_per_request = HistogramVec::new(
+            HistogramOpts::new(
+                frontend_metric_name(frontend_service::IMAGE_TOKENS_PER_REQUEST),
+                "SMG-derived image-placeholder token estimate per image-bearing request; \
+                 recorded from the response path only when every image resolves and \
+                 processor overrides are absent",
+            )
+            .buckets(image_token_buckets),
+            &["model"],
+        )
+        .unwrap();
+
         let cached_tokens = HistogramVec::new(
             HistogramOpts::new(
                 frontend_metric_name(frontend_service::CACHED_TOKENS),
@@ -986,6 +1006,7 @@ impl Metrics {
             images_per_request,
             videos_per_request,
             audio_per_request,
+            image_tokens_per_request,
             model_total_kv_blocks,
             model_max_num_seqs,
             model_max_num_batched_tokens,
@@ -1143,6 +1164,7 @@ impl Metrics {
         registry.register(Box::new(self.images_per_request.clone()))?;
         registry.register(Box::new(self.videos_per_request.clone()))?;
         registry.register(Box::new(self.audio_per_request.clone()))?;
+        registry.register(Box::new(self.image_tokens_per_request.clone()))?;
 
         // Register runtime configuration metrics
         registry.register(Box::new(self.model_total_kv_blocks.clone()))?;
@@ -1561,6 +1583,9 @@ impl ResponseMetricCollector {
         let images_per_request = metrics.images_per_request.with_label_values(&[&model]);
         let videos_per_request = metrics.videos_per_request.with_label_values(&[&model]);
         let audio_per_request = metrics.audio_per_request.with_label_values(&[&model]);
+        let image_tokens_per_request = metrics
+            .image_tokens_per_request
+            .with_label_values(&[&model]);
         ResponseMetricCollector {
             metrics,
             model,
@@ -1573,6 +1598,7 @@ impl ResponseMetricCollector {
             images_per_request,
             videos_per_request,
             audio_per_request,
+            image_tokens_per_request,
             image_count_val: 0,
             video_count_val: 0,
             audio_count_val: 0,
@@ -1684,13 +1710,23 @@ impl ResponseMetricCollector {
         }
     }
 
-    /// Observe per-request multimodal content-part counts, latched to run exactly
-    /// once per request (the counts are constant across a request's chunks).
+    /// Observe per-request multimodal content-part counts, latched to run
+    /// exactly once per request (the counts are constant across chunks).
     pub fn observe_multimodal_counts(
         &mut self,
         image_count: usize,
         video_count: usize,
         audio_count: usize,
+    ) {
+        self.observe_multimodal_metrics(image_count, video_count, audio_count, None);
+    }
+
+    fn observe_multimodal_metrics(
+        &mut self,
+        image_count: usize,
+        video_count: usize,
+        audio_count: usize,
+        image_tokens: Option<usize>,
     ) {
         if self.multimodal_counts_observed {
             return;
@@ -1704,6 +1740,9 @@ impl ResponseMetricCollector {
         self.images_per_request.observe(image_count as f64);
         self.videos_per_request.observe(video_count as f64);
         self.audio_per_request.observe(audio_count as f64);
+        if let Some(image_tokens) = image_tokens {
+            self.image_tokens_per_request.observe(image_tokens as f64);
+        }
     }
 
     /// Observe tokenize/detokenize latencies in milliseconds.
@@ -1954,10 +1993,11 @@ fn observe_llm_metrics(
 ) {
     response_collector.observe_current_osl(metrics.output_tokens);
     response_collector.observe_cached_tokens(metrics.cached_tokens);
-    response_collector.observe_multimodal_counts(
+    response_collector.observe_multimodal_metrics(
         metrics.image_count,
         metrics.video_count,
         metrics.audio_count,
+        metrics.image_tokens,
     );
     response_collector.observe_tokenize_latencies(
         metrics.tokenize_latency,
@@ -2569,10 +2609,10 @@ mod tests {
 
         let mut collector = metrics.clone().create_response_collector(model);
         // Repeated calls simulate the same counts arriving on each streamed chunk.
-        collector.observe_multimodal_counts(2, 1, 0);
-        collector.observe_multimodal_counts(2, 1, 0);
+        collector.observe_multimodal_metrics(2, 1, 0, Some(1290));
+        collector.observe_multimodal_metrics(2, 1, 0, Some(1290));
         // A later, differing value must not override the latched counts.
-        collector.observe_multimodal_counts(99, 99, 99);
+        collector.observe_multimodal_metrics(99, 99, 99, Some(9999));
 
         let img = metrics.images_per_request.with_label_values(&[model]);
         assert_eq!(img.get_sample_count(), 1, "image histogram observed once");
@@ -2587,6 +2627,13 @@ mod tests {
             "audio histogram observes even a 0 (text-only distribution)"
         );
         assert_eq!(aud.get_sample_sum(), 0.0);
+        let image_tokens = metrics.image_tokens_per_request.with_label_values(&[model]);
+        assert_eq!(
+            image_tokens.get_sample_count(),
+            1,
+            "image-token histogram observed once"
+        );
+        assert_eq!(image_tokens.get_sample_sum(), 1290.0);
     }
 
     #[test]
@@ -2604,6 +2651,12 @@ mod tests {
         let img = metrics.images_per_request.with_label_values(&[model]);
         assert_eq!(img.get_sample_count(), 1);
         assert_eq!(img.get_sample_sum(), 0.0);
+        let image_tokens = metrics.image_tokens_per_request.with_label_values(&[model]);
+        assert_eq!(
+            image_tokens.get_sample_count(),
+            0,
+            "unavailable image-token count must not emit a sample"
+        );
     }
 
     #[test]
@@ -3119,6 +3172,7 @@ mod tests {
             output_tokens: 2,
             chunk_tokens: 1,
             cached_tokens: Some(1),
+            image_tokens: Some(300),
             prefill_worker_id: None,
             prefill_dp_rank: None,
             prefill_worker_type: None,

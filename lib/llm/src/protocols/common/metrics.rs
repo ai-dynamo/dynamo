@@ -33,6 +33,11 @@ pub struct LLMMetricAnnotation {
     /// Number of `audio_url` content parts in the request (0 for text-only).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub audio_count: usize,
+    /// SMG-derived image-placeholder token estimate summed across the request.
+    /// `None` when the model is unsupported, media dimensions are incomplete,
+    /// or request-level processor overrides make the static count unreliable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_tokens: Option<usize>,
     /// Prefill worker ID (for TTFT attribution in disaggregated mode)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefill_worker_id: Option<u64>,

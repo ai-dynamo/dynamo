@@ -241,6 +241,9 @@ pub mod frontend_service {
     /// Number of `audio_url` content parts per request (histogram)
     pub const AUDIO_PER_REQUEST: &str = "audio_per_request";
 
+    /// SMG-derived image-placeholder token estimate per image-bearing request (histogram)
+    pub const IMAGE_TOKENS_PER_REQUEST: &str = "image_tokens_per_request";
+
     /// Model configuration metrics
     ///
     /// Runtime config metrics (from ModelRuntimeConfig):

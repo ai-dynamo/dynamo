@@ -230,6 +230,37 @@ impl MultimodalCounts {
     }
 }
 
+#[cfg(feature = "mm-routing")]
+fn checked_add_image_tokens(total: Option<usize>, next: usize) -> Option<usize> {
+    total?.checked_add(next)
+}
+
+#[cfg(feature = "mm-routing")]
+fn has_image_token_processor_override(value: Option<&serde_json::Value>) -> bool {
+    value.is_some_and(|value| match value {
+        serde_json::Value::Null => false,
+        serde_json::Value::Object(map) => !map.is_empty(),
+        // The schema expects an object. Fail closed for every other JSON shape
+        // because its processor semantics are unknown here.
+        _ => true,
+    })
+}
+
+#[cfg(feature = "mm-routing")]
+fn aggregate_image_tokens(
+    image_tokens: Option<usize>,
+    resolved_image_count: usize,
+    total_image_count: usize,
+    has_processor_override: bool,
+) -> Option<usize> {
+    if total_image_count == 0 || has_processor_override || resolved_image_count != total_image_count
+    {
+        return None;
+    }
+
+    image_tokens
+}
+
 /// Derive the model's local directory from the MDC. The directory is the
 /// parent of `config.json` (which lives in `mdc.model_info` as `HfConfigJson`)
 /// and contains the other artifacts MM-aware routing reads at startup
@@ -242,12 +273,13 @@ fn mdc_model_dir(mdc: &ModelDeploymentCard) -> Option<std::path::PathBuf> {
 }
 
 /// Shared SSRF-aware `MediaFetcher` + `reqwest::Client` for the dim-fetch
-/// path used by MM-aware routing. Inherits the same policy contract as the
-/// frontend-decode path (`MediaLoader`): blocklist DNS resolver, redirect
-/// revalidation, hostname/IP blocklist, `DYN_MM_ALLOW_INTERNAL` opt-in.
+/// path used by MM-aware routing and image-token metrics. Inherits the same
+/// policy contract as the frontend-decode path (`MediaLoader`): blocklist DNS
+/// resolver, redirect revalidation, hostname/IP blocklist,
+/// `DYN_MM_ALLOW_INTERNAL` opt-in.
 ///
 /// **Lifecycle:** `LazyLock` so the closure runs on first access. For MM-
-/// routable preprocessors, `OpenAIPreprocessor::new_with_parts` calls
+/// countable or routable preprocessors, `OpenAIPreprocessor::new_with_parts` calls
 /// `LazyLock::force(...)` at startup — that surfaces TLS-root / reqwest-
 /// init / env-misconfig failures at deployment time, not on the first MM
 /// request 20 minutes in. Text-only deployments skip the force, leaving
@@ -641,29 +673,30 @@ impl OpenAIPreprocessor {
         // custom-named directories where the family substring isn't in the path.
         #[cfg(feature = "mm-routing")]
         let model_dir_for_routing: Option<std::path::PathBuf> = mdc_model_dir(&mdc);
+        #[cfg(feature = "mm-routing")]
+        let fastokens_active = runtime_config.effective_tokenizer_backend().is_fastokens();
         // TODO(mm-routing): fastokens lacks a special-token mutator, so it
         // can't merge tokenizer_config.json specials and would BPE-shatter
         // placeholders (e.g. Qwen2-VL `<|image_pad|>`). Disable MM-routing
-        // here; remove once fastokens upstream exposes the mutator.
+        // token resolution here, but keep SMG image-token counting enabled.
+        // Remove this split once fastokens upstream exposes the mutator.
+        #[cfg(feature = "mm-routing")]
+        if fastokens_active && model_dir_for_routing.is_some() {
+            tracing::warn!(
+                target: "mm_routing",
+                "fastokens tokenizer backend is active; MM-aware KV routing disabled. \
+                 Image-token metrics remain enabled when SMG supports the model."
+            );
+        }
         #[cfg(feature = "mm-routing")]
         let image_token_inputs: Option<(String, String, std::path::PathBuf)> = {
-            let fastokens_active = runtime_config.effective_tokenizer_backend().is_fastokens();
-            if fastokens_active && model_dir_for_routing.is_some() {
-                tracing::warn!(
-                    target: "mm_routing",
-                    "fastokens tokenizer backend is active; MM-aware KV routing disabled. \
-                     Use the default tokenizer backend to re-enable."
-                );
-                None
-            } else {
-                model_dir_for_routing.as_ref().map(|p| {
-                    (
-                        mdc.source_path().to_string(),
-                        model_info.model_type(),
-                        p.clone(),
-                    )
-                })
-            }
+            model_dir_for_routing.as_ref().map(|p| {
+                (
+                    mdc.source_path().to_string(),
+                    model_info.model_type(),
+                    p.clone(),
+                )
+            })
         };
 
         let context_length = mdc.effective_context_length();
@@ -690,17 +723,23 @@ impl OpenAIPreprocessor {
                         Ok(c) => (Some(c), None),
                         Err(e) => (None, Some(e.to_string())),
                     };
-                    // One-shot config/tokenizer_config read for all
-                    // routing-side token info. Parsing lives next to the
-                    // spec resolution in the MM-routing module.
-                    let routing_tokens =
-                        lightseek_mm::resolve_routing_tokens(&model_id, &model_dir);
-                    // `chat_placeholder_token_id` already prefers config.json's
-                    // explicit field and falls back to the spec value, so it's
-                    // the single id used both for the engagement gate and the
-                    // routing-fill below.
-                    let img_tok = routing_tokens.chat_placeholder_token_id;
-                    let bos_tok_string = routing_tokens.bos_token_string;
+                    let (img_tok, bos_tok_string) = if fastokens_active {
+                        (None, None)
+                    } else {
+                        // One-shot config/tokenizer_config read for all
+                        // routing-side token info. Parsing lives next to the
+                        // spec resolution in the MM-routing module.
+                        let routing_tokens =
+                            lightseek_mm::resolve_routing_tokens(&model_id, &model_dir);
+                        // `chat_placeholder_token_id` already prefers
+                        // config.json's explicit field and falls back to the
+                        // spec value, so it is used for both the engagement
+                        // gate and the routing fill.
+                        (
+                            routing_tokens.chat_placeholder_token_id,
+                            routing_tokens.bos_token_string,
+                        )
+                    };
 
                     match (counter.is_some(), img_tok.is_some()) {
                         (true, true) => tracing::info!(
@@ -709,6 +748,7 @@ impl OpenAIPreprocessor {
                             model_dir = %model_dir.display(),
                             "MM-aware KV routing enabled"
                         ),
+                        _ if fastokens_active => {}
                         (counter_ok, img_ok) => {
                             let mut reasons: Vec<String> = Vec::new();
                             if !counter_ok {
@@ -720,8 +760,8 @@ impl OpenAIPreprocessor {
                             if !img_ok {
                                 reasons.push(
                                     "image-placeholder token unresolvable from \
-                                 config.json / processor_config.json / \
-                                 tokenizer_config.json / vocab probe"
+                                     config.json / processor_config.json / \
+                                     tokenizer_config.json / vocab probe"
                                         .to_string(),
                                 );
                             }
@@ -750,7 +790,7 @@ impl OpenAIPreprocessor {
             };
 
         // Force the dim-fetch HTTP client to build at startup for any
-        // MM-routable preprocessor, so TLS / env-var / reqwest-init
+        // MM-countable or routable preprocessor, so TLS / env-var / reqwest-init
         // failures fail the deployment instead of crashing the first
         // MM request 20 minutes in. Text-only preprocessors skip the
         // force (both MM-routing hooks resolved to `None`) — no point
@@ -847,8 +887,10 @@ impl OpenAIPreprocessor {
         request: &R,
         tracker: Option<&RequestTracker>,
     ) -> Result<(PreprocessedRequest, HashMap<String, String>, bool)> {
-        self.preprocess_request_with_options(request, tracker, PreprocessRequestOptions::default())
-            .await
+        let (request, annotations, prompt_injected_reasoning, _image_tokens) = self
+            .preprocess_request_with_options(request, tracker, PreprocessRequestOptions::default())
+            .await?;
+        Ok((request, annotations, prompt_injected_reasoning))
     }
 
     async fn preprocess_request_with_options<
@@ -864,7 +906,12 @@ impl OpenAIPreprocessor {
         request: &R,
         tracker: Option<&RequestTracker>,
         options: PreprocessRequestOptions,
-    ) -> Result<(PreprocessedRequest, HashMap<String, String>, bool)> {
+    ) -> Result<(
+        PreprocessedRequest,
+        HashMap<String, String>,
+        bool,
+        Option<usize>,
+    )> {
         let _stage_guard = StageGuard::new(STAGE_PREPROCESS, "");
         let preprocess_start = Instant::now();
         let mut builder = self.builder(request)?;
@@ -894,8 +941,8 @@ impl OpenAIPreprocessor {
         };
         TOKENIZE_SECONDS.observe(tokenize_start.elapsed().as_secs_f64());
 
-        let _mm_image_entries = self
-            .gather_multi_modal_data(
+        let (_mm_image_entries, image_tokens) = self
+            .gather_multi_modal_data_with_image_tokens(
                 request,
                 &mut builder,
                 formatted_prompt.as_deref(),
@@ -967,7 +1014,12 @@ impl OpenAIPreprocessor {
             preprocessed.stop_conditions.max_tokens = Some(max_tokens);
         }
 
-        Ok((preprocessed, annotations, prompt_injected_reasoning))
+        Ok((
+            preprocessed,
+            annotations,
+            prompt_injected_reasoning,
+            image_tokens,
+        ))
     }
 
     pub fn builder<
@@ -1290,6 +1342,26 @@ impl OpenAIPreprocessor {
         // `gather_mm_exact_routing_info`, so the two never diverge.
         token_ids: &[crate::protocols::TokenIdType],
     ) -> Result<Vec<MmImageEntry>> {
+        let (entries, _image_tokens) = self
+            .gather_multi_modal_data_with_image_tokens(
+                request,
+                builder,
+                formatted_prompt,
+                token_ids,
+            )
+            .await?;
+        Ok(entries)
+    }
+
+    async fn gather_multi_modal_data_with_image_tokens<
+        R: OAIChatLikeRequest + MediaRequestExt + NvExtProvider,
+    >(
+        &self,
+        request: &R,
+        builder: &mut PreprocessedRequestBuilder,
+        formatted_prompt: Option<&str>,
+        token_ids: &[crate::protocols::TokenIdType],
+    ) -> Result<(Vec<MmImageEntry>, Option<usize>)> {
         // `token_ids` is only consumed by the mm-routing `mm_hashes` gate below.
         #[cfg(not(feature = "mm-routing"))]
         let _ = token_ids;
@@ -1305,6 +1377,10 @@ impl OpenAIPreprocessor {
         // Cleared and returned to the caller; empty for non-image / text-only requests.
         #[cfg(feature = "mm-routing")]
         let mut mm_image_entries: Vec<MmImageEntry> = Vec::new();
+        // Private per-request total for frontend metrics. `None` means the SMG
+        // counter is unavailable or checked addition overflowed.
+        #[cfg(feature = "mm-routing")]
+        let mut image_tokens = self.image_token_counter.as_ref().map(|_| 0usize);
         // Total `image_url` content parts in the request. Bumped at every
         // image part regardless of which fetch path handles it. Used at
         // `mm_hashes` forwarding time: if `mm_image_entries.len()` is
@@ -1326,7 +1402,7 @@ impl OpenAIPreprocessor {
         let mut url_passthrough_images: Vec<(u64, &str)> = Vec::new();
 
         let Some(messages) = request.typed_messages() else {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), None));
         };
         let has_media_loader = self.media_loader.is_some();
 
@@ -1469,6 +1545,7 @@ impl OpenAIPreprocessor {
                                 source = hash_source,
                                 "image-token count"
                             );
+                            image_tokens = checked_add_image_tokens(image_tokens, n);
                         }
                         mm_image_entries.push(MmImageEntry {
                             mm_hash,
@@ -1514,6 +1591,7 @@ impl OpenAIPreprocessor {
                                 source = "url_passthrough_header_fetch",
                                 "image-token count"
                             );
+                            image_tokens = checked_add_image_tokens(image_tokens, n);
                         }
                         mm_image_entries.push(MmImageEntry {
                             mm_hash,
@@ -1640,9 +1718,19 @@ impl OpenAIPreprocessor {
         }
 
         #[cfg(feature = "mm-routing")]
-        return Ok(mm_image_entries);
+        let has_processor_override =
+            has_image_token_processor_override(request.mm_processor_kwargs());
+        #[cfg(feature = "mm-routing")]
+        let image_tokens = aggregate_image_tokens(
+            image_tokens,
+            mm_image_entries.len(),
+            total_image_count,
+            has_processor_override,
+        );
+        #[cfg(feature = "mm-routing")]
+        return Ok((mm_image_entries, image_tokens));
         #[cfg(not(feature = "mm-routing"))]
-        Ok(Vec::new())
+        Ok((Vec::new(), None))
     }
 
     /// Build `MmRoutingInfo` for exact MM-aware KV routing. The worker-bound
@@ -2358,6 +2446,33 @@ impl OpenAIPreprocessor {
         S: Stream<Item = Annotated<BackendOutput>> + Send + 'static,
         Resp: Send + Sync + Clone + 'static + std::fmt::Debug,
     {
+        Self::transform_postprocessor_stream_with_image_tokens(
+            stream,
+            generator,
+            context,
+            emit_payload_usage_chunk,
+            trace_tokens_enabled,
+            trace_finish_reason_metadata,
+            mm_counts,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn transform_postprocessor_stream_with_image_tokens<S, Resp>(
+        stream: S,
+        generator: Box<dyn DeltaGeneratorExt<Resp>>,
+        context: Arc<dyn AsyncEngineContext>,
+        emit_payload_usage_chunk: bool,
+        trace_tokens_enabled: bool,
+        trace_finish_reason_metadata: Option<crate::request_trace::SharedFinishReasonMetadata>,
+        mm_counts: MultimodalCounts,
+        image_tokens: Option<usize>,
+    ) -> impl Stream<Item = Annotated<Resp>> + Send
+    where
+        S: Stream<Item = Annotated<BackendOutput>> + Send + 'static,
+        Resp: Send + Sync + Clone + 'static + std::fmt::Debug,
+    {
         struct State<Resp>
         where
             Resp: Send + Sync + Clone + 'static + std::fmt::Debug,
@@ -2377,6 +2492,7 @@ impl OpenAIPreprocessor {
             trace_tokens_enabled: bool,
             trace_finish_reason_metadata: Option<crate::request_trace::SharedFinishReasonMetadata>,
             mm_counts: MultimodalCounts,
+            image_tokens: Option<usize>,
         }
 
         let state = State {
@@ -2393,6 +2509,7 @@ impl OpenAIPreprocessor {
             trace_tokens_enabled,
             trace_finish_reason_metadata,
             mm_counts,
+            image_tokens,
         };
 
         // transform the common response stream into a chat response stream
@@ -2507,6 +2624,7 @@ impl OpenAIPreprocessor {
                         image_count: inner.mm_counts.image,
                         video_count: inner.mm_counts.video,
                         audio_count: inner.mm_counts.audio,
+                        image_tokens: inner.image_tokens,
                         prefill_worker_id,
                         prefill_dp_rank,
                         prefill_worker_type,
@@ -2587,6 +2705,7 @@ impl OpenAIPreprocessor {
                             image_count: inner.mm_counts.image,
                             video_count: inner.mm_counts.video,
                             audio_count: inner.mm_counts.audio,
+                            image_tokens: inner.image_tokens,
                             prefill_worker_id,
                             prefill_dp_rank,
                             prefill_worker_type,
@@ -3444,7 +3563,7 @@ impl
         };
 
         // convert the chat completion request to a common completion request
-        let (mut common_request, annotations, prompt_injected_reasoning) = self
+        let (mut common_request, annotations, prompt_injected_reasoning, image_tokens) = self
             .preprocess_request_with_options(&request, tracker.as_deref(), preprocess_options)
             .await?;
         attach_agent_context_from_context(&mut common_request, &context);
@@ -3496,7 +3615,7 @@ impl
         let context = response_stream.context();
 
         // transform the postprocessor stream (no boxing yet) - detokenize
-        let stream = Self::transform_postprocessor_stream(
+        let stream = Self::transform_postprocessor_stream_with_image_tokens(
             response_stream,
             response_generator,
             context.clone(),
@@ -3504,6 +3623,7 @@ impl
             trace_tokens_enabled,
             trace_finish_reason_metadata,
             mm_counts,
+            image_tokens,
         );
 
         let transformed_stream = self.postprocessor_parsing_stream(
@@ -3861,6 +3981,39 @@ mod tests {
         assert_eq!(counts.audio, 0);
     }
 
+    #[cfg(feature = "mm-routing")]
+    #[test]
+    fn image_token_aggregate_requires_complete_trustworthy_counts() {
+        assert_eq!(aggregate_image_tokens(Some(300), 2, 2, false), Some(300));
+        assert_eq!(aggregate_image_tokens(Some(300), 2, 3, false), None);
+        assert_eq!(aggregate_image_tokens(Some(300), 2, 2, true), None);
+        assert_eq!(aggregate_image_tokens(None, 2, 2, false), None);
+        assert_eq!(aggregate_image_tokens(Some(0), 0, 0, false), None);
+        assert_eq!(
+            checked_add_image_tokens(Some(usize::MAX), 1),
+            None,
+            "overflow must omit the aggregate rather than wrap"
+        );
+    }
+
+    #[cfg(feature = "mm-routing")]
+    #[test]
+    fn image_token_processor_override_is_conservative() {
+        assert!(!has_image_token_processor_override(None));
+        assert!(!has_image_token_processor_override(Some(
+            &serde_json::Value::Null
+        )));
+        assert!(!has_image_token_processor_override(Some(
+            &serde_json::json!({})
+        )));
+        assert!(has_image_token_processor_override(Some(
+            &serde_json::json!([])
+        )));
+        assert!(has_image_token_processor_override(Some(
+            &serde_json::json!({"min_pixels": 64})
+        )));
+    }
+
     #[test]
     fn replace_reserved_media_slot_preserves_alignment_and_returns_errors() {
         let mut map = HashMap::from([(
@@ -3922,6 +4075,7 @@ mod tests {
             output_tokens: 20,
             chunk_tokens: 3,
             cached_tokens: Some(4),
+            image_tokens: Some(512),
             prefill_worker_id: Some(1),
             prefill_dp_rank: Some(2),
             prefill_worker_type: Some("prefill".to_string()),
@@ -3956,6 +4110,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("metrics recognized for tag {tag}"));
             assert_eq!(metrics.input_tokens, 10);
             assert_eq!(metrics.output_tokens, 20);
+            assert_eq!(metrics.image_tokens, Some(512));
             assert_eq!(metrics.detokenize_count, Some(6));
         }
     }

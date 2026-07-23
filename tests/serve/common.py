@@ -318,10 +318,13 @@ def run_serve_deployment(
                 if hasattr(payload, "with_model"):
                     payload = payload.with_model(config.model)
 
-                # Default behavior: requests go to the frontend port, except metrics which target
-                # worker system ports (mapped from DefaultPort -> per-test ports).
+                # Default behavior: requests go to the frontend port. Metrics
+                # may target either the frontend or worker system ports; map
+                # each DefaultPort placeholder to its per-test allocation.
                 if getattr(payload, "endpoint", "") == "/metrics":
-                    if payload.port == DefaultPort.SYSTEM1.value:
+                    if payload.port == DefaultPort.FRONTEND.value:
+                        payload.port = dynamic_frontend_port
+                    elif payload.port == DefaultPort.SYSTEM1.value:
                         if len(dynamic_system_ports) < 1:
                             raise RuntimeError(
                                 "Payload targets SYSTEM_PORT1 but no system ports were provided "
