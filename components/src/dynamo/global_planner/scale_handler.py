@@ -18,7 +18,7 @@ Behavior is unchanged from the pre-refactor monolithic handler.
 
 import logging
 
-from dynamo.global_planner.capacity_manager import KubernetesCapacityManager
+from dynamo.global_planner.kubernetes_capacity_manager import KubernetesCapacityManager
 from dynamo.global_planner.orchestrator import Orchestrator
 from dynamo.planner.connectors.protocol import ScaleRequest, ScaleResponse, ScaleStatus
 from dynamo.planner.errors import DynamoGraphDeploymentNotReadyError
@@ -72,10 +72,10 @@ class ScaleRequestHandler:
 
         # The wire vocabulary (K8s namespace / DGD name) is mapped here onto the
         # orchestrator's neutral vocabulary; the orchestrator is a no-K8s zone.
-        capacity_manager = KubernetesCapacityManager(cluster_name=k8s_namespace)
+        capacity_manager = KubernetesCapacityManager(namespace=k8s_namespace)
         self.orchestrator = Orchestrator(
             capacity_manager=capacity_manager,
-            managed_callers=managed_namespaces,
+            managed_deployments=managed_namespaces,
             max_total_gpus=max_total_gpus,
             min_total_gpus=min_total_gpus,
             intent_cache_ttl_seconds=intent_cache_ttl_seconds,
@@ -126,7 +126,7 @@ class ScaleRequestHandler:
 
     @property
     def managed_namespaces(self):
-        return self.orchestrator.managed_callers
+        return self.orchestrator.managed_deployments
 
     @dynamo_endpoint(ScaleRequest, ScaleResponse)
     async def scale_request(self, request: ScaleRequest):
@@ -179,7 +179,7 @@ class ScaleRequestHandler:
             self.orchestrator.register(
                 participant_id,
                 caller_name=request.caller_namespace,
-                cluster_name=request.k8s_namespace,
+                namespace=request.k8s_namespace,
                 deployment_name=request.graph_deployment_name,
             )
 

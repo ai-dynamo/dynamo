@@ -9,7 +9,7 @@ arbitration (ceiling/floor bounds, multi-partner pairing, intent cache), and the
 observe -> decide -> actuate loop, delegating the infrastructure reads/writes to
 a :class:`~dynamo.global_planner.capacity_manager.CapacityManager`. Its vocabulary
 is neutral — ``participant_id`` / ``caller_name`` / ``deployment_name`` /
-``cluster_name`` — and it imports no Kubernetes SDK and no transport types. The
+``namespace`` — and it imports no Kubernetes SDK and no transport types. The
 API layer maps wire fields onto these neutral names; a concrete backend maps them
 back onto its infrastructure.
 
@@ -105,7 +105,7 @@ class Orchestrator:
     def __init__(
         self,
         capacity_manager: CapacityManager,
-        managed_callers: Optional[list],
+        managed_deployments: Optional[list],
         max_total_gpus: int = -1,
         min_total_gpus: int = -1,
         intent_cache_ttl_seconds: float = 360.0,
@@ -126,9 +126,11 @@ class Orchestrator:
         # across requests when one request alone would breach bounds.
         self._intent_cache: dict[str, PoolIntent] = {}
 
-        # Authorization: the set of caller identities allowed to send scale
-        # requests. None/empty accepts all callers.
-        self.managed_callers = set(managed_callers) if managed_callers else None
+        # Authorization: the set of managed deployment identities allowed to send
+        # scale requests. None/empty accepts all callers.
+        self.managed_deployments = (
+            set(managed_deployments) if managed_deployments else None
+        )
 
         # Serializes budget-check + scale-execution so concurrent requests from
         # different pools cannot both pass against the same pre-scale state.
@@ -144,7 +146,10 @@ class Orchestrator:
 
         In implicit mode (no managed callers) every caller is authorized.
         """
-        if self.managed_callers is not None and caller_name not in self.managed_callers:
+        if (
+            self.managed_deployments is not None
+            and caller_name not in self.managed_deployments
+        ):
             return False
         return True
 
@@ -153,18 +158,18 @@ class Orchestrator:
         participant_id: str,
         *,
         caller_name: str,
-        cluster_name: str,
+        namespace: str,
         deployment_name: str,
     ) -> None:
         """Ensure the participant exists in the capacity backend (idempotent).
 
-        ``caller_name`` / ``cluster_name`` / ``deployment_name`` are forwarded
+        ``caller_name`` / ``namespace`` / ``deployment_name`` are forwarded
         opaquely to the backend, which uses them to construct its participant.
         """
         self.capacity_manager.ensure_participant(
             participant_id,
             caller_name=caller_name,
-            cluster_name=cluster_name,
+            namespace=namespace,
             deployment_name=deployment_name,
         )
 
@@ -177,7 +182,7 @@ class Orchestrator:
         below the floor. Only runs when budget enforcement is enabled."""
         if not self.budget_enforcement_enabled():
             return
-        self.capacity_manager.discover(self.managed_callers)
+        self.capacity_manager.discover(self.managed_deployments)
         if self.min_total_gpus >= 0:
             self._warn_if_below_floor()
 
@@ -320,7 +325,7 @@ class Orchestrator:
         applied: list[str] = []
         for i, pid in enumerate(ordered_participants):
             tgts = grouped_targets[pid]
-            if not self.capacity_manager.knows(pid):
+            if not self.capacity_manager.participant_exists(pid):
                 if i == 0:
                     # First patch: missing participant is unrecoverable since
                     # nothing has been applied yet.
@@ -339,7 +344,7 @@ class Orchestrator:
                 )
                 continue
             try:
-                await self.capacity_manager.actuate(pid, tgts, blocking=blocking)
+                await self.capacity_manager.scale(pid, tgts, blocking=blocking)
                 applied.append(pid)
             except DynamoGraphDeploymentNotReadyError as patch_err:
                 if i == 0:

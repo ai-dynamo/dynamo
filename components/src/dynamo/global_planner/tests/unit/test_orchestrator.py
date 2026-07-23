@@ -68,7 +68,7 @@ def _pools(**participants):
 
 def _decider(**kwargs):
     kwargs.setdefault("use_lock", False)
-    return Orchestrator(capacity_manager=None, managed_callers=None, **kwargs)
+    return Orchestrator(capacity_manager=None, managed_deployments=None, **kwargs)
 
 
 def _mediate(orch, key, targets, pools):
@@ -179,11 +179,11 @@ class FakeCapacityManager(CapacityManager):
         self.pools[key] = entry
 
     def ensure_participant(
-        self, participant_id, *, caller_name, cluster_name, deployment_name
+        self, participant_id, *, caller_name, namespace, deployment_name
     ):
         self.pools.setdefault(participant_id, {})
 
-    def knows(self, participant_id):
+    def participant_exists(self, participant_id):
         return participant_id in self.pools
 
     def observe(self):
@@ -192,7 +192,7 @@ class FakeCapacityManager(CapacityManager):
             for key, pools in self.pools.items()
         }
 
-    async def actuate(self, participant_id, targets, *, blocking):
+    async def scale(self, participant_id, targets, *, blocking):
         for t in targets:
             st = t.sub_component_type.value
             if st in self.pools[participant_id]:
@@ -205,7 +205,7 @@ class FakeCapacityManager(CapacityManager):
 def _orch(capacity_manager, *, max_gpus=-1, min_gpus=-1, managed=None, use_lock=True):
     return Orchestrator(
         capacity_manager=capacity_manager,
-        managed_callers=managed,
+        managed_deployments=managed,
         max_total_gpus=max_gpus,
         min_total_gpus=min_gpus,
         use_lock=use_lock,
