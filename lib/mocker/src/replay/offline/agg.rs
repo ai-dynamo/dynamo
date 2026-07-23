@@ -6,7 +6,14 @@ use super::components::OfflineRouterSnapshot;
 pub(super) use super::components::ReplayMode;
 #[cfg(test)]
 use super::components::TrafficStats;
+use super::core::round_robin::AggregatedRoundRobinPlacement;
+use super::core::{
+    AdmissionSource as CoreAdmissionSource, EngineEventBatch, NoEngineEvents, Placement,
+    PlacementDecision, PlacementPolicy, ReadyArrival, WorkerTopology,
+};
 use super::events::{SimulationEvent, SimulationWorkerStage};
+#[cfg(test)]
+use super::extensions::kv_router::AggRuntime;
 use super::planner_hook::{LatestFpmBuffer, PlannerHook, PlannerTickMetrics};
 use super::progress::ReplayProgress;
 use super::runtime_utils::{
@@ -19,20 +26,18 @@ use super::state::AggRequestPhase;
 use super::state::OfflineWorkerSnapshot;
 use super::{
     components::{
-        AdmissionQueue, EngineComponent, EngineEffects, EnginePassMode, OfflineReplayRouter,
-        ReadyArrival, ScheduledWorkerCompletion, TrafficAccumulator, WorkerAdmission,
+        AdmissionQueue, EngineComponent, EngineEffects, EnginePassMode, NoReplayMetadata,
+        ReplayAdmissionMetadata, ReplayEngineObservation, ScheduledWorkerCompletion,
+        TrafficAccumulator,
     },
     state::AggRequestState,
 };
 use crate::common::protocols::{DirectRequest, ForwardPassSnapshot, MockEngineArgs, OutputSignal};
-use crate::loadgen::{ReplayRequestHashes, WorkloadDriver};
-use crate::replay::{
-    ReplayPrefillLoadEstimator, ReplayRouterMode, ReplayTerminalStatus, SlaThresholds,
-    TraceCollector,
-};
+use crate::loadgen::WorkloadDriver;
+#[cfg(test)]
+use crate::replay::ReplayRouterMode;
+use crate::replay::{ReplayTerminalStatus, SlaThresholds, TraceCollector};
 use anyhow::bail;
-use dynamo_kv_router::config::KvRouterConfig;
-use dynamo_kv_router::protocols::RouterEvent;
 use rustc_hash::FxHashMap;
 #[cfg(test)]
 use std::collections::HashMap;
@@ -67,18 +72,52 @@ struct AggRuntimeSnapshot {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(in crate::replay) struct AggRuntimeStats;
 
-pub(in crate::replay) struct AggRuntime {
+pub(in crate::replay) trait AggregatedPlacement<Events, Metadata>:
+    PlacementPolicy<DirectRequest, Metadata = Metadata, Observation = Events> + Sized
+where
+    Events: EngineEventBatch,
+    Metadata: ReplayAdmissionMetadata,
+{
+    #[cfg(test)]
+    fn is_router(&self) -> bool;
+
+    #[cfg(test)]
+    fn debug_router_snapshot(&self, now_ms: f64) -> Option<OfflineRouterSnapshot>;
+}
+
+impl<Events: EngineEventBatch> AggregatedPlacement<Events, ()>
+    for AggregatedRoundRobinPlacement<Events>
+{
+    #[cfg(test)]
+    #[inline]
+    fn is_router(&self) -> bool {
+        false
+    }
+
+    #[cfg(test)]
+    fn debug_router_snapshot(&self, _now_ms: f64) -> Option<OfflineRouterSnapshot> {
+        None
+    }
+}
+
+pub(in crate::replay) type RoundRobinAggRuntime =
+    AggRuntimeImpl<AggregatedRoundRobinPlacement<()>, NoEngineEvents, NoReplayMetadata>;
+
+pub(in crate::replay) struct AggRuntimeImpl<PlacementPolicyImpl, Observation, Metadata>
+where
+    Observation: ReplayEngineObservation,
+    Metadata: ReplayAdmissionMetadata,
+    PlacementPolicyImpl: AggregatedPlacement<Observation::Batch, Metadata>,
+{
     now_ms: f64,
-    next_worker_idx: usize,
-    next_dp_rank_by_worker: FxHashMap<usize, u32>,
     dp_size: u32,
     next_event_seq: u64,
-    admission: AdmissionQueue,
+    admission: AdmissionQueue<Metadata>,
     requests: FxHashMap<Uuid, AggRequestState>,
-    engine: EngineComponent,
+    engine: EngineComponent<Observation>,
     collector: TraceCollector,
-    events: BinaryHeap<SimulationEvent>,
-    router: Option<OfflineReplayRouter>,
+    events: BinaryHeap<SimulationEvent<Observation::Batch>>,
+    placement: PlacementPolicyImpl,
     progress: ReplayProgress,
     stats: AggRuntimeStats,
     /// Latest forward pass metric per worker/rank since the previous planner tick.
@@ -102,76 +141,65 @@ pub(in crate::replay) struct AggRuntime {
     stepped: bool,
 }
 
-impl AggRuntime {
-    /// Create an aggregated offline runtime seeded from an explicit request queue.
-    pub(in crate::replay) fn new(
+impl AggRuntimeImpl<AggregatedRoundRobinPlacement<()>, NoEngineEvents, NoReplayMetadata> {
+    pub(in crate::replay) fn new_round_robin(
         args: &MockEngineArgs,
-        router_config: Option<KvRouterConfig>,
-        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         pending: VecDeque<DirectRequest>,
         num_workers: usize,
         mode: ReplayMode,
-        router_mode: ReplayRouterMode,
     ) -> anyhow::Result<Self> {
-        Self::new_with_source(
+        Self::new_composed(
             args,
-            router_config,
-            prefill_load_estimator,
             AdmissionQueue::new_requests(pending, mode),
             num_workers,
-            router_mode,
+            |args, topology| Ok(AggregatedRoundRobinPlacement::new(args.dp_size, topology)),
         )
     }
 
-    /// Create an aggregated offline runtime whose admissions come from a workload driver.
-    pub(in crate::replay) fn new_workload(
+    pub(in crate::replay) fn new_round_robin_workload(
         args: &MockEngineArgs,
-        router_config: Option<KvRouterConfig>,
-        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         driver: WorkloadDriver,
         num_workers: usize,
         mode: ReplayMode,
-        router_mode: ReplayRouterMode,
     ) -> anyhow::Result<Self> {
-        Self::new_with_source(
+        Self::new_composed(
             args,
-            router_config,
-            prefill_load_estimator,
             AdmissionQueue::new_workload(driver, mode),
             num_workers,
-            router_mode,
+            |args, topology| Ok(AggregatedRoundRobinPlacement::new(args.dp_size, topology)),
         )
     }
+}
 
-    /// Shared constructor for both raw-request and workload-driven admissions.
-    fn new_with_source(
+impl<PlacementPolicyImpl, Observation, Metadata>
+    AggRuntimeImpl<PlacementPolicyImpl, Observation, Metadata>
+where
+    Observation: ReplayEngineObservation,
+    Metadata: ReplayAdmissionMetadata,
+    PlacementPolicyImpl: AggregatedPlacement<Observation::Batch, Metadata>,
+{
+    pub(in crate::replay::offline) fn new_composed(
         args: &MockEngineArgs,
-        router_config: Option<KvRouterConfig>,
-        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
-        admission: AdmissionQueue,
+        admission: AdmissionQueue<Metadata>,
         num_workers: usize,
-        router_mode: ReplayRouterMode,
+        create_placement: impl FnOnce(
+            &MockEngineArgs,
+            Vec<WorkerTopology>,
+        ) -> anyhow::Result<PlacementPolicyImpl>,
     ) -> anyhow::Result<Self> {
         let args = args.clone().normalized()?;
-        let progress = ReplayProgress::new(admission.total_requests(), "offline replay");
-        let router = match router_mode {
-            ReplayRouterMode::RoundRobin => None,
-            ReplayRouterMode::KvRouter => Some(OfflineReplayRouter::new(
-                &args,
-                router_config,
-                prefill_load_estimator,
-                num_workers,
-            )?),
-        };
-        let capture_kv_events = router.is_some();
-        let mut engine = EngineComponent::new_ranked(
+        let progress = ReplayProgress::new(
+            CoreAdmissionSource::total_requests(&admission),
+            "offline replay",
+        );
+        let mut engine = EngineComponent::<Observation>::new_ranked(
             SimulationWorkerStage::Aggregated,
             EnginePassMode::Visible,
             args.clone(),
             num_workers,
-            capture_kv_events,
         );
-        engine.set_scaling_args(args.clone(), capture_kv_events);
+        engine.set_scaling_args(args.clone(), Observation::CAPTURE_RAW);
+        let placement = create_placement(&args, engine.active_topology())?;
 
         // Aggregated replay has a single (decode) pool; record its GPUs/worker
         // so the report can express GPU-hours from the mocker's own parallelism.
@@ -180,8 +208,6 @@ impl AggRuntime {
 
         Ok(Self {
             now_ms: 0.0,
-            next_worker_idx: 0,
-            next_dp_rank_by_worker: FxHashMap::default(),
             dp_size: args.dp_size.max(1),
             next_event_seq: 0,
             admission,
@@ -189,7 +215,7 @@ impl AggRuntime {
             engine,
             collector,
             events: BinaryHeap::new(),
-            router,
+            placement,
             progress,
             #[cfg(test)]
             stats: AggRuntimeStats::default(),
@@ -263,11 +289,7 @@ impl AggRuntime {
 
     /// Count all requests currently consuming cluster capacity, including router-queued ones.
     fn cluster_in_flight(&self) -> usize {
-        self.engine.in_flight()
-            + self
-                .router
-                .as_ref()
-                .map_or(0, OfflineReplayRouter::pending_count)
+        self.engine.in_flight() + self.placement.pending_count()
     }
 
     /// Track the peak cluster occupancy seen during the replay.
@@ -282,31 +304,12 @@ impl AggRuntime {
     /// Track the maximum number of requests parked in the offline router.
     fn record_router_pending(&mut self) {
         #[cfg(test)]
-        let Some(router) = self.router.as_ref() else {
-            return;
-        };
-        #[cfg(test)]
         {
             self.stats.max_router_pending_count = self
                 .stats
                 .max_router_pending_count
-                .max(router.pending_count());
+                .max(self.placement.pending_count());
         }
-    }
-
-    /// Pick the next active worker in round-robin order.
-    fn next_worker(&mut self) -> usize {
-        let active = self.engine.active_group_ids();
-        debug_assert!(!active.is_empty(), "no active workers for round-robin");
-        let idx = self.next_worker_idx % active.len();
-        self.next_worker_idx = idx + 1;
-        let worker_id = active[idx];
-        let dp_rank = self.next_dp_rank_by_worker.entry(worker_id).or_default();
-        let rank = *dp_rank % self.dp_size;
-        *dp_rank = rank + 1;
-        self.engine
-            .rank_id(worker_id, rank)
-            .expect("active worker must contain every configured DP rank")
     }
 
     /// Record which worker accepted a request and refresh in-flight stats.
@@ -357,21 +360,20 @@ impl AggRuntime {
         Ok(())
     }
 
-    /// Materialize router admissions into concrete worker dispatches.
-    fn dispatch_router_admissions(
-        &mut self,
-        admissions: Vec<WorkerAdmission>,
-    ) -> anyhow::Result<()> {
-        for WorkerAdmission {
-            uuid,
-            worker_idx,
-            overlap_blocks,
-            isl_blocks,
-        } in admissions
-        {
-            self.traffic.on_admission(overlap_blocks, isl_blocks);
+    fn record_placement(&mut self, placement: Placement) {
+        if let Some(sample) = placement.planner_cache_sample {
+            self.traffic
+                .on_admission(sample.overlap_blocks, sample.isl_blocks);
             #[cfg(test)]
-            self.stats.overlap_history.push(overlap_blocks);
+            self.stats.overlap_history.push(sample.overlap_blocks);
+        }
+    }
+
+    /// Materialize policy-released admissions into concrete worker dispatches.
+    fn dispatch_placements(&mut self, placements: Vec<Placement>) -> anyhow::Result<()> {
+        for placement in placements {
+            self.record_placement(placement);
+            let uuid = placement.request_id;
             let request = self
                 .requests
                 .get_mut(&uuid)
@@ -379,7 +381,7 @@ impl AggRuntime {
                     anyhow::anyhow!("offline replay missing queued request state for {uuid}")
                 })?
                 .take_queued_request(uuid)?;
-            self.dispatch_to_worker(request, uuid, worker_idx)?;
+            self.dispatch_to_worker(request, uuid, placement.scheduler_id)?;
         }
         Ok(())
     }
@@ -389,7 +391,7 @@ impl AggRuntime {
         &mut self,
         mut request: DirectRequest,
         arrival_time_ms: f64,
-        replay_hashes: Option<ReplayRequestHashes>,
+        metadata: Metadata,
         session_id: Option<String>,
     ) -> anyhow::Result<Uuid> {
         let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
@@ -405,25 +407,31 @@ impl AggRuntime {
             request.max_output_tokens,
         );
 
-        if self.router.is_none() {
-            self.requests.insert(
-                uuid,
-                AggRequestState::new_running(request.tokens.len(), request.max_output_tokens),
-            );
-            let worker_idx = self.next_worker();
-            self.dispatch_to_worker(request, uuid, worker_idx)?;
-            return Ok(uuid);
+        let effects = self
+            .placement
+            .place(&request, metadata, session_id, self.now_ms)?;
+        match effects.decision {
+            PlacementDecision::Immediate(placement) => {
+                if placement.request_id != uuid {
+                    bail!(
+                        "offline placement returned request {} while placing {uuid}",
+                        placement.request_id
+                    );
+                }
+                self.record_placement(placement);
+                self.requests.insert(
+                    uuid,
+                    AggRequestState::new_running(request.tokens.len(), request.max_output_tokens),
+                );
+                self.dispatch_to_worker(request, uuid, placement.scheduler_id)?;
+            }
+            PlacementDecision::Queued => {
+                self.requests
+                    .insert(uuid, AggRequestState::new_queued(request));
+            }
         }
-        let admissions = {
-            let router = self.router.as_mut().expect("router presence checked above");
-            router
-                .on_request_arrival_for_session(&request, replay_hashes, session_id, self.now_ms)?
-                .admissions
-        };
-        self.requests
-            .insert(uuid, AggRequestState::new_queued(request));
         self.record_router_pending();
-        self.dispatch_router_admissions(admissions)?;
+        self.dispatch_placements(effects.released)?;
         self.record_in_flight_peak();
         Ok(uuid)
     }
@@ -434,7 +442,7 @@ impl AggRuntime {
     fn is_done(&self) -> bool {
         self.only_idle_events_remain()
             && self.cluster_in_flight() == 0
-            && self.admission.is_drained()
+            && CoreAdmissionSource::is_drained(&self.admission)
             && self.engine.is_drained()
     }
 
@@ -443,7 +451,7 @@ impl AggRuntime {
     /// workers that will never receive requests should not block completion.
     fn is_workload_done(&self) -> bool {
         self.cluster_in_flight() == 0
-            && self.admission.is_drained()
+            && CoreAdmissionSource::is_drained(&self.admission)
             && self.engine.is_drained()
             && self.only_idle_events_remain()
     }
@@ -464,32 +472,32 @@ impl AggRuntime {
     /// Pick the next logical timestamp from either arrivals or scheduled worker completions.
     fn next_timestamp(&mut self) -> Option<f64> {
         let next_event_ms = self.events.peek().map(|event| event.at_ms);
-        let next = choose_next_timestamp(self.admission.next_ready_time_ms(), next_event_ms);
+        let next = choose_next_timestamp(
+            CoreAdmissionSource::next_ready_time_ms(&mut self.admission),
+            next_event_ms,
+        );
         #[cfg(feature = "kvbm-offload")]
         {
-            return choose_next_timestamp(next, self.engine.earliest_offload_deadline());
+            choose_next_timestamp(next, self.engine.earliest_offload_deadline())
         }
         #[cfg(not(feature = "kvbm-offload"))]
-        next
+        {
+            next
+        }
     }
 
     /// Apply router-visible KV events at the phase chosen by the scheduler core.
-    fn apply_router_events(&mut self, events: Vec<RouterEvent>) -> anyhow::Result<()> {
-        let Some(router) = self.router.as_mut() else {
-            return Ok(());
-        };
-        let effects = router.on_kv_events(events)?;
-        if !effects.admissions.is_empty() {
-            bail!("offline replay router KV event application must not admit requests");
-        }
-        Ok(())
+    fn apply_engine_observations(&mut self, events: Observation::Batch) -> anyhow::Result<()> {
+        let placements = self.placement.observe(events, self.now_ms)?;
+        self.dispatch_placements(placements)
     }
 
     #[cfg(feature = "kvbm-offload")]
     fn tick_offload_engines(&mut self) -> anyhow::Result<bool> {
-        let crate::scheduler::OffloadTickEffects {
-            kv_events,
+        let super::components::ObservedOffloadEffects {
+            engine_events,
             lifecycle_events,
+            progress,
         } = self.engine.tick_offload_engines(self.now_ms);
         if !lifecycle_events.is_empty() {
             bail!(
@@ -497,16 +505,14 @@ impl AggRuntime {
                 lifecycle_events.len()
             );
         }
-        let changed = !kv_events.is_empty();
-        self.apply_router_events(kv_events)?;
-        Ok(changed)
+        self.apply_engine_observations(engine_events)?;
+        Ok(progress.made_progress)
     }
 
     /// Consume one output signal, updating router state, collector state, and completion counts.
     fn process_output_signal(&mut self, signal: OutputSignal) -> anyhow::Result<()> {
-        let mut admissions = Vec::new();
         if let Some(token_id) = signal.token_id {
-            self.admission.on_output_token(signal.uuid, token_id)?;
+            CoreAdmissionSource::on_output_token(&mut self.admission, signal.uuid, token_id)?;
         }
         if signal.completed {
             let status = if signal.rejected {
@@ -517,16 +523,12 @@ impl AggRuntime {
             self.collector.on_terminal(signal.uuid, self.now_ms, status);
             #[cfg(test)]
             self.remove_active_request(signal.uuid);
-            if let Some(router) = self.router.as_mut() {
-                admissions = router
-                    .on_request_completed(signal.uuid, self.now_ms)?
-                    .admissions;
-                #[cfg(test)]
-                {
-                    self.stats.router_freed_count += 1;
-                }
-                self.record_router_pending();
+            let placements = self.placement.request_terminal(signal.uuid, self.now_ms)?;
+            #[cfg(test)]
+            if self.placement.is_router() {
+                self.stats.router_freed_count += 1;
             }
+            self.record_router_pending();
             let removed_state = self.requests.remove(&signal.uuid).ok_or_else(|| {
                 anyhow::anyhow!("offline replay missing request state for {}", signal.uuid)
             })?;
@@ -550,10 +552,14 @@ impl AggRuntime {
                     latencies,
                 );
             }
-            self.admission
-                .on_request_terminal(signal.uuid, self.now_ms, signal.rejected)?;
+            CoreAdmissionSource::on_terminal(
+                &mut self.admission,
+                signal.uuid,
+                self.now_ms,
+                signal.rejected,
+            )?;
             self.progress.inc_completed();
-            self.dispatch_router_admissions(admissions)?;
+            self.dispatch_placements(placements)?;
             return Ok(());
         }
 
@@ -574,17 +580,13 @@ impl AggRuntime {
                 anyhow::anyhow!("offline replay missing request state for {}", signal.uuid)
             })?
             .prefill_completed = true;
-        if let Some(router) = self.router.as_mut() {
-            admissions = router
-                .on_prefill_completed(signal.uuid, self.now_ms)?
-                .admissions;
-            #[cfg(test)]
-            {
-                self.stats.prefill_marked_count += 1;
-            }
-            self.record_router_pending();
+        let placements = self.placement.prefill_completed(signal.uuid, self.now_ms)?;
+        #[cfg(test)]
+        if self.placement.is_router() {
+            self.stats.prefill_marked_count += 1;
         }
-        self.dispatch_router_admissions(admissions)?;
+        self.record_router_pending();
+        self.dispatch_placements(placements)?;
 
         Ok(())
     }
@@ -610,11 +612,11 @@ impl AggRuntime {
         _worker_idx: usize,
         _completed_requests: usize,
         output_signals: Vec<OutputSignal>,
-        kv_events: Vec<RouterEvent>,
+        engine_events: Observation::Batch,
         accept_length_output_tokens: usize,
         accept_length_decode_forwards: usize,
     ) -> anyhow::Result<()> {
-        self.apply_router_events(kv_events)?;
+        self.apply_engine_observations(engine_events)?;
         self.traffic
             .on_accept_length_sample(accept_length_output_tokens, accept_length_decode_forwards);
         for signal in output_signals {
@@ -642,7 +644,7 @@ impl AggRuntime {
                 payload.worker_idx,
                 payload.completed_requests,
                 payload.output_signals,
-                payload.kv_events,
+                payload.engine_events,
                 payload.accept_length_output_tokens,
                 payload.accept_length_decode_forwards,
             )?;
@@ -655,19 +657,19 @@ impl AggRuntime {
     /// Release every admission made ready by the shared admission queue.
     fn release_ready_arrivals(&mut self) -> anyhow::Result<bool> {
         let mut released_any = false;
-        for ready in self
-            .admission
-            .drain_ready(self.now_ms, self.cluster_in_flight())?
+        let cluster_in_flight = self.cluster_in_flight();
+        for ready in
+            CoreAdmissionSource::drain_ready(&mut self.admission, self.now_ms, cluster_in_flight)?
         {
             let ReadyArrival {
                 request,
                 arrival_time_ms,
-                replay_hashes,
+                metadata,
                 session_id,
                 turn_index,
             } = ready;
             let session_metadata = session_id.clone().zip(turn_index);
-            let uuid = self.assign_request(request, arrival_time_ms, replay_hashes, session_id)?;
+            let uuid = self.assign_request(request, arrival_time_ms, metadata, session_id)?;
             if let Some((session_id, turn_index)) = session_metadata {
                 self.collector
                     .on_session_metadata(uuid, session_id, turn_index);
@@ -692,8 +694,11 @@ impl AggRuntime {
         }
     }
 
-    fn handle_engine_effects(&mut self, effects: EngineEffects) -> anyhow::Result<()> {
-        self.apply_router_events(effects.pass_start_kv_events)?;
+    fn handle_engine_effects(
+        &mut self,
+        effects: EngineEffects<Observation::Batch>,
+    ) -> anyhow::Result<()> {
+        self.apply_engine_observations(effects.pass_start_events)?;
         for payload in effects.immediate_completions {
             let payload = self.engine.on_scheduled_completion(payload)?;
             if self.collect_fpm
@@ -705,7 +710,7 @@ impl AggRuntime {
                 payload.worker_idx,
                 payload.completed_requests,
                 payload.output_signals,
-                payload.kv_events,
+                payload.engine_events,
                 payload.accept_length_output_tokens,
                 payload.accept_length_decode_forwards,
             )?;
@@ -726,13 +731,13 @@ impl AggRuntime {
                     self.fpm_buffer
                         .activate_worker(worker_id, self.dp_size, self.now_ms);
                 }
-                if let Some(router) = self.router.as_mut() {
-                    router.add_worker(worker_id)?;
-                    // Drain any requests that were queued while all workers
-                    // were busy — the new worker may have capacity for them.
-                    let effects = router.try_drain_pending(self.now_ms)?;
-                    self.dispatch_router_admissions(effects.admissions)?;
-                }
+                let topology = self.engine.worker_topology(worker_id).ok_or_else(|| {
+                    anyhow::anyhow!("ready worker {worker_id} has no engine topology")
+                })?;
+                let placements = self.placement.worker_ready(topology, self.now_ms)?;
+                self.dispatch_placements(placements)?;
+                let placements = self.placement.topology_settled(self.now_ms)?;
+                self.dispatch_placements(placements)?;
                 changed = true;
             }
             // If mark_worker_ready returned false the worker was cancelled
@@ -756,12 +761,13 @@ impl AggRuntime {
             changed |= self.drive_ready_workers()?;
             let removed = self.engine.try_remove_drained();
             for worker_id in &removed {
-                self.next_dp_rank_by_worker.remove(worker_id);
-            }
-            if let Some(router) = self.router.as_mut() {
-                for worker_id in &removed {
-                    router.finalize_worker_removal(*worker_id)?;
-                }
+                self.placement.worker_removed(
+                    WorkerTopology {
+                        worker_id: *worker_id,
+                        scheduler_ids: Vec::new(),
+                    },
+                    self.now_ms,
+                )?;
             }
             changed |= !removed.is_empty();
             // Planner ticks fire LAST so the planner observes a fully settled
@@ -894,9 +900,6 @@ impl AggRuntime {
     /// new requests land on it) and drains in-flight work in the engine.
     pub(in crate::replay) fn apply_scaling(&mut self, target_workers: usize) -> anyhow::Result<()> {
         let (added, newly_marked, removed) = self.engine.apply_target_count(target_workers);
-        let engine = &self.engine;
-        self.next_dp_rank_by_worker
-            .retain(|worker_id, _| engine.rank_id(*worker_id, 0).is_some());
         #[cfg(test)]
         if !added.is_empty() {
             self.worker_active_requests
@@ -920,27 +923,37 @@ impl AggRuntime {
                         self.fpm_buffer
                             .activate_worker(id, self.dp_size, self.now_ms);
                     }
-                    if let Some(router) = self.router.as_mut() {
-                        router.add_worker(id)?;
-                    }
+                    let topology = self
+                        .engine
+                        .worker_topology(id)
+                        .ok_or_else(|| anyhow::anyhow!("new worker {id} has no engine topology"))?;
+                    let placements = self.placement.worker_ready(topology, self.now_ms)?;
+                    self.dispatch_placements(placements)?;
                 }
             }
         }
 
-        let admissions = if let Some(router) = self.router.as_mut() {
-            for id in newly_marked {
-                router.remove_worker(id)?;
-            }
-            for id in removed {
-                router.finalize_worker_removal(id)?;
-            }
-            let admissions = router.on_topology_changed(self.now_ms)?.admissions;
-            self.record_router_pending();
-            admissions
-        } else {
-            Vec::new()
-        };
-        self.dispatch_router_admissions(admissions)?;
+        for id in newly_marked {
+            let topology = self.engine.worker_topology(id).unwrap_or(WorkerTopology {
+                worker_id: id,
+                scheduler_ids: Vec::new(),
+            });
+            let placements = self.placement.worker_draining(topology, self.now_ms)?;
+            self.dispatch_placements(placements)?;
+        }
+        for id in removed {
+            let placements = self.placement.worker_removed(
+                WorkerTopology {
+                    worker_id: id,
+                    scheduler_ids: Vec::new(),
+                },
+                self.now_ms,
+            )?;
+            self.dispatch_placements(placements)?;
+        }
+        let placements = self.placement.topology_settled(self.now_ms)?;
+        self.dispatch_placements(placements)?;
+        self.record_router_pending();
         self.record_in_flight_peak();
         Ok(())
     }
@@ -1089,10 +1102,7 @@ impl AggRuntime {
             workers: self.engine.debug_snapshots(),
             router_pending_request_ids,
             prefill_completed,
-            router: self
-                .router
-                .as_ref()
-                .map(|router| router.debug_snapshot(self.now_ms)),
+            router: self.placement.debug_router_snapshot(self.now_ms),
         }
     }
 }
@@ -1109,8 +1119,8 @@ mod tests {
     use super::*;
     use crate::common::protocols::{EngineType, SglangArgs};
     use crate::loadgen::{AgenticTrace, AgenticTurnTrace, SessionTrace, Trace, TurnTrace};
+    use crate::replay::offline::extensions::kv_router::{ReplayKvRouterConfig, RouterQueuePolicy};
     use crate::replay::{TraceRequestStatsSnapshot, normalize_trace_requests};
-    use dynamo_kv_router::config::{KvRouterConfig, RouterQueuePolicy};
     use rstest::rstest;
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -1326,11 +1336,11 @@ mod tests {
             .unwrap()
     }
 
-    fn queueing_router_config(policy: RouterQueuePolicy) -> KvRouterConfig {
-        KvRouterConfig {
+    fn queueing_router_config(policy: RouterQueuePolicy) -> ReplayKvRouterConfig {
+        ReplayKvRouterConfig {
             router_queue_threshold: Some(0.5),
             router_queue_policy: policy,
-            ..KvRouterConfig::default()
+            ..ReplayKvRouterConfig::default()
         }
     }
 
@@ -1376,10 +1386,10 @@ mod tests {
         .unwrap()
     }
 
-    fn planner_router_config() -> KvRouterConfig {
-        KvRouterConfig {
+    fn planner_router_config() -> ReplayKvRouterConfig {
+        ReplayKvRouterConfig {
             router_queue_threshold: Some(0.5),
-            ..KvRouterConfig::default()
+            ..ReplayKvRouterConfig::default()
         }
     }
 
@@ -3346,13 +3356,13 @@ mod tests {
         .unwrap();
 
         assert!(rt.advance_one_timestamp().unwrap());
-        assert_eq!(rt.next_dp_rank_by_worker.len(), 2);
+        assert_eq!(rt.placement.tracked_round_robin_workers().len(), 2);
         while rt.advance_one_timestamp().unwrap() {}
 
         rt.apply_scaling(1).unwrap();
 
-        assert_eq!(rt.next_dp_rank_by_worker.len(), 1);
-        assert!(!rt.next_dp_rank_by_worker.contains_key(&1));
+        assert_eq!(rt.placement.tracked_round_robin_workers().len(), 1);
+        assert!(!rt.placement.tracked_round_robin_workers().contains_key(&1));
     }
 
     #[test]

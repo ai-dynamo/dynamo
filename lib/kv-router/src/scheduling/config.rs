@@ -973,6 +973,17 @@ impl KvRouterConfig {
         self.router_predicted_ttl_secs.is_some()
     }
 
+    pub fn queueing_enabled(
+        &self,
+        model_name: Option<&str>,
+    ) -> Result<bool, super::policy_config::RouterPolicyConfigError> {
+        Ok(self
+            .policy_profile(model_name)?
+            .classes()
+            .iter()
+            .any(super::policy_config::PolicyClassConfig::queueing_enabled))
+    }
+
     pub fn assume_kv_reuse(&self, config_override: Option<&RouterConfigOverride>) -> bool {
         config_override
             .and_then(|cfg| cfg.assume_kv_reuse)
@@ -1590,5 +1601,17 @@ models:
     fn test_kv_router_config_defaults_are_disabled() {
         assert_eq!(KvRouterConfig::default().router_queue_threshold, None);
         assert_eq!(KvRouterConfig::default().shared_cache_multiplier, 0.0);
+    }
+
+    #[test]
+    fn queueing_enabled_reflects_synthetic_threshold() {
+        // With default config, queueing is disabled.
+        assert!(!KvRouterConfig::default().queueing_enabled(None).unwrap());
+        let with_threshold = KvRouterConfig {
+            router_queue_threshold: Some(0.5),
+            ..Default::default()
+        };
+        // With a threshold set, queueing is enabled
+        assert!(with_threshold.queueing_enabled(None).unwrap());
     }
 }

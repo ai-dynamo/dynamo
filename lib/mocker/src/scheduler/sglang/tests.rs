@@ -69,17 +69,17 @@ fn direct_request(tokens: Vec<u32>, max_output_tokens: usize) -> DirectRequest {
 fn make_decoded_request(
     kv_manager: &mut SglangKvManager,
     config: &SglangConfig,
-    prompt_tokens: Vec<u64>,
+    prompt_tokens: Vec<u32>,
     max_output_tokens: usize,
 ) -> SglangRequest {
     let prompt_len = prompt_tokens.len();
     let alloc = kv_manager.allocate_for_request(&prompt_tokens).unwrap();
     let mut running = vec![SglangRequest {
         uuid: Uuid::new_v4(),
-        prompt_tokens,
+        sequence_tokens: prompt_tokens,
+        prompt_len,
         max_output_tokens,
         planned_output_ids: None,
-        output_ids: Vec::new(),
         kv_lease: alloc.lease,
         materialized_tokens: prompt_len,
         allocated_tokens: ceil_to_block(prompt_len, config.block_size),
@@ -124,20 +124,20 @@ fn zero_output_completion_survives_decode_reservation_failure() {
     let mut running = vec![
         SglangRequest {
             uuid: zero_uuid,
-            prompt_tokens: vec![1, 2, 3, 4],
+            sequence_tokens: vec![1, 2, 3, 4],
+            prompt_len: 4,
             max_output_tokens: 0,
             planned_output_ids: None,
-            output_ids: Vec::new(),
             kv_lease: zero_alloc.lease,
             materialized_tokens: 4,
             allocated_tokens: 4,
         },
         SglangRequest {
             uuid: normal_uuid,
-            prompt_tokens: vec![5, 6, 7, 8],
+            sequence_tokens: vec![5, 6, 7, 8],
+            prompt_len: 4,
             max_output_tokens: 1,
             planned_output_ids: None,
-            output_ids: Vec::new(),
             kv_lease: normal_alloc.lease,
             materialized_tokens: 4,
             allocated_tokens: 4,
@@ -183,10 +183,10 @@ fn fresh_prefill_tracks_cache_owned_prefix_indices() {
     kv_manager.finish(&prompt, cached.lease);
     let mut waiting = VecDeque::from([SglangRequest {
         uuid: Uuid::from_u128(90_002),
-        prompt_tokens: prompt.clone(),
+        sequence_tokens: prompt.clone(),
+        prompt_len: prompt.len(),
         max_output_tokens: 1,
         planned_output_ids: None,
-        output_ids: Vec::new(),
         materialized_tokens: 0,
         kv_lease: ActiveKvLease::default(),
         allocated_tokens: 0,
@@ -206,10 +206,10 @@ fn fresh_prefill_tracks_cache_owned_prefix_indices() {
     let blocker_alloc = kv_manager.allocate_for_request(&blocker_tokens).unwrap();
     let blocker = SglangRequest {
         uuid: Uuid::from_u128(90_003),
-        prompt_tokens: blocker_tokens,
+        sequence_tokens: blocker_tokens,
+        prompt_len: 3,
         max_output_tokens: 1,
         planned_output_ids: None,
-        output_ids: Vec::new(),
         kv_lease: blocker_alloc.lease,
         materialized_tokens: 3,
         allocated_tokens: 4,
@@ -1014,20 +1014,20 @@ mod scheduling {
         let mut waiting = VecDeque::from([
             SglangRequest {
                 uuid: no_match_uuid,
-                prompt_tokens: vec![9, 8, 7],
+                sequence_tokens: vec![9, 8, 7],
+                prompt_len: 3,
                 max_output_tokens: 1,
                 planned_output_ids: None,
-                output_ids: Vec::new(),
                 materialized_tokens: 0,
                 kv_lease: ActiveKvLease::default(),
                 allocated_tokens: 0,
             },
             SglangRequest {
                 uuid: match_uuid,
-                prompt_tokens: vec![1, 2, 3, 4, 5],
+                sequence_tokens: vec![1, 2, 3, 4, 5, 6, 7],
+                prompt_len: 5,
                 max_output_tokens: 1,
                 planned_output_ids: None,
-                output_ids: vec![6, 7],
                 materialized_tokens: 0,
                 kv_lease: ActiveKvLease::default(),
                 allocated_tokens: 0,
@@ -1057,10 +1057,10 @@ mod scheduling {
         for _ in 0..33 {
             waiting.push_back(SglangRequest {
                 uuid: Uuid::new_v4(),
-                prompt_tokens: duplicate_prefix.clone(),
+                sequence_tokens: duplicate_prefix.clone(),
+                prompt_len: duplicate_prefix.len(),
                 max_output_tokens: 1,
                 planned_output_ids: None,
-                output_ids: Vec::new(),
                 materialized_tokens: 0,
                 kv_lease: ActiveKvLease::default(),
                 allocated_tokens: 0,
@@ -1069,10 +1069,10 @@ mod scheduling {
         let unique_uuid = Uuid::new_v4();
         waiting.push_back(SglangRequest {
             uuid: unique_uuid,
-            prompt_tokens: (100..132).collect(),
+            sequence_tokens: (100..132).collect(),
+            prompt_len: 32,
             max_output_tokens: 1,
             planned_output_ids: None,
-            output_ids: Vec::new(),
             materialized_tokens: 0,
             kv_lease: ActiveKvLease::default(),
             allocated_tokens: 0,
@@ -1135,10 +1135,10 @@ mod core_behavior {
         let mut kv_manager = SglangKvManager::new(10000, 4, KvEventPublishers::default(), 0);
         let mut waiting = VecDeque::from([SglangRequest {
             uuid: Uuid::new_v4(),
-            prompt_tokens: vec![1; 6],
+            sequence_tokens: vec![1; 6],
+            prompt_len: 6,
             max_output_tokens: 3,
             planned_output_ids: None,
-            output_ids: Vec::new(),
             materialized_tokens: 0,
             kv_lease: ActiveKvLease::default(),
             allocated_tokens: 0,
@@ -1165,10 +1165,10 @@ mod core_behavior {
         let mut kv_manager = SglangKvManager::new(12, 4, KvEventPublishers::default(), 0);
         let mut waiting = VecDeque::from([SglangRequest {
             uuid: Uuid::new_v4(),
-            prompt_tokens: vec![1; 16],
+            sequence_tokens: vec![1; 16],
+            prompt_len: 16,
             max_output_tokens: 2,
             planned_output_ids: None,
-            output_ids: Vec::new(),
             materialized_tokens: 0,
             kv_lease: ActiveKvLease::default(),
             allocated_tokens: 0,
@@ -1198,20 +1198,20 @@ mod core_behavior {
         let mut waiting = VecDeque::from([
             SglangRequest {
                 uuid: first_uuid,
-                prompt_tokens: vec![1; 7],
+                sequence_tokens: vec![1; 7],
+                prompt_len: 7,
                 max_output_tokens: 3,
                 planned_output_ids: None,
-                output_ids: Vec::new(),
                 materialized_tokens: 0,
                 kv_lease: ActiveKvLease::default(),
                 allocated_tokens: 0,
             },
             SglangRequest {
                 uuid: second_uuid,
-                prompt_tokens: vec![2; 8],
+                sequence_tokens: vec![2; 8],
+                prompt_len: 8,
                 max_output_tokens: 3,
                 planned_output_ids: None,
-                output_ids: Vec::new(),
                 materialized_tokens: 0,
                 kv_lease: ActiveKvLease::default(),
                 allocated_tokens: 0,
@@ -1242,10 +1242,10 @@ mod core_behavior {
         kv_manager.extend_cached_prefix(&[1, 2, 3, 4], &mut alloc.lease);
         let mut running = vec![SglangRequest {
             uuid: Uuid::new_v4(),
-            prompt_tokens: vec![1, 2, 3, 4, 5, 6],
+            sequence_tokens: vec![1, 2, 3, 4, 5, 6],
+            prompt_len: 6,
             max_output_tokens: 4,
             planned_output_ids: None,
-            output_ids: Vec::new(),
             kv_lease: alloc.lease,
             materialized_tokens: 6,
             allocated_tokens: 8,
@@ -1286,10 +1286,10 @@ mod core_behavior {
         let base_alloc = base_kv_manager.allocate_for_request(&[1, 2, 3, 4]).unwrap();
         let mut base_running = vec![SglangRequest {
             uuid: Uuid::new_v4(),
-            prompt_tokens: vec![1, 2, 3, 4],
+            sequence_tokens: vec![1, 2, 3, 4],
+            prompt_len: 4,
             max_output_tokens: 4,
             planned_output_ids: None,
-            output_ids: Vec::new(),
             kv_lease: base_alloc.lease,
             materialized_tokens: 4,
             allocated_tokens: 4,
@@ -1299,10 +1299,10 @@ mod core_behavior {
         let fast_alloc = fast_kv_manager.allocate_for_request(&[1, 2, 3, 4]).unwrap();
         let mut fast_running = vec![SglangRequest {
             uuid: Uuid::new_v4(),
-            prompt_tokens: vec![1, 2, 3, 4],
+            sequence_tokens: vec![1, 2, 3, 4],
+            prompt_len: 4,
             max_output_tokens: 4,
             planned_output_ids: None,
-            output_ids: Vec::new(),
             kv_lease: fast_alloc.lease,
             materialized_tokens: 4,
             allocated_tokens: 4,
@@ -1348,20 +1348,20 @@ mod core_behavior {
         let mut running = vec![
             SglangRequest {
                 uuid: Uuid::new_v4(),
-                prompt_tokens: vec![1, 2, 3, 4],
+                sequence_tokens: vec![1, 2, 3, 4, 11, 12, 13],
+                prompt_len: 4,
                 max_output_tokens: 10,
                 planned_output_ids: None,
-                output_ids: vec![11, 12, 13],
                 kv_lease: ActiveKvLease::from_parts(first, 4, kv_manager.cache().root()),
                 materialized_tokens: 7,
                 allocated_tokens: 8,
             },
             SglangRequest {
                 uuid: Uuid::new_v4(),
-                prompt_tokens: vec![9, 8, 7, 6],
+                sequence_tokens: vec![9, 8, 7, 6, 21],
+                prompt_len: 4,
                 max_output_tokens: 10,
                 planned_output_ids: None,
-                output_ids: vec![21],
                 kv_lease: ActiveKvLease::from_parts(second, 4, kv_manager.cache().root()),
                 materialized_tokens: 5,
                 allocated_tokens: 8,
@@ -1370,7 +1370,7 @@ mod core_behavior {
 
         let retracted = decode::check_decode_mem(&mut running, &mut kv_manager, &config);
         assert_eq!(retracted.len(), 1);
-        assert_eq!(retracted[0].output_ids, vec![21]);
+        assert_eq!(retracted[0].output_tokens(), &[21]);
         assert_eq!(retracted[0].materialized_tokens, 0);
         assert!(retracted[0].kv_indices().is_empty());
     }
@@ -1389,10 +1389,10 @@ mod core_behavior {
         let alloc = kv_manager.allocate_for_request(&[1, 2, 3, 4]).unwrap();
         let mut running = vec![SglangRequest {
             uuid: Uuid::new_v4(),
-            prompt_tokens: vec![1, 2, 3, 4],
+            sequence_tokens: vec![1, 2, 3, 4],
+            prompt_len: 4,
             max_output_tokens: 4,
             planned_output_ids: None,
-            output_ids: Vec::new(),
             kv_lease: alloc.lease,
             materialized_tokens: 4,
             allocated_tokens: 4,
@@ -1400,7 +1400,7 @@ mod core_behavior {
 
         simulate_decode_step(&mut running, &mut kv_manager, &config, 0.0, false);
         let prefix = running[0].sequence_prefix(4);
-        assert_eq!(kv_manager.cache().prefix_match_len(&prefix), 4);
+        assert_eq!(kv_manager.cache().prefix_match_len(prefix), 4);
     }
 
     #[test]
@@ -1685,10 +1685,10 @@ mod router_events {
         let prompt_tokens = vec![101, 202];
         let mut expected_request = SglangRequest {
             uuid,
-            prompt_tokens: prompt_tokens.iter().map(|&token| token as u64).collect(),
+            sequence_tokens: prompt_tokens.clone(),
+            prompt_len: prompt_tokens.len(),
             max_output_tokens: 2,
             planned_output_ids: None,
-            output_ids: Vec::new(),
             materialized_tokens: 0,
             kv_lease: ActiveKvLease::default(),
             allocated_tokens: 0,
@@ -1785,10 +1785,10 @@ mod router_events {
 
         let mut waiting = VecDeque::from([SglangRequest {
             uuid: Uuid::new_v4(),
-            prompt_tokens: vec![1, 2, 3, 4, 5, 6],
+            sequence_tokens: vec![1, 2, 3, 4, 5, 6],
+            prompt_len: 6,
             max_output_tokens: 3,
             planned_output_ids: None,
-            output_ids: Vec::new(),
             materialized_tokens: 0,
             kv_lease: ActiveKvLease::default(),
             allocated_tokens: 0,

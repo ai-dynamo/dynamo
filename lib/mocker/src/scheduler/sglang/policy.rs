@@ -32,7 +32,7 @@ pub(super) fn apply_schedule_policy(
 
             for req in waiting.drain(..) {
                 let sequence = req.sequence_tokens();
-                let prefix_len = kv_manager.cache().prefix_match_len(&sequence);
+                let prefix_len = kv_manager.cache().prefix_match_len(sequence);
                 let deprioritized = prefix_len <= IN_BATCH_PREFIX_CACHING_CHECK_THRESHOLD
                     && sequence.len() >= duplicate_prefix_len
                     && !waiting_prefixes.insert(sequence[..duplicate_prefix_len].to_vec());
