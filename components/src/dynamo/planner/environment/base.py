@@ -89,12 +89,12 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
         self.runtime_namespace_source = runtime_namespace_source
         self._state = DeploymentState()
         self._metrics_state = Metrics()
-        # Per-role per-pod GPU count the startup power caps were computed
-        # against. ``power_watts_per_replica`` is cached once at startup, but
-        # ``num_gpus`` is refreshed every tick; if the GPUs-per-replica changes
-        # under a running planner the cached wattage goes stale, so the runtime
-        # guard fails closed until the planner restarts and re-reads the caps.
-        self._power_startup_num_gpus: Optional[
+        # Per-role ``gpus_per_replica`` (nodeCount × per-pod GPUs) the startup
+        # power caps were computed against. ``power_watts_per_replica`` is
+        # cached once at startup; if this topology quantity changes under a
+        # running planner the cached wattage goes stale, so the runtime guard
+        # fails closed until the planner restarts and re-reads the caps.
+        self._power_startup_gpus_per_replica: Optional[
             tuple[Optional[int], Optional[int]]
         ] = None
 
@@ -274,24 +274,8 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
         if not self.config.enable_power_awareness:
             return
 
-        get_configs = getattr(self.controller, "get_component_power_configs", None)
-        if not callable(get_configs):
-            raise DeploymentValidationError(
-                [
-                    "Power awareness requires a connector that can resolve "
-                    "DGD-owned per-GPU caps; this connector does not implement "
-                    "get_component_power_configs."
-                ]
-            )
-
-        prefill_name, decode_name = self._power_component_names()
         try:
-            prefill_cfg, decode_cfg = get_configs(
-                require_prefill=self.require_prefill,
-                require_decode=self.require_decode,
-                prefill_component_name=prefill_name,
-                decode_component_name=decode_name,
-            )
+            prefill_cfg, decode_cfg = self._resolve_power_configs()
         except Exception as exc:
             raise DeploymentValidationError(
                 [f"Failed to resolve DGD-owned power caps at startup: {exc}"]
@@ -303,45 +287,96 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
         if self.require_decode and decode_cfg is not None:
             self._adopt_power_config(state.decode, decode_cfg)
         self._validate_minimum_power_footprint(prefill_cfg, decode_cfg)
-        # Snapshot the per-pod GPU count the cached wattage was derived from so
-        # the runtime guard can detect a topology change (see refresh()).
-        self._power_startup_num_gpus = (
-            state.prefill.num_gpus if self.require_prefill else None,
-            state.decode.num_gpus if self.require_decode else None,
+        # Snapshot the replica-wide GPU total the cached wattage was derived
+        # from so the runtime guard can detect a topology change (see
+        # ``_assert_power_topology_static``). Uses the power resolver's
+        # ``gpus_per_replica`` (not ``get_gpu_counts`` / ``num_gpus``), so
+        # aggregate ``type: worker`` and named generic workers are visible.
+        self._power_startup_gpus_per_replica = (
+            prefill_cfg.gpus_per_replica
+            if self.require_prefill and prefill_cfg is not None
+            else None,
+            decode_cfg.gpus_per_replica
+            if self.require_decode and decode_cfg is not None
+            else None,
+        )
+
+    def _resolve_power_configs(
+        self,
+    ) -> tuple[Optional[ComponentPowerConfig], Optional[ComponentPowerConfig]]:
+        """Resolve DGD power configs with the same name/generic semantics as startup.
+
+        Uses ``get_component_power_configs`` (explicit backend names + unique
+        generic ``type: worker`` fallback). Does not write environment state —
+        callers decide whether to adopt caps or only compare topology.
+        """
+        get_configs = getattr(self.controller, "get_component_power_configs", None)
+        if not callable(get_configs):
+            raise DeploymentValidationError(
+                [
+                    "Power awareness requires a connector that can resolve "
+                    "DGD-owned per-GPU caps; this connector does not implement "
+                    "get_component_power_configs."
+                ]
+            )
+
+        prefill_name, decode_name = self._power_component_names()
+        return get_configs(
+            require_prefill=self.require_prefill,
+            require_decode=self.require_decode,
+            prefill_component_name=prefill_name,
+            decode_component_name=decode_name,
         )
 
     def _assert_power_topology_static(self) -> None:
         """Fail closed if GPUs-per-replica changed since startup.
 
         ``power_watts_per_replica`` is read once at startup and treated as
-        static for the planner lifetime, but ``num_gpus`` is refreshed every
-        tick. A worker rollout that changes per-pod GPUs leaves the cached
-        wattage stale, so the power budget would be projected against the old
+        static for the planner lifetime. A worker rollout that changes
+        per-pod GPUs or ``multinode.nodeCount`` leaves that cached wattage
+        stale, so the power budget would be projected against the old
         per-replica watts and could admit a scale-up that exceeds the real
-        requested-cap total. Rather than silently under-count, refuse to act
-        and require a restart (which re-reads the annotation against the new
-        topology), matching the static-cap contract.
+        requested-cap total.
+
+        Re-resolve topology through the same power-config path used at
+        startup (explicit component names + aggregate generic-worker
+        fallback). Do **not** trust ``get_gpu_counts`` / ``num_gpus`` here —
+        that shared path cannot see generic ``type: worker`` components and
+        would silently retain the previous count on ``DeploymentValidationError``,
+        leaving this guard blind. Cap watts stay static; only topology is
+        re-checked. On change or resolution failure, refuse to act and require
+        a restart.
         """
         if not self.config.enable_power_awareness:
             return
-        baseline = self._power_startup_num_gpus
+        baseline = self._power_startup_gpus_per_replica
         if baseline is None:
             return
-        state = self.deployment_state()
+
+        try:
+            prefill_cfg, decode_cfg = self._resolve_power_configs()
+        except Exception as exc:
+            raise DeploymentValidationError(
+                [
+                    "Failed to re-verify power-relevant GPU topology at runtime "
+                    f"({exc}). power_watts_per_replica is cached at startup, so "
+                    "the planner cannot safely project the budget. Restart the "
+                    "Planner to re-read the DGD power annotation."
+                ]
+            ) from exc
+
         startup_p, startup_d = baseline
         changed = []
-        if (
-            self.require_prefill
-            and startup_p is not None
-            and state.prefill.num_gpus != startup_p
-        ):
-            changed.append(f"prefill {startup_p} -> {state.prefill.num_gpus}")
-        if (
-            self.require_decode
-            and startup_d is not None
-            and state.decode.num_gpus != startup_d
-        ):
-            changed.append(f"decode {startup_d} -> {state.decode.num_gpus}")
+        if self.require_prefill and startup_p is not None:
+            current_p = (
+                prefill_cfg.gpus_per_replica if prefill_cfg is not None else None
+            )
+            if current_p != startup_p:
+                changed.append(f"prefill {startup_p} -> {current_p}")
+        if self.require_decode and startup_d is not None:
+            current_d = decode_cfg.gpus_per_replica if decode_cfg is not None else None
+            if current_d != startup_d:
+                changed.append(f"decode {startup_d} -> {current_d}")
         if changed:
             raise DeploymentValidationError(
                 [
