@@ -1195,6 +1195,7 @@ article:has(.dynamo-welcome) {
   isolation: isolate;
   width: 100% !important;
   max-width: 1200px !important;
+  margin-inline: auto;
   padding-inline: clamp(1rem, 3vw, 2.5rem);
 }
 
@@ -4717,4 +4718,140 @@ article:has(.dynamo-blog-article) .fern-prose > div:has(> .dynamo-blog-article) 
 article:has(.dynamo-blog-article) .fern-prose > div:has(> .dynamo-blog-article) > div:has(> table),
 article:has(.dynamo-blog-article) .fern-prose > div:has(> .dynamo-blog-article) > div:has(img) {
   max-width: 1000px;
+}
+
+/* Unify the cover and masthead into one continuous dark block. */
+article:has(.dynamo-blog-article) {
+  padding-inline: 0 !important;
+}
+
+.dynamo-blog-cover {
+  top: 2.2rem;
+  left: 0;
+  right: 0;
+  border: 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 32px 32px 0 0;
+  box-shadow: none;
+}
+
+/* The landing page is a normal nav entry; the archive year supplies hierarchy. */
+body:has(.dynamo-blog-home) #fern-sidebar a[href="/dynamo/blog"],
+body:has(.dynamo-blog-article) #fern-sidebar a[href="/dynamo/blog"] {
+  min-height: 2.8rem;
+  align-items: center;
+  margin: 0.2rem 0.35rem 0.65rem;
+  padding: 0.62rem 0.75rem;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+}
+
+body:has(.dynamo-blog-home) #fern-sidebar a[href="/dynamo/blog"]:hover,
+body:has(.dynamo-blog-article) #fern-sidebar a[href="/dynamo/blog"]:hover,
+body:has(.dynamo-blog-home) #fern-sidebar a[href="/dynamo/blog"][data-state="active"],
+body:has(.dynamo-blog-article) #fern-sidebar a[href="/dynamo/blog"][data-state="active"] {
+  background: linear-gradient(90deg, rgba(118, 185, 0, 0.12), rgba(118, 185, 0, 0.025));
+  box-shadow: inset 2px 0 0 rgba(118, 185, 0, 0.8);
+}
+
+body:has(.dynamo-blog-home) #fern-sidebar a[href="/dynamo/blog"] > svg,
+body:has(.dynamo-blog-article) #fern-sidebar a[href="/dynamo/blog"] > svg {
+  display: none;
+}
+
+body:has(.dynamo-blog-home) #fern-sidebar a[href="/dynamo/blog"] .fern-sidebar-link-title-inner,
+body:has(.dynamo-blog-article) #fern-sidebar a[href="/dynamo/blog"] .fern-sidebar-link-title-inner {
+  display: block;
+  font-size: 0.8rem;
+  font-weight: 720;
+  line-height: 1.3;
+  letter-spacing: 0;
+}
+
+body:has(.dynamo-blog-home) #fern-sidebar a[href="/dynamo/blog"] .fern-sidebar-link-title-inner::after,
+body:has(.dynamo-blog-article) #fern-sidebar a[href="/dynamo/blog"] .fern-sidebar-link-title-inner::after {
+  content: none;
+}
+
+/* Avoid clipping descenders such as the g in Agentic. */
+body:has(.dynamo-blog-home) #fern-sidebar .fern-sidebar-link-title-inner,
+body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-link-title-inner {
+  padding-bottom: 0.1rem;
+  line-height: 1.34;
+}
+
+@media (max-width: 680px) {
+  article:has(.dynamo-blog-article) {
+    padding-inline: 0.5rem !important;
+  }
+
+  .dynamo-blog-cover {
+    top: 1rem;
+    border-radius: 22px 22px 0 0;
+  }
+}
+
+/* Blend the animated cover into the masthead instead of rendering two stacked panels. */
+.dynamo-blog-cover {
+  border-bottom: 0;
+  -webkit-mask-image: linear-gradient(to bottom, black 0%, black 88%, transparent 100%);
+  mask-image: linear-gradient(to bottom, black 0%, black 88%, transparent 100%);
+}
+
+/* Keep Latest visibly clickable without presenting it as another section masthead. */
+body:has(.dynamo-blog-home) #fern-sidebar .fern-sidebar-group > li > a[href="/dynamo/blog"],
+body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group > li > a[href="/dynamo/blog"] {
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+body:has(.dynamo-blog-home) #fern-sidebar .fern-sidebar-group > li > a[href="/dynamo/blog"]:hover,
+body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group > li > a[href="/dynamo/blog"]:hover,
+body:has(.dynamo-blog-home) #fern-sidebar .fern-sidebar-group > li > a[href="/dynamo/blog"][data-state="active"],
+body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group > li > a[href="/dynamo/blog"][data-state="active"] {
+  background: linear-gradient(90deg, rgba(118, 185, 0, 0.11), rgba(118, 185, 0, 0.02)) !important;
+  box-shadow: inset 2px 0 0 rgba(118, 185, 0, 0.78) !important;
+}
+
+/* Nested Fern links use their anchor ::before for the active indicator; dates live with the title. */
+body:has(.dynamo-blog-home) #fern-sidebar a[href*="/dynamo/blog/"]::before,
+body:has(.dynamo-blog-article) #fern-sidebar a[href*="/dynamo/blog/"]::before {
+  content: "" !important;
+}
+
+body:has(.dynamo-blog-home) #fern-sidebar a[href$="/dynosim-pareto-frontier"] .fern-sidebar-link-title-inner::before,
+body:has(.dynamo-blog-article) #fern-sidebar a[href$="/dynosim-pareto-frontier"] .fern-sidebar-link-title-inner::before { content: "MAY 29"; }
+body:has(.dynamo-blog-home) #fern-sidebar a[href$="/dynamo-snapshot-fast-startup"] .fern-sidebar-link-title-inner::before,
+body:has(.dynamo-blog-article) #fern-sidebar a[href$="/dynamo-snapshot-fast-startup"] .fern-sidebar-link-title-inner::before { content: "MAY 28"; }
+body:has(.dynamo-blog-home) #fern-sidebar a[href$="/tokenspeed-day-0"] .fern-sidebar-link-title-inner::before,
+body:has(.dynamo-blog-article) #fern-sidebar a[href$="/tokenspeed-day-0"] .fern-sidebar-link-title-inner::before { content: "MAY 06"; }
+body:has(.dynamo-blog-home) #fern-sidebar a[href$="/agentic-harnesses"] .fern-sidebar-link-title-inner::before,
+body:has(.dynamo-blog-article) #fern-sidebar a[href$="/agentic-harnesses"] .fern-sidebar-link-title-inner::before { content: "APR 30"; }
+body:has(.dynamo-blog-home) #fern-sidebar a[href$="/agentic-inference"] .fern-sidebar-link-title-inner::before,
+body:has(.dynamo-blog-article) #fern-sidebar a[href$="/agentic-inference"] .fern-sidebar-link-title-inner::before { content: "MAR 2026"; }
+body:has(.dynamo-blog-home) #fern-sidebar a[href$="/flash-indexer"] .fern-sidebar-link-title-inner::before,
+body:has(.dynamo-blog-article) #fern-sidebar a[href$="/flash-indexer"] .fern-sidebar-link-title-inner::before { content: "FEB 23"; }
+
+body:has(.dynamo-blog-home) #fern-sidebar a[href*="/dynamo/blog/"] .fern-sidebar-link-title-inner,
+body:has(.dynamo-blog-article) #fern-sidebar a[href*="/dynamo/blog/"] .fern-sidebar-link-title-inner {
+  display: flex !important;
+  overflow: visible !important;
+  flex-direction: column;
+  gap: 0.24rem;
+  padding-bottom: 0.14rem;
+  line-height: 1.36;
+  -webkit-line-clamp: unset;
+}
+
+body:has(.dynamo-blog-home) #fern-sidebar a[href*="/dynamo/blog/"] .fern-sidebar-link-title-inner::before,
+body:has(.dynamo-blog-article) #fern-sidebar a[href*="/dynamo/blog/"] .fern-sidebar-link-title-inner::before {
+  display: block;
+  color: var(--dynamo-blog-green);
+  font-size: 0.57rem;
+  font-weight: 780;
+  letter-spacing: 0.11em;
+  line-height: 1;
 }

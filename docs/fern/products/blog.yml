@@ -14,10 +14,12 @@
 # limitations under the License.
 
 navigation:
-  - section: Blog
-    icon: newspaper
+  - page: Latest
     path: ../digest/index.mdx
     slug: /
+  - section: "2026"
+    slug: /
+    collapsed: open-by-default
     contents:
       # Keep this archive in reverse chronological order. Publication dates are
       # rendered in each article header and on the custom landing page.

@@ -25,8 +25,13 @@ agents:
   page-directive: "For clean Markdown content of this page, append .md to this URL. For the complete documentation index, see https://docs.nvidia.com/dynamo/llms.txt. For full content including API reference and SDK examples, see https://docs.nvidia.com/dynamo/llms-full.txt."
 
 
-# Keep Docs first internally so Fern retains /dynamo as the versioned Docs root.
-# main.css presents Home first in the visible product switcher.
+# Render the Home experience at the site root while keeping Docs first internally
+# so versioned documentation routes remain under /dynamo/dev and pinned versions.
+landing-page:
+  page: Home
+  path: ./welcome.mdx
+  slug: /
+
 products:
   - display-name: Docs
     slug: /

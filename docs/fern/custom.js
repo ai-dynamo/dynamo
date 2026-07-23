@@ -312,6 +312,29 @@
     });
   }
 
+  function enhanceProductNavigation() {
+    const pathname = window.location.pathname.replace(/\/$/, "") || "/";
+    const isHomeRoot = pathname === "/dynamo";
+
+    document.querySelectorAll(".fern-product-selector a").forEach((link) => {
+      const label = link.textContent?.trim();
+
+      if (label === "Docs") {
+        link.setAttribute("href", "/dynamo/dev");
+
+        if (isHomeRoot) {
+          link.dataset.active = "false";
+          link.removeAttribute("aria-current");
+        }
+      }
+
+      if (label === "Home" && isHomeRoot) {
+        link.dataset.active = "true";
+        link.setAttribute("aria-current", "page");
+      }
+    });
+  }
+
   let enhancementQueued = false;
 
   function queueEnhancement() {
@@ -323,6 +346,7 @@
     window.requestAnimationFrame(() => {
       enhancementQueued = false;
       enhanceVariantSelector();
+      enhanceProductNavigation();
     });
   }
 
