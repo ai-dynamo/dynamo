@@ -201,6 +201,9 @@ class OmniHandler(BaseOmniHandler):
 
         # Keep parity with BaseWorkerHandler LoRA resolver contract.
         self._served_model_name = config.served_model_name or config.model
+        self._served_model_aliases = tuple(
+            getattr(config, "served_model_aliases", ()) or ()
+        )
         self.engine_args = SimpleNamespace(model=config.model)
 
         self.output_formatter = OutputFormatter(
