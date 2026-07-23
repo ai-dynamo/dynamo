@@ -857,7 +857,10 @@ impl Trace {
                         let base = hash_id
                             .checked_mul(factor)
                             .expect("hash prefix expansion overflow");
-                        (0..factor).map(move |offset| base + offset)
+                        (0..factor).map(move |offset| {
+                            base.checked_add(offset)
+                                .expect("hash prefix expansion overflow")
+                        })
                     })
                     .collect();
             }

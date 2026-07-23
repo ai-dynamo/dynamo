@@ -731,6 +731,25 @@ fn test_expand_hash_prefix_depth_scales_hashes_and_input_length() {
 }
 
 #[test]
+#[should_panic(expected = "hash prefix expansion overflow")]
+fn test_expand_hash_prefix_depth_rejects_offset_overflow() {
+    Trace {
+        block_size: 1,
+        sessions: vec![SessionTrace {
+            session_id: "session".to_string(),
+            first_arrival_timestamp_ms: None,
+            turns: vec![TurnTrace {
+                input_length: 1,
+                max_output_tokens: 1,
+                hash_ids: vec![u32::MAX / 3],
+                ..Default::default()
+            }],
+        }],
+    }
+    .expand_hash_prefix_depth(3);
+}
+
+#[test]
 fn test_rescale_ready_span_scales_session_starts_and_inter_turn_delays() {
     let trace = Trace {
         block_size: 4,
