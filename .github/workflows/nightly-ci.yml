@@ -397,7 +397,10 @@ jobs:
       enable_coverage: true
       run_sanity_check: false
       gpu_test_markers: vllm and gpu_1
-      gpu_test_timeout_minutes: 60
+      gpu_test_timeout_minutes: 240
+      # 80 GiB H100 admits more of the profiled pool per slot than the 24 GiB lanes.
+      run_gpu_parallel_tests: true
+      gpu_parallel_max_vram_gib: '80'
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
       image_tag_suffix: '-nightly'
     secrets: inherit
@@ -471,7 +474,10 @@ jobs:
       enable_coverage: true
       run_sanity_check: false
       gpu_test_markers: sglang and gpu_1
-      gpu_test_timeout_minutes: 60
+      gpu_test_timeout_minutes: 240
+      # 80 GiB H100 admits more of the profiled pool per slot than the 24 GiB lanes.
+      run_gpu_parallel_tests: true
+      gpu_parallel_max_vram_gib: '80'
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
       image_tag_suffix: '-nightly'
     secrets: inherit
@@ -544,7 +550,10 @@ jobs:
       enable_coverage: true
       run_sanity_check: false
       gpu_test_markers: trtllm and gpu_1
-      gpu_test_timeout_minutes: 60
+      gpu_test_timeout_minutes: 240
+      # 80 GiB H100 admits more of the profiled pool per slot than the 24 GiB lanes.
+      run_gpu_parallel_tests: true
+      gpu_parallel_max_vram_gib: '80'
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
       image_tag_suffix: '-nightly'
     secrets: inherit
