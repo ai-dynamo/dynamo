@@ -603,6 +603,9 @@ pub(crate) struct TraceCollector {
     /// completed requests no longer retain one timestamp per emitted token.
     itl_distribution: StreamingDistribution,
     output_token_throughput_per_user: StreamingDistribution,
+    /// Keep completed token timelines until `finish()` instead of folding them
+    /// synchronously in `on_terminal`.
+    defer_token_timeline_finalization: bool,
     /// When `true`, `finish()` populates `TraceSimulationReport::per_request`.
     /// Default `false` to skip the ~100ms terminal pass + ~30MB allocation
     /// when the caller doesn't need per-request granularity.
@@ -708,6 +711,11 @@ impl TraceRequestStats {
 }
 
 impl TraceCollector {
+    /// Defer token-timeline folding until the entire replay has ended.
+    pub(crate) fn set_defer_token_timeline_finalization(&mut self, value: bool) {
+        self.defer_token_timeline_finalization = value;
+    }
+
     /// Toggle whether `finish()` should build per-request records. Off by
     /// default; the runtimes flip it on when the caller asks for JSONL output.
     pub(crate) fn set_capture_per_request(&mut self, value: bool) {
@@ -911,6 +919,7 @@ impl TraceCollector {
             requests,
             itl_distribution,
             output_token_throughput_per_user,
+            defer_token_timeline_finalization,
             ..
         } = self;
         if let Some(stats) = requests.get_mut(&uuid)
@@ -918,11 +927,13 @@ impl TraceCollector {
         {
             stats.terminal_time_ms = Some(terminal_time_ms);
             stats.terminal_status = Some(status);
-            stats.finalize_token_timeline(
-                status == ReplayTerminalStatus::Completed && stats.first_admit_ms.is_some(),
-                itl_distribution,
-                output_token_throughput_per_user,
-            );
+            if !*defer_token_timeline_finalization {
+                stats.finalize_token_timeline(
+                    status == ReplayTerminalStatus::Completed && stats.first_admit_ms.is_some(),
+                    itl_distribution,
+                    output_token_throughput_per_user,
+                );
+            }
         }
     }
 
@@ -987,7 +998,22 @@ impl TraceCollector {
             .map(TraceRequestStats::actual_output_length)
     }
 
-    pub(crate) fn finish(self) -> TraceSimulationReport {
+    pub(crate) fn finish(mut self) -> TraceSimulationReport {
+        let Self {
+            requests,
+            itl_distribution,
+            output_token_throughput_per_user,
+            ..
+        } = &mut self;
+        for stats in requests.values_mut() {
+            stats.finalize_token_timeline(
+                stats.terminal_status == Some(ReplayTerminalStatus::Completed)
+                    && stats.first_admit_ms.is_some(),
+                itl_distribution,
+                output_token_throughput_per_user,
+            );
+        }
+
         // Build per-request records before we move `self.requests` into the
         // summary aggregation below. Gated on `capture_per_request` — the
         // ~100ms terminal pass + ~30MB allocation only runs when a caller
@@ -1881,5 +1907,25 @@ mod tests {
         assert_eq!(report.latency.itl.distribution.mean_ms, 1.0);
         assert_eq!(report.latency.itl.distribution.min_ms, 1.0);
         assert_eq!(report.latency.itl.distribution.max_ms, 1.0);
+    }
+
+    #[test]
+    fn deferred_token_timeline_finalization_folds_at_finish() {
+        let uuid = Uuid::from_u128(8);
+        let mut collector = TraceCollector::default();
+        collector.set_defer_token_timeline_finalization(true);
+        collector.on_arrival(uuid, 0.0, 128, 3);
+        collector.on_admit(uuid, 1.0, 0);
+        collector.on_token(uuid, 10.0);
+        collector.on_token(uuid, 12.0);
+        collector.on_token(uuid, 15.0);
+        collector.on_terminal(uuid, 15.0, ReplayTerminalStatus::Completed);
+
+        assert_eq!(collector.retained_token_timestamps(), 3);
+
+        let report = collector.finish();
+        assert_eq!(report.latency.itl.distribution.mean_ms, 2.5);
+        assert_eq!(report.latency.itl.distribution.min_ms, 2.0);
+        assert_eq!(report.latency.itl.distribution.max_ms, 3.0);
     }
 }
