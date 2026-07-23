@@ -61,11 +61,19 @@ components:
             image: registry.example/my-runtime:build-20260723
 ```
 
-The main container image is required even when `runtimeVersionOverride` is set. For the served
-`v1alpha1` API, set the image at `extraPodSpec.mainContainer.image` instead. After upgrading the
-CRDs and operator, add an override to every component that uses a non-semantic-version main-image
-tag before its next update. Existing resources are not modified by the upgrade, but an update
-without the override is rejected.
+Admission now requires every component's main-container image. In `v1beta1`, set
+`spec.components[*].podTemplate.spec.containers[name=main].image` for a DGD, or
+`spec.podTemplate.spec.containers[name=main].image` for a standalone DCD. In `v1alpha1`, set
+`spec.components[*].extraPodSpec.mainContainer.image` for a DGD, or
+`spec.extraPodSpec.mainContainer.image` for a standalone DCD. These fields were not previously
+required by Dynamo admission, but were effectively required: Kubernetes rejects the rendered Pod
+specification when its main container has no image.
+
+After upgrading the CRDs and operator, admission denies a new DGD, or an update to a pre-existing
+DGD, when a component's main-image tag is not a semantic version and `runtimeVersionOverride` is
+unset. This includes custom and SHA-tagged images. Set `runtimeVersionOverride` to the Dynamo
+runtime compatibility version for that image before creating or updating the DGD. Existing resources
+are not changed or revalidated solely by the upgrade.
 
 ### Bundled NATS is now disabled by default
 
