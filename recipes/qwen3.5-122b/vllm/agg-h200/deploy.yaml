@@ -118,6 +118,8 @@ spec:
                 - --served-model-name
                 - Qwen/Qwen3.5-122B-A10B-FP8
                 - --trust-remote-code
+                - --moe-backend
+                - triton
                 - --dyn-tool-call-parser
                 - qwen3_coder
                 - --dyn-reasoning-parser
