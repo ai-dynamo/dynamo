@@ -1300,11 +1300,15 @@ def test_extract_mdc_entries_uses_truncated_grove_component_name(
     assert entries[0].card_json["worker_type"] == "decode"
 
 
-def test_extract_mdc_entries_falls_back_to_dgd_prefix_without_component_names(
+def test_extract_mdc_entries_uses_dgd_prefix_with_partial_component_names(
     kubernetes_connector, mock_kube_api
 ):
     deployment = _deployment(_component("VllmDecodeWorker", "decode", replicas=1))
-    deployment["status"] = {"components": {}}
+    deployment["status"] = {
+        "components": {
+            "Frontend": {"componentNames": ["test-graph-0-frontend"]},
+        }
+    }
     mock_kube_api.get_graph_deployment.return_value = deployment
     kubernetes_connector._list_worker_metadata_crs = Mock(
         return_value=[_model_card_cr("test-graph-0-vllmdecodeworker-f4k85")]

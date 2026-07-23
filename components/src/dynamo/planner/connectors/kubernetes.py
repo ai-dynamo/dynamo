@@ -480,11 +480,10 @@ class KubernetesConnector(PlannerConnector):
     def _extract_mdc_entries(self) -> list[MdcEntry]:
         """Extract MDC entries belonging to this DGD.
 
-        CRs are named after the worker pod. Prefer the actual component names
-        from DGD status because Grove may truncate and hash a long DGD name.
-        Fall back to the DGD name prefix for older or not-yet-ready operators
-        that do not report ``componentNames``. LoRA-adapter wrappers are dropped
-        via :func:`is_model_card`.
+        CRs are named after the worker pod. Match the DGD name prefix and the
+        actual component names from DGD status because Grove may truncate and
+        hash a long DGD name. LoRA-adapter wrappers are dropped via
+        :func:`is_model_card`.
         """
         crs = self._list_worker_metadata_crs()
         component_names = self._get_dgd_component_names()
@@ -493,14 +492,10 @@ class KubernetesConnector(PlannerConnector):
         entries: list[MdcEntry] = []
         for cr in crs:
             cr_name = cr.get("metadata", {}).get("name", "")
-            if component_names:
-                belongs_to_dgd = any(
-                    cr_name == component_name
-                    or cr_name.startswith(f"{component_name}-")
-                    for component_name in component_names
-                )
-            else:
-                belongs_to_dgd = cr_name.startswith(dgd_prefix)
+            belongs_to_dgd = cr_name.startswith(dgd_prefix) or any(
+                cr_name == component_name or cr_name.startswith(f"{component_name}-")
+                for component_name in component_names
+            )
             if not belongs_to_dgd:
                 continue
 
