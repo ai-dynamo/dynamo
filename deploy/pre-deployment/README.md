@@ -164,15 +164,6 @@ kubectl patch storageclass <storage-class-name> -p '{"metadata": {"annotations":
 ### No GPU Nodes Found (NVIDIA)
 If no GPU nodes are found, ensure your cluster has nodes with the `nvidia.com/gpu.present=true` label.
 
-### No CPU Nodes Found
-If no CPU nodes are found, ensure your cluster has at least one Ready Kubernetes node:
-
-```bash
-kubectl get nodes
-```
-
-For CPU-only deployments, no GPU Operator or accelerator device plugin is required.
-
 ### No StorageClasses Available
 If no StorageClasses are available in your cluster, you'll need to:
 1. Install a storage provisioner (e.g., for cloud providers, local storage, etc.)
