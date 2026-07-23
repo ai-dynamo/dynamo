@@ -6,8 +6,12 @@
 :class:`KubernetesCapacityManager` is the concrete
 :class:`~dynamo.global_planner.capacity_manager.CapacityManager` — the only place
 in the control loop that touches Kubernetes. A ``participant_id`` is
-``"{namespace}/{deployment_name}"``, and the read/write logic is lifted
-verbatim from the pre-refactor ``ScaleRequestHandler`` so behavior is unchanged.
+``"{namespace}/{deployment_name}"``.
+
+Pool state is read from the v1beta1 DGD component model (``spec.components[]``):
+a component's planner pool is its explicit ``prefill``/``decode`` type, or — for
+a generic ``worker`` — the role hinted by its Planner's
+``TargetReplica.component_name`` (remembered via :meth:`remember_roles`).
 """
 
 from __future__ import annotations
@@ -22,6 +26,13 @@ from dynamo.global_planner.capacity_manager import (
 )
 from dynamo.planner import KubernetesConnector, TargetReplica
 from dynamo.planner.connectors.clients.kubernetes_api import KubernetesAPI
+from dynamo.planner.monitoring.dgd_services import (
+    V1BETA1_GENERIC_WORKER_COMPONENT_TYPE,
+    Service,
+    get_component_type,
+    get_components_by_name,
+    get_planner_component_role,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +48,10 @@ class KubernetesCapacityManager(CapacityManager):
         self.namespace = namespace
         # participant_id -> KubernetesConnector
         self.connectors: dict[str, KubernetesConnector] = {}
+        # participant_id -> {component_name: planner_role}. Generic ``worker``
+        # components need the role supplied by their Planner's TargetReplica;
+        # specialized prefill/decode components do not need a hint.
+        self._component_roles: dict[str, dict[str, str]] = {}
 
     # ------------------------------------------------------------------ #
     # Discovery / registration                                           #
@@ -130,12 +145,24 @@ class KubernetesCapacityManager(CapacityManager):
     def participant_exists(self, participant_id: str) -> bool:
         return participant_id in self.connectors
 
+    def remember_roles(self, participant_id: str, targets: list[TargetReplica]) -> None:
+        """Remember each target's ``component_name -> planner role`` hint so a
+        later ``observe`` can map generic ``worker`` components to prefill/decode.
+        """
+        role_hints = self._component_roles.setdefault(participant_id, {})
+        for target in targets:
+            if target.component_name:
+                role_hints[target.component_name] = target.sub_component_type.value
+
     # ------------------------------------------------------------------ #
     # Observe                                                            #
     # ------------------------------------------------------------------ #
 
-    def observe(self) -> PoolSnapshot:
+    def observe(self, require_complete: bool = False) -> PoolSnapshot:
         """Read current pool state for every known deployment.
+
+        When ``require_complete`` is true, any unreadable deployment fails the
+        whole snapshot so budget enforcement cannot under-count cluster usage.
 
         Snapshots ``self.connectors`` up-front via ``list(...)``: this runs on a
         worker thread (the orchestrator calls it via ``asyncio.to_thread``), and
@@ -146,34 +173,111 @@ class KubernetesCapacityManager(CapacityManager):
         all_pools: PoolSnapshot = {}
         for key, connector in list(self.connectors.items()):
             try:
-                all_pools[key] = self._read_pools(connector)
+                all_pools[key] = self._read_pools(
+                    connector, self._component_roles.get(key)
+                )
             except Exception as e:
+                if require_complete:
+                    raise RuntimeError(
+                        f"Failed to read deployment for {key}: {e}"
+                    ) from e
                 logger.warning(f"Failed to read deployment for {key}: {e}")
                 all_pools[key] = {}
         return all_pools
 
-    def _read_pools(self, connector: KubernetesConnector) -> dict[str, PoolSpec]:
-        """Read the current pool state for one deployment.
+    def _component_role(
+        self,
+        component_name: str,
+        component: dict,
+        role_hints: dict[str, str],
+    ) -> str:
+        """Resolve a component's planner pool role.
 
-        Returns a map from sub_type to PoolSpec. Pools with 0 gpu_per_replica are
-        included for completeness but contribute 0 to budget math. GPU count is
-        read from ``spec.services[].resources.limits.gpu`` only.
+        An explicit ``prefill``/``decode`` type wins; otherwise a generic or
+        untyped worker takes the remembered role hint (if any); else ``""``.
+        """
+        explicit_role = get_planner_component_role(component)
+        if explicit_role:
+            return explicit_role
+        if get_component_type(component) in (
+            "",
+            V1BETA1_GENERIC_WORKER_COMPONENT_TYPE,
+        ):
+            return role_hints.get(component_name, "")
+        return ""
+
+    @staticmethod
+    def _gpu_per_replica(component: dict, service: Service) -> int:
+        """GPUs per replica = main-container GPUs × node count (multinode)."""
+        multinode = component.get("multinode")
+        node_count = 1 if multinode is None else multinode.get("nodeCount", 2)
+        return service.get_gpu_count() * int(node_count)
+
+    @staticmethod
+    def _record_pool_component(
+        components_by_pool: dict[str, str],
+        pool_key: str,
+        component_name: str,
+        deployment_name: str,
+    ) -> None:
+        """Guard against two components resolving to the same planner pool."""
+        previous_component = components_by_pool.get(pool_key)
+        if previous_component is not None:
+            raise ValueError(
+                f"Deployment {deployment_name!r} components {previous_component!r} "
+                f"and {component_name!r} both resolve to planner pool {pool_key!r}"
+            )
+        components_by_pool[pool_key] = component_name
+
+    def _read_pools(
+        self,
+        connector: KubernetesConnector,
+        role_hints: Optional[dict[str, str]] = None,
+    ) -> dict[str, PoolSpec]:
+        """Read the current pool state for one deployment (v1beta1 components).
+
+        An unmapped generic worker is keyed by component name so it still
+        contributes to the total; once its Planner sends a request, the
+        component-name hint replaces that key with its prefill/decode role.
         """
         deployment = connector.kube_api.get_graph_deployment(connector.parent_dgd_name)
         pools: dict[str, PoolSpec] = {}
-        services = deployment.get("spec", {}).get("services", {})
-        for svc_spec in services.values():
-            sub_type = svc_spec.get("subComponentType", "")
-            if not sub_type:
+        components_by_pool: dict[str, str] = {}
+        role_hints = role_hints or {}
+        for component_name, component in get_components_by_name(deployment).items():
+            pool_key = self._component_role(component_name, component, role_hints)
+            component_type = get_component_type(component)
+            service = Service(name=component_name, service=component)
+            gpu_per_replica = None
+            if not pool_key and component_type in (
+                "",
+                V1BETA1_GENERIC_WORKER_COMPONENT_TYPE,
+            ):
+                try:
+                    gpu_per_replica = self._gpu_per_replica(component, service)
+                except ValueError:
+                    if component_type == "":
+                        # An untyped non-worker component is not a pool.
+                        continue
+                    raise
+                pool_key = component_name
+            if not pool_key:
                 continue
-            gpu_per_replica = int(
-                svc_spec.get("resources", {}).get("limits", {}).get("gpu", 0)
+            self._record_pool_component(
+                components_by_pool,
+                pool_key,
+                component_name,
+                connector.parent_dgd_name,
             )
-            replicas = svc_spec.get("replicas", 0)
-            pools[sub_type] = PoolSpec(
-                sub_type=sub_type,
-                current_replicas=replicas,
-                gpu_per_replica=gpu_per_replica,
+            pools[pool_key] = PoolSpec(
+                sub_type=pool_key,
+                component_name=component_name,
+                current_replicas=service.number_replicas(),
+                gpu_per_replica=(
+                    gpu_per_replica
+                    if gpu_per_replica is not None
+                    else self._gpu_per_replica(component, service)
+                ),
             )
         return pools
 
@@ -198,10 +302,20 @@ class KubernetesCapacityManager(CapacityManager):
 
     def current_replicas(self, participant_id: str) -> dict[str, int]:
         connector = self.connectors[participant_id]
+        role_hints = self._component_roles.get(participant_id, {})
         current_replicas: dict[str, int] = {}
+        components_by_pool: dict[str, str] = {}
         deployment = connector.kube_api.get_graph_deployment(connector.parent_dgd_name)
-        for service_name, service_spec in deployment["spec"]["services"].items():
-            sub_type = service_spec.get("subComponentType", "")
+        for component_name, component in get_components_by_name(deployment).items():
+            sub_type = self._component_role(component_name, component, role_hints)
             if sub_type:
-                current_replicas[sub_type] = service_spec.get("replicas", 0)
+                self._record_pool_component(
+                    components_by_pool,
+                    sub_type,
+                    component_name,
+                    connector.parent_dgd_name,
+                )
+                current_replicas[sub_type] = Service(
+                    name=component_name, service=component
+                ).number_replicas()
         return current_replicas

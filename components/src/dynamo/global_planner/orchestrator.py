@@ -207,7 +207,11 @@ class Orchestrator:
         drift toward the floor as load arrives.
         """
         try:
-            total = self.total_gpus(self.capacity_manager.observe())
+            total = self.total_gpus(
+                self.capacity_manager.observe(
+                    require_complete=self.budget_enforcement_enabled()
+                )
+            )
         except Exception as e:
             logger.warning(f"Could not compute initial total GPUs: {e}")
             return
@@ -279,12 +283,19 @@ class Orchestrator:
         caller should read back current replicas. May raise a patch error from
         the first applied participant (propagated to the API layer).
         """
+        # Let the backend record any request context it needs to read pool state
+        # correctly (e.g. component-name role hints for generic workers).
+        self.capacity_manager.remember_roles(participant_id, targets)
+
         # Read ALL known participants' current state once. Cross-participant
         # partner search needs every pool's current replicas and gpu_per_replica;
         # cross-participant budget math also consumes this. Run the synchronous
         # backend reads off-thread so the event loop isn't blocked for the N
-        # round-trips.
-        all_pools = await asyncio.to_thread(self.capacity_manager.observe)
+        # round-trips. When budget is enforced, require a complete snapshot so a
+        # partial read can't under-count cluster usage.
+        all_pools = await asyncio.to_thread(
+            self.capacity_manager.observe, self.budget_enforcement_enabled()
+        )
 
         result = self.mediate(
             participant_id,
@@ -312,6 +323,7 @@ class Orchestrator:
             grouped_targets[partner.participant_id].append(
                 TargetReplica(
                     sub_component_type=SubComponentType(partner.sub_type),
+                    component_name=partner.spec.component_name or None,
                     desired_replicas=partner.applied_desired,
                 )
             )
