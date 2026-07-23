@@ -158,6 +158,11 @@ overrides:
     source: "NVIDIA cuDNN Software License Agreement — https://docs.nvidia.com/deeplearning/cudnn/sla/index.html"
 
   - ecosystem: python
+    name: nvidia-cudnn-cu12
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA cuDNN Software License Agreement — https://docs.nvidia.com/deeplearning/cudnn/sla/index.html"
+
+  - ecosystem: python
     name: cuda-bindings
     license: LicenseRef-NVIDIA-SOFTWARE-LICENSE
     source: "NVIDIA Software License Agreement — https://docs.nvidia.com/cuda/cuda-bindings/eula.html"
@@ -166,6 +171,15 @@ overrides:
     name: cuda-toolkit
     license: LicenseRef-NVIDIA-Proprietary
     source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html"
+
+  # dotjson-vllm is distributed under the dottxt proprietary license included
+  # in the wheel. The matching package-specific policy exception is recorded
+  # in licenses.toml because this reference is intentionally not allowed
+  # globally.
+  - ecosystem: python
+    name: dotjson-vllm
+    license: LicenseRef-Proprietary
+    source: "dottxt Inc. proprietary license included in the dotjson-vllm wheel"
 
   # --- NVIDIA-internal Python tools ---
   - ecosystem: python
