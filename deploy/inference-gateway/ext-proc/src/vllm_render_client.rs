@@ -131,7 +131,6 @@ impl VllmRenderClient {
             .client
             .post(self.endpoint.clone())
             .header(CONTENT_TYPE, "application/json")
-            // `Bytes` -> reqwest `Body` is zero-copy (no `to_vec`).
             .body(request_body)
             .send()
             .await
