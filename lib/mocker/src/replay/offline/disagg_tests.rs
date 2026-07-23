@@ -34,6 +34,27 @@ impl PlannerHook for CaptureOnceHook {
     }
 }
 
+struct DecodeOnlyScaleHook {
+    calls: Rc<RefCell<usize>>,
+}
+
+impl PlannerHook for DecodeOnlyScaleHook {
+    fn initial_tick_ms(&mut self) -> anyhow::Result<f64> {
+        Ok(0.0)
+    }
+
+    fn on_tick(&mut self, metrics: PlannerTickMetrics) -> anyhow::Result<PlannerTickDecision> {
+        assert_eq!(metrics.active_prefill_ids.len(), 1);
+        assert_eq!(metrics.total_prefill, 2);
+        *self.calls.borrow_mut() += 1;
+        Ok(PlannerTickDecision {
+            target_prefill: None,
+            target_decode: Some(2),
+            next_tick_ms: None,
+        })
+    }
+}
+
 fn staged_args(worker_type: WorkerType, speedup_ratio: f64) -> MockEngineArgs {
     MockEngineArgs::builder()
         .block_size(64)
@@ -1288,6 +1309,88 @@ fn test_apply_scaling_drains_prefill_router_pending_immediately() {
         DisaggPhase::RunningPrefill
     );
     assert_eq!(runtime.stats.prefill_assignments[&Uuid::from_u128(2)], 1);
+}
+
+#[test]
+fn world_partial_decode_target_does_not_recreate_draining_prefill() {
+    let mut config = scaling_test_disagg_config();
+    config.num_prefill_workers = 2;
+    let mut runtime = DisaggRuntime::new(
+        &config,
+        None,
+        None,
+        VecDeque::from([request(1, 64, 8, 0.0), request(2, 64, 8, 0.0)]),
+        ReplayMode::Trace,
+        ReplayRouterMode::RoundRobin,
+    )
+    .unwrap();
+
+    runtime.drain_current_timestamp().unwrap();
+    assert_eq!(runtime.prefill_engine.active_group_ids().len(), 2);
+    runtime.apply_scaling(1, 1).unwrap();
+    assert_eq!(runtime.prefill_engine.active_group_ids().len(), 1);
+    assert_eq!(
+        runtime.total_prefill_count(),
+        2,
+        "one busy prefill worker should remain provisioned while draining"
+    );
+
+    runtime.world_apply_targets(None, Some(2)).unwrap();
+
+    assert_eq!(
+        runtime.prefill_engine.active_group_ids().len(),
+        1,
+        "an omitted prefill target must preserve its effective desired count"
+    );
+    assert_eq!(
+        runtime.total_prefill_count(),
+        2,
+        "an omitted prefill target must not recreate its draining worker"
+    );
+    assert_eq!(runtime.decode_engine.active_group_ids().len(), 2);
+    assert_eq!(runtime.total_decode_count(), 2);
+}
+
+#[test]
+fn legacy_planner_decode_only_target_does_not_recreate_draining_prefill() {
+    let mut config = scaling_test_disagg_config();
+    config.num_prefill_workers = 2;
+    let calls = Rc::new(RefCell::new(0));
+    let mut runtime = DisaggRuntime::new(
+        &config,
+        None,
+        None,
+        VecDeque::from([request(1, 64, 8, 0.0), request(2, 64, 8, 0.0)]),
+        ReplayMode::Trace,
+        ReplayRouterMode::RoundRobin,
+    )
+    .unwrap();
+
+    runtime.drain_current_timestamp().unwrap();
+    assert_eq!(runtime.prefill_engine.active_group_ids().len(), 2);
+    runtime.apply_scaling(1, 1).unwrap();
+    assert_eq!(runtime.prefill_engine.active_group_ids().len(), 1);
+    assert_eq!(runtime.total_prefill_count(), 2);
+
+    let mut runtime = runtime.with_planner_hook(Box::new(DecodeOnlyScaleHook {
+        calls: Rc::clone(&calls),
+    }));
+    runtime.seed_first_planner_tick().unwrap();
+    runtime.drain_current_timestamp().unwrap();
+
+    assert_eq!(*calls.borrow(), 1);
+    assert_eq!(
+        runtime.prefill_engine.active_group_ids().len(),
+        1,
+        "a masked legacy planner decision must preserve the prefill drain"
+    );
+    assert_eq!(
+        runtime.total_prefill_count(),
+        2,
+        "a masked legacy planner decision must not recreate a prefill worker"
+    );
+    assert_eq!(runtime.decode_engine.active_group_ids().len(), 2);
+    assert_eq!(runtime.total_decode_count(), 2);
 }
 
 #[test]

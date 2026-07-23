@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib
 import json
 import os
+import re
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -301,7 +303,17 @@ def _engine_caps(args: MockEngineArgs) -> EngineCapabilities:
     """Derive EngineCapabilities from MockEngineArgs."""
     from dynamo.planner.core.types import EngineCapabilities
 
-    dp_size = max(args.dp_size, 1)
+    # Match the Rust replay materialization exactly: an explicit attention-DP
+    # size becomes the scheduler topology even when the Python object's raw
+    # `dp_size` is still its default. GP budgets, local planner capabilities,
+    # and Mocker GPU-hours must all use the same per-worker width.
+    attention_dp = args.aic_attention_dp_size
+    dp_size = max(attention_dp if attention_dp is not None else args.dp_size, 1)
+    if attention_dp is not None and args.dp_size > 1 and args.dp_size != dp_size:
+        raise ValueError(
+            "dp_size must match aic_attention_dp_size for AIC-backed replay "
+            f"(got dp_size={args.dp_size}, aic_attention_dp_size={dp_size})"
+        )
     max_kv_tokens = args.num_gpu_blocks * args.block_size * dp_size
     return EngineCapabilities(
         num_gpu=(args.aic_tp_size or 1) * dp_size,
@@ -400,7 +412,18 @@ class SyntheticWorkload:
     inter_turn_delay_ms: float = 0.0
 
 
-def _run_planner_replay(
+def _report_namespace_component(report_namespace: str | None) -> str | None:
+    """Return a filesystem-safe, collision-resistant report directory name."""
+    if report_namespace is None:
+        return None
+
+    safe_prefix = re.sub(r"[^A-Za-z0-9_.-]+", "_", report_namespace).strip("._")
+    safe_prefix = safe_prefix[:64] or "deployment"
+    namespace_hash = hashlib.sha256(report_namespace.encode("utf-8")).hexdigest()
+    return f"{safe_prefix}-{namespace_hash}"
+
+
+def _build_planner_replay(
     trace_file: str | None,
     extra_engine_args: MockEngineArgs | None,
     prefill_engine_args: MockEngineArgs | None,
@@ -420,8 +443,11 @@ def _run_planner_replay(
     sla_e2e_ms: float | None = None,
     replay_concurrency: int | None = None,
     synthetic: SyntheticWorkload | None = None,
+    event_loop=None,
+    clock=None,
+    report_namespace: str | None = None,
 ):
-    """Run an offline replay with planner-in-the-loop (agg or disagg).
+    """Build an offline planner bridge and adapter without starting the replay.
 
     ``sla_ttft_ms`` / ``sla_itl_ms`` / ``sla_e2e_ms`` are the **goodput** SLA used
     to classify SLA-satisfying requests in the report. They are independent of
@@ -443,6 +469,11 @@ def _run_planner_replay(
 
     planner_config = PlannerConfig.from_config_arg(planner_config_arg)
     planner_config.advisory = True
+    safe_namespace = _report_namespace_component(report_namespace)
+    if safe_namespace is not None:
+        planner_config.report_output_dir = os.path.join(
+            planner_config.report_output_dir, safe_namespace
+        )
 
     if (trace_file is None) == (synthetic is None):
         raise ValueError(
@@ -549,18 +580,13 @@ def _run_planner_replay(
             f"planner-in-the-loop replay supports mode='agg' or 'disagg', got '{planner_config.mode}'"
         )
 
-    adapter = ReplayPlannerAdapter(
-        planner_config=planner_config,
-        bridge=bridge,
-        capabilities=capabilities,
-    )
-
     # Bootstrap regression models from mocker's perf model.
     # AIC provides accurate batch-size-aware timing that works with the
     # planner's linear regression. The default polynomial model cannot
     # feed the throughput regression (its decode formula is quadratic in
     # utilization ratio, causing negative regression coefficients).
-    if not adapter._is_easy_mode():
+    benchmark_fpms: dict[str, list[ForwardPassMetrics]] = {}
+    if planner_config.optimization_target == "sla":
         ref_args = (
             extra_engine_args
             or (
@@ -673,21 +699,47 @@ def _run_planner_replay(
                     # have variance.
                     agg_fpms = prefill_fpms + decode_fpms
                     if agg_fpms:
-                        adapter.install_benchmark_fpms(agg_fpms=agg_fpms)
+                        benchmark_fpms["agg_fpms"] = agg_fpms
                     else:
                         sys.stderr.write(
                             "Warning: AIC produced no agg benchmark FPMs\n"
                         )
                 else:
                     if prefill_fpms and decode_fpms:
-                        adapter.install_benchmark_fpms(
-                            prefill_fpms=prefill_fpms, decode_fpms=decode_fpms
-                        )
+                        benchmark_fpms["prefill_fpms"] = prefill_fpms
+                        benchmark_fpms["decode_fpms"] = decode_fpms
                     else:
                         sys.stderr.write(
                             f"Warning: AIC produced empty benchmark FPMs "
                             f"(prefill={len(prefill_fpms)}, decode={len(decode_fpms)})\n"
                         )
+
+    adapter = ReplayPlannerAdapter(
+        planner_config=planner_config,
+        bridge=bridge,
+        capabilities=capabilities,
+        event_loop=event_loop,
+        clock=clock,
+    )
+    try:
+        if benchmark_fpms:
+            adapter.install_benchmark_fpms(**benchmark_fpms)
+    except BaseException as exc:
+        try:
+            adapter.close()
+        except BaseException as cleanup_exc:
+            exc.add_note(
+                "Replay planner adapter cleanup after build failure also failed: "
+                f"{cleanup_exc}"
+            )
+        raise
+
+    return bridge, adapter
+
+
+def _run_planner_replay(*args, **kwargs):
+    """Build and run the legacy single-deployment planner Replay path."""
+    bridge, adapter = _build_planner_replay(*args, **kwargs)
 
     # gpu_hours (and prefill/decode_gpus_per_worker) are computed in the mocker
     # from its own worker parallelism (aic_tp x aic_attention_dp) and ride the
@@ -698,11 +750,14 @@ def _run_planner_replay(
     # trace_report with the adapter's accumulated scaling events / diagnostics.
     try:
         trace_report = bridge.run(adapter)
-    except BaseException:
+    except BaseException as exc:
         # `finalize` (which closes the engine + replay-scoped event loop) is only
         # reached on success; ensure cleanup also runs when the Rust loop or a
         # planner callback raises. `close()` is idempotent.
-        adapter.close()
+        try:
+            adapter.close()
+        except BaseException as cleanup_exc:
+            exc.add_note(f"Replay planner cleanup also failed: {cleanup_exc}")
         raise
     return adapter.finalize(trace_report)
 

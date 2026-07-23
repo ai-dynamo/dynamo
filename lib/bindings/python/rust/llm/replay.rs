@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -13,10 +14,14 @@ use dynamo_mocker::common::protocols::{
 use dynamo_mocker::loadgen::{
     ArrivalSpec, DelaySpec, DynamoRequestTrace, LengthSpec, SyntheticTraceSpec, Trace as RsTrace,
 };
-use dynamo_mocker::replay::{PlannerHook, PlannerTickDecision, PlannerTickMetrics, ReplayArgsMode};
+use dynamo_mocker::replay::{
+    PlannerHook, PlannerReplayHandle, PlannerTickDecision, PlannerTickMetrics, ReplayArgsMode,
+    ReplayWorldHandle, WorldPlannerDecision, WorldPlannerHook, WorldScalingAction,
+};
 use pyo3::{
     exceptions::{PyException, PyValueError},
     prelude::*,
+    types::PyDict,
 };
 use pythonize::pythonize;
 use serde_json::json;
@@ -2113,6 +2118,45 @@ fn fpm_snapshots_to_json(
         .collect()
 }
 
+/// Convert one deployment-local planner snapshot into the Python callback
+/// contract shared by the legacy and multi-deployment bridges.
+fn planner_tick_metrics_to_json(metrics: PlannerTickMetrics) -> serde_json::Value {
+    let PlannerTickMetrics {
+        now_ms,
+        prefill_fpm,
+        decode_fpm,
+        traffic,
+        active_prefill_ids,
+        active_decode_ids,
+        total_prefill,
+        total_decode,
+    } = metrics;
+    json!({
+        "now_ms": now_ms,
+        "prefill_fpm_snapshots": fpm_snapshots_to_json(prefill_fpm),
+        "decode_fpm_snapshots": fpm_snapshots_to_json(decode_fpm),
+        "active_prefill_count": active_prefill_ids.len(),
+        "active_decode_count": active_decode_ids.len(),
+        "active_prefill_ids": active_prefill_ids,
+        "active_decode_ids": active_decode_ids,
+        "total_prefill_count": total_prefill,
+        "total_decode_count": total_decode,
+        "traffic": {
+            "duration_s": traffic.duration_s,
+            "num_req": traffic.num_req,
+            "avg_isl": traffic.avg_isl,
+            "avg_osl": traffic.avg_osl,
+            "avg_ttft_ms": traffic.avg_ttft_ms,
+            "avg_itl_ms": traffic.avg_itl_ms,
+            "avg_accept_length": traffic.avg_accept_length,
+            "avg_kv_hit_rate": traffic.avg_kv_hit_rate,
+            // Native denominators let Python merge partial windows exactly.
+            "hit_rate_count": traffic.hit_rate_count,
+            "accept_length_forward_count": traffic.accept_length_forward_count,
+        },
+    })
+}
+
 /// Reject a goodput SLA threshold that is not a finite, non-negative value;
 /// `None` (unset) is allowed and means "do not gate on this dimension".
 fn validate_sla_threshold(name: &str, value: Option<f64>) -> PyResult<()> {
@@ -2428,6 +2472,71 @@ impl PlannerReplayBridge {
     }
 }
 
+/// Builder/runner for a coordinated multi-deployment planner Replay.
+///
+/// Existing `PlannerReplayBridge` constructors remain the source of deployment
+/// runtimes. `add_deployment` consumes each bridge handle; `run` then invokes one
+/// timestamp-batched Python controller for the whole world.
+#[pyclass(unsendable)]
+pub struct ReplayWorldBridge {
+    deployments: Option<Vec<(String, PlannerReplayHandle)>>,
+    deployment_ids: BTreeSet<String>,
+}
+
+#[pymethods]
+impl ReplayWorldBridge {
+    #[new]
+    fn new() -> Self {
+        Self {
+            deployments: Some(Vec::new()),
+            deployment_ids: BTreeSet::new(),
+        }
+    }
+
+    fn add_deployment(
+        &mut self,
+        deployment_id: String,
+        mut bridge: PyRefMut<'_, PlannerReplayBridge>,
+    ) -> PyResult<()> {
+        if deployment_id.trim().is_empty() {
+            return Err(PyValueError::new_err(
+                "Replay world deployment_id must be non-empty",
+            ));
+        }
+        let deployments = self
+            .deployments
+            .as_mut()
+            .ok_or_else(|| PyException::new_err("Replay world bridge has been finalized"))?;
+        if self.deployment_ids.contains(&deployment_id) {
+            return Err(PyValueError::new_err(format!(
+                "duplicate Replay world deployment_id {deployment_id:?}"
+            )));
+        }
+        let handle = bridge.handle.take().ok_or_else(|| {
+            PyException::new_err(format!(
+                "planner bridge for deployment {deployment_id:?} has been finalized"
+            ))
+        })?;
+        self.deployment_ids.insert(deployment_id.clone());
+        deployments.push((deployment_id, handle));
+        Ok(())
+    }
+
+    fn run(&mut self, py: Python<'_>, planner: Py<PyAny>) -> PyResult<PyObject> {
+        let deployments = self
+            .deployments
+            .take()
+            .ok_or_else(|| PyException::new_err("Replay world bridge has been finalized"))?;
+        let handle =
+            ReplayWorldHandle::from_deployments(deployments).map_err(planner_run_err_to_pyerr)?;
+        let hook: Box<dyn WorldPlannerHook> = Box::new(PyWorldPlannerHook { callback: planner });
+        let report = handle.run(hook).map_err(planner_run_err_to_pyerr)?;
+        pythonize(py, &report)
+            .map_err(to_pyerr)
+            .map(|obj| obj.unbind())
+    }
+}
+
 /// Convert a planner-run error back into a `PyErr`, preserving the original
 /// Python exception (its type and traceback) when the failure originated in a
 /// planner callback (`initial_tick_ms` / `on_tick` stash the `PyErr` via
@@ -2461,45 +2570,10 @@ impl PlannerHook for PyPlannerHook {
     }
 
     fn on_tick(&mut self, metrics: PlannerTickMetrics) -> anyhow::Result<PlannerTickDecision> {
-        let PlannerTickMetrics {
-            now_ms,
-            prefill_fpm,
-            decode_fpm,
-            traffic,
-            active_prefill_ids,
-            active_decode_ids,
-            total_prefill,
-            total_decode,
-        } = metrics;
         Python::with_gil(|py| -> PyResult<PlannerTickDecision> {
             // The metrics dict mirrors the old `advance_to` + `drain_traffic` dicts so
             // the Python adapter's `_build_tick_input` consumes it unchanged.
-            let metrics_json = json!({
-                "now_ms": now_ms,
-                "prefill_fpm_snapshots": fpm_snapshots_to_json(prefill_fpm),
-                "decode_fpm_snapshots": fpm_snapshots_to_json(decode_fpm),
-                "active_prefill_count": active_prefill_ids.len(),
-                "active_decode_count": active_decode_ids.len(),
-                "active_prefill_ids": active_prefill_ids,
-                "active_decode_ids": active_decode_ids,
-                "total_prefill_count": total_prefill,
-                "total_decode_count": total_decode,
-                "traffic": {
-                    "duration_s": traffic.duration_s,
-                    "num_req": traffic.num_req,
-                    "avg_isl": traffic.avg_isl,
-                    "avg_osl": traffic.avg_osl,
-                    "avg_ttft_ms": traffic.avg_ttft_ms,
-                    "avg_itl_ms": traffic.avg_itl_ms,
-                    "avg_accept_length": traffic.avg_accept_length,
-                    "avg_kv_hit_rate": traffic.avg_kv_hit_rate,
-                    // Denominators behind the two ratio averages, so the Python
-                    // adapter can merge partial windows with exact count weights
-                    // instead of approximating with num_req.
-                    "hit_rate_count": traffic.hit_rate_count,
-                    "accept_length_forward_count": traffic.accept_length_forward_count,
-                },
-            });
+            let metrics_json = planner_tick_metrics_to_json(metrics);
             let metrics_obj = pythonize(py, &metrics_json).map_err(to_pyerr)?;
             let decision = self
                 .callback
@@ -2514,6 +2588,75 @@ impl PlannerHook for PyPlannerHook {
         })
         // Preserve the original `PyErr` (type + traceback) through the anyhow
         // boundary so `PlannerReplayBridge::run` can re-raise it unchanged.
+        .map_err(anyhow::Error::new)
+    }
+}
+
+/// Python adapter for the timestamp-batched [`WorldPlannerHook`] contract.
+struct PyWorldPlannerHook {
+    callback: Py<PyAny>,
+}
+
+impl WorldPlannerHook for PyWorldPlannerHook {
+    fn initial_tick_ms(&mut self, deployment_id: &str) -> anyhow::Result<f64> {
+        Python::with_gil(|py| {
+            self.callback
+                .bind(py)
+                .call_method1("initial_tick_ms", (deployment_id,))?
+                .extract::<f64>()
+        })
+        .map_err(anyhow::Error::new)
+    }
+
+    fn on_ticks(
+        &mut self,
+        ticks: Vec<(String, PlannerTickMetrics)>,
+    ) -> anyhow::Result<WorldPlannerDecision> {
+        Python::with_gil(|py| -> PyResult<WorldPlannerDecision> {
+            let ticks_json = ticks
+                .into_iter()
+                .map(|(deployment_id, metrics)| {
+                    let mut value = planner_tick_metrics_to_json(metrics);
+                    value
+                        .as_object_mut()
+                        .expect("planner metrics serialize as an object")
+                        .insert("deployment_id".to_string(), json!(deployment_id));
+                    value
+                })
+                .collect::<Vec<_>>();
+            let ticks_obj = pythonize(py, &ticks_json).map_err(to_pyerr)?;
+            let decision = self
+                .callback
+                .bind(py)
+                .call_method1("on_ticks", (ticks_obj,))?;
+
+            let next_ticks_dict = decision.get_item("next_ticks")?.downcast_into::<PyDict>()?;
+            let mut next_ticks = BTreeMap::new();
+            for (deployment_id, next_ms) in next_ticks_dict.iter() {
+                let deployment_id = deployment_id.extract::<String>()?;
+                let next_ms = next_ms.extract::<Option<f64>>()?;
+                if next_ticks.insert(deployment_id.clone(), next_ms).is_some() {
+                    return Err(PyValueError::new_err(format!(
+                        "duplicate next tick for deployment {deployment_id:?}"
+                    )));
+                }
+            }
+
+            let mut actions = Vec::new();
+            for action in decision.get_item("actions")?.try_iter()? {
+                let action = action?;
+                actions.push(WorldScalingAction {
+                    deployment_id: action.get_item("deployment_id")?.extract()?,
+                    target_prefill: action.get_item("target_prefill")?.extract()?,
+                    target_decode: action.get_item("target_decode")?.extract()?,
+                });
+            }
+
+            Ok(WorldPlannerDecision {
+                next_ticks: next_ticks.into_iter().collect(),
+                actions,
+            })
+        })
         .map_err(anyhow::Error::new)
     }
 }

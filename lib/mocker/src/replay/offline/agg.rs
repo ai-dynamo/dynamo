@@ -11,7 +11,7 @@ use super::core::{
     AdmissionSource as CoreAdmissionSource, EngineEventBatch, NoEngineEvents, Placement,
     PlacementDecision, PlacementPolicy, ReadyArrival, WorkerTopology,
 };
-use super::events::{SimulationEvent, SimulationWorkerStage};
+use super::events::{SimulationEvent, SimulationEventKind, SimulationWorkerStage};
 #[cfg(test)]
 use super::extensions::kv_router::AggRuntime;
 use super::planner_hook::{LatestFpmBuffer, PlannerHook, PlannerTickMetrics};
@@ -279,6 +279,30 @@ where
         }
         self.planner_hook = Some(hook);
         self
+    }
+
+    /// Prepare this runtime for a world-owned planner. The world coordinator owns
+    /// planner deadlines and callbacks, so no `PlannerTick` events or local hook
+    /// are installed here; the runtime only retains the FPM/traffic state needed
+    /// to freeze a [`PlannerTickMetrics`] snapshot at a control-time barrier.
+    pub(in crate::replay) fn enable_world_planner(&mut self) -> anyhow::Result<()> {
+        if self.planner_hook.is_some()
+            || self
+                .events
+                .iter()
+                .any(|event| matches!(&event.kind, SimulationEventKind::PlannerTick))
+        {
+            bail!("aggregated replay runtime already has a local planner attached");
+        }
+        if self.max_sim_time_ms.is_some() {
+            bail!("max_sim_time_ms is not supported by multi-deployment replay");
+        }
+        self.collect_fpm = true;
+        for worker_id in self.engine.active_group_ids() {
+            self.fpm_buffer
+                .activate_worker(worker_id, self.dp_size, self.now_ms);
+        }
+        Ok(())
     }
 
     #[cfg(test)]
@@ -812,19 +836,7 @@ where
             if self.is_workload_done() {
                 continue;
             }
-            let active_decode_ids = self.engine.active_group_ids();
-            self.fpm_buffer
-                .emit_idle_due(&active_decode_ids, self.dp_size, self.now_ms);
-            let metrics = PlannerTickMetrics {
-                now_ms: self.now_ms,
-                prefill_fpm: Vec::new(),
-                decode_fpm: self.fpm_buffer.take(),
-                traffic: self.traffic.drain(self.now_ms),
-                active_prefill_ids: Vec::new(),
-                active_decode_ids,
-                total_prefill: 0,
-                total_decode: self.total_worker_count(),
-            };
+            let metrics = self.take_planner_metrics();
             let mut hook = self
                 .planner_hook
                 .take()
@@ -858,6 +870,22 @@ where
         Ok(changed)
     }
 
+    fn take_planner_metrics(&mut self) -> PlannerTickMetrics {
+        let active_decode_ids = self.engine.active_group_ids();
+        self.fpm_buffer
+            .emit_idle_due(&active_decode_ids, self.dp_size, self.now_ms);
+        PlannerTickMetrics {
+            now_ms: self.now_ms,
+            prefill_fpm: Vec::new(),
+            decode_fpm: self.fpm_buffer.take(),
+            traffic: self.traffic.drain(self.now_ms),
+            active_prefill_ids: Vec::new(),
+            active_decode_ids,
+            total_prefill: 0,
+            total_decode: self.total_worker_count(),
+        }
+    }
+
     // ------------------------------------------------------------------
     // Planner integration: scaling + worker-count accessors used by the
     // in-loop `PlannerTick` handler (apply_planner_ticks).
@@ -887,6 +915,91 @@ where
     /// Total worker count including pending-removal.
     pub(in crate::replay) fn total_worker_count(&self) -> usize {
         self.engine.worker_count()
+    }
+
+    /// Current logical time for a world-owned deployment runtime.
+    pub(in crate::replay) fn world_now_ms(&self) -> f64 {
+        self.now_ms
+    }
+
+    /// Earliest data-plane timestamp. Planner deadlines live in the world
+    /// coordinator and are intentionally absent from this runtime's event heap.
+    pub(in crate::replay) fn world_next_data_timestamp(&mut self) -> Option<f64> {
+        self.next_timestamp()
+    }
+
+    /// Advance through every data-plane timestamp up to `control_ms`, settling
+    /// each timestamp to the runtime's existing fixed point. When no local event
+    /// is due, the clock still advances so provisioned worker-time stays aligned
+    /// with the authoritative world clock.
+    pub(in crate::replay) fn world_settle_data_plane_to(
+        &mut self,
+        control_ms: f64,
+    ) -> anyhow::Result<()> {
+        if !control_ms.is_finite() || control_ms < self.now_ms {
+            bail!(
+                "aggregated deployment cannot advance from {}ms to {control_ms}ms",
+                self.now_ms
+            );
+        }
+
+        self.drain_current_timestamp()?;
+        while let Some(next_ms) = self.next_timestamp() {
+            if next_ms > control_ms {
+                break;
+            }
+            if next_ms < self.now_ms {
+                bail!(
+                    "aggregated deployment produced a past event at {next_ms}ms while at {}ms",
+                    self.now_ms
+                );
+            }
+            self.advance_now_ms(next_ms);
+            self.drain_current_timestamp()?;
+        }
+        if control_ms > self.now_ms {
+            self.advance_now_ms(control_ms);
+        }
+        self.drain_current_timestamp()
+    }
+
+    /// Freeze planner-visible state after the world has settled every deployment
+    /// at the current control timestamp.
+    pub(in crate::replay) fn world_take_planner_metrics(&mut self) -> PlannerTickMetrics {
+        self.take_planner_metrics()
+    }
+
+    /// Apply a world-mediated target using the same lifecycle path as the legacy
+    /// local planner. Aggregated replay reports its sole pool as decode.
+    pub(in crate::replay) fn world_apply_targets(
+        &mut self,
+        _target_prefill: Option<usize>,
+        target_decode: Option<usize>,
+    ) -> anyhow::Result<()> {
+        if let Some(target_decode) = target_decode {
+            self.apply_scaling(target_decode)?;
+        }
+        Ok(())
+    }
+
+    pub(in crate::replay) fn world_has_request_work(&self) -> bool {
+        !self.is_workload_done()
+    }
+
+    pub(in crate::replay) fn world_has_lifecycle_work(&self) -> bool {
+        self.events
+            .iter()
+            .any(|event| matches!(&event.kind, SimulationEventKind::WorkerReady { .. }))
+    }
+
+    pub(in crate::replay) fn world_stop_planner(&mut self) {
+        self.collect_fpm = false;
+        self.fpm_buffer.take();
+    }
+
+    pub(in crate::replay) fn world_finish(self) -> TraceCollector {
+        self.progress.finish();
+        self.collector
     }
 
     /// Apply a scaling decision: set the target number of workers.
