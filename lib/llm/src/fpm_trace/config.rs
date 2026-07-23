@@ -4,6 +4,7 @@
 use std::sync::OnceLock;
 
 use dynamo_runtime::config::environment_names::llm::fpm_trace as env_fpm_trace;
+use dynamo_runtime::config::parse_bool;
 
 pub const DEFAULT_OUTPUT_PATH: &str = "/tmp/dynamo-fpm";
 pub const DEFAULT_SAMPLE_INTERVAL_MS: u64 = 5_000;
@@ -43,17 +44,6 @@ impl Default for FpmTracePolicy {
             jsonl_gz_roll_bytes: DEFAULT_JSONL_GZ_ROLL_BYTES,
             max_segments: DEFAULT_MAX_SEGMENTS,
         }
-    }
-}
-
-fn parse_bool(value: &str) -> anyhow::Result<bool> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "on" | "yes" => Ok(true),
-        "0" | "false" | "off" | "no" => Ok(false),
-        _ => anyhow::bail!(
-            "{} must be one of true/false, 1/0, on/off, or yes/no",
-            env_fpm_trace::DYN_FPM_TRACE
-        ),
     }
 }
 
@@ -273,10 +263,11 @@ mod tests {
         for value in ["true", "TRUE", "1", "on", "ON", "yes"] {
             assert!(parse_bool(value).unwrap(), "value={value}");
         }
-        for value in ["false", "FALSE", "0", "off", "OFF", "no"] {
+        // Empty counts as falsey: DYN_FPM_TRACE="" disables tracing.
+        for value in ["false", "FALSE", "0", "off", "OFF", "no", ""] {
             assert!(!parse_bool(value).unwrap(), "value={value}");
         }
-        for value in ["", "enabled", "2"] {
+        for value in ["enabled", "2"] {
             assert!(parse_bool(value).is_err(), "value={value}");
         }
     }

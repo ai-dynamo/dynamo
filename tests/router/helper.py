@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import aiohttp
-import nats
 
 from dynamo.llm import KvRouter
 from dynamo.runtime import DistributedRuntime
@@ -24,9 +23,23 @@ NUM_REQUESTS = 100
 BLOCK_SIZE = 16
 
 
-def _nats_server() -> str:
-    # Prefer dynamically-started NATS from per-test fixtures when present.
-    return os.environ.get("NATS_SERVER", "nats://localhost:4222")
+def parse_sse_json_chunks(body: str) -> list[dict[str, Any]]:
+    """Decode JSON objects from single-line SSE data fields."""
+    chunks = []
+    for line in body.splitlines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if not data or data == "[DONE]":
+            continue
+        try:
+            chunk = json.loads(data)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(chunk, dict):
+            chunks.append(chunk)
+    return chunks
 
 
 def generate_random_suffix() -> str:
@@ -597,49 +610,6 @@ def managed_runtime(
         yield runtime
     finally:
         runtime.shutdown()
-
-
-async def check_nats_consumers(namespace: str, expected_count: Optional[int] = None):
-    """Check NATS consumers for the KV events stream.
-
-    Args:
-        namespace: The namespace to check consumers for
-        expected_count: Optional expected number of consumers. If provided, asserts if count doesn't match.
-
-    Returns:
-        List of consumer names
-    """
-    component_subject = f"namespace.{namespace}.component.mocker"
-    slugified = component_subject.lower().replace(".", "-").replace("_", "-")
-    stream_name = f"{slugified}-kv-events"
-    logger.info(f"Checking consumers for stream: {stream_name}")
-
-    nc = await nats.connect(servers=_nats_server())
-    try:
-        js = nc.jetstream()
-        consumer_infos = await js.consumers_info(stream_name)
-        consumer_names = [info.name for info in consumer_infos]
-        logger.info(f"Found {len(consumer_names)} consumers: {consumer_names}")
-
-        # Log detailed consumer info
-        for info in consumer_infos:
-            logger.info(
-                f"Consumer {info.name}: "
-                f"num_pending={info.num_pending}, "
-                f"num_ack_pending={info.num_ack_pending}, "
-                f"ack_floor={info.ack_floor}, "
-                f"delivered={info.delivered}"
-            )
-
-        if expected_count is not None:
-            assert (
-                len(consumer_names) == expected_count
-            ), f"Expected {expected_count} durable consumers, found {len(consumer_names)}: {consumer_names}"
-            logger.info(f"✓ Verified {expected_count} durable consumers exist")
-
-        return consumer_names
-    finally:
-        await nc.close()
 
 
 async def send_inflight_requests(urls: list, payload: dict, num_requests: int):

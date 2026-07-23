@@ -33,8 +33,8 @@ async def _warmup_prefill_engine(engine: sgl.Engine, server_args) -> None:
     """Perform warmup request for prefill engine to reduce initial TTFT.
 
     Raises on failure so the caller can prevent the worker from registering
-    with a broken engine (silent request drops). Shared with the unified
-    backend (`dynamo.sglang.llm_engine`) via `_disagg.warmup_prefill_engine`.
+    with a broken engine (silent request drops). Delegates to
+    `_disagg.warmup_prefill_engine`.
     """
     from dynamo.sglang._disagg import warmup_prefill_engine
 

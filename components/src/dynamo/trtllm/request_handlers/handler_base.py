@@ -37,6 +37,7 @@ from dynamo._core import Client, Context
 from dynamo.common.backend import logprobs as _shared_logprobs
 from dynamo.common.backend.engine import is_generation_stage
 from dynamo.common.constants import DisaggregationMode as CommonDisaggregationMode
+from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.health_check import HEALTH_CHECK_KEY
 from dynamo.llm.exceptions import EngineShutdown
@@ -63,6 +64,7 @@ from dynamo.trtllm.utils.disagg_utils import (
 )
 from dynamo.trtllm.utils.request_utils import (
     apply_stop_conditions_to_sampling_params,
+    normalize_top_k_for_trtllm,
     request_cache_salt,
 )
 
@@ -247,6 +249,8 @@ class RequestHandlerConfig:
     additional_metrics: Optional["AdditionalMetricsCollector"] = None
     max_seq_len: Optional[int] = None
     disagg_machine_id: int = 0  # 10-bit machine_id for snowflake disagg_request_id
+    # Force engine-owned conversation-affinity ADP routing regardless of engine detection.
+    conversation_affinity: bool = False
 
 
 class HandlerBase(BaseGenerativeHandler):
@@ -271,6 +275,9 @@ class HandlerBase(BaseGenerativeHandler):
         # request (engine may not be initialized at handler construction). See
         # conversation_affinity.py. None = not yet resolved.
         self._conversation_affinity: Optional[bool] = None
+        # Manual override (--conversation-affinity / DYN_ENGINE_CONV_AFFINITY) to force
+        # engine-side assignment of conversation-affinity regardless of engine detection.
+        self._engine_conversation_affinity_override: bool = config.conversation_affinity
         self.encode_client = config.encode_client
         self.multimodal_processor = config.multimodal_processor
         self.first_generation = True
@@ -948,6 +955,8 @@ class HandlerBase(BaseGenerativeHandler):
             embeddings: Optional tensor or dict containing embeddings for multimodal processing
             ep_disaggregated_params: Optional DisaggregatedParams from encode worker (full EPD flow)
         """
+        reject_unsupported_multimodal_uuids(request.get("multi_modal_uuids"))
+
         request_token_ids = request.get("token_ids")
         logging.debug(
             "Request summary: token_ids=%s keys=%s has_embeddings=%s has_ep_disaggregated_params=%s",
@@ -1110,8 +1119,18 @@ class HandlerBase(BaseGenerativeHandler):
         # initialized by first request). When on, the engine's ConversationAwareADPRouter
         # picks the attention-DP rank from the conversation id, so we must NOT force a rank.
         if self._conversation_affinity is None:
-            self._conversation_affinity = engine_conversation_affinity_enabled(
-                self.engine.llm
+            if (
+                self._engine_conversation_affinity_override
+                and not CONVERSATION_PARAMS_AVAILABLE
+            ):
+                raise RuntimeError(
+                    "--conversation-affinity / DYN_ENGINE_CONV_AFFINITY is set but "
+                    "the installed TensorRT-LLM build has no ConversationParams API (requires a "
+                    "release newer than 1.3.0rc20)."
+                )
+            self._conversation_affinity = (
+                self._engine_conversation_affinity_override
+                or engine_conversation_affinity_enabled(self.engine.llm)
             )
             if self._conversation_affinity and not CONVERSATION_PARAMS_AVAILABLE:
                 raise RuntimeError(
@@ -1421,6 +1440,8 @@ class HandlerBase(BaseGenerativeHandler):
             for key, value in request["sampling_options"].items()
             if value is not None
         }
+        if "top_k" in overrides:
+            overrides["top_k"] = normalize_top_k_for_trtllm(overrides["top_k"])
 
         # Convert guided_decoding dict (from Rust serialization) to GuidedDecodingParams.
         # Explicit field mapping avoids breakage if either side adds fields the other

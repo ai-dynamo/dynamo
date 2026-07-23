@@ -20,6 +20,7 @@ if not torch.cuda.is_available():
 
 from dynamo.common.http import HttpStatusError
 from dynamo.common.http.url_validator import UrlValidationError
+from dynamo.trtllm import multimodal_processor as mmp
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 
 pytestmark = [
@@ -57,3 +58,31 @@ async def test_client_errors_propagate(error) -> None:
         await processor.process_openai_request(
             request, embeddings=None, ep_disaggregated_params=None
         )
+
+
+@pytest.mark.asyncio
+async def test_internal_video_uses_dynamo_fetcher_when_allowed(monkeypatch) -> None:
+    monkeypatch.setenv("DYN_MM_ALLOW_INTERNAL", "1")
+    processor = MultimodalRequestProcessor(
+        model_type="multimodal",
+        model_dir="unused",
+        max_file_size_mb=10,
+        tokenizer=MagicMock(),
+    )
+    fetch = AsyncMock(return_value=b"video bytes")
+    load_video = AsyncMock(return_value=object())
+    monkeypatch.setattr(mmp, "fetch_bytes", fetch, raising=False)
+    monkeypatch.setattr(mmp, "async_load_video", load_video)
+    url = "http://169.254.169.254/latest/meta-data/"
+
+    await processor.process_openai_request(
+        {
+            "multi_modal_data": {"video_url": [{"Url": url}]},
+            "token_ids": [1],
+        },
+        embeddings=None,
+        ep_disaggregated_params=None,
+    )
+
+    fetch.assert_awaited_once_with(url, 30.0, policy=processor._url_policy)
+    assert load_video.await_args.args[0] != url

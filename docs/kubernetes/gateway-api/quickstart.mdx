@@ -20,7 +20,7 @@ flowchart LR
     Pool -->|"calls"| EPP["Dynamo EPP"]
     EPP -->|"selects worker"| Sidecar["Frontend sidecar<br/>--router-mode direct"]
     Sidecar -->|"forwards"| Worker["Dynamo vLLM worker"]
-    Worker -. "publishes KV events" .-> Runtime["Dynamo runtime<br/>NATS/JetStream"]
+    Worker -. "publishes KV events" .-> Runtime["Dynamo runtime<br/>NATS Core event plane"]
     Runtime -. "updates routing state" .-> EPP
 
     DGD["DynamoGraphDeployment"] -->|"declares graph"| Operator["Dynamo operator"]

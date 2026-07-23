@@ -20,7 +20,7 @@ from typing import Optional
 
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.connectors.base import PlannerConnector
-from dynamo.planner.connectors.kubernetes_api import (
+from dynamo.planner.connectors.clients.kubernetes_api import (
     DYNAMO_WORKER_METADATA_API_VERSION,
     NVIDIA_API_GROUP,
     KubernetesAPI,
@@ -91,6 +91,10 @@ class KubernetesConnector(PlannerConnector):
         # For backwards compatibility
         self.graph_deployment_name = self.parent_dgd_name
         self.raise_not_ready = raise_not_ready
+
+    async def async_init(self):
+        """No-op asynchronous lifecycle hook."""
+        return
 
     def get_worker_runtime_namespace(self, base_dynamo_namespace: str) -> str:
         """Return the Dynamo namespace used by the current worker generation.
@@ -238,8 +242,10 @@ class KubernetesConnector(PlannerConnector):
                 errors.append(str(e))
 
         try:
-            self.get_model_name(
+            self._get_model_name_from_deployment(
                 deployment,
+                prefill_component_name=prefill_component_name,
+                decode_component_name=decode_component_name,
                 require_prefill=require_prefill,
                 require_decode=require_decode,
             )
@@ -252,17 +258,36 @@ class KubernetesConnector(PlannerConnector):
 
     def get_model_name(
         self,
-        deployment: Optional[dict] = None,
         require_prefill: bool = True,
         require_decode: bool = True,
     ) -> str:
-        """Get the model name from the deployment"""
+        """Get the model name from the current deployment."""
         try:
-            if deployment is None:
-                deployment = self.kube_api.get_graph_deployment(
-                    self.graph_deployment_name
+            deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
+        except PlannerError as e:
+            if self.user_provided_model_name:
+                logger.warning(
+                    f"Failed to get model name from deployment with error: {e}, using provided model name: {self.user_provided_model_name}"
                 )
+                return self.user_provided_model_name
+            raise
 
+        return self._get_model_name_from_deployment(
+            deployment,
+            require_prefill=require_prefill,
+            require_decode=require_decode,
+        )
+
+    def _get_model_name_from_deployment(
+        self,
+        deployment: dict,
+        require_prefill: bool = True,
+        require_decode: bool = True,
+        prefill_component_name: Optional[str] = None,
+        decode_component_name: Optional[str] = None,
+    ) -> str:
+        """Get the model name from an already-fetched deployment."""
+        try:
             # TODO: dynamo/profiler/utils/config.py already contains DGD config parsing
             # and model name logic, should consolidate
             prefill_model_name = None
@@ -271,12 +296,14 @@ class KubernetesConnector(PlannerConnector):
                 prefill_service = get_component_from_type_or_name(
                     deployment,
                     SubComponentType.PREFILL,
+                    component_name=prefill_component_name,
                 )
                 prefill_model_name = prefill_service.get_model_name()
             if require_decode:
                 decode_service = get_component_from_type_or_name(
                     deployment,
                     SubComponentType.DECODE,
+                    component_name=decode_component_name,
                 )
                 decode_model_name = decode_service.get_model_name()
 
@@ -318,14 +345,27 @@ class KubernetesConnector(PlannerConnector):
 
     def get_gpu_counts(
         self,
-        deployment: Optional[dict] = None,
         require_prefill: bool = True,
         require_decode: bool = True,
     ) -> tuple[int, int]:
-        """Get the GPU counts for prefill and decode components from the deployment.
+        """Get the GPU counts for prefill and decode components."""
+        deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
+        return self._get_gpu_counts_from_deployment(
+            deployment,
+            require_prefill=require_prefill,
+            require_decode=require_decode,
+        )
+
+    def _get_gpu_counts_from_deployment(
+        self,
+        deployment: dict,
+        require_prefill: bool = True,
+        require_decode: bool = True,
+    ) -> tuple[int, int]:
+        """Get GPU counts from an already-fetched deployment.
 
         Args:
-            deployment: Optional deployment dict, fetched if not provided
+            deployment: Deployment dict to inspect
             require_prefill: Whether to require a prefill component
             require_decode: Whether to require a decode component
 
@@ -335,9 +375,6 @@ class KubernetesConnector(PlannerConnector):
         Raises:
             DeploymentValidationError: If GPU counts cannot be determined from DGD
         """
-        if deployment is None:
-            deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
-
         prefill_gpu_count = 0
         decode_gpu_count = 0
         errors = []
@@ -425,21 +462,41 @@ class KubernetesConnector(PlannerConnector):
                 return []
             raise
 
+    def _get_dgd_component_names(self) -> list[str]:
+        """Return the Kubernetes component names reported in DGD status.
+
+        Grove may truncate and hash long DGD names when it creates component
+        resources. These status names reflect the names actually used by the
+        worker pods and their DynamoWorkerMetadata CRs.
+        """
+        deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
+        component_statuses = deployment.get("status", {}).get("components", {}) or {}
+        return [
+            component_name
+            for component_status in component_statuses.values()
+            for component_name in component_status.get("componentNames", []) or []
+        ]
+
     def _extract_mdc_entries(self) -> list[MdcEntry]:
         """Extract MDC entries belonging to this DGD.
 
-        CRs are named after the worker pod (e.g. ``<dgd>-0-<service>-<hash>``),
-        so we filter by the DGD name prefix to avoid picking up entries from
-        other deployments sharing the namespace.  LoRA-adapter wrappers are
-        dropped via :func:`is_model_card`.
+        CRs are named after the worker pod. Match the DGD name prefix and the
+        actual component names from DGD status because Grove may truncate and
+        hash a long DGD name. LoRA-adapter wrappers are dropped via
+        :func:`is_model_card`.
         """
         crs = self._list_worker_metadata_crs()
+        component_names = self._get_dgd_component_names()
         dgd_prefix = f"{self.graph_deployment_name}-"
 
         entries: list[MdcEntry] = []
         for cr in crs:
             cr_name = cr.get("metadata", {}).get("name", "")
-            if not cr_name.startswith(dgd_prefix):
+            belongs_to_dgd = cr_name.startswith(dgd_prefix) or any(
+                cr_name == component_name or cr_name.startswith(f"{component_name}-")
+                for component_name in component_names
+            )
+            if not belongs_to_dgd:
                 continue
 
             data = cr.get("spec", {}).get("data", {})
@@ -567,7 +624,8 @@ class KubernetesConnector(PlannerConnector):
         )
         return info
 
-    def get_actual_worker_counts(
+    # todo -> how are we handling 3 active 2 more new workers pending?
+    async def get_actual_worker_counts(
         self,
         prefill_component_name: Optional[str] = None,
         decode_component_name: Optional[str] = None,

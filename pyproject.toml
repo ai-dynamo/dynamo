@@ -48,7 +48,7 @@ Repository = "https://github.com/ai-dynamo/dynamo.git"
 [project.optional-dependencies]
 trtllm =[
     "uvloop",
-    "tensorrt-llm==1.3.0rc20",
+    "tensorrt-llm==1.3.0rc21",
     # tensorrt-llm declares an uncapped `mpmath>=1.3.0`; under `--pre` the resolver
     # picks mpmath 1.5.0a0 (mpmath.libmp.bitcount removed) and backtracks sympy to
     # the uncapped 1.14.0rc1, which still imports bitcount -> torch._dynamo dies at
@@ -82,7 +82,9 @@ sglang = [
 
 mocker = [
     # No direct URL: it blocks the wheel release (PyPI/Warehouse rejects direct references).
-    "aiconfigurator>=0.9.0",
+    # Cap below 0.10: the 0.10 SDK/CLI API and AIC Rust engine wire-format
+    # broke the profiler; lift the cap when the 0.10 migration lands.
+    "aiconfigurator>=0.9.0,<0.10.0",
 ]
 
 [project.entry-points.pytest11]
@@ -310,8 +312,7 @@ markers = [
     "framework_only: marks standard framework deployment tests (vllm, sglang, trtllm)",
     "framework_with_gaie: marks tests for GAIE (Gateway API Inference Extension) deployment",
     "dynamocheckpoint: marks tests for the DynamoCheckpoint controller deploy path",
-    "unified: marks unified-backend e2e tests (LLMEngine ABC + Worker, DEP #8251)",
-    "elastic_ep: marks vLLM elastic expert-parallelism (ePLB) scaling tests (scale_elastic_ep over the Ray DP backend)",
+    "unified: marks common backend-interface e2e tests (BaseEngine + Worker)",
     # Built-in markers
     "skip: skip this test",
     "skipif: skip if condition is true",

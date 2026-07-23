@@ -28,7 +28,15 @@ python -m dynamo.router \
 - `--endpoint`: Full endpoint path for workers in the format `namespace.component.endpoint` (e.g., `dynamo.prefill.generate`)
 
 **Router Configuration:**
-All router options use the `--router-*` prefix (e.g., `--router-block-size`, `--router-kv-overlap-score-credit`, `--router-prefill-load-scale`, `--router-temperature`, `--router-kv-events` / `--no-router-kv-events`, `--router-replica-sync`, `--router-snapshot-threshold`, `--router-reset-states`, `--router-track-active-blocks` / `--no-router-track-active-blocks`, `--router-track-prefill-tokens` / `--no-router-track-prefill-tokens`). `--load-aware` is a preset for KV active-load routing without cache-reuse signals. On the frontend, it implies `--router-mode kv`. Legacy names without the prefix (e.g., `--block-size`, `--kv-events`) are still accepted but deprecated. For detailed descriptions, see [Configuration and Tuning](/docs/components/router/router-configuration.md).
+Most KV tuning options use the `--router-*` prefix, but shared options such as
+`--load-aware`, `--serve-indexer`, `--use-remote-indexer`, and `--shared-cache-*` do
+not. Standalone-only options include `--endpoint` and `--router-block-size`. Legacy
+names such as `--block-size` and `--kv-events` are still accepted but deprecated.
+Run `python -m dynamo.router --help` for the standalone command surface. The
+[Frontend Configuration Reference](/docs/components/frontend/configuration.md#router)
+is the canonical reference for shared embedded-router flags and environment variables;
+see [Configuration and Tuning](/docs/components/router/router-configuration.md) for
+behavioral guidance.
 
 ## Architecture
 

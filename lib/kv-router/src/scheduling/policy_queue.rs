@@ -3,14 +3,21 @@
 
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, BinaryHeap};
+use std::time::Duration;
 
 use ordered_float::OrderedFloat;
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
+use tokio::time::Instant;
 
 use super::config::RouterQueuePolicy;
 use super::policy_config::{PolicyClassConfig, PolicyProfile};
-use super::queue_admission::WorkerPlacement;
+use super::queue_admission::{
+    AdmissionDecision, AdmissionEvent, AdmissionId, AdmissionRequest, AdmissionTicket,
+    ClassAdmissionAction, PolicyClassAdmissionPolicies, PolicyClassAdmissionPolicy,
+    RequestProgress, RequestProgressUpdater, WorkerEligibility, WorkerPlacement,
+};
+use super::types::KvSchedulerError;
 use crate::protocols::WorkerWithDpRank;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -189,7 +196,9 @@ impl PartialOrd for WorkerLaneHead {
 
 struct PolicyClassQueue<T> {
     config: PolicyClassConfig,
+    admission_policy: Option<ScheduledAdmissionPolicy>,
     pending: BinaryHeap<PolicyQueueEntry<T>>,
+    deferred: FxHashMap<AdmissionId, PolicyQueueEntry<T>>,
     stats: PolicyQueueStats,
     deficit: usize,
     ready_by_worker: FxHashMap<WorkerWithDpRank, BinaryHeap<PolicyQueueEntry<T>>>,
@@ -198,8 +207,14 @@ struct PolicyClassQueue<T> {
     needs_blocked_worker_recheck: bool,
 }
 
+struct ScheduledAdmissionPolicy {
+    policy: Box<dyn PolicyClassAdmissionPolicy>,
+    reconcile_interval: Duration,
+    next_reconcile: Instant,
+}
+
 impl<T> PolicyClassQueue<T> {
-    fn is_empty(&self) -> bool {
+    fn ready_is_empty(&self) -> bool {
         self.pending.is_empty() && self.ready_by_worker.is_empty()
     }
 
@@ -207,6 +222,7 @@ impl<T> PolicyClassQueue<T> {
         self.pending
             .iter()
             .chain(self.ready_by_worker.values().flat_map(|ready| ready.iter()))
+            .chain(self.deferred.values())
     }
 
     fn push_ready(&mut self, placement: WorkerPlacement, entry: PolicyQueueEntry<T>) {
@@ -417,8 +433,14 @@ pub struct PolicyQueue<T> {
     round_cursor: usize,
     carry_class: Option<usize>,
     next_enqueue_seq: u64,
+    next_admission_id: u64,
     pending_count: usize,
     candidates: Vec<Option<DispatchCandidate>>,
+}
+
+enum QueueEntryState {
+    Ready(WorkerPlacement),
+    Deferred(AdmissionId),
 }
 
 impl<T> PolicyQueue<T> {
@@ -431,7 +453,9 @@ impl<T> PolicyQueue<T> {
                 .cloned()
                 .map(|config| PolicyClassQueue {
                     config,
+                    admission_policy: None,
                     pending: BinaryHeap::new(),
+                    deferred: FxHashMap::default(),
                     ready_by_worker: FxHashMap::default(),
                     blocked_workers: FxHashSet::default(),
                     candidate_worker_heads: BTreeSet::new(),
@@ -443,13 +467,183 @@ impl<T> PolicyQueue<T> {
             round_cursor: 0,
             carry_class: None,
             next_enqueue_seq: 0,
+            next_admission_id: 0,
             pending_count: 0,
             candidates: vec![None; class_count],
         }
     }
 
+    pub(crate) fn new_with_admission_policies(
+        profile: PolicyProfile,
+        queue_recheck_interval: Duration,
+        mut policies: PolicyClassAdmissionPolicies,
+    ) -> Result<Self, KvSchedulerError> {
+        let mut queue = Self::new(profile);
+        let now = Instant::now();
+        for class in &mut queue.classes {
+            let Some(policy) = policies.remove(&class.config.name) else {
+                if class.config.admission.is_some() {
+                    return Err(KvSchedulerError::InitFailed(format!(
+                        "no admission policy registered for configured policy class {:?}",
+                        class.config.name
+                    )));
+                }
+                continue;
+            };
+            let reconcile_interval = policy
+                .reconcile_interval()
+                .map_or(queue_recheck_interval, |requested| {
+                    requested.min(queue_recheck_interval)
+                });
+            if reconcile_interval.is_zero() {
+                return Err(KvSchedulerError::InitFailed(format!(
+                    "admission policy for policy class {:?} has a zero reconcile interval",
+                    class.config.name
+                )));
+            }
+            class.admission_policy = Some(ScheduledAdmissionPolicy {
+                policy,
+                reconcile_interval,
+                next_reconcile: now + reconcile_interval,
+            });
+        }
+        if let Some(class_name) = policies.keys().next() {
+            return Err(KvSchedulerError::InitFailed(format!(
+                "admission policy registered for unknown policy class {class_name:?}"
+            )));
+        }
+        Ok(queue)
+    }
+
+    pub(crate) fn has_admission_policy(&self, class_index: usize) -> bool {
+        self.classes[class_index].admission_policy.is_some()
+    }
+
+    pub(crate) fn admit(
+        &mut self,
+        class_index: usize,
+        session_id: Option<&str>,
+        context_tokens: usize,
+        worker_eligibility: WorkerEligibility,
+    ) -> Option<(AdmissionTicket, RequestProgressUpdater, AdmissionDecision)> {
+        let policy = &mut self.classes[class_index].admission_policy.as_mut()?.policy;
+        let id = AdmissionId::new(self.next_admission_id);
+        self.next_admission_id = self.next_admission_id.wrapping_add(1);
+        let ticket = AdmissionTicket { class_index, id };
+        let (progress, updater) = RequestProgress::new(context_tokens);
+        let decision = policy.admit(AdmissionRequest::with_progress(
+            id,
+            session_id,
+            progress,
+            worker_eligibility,
+        ));
+        Some((ticket, updater, decision))
+    }
+
+    pub(crate) fn dispatched(
+        &mut self,
+        ticket: AdmissionTicket,
+        worker: WorkerWithDpRank,
+    ) -> Vec<ClassAdmissionAction> {
+        self.admission_event(
+            ticket,
+            AdmissionEvent::Dispatched {
+                id: ticket.id,
+                worker,
+            },
+        )
+    }
+
+    pub(crate) fn completed(
+        &mut self,
+        ticket: AdmissionTicket,
+        context_tokens: usize,
+    ) -> Vec<ClassAdmissionAction> {
+        self.admission_event(
+            ticket,
+            AdmissionEvent::Completed {
+                id: ticket.id,
+                context_tokens,
+            },
+        )
+    }
+
+    pub(crate) fn aborted(&mut self, ticket: AdmissionTicket) -> Vec<ClassAdmissionAction> {
+        self.admission_event(ticket, AdmissionEvent::Aborted { id: ticket.id })
+    }
+
+    pub(crate) fn reconcile_admission(
+        &mut self,
+        now: Instant,
+        force: bool,
+    ) -> Vec<ClassAdmissionAction> {
+        let mut actions = Vec::new();
+        for (class_index, class) in self.classes.iter_mut().enumerate() {
+            let Some(scheduled) = &mut class.admission_policy else {
+                continue;
+            };
+            if !force && now < scheduled.next_reconcile {
+                continue;
+            }
+            if now >= scheduled.next_reconcile {
+                scheduled.next_reconcile = now + scheduled.reconcile_interval;
+            }
+            actions.extend(
+                scheduled
+                    .policy
+                    .on_event(AdmissionEvent::Reconcile)
+                    .into_iter()
+                    .map(|action| ClassAdmissionAction {
+                        class_index,
+                        action,
+                    }),
+            );
+        }
+        actions
+    }
+
+    fn admission_event(
+        &mut self,
+        ticket: AdmissionTicket,
+        event: AdmissionEvent,
+    ) -> Vec<ClassAdmissionAction> {
+        let Some(scheduled) = &mut self.classes[ticket.class_index].admission_policy else {
+            return Vec::new();
+        };
+        scheduled
+            .policy
+            .on_event(event)
+            .into_iter()
+            .map(|action| ClassAdmissionAction {
+                class_index: ticket.class_index,
+                action,
+            })
+            .collect()
+    }
+
     pub fn pending_count(&self) -> usize {
         self.pending_count
+    }
+
+    pub(crate) fn has_ready(&self) -> bool {
+        self.classes.iter().any(|class| !class.ready_is_empty())
+    }
+
+    pub(crate) fn any_ready_head(
+        &self,
+        mut predicate: impl FnMut(usize, &PolicyClassConfig, &T) -> bool,
+    ) -> bool {
+        self.classes.iter().enumerate().any(|(class_index, class)| {
+            class
+                .pending
+                .peek()
+                .is_some_and(|entry| predicate(class_index, &class.config, entry.payload()))
+                || class.ready_by_worker.values().any(|ready| {
+                    ready
+                        .peek()
+                        .is_some_and(|entry| predicate(class_index, &class.config, entry.payload()))
+                })
+        })
     }
 
     pub fn class_count(&self) -> usize {
@@ -477,7 +671,7 @@ impl<T> PolicyQueue<T> {
     }
 
     pub fn has_backlog(&self, class_index: usize) -> bool {
-        !self.classes[class_index].is_empty()
+        !self.classes[class_index].ready_is_empty()
     }
 
     pub fn entries(&self) -> impl Iterator<Item = &PolicyQueueEntry<T>> {
@@ -487,25 +681,8 @@ impl<T> PolicyQueue<T> {
     /// Remove queued entries that no longer satisfy `keep`, rebuilding queue
     /// accounting while preserving each retained entry's scheduling key.
     pub fn retain(&mut self, mut keep: impl FnMut(&T) -> bool) {
-        self.pending_count = 0;
-        for class in &mut self.classes {
-            class.pending.retain(|entry| keep(entry.payload()));
-            class.ready_by_worker.retain(|_, ready| {
-                ready.retain(|entry| keep(entry.payload()));
-                !ready.is_empty()
-            });
-            class.rebuild_worker_heads();
-            let mut stats = PolicyQueueStats::default();
-            let mut count = 0;
-            for entry in class.entries() {
-                add_stats(&mut stats, entry.snapshot);
-                count += 1;
-            }
-            class.stats = stats;
-            self.pending_count += count;
-            if class.is_empty() {
-                class.deficit = 0;
-            }
+        for class_index in 0..self.classes.len() {
+            drop(self.take_if_in_class(class_index, |payload| !keep(payload)));
         }
     }
 
@@ -521,6 +698,54 @@ impl<T> PolicyQueue<T> {
         priority_jump: f64,
         strict_priority: u32,
         placement: WorkerPlacement,
+        payload: T,
+    ) -> Result<(), (QueueRejection, T)> {
+        self.enqueue_with_state(
+            class_index,
+            worker_count,
+            snapshot,
+            arrival_offset_secs,
+            priority_jump,
+            strict_priority,
+            QueueEntryState::Ready(placement),
+            payload,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn enqueue_deferred(
+        &mut self,
+        class_index: usize,
+        worker_count: usize,
+        snapshot: QueueSnapshot,
+        arrival_offset_secs: f64,
+        priority_jump: f64,
+        strict_priority: u32,
+        admission_id: AdmissionId,
+        payload: T,
+    ) -> Result<(), (QueueRejection, T)> {
+        self.enqueue_with_state(
+            class_index,
+            worker_count,
+            snapshot,
+            arrival_offset_secs,
+            priority_jump,
+            strict_priority,
+            QueueEntryState::Deferred(admission_id),
+            payload,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn enqueue_with_state(
+        &mut self,
+        class_index: usize,
+        worker_count: usize,
+        snapshot: QueueSnapshot,
+        arrival_offset_secs: f64,
+        priority_jump: f64,
+        strict_priority: u32,
+        state: QueueEntryState,
         payload: T,
     ) -> Result<(), (QueueRejection, T)> {
         let class = &mut self.classes[class_index];
@@ -540,9 +765,159 @@ impl<T> PolicyQueue<T> {
         );
         self.next_enqueue_seq = self.next_enqueue_seq.wrapping_add(1);
         add_stats(&mut class.stats, snapshot);
-        class.push_ready(placement, entry);
+        match state {
+            QueueEntryState::Ready(placement) => class.push_ready(placement, entry),
+            QueueEntryState::Deferred(admission_id) => {
+                let replaced = class.deferred.insert(admission_id, entry);
+                debug_assert!(replaced.is_none(), "duplicate deferred admission ID");
+            }
+        }
         self.pending_count += 1;
         Ok(())
+    }
+
+    pub(crate) fn make_ready(
+        &mut self,
+        source_class_index: usize,
+        target_class_index: usize,
+        admission_id: AdmissionId,
+        placement: WorkerPlacement,
+        replacement_snapshot: Option<(QueueSnapshot, f64, f64)>,
+    ) -> Option<QueueSnapshot> {
+        if source_class_index == target_class_index {
+            let class = &mut self.classes[source_class_index];
+            let mut entry = class.deferred.remove(&admission_id)?;
+            let old_snapshot = entry.snapshot;
+            if let Some((snapshot, arrival_offset_secs, priority_jump)) = replacement_snapshot {
+                subtract_stats(&mut class.stats, old_snapshot);
+                add_stats(&mut class.stats, snapshot);
+                entry.priority.policy_score = OrderedFloat(queue_policy_score(
+                    class.config.queue_policy,
+                    snapshot,
+                    arrival_offset_secs,
+                    priority_jump,
+                ));
+                entry.snapshot = snapshot;
+            }
+            class.push_ready(placement, entry);
+            return Some(old_snapshot);
+        }
+
+        let source = &mut self.classes[source_class_index];
+        let mut entry = source.deferred.remove(&admission_id)?;
+        let old_snapshot = entry.snapshot;
+        subtract_stats(&mut source.stats, old_snapshot);
+        if source.ready_is_empty() {
+            source.deficit = 0;
+        }
+
+        let (snapshot, arrival_offset_secs, priority_jump) = replacement_snapshot
+            .expect("cross-class exact placement must replace the queue snapshot");
+        entry.class_index = target_class_index;
+        entry.snapshot = snapshot;
+        let target = &mut self.classes[target_class_index];
+        entry.priority.policy_score = OrderedFloat(queue_policy_score(
+            target.config.queue_policy,
+            snapshot,
+            arrival_offset_secs,
+            priority_jump,
+        ));
+        add_stats(&mut target.stats, snapshot);
+        target.push_ready(placement, entry);
+        Some(old_snapshot)
+    }
+
+    pub(crate) fn deferred_payload_mut(
+        &mut self,
+        class_index: usize,
+        admission_id: AdmissionId,
+    ) -> Option<&mut T> {
+        self.classes[class_index]
+            .deferred
+            .get_mut(&admission_id)
+            .map(PolicyQueueEntry::payload_mut)
+    }
+
+    pub(crate) fn remove_deferred(
+        &mut self,
+        class_index: usize,
+        admission_id: AdmissionId,
+    ) -> Option<PolicyQueueEntry<T>> {
+        let class = &mut self.classes[class_index];
+        let entry = class.deferred.remove(&admission_id)?;
+        subtract_stats(&mut class.stats, entry.snapshot);
+        self.pending_count -= 1;
+        if class.ready_is_empty() {
+            class.deficit = 0;
+        }
+        Some(entry)
+    }
+
+    pub(crate) fn take_if_in_class(
+        &mut self,
+        class_index: usize,
+        mut predicate: impl FnMut(&T) -> bool,
+    ) -> (Vec<PolicyQueueEntry<T>>, bool) {
+        let class = &mut self.classes[class_index];
+        let remove_sequences: FxHashSet<u64> = class
+            .entries()
+            .filter(|entry| predicate(entry.payload()))
+            .map(|entry| entry.enqueue_seq)
+            .collect();
+        if remove_sequences.is_empty() {
+            return (Vec::new(), false);
+        }
+
+        let removed_ready_head = class
+            .pending
+            .peek()
+            .is_some_and(|entry| remove_sequences.contains(&entry.enqueue_seq))
+            || class.ready_by_worker.values().any(|ready| {
+                ready
+                    .peek()
+                    .is_some_and(|entry| remove_sequences.contains(&entry.enqueue_seq))
+            });
+
+        let mut removed = Vec::new();
+        let mut retained = Vec::with_capacity(class.pending.len());
+        for entry in class.pending.drain() {
+            if remove_sequences.contains(&entry.enqueue_seq) {
+                removed.push(entry);
+            } else {
+                retained.push(entry);
+            }
+        }
+        class.pending = BinaryHeap::from(retained);
+
+        removed.extend(
+            class
+                .deferred
+                .extract_if(|_, entry| remove_sequences.contains(&entry.enqueue_seq))
+                .map(|(_, entry)| entry),
+        );
+
+        class.ready_by_worker.retain(|_, ready| {
+            let mut retained = Vec::with_capacity(ready.len());
+            for entry in ready.drain() {
+                if remove_sequences.contains(&entry.enqueue_seq) {
+                    removed.push(entry);
+                } else {
+                    retained.push(entry);
+                }
+            }
+            *ready = BinaryHeap::from(retained);
+            !ready.is_empty()
+        });
+        class.rebuild_worker_heads();
+
+        for entry in &removed {
+            subtract_stats(&mut class.stats, entry.snapshot);
+            self.pending_count -= 1;
+        }
+        if class.ready_is_empty() {
+            class.deficit = 0;
+        }
+        (removed, removed_ready_head)
     }
 
     /// Runs one DRR ring pass over dispatchable class heads. If no head has
@@ -570,7 +945,7 @@ impl<T> PolicyQueue<T> {
                 return Some(self.pop_candidate(class_index, candidate));
             }
             self.candidates[class_index] = candidate;
-            if class.is_empty() {
+            if class.ready_is_empty() {
                 class.deficit = 0;
             }
         }
@@ -586,7 +961,7 @@ impl<T> PolicyQueue<T> {
                 class.next_dispatchable(class_index, &mut is_dispatchable)
             };
             let Some(candidate) = candidate else {
-                if class.is_empty() {
+                if class.ready_is_empty() {
                     class.deficit = 0;
                 }
                 continue;
@@ -651,6 +1026,7 @@ impl<T> PolicyQueue<T> {
                 .pending
                 .into_iter()
                 .chain(class.ready_by_worker.into_values().flatten())
+                .chain(class.deferred.into_values())
         })
     }
 
@@ -667,7 +1043,7 @@ impl<T> PolicyQueue<T> {
             .saturating_sub(entry.snapshot.scheduling_cost_tokens);
         subtract_stats(&mut class.stats, entry.snapshot);
         self.pending_count -= 1;
-        if class.is_empty() {
+        if class.ready_is_empty() {
             class.deficit = 0;
         } else {
             self.carry_class = (class.deficit > 0).then_some(class_index);
@@ -687,13 +1063,8 @@ fn make_entry<T>(
     enqueue_seq: u64,
     payload: T,
 ) -> PolicyQueueEntry<T> {
-    let policy_score = match queue_policy {
-        RouterQueuePolicy::Fcfs => priority_jump.max(0.0) - arrival_offset_secs.max(0.0),
-        RouterQueuePolicy::Wspt => {
-            (1.0 + priority_jump.max(0.0)) / snapshot.scheduling_cost_tokens as f64
-        }
-        RouterQueuePolicy::Lcfs => priority_jump.max(0.0) + arrival_offset_secs.max(0.0),
-    };
+    let policy_score =
+        queue_policy_score(queue_policy, snapshot, arrival_offset_secs, priority_jump);
     PolicyQueueEntry {
         class_index,
         priority: QueuePriority {
@@ -703,6 +1074,21 @@ fn make_entry<T>(
         enqueue_seq,
         snapshot,
         payload,
+    }
+}
+
+fn queue_policy_score(
+    queue_policy: RouterQueuePolicy,
+    snapshot: QueueSnapshot,
+    arrival_offset_secs: f64,
+    priority_jump: f64,
+) -> f64 {
+    match queue_policy {
+        RouterQueuePolicy::Fcfs => priority_jump.max(0.0) - arrival_offset_secs.max(0.0),
+        RouterQueuePolicy::Wspt => {
+            (1.0 + priority_jump.max(0.0)) / snapshot.scheduling_cost_tokens as f64
+        }
+        RouterQueuePolicy::Lcfs => priority_jump.max(0.0) + arrival_offset_secs.max(0.0),
     }
 }
 
@@ -754,8 +1140,54 @@ fn subtract_stats(stats: &mut PolicyQueueStats, snapshot: QueueSnapshot) {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
     use super::*;
     use crate::scheduling::RouterPolicyConfig;
+    use crate::scheduling::queue_admission::{AdmissionAction, WorkerEligibilitySnapshot};
+
+    struct ReadyPolicy;
+
+    impl PolicyClassAdmissionPolicy for ReadyPolicy {
+        fn admit(&mut self, _request: AdmissionRequest<'_>) -> AdmissionDecision {
+            AdmissionDecision::Ready(WorkerPlacement::Any)
+        }
+    }
+
+    struct ZeroIntervalPolicy;
+
+    impl PolicyClassAdmissionPolicy for ZeroIntervalPolicy {
+        fn admit(&mut self, _request: AdmissionRequest<'_>) -> AdmissionDecision {
+            AdmissionDecision::Bypass
+        }
+
+        fn reconcile_interval(&self) -> Option<Duration> {
+            Some(Duration::ZERO)
+        }
+    }
+
+    struct CountingPolicy {
+        reconciles: Arc<AtomicUsize>,
+        interval: Duration,
+    }
+
+    impl PolicyClassAdmissionPolicy for CountingPolicy {
+        fn admit(&mut self, _request: AdmissionRequest<'_>) -> AdmissionDecision {
+            AdmissionDecision::Bypass
+        }
+
+        fn on_event(&mut self, event: AdmissionEvent) -> Vec<AdmissionAction> {
+            if event == AdmissionEvent::Reconcile {
+                self.reconciles.fetch_add(1, AtomicOrdering::Relaxed);
+            }
+            Vec::new()
+        }
+
+        fn reconcile_interval(&self) -> Option<Duration> {
+            Some(self.interval)
+        }
+    }
 
     fn profile(yaml: &str) -> PolicyProfile {
         RouterPolicyConfig::from_yaml(yaml)
@@ -775,11 +1207,341 @@ policy_classes:
     policy_family: agents
     cache_bucket: all
     queue_policy: fcfs
-    queue_admission:
-      type: session_aware
     quantum: 10
 "#,
         )
+    }
+
+    fn two_class_profile() -> PolicyProfile {
+        profile(
+            r#"
+default_policy_family: standard
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: standard
+    policy_family: standard
+    cache_bucket: all
+    quantum: 1
+  - name: agents
+    quantum: 1
+"#,
+        )
+    }
+
+    #[test]
+    fn rejects_zero_reconcile_interval() {
+        let profile = PolicyProfile::synthetic(None, RouterQueuePolicy::Fcfs);
+        let mut policies = PolicyClassAdmissionPolicies::new();
+        policies.insert(
+            profile.default_class().name.clone(),
+            Box::new(ZeroIntervalPolicy),
+        );
+
+        let error = PolicyQueue::<()>::new_with_admission_policies(
+            profile,
+            Duration::from_secs(60),
+            policies,
+        )
+        .err()
+        .unwrap();
+
+        assert!(matches!(error, KvSchedulerError::InitFailed(message) if
+            message.contains("zero reconcile interval")));
+    }
+
+    #[test]
+    fn rejects_policy_for_unknown_class() {
+        let profile = PolicyProfile::synthetic(None, RouterQueuePolicy::Fcfs);
+        let mut policies = PolicyClassAdmissionPolicies::new();
+        policies.insert("unknown".to_owned(), Box::new(ReadyPolicy));
+
+        let error = PolicyQueue::<()>::new_with_admission_policies(
+            profile,
+            Duration::from_secs(60),
+            policies,
+        )
+        .err()
+        .unwrap();
+
+        assert!(matches!(error, KvSchedulerError::InitFailed(message) if
+            message.contains("unknown policy class") && message.contains("unknown")));
+    }
+
+    #[test]
+    fn rejects_missing_configured_policy() {
+        let profile = profile(
+            r#"
+default_policy_family: standard
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: standard
+    policy_family: standard
+    cache_bucket: all
+    quantum: 1
+  - name: agents
+    admission:
+      type: test
+    quantum: 1
+"#,
+        );
+
+        let error = PolicyQueue::<()>::new_with_admission_policies(
+            profile,
+            Duration::from_secs(60),
+            PolicyClassAdmissionPolicies::new(),
+        )
+        .err()
+        .unwrap();
+
+        assert!(matches!(error, KvSchedulerError::InitFailed(message) if
+            message.contains("no admission policy registered") && message.contains("agents")));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reconciles_only_policies_whose_deadlines_are_due() {
+        let fast = Arc::new(AtomicUsize::new(0));
+        let slow = Arc::new(AtomicUsize::new(0));
+        let mut policies = PolicyClassAdmissionPolicies::new();
+        policies.insert(
+            "standard".to_owned(),
+            Box::new(CountingPolicy {
+                reconciles: Arc::clone(&fast),
+                interval: Duration::from_millis(10),
+            }),
+        );
+        policies.insert(
+            "agents".to_owned(),
+            Box::new(CountingPolicy {
+                reconciles: Arc::clone(&slow),
+                interval: Duration::from_secs(60),
+            }),
+        );
+        let mut queue = PolicyQueue::<()>::new_with_admission_policies(
+            two_class_profile(),
+            Duration::from_secs(60),
+            policies,
+        )
+        .unwrap();
+
+        tokio::time::advance(Duration::from_millis(10)).await;
+        queue.reconcile_admission(Instant::now(), false);
+        assert_eq!(fast.load(AtomicOrdering::Relaxed), 1);
+        assert_eq!(slow.load(AtomicOrdering::Relaxed), 0);
+
+        tokio::time::advance(Duration::from_millis(59_990)).await;
+        queue.reconcile_admission(Instant::now(), false);
+        assert_eq!(fast.load(AtomicOrdering::Relaxed), 2);
+        assert_eq!(slow.load(AtomicOrdering::Relaxed), 1);
+    }
+
+    #[test]
+    fn admission_ids_are_unique_across_policy_classes() {
+        let mut policies = PolicyClassAdmissionPolicies::new();
+        policies.insert("standard".to_owned(), Box::new(ReadyPolicy));
+        policies.insert("agents".to_owned(), Box::new(ReadyPolicy));
+        let mut queue = PolicyQueue::<()>::new_with_admission_policies(
+            two_class_profile(),
+            Duration::from_secs(60),
+            policies,
+        )
+        .unwrap();
+        let eligibility = || WorkerEligibility::new(|| WorkerEligibilitySnapshot::new([]));
+
+        let first = queue.admit(0, None, 1, eligibility()).unwrap().0.id;
+        let second = queue.admit(1, None, 1, eligibility()).unwrap().0.id;
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn deferred_entries_count_toward_limits_without_blocking_ready_work() {
+        let mut queue = PolicyQueue::new(admission_profile());
+        let deferred_id = AdmissionId::new(7);
+        queue
+            .enqueue_deferred(
+                0,
+                1,
+                QueueSnapshot::new(20, 5),
+                0.0,
+                0.0,
+                0,
+                deferred_id,
+                "deferred",
+            )
+            .unwrap();
+        assert!(!queue.has_backlog(0));
+        queue
+            .enqueue(
+                0,
+                1,
+                QueueSnapshot::new(10, 0),
+                1.0,
+                0.0,
+                0,
+                WorkerPlacement::Any,
+                "ready",
+            )
+            .unwrap();
+        assert!(queue.has_backlog(0));
+
+        assert_eq!(queue.pending_count(), 2);
+        assert_eq!(queue.class_stats(0).requests, 2);
+        assert_eq!(
+            queue.pop_next(|_, _, _| true).unwrap().into_payload(),
+            "ready"
+        );
+        assert!(queue.pop_next(|_, _, _| true).is_none());
+
+        assert!(
+            queue
+                .make_ready(0, 0, deferred_id, WorkerPlacement::Any, None)
+                .is_some()
+        );
+        assert_eq!(
+            queue.pop_next(|_, _, _| true).unwrap().into_payload(),
+            "deferred"
+        );
+        assert_eq!(queue.pending_count(), 0);
+        assert_eq!(queue.class_stats(0), PolicyQueueStats::default());
+    }
+
+    #[test]
+    fn exact_make_ready_rekeys_wspt_priority() {
+        let mut queue = PolicyQueue::new(profile(
+            r#"
+default_policy_family: agents
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: agents
+    policy_family: agents
+    cache_bucket: all
+    queue_policy: wspt
+    quantum: 1000
+"#,
+        ));
+        let deferred_id = AdmissionId::new(1);
+        queue
+            .enqueue_deferred(
+                0,
+                1,
+                QueueSnapshot::new(100, 99),
+                0.0,
+                0.0,
+                0,
+                deferred_id,
+                "rekeyed",
+            )
+            .unwrap();
+        queue
+            .enqueue(
+                0,
+                1,
+                QueueSnapshot::new(10, 0),
+                1.0,
+                0.0,
+                0,
+                WorkerPlacement::Any,
+                "ready",
+            )
+            .unwrap();
+
+        queue
+            .make_ready(
+                0,
+                0,
+                deferred_id,
+                WorkerPlacement::Any,
+                Some((QueueSnapshot::new(100, 0), 0.0, 0.0)),
+            )
+            .unwrap();
+
+        assert_eq!(
+            queue.pop_next(|_, _, _| true).unwrap().into_payload(),
+            "ready"
+        );
+    }
+
+    #[test]
+    fn exact_make_ready_moves_entry_and_accounting_to_target_class() {
+        let mut queue = PolicyQueue::new(profile(
+            r#"
+default_policy_family: agents
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: cached
+  - min_tokens: 32
+    bucket: uncached
+policy_classes:
+  - name: agents_cached
+    policy_family: agents
+    cache_bucket: cached
+    queue_policy: fcfs
+    quantum: 1000
+  - name: agents_uncached
+    policy_family: agents
+    cache_bucket: uncached
+    queue_policy: wspt
+    quantum: 1000
+"#,
+        ));
+        let deferred_id = AdmissionId::new(1);
+        queue
+            .enqueue_deferred(
+                0,
+                1,
+                QueueSnapshot::new(100, 99),
+                0.0,
+                0.0,
+                0,
+                deferred_id,
+                "migrated",
+            )
+            .unwrap();
+        queue
+            .enqueue(
+                1,
+                1,
+                QueueSnapshot::new(10, 0),
+                1.0,
+                0.0,
+                0,
+                WorkerPlacement::Any,
+                "ready",
+            )
+            .unwrap();
+
+        queue
+            .make_ready(
+                0,
+                1,
+                deferred_id,
+                WorkerPlacement::Any,
+                Some((QueueSnapshot::new(100, 0), 0.0, 0.0)),
+            )
+            .unwrap();
+
+        assert_eq!(queue.class_stats(0), PolicyQueueStats::default());
+        assert_eq!(
+            queue.class_stats(1),
+            PolicyQueueStats {
+                requests: 2,
+                raw_isl_tokens: 110,
+                cached_tokens: 0,
+            }
+        );
+        assert_eq!(
+            queue.pop_next(|_, _, _| true).unwrap().into_payload(),
+            "ready"
+        );
+        let migrated = queue.pop_next(|_, _, _| true).unwrap();
+        assert_eq!(migrated.class_index(), 1);
+        assert_eq!(migrated.into_payload(), "migrated");
     }
 
     #[test]

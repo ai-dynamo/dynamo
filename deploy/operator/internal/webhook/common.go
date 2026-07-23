@@ -19,9 +19,11 @@ package webhook
 
 import (
 	"context"
+	"net/http"
 	"strings"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -68,6 +70,19 @@ type LeaseAwareValidator struct {
 type LeaseAwareDefaulter struct {
 	defaulter          admission.Defaulter[runtime.Object]
 	excludedNamespaces ExcludedNamespacesChecker
+}
+
+// WithGate makes gate available through the admission request context and fails if it is missing.
+func WithGate(webhook *admission.Webhook, gate features.Gate) *admission.Webhook {
+	handler := webhook.Handler
+	webhook.Handler = admission.HandlerFunc(func(ctx context.Context, req admission.Request) admission.Response {
+		features.MustGateFrom(ctx)
+		return handler.Handle(ctx, req)
+	})
+	webhook.WithContextFunc = func(ctx context.Context, _ *http.Request) context.Context {
+		return features.WithGate(ctx, gate)
+	}
+	return webhook
 }
 
 // NewLeaseAwareValidator creates a new LeaseAwareValidator that wraps the given validator.

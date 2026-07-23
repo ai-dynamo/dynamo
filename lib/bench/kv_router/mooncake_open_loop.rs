@@ -17,6 +17,8 @@ use dynamo_kv_router::protocols::{KvCacheEventData, RouterEvent};
 use serde::Serialize;
 use tokio::sync::{Notify, oneshot};
 
+use dynamo_bench::kv_router_common::issuer::{contiguous_worker_issuer, pin_current_thread};
+
 use super::mooncake_shared::{MooncakeTraceTotals, PreparedMooncakeBenchmark, WorkerTraceEntry};
 
 const RESULT_SCHEMA_VERSION: u32 = 2;
@@ -887,9 +889,9 @@ fn partition_dispatch(
         .map(|entry| entry.worker_id as usize)
         .max()
         .map_or(0, |worker| worker + 1);
-    let workers_per_issuer = logical_workers.div_ceil(event_issuer_count).max(1);
-    let event_shard_for =
-        |worker_id: u64| (worker_id as usize / workers_per_issuer).min(event_issuer_count - 1);
+    let event_shard_for = |worker_id: u64| {
+        contiguous_worker_issuer(worker_id as usize, logical_workers, event_issuer_count)
+    };
     let mut query_count = 0usize;
     let mut event_counts = vec![0usize; event_issuer_count];
     for entry in &dispatch {
@@ -1568,33 +1570,6 @@ fn thread_cpu_time_ns() -> u64 {
     0
 }
 
-fn pin_current_thread(cpu: Option<usize>) -> Result<(), ()> {
-    let Some(cpu) = cpu else {
-        return Ok(());
-    };
-    #[cfg(target_os = "linux")]
-    {
-        let mut set = unsafe { std::mem::zeroed::<libc::cpu_set_t>() };
-        unsafe {
-            libc::CPU_ZERO(&mut set);
-            libc::CPU_SET(cpu, &mut set);
-        }
-        let rc = unsafe {
-            libc::sched_setaffinity(
-                0,
-                std::mem::size_of::<libc::cpu_set_t>(),
-                &set as *const libc::cpu_set_t,
-            )
-        };
-        if rc != 0 {
-            return Err(());
-        }
-    }
-    #[cfg(not(target_os = "linux"))]
-    let _ = cpu;
-    Ok(())
-}
-
 pub fn parse_cpu_list(value: &str) -> anyhow::Result<Vec<usize>> {
     let mut cpus = Vec::new();
     for part in value
@@ -1668,33 +1643,6 @@ pub fn validate_cpu_partition(
                     "CPUs {existing} and {cpu} are SMT siblings; select one logical CPU per physical core"
                 );
             }
-        }
-    }
-    Ok(())
-}
-
-pub fn pin_current_thread_to_cpus(cpus: &[usize]) -> anyhow::Result<()> {
-    if cpus.is_empty() {
-        return Ok(());
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let mut set = unsafe { std::mem::zeroed::<libc::cpu_set_t>() };
-        unsafe {
-            libc::CPU_ZERO(&mut set);
-            for &cpu in cpus {
-                libc::CPU_SET(cpu, &mut set);
-            }
-        }
-        let rc = unsafe {
-            libc::sched_setaffinity(
-                0,
-                std::mem::size_of::<libc::cpu_set_t>(),
-                &set as *const libc::cpu_set_t,
-            )
-        };
-        if rc != 0 {
-            return Err(std::io::Error::last_os_error().into());
         }
     }
     Ok(())
