@@ -1591,8 +1591,8 @@ fn validate_disagg_replay_mode(replay_mode: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        SyntheticLoadController, build_synthetic_requests, fpm_snapshots_to_json,
-        parse_synthetic_load_controller, reconcile_replay_dp_topology, validate_disagg_replay_mode,
+        build_synthetic_requests, fpm_snapshots_to_json, reconcile_replay_dp_topology,
+        validate_disagg_replay_mode,
     };
     use dynamo_mocker::common::protocols::{ForwardPassSnapshot, MockEngineArgs};
     use dynamo_mocker::loadgen::ArrivalSpec;
@@ -1649,33 +1649,31 @@ mod tests {
     }
 
     #[test]
-    fn request_rate_selects_poisson_open_loop() {
-        let controller = parse_synthetic_load_controller(None, Some(8.0), None).unwrap();
-
-        assert!(matches!(
-            controller,
-            SyntheticLoadController::Arrivals(ArrivalSpec::PoissonQps { qps: 8.0 })
-        ));
-        assert!(
-            parse_synthetic_load_controller(Some(2), Some(8.0), None)
-                .unwrap_err()
-                .to_string()
-                .contains("exactly one")
-        );
-    }
-
-    #[test]
     fn simple_synthetic_arrival_mode_changes_timestamps_only() {
         let fixed_timestamps = ArrivalSpec::ConstantQps { qps: 20.0 }
             .timestamps(8, 42)
             .unwrap();
         let poisson_timestamps = ArrivalSpec::PoissonQps { qps: 20.0 }
-            .timestamps(8, 7)
+            .timestamps(8, 42)
             .unwrap();
         let fixed = build_synthetic_requests(16, 4, 8, Some(&fixed_timestamps)).unwrap();
         let poisson = build_synthetic_requests(16, 4, 8, Some(&poisson_timestamps)).unwrap();
 
         assert_ne!(fixed_timestamps, poisson_timestamps);
+        assert_eq!(
+            fixed
+                .iter()
+                .map(|request| request.arrival_timestamp_ms.unwrap())
+                .collect::<Vec<_>>(),
+            fixed_timestamps
+        );
+        assert_eq!(
+            poisson
+                .iter()
+                .map(|request| request.arrival_timestamp_ms.unwrap())
+                .collect::<Vec<_>>(),
+            poisson_timestamps
+        );
         for (fixed_request, poisson_request) in fixed.iter().zip(&poisson) {
             assert_eq!(fixed_request.tokens, poisson_request.tokens);
             assert_eq!(

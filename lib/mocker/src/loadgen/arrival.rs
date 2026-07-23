@@ -92,13 +92,36 @@ fn sample_gamma_ms(shape: f64, scale: f64, rng: &mut StdRng) -> f64 {
 mod tests {
     use super::*;
 
+    fn gap_moments(timestamps: &[f64]) -> (f64, f64) {
+        let gaps = timestamps
+            .windows(2)
+            .map(|values| values[1] - values[0])
+            .collect::<Vec<_>>();
+        assert!(gaps.iter().all(|gap| *gap > 0.0));
+
+        let mean = gaps.iter().sum::<f64>() / gaps.len() as f64;
+        let variance = gaps
+            .iter()
+            .map(|gap| {
+                let delta = gap - mean;
+                delta * delta
+            })
+            .sum::<f64>()
+            / gaps.len() as f64;
+        (mean, variance.sqrt())
+    }
+
     #[test]
-    fn fixed_and_poisson_schedules_have_expected_behavior() {
+    fn fixed_schedule_has_exact_cadence() {
+        assert_eq!(ArrivalSpec::Burst.timestamps(4, 17).unwrap(), vec![0.0; 4]);
         let fixed = ArrivalSpec::ConstantQps { qps: 10.0 }
             .timestamps(4, 17)
             .unwrap();
         assert_eq!(fixed, vec![0.0, 100.0, 200.0, 300.0]);
+    }
 
+    #[test]
+    fn poisson_schedule_is_seeded_and_matches_exponential_moments() {
         let poisson = ArrivalSpec::PoissonQps { qps: 10.0 }
             .timestamps(100_001, 17)
             .unwrap();
@@ -107,20 +130,19 @@ mod tests {
             .unwrap();
         assert_eq!(poisson, repeated);
 
-        let gaps = poisson
-            .windows(2)
-            .map(|timestamps| timestamps[1] - timestamps[0])
-            .collect::<Vec<_>>();
-        assert!(gaps.iter().all(|gap| *gap > 0.0));
-        let mean_gap_ms = gaps.iter().sum::<f64>() / gaps.len() as f64;
+        let (mean_gap_ms, stddev_gap_ms) = gap_moments(&poisson);
         assert!(
             (mean_gap_ms - 100.0).abs() < 1.0,
             "expected a 100ms mean gap, got {mean_gap_ms}"
         );
+        assert!(
+            (stddev_gap_ms - 100.0).abs() < 2.0,
+            "expected a 100ms gap standard deviation, got {stddev_gap_ms}"
+        );
     }
 
     #[test]
-    fn gamma_schedule_is_seeded_and_preserves_the_requested_mean() {
+    fn gamma_schedule_is_seeded_and_matches_requested_moments() {
         let spec = ArrivalSpec::GammaQps {
             qps: 20.0,
             smoothness: 4.0,
@@ -128,35 +150,39 @@ mod tests {
         let timestamps = spec.timestamps(100_001, 23).unwrap();
         assert_eq!(timestamps, spec.timestamps(100_001, 23).unwrap());
 
-        let mean_gap_ms = timestamps
-            .windows(2)
-            .map(|values| values[1] - values[0])
-            .sum::<f64>()
-            / 100_000.0;
+        let (mean_gap_ms, stddev_gap_ms) = gap_moments(&timestamps);
         assert!(
             (mean_gap_ms - 50.0).abs() < 0.5,
             "expected a 50ms mean gap, got {mean_gap_ms}"
+        );
+        assert!(
+            (stddev_gap_ms - 25.0).abs() < 0.5,
+            "expected a 25ms gap standard deviation, got {stddev_gap_ms}"
         );
     }
 
     #[test]
     fn arrival_parameters_are_validated_before_sampling() {
-        assert!(
-            ArrivalSpec::PoissonQps { qps: 0.0 }
+        for qps in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(
+                ArrivalSpec::PoissonQps { qps }
+                    .timestamps(2, 42)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("qps must be")
+            );
+        }
+        for smoothness in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(
+                ArrivalSpec::GammaQps {
+                    qps: 1.0,
+                    smoothness,
+                }
                 .timestamps(2, 42)
                 .unwrap_err()
                 .to_string()
-                .contains("qps must be")
-        );
-        assert!(
-            ArrivalSpec::GammaQps {
-                qps: 1.0,
-                smoothness: 0.0,
-            }
-            .timestamps(2, 42)
-            .unwrap_err()
-            .to_string()
-            .contains("gamma smoothness")
-        );
+                .contains("gamma smoothness")
+            );
+        }
     }
 }
