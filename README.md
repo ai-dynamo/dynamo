@@ -187,9 +187,9 @@ Pre-built recipes for common models:
 
 | Model | Framework | Mode | Recipe |
 |-------|-----------|------|--------|
-| Llama-3-70B | vLLM | Aggregated | [View](recipes/llama-3-70b/vllm/) |
-| DeepSeek-R1 | SGLang | Disaggregated | [View](recipes/deepseek-r1/sglang/) |
-| Qwen3-32B-FP8 | TensorRT-LLM | Aggregated | [View](recipes/qwen3-32b-fp8/trtllm/) |
+| GLM-5.2 | SGLang | Aggregated + disaggregated | [View](recipes/glm-5.2/) |
+| GPT-OSS-120B | vLLM + TensorRT-LLM | Aggregated + disaggregated | [View](recipes/gpt-oss-120b/) |
+| Qwen3-235B-A22B-FP8 | TensorRT-LLM | Aggregated + disaggregated | [View](recipes/qwen3-235b-a22b-fp8/) |
 
 See [recipes/](recipes/README.md) for the full list. Cloud-specific guides: [AWS EKS](docs/kubernetes/cloud-providers/eks/eks.md) · [Google GKE](docs/kubernetes/cloud-providers/gke/gke.md) · [Azure AKS](docs/kubernetes/cloud-providers/aks/aks.md) · [Amazon ECS](docs/kubernetes/cloud-providers/ecs/ecs.md)
 
