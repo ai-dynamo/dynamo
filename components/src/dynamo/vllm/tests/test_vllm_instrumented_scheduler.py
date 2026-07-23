@@ -32,7 +32,10 @@ from vllm.v1.request import RequestStatus  # noqa: E402
 # not be resolvable and ``instrumented_scheduler`` will fail to load with
 # ``ModuleNotFoundError: No module named 'vllm.sampling_params'``.
 import dynamo.vllm.instrumented_scheduler as instrumented_scheduler_module  # noqa: E402
-from dynamo.vllm.benchmark_points import BenchmarkPoints  # noqa: E402
+from dynamo.vllm.benchmark_points import (  # noqa: E402
+    BenchmarkPoints,
+    PrefillPointCandidate,
+)
 from dynamo.vllm.instrumented_scheduler import (  # noqa: E402
     BenchmarkConfig,
     BenchmarkPoint,
@@ -650,6 +653,53 @@ def test_benchmark_synchronizer_rejects_capacity_invariant_mismatch():
     finally:
         rank1.close()
         rank0.close()
+
+
+def _digest_stub(max_num_running_reqs: int):
+    """Populate only the attributes ``_bench_grid_invariants_digest`` reads,
+    mirroring the activation-time filtering of the decode capture sizes."""
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_config = BenchmarkConfig()
+    stub.block_size = 16
+    stub._bench_hash_block_size = 16
+    stub.cache_config = SimpleNamespace(block_size=16, enable_prefix_caching=True)
+    stub.max_num_running_reqs = max_num_running_reqs
+    stub._bench_prefill_cudagraph_mode = "PIECEWISE"
+    stub._bench_decode_cudagraph_mode = "FULL"
+    stub._bench_cudagraph_capture_sizes = [1, 2, 4, 8, 16, 32, 64, 128, 256]
+    stub._bench_prefill_capture_sizes = list(stub._bench_cudagraph_capture_sizes)
+    stub._bench_decode_capture_sizes = [
+        size
+        for size in stub._bench_cudagraph_capture_sizes
+        if size <= max_num_running_reqs
+    ]
+    return stub
+
+
+def test_capacity_digest_ignores_request_limit_filtered_capture_sizes():
+    """Ranks that differ only in ``max_num_running_reqs`` filter different
+    decode capture lists at activation. The invariants digest must hash the
+    unfiltered configuration so ``common()`` negotiates the minimum instead
+    of rejecting the ranks as structurally different."""
+    small = _digest_stub(max_num_running_reqs=128)
+    large = _digest_stub(max_num_running_reqs=256)
+    assert small._bench_decode_capture_sizes != large._bench_decode_capture_sizes
+
+    small_digest = InstrumentedScheduler._bench_grid_invariants_digest(small)
+    large_digest = InstrumentedScheduler._bench_grid_invariants_digest(large)
+    assert small_digest == large_digest
+
+    common = instrumented_scheduler_module._BenchmarkCapacityEnvelope.common(
+        [
+            _benchmark_capacity(
+                max_num_running_reqs=128, grid_invariants_digest=small_digest
+            ),
+            _benchmark_capacity(
+                max_num_running_reqs=256, grid_invariants_digest=large_digest
+            ),
+        ]
+    )
+    assert common.max_num_running_reqs == 128
 
 
 def test_benchmark_synchronizer_rejects_grid_mismatch_before_warmup():
@@ -2140,6 +2190,38 @@ def test_prefill_grid_uses_common_attention_dp_capacity():
             )
             for point in stub._bench_grid
         )
+
+
+def test_explicit_prefill_point_uses_negotiated_scheduled_token_limit():
+    """An explicit point at the negotiated ``max_num_scheduled_tokens`` must
+    get identical cudagraph metadata on every rank regardless of the rank's
+    local limit — otherwise ``sample_reasons`` (engine_limit vs
+    geometric_tail) and therefore the per-point digests diverge."""
+    at_limit_rank = _prefill_grid_stub()
+    above_limit_rank = _prefill_grid_stub()
+    above_limit_rank.max_num_scheduled_tokens = 48
+    common = _benchmark_capacity(
+        max_model_len=128,
+        max_num_scheduled_tokens=40,
+        max_num_running_reqs=8,
+        usable_blocks_without_watermark=63,
+    )
+    candidate = PrefillPointCandidate(
+        total_prefill_tokens=40, batch_size=1, total_kv_read_tokens=0
+    )
+
+    points = []
+    for stub in (at_limit_rank, above_limit_rank):
+        stub._bench_negotiated_capacity = common
+        points.append(
+            InstrumentedScheduler._bench_materialize_prefill_candidate(
+                stub, candidate, "points[0]"
+            )
+        )
+
+    assert points[0] == points[1]
+    assert "engine_limit" in points[0].sample_reasons
+    assert "geometric_tail" not in points[1].sample_reasons
 
 
 def test_agg_grid_contains_piecewise_prefill_then_full_decode_points():

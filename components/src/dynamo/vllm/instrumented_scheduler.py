@@ -2132,7 +2132,15 @@ class InstrumentedScheduler(AsyncScheduler):
             "prefill_cudagraph_mode": self._bench_prefill_cudagraph_mode,
             "decode_cudagraph_mode": self._bench_decode_cudagraph_mode,
             "prefill_capture_sizes": self._bench_prefill_capture_sizes,
-            "decode_capture_sizes": self._bench_decode_capture_sizes,
+            # ``_bench_decode_capture_sizes`` is filtered by
+            # ``max_num_running_reqs`` — a negotiable capacity value that may
+            # legitimately differ across ranks — so hash the unfiltered
+            # configuration and re-filter after negotiation.
+            "decode_capture_sizes": (
+                list(self._bench_cudagraph_capture_sizes)
+                if self._bench_decode_cudagraph_mode != "NONE"
+                else []
+            ),
         }
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         return hashlib.sha256(encoded).hexdigest()
@@ -2191,6 +2199,14 @@ class InstrumentedScheduler(AsyncScheduler):
             asdict(local_capacity),
             asdict(common_capacity),
         )
+        # The activation-time filter used the local request limit; re-filter
+        # with the negotiated one so every rank builds the decode grid from
+        # the same capture list.
+        self._bench_decode_capture_sizes = [
+            size
+            for size in self._bench_decode_capture_sizes
+            if size <= common_capacity.max_num_running_reqs
+        ]
 
         self._bench_grid_built = True
         mode = self._bench_config.mode
@@ -2263,7 +2279,7 @@ class InstrumentedScheduler(AsyncScheduler):
         capture_size, padding_tokens, reasons = self._bench_cudagraph_metadata(
             candidate.total_prefill_tokens,
             self._bench_prefill_capture_sizes,
-            self.max_num_scheduled_tokens,
+            self._bench_capacity_limit("max_num_scheduled_tokens"),
         )
         return BenchmarkPoint(
             point_type="prefill",
@@ -2732,10 +2748,6 @@ class InstrumentedScheduler(AsyncScheduler):
 
     def _bench_generate_decode_grid(self) -> None:
         max_model_len = self._bench_capacity_limit("max_model_len")
-        max_num_running_reqs = self._bench_capacity_limit("max_num_running_reqs")
-        max_num_scheduled_tokens = self._bench_capacity_limit(
-            "max_num_scheduled_tokens"
-        )
         if max_model_len < 3:
             logger.warning("max_model_len too small for decode grid, skipping")
             return
