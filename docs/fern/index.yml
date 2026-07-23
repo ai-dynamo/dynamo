@@ -259,6 +259,18 @@ navigation:
                 path: features/multimodal/encoder-disaggregation.md
               - page: Multimodal KV Routing
                 path: features/multimodal/multimodal-kv-routing.md
+              # Per-backend multimodal pages: linked from the Compatibility
+              # feature tables; registered here (hidden) so those links
+              # resolve without changing the visible sidebar.
+              - section: Per-Backend Multimodal
+                hidden: true
+                contents:
+                  - page: Multimodal with vLLM
+                    path: features/multimodal/multimodal-vllm.md
+                  - page: Multimodal with SGLang
+                    path: features/multimodal/multimodal-sglang.md
+                  - page: Multimodal with TensorRT-LLM
+                    path: features/multimodal/multimodal-trtllm.md
           - section: Diffusion
             slug: diffusion
             contents:

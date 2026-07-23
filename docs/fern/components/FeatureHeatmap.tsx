@@ -48,21 +48,21 @@ const HEAT_CSS = `
 }
 
 .dynref-heat-swatch--yes {
-    background: rgba(118, 185, 0, 0.16);
-    border: 1px solid rgba(118, 185, 0, 0.38);
+    background: var(--dynref-green-bg);
+    border: 1px solid var(--dynref-green-border);
 }
 .dark .dynref-heat-swatch--yes {
-    background: rgba(118, 185, 0, 0.22);
-    border-color: rgba(118, 185, 0, 0.46);
+    background: var(--dynref-green-bg);
+    border-color: var(--dynref-green-border);
 }
 
 .dynref-heat-swatch--caveat {
-    background: rgba(239, 159, 39, 0.14);
-    border: 1px solid rgba(239, 159, 39, 0.35);
+    background: var(--dynref-amber-bg);
+    border: 1px solid var(--dynref-amber-border);
 }
 .dark .dynref-heat-swatch--caveat {
-    background: rgba(239, 159, 39, 0.16);
-    border-color: rgba(239, 159, 39, 0.4);
+    background: var(--dynref-amber-bg);
+    border-color: var(--dynref-amber-border);
 }
 
 .dynref-heat-swatch--wip {
@@ -115,25 +115,25 @@ const HEAT_CSS = `
 .dynref-heat-cell--titled { cursor: help; }
 
 .dynref-heat-cell--yes {
-    background: rgba(118, 185, 0, 0.16);
-    border: 1px solid rgba(118, 185, 0, 0.38);
-    color: #4D7C0F;
+    background: var(--dynref-green-bg);
+    border: 1px solid var(--dynref-green-border);
+    color: var(--dynref-green-fg);
 }
 .dark .dynref-heat-cell--yes {
-    background: rgba(118, 185, 0, 0.22);
-    border-color: rgba(118, 185, 0, 0.46);
-    color: #A3E635;
+    background: var(--dynref-green-bg);
+    border-color: var(--dynref-green-border);
+    color: var(--dynref-green-fg);
 }
 
 .dynref-heat-cell--caveat {
-    background: rgba(239, 159, 39, 0.14);
-    border: 1px solid rgba(239, 159, 39, 0.35);
-    color: #854F0B;
+    background: var(--dynref-amber-bg);
+    border: 1px solid var(--dynref-amber-border);
+    color: var(--dynref-amber-fg);
 }
 .dark .dynref-heat-cell--caveat {
-    background: rgba(239, 159, 39, 0.16);
-    border-color: rgba(239, 159, 39, 0.4);
-    color: #FAC775;
+    background: var(--dynref-amber-bg);
+    border-color: var(--dynref-amber-border);
+    color: var(--dynref-amber-fg);
 }
 
 .dynref-heat-cell--wip {

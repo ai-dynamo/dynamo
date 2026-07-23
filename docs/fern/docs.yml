@@ -329,7 +329,9 @@ experimental:
 colors:
   accentPrimary:
     dark: '#76B900'
-    light: '#76B900'
+    # Darkened NVIDIA green for light mode: #76B900 on white is 2.41:1,
+    # below the 3:1 minimum Fern warns about; #538300 passes (~4.3:1).
+    light: '#538300'
   background:
     light: '#FFFFFF'
     dark: '#000000'

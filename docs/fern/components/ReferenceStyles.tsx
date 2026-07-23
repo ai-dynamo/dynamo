@@ -43,6 +43,29 @@ const REFERENCE_CSS = `
     --pst-color-surface: #1a1a1a !important;
 }
 
+/* Shared tint tokens — single source for the green (supported/stable) and
+   amber (early-access/caveat/experimental) families used by chips, badges,
+   the feature heatmap, and the copied state. Change them here, not inline. */
+:root {
+    --dynref-green-bg: rgba(118, 185, 0, 0.16);
+    --dynref-green-border: rgba(118, 185, 0, 0.38);
+    --dynref-green-fg: #4D7C0F;
+    --dynref-amber-bg: rgba(239, 159, 39, 0.14);
+    --dynref-amber-border: rgba(239, 159, 39, 0.35);
+    --dynref-amber-fg: #854F0B;
+    --dynref-amber-dash: rgba(185, 122, 23, 0.7);
+}
+
+.dark {
+    --dynref-green-bg: rgba(118, 185, 0, 0.22);
+    --dynref-green-border: rgba(118, 185, 0, 0.46);
+    --dynref-green-fg: #A3E635;
+    --dynref-amber-bg: rgba(239, 159, 39, 0.16);
+    --dynref-amber-border: rgba(239, 159, 39, 0.4);
+    --dynref-amber-fg: #FAC775;
+    --dynref-amber-dash: rgba(239, 159, 39, 0.55);
+}
+
 /* Card container shared by every reference component. */
 .dynref-panel {
     margin: 24px 0;
@@ -123,16 +146,11 @@ const REFERENCE_CSS = `
 
 /* NVIDIA green — GPU generations. */
 .dynref-chip--gpu {
-    background: rgba(118, 185, 0, 0.16);
-    color: #4D7C0F;
-    border-color: rgba(118, 185, 0, 0.38);
+    background: var(--dynref-green-bg);
+    color: var(--dynref-green-fg);
+    border-color: var(--dynref-green-border);
 }
 
-.dark .dynref-chip--gpu {
-    background: rgba(118, 185, 0, 0.22);
-    color: #A3E635;
-    border-color: rgba(118, 185, 0, 0.46);
-}
 
 /* Ubuntu — brand orange. */
 .dynref-chip--ubuntu {
@@ -183,16 +201,11 @@ const REFERENCE_CSS = `
 /* Amber — experimental/preview entries (pairs with --exp for the dashed
    treatment so "experimental" reads identically everywhere). */
 .dynref-chip--amber {
-    background: rgba(239, 159, 39, 0.14);
-    color: #854F0B;
-    border-color: rgba(239, 159, 39, 0.35);
+    background: var(--dynref-amber-bg);
+    color: var(--dynref-amber-fg);
+    border-color: var(--dynref-amber-border);
 }
 
-.dark .dynref-chip--amber {
-    background: rgba(239, 159, 39, 0.16);
-    color: #FAC775;
-    border-color: rgba(239, 159, 39, 0.4);
-}
 
 /* CUDA toolkit — teal. */
 .dynref-chip--cuda {
@@ -221,28 +234,18 @@ const REFERENCE_CSS = `
 }
 
 .dynref-badge--green {
-    background: rgba(118, 185, 0, 0.16);
-    color: #4D7C0F;
-    border-color: rgba(118, 185, 0, 0.38);
+    background: var(--dynref-green-bg);
+    color: var(--dynref-green-fg);
+    border-color: var(--dynref-green-border);
 }
 
-.dark .dynref-badge--green {
-    background: rgba(118, 185, 0, 0.22);
-    color: #A3E635;
-    border-color: rgba(118, 185, 0, 0.46);
-}
 
 .dynref-badge--amber {
-    background: rgba(239, 159, 39, 0.14);
-    color: #854F0B;
-    border-color: rgba(239, 159, 39, 0.35);
+    background: var(--dynref-amber-bg);
+    color: var(--dynref-amber-fg);
+    border-color: var(--dynref-amber-border);
 }
 
-.dark .dynref-badge--amber {
-    background: rgba(239, 159, 39, 0.16);
-    color: #FAC775;
-    border-color: rgba(239, 159, 39, 0.4);
-}
 
 .dynref-badge--gray {
     background: rgba(120, 120, 120, 0.1);
@@ -272,13 +275,13 @@ const REFERENCE_CSS = `
    experimental cell encoding. */
 .dynref-badge--wip {
     background: transparent;
-    color: #854F0B;
-    border: 1.5px dashed rgba(185, 122, 23, 0.7);
+    color: var(--dynref-amber-fg);
+    border: 1.5px dashed var(--dynref-amber-dash);
 }
 
 .dark .dynref-badge--wip {
-    color: #FAC775;
-    border-color: rgba(239, 159, 39, 0.55);
+    color: var(--dynref-amber-fg);
+    border-color: var(--dynref-amber-dash);
 }
 
 .dynref-badge--blue {
@@ -338,16 +341,11 @@ const REFERENCE_CSS = `
 }
 
 .dynref-copy.dynref-copied {
-    background: rgba(118, 185, 0, 0.16);
-    color: #4D7C0F;
-    border-color: rgba(118, 185, 0, 0.38);
+    background: var(--dynref-green-bg);
+    color: var(--dynref-green-fg);
+    border-color: var(--dynref-green-border);
 }
 
-.dark .dynref-copy.dynref-copied {
-    background: rgba(118, 185, 0, 0.22);
-    color: #A3E635;
-    border-color: rgba(118, 185, 0, 0.46);
-}
 
 .dynref-grid-note {
     margin-top: 12px;
