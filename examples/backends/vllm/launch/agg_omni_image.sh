@@ -26,6 +26,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+GPU_MEM_ARGS=()
+read -r -a GPU_MEM_ARGS <<< "$(build_vllm_gpu_mem_args)"
 print_launch_banner --no-curl "Launching vLLM-Omni Image Generation (1 GPU)" "$MODEL" "$HTTP_PORT"
 print_curl_footer <<CURL
 curl -s -X POST http://localhost:${HTTP_PORT}/v1/images/generations \\
@@ -50,6 +52,7 @@ DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
     --model "$MODEL" \
     --output-modalities image \
     --media-output-fs-url file:///tmp/dynamo_media \
+    "${GPU_MEM_ARGS[@]}" \
     "${EXTRA_ARGS[@]}" &
 
 # Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
