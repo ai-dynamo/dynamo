@@ -81,7 +81,7 @@ kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeo
 ```bash
 kubectl apply -f vllm/agg-h200/deploy.yaml -n ${NAMESPACE}
 ```
-Scale to a full node by editing `spec.components[VllmWorker].replicas` to `8`.
+Scale to a full node by editing `spec.components[agg].replicas` to `8`.
 
 ### 5. Smoke test
 ```bash
@@ -132,12 +132,12 @@ synthetic trace data.
 | nst (draft length) | measured AL | SpeedBench tok/s |
 | ------------------ | ----------- | ---------------- |
 | 1                  | 1.825       | 681              |
-| **3 (recipe)**     | **2.937**   | 895              |
+| **3 (recipe)**     | **2.925**   | 895              |
 | 5                  | 3.518       | 910              |
 
-- **AL(nst=3) = 2.93** — per-position acceptance 0.80 / 0.63 / 0.50, overall acceptance
-  rate ~64%. (Cross-validates the 8k-split value of 2.89 within ~1%.) This is the AL forced
-  in the router benchmark.
+- **AL(nst=3) = 2.925** — per-position acceptance ~0.80 / 0.62 / 0.50, overall acceptance
+  rate ~64%. This is the AL forced (`synthetic_acceptance_length:2.925`) in the router
+  benchmark above.
 - **nst=3 is the chosen depth.** nst=5 has higher AL and edges nst=3 by <2% on the
   short-ISL SpeedBench split, but its larger draft head costs more KV pool — on the
   64k-context agentic workload (pool-bound) that reverses the thin gain. nst=1 is clearly

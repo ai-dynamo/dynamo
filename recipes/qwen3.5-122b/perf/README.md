@@ -36,7 +36,7 @@ the frontend service:
 ```bash
 aiperf profile Qwen/Qwen3.5-122B-A10B-FP8 --tokenizer Qwen/Qwen3.5-122B-A10B-FP8 \
   --url http://${ENDPOINT} --endpoint-type chat \
-  --input-file /model-cache/traces/mooncake_trace.jsonl \
+  --input-file ${TRACE_FILE} \
   --custom-dataset-type mooncake_trace --prompt-input-tokens-block-size 512 \
   --concurrency ${CONCURRENCY} --workers-max ${CONCURRENCY} \
   --extra-inputs ignore_eos:true --streaming --use-server-token-count \
@@ -96,7 +96,9 @@ this as the `speculative-config-synthetic` ConfigMap key; set the worker's
      --extra-inputs temperature:1.0 --extra-inputs max_tokens:4096 --ui none
    ```
    (No `ignore_eos` — natural EOS, or AL is skewed by junk tails.)
-3. Read `AL = 1 + accepted/draft_steps` from the worker's vLLM spec-decode counters:
+3. Read `AL = 1 + accepted/draft_steps` from the worker's vLLM spec-decode counters. Use a
+   **freshly-started worker** (or the run right after a restart) so the cumulative counters
+   cover only this SpeedBench run:
    ```bash
    curl -s http://<worker>:9090/metrics | grep -E 'vllm:spec_decode_num_(accepted_tokens_total|drafts_total)\{'
    # AL = 1 + spec_decode_num_accepted_tokens_total / spec_decode_num_drafts_total
