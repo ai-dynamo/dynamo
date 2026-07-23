@@ -45,3 +45,10 @@ dependencies:
     version: v0.1.0-alpha.11
     repository: oci://ghcr.io/ai-dynamo/grove
     condition: global.grove.install
+  - name: lws
+    # The OCI registry tags the chart with a `v` prefix that does not match
+    # the chart's own `version` field. Track upstream at
+    # https://github.com/kubernetes-sigs/lws/releases for new tags.
+    version: "v0.9.0"
+    repository: oci://registry.k8s.io/lws/charts
+    condition: global.lws.install

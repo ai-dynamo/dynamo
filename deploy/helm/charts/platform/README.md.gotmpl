@@ -29,6 +29,7 @@ The Dynamo Platform Helm chart deploys the complete Dynamo Kubernetes Platform i
 - **NATS**: Optional messaging system for NATS-based request, event, and request-trace transports
 - **etcd**: Distributed key-value store for service discovery (optional, disabled by default)
 - **Grove**: Multi-node inference orchestration (optional)
+- **LeaderWorkerSet (LWS)**: Multinode orchestration for prefill/decode workloads (optional)
 - **Kai Scheduler**: Advanced workload scheduling (optional)
 
 ## 📋 Prerequisites
@@ -196,6 +197,66 @@ global:
 ```
 
 Note: `global.*.install` controls whether the bundled subcharts are deployed. When set, integration is automatically enabled. `global.*.enabled` can be set independently when using externally-managed installations.
+
+### LeaderWorkerSet and DisaggregatedSet Configuration
+
+The operator supports two multinode orchestrator pathways backed by
+[LeaderWorkerSet](https://github.com/kubernetes-sigs/lws) (LWS):
+
+- **LWS pathway** — the operator renders one `LeaderWorkerSet` per
+  multinode component.
+- **DisaggregatedSet (DS) pathway** — when the DGD carries the
+  `nvidia.com/enable-disaggregatedset: "true"` annotation and DS is
+  installed, the operator renders a single `DisaggregatedSet` that owns
+  one `LeaderWorkerSet` per role (prefill, decode, etc.).
+
+DS ships inside the LWS chart as of LWS v0.9.0, gated by
+`lws.enableDisaggregatedSet`. The DS CRD and bundled controller are
+always installed once LWS is; `enableDisaggregatedSet=true` only
+adds the DS editor/viewer/admin `ClusterRoles` and the validating
+webhook entry.
+
+The operator's LWS pathway also requires the Volcano API group. In
+auto-detect mode, LWS is considered available only when both LWS and
+Volcano are detected. If `global.lws.enabled=true` is set explicitly,
+the operator will fail at startup unless both APIs are present.
+
+**Compatibility Matrix:**
+
+| dynamo-platform | lws (appVersion) |
+|-----------------|------------------|
+| 1.3.x           | >= v0.9.0        |
+
+After installing LWS separately, enable Dynamo integration:
+
+```yaml
+global:
+  lws:
+    enabled: true   # Enables the operator's LWS pathway
+  disaggregatedset:
+    enabled: true   # Enables the operator's DS pathway (requires DS enabled in the LWS release)
+```
+
+Note: `lws.enableDisaggregatedSet` is an upstream LWS chart value. If you install
+LWS separately and want DS, enable it on the LWS release (e.g.
+`--set enableDisaggregatedSet=true`).
+
+For **development/testing only**, you can deploy LWS as a bundled subchart:
+
+```yaml
+global:
+  lws:
+    install: true   # Deploys the bundled LWS subchart (integration auto-enabled)
+  disaggregatedset:
+    install: true   # Also enables DS ClusterRoles and validating webhook on the bundled chart
+lws:
+  enableDisaggregatedSet: true   # Mirror the disaggregatedset.install flag here
+```
+
+Note: `lws.enableDisaggregatedSet` must be set explicitly because
+Helm does not chain `global.disaggregatedset.install` into the LWS
+subchart values automatically. The two flags are kept in sync by
+install commands and Helmfile wrappers, not by the chart itself.
 
 ## 📚 Additional Resources
 

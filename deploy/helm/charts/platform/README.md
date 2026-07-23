@@ -29,6 +29,7 @@ The Dynamo Platform Helm chart deploys the complete Dynamo Kubernetes Platform i
 - **NATS**: Optional messaging system for NATS-based request, event, and request-trace transports
 - **etcd**: Distributed key-value store for service discovery (optional, disabled by default)
 - **Grove**: Multi-node inference orchestration (optional)
+- **LeaderWorkerSet (LWS)**: Multinode orchestration for prefill/decode workloads (optional)
 - **Kai Scheduler**: Advanced workload scheduling (optional)
 
 ## 📋 Prerequisites
@@ -109,6 +110,7 @@ Kubernetes: `>=1.30.0-0`
 | https://nats-io.github.io/k8s/helm/charts/ | nats | 1.3.2 |
 | oci://ghcr.io/ai-dynamo/grove | grove(grove-charts) | v0.1.0-alpha.11 |
 | oci://ghcr.io/kai-scheduler/kai-scheduler | kai-scheduler | v0.13.4 |
+| oci://registry.k8s.io/lws/charts | lws | v0.9.0 |
 
 ## Values
 
@@ -121,6 +123,10 @@ Kubernetes: `>=1.30.0-0`
 | global.volcano-scheduler.enabled | bool | `false` | EXPERIMENTAL: Whether to enable Volcano scheduler integration for Grove PodCliqueSets. Set to true when Volcano is available in the cluster and Grove is configured with Volcano scheduler support. The operator uses this to inject schedulerName and map nvidia.com/volcano-queue to Grove's Volcano queue annotation. |
 | global.grove.install | bool | `false` | Whether this chart should install the bundled Grove subchart. When true, deploys the Grove operator cluster-wide. Integration is automatically enabled. NOTE: For production environments, it is recommended to install Grove separately. |
 | global.grove.enabled | bool | `false` | Whether to enable Grove integration (multinode orchestration via PodCliqueSets). Set to true when Grove is available in the cluster (installed externally). Automatically true when install=true. The operator uses this to decide whether to create PodCliqueSets for multinode deployments. |
+| global.lws.install | bool | `false` | Whether this chart should install the bundled LeaderWorkerSet (LWS) subchart. When true, deploys the LWS operator cluster-wide. LWS is the multinode orchestrator used by the operator's LWS pathway. NOTE: For production environments, it is recommended to install LWS separately. |
+| global.lws.enabled | bool | `false` | Whether to enable LWS integration (multinode orchestration via LeaderWorkerSets). Set to true when LWS is available in the cluster (installed externally). Automatically true when install=true. The operator uses this to decide whether to create LeaderWorkerSets for multinode deployments. NOTE: The operator requires both the LWS API group and the Volcano API group for the LWS pathway. If this value is explicitly set to true, startup will fail unless both APIs are available. |
+| global.disaggregatedset.install | bool | `false` | Whether to enable DisaggregatedSet (DS) support on top of LWS. This is an operator-facing intent flag only. This chart does not automatically sync DS enablement between the operator flags under `global` and the upstream LWS chart settings: - If you install LWS via this chart (`global.lws.install=true`), you must   also set `lws.enableDisaggregatedSet=true` to enable DS ClusterRoles and   the validating webhook in the upstream LWS chart. - If you install LWS separately, `enableDisaggregatedSet` must be set on   the external LWS release, not here. Requires LWS to be installed (either via `global.lws.install=true` or externally). The DS CRD and bundled controller ship with the LWS chart and are always present once LWS is installed. DS orchestrates N LeaderWorkerSets (one per role) and is the recommended orchestrator for prefill/decode disaggregation. |
+| global.disaggregatedset.enabled | bool | `false` | Whether to enable DS integration in the operator. Set to true to make the operator create DisaggregatedSets for multinode deployments when the DGD carries the `nvidia.com/enable-disaggregatedset: "true"` annotation. This is not automatically set when install=true. |
 | dynamo-operator.enabled | bool | `true` | Whether to enable the Dynamo Kubernetes operator deployment |
 | dynamo-operator.upgradeCRD | bool | `true` | Whether the cluster-wide operator applies CRDs from its image through the crd-apply init container. When false, the chart installs no CRDs; apply them separately before starting a cluster-wide operator. Namespace-restricted installations must set this to false and use the CRDs managed by the cluster-wide operator. |
 | dynamo-operator.natsAddr | string | `""` | NATS server address for operator communication. When empty, the operator uses bundled NATS only if global.nats.install=true; otherwise NATS is not configured. Format: `nats://hostname:4222` |
@@ -185,6 +191,9 @@ Kubernetes: `>=1.30.0-0`
 | dynamo-operator.checkpoint.storage | object | `{}` | Optional PVC storage used when the snapshot-agent is installed outside workload namespaces with snapshot.storage.accessMode=podMount. Set create=true for operator-managed namespace PVCs, or omit/create=false to require an already-present PVC with the configured name. ReadWriteOnce can be used with podMount for sequential checkpoint/restore on suitable storage backends; use ReadWriteMany for concurrent multi-node access. |
 | grove.tolerations | list | `[]` | Node tolerations for Grove pods |
 | grove.affinity | object | `{}` | Affinity for Grove pods |
+| lws.enableDisaggregatedSet | bool | `false` | Install the DisaggregatedSet editor/viewer/admin ClusterRoles and validating webhook in the LWS chart. The DisaggregatedSet CRD and the bundled controller ship with the LWS chart and are always installed once LWS is enabled. Set to true when `global.disaggregatedset.install=true` so the operator can use the DS pathway. |
+| lws.tolerations | list | `[]` | Node tolerations for LWS pods |
+| lws.affinity | object | `{}` | Affinity for LWS pods |
 | kai-scheduler.global.tolerations | list | `[]` | Node tolerations for kai-scheduler pods |
 | kai-scheduler.global.affinity | object | `{}` | Affinity for kai-scheduler pods |
 | etcd.image.repository | string | `"bitnamilegacy/etcd"` | following bitnami announcement for brownout - https://github.com/bitnami/charts/tree/main/bitnami/etcd#%EF%B8%8F-important-notice-upcoming-changes-to-the-bitnami-catalog, we need to use the legacy repository until we migrate to the new "secure" repository |
@@ -283,6 +292,66 @@ global:
 ```
 
 Note: `global.*.install` controls whether the bundled subcharts are deployed. When set, integration is automatically enabled. `global.*.enabled` can be set independently when using externally-managed installations.
+
+### LeaderWorkerSet and DisaggregatedSet Configuration
+
+The operator supports two multinode orchestrator pathways backed by
+[LeaderWorkerSet](https://github.com/kubernetes-sigs/lws) (LWS):
+
+- **LWS pathway** — the operator renders one `LeaderWorkerSet` per
+  multinode component.
+- **DisaggregatedSet (DS) pathway** — when the DGD carries the
+  `nvidia.com/enable-disaggregatedset: "true"` annotation and DS is
+  installed, the operator renders a single `DisaggregatedSet` that owns
+  one `LeaderWorkerSet` per role (prefill, decode, etc.).
+
+DS ships inside the LWS chart as of LWS v0.9.0, gated by
+`lws.enableDisaggregatedSet`. The DS CRD and bundled controller are
+always installed once LWS is; `enableDisaggregatedSet=true` only
+adds the DS editor/viewer/admin `ClusterRoles` and the validating
+webhook entry.
+
+The operator's LWS pathway also requires the Volcano API group. In
+auto-detect mode, LWS is considered available only when both LWS and
+Volcano are detected. If `global.lws.enabled=true` is set explicitly,
+the operator will fail at startup unless both APIs are present.
+
+**Compatibility Matrix:**
+
+| dynamo-platform | lws (appVersion) |
+|-----------------|------------------|
+| 1.3.x           | >= v0.9.0        |
+
+After installing LWS separately, enable Dynamo integration:
+
+```yaml
+global:
+  lws:
+    enabled: true   # Enables the operator's LWS pathway
+  disaggregatedset:
+    enabled: true   # Enables the operator's DS pathway (requires DS enabled in the LWS release)
+```
+
+Note: `lws.enableDisaggregatedSet` is an upstream LWS chart value. If you install
+LWS separately and want DS, enable it on the LWS release (e.g.
+`--set enableDisaggregatedSet=true`).
+
+For **development/testing only**, you can deploy LWS as a bundled subchart:
+
+```yaml
+global:
+  lws:
+    install: true   # Deploys the bundled LWS subchart (integration auto-enabled)
+  disaggregatedset:
+    install: true   # Also enables DS ClusterRoles and validating webhook on the bundled chart
+lws:
+  enableDisaggregatedSet: true   # Mirror the disaggregatedset.install flag here
+```
+
+Note: `lws.enableDisaggregatedSet` must be set explicitly because
+Helm does not chain `global.disaggregatedset.install` into the LWS
+subchart values automatically. The two flags are kept in sync by
+install commands and Helmfile wrappers, not by the chart itself.
 
 ## 📚 Additional Resources
 
