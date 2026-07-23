@@ -133,7 +133,7 @@ export function CompatibilityHero() {
             <p className="dynref-eyebrow">Current release</p>
             <div className="dynref-hero-title">
               Dynamo {CURRENT_VERSION}
-              <span className="dynref-badge dynref-badge--green">Stable</span>
+              <span className="dynref-badge dynref-badge--green">GA release</span>
             </div>
           </div>
           <p className="dynref-muted dynref-hero-meta">

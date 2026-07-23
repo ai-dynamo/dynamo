@@ -34,6 +34,9 @@ export interface Release {
   pins?: BackendPins;
   delta?: string;
   note?: string;
+  /** Feature-voice one-liner for the Release Notes timeline (stable releases);
+   *  composed from the release page's Highlights themes. */
+  notesSummary?: string;
   partial?: boolean;
 }
 
@@ -64,6 +67,8 @@ export const RELEASES: Release[] = [
     pins: { sglang: "0.5.14", trtllm: "1.3.0rc19", vllm: "0.23.0", nixlSglang: "1.3.0", nixlTrtllm: "1.0.1", nixlVllm: "1.1.0" },
     delta:
       "CUDA 12 container images discontinued; EFA variants go multi-arch as -efa; GA wheels published as 1.3.0.post1 (containers stay :1.3.0); UCX 1.20.x.",
+    notesSummary:
+      "Tool-calling and reasoning overhaul, RL rollout serving, the largest Router buildout to date, SLA-driven Planner autoscaling, and production GPU Memory Service on Kubernetes.",
   },
   {
     version: "v1.3.0-dev.1",
@@ -94,6 +99,8 @@ export const RELEASES: Release[] = [
     pins: { sglang: "0.5.11", trtllm: "1.3.0rc14", vllm: "0.20.1", nixlSglang: "1.0.1", nixlTrtllm: "0.10.1", nixlVllm: "0.10.1" },
     delta:
       "603 PRs from 82 authors. DGD/DGDR promoted to v1beta1; CRTC default approximate KV router; inter-pod GMS sidecar; Dynamo Snapshot on CRI-O / OpenShift; UCX 1.20.0.",
+    notesSummary:
+      "DGD/DGDR v1beta1, CRTC as the default KV router, inter-pod GPU Memory Service, Dynamo Snapshot on CRI-O/OpenShift, and DeepSeek-V4 recipes on vLLM.",
   },
   {
     version: "v1.2.0-deepseek-v4-dev.3",
@@ -133,6 +140,8 @@ export const RELEASES: Release[] = [
     pins: { sglang: "0.5.10.post1", trtllm: "1.3.0rc11", vllm: "0.19.0", nixlSglang: "1.0.1", nixlTrtllm: "0.10.1", nixlVllm: "0.10.1" },
     delta:
       "Planner split into its own dynamo-planner image (artifact boundary change). First 1.y.z publication of dynamo-protocols on crates.io; dynamo-async-openai deprecated at final 1.0.2.",
+    notesSummary:
+      "Resilient KV routing at scale, Anthropic Messages API support, performance modeling and offline replay, and the multimodal embedding cache.",
   },
   {
     version: "v1.1.0-dev.3",
@@ -190,6 +199,8 @@ export const RELEASES: Release[] = [
     pins: { sglang: "0.5.9", trtllm: "1.3.0rc5.post1", vllm: "0.16.0", nixlSglang: "0.10.1", nixlTrtllm: "0.10.1", nixlVllm: "0.10.1" },
     delta:
       "snapshot-agent image and EFA variants for vLLM and TRT-LLM (AMD64 only). First publish of dynamo-mocker and dynamo-kv-router crates. snapshot Helm chart added (preview); deprecated dynamo-crds dropped from the publish stream.",
+    notesSummary:
+      "First GA release: unified configuration, Kubernetes production readiness, multimodal serving, and the agents surface.",
   },
   {
     version: "v0.9.1",

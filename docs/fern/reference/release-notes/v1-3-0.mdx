@@ -24,12 +24,12 @@ import { UpgradePanel } from "@/components/UpgradePanel";
 Dynamo v1.3.0 is the 16th feature release of the open-source distributed inference platform. It delivers the largest **Dynamo Router** buildout to date (a standalone selection service, the **Branch-Sharded KV Indexer**, compressed-radix-tree hot-path speedups, and topology-aware routing), overhauls **tool-calling and reasoning** into a configurable parser layer aligned to vLLM and SGLang across the model fleet, and deepens **Kubernetes deployment** around a production **GPU Memory Service** and DynamoGraphDeployment (DGD) `v1beta1` admission. It also expands **performance modeling and replay** with AIC latency prediction and Mooncake trace replay, and moves the platform to **CUDA 13** with refreshed vLLM, SGLang, and TensorRT-LLM engines and **NIXL v1.x**.
 
 <Note>
-Breaking changes and deprecations for this release are tracked on the [Deprecations](../deprecations.mdx#v130) ledger; known issues on the [Known Issues](../known-issues.mdx#v130) page. Key dependency pins live on [Compatibility](../compatibility.mdx); shipped artifacts on [Release Artifacts](../release-artifacts.mdx).
+Breaking changes and deprecations for this release are tracked on the [Deprecations](../deprecations.mdx#v130) ledger; known issues on the [Known Issues](../known-issues.mdx#v130) page. Key dependency pins live on [Compatibility](../compatibility.mdx); shipped artifacts on [Release Artifacts](../release-artifacts.mdx). Model early access builds (`vX.Y.Z-<model>-dev.N`) are tracked in [Model Early Access Builds](../model-early-access-builds.mdx).
 </Note>
 
 <UpgradePanel
   toVersion="v1.3.0"
-  fromVersions={[{ version: "v1.2.1", label: "v1.2.x" }, { version: "v1.1.1", label: "v1.1.x" }, { version: "v1.0.2", label: "v1.0.x" }]}
+  fromVersion={{ version: "v1.2.1", label: "v1.2.x" }}
   readingList={[
     { label: "v1.3.0 breaking changes (24)", href: "/dynamo/dev/reference/deprecations#v130" },
     { label: "v1.3.0 known issues (10)", href: "/dynamo/dev/reference/known-issues#v130" },

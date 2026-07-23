@@ -224,7 +224,7 @@ export function BackendVersionMatrix({ mode = "current" }: { mode?: "current" | 
                       {current.date && <span className="dynref-vm-date">{current.date}</span>}
                     </td>
                     <td className="dynref-vm-kind">
-                      <span className="dynref-badge dynref-badge--green">Stable</span>
+                      <span className="dynref-badge dynref-badge--green">GA release</span>
                     </td>
                     <PinCells pins={current.pins} />
                   </tr>

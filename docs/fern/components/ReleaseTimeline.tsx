@@ -8,6 +8,11 @@
  * stable, solid neutral = patch, dashed amber = platform preview /
  * model build.
  *
+ * variant="artifacts" (default) keeps the artifact-delta blurbs and the
+ * crates table — the Release Artifacts page. variant="notes" swaps stable
+ * releases to their feature-voice notesSummary and suppresses the crates
+ * table — the Release Notes overview.
+ *
  * Server component; shared vocabulary (headings, badges, mono) comes from
  * ReferenceStyles — place <ReferenceStyles /> on the page alongside this
  * component. Only the .dynref-tl-* layout classes are defined here.
@@ -177,9 +182,22 @@ const NODE_CLASS: Record<ReleaseKind, string> = {
   "model-build": "dynref-tl-node--preview",
 };
 
-function TimelineEntry({ release, isLast }: { release: Release; isLast: boolean }) {
+type TimelineVariant = "artifacts" | "notes";
+
+function TimelineEntry({
+  release,
+  isLast,
+  variant,
+}: {
+  release: Release;
+  isLast: boolean;
+  variant: TimelineVariant;
+}) {
   const badge = KIND_BADGE[release.kind];
-  const summary = release.delta ?? release.note;
+  const summary =
+    variant === "notes" && release.kind === "stable"
+      ? release.notesSummary ?? release.note ?? release.delta
+      : release.delta ?? release.note;
   return (
     <div className="dynref-tl-item">
       <div className="dynref-tl-rail">
@@ -212,15 +230,21 @@ function TimelineEntry({ release, isLast }: { release: Release; isLast: boolean 
   );
 }
 
-export function ReleaseTimeline() {
+export function ReleaseTimeline({ variant = "artifacts" }: { variant?: TimelineVariant }) {
   return (
     <>
       <style>{TL_CSS}</style>
       <section className="dynref-tl">
         {RELEASES.map((release, index) => (
-          <TimelineEntry key={release.version} release={release} isLast={index === RELEASES.length - 1} />
+          <TimelineEntry
+            key={release.version}
+            release={release}
+            isLast={index === RELEASES.length - 1}
+            variant={variant}
+          />
         ))}
 
+        {variant === "artifacts" && (
         <div className="dynref-tl-crates">
           <h3 className="dynref-h">Crates on crates.io — first publication</h3>
           <table className="dynref-tl-table">
@@ -246,6 +270,7 @@ export function ReleaseTimeline() {
             dependencies.
           </p>
         </div>
+        )}
       </section>
     </>
   );

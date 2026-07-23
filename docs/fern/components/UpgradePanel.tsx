@@ -4,11 +4,11 @@
  *
  * UpgradePanel — "upgrade to this release" panel for a Release Notes page.
  *
- * Renders the upgrade target, the from-version chips (static in v1 — the
- * first entry is styled as selected), a migration strip computed from
- * releases.data (backend pins, NIXL pins, CUDA toolkits + discontinuation
- * badge, minimum driver), and a "Read before upgrading" reading list of
- * link chips.
+ * Renders the upgrade target, an informational from-version (plain muted
+ * mono text — deliberately NOT chip-styled, so it does not read as an
+ * interactive filter), a migration strip computed from releases.data
+ * (backend pins, NIXL pins, CUDA toolkits + discontinuation badge, minimum
+ * driver), and a "Read before upgrading" reading list of link chips.
  *
  * Server component (no "use client"); shared vocabulary comes from
  * ReferenceStyles — place <ReferenceStyles /> on the page alongside this
@@ -24,32 +24,14 @@ const UP_CSS = `
 .dynref-up-from {
     display: flex;
     flex-wrap: wrap;
-    align-items: center;
+    align-items: baseline;
     gap: 6px;
 }
 
-.dynref-up-fromchip {
-    display: inline-flex;
-    align-items: center;
-    padding: 2px 9px;
-    border: 1px solid var(--border, var(--grayscale-a5));
-    border-radius: 6px;
+/* Informational, not interactive — no border or background. */
+.dynref-up-fromver {
     color: var(--pst-color-text-muted);
-    font-size: 12px;
-}
-
-.dark .dynref-up-fromchip {
-    border-color: #383838;
-}
-
-.dynref-up-fromchip--selected {
-    border: 1.5px solid var(--dynref-green-border);
-    background: transparent;
-    color: var(--dynref-green-fg);
-}
-
-.dark .dynref-up-fromchip--selected {
-    border-color: var(--dynref-green-border);
+    font-size: 12.5px;
 }
 
 .dynref-up-strip {
@@ -232,18 +214,13 @@ function buildRows(
 
 export function UpgradePanel(props: {
   toVersion: string;
-  fromVersions: { version: string; label: string }[];
+  fromVersion: { version: string; label: string };
   readingList: { label: string; href: string }[];
 }) {
-  const selectedFrom = props.fromVersions[0];
-  const from = selectedFrom
-    ? RELEASES.find((r) => r.version === selectedFrom.version)
-    : undefined;
+  const from = RELEASES.find((r) => r.version === props.fromVersion.version);
   const to = RELEASES.find((r) => r.version === props.toVersion);
 
-  const rows = selectedFrom
-    ? buildRows(selectedFrom.version, props.toVersion, from?.pins, to?.pins)
-    : [];
+  const rows = buildRows(props.fromVersion.version, props.toVersion, from?.pins, to?.pins);
 
   return (
     <>
@@ -253,18 +230,7 @@ export function UpgradePanel(props: {
           <p className="dynref-h">Upgrade to {props.toVersion}</p>
           <div className="dynref-up-from">
             <span className="dynref-muted">from</span>
-            {props.fromVersions.map((entry, index) => (
-              <span
-                className={
-                  index === 0
-                    ? "dynref-up-fromchip dynref-up-fromchip--selected dynref-mono"
-                    : "dynref-up-fromchip dynref-mono"
-                }
-                key={entry.version}
-              >
-                {entry.label}
-              </span>
-            ))}
+            <span className="dynref-mono dynref-up-fromver">{props.fromVersion.label}</span>
           </div>
         </div>
 
