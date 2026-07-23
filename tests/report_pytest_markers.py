@@ -293,6 +293,7 @@ STUB_MODULES = [
 # Project paths for local imports
 PROJECT_PATHS = [
     os.getcwd(),
+    os.path.join(os.getcwd(), "aisimulate"),
     os.path.join(os.getcwd(), "components", "src"),
     os.path.join(os.getcwd(), "lib", "bindings", "python", "src"),
 ]
@@ -608,8 +609,8 @@ def parse_args():
     parser.add_argument(
         "--tests",
         nargs="*",
-        default=["tests", "components/src"],
-        help="Paths to test directories (default: tests components/src)",
+        default=["tests", "components/src", "aisimulate/tests"],
+        help="Paths to test directories (default: tests components/src aisimulate/tests)",
     )
     parser.add_argument(
         "--verbose",

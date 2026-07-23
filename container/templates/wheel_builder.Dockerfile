@@ -527,6 +527,17 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     fi && \
     /tmp/use-sccache.sh show-stats "Dynamo Runtime"
 
+{% if target == "planner" %}
+# AI Simulate is a separate Python distribution. Build it only for the planner
+# image, after the Dynamo wheels so Python-only changes do not invalidate the
+# expensive Rust build layers above.
+COPY aisimulate/ /opt/dynamo/aisimulate/
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=shared \
+    export UV_CACHE_DIR=/root/.cache/uv && \
+    source ${VIRTUAL_ENV}/bin/activate && \
+    uv build --wheel --out-dir /opt/dynamo/dist /opt/dynamo/aisimulate
+{% endif %}
+
 # Compliance: harvest each crate's real LICENSE files from the cargo registry
 # source cache so the rust NOTICES generator can inline upstream license text
 # (the runtime image keeps only the compiled wheel). Keyed "<name>-<version>"

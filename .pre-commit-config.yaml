@@ -104,9 +104,9 @@ repos:
         - pyyaml
     - id: check-spica-packaging
       name: Validate experimental Spica packaging contracts
-      entry: python3 scripts/check_spica_packaging.py
+      entry: python3 aisimulate/scripts/check_packaging.py
       language: python
-      files: ^(pyproject\.toml|container/deps/requirements\.planner\.txt|container/templates/wheel_builder\.Dockerfile|components/src/dynamo/profiler/__init__\.py|scripts/check_spica_packaging\.py)$
+      files: ^(pyproject\.toml|aisimulate/(pyproject\.toml|spica/.*|scripts/check_packaging\.py)|container/templates/(wheel_builder|planner)\.Dockerfile|components/src/dynamo/profiler/__init__\.py)$
       pass_filenames: false
       additional_dependencies:
         - tomli>=2.0.1; python_version < '3.11'
