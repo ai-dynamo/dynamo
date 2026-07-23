@@ -755,6 +755,24 @@ def test_optimizer_starts_with_requested_kv_router_mode(
     assert set(seen_prefill_scales) == {2.0}
 
 
+def test_agg_optimizer_rejects_single_worker_kv_state_before_replay(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        replay_optimize.aic,
+        "_enumerate_dense_tp_candidates",
+        lambda backend, system: ([4], [4]),
+    )
+    monkeypatch.setattr(
+        replay_optimize.evaluate,
+        "_run_agg_replay_for_state",
+        lambda **kwargs: pytest.fail("unsupported state reached replay"),
+    )
+
+    with pytest.raises(ValueError, match="no TP candidates fit"):
+        optimize_dense_agg_with_replay(_agg_spec(total_gpus=4))
+
+
 def test_disagg_optimizer_supports_latency_objective(monkeypatch) -> None:
     def fake_run(**kwargs):
         state = kwargs["state"]

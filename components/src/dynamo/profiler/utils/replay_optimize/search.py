@@ -159,6 +159,11 @@ def _iter_agg_tp_states_with_max_workers(
         workers = max_total_gpus // tp
         if workers < 1:
             continue
+        if not _supports_agg_router_mode(
+            workers=workers,
+            router_mode=router_mode,
+        ):
+            continue
         states.append(
             DenseAggReplayState(
                 tp=tp,
