@@ -22,7 +22,7 @@ from tests.serve.multimodal_profiles.vllm import (
     VLLM_MULTIMODAL_PROFILES,
     VLLM_TOPOLOGY_SCRIPTS,
 )
-from tests.utils.constants import DefaultPort
+from tests.utils.constants import DefaultPort, DynamoPortRange
 from tests.utils.engine_process import EngineConfig
 from tests.utils.multimodal import make_multimodal_configs
 from tests.utils.payload_builder import (
@@ -44,6 +44,7 @@ from tests.utils.payloads import (
     LoraTestChatPayload,
     ToolCallingChatPayload,
 )
+from tests.utils.port_utils import allocate_ports, deallocate_ports
 
 logger = logging.getLogger(__name__)
 
@@ -764,6 +765,72 @@ def test_serve_deployment(
         vllm_config_test, frontend_port=dynamo_dynamic_ports.frontend_port
     )
     run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
+
+
+@pytest.fixture
+def kvbm_zmq_ports():
+    """Reserve independent KVBM coordination ports for two prefill workers."""
+    ports = allocate_ports(4, DynamoPortRange.ROUTER.value)
+    try:
+        yield ports
+    finally:
+        deallocate_ports(ports)
+
+
+@pytest.mark.vllm
+@pytest.mark.kvbm
+@pytest.mark.e2e
+@pytest.mark.gpu_4
+@pytest.mark.model("Qwen/Qwen3-0.6B")
+@pytest.mark.profiled_vram_gib(3.8)  # per GPU; existing KVBM profile with this cap
+@pytest.mark.requested_vllm_kv_cache_bytes(1_119_388_000)
+@pytest.mark.timeout(900)
+@pytest.mark.pre_merge
+@pytest.mark.parametrize("num_system_ports", [4], indirect=True)
+def test_disaggregated_kvbm_router(
+    request,
+    runtime_services_dynamic_ports,
+    dynamo_dynamic_ports,
+    num_system_ports,
+    predownload_models,
+    kvbm_zmq_ports,
+):
+    """Launch 2 decode and 2 KVBM prefill workers behind the KV router."""
+    assert num_system_ports == 4, "Requires one system port per vLLM worker"
+    assert len(kvbm_zmq_ports) == 4, "Requires two KVBM ZMQ port pairs"
+
+    config = VLLMConfig(
+        name="disaggregated_kvbm_router",
+        directory=vllm_dir,
+        script_name="disagg_kvbm_router.sh",
+        marks=[],  # markers at function level
+        model="Qwen/Qwen3-0.6B",
+        timeout=900,
+        health_check_workers=True,
+        request_payloads=[
+            router_selection_chat_payload_default(
+                repeat_count=3,
+                max_tokens=64,
+            ),
+            completion_payload_default(),
+        ],
+    )
+    config = dataclasses.replace(
+        config, frontend_port=dynamo_dynamic_ports.frontend_port
+    )
+    extra_env = {
+        "DYN_KVBM_CPU_CACHE_GB": "2",
+        "DYN_KVBM_LEADER_ZMQ_PUB_PORT1": str(kvbm_zmq_ports[0]),
+        "DYN_KVBM_LEADER_ZMQ_ACK_PORT1": str(kvbm_zmq_ports[1]),
+        "DYN_KVBM_LEADER_ZMQ_PUB_PORT2": str(kvbm_zmq_ports[2]),
+        "DYN_KVBM_LEADER_ZMQ_ACK_PORT2": str(kvbm_zmq_ports[3]),
+    }
+    run_serve_deployment(
+        config,
+        request,
+        ports=dynamo_dynamic_ports,
+        extra_env=extra_env,
+    )
 
 
 # LoRA Test Directory
