@@ -49,11 +49,15 @@ futures = { workspace = true }
 humantime = { workspace = true }
 parking_lot = { workspace = true }
 prometheus = { workspace = true }
+quinn = { workspace = true }
 rand = { workspace = true }
+rcgen = { workspace = true }
 reqwest = { workspace = true }
 rmp-serde = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
+rustls = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 tokio-util = { workspace = true }

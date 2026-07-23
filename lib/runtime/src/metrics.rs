@@ -8,6 +8,7 @@
 
 pub mod frontend_perf;
 pub mod prometheus_names;
+pub mod quic_response;
 pub mod request_plane;
 pub mod tokio_perf;
 pub mod transport_metrics;

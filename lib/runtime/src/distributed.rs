@@ -50,6 +50,8 @@ pub struct DistributedRuntime {
     nats_client: Option<transports::nats::Client>,
     network_manager: Arc<NetworkManager>,
     tcp_server: Arc<OnceCell<Arc<transports::tcp::server::TcpStreamServer>>>,
+    quic_response_server:
+        Arc<OnceCell<Arc<crate::pipeline::network::quic_response::QuicResponseServer>>>,
     system_status_server: Arc<OnceLock<Arc<system_status_server::SystemStatusServerInfo>>>,
     request_plane: RequestPlaneMode,
 
@@ -198,6 +200,7 @@ impl DistributedRuntime {
             network_manager: Arc::new(network_manager),
             nats_client,
             tcp_server: Arc::new(OnceCell::new()),
+            quic_response_server: Arc::new(OnceCell::new()),
             system_status_server: Arc::new(OnceLock::new()),
             discovery_client,
             discovery_metadata,
@@ -212,6 +215,10 @@ impl DistributedRuntime {
             metadata_artifacts: crate::metadata_registry::MetadataArtifactRegistry::new(),
             event_transport_kind,
         };
+
+        crate::metrics::quic_response::ensure_registered(
+            distributed_runtime.get_metrics_registry(),
+        );
 
         // Initialize the uptime gauge in SystemHealth
         distributed_runtime
@@ -384,11 +391,11 @@ impl DistributedRuntime {
                     .map_or(String::new(), |h| format!(" on host {h}"));
                 if port == 0 {
                     tracing::info!(
-                        "TCP response stream server using OS-assigned port{host_suffix}"
+                        "TCP request callback server using OS-assigned port{host_suffix}"
                     );
                 } else {
                     tracing::info!(
-                        "TCP response stream server using fixed port {port}{host_suffix}"
+                        "TCP request callback server using fixed port {port}{host_suffix}"
                     );
                 }
 
@@ -398,6 +405,32 @@ impl DistributedRuntime {
             })
             .await?
             .clone())
+    }
+
+    pub async fn quic_response_server(
+        &self,
+    ) -> Result<Arc<crate::pipeline::network::quic_response::QuicResponseServer>> {
+        Ok(self
+            .quic_response_server
+            .get_or_try_init(async {
+                let tcp_server = self.tcp_server().await?;
+                let address = tcp_server.local_address()?;
+                crate::pipeline::network::quic_response::QuicResponseServer::new(
+                    address,
+                    address,
+                    self.runtime.child_token(),
+                )
+                .map_err(anyhow::Error::from)
+            })
+            .await?
+            .clone())
+    }
+
+    pub fn quic_response_client_pool(
+        &self,
+    ) -> Result<Arc<crate::pipeline::network::quic_response::QuicResponseClientPool>> {
+        crate::pipeline::network::quic_response::process_client_pool_from_env()
+            .map_err(anyhow::Error::from)
     }
 
     /// Get the network manager
