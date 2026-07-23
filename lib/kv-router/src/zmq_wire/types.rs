@@ -54,6 +54,15 @@ pub enum KvTokenIds {
     Bigram(Vec<(u32, u32)>),
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum Locality {
+    Local,
+    Remote,
+    #[serde(other)]
+    Unknown,
+}
+
 #[derive(Debug, Serialize, Clone)]
 #[serde(tag = "type")] // msgspec encodes variant tag as a string when `tag=True`
 pub enum RawKvEvent {
@@ -88,6 +97,8 @@ pub enum RawKvEvent {
         kv_cache_spec_kind: Option<KvCacheSpecKind>,
         #[serde(skip_serializing_if = "Option::is_none")]
         kv_cache_spec_sliding_window: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        locality: Option<Locality>,
     },
     BlockRemoved {
         block_hashes: Vec<BlockHashValue>,
@@ -99,6 +110,8 @@ pub enum RawKvEvent {
         kv_cache_spec_kind: Option<KvCacheSpecKind>,
         #[serde(skip_serializing_if = "Option::is_none")]
         kv_cache_spec_sliding_window: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        locality: Option<Locality>,
     },
     AllBlocksCleared,
     Ignored,

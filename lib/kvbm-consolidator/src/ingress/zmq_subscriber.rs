@@ -27,6 +27,8 @@ use crate::source::EventSource;
 use crate::tracker::{StoreInput, Tracker};
 use crate::wire::vllm_in::{KvEventBatch, RawKvEvent};
 use crate::zmq_util::{connect_sub_socket, multipart_message};
+use dynamo_kv_router::protocols::StorageTier;
+use dynamo_kv_router::zmq_wire::worker_local_event_tier;
 
 /// Spawn the ZMQ listener. Returns immediately with a [`JoinHandle`] for the task.
 pub async fn spawn(
@@ -89,6 +91,12 @@ pub async fn spawn(
 }
 
 fn process_event(tracker: &mut Tracker, event: RawKvEvent, engine_source: EventSource) {
+    // This source represents the engine's G1 cache. Native lower-tier events
+    // are outside this consolidator's contract.
+    if worker_local_event_tier(&event) != Some(StorageTier::Device) {
+        return;
+    }
+
     match event {
         RawKvEvent::BlockStored {
             block_hashes,
@@ -180,5 +188,55 @@ fn process_event(tracker: &mut Tracker, event: RawKvEvent, engine_source: EventS
         }
 
         RawKvEvent::Ignored => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tracker::ConsolidatedEvent;
+    use dynamo_kv_router::zmq_wire::{BlockHashValue, Locality};
+
+    fn stored_event(medium: &str, locality: Option<Locality>) -> RawKvEvent {
+        RawKvEvent::BlockStored {
+            block_hashes: vec![BlockHashValue::Unsigned(1)],
+            parent_block_hash: None,
+            token_ids: vec![10, 11],
+            block_size: 2,
+            medium: Some(medium.to_string()),
+            lora_name: None,
+            cache_namespace: None,
+            block_mm_infos: None,
+            is_eagle: Some(false),
+            group_idx: None,
+            kv_cache_spec_kind: None,
+            kv_cache_spec_sliding_window: None,
+            locality,
+        }
+    }
+
+    #[test]
+    fn process_event_only_tracks_worker_local_g1_events() {
+        let mut tracker = Tracker::new(None);
+
+        process_event(
+            &mut tracker,
+            stored_event("GPU", Some(Locality::Remote)),
+            EventSource::Vllm,
+        );
+        process_event(
+            &mut tracker,
+            stored_event("FS", Some(Locality::Local)),
+            EventSource::Vllm,
+        );
+        process_event(&mut tracker, stored_event("FS", None), EventSource::Vllm);
+        assert_eq!(tracker.num_blocks(), 0);
+
+        process_event(&mut tracker, stored_event("GPU", None), EventSource::Vllm);
+        assert_eq!(tracker.num_blocks(), 1);
+        assert!(matches!(
+            tracker.drain_events().as_slice(),
+            [ConsolidatedEvent::Store { .. }]
+        ));
     }
 }
