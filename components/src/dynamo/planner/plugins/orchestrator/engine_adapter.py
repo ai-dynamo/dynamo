@@ -174,6 +174,9 @@ class OrchestratorEngineAdapter:
         self._last_tick_monotonic: float = 0.0
         self._last_load_loop_monotonic: float = 0.0
         self._last_throughput_loop_monotonic: float = 0.0
+        # Emit one rollout-hold warning per continuous mid-rollout stretch;
+        # reset when the deployment is stable again so the next rollout warns.
+        self._power_rollout_hold_warned: bool = False
 
         # Plugin-framework metrics live alongside the adapter so they
         # share the orchestrator's lifecycle.  Use the default global
@@ -1031,26 +1034,25 @@ class OrchestratorEngineAdapter:
             ready_p, worker_counts.expected_num_prefill, p_watts
         ) or _rolling(ready_d, worker_counts.expected_num_decode, d_watts)
         if not any_rolling:
+            self._power_rollout_hold_warned = False
             return num_p, num_d
 
+        held_roles: list[str] = []
         if num_p is not None and ready_p is not None and num_p > ready_p:
-            log.warning(
-                "power budget: holding prefill at %s (proposed %s) — a "
-                "power-relevant role is mid-rollout with an unknown settled "
-                "target, so a scale-up cannot be safely budgeted this tick",
-                ready_p,
-                num_p,
-            )
+            held_roles.append(f"prefill at {ready_p} (proposed {num_p})")
             num_p = ready_p
         if num_d is not None and ready_d is not None and num_d > ready_d:
-            log.warning(
-                "power budget: holding decode at %s (proposed %s) — a "
-                "power-relevant role is mid-rollout with an unknown settled "
-                "target, so a scale-up cannot be safely budgeted this tick",
-                ready_d,
-                num_d,
-            )
+            held_roles.append(f"decode at {ready_d} (proposed {num_d})")
             num_d = ready_d
+        if held_roles and not self._power_rollout_hold_warned:
+            log.warning(
+                "power budget: holding %s — a power-relevant role is "
+                "mid-rollout with an unknown settled target, so a scale-up "
+                "cannot be safely budgeted this tick (further holds this "
+                "rollout are silent)",
+                "; ".join(held_roles),
+            )
+            self._power_rollout_hold_warned = True
         return num_p, num_d
 
     def _apply_power_final_budget(
