@@ -534,7 +534,14 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
         let mut event_id = 0u64;
         let mut queue = VecDeque::new();
 
-        for child in self.root.children.iter() {
+        let mut root_children: Vec<_> = self
+            .root
+            .children
+            .iter()
+            .map(|e| (*e.key(), e.value().clone()))
+            .collect();
+        root_children.sort_by_key(|(hash, _)| *hash);
+        for (_, child) in root_children {
             queue.push_back((child.clone(), None, None::<FxHashSet<WorkerWithDpRank>>));
         }
 
@@ -578,7 +585,13 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
                 event_id += 1;
             }
 
-            for child in node.children.iter() {
+            let mut node_children: Vec<_> = node
+                .children
+                .iter()
+                .map(|e| (*e.key(), e.value().clone()))
+                .collect();
+            node_children.sort_by_key(|(hash, _)| *hash);
+            for (_, child) in node_children {
                 queue.push_back((child.clone(), Some(block_hash), Some(live_workers.clone())));
             }
         }
@@ -1735,5 +1748,57 @@ mod tests {
                 "dump replay changed scores for query {query:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn dump_events_is_deterministic_for_sibling_nodes() {
+        // Workers 0 and 1 share prefix [1,2] but diverge at depth 3,
+        // creating sibling routing nodes whose DashMap iteration order
+        // is non-deterministic without an explicit sort.
+        let index = make_indexer(2, 3);
+        index.apply_event(store_event(0, &[1, 2, 3, 4])).await;
+        index.apply_event(store_event(1, &[1, 2, 5, 6])).await;
+        index.flush().await;
+
+        let dump1 = index.dump_events().await.unwrap();
+        let dump2 = index.dump_events().await.unwrap();
+
+        assert_eq!(
+            dump1, dump2,
+            "dump_events must produce identical event order across calls for sibling nodes"
+        );
+    }
+
+    #[tokio::test]
+    async fn dump_events_sibling_order_is_sorted_by_hash() {
+        // depth=4, sequences length 3 — all blocks stay in the router trie,
+        // none forwarded to backend shards. Sibling nodes at depth 3 must
+        // appear in sorted hash order.
+        let index = make_indexer(2, 4);
+        index.apply_event(store_event(0, &[1, 2, 3])).await;
+        index.apply_event(store_event(1, &[1, 2, 5])).await;
+        index.apply_event(store_event(2, &[1, 2, 7])).await;
+        index.apply_event(store_event(3, &[1, 2, 9])).await;
+        index.flush().await;
+
+        let dump = index.dump_events().await.unwrap();
+
+        let hashes: Vec<_> = dump
+            .iter()
+            .filter_map(|e| {
+                if let KvCacheEventData::Stored(s) = &e.event.data {
+                    s.blocks.first().map(|b| b.tokens_hash)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let mut sorted = hashes.clone();
+        sorted.sort();
+        assert_eq!(
+            hashes, sorted,
+            "dump_router_events must emit sibling nodes in sorted hash order"
+        );
     }
 }
