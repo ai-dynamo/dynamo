@@ -18,9 +18,6 @@
 # Slow from GitHub runners and not part of Dynamo-owned documentation.
 ^https://martinfowler\.com/articles/practical-test-pyramid\.html
 
-# NeurIPS refuses connections from GitHub runners for this paper PDF.
-^https://proceedings\.neurips\.cc/paper_files/paper/2017/file/3f5ee243547dee91fbd053c1c4a845aa-Paper\.pdf$
-
 # Helm artifact repository; its root endpoint intermittently returns 503.
 ^https://charts\.bitnami\.com/bitnami/?$
 

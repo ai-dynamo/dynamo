@@ -18,7 +18,7 @@ path = "src/main.rs"
 
 [dependencies]
 dynamo-mocker = { workspace = true }
-dynamo-vllm-grpc = { workspace = true }
+dynamo-vllm-sidecar = { path = "../../../sidecar/vllm", version = "1.3.0" }
 
 anyhow = { workspace = true }
 async-stream = { workspace = true }
@@ -34,5 +34,4 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 dynamo-backend-common = { workspace = true, features = ["testing"] }
-dynamo-vllm-sidecar = { path = "../vllm" }
 tokio-stream = { workspace = true, features = ["net"] }

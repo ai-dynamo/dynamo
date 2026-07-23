@@ -6,8 +6,8 @@ use std::net::SocketAddr;
 use anyhow::Context;
 use clap::Parser;
 use dynamo_mocker::common::protocols::MockEngineArgs;
-use dynamo_vllm_grpc::generate_server::GenerateServer;
 use dynamo_vllm_mocker::{MockerServerConfig, ServerMode, VllmMockerService};
+use dynamo_vllm_sidecar::proto::generate_server::GenerateServer;
 
 #[derive(Parser, Debug)]
 #[command(

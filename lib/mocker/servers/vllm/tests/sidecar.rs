@@ -8,9 +8,9 @@ use dynamo_backend_common::{
     PreprocessedRequest, SamplingOptions, StopConditions,
 };
 use dynamo_mocker::common::protocols::MockEngineArgs;
-use dynamo_vllm_grpc::generate_server::GenerateServer;
 use dynamo_vllm_mocker::{MockerServerConfig, ServerMode, VllmMockerService};
 use dynamo_vllm_sidecar::VllmSidecarEngine;
+use dynamo_vllm_sidecar::proto::generate_server::GenerateServer;
 use futures::StreamExt;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;

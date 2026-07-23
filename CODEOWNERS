@@ -80,9 +80,7 @@
 
 # === backend-vllm  (@ai-dynamo/dynamo-backend-vllm-codeowners) ===
 /lib/sidecar/vllm/                                                           @ai-dynamo/dynamo-backend-vllm-codeowners
-/lib/sidecar/vllm-grpc/                                                      @ai-dynamo/dynamo-backend-vllm-codeowners
 /examples/backends/vllm/                                                     @ai-dynamo/dynamo-backend-vllm-codeowners
-/lib/sidecar/vllm-mocker/                                                    @ai-dynamo/dynamo-backend-vllm-codeowners
 /components/src/dynamo/vllm/                                                 @ai-dynamo/dynamo-backend-vllm-codeowners
 /components/src/dynamo/vllm/tests/                                           @ai-dynamo/dynamo-backend-vllm-codeowners
 
