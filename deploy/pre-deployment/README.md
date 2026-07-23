@@ -32,7 +32,7 @@ Run the pre-deployment check before deploying Dynamo:
 ./pre-deployment-check.sh
 
 # For CPU-only clusters
-./pre-deployment-check.sh --device cpu
+# ./pre-deployment-check.sh --device cpu
 ```
 
 ## What it checks
@@ -49,10 +49,8 @@ The script performs few checks and provides a detailed summary:
   - Provides a sample command to set a StorageClass as default
   - References the official Kubernetes documentation for detailed guidance
 
-### 3. Cluster Resources
-- Checks for the requested cluster resources:
-  - NVIDIA GPU: GPU-enabled nodes using label `nvidia.com/gpu.present=true`
-  - CPU: ready Kubernetes nodes; no accelerator operator required
+### 3. Cluster GPU Resources (skipped for CPU device type)
+- Checks for GPU-enabled nodes in the cluster using label `nvidia.com/gpu.present=true`
 
 ## Sample Output
 
