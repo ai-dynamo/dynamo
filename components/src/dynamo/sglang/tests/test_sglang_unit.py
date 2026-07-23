@@ -772,27 +772,23 @@ async def test_invalid_fpm_trace_is_disabled_by_arg_parser(
 
 
 @pytest.mark.parametrize(
-    ("overrides", "role", "fpm_trace_relay_supported"),
+    ("overrides", "role"),
     [
-        ({}, "unified backend", False),
-        ({"embedding_worker": True}, "embedding", True),
-        ({"multimodal_encode_worker": True}, "dedicated multimodal", True),
-        ({"multimodal_worker": True}, "dedicated multimodal", True),
-        ({"image_diffusion_worker": True}, "image diffusion", True),
-        ({"video_generation_worker": True}, "video generation", True),
+        ({"embedding_worker": True}, "embedding"),
+        ({"multimodal_encode_worker": True}, "dedicated multimodal"),
+        ({"multimodal_worker": True}, "dedicated multimodal"),
+        ({"image_diffusion_worker": True}, "image diffusion"),
+        ({"video_generation_worker": True}, "video generation"),
     ],
 )
 def test_trace_does_not_activate_fpm_without_relay(
-    monkeypatch, caplog, overrides, role, fpm_trace_relay_supported
+    monkeypatch, caplog, overrides, role
 ):
     monkeypatch.delenv("DYN_FORWARDPASS_METRIC_PORT", raising=False)
     dynamo_config = _make_sglang_config(fpm_trace=True, **overrides)
 
     with caplog.at_level(logging.WARNING):
-        source = _forward_pass_metrics_source(
-            dynamo_config,
-            fpm_trace_relay_supported=fpm_trace_relay_supported,
-        )
+        source = _forward_pass_metrics_source(dynamo_config)
 
     assert source is None
     assert f"SGLang {role} workers do not create a Dynamo FPM relay" in caplog.text
@@ -803,10 +799,7 @@ def test_explicit_port_preserves_legacy_activation_without_relay(monkeypatch, ca
     dynamo_config = _make_sglang_config(embedding_worker=True, fpm_trace=True)
 
     with caplog.at_level(logging.WARNING):
-        source = _forward_pass_metrics_source(
-            dynamo_config,
-            fpm_trace_relay_supported=False,
-        )
+        source = _forward_pass_metrics_source(dynamo_config)
 
     assert source == "DYN_FORWARDPASS_METRIC_PORT"
     assert "do not create a Dynamo FPM relay" not in caplog.text
