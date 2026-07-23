@@ -440,6 +440,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileScalingAdapters(t *testing.T) 
 				WithScheme(testScheme).
 				WithObjects(initObjs...)
 			if tt.assertNoReplicaPatch {
+				t.Log("Intercept adapter patches and verify they exclude replicas")
 				clientBuilder = clientBuilder.WithInterceptorFuncs(interceptor.Funcs{
 					Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
 						data, err := patch.Data(obj)

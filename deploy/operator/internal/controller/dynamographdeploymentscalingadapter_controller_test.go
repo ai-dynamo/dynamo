@@ -305,6 +305,7 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_Reconcile(t *testing.T) {
 			}
 
 			if tt.expectSkipped {
+				t.Log("Verify adapter status remains unchanged after component opt-out")
 				if updatedAdapter.Status.Selector != "" || updatedAdapter.Status.Replicas != 0 {
 					t.Errorf("Adapter status was updated after opt-out: %+v", updatedAdapter.Status)
 				}
