@@ -364,11 +364,11 @@ def test_project_scale_to_applies_final_gpu_budget_to_external_proposal():
 
 
 def test_project_scale_to_budget_preserves_single_component_target_mask():
-    """Decode-only proposal: joint GPU clamp must not invent a prefill target.
+    """Decode-only proposal: residual GPU clamp must not invent a prefill target.
 
-    Prefill is charged at its ready count inside ``proportional_clamp_pair`` but
-    the proposal-mask invariant (``clamped_p if proposed_p else None``) must keep
-    ``num_prefill`` None so a decode-only decision cannot rewrite prefill desired.
+    Prefill is charged at its ready count against the residual ceiling, and
+    the proposal-mask invariant must keep ``num_prefill`` None so a
+    decode-only decision cannot rewrite prefill desired.
     """
     cfg = PlannerConfig(
         mode="disagg",
@@ -391,8 +391,52 @@ def test_project_scale_to_budget_preserves_single_component_target_mask():
     assert dec.num_prefill is None
     assert dec.num_decode is not None
     # Prefill is omitted from the decision (mask keeps None) but still charged
-    # at its ready count (=1) inside the joint GPU clamp.
+    # at its ready count (=1) inside the residual GPU clamp.
     assert 1 + dec.num_decode <= 4
+
+
+def test_partial_decode_proposal_respects_residual_gpu_ceiling():
+    """Asymmetric ready counts: decode-only proposal must not assume prefill shrinks.
+
+    Current (7, 1), one GPU each, ceiling 8. A decode-only (or ready-echoed
+    prefill) proposal of 7 must leave prefill fixed and size decode against
+    the residual 1 GPU — never emit decode 4 from a joint clamp that assumed
+    prefill also dropped to 4 (applied (7, 4) = 11 GPUs).
+    """
+    cfg = PlannerConfig(
+        mode="disagg",
+        enable_load_scaling=True,
+        enable_throughput_scaling=True,
+        optimization_target="sla",
+        served_model_name="test",
+        max_gpu_budget=8,
+        min_gpu_budget=-1,
+        enable_power_awareness=True,
+        # High enough that power does not mask the GPU-ceiling bug.
+        total_gpu_power_limit=100000,
+    )
+    adapter = OrchestratorEngineAdapter(cfg, _disagg_caps())
+    wc = WorkerCounts(
+        ready_num_prefill=7,
+        ready_num_decode=1,
+        expected_num_prefill=7,
+        expected_num_decode=1,
+    )
+
+    assert adapter._apply_gpu_final_budget(None, 7, wc) == (None, 1)
+
+    # Power-awareness masks the ready-equal prefill echo before the GPU clamp.
+    outcome = _apply_outcome(
+        [
+            ComponentTarget(sub_component_type="prefill", replicas=7),
+            ComponentTarget(sub_component_type="decode", replicas=7),
+        ]
+    )
+    dec = adapter._project_scale_to(outcome, wc)
+    assert dec is None or dec.num_prefill is None
+    applied_d = 1 if (dec is None or dec.num_decode is None) else dec.num_decode
+    assert applied_d <= 1
+    assert 7 + applied_d <= 8
 
 
 def test_project_scale_to_does_not_apply_budget_on_baseline_only_noop():
