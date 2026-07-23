@@ -79,7 +79,7 @@ pub(crate) enum DisaggPhase {
 }
 
 pub(crate) struct DisaggRequestState {
-    original: Option<DirectRequest>,
+    original: Option<ReplayRequestPayload>,
     session_id: Option<String>,
     #[cfg(test)]
     arrival_ms: f64,
@@ -107,7 +107,7 @@ pub(crate) struct DisaggRequestSnapshot {
 
 impl DisaggRequestState {
     pub(crate) fn new(
-        request: DirectRequest,
+        request: ReplayRequestPayload,
         arrival_ms: f64,
         handoff_id: HandoffId,
         order: HandoffOrder,
@@ -142,14 +142,48 @@ impl DisaggRequestState {
         self.original
             .as_ref()
             .ok_or_else(|| anyhow!("offline disagg replay request payload was already released"))
+            .and_then(|request| {
+                request.materialized_request().ok_or_else(|| {
+                    anyhow!("offline disagg replay request payload is not materialized")
+                })
+            })
+    }
+
+    pub(crate) fn request_payload(&self) -> Result<&ReplayRequestPayload> {
+        self.original
+            .as_ref()
+            .ok_or_else(|| anyhow!("offline disagg replay request payload was already released"))
+    }
+
+    pub(crate) fn input_length(&self) -> Result<usize> {
+        self.original
+            .as_ref()
+            .map(ReplayRequestPayload::input_length)
+            .ok_or_else(|| anyhow!("offline disagg replay request payload was already released"))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn materialized_tokens(&self) -> Result<Option<&[u32]>> {
+        self.original
+            .as_ref()
+            .map(ReplayRequestPayload::materialized_tokens)
+            .ok_or_else(|| anyhow!("offline disagg replay request payload was already released"))
+    }
+
+    pub(crate) fn materialize_original_request(&mut self) -> Result<&DirectRequest> {
+        self.original
+            .as_mut()
+            .ok_or_else(|| anyhow!("offline disagg replay request payload was already released"))?
+            .materialize()
+            .ok_or_else(|| anyhow!("offline disagg replay request payload failed to materialize"))
     }
 
     pub(crate) fn session_id(&self) -> Option<&str> {
         self.session_id.as_deref()
     }
 
-    pub(crate) fn build_prefill_request(&self) -> Result<DirectRequest> {
-        let mut request = self.original_request()?.clone();
+    pub(crate) fn build_prefill_request(&mut self) -> Result<DirectRequest> {
+        let mut request = self.materialize_original_request()?.clone();
         request.max_output_tokens = request.max_output_tokens.min(1);
         Ok(request)
     }
@@ -449,7 +483,7 @@ mod tests {
     use super::{AggRequestState, DisaggRequestState, OfflineWorkerState};
     use crate::common::handoff::{HandoffId, HandoffOrder};
     use crate::common::protocols::{DirectRequest, EngineType, MockEngineArgs, WorkerType};
-    use crate::loadgen::{SessionTrace, Trace, TurnTrace, WorkloadDriver};
+    use crate::loadgen::{ReplayRequestPayload, SessionTrace, Trace, TurnTrace, WorkloadDriver};
     use crate::replay::offline::extensions::kv_events::KvCacheEventData;
     use crate::scheduler::{SchedulerCommand, SchedulerCommandResult};
 
@@ -554,8 +588,8 @@ mod tests {
 
     #[test]
     fn disagg_prefill_request_preserves_router_priorities() {
-        let state = DisaggRequestState::new(
-            DirectRequest {
+        let mut state = DisaggRequestState::new(
+            ReplayRequestPayload::materialized(DirectRequest {
                 tokens: vec![1; 8],
                 max_output_tokens: 12,
                 output_token_ids: None,
@@ -565,7 +599,7 @@ mod tests {
                 priority: -3,
                 strict_priority: 9,
                 policy_class: None,
-            },
+            }),
             0.0,
             HandoffId::from(Uuid::from_u128(2)),
             HandoffOrder::SourceFirst,
@@ -577,6 +611,43 @@ mod tests {
         assert_eq!(request.max_output_tokens, 1);
         assert_eq!(request.priority, -3);
         assert_eq!(request.strict_priority, 9);
+    }
+
+    #[test]
+    fn disagg_prefill_request_materializes_only_for_worker_submission() {
+        let trace = Trace {
+            block_size: 64,
+            sessions: vec![SessionTrace {
+                session_id: "deferred-disagg".to_string(),
+                first_arrival_timestamp_ms: Some(0.0),
+                turns: vec![TurnTrace {
+                    input_length: 128,
+                    max_output_tokens: 4,
+                    hash_ids: vec![21, 22],
+                    ..Default::default()
+                }],
+            }],
+        };
+        let mut driver = WorkloadDriver::new_trace(trace, 64).unwrap();
+        let compact = driver.pop_ready_compact(0.0, 1).pop().unwrap();
+        let mut state = DisaggRequestState::new(
+            compact.request,
+            0.0,
+            HandoffId::from(Uuid::from_u128(3)),
+            HandoffOrder::SourceFirst,
+            compact.replay_hashes,
+            None,
+        );
+
+        assert_eq!(state.input_length().unwrap(), 128);
+        assert!(state.materialized_tokens().unwrap().is_none());
+
+        let request = state.build_prefill_request().unwrap();
+
+        assert_eq!(request.max_output_tokens, 1);
+        assert!(request.tokens[..64].iter().all(|token| *token == 21));
+        assert!(request.tokens[64..].iter().all(|token| *token == 22));
+        assert!(state.materialized_tokens().unwrap().is_some());
     }
 
     #[test]

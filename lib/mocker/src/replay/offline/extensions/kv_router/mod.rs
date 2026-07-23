@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -81,6 +82,7 @@ struct AdmitOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct OfflinePendingRequestSnapshot {
     pub(crate) uuid: Uuid,
+    pub(crate) expected_output_tokens: Option<u32>,
     pub(crate) overlap_blocks_by_worker: Vec<(usize, u32)>,
 }
 
@@ -326,14 +328,21 @@ impl<Request: PlacementRequestView> PlacementPolicy<Request> for KvRouterPlaceme
         session_id: Option<String>,
         now_ms: f64,
     ) -> Result<PlacementEffects> {
-        let request_metadata = request.metadata();
+        let request_metadata = match metadata.max_output_tokens_override() {
+            Some(max_output_tokens) => {
+                let mut overridden = request.metadata().clone();
+                overridden.max_output_tokens = overridden.max_output_tokens.min(max_output_tokens);
+                Cow::Owned(overridden)
+            }
+            None => Cow::Borrowed(request.metadata()),
+        };
         let request_id = request_metadata
             .uuid
             .ok_or_else(|| anyhow!("KV placement requires a request UUID"))?;
         let admissions = self
             .router
             .on_compact_request_arrival_for_session(
-                request_metadata,
+                &request_metadata,
                 request.input_length(),
                 request.materialized_tokens(),
                 metadata.into_hashes(),
@@ -656,6 +665,7 @@ impl OfflineReplayRouter {
                     entry,
                     OfflinePendingRequestSnapshot {
                         uuid: entry.payload().uuid,
+                        expected_output_tokens: entry.payload().expected_output_tokens,
                         overlap_blocks_by_worker,
                     },
                 )

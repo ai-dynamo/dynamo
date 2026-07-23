@@ -204,8 +204,9 @@ pub struct ReadyTurn {
 }
 
 /// A request whose prompt may still be represented by one hash id per trace
-/// block. Offline aggregated replay keeps this compact form while the router
-/// queues the request and materializes tokens only when a worker admits it.
+/// block. Offline replay keeps this compact form while an aggregated or
+/// prefill router queues the request and materializes tokens only when a
+/// worker admits it.
 #[derive(Debug)]
 pub(crate) enum ReplayRequestPayload {
     Materialized(DirectRequest),
@@ -269,6 +270,13 @@ impl ReplayRequestPayload {
         }
     }
 
+    pub(crate) fn materialized_request(&self) -> Option<&DirectRequest> {
+        match self {
+            Self::Materialized(request) => Some(request),
+            Self::Deferred { .. } => None,
+        }
+    }
+
     pub(crate) fn prompt_tokens(&self) -> Vec<u32> {
         match self {
             Self::Materialized(request) => request.tokens.clone(),
@@ -295,6 +303,14 @@ impl ReplayRequestPayload {
                 request_metadata
             }
         }
+    }
+
+    pub(crate) fn materialize(&mut self) -> Option<&DirectRequest> {
+        if matches!(self, Self::Deferred { .. }) {
+            let payload = std::mem::replace(self, Self::Materialized(DirectRequest::default()));
+            *self = Self::Materialized(payload.into_direct_request());
+        }
+        self.materialized_request()
     }
 }
 
