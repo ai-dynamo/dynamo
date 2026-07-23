@@ -1685,6 +1685,113 @@ mod router_events {
     }
 
     #[tokio::test]
+    async fn test_native_destination_cancel_preserves_tail_first_eviction() {
+        let block_size = 4;
+        let harness = RouterIndexerHarness::new(block_size as u32, ROUTER_TEST_WORKER_ID);
+        let args = MockEngineArgs::builder()
+            .block_size(block_size)
+            .num_gpu_blocks(3)
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(1))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(true)
+            .g1_backend(G1Backend::Native)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new_with_kv_capture(args, ROUTER_TEST_WORKER_ID);
+        let seed_tokens = (0..8).collect::<Vec<_>>();
+        core.receive(DirectRequest {
+            tokens: seed_tokens.clone(),
+            max_output_tokens: 1,
+            output_token_ids: Some(vec![8]),
+            uuid: Some(Uuid::from_u128(81)),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+            ..Default::default()
+        });
+
+        let mut collector = crate::replay::TraceCollector::default();
+        let mut now_ms = 0.0;
+        let mut prefix_hashes = Vec::new();
+        for _ in 0..4 {
+            if core.is_empty() {
+                break;
+            }
+            let pass = core.execute_pass(&mut collector, now_ms);
+            now_ms = pass.end_ms;
+            prefix_hashes.extend(stored_hashes(&pass.kv_events));
+            harness.apply_events(pass.kv_events).await;
+        }
+        assert!(core.is_empty(), "seed request should complete");
+        assert_eq!(
+            prefix_hashes.len(),
+            2,
+            "seed request should store the two-block prefix A -> B"
+        );
+        assert_eq!(harness.overlap_for_hashes(prefix_hashes.clone()).await, 2);
+
+        let handoff_id = HandoffId::from(Uuid::from_u128(82));
+        let request_id = Uuid::from_u128(83);
+        let reservation = core
+            .apply_command_effects(
+                SchedulerCommand::ReserveDestination {
+                    handoff_id,
+                    request: DirectRequest {
+                        tokens: seed_tokens,
+                        max_output_tokens: 1,
+                        output_token_ids: Some(vec![8]),
+                        uuid: Some(request_id),
+                        dp_rank: 0,
+                        arrival_timestamp_ms: None,
+                        ..Default::default()
+                    },
+                },
+                true,
+            )
+            .unwrap();
+        assert!(matches!(
+            reservation.lifecycle_events.as_slice(),
+            [SchedulerLifecycleEvent::DestinationReserved {
+                handoff_id: reserved_handoff,
+                request_id: reserved_request,
+                ..
+            }] if *reserved_handoff == handoff_id && *reserved_request == request_id
+        ));
+        assert_eq!(
+            core.apply_command(SchedulerCommand::CancelDestination { handoff_id })
+                .unwrap(),
+            SchedulerCommandResult::Applied
+        );
+
+        core.receive(DirectRequest {
+            tokens: (100..108).collect(),
+            max_output_tokens: 1,
+            output_token_ids: Some(vec![108]),
+            uuid: Some(Uuid::from_u128(84)),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+            ..Default::default()
+        });
+        let pressure = core.execute_pass(&mut collector, now_ms);
+        assert_eq!(
+            removed_event_count(&pressure.kv_events),
+            1,
+            "two fresh blocks with one free slot should evict exactly one cached block"
+        );
+        harness.apply_events(pressure.kv_events).await;
+
+        assert_eq!(
+            harness.overlap_for_hashes(prefix_hashes).await,
+            1,
+            "destination cancellation must make leaf B older than parent A"
+        );
+        harness.assert_no_event_errors();
+        harness.assert_no_event_warnings();
+        harness.shutdown();
+    }
+
+    #[tokio::test]
     async fn test_preemption_recompute_events_apply_cleanly() {
         let harness = RouterIndexerHarness::new(4, ROUTER_TEST_WORKER_ID);
         let args = MockEngineArgs::builder()

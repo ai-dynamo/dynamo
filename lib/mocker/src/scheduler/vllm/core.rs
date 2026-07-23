@@ -1779,6 +1779,7 @@ impl VllmCore {
                         request.sequence.len(),
                         self.args.block_size,
                         self.args.aic_nextn.is_some(),
+                        !policy::generation_complete(&request.sequence, self.args.max_model_len),
                         self.kv_manager.get_prefill_cost(&request.sequence),
                     )
                     .cached_tokens

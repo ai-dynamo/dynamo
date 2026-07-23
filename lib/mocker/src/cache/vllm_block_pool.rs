@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 use dynamo_tokens::SequenceHash;
 use rustc_hash::{FxHashMap, FxHashSet};
 use slotmap::{SlotMap, new_key_type};
+use smallvec::SmallVec;
 
 new_key_type! {
     pub(crate) struct BlockCopyId;
@@ -40,6 +41,7 @@ pub(crate) struct PrefixHit {
 
 /// Capacity and cached-prefix pins held before a manager commits ownership.
 pub(crate) struct BlockReservation {
+    /// Cached prefix copies in request order, from root/head to suffix/leaf.
     prefix: Vec<(SequenceHash, BlockCopyId)>,
     fresh: usize,
 }
@@ -63,7 +65,7 @@ pub(crate) struct ReserveOutcome {
 pub(crate) struct VllmBlockPool {
     capacity: usize,
     copies: SlotMap<BlockCopyId, BlockCopy>,
-    by_hash: FxHashMap<SequenceHash, Vec<BlockCopyId>>,
+    by_hash: FxHashMap<SequenceHash, SmallVec<[BlockCopyId; 1]>>,
     /// Ordinary LRU: lower timestamp is evicted first.
     inactive: BTreeMap<u64, BlockCopyId>,
     next_lru: u64,
@@ -260,8 +262,12 @@ impl VllmBlockPool {
     }
 
     /// Release all unconsumed capacity and prefix pins.
+    ///
+    /// Prefix reservations are stored head-to-tail, while the pool expects
+    /// callers to release them in eviction-priority order. Unpinning in reverse
+    /// makes suffix/leaf blocks older LRU candidates than their parents.
     pub(crate) fn cancel(&mut self, reservation: BlockReservation) {
-        for (hash, id) in reservation.prefix {
+        for (hash, id) in reservation.prefix.into_iter().rev() {
             self.unpin(id, hash);
         }
         assert!(
@@ -478,5 +484,30 @@ mod tests {
         let second_eviction = reserve(&mut pool, &[], 2);
         assert_eq!(second_eviction.removed, vec![3]);
         pool.cancel(second_eviction.reservation);
+    }
+
+    #[test]
+    fn canceled_prefix_evicts_leaf_before_parent_under_pressure() {
+        let mut pool = VllmBlockPool::new(2);
+        let mut seed = reserve(&mut pool, &[], 2).reservation;
+        let parent = pool.allocate_private(&mut seed);
+        let leaf = pool.allocate_private(&mut seed);
+        assert!(pool.cache_private(parent, 7));
+        assert!(pool.cache_private(leaf, 8));
+
+        // Match the normal request-release contract: the leaf enters the LRU
+        // before its parent.
+        pool.release(leaf);
+        pool.release(parent);
+
+        let canceled = reserve(&mut pool, &[7, 8], 0);
+        assert!(canceled.removed.is_empty());
+        pool.cancel(canceled.reservation);
+
+        let pressure = reserve(&mut pool, &[], 1);
+        assert_eq!(pressure.removed, vec![8]);
+        assert!(pool.prefix_hit(7).is_some());
+        assert!(pool.prefix_hit(8).is_none());
+        pool.cancel(pressure.reservation);
     }
 }

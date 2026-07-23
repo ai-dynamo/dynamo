@@ -133,6 +133,7 @@ seqlock = { version = "0.2.0" }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = { version = "1" }
 serde_path_to_error = "0.1"
+smallvec = "1"
 strum = { version = "0.27", features = ["derive"] }
 tempfile = "3"
 thiserror = { version = "2.0.17" }

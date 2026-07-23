@@ -94,8 +94,13 @@ pub(super) fn apply_prefix_recompute(
     known_tokens: usize,
     block_size: usize,
     mtp_enabled: bool,
+    requires_logits: bool,
     mut prefill_cost: PrefillCost,
 ) -> PrefillCost {
+    if !requires_logits {
+        return prefill_cost;
+    }
+
     if policy == SchedulingPolicy::Vllm {
         let max_cached_tokens = known_tokens
             .saturating_sub(1)
@@ -161,6 +166,7 @@ pub(super) fn decide_waiting_admission<'a>(
         sequence.len(),
         block_size,
         mtp_enabled,
+        !generation_complete(sequence, None),
         raw_prefill_cost,
     );
     let available = match policy {

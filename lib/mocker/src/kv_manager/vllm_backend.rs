@@ -29,7 +29,9 @@ struct PendingStore {
 struct FullBlock {
     copy: BlockCopyId,
     hash: SequenceHash,
-    /// Present while a freshly allocated full block is not cache-visible.
+    /// Whether a freshly allocated full block still needs to become cache-visible.
+    pending_cache: bool,
+    /// Event metadata retained until `pending_cache` is finalized.
     pending_store: Option<PendingStore>,
 }
 
@@ -235,6 +237,7 @@ impl VllmKvManager {
             return;
         }
 
+        let materialize_store_events = self.materialize_store_events();
         let Some(blocks) = self.request_blocks.get_mut(&request_id) else {
             panic!("request {request_id} owns no block table")
         };
@@ -242,27 +245,39 @@ impl VllmKvManager {
         if first_new_block >= completed_blocks {
             return;
         }
-        let mut stores = Vec::with_capacity(completed_blocks - first_new_block);
+        let mut stores = materialize_store_events
+            .then(|| Vec::with_capacity(completed_blocks - first_new_block));
         for block in &mut blocks[first_new_block..completed_blocks] {
             match block {
                 OwnedBlock::Full(full) => {
-                    let Some(metadata) = full.pending_store.take() else {
-                        stores.push(None);
+                    if !full.pending_cache {
+                        if let Some(stores) = &mut stores {
+                            stores.push(None);
+                        }
                         continue;
-                    };
-                    if self.pool.cache_private(full.copy, full.hash) {
-                        stores.push(Some(StoredBlock {
-                            hash: full.hash,
-                            metadata,
+                    }
+                    full.pending_cache = false;
+                    let metadata = full.pending_store.take();
+                    let became_visible = self.pool.cache_private(full.copy, full.hash);
+                    if let Some(stores) = &mut stores {
+                        stores.push(became_visible.then(|| {
+                            StoredBlock {
+                                hash: full.hash,
+                                metadata: metadata.expect(
+                                    "materialized pending store must retain event metadata",
+                                ),
+                            }
                         }));
                     } else {
-                        stores.push(None);
+                        debug_assert!(metadata.is_none());
                     }
                 }
                 OwnedBlock::Partial { .. } => break,
             }
         }
-        self.publish_store_sequence(stores);
+        if let Some(stores) = stores {
+            self.publish_store_sequence(stores);
+        }
     }
 
     pub(crate) fn reserve_decode_blocks(
@@ -493,9 +508,11 @@ impl VllmKvManager {
             Some(UniqueBlock::PartialBlock(_)) => unreachable!("validated above"),
         };
         let mut full_idx = 0;
+        let materialize_store_events = self.materialize_store_events();
         let owned = self.request_blocks.entry(request_id).or_default();
         owned.reserve(blocks.len());
-        let mut stores = cache_fresh.then(|| Vec::with_capacity(blocks.len()));
+        let mut stores =
+            (cache_fresh && materialize_store_events).then(|| Vec::with_capacity(blocks.len()));
 
         for (block_idx, block) in blocks.iter().enumerate() {
             match block {
@@ -510,6 +527,7 @@ impl VllmKvManager {
                         owned.push(OwnedBlock::Full(FullBlock {
                             copy,
                             hash: *hash,
+                            pending_cache: false,
                             pending_store: None,
                         }));
                         cursor = Some(*hash);
@@ -517,34 +535,37 @@ impl VllmKvManager {
                     }
 
                     if cache_fresh {
-                        let metadata = PendingStore {
-                            parent_hash: cursor,
-                            local_hash,
-                            token_ids: token_ids.and_then(|ids| ids.get(full_idx - 1).cloned()),
-                        };
                         let (copy, became_visible) = self.pool.allocate_cached(reservation, *hash);
                         owned.push(OwnedBlock::Full(FullBlock {
                             copy,
                             hash: *hash,
+                            pending_cache: false,
                             pending_store: None,
                         }));
-                        stores
-                            .as_mut()
-                            .expect("cache-fresh commit must collect store events")
-                            .push(became_visible.then_some(StoredBlock {
+                        if let Some(stores) = &mut stores {
+                            let metadata = PendingStore {
+                                parent_hash: cursor,
+                                local_hash,
+                                token_ids: token_ids.and_then(|ids| ids.get(full_idx - 1).cloned()),
+                            };
+                            stores.push(became_visible.then_some(StoredBlock {
                                 hash: *hash,
                                 metadata,
                             }));
+                        }
                     } else {
                         let copy = self.pool.allocate_private(reservation);
-                        let pending_store = self.enable_prefix_caching.then(|| PendingStore {
-                            parent_hash: cursor,
-                            local_hash,
-                            token_ids: token_ids.and_then(|ids| ids.get(full_idx - 1).cloned()),
-                        });
+                        let pending_cache = self.enable_prefix_caching;
+                        let pending_store =
+                            (pending_cache && materialize_store_events).then(|| PendingStore {
+                                parent_hash: cursor,
+                                local_hash,
+                                token_ids: token_ids.and_then(|ids| ids.get(full_idx - 1).cloned()),
+                            });
                         owned.push(OwnedBlock::Full(FullBlock {
                             copy,
                             hash: *hash,
+                            pending_cache,
                             pending_store,
                         }));
                     }
@@ -629,6 +650,11 @@ impl VllmKvManager {
             .collect()
     }
 
+    /// Release request blocks in caller-provided eviction-priority order.
+    ///
+    /// Like vLLM's `BlockPool::free_blocks`, the physical pool is lineage-agnostic:
+    /// reversing the request-owned table here makes suffix/leaf blocks older LRU
+    /// candidates than their parents, so capacity pressure evicts the leaf first.
     fn process_deref(&mut self, request_id: Uuid, blocks: &[UniqueBlock]) {
         let released = {
             let Some(owned) = self.request_blocks.get_mut(&request_id) else {
@@ -677,6 +703,7 @@ impl VllmKvManager {
         local_hash: Option<BlockHash>,
         token_ids: Option<Vec<u32>>,
     ) {
+        let materialize_store_events = self.materialize_store_events();
         let Some(blocks) = self.request_blocks.get_mut(&request_id) else {
             panic!("request {request_id} owns no block table")
         };
@@ -692,24 +719,27 @@ impl VllmKvManager {
         };
         assert!(self.partial_uuids.remove(&uuid));
 
-        let metadata = PendingStore {
-            parent_hash,
-            local_hash,
-            token_ids,
-        };
-        let store = if self.enable_prefix_caching && self.pool.cache_private(copy, hash) {
-            Some(Some(StoredBlock { hash, metadata }))
-        } else {
-            None
-        };
+        let became_visible = self.enable_prefix_caching && self.pool.cache_private(copy, hash);
         *last = OwnedBlock::Full(FullBlock {
             copy,
             hash,
+            pending_cache: false,
             pending_store: None,
         });
-        if let Some(store) = store {
-            self.publish_store_sequence(vec![store]);
+        if became_visible && materialize_store_events {
+            self.publish_store_sequence(vec![Some(StoredBlock {
+                hash,
+                metadata: PendingStore {
+                    parent_hash,
+                    local_hash,
+                    token_ids,
+                },
+            })]);
         }
+    }
+
+    fn materialize_store_events(&self) -> bool {
+        !self.kv_event_publishers.is_empty() || *kv_cache_trace::KV_CACHE_TRACE_ENABLED
     }
 
     fn publish_store_sequence(&mut self, stores: Vec<Option<StoredBlock>>) {
@@ -890,7 +920,28 @@ impl VllmKvManager {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use super::*;
+    use crate::common::protocols::{RawKvEvent, RawKvEventSink};
+
+    #[derive(Default)]
+    struct CapturingRawSink {
+        events: Mutex<Vec<RawKvEvent>>,
+    }
+
+    impl CapturingRawSink {
+        fn take(&self) -> Vec<RawKvEvent> {
+            std::mem::take(&mut *self.events.lock().unwrap())
+        }
+    }
+
+    impl RawKvEventSink for CapturingRawSink {
+        fn publish(&self, event: RawKvEvent) -> anyhow::Result<()> {
+            self.events.lock().unwrap().push(event);
+            Ok(())
+        }
+    }
 
     fn use_full(
         manager: &mut VllmKvManager,
@@ -1003,5 +1054,64 @@ mod tests {
         manager.finalize_computed_prefix(owner, 4, 8);
         assert!(manager.pool.prefix_hit(7).is_some());
         assert!(manager.pool.prefix_hit(8).is_some());
+    }
+
+    #[test]
+    fn request_release_evicts_leaf_before_parent() {
+        let mut manager =
+            VllmKvManager::new_with_event_sink(2, 4, true, KvEventPublishers::default(), 0);
+        let owner = Uuid::from_u128(1);
+        ready(use_full(&mut manager, owner, &[7, 8], 0));
+        manager.finalize_computed_prefix(owner, 0, 8);
+
+        // Deref signals describe the request tail first.
+        manager.deref_for_request(
+            owner,
+            &[UniqueBlock::FullBlock(8), UniqueBlock::FullBlock(7)],
+        );
+        ready(use_full(&mut manager, Uuid::from_u128(2), &[9], 0));
+
+        assert!(
+            manager.pool.prefix_hit(7).is_some(),
+            "parent should remain resident"
+        );
+        assert!(
+            manager.pool.prefix_hit(8).is_none(),
+            "leaf should be evicted first"
+        );
+    }
+
+    #[test]
+    fn event_enabled_finalization_preserves_store_payload() {
+        let sink = Arc::new(CapturingRawSink::default());
+        let publishers = KvEventPublishers::new(None, Some(sink.clone()));
+        let mut manager = VllmKvManager::new_with_event_sink(2, 4, true, publishers, 3);
+        let owner = Uuid::from_u128(1);
+        let token_ids = vec![vec![1, 2, 3, 4]];
+        let parent = UniqueBlock::FullBlock(6);
+
+        ready(manager.use_for_request(
+            owner,
+            &[UniqueBlock::FullBlock(7)],
+            &[107],
+            Some(&token_ids),
+            Some(&parent),
+            0,
+        ));
+        manager.finalize_computed_prefix(owner, 0, 4);
+
+        let mut events = sink.take();
+        assert_eq!(events.len(), 1);
+        let event = events.pop().unwrap();
+        assert_eq!(event.event.event_id, 0);
+        assert_eq!(event.event.dp_rank, 3);
+        assert_eq!(event.block_token_ids, Some(token_ids));
+        let KvCacheEventData::Stored(stored) = event.event.data else {
+            panic!("expected Stored event")
+        };
+        assert_eq!(stored.parent_hash, Some(ExternalSequenceBlockHash(6)));
+        assert_eq!(stored.blocks.len(), 1);
+        assert_eq!(stored.blocks[0].block_hash, ExternalSequenceBlockHash(7));
+        assert_eq!(stored.blocks[0].tokens_hash, LocalBlockHash(107));
     }
 }

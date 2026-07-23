@@ -79,6 +79,7 @@ mod vllm {
             8,
             4,
             false,
+            true,
             PrefillCost {
                 new_blocks: 0,
                 new_tokens: 0,
@@ -106,6 +107,7 @@ mod vllm {
             8,
             4,
             false,
+            true,
             original.clone(),
         );
 
@@ -154,7 +156,7 @@ mod vllm {
             assert_eq!(raw.active_cached_tokens, 0, "backend={backend:?}");
 
             let adjusted =
-                apply_prefix_recompute(SchedulingPolicy::Vllm, sequence.len(), 4, false, raw);
+                apply_prefix_recompute(SchedulingPolicy::Vllm, sequence.len(), 4, false, true, raw);
             assert_eq!(adjusted.cached_tokens, 8, "backend={backend:?}");
             assert_eq!(adjusted.new_tokens, 1, "backend={backend:?}");
         }

@@ -1445,7 +1445,9 @@ mod tests {
         ]
         .into_iter()
         .map(|(uuid, token, arrival_timestamp_ms)| DirectRequest {
-            tokens: vec![token; 4],
+            // Two blocks ensure vLLM's required final-block recomputation
+            // still leaves one router-visible block of restored G2 reuse.
+            tokens: vec![token; 8],
             max_output_tokens: 1,
             uuid: Some(Uuid::from_u128(uuid)),
             arrival_timestamp_ms: Some(arrival_timestamp_ms),
@@ -1462,9 +1464,9 @@ mod tests {
             .iter()
             .find(|record| record.uuid == Uuid::from_u128(3).to_string())
             .expect("restored request record must be present");
-        assert!(
-            restored.reused_input_tokens >= 4,
-            "third request should restore its full prompt from G2: {restored:?}"
+        assert_eq!(
+            restored.reused_input_tokens, 4,
+            "third request should restore one reusable block from G2 after final-block recomputation: {restored:?}"
         );
     }
 
