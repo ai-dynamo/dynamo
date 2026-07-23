@@ -20,10 +20,13 @@ rack/DGD budget when it scales replicas.
 > The budget is a **projected** ceiling over the *requested* per-GPU caps, not a
 > proven hardware limit. The Power Agent applies each requested cap but may
 > clamp it up to the GPU's hardware minimum, and a cap write can fail; neither
-> is fed back to the Planner today. So the Planner guarantees
-> `projected_watts ≤ total_gpu_power_limit` for the requested caps — it does not
-> guarantee the *effective* hardware draw stays under the budget. Effective-cap
-> and enforcement-health feedback are deferred to the dynamic-control design.
+> is fed back to the Planner today. So the Planner prevents an admitted
+> scale-up from pushing `projected_watts` over `total_gpu_power_limit` for the
+> requested caps — it does **not** automatically remediate a deployment that is
+> already over budget (it holds scale-ups and allows scale-downs), and it does
+> not guarantee the *effective* hardware draw stays under the budget.
+> Effective-cap and enforcement-health feedback are deferred to the
+> dynamic-control design.
 
 ## Ownership model
 
