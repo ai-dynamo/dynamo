@@ -11,6 +11,9 @@ output without creating an engine or loading model weights.
 import asyncio
 import base64
 import logging
+import os
+import shutil
+import subprocess
 import tempfile
 import time
 import uuid
@@ -33,6 +36,93 @@ from dynamo.vllm.handlers import build_prompt_tokens_details
 from dynamo.vllm.omni.utils import is_empty_payload
 
 logger = logging.getLogger(__name__)
+
+def _running_on_xpu() -> bool:
+    """Return True when torch reports an available XPU backend.""" x
+    try:
+        return bool(hasattr(torch, "xpu") and torch.xpu.is_available())
+    except Exception:
+        return False
+
+
+def _vaapi_render_device() -> str:
+    """Return the DRM render node to use for VA-API encoding.
+
+    Set via DYNAMO_VAAPI_DEVICE (full path, e.g. /dev/dri/renderD131).
+
+    NOTE: we intentionally do NOT derive the node from ZE_AFFINITY_MASK. Level
+    Zero device ordering is independent from DRM render-node numbering (and is
+    itself runtime-configurable, e.g. ZE_ENABLE_PCI_ID_DEVICE_ORDER), and hosts
+    may expose display-only or non-encode DRM nodes interleaved with the XPUs,
+    so there is no reliable index arithmetic. Pick the encode node explicitly.
+    """
+    return os.environ.get("DYNAMO_VAAPI_DEVICE", "/dev/dri/renderD128")
+
+
+def _encode_video_vaapi(
+    frame_array: np.ndarray, output_path: str, fps: int
+) -> None:
+    """Encode RGB frames to H.264/MP4 using the Intel VA-API encoder.
+
+    Args:
+        frame_array: Video frames, shape ``(num_frames, height, width, 3)``,
+            dtype ``uint8``, RGB.
+        output_path: Destination MP4 path (must be seekable for the moov atom).
+        fps: Output frame rate.
+    """
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError("ffmpeg not found in PATH; required for XPU video encoding")
+
+    if frame_array.ndim != 4 or frame_array.shape[-1] != 3:
+        raise ValueError(
+            f"Expected RGB frames of shape (N, H, W, 3), got {frame_array.shape}"
+        )
+
+    # Scale floats to [0, 255]; leave already-uint8 frames (e.g. from PIL Images) untouched.
+    if np.issubdtype(frame_array.dtype, np.floating):
+        frame_array = np.clip(frame_array * 255.0, 0, 255).round()
+    frame_array = np.ascontiguousarray(frame_array, dtype=np.uint8)
+    num_frames, height, width, _ = frame_array.shape
+    device = _vaapi_render_device()
+
+    cmd = [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel", "error",
+        "-y",
+        "-vaapi_device", device,
+        "-f", "rawvideo",
+        "-pix_fmt", "rgb24",
+        "-s", f"{width}x{height}",
+        "-r", str(fps),
+        "-i", "-",
+        "-vf", "format=nv12,hwupload",
+        "-c:v", "h264_vaapi",
+        "-movflags", "+faststart",
+        "-f", "mp4",
+        output_path,
+    ]
+    logger.info(
+        "Encoding %d frames (%dx%d @ %d fps) via h264_vaapi on %s",
+        num_frames,
+        width,
+        height,
+        fps,
+        device,
+    )
+
+    proc = subprocess.run(
+        cmd,
+        input=frame_array.tobytes(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if proc.returncode != 0:
+        stderr = proc.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(
+            f"ffmpeg h264_vaapi encode failed (exit {proc.returncode}): {stderr}"
+        )
 
 
 class TextFormatter:
@@ -142,10 +232,19 @@ class DiffusionFormatter:
         try:
             start_time = time.time()
             frame_list = normalize_video_frames(images)
+            if _running_on_xpu():
+                encode_video = _encode_video_vaapi
+                frames = np.stack(
+                    [np.asarray(frame) for frame in frame_list], axis=0
+                )
+            else:
+                encode_video = export_to_video
+                frames = frame_list
+
             with tempfile.NamedTemporaryFile(
                 suffix=f".{output_format}", delete=True
             ) as tmp:
-                await asyncio.to_thread(export_to_video, frame_list, tmp.name, fps)
+                await asyncio.to_thread(encode_video, frames, tmp.name, fps)
                 video_bytes = tmp.read()
 
             if response_format == "b64_json":
