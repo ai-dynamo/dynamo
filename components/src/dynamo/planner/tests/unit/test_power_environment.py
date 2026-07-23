@@ -170,3 +170,45 @@ async def test_refresh_does_not_reread_power_annotation():
 
     controller.get_component_power_configs.assert_not_called()
     assert env.deployment_state().decode.power_watts_per_replica == 1200
+
+
+def test_call_with_optional_deployment_forwards_when_accepted():
+    seen = {}
+
+    def accepts(*, require_prefill=True, deployment=None):
+        seen["deployment"] = deployment
+        seen["require_prefill"] = require_prefill
+        return (1, 1)
+
+    out = PlannerEnvironmentImpl._call_with_optional_deployment(
+        accepts, deployment={"dgd": True}, require_prefill=False
+    )
+    assert out == (1, 1)
+    assert seen == {"deployment": {"dgd": True}, "require_prefill": False}
+
+
+def test_call_with_optional_deployment_skips_when_unsupported():
+    seen = {}
+
+    def legacy(*, require_prefill=True):
+        seen["require_prefill"] = require_prefill
+        return (2, 2)
+
+    out = PlannerEnvironmentImpl._call_with_optional_deployment(
+        legacy, deployment={"dgd": True}, require_prefill=True
+    )
+    assert out == (2, 2)
+    assert seen == {"require_prefill": True}
+
+
+def test_call_with_optional_deployment_propagates_inner_typeerror():
+    """A TypeError raised inside the connector must not be swallowed/retried."""
+
+    def broken(*, require_prefill=True, deployment=None):
+        del require_prefill, deployment
+        raise TypeError("NoneType is not subscriptable")
+
+    with pytest.raises(TypeError, match="NoneType is not subscriptable"):
+        PlannerEnvironmentImpl._call_with_optional_deployment(
+            broken, deployment={"dgd": True}, require_prefill=True
+        )

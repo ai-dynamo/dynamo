@@ -149,6 +149,7 @@ def _bare_adapter(config, capabilities) -> OrchestratorEngineAdapter:
     adapter = object.__new__(OrchestratorEngineAdapter)
     adapter._config = config
     adapter._capabilities = capabilities
+    adapter._power_rollout_hold_warned = False
     return adapter
 
 
@@ -294,10 +295,16 @@ def test_final_boundary_clamps_merged_proposal_regardless_of_source():
 # These tests use that reachable state (both None during any rollout).
 
 
-def test_scale_up_held_while_deployment_is_rolling():
+def test_scale_up_held_while_deployment_is_rolling(caplog):
     """Fail closed: while any power-relevant role is mid-rollout (deployment
     unstable → both expected None), a proposed scale-up is held at ready, since
-    a rolling role can only be charged at its transient ready count."""
+    a rolling role can only be charged at its transient ready count.
+
+    The hold warning fires once per continuous mid-rollout stretch, not every
+    tick, so long rollouts do not flood logs.
+    """
+    import logging
+
     caps = WorkerCapabilities(
         prefill=EngineCapabilities(num_gpu=2, power_watts_per_replica=700),
         decode=EngineCapabilities(num_gpu=4, power_watts_per_replica=1200),
@@ -309,8 +316,43 @@ def test_scale_up_held_while_deployment_is_rolling():
         expected_num_prefill=None,  # deployment mid-rollout ->
         expected_num_decode=None,  # both settled targets unknown
     )
-    # Prefill proposed 2 -> 4 is held at ready 2 while the deployment rolls.
-    assert adapter._apply_final_budget(4, None, wc) == (2, None)
+    with caplog.at_level(logging.WARNING):
+        # Prefill proposed 2 -> 4 is held at ready 2 while the deployment rolls.
+        assert adapter._apply_final_budget(4, None, wc) == (2, None)
+        assert adapter._apply_final_budget(4, None, wc) == (2, None)
+    hold_warnings = [
+        r
+        for r in caplog.records
+        if "holding" in r.message and "mid-rollout" in r.message
+    ]
+    assert len(hold_warnings) == 1
+
+    # After the deployment stabilizes, a later rollout may warn again.
+    stable = WorkerCounts(
+        ready_num_prefill=2,
+        ready_num_decode=2,
+        expected_num_prefill=2,
+        expected_num_decode=2,
+    )
+    assert adapter._apply_final_budget(2, None, stable) == (2, None)
+    assert adapter._power_rollout_hold_warned is False
+    rolling_again = WorkerCounts(
+        ready_num_prefill=2,
+        ready_num_decode=2,
+        expected_num_prefill=None,
+        expected_num_decode=None,
+    )
+    with caplog.at_level(logging.WARNING):
+        caplog.clear()
+        assert adapter._apply_final_budget(4, None, rolling_again) == (2, None)
+    assert (
+        sum(
+            1
+            for r in caplog.records
+            if "holding" in r.message and "mid-rollout" in r.message
+        )
+        == 1
+    )
 
 
 def test_scale_up_allowed_when_deployment_stable():

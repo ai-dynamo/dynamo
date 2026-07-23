@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 from typing import Optional
 
@@ -118,6 +119,12 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
         deployment = self._shared_dgd_deployment()
         await self._refresh_deployment_state(deployment=deployment)
         self._load_static_power_caps_at_startup(deployment=deployment)
+        # FPM init can change the effective runtime namespace / discovery view;
+        # re-refresh replica/GPU/model state afterward so the first tick sees
+        # post-init truth. This second call intentionally omits the shared
+        # deployment snapshot (power caps stay startup-static) and may issue
+        # a separate DGD GET for GPU counts — that is expected, not a merge
+        # of the shared-GET path above.
         await self.fpm_provider.async_init(self._runtime_namespace_or_none())
         await self._refresh_deployment_state()
 
@@ -194,12 +201,21 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
 
     @staticmethod
     def _call_with_optional_deployment(method, *, deployment=None, **kwargs):
-        """Invoke a connector method, forwarding ``deployment`` when accepted."""
+        """Invoke a connector method, forwarding ``deployment`` when accepted.
+
+        Inspects the callable signature so a real ``TypeError`` raised inside
+        the connector (wrong arg types, ``None`` arithmetic, etc.) is not
+        swallowed by a retry without ``deployment``.
+        """
         if deployment is not None:
             try:
+                params = inspect.signature(method).parameters
+            except (TypeError, ValueError):
+                # Builtins / C extensions without an inspectable signature —
+                # fall through to the no-deployment call rather than guess.
+                params = {}
+            if "deployment" in params:
                 return method(**kwargs, deployment=deployment)
-            except TypeError:
-                pass
         return method(**kwargs)
 
     def _refresh_worker_info(self) -> None:
