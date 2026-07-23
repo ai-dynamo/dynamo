@@ -35,13 +35,13 @@ base64 data).
 
 The main multimodal vLLM launchers in this repo are:
 
-| Pattern | Device | Launch script | Unified selection | Best for |
-| --- | --- | --- | --- | --- |
-| Aggregated | CUDA | `agg_multimodal.sh` | `--unified` | Simplest image/video serving from one worker |
-| Aggregated | XPU | `xpu/agg_multimodal_xpu.sh` | No | Image/video serving on XPU devices |
-| P/D | CUDA | `disagg_multimodal_p_d.sh` | `--unified` | Prefill/decode separation without a dedicated encoder |
-| E/PD (Encode + PD) | CUDA | `disagg_multimodal_e_pd.sh` | No | Separate encoder and embedding-cache workflows |
-| E/P/D (Full Disaggregation) | CUDA | `disagg_multimodal_epd.sh` | No | Separate encode, prefill, and decode workers |
+| Pattern | Device | Launch script | Best for |
+| --- | --- | --- | --- |
+| Aggregated | CUDA | `agg_multimodal.sh` | Simplest image/video serving from one worker |
+| Aggregated | XPU | `xpu/agg_multimodal_xpu.sh` | Image/video serving on XPU devices |
+| P/D | CUDA | `disagg_multimodal_p_d.sh` | Prefill/decode separation without a dedicated encoder |
+| E/PD (Encode + PD) | CUDA | `disagg_multimodal_e_pd.sh` | Separate encoder and embedding-cache workflows |
+| E/P/D (Full Disaggregation) | CUDA | `disagg_multimodal_epd.sh` | Separate encode, prefill, and decode workers |
 
 ### Custom Vision Encoders
 
@@ -64,9 +64,6 @@ cd $DYNAMO_HOME/examples/backends/vllm
 
 # GPU deployment
 bash launch/agg_multimodal.sh --model Qwen/Qwen3-VL-2B-Instruct
-
-# Unified backend
-bash launch/agg_multimodal.sh --unified --model Qwen/Qwen3-VL-2B-Instruct
 
 # XPU deployment
 bash launch/xpu/agg_multimodal_xpu.sh --model Qwen/Qwen3-VL-2B-Instruct
@@ -139,12 +136,7 @@ dedicated multimodal encoder:
 ```bash
 cd $DYNAMO_HOME/examples/backends/vllm
 
-# Legacy vLLM worker path
 bash launch/disagg_multimodal_p_d.sh --model Qwen/Qwen3-VL-2B-Instruct
-
-# Unified vLLM worker path
-bash launch/disagg_multimodal_p_d.sh --unified \
-  --model Qwen/Qwen3-VL-2B-Instruct
 ```
 
 For Qwen-VL images, prefill sends grid and embedding-shape metadata so decode
@@ -158,26 +150,25 @@ media download and processing work. Mixed image-and-video P/D requests retain
 the same model-specific limitations as the legacy vLLM path.
 </Warning>
 
-### Unified vLLM Backend
+### Multimodal Input Handling
 
-Pass `--unified` to the aggregated or P/D launchers to run
-`python -m dynamo.vllm.unified_main`. The unified path supports HTTP URLs,
-data URLs, frontend-decoded images, `mm_processor_kwargs`, frontend-provided
-multimodal hashes, and Kimi-style `vision_chunk` inputs.
+The vLLM multimodal worker supports HTTP URLs, data URLs, frontend-decoded
+images, `mm_processor_kwargs`, frontend-provided multimodal hashes, and
+Kimi-style `vision_chunk` inputs.
 
 The Python vLLM frontend can pre-render multimodal processor inputs and send
-them to an aggregated unified worker. Shared memory is the same-node default;
-NIXL supports the transfer channel used by cross-node deployments:
+them to an aggregated worker. Shared memory is the same-node default; NIXL
+supports the transfer channel used by cross-node deployments:
 
 ```bash
 # Same-node shared-memory transfer
 DYN_CHAT_PROCESSOR=vllm DYNAMO_MM_TRANSFER=shm \
-  bash launch/agg_multimodal.sh --unified \
+  bash launch/agg_multimodal.sh \
   --model Qwen/Qwen3-VL-2B-Instruct
 
 # NIXL transfer
 DYN_CHAT_PROCESSOR=vllm DYNAMO_MM_TRANSFER=nixl \
-  bash launch/agg_multimodal.sh --unified \
+  bash launch/agg_multimodal.sh \
   --model Qwen/Qwen3-VL-2B-Instruct
 ```
 
@@ -190,9 +181,8 @@ P/D prefill deliberately uses the original media because it still needs
 raw-media-derived metadata for the decode handoff.
 
 <Warning>
-The unified vLLM entry point does not provide a separate Encode worker and
-rejects both `--disaggregation-mode encode` and `--route-to-encoder`. Use the
-legacy E/PD or E/P/D launchers when a dedicated encoder is required.
+The aggregated and P/D multimodal launchers do not run a separate Encode worker.
+Use the E/PD or E/P/D launchers when a dedicated encoder is required.
 </Warning>
 
 ### E/PD Serving (Encode + PD)
@@ -319,14 +309,13 @@ flowchart LR
 
 ```bash
 bash examples/backends/vllm/launch/agg_multimodal.sh \
-    --unified \
     --model Qwen/Qwen3-VL-30B-A3B-Instruct-FP8 \
     --multimodal-embedding-cache-capacity-gb 10
 ```
 
-Both `dynamo.vllm` and `dynamo.vllm.unified_main` automatically configure
-`ec_both` mode with `DynamoMultimodalEmbeddingCacheConnector` when capacity is
-greater than zero. A capacity of zero disables the CPU cache. Frontend-provided
+`dynamo.vllm` automatically configures `ec_both` mode with
+`DynamoMultimodalEmbeddingCacheConnector` when capacity is greater than zero. A
+capacity of zero disables the CPU cache. Frontend-provided
 multimodal hashes are reused as cache identities so routing and embedding-cache
 lookups agree.
 

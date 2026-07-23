@@ -25,7 +25,7 @@ Logits processors let you modify the next-token logits at every decoding step (e
 cd $DYNAMO_HOME/examples/backends/sglang
 export DYN_ENABLE_TEST_LOGITS_PROCESSOR=1
 
-# unified aggregated
+# aggregated
 ./launch/agg.sh
 ```
 
@@ -38,11 +38,11 @@ Send a normal chat/completions request; the response should contain "Hello world
 
 #### Disaggregated caveat
 
-The quick test targets aggregated deployments. In disaggregated mode the prefill worker emits one token before decode resumes. The unified backend skips the test hook on the prefill role (the shared generation-stage gating returns no entries there), but the decode-side output can still be affected by the prefill-produced leading token. Use aggregated mode to verify the wiring.
+The quick test targets aggregated deployments. In disaggregated mode the prefill worker emits one token before decode resumes. The backend skips the test hook on the prefill role (the shared generation-stage gating returns no entries there), but the decode-side output can still be affected by the prefill-produced leading token. Use aggregated mode to verify the wiring.
 
-### How the unified backend wires this up
+### How the backend wires this up
 
-The unified SGLang engine threads logits processors through the shared spec layer in `dynamo.common.backend.engine` and the per-backend realizer at `dynamo.sglang.logits_processing.adapter`:
+The SGLang backend threads logits processors through the shared spec layer in `dynamo.common.backend.engine` and the per-backend realizer at `dynamo.sglang.logits_processing.adapter`:
 
 - `from_args()` sets `server_args.enable_custom_logit_processor = True` and `server_args.skip_tokenizer_init = False` when the env hook is on **and** the worker is a generation role — after user overrides, so an explicit `skip_tokenizer_init=True` can't starve the hook. PREFILL keeps its configured flags.
 - `start()` resolves a `LogitsProcessorSpec` once via `resolve_test_logits_processor_spec`, tokenizing `"Hello world!"` into a `ForcedTokenSequenceSpec`. `None` when the env var is off or on a non-generation role.

@@ -434,7 +434,7 @@ def _vllm_legacy_call(output, num_so_far, tokenizer=None):
 
 
 def _vllm_unified_call(output, tokenizer=None):
-    """Mirror of ``VllmLLMEngine.generate``'s per-chunk extraction.
+    """Mirror of the vLLM per-chunk logprob extraction.
     DELTA outputs always slice from offset 0."""
     return extract_from_completion_output(
         output,
@@ -446,9 +446,8 @@ def _vllm_unified_call(output, tokenizer=None):
 
 
 def _trtllm_call(output, num_so_far):
-    """Mirror of both ``HandlerBase._extract_logprobs`` and
-    ``TrtllmLLMEngine.generate``'s per-chunk extraction — TRT-LLM uses
-    cumulative arrays on both call sites with the same offset."""
+    """Mirror of ``HandlerBase._extract_logprobs``'s per-chunk extraction —
+    TRT-LLM uses cumulative arrays with a running offset."""
     return extract_from_completion_output(
         output,
         num_so_far,

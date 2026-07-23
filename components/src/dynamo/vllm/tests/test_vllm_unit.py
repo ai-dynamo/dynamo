@@ -1492,15 +1492,13 @@ class TestForwardPassMetricsActivation:
         ]
 
     @pytest.mark.parametrize(
-        ("overrides", "role", "fpm_trace_relay_supported"),
+        ("overrides", "role"),
         [
-            ({}, "unified backend", False),
-            ({"embedding_worker": True}, "embedding", True),
-            ({"headless": True}, "headless", True),
+            ({"embedding_worker": True}, "embedding"),
+            ({"headless": True}, "headless"),
             (
                 {"disaggregation_mode": DisaggregationMode.ENCODE},
                 "multimodal encode",
-                True,
             ),
         ],
     )
@@ -1510,18 +1508,13 @@ class TestForwardPassMetricsActivation:
         caplog,
         overrides,
         role,
-        fpm_trace_relay_supported,
     ):
         monkeypatch.delenv("DYN_FORWARDPASS_METRIC_PORT", raising=False)
         dynamo_cfg = _make_dynamo_config(fpm_trace=True, **overrides)
         engine_cfg = _make_engine_config_with_runner(scheduler_cls=None)
 
         with caplog.at_level(logging.WARNING, logger="dynamo.vllm.args"):
-            update_engine_config_with_dynamo(
-                dynamo_cfg,
-                engine_cfg,
-                fpm_trace_relay_supported=fpm_trace_relay_supported,
-            )
+            update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
 
         assert engine_cfg.scheduler_cls is None
         assert f"vLLM {role} workers do not create a Dynamo FPM relay" in caplog.text
@@ -1533,11 +1526,7 @@ class TestForwardPassMetricsActivation:
         dynamo_cfg = _make_dynamo_config(embedding_worker=True)
         engine_cfg = _make_engine_config_with_runner(scheduler_cls=None)
 
-        update_engine_config_with_dynamo(
-            dynamo_cfg,
-            engine_cfg,
-            fpm_trace_relay_supported=False,
-        )
+        update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
 
         assert (
             engine_cfg.scheduler_cls

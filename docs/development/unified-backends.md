@@ -175,7 +175,7 @@ Request handling:
   `reasoning_parser`, `exclude_tools_when_tool_choice_none`)
 - vLLM image and video inference in aggregated and prefill/decode deployments,
   including frontend-rendered multimodal input transfer and the CPU embedding
-  cache. See [vLLM Multimodal](../features/multimodal/multimodal-vllm.md#unified-vllm-backend).
+  cache. See [vLLM Multimodal](../features/multimodal/multimodal-vllm.md#multimodal-input-handling).
 
 **Remaining Python unified-backend gaps**
 
