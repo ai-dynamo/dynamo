@@ -239,7 +239,9 @@ def _new_checkpoint_spec(
     deployment_spec.name = name
     deployment_spec.namespace = namespace
     deployment_spec.set_image(frontend_image, backend.frontend_component)
+    deployment_spec.set_runtime_version_override("1.3.0", backend.frontend_component)
     deployment_spec.set_image(image, backend.decode_component)
+    deployment_spec.set_runtime_version_override("1.3.0", backend.decode_component)
     deployment_spec.set_model(backend.model, backend.decode_component)
 
     raw_spec = deployment_spec.spec()
