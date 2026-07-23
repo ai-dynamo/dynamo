@@ -61,7 +61,7 @@ This guide uses a single namespace. We deploy one configuration (e.g. router-ON)
 └──────────────────────────────────────────────┘
 ```
 
-**Key Difference:** Deployment B sets `DYN_ROUTER_MODE=kv` on the frontend to enable KV cache-aware routing.
+**Key Difference:** Deployment B sets `DYN_ROUTER_MODE=kv` on the frontend **and** configures the workers to publish KV cache events (`--kv-events-config`). Both halves are needed: the frontend flag makes the router *consume* events, but the router only learns prefix-cache state if the workers *publish* them. With `DYN_ROUTER_MODE=kv` alone the router stays in event-driven mode with an empty prefix tree, so overlap scores are always zero and routing degrades to load-based decisions (see the note after the Deployment B YAML below).
 
 ---
 
@@ -220,7 +220,7 @@ spec:
                   fieldPath: metadata.uid
       envs:
         - name: DYN_ROUTER_MODE
-          value: kv  # KEY DIFFERENCE: Enable KV Smart Router
+          value: kv  # KEY DIFFERENCE 1/2: frontend consumes KV events (empty prefix tree until workers publish, see 2/2)
     VllmDecodeWorker:
       envFromSecret: hf-token-secret
       componentType: worker
@@ -256,6 +256,7 @@ spec:
               --block-size 64
               --async-scheduling
               --no-enable-log-requests
+              --kv-events-config '{"enable_kv_cache_events": true, "publisher": "zmq", "endpoint": "tcp://*:5557"}'
           env:
             - name: DYN_HEALTH_CHECK_ENABLED
               value: "false"
@@ -289,6 +290,19 @@ spec:
             failureThreshold: 10
       subComponentType: decode
 ```
+
+> **The worker must publish KV events.** `DYN_ROUTER_MODE=kv` only makes the frontend *consume*
+> events; the `--kv-events-config` arg above makes the worker *publish* them. Without it the
+> prefix tree stays empty, overlap scores are zero, and routing degrades to load-based, so the
+> A/B measures load-aware vs round-robin, not KV reuse. The two flags are independent (see
+> [Router Operations](../components/router/router-operations.md#additional-notes)).
+>
+> Verify before trusting router-ON numbers: `dynamo_component_kv_cache_events_applied` should be `> 0`.
+>
+> ```bash
+> FE=$(kubectl get pods -n dynamo-bench -l nvidia.com/dynamo-component-type=frontend -o jsonpath='{.items[0].metadata.name}')
+> kubectl -n dynamo-bench exec ${FE} -- curl -s localhost:8000/metrics | grep kv_cache_events_applied
+> ```
 
 ### Step 2.2: Deploy Router-ON First
 
