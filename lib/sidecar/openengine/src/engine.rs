@@ -34,6 +34,12 @@ use crate::proto as pb;
 
 const DRAIN_ABORT_CLEANUP_GRACE: Duration = Duration::from_secs(5);
 
+fn request_error_stream(
+    error: DynamoError,
+) -> BoxStream<'static, Result<LLMEngineOutput, DynamoError>> {
+    Box::pin(futures::stream::once(async move { Err(error) }))
+}
+
 pub struct OpenEngineSidecar {
     endpoint: String,
     expected_engine: Option<String>,
@@ -323,11 +329,15 @@ impl LLMEngine for OpenEngineSidecar {
             && request.prefill_result.is_none()
             && !(connector_uses_client_bootstrap && request.bootstrap_info.is_some())
         {
-            return Err(client::invalid_arg(
+            return Ok(request_error_stream(client::invalid_arg(
                 "decode worker requires a context-first prefill_result or advertised client bootstrap",
-            ));
+            )));
         }
-        validate_request_capabilities(discovery, &request, self.disaggregation_mode)?;
+        if let Err(error) =
+            validate_request_capabilities(discovery, &request, self.disaggregation_mode)
+        {
+            return Ok(request_error_stream(error));
+        }
 
         let request_id = ctx.id().to_string();
         let prompt_tokens = request.token_ids.len() as u32;
@@ -338,27 +348,39 @@ impl LLMEngine for OpenEngineSidecar {
         } else {
             discovery.model.served_model_name.as_str()
         };
-        let mut grpc_message = convert::build_generate_request(
+        let mut grpc_message = match convert::build_generate_request(
             &request,
             &request_id,
             remote_model,
             is_prefill,
             discovery.model.supports_text_input == Some(true),
-        )?;
-        apply_client_bootstrap(
+        ) {
+            Ok(message) => message,
+            Err(error) => return Ok(request_error_stream(error)),
+        };
+        if let Err(error) = apply_client_bootstrap(
             discovery,
             &request,
             &request_id,
             self.disaggregation_mode,
             &mut grpc_message,
-        )?;
-        validate_decode_handoff(discovery, &grpc_message, self.disaggregation_mode)?;
+        ) {
+            return Ok(request_error_stream(error));
+        }
+        if let Err(error) =
+            validate_decode_handoff(discovery, &grpc_message, self.disaggregation_mode)
+        {
+            return Ok(request_error_stream(error));
+        }
         let requested_bootstrap = grpc_message
             .kv
             .as_ref()
             .and_then(|kv| kv.session.as_ref())
             .and_then(|session| session.bootstrap.clone());
-        let metadata = convert::generate_metadata(&request, ctx.metadata(), is_prefill)?;
+        let metadata = match convert::generate_metadata(&request, ctx.metadata(), is_prefill) {
+            Ok(metadata) => metadata,
+            Err(error) => return Ok(request_error_stream(error)),
+        };
         let mut grpc_request = tonic::Request::new(grpc_message);
         *grpc_request.metadata_mut() = metadata;
         let mut grpc_client = pool.stream_client();

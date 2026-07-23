@@ -919,6 +919,31 @@ async fn build_sidecar(
     .unwrap()
 }
 
+async fn request_error_from_stream(
+    engine: &crate::OpenEngineSidecar,
+    request: PreprocessedRequest,
+) -> dynamo_backend_common::DynamoError {
+    use futures::StreamExt;
+
+    let mut stream = engine
+        .generate(
+            request,
+            GenerateContext::new(dynamo_backend_common::testing::mock_context(), None),
+        )
+        .await
+        .expect("request validation must open a typed error stream");
+    let error = stream
+        .next()
+        .await
+        .expect("request validation stream must yield an error")
+        .expect_err("request validation stream yielded data");
+    assert!(
+        stream.next().await.is_none(),
+        "request validation stream must end after its typed error"
+    );
+    error
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fake_tonic_server_discovery_and_aggregate_stream() {
     use futures::StreamExt;
@@ -988,14 +1013,12 @@ async fn fake_tonic_server_discovery_and_aggregate_stream() {
     unsupported_nvext.extra_args = Some(serde_json::json!({
         "nvext": {"metadata_upload": {"url": "s3://bucket/results"}}
     }));
-    assert!(
-        engine
-            .generate(
-                unsupported_nvext,
-                GenerateContext::new(dynamo_backend_common::testing::mock_context(), None),
-            )
-            .await
-            .is_err()
+    let error = request_error_from_stream(&engine, unsupported_nvext).await;
+    assert_eq!(
+        error.error_type(),
+        dynamo_backend_common::ErrorType::Backend(
+            dynamo_backend_common::BackendError::InvalidArgument
+        )
     );
 
     // Some multimodal processors (notably Phi-4 audio) require the rendered
@@ -1034,14 +1057,12 @@ async fn fake_tonic_server_discovery_and_aggregate_stream() {
 
     let mut bypass = request();
     bypass.extra_args = Some(serde_json::json!({"bypass_prefix_cache": true}));
-    assert!(
-        engine
-            .generate(
-                bypass,
-                GenerateContext::new(dynamo_backend_common::testing::mock_context(), None),
-            )
-            .await
-            .is_err()
+    let error = request_error_from_stream(&engine, bypass).await;
+    assert_eq!(
+        error.error_type(),
+        dynamo_backend_common::ErrorType::Backend(
+            dynamo_backend_common::BackendError::InvalidArgument
+        )
     );
     engine.cleanup().await.unwrap();
     server.stop().await;
@@ -1119,6 +1140,8 @@ async fn fake_tonic_token_only_multimodal_uses_token_ids() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fake_tonic_rejects_unadvertised_request_semantics_before_scheduling() {
+    use futures::StreamExt;
+
     let state = Arc::new(FakeState::default());
     state.model.lock().supports_lora = Some(false);
     let server = FakeServer::start(state.clone()).await;
@@ -1156,22 +1179,40 @@ async fn fake_tonic_rejects_unadvertised_request_semantics_before_scheduling() {
     let mut too_many_logprobs = request();
     too_many_logprobs.output_options.prompt_logprobs = Some(5);
     requests.push(too_many_logprobs);
+    let mut unsupported_video = request();
+    unsupported_video.multi_modal_data = Some(HashMap::from([(
+        "video_url".to_string(),
+        vec![MultimodalData::RawUrl("https://host/video.mp4".to_string())],
+    )]));
+    requests.push(unsupported_video);
 
     for request in requests {
-        assert!(
-            engine
-                .generate(
-                    request,
-                    GenerateContext::new(dynamo_backend_common::testing::mock_context(), None),
-                )
-                .await
-                .is_err()
+        let error = request_error_from_stream(&engine, request).await;
+        assert_eq!(
+            error.error_type(),
+            dynamo_backend_common::ErrorType::Backend(
+                dynamo_backend_common::BackendError::InvalidArgument
+            )
         );
     }
     assert!(
         state.requests.lock().is_empty(),
         "rejected requests reached Generate"
     );
+
+    let outputs = engine
+        .generate(
+            request(),
+            GenerateContext::new(dynamo_backend_common::testing::mock_context(), None),
+        )
+        .await
+        .expect("a rejected request must not make the sidecar unavailable")
+        .collect::<Vec<_>>()
+        .await;
+    assert_eq!(outputs.len(), 2);
+    assert!(outputs.iter().all(Result::is_ok));
+    assert_eq!(state.requests.lock().len(), 1);
+
     engine.cleanup().await.unwrap();
     server.stop().await;
 }
