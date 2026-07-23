@@ -22,6 +22,7 @@ from dynamo.common.configuration.groups.runtime_args import (
     DynamoRuntimeArgGroup,
     DynamoRuntimeConfig,
 )
+from dynamo.common.configuration.utils import split_served_model_names
 from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.vllm.backend_args import DynamoVllmArgGroup, DynamoVllmConfig
 from dynamo.vllm.constants import DisaggregationMode
@@ -169,13 +170,12 @@ def update_dynamo_config_with_engine(
 ) -> None:
     """Update dynamo_config fields from engine_config and worker flags."""
 
-    if getattr(engine_config, "served_model_name", None) is not None:
-        served = engine_config.served_model_name
-        if len(served) > 1:
-            raise ValueError("We do not support multiple model names.")
-        dynamo_config.served_model_name = served[0]
-    else:
-        dynamo_config.served_model_name = None
+    # vLLM's --served-model-name is nargs="+"; each token may itself pack
+    # several comma-separated names. The first is the primary served name; any
+    # remaining names are registered as aliases for the same worker.
+    served_names = split_served_model_names(engine_config.served_model_name)
+    dynamo_config.served_model_name = served_names[0] if served_names else None
+    dynamo_config.served_model_aliases = served_names[1:]
 
     # Capture user-provided --endpoint before defaults overwrite it
     user_endpoint = dynamo_config.endpoint
@@ -359,27 +359,36 @@ def update_engine_config_with_dynamo(
                 f"--scheduler-cls is set to '{existing_cls}'. Either remove "
                 f"--scheduler-cls or use a subclass of InstrumentedScheduler."
             )
-        dynamo_config._benchmark_additional_config = {  # type: ignore[attr-defined]
+        benchmark_config: Dict[str, Any] = {
             "mode": dynamo_config.benchmark_mode,
             "warmup_iterations": dynamo_config.benchmark_warmup_iterations,
             "output_path": dynamo_config.benchmark_output_path,
             "timeout": dynamo_config.benchmark_timeout,
-            "prefill_max_new_token_samples": (
-                dynamo_config.prefill_max_new_token_samples
-            ),
-            "prefill_max_kv_read_token_samples": (
-                dynamo_config.prefill_max_kv_read_token_samples
-            ),
-            "decode_max_kv_read_token_samples": (
-                dynamo_config.decode_max_kv_read_token_samples
-            ),
-            "decode_max_batch_size_samples": (
-                dynamo_config.decode_max_batch_size_samples
-            ),
-            "prefix_max_batch_size_samples": (
-                dynamo_config.prefix_max_batch_size_samples
-            ),
         }
+        explicit_points = dynamo_config._benchmark_points
+        if explicit_points is not None:
+            benchmark_config["points"] = explicit_points.model_dump(mode="json")
+        else:
+            benchmark_config.update(
+                {
+                    "prefill_max_new_token_samples": (
+                        dynamo_config.prefill_max_new_token_samples
+                    ),
+                    "prefill_max_kv_read_token_samples": (
+                        dynamo_config.prefill_max_kv_read_token_samples
+                    ),
+                    "decode_max_kv_read_token_samples": (
+                        dynamo_config.decode_max_kv_read_token_samples
+                    ),
+                    "decode_max_batch_size_samples": (
+                        dynamo_config.decode_max_batch_size_samples
+                    ),
+                    "prefix_max_batch_size_samples": (
+                        dynamo_config.prefix_max_batch_size_samples
+                    ),
+                }
+            )
+        dynamo_config._benchmark_additional_config = benchmark_config  # type: ignore[attr-defined]
         logger.info(
             "Benchmark mode=%s configured (output=%s)",
             dynamo_config.benchmark_mode,

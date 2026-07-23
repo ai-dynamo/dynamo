@@ -327,7 +327,7 @@ impl Drop for DynamicSubscriber {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::discovery::{DiscoverySpec, DiscoveryStream, EventChannelQuery};
+    use crate::discovery::{DiscoverySpec, DiscoveryStream, EventChannelQuery, EventScope};
     use tokio::sync::Notify;
     use tokio::time::{Duration, timeout};
 
@@ -372,8 +372,10 @@ mod tests {
 
     fn event_channel(topic: &str, transport: EventTransport) -> DiscoveryInstance {
         DiscoveryInstance::EventChannel {
-            namespace: "test-ns".to_string(),
-            component: "test-component".to_string(),
+            scope: EventScope::Component {
+                namespace: "test-ns".to_string(),
+                component: "test-component".to_string(),
+            },
             topic: topic.to_string(),
             instance_id: 1,
             transport,

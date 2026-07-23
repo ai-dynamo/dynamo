@@ -45,7 +45,7 @@ use tracing;
 #[cfg(feature = "mm-routing")]
 use crate::model_card::ModelInfoType;
 use crate::model_card::{ModelDeploymentCard, ModelInfo};
-use crate::preprocessor::media::MediaLoader;
+use crate::preprocessor::media::{MediaLoader, require_image_url};
 use crate::protocols::common::preprocessor::{
     MultimodalData, MultimodalDataMap, PreprocessedRequestBuilder, RoutingHints,
 };
@@ -1317,13 +1317,26 @@ impl OpenAIPreprocessor {
                 } else {
                     let (type_str, url) = match content_part {
                         ChatCompletionRequestUserMessageContentPart::ImageUrl(p) => {
-                            ("image_url", p.image_url.url.clone())
+                            let url = require_image_url(p)?.clone();
+                            ("image_url", url)
                         }
                         ChatCompletionRequestUserMessageContentPart::VideoUrl(p) => {
-                            ("video_url", p.video_url.url.clone())
+                            let url = p
+                                .video_url
+                                .as_ref()
+                                .context("video_url content part is missing a URL")?
+                                .url
+                                .clone();
+                            ("video_url", url)
                         }
                         ChatCompletionRequestUserMessageContentPart::AudioUrl(p) => {
-                            ("audio_url", p.audio_url.url.clone())
+                            let url = p
+                                .audio_url
+                                .as_ref()
+                                .context("audio_url content part is missing a URL")?
+                                .url
+                                .clone();
+                            ("audio_url", url)
                         }
                         _ => continue,
                     };
@@ -1362,14 +1375,6 @@ impl OpenAIPreprocessor {
                     if shape.len() >= 2 {
                         let h = shape[0] as u32;
                         let w = shape[1] as u32;
-                        let url_str = match _content_part {
-                            ChatCompletionRequestUserMessageContentPart::ImageUrl(p) => {
-                                p.image_url.url.as_str()
-                            }
-                            _ => unreachable!(
-                                "rdma image_url descriptor only originates from ImageUrl content parts"
-                            ),
-                        };
                         // Frontend-decode path: hash the decoded RGB bytes so
                         // the same image reached via different (signed) URLs
                         // collides on the same `mm_hash` and routes to the
@@ -1379,7 +1384,17 @@ impl OpenAIPreprocessor {
                         // shouldn't happen on the frontend.
                         let (mm_hash, hash_source) = match rdma_descriptor.content_hash() {
                             Some(h) => (h, "decoded_bytes"),
-                            None => (Self::hash_image_url(url_str), "url_fallback"),
+                            None => {
+                                let url = match _content_part {
+                                    ChatCompletionRequestUserMessageContentPart::ImageUrl(p) => {
+                                        require_image_url(p)?
+                                    }
+                                    _ => unreachable!(
+                                        "rdma image_url descriptor only originates from ImageUrl content parts"
+                                    ),
+                                };
+                                (Self::hash_image_url(url.as_str()), "url_fallback")
+                            }
                         };
                         if let Some(counter) = self.image_token_counter.as_ref() {
                             let n = counter.count_tokens(w, h);

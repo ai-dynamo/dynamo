@@ -348,6 +348,7 @@ impl WorkerConfig {
         route_to_encoder = false,
         media_decoder = None,
         media_fetcher = None,
+        kv_state_endpoint = None,
         rejection_frontend_request_concurrency_limit = None,
     ))]
     #[allow(clippy::too_many_arguments)]
@@ -376,6 +377,7 @@ impl WorkerConfig {
         route_to_encoder: bool,
         media_decoder: Option<MediaDecoder>,
         media_fetcher: Option<MediaFetcher>,
+        kv_state_endpoint: Option<String>,
         rejection_frontend_request_concurrency_limit: Option<u64>,
     ) -> PyResult<Self> {
         // Delegating to the same conversion used by `register_model`.
@@ -436,6 +438,9 @@ impl WorkerConfig {
                 namespace,
                 component,
                 endpoint,
+                kv_state_endpoint: kv_state_endpoint
+                    .as_deref()
+                    .map(dynamo_runtime::protocols::EndpointId::from),
                 model_name,
                 served_model_name,
                 model_input: model_input_rs,

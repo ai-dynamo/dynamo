@@ -25,10 +25,11 @@ use uuid::Uuid;
 
 use super::driver::WorkloadDriver;
 use super::types::{
-    AgenticTrace, AgenticTurnTrace, ArrivalSpec, DelaySpec, DynamoRequestTrace, LengthSpec,
-    ReplayRequestHashes, RouterSequence, SequenceHashMode, SessionPartitionSpec, SessionTrace,
-    SyntheticTraceSpec, Trace, TraceFileFormat, TurnTrace, effective_replay_key,
+    AgenticTrace, AgenticTurnTrace, DelaySpec, DynamoRequestTrace, LengthSpec, ReplayRequestHashes,
+    RouterSequence, SequenceHashMode, SessionPartitionSpec, SessionTrace, SyntheticTraceSpec,
+    Trace, TraceFileFormat, TurnTrace, effective_replay_key,
 };
+use super::{SYNTHETIC_OUTPUT_SEED, planned_output_token_ids};
 use crate::common::protocols::DirectRequest;
 
 #[derive(Debug, Deserialize)]
@@ -108,28 +109,57 @@ fn validate_dynamo_trace_block_size(expected: Option<usize>, embedded: usize) ->
     Ok(())
 }
 
-fn synthesize_trace_tokens(
+fn single_turn_request_uuid(_request_ordinal: usize) -> Uuid {
+    #[cfg(feature = "replay-bench")]
+    {
+        Uuid::from_u128(_request_ordinal as u128 + 1)
+    }
+    #[cfg(not(feature = "replay-bench"))]
+    {
+        Uuid::new_v4()
+    }
+}
+
+pub(super) fn validate_synthesizable_prompt(
+    input_length: usize,
+    hash_ids: &[u64],
+    trace_block_size: usize,
+) -> Result<()> {
+    if trace_block_size == 0 {
+        bail!("trace_block_size must be greater than 0");
+    }
+    let synthesizable_capacity = hash_ids
+        .len()
+        .checked_mul(trace_block_size)
+        .context("synthesized prompt capacity overflow")?;
+    let required_hash_ids = input_length.div_ceil(trace_block_size);
+    if hash_ids.len() < required_hash_ids {
+        bail!(
+            "input_length {} exceeds synthesized capacity {}",
+            input_length,
+            synthesizable_capacity
+        );
+    }
+
+    Ok(())
+}
+
+pub(super) fn synthesize_trace_tokens(
     input_length: usize,
     hash_ids: &[u64],
     trace_block_size: usize,
 ) -> Result<Vec<u32>> {
-    if trace_block_size == 0 {
-        bail!("trace_block_size must be greater than 0");
-    }
-    if hash_ids.len() * trace_block_size < input_length {
-        bail!(
-            "input_length {} exceeds synthesized capacity {}",
-            input_length,
-            hash_ids.len() * trace_block_size
-        );
-    }
+    validate_synthesizable_prompt(input_length, hash_ids, trace_block_size)?;
 
     let mut tokens = Vec::with_capacity(input_length);
     for &hash_id in hash_ids {
         let token_id = hash_id as u32;
-        tokens.extend((0..trace_block_size).map(|_| token_id));
-        if tokens.len() >= input_length {
-            tokens.truncate(input_length);
+        let remaining = input_length - tokens.len();
+        tokens.extend(std::iter::repeat_n(
+            token_id,
+            remaining.min(trace_block_size),
+        ));
+        if tokens.len() == input_length {
             break;
         }
     }
@@ -600,19 +630,9 @@ impl Trace {
 
         let mut rng = StdRng::seed_from_u64(spec.seed);
         let mut sessions = Vec::with_capacity(spec.num_sessions);
-        let mut first_arrivals = Vec::with_capacity(spec.num_sessions);
-        let mean_gap_ms = arrival_spec_mean_gap_ms(&spec.first_turn_arrivals)?;
-        let mut next_arrival_ms = 0.0;
-
-        for session_idx in 0..spec.num_sessions {
-            if session_idx == 0 {
-                first_arrivals.push(0.0);
-                continue;
-            }
-            next_arrival_ms +=
-                sample_arrival_gap_ms(&spec.first_turn_arrivals, mean_gap_ms, &mut rng)?;
-            first_arrivals.push(next_arrival_ms);
-        }
+        let first_arrivals = spec
+            .first_turn_arrivals
+            .timestamps(spec.num_sessions, spec.arrival_seed)?;
 
         let mut next_unique_hash = 1_u64;
         for (session_idx, first_arrival_timestamp_ms) in first_arrivals.into_iter().enumerate() {
@@ -884,7 +904,8 @@ impl Trace {
 
     pub fn to_single_turn_requests(&self) -> Result<Vec<DirectRequest>> {
         let mut requests = Vec::with_capacity(self.sessions.len());
-        for session in &self.sessions {
+        let mut output_rng = StdRng::seed_from_u64(SYNTHETIC_OUTPUT_SEED);
+        for (request_ordinal, session) in self.sessions.iter().enumerate() {
             if session.turns.len() != 1 {
                 bail!(
                     "to_single_turn_requests requires exactly one turn per session, but session {} has {} turns",
@@ -892,11 +913,18 @@ impl Trace {
                     session.turns.len()
                 );
             }
-            requests.push(session.turns[0].to_direct_request(
+            let request_uuid = single_turn_request_uuid(request_ordinal);
+            let mut request = session.turns[0].to_direct_request(
                 self.block_size,
-                Uuid::new_v4(),
+                request_uuid,
                 session.first_arrival_timestamp_ms,
-            )?);
+            )?;
+            request.output_token_ids = Some(planned_output_token_ids(
+                request.output_token_ids,
+                request.max_output_tokens,
+                &mut output_rng,
+            ));
+            requests.push(request);
         }
         Ok(requests)
     }
@@ -1049,15 +1077,13 @@ impl Trace {
                         turn_idx
                     );
                 }
-                if turn.hash_ids.len() * self.block_size < turn.input_length {
-                    bail!(
-                        "session {} turn {} input_length {} exceeds synthesized capacity {}",
-                        session.session_id,
-                        turn_idx,
-                        turn.input_length,
-                        turn.hash_ids.len() * self.block_size
-                    );
-                }
+                validate_synthesizable_prompt(turn.input_length, &turn.hash_ids, self.block_size)
+                    .with_context(|| {
+                    format!(
+                        "session {} turn {} has invalid prompt",
+                        session.session_id, turn_idx
+                    )
+                })?;
                 if !turn.delay_after_previous_ms.is_finite() || turn.delay_after_previous_ms < 0.0 {
                     bail!(
                         "session {} turn {} has invalid delay {}",
@@ -1382,34 +1408,6 @@ fn extend_applied_compute_agentic_hash_ids(
     Ok(())
 }
 
-fn arrival_spec_mean_gap_ms(spec: &ArrivalSpec) -> Result<f64> {
-    match spec {
-        ArrivalSpec::Burst => Ok(0.0),
-        ArrivalSpec::ConstantQps { qps }
-        | ArrivalSpec::PoissonQps { qps }
-        | ArrivalSpec::GammaQps { qps, .. } => {
-            if !qps.is_finite() || *qps <= 0.0 {
-                bail!("qps must be a finite positive number, got {qps}");
-            }
-            Ok(1000.0 / qps)
-        }
-    }
-}
-
-fn sample_arrival_gap_ms(spec: &ArrivalSpec, mean_gap_ms: f64, rng: &mut StdRng) -> Result<f64> {
-    match spec {
-        ArrivalSpec::Burst => Ok(0.0),
-        ArrivalSpec::ConstantQps { .. } => Ok(mean_gap_ms),
-        ArrivalSpec::PoissonQps { .. } => Ok(sample_exponential_ms(mean_gap_ms, rng)),
-        ArrivalSpec::GammaQps { smoothness, .. } => {
-            if !smoothness.is_finite() || *smoothness <= 0.0 {
-                bail!("gamma smoothness must be a finite positive number, got {smoothness}");
-            }
-            Ok(sample_gamma_ms(*smoothness, mean_gap_ms / smoothness, rng))
-        }
-    }
-}
-
 fn sample_delay_ms(spec: &DelaySpec, rng: &mut StdRng) -> Result<f64> {
     match spec {
         DelaySpec::None => Ok(0.0),
@@ -1423,7 +1421,7 @@ fn sample_delay_ms(spec: &DelaySpec, rng: &mut StdRng) -> Result<f64> {
             if !mean_ms.is_finite() || *mean_ms < 0.0 {
                 bail!("mean_ms must be a finite non-negative number, got {mean_ms}");
             }
-            Ok(sample_exponential_ms(*mean_ms, rng))
+            Ok(sample_exponential_delay_ms(*mean_ms, rng))
         }
     }
 }
@@ -1441,41 +1439,12 @@ fn sample_length(spec: &LengthSpec, min_value: usize, rng: &mut StdRng) -> usize
     sample.round().max(min_value as f64) as usize
 }
 
-fn sample_exponential_ms(mean_ms: f64, rng: &mut StdRng) -> f64 {
+fn sample_exponential_delay_ms(mean_ms: f64, rng: &mut StdRng) -> f64 {
     if mean_ms == 0.0 {
         return 0.0;
     }
     let u = (1.0 - rng.random::<f64>()).clamp(f64::MIN_POSITIVE, 1.0);
     -mean_ms * u.ln()
-}
-
-fn sample_gamma_ms(shape: f64, scale: f64, rng: &mut StdRng) -> f64 {
-    if scale == 0.0 {
-        return 0.0;
-    }
-    if shape < 1.0 {
-        let u = (1.0 - rng.random::<f64>()).clamp(f64::MIN_POSITIVE, 1.0);
-        return sample_gamma_ms(shape + 1.0, scale, rng) * u.powf(1.0 / shape);
-    }
-
-    let d = shape - 1.0 / 3.0;
-    let c = (1.0 / (9.0 * d)).sqrt();
-    loop {
-        let u1 = (1.0 - rng.random::<f64>()).clamp(f64::MIN_POSITIVE, 1.0);
-        let u2 = rng.random::<f64>();
-        let z = (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos();
-        let v = (1.0 + c * z).powi(3);
-        if v <= 0.0 {
-            continue;
-        }
-        let u = rng.random::<f64>();
-        if u < 1.0 - 0.0331 * z.powi(4) {
-            return d * v * scale;
-        }
-        if u.ln() < 0.5 * z * z + d * (1.0 - v + v.ln()) {
-            return d * v * scale;
-        }
-    }
 }
 
 fn local_block_hash_from_id(hash_id: u64, block_size: usize) -> LocalBlockHash {

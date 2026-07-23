@@ -41,7 +41,7 @@ use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::metrics::MetricsHierarchy;
 use dynamo_runtime::protocols::annotated::Annotated;
 use dynamo_runtime::{
-    component::Component,
+    component::Endpoint,
     engine::AsyncEngineContextProvider,
     pipeline::{AsyncEngine, Error, ManyOut, ResponseStream, SingleIn, async_trait},
     traits::DistributedRuntimeProvider,
@@ -183,6 +183,15 @@ impl KvCacheEventSink for KvEventSinkAdapter {
             .publish_with_storage_tier(event, storage_tier)
             .map_err(|e| anyhow::anyhow!("Failed to send KV event: {}", e))
     }
+
+    fn publish_batch_with_storage_tiers(
+        &self,
+        events: Vec<(KvCacheEvent, StorageTier)>,
+    ) -> anyhow::Result<()> {
+        self.0
+            .publish_batch_with_storage_tiers(events)
+            .map_err(|e| anyhow::anyhow!("Failed to send KV event batch: {}", e))
+    }
 }
 
 fn generate_random_token() -> TokenIdType {
@@ -217,6 +226,9 @@ pub struct MockEngine {
     active_requests: Arc<DashMap<Uuid, mpsc::UnboundedSender<OutputSignal>>>,
     request_senders: OnceCell<Vec<mpsc::UnboundedSender<DirectRequest>>>,
     command_senders: OnceCell<Vec<mpsc::Sender<SchedulerCommandEnvelope>>>,
+    // TODO(DIS-2478): Store the scheduler cancellation senders and connect the AsyncEngine
+    // context stop/response-stream drop path to targeted cancellation. Until then, lib/mocker
+    // cancellation is not wired end to end through MockEngine.
     handoff_session_permits: OnceCell<Vec<Arc<Semaphore>>>,
     senders_ready: Notify,
     engine_args: MockEngineArgs,
@@ -349,7 +361,8 @@ impl MockEngine {
         );
     }
 
-    pub async fn start(&self, component: Component) -> Result<()> {
+    pub async fn start(&self, endpoint: dynamo_runtime::component::Endpoint) -> Result<()> {
+        let component = endpoint.component().clone();
         // Use primary_token() instead of child_token() so the mocker continues running
         // during graceful shutdown (Phase 1/2) and only stops in Phase 3.
         // child_token() is a child of endpoint_shutdown_token which is cancelled in Phase 1.
@@ -365,13 +378,13 @@ impl MockEngine {
             tracing::info!("Engine startup simulation completed");
         }
 
-        let kv_component = if self.engine_args.needs_kv_publisher() {
+        let kv_endpoint = if self.engine_args.needs_kv_publisher() {
             tracing::info!(
                 "Initializing KV event publisher with block_size {}, enable_local_indexer={}",
                 self.engine_args.block_size,
                 self.engine_args.enable_local_indexer
             );
-            Some(&component)
+            Some(&endpoint)
         } else {
             None
         };
@@ -380,7 +393,7 @@ impl MockEngine {
         // Create FPM publisher upfront and get per-dp-rank sink handles.
         let worker_id = component.drt().connection_id().to_string();
         let fpm_sinks = match crate::fpm_publisher::FpmDirectPublisher::new(
-            component.clone(),
+            endpoint.clone(),
             worker_id,
             self.engine_args.dp_size,
         )
@@ -399,7 +412,7 @@ impl MockEngine {
         };
 
         let schedulers = self
-            .start_schedulers(kv_component, self.scheduler_shutdown.clone(), fpm_sinks)
+            .start_schedulers(kv_endpoint, self.scheduler_shutdown.clone(), fpm_sinks)
             .await;
 
         if let Some(prepared) = prepared_bootstrap {
@@ -408,7 +421,7 @@ impl MockEngine {
 
         Self::start_metrics_publishing(
             &schedulers,
-            component.clone(),
+            endpoint,
             self.native_metrics.clone(),
             self.scheduler_shutdown.clone(),
             self.scheduler_tasks.clone(),
@@ -501,7 +514,7 @@ impl MockEngine {
     /// Create schedulers and spawn their background tasks for distributing token notifications.
     async fn start_schedulers(
         &self,
-        component: Option<&Component>,
+        endpoint: Option<&dynamo_runtime::component::Endpoint>,
         cancel_token: CancellationToken,
         fpm_sinks: Vec<dynamo_mocker::common::protocols::FpmPublisher>,
     ) -> Vec<Box<dyn SchedulerHandle>> {
@@ -517,8 +530,8 @@ impl MockEngine {
             let (kv_event_publishers, relay_publisher): (
                 KvEventPublishers,
                 Option<KvEventPublisher>,
-            ) = match component {
-                Some(comp) if args.zmq_kv_events_port.is_some() => {
+            ) = match endpoint {
+                Some(endpoint) if args.zmq_kv_events_port.is_some() => {
                     let zmq_port = args.zmq_kv_events_port.unwrap() + dp_rank as u16;
                     let replay_port = args.zmq_replay_port.map(|p| p + dp_rank as u16);
                     match ZmqKvEventSink::new(
@@ -536,7 +549,7 @@ impl MockEngine {
                                 image_token_id: None,
                             });
                             match KvEventPublisher::new_with_local_indexer(
-                                comp.clone(),
+                                endpoint.clone(),
                                 args.block_size as u32,
                                 source_config,
                                 args.enable_local_indexer,
@@ -566,9 +579,9 @@ impl MockEngine {
                         }
                     }
                 }
-                Some(comp) => {
+                Some(endpoint) => {
                     match KvEventPublisher::new_with_local_indexer(
-                        comp.clone(),
+                        endpoint.clone(),
                         args.block_size as u32,
                         None,
                         args.enable_local_indexer,
@@ -680,14 +693,14 @@ impl MockEngine {
     /// Start background tasks to publish metrics on change
     async fn start_metrics_publishing(
         schedulers: &[Box<dyn SchedulerHandle>],
-        component: Component,
+        endpoint: Endpoint,
         native_metrics: Arc<NativeMockerMetrics>,
         cancel_token: CancellationToken,
         tasks: TaskTracker,
     ) -> Result<()> {
         let metrics_publisher = Arc::new(WorkerMetricsPublisher::new()?);
 
-        if let Err(e) = metrics_publisher.create_endpoint(component).await {
+        if let Err(e) = metrics_publisher.create_endpoint(endpoint).await {
             tracing::error!("Metrics endpoint failed: {e}");
         }
         for scheduler in schedulers.iter() {
@@ -1177,7 +1190,8 @@ impl AnnotatedMockEngine {
             };
 
             tracing::debug!("Component service is now available, starting mocker engine");
-            if let Err(e) = inner_clone.start(component).await {
+            let endpoint = component.endpoint(endpoint_id.name);
+            if let Err(e) = inner_clone.start(endpoint).await {
                 tracing::error!("Failed to start mocker engine: {e}");
             }
         });

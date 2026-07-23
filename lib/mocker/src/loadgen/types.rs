@@ -151,6 +151,7 @@ pub struct SyntheticTraceSpec {
     pub first_turn_arrivals: ArrivalSpec,
     pub inter_turn_delays: DelaySpec,
     pub seed: u64,
+    pub arrival_seed: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -199,5 +200,6 @@ pub struct ReadyTurn {
     pub replay_key: Option<String>,
     pub scheduled_ready_at_ms: f64,
     pub replay_hashes: Option<ReplayRequestHashes>,
+    pub(crate) emit_session_metadata: bool,
     pub request: DirectRequest,
 }

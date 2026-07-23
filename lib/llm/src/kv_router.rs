@@ -10,14 +10,14 @@ use dynamo_kv_router::{
     indexer::{KvRouterError, RoutingDecisionHashes},
     protocols::KV_EVENT_SUBJECT,
     protocols::{
-        BlockExtraInfo, BlockHashOptions, DpRank, LocalBlockHash, PrefillLoadHint, RouterEvent,
+        BlockExtraInfo, BlockHashOptions, LocalBlockHash, PrefillLoadHint, RouterEvent,
         RouterRequest, RouterResponse, RoutingConstraints, TokensWithHashes, WorkerConfigLike,
         WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
     },
     scheduling::{
-        CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider, RequestProgressUpdater,
-        ScheduleMode, ScheduleRequest, TieredOverlapRefresher, effective_prefill_tokens,
-        overlap::cache_hit_estimates_from_tiered_matches,
+        CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider, RequestLifecycleLease,
+        RequestProgressUpdater, ScheduleMode, ScheduleRequest, TieredOverlapRefresher,
+        effective_prefill_tokens, overlap::cache_hit_estimates_from_tiered_matches,
     },
 };
 use dynamo_runtime::{
@@ -62,7 +62,7 @@ pub use prefill_router::PrefillRouter;
 pub use push_router::{DirectRoutingRouter, KvPushRouter};
 
 use crate::{
-    discovery::RuntimeConfigWatch,
+    discovery::{KvSourceMembershipWatch, RuntimeConfigWatch},
     kv_router::{
         scheduler::{DefaultWorkerSelector, KvScheduler, PotentialLoad},
         sequence::{SequenceError, SequenceRequest},
@@ -78,8 +78,6 @@ pub enum FindBestMatchOutcome {
         effective_overlap_blocks: f64,
         cached_tokens: usize,
         routing_hashes: Option<RoutingDecisionHashes>,
-        request_progress: Option<RequestProgressUpdater>,
-        admission_lease: Option<scheduler::AdmissionLease>,
     },
     QueueRejected {
         rejection: scheduling::QueueRejection,
@@ -154,20 +152,6 @@ fn cancelled_error(context_id: &str) -> anyhow::Error {
         .into()
 }
 
-/// Generates a dp_rank-specific endpoint name for the worker KV indexer query service.
-/// Each dp_rank has its own LocalKvIndexer and query endpoint to ensure per-dp_rank monotonicity.
-pub fn worker_kv_indexer_query_endpoint(dp_rank: DpRank) -> String {
-    format!("worker_kv_indexer_query_dp{dp_rank}")
-}
-
-/// Generates a query endpoint name for a dp_rank whose events are attributed to `worker_id`.
-pub fn worker_kv_indexer_query_endpoint_for_worker(worker_id: WorkerId, dp_rank: DpRank) -> String {
-    format!(
-        "{}_worker{worker_id}",
-        worker_kv_indexer_query_endpoint(dp_rank)
-    )
-}
-
 fn log_routing_input_hashes(
     request_id: Option<&str>,
     block_size: u32,
@@ -226,6 +210,7 @@ where
     cancellation_token: CancellationToken,
     client: Client,
     is_eagle: bool,
+    kv_event_subscription: Option<indexer::KvEventSubscriptionHandle>,
     _served_indexer_handle: Option<ServedIndexerHandle>,
     /// Optional external shared KV cache pool. When present, `find_best_match`
     /// queries it in parallel with the indexer and factors shared hits into scoring.
@@ -245,6 +230,7 @@ where
         endpoint: Endpoint,
         client: Client,
         workers_with_configs: RuntimeConfigWatch,
+        kv_source_membership: Option<KvSourceMembershipWatch>,
         block_size: u32,
         selector: Sel,
         kv_router_config: Option<KvRouterConfig>,
@@ -297,7 +283,7 @@ where
             Arc::new(move || client_for_overload.overloaded_instance_ids());
 
         let scheduler = KvScheduler::start(
-            component.clone(),
+            endpoint.clone(),
             block_size,
             workers_with_configs.clone(),
             selector,
@@ -308,29 +294,39 @@ where
             model_name.as_deref(),
             worker_type,
             cancellation_token.child_token(),
+            Default::default(),
         )
         .await?;
 
         // Start KV event subscription if needed — skip when using a remote indexer.
-        if kv_router_config.use_remote_indexer {
+        let kv_event_subscription = if kv_router_config.use_remote_indexer {
             tracing::info!("Skipping KV event subscription (using remote indexer)");
+            None
         } else if kv_router_config.should_subscribe_to_kv_events() {
-            indexer::start_subscriber(
-                component.clone(),
-                indexer.clone(),
-                workers_with_configs.clone(),
-                model_name.clone().unwrap_or_else(|| "unknown".to_string()),
-                worker_type,
-                cancellation_token.child_token(),
+            let membership_watch = kv_source_membership.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "KV source membership watch is required when local KV event subscription is enabled"
+                )
+            })?;
+            Some(
+                indexer::start_subscriber(
+                    endpoint.clone(),
+                    indexer.clone(),
+                    membership_watch,
+                    model_name.clone().unwrap_or_else(|| "unknown".to_string()),
+                    worker_type,
+                    cancellation_token.child_token(),
+                )
+                .await?,
             )
-            .await?;
         } else {
             tracing::info!(
                 "Skipping KV event subscription (use_kv_events={}, overlap_score_credit={})",
                 kv_router_config.use_kv_events,
                 kv_router_config.overlap_score_credit,
             );
-        }
+            None
+        };
 
         let served_indexer_handle = if kv_router_config.serve_indexer {
             let model_name = model_name.clone().ok_or_else(|| {
@@ -361,6 +357,7 @@ where
             cancellation_token,
             client,
             is_eagle,
+            kv_event_subscription,
             _served_indexer_handle: served_indexer_handle,
             shared_cache,
             lora_filter,
@@ -378,6 +375,14 @@ where
 
     pub fn kv_router_config(&self) -> &KvRouterConfig {
         &self.kv_router_config
+    }
+
+    /// Cancel background work and wait for KV event ingestion to stop.
+    pub async fn shutdown(mut self) {
+        self.cancellation_token.cancel();
+        if let Some(subscription) = self.kv_event_subscription.take() {
+            subscription.shutdown().await;
+        }
     }
 
     pub fn is_eagle(&self) -> bool {
@@ -556,48 +561,7 @@ where
             false,
         )
         .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn find_best_match_details_with_admission(
-        &self,
-        context_id: Option<&str>,
-        tokens: &[u32],
-        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
-        router_config_override: Option<&RouterConfigOverride>,
-        update_states: bool,
-        return_routing_hashes: bool,
-        lora_name: Option<String>,
-        cache_namespace: Option<String>,
-        priority_jump: f64,
-        strict_priority: u32,
-        policy_class: Option<String>,
-        session_id: Option<String>,
-        expected_output_tokens: Option<u32>,
-        pinned_worker: Option<WorkerWithDpRank>,
-        allowed_worker_ids: Option<HashSet<WorkerId>>,
-        routing_constraints: RoutingConstraints,
-    ) -> anyhow::Result<FindBestMatchOutcome> {
-        self.find_best_match_details_with_policy_class_inner(
-            context_id,
-            tokens,
-            block_mm_infos,
-            router_config_override,
-            update_states,
-            return_routing_hashes,
-            lora_name,
-            cache_namespace,
-            priority_jump,
-            strict_priority,
-            policy_class,
-            session_id,
-            expected_output_tokens,
-            pinned_worker,
-            allowed_worker_ids,
-            routing_constraints,
-            true,
-        )
-        .await
+        .map(|(outcome, _)| outcome)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -619,15 +583,18 @@ where
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
-        use_admission: bool,
-    ) -> anyhow::Result<FindBestMatchOutcome> {
+        track_lifecycle: bool,
+    ) -> anyhow::Result<(
+        FindBestMatchOutcome,
+        Option<(RequestProgressUpdater, RequestLifecycleLease)>,
+    )> {
         let start = Instant::now();
 
         if update_states && context_id.is_none() {
             anyhow::bail!("context_id must be provided if update_states is true");
         }
-        let mode = if update_states && use_admission {
-            ScheduleMode::TrackedWithAdmission {
+        let mode = if update_states && track_lifecycle {
+            ScheduleMode::TrackedWithLifecycle {
                 request_id: context_id.expect("validated above").to_string(),
             }
         } else if update_states {
@@ -740,7 +707,7 @@ where
         {
             Ok(response) => response,
             Err(KvSchedulerError::QueueRejected(rejection)) => {
-                return Ok(FindBestMatchOutcome::QueueRejected { rejection });
+                return Ok((FindBestMatchOutcome::QueueRejected { rejection }, None));
             }
             Err(error) => return Err(map_scheduler_error(error)),
         };
@@ -781,15 +748,21 @@ where
             "find_best_match completed"
         );
 
-        Ok(FindBestMatchOutcome::Routed {
-            worker: response.best_worker,
-            overlap_blocks: response.effective_overlap_blocks.round() as u32,
-            effective_overlap_blocks: response.effective_overlap_blocks,
-            cached_tokens: response.cached_tokens,
-            routing_hashes,
-            request_progress: response.request_progress,
-            admission_lease: response.admission_lease,
-        })
+        debug_assert_eq!(
+            response.request_progress.is_some(),
+            response.lifecycle_lease.is_some()
+        );
+        let lifecycle = response.request_progress.zip(response.lifecycle_lease);
+        Ok((
+            FindBestMatchOutcome::Routed {
+                worker: response.best_worker,
+                overlap_blocks: response.effective_overlap_blocks.round() as u32,
+                effective_overlap_blocks: response.effective_overlap_blocks,
+                cached_tokens: response.cached_tokens,
+                routing_hashes,
+            },
+            lifecycle,
+        ))
     }
 
     /// Give these tokens, find the worker with the best match in its KV cache.
@@ -898,11 +871,7 @@ where
         self.scheduler.mark_prefill_completed(request_id).await
     }
 
-    pub async fn mark_dispatched(&self, request_id: &str) {
-        self.scheduler.mark_dispatched(request_id).await;
-    }
-
-    /// Legacy slot cleanup. Admission-managed requests use their `AdmissionLease`.
+    /// Legacy slot cleanup. Lifecycle-tracked requests use their `RequestLifecycleLease`.
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
         self.scheduler.free(request_id).await
     }
@@ -1460,6 +1429,7 @@ mod tests {
             endpoint,
             client,
             rx,
+            None,
             2,
             selector,
             Some(config),

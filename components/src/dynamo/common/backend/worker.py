@@ -144,6 +144,8 @@ class WorkerConfig:
     route_to_encoder: bool = False
     media_decoder: Optional[MediaDecoder] = None
     media_fetcher: Optional[MediaFetcher] = None
+    # KV event/recovery ownership endpoint. None uses this worker's serving endpoint.
+    kv_state_endpoint: Optional[str] = None
     # Per-model frontend request-concurrency override published on the MDC.
     # None leaves the frontend-level default in effect.
     rejection_frontend_request_concurrency_limit: Optional[int] = None
@@ -166,6 +168,7 @@ class WorkerConfig:
             "namespace": runtime_cfg.namespace,
             "component": getattr(runtime_cfg, "component", None) or "backend",
             "endpoint": getattr(runtime_cfg, "endpoint", None) or "generate",
+            "kv_state_endpoint": getattr(runtime_cfg, "kv_state_endpoint", None),
             "model_name": model_name,
             "served_model_name": served_model_name,
             "endpoint_types": getattr(
@@ -261,6 +264,7 @@ class Worker:
             namespace=self.config.namespace,
             component=self.config.component,
             endpoint=self.config.endpoint,
+            kv_state_endpoint=self.config.kv_state_endpoint,
             model_name=self.config.model_name,
             served_model_name=self.config.served_model_name,
             model_input=self.config.model_input,

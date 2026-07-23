@@ -652,10 +652,10 @@ class WorkerMetricsPublisher:
 
     async def create_endpoint(self, endpoint: Endpoint) -> None:
         """
-        Initialize the NATS endpoint for publishing worker metrics. Must be awaited.
+        Initialize event-plane publishing for worker metrics. Must be awaited.
 
         Extracts component information from the endpoint to set up metrics publishing
-        on the correct NATS subject for routing decisions.
+        on the endpoint-scoped event subject used for routing decisions.
 
         Args:
             endpoint: The endpoint to extract component information from for metrics publishing
@@ -691,7 +691,7 @@ class MultimodalEmbeddingCachePublisher:
 
     async def create_endpoint(self, endpoint: Endpoint) -> None:
         """
-        Initialize the NATS endpoint for publishing multimodal cache state.
+        Initialize event-plane publishing for multimodal cache state.
 
         Args:
             endpoint: The endpoint to extract component information from.
@@ -864,6 +864,7 @@ class ModelRuntimeConfig:
     data_parallel_start_rank: int
     data_parallel_size: int
     enable_local_indexer: bool
+    kv_state_endpoint: str | None
     enable_eagle: bool
     taints: Set[str]
     stable_routing_id: str | None
@@ -1148,6 +1149,7 @@ class KvEventPublisher:
         zmq_topic: Optional[str] = None,
         batching_timeout_ms: Optional[int] = None,
         image_token_id: Optional[int] = None,
+        kv_state_endpoint: Optional[str] = None,
     ) -> None:
         """
         Create a `KvEventPublisher` object.
@@ -1165,6 +1167,7 @@ class KvEventPublisher:
             enable_local_indexer: Enable worker-local KV indexer
             zmq_endpoint: Optional ZMQ endpoint for relay mode (e.g. "tcp://127.0.0.1:5557")
             zmq_topic: ZMQ topic to subscribe to (defaults to "" when zmq_endpoint is set)
+            kv_state_endpoint: KV event ownership endpoint; defaults to endpoint.
         """
 
     def publish_stored(
@@ -2424,8 +2427,79 @@ async def make_engine(distributed_runtime: DistributedRuntime, args: EntrypointA
     """Make an engine matching the args"""
     ...
 
-async def run_input(runtime: DistributedRuntime, input: str, engine_config: EngineConfig) -> None:
-    """Start an engine, connect it to an input, and run until stopped."""
+class FrontendExtensionContext:
+    """Read-only, live view of frontend state passed to extension route handlers.
+
+    Handlers receive this and answer from current state. The surface is
+    intentionally narrow (typed read-only accessors only); it does not expose
+    the internal service state.
+    """
+
+    def is_ready(self) -> bool:
+        """Whether the HTTP service has finished startup and is ready to serve."""
+        ...
+
+    def is_cancelled(self) -> bool:
+        """Whether the frontend is shutting down (draining)."""
+        ...
+
+    def has_any_ready_model(self) -> bool:
+        """Whether at least one model is registered and ready to serve."""
+        ...
+
+    def is_model_ready_to_serve(self, model: str) -> bool:
+        """Whether the named model is registered and ready to serve."""
+        ...
+
+    def model_display_names(self) -> list[str]:
+        """Sorted display names of all registered models."""
+        ...
+
+    def serving_ready_display_names(self) -> list[str]:
+        """Sorted display names of models ready to serve."""
+        ...
+
+class FrontendRoute:
+    """A trusted extension route served on the Dynamo HTTP frontend.
+
+    Currently restricted to static-path ``GET`` routes. ``handler`` is a
+    synchronous callable that receives a ``FrontendExtensionContext`` and
+    returns a JSON-serializable body (implies HTTP 200) or a ``FrontendResponse``
+    to set the status code. Async handlers and path parameters are rejected at
+    construction.
+    """
+
+    def __init__(
+        self,
+        method: str,
+        path: str,
+        handler: Callable[[FrontendExtensionContext], object],
+    ) -> None: ...
+    @property
+    def method(self) -> str: ...
+    @property
+    def path(self) -> str: ...
+
+class FrontendResponse:
+    """Explicit status-code override returned by a ``FrontendRoute`` handler.
+
+    Return this to set a non-200 status (e.g. ``FrontendResponse(503, body)``);
+    return a plain JSON-serializable value for the default 200.
+    """
+
+    def __init__(self, status_code: int, body: object) -> None: ...
+
+async def run_input(
+    distributed_runtime: DistributedRuntime,
+    input: str,
+    engine_config: EngineConfig,
+    frontend_route_extensions: Optional[Sequence[FrontendRoute]] = None,
+) -> None:
+    """Start an engine, connect it to an input, and run until stopped.
+
+    ``frontend_route_extensions`` supplies additional HTTP routes to the
+    frontend (HTTP input only); see ``FrontendRoute``.
+    """
     ...
 
 def run_mocker_trace_replay(
@@ -2492,7 +2566,9 @@ def run_mocker_synthetic_trace_replay(
     replay_mode: Literal["offline", "online"] = "offline",
     router_mode: Literal["round_robin", "kv_router"] = "round_robin",
     arrival_speedup_ratio: float = 1.0,
-    arrival_interval_ms: float = 1.0,
+    request_rate: Optional[float] = None,
+    arrival_interval_ms: Optional[float] = None,
+    arrival_seed: int = 42,
     turns_per_session: int = 1,
     shared_prefix_ratio: float = 0.0,
     num_prefix_groups: int = 0,
@@ -2562,7 +2638,9 @@ class PlannerReplayBridge:
         model_name: Optional[str] = None,
         replay_concurrency: Optional[int] = None,
         arrival_speedup_ratio: float = 1.0,
-        arrival_interval_ms: float = 1.0,
+        request_rate: Optional[float] = None,
+        arrival_interval_ms: Optional[float] = None,
+        arrival_seed: int = 42,
         turns_per_session: int = 1,
         shared_prefix_ratio: float = 0.0,
         num_prefix_groups: int = 0,
@@ -2586,7 +2664,9 @@ class PlannerReplayBridge:
         model_name: Optional[str] = None,
         replay_concurrency: Optional[int] = None,
         arrival_speedup_ratio: float = 1.0,
-        arrival_interval_ms: float = 1.0,
+        request_rate: Optional[float] = None,
+        arrival_interval_ms: Optional[float] = None,
+        arrival_seed: int = 42,
         turns_per_session: int = 1,
         shared_prefix_ratio: float = 0.0,
         num_prefix_groups: int = 0,
@@ -2814,6 +2894,31 @@ class KvbmRequest:
     """
 
     def __init__(self, request_id: int, tokens: List[int], block_size: int) -> None:
+        ...
+
+class KvDcRelay:
+    def __init__(
+        self,
+        endpoint: Endpoint,
+        dc_id: str,
+        namespace_filter: Optional[str] = None,
+        endpoint_prefix: Optional[str] = None,
+        publication_threshold: int = 16,
+        publication_delay_ms: int = 1,
+        recovery_attempt_timeout_ms: int = 30_000,
+    ) -> None:
+        ...
+
+    async def start(self) -> None:
+        ...
+
+    async def health(self) -> Dict[str, Any]:
+        ...
+
+    async def flush(self) -> None:
+        ...
+
+    async def shutdown(self) -> None:
         ...
 
 class KvRouter:
@@ -3381,6 +3486,7 @@ class backend:
             route_to_encoder: bool = ...,
             media_decoder: Optional[MediaDecoder] = None,
             media_fetcher: Optional[MediaFetcher] = None,
+            kv_state_endpoint: Optional[str] = None,
             rejection_frontend_request_concurrency_limit: Optional[int] = None,
         ) -> None: ...
 

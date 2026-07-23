@@ -2,12 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_kv_router::protocols::{LocalBlockHash, SharedCacheHits};
+use dynamo_kv_router::scheduling::PolicyClassAdmissionPolicies;
 pub use dynamo_kv_router::scheduling::overlap_refresh::{
     NoopOverlapScoresRefresh, OverlapScoresRefresh, RefreshedOverlap,
 };
 pub use dynamo_kv_router::scheduling::{
-    AdmissionLease, KvSchedulerError, LocalScheduler, OverloadedWorkerProvider,
-    PolicyClassAdmissionStrategies, PotentialLoad, RequestOutcome, ScheduleRequest,
+    KvSchedulerError, LocalScheduler, OverloadedWorkerProvider, PotentialLoad, ScheduleRequest,
     SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
 };
 pub use dynamo_kv_router::selector::DefaultWorkerSelector;
@@ -25,7 +25,7 @@ use dynamo_kv_router::{
     config::{KvRouterConfig, RouterConfigOverride},
     protocols::{RoutingConstraints, WorkerId, WorkerWithDpRank},
 };
-use dynamo_runtime::component::Component;
+use dynamo_runtime::component::Endpoint;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_tokens::SequenceHash;
 use std::collections::{HashMap, HashSet};
@@ -52,7 +52,7 @@ where
     /// long-waiting requests can be re-scored at dequeue time.
     #[expect(clippy::too_many_arguments)]
     pub async fn start(
-        component: Component,
+        endpoint: Endpoint,
         block_size: u32,
         workers_with_configs: RuntimeConfigWatch,
         selector: Sel,
@@ -63,45 +63,14 @@ where
         model_name: Option<&str>,
         worker_type: &'static str,
         cancellation_token: CancellationToken,
-    ) -> Result<Self, KvSchedulerError> {
-        Self::start_with_admission_strategies(
-            component,
-            block_size,
-            workers_with_configs,
-            selector,
-            kv_router_config,
-            prefill_load_estimator,
-            overlap_scores_refresh,
-            overloaded_worker_provider,
-            model_name,
-            worker_type,
-            cancellation_token,
-            PolicyClassAdmissionStrategies::new(),
-        )
-        .await
-    }
-
-    #[expect(clippy::too_many_arguments)]
-    pub async fn start_with_admission_strategies(
-        component: Component,
-        block_size: u32,
-        workers_with_configs: RuntimeConfigWatch,
-        selector: Sel,
-        kv_router_config: &KvRouterConfig,
-        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
-        overlap_scores_refresh: Option<Arc<RF>>,
-        overloaded_worker_provider: Option<OverloadedWorkerProvider>,
-        model_name: Option<&str>,
-        worker_type: &'static str,
-        cancellation_token: CancellationToken,
-        admission_strategies: PolicyClassAdmissionStrategies,
+        admission_policies: PolicyClassAdmissionPolicies,
     ) -> Result<Self, KvSchedulerError> {
         let initial_workers: HashMap<WorkerId, ModelRuntimeConfig> =
             workers_with_configs.borrow().clone();
 
-        let router_id = component.drt().discovery().instance_id();
+        let router_id = endpoint.drt().discovery().instance_id();
         let slots = create_multi_worker_sequences(
-            component.clone(),
+            endpoint,
             block_size as usize,
             initial_workers,
             kv_router_config.router_replica_sync,
@@ -133,24 +102,22 @@ where
             .map(|(index, class)| (class.name.clone(), index))
             .collect();
 
-        let inner = Arc::new(
-            LocalScheduler::new_with_policy_profile_and_admission_strategies(
-                slots,
-                workers_with_configs.clone(),
-                profile,
-                block_size,
-                selector,
-                prefill_load_estimator,
-                overlap_scores_refresh,
-                overloaded_worker_provider,
-                queue_recheck_interval,
-                kv_router_config.router_track_prefill_tokens,
-                cancellation_token.child_token(),
-                worker_type,
-                watch_worker_configs,
-                admission_strategies,
-            )?,
-        );
+        let inner = Arc::new(LocalScheduler::new_with_policy_profile(
+            slots,
+            workers_with_configs.clone(),
+            profile,
+            block_size,
+            selector,
+            prefill_load_estimator,
+            overlap_scores_refresh,
+            overloaded_worker_provider,
+            queue_recheck_interval,
+            kv_router_config.router_track_prefill_tokens,
+            cancellation_token.child_token(),
+            worker_type,
+            watch_worker_configs,
+            admission_policies,
+        )?);
 
         let metrics_scheduler = Arc::clone(&inner);
         let background_metrics = queue_metrics.clone();
@@ -378,10 +345,6 @@ where
         Ok(())
     }
 
-    pub async fn mark_dispatched(&self, request_id: &str) {
-        self.inner.mark_dispatched(request_id).await;
-    }
-
     pub fn pending_count(&self) -> usize {
         self.inner.pending_count()
     }
@@ -457,6 +420,7 @@ fn update_queue_metrics(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dynamo_runtime::component::Component;
     use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
     use tokio::sync::watch;
 
@@ -518,7 +482,7 @@ mod tests {
         let cancellation_token = CancellationToken::new();
 
         let scheduler = KvScheduler::start(
-            component.clone(),
+            component.endpoint("generate"),
             64,
             cfg_rx,
             DefaultWorkerSelector::new(Some(config.clone()), "decode"),
@@ -529,6 +493,7 @@ mod tests {
             Some("test-model"),
             "decode",
             cancellation_token.clone(),
+            Default::default(),
         )
         .await
         .unwrap();
