@@ -34,15 +34,22 @@ over ZMQ.
 
 | Concern | Standalone mode, in-process selector (gap vs full Dynamo) |
 |---|---|
-Duplicate store/remove (vLLM "retries") | parity
-In-stream ordering | parity
 Transient disconnects | The in-process indexer reconnects on its own and keeps routing. KV-cache updates the worker sent during the gap are recovered from the worker's **replay** socket when `DYN_EPP_KV_EVENT_REPLAY_PORT` is set (and the vLLM worker exposes one); otherwise the index refreshes from new traffic.
 Dropped events / gaps | The `SelectionCore` indexer does seq-watermark gap detection and replays missed events from the worker's replay socket when `DYN_EPP_KV_EVENT_REPLAY_PORT` is configured. Without a replay socket, gaps are dropped and the index re-warms from new traffic.
 Initial cache state | A fresh or restarted EPP starts with an empty index and re-warms from live traffic + replay. Replicas share active load (admission/prefill/free) but not KV-index state.
 Backpressure / EPP restart | vLLM PUB drops to slow subscribers (ZMQ HWM) can be silently lost; on restart the index starts empty and re-warms from new traffic.
 Data parallelism | V1 targets DP=1.
 Disaggregated prefill/decode | Not supported by these PRs (aggregated: prefill and decode share one worker). Planned follow-up.
-Multi-replica EPP | Supported: set `DYN_EPP_PEER_SERVICE` so replicas sync active load over ZMQ (`agg.yaml` runs 2 replicas). Cross-replica KV-index warm-up is not wired; a new replica re-warms from live traffic + replay.
+Cross-replica KV-index warm-up is not wired; a new replica re-warms from live traffic + replay.
+x-tenant-id / cache_salt | KV routing per tenant is not supported at this time. his requires per-engine support
+
+## Still supported
+
+| Concern | Standalone mode, in-process selector (gap vs full Dynamo) |
+|---|---|
+Duplicate store/remove (vLLM "retries") | parity
+In-stream ordering | parity
+Multi-replica EPP | Supported: set `DYN_EPP_PEER_SERVICE` so replicas sync active load over ZMQ (`agg.yaml` runs 2 replicas).
 
 ## Examples
 
@@ -252,16 +259,19 @@ metadata:
      value: "5557"
    ```
 
-4. **Set the model, renderer URL, and block size.** The renderer URL points to a
-   vLLM HTTP Service exposing `/v1/chat/completions/render`; it may select the
-   same homogeneous worker pods. The block size MUST equal the vLLM
-   `--block-size`:
+4. **Set the model, tokenizer service, and block size.** The tokenizer service
+   URL points to a vLLM HTTP Service exposing `/v1/chat/completions/render`; it
+   may select the same homogeneous worker pods. `DYN_EPP_TOKENIZER_PROTOCOL`
+   selects its wire protocol (only `vllm-render` is supported today). The block
+   size MUST equal the vLLM `--block-size`:
 
    ```yaml
    - name: DYN_MODEL_NAME
      value: "Qwen/Qwen3-0.6B"
-   - name: DYN_EPP_VLLM_RENDER_URL
+   - name: DYN_EPP_TOKENIZER_SERVICE_URL
      value: "http://vllm-qwen-render:8000"
+   - name: DYN_EPP_TOKENIZER_PROTOCOL
+     value: "vllm-render"
    - name: DYN_KV_CACHE_BLOCK_SIZE
      value: "16"
    ```
@@ -374,7 +384,8 @@ Required:
 | `DYN_EPP_MODE=standalone` | Select standalone (on-ramp) mode; `dynamo` (default) keeps Dynamo mode |
 | `DYN_EPP_INFERENCE_POOL_NAME` | Name of the `InferencePool` this EPP backs; its selector + target port drive pod discovery |
 | `DYN_MODEL_NAME` | Model id used for worker registration and request selection |
-| `DYN_EPP_VLLM_RENDER_URL` | Base URL of the vLLM `/v1/chat/completions/render` service |
+| `DYN_EPP_TOKENIZER_SERVICE_URL` | Base URL of the tokenizer service (vLLM `/v1/chat/completions/render`) |
+| `DYN_EPP_TOKENIZER_PROTOCOL` | Tokenizer service wire protocol; only `vllm-render` is supported |
 | `DYN_KV_CACHE_BLOCK_SIZE` | MUST equal vLLM `--block-size` |
 | `POD_NAMESPACE` | The namespace the EPP, its `InferencePool`, worker pods, and sibling replicas all live in (inject via the downward API) |
 
@@ -385,7 +396,8 @@ Optional:
 | `DYN_EPP_KV_EVENT_PORT` | `5557` | vLLM `--kv-events-config` PUB port the selector subscribes to |
 | `DYN_EPP_KV_EVENT_REPLAY_PORT` | unset | Per-worker ZMQ replay socket for KV-event gap recovery (requires the vLLM worker to expose one) |
 | `DYN_EPP_SELECTION_INDEXER_THREADS` | `4` | KV indexer thread pool for the in-process selector |
-| `DYN_EPP_TOKENIZATION_TIMEOUT_MS` | `5000` | Deadline for the vLLM render request |
+| `DYN_EPP_TOKENIZATION_TIMEOUT_MS` | `5000` | Deadline for the tokenizer service request |
+| `DYN_EPP_TOKENIZER_MAX_RESPONSE_BYTES` | `16777216` | Max tokenizer response body accepted (16 MiB) |
 | `DYN_EPP_PEER_SERVICE` | unset | Replication: the EPP's OWN `Service`; watch its EndpointSlices and resolve the required named `replica-agg` port to discover sibling replicas and sync active load over ZMQ. Set = replicated; unset = single local replica |
 | `POD_IP` | unset | Replication: the EPP's own pod IP (downward API `status.podIP`), so a replica excludes itself from its peer set. Required when `DYN_EPP_PEER_SERVICE` is set |
 | `DYN_EPP_TOTAL_KV_BLOCKS` | unset | Per-worker total KV blocks hint for the load model |
