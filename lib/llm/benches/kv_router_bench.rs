@@ -625,9 +625,7 @@ async fn discover_worker_ids(
     let worker_ids: Vec<WorkerId> = health
         .instances
         .iter()
-        .filter(|i| {
-            i.namespace == namespace && i.component == component && i.endpoint == endpoint
-        })
+        .filter(|i| i.namespace == namespace && i.component == component && i.endpoint == endpoint)
         .map(|i| i.instance_id)
         .collect();
 
