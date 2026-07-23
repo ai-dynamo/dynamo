@@ -36,10 +36,20 @@ def test_replay_api_forwards_policy_model_name(monkeypatch):
     )
 
     replay_api.run_trace_replay("trace.jsonl", model_name="model-a")
-    replay_api.run_synthetic_trace_replay(64, 8, 2, model_name="model-b")
+    replay_api.run_synthetic_trace_replay(
+        64,
+        8,
+        2,
+        model_name="model-b",
+        request_rate=6.5,
+        arrival_seed=17,
+    )
 
     assert calls[0][2]["model_name"] == "model-a"
     assert calls[1][2]["model_name"] == "model-b"
+    assert calls[1][2]["request_rate"] == 6.5
+    assert calls[1][2]["arrival_interval_ms"] is None
+    assert calls[1][2]["arrival_seed"] == 17
 
 
 def test_replay_api_and_cli_route_trace_file_lists(monkeypatch):

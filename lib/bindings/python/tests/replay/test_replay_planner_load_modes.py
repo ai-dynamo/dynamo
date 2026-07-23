@@ -40,7 +40,7 @@ def test_synthetic_agg_load_modes(replay_concurrency):
         num_workers=2,
         replay_concurrency=replay_concurrency,
         replay_mode="offline",
-        arrival_interval_ms=1.0,
+        arrival_interval_ms=1.0 if replay_concurrency is None else None,
     )
     assert report["completed_requests"] == 8
 
@@ -94,7 +94,6 @@ def test_planner_callback_error_preserves_python_exception_type():
         extra_engine_args=MockEngineArgs(block_size=64, speedup_ratio=1000.0),
         num_workers=1,
         replay_concurrency=2,
-        arrival_interval_ms=1.0,
     )
     with pytest.raises(ValueError, match="boom from on_tick"):
         bridge.run(_RaisingPlanner())

@@ -217,6 +217,42 @@ def test_run_replay_for_state_passes_applied_compute_agentic_trace_knobs(
     assert captured["kwargs"]["trace_num_prefix_groups"] == 1
 
 
+def test_run_replay_for_state_uses_request_rate_as_poisson_open_loop(
+    monkeypatch,
+) -> None:
+    workload = WorkloadSpec(
+        isl=64,
+        osl=8,
+        requestCount=10,
+        requestRate=6.5,
+        arrivalSeed=17,
+    )
+    captured: dict[str, Any] = {}
+
+    def fake_run_synthetic_trace_replay(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return {"output_throughput_tok_s": 1.0}
+
+    monkeypatch.setattr(
+        "dynamo.profiler.utils.replay_optimize.evaluate.run_synthetic_trace_replay",
+        fake_run_synthetic_trace_replay,
+    )
+
+    replay_optimize.evaluate._run_replay_for_state(
+        state=DenseReplayState(1, 1, 1, 1, 0.5),
+        workload=workload,
+        prefill_engine_args=MockEngineArgs.from_json(json.dumps(_base_prefill_args())),
+        decode_engine_args=MockEngineArgs.from_json(json.dumps(_base_decode_args())),
+        router_config=KvRouterConfig(),
+    )
+
+    assert captured["kwargs"]["replay_concurrency"] is None
+    assert captured["kwargs"]["request_rate"] == 6.5
+    assert captured["kwargs"]["arrival_interval_ms"] is None
+    assert captured["kwargs"]["arrival_seed"] == 17
+
+
 def _disagg_spec(
     *,
     workload: WorkloadSpec | None = None,

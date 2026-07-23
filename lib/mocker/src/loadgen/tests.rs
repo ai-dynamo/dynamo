@@ -571,6 +571,7 @@ fn test_partition_by_session_round_robin_keeps_sessions_intact() {
         first_turn_arrivals: ArrivalSpec::Burst,
         inter_turn_delays: DelaySpec::ConstantMs(5.0),
         seed: 7,
+        arrival_seed: 42,
     })
     .unwrap();
 
@@ -606,6 +607,7 @@ fn test_synthetic_prefix_groups_share_prefixes_within_group() {
         first_turn_arrivals: ArrivalSpec::Burst,
         inter_turn_delays: DelaySpec::None,
         seed: 42,
+        arrival_seed: 42,
     })
     .unwrap();
 
@@ -616,6 +618,68 @@ fn test_synthetic_prefix_groups_share_prefixes_within_group() {
         .map(|session| session.turns[0].hash_ids[..prefix_len].to_vec())
         .collect::<Vec<_>>();
     assert!(prefixes.windows(2).any(|window| window[0] == window[1]));
+}
+
+#[test]
+fn test_synthetic_arrival_mode_changes_timestamps_only() {
+    let build = |first_turn_arrivals, arrival_seed| {
+        Trace::synthetic(SyntheticTraceSpec {
+            block_size: 4,
+            num_sessions: 20,
+            turns_per_session: 3,
+            input_tokens: LengthSpec {
+                mean: 16,
+                stddev: 3.0,
+            },
+            output_tokens: LengthSpec {
+                mean: 4,
+                stddev: 1.0,
+            },
+            shared_prefix_ratio: 0.5,
+            num_prefix_groups: 5,
+            first_turn_arrivals,
+            inter_turn_delays: DelaySpec::ExponentialMs { mean_ms: 8.0 },
+            seed: 99,
+            arrival_seed,
+        })
+        .unwrap()
+    };
+
+    let mut fixed = build(ArrivalSpec::ConstantQps { qps: 25.0 }, 42);
+    let mut poisson = build(ArrivalSpec::PoissonQps { qps: 25.0 }, 7);
+    let fixed_timestamps = fixed
+        .sessions
+        .iter()
+        .map(|session| session.first_arrival_timestamp_ms)
+        .collect::<Vec<_>>();
+    let poisson_timestamps = poisson
+        .sessions
+        .iter()
+        .map(|session| session.first_arrival_timestamp_ms)
+        .collect::<Vec<_>>();
+
+    assert_ne!(fixed_timestamps, poisson_timestamps);
+    for session in &mut fixed.sessions {
+        session.first_arrival_timestamp_ms = None;
+    }
+    for session in &mut poisson.sessions {
+        session.first_arrival_timestamp_ms = None;
+    }
+    assert_eq!(fixed, poisson);
+
+    let fixed_hashes = fixed
+        .sessions
+        .iter()
+        .flat_map(|session| &session.turns)
+        .map(|turn| turn.to_replay_hashes(4, 4).unwrap())
+        .collect::<Vec<_>>();
+    let poisson_hashes = poisson
+        .sessions
+        .iter()
+        .flat_map(|session| &session.turns)
+        .map(|turn| turn.to_replay_hashes(4, 4).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(fixed_hashes, poisson_hashes);
 }
 
 #[test]

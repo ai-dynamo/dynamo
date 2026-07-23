@@ -151,6 +151,7 @@ pub struct SyntheticTraceSpec {
     pub first_turn_arrivals: ArrivalSpec,
     pub inter_turn_delays: DelaySpec,
     pub seed: u64,
+    pub arrival_seed: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
