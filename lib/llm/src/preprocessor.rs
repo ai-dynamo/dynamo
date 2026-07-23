@@ -371,7 +371,12 @@ impl OpenAIPreprocessor {
         let mut sampling_passthrough = serde_json::Map::new();
 
         if let Some(fields) = request.unsupported_fields() {
-            for key in ["detokenize", "allowed_token_ids", "bad_words_token_ids"] {
+            for key in [
+                "detokenize",
+                "allowed_token_ids",
+                "bad_words_token_ids",
+                "repetition_detection",
+            ] {
                 if let Some(value) = fields.get(key) {
                     sampling_passthrough.insert(key.to_string(), value.clone());
                 }
@@ -4480,6 +4485,27 @@ mod tests {
         assert!(!OpenAIPreprocessor::sglang_effective_reasoning_enabled(
             None, None
         ));
+    }
+
+    #[test]
+    fn test_backend_extra_args_passes_repetition_detection() {
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "repetition_detection": {
+                "max_pattern_size": 100,
+                "min_pattern_size": 2,
+                "min_count": 10
+            }
+        }))
+        .unwrap();
+
+        let extra_args = OpenAIPreprocessor::backend_extra_args(&request).unwrap();
+
+        assert_eq!(
+            extra_args["sampling_options"]["repetition_detection"],
+            serde_json::json!({"max_pattern_size": 100, "min_pattern_size": 2, "min_count": 10})
+        );
     }
 
     #[test]

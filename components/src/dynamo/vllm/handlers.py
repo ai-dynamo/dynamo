@@ -37,6 +37,7 @@ from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.renderers.embed_utils import safe_load_prompt_embeds
 from vllm.sampling_params import (
+    RepetitionDetectionParams,
     RequestOutputKind,
     SamplingParams,
     StructuredOutputsParams,
@@ -735,6 +736,11 @@ def build_sampling_params(
                     "vLLM version"
                 )
             sampling_params._bad_words_token_ids = value
+            continue
+        if key == "repetition_detection" and isinstance(value, dict):
+            sampling_params.repetition_detection = RepetitionDetectionParams(
+                **value
+            )
             continue
         if value is not None and hasattr(sampling_params, key):
             setattr(sampling_params, key, value)

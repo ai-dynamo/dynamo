@@ -794,6 +794,60 @@ mod tests {
     }
 
     #[test]
+    fn test_passthrough_repetition_detection_validate() {
+        let request_json = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "repetition_detection": {
+                "max_pattern_size": 100,
+                "min_pattern_size": 2,
+                "min_count": 10
+            }
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(request_json).expect("Failed to deserialize request");
+
+        assert_eq!(
+            request.unsupported_fields.get("repetition_detection"),
+            Some(&serde_json::json!({"max_pattern_size": 100, "min_pattern_size": 2, "min_count": 10}))
+        );
+        assert!(ValidateRequest::validate(&request).is_ok());
+    }
+
+    #[test]
+    fn test_passthrough_repetition_detection_rejects_non_object() {
+        let request_json = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "repetition_detection": "bad"
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(request_json).expect("Failed to deserialize request");
+
+        let err = ValidateRequest::validate(&request)
+            .expect_err("repetition_detection must be an object");
+        assert!(err.to_string().contains("repetition_detection"));
+    }
+
+    #[test]
+    fn test_passthrough_repetition_detection_rejects_unknown_key() {
+        let request_json = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "repetition_detection": {
+                "max_pattern_size": 100,
+                "unknown_key": 5
+            }
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(request_json).expect("Failed to deserialize request");
+
+        let err = ValidateRequest::validate(&request)
+            .expect_err("repetition_detection unknown key");
+        assert!(err.to_string().contains("unknown key"));
+    }
+
+    #[test]
     fn test_completion_token_ids_rejected_for_multi_choice() {
         let request_json = json!({
             "model": "test-model",
