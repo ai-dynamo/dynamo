@@ -8,16 +8,28 @@ use super::types::ExtraKeyItem;
 // Must match _DYNAMO_CACHE_SALT_PREFIX in components/src/dynamo/vllm/handlers.py.
 const DYNAMO_CACHE_SALT_PREFIX: &str = "dynamo-cache-salt:";
 
-/// Parse MM hash from extra_keys string:
-/// - Only accept canonical vLLM MM identifiers (64-char hex digest)
-/// - Convert by taking the first 16 hex chars as u64
+/// Parse a bare MM hash from an extra-keys string.
+///
+/// Bare strings are ambiguous with LoRA names and cache metadata, so only the
+/// canonical 64-character vLLM digest is accepted here. Offset tuples are
+/// unambiguous MM metadata and additionally accept vLLM's 16-character u64
+/// representation through [`parse_mm_hash_from_offset_extra_key`].
 pub fn parse_mm_hash_from_extra_key(s: &str) -> Option<u64> {
-    // extra_keys mixes MM identifiers with LoRA/cache_salt/prompt-embed metadata.
-    // Only MM identifiers should be mapped into BlockExtraInfo.
-    if s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit()) {
-        return u64::from_str_radix(&s[..16], 16).ok();
+    parse_mm_hash(s, false)
+}
+
+fn parse_mm_hash_from_offset_extra_key(s: &str) -> Option<u64> {
+    parse_mm_hash(s, true)
+}
+
+fn parse_mm_hash(s: &str, allow_u64: bool) -> Option<u64> {
+    if (s.len() == 64 || (allow_u64 && s.len() == 16))
+        && s.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        u64::from_str_radix(&s[..16], 16).ok()
+    } else {
+        None
     }
-    None
 }
 
 /// Extract a vLLM cache salt from `extra_keys` when a producer does not emit
@@ -68,10 +80,10 @@ pub fn extra_keys_to_block_mm_infos(
                 .unwrap_or_default()
                 .iter()
                 .filter_map(|key| match key {
-                    ExtraKeyItem::Hash(hash)
-                    | ExtraKeyItem::HashWithSignedOffset((hash, _))
+                    ExtraKeyItem::Hash(hash) => parse_mm_hash_from_extra_key(hash),
+                    ExtraKeyItem::HashWithSignedOffset((hash, _))
                     | ExtraKeyItem::HashWithUnsignedOffset((hash, _)) => {
-                        parse_mm_hash_from_extra_key(hash)
+                        parse_mm_hash_from_offset_extra_key(hash)
                     }
                     ExtraKeyItem::Bytes(_)
                     | ExtraKeyItem::Signed(_)
@@ -139,6 +151,35 @@ mod tests {
         assert_eq!(
             extra_keys_to_cache_namespace(Some(&extra_keys), Some("adapter-a")).as_deref(),
             Some("adapter-a")
+        );
+    }
+
+    #[test]
+    fn offset_mm_hash_accepts_canonical_forms_and_rejects_ambiguous_or_malformed() {
+        let short = "4481d94bb3130554";
+        let digest = "4481d94bb313055400112233445566778899aabbccddeeff0011223344556677";
+
+        assert_eq!(
+            parse_mm_hash_from_offset_extra_key(short),
+            Some(0x4481d94bb3130554)
+        );
+        assert_eq!(
+            parse_mm_hash_from_offset_extra_key(digest),
+            Some(0x4481d94bb3130554)
+        );
+        assert_eq!(
+            parse_mm_hash_from_extra_key(digest),
+            Some(0x4481d94bb3130554)
+        );
+        assert_eq!(parse_mm_hash_from_extra_key(short), None);
+        assert_eq!(parse_mm_hash_from_offset_extra_key("4481d94bb313055"), None);
+        assert_eq!(
+            parse_mm_hash_from_offset_extra_key("4481d94bb31305540"),
+            None
+        );
+        assert_eq!(
+            parse_mm_hash_from_offset_extra_key("4481d94bb313055g"),
+            None
         );
     }
 }
