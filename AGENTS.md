@@ -43,6 +43,9 @@ to it — edit only the canonical copy. Reach for the right group first:
 
 **For deploying and operating Dynamo:**
 
+- `consult-perf-knowledge` — select one evidence-backed optimization proposal and write its reasoning record
+- `create-optimization-hypothesis` — materialize a performance consultation as a challenger-ready DGD draft
+- `perform-adversarial-review` — challenge a generated DGD candidate before it consumes GPU time
 - `dynamo-recipe-runner` — select, patch, and deploy Kubernetes recipes
 - `dynamo-router-starter` — start/patch router modes with smoke checks
 - `dynamo-interconnect-check` — validate NIXL/UCX/NCCL readiness for disaggregation
