@@ -80,6 +80,16 @@ The difference: the default CUTLASS MoE backend in TRT-LLM 1.3.x falls through t
 | Disaggregated (Hopper) | 16x H100/H200 | ~1.3TB |
 | Disaggregated (Blackwell) | 16x B100/B200 | ~1.3TB |
 
+## GPU Memory Fractions
+
+The TensorRT-LLM `free_gpu_memory_fraction` values in these recipes reserve headroom for non-KV-cache allocations after the model is loaded. Treat them as recipe-specific validation points rather than generic defaults.
+
+| Configuration | Worker | Hopper | Blackwell | Rationale |
+|--------------|--------|--------|-----------|-----------|
+| Aggregated | Worker | `0.8` | `0.8` | Leaves room for MoE, attention, and CUDA graph workspace while keeping a useful KV cache budget. |
+| Disaggregated | Prefill | `0.7` | `0.7` | Prefill uses large prompt batches and transfer buffers; a lower fraction leaves room for workspace growth. |
+| Disaggregated | Decode | `0.85` | `0.85` | Validated on H200 and B200 for TP4 x EP4 decode. Higher fractions can over-reserve KV cache and leave too little headroom for runtime workspace allocations. |
+
 ## Notes
 
 - Update `storageClassName` in `model-cache/model-cache.yaml` before deploying

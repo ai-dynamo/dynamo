@@ -45,7 +45,7 @@ data:
     enable_chunked_prefill: false
     kv_cache_config:
       enable_block_reuse: false
-      free_gpu_memory_fraction: 0.95
+      free_gpu_memory_fraction: 0.85
       dtype: fp8
     cache_transceiver_config:
       backend: DEFAULT
