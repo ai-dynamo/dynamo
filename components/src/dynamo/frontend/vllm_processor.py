@@ -674,6 +674,21 @@ class VllmProcessor:
         # content-part counts here too (else frontend metrics report zero media).
         input_tokens = len(tokens)
         cumulative_output_tokens = 0
+        # When stream_options.include_usage and continuous_usage_stats are both
+        # set, OpenAI/vLLM emit a usage object on every streamed chunk (not just
+        # the final one). continuous_usage_stats is a sub-option of include_usage,
+        # so it only takes effect when include_usage is also true. The underlying
+        # engine only reports completion_usage on the final chunk, so synthesize
+        # per-chunk usage here from the running token counters.
+        stream_options = request.get("stream_options") or {}
+        continuous_usage_stats = bool(
+            stream_options.get("include_usage", False)
+        ) and bool(stream_options.get("continuous_usage_stats", False))
+        # Per-choice completion-token counters keyed by output index. The
+        # request-wide cumulative counter is used for metrics, but continuous
+        # usage must report each choice's own running total (n > 1 streams
+        # interleave choices).
+        per_choice_output_tokens: dict[int, int] = {}
         _mm_counts = extract_mm_urls(request.get("messages") or []) or {}
         image_count = len(_mm_counts.get("image_url", []))
         video_count = len(_mm_counts.get("video_url", []))
@@ -732,6 +747,10 @@ class VllmProcessor:
                         }
                     }
                     break
+
+                per_choice_output_tokens[output_idx] = (
+                    per_choice_output_tokens.get(output_idx, 0) + chunk_tokens
+                )
 
                 raw_finish_reason = engine_response.get("finish_reason")
                 finish_reason = map_finish_reason(raw_finish_reason)
@@ -798,6 +817,18 @@ class VllmProcessor:
                     }
                     if usage := engine_response.get("completion_usage"):
                         dynamo_out["usage"] = usage
+                    elif continuous_usage_stats:
+                        # No engine-provided usage on this chunk, but the client
+                        # asked for per-chunk stats: emit this choice's running
+                        # counts.
+                        choice_output_tokens = per_choice_output_tokens.get(
+                            output_idx, 0
+                        )
+                        dynamo_out["usage"] = {
+                            "prompt_tokens": input_tokens,
+                            "completion_tokens": choice_output_tokens,
+                            "total_tokens": input_tokens + choice_output_tokens,
+                        }
                     envelope["data"] = dynamo_out
 
                 metrics = {
