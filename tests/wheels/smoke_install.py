@@ -131,6 +131,16 @@ def assert_core_wheel_metadata(wheelhouse: Path, target_arch: str | None) -> Non
 
     ai_meta = wheel_metadata(ai_dynamo)
     runtime_meta = wheel_metadata(runtime)
+    direct_references = [
+        requirement
+        for requirement in ai_meta.get("Requires-Dist", [])
+        if " @ " in requirement or "git+" in requirement
+    ]
+    if direct_references:
+        raise AssertionError(
+            f"{ai_dynamo.name} contains direct dependency references: "
+            f"{direct_references}"
+        )
     requires = "\n".join(ai_meta.get("Requires-Dist", []))
     runtime_version = runtime_meta["Version"]
     if f"ai-dynamo-runtime=={runtime_version}" not in requires.replace(" ", ""):

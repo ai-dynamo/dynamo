@@ -270,10 +270,8 @@ def test_aic_config_requests_raw_spec_decode_iteration_time(
 
     assert _FakeRustFactory.last_kwargs is not None
     aic_config = _FakeRustFactory.last_kwargs["aic_config"]
-    assert aic_config.kwargs["extra"] == {
-        "nextn": expected_nextn,
-        "nextn_accept_rates": rust_adapter.RAW_AIC_NEXTN_ACCEPT_RATES,
-    }
+    assert aic_config.kwargs["nextn"] == int(expected_nextn)
+    assert aic_config.kwargs["nextn_accepted"] == rust_adapter.RAW_AIC_NEXTN_ACCEPTED
 
 
 def test_capability_nextn_update_rebuilds_aic_model_and_replays_fpms(monkeypatch):
@@ -311,10 +309,8 @@ def test_capability_nextn_update_rebuilds_aic_model_and_replays_fpms(monkeypatch
 
     assert _FakeRustFactory.last_kwargs is not None
     aic_config = _FakeRustFactory.last_kwargs["aic_config"]
-    assert aic_config.kwargs["extra"] == {
-        "nextn": "3",
-        "nextn_accept_rates": rust_adapter.RAW_AIC_NEXTN_ACCEPT_RATES,
-    }
+    assert aic_config.kwargs["nextn"] == 3
+    assert aic_config.kwargs["nextn_accepted"] == rust_adapter.RAW_AIC_NEXTN_ACCEPTED
     assert second.tuned_iterations == [[fpm]]
 
 

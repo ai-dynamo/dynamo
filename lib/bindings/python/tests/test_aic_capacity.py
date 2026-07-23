@@ -12,6 +12,7 @@ from dynamo._internal.aic import (
     DEFAULT_FREE_GPU_MEMORY_FRACTION,
     DEFAULT_MEM_FRACTION_STATIC,
     AicMemoryEstimatorUnavailableError,
+    _fold_nextn_accept_rates,
     _normalize_aic_quant_mode,
     _pad_nextn_accept_rates,
     _resolve_quant_mode,
@@ -246,7 +247,7 @@ def test_trtllm_version_resolution():
 
 
 def test_pad_nextn_accept_rates_defaults_when_omitted():
-    # Omitted/empty input falls back to AIC's CLI default, not all zeros.
+    # Omitted/empty input preserves Dynamo's historical AIC default.
     assert _pad_nextn_accept_rates(None) == _DEFAULT_NEXTN_ACCEPT_RATES
     assert _pad_nextn_accept_rates("") == _DEFAULT_NEXTN_ACCEPT_RATES
     assert _pad_nextn_accept_rates([]) == _DEFAULT_NEXTN_ACCEPT_RATES
@@ -265,6 +266,17 @@ def test_pad_nextn_accept_rates_pads_and_truncates():
 def test_pad_nextn_accept_rates_rejects_invalid(bad):
     with pytest.raises(ValueError):
         _pad_nextn_accept_rates(bad)
+
+
+def test_fold_nextn_accept_rates_to_expected_accepted_tokens():
+    assert _fold_nextn_accept_rates(1, [0.9, 0.4]) == pytest.approx(0.9)
+    assert _fold_nextn_accept_rates(2, [0.9, 0.4]) == pytest.approx(1.26)
+    assert _fold_nextn_accept_rates(3, "1,0.5,0.25") == pytest.approx(1.625)
+
+
+def test_fold_nextn_accept_rates_rejects_unsupported_depth():
+    with pytest.raises(ValueError, match="1..=5"):
+        _fold_nextn_accept_rates(6, [1.0] * 6)
 
 
 @pytest.mark.parametrize(
@@ -385,6 +397,8 @@ def test_aic_session_forwards_quant_modes_to_model_config(monkeypatch):
         fmha_dtype="fp8",
         kv_cache_dtype="auto",  # -> omitted, ModelConfig keeps its default
         comm_dtype="fp8",
+        nextn=2,
+        nextn_accept_rates="0.8,0.5",
     )
 
     assert captured["gemm_quant_mode"] == common.GEMMQuantMode.int4_wo
@@ -392,3 +406,6 @@ def test_aic_session_forwards_quant_modes_to_model_config(monkeypatch):
     assert captured["fmha_quant_mode"] == common.FMHAQuantMode.fp8
     assert "kvcache_quant_mode" not in captured
     assert captured["comm_quant_mode"] == common.CommQuantMode.fp8
+    assert captured["nextn"] == 2
+    assert captured["nextn_accepted"] == pytest.approx(1.2)
+    assert "nextn_accept_rates" not in captured

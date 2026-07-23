@@ -60,7 +60,7 @@ _RUST_SHIM_FALLBACK_EXCEPTIONS = (RuntimeError, ValueError, TypeError)
 DEFAULT_MAX_NUM_BATCHED_TOKENS = 8192
 DEFAULT_MAX_NUM_SEQS = 512
 DEFAULT_MAX_KV_TOKENS = 2_000_000
-RAW_AIC_NEXTN_ACCEPT_RATES = "0,0,0,0,0"
+RAW_AIC_NEXTN_ACCEPTED = 0.0
 
 
 @dataclass(frozen=True)
@@ -259,10 +259,8 @@ class PlannerEnginePerfModel:
         pick = self._pick_for_worker(spec)
         if pick is None:
             return None
-        extra = {"nextn_accept_rates": RAW_AIC_NEXTN_ACCEPT_RATES}
         nextn = self._effective_speculative_nextn()
-        if self._worker_type != "prefill" and nextn > 0:
-            extra["nextn"] = str(nextn)
+        aic_nextn = nextn if self._worker_type != "prefill" and nextn > 0 else None
         return AicEngineConfig(
             model_name=spec.hf_id,
             backend=spec.backend,
@@ -278,12 +276,13 @@ class PlannerEnginePerfModel:
                 if self._capabilities is not None
                 else None
             ),
+            nextn=aic_nextn,
+            nextn_accepted=(RAW_AIC_NEXTN_ACCEPTED if aic_nextn is not None else None),
             model_arch=spec.model_arch,
             weight_dtype=spec.weight_dtype,
             moe_dtype=spec.moe_dtype,
             activation_dtype=spec.activation_dtype,
             kv_cache_dtype=spec.kv_cache_dtype,
-            extra=extra,
         )
 
     def _model_key(self) -> Optional[tuple[Any, ...]]:
@@ -294,14 +293,12 @@ class PlannerEnginePerfModel:
         pick = self._pick_for_worker(spec) if spec is not None else None
         aic_key = None
         if spec is not None and pick is not None:
-            aic_extra: tuple[tuple[str, str], ...] = (
-                ("nextn_accept_rates", RAW_AIC_NEXTN_ACCEPT_RATES),
-            )
+            aic_speculative: tuple[tuple[str, str], ...] = ()
             nextn = self._effective_speculative_nextn()
             if self._worker_type != "prefill" and nextn > 0:
-                aic_extra = (
+                aic_speculative = (
                     ("nextn", str(nextn)),
-                    ("nextn_accept_rates", RAW_AIC_NEXTN_ACCEPT_RATES),
+                    ("nextn_accepted", str(RAW_AIC_NEXTN_ACCEPTED)),
                 )
             aic_key = (
                 spec.hf_id,
@@ -321,7 +318,7 @@ class PlannerEnginePerfModel:
                 self._capabilities.kv_cache_block_size
                 if self._capabilities is not None
                 else None,
-                aic_extra,
+                aic_speculative,
             )
         return (
             self._worker_type,

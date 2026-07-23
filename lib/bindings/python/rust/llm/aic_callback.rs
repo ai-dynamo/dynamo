@@ -25,6 +25,59 @@ use aiconfigurator_core::{AicEngine, build_aic_engine};
 use dynamo_kv_router::PrefillLoadEstimator;
 use dynamo_mocker::common::perf_model::AicCallback;
 
+#[cfg(feature = "aic-forward-pass")]
+const DEFAULT_NEXTN_ACCEPT_RATES: [f64; 5] = [0.85, 0.3, 0.0, 0.0, 0.0];
+
+/// Fold Dynamo's conditional per-position acceptance rates into AIC's current
+/// scalar `nextn_accepted` value (the average accepted draft tokens per step).
+#[cfg(feature = "aic-forward-pass")]
+fn fold_nextn_accept_rates(nextn: u32, rates: Option<&str>) -> Result<Option<f64>, String> {
+    if nextn == 0 {
+        return Ok(None);
+    }
+    if nextn > DEFAULT_NEXTN_ACCEPT_RATES.len() as u32 {
+        return Err(format!(
+            "AIC: nextn must be 1..={}, got {nextn}",
+            DEFAULT_NEXTN_ACCEPT_RATES.len()
+        ));
+    }
+
+    let parsed = match rates.map(str::trim).filter(|rates| !rates.is_empty()) {
+        Some(rates) => {
+            let parsed = rates
+                .split(',')
+                .filter(|rate| !rate.trim().is_empty())
+                .map(|rate| {
+                    rate.trim().parse::<f64>().map_err(|error| {
+                        format!("AIC: invalid nextn_accept_rates value {rate:?}: {error}")
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if parsed.is_empty() {
+                DEFAULT_NEXTN_ACCEPT_RATES.to_vec()
+            } else {
+                parsed
+            }
+        }
+        None => DEFAULT_NEXTN_ACCEPT_RATES.to_vec(),
+    };
+    for (index, rate) in parsed.iter().copied().enumerate() {
+        if !rate.is_finite() || !(0.0..=1.0).contains(&rate) {
+            return Err(format!(
+                "AIC: nextn_accept_rates[{index}] must be finite and in [0, 1], got {rate}"
+            ));
+        }
+    }
+
+    let mut probability = 1.0;
+    let mut expectation = 0.0;
+    for index in 0..nextn as usize {
+        probability *= parsed.get(index).copied().unwrap_or(0.0);
+        expectation += probability;
+    }
+    Ok(Some(expectation))
+}
+
 /// Pure-Rust AIC callback: wraps an `aiconfigurator_core::AicEngine`
 /// compiled once at startup and answers predict calls with NO PyO3 / GIL on the
 /// hot path — `AicEngine::{prefill,decode}_latency_ms` are pure Rust.
@@ -109,23 +162,12 @@ fn build_rust_engine(
     nextn: Option<usize>,
     nextn_accept_rates: Option<&str>,
 ) -> PyResult<Arc<AicEngine>> {
-    // Speculative (MTP) decoding: forward the mocker's nextn / accept-rates to
-    // the engine build, mirroring the Python AicSession path. Dense models pass
-    // nextn=0 and no rates. accept-rates arrive comma-separated from the caller.
+    // Speculative (MTP) decoding: Dynamo retains conditional per-position
+    // acceptance rates for its token sampler; current AIC takes the equivalent
+    // scalar average accepted draft tokens per step.
     let nextn = nextn.unwrap_or(0) as u32;
-    let nextn_accept_rates: Option<Vec<f64>> = match nextn_accept_rates {
-        Some(s) if !s.trim().is_empty() => Some(
-            s.split(',')
-                .map(|x| x.trim().parse::<f64>())
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| {
-                    pyo3::exceptions::PyValueError::new_err(format!(
-                        "AIC: invalid nextn_accept_rates {s:?}: {e}"
-                    ))
-                })?,
-        ),
-        _ => None,
-    };
+    let nextn_accepted = fold_nextn_accept_rates(nextn, nextn_accept_rates)
+        .map_err(pyo3::exceptions::PyValueError::new_err)?;
     // Resolve each quant-mode string through the single Python source of truth
     // (`dynamo._internal.aic._resolve_quant_mode_name`) so this latency-engine
     // path matches the Python paths (`create_session`/`estimate_num_gpu_blocks`)
@@ -153,7 +195,7 @@ fn build_rust_engine(
     // paid once per unique config (speculative config included).
     static CACHE: OnceLock<Mutex<HashMap<String, Arc<AicEngine>>>> = OnceLock::new();
     let key = format!(
-        "{backend_name}|{system}|{backend_version:?}|{model_path}|{tp_size}|{moe_tp_size:?}|{moe_ep_size:?}|{attention_dp_size:?}|{gemm_dtype:?}|{moe_dtype:?}|{fmha_dtype:?}|{kv_cache_dtype:?}|{comm_dtype:?}|{nextn}|{nextn_accept_rates:?}"
+        "{backend_name}|{system}|{backend_version:?}|{model_path}|{tp_size}|{moe_tp_size:?}|{moe_ep_size:?}|{attention_dp_size:?}|{gemm_dtype:?}|{moe_dtype:?}|{fmha_dtype:?}|{kv_cache_dtype:?}|{comm_dtype:?}|{nextn}|{nextn_accepted:?}"
     );
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Some(existing) = cache.lock().unwrap().get(&key) {
@@ -184,7 +226,7 @@ fn build_rust_engine(
         fmha_dtype.as_deref(),     // fmha_quant_mode
         comm_dtype.as_deref(),     // comm_quant_mode
         nextn,                     // speculative (MTP) tokens; 0 for dense
-        nextn_accept_rates,        // per-position accept rates
+        nextn_accepted,            // average accepted draft tokens per step
         None,                      // kv_block_size
         None,                      // systems_path (resolved via env above / build-time default)
     )
@@ -344,4 +386,30 @@ pub(super) fn estimate_aic_num_gpu_blocks(
     kwargs.set_item("comm_dtype", comm_dtype)?;
     let blocks = module.call_method("estimate_num_gpu_blocks", (), Some(&kwargs))?;
     blocks.extract()
+}
+
+#[cfg(all(test, feature = "aic-forward-pass"))]
+mod tests {
+    use super::fold_nextn_accept_rates;
+
+    fn assert_close(actual: Option<f64>, expected: f64) {
+        assert!((actual.unwrap() - expected).abs() < 1e-12);
+    }
+
+    #[test]
+    fn folds_conditional_acceptance_into_expected_tokens() {
+        assert_close(fold_nextn_accept_rates(1, Some("0.9,0.4")).unwrap(), 0.9);
+        assert_close(fold_nextn_accept_rates(2, Some("0.9,0.4")).unwrap(), 1.26);
+        assert_close(
+            fold_nextn_accept_rates(3, Some("1,0.5,0.25")).unwrap(),
+            1.625,
+        );
+    }
+
+    #[test]
+    fn validates_acceptance_inputs() {
+        assert!(fold_nextn_accept_rates(6, Some("1,1,1,1,1,1")).is_err());
+        assert!(fold_nextn_accept_rates(2, Some("0.9,1.1")).is_err());
+        assert!(fold_nextn_accept_rates(2, Some("0.9,nope")).is_err());
+    }
 }

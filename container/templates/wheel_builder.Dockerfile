@@ -493,17 +493,16 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
 
 {% if framework == "dynamo" and target in ("planner", "runtime", "dev", "local-dev", "wheel_builder") %}
 ######################################
-##### aic_core_wheel_builder #########
+##### aic_wheel_builder ##############
 ######################################
-# The split core package exists on AIConfigurator main but is not published yet.
-# Build it once in the Rust-enabled stage so the slim planner builder does not
-# need a Rust toolchain or a source checkout.
+# Build the upper and core packages from one pinned checkout so downstream
+# images cannot combine artifacts from different revisions.
 
-FROM wheel_builder_base AS aic_core_wheel_builder
+FROM wheel_builder_base AS aic_wheel_builder
 
 COPY container/compliance /opt/compliance
 
-ARG AICONFIGURATOR_CORE_REF
+ARG AICONFIGURATOR_REF
 RUN --mount=type=cache,id=aic-core-cargo-registry,target=/root/.cargo/registry,sharing=shared \
     --mount=type=cache,id=aic-core-cargo-git,target=/root/.cargo/git,sharing=shared \
     --mount=type=cache,id=aic-core-uv,target=/root/.cache/uv,sharing=shared \
@@ -512,11 +511,16 @@ RUN --mount=type=cache,id=aic-core-cargo-registry,target=/root/.cargo/registry,s
         https://github.com/ai-dynamo/aiconfigurator.git /tmp/aiconfigurator && \
     cd /tmp/aiconfigurator && \
     git lfs install --local && \
-    GIT_LFS_SKIP_SMUDGE=1 git checkout "${AICONFIGURATOR_CORE_REF}" && \
+    GIT_LFS_SKIP_SMUDGE=1 git checkout "${AICONFIGURATOR_REF}" && \
     git lfs pull && \
     git lfs fsck && \
     source ${VIRTUAL_ENV}/bin/activate && \
-    uv build --wheel --out-dir /opt/aiconfigurator/dist aic-core
+    uv build --wheel --out-dir /opt/aiconfigurator/dist aic-core && \
+    uv build --wheel --out-dir /opt/aiconfigurator/dist . && \
+    "${VIRTUAL_ENV}/bin/python3" tools/verify_release_wheels.py \
+        /opt/aiconfigurator/dist && \
+    install -D -m 0755 tools/verify_installed_package_layers.py \
+        /opt/aiconfigurator/verify_installed_package_layers.py
 
 # The AIC core wheel is built from a separate Cargo registry cache, so harvest
 # its crate license files here and embed human-readable NOTICES alongside the
@@ -660,10 +664,11 @@ COPY lib/gpu_memory_service/ /opt/dynamo/lib/gpu_memory_service/
 {% endif %}
 
 {% if framework == "dynamo" and target in ("planner", "runtime", "dev", "local-dev", "wheel_builder") %}
-# Add the Python core wheel built from the same AIC revision used by the Rust
-# dependency. Downstream images install this local artifact instead of resolving
-# the currently unpublished project from the package index.
-COPY --from=aic_core_wheel_builder /opt/aiconfigurator/dist/*.whl /opt/dynamo/dist/
+# Add the AIC wheels built from the same revision used by the Rust dependency.
+# Downstream images install these local artifacts instead of resolving the older
+# monolithic upper distribution from the index.
+COPY --from=aic_wheel_builder /opt/aiconfigurator/dist/*.whl /opt/dynamo/dist/
+COPY --from=aic_wheel_builder /opt/aiconfigurator/verify_installed_package_layers.py /opt/dynamo/aiconfigurator/
 {% endif %}
 
 # Build gpu-memory-service wheel → /opt/dynamo/dist/gpu_memory_service*.whl (small C++ extension, fast build -- all targets, all frameworks)

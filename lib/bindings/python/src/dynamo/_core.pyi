@@ -1703,6 +1703,8 @@ class AicEngineConfig:
         activation_dtype: Optional[str] = None,
         kv_cache_dtype: Optional[str] = None,
         kv_block_size: Optional[int] = None,
+        nextn: Optional[int] = None,
+        nextn_accepted: Optional[float] = None,
         extra: Optional[dict[str, str]] = None,
     ) -> None:
         ...

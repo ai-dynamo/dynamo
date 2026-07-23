@@ -59,6 +59,7 @@ RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/loca
 COPY --chown=dynamo: --from=wheel_builder $CARGO_TARGET_DIR $CARGO_TARGET_DIR
 {% endif %}
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
+COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/aiconfigurator/verify_installed_package_layers.py /tmp/verify_installed_package_layers.py
 
 # Install Python for framework=none runtime (cuda-dl-base doesn't include Python)
 # This is needed to create venv and install dynamo packages
@@ -156,7 +157,9 @@ RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tm
         --requirement /tmp/requirements.common.txt \
         --requirement /tmp/requirements.planner.txt \
         --requirement /tmp/requirements.frontend.txt \
-        /opt/dynamo/wheelhouse/aiconfigurator_core*.whl
+        /opt/dynamo/wheelhouse/aiconfigurator-*.whl \
+        /opt/dynamo/wheelhouse/aiconfigurator_core*.whl && \
+    ${VIRTUAL_ENV}/bin/python /tmp/verify_installed_package_layers.py --expect full
 
 # TODO: skip /workspace COPY for dev/local-dev (bind-mounted from host, gets shadowed)
 # Copy workspace source code

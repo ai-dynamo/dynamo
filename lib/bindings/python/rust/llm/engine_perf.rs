@@ -41,6 +41,8 @@ impl AicEngineConfig {
         activation_dtype=None,
         kv_cache_dtype=None,
         kv_block_size=None,
+        nextn=None,
+        nextn_accepted=None,
         extra=None,
     ))]
     #[allow(clippy::too_many_arguments)]
@@ -60,6 +62,8 @@ impl AicEngineConfig {
         activation_dtype: Option<String>,
         kv_cache_dtype: Option<String>,
         kv_block_size: Option<u32>,
+        nextn: Option<u32>,
+        nextn_accepted: Option<f64>,
         extra: Option<BTreeMap<String, String>>,
     ) -> Self {
         Self {
@@ -79,6 +83,8 @@ impl AicEngineConfig {
                 activation_dtype,
                 kv_cache_dtype,
                 kv_block_size,
+                nextn,
+                nextn_accepted,
                 extra: extra.unwrap_or_default(),
             },
         }
