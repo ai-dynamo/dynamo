@@ -26,11 +26,11 @@ Status legend: ✅ validated end to end · ⚠️ available but not yet validate
 | --- | --- | --- |
 | Aggregated serving + event-driven KV routing (`--router-mode kv`) | ✅ | Requires the versions and flags below. |
 | Chunked offloading (offload `block_size` larger than the GPU block size) | ✅ | Validated with 256-token offload blocks over a 16-token GPU block size; cuts KV event volume substantially at equal serving latency. |
-| Approximate KV routing (`--no-router-kv-events`) | ⚠️ | Runs, but the router predicts device-tier reuse only; lower-tier weights have no effect. |
+| Approximate KV routing (`--no-router-kv-events`) | ✅ | Router predicts device-tier reuse only; lower-tier weights have no effect. Validated with two workers: sticky prefix selection, CPU offload store, and output consistency. |
 | Disaggregated serving (`MultiConnector`: `NixlConnector` + `OffloadingConnector`) | ⚠️ | vLLM tests this composition upstream; not yet validated behind the Dynamo KV router. |
 | Tensor parallelism (TP > 1) | ⚠️ | Events are published once per engine and the CPU pool is sharded across TP workers by design; not yet validated end to end. |
 | Models with sliding-window or Mamba/SSM layers | ⚠️ | Offloading works; self-describing events cover full-attention KV cache groups only, so the router sees a subset of CPU-resident blocks. |
-| Disk and multi-tier offloading (`TieringOffloadingSpec`) | ⚠️ | Router-usable events are available on the vLLM main branch. Use vLLM v0.26.0 or later once released. |
+| Disk and multi-tier offloading (`TieringOffloadingSpec`) | 🚧 | Router-usable events are available on the vLLM main branch (v0.26.0+ once released). Dynamo medium mapping for vLLM `FS` / `OBJ` wire values is not yet connected. |
 | Shared-pool routing | 🚧 | The vLLM main branch publishes optional locality metadata on FS and OBJ events. Dynamo shared-pool indexing is in progress. |
 
 ## Requirements
