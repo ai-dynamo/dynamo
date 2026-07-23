@@ -2926,8 +2926,7 @@ class InstrumentedScheduler(AsyncScheduler):
         # their nominal coordinate).
         max_model_len = self._bench_capacity_limit("max_model_len")
         if any(
-            max(context_len, 2) + 2 > max_model_len
-            for context_len in context_lengths
+            max(context_len, 2) + 2 > max_model_len for context_len in context_lengths
         ):
             return False
         required_blocks = sum(
@@ -4023,8 +4022,13 @@ class InstrumentedScheduler(AsyncScheduler):
             },
             "capacity": {
                 "common": (
-                    asdict(self._bench_negotiated_capacity)
-                    if getattr(self, "_bench_negotiated_capacity", None) is not None
+                    asdict(negotiated_capacity)
+                    if (
+                        negotiated_capacity := getattr(
+                            self, "_bench_negotiated_capacity", None
+                        )
+                    )
+                    is not None
                     else None
                 ),
             },
