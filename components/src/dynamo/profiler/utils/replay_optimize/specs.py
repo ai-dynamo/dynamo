@@ -138,6 +138,7 @@ _SYNTHETIC_ONLY_FIELDS: tuple[str, ...] = (
     "concurrency",
     "requestRate",
     "requestCount",
+    "arrivalIntervalMs",
 )
 
 
@@ -153,8 +154,8 @@ class WorkloadSpec(BaseModel):
     - when set, the workload is trace-based and the synthetic-only fields
       (`isl`, `osl`, `concurrency`, `requestRate`, `requestCount`) must not
       be populated — the validator rejects mixed mode to avoid silent data loss
-    - when unset, the synthetic fields `isl`, `osl`, `concurrency`, and
-      `requestCount` are all required
+    - when unset, `isl`, `osl`, and `requestCount` are required, along with
+      exactly one of `concurrency`, `requestRate`, or `arrivalIntervalMs`
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -171,7 +172,8 @@ class WorkloadSpec(BaseModel):
     numPrefixGroups: int = 0
     turnsPerSession: int = 1
     interTurnDelayMs: float = 0.0
-    arrivalIntervalMs: float = 0.0
+    arrivalIntervalMs: float | None = None
+    arrivalSeed: int = 42
 
     # Replay trace-source extensions (mutually exclusive with synthetic fields)
     traceFile: str | None = None
@@ -223,7 +225,7 @@ class WorkloadSpec(BaseModel):
 
         missing = [
             name
-            for name in ("isl", "osl", "concurrency", "requestCount")
+            for name in ("isl", "osl", "requestCount")
             if getattr(self, name) is None
         ]
         if missing:
@@ -231,6 +233,16 @@ class WorkloadSpec(BaseModel):
                 "synthetic workload requires "
                 + ", ".join(missing)
                 + "; or set traceFile for trace replay"
+            )
+        controllers = (
+            self.concurrency,
+            self.requestRate,
+            self.arrivalIntervalMs,
+        )
+        if sum(value is not None for value in controllers) != 1:
+            raise ValueError(
+                "synthetic workload requires exactly one of concurrency, "
+                "requestRate, or arrivalIntervalMs"
             )
         return self
 

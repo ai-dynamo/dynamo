@@ -63,8 +63,7 @@ impl ReservedSglangDecode {
     fn activate(self, kv_manager: &mut SglangKvManager, block_size: usize) -> SglangRequest {
         let Self { mut request, kv } = self;
         let allocated_tokens = kv.allocated_tokens;
-        let prompt_tokens = request.prompt_tokens.clone();
-        let alloc = kv_manager.activate_destination(kv, &prompt_tokens);
+        let alloc = kv_manager.activate_destination(kv, request.prompt_tokens());
         request.kv_lease = alloc.lease;
         request.materialized_tokens = request.prompt_len();
         request.allocated_tokens = allocated_tokens;
@@ -323,7 +322,7 @@ impl SglangCore {
         {
             self.destination_reservation_attempts += 1;
         }
-        let reservation = self.kv_manager.reserve_destination(&request.prompt_tokens);
+        let reservation = self.kv_manager.reserve_destination(request.prompt_tokens());
         self.pending_destinations.mark_front_attempted(generation);
         let Some(kv) = reservation else {
             return Vec::new();
