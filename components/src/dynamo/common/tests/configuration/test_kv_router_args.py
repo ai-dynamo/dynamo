@@ -378,7 +378,7 @@ def test_frontend_rejection_thresholds_default_to_none(
         "active_prefill_tokens_threshold": None,
         "active_prefill_tokens_threshold_frac": None,
         "session_affinity_ttl_secs": None,
-        "session_affinity_grouping": None,
+        "parent_affinity": False,
     }
     assert "busy-worker rejection disabled" in caplog.text
 
@@ -507,7 +507,7 @@ def test_all_rejection_thresholds_and_queue_override_are_forwarded(
         "active_prefill_tokens_threshold": 1000,
         "active_prefill_tokens_threshold_frac": 2.0,
         "session_affinity_ttl_secs": None,
-        "session_affinity_grouping": None,
+        "parent_affinity": False,
     }
     assert config.kv_router_kwargs()["router_queue_threshold"] == 32.0
 
@@ -652,13 +652,13 @@ def test_rejection_threshold_validation_rejects_invalid_values(
 
 def test_session_affinity_ttl_cli_and_environment(monkeypatch) -> None:
     monkeypatch.delenv("DYN_ROUTER_SESSION_AFFINITY_TTL_SECS", raising=False)
-    monkeypatch.delenv("DYN_ROUTER_SESSION_AFFINITY_GROUPING", raising=False)
+    monkeypatch.delenv("DYN_ROUTER_PARENT_AFFINITY", raising=False)
     parser = argparse.ArgumentParser()
     FrontendArgGroup().add_arguments(parser)
     config = FrontendConfig.from_cli_args(parser.parse_args([]))
     config.validate()
     assert config.session_affinity_ttl_secs is None
-    assert config.session_affinity_grouping is None
+    assert config.parent_affinity is False
     assert config.router_kwargs()["session_affinity_ttl_secs"] is None
 
     monkeypatch.setenv("DYN_ROUTER_SESSION_AFFINITY_TTL_SECS", "600")
@@ -678,9 +678,9 @@ def test_session_affinity_ttl_cli_and_environment(monkeypatch) -> None:
     assert config.session_affinity_ttl_secs == 900
 
 
-def test_session_affinity_grouping_cli_and_environment(monkeypatch) -> None:
+def test_parent_affinity_cli_and_environment(monkeypatch) -> None:
     monkeypatch.delenv("DYN_ROUTER_SESSION_AFFINITY_TTL_SECS", raising=False)
-    monkeypatch.delenv("DYN_ROUTER_SESSION_AFFINITY_GROUPING", raising=False)
+    monkeypatch.delenv("DYN_ROUTER_PARENT_AFFINITY", raising=False)
     parser = argparse.ArgumentParser()
     FrontendArgGroup().add_arguments(parser)
     config = FrontendConfig.from_cli_args(
@@ -688,27 +688,26 @@ def test_session_affinity_grouping_cli_and_environment(monkeypatch) -> None:
             [
                 "--router-session-affinity-ttl-secs",
                 "600",
-                "--router-session-affinity-grouping",
-                "parent",
+                "--router-parent-affinity",
             ]
         )
     )
     config.validate()
-    assert config.router_kwargs()["session_affinity_grouping"] == "parent"
+    assert config.router_kwargs()["parent_affinity"] is True
 
-    monkeypatch.setenv("DYN_ROUTER_SESSION_AFFINITY_GROUPING", "root")
+    monkeypatch.setenv("DYN_ROUTER_PARENT_AFFINITY", "1")
     parser = argparse.ArgumentParser()
     FrontendArgGroup().add_arguments(parser)
     config = FrontendConfig.from_cli_args(
         parser.parse_args(["--router-session-affinity-ttl-secs", "600"])
     )
     config.validate()
-    assert config.session_affinity_grouping == "root"
+    assert config.parent_affinity is True
 
     parser = argparse.ArgumentParser()
     FrontendArgGroup().add_arguments(parser)
     config = FrontendConfig.from_cli_args(parser.parse_args([]))
-    with pytest.raises(ValueError, match="router-session-affinity-grouping"):
+    with pytest.raises(ValueError, match="router-parent-affinity"):
         config.validate()
 
 

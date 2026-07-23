@@ -34,7 +34,7 @@ impl PrefillRouter {
         model_manager: Arc<ModelManager>,
         router_mode: RouterMode,
         session_affinity_ttl_secs: Option<u64>,
-        session_affinity_grouping: Option<crate::session_affinity::SessionAffinityGrouping>,
+        parent_affinity: bool,
     ) -> Arc<Self> {
         Arc::new(Self {
             prefill_router: std::sync::OnceLock::new(),
@@ -43,7 +43,7 @@ impl PrefillRouter {
             cancel_token: tokio_util::sync::CancellationToken::new(),
             router_mode,
             session_affinity_ttl: session_affinity_ttl_secs.map(std::time::Duration::from_secs),
-            session_affinity_grouping,
+            parent_affinity,
             prefill_load_estimator: None,
             model_name: String::new(), // Not used for disabled router
             namespace: String::new(),  // Not used for disabled router
@@ -61,7 +61,7 @@ impl PrefillRouter {
         kv_router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         session_affinity_ttl_secs: Option<u64>,
-        session_affinity_grouping: Option<crate::session_affinity::SessionAffinityGrouping>,
+        parent_affinity: bool,
         model_name: String,
         namespace: String,
         is_eagle: bool,
@@ -77,7 +77,7 @@ impl PrefillRouter {
             cancel_token: cancel_token.clone(),
             router_mode,
             session_affinity_ttl: session_affinity_ttl_secs.map(std::time::Duration::from_secs),
-            session_affinity_grouping,
+            parent_affinity,
             prefill_load_estimator,
             model_name,
             namespace,
@@ -180,7 +180,7 @@ impl PrefillRouter {
             Self::attach_prefill_client(worker_monitor, &client);
             let affinity = create_affinity_coordinator(
                 self.session_affinity_ttl,
-                self.session_affinity_grouping,
+                self.parent_affinity,
                 client.clone(),
             )
             .await?;
@@ -205,7 +205,7 @@ impl PrefillRouter {
             Self::attach_prefill_client(worker_monitor, &client);
             let affinity = create_affinity_coordinator(
                 self.session_affinity_ttl,
-                self.session_affinity_grouping,
+                self.parent_affinity,
                 client.clone(),
             )
             .await?;

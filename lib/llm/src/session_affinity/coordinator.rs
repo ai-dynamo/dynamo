@@ -25,7 +25,7 @@ use tokio_util::sync::CancellationToken;
 use super::replica_sync::SessionAffinityUpdate;
 use super::{
     LlmResponse, MAX_SESSION_AFFINITY_ENTRIES, MAX_SESSION_AFFINITY_ID_BYTES,
-    MAX_SESSION_AFFINITY_TTL_SECS, SessionAffinityGrouping, replica_sync::ReplicaSyncRuntime,
+    MAX_SESSION_AFFINITY_TTL_SECS, replica_sync::ReplicaSyncRuntime,
 };
 use crate::{
     preprocessor::PreprocessedRequest,
@@ -45,14 +45,12 @@ enum AffinityEntry {
     Initializing {
         revision: u64,
         notify: Arc<Notify>,
-        root_session_id: Option<String>,
     },
     Bound {
         target: AffinityTarget,
         revision: u64,
         active_leases: usize,
         idle_deadline: Instant,
-        root_session_id: Option<String>,
     },
 }
 
@@ -61,7 +59,7 @@ pub(super) struct AffinityCoordinatorInner {
     ttl: Duration,
     max_entries: usize,
     max_session_id_bytes: usize,
-    grouping: Option<SessionAffinityGrouping>,
+    parent_affinity: bool,
     entry_count: AtomicUsize,
     next_revision: AtomicU64,
     cancel: CancellationToken,
@@ -99,18 +97,15 @@ pub struct AffinityCoordinator {
 
 impl AffinityCoordinator {
     pub fn new(ttl: Duration) -> Result<Self, Error> {
-        Self::new_with_grouping(ttl, None)
+        Self::new_with_parent_affinity(ttl, false)
     }
 
-    pub fn new_with_grouping(
-        ttl: Duration,
-        grouping: Option<SessionAffinityGrouping>,
-    ) -> Result<Self, Error> {
+    pub fn new_with_parent_affinity(ttl: Duration, parent_affinity: bool) -> Result<Self, Error> {
         Self::new_with_limits(
             ttl,
             MAX_SESSION_AFFINITY_ENTRIES,
             MAX_SESSION_AFFINITY_ID_BYTES,
-            grouping,
+            parent_affinity,
         )
     }
 
@@ -118,7 +113,7 @@ impl AffinityCoordinator {
         ttl: Duration,
         max_entries: usize,
         max_session_id_bytes: usize,
-        grouping: Option<SessionAffinityGrouping>,
+        parent_affinity: bool,
     ) -> Result<Self, Error> {
         if !(Duration::from_secs(1)..=Duration::from_secs(MAX_SESSION_AFFINITY_TTL_SECS))
             .contains(&ttl)
@@ -132,7 +127,7 @@ impl AffinityCoordinator {
             ttl,
             max_entries,
             max_session_id_bytes,
-            grouping,
+            parent_affinity,
             entry_count: AtomicUsize::new(0),
             next_revision: AtomicU64::new(1),
             cancel: CancellationToken::new(),
@@ -146,7 +141,7 @@ impl AffinityCoordinator {
         tracing::info!(
             ttl_secs = ttl.as_secs(),
             max_entries,
-            ?grouping,
+            parent_affinity,
             "session affinity enabled"
         );
         Ok(Self { inner })
@@ -207,7 +202,7 @@ impl AffinityCoordinator {
         session_id: &SessionAffinityId,
         requested_target: Option<AffinityTarget>,
     ) -> Result<AffinityAcquire, Error> {
-        self.acquire_inner(session_id, requested_target, None, None, None)
+        self.acquire_inner(session_id, requested_target, None, None)
             .await
     }
 
@@ -217,17 +212,11 @@ impl AffinityCoordinator {
         requested_target: Option<AffinityTarget>,
         request_context: &dyn AsyncEngineContext,
     ) -> Result<AffinityAcquire, Error> {
-        self.acquire_inner(
-            session_id,
-            requested_target,
-            None,
-            None,
-            Some(request_context),
-        )
-        .await
+        self.acquire_inner(session_id, requested_target, None, Some(request_context))
+            .await
     }
 
-    pub(crate) async fn acquire_with_lineage(
+    pub(crate) async fn acquire_with_parent(
         &self,
         session_id: &SessionAffinityId,
         parent_session_id: Option<&str>,
@@ -236,22 +225,14 @@ impl AffinityCoordinator {
     ) -> Result<AffinityAcquire, Error> {
         if self.query_target(session_id, None)?.is_some() {
             return self
-                .acquire_inner(
-                    session_id,
-                    requested_target,
-                    None,
-                    None,
-                    Some(request_context),
-                )
+                .acquire_inner(session_id, requested_target, None, Some(request_context))
                 .await;
         }
-        let (root_session_id, preferred_target) =
-            self.lineage_preference(parent_session_id, requested_target)?;
+        let preferred_target = self.parent_preference(parent_session_id, requested_target)?;
         self.acquire_inner(
             session_id,
             requested_target,
             preferred_target,
-            root_session_id,
             Some(request_context),
         )
         .await
@@ -262,7 +243,6 @@ impl AffinityCoordinator {
         session_id: &SessionAffinityId,
         requested_target: Option<AffinityTarget>,
         preferred_target: Option<AffinityTarget>,
-        root_session_id: Option<String>,
         request_context: Option<&dyn AsyncEngineContext>,
     ) -> Result<AffinityAcquire, Error> {
         self.validate_session_id(session_id)?;
@@ -282,7 +262,6 @@ impl AffinityCoordinator {
                         session_id,
                         requested_target,
                         preferred_target,
-                        root_session_id,
                     )));
                 }
                 Entry::Occupied(mut entry) => match entry.get_mut() {
@@ -324,7 +303,6 @@ impl AffinityCoordinator {
                         *entry.get_mut() = AffinityEntry::Initializing {
                             revision,
                             notify: notify.clone(),
-                            root_session_id: root_session_id.clone(),
                         };
                         drop(entry);
                         return Ok(AffinityAcquire::Initialize(AffinityInitialization {
@@ -334,7 +312,6 @@ impl AffinityCoordinator {
                             notify,
                             requested_target,
                             preferred_target,
-                            root_session_id,
                             active: true,
                         }));
                     }
@@ -342,13 +319,9 @@ impl AffinityCoordinator {
                         target,
                         revision,
                         active_leases,
-                        root_session_id: stored_root_session_id,
                         ..
                     } => {
                         validate_bound_target(&session_id, *target, requested_target)?;
-                        if stored_root_session_id.is_none() {
-                            stored_root_session_id.clone_from(&root_session_id);
-                        }
                         tracing::debug!(
                             session_id = %session_id,
                             worker_id = target.worker_id,
@@ -361,7 +334,6 @@ impl AffinityCoordinator {
                             coordinator: Arc::downgrade(&self.inner),
                             session_id,
                             revision: *revision,
-                            root_session_id: stored_root_session_id.clone(),
                             active: true,
                         };
                         return Ok(AffinityAcquire::Bound {
@@ -406,7 +378,7 @@ impl AffinityCoordinator {
         Ok(Some(*target))
     }
 
-    pub(crate) fn query_target_with_lineage(
+    pub(crate) fn query_target_with_parent(
         &self,
         session_id: &SessionAffinityId,
         parent_session_id: Option<&str>,
@@ -418,45 +390,28 @@ impl AffinityCoordinator {
         if requested_target.is_some() {
             return Ok(requested_target);
         }
-        let (_, preferred_target) = self.lineage_preference(parent_session_id, requested_target)?;
-        Ok(preferred_target)
+        self.parent_preference(parent_session_id, requested_target)
     }
 
-    fn lineage_preference(
+    fn parent_preference(
         &self,
         parent_session_id: Option<&str>,
         requested_target: Option<AffinityTarget>,
-    ) -> Result<(Option<String>, Option<AffinityTarget>), Error> {
-        let (Some(grouping), Some(parent_session_id)) = (self.inner.grouping, parent_session_id)
-        else {
-            return Ok((None, None));
+    ) -> Result<Option<AffinityTarget>, Error> {
+        if !self.inner.parent_affinity {
+            return Ok(None);
+        }
+        let Some(parent_session_id) = parent_session_id else {
+            return Ok(None);
         };
         self.validate_session_id(&SessionAffinityId::new(parent_session_id))?;
 
-        let root_session_id = self
-            .inner
-            .entries
-            .get(parent_session_id)
-            .and_then(|entry| match entry.value() {
-                AffinityEntry::Initializing {
-                    root_session_id, ..
-                }
-                | AffinityEntry::Bound {
-                    root_session_id, ..
-                } => root_session_id.clone(),
-            })
-            .unwrap_or_else(|| parent_session_id.to_string());
-        let preference_session_id = match grouping {
-            SessionAffinityGrouping::Parent => parent_session_id,
-            SessionAffinityGrouping::Root => root_session_id.as_str(),
-        };
         let preferred_target = requested_target
             .is_none()
-            .then(|| self.query_target(&SessionAffinityId::new(preference_session_id), None))
+            .then(|| self.query_target(&SessionAffinityId::new(parent_session_id), None))
             .transpose()?
             .flatten();
-
-        Ok((Some(root_session_id), preferred_target))
+        Ok(preferred_target)
     }
 
     #[cfg(test)]
@@ -502,7 +457,7 @@ impl AffinityCoordinator {
             Duration::from_secs(10),
             max_entries,
             max_session_id_bytes,
-            None,
+            false,
         )
         .unwrap()
     }
@@ -527,8 +482,7 @@ impl AffinityCoordinator {
         session_id: impl Into<String>,
         target: AffinityTarget,
     ) -> ReplicaApplyOutcome {
-        self.inner
-            .apply_replica_update(session_id.into(), target, None)
+        self.inner.apply_replica_update(session_id.into(), target)
     }
 
     fn validate_session_id(&self, session_id: &SessionAffinityId) -> Result<(), Error> {
@@ -558,14 +512,9 @@ impl AffinityCoordinatorInner {
             .is_ok()
     }
 
-    fn publish_replica_update(
-        &self,
-        session_id: &str,
-        target: AffinityTarget,
-        root_session_id: Option<&str>,
-    ) {
+    fn publish_replica_update(&self, session_id: &str, target: AffinityTarget) {
         if let Some(replica) = self.replica.get() {
-            replica.publish(session_id, target, root_session_id);
+            replica.publish(session_id, target);
         }
     }
 
@@ -573,13 +522,8 @@ impl AffinityCoordinatorInner {
         &self,
         session_id: String,
         target: AffinityTarget,
-        root_session_id: Option<String>,
     ) -> ReplicaApplyOutcome {
-        if session_id.len() > self.max_session_id_bytes
-            || root_session_id
-                .as_ref()
-                .is_some_and(|id| id.len() > self.max_session_id_bytes)
-        {
+        if session_id.len() > self.max_session_id_bytes {
             return ReplicaApplyOutcome::RejectedSessionId;
         }
 
@@ -595,7 +539,6 @@ impl AffinityCoordinatorInner {
                     revision,
                     active_leases: 0,
                     idle_deadline: now + self.ttl,
-                    root_session_id,
                 });
                 ReplicaApplyOutcome::Inserted
             }
@@ -612,20 +555,15 @@ impl AffinityCoordinatorInner {
                         revision,
                         active_leases: 0,
                         idle_deadline: now + self.ttl,
-                        root_session_id,
                     };
                     ReplicaApplyOutcome::ReplacedExpired
                 }
                 AffinityEntry::Bound {
                     target: existing,
                     idle_deadline,
-                    root_session_id: existing_root_session_id,
                     ..
                 } if *existing == target => {
                     *idle_deadline = now + self.ttl;
-                    if existing_root_session_id.is_none() {
-                        existing_root_session_id.clone_from(&root_session_id);
-                    }
                     ReplicaApplyOutcome::Refreshed
                 }
                 AffinityEntry::Bound { .. } => ReplicaApplyOutcome::IgnoredConflict,
@@ -641,7 +579,6 @@ trait VacantEntryExt {
         session_id: String,
         requested_target: Option<AffinityTarget>,
         preferred_target: Option<AffinityTarget>,
-        root_session_id: Option<String>,
     ) -> AffinityInitialization;
 }
 
@@ -652,14 +589,12 @@ impl<'a> VacantEntryExt for dashmap::mapref::entry::VacantEntry<'a, String, Affi
         session_id: String,
         requested_target: Option<AffinityTarget>,
         preferred_target: Option<AffinityTarget>,
-        root_session_id: Option<String>,
     ) -> AffinityInitialization {
         let revision = inner.next_revision.fetch_add(1, Ordering::Relaxed);
         let notify = Arc::new(Notify::new());
         self.insert(AffinityEntry::Initializing {
             revision,
             notify: notify.clone(),
-            root_session_id: root_session_id.clone(),
         });
         AffinityInitialization {
             coordinator: Arc::downgrade(inner),
@@ -668,7 +603,6 @@ impl<'a> VacantEntryExt for dashmap::mapref::entry::VacantEntry<'a, String, Affi
             notify,
             requested_target,
             preferred_target,
-            root_session_id,
             active: true,
         }
     }
@@ -729,7 +663,6 @@ pub(crate) struct AffinityInitialization {
     notify: Arc<Notify>,
     requested_target: Option<AffinityTarget>,
     preferred_target: Option<AffinityTarget>,
-    root_session_id: Option<String>,
     active: bool,
 }
 
@@ -750,13 +683,11 @@ impl AffinityInitialization {
         ) {
             return Err(invalid_argument("session affinity initialization changed"));
         }
-        let root_session_id = self.root_session_id.take();
         *entry = AffinityEntry::Bound {
             target,
             revision: self.revision,
             active_leases: 1,
             idle_deadline: Instant::now() + inner.ttl,
-            root_session_id: root_session_id.clone(),
         };
         drop(entry);
         self.active = false;
@@ -765,7 +696,6 @@ impl AffinityInitialization {
             coordinator: Arc::downgrade(&inner),
             session_id: self.session_id.clone(),
             revision: self.revision,
-            root_session_id,
             active: true,
         })
     }
@@ -796,14 +726,13 @@ pub(crate) struct AffinityLease {
     coordinator: Weak<AffinityCoordinatorInner>,
     session_id: String,
     revision: u64,
-    root_session_id: Option<String>,
     active: bool,
 }
 
 impl AffinityLease {
     fn publish(&self, target: AffinityTarget) {
         if let Some(inner) = self.coordinator.upgrade() {
-            inner.publish_replica_update(&self.session_id, target, self.root_session_id.as_deref());
+            inner.publish_replica_update(&self.session_id, target);
         }
     }
 
@@ -847,7 +776,7 @@ impl AffinityLease {
             *idle_deadline = Instant::now() + inner.ttl;
             *target
         };
-        inner.publish_replica_update(&self.session_id, target, self.root_session_id.as_deref());
+        inner.publish_replica_update(&self.session_id, target);
     }
 
     fn invalidate(&mut self) {

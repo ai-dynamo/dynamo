@@ -1174,7 +1174,7 @@ mod tests {
             std::sync::Arc::new(crate::discovery::ModelManager::new()),
             dynamo_runtime::pipeline::RouterMode::RoundRobin,
             None,
-            None,
+            false,
         );
         pr.mark_active_for_test();
         pr.deactivate();
@@ -1214,7 +1214,7 @@ mod tests {
                 Arc::new(crate::discovery::ModelManager::new()),
                 dynamo_runtime::pipeline::RouterMode::RoundRobin,
                 None,
-                None,
+                false,
             );
             router.mark_active_for_test();
             worker_set.prefill_router = Some(router);

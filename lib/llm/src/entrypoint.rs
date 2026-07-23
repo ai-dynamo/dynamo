@@ -19,7 +19,6 @@ use serde::{Deserialize, Serialize};
 use crate::{
     backend::ExecutionContext, discovery::LoadThresholdConfig, engines::StreamingEngine,
     local_model::LocalModel, model_card::ModelDeploymentCard,
-    session_affinity::SessionAffinityGrouping,
     types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine,
 };
 
@@ -54,7 +53,7 @@ pub struct RouterConfig {
     #[serde(default)]
     pub session_affinity_ttl_secs: Option<u64>,
     #[serde(default)]
-    pub session_affinity_grouping: Option<SessionAffinityGrouping>,
+    pub parent_affinity: bool,
 }
 
 impl RouterConfig {
@@ -65,7 +64,7 @@ impl RouterConfig {
             load_threshold_config: LoadThresholdConfig::default(),
             enforce_disagg: false,
             session_affinity_ttl_secs: None,
-            session_affinity_grouping: None,
+            parent_affinity: false,
         }
     }
 
@@ -87,8 +86,8 @@ impl RouterConfig {
         self
     }
 
-    pub fn with_session_affinity_grouping(mut self, grouping: SessionAffinityGrouping) -> Self {
-        self.session_affinity_grouping = Some(grouping);
+    pub fn with_parent_affinity(mut self) -> Self {
+        self.parent_affinity = true;
         self
     }
 }

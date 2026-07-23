@@ -252,7 +252,7 @@ pub async fn build_preprocessed_routing(
     encoder_chooser: Option<Arc<EncoderRouter>>,
     enable_multimodal_cache_indexer: bool,
     session_affinity_ttl_secs: Option<u64>,
-    session_affinity_grouping: Option<crate::session_affinity::SessionAffinityGrouping>,
+    parent_affinity: bool,
 ) -> anyhow::Result<PreprocessedRouting> {
     // Fail fast on an unsupported LoRA + router-mode combination BEFORE waiting for the initial
     // worker set, so a misconfiguration surfaces immediately at startup rather than after the
@@ -270,7 +270,7 @@ pub async fn build_preprocessed_routing(
 
     let affinity = create_affinity_coordinator(
         session_affinity_ttl_secs.map(Duration::from_secs),
-        session_affinity_grouping,
+        parent_affinity,
         router_client.clone(),
     )
     .await?;
@@ -310,7 +310,7 @@ pub async fn build_preprocessed_routing(
             model_manager.clone(),
             router_mode,
             session_affinity_ttl_secs,
-            session_affinity_grouping,
+            parent_affinity,
         )
     });
     let encoder_router = encoder_chooser.unwrap_or_else(EncoderRouter::disabled);
