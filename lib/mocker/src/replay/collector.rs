@@ -1403,6 +1403,55 @@ mod tests {
     }
 
     #[test]
+    fn streaming_distribution_preserves_all_zero_samples() {
+        let mut distribution = StreamingDistribution::default();
+        for _ in 0..128 {
+            distribution.add(0.0);
+        }
+
+        assert_eq!(distribution.sketch.get_zero_count(), 128);
+        let stats = distribution.finish();
+        for value in [
+            stats.mean_ms,
+            stats.min_ms,
+            stats.max_ms,
+            stats.median_ms,
+            stats.p75_ms,
+            stats.p90_ms,
+            stats.p95_ms,
+            stats.p99_ms,
+            stats.std_ms,
+        ] {
+            assert_eq!(value, 0.0);
+        }
+    }
+
+    #[test]
+    fn streaming_percentiles_select_the_historical_rounded_rank() {
+        let percentiles = [
+            0.0, 1.0, 10.0, 25.0, 49.0, 50.0, 51.0, 75.0, 90.0, 95.0, 99.0, 100.0,
+        ];
+        for len in [2, 3, 4, 5, 10, 11, 100, 101, 256, 257] {
+            let values = (0..len)
+                .map(|index| 1_000.0 + index as f64 * 10.0)
+                .collect::<Vec<_>>();
+            let mut distribution = StreamingDistribution::default();
+            for &value in &values {
+                distribution.add(value);
+            }
+
+            for percentile in percentiles {
+                let expected = values[percentile_rank(values.len(), percentile)];
+                let actual = distribution.percentile(percentile);
+                assert!(
+                    (actual - expected).abs() <= expected * DDSKETCH_RELATIVE_ACCURACY,
+                    "len={len} percentile={percentile}: expected rank value {expected}, got {actual}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn completed_zero_output_request_counts_without_latency_samples() {
         let mut collector = TraceCollector::default();
         collector.set_static_worker_count(0, 1);
