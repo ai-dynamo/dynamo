@@ -198,14 +198,31 @@ The recommended deployment method is through DGDRs. See [Profiler Examples](prof
 
 #### Container Images
 
-Each DGDR requires a container image for profiling and deployment:
-
-- **`image`** (Optional): Container image for the profiling job. Must contain the profiler code and dependencies.
+The DGDR `image` field selects the container image for the profiling job. The
+image must contain the profiler code and dependencies. If `image` is omitted,
+the operator defaults it to
+`nvcr.io/nvidia/ai-dynamo/dynamo-planner:<operatorVersion>`.
 
 ```yaml
 spec:
   image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"  # dynamo-frontend for Dynamo < 1.1.0
 ```
+
+> [!WARNING]
+> With Dynamo Operator 1.4.0 or later, an explicitly selected profiler based on
+> Dynamo 1.3.0 or earlier must use a `spec.image` tag that accurately identifies
+> its runtime with semantic versioning, such as `:1.3.0`. Older profilers
+> silently discard the DGDR-level `spec.runtimeVersionOverride` field and
+> therefore cannot propagate it into the generated DGD.
+>
+> If `overrides.dgd` replaces a generated worker image, that worker image must
+> either have a parseable semantic-version tag or have an effective
+> `runtimeVersionOverride` on the same DGD service or component. Profiler 1.4.0
+> and later propagate the DGDR-level override to generated components. For an
+> older profiler, include the field directly in the raw, legacy `v1alpha1` DGD
+> service override because that profiler ignores the DGDR-level field. See
+> [Profiler Image Version Compatibility](../../kubernetes/dgdr.md#profiler-image-version-compatibility)
+> for details.
 
 #### Quick Start: Deploy with DGDR
 

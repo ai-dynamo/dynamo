@@ -49,9 +49,28 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			name: "valid v1beta1 request is defaulted",
 			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
 				request.Spec.Image = ""
+				request.Spec.RuntimeVersionOverride = ""
 			}),
 			gpuDiscovery: true,
 			wantImage:    "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.0",
+		},
+		{
+			name: "custom image requires runtime version override",
+			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.RuntimeVersionOverride = ""
+			}),
+			gpuDiscovery: true,
+			wantWebhook: []string{
+				"spec.runtimeVersionOverride: Required value: is required when spec.image has no parseable semantic-version tag",
+			},
+		},
+		{
+			name: "runtime version override must be canonical semver core",
+			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.RuntimeVersionOverride = "1.2"
+			}),
+			gpuDiscovery:  true,
+			wantSchemaErr: `spec.runtimeVersionOverride: Invalid value: "1.2": spec.runtimeVersionOverride in body should match '^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$'`,
 		},
 		{
 			name:         "valid v1alpha1 request converts through the production path",
@@ -206,6 +225,46 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			gpuDiscovery: true,
 		},
 		{
+			name:               "legacy custom image without override must be repaired on update",
+			seedWithoutWebhook: true,
+			oldRequest: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.RuntimeVersionOverride = ""
+			}),
+			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.RuntimeVersionOverride = ""
+				request.Labels = map[string]string{"updated": "true"}
+			}),
+			gpuDiscovery: true,
+			wantWebhook: []string{
+				"spec.runtimeVersionOverride: Required value: is required when spec.image has no parseable semantic-version tag",
+			},
+		},
+		{
+			name:               "adding runtime version override repairs legacy custom image",
+			seedWithoutWebhook: true,
+			oldRequest: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.RuntimeVersionOverride = ""
+			}),
+			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Labels = map[string]string{"updated": "true"}
+			}),
+			gpuDiscovery: true,
+		},
+		{
+			name: "newly introduced custom image without override is rejected on update",
+			oldRequest: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.Image = "test-profiler:1.1.0"
+				request.Spec.RuntimeVersionOverride = ""
+			}),
+			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.RuntimeVersionOverride = ""
+			}),
+			gpuDiscovery: true,
+			wantWebhook: []string{
+				"spec.runtimeVersionOverride: Required value: is required when spec.image has no parseable semantic-version tag",
+			},
+		},
+		{
 			name:       "missing hardware is ratcheted when GPU discovery becomes disabled",
 			oldRequest: betaDGDRForAdmission(nil),
 			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
@@ -279,10 +338,11 @@ func betaDGDRForAdmission(
 		},
 		ObjectMeta: metav1.ObjectMeta{Name: "test-dgdr", Namespace: "default"},
 		Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
-			Model:          "Qwen/Qwen3-0.6B",
-			Backend:        nvidiacomv1beta1.BackendTypeVllm,
-			Image:          "profiler:latest",
-			SearchStrategy: nvidiacomv1beta1.SearchStrategyRapid,
+			Model:                  "Qwen/Qwen3-0.6B",
+			Backend:                nvidiacomv1beta1.BackendTypeVllm,
+			Image:                  "profiler:custom",
+			RuntimeVersionOverride: "1.1.0",
+			SearchStrategy:         nvidiacomv1beta1.SearchStrategyRapid,
 		},
 	}
 	if mutate != nil {
@@ -301,10 +361,11 @@ func alphaDGDRForAdmission(
 		},
 		ObjectMeta: metav1.ObjectMeta{Name: "test-dgdr", Namespace: "default"},
 		Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
-			Model:   "Qwen/Qwen3-0.6B",
-			Backend: "vllm",
+			Model:                  "Qwen/Qwen3-0.6B",
+			Backend:                "vllm",
+			RuntimeVersionOverride: "1.1.0",
 			ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
-				ProfilerImage: "profiler:latest",
+				ProfilerImage: "profiler:custom",
 			},
 		},
 	}

@@ -176,6 +176,14 @@ type DynamoGraphDeploymentRequestSpec struct {
 	// +kubebuilder:validation:Required
 	ProfilingConfig ProfilingConfigSpec `json:"profilingConfig"`
 
+	// RuntimeVersionOverride explicitly sets the Dynamo runtime version for every
+	// component in the generated DynamoGraphDeployment. Set this when
+	// profilingConfig.profilerImage uses a non-semantic-version tag or digest, or
+	// when its tag does not identify the Dynamo runtime version.
+	// +kubebuilder:validation:Pattern=`^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$`
+	// +optional
+	RuntimeVersionOverride string `json:"runtimeVersionOverride,omitempty"`
+
 	// EnableGPUDiscovery controls whether the operator attempts to discover GPU hardware from cluster nodes.
 	// DEPRECATED: This field is deprecated and will be removed in v1beta1. GPU discovery is now always
 	// attempted automatically. Setting this field has no effect - the operator will always try to discover
