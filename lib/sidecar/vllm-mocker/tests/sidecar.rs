@@ -191,7 +191,7 @@ async fn prefill_handoff_round_trips_through_a_decode_server() {
 #[tokio::test]
 async fn dropping_sidecar_stream_cancels_mocker_work() {
     let mut args = fast_engine_args();
-    args.speedup_ratio = 0.001;
+    args.speedup_ratio = 0.1;
     let server = RunningServer::start(ServerMode::Aggregated, args).await;
     let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated);
     engine.start(0).await.unwrap();
@@ -204,6 +204,8 @@ async fn dropping_sidecar_stream_cancels_mocker_work() {
         )
         .await
         .unwrap();
+    let first = stream.next().await.unwrap().unwrap();
+    assert!(first.finish_reason.is_none());
     context.stop_generating();
     let terminal = stream.next().await.unwrap().unwrap();
     assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
