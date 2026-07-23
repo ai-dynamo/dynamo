@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 
 use dynamo_mocker::common::protocols::DirectRequest;
-use dynamo_vllm_grpc as pb;
+use dynamo_vllm_sidecar::proto as pb;
 use prost_types::{ListValue, Struct, Value, value::Kind};
 use tonic::Status;
 use uuid::Uuid;

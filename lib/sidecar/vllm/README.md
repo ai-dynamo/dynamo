@@ -71,5 +71,6 @@ cargo run -p dynamo-vllm-sidecar --bin dynamo-vllm-sidecar -- \
   --model-path mocker-model
 ```
 
-See [`../vllm-mocker/README.md`](../vllm-mocker/README.md) for aggregated and
-prefill/decode examples, supported Mocker configuration, and fidelity limits.
+See [`../../mocker/servers/vllm/README.md`](../../mocker/servers/vllm/README.md)
+for aggregated and prefill/decode examples, supported Mocker configuration,
+and fidelity limits.

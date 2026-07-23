@@ -11,5 +11,6 @@ SPDX-License-Identifier: Apache-2.0
 - SHA-256: `7cccd0e1b2e54f189550e1090cc80321fc2bbd188c98a4e22701b28fdeb177b6`
 
 The file is copied without modification. Update the revision and checksum when
-updating the protocol. Both `dynamo-vllm-sidecar` and
-`dynamo-vllm-mocker-server` depend on the generated types from this crate.
+updating the protocol. `dynamo-vllm-sidecar` generates and temporarily exports
+these types for `dynamo-vllm-mocker-server`; both consumers will move to the
+upstream package once vLLM publishes it.

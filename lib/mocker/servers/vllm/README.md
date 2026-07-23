@@ -10,8 +10,9 @@ SPDX-License-Identifier: Apache-2.0
 KV-capacity, prefix-cache, and timing behavior. Its primary purpose is fast,
 repeatable testing of `dynamo-vllm-sidecar` without a model or GPU.
 
-The mock server and sidecar share the generated types from
-`dynamo-vllm-grpc`, whose proto is vendored unchanged from vLLM v0.25.1.
+The mock server temporarily imports the generated types exposed by
+`dynamo-vllm-sidecar`, whose proto is vendored unchanged from vLLM v0.25.1.
+Both consumers will move to vLLM's upstream package once it is published.
 
 ## Aggregated serving
 
@@ -39,12 +40,9 @@ synthetic token stream. `--max-concurrent-requests` bounds admitted RPCs
 (default `256`) independently of the scheduler's `max_num_seqs`, so accepted
 requests can still exercise Mocker queueing.
 
-Live response streams share a bounded budget of 32,768 output signals. Each
-RPC reserves its declared `max_new_tokens` before scheduler admission and
-releases that reservation when its response stream is drained or dropped. This
-keeps slow readers memory-bounded without blocking delivery to other admitted
-streams; a request declaring the full 32,768-token limit intentionally holds
-the entire response budget until its stream is released.
+Synthetic output plans are limited to 32,768 tokens. LiveEngine uses a small,
+fixed response buffer for each request and cancels slow consumers rather than
+turning declared output length into a second admission-control policy.
 
 ## Disaggregated wire-flow
 

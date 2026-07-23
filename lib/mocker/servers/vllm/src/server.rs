@@ -9,7 +9,7 @@ use clap::ValueEnum;
 use dynamo_mocker::common::protocols::{EngineType, MockEngineArgs, OutputSignal, WorkerType};
 use dynamo_mocker::live::{LiveEngine, LiveRequest};
 use dynamo_mocker::scheduler::MockerMetrics;
-use dynamo_vllm_grpc as pb;
+use dynamo_vllm_sidecar::proto as pb;
 use futures::Stream;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tonic::{Request, Response, Status};
