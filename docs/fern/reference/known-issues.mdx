@@ -1,0 +1,317 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Known Issues
+subtitle: Known issues per Dynamo release, mirrored from the GitHub release notes
+---
+
+import { ReferenceStyles } from "@/components/ReferenceStyles";
+
+<ReferenceStyles />
+
+Known issues are mirrored verbatim from each release's GitHub release notes. The current release is listed first, with older releases collapsed below; artifact-specific issues sit at the bottom of the page.
+
+<a id="v130"></a>
+
+## v1.3.0 — current release
+
+<span className="dynref-badge dynref-badge--blue">vLLM</span> **GMS + Expert Parallel Crash at Model Load:** When running the GPU Memory Service with Expert Parallel, `Tensor.item()` is called on a meta tensor in `ExpertMapManager` and the worker crashes at model load. The root cause is an upstream vLLM defect (fix in flight as vllm-project/vllm#43928, not yet in v0.23.0 or v0.24.0). **Workaround:** Avoid GMS with Expert Parallel (MoE) on vLLM until the upstream vLLM fix ships.
+
+<span className="dynref-badge dynref-badge--blue">vLLM</span> **Mistral Multimodal Image Fetch Fails on vLLM v0.23.0:** Multimodal Mistral image requests fail because `MistralCommonImageProcessor` is missing the `fetch_images` method. This is an upstream vLLM v0.23.0 gap (fixed upstream in v0.24.0); the v0.24.0 pin bump was not taken for v1.3.0. **Workaround:** None in v1.3.0; resolved by a vLLM pin bump to `>=0.24.0` (already fixed on the development tip).
+
+<span className="dynref-badge dynref-badge--blue">vLLM</span> **Disagg Decode + EAGLE3 Speculative Decoding Crashes Silently:** In a disaggregated deployment, EAGLE3 speculative decoding crashes silently under large KV-transfer volume (an upstream vLLM defect). The crash reproduces even with speculative decoding enabled on both the prefill and decode workers using an identical `--speculative_config`. **Workaround:** None reliable in v1.3.0 — EAGLE3 speculative decoding with disaggregated serving is unsupported. **Targeted fix:** v1.4.0.
+
+<span className="dynref-badge dynref-badge--blue">vLLM</span> **KVBM PdConnector Disaggregated E2E Broken (NIXL VRAM_SEG):** All four disaggregated KVBM/LMCache configurations fail the NIXL `VRAM_SEG` handshake (aggregated paths pass). The KVBM PD connector subclasses vLLM's `MultiConnector`, which in vLLM v0.23.0 inherits `SupportsHMA` and wrongly assumes the PD connector is HMA-capable, tripping the handshake at `MultiConnector.__init__`. **Workaround:** Pass `--disable-hybrid-kv-cache-manager` on both prefill and decode workers. **Targeted fix:** v1.3.1.
+
+<span className="dynref-badge dynref-badge--blue">TRT-LLM</span> **Qwen2-VL-7B Multimodal Inference Fails:** Qwen2-VL-7B multimodal inference fails with `AssertionError: Number of mm_embeds (2) does not match expected total (3897)`. This is an upstream TensorRT-LLM regression introduced across the rc14→rc19 bump (transformers 4.57.3→5.5.4); it affects Qwen2-VL-7B only — Qwen3-VL is unaffected. **Workaround:** Use Qwen3-VL. **Targeted fix:** v1.4.0, contingent on the upstream TensorRT-LLM fix.
+
+<span className="dynref-badge dynref-badge--blue">TRT-LLM</span> **Crashed TensorRT-LLM Worker Keeps Receiving Traffic and Is Never Restarted:** After a TensorRT-LLM engine-core OOM or SIGKILL, `check_health()` still reports healthy, so `TrtllmEngineMonitor` never trips and the worker keeps receiving requests it can no longer serve while the pod is never restarted. Correct idle-gap fatal-state detection requires an upstream TensorRT-LLM change; this is pre-existing behavior, not a v1.3.0 regression. **Workaround:** Manually restart the affected worker. **Targeted fix:** pending upstream TensorRT-LLM.
+
+<span className="dynref-badge dynref-badge--blue">TRT-LLM</span> **Wide-EP Decode Crashes on All Ranks:** Wide Expert-Parallel decode crashes on all WideEP ranks due to a `run_moe()` argument-count mismatch (reproduced since rc1/rc2). The root cause is an upstream TensorRT-LLM ABI skew (a 37-vs-44 argument mismatch present in the rc18–rc20 bases, fixed upstream in rc21); v1.3.0 stays on the rc19 base rather than taking the destabilizing rc21 bump. **Workaround:** Rebuild against a TensorRT-LLM rc21 base, where the upstream `run_moe()` fix is present — v1.3.0 ships the rc21-compatibility changes ([#11769](https://github.com/ai-dynamo/dynamo/pull/11769), [#11799](https://github.com/ai-dynamo/dynamo/pull/11799)) so the Dynamo TensorRT-LLM worker builds against rc21. **Targeted fix:** v1.3.1.
+
+<span className="dynref-badge dynref-badge--blue">SGLang</span> **Disaggregated SGLang Inference over EFA Stalls and Returns Empty Response:** On AWS EFA clusters (GB200 and H100 / P5), the first disaggregated end-to-end SGLang request stalls for roughly 300 seconds and then returns HTTP 200 with empty content and zero completion tokens, because the KV cache is never transferred. The root cause is a NIXL `FI_MORE` multi-rail write-batching deadlock in the KV transfer over the EFA LIBFABRIC backend. **Workaround:** Avoid EFA-based disaggregated SGLang serving; use aggregated serving or a non-EFA transport instead. **Targeted fix:** v1.3.1.
+
+<span className="dynref-badge dynref-badge--blue">Planner</span> **Planner SLA and Load-Based Autoscaling Does Not Scale Deployments:** SLA and load-based scaling is an advanced, opt-in path; default throughput-based scaling and core disaggregated serving are unaffected. On that path, decode-side KV-rate scaling never fires on TensorRT-LLM (workers do not report `total_kv_blocks` / `kv_cache_block_size`), disagg-prefill scale-up never triggers on SGLang (the prefill-token signal omits the chunked-prefill backlog), the MTP accept-length discount never reaches replica decisions (accept length pins at 1.0), and GlobalPlanner scale operations fail while reading the deprecated DGD `spec.services` field. **Workaround:** Use throughput-based Planner scaling. **Targeted fix:** v1.4.0.
+
+<span className="dynref-badge dynref-badge--blue">Planner</span> **AIConfigurator-Backed Estimation Unavailable on v0.9.0:** AIConfigurator `v0.9.0` is missing the native forward-pass performance estimator and the KV-memory estimator (`sdk.memory`), so AIConfigurator-backed estimation is unavailable. The Planner may fall back to FPM regression, AIC-backed Mocker and router modes may fail to initialize, and `dynamo.mocker` crashes on startup with `--aic-perf-model`. The Profiler `thorough` sweep also skips its mocker-mode check and can spawn a real-GPU interpolation pod that fails before falling back. **Workaround:** Run the Mocker and router without AIC-backed modes and use FPM-based Planner scaling. **Targeted fix:** v1.4.0, pending the AIConfigurator `v0.10` upgrade.
+
+<a id="v120"></a>
+
+<Accordion title="v1.2.x known issues (12)">
+
+<span className="dynref-badge dynref-badge--blue">vLLM</span> **Qwen2.5-Omni Text-to-Text Garbage Output:** When running the Qwen2.5-Omni-7B model through the vLLM-Omni backend in a text-to-text (aggregated) configuration, the model produces garbage tokens instead of coherent text output. The vLLM-Omni backend is not natively designed for pure text generation with this model, and the text-to-text example path is being deprecated. **Workaround:** Use the pure vLLM backend for text-to-text generation; the vLLM-Omni text-to-text path produces garbage output and was deprecated for this reason.
+
+<span className="dynref-badge dynref-badge--blue">vLLM</span> **Disagg Prefill Sleep Fails Post-Inference:** When using disaggregated prefill with the vLLM backend (observed with Qwen/Qwen3-0.6B, TP=1 on B200), attempting to sleep a prefill worker after inference fails with a "pause_scheduler ... not supported yet" error due to stale KV-transfer state in vLLM's sleep/wake lifecycle. Because the sleep handler unregisters the worker from discovery before calling pause_scheduler, and does not roll back on failure, the prefill worker is permanently dropped from the routing pool until the pod is restarted. This is an upstream vLLM limitation related to sleep/wake KV-transfer state cleanup, not a Dynamo defect. **Workaround:** Restart the affected prefill-worker pod to return it to the routing pool; the worker does not auto-recover after a failed sleep.
+
+<span className="dynref-badge dynref-badge--blue">SGLang</span> **Disagg Serving Fails on ARM64:** Disaggregated serving fails on ARM64 platforms (GB200 with EFA) across all backends (vLLM, TensorRT-LLM, and SGLang). The NIXL libfabric backend's `register_memory()` call fails when attempting to register GPU memory for RDMA via the EFA driver. The root cause is an upstream NIXL issue: the bundled libfabric version (2.4.0amzn1.0) lacks the CUDA dmabuf fix required for ARM64 64K-page kernels. The same operation succeeds on x86_64 (H100 + EFA). The fix is available in upstream NIXL v1.1.0 but requires a major version bump with breaking changes that could not be incorporated before the 1.2.0 release. **Workaround:** Run disaggregated serving on an x86_64 platform (e.g., H100 + EFA), where the same NIXL `register_memory` path succeeds; arm64 (GB200) is blocked until upstream NIXL v1.1.0 is integrated.
+
+<span className="dynref-badge dynref-badge--blue">SGLang</span> **Multi-Node Streaming Completions Hang:** In a multi-node aggregated deployment with TP=8 using the SGLang backend, both streaming and unary chat completion requests may hang intermittently (approximately 1 in 3 runs) after prefill. All tensor-parallel ranks become stuck at a `torch.cuda.streams.synchronize()` call due to a CUDA-event deadlock in the upstream SGLang overlap scheduler (see https://github.com/sgl-project/sglang/issues/26454). **Workaround:** Launch the SGLang worker with `--disable-overlap-schedule`. This avoids the deadlock but may reduce scheduling throughput.
+
+<span className="dynref-badge dynref-badge--blue">SGLang</span> **DeepSeek V4 Unsupported on SGLang:** The SGLang backend shipped in v1.2.0 (SGLang 0.5.11) does not support DeepSeek V4 models; in this release DeepSeek V4 is generally available only on the vLLM backend (vLLM 0.20.1). **Workaround:** Run DeepSeek V4 on the vLLM backend, or use the separate experimental SGLang images at https://github.com/ai-dynamo/dynamo/releases/tag/v1.2.0-deepseek-v4-dev.3. SGLang DeepSeek V4 support is planned for a future release.
+
+<span className="dynref-badge dynref-badge--blue">TRT-LLM</span> **Multimodal Disagg Decode Tensor Failure:** When running multimodal disaggregated serving (prefill/decode) with the TensorRT-LLM backend on Kubernetes, the decode worker crashes because it cannot access shared-tensor handles (e.g. multimodal embedding and MRoPE position tensors stored in `/dev/shm`) that were created locally by the prefill worker in a separate pod. Text-only disaggregated serving is unaffected because KV transfer uses NIXL/EFA, but multimodal embedding and MRoPE tensors are passed via local shared-memory references that are not visible across pods. This is a TensorRT-LLM backend limitation where the disaggregated path assumes local-process visibility for multimodal tensor artifacts. **Workaround:** No workaround is available yet.
+
+<span className="dynref-badge dynref-badge--blue">Multimodal</span> **Wan2.2 Video Compiled-Path Crash:** Wan2.2 video generation (Wan-AI/Wan2.1-T2V-1.3B-Diffusers) runs in eager mode only. On the `torch.compile` path the vLLM-Omni diffusion worker crashes with a CUDA illegal memory access during the transformer cross-attention forward pass, because `WanSelfAttention.forward` mutates internal module state in a way that is incompatible with `torch.compile`. The root cause is upstream. **Workaround:** The v1.2.0 video launchers set `--enforce-eager` by default to avoid the crash; keep that flag set. The compiled path remains broken pending an upstream vLLM-Omni fix.
+
+<span className="dynref-badge dynref-badge--blue">KVBM</span> **TRT-LLM KVBM RequestData AttributeError:** All TensorRT-LLM × KV Block Manager container tests fail with `AttributeError: 'RequestData' object has no attribute 'block_hashes'` at `kvbm_connector_leader.py:138`. The failure is 100% reproducible across both H100 and GB200 (aarch64) hardware and affects every KVBM test configuration (aggregated, disaggregated, offload filtering). The root cause is an API attribute drift in the TensorRT-LLM `RequestData` class between upstream release candidates; the Dynamo KVBM connector expects a `block_hashes` attribute that was removed or renamed in the bundled TRT-LLM version. A fix is expected in a future release. **Workaround:** No workaround is available yet.
+
+<span className="dynref-badge dynref-badge--blue">Planner</span> **Scale-Up Gang Roll Strands Planner:** When the Planner issues a latency-mode prefill or decode scale-up in a disaggregated topology (optimization_target=sla, enable_throughput_scaling=True), the resulting DGD patch triggers a full Grove pod-gang roll. All pods are replaced, breaking active connections (observed ~86% request error rate during the roll) and resetting the Planner's in-memory state. After the roll, new workers report zero traffic (wall_time=0.0), the regression model cannot fit, and the throughput scaler enters a permanent model_not_ready hold, leaving the Planner stranded at its post-roll worker count with no further scaling decisions possible. The root cause is non-deterministic PodCliqueSet hash ordering in Grove, which interprets a metadata-only patch as a full topology change. A fix (PodCliqueSet hash stabilization) has been merged upstream in Grove but is not yet included in a tagged Grove release consumed by Dynamo. **Workaround:** No workaround is available yet.
+
+<span className="dynref-badge dynref-badge--blue">Planner</span> **SLA Load Scaler Stuck:** Under certain workloads the Planner's SLA-based load scaler remains stuck in an `insufficient_data` state because the decode regression model lacks noise tolerance for non-relaxable coefficients. This is a follow-up to a partially addressed issue where only one of two deadlock paths was resolved; the remaining path (decode regression noise tolerance) can prevent the scaler from advancing past its initial state, leaving autoscaling decisions stalled. Root cause is identified in the Planner regression-model code but the fix is deferred to a future release. **Workaround:** No workaround is available yet.
+
+<span className="dynref-badge dynref-badge--blue">Recipes</span> **GPT-OSS 120B GB200 Crash:** When deploying the `gpt-oss-120b-agg` recipe on GB200 systems, TRT-LLM automatically selects the DeepEP communication path, which triggers a `cudaErrorIllegalAddress` in the `intranode_combine` kernel (FmhaAutoTuner). The root cause is an upstream TRT-LLM defect where newer releases (rc11/rc12) incorrectly auto-select DeepEP instead of the working AllGather strategy. **Workaround:** Set `TRTLLM_FORCE_COMM_METHOD=ALLGATHER` in the deployment configuration to bypass the broken DeepEP path on GB200.
+
+<span className="dynref-badge dynref-badge--gray">v1.2.1</span> **SGLang ModelExpress peer-to-peer:** SGLang ModelExpress peer-to-peer transfer is not included in this release; the bundled SGLang 0.5.11 runtime does not carry the required upstream support.
+
+</Accordion>
+
+<a id="v110"></a>
+
+<Accordion title="v1.1.0 known issues (20)">
+
+### NIXL
+
+#### TRT-LLM and vLLM on NIXL `v0.10.1` Missing EFA Fixes
+
+TRT-LLM and vLLM ship NIXL `0.10.1`, missing two Libfabric/EFA fixes in NIXL `1.0.1`: an endpoint-thread-safety mutex ([nixl#1457](https://github.com/ai-dynamo/nixl/pull/1457)), without which concurrent I/O can crash the worker, and a notification-override fix ([nixl#1433](https://github.com/ai-dynamo/nixl/pull/1433)), without which reposted transfers can corrupt the KV cache. Dynamo v1.1.1 will upgrade TRT-LLM and vLLM to NIXL `v1.0.1`.
+
+> **Workaround:** None for v1.1.0. Fix lands in v1.1.1 with the NIXL `v1.0.1` bump.
+
+### Planner
+
+#### SLA Mode Throughput-Tick Ignores Decode-Side ITL Violations
+
+Under `optimization_target=sla` with default scaling settings, the 180 s throughput-tick decouples scaling decisions from the latency signal. Prefill never scales above 1 replica because `demand_rps` is capped under HTTP backpressure; decode never fires its ITL-violation check because `find_best_engine_decode_rps` clamps the returned ITL to ≤ target by construction. In QA, decode hit a 16% client `ReadTimeout` rate at the 50 ms ITL target while the planner's reported `est_itl` stayed flat. Prefill-side fix shipped in RC10 (#8861, cherry-pick #8956); decode-side fix is deferred.
+
+> **Workaround:** Enable `enable_load_scaling=True` (the README's "advanced" example) so the reactive 5 s load-tick triggers prefill scale-up based on `queued_prefill_tokens`. For decode, pre-provision sufficient `VllmDecodeWorker.replicas` for peak load until the fix lands.
+
+#### Latency-Mode Prefill Scale-Up Triggers Grove Gang Roll
+
+On `environment=kubernetes` disagg DGDs with `optimization_target=latency`, planner scale-up patches trigger a Grove full-gang roll that kills and recreates every service in the DGD. The post-roll planner observes one prefill engine and short-circuits its scale-down gate, bricking the loop for the lifetime of the DGD. Throughput mode is unaffected. Tracked as Grove #566 — Grove-side fix.
+
+> **Workaround:** Use `optimization_target=throughput` or pre-provision prefill replicas at the expected peak count.
+
+#### GlobalPlanner Endpoint Health Race
+
+GlobalPlanner can fail to register endpoint health on first reconcile when multiple pool workers come up concurrently. The connector now waits for pool workers ([#8702](https://github.com/ai-dynamo/dynamo/pull/8702), cherry-pick of [#8694](https://github.com/ai-dynamo/dynamo/pull/8694)) and awaits endpoints concurrently ([#8692](https://github.com/ai-dynamo/dynamo/pull/8692), cherry-pick of [#8682](https://github.com/ai-dynamo/dynamo/pull/8682)), but residual races can still surface as a `not ready` status until the next reconcile.
+
+> **Workaround:** Wait for the next reconcile cycle (typically 30 s) or trigger a manual reconcile by patching the DGDR.
+
+#### Multi-DGD GlobalPlanner Scaling Edge Case
+
+Under multi-DGD configurations with GlobalPlanner, readiness gates can transiently report not-ready when one DGD is mid-rollout while a sibling DGD is being scaled. The primary fix landed in [#8514](https://github.com/ai-dynamo/dynamo/pull/8514) (cherry-pick of [#8482](https://github.com/ai-dynamo/dynamo/pull/8482)) but a residual edge case remains.
+
+> **Workaround:** Stagger DGDR rollouts when scaling sibling deployments under a single GlobalPlanner.
+
+### TensorRT-LLM
+
+#### Dynamic Default `max_tokens` Not Effective — Responses Capped at 32 Tokens
+
+The dynamic-default `max_tokens` path for the TensorRT-LLM backend ([#5152](https://github.com/ai-dynamo/dynamo/pull/5152)) is not effective in the released image. When the client omits `max_tokens` from the OpenAI request, the handler should compute `dynamic_default = max(1, max_seq_len - input_length)`, but in practice requests still produce exactly 32 completion tokens with `finish_reason="length"` — identical to the pre-PR behavior.
+
+> **Workaround:** Pass `max_seq_length` in the worker config or set `max_tokens` explicitly per request.
+
+#### Scheduler Deadlock with KV Cache Reuse + Chunked Prefill ([TRT-LLM #13318](https://github.com/NVIDIA/TensorRT-LLM/issues/13318))
+
+Dynamo + TRT-LLM servers hit a scheduler deadlock and crash roughly every 30 minutes when KV cache reuse is combined with chunked prefill. Root cause is a token-accounting bug in TRT-LLM's `microBatchScheduler` that hangs the event loop. v1.1.0 ships TRT-LLM 1.3.0rc11; the fix ([TRT-LLM #12976](https://github.com/NVIDIA/TensorRT-LLM/pull/12976)) is merged upstream and lands in rc13. A v1.1.x bump to rc13 is under consideration.
+
+> **Workaround:** Disable KV cache reuse or chunked prefill until the rc13 bump lands.
+
+#### Qwen3‑235B‑A22B‑FP8 CuTe Experimental NotImplementedError on Blackwell *(carryover from v1.0.0)*
+
+Deploying the `qwen3-235b-a22b-fp8` recipes (both agg and disagg) on GB200/Blackwell still fails at runtime with `NotImplementedError: CuTe Experimental module is only supported on Cuda toolkit 13.1 and above!`. Caused by a packaging mismatch in the container image: the bundled `nvidia-cutlass-dsl==4.3.4` wheel is the pre-CUDA-13.1 variant that stubs out `cutlass.cute.experimental`, while the image itself ships CUDA 13.1 and TRT‑LLM's Blackwell FP8 GEMM path requires `cute.experimental` to be functional.
+
+> **Workaround:** Use the GB200-supported recipe variants until the container packaging is realigned.
+
+#### TRT-LLM Disaggregated Multimodal Path Edge Cases
+
+The TRT-LLM disaggregated embeddings/prefill/decode path has had multiple fixes land in v1.1.0 (#6726, #6810, #6840, #6920, #6924) but specific model+config combinations can still raise input-shape errors because the LLM API does not accept the token IDs + multimodal embeddings tuple for all model classes.
+
+> **Workaround:** Use aggregated mode for affected TRT-LLM multimodal workloads.
+
+#### `tensorrt_llm` ModuleNotFoundError on Bare Imports *(carryover from v0.5.0)*
+
+Importing TRT-LLM-backed Python entry points outside the documented worker launch path can raise `ModuleNotFoundError: No module named 'tensorrt_llm'`. Long-standing carryover from v0.5.0; does not affect supported worker launch scripts, which set the import path correctly before invoking `dynamo.trtllm`.
+
+> **Workaround:** Use the documented TRT-LLM worker launch scripts; do not import `dynamo.trtllm` directly from a bare Python REPL inside the container.
+
+### vLLM Omni / Diffusion
+
+#### `disagg_omni_glm_image` Crashes on Startup
+
+The vLLM disaggregated GLM-Image flow fails at Stage 0 with `Value error, The checkpoint you are trying to load has model type 'glm_image' but Transformers does not recognize this architecture` because the runtime image bundles a `transformers` version that predates `glm_image` support. Stage 0 dies before `/v1/models` becomes healthy and the diffusion stage later fails handshake (exit code 143).
+
+> **Workaround:** Install `transformers>=5.0` inside the container before launching the GLM-Image flow. A docs note has been added; a packaging fix is planned for the next image refresh.
+
+#### `vllm_omni` Missing from ARM64 Image — All Omni Tests Fail on GB200
+
+The `vllm-runtime` ARM64 image does not include the `vllm_omni` module, so all Omni test cases fail on GB200 / arm64. Deferred from the v1.1.0 fix scope per QA.
+
+> **Workaround:** Run vLLM Omni workloads on x86_64 hardware, or install `vllm_omni` manually inside the ARM64 container.
+
+### GMS
+
+#### Disagg Prefill Worker Sleep Fails After Inference
+
+In a disaggregated vLLM deployment with GMS and `--enable-sleep-mode`, `/engine/sleep` on the prefill worker fails after any inference request. The `NixlConnector` leaves KV transfer state that prevents `pause_scheduler` from resetting the cache, and the worker becomes unresponsive (subsequent requests fail with `no instances found`). Decode worker sleep/wake is unaffected.
+
+> **Workaround:** Do not call `/engine/sleep` on prefill workers in disaggregated GMS deployments. Use decode-side sleep only.
+
+#### GMS Failover Not Supported for Disaggregated Serving
+
+The operator-managed GMS failover API ([#8157](https://github.com/ai-dynamo/dynamo/pull/8157)) currently targets aggregated single-engine active/standby pairs. Failover is not yet supported for disaggregated serving topologies, and also fails when DRA-managed and non-DRA workloads co-exist on the same GPU.
+
+> **Workaround:** Use GMS failover only with aggregated deployments where all workloads on a shared GPU use a consistent device-allocation mode.
+
+### KVBM
+
+#### CPU/Disk to GPU Reload Never Triggers for Preempted Requests
+
+The KVBM onboard path (CPU/Disk → GPU reload) does not trigger for preempted requests. Root-caused to an upstream vLLM scheduler bug, not a Dynamo regression.
+
+> **Workaround:** None for v1.1.0; tracking the upstream vLLM fix.
+
+#### NUMA-Aware Pinned Memory Fails on Multi-Socket Systems
+
+KVBM's NUMA worker pool relies on first-touch placement via `cudaHostAlloc()`, but CUDA does not honor per-thread CPU affinity for memory placement. On GB200 NVL4, all pinned memory lands on NUMA node 0, so GPUs 2 and 3 see suboptimal access latency. Does not reproduce on H100. Fix is to call `mbind()` after `cudaHostAlloc()`.
+
+> **Workaround:** Wrap the worker process with `numactl --membind=N --cpunodebind=N` to set process-level NUMA policy, which CUDA does honor.
+
+#### PyO3 Panic in `slot.rs` on TRT-LLM
+
+A PyO3 panic fires in `slot.rs` (`next_position > device_blocks`) under KVBM with the TRT-LLM backend. Deferred from v1.1.0 fix scope.
+
+> **Workaround:** None for v1.1.0; affected configurations should disable KVBM with `DYN_KVBM_ENABLE=0`.
+
+#### NCCL Window-Buffer Init Fails on GB200 with CUDA 13
+
+KVBM MLA on TRT-LLM fails NCCL window-buffer initialization on GB200 with CUDA 13. Failure is inside the TRT-LLM library, not Dynamo source. Deferred from v1.1.0 fix scope.
+
+> **Workaround:** Use a non-MLA configuration or run on CUDA 12 hardware until the TRT-LLM-side fix lands.
+
+#### KVBM Performance vs. Disabled Baseline *(carryover from v1.0.0)*
+
+KVBM end-to-end performance with offload enabled can still trail the KVBM-disabled baseline on certain workloads. Active investigation across SGLang, TRT-LLM, and vLLM backends; v1.1.0 ships scheduler-aware offload sizing, KV-events on TRT-LLM, and event throughput improvements, but KVBM is not yet a default-on feature.
+
+> **Workaround:** Benchmark KVBM on/off for your workload before enabling in production. Default disabled.
+
+### Snapshot
+
+#### Snapshot + GMS Combination Disabled in Admission
+
+The Operator admission webhook explicitly rejects DGDs that combine ModelExpress snapshots with GMS storage. Enforced in [#8688](https://github.com/ai-dynamo/dynamo/pull/8688) (cherry-pick of [#8675](https://github.com/ai-dynamo/dynamo/pull/8675)). This is intentional pending design alignment between the snapshot lifecycle and the GMS attachment model.
+
+> **Workaround:** Use one or the other for v1.1.0; combined support is targeted for a follow-up release.
+
+</Accordion>
+
+<a id="v100"></a>
+
+<Accordion title="v1.0.0 known issues (14)">
+
+### DynamoGraphDeploymentRequest (Preview in v1.0.0)
+
+#### Planner With Empty Defaults Fails on Non-AIC-Supported Model/Hardware
+
+Applying a DGDR with `features.planner: {}` (empty defaults) on a model/hardware combination not supported by AIConfigurator causes the profiling job to fail with `ValueError: Throughput-based planner scaling requires AIC support`. The default planner config assumes throughput scaling with rapid in-depth sweeping, which requires AIC support. The Dynamo profiler validation raises a hard error before AIC is called, even though AIC PR#516 added the backend-side fix.
+
+> **Workaround:** Set `features.planner: {pre_deployment_sweeping_mode: thorough}` to bypass the AIC support gate check.
+
+#### Profiler Rejects Valid SLA Combination
+
+Specifying both `optimizationType` and `ttft`/`itl` SLA targets on a `DynamoGraphDeploymentRequest` triggers a Pydantic validation error because the schema treats them as mutually exclusive. The `optimizationType` field is not yet implemented in Dynamo 1.0.0, and any CRDs or manifests that reference it will fail validation. Users who upgrade from earlier versions with existing DGDR specs that include `optimizationType` alongside latency targets will see immediate admission errors.
+
+> **Workaround:** Remove the `optimizationType` field from SLA specifications. Use only `e2eLatency` or the `ttft`/`itl` pair (which must be specified together) — these two modes are mutually exclusive.
+
+#### Interpolation Does Not Propagate Tolerations
+
+Tolerations defined in `overrides.dgd` on a `DynamoGraphDeploymentRequest` are not propagated to candidate `DynamoGraphDeployments` created during the interpolation phase of profiling. This causes worker pods to remain in `Pending` state on clusters with tainted nodes, because the generated deployments lack the required tolerations to schedule onto those nodes. PR [#7226](https://github.com/ai-dynamo/dynamo/pull/7226) moved override application to before the interpolation step, but the fix is incomplete for all override paths and has been reopened. A complete fix is pending for a patch release.
+
+> **Workaround:** Manually add the required tolerations directly to each generated `DynamoGraphDeployment` after interpolation completes, or remove taints from target nodes during profiling.
+
+#### Thorough Profiler Generates Infeasible TP=1 for MoE Models
+
+The profiler's memory estimation does not account for WideEP communication buffers used by Mixture-of-Experts models, causing it to generate TP=1 configurations that are guaranteed to OOM at runtime. When the thorough profiler enumerates candidate configurations, it underestimates peak memory for MoE architectures, and the resulting deployment crashes immediately upon loading the model.
+
+> **Workaround:** Manually reduce `kv_cache_ratio` to approximately 0.75 in the profiler configuration to reserve headroom for WideEP buffers, or exclude TP=1 from the candidate search space by setting a minimum tensor parallelism degree.
+
+#### Infeasible SLA Targets Silently Accepted
+
+When a user specifies SLA targets (TTFT, ITL, or E2E latency) that cannot be met by any profiled configuration, the profiler logs a warning but does not surface it as a Kubernetes condition on the `DynamoGraphDeploymentRequest` status. Operators monitoring the DGDR via `kubectl` or cluster dashboards will see no indication that the requested SLAs are unachievable, leading to deployments that run but never meet their performance objectives. This issue has been moved to the backlog and will not be fixed in 1.0.0.
+
+> **Workaround:** After profiling completes, manually inspect profiler pod logs for warnings containing "infeasible" or "no valid configuration" to verify that the requested SLA targets are achievable.
+
+### Multimodal
+
+#### TRT-LLM Disaggregated Multimodal Raises AttributeError
+
+Running the disaggregated embeddings/prefill/decode pipeline (`diagg_e_pd.sh`) with TRT-LLM on multimodal models raises `AttributeError: 'NoneType' object has no attribute 'keys'` during input preprocessing. The root cause is that TRT-LLM does not support the token IDs and multimodal embeddings path in its LLM API; the preprocessor must fall back to passing a text prompt via `default_multimodal_input_loader` for the embeddings case. A fix was merged ([#6840](https://github.com/ai-dynamo/dynamo/pull/6840)) and cherry-picked as [#6920](https://github.com/ai-dynamo/dynamo/pull/6920) in RC6, but the fix regressed and the issue persists in the v1.0.0 release.
+
+> **Workaround:** Use aggregated mode instead of disaggregated embeddings/prefill/decode for TRT-LLM multimodal workloads. A corrected fix is planned for a follow-up patch release.
+
+#### Wan2.1 Video Diffusion Requires Manual imageio Install
+
+Deploying `Wan-AI/Wan2.1-T2V-1.3B-Diffusers` for text-to-video generation fails with `ModuleNotFoundError: No module named 'imageio'`. The `imageio` package is intentionally excluded from the TRT-LLM runtime container to reduce image size, as video generation is an experimental feature. This is documented in `docs/backends/trtllm/trtllm-video-diffusion.md`.
+
+> **Workaround:** Install the package manually inside the container: `pip install imageio imageio-ffmpeg`.
+
+#### Embeddings Cache with TensorRT-LLM and enable_block_reuse
+
+Deploying a TensorRT-LLM multimodal workflow with Embeddings Cache and `enable_block_reuse: true` is not supported due to limitations in the backend. This will be supported in upcoming releases.
+
+> **Workaround:** Use Embeddings Cache with `enable_block_reuse: false`. All existing recipes, benchmarks, and guides already reflect this configuration.
+
+### Dynamo Snapshot
+
+#### Snapshot Restore Fails on AKS for vLLM
+
+Snapshot restore of vLLM workers on AKS does not fully reinitialize model state. A single restored worker appears healthy and passes readiness checks but returns empty responses with no generated tokens. Restoring multiple workers simultaneously can hang, causing inference requests to time out. This issue has only been observed on AKS.
+
+> **Workaround:** No workaround available. Fix planned for a follow-up patch release.
+
+### KVBM
+
+#### Pinned Memory Allocation Failure on Blackwell GPUs
+
+KVBM initialization may fail on Blackwell GPUs (GB200, B100, B200) with `CUDA_ERROR_INVALID_VALUE` when allocating pinned host memory. The root cause is that the `PinnedAllocator` was hardcoded to `device_id` 0 instead of using the actual device ID, which causes NUMA binding to select the wrong memory node. A partial fix ([#6809](https://github.com/ai-dynamo/dynamo/pull/6809)) corrects the device ID in the allocator, but some Blackwell configurations may still encounter initialization failures depending on the NUMA topology.
+
+> **Workaround:** Ensure `CUDA_VISIBLE_DEVICES` is set to expose only the intended GPUs, and verify that the NUMA node assignment matches the GPU topology.
+
+#### Performance Degradation When KVBM Is Enabled
+
+Enabling KVBM may degrade inference performance compared to running without it — observed in vLLM disaggregated mode and TensorRT-LLM aggregated mode. KVBM is now enabled by default (#5602), so users may see lower throughput out of the box. The overhead comes from KV cache block management and transfer coordination, which adds latency to each request even when KV cache reuse rates are low.
+
+> **Workaround:** Disable KVBM by unsetting `DYN_KVBM_ENABLE` if KV cache sharing is not needed for your workload.
+
+### SGLang
+
+#### HiCache NIXL Storage Backend Crash on Init
+
+SGLang HiCache with `--hicache-storage-backend nixl` crashes during scheduler initialization with `TypeError: expected str, bytes or os.PathLike object, not MHATokenToKVPoolHost`. The `HiCacheNixl` backend passes the memory pool host object where a file path string is expected. This is an upstream SGLang bug, fixed in [sgl-project/sglang#19517](https://github.com/sgl-project/sglang/pull/19517) but not yet included in the SGLang version pinned by Dynamo 1.0.0.
+
+> **Workaround:** Use a different HiCache storage backend (e.g., `disk`). HiCache works correctly with non-NIXL backends.
+
+#### SGLang DSR1 Recipe Model Loading from PVC Failure
+
+Deploying the SGLang DSR1 recipe or using it as a base config in the SLA profiler may fail because the model-download script downloads the model into a non-standard HuggingFace directory that ModelExpress cannot load, causing prefill and decode workers to enter CrashLoopBackOff.
+
+> **Workaround:** (1) Download the HF model into a standard HF directory and set `HF_HOME` to the PVC-mounted path, (2) update `--model-path` to point at the directory containing the downloaded HF cache (not supported for SLA profiler), or (3) provide `HF_TOKEN` so the model can be downloaded directly.
+
+### TensorRT-LLM
+
+#### Qwen3‑235B‑A22B‑FP8 fails with CuTe Experimental NotImplementedError on Blackwell
+
+Deploying the `qwen3-235b-a22b-fp8` recipes (both agg and disagg) on GB200/Blackwell fails at runtime with: `NotImplementedError: CuTe Experimental module is only supported on Cuda toolkit 13.1 and above!`
+
+> **Workaround:** This is caused by a packaging mismatch in the container image: the `nvidia-cutlass-dsl==4.3.4` wheel baked into the image is the CUDA \< 13.1 variant that stubs out `cutlass.cute.experimental` by unconditionally raising `NotImplementedError`, while the image itself ships CUDA 13.1 and TensorRT‑LLM’s Blackwell FP8 GEMM path (`cute_dsl_fp8_gemm_blackwell`) requires `cute.experimental` to be functional
+
+</Accordion>
+
+## Known Artifact Issues
+
+| Version | Artifact | Issue | Status |
+| :---- | :---- | :---- | :---- |
+| v0.9.0 | dynamo-platform-0.9.0 | Helm chart sets operator image to 0.7.1 instead of 0.9.0. | Fixed in v0.9.0.post1 |
+| v0.8.1 | vllm-runtime:0.8.1-cuda13 | Container fails to launch. | Known issue |
+| v0.8.1 | sglang-runtime:0.8.1-cuda13, vllm-runtime:0.8.1-cuda13 | Multimodality not expected to work on ARM64. Works on AMD64. | Known limitation |
+| v0.8.0 | sglang-runtime:0.8.0-cuda13 | CuDNN installation issue caused PyTorch v2.9.1 compatibility problems with nn.Conv3d — performance degradation and excessive memory usage in multimodal workloads. | Fixed in v0.8.1 (#5461) |

@@ -1,0 +1,339 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Deprecations
+subtitle: Breaking changes, deprecations, and removals across Dynamo releases
+---
+
+import { ReferenceStyles } from "@/components/ReferenceStyles";
+
+<ReferenceStyles />
+
+This page is the ledger of breaking changes, behavioral changes, and deprecations and removals for each Dynamo release, mirrored verbatim from the GitHub release notes. Each entry carries a badge: <span className="dynref-badge dynref-badge--red">Removed</span> means the surface is gone, <span className="dynref-badge dynref-badge--amber">Deprecated</span> means it still works but emits warnings, and <span className="dynref-badge dynref-badge--blue">Behavioral</span> means defaults or behavior changed.
+
+<a id="v130"></a>
+
+## v1.3.0 — Jul 20, 2026
+
+24 entries — 14 behavioral changes, 10 deprecated and removed.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **CUDA 12 container images removed — CUDA 13 only** (`vLLM and SGLang runtime images shipped CUDA 12.9 and CUDA 13 variants` -> `CUDA 13 images only`).
+
+  > **Migrate:** Move all deployments to the CUDA 13 runtime images before upgrading — the CUDA 12.9 variants are no longer published. The bare `vllm-runtime` / `sglang-runtime` / `tensorrtllm-runtime` tags now resolve to CUDA 13, with explicit `-cuda13` aliases on the same digest.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Multimodal now requires an explicit `--enable-multimodal` flag** (`--multimodal-worker / --multimodal-encode-worker` -> `--enable-multimodal (with --dedicated-mm-encoder / --disaggregation-mode)`); workers without the flag now raise a RuntimeError on multimodal requests instead of silently processing them as text-only ([#10680](https://github.com/ai-dynamo/dynamo/pull/10680)).
+
+  > **Migrate:** Add `--enable-multimodal` (and `--dedicated-mm-encoder` for internal encode-worker topologies) to both prefill and decode workers so multimodal requests are accepted rather than rejected.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **`disaggregation-mode` default changed to `agg`; `prefill_and_decode` deprecated** (`--disaggregation-mode default 'prefill_and_decode' (DisaggregationMode.AGGREGATED)` -> `--disaggregation-mode default 'agg'; 'prefill_and_decode' deprecated, use 'pd'`) ([#10690](https://github.com/ai-dynamo/dynamo/pull/10690)).
+
+  > **Migrate:** Use `--disaggregation-mode agg` for aggregated serving and `pd` for combined prefill+decode; legacy `prefill_and_decode` still works temporarily.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **GPU Memory Service (GMS) DRA now requires Kubernetes 1.34+** — GMS attaches GPUs to workers through the Kubernetes Dynamic Resource Allocation (DRA) API, which must now be the stable `resource.k8s.io/v1` (Kubernetes 1.34+) instead of the older 1.32+ API group; GMS errors if it is unavailable ([#9454](https://github.com/ai-dynamo/dynamo/pull/9454)).
+
+  > **Migrate:** Upgrade the cluster to Kubernetes 1.34+ so `resource.k8s.io/v1` is available before using GMS `ResourceClaimTemplates`.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **GMS now wires GPUs into your declared client containers instead of a sidecar** — setting `enabled` used to start a GMS sidecar and swap the main container's GPUs for a DRA ResourceClaim; it now wires GPUs into the client containers you declare, and the operator no longer auto-creates `gms-loader`/`gms-saver` containers ([#9641](https://github.com/ai-dynamo/dynamo/pull/9641)).
+
+  > **Migrate:** Because the operator no longer injects `gms-loader`/`gms-saver` containers automatically, list the containers that should use GMS-managed GPU memory yourself via `extraClientContainers` (and `checkpoint.job.gmsClientContainers` for checkpoint jobs).
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **GMS "shadow mode" is now enabled only with inter-pod failover** — shadow mode runs the GPU Memory Service alongside the live KV path for validation without serving from it; `DYN_VLLM_GMS_SHADOW_MODE=true` is now injected only when inter-pod failover is on, not for every standalone inter-pod GMS deployment ([#10378](https://github.com/ai-dynamo/dynamo/pull/10378)).
+
+  > **Migrate:** If you rely on shadow mode with standalone inter-pod GMS, enable failover (`mode=interPod`) to restore `DYN_VLLM_GMS_SHADOW_MODE` injection.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Router backpressure defaults raised** — queue threshold `4.0 -> 16.0` and active-prefill-tokens threshold fraction `10.0 -> 64.0` ([#9547](https://github.com/ai-dynamo/dynamo/pull/9547)).
+
+  > **Migrate:** Explicitly set `--router-queue-threshold=4.0` and `--active-prefill-tokens-threshold-frac=10.0` to retain the previous backpressure and prefill busy-detection behavior.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Removed the forced default of `--runner generate` in vLLM** (`runner defaults to "generate" when not explicitly set` -> `runner defaults to vLLM's own value (auto-detection)`) ([#9710](https://github.com/ai-dynamo/dynamo/pull/9710)).
+
+  > **Migrate:** If you relied on the implicit `runner=generate` default, pass `--runner generate` explicitly.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Frontend nvext / admin-API master switches renamed to opt-out** (`DYN_ENABLE_FRONTEND_{NVEXT,ADMIN_API}` -> `DYN_DISABLE_*`) ([#11123](https://github.com/ai-dynamo/dynamo/pull/11123)).
+
+  **Migrate:** The `nvext` and frontend admin-API surfaces are now on by default; disable them with `DYN_DISABLE_FRONTEND_NVEXT` / `DYN_DISABLE_FRONTEND_ADMIN_API` instead of enabling with `DYN_ENABLE_*`.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Requests carrying `nvext.agent_context` are now rejected** — the `nvext` OpenAI-API extension no longer accepts the `agent_context` object (previously used to pass agent/trajectory identity); it is refused as an unknown field ([#10808](https://github.com/ai-dynamo/dynamo/pull/10808)).
+
+  > **Migrate:** Stop sending `agent_context` in `nvext`; use trajectory identity headers instead.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **`spec.restart.id` on DGD create no longer triggers a restart (`Creating a DynamoGraphDeployment with spec.restart.id triggered an immediate restart` -> `spec.restart.id on initial creation is treated as already observed and does not trigger a restart`)** ([#10955](https://github.com/ai-dynamo/dynamo/pull/10955)).
+
+  > **Migrate:** Create the DGD without `spec.restart`, then set `spec.restart.id` after creation to request a restart.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Snapshot Helm chart defaults changed for live worker checkpointing** — Dynamo checkpoints running workers with CRIU (Checkpoint/Restore In Userspace); the chart now defaults TCP socket handling to `tcpClose=false / tcpEstablished=true` and points the CRIU `libDir` at `/usr/local/lib/snapshot/criu-plugins` instead of leaving it empty ([#10727](https://github.com/ai-dynamo/dynamo/pull/10727)).
+
+  > **Migrate:** To preserve prior behavior, set `config.tcpClose=true`, `config.tcpEstablished=false`, and `config.libDir=""` explicitly in your snapshot values.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **DGD Auto checkpoint identity and status changes** — the DynamoCheckpoint printer column is renamed `Hash -> CheckpointID` (`.status.identityHash` -> `.status.checkpointID`), Auto checkpoints are no longer reused across DGDs via identity hash (now scoped to the owning DGD/component generation), and Manual mode without `checkpointRef` or `identity` now fails fast instead of silently waiting ([#10177](https://github.com/ai-dynamo/dynamo/pull/10177)).
+
+  > **Migrate:** Read `.status.checkpointID` (identityHash remains as a deprecated mirror), set `checkpointRef` to explicitly reuse a named DynamoCheckpoint, and provide `checkpointRef` or `identity` when using Manual mode.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Router `enforce-disagg` deprecated** ([#11295](https://github.com/ai-dynamo/dynamo/pull/11295)).
+
+  **Migrate:** Remove `enforce-disagg` from router configuration; disaggregated routing is selected through the standard router modes.
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **Removed the standalone `dynamo-gaie` Helm chart and gateway CRD install script for the inference gateway (EPP)** — the Endpoint Picker (EPP) inference-gateway extension now installs through the operator, so the standalone chart (`deploy/inference-gateway/standalone/helm/dynamo-gaie`) and the `install_gaie_crd_kgateway.sh` script are removed ([#10001](https://github.com/ai-dynamo/dynamo/pull/10001)).
+
+  > **Migrate:** Move off the standalone EPP Helm chart to the operator-managed inference gateway path, and use `agentgateway` CRD installation instead of the removed `kgateway` install script.
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **Removed `clear_kv_blocks` endpoint and its router function** (`POST /clear_kv_blocks` and `pub fn clear_kv_blocks_router` removed) ([#10556](https://github.com/ai-dynamo/dynamo/pull/10556)).
+
+  > **Migrate:** Stop calling the `/clear_kv_blocks` HTTP endpoint and remove any callers of `clear_kv_blocks_router`; both the endpoint and the function/module were deleted.
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **Removed `nvext.agent_context` and its session fields** (`nvext.agent_context` request-body field removed; `session_type_id` and `session_id` removed from AgentContext, leaving trajectory fields only) ([#10808](https://github.com/ai-dynamo/dynamo/pull/10808)).
+
+  > **Migrate:** Remove `agent_context` from request bodies and supply trajectory identity via `x-dynamo-trajectory-id` / `x-dynamo-parent-trajectory-id` / `x-dynamo-trajectory-final` headers; only trajectory fields remain on AgentContext.
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **Removed sticky-session routing and its `nvext.session_control` surface** — session affinity (pinning a conversation's requests to one worker) is replaced by trajectory-based KV/radix cache tags; this drops `nvext.session_control`, the worker session-lifecycle endpoint, and the `StickySessionRouter / InMemoryAffinityStore / AffinityBinding / AffinityKind` Rust types ([#10214](https://github.com/ai-dynamo/dynamo/pull/10214)).
+
+  > **Migrate:** Stop sending `nvext.session_control` and migrate to trajectory-based radix cache tags; sticky routing, the worker lifecycle RPC, and the sticky routing types are no longer available.
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **Removed `DYN_AGENT_TRACE` in favor of `DYN_REQUEST_TRACE`** (`DYN_AGENT_TRACE` -> `DYN_REQUEST_TRACE`) ([#10701](https://github.com/ai-dynamo/dynamo/pull/10701)).
+
+  > **Migrate:** Set `DYN_REQUEST_TRACE=1` instead of `DYN_AGENT_TRACE`; agent-context enrichment now emits under the unified request-trace path.
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **vLLM ModelExpress weight loading moved behind a single `--load-format modelexpress`** — ModelExpress streams model weights to workers for faster startup; the split `mx-source`/`mx-target` load formats and the `--model-express-url` / `MODEL_EXPRESS_URL` setting are removed in favor of the plugin-owned `--load-format modelexpress` ([#10049](https://github.com/ai-dynamo/dynamo/pull/10049)).
+
+  > **Migrate:** Switch vLLM deployments to `--load-format modelexpress` and rely on the ModelExpress vLLM plugin; stop relying on `--model-express-url` / `MODEL_EXPRESS_URL`.
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **Removed the diffusion-transformer data-parallel flag `--dit-dp-size`** — this TensorRT-LLM knob set the data-parallel degree for the DiT (Diffusion Transformer) image/video path; the flag and its `DYN_TRTLLM_DIT_DP_SIZE` env var are gone ([#10036](https://github.com/ai-dynamo/dynamo/pull/10036)).
+
+  > **Migrate:** Remove `--dit-dp-size` and `DYN_TRTLLM_DIT_DP_SIZE` from your diffusion launch configuration.
+
+<span className="dynref-badge dynref-badge--amber">Deprecated</span> **Deprecated per-backend multimodal flags (`--multimodal-worker` / `--multimodal-encode-worker` / `--modality multimodal`)** — superseded by a single `--enable-multimodal` plus `--disaggregation-mode` (with `--dedicated-mm-encoder` for internal encode workers); the old flags still work but emit deprecation warnings ([#10680](https://github.com/ai-dynamo/dynamo/pull/10680), [#10690](https://github.com/ai-dynamo/dynamo/pull/10690)).
+
+  > **Migrate:** Switch to `--enable-multimodal` plus the appropriate `--disaggregation-mode` / `--dedicated-mm-encoder` combination.
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **Removed the GMS checkpoint `loader`/`saver` override structs** — instead of the built-in `gpuMemoryService.checkpoint.{loader,saver}` containers, declare your own GMS client containers via `extraClientContainers` / `checkpoint.job.gmsClientContainers` ([#9641](https://github.com/ai-dynamo/dynamo/pull/9641)).
+
+  > **Migrate:** Replace the `gpuMemoryService.checkpoint.{loader,saver}` config with user-declared containers referenced via `extraClientContainers` / `checkpoint.job.gmsClientContainers`.
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **Fixed the misspelled Planner autoscaling key `decode_sacle_up_kv_rate`** — this SLA-Planner threshold governs when decode workers scale up under KV-cache pressure; the misspelled alias is removed in favor of the correct `decode_scale_up_kv_rate` ([#10601](https://github.com/ai-dynamo/dynamo/pull/10601)).
+
+  > **Migrate:** Update any configuration using the misspelled `decode_sacle_up_kv_rate` key to the correct `decode_scale_up_kv_rate`.
+
+<a id="v120"></a>
+
+<Accordion title="v1.2.0 (5 entries + carryover reminders)">
+
+**ACTION REQUIRED:** The following changes require updates to your code, configuration, or deployment manifests before upgrading.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **DGD/DGDR Promoted to `v1beta1` as the Served API** ([#9235](https://github.com/ai-dynamo/dynamo/pull/9235), [#9262](https://github.com/ai-dynamo/dynamo/pull/9262)): The `DynamoGraphDeployment`, `DynamoComponentDeployment`, and `DynamoGraphDeploymentRequest` APIs now serve `v1beta1`. The `v1alpha1` ↔ `v1beta1` round-trip conversion is maintained for backward compatibility, but all docs and examples have moved to `v1beta1`.
+
+  > **Migrate:** Update Helm values, Argo manifests, and any inline YAML to reference `v1beta1`. Existing `v1alpha1` resources continue to work via the conversion path during the transition; remove `v1alpha1` references at your next deploy.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Duration Config Fields Suffixed with Units** ([#9246](https://github.com/ai-dynamo/dynamo/pull/9246)): Configuration fields representing durations were renamed to make their units explicit (e.g., `*_ttl` → `*_ttl_secs`).
+
+  > **Migrate:** Audit your deployment YAMLs and CLI invocations for any duration field; the new suffix-bearing names are required. The previous unsuffixed names are no longer recognized.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Concurrent Radix Tree is the Default Approximate Router** ([#9219](https://github.com/ai-dynamo/dynamo/pull/9219), [#9007](https://github.com/ai-dynamo/dynamo/pull/9007)): The default approximate KV routing backend switched to the concurrent radix tree with anchor-aware branch sharding.
+
+  > **Migrate:** Update any custom router instrumentation that targeted the previous radix-tree internals. No action required for default deployments; routing semantics are equivalent.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Inter-Pod GPU Memory Service Sidecar Model** ([#7777](https://github.com/ai-dynamo/dynamo/pull/7777), [#8829](https://github.com/ai-dynamo/dynamo/pull/8829)): GMS moves to an inter-pod sidecar that multiple workers can share. The Operator gates GMS+Snapshot combinations via Helm config.
+
+  > **Migrate:** If you ran the v1.1.0 per-pod GMS deployment pattern, switch to the new shared-sidecar Helm values. The previous topology continues to work but is no longer the recommended path.
+
+<span className="dynref-badge dynref-badge--amber">Deprecated</span> **CUDA 12 Containers Discontinued in v1.3.0:** v1.2.0 is the last release to publish CUDA 12 container images. Starting with v1.3.0, Dynamo will ship CUDA 13 images only. In v1.2.0 the vLLM and SGLang containers ship both CUDA 12.9 and CUDA 13.0 variants, while TensorRT-LLM is already CUDA 13 only.
+
+  > **Migrate:** Move CUDA 12 deployments to the CUDA 13 container variants before upgrading to v1.3.0.
+
+<span className="dynref-badge dynref-badge--amber">Deprecated</span> The following warnings from v1.1.0 still apply. Migrate before they are removed:
+
+- `v1alpha1` DGDR API: now in active conversion to `v1beta1` (see above)
+- `enableGpuDiscovery` CRD field has no effect
+- `ComponentName` field on `ServiceReplicaStatus`: migrate to `ComponentNames`
+- Router CLI flags without the `--router-` prefix
+- vLLM `--is-prefill-worker` / `--is-decode-worker`: migrate to `--disaggregation-mode`
+- `--router-durable-kv-events`: migrate to the event-plane subscriber
+
+</Accordion>
+
+<a id="v110"></a>
+
+<Accordion title="v1.1.0 (8 entries + carryover reminders)">
+
+**ACTION REQUIRED:** The following changes require updates to your code, configuration, or deployment manifests before upgrading.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **`enable_nats` and `use_kv_events` Removed from `DistributedRuntime`** ([#7265](https://github.com/ai-dynamo/dynamo/pull/7265)): Both parameters are removed from `DistributedRuntime`, `create_runtime()`, and the `dynamo_worker()` decorator. NATS is now auto-detected from the event plane: enabled when the request plane is NATS or `NATS_SERVER` is configured.
+
+  > **Migrate:** Drop both arguments from your Python entry points and configure NATS via the `DYN_EVENT_PLANE` and `NATS_SERVER` environment variables instead.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Experimental `nvext.cache_control` Cache Pinning Removed** ([#7790](https://github.com/ai-dynamo/dynamo/pull/7790)): The experimental cache-pinning feature is removed: the `nvext.cache_control` request field, the `--enable-cache-control` flag, and the `DYN_ENABLE_CACHE_CONTROL` env var are all gone. SGLang upstream chose a different direction, so the v1.0.0 plumbing is being unwound. The Anthropic Messages parser still accepts `cache_control` blocks for protocol compatibility but no longer derives router-pin TTLs from them.
+
+  > **Migrate:** If you depended on cache pinning, track the v1.2.0 sticky-session / session-controller work. There is no drop-in replacement in v1.1.0.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Cargo-Built `dynamo-kv-indexer` Binary Removed** ([#7338](https://github.com/ai-dynamo/dynamo/pull/7338)): The Cargo-built `dynamo-kv-indexer` binary in `lib/kv-router/target/release/` is removed; the maturin-built binary shipped via the Python wheel is now the single source.
+
+  > **Migrate:** Update launchers and Dockerfiles to point at the wheel-installed `dynamo-kv-indexer` (on `PATH` after `pip install ai-dynamo`).
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **LLaVA-Specific EPD Path Removed; EPD Now Single-GPU** ([#6674](https://github.com/ai-dynamo/dynamo/pull/6674)): The LLaVA-specific multimodal EPD code path is removed, EPD is now constrained to single-GPU configurations, and the default multimodal example moved from `Llava-Mistral` to `Qwen/Qwen3-VL-2B-Instruct`.
+
+  > **Migrate:** Switch LLaVA workloads to the aggregated path or to a Qwen3-VL recipe.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Compressed Concurrent Tree Default** ([#7874](https://github.com/ai-dynamo/dynamo/pull/7874)): The KV router defaults to the compressed concurrent radix tree. Improves resource utilization for multi-threaded indexing; node-allocation semantics differ from the previous tree.
+
+  > **Migrate:** Update any custom instrumentation that targeted the old radix-tree internals. No action required for default deployments.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **MDC Checksum Scoped Per-WorkerSet** ([#7368](https://github.com/ai-dynamo/dynamo/pull/7368)): Model Discovery Card checksum validation moved from per-Model to per-WorkerSet. Different WorkerSets under the same Model can now carry different configuration without forcing workers to drain first.
+
+  > **Migrate:** If you relied on the v1.0.0 strict per-Model behavior, audit your WorkerSet configs before upgrading.
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **vLLM Auto-Enable KV Events Removed** ([#7591](https://github.com/ai-dynamo/dynamo/pull/7591)): The deprecated automatic KV-events config in vLLM is removed; the `DYN_VLLM_KV_EVENT_PORT` env var is also no longer supported.
+
+  > **Migrate:** Set `--kv-events-config` explicitly per the v1.0.0 migration note.
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **Unused `genai-perf` Pin Dropped** ([#8763](https://github.com/ai-dynamo/dynamo/pull/8763)): The unused `genai-perf==0.0.15` pin was removed from `container/deps/requirements.benchmark.txt`. It was not invoked anywhere in the repo.
+
+  > **Migrate:** No action required. `aiperf` is the supported in-container benchmarking tool.
+
+<span className="dynref-badge dynref-badge--amber">Deprecated</span> The following warnings from v1.0.0 still apply. Migrate before they are removed:
+
+- `v1alpha1` DGDR API: migrate to `v1beta1`
+- `enableGpuDiscovery` CRD field has no effect
+- `ComponentName` field on `ServiceReplicaStatus`: migrate to `ComponentNames`
+- Router CLI flags without the `--router-` prefix
+- vLLM `--is-prefill-worker`/`--is-decode-worker`: migrate to `--disaggregation-mode`
+- `--router-durable-kv-events`: migrate to the event-plane subscriber
+
+</Accordion>
+
+<a id="v100"></a>
+
+<Accordion title="v1.0.0 (41 entries)">
+
+**ACTION REQUIRED:** The following changes require updates to your code, configuration, or deployment manifests before upgrading.
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **KV Router Flags Renamed** ([#6361](https://github.com/ai-dynamo/dynamo/pull/6361)): All KV router CLI flags and env vars now use the `--router-`* / `DYN_ROUTER_`* prefix.
+
+| Old Flag / Env Var | New Flag / Env Var |
+| :---- | :---- |
+| `--kv-events` / `DYN_KV_EVENTS` | `--router-kv-events` / `DYN_ROUTER_USE_KV_EVENTS` |
+| `--kv-overlap-score-weight` / `DYN_KV_OVERLAP_SCORE_WEIGHT` | `--router-kv-overlap-score-weight` / `DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT` |
+| `--assume-kv-reuse` / `DYN_ASSUME_KV_REUSE` | `--router-assume-kv-reuse` / `DYN_ROUTER_ASSUME_KV_REUSE` |
+| `--durable-kv-events` / `DYN_DURABLE_KV_EVENTS` | `--router-durable-kv-events` / `DYN_ROUTER_DURABLE_KV_EVENTS` |
+| `--track-active-blocks` / `DYN_TRACK_ACTIVE_BLOCKS` | `--router-track-active-blocks` / `DYN_ROUTER_TRACK_ACTIVE_BLOCKS` |
+| `--track-output-blocks` | `--router-track-output-blocks` |
+| `--router-ttl` / `DYN_ROUTER_TTL` | `--router-ttl-secs` / `DYN_ROUTER_TTL_SECS` |
+
+**Migrate:** Update all CLI invocations, env vars, and deployment YAMLs to use the new names.
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **Disagg Flag Inverted** ([#6515](https://github.com/ai-dynamo/dynamo/pull/6515)): `--enforce-disagg` replaced by `--decode-fallback` with inverted semantics — disaggregated mode is now enforced by default.
+
+  **Migrate:** Replace `--enforce-disagg` with `--decode-fallback`. If you need fallback to aggregated mode, explicitly pass `--decode-fallback` or `DYN_DECODE_FALLBACK=true`. In the EPP plugin, update from `DYN_ENFORCE_DISAGG` to `DYN_DECODE_FALLBACK` with inverted boolean.
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **Migration Limit Moved to Frontend** ([#5918](https://github.com/ai-dynamo/dynamo/pull/5918)): The `--migration-limit` CLI flag has been removed from all backend workers (vLLM, SGLang, TRT-LLM) and is now set on the Frontend only.
+
+  **Migrate:** Remove `--migration-limit` from backend launch commands; pass it to the Frontend instead.
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **Connector Flag Replaced** ([#6450](https://github.com/ai-dynamo/dynamo/pull/6450)): The `--connector` flag is removed. Disaggregated prefill workers now require explicit `--kv-transfer-config` with a JSON value.
+
+  **Migrate:** Replace `--connector nixl` with `--kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'`. Update all deployment YAMLs and launch scripts accordingly.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **KV Events Now Opt-In** ([#6404](https://github.com/ai-dynamo/dynamo/pull/6404)): KV cache events are no longer auto-created when prefix caching is enabled. Users must explicitly opt in via `--kv-events-config`.
+
+  **Migrate:** Add `--kv-events-config '{"publisher":"zmq","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'` to worker launch commands. Replace `DYN_VLLM_KV_EVENT_PORT` env var with the CLI flag.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Local Indexer Now Default** ([#5941](https://github.com/ai-dynamo/dynamo/pull/5941), [#6073](https://github.com/ai-dynamo/dynamo/pull/6073)): Default event transport changed from JetStream to NATS Core/Event Plane with Local Indexer. The `--enable-local-indexer` flag is removed.
+
+  **Migrate:** If you relied on JetStream persistence, add `--durable-kv-events` on both frontend and all workers. Remove any `--enable-local-indexer` flags.
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **Omni Flags Prefixed** ([#6476](https://github.com/ai-dynamo/dynamo/pull/6476)): 14 diffusion/omni CLI flags renamed with `--omni-` prefix (e.g., `--enforce-eager` → `--omni-enforce-eager`).
+
+  **Migrate:** Update CLI invocations to use the `--omni-` prefixed names.
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **Multimodal Worker Flag Removed** ([#6060](https://github.com/ai-dynamo/dynamo/pull/6060)): `--multimodal-encode-prefill-worker` removed from vLLM backend.
+
+  **Migrate:** Use `--multimodal-encode-worker`, `--multimodal-worker`, or `--multimodal-decode-worker` instead.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Output Modalities Required** ([#6270](https://github.com/ai-dynamo/dynamo/pull/6270)): vLLM omni mode no longer auto-registers image endpoints; you must pass `--output-modalities image` explicitly.
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **Media URL Flags Unified** ([#6391](https://github.com/ai-dynamo/dynamo/pull/6391)): SGLang/TRT-LLM flags `--image-diffusion-fs-url`, `--video-generation-fs-url`, and `--output-dir` replaced by `--media-fs-url` and `--media-base-url`.
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **Discovery Backend Simplified** ([#6167](https://github.com/ai-dynamo/dynamo/pull/6167)): `DYN_DISCOVERY_BACKEND` now accepts `kubernetes`, `etcd`, `file`, `mem` directly. Remove `DYN_KV_STORE`; replace `--store-kv` with `--discovery-backend`.
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **Planner CLI Replaced by Config File** ([#6356](https://github.com/ai-dynamo/dynamo/pull/6356)): All individual Planner CLI flags removed in favor of `--config <path>` pointing to a JSON/YAML configuration file.
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **dynamo-run Removed** ([#6203](https://github.com/ai-dynamo/dynamo/pull/6203)): The `dynamo-run` CLI tool and all its flags have been removed. Migrate to the Python-based deployment approach.
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **Env Var Renames** ([#6358](https://github.com/ai-dynamo/dynamo/pull/6358), [#5882](https://github.com/ai-dynamo/dynamo/pull/5882)):
+
+| Old | New |
+| :---- | :---- |
+| `DYNAMO_FATBIN_PATH` | `DYN_FATBIN_PATH` |
+| `ENABLE_KVBM_RECORD` | `DYN_KVBM_ENABLE_RECORD` |
+| `SPLIT_ENCODE` | `DYN_SPLIT_ENCODE` |
+| `DYNAMO_BUSY_THRESHOLD` | `DYN_BUSY_THRESHOLD` |
+| `DYNAMO_`* (EPP vars) | `DYN_`* |
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **KVStats Metrics Removed** ([#5704](https://github.com/ai-dynamo/dynamo/pull/5704)): `dynamo_component_kvstats_`* metrics removed. Use `dynamo_frontend_inter_token_latency_seconds` for Decode autoscaling instead of `kvstats_gpu_cache_usage_percent`.
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **Router Metrics Namespace** ([#6227](https://github.com/ai-dynamo/dynamo/pull/6227)): `dynamo_frontend_worker_active_`* → `dynamo_router_worker_active_`*, `dynamo_component_router_*` → `dynamo_router_*`. New `router_id` label added to all Router metrics.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Frontend Request Counter Label** ([#5568](https://github.com/ai-dynamo/dynamo/pull/5568)): `dynamo_frontend_requests_total` now includes an `error_type` label. Update PromQL queries to account for the new label.
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **SGLang Metric Prefix** ([#5701](https://github.com/ai-dynamo/dynamo/pull/5701)): SGLang metrics now use the native `sglang:` prefix (colon) instead of `sglang_` (underscore).
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **etcd Subchart Disabled** ([#6329](https://github.com/ai-dynamo/dynamo/pull/6329)): Bundled etcd is now disabled by default. Set `global.etcd.install: true` if your deployment depends on it.
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **Webhook Key Removed** ([#6441](https://github.com/ai-dynamo/dynamo/pull/6441)): `webhook.enabled` removed from Helm values. Remove it from custom values files.
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **Helm Values Restructured for Snapshot** ([#5946](https://github.com/ai-dynamo/dynamo/pull/5946)): `storage.signalHostPath`, `daemonset.criu.`*, and `daemonset.containerRuntimeSocket` replaced by `config.checkpoint.`* and `config.agent.*` hierarchy.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **DGDR Planner Schema** ([#6463](https://github.com/ai-dynamo/dynamo/pull/6463)): `FeaturesSpec.planner` in DGDR CRD changed from a typed `PlannerSpec` to the PlannerConfig JSON schema. Review DGDR manifests that set `features.planner`.
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **EPP Discovery Timeout** ([#5770](https://github.com/ai-dynamo/dynamo/pull/5770)): `DYN_DISCOVERY_TIMEOUT_SEC` no longer works. Use StartupProbe `failureThreshold` × `periodSeconds` instead.
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **Component/Namespace/CancellationToken Removed** ([#6403](https://github.com/ai-dynamo/dynamo/pull/6403), [#6386](https://github.com/ai-dynamo/dynamo/pull/6386), [#6405](https://github.com/ai-dynamo/dynamo/pull/6405)): `Component`, `Namespace`, and `CancellationToken` classes removed from the Python API.
+
+  **Migrate:** Replace `runtime.namespace('ns').component('comp').endpoint('ep')` with `runtime.endpoint('ns.comp.ep')`. Replace `token.cancel()` with `HttpService.shutdown()`. Pass `DistributedRuntime` directly to service `.run()` methods.
+
+<span className="dynref-badge dynref-badge--red">Removed</span>
+
+| Old | New | PR |
+| :---- | :---- | :---- |
+| `client2(router_mode)` | `client(router_mode=router_mode)` | [#6158](https://github.com/ai-dynamo/dynamo/pull/6158) |
+| `register_llm` / `unregister_llm` / `fetch_llm` | `register_model` / `unregister_model` / `fetch_model` | [#6268](https://github.com/ai-dynamo/dynamo/pull/6268) |
+| `ModelDeploymentCard` in `dynamo.runtime` | Moved to `dynamo._internal` | [#6378](https://github.com/ai-dynamo/dynamo/pull/6378) |
+| `EncoderCacheManager` | `MultimodalEmbeddingCacheManager` in `dynamo.common.memory` | [#5962](https://github.com/ai-dynamo/dynamo/pull/5962) |
+| `KvPushRouter` / `ZmqKvEventPublisherConfig` | `KvRouter`; pass `zmq_endpoint`/`zmq_topic` directly to `KvEventPublisher()` | [#6238](https://github.com/ai-dynamo/dynamo/pull/6238) |
+| `ZmqKvEventPublisher` | `KvEventPublisher(component, zmq_config=config)` | [#6016](https://github.com/ai-dynamo/dynamo/pull/6016) |
+| `DYNAMO_ARGS` from `dynamo.sglang.args` | `DynamoSGLangArgGroup` from `dynamo.sglang.backend_args` | [#6280](https://github.com/ai-dynamo/dynamo/pull/6280) |
+| `Config` from `dynamo.trtllm.utils.trtllm_utils` / `create_worker(...)` | `Config` in `dynamo.trtllm.args` / `create_llm_worker(...)` | [#6297](https://github.com/ai-dynamo/dynamo/pull/6297) |
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Frontend Config Refactored** ([#6201](https://github.com/ai-dynamo/dynamo/pull/6201)): Frontend CLI now rejects unknown args unless `--chat-processor vllm` is set.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **ModelManager Checksum Enforcement** ([#6054](https://github.com/ai-dynamo/dynamo/pull/6054)): Mismatched MDC checksums across WorkerSets now raise `ChecksumMismatch` instead of being silently accepted.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Tool Call Parser Separation** ([#5849](https://github.com/ai-dynamo/dynamo/pull/5849)): `--tool-call-parser` alone no longer uses Dynamo's parser. Use `--dyn-tool-call-parser` for Dynamo's pipeline.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Custom Backend Metrics Removed** ([#5893](https://github.com/ai-dynamo/dynamo/pull/5893)): `custom_backend_metrics_endpoint` and `custom_backend_metrics_polling_interval` removed from `LocalModel` and frontend config.
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **Deprecated Component Removals:** Removed dynamo-run and mistral-rs engine (#6203), standalone FastAPI Router (#5845), media-nixl feature (#5940),  and llava-hf recipes (#6961).
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Local Indexers On By Default** ([#5941](https://github.com/ai-dynamo/dynamo/pull/5941)): KV event transport now defaults to NATS Core/Event Plane with Local Indexer instead of JetStream. Pass `--durable-kv-events` on both frontend and workers to restore JetStream behavior.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **GPU Memory Utilization** ([#5755](https://github.com/ai-dynamo/dynamo/pull/5755)): `gpu-memory-utilization` adjusted for vLLM runtime to improve out-of-the-box performance.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Operator Env Vars Documented** ([#6548](https://github.com/ai-dynamo/dynamo/pull/6548)): All environment variables injected by the Operator are now documented.
+
+<span className="dynref-badge dynref-badge--amber">Deprecated</span> **`dynamo-crds` Helm Chart:** The standalone `dynamo-crds` Helm chart is deprecated. CRDs are now embedded in the Dynamo Operator image and applied automatically via an init container on the operator Deployment ([#6466](https://github.com/ai-dynamo/dynamo/pull/6466), [#6780](https://github.com/ai-dynamo/dynamo/pull/6780)). Users should uninstall the `dynamo-crds` Helm release; the operator manages CRD lifecycle directly.
+
+The following features still work but will be removed in a future release with most targeted to Dynamo v1.1.0.
+
+<span className="dynref-badge dynref-badge--amber">Deprecated</span> **`v1alpha1` DGDR API** ([#6352](https://github.com/ai-dynamo/dynamo/pull/6352)): The `v1alpha1` DynamoGraphDeploymentRequest API will be removed in a future release. Migrate to `v1beta1`; automatic conversion maintains backward compatibility during the transition.
+
+<span className="dynref-badge dynref-badge--amber">Deprecated</span> **enableGpuDiscovery CRD Field** ([#6224](https://github.com/ai-dynamo/dynamo/pull/6224)): The `enableGpuDiscovery` CRD field no longer has any effect and will be removed in a future release. GPU discovery now runs automatically.
+
+<span className="dynref-badge dynref-badge--amber">Deprecated</span> **ComponentName Field** ([#6110](https://github.com/ai-dynamo/dynamo/pull/6110)): The `ComponentName` field on `ServiceReplicaStatus` will be removed in a future release. Migrate to the new `ComponentNames` list field.
+
+<span className="dynref-badge dynref-badge--amber">Deprecated</span> **Router Legacy Flag Names** ([#6346](https://github.com/ai-dynamo/dynamo/pull/6346)): Router CLI flags without the `--router-` prefix (e.g., `--block-size`, `--kv-events`) will be removed in a future release. Migrate to the prefixed versions (`--router-block-size`, `--router-kv-events`).
+
+<span className="dynref-badge dynref-badge--amber">Deprecated</span> **vLLM KV Auto-Enable** ([#6404](https://github.com/ai-dynamo/dynamo/pull/6404)): vLLM's auto-enabling of KV events when prefix caching is active will be removed in a future release. Use `--kv-events-config` explicitly instead.
+
+<span className="dynref-badge dynref-badge--amber">Deprecated</span> **Prefill/Decode Worker Flags** ([#6483](https://github.com/ai-dynamo/dynamo/pull/6483)): The `--is-prefill-worker` and `--is-decode-worker` boolean flags for the vLLM backend will be removed in a future release. Migrate to `--disaggregation-mode`.
+
+<span className="dynref-badge dynref-badge--amber">Deprecated</span> **Durable KV Events** ([#6477](https://github.com/ai-dynamo/dynamo/pull/6477)): The `--router-durable-kv-events` CLI flag will be removed in a future release. Migrate to the event-plane subscriber (local_indexer mode).
+
+</Accordion>

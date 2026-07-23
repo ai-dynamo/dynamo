@@ -1,0 +1,497 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Dynamo v1.1.0
+subtitle: Release notes for Dynamo v1.1.0 (GA May 1, 2026), including patch release v1.1.1
+---
+
+import { ReferenceStyles } from "@/components/ReferenceStyles";
+import { ReleaseHeader } from "@/components/ReleaseHeader";
+import { ReleaseSummaryCards } from "@/components/ReleaseSummaryCards";
+
+<ReferenceStyles />
+
+<ReleaseHeader
+  version="v1.1.0"
+  prs={896}
+  contributors={113}
+  firstTimers={12}
+  breakingCount={8}
+  knownIssuesCount={20}
+/>
+
+Dynamo v1.1.0 is the 14th feature release of the open-source distributed inference platform. It makes the standalone KV indexer recoverable across node failures, brings the Anthropic Messages API to production for Claude Code, lands SGLang multimodal disaggregated serving, and turns the Mocker into a unified performance-modeling and offline-replay engine.
+
+<Note>
+Breaking changes and deprecations for this release are tracked on the [Deprecations](../deprecations.mdx#v110) ledger; known issues on the [Known Issues](../known-issues.mdx#v110) page. Key dependency pins live on [Compatibility](../compatibility.mdx); shipped artifacts on [Release Artifacts](../release-artifacts.mdx).
+</Note>
+
+## Highlights
+
+<ReleaseSummaryCards
+  cards={[
+    {
+      area: "Router",
+      title: "Resilient KV Routing at Scale",
+      body: "The standalone KV indexer is now recoverable. New replicas bootstrap their radix tree from a healthy peer's `/dump` endpoint before serving. Inline ZMQ gap detection replays dropped messages from the engine ring buffer. Multi-model and multi-tenant isolation lets shared clusters route to the correct cache. Ships as a maturin-built `dynamo-kv-indexer` on `PATH` with Prometheus metrics.",
+      anchor: "scheduling",
+    },
+    {
+      area: "Frontend",
+      title: "Anthropic Messages API for Claude Code",
+      body: "`/v1/messages` is production-grade for Claude Code-style harnesses. `cache_control` is honored at top-level, per-block, and system-block-array forms. Thinking-block pass-through, system-prompt preamble stripping, accurate streaming `input_tokens`, and Anthropic `image` → OpenAI `image_url` conversion cover end-to-end vision and reasoning. `/v1/models` exposes `context_window`; streaming double-parsing and `reasoning_content` round-tripping are fixed.",
+      anchor: "frontend-agents",
+    },
+    {
+      area: "Mocker",
+      title: "Performance Modeling & Offline Replay",
+      body: "The Mocker becomes a performance-modeling and offline-replay engine. SGLang engine simulation, AIConfigurator-backed latency prediction with MoE parallelism, `--decode-speedup-ratio` for speculative decoding, and offline agg/disagg replay over Mooncake-style traces all land. Forward-pass metrics flow onto the event plane, enabling planner-in-the-loop replay. The Planner consolidates onto a single FPM-based regression model that serves both throughput and load scaling.",
+      anchor: "performance-modeling-replay",
+    },
+    {
+      area: "Multimodal",
+      title: "Multimodal Embedding Cache & Diffusion",
+      body: "SGLang multimodal disaggregated serving lands with `NixlEmbeddingSender`/`NixlEmbeddingReceiver`, an embedding cache, and device-type-and-load EPD routing. vLLM E/P/D worker init moves to a factory; embedding loading is abstracted into `ImageLoader`. Diffusion adds image-to-video on vLLM Omni, image-to-image on SGLang, audio/TTS, video input for SGLang aggregated, audio-in-video, and Flux benchmarking. The v1.0.0 `PersistentConnector` monkey-patch is retired for a proper `nixl_connector` integration.",
+      anchor: "multimodal-diffusion",
+    },
+  ]}
+/>
+
+## Features & Improvements
+
+### Multimodal & Diffusion
+
+#### Embedding Cache & E/P/D
+
+- **SGLang Embedding Cache:** Added an SGLang embedding cache for cross-request reuse ([#7674](https://github.com/ai-dynamo/dynamo/pull/7674)).
+- **NIXL WRITE for Embedding Transfer:** Added a NIXL WRITE initiation path for cross-node embedding transfer ([#6651](https://github.com/ai-dynamo/dynamo/pull/6651)).
+- **SGLang Embedding Transfer:** Added `NixlEmbeddingSender`/`NixlEmbeddingReceiver` in the SGLang backend for cross-worker multimodal embedding transfer ([#7153](https://github.com/ai-dynamo/dynamo/pull/7153)) and NVTX markers for SGLang EPD profiling ([#7079](https://github.com/ai-dynamo/dynamo/pull/7079)).
+- **vLLM Connector Modernization:** Replaced the v1.0.0 vLLM `PersistentConnector` monkey-patch with a proper `nixl_connector` integration ([#6913](https://github.com/ai-dynamo/dynamo/pull/6913)) and retired the aggregated-embedding-cache patches ([#7799](https://github.com/ai-dynamo/dynamo/pull/7799)).
+- **vLLM E/P/D Refactor:** Refactored vLLM E/P/D worker init into a factory and abstracted embedding loading into `ImageLoader` for cleaner per-worker bootstrap and pluggable image sources ([#7367](https://github.com/ai-dynamo/dynamo/pull/7367), [#7482](https://github.com/ai-dynamo/dynamo/pull/7482), [#7507](https://github.com/ai-dynamo/dynamo/pull/7507)).
+- **Device-Aware EPD Routing:** Added device-type-and-load EPD routing to balance multimodal requests across heterogeneous EPD pools ([#7215](https://github.com/ai-dynamo/dynamo/pull/7215)).
+- **Embedding Cache Hit-Rate Metric:** Exposed multimodal embedding cache hit-rate via Prometheus for tuning cache sizing in production ([#8031](https://github.com/ai-dynamo/dynamo/pull/8031)).
+
+#### Model Coverage
+
+- **SGLang Multi-Image Requests:** Added multi-image-per-request support on the SGLang backend ([#6068](https://github.com/ai-dynamo/dynamo/pull/6068)).
+- **Qwen3-VL Multimodal Expansion:** Expanded Qwen3-VL multimodal support across vLLM to cover the broader Qwen3-VL model family ([#6163](https://github.com/ai-dynamo/dynamo/pull/6163)).
+- **Qwen VL Grid for P/D Disagg:** Compute Qwen VL `grid_thw` from PIL images for P/D disaggregation ([#7885](https://github.com/ai-dynamo/dynamo/pull/7885)).
+
+#### Diffusion & Video
+
+- **Image-to-Video on vLLM Omni:** Added image-to-video ([#6530](https://github.com/ai-dynamo/dynamo/pull/6530)), a vLLM Omni CLI ([#6788](https://github.com/ai-dynamo/dynamo/pull/6788)), a disagg path ([#7409](https://github.com/ai-dynamo/dynamo/pull/7409)), and end-to-end tests ([#7454](https://github.com/ai-dynamo/dynamo/pull/7454)).
+- **vLLM Video Backend Promotion:** Promoted vLLM video support from example to backend ([#7663](https://github.com/ai-dynamo/dynamo/pull/7663)).
+- **SGLang Diffusion:** Added image-to-image generation ([#7870](https://github.com/ai-dynamo/dynamo/pull/7870)) and video input for SGLang aggregated serving ([#7941](https://github.com/ai-dynamo/dynamo/pull/7941)).
+- **Audio/TTS on vLLM Omni:** Initial audio/TTS pipeline on vLLM Omni ([#7495](https://github.com/ai-dynamo/dynamo/pull/7495)).
+- **Audio-in-Video Pipelines:** Added audio-in-video pipeline support ([#8150](https://github.com/ai-dynamo/dynamo/pull/8150)).
+- **TRT-LLM Video Diffusion API Alignment:** Aligned the TRT-LLM video diffusion pipeline with 1.3.0rc9 API changes ([#7529](https://github.com/ai-dynamo/dynamo/pull/7529)).
+- **FastVideo Example:** Shipped a FastVideo example with a guide and sidebar reorganization ([#7283](https://github.com/ai-dynamo/dynamo/pull/7283)).
+- **XPU Aggregated-Video Example:** Added an XPU aggregated-video example ([#7855](https://github.com/ai-dynamo/dynamo/pull/7855)).
+- **Flux Benchmarking:** Added Flux benchmarking to track image-diffusion throughput across releases ([#8083](https://github.com/ai-dynamo/dynamo/pull/8083)).
+- **GPUDirect for Intel XPU:** Added GPUDirect support for Intel XPU ([#5852](https://github.com/ai-dynamo/dynamo/pull/5852)) and enabled the Intel XPU Dockerfile for dev and runtime targets ([#6109](https://github.com/ai-dynamo/dynamo/pull/6109), [#7134](https://github.com/ai-dynamo/dynamo/pull/7134)).
+
+#### Plumbing & Observability
+
+- **Multimodal URL Forwarding:** Forward multimodal URLs from Python preprocessors to backend workers to keep media decoding on the worker side ([#7837](https://github.com/ai-dynamo/dynamo/pull/7837)), and strip inline base64 from TCP transport in frontend decoding to cut request payload sizes ([#7895](https://github.com/ai-dynamo/dynamo/pull/7895)).
+- **Omni Post-Processing Formatters:** Moved Omni post-processing to dedicated formatters and processors for cleaner separation between engine output and response shaping ([#7746](https://github.com/ai-dynamo/dynamo/pull/7746)).
+- **OTEL Multimodal Trace Context:** Propagated OpenTelemetry trace context across E/P/D multimodal workers ([#7239](https://github.com/ai-dynamo/dynamo/pull/7239)) and TRT-LLM E/P/D workers ([#7592](https://github.com/ai-dynamo/dynamo/pull/7592)).
+- **Multimodal Sweep Tooling:** Added a `request_rate`-based multimodal sweep for throughput-vs-latency curves ([#7363](https://github.com/ai-dynamo/dynamo/pull/7363)), seed support to the multimodal sweep and JSONL generator for reproducible runs ([#7995](https://github.com/ai-dynamo/dynamo/pull/7995)), and a generalized multimodal model coverage test framework so new multimodal models inherit a baseline test suite ([#7975](https://github.com/ai-dynamo/dynamo/pull/7975)).
+
+### Frontend & Agents
+
+#### Anthropic Messages API
+
+- **Anthropic `cache_control` Coverage:** Full `cache_control` support at top-level, per-block, and system-block-array forms for prompt-cache parity with Anthropic Messages API ([#6629](https://github.com/ai-dynamo/dynamo/pull/6629)).
+- **Anthropic Thinking Blocks:** Added thinking-block support and system-prompt preamble stripping for `/v1/messages` ([#7137](https://github.com/ai-dynamo/dynamo/pull/7137)).
+- **Anthropic Vision Input:** Convert Anthropic `image` blocks to OpenAI `image_url` parts with data URIs so multimodal Anthropic requests reach OpenAI-shaped backends ([#7256](https://github.com/ai-dynamo/dynamo/pull/7256)).
+- **Anthropic Streaming Tokens & `/v1/models`:** Accurate streaming `input_tokens`, `/v1/models` `context_window`, and the OpenAI model-retrieve endpoint so Claude Code and other clients see correct token counts and model metadata ([#7234](https://github.com/ai-dynamo/dynamo/pull/7234)).
+- **Anthropic Streaming Fix:** Fixed streaming double-parsing and `reasoning_content` round-tripping for clean reasoning streams to Claude Code ([#7358](https://github.com/ai-dynamo/dynamo/pull/7358)).
+
+#### Tokenizers
+
+- **`fastokens` BPE Backend:** Integrated `fastokens` as a hybrid BPE encoder selectable via `DYN_TOKENIZER=fastokens` for faster BPE tokenization on long prompts ([#7387](https://github.com/ai-dynamo/dynamo/pull/7387)), with benchmarks and docs ([#7388](https://github.com/ai-dynamo/dynamo/pull/7388)).
+- **`chat_template.json` Support:** Added support for `chat_template.json` as a prompt-formatter artifact so models that ship a chat template alongside the tokenizer load correctly ([#7785](https://github.com/ai-dynamo/dynamo/pull/7785)), and for passing a local tokenizer path for offline and air-gapped deployments ([#8128](https://github.com/ai-dynamo/dynamo/pull/8128)).
+- **Tokenizer Kind Enum:** Converted the tokenizer kind to a strongly typed enum to catch invalid tokenizer kinds at parse time ([#8022](https://github.com/ai-dynamo/dynamo/pull/8022)).
+- **Kimi K2.5 Tokenizer Fixes:** Resolved Kimi K2.5 tiktoken multi-byte sequence handling and reserved-token fallback naming so K2.5 prompts no longer panic on multi-byte boundaries ([#6996](https://github.com/ai-dynamo/dynamo/pull/6996), [#7886](https://github.com/ai-dynamo/dynamo/pull/7886)).
+- **DeepSeek V3 BPE Reuse:** Allowed DeepSeek V3 architectures to reuse Kimi's BPE pattern to enable DeepSeek V3 tokenization without a separate code path ([#6653](https://github.com/ai-dynamo/dynamo/pull/6653)).
+- **GLM-5 Tokenizer Loading:** Fixed GLM-5 custom tokenizer loading ([#8079](https://github.com/ai-dynamo/dynamo/pull/8079)).
+- **Qwen3.5 `eos_token_ids`:** Fixed `eos_token_ids` handling for Qwen3.5 ([#8091](https://github.com/ai-dynamo/dynamo/pull/8091)).
+- **Null-Byte Prompt Rejection:** Stripped null bytes before tokenization to fix prompt-rejection divergence between Rust and Python tokenizers ([#7694](https://github.com/ai-dynamo/dynamo/pull/7694)).
+- **Generic Tokenizer Manager Passthrough:** Added a generic `tokenizer_manager` passthrough route for RL training and other off-path tokenizer consumers ([#6836](https://github.com/ai-dynamo/dynamo/pull/6836)).
+
+#### Tool Calling & Reasoning
+
+- **Structured Streaming SSE:** Added structured streaming SSE events for tool calls and reasoning content ([#7114](https://github.com/ai-dynamo/dynamo/pull/7114)).
+- **Reasoning + Tool Mid-Chunk:** Preserved reasoning content when a tool call starts mid-chunk so streaming clients see both segments ([#6902](https://github.com/ai-dynamo/dynamo/pull/6902)).
+- **`tool_choice=required` Routing:** Routed `tool_choice=required` through the format-specific parser path so required tool calls honor the model's parser instead of the default ([#7589](https://github.com/ai-dynamo/dynamo/pull/7589)).
+- **Tool-Call Speculative Decoding Fix:** Fixed tool-call loss under speculative decoding ([#7768](https://github.com/ai-dynamo/dynamo/pull/7768)).
+- **LoRA Parser Inheritance:** Inherited tool-call and reasoning parsers when registering LoRA models so LoRA-tuned variants reuse the base model's tool/reasoning parsers ([#7559](https://github.com/ai-dynamo/dynamo/pull/7559)).
+- **Dict-Format Tool Args:** Accepted dict-format tool-call arguments in `async-openai` for compatibility with clients that send tool args as objects rather than JSON strings ([#7772](https://github.com/ai-dynamo/dynamo/pull/7772)).
+- **Qwen3Coder `anyOf`/`oneOf`:** Handled `anyOf`/`oneOf` parameter schemas in the Qwen3Coder tool parser ([#7847](https://github.com/ai-dynamo/dynamo/pull/7847)).
+- **Tool Parser Log Quieting:** Downgraded noisy tool-parser INFO logs to DEBUG to reduce log volume in production frontends ([#7573](https://github.com/ai-dynamo/dynamo/pull/7573)).
+
+#### Backend Options
+
+- **SGLang Guided Decoding:** Added SGLang guided-decoding support ([#6620](https://github.com/ai-dynamo/dynamo/pull/6620)).
+- **vLLM Chat Processor Flags:** Allowed passing vLLM chat processor-specific flags through the frontend so vLLM-specific options don't have to be configured separately ([#7896](https://github.com/ai-dynamo/dynamo/pull/7896)).
+
+#### Observability & Lifecycle
+
+- **Request Lifecycle Logging:** Added end-to-end request-lifecycle logging and metrics capture for end-to-end observability of request paths ([#7840](https://github.com/ai-dynamo/dynamo/pull/7840)).
+- **Request Rejection Metrics:** Added request rejection metrics ([#7644](https://github.com/ai-dynamo/dynamo/pull/7644)) and frontend/runtime request cancellation metrics ([#7493](https://github.com/ai-dynamo/dynamo/pull/7493)) to surface client-side cancellations and admission rejections in dashboards.
+- **Unified `on_response` and Request ID:** Unified `on_response`, renamed `request_id` fields, and deprecated the `x-dynamo-request-id` header for a single canonical request identity across the request plane ([#7834](https://github.com/ai-dynamo/dynamo/pull/7834)).
+
+### Kubernetes Deployment
+
+#### Operator Self-Sufficiency
+
+- **CRD Apply via Init Container:** Moved CRD apply from a Helm hook Job into an init container on the operator Deployment so CRDs reconcile on every operator restart instead of only at install time ([#6780](https://github.com/ai-dynamo/dynamo/pull/6780)).
+- **Webhook Cert Management in Operator:** Moved webhook certificate management and CA injection from Helm hooks into the operator for self-rotating certs without Helm post-install jobs ([#6839](https://github.com/ai-dynamo/dynamo/pull/6839)).
+- **MPI SSH Key in Reconciliation:** Moved MPI SSH key generation from a Helm hook Job into operator reconciliation so multinode workers get keys without a separate install hook ([#6940](https://github.com/ai-dynamo/dynamo/pull/6940)).
+- **`metrics-reader` Cleanup:** Removed the leftover `metrics-reader` ClusterRole to drop a stale RBAC binding ([#7107](https://github.com/ai-dynamo/dynamo/pull/7107)).
+- **Operator Helm `env` Support:** Added `env` support on the operator Helm chart for image-side configuration ([#7081](https://github.com/ai-dynamo/dynamo/pull/7081)).
+
+#### GPU Memory Service & Failover
+
+- **GMS Failover API:** Operator `failover` API runs an active/standby pair sharing GPUs and the GMS sidecar so the standby can take over via flock when the active engine fails ([#8157](https://github.com/ai-dynamo/dynamo/pull/8157)).
+- **Operator-Managed GMS Checkpoint/Restore:** Added operator-managed GMS checkpoint/restore with a shared runtime helper that keeps the snapshot layer GMS-unaware ([#8153](https://github.com/ai-dynamo/dynamo/pull/8153), [#8194](https://github.com/ai-dynamo/dynamo/pull/8194)).
+- **GMS in Snapshot Subsystem:** Wired GMS into the snapshot subsystem to drive memory release and restore through the snapshot lifecycle ([#7026](https://github.com/ai-dynamo/dynamo/pull/7026)).
+- **TRT-LLM Sleep/Wake with GMS:** Integrated TRT-LLM sleep/wake with GMS so TRT-LLM workers can release and reclaim GPU memory under GMS control ([#7575](https://github.com/ai-dynamo/dynamo/pull/7575)).
+- **Single-Handle Allocation:** Exported a single shareable handle per allocation and reused it for later export RPCs to cut allocation overhead in GMS sidecars ([#8108](https://github.com/ai-dynamo/dynamo/pull/8108)).
+
+#### Dynamo Snapshot
+
+- **Renamed from `chrek`:** Renamed Dynamo Snapshot from `chrek` as part of the v1.1.0 productization ([#7028](https://github.com/ai-dynamo/dynamo/pull/7028)).
+- **x86_64-Only with Backend Docs:** Restricted to x86_64 with explicit backend-support docs to set clear platform expectations ([#7031](https://github.com/ai-dynamo/dynamo/pull/7031)).
+- **Manifest-Based `snapshotctl`:** Introduced a manifest-based `snapshotctl` flow with shared workload builders for repeatable declarative snapshot/restore operations ([#7671](https://github.com/ai-dynamo/dynamo/pull/7671)) and watch-based waits ([#8024](https://github.com/ai-dynamo/dynamo/pull/8024)).
+- **File-Sentinel IPC Contract:** Replaced the PID-1 `SIGUSR1`/`SIGCONT` contract with file sentinels for safer container-PID-1 coordination ([#8431](https://github.com/ai-dynamo/dynamo/pull/8431), cherry-pick of [#8403](https://github.com/ai-dynamo/dynamo/pull/8403)).
+- **CUDA Namespace PID Persistence:** Persisted CUDA namespace PIDs in the manifest so restores can rebuild CUDA namespaces correctly ([#7539](https://github.com/ai-dynamo/dynamo/pull/7539)).
+- **DRA GPU UUID Resolution:** Resolved DRA GPU UUIDs from Kubernetes claims so checkpoints capture the GPU identity used at runtime ([#8425](https://github.com/ai-dynamo/dynamo/pull/8425)).
+- **Versioned Snapshot Artifacts:** Versioned snapshot artifacts on readable checkpoints for forward-compatible snapshot upgrades ([#7533](https://github.com/ai-dynamo/dynamo/pull/7533)).
+- **Tighter Operator Boundary:** Tightened the operator protocol boundary to keep operator and runtime concerns cleanly separated ([#8018](https://github.com/ai-dynamo/dynamo/pull/8018)).
+- **CRIU `criu-dev` Default:** Defaulted CRIU builds to upstream `criu-dev` to track the upstream branch we depend on ([#7744](https://github.com/ai-dynamo/dynamo/pull/7744)).
+- **Checkpoint/Restore Timing:** Added checkpoint and restore timing summaries for visibility into snapshot performance ([#7949](https://github.com/ai-dynamo/dynamo/pull/7949)).
+- **Snapshot CI Build:** Added a snapshot CI build to keep the subsystem green pre-merge ([#8159](https://github.com/ai-dynamo/dynamo/pull/8159)).
+
+#### DGD/DGDR Lifecycle
+
+- **MDC Checksum Per-WorkerSet:** Scoped Model Discovery Card checksum validation from per-Model to per-WorkerSet so different WorkerSets under the same Model can carry different configuration without draining workers first ([#7368](https://github.com/ai-dynamo/dynamo/pull/7368)).
+- **Foreground Cascade-Delete Stability:** Prevented operator thrashing under foreground cascading deletion of DGDs ([#8207](https://github.com/ai-dynamo/dynamo/pull/8207)).
+- **No Orphaned Worker DCDs:** Prevented orphaned old worker DCDs after a rolling update ([#7939](https://github.com/ai-dynamo/dynamo/pull/7939)).
+- **DGDR ConfigMap Owner Refs:** Added Kubernetes owner references to DGDR-created ConfigMaps so they cascade-delete with their parent ([#7782](https://github.com/ai-dynamo/dynamo/pull/7782)).
+- **Unique DGD Names per DGDR:** Used unique DGD names following the DGDR to avoid collisions across rolling DGDRs ([#7778](https://github.com/ai-dynamo/dynamo/pull/7778)).
+- **DNS-1035 Compliance:** Sanitized dots in DGD names for DNS-1035 compliance ([#7032](https://github.com/ai-dynamo/dynamo/pull/7032)).
+- **`model_name` Case Normalization:** Normalized `model_name` case in KubernetesConnector comparisons so case-mismatched DGDs no longer cause spurious reconciliation diffs ([#8401](https://github.com/ai-dynamo/dynamo/pull/8401), cherry-pick of [#8384](https://github.com/ai-dynamo/dynamo/pull/8384)).
+- **Spec-Level Annotation/Label Propagation:** Propagated DGD spec-level annotations and labels to child resources so cluster-level metadata reaches every child ([#7326](https://github.com/ai-dynamo/dynamo/pull/7326)).
+- **`SyncResource` Spec-Less Handling:** Handled spec-less resources in `SyncResource` to keep sync stable across resource types that omit `spec` ([#7953](https://github.com/ai-dynamo/dynamo/pull/7953)).
+- **Webhook SA Allow-List:** Replaced hardcoded SA suffix matching with a config-driven allow-list in the DGD-replicas webhook so cluster admins can authorize new ServiceAccount patterns without a code change ([#7682](https://github.com/ai-dynamo/dynamo/pull/7682)).
+- **`wait-for-leader` ConfigMap:** Used a ConfigMap for the vLLM multinode `wait-for-leader` script so operators can patch the script without rebuilding the image ([#7954](https://github.com/ai-dynamo/dynamo/pull/7954)).
+- **GPU Resource Requests Recognition:** Recognized GPU resources in `requests` rather than only `limits` for compatibility with schedulers that set GPU `requests` ([#8005](https://github.com/ai-dynamo/dynamo/pull/8005)).
+
+#### Inference Gateway (GAIE)
+
+- **EPP Worker Discovery Mode:** Enabled EPP worker discovery mode for the Gateway API Inference Endpoint so the Endpoint Picker can locate Dynamo workers via the GAIE API ([#6592](https://github.com/ai-dynamo/dynamo/pull/6592)).
+- **Data-Parallel Routing through GAIE:** Enabled data-parallel routing through GAIE so DP-sharded backends are reachable behind the gateway ([#7741](https://github.com/ai-dynamo/dynamo/pull/7741)).
+- **EPP Prefill Race Fix:** Fixed a race condition in EPP prefill ([#7530](https://github.com/ai-dynamo/dynamo/pull/7530)).
+- **GAIE Test Coverage:** Added GAIE unit and e2e integration tests ([#7257](https://github.com/ai-dynamo/dynamo/pull/7257)) plus a nightly integration test ([#7458](https://github.com/ai-dynamo/dynamo/pull/7458)) to lock the gateway integration in CI.
+- **vCluster in Post-Merge GAIE:** Supported vCluster in post-merge GAIE testing for isolated multi-tenant test runs ([#7743](https://github.com/ai-dynamo/dynamo/pull/7743)).
+
+### Scheduling
+
+#### KV Router
+
+- **Maturin-Built `dynamo-kv-indexer`:** Packaged the indexer as a maturin-built binary with a Python launcher for a standalone, pip-installable indexer ([#7194](https://github.com/ai-dynamo/dynamo/pull/7194), [#7338](https://github.com/ai-dynamo/dynamo/pull/7338), [#7395](https://github.com/ai-dynamo/dynamo/pull/7395)).
+- **Standalone KV Indexer Bootstrap:** Added P2P recovery so a new or restarted replica bootstraps its radix-tree state from a healthy peer's `/dump` endpoint before serving queries ([#6934](https://github.com/ai-dynamo/dynamo/pull/6934), [#7596](https://github.com/ai-dynamo/dynamo/pull/7596)).
+- **Inline ZMQ Gap Detection & Replay:** Recovered dropped messages from the engine's ring buffer via inline gap detection and replay ([#7209](https://github.com/ai-dynamo/dynamo/pull/7209)).
+- **Multi-Model / Multi-Tenant Isolation:** Added multi-model and multi-tenant isolation in the standalone indexer so a single indexer can serve multiple models without cross-tenant cache reuse ([#6830](https://github.com/ai-dynamo/dynamo/pull/6830)).
+- **Discovery-Based Worker Management:** Runtime integration with discovery-based worker management and a `Remote` indexer variant so the router learns workers via discovery instead of static config ([#7295](https://github.com/ai-dynamo/dynamo/pull/7295), [#7973](https://github.com/ai-dynamo/dynamo/pull/7973)).
+- **Indexer Metrics & Health:** Exposed Prometheus metrics and `/health` endpoints on the standalone indexer for production observability and load-balancer probes ([#7339](https://github.com/ai-dynamo/dynamo/pull/7339)).
+- **Monolithic Indexer Split:** Split the monolithic indexer into smaller crates for cleaner ownership and faster compile times ([#6870](https://github.com/ai-dynamo/dynamo/pull/6870), [#7871](https://github.com/ai-dynamo/dynamo/pull/7871)).
+- **Power-of-Two-Choices Router:** Added a power-of-two-choices router mode for low-overhead load balancing under heavy fan-out ([#7614](https://github.com/ai-dynamo/dynamo/pull/7614)).
+- **Pluggable Router Queue Policy:** Added a pluggable scheduling policy for the router queue so deployments can swap FIFO for fairness or priority ([#7260](https://github.com/ai-dynamo/dynamo/pull/7260)).
+- **Priority-Based Pool Routing:** Added priority-based pool routing in the global router that consumes `nvext.agent_hints.priority` and overrides 2D grid-based pool selection on a first-matching-rule basis with full backward compatibility ([#8010](https://github.com/ai-dynamo/dynamo/pull/8010)).
+- **Per-Media-Type Worker Placements:** Added per-media-type worker-side placements so multimodal requests prefer workers warm for the same media type ([#7462](https://github.com/ai-dynamo/dynamo/pull/7462)).
+- **Compressed Radix Tree:** Added an internal radix tree that compresses single-token chains for faster prefix matching ([#7459](https://github.com/ai-dynamo/dynamo/pull/7459)).
+- **Compressed Tree as Default:** Switched to the compressed concurrent radix tree by default so all deployments benefit from the smaller, faster tree ([#7874](https://github.com/ai-dynamo/dynamo/pull/7874)).
+- **Compressed-Tree Size Accounting:** Fixed compressed-tree-size accounting so reported tree size matches the real footprint ([#7800](https://github.com/ai-dynamo/dynamo/pull/7800)).
+- **170M ops/s Linear-Scan Path:** Added the linear-scan perf path that reaches 170M ops/s ([#6363](https://github.com/ai-dynamo/dynamo/pull/6363)).
+- **Concurrent KV Event Consumer:** Added a concurrent KV event consumer to keep up with high-throughput event streams ([#7293](https://github.com/ai-dynamo/dynamo/pull/7293)).
+- **Client-Side Event Batching:** Added dynamic batching of client-side events to reduce per-event overhead under burst traffic ([#6733](https://github.com/ai-dynamo/dynamo/pull/6733), [#6741](https://github.com/ai-dynamo/dynamo/pull/6741)).
+- **vLLM KV Block Event Dedup:** Added a dedup filter for duplicate vLLM KV block events to prevent double-accounting under upstream replay ([#8012](https://github.com/ai-dynamo/dynamo/pull/8012)).
+- **Lazy Worker Registration:** Added lazy worker registration in the slot tracker so workers register only when first scheduled ([#7795](https://github.com/ai-dynamo/dynamo/pull/7795)).
+- **Decode Scoring for Unregistered Workers:** Corrected decode-worker scoring for unregistered workers so scoring no longer mis-counts workers that aren't yet visible ([#7919](https://github.com/ai-dynamo/dynamo/pull/7919)).
+- **Watermark Cleanup on Deregister:** Cleaned up watermarks on worker deregister to keep watermark state correct under churn ([#7863](https://github.com/ai-dynamo/dynamo/pull/7863)).
+- **Unit-Block-Size Handling:** Fixed unit-block-size handling for correct accounting at unit block size ([#8405](https://github.com/ai-dynamo/dynamo/pull/8405)).
+- **Queue-Depth Metric & `nvext` Field:** Exposed a queue-depth Prometheus metric and matching `nvext` field for queue-aware client-side routing ([#6786](https://github.com/ai-dynamo/dynamo/pull/6786)).
+- **Queue ISL-Token Metrics:** Added queue ISL-token metrics for length-aware queue diagnostics ([#8136](https://github.com/ai-dynamo/dynamo/pull/8136)).
+- **`ActiveSequences` Benchmark:** Added an `ActiveSequences` benchmark to track router-side active-request scaling under load ([#6633](https://github.com/ai-dynamo/dynamo/pull/6633)).
+- **Router Perf Improvements:** Miscellaneous router performance improvements ([#7477](https://github.com/ai-dynamo/dynamo/pull/7477)).
+
+#### Planner & Profiler
+
+- **FPM-Based Regression Unification:** Replaced the dual performance-modeling layer (scipy interpolators for throughput scaling, sklearn regression for load scaling) with a single FPM-based regression model that serves both modes, enabling throughput scaling for aggregated mode ([#7961](https://github.com/ai-dynamo/dynamo/pull/7961)).
+- **Discrete-Event Control Loop:** Extracted the planner control loop into an explicit discrete-event state machine for inspectable, deterministic scaling decisions ([#8046](https://github.com/ai-dynamo/dynamo/pull/8046)).
+- **Planner Subpackage Restructure:** Restructured the planner package into a subpackage hierarchy for cleaner module boundaries between scaling, profiling, and policy code ([#7689](https://github.com/ai-dynamo/dynamo/pull/7689)).
+- **Standalone `dynamo-planner` Image:** Shipped a standalone `dynamo-planner` image and removed planner deps from non-planner images to keep worker images lean ([#7696](https://github.com/ai-dynamo/dynamo/pull/7696), [#7748](https://github.com/ai-dynamo/dynamo/pull/7748)).
+- **Planner CI with arm64:** Added a planner CI pipeline with arm64 builds for ARM-architecture coverage ([#7956](https://github.com/ai-dynamo/dynamo/pull/7956)).
+- **GlobalPlanner GPU Budget:** Added GlobalPlanner `--max-total-gpus` for cluster-wide GPU budgeting ([#7103](https://github.com/ai-dynamo/dynamo/pull/7103)).
+- **Dynamic `--trtllm.*` Config Modifier:** Switched the TRT-LLM config modifier to dynamic `--trtllm.*` flags so new TRT-LLM options propagate without planner code changes ([#7884](https://github.com/ai-dynamo/dynamo/pull/7884)).
+- **GPU-VRAM Memory-Fraction Injection:** Added GPU-VRAM profiler memory-fraction injection with profiled test markers for SGLang and vLLM to right-size memory budgets per backend during profiling ([#6719](https://github.com/ai-dynamo/dynamo/pull/6719), [#7508](https://github.com/ai-dynamo/dynamo/pull/7508)).
+- **Profiler Job Overrides:** Added profiler job overrides so users can pin specific profiler runs without editing the base config ([#6607](https://github.com/ai-dynamo/dynamo/pull/6607)).
+- **Wait-for-Scaling Hang Fix:** Fixed a wait-for-scaling-completion hang ([#8008](https://github.com/ai-dynamo/dynamo/pull/8008)).
+- **Planner Test Isolation:** Isolated planner test suites to keep planner tests from interfering with the rest of the suite ([#7723](https://github.com/ai-dynamo/dynamo/pull/7723)).
+
+### KV Block Manager
+
+#### Storage & Allocation
+
+- **KVBM Disk Allocation Variants:** Added KVBM disk allocation for different storage classes including local-SSD and shared-volume tiers ([#7839](https://github.com/ai-dynamo/dynamo/pull/7839)).
+- **`PinnedAllocator` Device ID:** Passed `device_id` into the `PinnedAllocator` instead of hardcoding 0 so multi-GPU workers allocate pinned memory on the right device ([#6809](https://github.com/ai-dynamo/dynamo/pull/6809)).
+- **`CUDA_VISIBLE_DEVICES` for NUMA:** Respected `CUDA_VISIBLE_DEVICES` for NUMA binding ([#6931](https://github.com/ai-dynamo/dynamo/pull/6931)).
+- **MAX_CONCURRENT_TRANSFERS Knob:** Added a `MAX_CONCURRENT_TRANSFERS` env var to throttle outbound KV transfer concurrency on the offload path ([#7527](https://github.com/ai-dynamo/dynamo/pull/7527)).
+
+#### NCCL Integration
+
+- **KVBM `nccl` Wheel Feature:** Built KVBM wheels with the `nccl` feature for CUDA containers ([#8120](https://github.com/ai-dynamo/dynamo/pull/8120)).
+- **Runtime NCCL Version Query:** Queried the NCCL version at runtime instead of hardcoding so KVBM tracks whatever NCCL ships in the runtime image ([#8130](https://github.com/ai-dynamo/dynamo/pull/8130)).
+- **CUDA Device Per Rank:** Set the CUDA device per rank before `ncclCommInitRank` to avoid cross-rank device-binding bugs in NCCL init ([#8147](https://github.com/ai-dynamo/dynamo/pull/8147)).
+
+#### MLA, Consolidator & Tests
+
+- **MLA Support for DeepSeek-V2:** Added MLA support to KVBM for DeepSeek-V2-style attention ([#7786](https://github.com/ai-dynamo/dynamo/pull/7786)).
+- **KVBM MLA Optimization:** Added KVBM MLA optimization for faster MLA-attention KV ops ([#7015](https://github.com/ai-dynamo/dynamo/pull/7015)).
+- **Typed `KvCacheConnectorConfig`:** Handled the typed `KvCacheConnectorConfig` in the consolidator so the consolidator parses connector config without ad-hoc dict handling ([#8117](https://github.com/ai-dynamo/dynamo/pull/8117)).
+- **Consolidator e2e Tests:** Fixed consolidator e2e tests to keep consolidator coverage green pre-merge ([#8503](https://github.com/ai-dynamo/dynamo/pull/8503)).
+- **Disagg Determinism on GB200:** Stabilized the disagg determinism test on GB200 by setting the KV block size to 32 ([#6980](https://github.com/ai-dynamo/dynamo/pull/6980)).
+
+### Performance Modeling & Replay
+
+#### Latency Prediction & Mocker Simulation
+
+- **AIConfigurator Latency Prediction:** Added AIConfigurator-backed latency prediction with MoE-parallelism support for closed-form latency estimates without running real workloads ([#7505](https://github.com/ai-dynamo/dynamo/pull/7505), [#7856](https://github.com/ai-dynamo/dynamo/pull/7856)).
+- **Mocker SGLang Simulation:** Added SGLang engine simulation to the Mocker so the Mocker can model SGLang behaviors offline ([#6977](https://github.com/ai-dynamo/dynamo/pull/6977)).
+- **vLLM v1 Scheduler Parity in Mocker:** Aligned the Mocker's vLLM scheduler with v1 semantics — drop watermark, LIFO preemption, retry loop — so simulation matches the v1 scheduler in production ([#7020](https://github.com/ai-dynamo/dynamo/pull/7020)).
+- **Speculative Decoding Simulation:** Added `--decode-speedup-ratio` for speculative-decoding simulation ([#7349](https://github.com/ai-dynamo/dynamo/pull/7349)).
+- **Mocker FPM Emission:** Forward-pass-metric emission from the Mocker to the event plane for planner consumption ([#8032](https://github.com/ai-dynamo/dynamo/pull/8032)).
+
+#### Trace Replay
+
+- **Offline Aggregated & Disaggregated Replay:** Added offline aggregated and disaggregated trace replay including Mooncake-style traces with multi-worker support for repeatable benchmarking against captured traffic ([#7543](https://github.com/ai-dynamo/dynamo/pull/7543), [#7553](https://github.com/ai-dynamo/dynamo/pull/7553), [#7617](https://github.com/ai-dynamo/dynamo/pull/7617), [#7876](https://github.com/ai-dynamo/dynamo/pull/7876)).
+- **Shared Loadgen with Multi-Turn:** Shared loadgen and workload paths with multi-turn session support so multi-turn agentic traces replay alongside single-turn workloads ([#7593](https://github.com/ai-dynamo/dynamo/pull/7593)).
+- **Planner-in-the-Loop Replay:** Planner-in-the-loop offline replay with dynamic worker pool management to validate planner decisions on captured traffic before deployment ([#8187](https://github.com/ai-dynamo/dynamo/pull/8187)).
+- **Dense Replay Optimization:** Dense offline replay optimization for both aggregated and disaggregated topologies for faster offline iteration on large traces ([#7774](https://github.com/ai-dynamo/dynamo/pull/7774)).
+- **`replay_optimize` Sweep:** Added a `replay_optimize` sweep README and single-worker soak test to make the optimization sweep reproducible from the docs ([#8195](https://github.com/ai-dynamo/dynamo/pull/8195), [#8234](https://github.com/ai-dynamo/dynamo/pull/8234)).
+- **Replay Accounting & Perf Fixes:** Many small replay accounting and performance fixes to keep replay numbers honest under heavy traces ([#6998](https://github.com/ai-dynamo/dynamo/pull/6998), [#7647](https://github.com/ai-dynamo/dynamo/pull/7647), [#7687](https://github.com/ai-dynamo/dynamo/pull/7687), [#7692](https://github.com/ai-dynamo/dynamo/pull/7692), [#7698](https://github.com/ai-dynamo/dynamo/pull/7698), [#7729](https://github.com/ai-dynamo/dynamo/pull/7729), [#7838](https://github.com/ai-dynamo/dynamo/pull/7838), [#7866](https://github.com/ai-dynamo/dynamo/pull/7866), [#7938](https://github.com/ai-dynamo/dynamo/pull/7938), [#8050](https://github.com/ai-dynamo/dynamo/pull/8050), [#8232](https://github.com/ai-dynamo/dynamo/pull/8232)).
+
+### Infrastructure Modernization
+
+#### Event & Transport Plane
+
+- **libzmq Migration Complete:** Finished the libzmq migration and stabilized standalone indexer/replay coverage to land all event and transport code on a single ZMQ binding ([#7871](https://github.com/ai-dynamo/dynamo/pull/7871)).
+- **Router ZMQ Port Reservation:** Made router tests reserve contiguous ZMQ ports to eliminate flaky port collisions in router CI ([#7448](https://github.com/ai-dynamo/dynamo/pull/7448)).
+
+#### Forward-Pass Metrics
+
+- **vLLM FPM Initial Emission:** Initial ZMQ PUB/SUB emission of forward-pass metrics from the vLLM engine to expose per-step engine state to planner and observability consumers ([#7200](https://github.com/ai-dynamo/dynamo/pull/7200)).
+- **vLLM FPM Event-Plane Relay:** Transport-agnostic event-plane relay for vLLM forward-pass metrics, following the same two-layer bridge pattern as KV events ([#7250](https://github.com/ai-dynamo/dynamo/pull/7250)).
+- **`ForwardPassMetric` Versioning:** Exposed `inc_id` and a version field on `ForwardPassMetric` so consumers can detect schema upgrades and dropped samples ([#7501](https://github.com/ai-dynamo/dynamo/pull/7501)).
+- **FPM Async Scheduling Fix:** Fixed forward-pass-metric emission under async scheduling so async-scheduled workers still emit FPM samples ([#7537](https://github.com/ai-dynamo/dynamo/pull/7537)).
+- **FPM `data_parallel_index` Port Offset:** Used `data_parallel_index` for the FPM ZMQ port offset to avoid port collisions between DP ranks on the same node ([#8706](https://github.com/ai-dynamo/dynamo/pull/8706), cherry-pick of [#8696](https://github.com/ai-dynamo/dynamo/pull/8696)).
+- **Auto-Injected `worker_id` Label:** Auto-injected a `worker_id` label into all metrics so planner consumers can attribute FPM streams correctly ([#8089](https://github.com/ai-dynamo/dynamo/pull/8089)).
+
+### Recipes
+
+#### Kimi K2.5
+
+- **Kimi K2.5 Initial Recipe:** Shipped the initial Baseten-based Kimi K2.5 recipe to enable Kimi K2.5 deployment on Dynamo ([#6602](https://github.com/ai-dynamo/dynamo/pull/6602)).
+- **Kimi K2.5 NVFP4 Aggregated + KVBM:** Added an aggregated + KVBM recipe with a TRT-LLM patch for `nvidia/Kimi-K2.5-NVFP4` for KVBM-backed NVFP4 deployments ([#6842](https://github.com/ai-dynamo/dynamo/pull/6842)).
+- **Kimi K2.5 Speculative Decoding:** Added a performance-optimized speculative-decoding variant for Kimi K2.5 ([#7555](https://github.com/ai-dynamo/dynamo/pull/7555), [#7576](https://github.com/ai-dynamo/dynamo/pull/7576)).
+- **Kimi K2.5 Container-Patch Removal:** Removed the container-patch requirement and replaced the KVBM Kimi recipe with a Qwen3 KVBM recipe so the recipe runs on the stock TRT-LLM container ([#8199](https://github.com/ai-dynamo/dynamo/pull/8199), [#8476](https://github.com/ai-dynamo/dynamo/pull/8476)).
+- **Kimi K2.5 KVBM Metrics on Kubernetes:** Enabled KVBM metrics for the Kimi K2.5 recipe on Kubernetes so K2.5 deployments expose KVBM telemetry on K8s ([#6963](https://github.com/ai-dynamo/dynamo/pull/6963)).
+- **Kimi K2.5 Stabilization Fixes:** Pin reset and patch fixes during Kimi K2.5 stabilization ([#7411](https://github.com/ai-dynamo/dynamo/pull/7411), [#7435](https://github.com/ai-dynamo/dynamo/pull/7435)).
+- **Kimi K2.5 Doc Restructuring:** Restructured the Kimi K2.5 recipe documentation for clearer per-variant guidance ([#7412](https://github.com/ai-dynamo/dynamo/pull/7412)).
+
+#### DeepSeek & Qwen
+
+- **DeepSeek V3.2 on TRT-LLM:** Added a DeepSeek V3.2 recipe on TensorRT-LLM ([#6688](https://github.com/ai-dynamo/dynamo/pull/6688)).
+- **DeepSeek WideEP + Qwen3-235B Recipe Refresh:** Advanced the DeepSeek WideEP and Qwen3-235B recipes to the Dynamo 1.0.1-era TRT-LLM container baseline to keep both recipes runnable on a known-good baseline ([#7479](https://github.com/ai-dynamo/dynamo/pull/7479)); v1.1.0 itself ships TRT-LLM `v1.3.0rc11`.
+- **Qwen3-VL-30B Aggregated + Encoder Cache:** Added a Qwen3-VL-30B aggregated recipe with encoder cache on vLLM ([#6919](https://github.com/ai-dynamo/dynamo/pull/6919)).
+- **Qwen3-235B DeepGEMM Switch:** Switched the Qwen3-235B recipe to the DeepGEMM backend for higher throughput on Hopper-class GPUs ([#7204](https://github.com/ai-dynamo/dynamo/pull/7204)).
+
+#### Other Models
+
+- **GLM-5 NVFP4 on GB200 SGLang:** Added a GLM-5 NVFP4 recipe on GB200 SGLang ([#7780](https://github.com/ai-dynamo/dynamo/pull/7780), [#8098](https://github.com/ai-dynamo/dynamo/pull/8098)).
+- **Nemotron-3-Super-FP8:** Added a Nemotron-3-Super-FP8 recipe ([#7216](https://github.com/ai-dynamo/dynamo/pull/7216)).
+- **gpt-oss-120b Disaggregated:** Added a gpt-oss-120b disaggregated recipe ([#8133](https://github.com/ai-dynamo/dynamo/pull/8133)).
+
+---
+
+## Bug Fixes
+
+### Multimodal
+
+- **TRT-LLM EPD Multimodal Stabilization:** Fixed encoder LLM creation gating, `apply_mm_hashes` 1.3 API alignment, and preprocessor handling for the embeddings case in the TRT-LLM EPD multimodal flow ([#6726](https://github.com/ai-dynamo/dynamo/pull/6726), [#6810](https://github.com/ai-dynamo/dynamo/pull/6810), [#6840](https://github.com/ai-dynamo/dynamo/pull/6840), [#6866](https://github.com/ai-dynamo/dynamo/pull/6866), [#6920](https://github.com/ai-dynamo/dynamo/pull/6920), [#6924](https://github.com/ai-dynamo/dynamo/pull/6924)).
+- **LLaVA EPD Path Phase-Out:** Phased out the LLaVA-specific EPD path and constrained EPD to single-GPU ([#6674](https://github.com/ai-dynamo/dynamo/pull/6674)).
+- **LLaVA `out_hidden_size`:** Fixed `out_hidden_size` handling for LLaVA in the EPD encode worker ([#6759](https://github.com/ai-dynamo/dynamo/pull/6759)).
+- **vLLM-Omni Finish Reason:** Fixed the vLLM-Omni `normalize_finish_reason` call ([#6910](https://github.com/ai-dynamo/dynamo/pull/6910)) and the chat processor for video/audio examples ([#6689](https://github.com/ai-dynamo/dynamo/pull/6689)).
+- **Empty Multimodal Input Rejection:** Rejected empty multimodal inputs that triggered invalid-UUID checks ([#6853](https://github.com/ai-dynamo/dynamo/pull/6853)) and local file inputs in the `ImageLoader` ([#8158](https://github.com/ai-dynamo/dynamo/pull/8158)).
+- **Modality Mismatch Rejection:** Rejected multimodal requests against workers without `--modality multimodal` ([#7065](https://github.com/ai-dynamo/dynamo/pull/7065)).
+- **MM Router Image Dedup:** Skipped duplicate image downloads and unnecessary image processing in the MM Router ([#7080](https://github.com/ai-dynamo/dynamo/pull/7080)).
+- **Decode-Side Re-Download Elimination:** Eliminated redundant image re-download on the decode worker in disagg ([#7827](https://github.com/ai-dynamo/dynamo/pull/7827)).
+- **Multimodal PD Race Fix:** Fixed a race condition in the multimodal PD worker ([#7679](https://github.com/ai-dynamo/dynamo/pull/7679)) and `ImageLoader` errors ([#7703](https://github.com/ai-dynamo/dynamo/pull/7703)).
+- **Dummy-Embedding Value Range:** Restricted the dummy-embedding value range to bypass vLLM checks ([#7117](https://github.com/ai-dynamo/dynamo/pull/7117)).
+- **Bounded Media-Fetch Concurrency:** Bounded media-fetch concurrency with decoupled httpx timeouts to prevent fetcher exhaustion ([#8767](https://github.com/ai-dynamo/dynamo/pull/8767)).
+- **Vision Model Loader Fixes:** Fixed several vision-model loader paths and the SGLang Eagle bigram tokens KV event report ([#6952](https://github.com/ai-dynamo/dynamo/pull/6952), [#6872](https://github.com/ai-dynamo/dynamo/pull/6872)).
+- **Multimodal Media URL Validation:** Added validation on multimodal media URLs and bounded the `MediaConnector` allowed local-media path so an unset or `/` value cannot yield arbitrary `file://` reads ([#9015](https://github.com/ai-dynamo/dynamo/pull/9015), cherry-pick of [#8282](https://github.com/ai-dynamo/dynamo/pull/8282)).
+- **TRT-LLM Multimodal Loader Hardening:** Replaced `torch.load` with `safetensors` for TRT-LLM multimodal and routed media decoding through the Rust frontend ([#9016](https://github.com/ai-dynamo/dynamo/pull/9016), cherry-pick of [#8295](https://github.com/ai-dynamo/dynamo/pull/8295)).
+- **`ffmpeg-next` 7.1.0 → 8.1:** Bumped the `ffmpeg-next` Rust dependency to harden the Rust-frontend media-decode path against pathological inputs ([#9018](https://github.com/ai-dynamo/dynamo/pull/9018), cherry-pick of [#8452](https://github.com/ai-dynamo/dynamo/pull/8452)).
+
+### Frontend & Agents
+
+- **Responses API `output_text` Acceptance:** Fixed the OpenAI Responses API to accept assistant `output_text` messages without `id`/`status` and rejected variants that should never have round-tripped ([#6599](https://github.com/ai-dynamo/dynamo/pull/6599), [#7049](https://github.com/ai-dynamo/dynamo/pull/7049)).
+- **Responses Wire-Shape Compliance:** Aligned the Responses wire shape with the OpenResponses spec and added compliance CI ([#8561](https://github.com/ai-dynamo/dynamo/pull/8561), cherry-pick of [#8283](https://github.com/ai-dynamo/dynamo/pull/8283)).
+- **`logprobs` Bytes & Token Population:** Populated `logprobs` `bytes` and `token` fields in OpenAI-compatible responses ([#6953](https://github.com/ai-dynamo/dynamo/pull/6953)).
+- **DeepSeek V3.2 Content Arrays:** Supported OpenAI content arrays in DeepSeek V3.2 prompt rendering ([#6321](https://github.com/ai-dynamo/dynamo/pull/6321)).
+- **DeepSeek V3.2 Thinking Mode kwargs:** Per-request `chat_template_kwargs` for V3.2 thinking mode ([#7286](https://github.com/ai-dynamo/dynamo/pull/7286)).
+- **`tool_choice=none` Template Stripping:** Stripped tools from the chat template when `tool_choice=none` ([#7391](https://github.com/ai-dynamo/dynamo/pull/7391)).
+- **vLLM-Only Tokenizer Path:** Allowed running without a Rust tokenizer when `dyn-chat-processor` is `vllm` ([#7697](https://github.com/ai-dynamo/dynamo/pull/7697)).
+- **`ResponseTimeout` & Worker Quarantine:** Added a `ResponseTimeout` error type with request-plane worker quarantine ([#8011](https://github.com/ai-dynamo/dynamo/pull/8011)).
+- **`top_logprobs` Token-ID Detokenization:** Detokenized `top_logprobs` token IDs in the backend so the OpenAI-compatible response surfaces human-readable tokens instead of raw IDs ([#8958](https://github.com/ai-dynamo/dynamo/pull/8958)).
+- **LoRA S3 and Streaming:** Extended the LoRA download S3 timeout and streamed large LoRA downloads to disk to prevent OOM on large adapters ([#6544](https://github.com/ai-dynamo/dynamo/pull/6544)).
+- **Cancellation in KV Commit Router:** Fixed cancellation handling in the KV-commit router path ([#7178](https://github.com/ai-dynamo/dynamo/pull/7178)).
+- **Active Sequences Expiration:** Improved active-sequences request expiration to clear stale slots more aggressively ([#7340](https://github.com/ai-dynamo/dynamo/pull/7340)).
+
+### vLLM
+
+- **vLLM Correctness Fixes:** Corrected the KV transfer config plumbing ([#7163](https://github.com/ai-dynamo/dynamo/pull/7163)), the deprecated automatic KV-events config ([#7591](https://github.com/ai-dynamo/dynamo/pull/7591)), the vLLM Omni dependency wiring ([#7683](https://github.com/ai-dynamo/dynamo/pull/7683)), the KV block size derivation from the engine ([#7690](https://github.com/ai-dynamo/dynamo/pull/7690)), and the `distributed-executor-backend` annotation handling ([#6692](https://github.com/ai-dynamo/dynamo/pull/6692)).
+- **vLLM Prompt-Embeds Loader:** Routed prompt-embeds loading through vLLM instead of `torch.load` ([#9013](https://github.com/ai-dynamo/dynamo/pull/9013), cherry-pick of [#8228](https://github.com/ai-dynamo/dynamo/pull/8228)) and gated the prompt-embeds request field behind a global enable flag so the loader is only reachable when an operator opts in ([#9014](https://github.com/ai-dynamo/dynamo/pull/9014), cherry-pick of [#8248](https://github.com/ai-dynamo/dynamo/pull/8248)).
+
+### SGLang
+
+- **SGLang Stabilization:** Fixed NIXL native libs in the SGLang container ([#6939](https://github.com/ai-dynamo/dynamo/pull/6939)), `served_model_name` resolution ([#8035](https://github.com/ai-dynamo/dynamo/pull/8035)), enabled OTEL trace propagation ([#7592](https://github.com/ai-dynamo/dynamo/pull/7592), [#8361](https://github.com/ai-dynamo/dynamo/pull/8361)), `accelerate` package installation in containers ([#8400](https://github.com/ai-dynamo/dynamo/pull/8400)), and disabled piecewise CUDA graph in launch scripts to work around a backend hang ([#8622](https://github.com/ai-dynamo/dynamo/pull/8622), cherry-pick of [#8609](https://github.com/ai-dynamo/dynamo/pull/8609)).
+- **SGLang RC11 Cherry-Picks:** Backported a decode-canary `instance_id-not-found` health fix ([#8816](https://github.com/ai-dynamo/dynamo/pull/8816), cherry-pick of [#8294](https://github.com/ai-dynamo/dynamo/pull/8294)), enabled guided decoding in aggregated serving ([#8874](https://github.com/ai-dynamo/dynamo/pull/8874), cherry-pick of [#8843](https://github.com/ai-dynamo/dynamo/pull/8843)), and registered LoRA with the `Prefill` ModelType in prefill workers ([#8964](https://github.com/ai-dynamo/dynamo/pull/8964), cherry-pick of [#8945](https://github.com/ai-dynamo/dynamo/pull/8945)).
+
+### TensorRT-LLM
+
+- **TRT-LLM Metrics & Test Stabilization:** Incremented `kv_transfer_success_total` on the decode side so disagg KV-transfer success is observable end-to-end ([#8873](https://github.com/ai-dynamo/dynamo/pull/8873), cherry-pick of [#8483](https://github.com/ai-dynamo/dynamo/pull/8483)) and stabilized the TRT-LLM router e2e test in the release/1.1.0 CI lane ([#8959](https://github.com/ai-dynamo/dynamo/pull/8959)).
+
+### Discovery & Transport
+
+- **ETCD & NATS Hardening:** Fixed an ETCD cluster-unhealthy condition during operator startup ([#6976](https://github.com/ai-dynamo/dynamo/pull/6976)), spawned `handle_put` operations concurrently to avoid head-of-line blocking on the discovery plane ([#7931](https://github.com/ai-dynamo/dynamo/pull/7931)), corrected push-router transport resolution ([#8007](https://github.com/ai-dynamo/dynamo/pull/8007)), and stabilized NATS connection handling in the snapshot path ([#8635](https://github.com/ai-dynamo/dynamo/pull/8635)).
+
+### Operator
+
+- **Operator Reliability:** Fixed a multi-node SSH crash during operator startup ([#6694](https://github.com/ai-dynamo/dynamo/pull/6694)), corrected the `chrek` Helm chart version reference ([#6738](https://github.com/ai-dynamo/dynamo/pull/6738)), prevented a nil-pointer panic when DGD service omits replicas ([#6739](https://github.com/ai-dynamo/dynamo/pull/6739)), unblocked PVC handling on restore ([#6752](https://github.com/ai-dynamo/dynamo/pull/6752)), and resolved a startup race condition ([#6929](https://github.com/ai-dynamo/dynamo/pull/6929)).
+
+### Snapshot
+
+- **Snapshot Hardening:** Fixed child-snapshot creation to prevent orphaned processes ([#7122](https://github.com/ai-dynamo/dynamo/pull/7122)), corrected the CI image linter ([#7124](https://github.com/ai-dynamo/dynamo/pull/7124)), bounded snapshot GPU memory growth ([#7975](https://github.com/ai-dynamo/dynamo/pull/7975)), and disabled snapshot with GMS in admission to surface unsupported configurations ([#8764](https://github.com/ai-dynamo/dynamo/pull/8764), cherry-pick of [#8689](https://github.com/ai-dynamo/dynamo/pull/8689)).
+
+### GPU Memory Service
+
+- **GMS Init & Per-Engine Port Fixes:** Initialized the GPU Memory Service with a scratch-aliased KV cache so SGLang and vLLM engines start cleanly under the operator-managed sidecar ([#8865](https://github.com/ai-dynamo/dynamo/pull/8865), cherry-pick of [#8686](https://github.com/ai-dynamo/dynamo/pull/8686)), and bounded GMS retry plus assigned per-engine FPM ports to eliminate port collisions on multi-engine pods ([#8962](https://github.com/ai-dynamo/dynamo/pull/8962)).
+
+### Runtime & Lifecycle
+
+- **Process Lifecycle Correctness:** Propagated child exit codes through `wait_any_exit` so pod restarts surface the real failure code instead of always reporting success ([#8920](https://github.com/ai-dynamo/dynamo/pull/8920), cherry-pick of [#8883](https://github.com/ai-dynamo/dynamo/pull/8883)), and fixed teardown ordering with additional cleanup tests so worker shutdown no longer races against in-flight requests ([#8936](https://github.com/ai-dynamo/dynamo/pull/8936), cherry-pick of [#8857](https://github.com/ai-dynamo/dynamo/pull/8857)).
+
+### Profiler & Planner Stabilization (release/1.1.0)
+
+- **Dedicated Planner Image for Profiler:** Used the dedicated `dynamo-planner` image for profiler jobs and planner pods ([#8450](https://github.com/ai-dynamo/dynamo/pull/8450), cherry-pick of [#8407](https://github.com/ai-dynamo/dynamo/pull/8407)).
+- **DGD `Recreate` Override Removal:** Dropped a `Recreate` override on restore-target Deployments to avoid downtime during planner-driven scaling ([#8546](https://github.com/ai-dynamo/dynamo/pull/8546), cherry-pick of [#8434](https://github.com/ai-dynamo/dynamo/pull/8434)).
+- **Multi-DGD GlobalPlanner Scaling:** Fixed multi-DGD plus GlobalPlanner scaling and readiness ([#8514](https://github.com/ai-dynamo/dynamo/pull/8514), cherry-pick of [#8482](https://github.com/ai-dynamo/dynamo/pull/8482)).
+- **MDC Backend-Default Match:** Matched the MDC component field against the backend default rather than the DGD key ([#8512](https://github.com/ai-dynamo/dynamo/pull/8512), cherry-pick of [#8489](https://github.com/ai-dynamo/dynamo/pull/8489)).
+- **Prometheus Metric Behaviour:** Restored the documented Prometheus metric behaviour ([#8618](https://github.com/ai-dynamo/dynamo/pull/8618), cherry-pick of [#8575](https://github.com/ai-dynamo/dynamo/pull/8575)).
+- **GlobalPlanner Endpoint Concurrency:** Awaited GlobalPlanner endpoints concurrently so health registers ([#8692](https://github.com/ai-dynamo/dynamo/pull/8692), cherry-pick of [#8682](https://github.com/ai-dynamo/dynamo/pull/8682)).
+- **GlobalPlanner Pool-Worker Wait:** Waited for pool workers in the GlobalPlanner connector ([#8702](https://github.com/ai-dynamo/dynamo/pull/8702), cherry-pick of [#8694](https://github.com/ai-dynamo/dynamo/pull/8694)).
+- **DGD/DGDR Validation Hardening:** Added `optimizationType` enum validation in DGDR so invalid values surface at admission rather than at reconcile ([#8837](https://github.com/ai-dynamo/dynamo/pull/8837), cherry-pick of [#8796](https://github.com/ai-dynamo/dynamo/pull/8796)), surfaced DGD name-length violations as a terminal failure instead of an indefinite retry loop ([#8838](https://github.com/ai-dynamo/dynamo/pull/8838), cherry-pick of [#8807](https://github.com/ai-dynamo/dynamo/pull/8807)), and fixed an "unknown manifest" planner error path that masked the real failure mode ([#8877](https://github.com/ai-dynamo/dynamo/pull/8877)).
+
+---
+
+## Documentation
+
+### New Content
+
+- **Mocker & Planner Docs:** Added comprehensive Mocker documentation including planner-in-the-loop and offline replay patterns ([#7488](https://github.com/ai-dynamo/dynamo/pull/7488), [#7610](https://github.com/ai-dynamo/dynamo/pull/7610)), the `replay_optimize` sweep README ([#8195](https://github.com/ai-dynamo/dynamo/pull/8195)), and crate-level READMEs for `dynamo-mocker` and `dynamo-kv-router` ([#7687](https://github.com/ai-dynamo/dynamo/pull/7687)).
+- **KV Router A/B Testing Guide:** Added a KV Router A/B testing guide for evaluating routing-policy changes ([#7047](https://github.com/ai-dynamo/dynamo/pull/7047)).
+- **Multimodal Documentation Reorg:** Reorganized multimodal documentation around the new EPD pipeline and embedding cache ([#6831](https://github.com/ai-dynamo/dynamo/pull/6831)).
+- **KVBM Diagram & Architecture Updates:** Updated KVBM architecture diagrams and the consolidator boundary to match the current code layout ([#7277](https://github.com/ai-dynamo/dynamo/pull/7277), [#7365](https://github.com/ai-dynamo/dynamo/pull/7365)).
+- **vLLM Container README:** Documented vLLM container image build and run instructions ([#6793](https://github.com/ai-dynamo/dynamo/pull/6793)).
+- **KV Event Replay Comparison:** Documented the KV event replay flow and how it compares with vLLM's native KV event handling ([#6928](https://github.com/ai-dynamo/dynamo/pull/6928)).
+- **Snapshot Checkpointing Docs:** Updated Dynamo Snapshot checkpointing docs for the file-sentinel IPC contract ([#7244](https://github.com/ai-dynamo/dynamo/pull/7244)).
+- **Profiler & Planner Doc Updates:** Added profiler/planner clarifications ([#7303](https://github.com/ai-dynamo/dynamo/pull/7303)), the `planner-profile-data` ConfigMap clarification ([#8516](https://github.com/ai-dynamo/dynamo/pull/8516), cherry-pick of [#8486](https://github.com/ai-dynamo/dynamo/pull/8486)), and the throughput-scaling SLA requirement ([#8655](https://github.com/ai-dynamo/dynamo/pull/8655), cherry-pick of [#8649](https://github.com/ai-dynamo/dynamo/pull/8649)).
+- **Tool & Reasoning Parser Support Docs:** Added documentation for the supported tool and reasoning parsers ([#7605](https://github.com/ai-dynamo/dynamo/pull/7605)).
+- **Disaggregated Inference Communication Guide:** Added a disaggregated inference communication guide for Kubernetes deployments ([#6370](https://github.com/ai-dynamo/dynamo/pull/6370)).
+- **AIC Disaggregated Serving Guide:** Updated the AI Configurator disaggregated serving guide ([#6553](https://github.com/ai-dynamo/dynamo/pull/6553)).
+- **GAIE Fallback Documentation:** Clarified GAIE fallback behavior and source-install flow ([#7077](https://github.com/ai-dynamo/dynamo/pull/7077)).
+- **DGDR `v1beta1` Documentation:** Added `v1beta1` DGDR API documentation ([#6647](https://github.com/ai-dynamo/dynamo/pull/6647)).
+- **Fern CI / Docs Platform:** First Fern push of the docs site ([#7253](https://github.com/ai-dynamo/dynamo/pull/7253)) and broken-link fixes ([#7322](https://github.com/ai-dynamo/dynamo/pull/7322)).
+
+---
+
+## Looking Ahead
+
+Dynamo v1.2.0 is targeted for May 27, 2026. Here's what is already taking shape:
+
+### TensorRT-LLM Backend Refactor
+
+A larger refactor of the TRT-LLM backend is in implementation, consolidating the disaggregated-multimodal path and the EPD encoder boundary to remove the residual cases that still require workarounds today. Tracked in [#8251](https://github.com/ai-dynamo/dynamo/issues/8251).
+
+### FlexKV Maturation
+
+FlexKV (introduced as an integration in [#5858](https://github.com/ai-dynamo/dynamo/pull/5858)) continues to mature toward production use for cross-tier KV cache management on long-context workloads.
+
+### GlobalPlanner Multi-Tenancy
+
+GlobalPlanner gains multi-tenant scheduling for shared clusters, building on the v1.1.0 multi-DGD scaling work and the standalone KV indexer's multi-tenant isolation.
+
+### Continued Diffusion Expansion
+
+Audio, video, and image-to-image pipelines move from initial support in v1.1.0 to broader model coverage and tighter integration with the EPD pipeline.
+
+---
+
+**Full Changelog**: [https://github.com/ai-dynamo/dynamo/compare/v1.0.2...v1.1.0](https://github.com/ai-dynamo/dynamo/compare/v1.0.2...v1.1.0)
+
+---
+
+## Patch releases
+
+### v1.1.1 — May 5, 2026
+
+#### Summary
+
+Dynamo v1.1.1 is a patch release that bumps the **TensorRT-LLM** pin from `1.3.0rc11` to `1.3.0rc13` to pick up an upstream fix for a scheduler deadlock that could permanently hang the TRT-LLM engine when KV cache reuse and chunked prefill were enabled together.
+
+For dependency versions, full feature set, and known issues, see the [Dynamo v1.1.0 release notes](https://github.com/ai-dynamo/dynamo/releases/tag/v1.1.0).
+
+**Base Branch**: `release/1.1.0`
+
+#### Bug Fixes
+
+- **TensorRT-LLM Scheduler Deadlock with KV Reuse + Chunked Prefill:** Resolved a TensorRT-LLM scheduler deadlock where `_prepare_tp_inputs` would trip the `total_num_tokens > max_num_tokens` assertion under KV offload + chunked prefill and permanently hang the event loop, by bumping the TensorRT-LLM pin from `1.3.0rc11` to `1.3.0rc13` (#9182, cherry-pick of #9126) to pick up the upstream fix for [NVIDIA/TensorRT-LLM#13318](https://github.com/NVIDIA/TensorRT-LLM/issues/13318). Reported against TRT-LLM with `--enable_kv_cache_reuse` and `--enable_chunked_context` both on; v1.1.1 resolves it for Dynamo users running the TensorRT-LLM backend with these flags enabled.
+
+**Full Changelog**: [https://github.com/ai-dynamo/dynamo/compare/v1.1.0...v1.1.1](https://github.com/ai-dynamo/dynamo/compare/v1.1.0...v1.1.1)
+
+<Accordion title="Open-source contributions and new contributors">
+
+Between v1.0.2 and v1.1.0, the project merged 896 PRs from 113 contributors. New first-time external contributors in this release include:
+
+- **@stevemurr** (Baseten) added a dynamic default `max_tokens` for the TensorRT-LLM backend (#5152)
+- **@YconquestY** added FlexKV integration for cross-tier KV cache management (#5858)
+- **@Spycsh** (Intel) added GPUDirect support for Intel XPU (#5852)
+- **@sywangyi** (Intel) added the SGLang multi-image request path, NIXL EmbeddingSender/Receiver in SGLang, NVTX markers for SGLang EPD, and device-type EPD routing (#6068, #7079, #7153, #7215)
+- **@kornelcsernai-harmonic** (Harmonic AI) added a least-loaded router mode (#6314)
+- **@danehans** (Tetrate) clarified GAIE fallback behavior and source-install flow (#7077)
+- **@jellysnack** added SGLang guided-decoding support (#6620)
+- **@blarson-b10** (Baseten) improved active-sequence request expiration (#7340)
+- **@simone-chen** updated the AIC disaggregated serving guide (#6553)
+- **@yifjiang** added TRT-LLM dynamo-trtllm metrics and fixed guided-decoding arg placement (#6617, #6668)
+- **@joshuayao** (Intel) added vLLM aggregated serving examples and unit tests for XPU (#7146, #7078)
+- **@ZhengHongming888** (Intel) enabled the Intel XPU Dockerfile for dev targets (#7134)
+
+Returning external contributors include **@michaelfeil** (Baseten), **@vladnosiv** (Yandex.Cloud), **@dsocek** (Intel), **@AmeenP** (PrimeIntellect), **@huitianbai**, **@InfraWhisperer** (F5), **@devivasudevan** (Microsoft), **@Jont828** (Microsoft), **@ashnamehrotra** (Microsoft), **@Ryan-Amirthan** (Fern), and several others.
+
+If you would like to get involved, please see our [Contribution Guide](https://docs.nvidia.com/dynamo/dev/getting-started/contribution-guide).
+
+</Accordion>

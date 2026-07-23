@@ -20,6 +20,7 @@ import {
   CURRENT_TAG,
   CURRENT_VERSION,
   CURRENT_WHEEL,
+  RELEASES,
   type Artifact,
   type ArtifactCategory,
 } from "./releases.data";
@@ -36,6 +37,41 @@ const AB_CSS = `
 
 .dynref-ab-note {
     margin: 0;
+}
+
+.dynref-ab-headmeta {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 8px;
+}
+
+.dynref-ab-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.dynref-ab-linkchip {
+    display: inline-flex;
+    align-items: center;
+    padding: 4px 10px;
+    border: 1px solid var(--border, var(--grayscale-a5));
+    border-radius: 8px;
+    color: var(--pst-color-text-muted);
+    font-size: 12px;
+    line-height: 1;
+    text-decoration: none;
+}
+
+.dynref-ab-linkchip:hover {
+    border-color: var(--nv-color-green, #76B900);
+    color: var(--pst-color-text-base);
+}
+
+.dark .dynref-ab-linkchip {
+    border-color: #333;
+    background: #1c1c1c;
 }
 
 .dynref-ab-rail {
@@ -210,6 +246,10 @@ const AB_CSS = `
     .dynref-ab-tags {
         justify-content: flex-start;
     }
+
+    .dynref-ab-headmeta {
+        align-items: flex-start;
+    }
 }
 `;
 
@@ -319,6 +359,8 @@ export function ArtifactBrowser() {
   const counts: Record<ArtifactCategory, number> = { container: 0, wheel: 0, helm: 0, crate: 0 };
   for (const artifact of ARTIFACTS) counts[artifact.category] += 1;
 
+  const currentRelease = RELEASES.find((r) => r.version === CURRENT_VERSION);
+
   const runtimeContainers = ARTIFACTS.filter((a) => a.category === "container" && a.group === "runtime");
   const componentContainers = ARTIFACTS.filter((a) => a.category === "container" && a.group !== "runtime");
   const wheels = ARTIFACTS.filter((a) => a.category === "wheel");
@@ -356,10 +398,32 @@ export function ArtifactBrowser() {
               </span>
             </h3>
           </div>
-          <p className="dynref-muted dynref-ab-note">
-            Wheels ship as <span className="dynref-mono">{CURRENT_WHEEL}</span> · containers stay{" "}
-            <span className="dynref-mono">:{CURRENT_TAG}</span>
-          </p>
+          <div className="dynref-ab-headmeta">
+            <p className="dynref-muted dynref-ab-note">
+              Wheels ship as <span className="dynref-mono">{CURRENT_WHEEL}</span> · containers stay{" "}
+              <span className="dynref-mono">:{CURRENT_TAG}</span>
+            </p>
+            <div className="dynref-ab-links">
+              <a
+                className="dynref-ab-linkchip"
+                href={currentRelease?.github ?? "https://github.com/ai-dynamo/dynamo/releases"}
+              >
+                GitHub ↗
+              </a>
+              <a
+                className="dynref-ab-linkchip"
+                href={currentRelease?.docs ?? "https://docs.nvidia.com/dynamo"}
+              >
+                Docs
+              </a>
+              <a
+                className="dynref-ab-linkchip"
+                href="https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo"
+              >
+                NGC collection
+              </a>
+            </div>
+          </div>
         </div>
 
         <div className="dynref-ab-rail">

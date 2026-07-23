@@ -5,8 +5,8 @@
  * CompatibilityHero — current-release summary panel for the Compatibility page.
  *
  * Renders the current stable release (version, date, release-notes link), the
- * per-backend engine + NIXL pins, and the platform requirement rows (GPU, OS,
- * arch, CUDA) from releases.data.ts. Server component; shared vocabulary
+ * per-backend engine + NIXL + CUDA toolkit pins, and the platform requirement
+ * rows (GPU, OS, arch) from releases.data.ts. Server component; shared vocabulary
  * (panel, eyebrow, label, mono, chips, badges) comes from ReferenceStyles —
  * place <ReferenceStyles /> on the page alongside this component. Only the
  * .dynref-hero-* layout classes are defined here.
@@ -16,6 +16,8 @@ import {
   RELEASES,
   CURRENT_VERSION,
   CURRENT_DATE,
+  CURRENT_TAG,
+  CUDA_HISTORY,
   PLATFORM,
 } from "./releases.data";
 
@@ -67,11 +69,25 @@ const HERO_CSS = `
     border-color: #2e2e2e;
 }
 
+.dynref-hero-backend-name {
+    display: block;
+    color: var(--pst-color-text-base);
+    font-size: 14px;
+    font-weight: 600;
+}
+
 .dynref-hero-pin {
     display: block;
     margin: 4px 0 2px;
     color: var(--pst-color-text-base);
     font-size: 15px;
+}
+
+.dynref-hero-backend-cuda {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 6px;
 }
 
 .dynref-hero-reqs {
@@ -129,11 +145,20 @@ export function CompatibilityHero() {
         <div className="dynref-hero-backends">
           {backends.map((backend) => (
             <div className="dynref-hero-backend" key={backend.label}>
-              <span className="dynref-label">{backend.label}</span>
+              <span className="dynref-hero-backend-name">{backend.label}</span>
               <span className="dynref-mono dynref-hero-pin">{backend.pin}</span>
               <span className="dynref-muted">
                 NIXL <span className="dynref-mono">{backend.nixl}</span>
               </span>
+              <div className="dynref-hero-backend-cuda">
+                {CUDA_HISTORY.filter(
+                  (r) => r.version === CURRENT_TAG && r.backend === backend.label,
+                ).map((r) => (
+                  <span className="dynref-chip dynref-chip--cuda" key={r.toolkit}>
+                    CUDA {r.toolkit}
+                  </span>
+                ))}
+              </div>
             </div>
           ))}
         </div>
@@ -174,19 +199,11 @@ export function CompatibilityHero() {
             ))}
           </div>
 
-          <span className="dynref-label">CUDA</span>
-          <div className="dynref-hero-req-values">
-            <span className="dynref-chip dynref-chip--cuda">
-              13.0 · SGLang, vLLM
-            </span>
-            <span className="dynref-chip dynref-chip--cuda">
-              13.1 · TensorRT-LLM
-            </span>
-            <span className="dynref-muted">
-              CUDA 12 discontinued as of {CURRENT_VERSION}
-            </span>
-          </div>
         </div>
+
+        <p className="dynref-muted dynref-grid-note">
+          CUDA 12 discontinued as of {CURRENT_VERSION}.
+        </p>
 
         <p className="dynref-muted dynref-grid-note">
           Early access: model builds are tracked in{" "}

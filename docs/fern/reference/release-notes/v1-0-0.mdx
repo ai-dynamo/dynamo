@@ -1,0 +1,448 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Dynamo v1.0.0
+subtitle: Release notes for Dynamo v1.0.0 (GA Mar 12, 2026), including patch releases v1.0.1, v1.0.2
+---
+
+import { ReferenceStyles } from "@/components/ReferenceStyles";
+import { ReleaseHeader } from "@/components/ReleaseHeader";
+import { ReleaseSummaryCards } from "@/components/ReleaseSummaryCards";
+
+<ReferenceStyles />
+
+<ReleaseHeader
+  version="v1.0.0"
+  contributors={90}
+  firstTimers={34}
+  breakingCount={41}
+  knownIssuesCount={14}
+/>
+
+Dynamo v1.0.0 is the first major release of the open-source distributed inference platform. This release delivers production-grade disaggregated serving with comprehensive multimodal and omni-model support, KV cache optimizations, improved handling of agentic workloads, Kubernetes-native deployment at scale, and a stabilized public API.
+
+<Note>
+Breaking changes and deprecations for this release are tracked on the [Deprecations](../deprecations.mdx#v100) ledger; known issues on the [Known Issues](../known-issues.mdx#v100) page. Key dependency pins live on [Compatibility](../compatibility.mdx); shipped artifacts on [Release Artifacts](../release-artifacts.mdx).
+</Note>
+
+## Highlights
+
+<ReleaseSummaryCards
+  cards={[
+    {
+      area: "Multimodal",
+      title: "Multimodal & Diffusion",
+      body: "Dynamo now serves a range of generative modalities—text, image, and video—across all three major inference frameworks. Text-to-image generation is available through both vLLM Omni and SGLang image diffusion pipelines, and text-to-video through SGLang, vLLM Omni, and TensorRT-LLM Wan T2V, with experimental MJPEG streaming for real-time video output. Encoder disaggregation matured with a new EncoderCacheManager and content-addressed hashing, enabling multimodal encoder outputs to be cached and reused across workers. Embedding transfer between workers uses NIXL to minimize latency, and multimodal-aware KV cache routing places requests based on media content for better cache hit rates.",
+      anchor: "multimodal-diffusion",
+    },
+    {
+      area: "Frontend",
+      title: "Agents",
+      body: "Dynamo added building blocks for agentic workloads: agent hints at the API, priority scheduling, and (experimental) KV cache retention and lifecycle awareness for long agent sessions. Dynamo expanded its agentic capabilities with reasoning content management for DeepSeek v3.2, GLM-4.7, and Kimi-2.5—including interleaved thinking support where reasoning and tool calls alternate within a single response. New tool call parsers for GLM-4.7, MiniMax-M2, and Kimi K2/K2.5 broaden the set of models that can drive tool-use workflows. Agentic frameworks that target OpenAI or Anthropic can now connect to Dynamo directly via new `/v1/responses` and `/v1/messages` endpoints, removing the need for adapter layers. Guided decoding now enforces JSON schema constraints on model output across vLLM and TensorRT-LLM, ensuring tool calls and function arguments are always valid structured data.",
+      anchor: "frontend-agents",
+    },
+    {
+      area: "General",
+      title: "Unified Configuration & Public API Stabilization",
+      body: "All backends (SGLang, TensorRT-LLM, vLLM) and core components (Frontend, Router, Planner) migrated from fragmented argparse flags to a typed, modular configuration system with validated base classes. The public Python API was streamlined—deprecated types like `Component`, `Namespace`, and `CancellationToken` were removed, and endpoint methods were consolidated. These changes make the SDK smaller, more consistent, and easier to maintain.\n\nSee [Breaking Changes](#breaking-changes) for migration details.",
+      anchor: "infrastructure-modernization",
+    },
+    {
+      area: "Kubernetes",
+      title: "Kubernetes Production Readiness",
+      body: "Dynamo Operator matured with a `v1beta1` DynamoGraphDeploymentRequest API (Preview in Dynamo v1.0.0), config versioning via ConfigMap injection, GPU auto-discovery migrated from Profiler to Operator, rolling updates for DGD worker deployments, and simplified CRD management. The EPP component introduced a decomposed pipeline for supporting Inference Gateway-based routing with pod-level traffic management. LoRA support expanded with routing-aware adapter placement, memory-aware allocation, and multimodal LoRA with Kubernetes deployment examples. Multiple new Kubernetes deployment recipes were added including Kimi-K2.5, Qwen3-VL-30B-A3B-FP8, & Nemotron-3-Super-FP8.",
+      anchor: "kubernetes-deployment",
+    },
+    {
+      area: "General",
+      title: "Performance & Reliability",
+      body: "Dynamo Snapshot (Preview in Dynamo v1.0.0) enables fast GPU worker recovery via a portable DaemonSet using CRIU and cuda-checkpoint, now extended to SGLang. The Dynamo Planner now adds a load-based scaling approach, and a new GlobalPlanner mode (Preview in Dynamo v1.0.0) that provides cross-deployment autoscaling for multiple models or deployments backing an endpoint. Observability was overhauled with standardized `dynamo_router_`* metrics, engine-level Prometheus metrics, OTel tracing for routing, and more robust Grafana dashboards.",
+    },
+    {
+      area: "General",
+      title: "Under the Hood",
+      body: "Two posts on the [Dynamo Dev Blog](https://docs.nvidia.com/dynamo/dev/blog) give a closer look at some of the problems we've worked on:\n\n1. [Flash Indexer: Inter-Galactic KV Routing](https://docs.nvidia.com/dynamo/dev/blog/flash-indexer) traces six iterations of data structure design—from a Python dictionary to a concurrent positional index with jump search. The result: the Dynamo Router sustains 170M ops/s—42x faster than what we shipped in Dynamo v0.1.0 and enough to handle planetary-scale inference workloads (we think).\n2. [Full-Stack Optimizations for Agentic Inference](https://docs.nvidia.com/dynamo/dev/blog/agentic-inference) tackles the visibility gap between agent harnesses and inference stacks. Claude Code and Codex know what's urgent—but the inference engines handling the workloads didn't, until now. The new `nvext.agent_hints` API lets harnesses pass scheduling priority, cache retention, and speculative prefill hints directly to the engine.",
+    },
+  ]}
+/>
+
+## Features & Improvements
+
+### Multimodal & Diffusion
+
+- **Encoder Cache Infrastructure:** Implemented EncoderCacheManager with async support for caching multimodal encoder outputs (#5632, #5676) and content-addressed hashing for TensorRT-LLM (#5715).
+- **TensorRT-LLM Encoder Cache:** Integrated encoder cache into TensorRT-LLM PrefillHandler (#5714), EPD workflow (#5780), and E/PD disaggregated workflow (#5815) for cross-worker multimodal reuse.
+- **vLLM Embedding Cache:** Added embedding cache to PD workers (#6029, #6061) and aggregated vLLM nodes (#6153) for reusing multimodal embeddings across requests.
+- **Text-to-Image Generation:** Added text-to-image support via vLLM Omni pipeline (#5608, #5912) and SGLang image diffusion (#5609).
+- **Text-to-Video Generation:** Added text-to-video support via SGLang T2V (#5793), vLLM Omni pipeline (#6104), and TensorRT-LLM Wan T2V (#5926), with experimental MJPEG video streaming via `/v1/videos/stream` (#6487).
+- **Multimodal Embedding Transfer:** Added embedding transfer sender and receiver for cross-worker multimodal data movement (#6098), adopted transfer classes for the EPD pipeline (#6223), and optimized by keeping embeddings on GPU in the Embedding Sender (#6535).
+- **Multimodal-Aware KV Cache Routing:** Implemented multimodal-aware request routing for vLLM (#6235) and end-to-end multimodal KV cache routing for TensorRT-LLM (#5480), optimizing request placement based on media content.
+- **TensorRT-LLM Multimodal Preprocessor:** Added TensorRT-LLM multimodal preprocessor with backend media decoding (#5910).
+- **vLLM Frontend Media Decoding:** Enabled vLLM backend with frontend media decoding for end-to-end multimodal serving (#5781).
+- **Batch Image Processing:** Added batch image processing in encode worker and Qwen3 model support (#6021).
+- **SGLang MMEncoder in EPD:** Integrated SGLang MMEncoder for multimodal EPD encode worker pipeline (#6162).
+- **Multimodal Model Support:** Improved multimodal disaggregation reliability with Qwen2.5 VL 32B support (#5895) and added Qwen3-VL-30B-A3B support for EPD pipeline (#6533).
+- **NIXL WRITE Embedding Transfer:** Added NIXL WRITE initiation for cross-node multimodal embedding transfer (#6776).
+- **vLLM Omni Container:** Installed vllm-omni in vLLM container for visual generation support (#6458).
+
+### Frontend & Agents
+
+- **Reasoning and Tool Call Parsers:** Added reasoning content management for DeepSeek v3.2, GLM-4.7, and Kimi-2.5 (#6107), interleaved thinking support (#6422), and new tool/reasoning parsers for GLM-4.7 (#5897), MiniMax-M2 (#6294), and Kimi K2/K2.5 (#6407).
+- **Responses API Compliance:** Implemented Responses API compliance with upstream type alignment for spec conformance (#6089).
+- **Anthropic Messages Endpoint:** Added Anthropic Messages API endpoint (`/v1/messages`) for cross-provider compatibility (#6231).
+- **Tiktoken Support:** Added Tiktoken tokenizer support for models requiring Tiktoken encoding (#6460).
+- **vLLM Chat Path Optimization:** Reduced Python-side overhead in the vLLM chat path for lower latency (#6437).
+- **vLLM Pre/Post Processing:** Adopted vLLM for pre- and post-processing in the Frontend for consistency (#5544).
+- **Dynamic gRPC Startup:** Made gRPC startup dynamic for high ISL/OSL scenarios in the gRPC Frontend (#5536).
+
+### Kubernetes Deployment
+
+#### DynamoGraphDeployment Request
+
+- **DGDR Deployment Guide:** Added comprehensive Kubernetes deployment guide for DynamoGraphDeploymentRequest (DGDR) workflows covering the golden path from model selection through profiling and autoscaling (#7304).
+- **DGDR API Maturation:** Added structured `.status.state` enums for DGD (#6324) and DGDR (#6396), `observedGeneration` for reconciliation tracking (#6398), introduced the `v1beta1` DGDR API with automatic conversion from `v1alpha1` (#6352), and adopted `v1beta1` in the controller (#6498).
+- **Model/WorkerSet Architecture:** Introduced hierarchical Model/WorkerSet architecture for multi-namespace support (#6054).
+- **Rolling Updates:** Implemented managed rolling updates for DGD worker deployments (#6110).
+- **DGD Print Columns:** Added print columns with ready condition for `v1alpha1` API types like DGD (#5542).
+- **Optional DGDR Image Field:** Made the image field optional in DGDRs for flexible container configuration (#6557).
+- **Operator Version in DGD:** Included Operator version in DGD for version tracking in cluster state (#6121).
+- **AIC DGD Generation:** Enabled AIC DGD generation call for automated infrastructure configuration (#6216).
+- **Profiler Job Overrides:** Added profiler job overrides for customizable profiling runs (#6641).
+
+#### Dynamo Snapshot
+
+- **Dynamo Snapshot:** Introduced Dynamo Snapshot for fast GPU worker recovery (#4978, #7068), refactored configuration with `/dev/shm` support and mount-policy rewrite (#5946), added external restore with signal-based IPC (#6286), and extended to the SGLang backend (#6594).
+
+#### Gateway API Inference Endpoint (GAIE)
+
+- **EPP Integration:** Added the EPP component for Kubernetes Gateway API-based inference routing (#5611), implemented the decomposed pipeline for flexible routing stages (#5446), added startup probe for reliable liveness detection (#5770), and enabled the EPP `pods` interface for pod-level traffic management (#6302).
+
+#### Dynamo Operator
+
+- **Operator Management Improvements:** Implemented config versioning via ConfigMap injection (#6464), simplified CRD management (#6466), reduced Helm chart dependencies (#7048), and replaced kube-rbac-proxy with controller-runtime authorization (#7069).
+- **GPU Discovery Migration:** Migrated GPU discovery from Dynamo Profiler to Operator with automatic injection (#6224).
+- **Namespace-Scoped GPU Discovery:** Added optional GPU discovery for namespace-scoped Operators (#6343).
+- **Tolerations and Affinity Support:** Added tolerations and affinity support for all platform Helm chart components (#5561).
+- **Rolling Updates Documentation:** Added documentation for Operator rolling updates (#6541).
+
+### Scheduling
+
+#### Router
+
+- **Data-Parallel Routing:** Added per-DP-rank gap detection (#5873), TensorRT-LLM DP rank routing (#5936), and RNG tiebreaking for DP routing targets (#6253) for improved data-parallel load distribution.
+- **Router Priority Queue:** Implemented request priority queue in the Router (#6010) and plumbed priority through SGLang and vLLM handlers for end-to-end support (#6348).
+- **Global Router:** Added global Router for hierarchical Planner topology (#5697).
+- **Global Router + vLLM Example:** Added DGD example for global Router + vLLM deployment (#5760).
+- **Expert Routing Info:** Enabled returning routed experts info through SGLang for expert-parallel routing visibility (#6137).
+- **Prefill Tokens Threshold:** Added prefill tokens threshold based on max batched tokens fraction for adaptive batching (#5867).
+- **Default Event Threads:** Defaulted `router_event_threads` to 4 for improved Router throughput (#6724).
+
+#### Planner
+
+- **Planner Autoscaling:** Added GlobalPlanner component for centralized cross-cluster scaling (#5702), implemented load-based scaling in SLA Planner (#6145), added throughput metrics source for disaggregated scaling decisions (#6500), and moved core logic from DPP to AIC with static profiling support (#6285).
+- **Planner P/D Separation:** Separated Planner into independent prefill/decode Planners (#5622) and automated resource allocation by deriving GPU counts (#5919) and worker counts (#5934) from DGD status.
+- **Planner Config Migration:** Migrated Planner from argparse CLI to config file for unified configuration (#6356).
+- **Planner Schema in DGDR:** Added Planner schema to DGDR and Profiler input for configuration consistency (#6463).
+- **Profiler Model Validation:** Removed default model name in Profiler and added validation for served model name or path (#5950).
+
+### KV Block Manager
+
+- **Speculative Prefill:** Implemented speculative prefill for proactive KV cache population (#6230).
+- **Flash Indexer Optimizations:** Optimized flash indexer performance for faster KV cache prefix lookups (#6305).
+- **Standalone KV Indexer:** Added standalone KV indexer with query endpoint for decoupled prefix matching (#6446).
+- **KVBM Priority Offload:** Implemented priority-based KV cache offload filtering (#5563) and optimized by reading the priority env var once at init (#5798).
+- **KVBM Logical Abstraction:** Introduced KVBM-logical abstraction layer for flexible KV block management (#6033).
+- **Nested KV Index Mapper:** Implemented nested mapper for KV indexing to support hierarchical prefix matching (#5785).
+- **KVBM Memory Enhancements:** Added KVBM memory management enhancements for improved allocation and lifecycle (#5532).
+- **Default KVBM Enablement:** Enabled lib/memory, media-nixl, and KVBM by default for out-of-the-box disaggregated serving (#5602).
+- **KVBM Kernels Crate:** Added `kvbm-kernels` crate and upgraded cudarc to 0.19 for GPU kernel support (#6309).
+- **NVTX Annotations:** Added NVTX annotations to KVBM for GPU profiling visibility (#6334).
+- **Default KV Events Config:** Defaulted `kv-events-config` to empty to align with vLLM defaults (#6404).
+- **KV Hit Rate Histogram:** Exposed predicted KV hit rate as Prometheus histogram for cache efficiency monitoring (#6507).
+- **Mocker KV Cache Tracing:** Added optional KV cache allocation/eviction tracing (#6052, #6207), KV transfer latency simulation for disaggregated benchmarks (#6504), and ZMQ-based KV event publishing (#6528) to the mocker.
+
+### LoRA Support
+
+- **LoRA Routing and Allocation:** Added LoRA-aware routing hints and tracking (#5875), memory-aware load estimation (#5880), HRW-based optimal adapter allocation (#5992), and LoRA-aware KV cache events (#6517).
+- **Multimodal LoRA:** Extended LoRA support to multimodal workloads with protocol-level model identification (#6382), request handling for multimodal workers (#6399), and deployment examples for local (#6400) and Kubernetes (#6452).
+
+### Infrastructure Modernization
+
+- **Unified Configuration System:** Introduced a unified configuration system with typed base classes (#5975) and migrated vLLM (#6075) and Frontend CLI (#6201) to the new system.
+- **Configuration System Migration:** Migrated SGLang (#6280), TensorRT-LLM (#6297), global Router (#6342), and Router (#6346) to the unified configuration system.
+- **Go-to-Definition Support:** Enabled go-to-definition for `dynamo.runtime`, `dynamo.nixl`, and external dependencies (#6026).
+- **Standardized Error Type:** Introduced standardized Dynamo error type for consistent error handling across the stack (#6303).
+- **AIPerf Client Rate Control:** Added `--request-rate` and `--request-rate-mode` flags to aiper client for flexible load testing (#6585).
+- **Disaggregation Mode Enum:** Added `--disaggregation-mode` enum to vLLM backend for explicit mode selection (#6483).
+- **vLLM Endpoint Flag:** Added `--endpoint` flag support to `dynamo.vllm` for flexible serving configuration (#6360).
+
+### Performance
+
+- **Mocker Performance:** Improved mocker with model pre-fetching, staggered launches, and timing accuracy (#5871, #5808, #6100), and modularized the crate into common/scheduler/kv_manager/cache modules (#6440).
+
+#### SGLang
+
+- **SGLang GPU Memory Service:** Integrated SGLang with GPU Memory Service for unified memory management (#5664).
+- **SGLang Request Migration:** Implemented request migration for SGLang to support live request handoff (#5659).
+- **SGLang Weight Update Endpoints:** Added SGLang `/engine` weight update endpoints for online model updates (#6094).
+
+#### TensorRT-LLM
+
+- **TensorRT-LLM Guided Decoding:** Added guided decoding backend config and choice support for TensorRT-LLM (#5762).
+- **CUDA IPC for TensorRT-LLM:** Introduced CUDA IPC for TensorRT-LLM PrefillHandler enabling zero-copy cross-process transfers (#5773).
+- **NixlConnector Config:** Added `--kv-transfer-config NixlConnector` to disaggregated scripts and recipes (#6560).
+
+#### vLLM
+
+- **vLLM Multi-Node Multiprocessing:** Adopted vLLM multiprocessing in multi-node scenarios for improved parallelism (#6191).
+- **Headless Multi-Node Mode:** Added `--headless` mode for multi-node TP/PP in `dynamo.vllm` for worker-only deployments (#6204).
+- **ModelExpress P2P Weight Transfer:** Enabled ModelExpress P2P weight transfer in Dynamo vLLM worker for faster model loading (#6186).
+
+### Fault Tolerance & Observability
+
+- **Router Metrics and Tracing:** Added per-worker load monitoring (#5842), centralized Router-level request tracking (#6146), standardized all Router metrics under the `dynamo_router`_* namespace (#6227), and added OTel tracing for routing overheads (#6194).
+- **Engine Prometheus Metrics:** Exposed Python-level engine metrics via LLMComponentMetrics (#5817), added auto/custom label injection (#5989), introduced tokenizer (#6092) and detokenization (#6160) latency metrics, and exposed TensorRT-LLM kv_cache metrics (#6469).
+- **NIXL Telemetry Port:** Added NIXL Telemetry Prometheus port for transfer library monitoring (#5567).
+- **Error Type Metric Label:** Added `error_type` label to request metrics for fine-grained error classification (#5568).
+- **Grafana Dashboard:** Added Grafana dashboard and monitoring setup for comprehensive observability (#4639).
+- **NIXL Sanity Check:** Added NIXL availability check to sanity_check for environment validation (#6087).
+- **Graceful Shutdown Draining:** Enabled backends to accept new requests during shutdown grace period for graceful draining (#6093).
+
+### Recipes
+
+- **GB200 Disagg Recipe:** Added GB200 GPT-oss disaggregated serving recipe for next-gen hardware support (#4954).
+- **DeepSeek V3.2 Recipe:** Added DeepSeek V3.2 TensorRT-LLM recipe for optimized serving (#6969).
+- **Qwen3-VL-30B Recipe:** Added Qwen3-VL-30B recipe for aggregated and encoder cache deployment with vLLM (#7191).
+
+## Bug Fixes
+
+### Multimodal
+
+- **Multimodal Disaggregated Serving:** Fixed multiple reliability issues in multimodal prefill/decode disaggregated serving and restored EPD pipeline on single-GPU (#5951, #6753, #6978).
+- **Multimodal Input Processing:** Fixed multimodal input loader blocking the async event loop, PSD file crash in the image pipeline, and vLLM OmniModel image processing performance (#5945, #6212, #6451).
+- **Multimodal API and Stream Handling:** Fixed `stream_options` forwarding through the multimodal request pipeline, CLI flag collisions with `--omni-` prefixes, and `normalize_finish_reason` on the OmniHandler (#6474, #6476, #6896).
+- **Multimodal Cross-Node Transfer:** Fixed encode + prefill/decode flow in TensorRT-LLM for multimodal embedding transfer (#6790).
+- **Multimodal Video and Audio:** Fixed vLLM chat processor to correctly handle video and audio inputs and resolved invalid UUID errors from empty multimodal inputs (#6708, #6904).
+- **Multimodal Router Performance:** Fixed duplicate image downloads and unnecessary image processing in the multimodal Router for vLLM, reducing latency for repeated media content (#7172).
+- **Multimodal Pipeline Fixes:** Fixed multiple minor issues in the vLLM multimodal pipeline, worker service registration collisions, Llama 4 aggregated multimodal launch script, and LLaVA model EPD support (#5748, #5986, #6103, #6765).
+
+### Frontend & Agents
+
+- **LoRA Endpoint Reliability:** Fixed LoRA load/unload endpoints silently swallowing errors and extended S3 download timeouts to prevent failures with large adapter files (#5626, #6986).
+- **Request Sampling Parameters:** Fixed request sampling parameters not being forwarded to backend workers, causing generation settings to be silently ignored (#5797).
+- **Reasoning Token Handling:** Fixed reasoning parser propagation from worker runtime config, interleaved reasoning content ordering, and reasoning content being dropped when a tool-call starts mid-stream (#6300, #6442, #7051).
+- **Chat Template and Model Fixes:** Fixed DeepSeek V3.2 chat template for function calling and structured output, Nemotron Nano model to use the correct reasoning parser (#6034, #6288), and added `force_nonempty_content` for Nemotron models (#7225).
+- **Frontend Stability:** Fixed HTTP request cancellation using a temporary token instead of the real cancellation token, and fixed a Frontend crash when running with the TensorRT-LLM runtime image (#6344, #6481).
+- **Model Endpoint Correctness:** Fixed `/v1/models` endpoint exposing inactive models and model name resolution to prefer `--served-model-name` (#5881, #7021).
+- **Responses API Compatibility:** Fixed Responses API rejecting valid assistant `output_text` messages that lacked `id`/`status` fields (#7049).
+- **vLLM Processor Compatibility:** Fixed vLLM processor compatibility with vLLM 0.16 API changes and incorrect output when `stream_interval` is greater than 1 (#6873, #6874).
+- **Prompt Length Validation:** Fixed missing validation for prompts exceeding `max_seq_len`, now returning HTTP 400 instead of silently failing (#6997).
+- **Guided Grammar Depth Limit:** Fixed guided grammar to reject schemas with excessive nesting depth, preventing potential resource exhaustion (#7135).
+
+### Kubernetes Deployment
+
+#### DynamoGraphDeployment Request
+
+- **DGD/DGDR Configuration:** Fixed DGD cross-selection, fallback for missing `subComponentType`, service name length validation for DNS compliance, name sanitization for DNS-1035, DGDR prefix for naive fallback (#5449, #6113, #6317, #7062, #6679), and stripped `apiVersion`/`kind`/`metadata` from `overrides.dgd` before merging (#7121).
+- **Operator Override Ordering:** Fixed DGD overrides to apply before running interpolation, ensuring tolerations propagate correctly (#7226).
+
+#### Dynamo Snapshot
+
+- **Snapshot Checkpoint/Restore:** Fixed Snapshot checkpoint failure handling to use SIGKILL, multi-GPU UUID mapping, restore to correctly pass the checkpoint path (#6478, #6492, #7018), and snapshot children before process group kill to prevent GPU memory leaks (#7232).
+
+#### Dynamo Operator
+
+- **Helm Chart Reliability:** Disabled etcd subchart by default, restored Helm docs autogeneration, and reverted a template change that caused deployment failures (#5739, #6329, #6459).
+- **Operator Stability:** Fixed restart state tracking for parallel restarts, `DynamoComponentReady` condition updates, `imagePullPolicy` application, etcd cleanup logic, and consolidated discovery backend configuration (#4821, #5051, #5949, #6263, #6167).
+- **Multi-Node Deployment Fixes:** Fixed SSH setup for TensorRT-LLM multi-node workers, unquoted mpirun and Ray leader arguments that caused multi-node failures, and added nodeSelector support (#6225, #6248, #6711).
+- **Operator GPU Discovery and Tolerations:** Fixed GPU discovery preflight job, correct storage of GPU-equipped nodes, propagation of tolerations with auto-discovered GPU limits, and PVC block emission in configmap (#6640, #6714, #6979, #6755).
+- **Operator CRD and API Configuration:** Fixed CRD validation for nil/empty containers, `AutoApply` field type for proper nil handling, webhook version matching for `v1alpha1` DGDR, annotation propagation, EPP config plugin weight support (#6255, #6712, #6808, #6718, #6783), and allowed `x-kubernetes-preserve-unknown-fields` in CRD validation (#7128).
+
+### Scheduling
+
+#### Router
+
+- **Router Startup Race Condition:** Fixed race condition between worker discovery and runtime config discovery in the KV Router that caused routing failures on startup (#5924).
+- **Router Stream Panics:** Fixed stream handling in the Router that caused panics when polling after stream termination (#5872).
+- **Router Data-Parallel Routing:** Fixed Router to correctly pass the data-parallel rank into the vLLM engine and corrected KV Router discovery name derivation (#6014, #6475).
+- **Router Scheduling Backpressure:** Fixed scheduling by folding it into the queue so backpressure propagates correctly (#6470).
+- **Router Metrics Collection:** Fixed `RouterRequestMetrics` availability to ensure Router metrics are always collected (#6558).
+
+#### Planner
+
+- **Profiler Timeout and Crash Fixes:** Fixed profiler deployment timeout handling for large MoE models and config generation to strip None arguments that caused crashes (#6086, #6887).
+- **Profiler DGDR Validation:** Fixed DGDR validator and DGD generation in the profiler, improved service name logging (#6876, #6112), and fixed profiling condition updates to populate results and clear phase after completion (#7195).
+- **Planner CLI Configuration:** Fixed `disagg_planner.yaml` and Planner test configs to use the updated CLI format (#6775, #7041, #7042).
+- **Planner Backend Resolution:** Fixed propagation of resolved backend and skipped interpolation for aggregated deployments (#7142).
+- **Profiler TTFT/ITL Default Handling:** Fixed Profiler validation error by using `model_fields_set` to distinguish TTFT/ITL default usage (#6827).
+
+### KV Block Manager
+
+- **KV Cache Sleep/Wake Stability:** Fixed KV cache block allocation signal after sleep/wake cycles and CUDA synchronization race conditions during GPU memory transitions (#5681, #5759).
+- **KV Event Propagation and Block Management:** Fixed KV event propagation for data-parallel multi-node deployments and KVBM to read block size from vLLM at runtime instead of using a hardcoded value (#5589, #5713, #5851).
+- **KV Cache Memory Leak:** Fixed memory leak where KV cache blocks were not freed on stream drop (#6246).
+- **GMS Reliability:** Fixed GMS CLI startup failure, removed unnecessary CUDA synchronize calls that degraded performance, and fixed GMS socket UUID resolution via the CUDA driver API (#5749, #6362, #6914).
+- **KVBM CUDA Device Handling:** Fixed PinnedAllocator to use the correct `device_id`, KVBM to respect `CUDA_VISIBLE_DEVICES` for NUMA binding, `device_blocks` double-counting in the TensorRT-LLM connector, and added authorization guards to memory occupation control endpoints (#6877, #6950, #6406, #7023).
+
+### Performance
+
+#### SGLang
+
+- **SGLang Metrics and Monitoring:** Fixed metrics prefix format from `sglang`_ to `sglang:` and `TokenizerMetricsCollector` lazy-import to avoid collector registration errors (#5701, #6269).
+- **SGLang Configuration Fixes:** Fixed tool-call-parser flags to prevent configuration conflicts and DeepSeek-R1 recipe with watchdog timeout to prevent hangs (#5849, #6076).
+- **SGLang Decode Handler:** Fixed decode handler to ignore empty non-final stream chunks (#6304).
+- **SGLang Build and API:** Fixed container build conflict by removing `python3-blinker` and corrected multimodal item keys in the SGLang API (#5995, #5981).
+
+#### TensorRT-LLM
+
+- **TensorRT-LLM Stability:** Fixed decode worker stability by temporarily disabling request cancellation and eliminated crashes caused by unsafe `abort()` calls (#5764, #5827).
+- **TensorRT-LLM Multimodal Support:** Fixed multimodal flag being silently ignored, multimodal hash support for TRT-LLM 1.3 `apply_mm_hashes` API, skipped encoder LLM creation for unsupported models (#6468, #6907, #6918), and fixed the multimodal preprocessor after the initial approach was reverted (#6920, #6993).
+- **TensorRT-LLM Guided Decoding:** Fixed handler to properly convert guided decoding dictionaries to `GuidedDecodingParams` (#6127).
+- **TensorRT-LLM Multi-Node Deployment:** Fixed multi-node worker SSH crash in non-root containers and removed deprecated `beam_width` parameter from health check (#6772, #6890).
+
+#### vLLM
+
+- **vLLM Worker Stability:** Fixed worker graceful shutdown to prevent orphaned processes, decode worker logging format that caused CrashLoopBackOff, and worker registration for external/hybrid load balancing (#5818, #6267, #6833).
+- **vLLM Disaggregated Serving:** Fixed disaggregated serving by adding missing `--is-decode-worker` and `--kv-transfer-config` flags (#5843, #6554).
+- **vLLM Launch Script Fixes:** Fixed DeepSeek-R1 recipe checkpoint path, removed an unnecessary bash wrapper, and corrected launch scripts for disaggregated and speculative decoding (#5721, #6035, #6562).
+- **vLLM Stream Handling:** Fixed sampling parameter parsing in the EPD flow (#5813).
+- **vLLM Performance Configuration:** Fixed Docker image to use the CUDA sampler for better performance and corrected engine stats logging (#5613, #6566).
+- **vLLM Multi-Worker Port Collisions:** Fixed HTTP port collisions when multiple workers share a process (#7185).
+
+### Build & Container
+
+- **Runtime Image Fixes:** Fixed missing native libraries (nvlink, UCX, NIXL, CRT, Triton paths), corrected image tags across SGLang, TensorRT-LLM, and vLLM Dockerfiles (#6503, #6521, #6958, #6983, #6401), and updated UCX reference for performance (#7218).
+- **TensorRT-LLM Dependency Fixes:** Fixed missing `msgpack` dependency and pinned `pydantic-settings` below 2.13.0 for compatibility (#5799, #6339).
+- **Build System Fixes:** Fixed cross-platform NUMA module compilation, `ai-dynamo-runtime` wheel packaging to exclude NIXL shared libraries, CI container `GIT_COMMIT_SHA` population, and disabled `media-ffmpeg` feature by default (#6354, #6881, #7016, #6574).
+
+### Other
+
+- **Core Infrastructure Fixes:** Fixed ZMQ transport receive timeout to prevent hangs, Prometheus metric collisions via multi-registry scrape, stale NATS consumers, multi-node Slurm launch arguments, performance degradation from excessive logging in the EPD pipeline, and tool call validation (#5685, #5678, #5948, #5861, #6742, #5504).
+
+## Documentation
+
+### New Content
+
+- **AKS Storage Guidance:** Added Azure AKS storage guidance for Dynamo caches (#5581).
+- **TensorRT-LLM Known Issues:** Added known issues section for TensorRT-LLM backend (#5801).
+- **Mocker Documentation:** Added mocker component documentation (#5832).
+- **GPU Memory Service:** Added overview documentation for GPU Memory Service (#5920).
+- **Disaggregated Serving Guide:** Added disaggregated serving guide (#6024).
+- **Quick Start Sections:** Added quick start sections to KVBM and Router guides (#6043).
+- **KVBM Disaggregated Setup:** Added instructions for TensorRT-LLM KVBM disaggregated setup (#6055).
+- **Architecture Docs:** Added Discovery Plane documentation and refactored Event Plane with D2 diagrams (#6229).
+- **Inference Gateway:** Added inference gateway documentation page (#6319).
+- **Agent Docs:** Added agent readme and documentation (#6320).
+- **Frontend Configuration:** Documented Frontend requirement for model config file access (#6327).
+- **Speculative Prefill Demo:** Added multiturn_bench README with speculative prefill demo (#6502).
+- **Dev Containers Troubleshooting:** Documented Docker 29.x Dev Containers hang root cause and fix (#6505).
+- **KV Indexer Docs:** Added standalone KV indexer documentation (#6511).
+- **Embedding Cache:** Documented embedding cache support in vLLM and TensorRT-LLM (#6555).
+- **SGLang Observability:** Expanded SGLang observability guide with tracing and dashboards (#6556).
+- **DGDR `v1beta1`:** Documented `v1beta1` DynamoGPUDynamicResource API (#6713).
+- **vLLM Multimodal Router:** Added docs for vLLM multimodal Router (#6568).
+- **Nemotron-3-Super-FP8 Recipes:** Added Nemotron-3-Super-FP8 deployment recipes for SGLang aggregated, SGLang disaggregated, and TensorRT-LLM disaggregated with model download manifests (#7254).
+- **FastVideo Example and Guide:** Added FastVideo text-to-video example with deployment guide and sidebar reorganization (#7283).
+- **Getting Started Introduction:** Added introduction page to the Getting Started section with platform overview (#7292).
+
+## Looking Ahead
+
+Dynamo v1.1.0 is targeted for April 29, 2026. Here's a small preview of what's already taking shape:
+
+### Longer Contexts, Lower Cost
+
+FlexKV manages KV cache across HBM, host memory, and SSD so long-context and high-concurrency workloads don't hit GPU memory limits. Instead of dropping requests when HBM fills up, the system spills KV blocks to cheaper storage tiers and pulls them back on demand.
+
+### Resilient Routing at Scale
+
+The KV indexer gains P2P state recovery and automatic ZMQ gap replay, keeping prefix matching correct through node failures without manual intervention. Multi-model and multi-tenant isolation ensures that shared clusters route requests to the right cache even when multiple models share the same infrastructure.
+
+### Unified Observability
+
+Forward pass metrics on the event plane and Loki log aggregation with unified OTLP ingestion bring metrics, traces, and logs into a single pipeline. Operators debugging latency or throughput issues in disaggregated deployments no longer need to correlate data across separate tools.
+
+**Full Changelog**: [https://github.com/ai-dynamo/dynamo/compare/v0.9.1...v1.0.0](https://github.com/ai-dynamo/dynamo/compare/v0.9.1...v1.0.0)
+
+## Patch releases
+
+### v1.0.1 — Mar 16, 2026
+
+#### Summary
+
+Dynamo v1.0.1 is a patch release to Dynamo v1.0.0 with **critical bug fixes** and **expanded model support**. Key fixes resolve a TensorRT-LLM startup crash on CUDA 13.1 caused by a `cutlass-dsl` packaging mismatch, and restore OpenAI API logprobs compliance where `bytes` and `token` fields were not populated when routing through Dynamo Frontend. This release also enables experimental Kimi K2.5 model support by adding DeepSeek V3 architecture tokenizer handling and fixing tiktoken multi-byte streaming panics.
+
+**Base Branch**: `release/1.0.0`
+
+#### Bug Fixes
+
+- **TensorRT-LLM CUDA 13.1 Startup Crash:** Fixed startup crash where a `cutlass-dsl` stub crashed the TensorRT-LLM import chain on CUDA 13.1. This was a [known issue in v1.0.0](https://github.com/ai-dynamo/dynamo/releases/tag/v1.0.0) that blocked MoE models on Blackwell GPUs, including the Qwen3-235B-A22B-FP8 TensorRT-LLM recipe. (#7393)
+- **Kimi K2.5 Tokenizer and Streaming:** Added DeepSeek V3 architecture support for Kimi's BPE tokenizer pattern and fixed worker thread panic on incomplete multi-byte sequences during streaming inference. Enables serving nvidia/Kimi-K2.5-NVFP4 and other Kimi K2.5 models that use the DeepSeek V3 `model_type` with a tiktoken tokenizer. (#7424)
+- **OpenAI Logprobs Fields:** Fixed `bytes` and `token` fields in logprobs responses always returning `None`/empty when routing through Dynamo Frontend. Affected vLLM backend; direct backend queries returned correct values but requests routed through Frontend did not. (#7404)
+
+### v1.0.2 — Apr 22, 2026
+
+#### Summary
+
+Dynamo v1.0.2 is a patch release focusing on **Frontend correctness fixes**, **DGDR-driven Kubernetes deployment robustness**, **rolling-update flexibility**, and **guided-decoding input hardening**.
+
+Key fixes restore real stream metadata in non-streaming responses with tool calls, correct Kimi K2.5 tokenizer special-token handling that caused TensorRT-LLM to reject requests, and add byte-length and nesting-depth caps to the OpenAI guided-decoding path.
+
+On the deployment side, DGDR-created DynamoGraphDeployments now derive their name from the parent DGDR, DGDR-managed ConfigMaps cascade-delete with their parent, the Operator no longer thrashes on foreground cascading deletion, and per-WorkerSet MDC checksum validation enables rolling updates with divergent worker configuration under the same Model.
+
+**Base Branch**: `release/1.0.1`
+
+#### Full Changelog
+
+##### Kubernetes Deployment
+
+- **DGDR-Driven DGD Naming:** Fixed Profiler-generated DynamoGraphDeployment naming so that DGDs derive their name from the parent DynamoGraphDeploymentRequest (`<DGDR>-dgd`) instead of from topology alone (`<backend>-<agg/disagg>`) (#7835), eliminating namespace-level name collisions when multiple DGDRs share the same backend/topology and respecting user-provided names from `spec.overrides` when present.
+- **DGDR ConfigMap Owner References:** Added Kubernetes owner references to ConfigMaps created by DGDR (#7881) so that DGDR-managed ConfigMaps are cascade-deleted with their parent.
+
+##### Runtime
+
+- **Per-WorkerSet MDC Checksum Validation:** Scoped Model Discovery Card checksum validation from per-Model to per-WorkerSet (#8278), enabling rolling updates where different WorkerSets under the same Model can carry different configuration (e.g. tool-call parser) without draining existing workers first. Mismatches are still rejected when a new worker joins an existing WorkerSet, but cross-WorkerSet checksum drift is no longer a hard error.
+
+#### Bug Fixes
+
+- **DGD Cascading Deletion Thrashing:** Fixed Operator behavior under foreground cascading deletion of DynamoGraphDeployments (#8212) so the Operator no longer thrashes the resource during teardown, ensuring clean DGD deletion in Kubernetes garbage-collection scenarios.
+- **Stream Metadata Preservation:** Fixed OpenAI Frontend stream finalization that overwrote real `id`, `model`, and `created` fields with hardcoded placeholders (`stream-end`, `unknown`, `0`) when a tool-call parser combined streamed chunks into a non-streaming response (#8281), restoring correct response metadata for non-streaming tool-call requests.
+- **Per-Node GPU Topology in DGD Builder:** Fixed thorough-mode MoE config enumeration in the Planner/Profiler that ignored `numGpusPerNode` and produced unschedulable candidate DGDs on multi-node clusters (#8281). Worker GPU resource limits are now clamped per node and `multinode.nodeCount` is set for workers that span multiple nodes.
+- **Kimi Tokenizer Special Tokens:** Fixed Rust tiktoken tokenizer handling of reserved-token fallback names for Kimi K2.5 (#7898), resolving prompt-token inflation that caused TensorRT-LLM to reject requests with negative `default_max_tokens` and enabling correct serving of `nvidia/Kimi-K2.5-NVFP4` and other Kimi K2.5 models.
+- **Guided-Decoding Input Bounds:** Added byte-length and nesting-depth caps to OpenAI guided-decoding input validation (#8349) — `guided_grammar` 64 KiB, `guided_regex` 32 KiB, `guided_whitespace_pattern` 1 KiB, `guided_json` 256 KiB serialized with a nesting-depth cap of 64 — bounding pathological inputs before they reach the downstream guided-decoding backend.
+
+**Full Changelog**: [https://github.com/ai-dynamo/dynamo/compare/v1.0.1...v1.0.2](https://github.com/ai-dynamo/dynamo/compare/v1.0.1...v1.0.2)
+
+<Accordion title="Open-source contributions and new contributors">
+
+Between v0.9.0  and v1.0.0, we merged over 700 commits from over 90 contributors — 34 first-time contributors and 19 external contributors from 12 organizations.
+
+**First-Time External Contributors**
+
+- **@devivasudevan** (Microsoft) contributed a PR that adds Azure AKS storage guidance for Dynamo caches (#5581).
+- **@maljazaery** (Microsoft) contributed a PR that clarifies DGDSA creation for services is disabled by default (#6389).
+- **@dsocek** (Intel) contributed a PR that improves multimodal disaggregation reliability (#5895).
+- **@muskansh-google** (Google) contributed a PR that updates build commands for the Dynamo + SGLang container (#5908).
+- **@InfraWhisperer** (F5) contributed a PR that fixes a frontend crash when using the TRT-LLM runtime image (#6481).
+- **@Kaonael** (Gcore) contributed a PR that adds a status state enum to DynamoGraphDeployment for improved lifecycle tracking (#6324).
+- **@Ryan-Amirthan** (Fern) contributed a PR that adds standard NVIDIA Fern styling assets to the documentation site (#6148).
+- **@bledden** (Facilitair) contributed a PR that forwards `stream_options` through the multimodal request pipeline (#6474).
+- **@advpropsys** (WhiteCircle.ai) contributed a PR that reduces NATS consumer inactive threshold from 1 hour to 2 minutes to prevent stale connections (#5861).
+- **@luc-hiverge** (Hiverge) contributed a PR that fixes first token creation signal timing by emitting the signal after sleeping (#5681).
+- **@orangeng** contributed a PR that fixes the service name in port-forward documentation (#5527).
+- **@huitianbai** contributed a PR that limits bootstrap room ID range to 0–2^63-1 to prevent overflow (#6277).
+
+**First-Time NVIDIA Contributors:**
+
+- **@knowicki-nvidia** contributed a PR that adds image diffusion and text-to-image support for the SGLang backend (#5609).
+- **@akshatha-k** contributed a PR that restructures KVBM documentation into a three-tier format (#5905).
+- **@alexanderbilk** contributed a PR that adds a Prometheus port for NIXL telemetry metrics (#5567).
+- **@rwipfelnv** contributed a PR that adds Grafana dashboard and monitoring setup for observability (#4639).
+- **@mikwieczorek** contributed a PR that fixes TRT-LLM recipe component type from "main" to "worker" (#5788).
+- **@jpohl-nv** contributed a PR that adds experimental MJPEG video streaming via `/v1/videos/stream` (#6487).
+- **@rafiw** contributed a PR that adds Triton path environment variables to the vLLM runtime Dockerfile (#6401).
+
+**Returning External Contributors:** @michaelfeil (Baseten), @vladnosiv (Yandex.Cloud), @Jont828 (Microsoft), @ashnamehrotra (Microsoft), @ls-2018, @AmeenP (PrimeIntellect), @kerthcet (InftyAI/Hiverge).
+
+>If you would like to get involved, please see our [Contribution Guide](https://docs.nvidia.com/dynamo/dev/getting-started/contribution-guide)
+
+</Accordion>

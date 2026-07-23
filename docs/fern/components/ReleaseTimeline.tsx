@@ -106,6 +106,17 @@ const TL_CSS = `
     font-size: 12px;
 }
 
+.dynref-tl-gh {
+    color: var(--pst-color-text-muted);
+    font-size: 11.5px;
+    text-decoration: none;
+}
+
+.dynref-tl-gh:hover {
+    text-decoration: underline;
+    text-decoration-color: var(--nv-color-green, #76B900);
+}
+
 .dynref-tl-sum {
     margin: 4px 0 0;
     color: var(--pst-color-text-muted);
@@ -177,14 +188,22 @@ function TimelineEntry({ release, isLast }: { release: Release; isLast: boolean 
       </div>
       <div className="dynref-tl-body">
         <div className="dynref-tl-head">
-          {release.github ? (
-            <a className="dynref-mono dynref-tl-version" href={release.github}>
+          {release.notesHref || release.github ? (
+            <a
+              className="dynref-mono dynref-tl-version"
+              href={release.notesHref ?? release.github}
+            >
               {release.version}
             </a>
           ) : (
             <span className="dynref-mono dynref-tl-version">{release.version}</span>
           )}
           <span className={`dynref-badge dynref-badge--${badge.variant}`}>{badge.label}</span>
+          {release.notesHref && release.github && (
+            <a className="dynref-tl-gh" href={release.github}>
+              GitHub ↗
+            </a>
+          )}
           {release.date && <span className="dynref-tl-date">{release.date}</span>}
         </div>
         {summary && <p className="dynref-tl-sum">{summary}</p>}
