@@ -89,11 +89,15 @@ registry: docker.io/myuser
 # Set to true when you haven't changed API types (faster iteration).
 skip_codegen: true
 
+# Target architecture for the operator binaries.
+# Use arm64 for an ARM-based kind cluster.
+goarch: amd64
+
 # Target namespace for the operator and related resources.
 # namespace: dynamo-system
 
 # Subchart toggles
-# enable_nats: true            # Required for DGD/DGDR workloads (default: true)
+# enable_nats: true            # Only for NATS-based transports or features
 # enable_etcd: false           # Only if discoveryBackend is "etcd"
 # enable_kai_scheduler: false  # GPU-aware scheduling for multi-node
 # enable_grove: false          # PodClique-based multi-node orchestration
@@ -112,7 +116,8 @@ skip_codegen: true
 | `registry` | string | `""` | Container registry prefix (e.g. `docker.io/myuser`). Also settable via `REGISTRY` env var, which takes precedence. |
 | `namespace` | string | `dynamo-system` | Namespace for the operator Deployment and related resources. |
 | `skip_codegen` | bool | `false` | Skip `make generate && make manifests` before applying CRDs. Set to `true` when you haven't changed API types. |
-| `enable_nats` | bool | `true` | Deploy NATS subchart. Required for DGD/DGDR workloads (workers use it for communication). |
+| `goarch` | string | `amd64` | Target architecture for the operator binaries. |
+| `enable_nats` | bool | `false` | Deploy the NATS subchart for NATS-based transports or features. |
 | `enable_etcd` | bool | `false` | Deploy etcd subchart. Only needed when `discoveryBackend` is `etcd`. |
 | `enable_kai_scheduler` | bool | `false` | Deploy kai-scheduler for GPU-aware scheduling in multi-node setups. |
 | `enable_grove` | bool | `false` | Deploy Grove for PodClique-based multi-node orchestration. |
@@ -151,9 +156,9 @@ MPI SSH key provisioning at runtime — no external setup needed.
 
 ### What Each Resource Does
 
-**manager-build** — Runs `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build` to
-compile the operator binary. Re-runs on changes to `api/`, `cmd/`, `internal/`,
-`go.mod`, or `go.sum`.
+**manager-build** compiles the operator binary with `GOOS=linux` and `GOARCH`
+set from `goarch`. Re-runs on changes to `api/`, `cmd/`, `internal/`, `go.mod`,
+or `go.sum`.
 
 **crds** — Applies generated CRDs from `deploy/operator/config/crd/bases` using server-side apply.
 When `skip_codegen` is `false`, runs `make generate && make manifests` first.
