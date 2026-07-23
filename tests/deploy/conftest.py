@@ -357,6 +357,9 @@ def deployment_spec(
     # Override image if provided
     if image:
         spec.set_image(image)
+        # CI-built images use SHA tags, from which the operator cannot derive
+        # the Dynamo runtime compatibility version.
+        spec.set_runtime_version_override("1.3.0")
 
     # Mount the shared model cache onto workers when a PVC is provided (CI on
     # clusters that provision it); otherwise workers download from HuggingFace.
