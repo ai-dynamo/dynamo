@@ -15,7 +15,7 @@ LoRA (Low-Rank Adaptation) enables efficient fine-tuning and serving of speciali
 | SGLang | 🚧 | In progress |
 | TensorRT-LLM | ❌ | Not yet supported |
 
-See the [Feature Matrix](../../reference/feature-matrix.md) for full compatibility details.
+See the [feature support matrix](../../reference/compatibility.mdx#feature-support) for full compatibility details.
 
 ## Overview
 
@@ -390,7 +390,7 @@ This works end-to-end across the publisher pipeline, the KV consolidator (for de
 
 ## See Also
 
-- [Feature Matrix](../../reference/feature-matrix.md) - Backend compatibility overview
+- [Compatibility](../../reference/compatibility.mdx#feature-support) - Backend compatibility overview
 - [vLLM Backend](../../backends/vllm/README.md) - vLLM-specific configuration
 - [Dynamo Operator](../../kubernetes/dynamo-operator.md) - Kubernetes operator overview
 - [Routing Concepts](../../components/router/router-concepts.md) - LoRA-aware request routing

@@ -29,7 +29,7 @@ KVBM can be used independently without using the rest of the Dynamo stack:
 pip install kvbm
 ```
 
-See the [support matrix](../../reference/support-matrix.md) for version compatibility.
+See the [compatibility page](../../reference/compatibility.mdx) for version compatibility.
 
 ### Build from Source
 

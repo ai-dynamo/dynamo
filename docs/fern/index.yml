@@ -747,6 +747,8 @@ navigation:
             path: reference/compatibility.mdx
           - page: Release Artifacts
             path: reference/release-artifacts.mdx
+          - page: Model Early Access Builds
+            path: reference/model-early-access-builds.mdx
           - page: Glossary
             path: reference/glossary.md
 

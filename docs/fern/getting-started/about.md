@@ -193,6 +193,6 @@ Explore the following resources to go deeper:
 - [Kubernetes Deployment](../kubernetes/README.md) -- Deploy at scale with Grove
 - [Inference Gateway (GAIE)](../kubernetes/inference-gateway.md) -- Run Dynamo in gateway mode behind the K8s Inference Gateway
 - [Overall Architecture](../design-docs/architecture.md) -- Full technical design
-- [Support Matrix](../reference/support-matrix.md) -- Check hardware and engine compatibility
+- [Support Matrix](../reference/compatibility.mdx) -- Check hardware and engine compatibility
 
 **Further reading:** [Dynamo Digest](../digest/index.mdx).

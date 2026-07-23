@@ -72,6 +72,17 @@ redirects:
     destination: "/dynamo/dev/reference/compatibility"
   - source: "/dynamo/resources/release-artifacts"
     destination: "/dynamo/dev/reference/release-artifacts"
+  - source: "/dynamo/resources/model-early-access-builds"
+    destination: "/dynamo/dev/reference/model-early-access-builds"
+  # Live-site "Resources" section URLs (main's nav) → consolidated reference pages.
+  - source: "/dynamo/dev/resources/support-matrix"
+    destination: "/dynamo/dev/reference/compatibility"
+  - source: "/dynamo/dev/resources/feature-matrix"
+    destination: "/dynamo/dev/reference/compatibility"
+  - source: "/dynamo/dev/resources/release-artifacts"
+    destination: "/dynamo/dev/reference/release-artifacts"
+  - source: "/dynamo/dev/resources/model-early-access-builds"
+    destination: "/dynamo/dev/reference/model-early-access-builds"
   - source: "/dynamo/resources/examples"
     destination: "/dynamo/dev/resources/examples"
   # Version-scoped getting-started → resources redirects

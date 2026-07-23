@@ -1,0 +1,33 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Model Early Access Builds
+subtitle: Per-model early access container builds shipped ahead of stable releases
+---
+
+import { ReferenceStyles } from "@/components/ReferenceStyles";
+import { ModelEABuildCards } from "@/components/ModelEABuildCards";
+
+<ReferenceStyles />
+
+<Warning>
+**Model early access builds do not go through QA validation.** They are experimental builds intended for early testing of a specific model. They may contain bugs, require pinned runtime flags, and receive no patch support. Use a stable release container for production workloads unless the build's GA path says the recipe is promoted.
+</Warning>
+
+A **model early access build** packages a single model's recipe on one runtime container, tagged `X.Y.Z-<model>-dev.N` and cut from a side branch ahead of that model's launch — independently of the stable release cadence. When the model's backend patches land upstream in the versions a stable release ships, the recipe is **promoted** to the plain `:X.Y.Z` release container and the early access image is no longer needed.
+
+Full-platform early access builds (`vX.Y.Z-dev.N`, covering all runtimes, wheels, crates, and Helm charts) are platform previews and are documented under [Early Access Artifacts](release-artifacts.mdx#early-access-artifacts) instead.
+
+**GA path legend:**
+
+- **Promoted** — the recipe runs on the stock `:X.Y.Z` stable release container; the early access image is superseded.
+- **Dev-only** — the model still requires this early access image (its patches are not yet in a stable release).
+- **Recipe in GA** — the model ships as a recipe on the standard release container.
+
+Every card's tag is click-to-copy as a full `docker pull` command. The coverage dots show what each build actually shipped — model builds publish container images only (no wheels, Helm charts, or crates).
+
+<ModelEABuildCards />
+
+<Note>
+See [Compatibility](compatibility.mdx) for hardware, platform, and backend feature support, and [Release Artifacts](release-artifacts.mdx) for the stable release inventory.
+</Note>

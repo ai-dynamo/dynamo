@@ -71,7 +71,7 @@ TensorRT-LLM delivers maximum inference performance and optimization, with full 
 | `sglang-runtime:1.0.2` | SGLang `v0.5.9` | `v12.9` | `575+` |
 | `sglang-runtime:1.0.2-cuda13` | SGLang `v0.5.9` | `v13.0` | `580+` |
 
-Source of truth: [`docs/reference/support-matrix.md`](../../reference/support-matrix.md#cuda-and-driver-requirements) and [`docs/reference/release-artifacts.mdx`](../../reference/release-artifacts.mdx). If those differ from the values above, the source-of-truth files win.
+Source of truth: [`docs/fern/reference/compatibility.mdx`](../../reference/compatibility.mdx#cuda--driver-requirements) and [`docs/fern/reference/release-artifacts.mdx`](../../reference/release-artifacts.mdx). If those differ from the values above, the source-of-truth files win.
 
 ## Quick Start
 

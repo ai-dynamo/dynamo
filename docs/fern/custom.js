@@ -331,3 +331,31 @@
   window.addEventListener("popstate", queueEnhancement);
   queueEnhancement();
 })();
+
+// Reference-page click-to-copy: [data-dynref-copy] buttons (styled by
+// ReferenceStyles.tsx) copy their payload, flash the .dynref-copied state,
+// and swap their label to "Copied" for 1.2s. Buttons must carry plain-text
+// labels — the swap replaces textContent.
+(() => {
+  if (typeof document === "undefined") return;
+  document.addEventListener("click", (event) => {
+    const el = event.target.closest("[data-dynref-copy]");
+    if (!el || !navigator.clipboard) return;
+    navigator.clipboard.writeText(el.getAttribute("data-dynref-copy"));
+    if (el.dataset.dynrefRestore === undefined) {
+      // Narrow chips (short tags) would GROW to fit "Copied", causing a width
+      // jump — for those, the glyph flip + green state is the whole feedback.
+      const swapText = el.offsetWidth >= 72;
+      el.dataset.dynrefRestore = el.textContent;
+      el.style.minWidth = `${el.offsetWidth}px`;
+      if (swapText) el.textContent = "Copied";
+      el.classList.add("dynref-copied");
+      window.setTimeout(() => {
+        if (swapText) el.textContent = el.dataset.dynrefRestore;
+        delete el.dataset.dynrefRestore;
+        el.style.minWidth = "";
+        el.classList.remove("dynref-copied");
+      }, 1200);
+    }
+  });
+})();

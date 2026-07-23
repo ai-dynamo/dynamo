@@ -28,7 +28,7 @@ description: 使用容器或 PyPI 在本地机器或 VM 上安装并运行 Dynam
 
 TensorRT-LLM 不支持 Python 3.11。
 
-如需查看包含后端框架版本在内的完整兼容性矩阵，请参阅[支持矩阵](../reference/support-matrix.md)。
+如需查看包含后端框架版本在内的完整兼容性矩阵，请参阅[支持矩阵](../reference/compatibility.mdx)。
 
 ## 安装 Dynamo
 
@@ -194,7 +194,7 @@ curl localhost:8000/v1/chat/completions \
 
 **CUDA/驱动版本不匹配**
 
-运行 `nvidia-smi` 检查你的驱动版本。Dynamo 对 CUDA 12 需要驱动 575.51.03+，对 CUDA 13 需要驱动 580.00.03+。B300/GB300 GPU 需要 CUDA 13。完整要求请参阅[支持矩阵](../reference/support-matrix.md)。
+运行 `nvidia-smi` 检查你的驱动版本。Dynamo 对 CUDA 12 需要驱动 575.51.03+，对 CUDA 13 需要驱动 580.00.03+。B300/GB300 GPU 需要 CUDA 13。完整要求请参阅[支持矩阵](../reference/compatibility.mdx)。
 
 **模型无法装入 GPU（OOM）**
 
