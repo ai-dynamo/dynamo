@@ -1001,7 +1001,7 @@ func TestApplyRestoreCandidateMetadata(t *testing.T) {
 			snapshotprotocol.CheckpointIDLabel: "stale",
 		}
 		annotations := map[string]string{
-			snapshotprotocol.CheckpointStatusAnnotation: "stale",
+			snapshotprotocol.CheckpointArtifactVersionAnnotation: "stale",
 		}
 
 		err := ApplyRestoreCandidateMetadata(labels, annotations, &CheckpointInfo{
@@ -1016,7 +1016,7 @@ func TestApplyRestoreCandidateMetadata(t *testing.T) {
 
 		assert.Empty(t, labels[snapshotprotocol.CheckpointIDLabel])
 		assert.Empty(t, labels[snapshotprotocol.RestoreTargetLabel])
-		assert.Empty(t, annotations[snapshotprotocol.CheckpointStatusAnnotation])
+		assert.Empty(t, annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation])
 		assert.Equal(t, consts.KubeLabelValueTrue, annotations[consts.CheckpointRestoreCandidateAnnotation])
 		assert.Equal(t, "worker-checkpoint", annotations[consts.CheckpointNameAnnotation])
 		assert.Equal(t, string(nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint), annotations[consts.CheckpointStartupPolicyAnnotation])

@@ -104,6 +104,17 @@ spec:
                         PodRef identifies the pod to dump. Its UID guards against dumping a
                         same-named recreation of the pod.
                       properties:
+                        containers:
+                          description: |-
+                            Containers narrows the capture to these containers of the source pod. The
+                            node agent reads this instead of the source pod's target-container
+                            annotation. v1alpha1 supports exactly one container; the cap is lifted when
+                            the runtime supports multi-container capture.
+                          items:
+                            type: string
+                          maxItems: 1
+                          minItems: 1
+                          type: array
                         name:
                           description: Name of the source pod.
                           minLength: 1
@@ -114,6 +125,7 @@ spec:
                             pod and not a same-named recreation.
                           type: string
                       required:
+                        - containers
                         - name
                       type: object
                   required:

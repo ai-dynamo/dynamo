@@ -2234,7 +2234,7 @@ func TestApplyDCDCheckpointStartupPolicy(t *testing.T) {
 								snapshotprotocol.CheckpointIDLabel: "stale",
 							},
 							Annotations: map[string]string{
-								snapshotprotocol.CheckpointStatusAnnotation: "stale",
+								snapshotprotocol.CheckpointArtifactVersionAnnotation: "stale",
 							},
 						},
 					},
@@ -2263,6 +2263,8 @@ func TestApplyDCDCheckpointStartupPolicy(t *testing.T) {
 		assert.Equal(t, v1beta1.CheckpointStartupPolicyImmediate, dcd.Spec.Experimental.Checkpoint.StartupPolicy)
 		assert.Equal(t, int32(2), *dcd.Spec.Replicas)
 		assert.Empty(t, dcd.Spec.PodTemplate.Labels[snapshotprotocol.CheckpointIDLabel])
+		assert.NotContains(t, dcd.Spec.PodTemplate.Annotations, snapshotprotocol.CheckpointArtifactVersionAnnotation,
+			"stale capture artifact-version annotation must be scrubbed (key removed) alongside the checkpoint-id label")
 		assert.Equal(t, commonconsts.KubeLabelValueTrue, dcd.Spec.PodTemplate.Annotations[commonconsts.CheckpointRestoreCandidateAnnotation])
 		assert.Equal(t, "checkpoint-name", dcd.Spec.PodTemplate.Annotations[commonconsts.CheckpointNameAnnotation])
 		assert.Equal(t, commonconsts.MainContainerName, dcd.Spec.PodTemplate.Annotations[snapshotprotocol.TargetContainersAnnotation])

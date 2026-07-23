@@ -28,8 +28,7 @@ func TestNewCheckpointJob(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Labels: map[string]string{"existing": "label"},
 			Annotations: map[string]string{
-				"existing":                 "annotation",
-				TargetContainersAnnotation: "main",
+				"existing": "annotation",
 			},
 		},
 		Spec: corev1.PodSpec{
@@ -43,6 +42,7 @@ func TestNewCheckpointJob(t *testing.T) {
 		},
 	}, CheckpointJobOptions{
 		Namespace:             "test-ns",
+		TargetContainer:       "main",
 		CheckpointID:          "hash",
 		ArtifactVersion:       "2",
 		SeccompProfile:        DefaultSeccompLocalhostProfile,
@@ -67,8 +67,10 @@ func TestNewCheckpointJob(t *testing.T) {
 	if job.Spec.Template.Annotations[CheckpointArtifactVersionAnnotation] != "2" {
 		t.Fatalf("expected checkpoint artifact version annotation on template: %#v", job.Spec.Template.Annotations)
 	}
-	if got := job.Spec.Template.Annotations[TargetContainersAnnotation]; got != "main" {
-		t.Fatalf("target-containers annotation must be preserved on template, got %q", got)
+	// The capture Job must not stamp the target-containers annotation; the target flows via
+	// CheckpointJobOptions.TargetContainer. A regression that re-introduces the capture stamp fails here.
+	if _, ok := job.Spec.Template.Annotations[TargetContainersAnnotation]; ok {
+		t.Fatalf("capture job must not stamp %s annotation: %#v", TargetContainersAnnotation, job.Spec.Template.Annotations)
 	}
 	if len(job.Spec.Template.Spec.Volumes) != 1 || job.Spec.Template.Spec.Volumes[0].Name != SnapshotControlVolumeName {
 		t.Fatalf("expected only %s volume, got %#v", SnapshotControlVolumeName, job.Spec.Template.Spec.Volumes)
@@ -116,9 +118,7 @@ func TestNewCheckpointJob(t *testing.T) {
 
 func TestNewCheckpointJobWrapsTargetContainer(t *testing.T) {
 	job, err := NewCheckpointJob(&corev1.PodTemplateSpec{
-		ObjectMeta: metav1.ObjectMeta{
-			Annotations: map[string]string{TargetContainersAnnotation: "worker"},
-		},
+		ObjectMeta: metav1.ObjectMeta{},
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{
 				{Name: "sidecar", Command: []string{"sleep"}, Args: []string{"infinity"}},
@@ -127,6 +127,7 @@ func TestNewCheckpointJobWrapsTargetContainer(t *testing.T) {
 		},
 	}, CheckpointJobOptions{
 		Namespace:             "test-ns",
+		TargetContainer:       "worker",
 		CheckpointID:          "hash",
 		ArtifactVersion:       "2",
 		Name:                  "test-job",
@@ -169,7 +170,7 @@ func TestNewCheckpointJobWrapsTargetContainer(t *testing.T) {
 	}
 }
 
-func TestNewCheckpointJobRequiresTargetAnnotation(t *testing.T) {
+func TestNewCheckpointJobRequiresTarget(t *testing.T) {
 	_, err := NewCheckpointJob(&corev1.PodTemplateSpec{
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{{Name: "worker", Command: []string{"python3"}}},
@@ -179,44 +180,21 @@ func TestNewCheckpointJobRequiresTargetAnnotation(t *testing.T) {
 		CheckpointID: "hash",
 		Name:         "test-job",
 	})
-	if err == nil || !strings.Contains(err.Error(), TargetContainersAnnotation) {
-		t.Fatalf("expected missing-annotation error, got %v", err)
-	}
-}
-
-func TestNewCheckpointJobRequiresSingleTarget(t *testing.T) {
-	_, err := NewCheckpointJob(&corev1.PodTemplateSpec{
-		ObjectMeta: metav1.ObjectMeta{
-			Annotations: map[string]string{TargetContainersAnnotation: "engine-0,engine-1"},
-		},
-		Spec: corev1.PodSpec{
-			Containers: []corev1.Container{
-				{Name: "engine-0", Command: []string{"python3"}},
-				{Name: "engine-1", Command: []string{"python3"}},
-			},
-		},
-	}, CheckpointJobOptions{
-		Namespace:    "test-ns",
-		CheckpointID: "hash",
-		Name:         "test-job",
-	})
-	if err == nil || !strings.Contains(err.Error(), "at most 1") {
-		t.Fatalf("expected single-target error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "TargetContainer is required") {
+		t.Fatalf("expected missing-target error, got %v", err)
 	}
 }
 
 func TestNewCheckpointJobRejectsUnknownTarget(t *testing.T) {
 	_, err := NewCheckpointJob(&corev1.PodTemplateSpec{
-		ObjectMeta: metav1.ObjectMeta{
-			Annotations: map[string]string{TargetContainersAnnotation: "missing"},
-		},
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{{Name: "worker", Command: []string{"python3"}}},
 		},
 	}, CheckpointJobOptions{
-		Namespace:    "test-ns",
-		CheckpointID: "hash",
-		Name:         "test-job",
+		Namespace:       "test-ns",
+		TargetContainer: "missing",
+		CheckpointID:    "hash",
+		Name:            "test-job",
 	})
 	if err == nil || !strings.Contains(err.Error(), `"missing"`) {
 		t.Fatalf("expected unknown-target error, got %v", err)

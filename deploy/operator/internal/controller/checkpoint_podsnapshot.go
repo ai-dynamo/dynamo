@@ -104,7 +104,11 @@ func (r *CheckpointReconciler) findOwnedPodSnapshot(ctx context.Context, ckpt *n
 // findOwnedPodSnapshot) that none exists, so this is a pure create. On AlreadyExists the object is
 // classified: cache lag (ours) is adopted; a foreign owner is terminal.
 func (r *CheckpointReconciler) createPodSnapshot(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint, checkpointID string, pod *corev1.Pod) (*nvidiacomv1alpha1.PodSnapshot, error) {
-	snap := buildPodSnapshot(ckpt, checkpointID, pod)
+	snap, err := buildPodSnapshot(ckpt, checkpointID, pod)
+	if err != nil {
+		r.Recorder.Event(ckpt, corev1.EventTypeWarning, "PodSnapshotBuildFailed", err.Error())
+		return nil, err
+	}
 	if err := ctrl.SetControllerReference(ckpt, snap, r.Scheme()); err != nil {
 		return nil, err
 	}
@@ -139,11 +143,27 @@ func (r *CheckpointReconciler) classifyExistingPodSnapshot(ctx context.Context, 
 	return existing, nil
 }
 
+// captureTargetContainer returns the checkpoint's single capture-target container. The
+// DynamoCheckpoint API defaults targetContainerName to "main", but the default is guarded here
+// rather than trusted: an object that bypassed admission defaulting fails loudly instead of
+// producing an empty, invalid PodReference.Containers.
+func captureTargetContainer(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (string, error) {
+	name := ckpt.Spec.Job.TargetContainerName
+	if name == "" {
+		return "", fmt.Errorf("checkpoint %q: spec.job.targetContainerName is required", ckpt.Name)
+	}
+	return name, nil
+}
+
 // buildPodSnapshot constructs the desired PodSnapshot for a checkpoint. The name is the checkpoint's
 // own name; the SnapshotOwnerLabel is the stable lookup/search key and CheckpointIDLabel is retained
 // for observability. The source pod's UID is pinned so the PodSnapshotReconciler rejects a
 // same-named recreation instead of capturing the wrong workload.
-func buildPodSnapshot(ckpt *nvidiacomv1alpha1.DynamoCheckpoint, checkpointID string, pod *corev1.Pod) *nvidiacomv1alpha1.PodSnapshot {
+func buildPodSnapshot(ckpt *nvidiacomv1alpha1.DynamoCheckpoint, checkpointID string, pod *corev1.Pod) (*nvidiacomv1alpha1.PodSnapshot, error) {
+	targetContainer, err := captureTargetContainer(ckpt)
+	if err != nil {
+		return nil, err
+	}
 	return &nvidiacomv1alpha1.PodSnapshot{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: nvidiacomv1alpha1.GroupVersion.String(),
@@ -159,10 +179,10 @@ func buildPodSnapshot(ckpt *nvidiacomv1alpha1.DynamoCheckpoint, checkpointID str
 		},
 		Spec: nvidiacomv1alpha1.PodSnapshotSpec{
 			Source: nvidiacomv1alpha1.PodSnapshotSource{
-				PodRef: nvidiacomv1alpha1.PodReference{Name: pod.Name, UID: pod.UID},
+				PodRef: nvidiacomv1alpha1.PodReference{Name: pod.Name, UID: pod.UID, Containers: []string{targetContainer}},
 			},
 		},
-	}
+	}, nil
 }
 
 // updateFailedStatus marks the checkpoint Failed after a terminal PodSnapshot error. The failure

@@ -16,7 +16,6 @@ func TestApplyRestoreTargetMetadata(t *testing.T) {
 	}
 	annotations := map[string]string{
 		CheckpointArtifactVersionAnnotation:             "old",
-		CheckpointStatusAnnotation:                      "completed",
 		RestoreStatusAnnotationPrefix + "main":          "failed",
 		RestoreStatusAnnotationPrefix + "engine-1":      "completed",
 		RestoreContainerIDAnnotationPrefix + "main":     "dead-container",
@@ -37,9 +36,6 @@ func TestApplyRestoreTargetMetadata(t *testing.T) {
 	}
 	if annotations[CheckpointArtifactVersionAnnotation] != "2" {
 		t.Fatalf("expected checkpoint artifact version annotation, got %#v", annotations)
-	}
-	if _, ok := annotations[CheckpointStatusAnnotation]; ok {
-		t.Fatalf("checkpoint status annotation was not cleared: %#v", annotations)
 	}
 	for _, key := range []string{
 		RestoreStatusAnnotationPrefix + "main",
@@ -64,7 +60,6 @@ func TestApplyRestoreTargetMetadataDisabledClearsState(t *testing.T) {
 	}
 	annotations := map[string]string{
 		CheckpointArtifactVersionAnnotation:         "2",
-		CheckpointStatusAnnotation:                  "completed",
 		RestoreStatusAnnotationPrefix + "main":      "failed",
 		RestoreContainerIDAnnotationPrefix + "main": "dead-container",
 	}
@@ -76,9 +71,6 @@ func TestApplyRestoreTargetMetadataDisabledClearsState(t *testing.T) {
 	}
 	if _, ok := annotations[CheckpointArtifactVersionAnnotation]; ok {
 		t.Fatalf("checkpoint artifact version annotation was not cleared: %#v", annotations)
-	}
-	if _, ok := annotations[CheckpointStatusAnnotation]; ok {
-		t.Fatalf("checkpoint status annotation was not cleared: %#v", annotations)
 	}
 	if _, ok := annotations[RestoreStatusAnnotationPrefix+"main"]; ok {
 		t.Fatalf("per-container restore status was not cleared: %#v", annotations)

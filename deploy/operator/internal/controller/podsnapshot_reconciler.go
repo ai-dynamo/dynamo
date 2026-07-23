@@ -267,7 +267,7 @@ func (sr *PodSnapshotReconciler) buildPodSnapshotContent(snap *nvidiacomv1alpha1
 				UID:       snap.UID,
 			},
 			Source: nvidiacomv1alpha1.PodSnapshotContentSource{
-				PodRef:   nvidiacomv1alpha1.PodReference{Name: pod.Name, UID: pod.UID},
+				PodRef:   nvidiacomv1alpha1.PodReference{Name: pod.Name, UID: pod.UID, Containers: snap.Spec.Source.PodRef.Containers},
 				NodeName: pod.Spec.NodeName,
 			},
 		},

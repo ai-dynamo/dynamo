@@ -33,6 +33,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -163,7 +164,53 @@ func TestCreatePodSnapshot_CreatesWhenAbsent(t *testing.T) {
 	assert.Equal(t, "worker-xyz", snap.Spec.Source.PodRef.Name)
 	assert.Equal(t, "worker-xyz-uid", string(snap.Spec.Source.PodRef.UID),
 		"source pod UID is pinned so a same-named recreation is rejected")
+	assert.Equal(t, []string{"main"}, snap.Spec.Source.PodRef.Containers,
+		"target container is copied from spec.job.targetContainerName")
 	assert.True(t, metav1.IsControlledBy(snap, ckpt), "snapshot must be controlled by the checkpoint")
+}
+
+func TestCaptureTargetContainer_ReturnsName(t *testing.T) {
+	ckpt := newOwnedCheckpoint()
+	ckpt.Spec.Job.TargetContainerName = "worker"
+
+	got, err := captureTargetContainer(ckpt)
+	require.NoError(t, err)
+	assert.Equal(t, "worker", got)
+}
+
+func TestCaptureTargetContainer_ErrorsOnEmpty(t *testing.T) {
+	ckpt := newOwnedCheckpoint()
+	ckpt.Spec.Job.TargetContainerName = ""
+
+	_, err := captureTargetContainer(ckpt)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "targetContainerName")
+}
+
+func TestBuildPodSnapshot_ErrorsOnEmptyTarget(t *testing.T) {
+	ckpt := newOwnedCheckpoint()
+	ckpt.Spec.Job.TargetContainerName = ""
+
+	snap, err := buildPodSnapshot(ckpt, testHash, podNamed("worker-xyz"))
+	require.Error(t, err)
+	assert.Nil(t, snap)
+}
+
+func TestCreatePodSnapshot_EmptyTargetEmitsBuildFailedEvent(t *testing.T) {
+	ckpt := newOwnedCheckpoint()
+	ckpt.Spec.Job.TargetContainerName = ""
+	r := makeCheckpointReconciler(checkpointTestScheme(), ckpt)
+
+	_, err := r.createPodSnapshot(context.Background(), ckpt, testHash, podNamed("worker-xyz"))
+	require.Error(t, err)
+
+	recorder := r.Recorder.(*record.FakeRecorder)
+	select {
+	case ev := <-recorder.Events:
+		assert.Contains(t, ev, "PodSnapshotBuildFailed")
+	default:
+		t.Fatal("expected a PodSnapshotBuildFailed warning event")
+	}
 }
 
 func TestCreatePodSnapshot_AlreadyExistsOwnedReturnsExisting(t *testing.T) {
@@ -220,7 +267,8 @@ func TestCreatePodSnapshot_AlreadyExistsNotYetVisibleRequeues(t *testing.T) {
 
 func TestFindOwnedPodSnapshot_FindsOwnedIgnoresForeign(t *testing.T) {
 	ckpt := newOwnedCheckpoint()
-	owned := buildPodSnapshot(ckpt, testHash, podNamed("worker-xyz"))
+	owned, err := buildPodSnapshot(ckpt, testHash, podNamed("worker-xyz"))
+	require.NoError(t, err)
 	setCheckpointOwner(ckpt, owned)
 	foreign := foreignPodSnapshot(ckpt)
 	foreign.Name = "foreign-snap" // different name so both can coexist, same owner label
@@ -244,14 +292,16 @@ func TestFindOwnedPodSnapshot_NoneReturnsNotFound(t *testing.T) {
 
 func TestFindOwnedPodSnapshot_MultipleOwnedErrors(t *testing.T) {
 	ckpt := newOwnedCheckpoint()
-	first := buildPodSnapshot(ckpt, testHash, podNamed("worker-0"))
+	first, err := buildPodSnapshot(ckpt, testHash, podNamed("worker-0"))
+	require.NoError(t, err)
 	setCheckpointOwner(ckpt, first)
-	second := buildPodSnapshot(ckpt, testHash, podNamed("worker-1"))
+	second, err := buildPodSnapshot(ckpt, testHash, podNamed("worker-1"))
+	require.NoError(t, err)
 	second.Name = "second-owned"
 	setCheckpointOwner(ckpt, second)
 	r := makeCheckpointReconciler(checkpointTestScheme(), ckpt, first, second)
 
-	_, err := r.findOwnedPodSnapshot(context.Background(), ckpt)
+	_, err = r.findOwnedPodSnapshot(context.Background(), ckpt)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "multiple PodSnapshots owned")
 	// Non-terminal: a transient invariant report, not a Forbidden.
