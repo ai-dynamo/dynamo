@@ -866,9 +866,8 @@ func (r *DynamoGraphDeploymentReconciler) listDGDComponentPods(
 		ctx,
 		podList,
 		client.InNamespace(dgd.Namespace),
-		client.MatchingLabels{
-			consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
-			consts.KubeLabelDynamoComponent:           componentName,
+		client.MatchingFields{
+			dgdComponentPodIndex: dgdComponentPodIndexValue(dgd.Name, componentName),
 		},
 	); err != nil {
 		return nil, fmt.Errorf("failed to list pods for DGD %s component %s: %w", dgd.Name, componentName, err)

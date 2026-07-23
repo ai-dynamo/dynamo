@@ -75,6 +75,8 @@ type Message string
 const (
 	reasonFailedToInitializeWorkerHash Reason = "failed_to_initialize_worker_hash"
 	reasonRollingUpdateFailed          Reason = "rolling_update_failed"
+
+	dgdComponentPodIndex = ".metadata.dgdComponent"
 )
 
 // rbacManager interface for managing RBAC resources
@@ -2748,6 +2750,15 @@ func (r *DynamoGraphDeploymentReconciler) FinalizeResource(ctx context.Context, 
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if err := mgr.GetFieldIndexer().IndexField(
+		context.Background(),
+		&corev1.Pod{},
+		dgdComponentPodIndex,
+		dgdComponentPodIndexValues,
+	); err != nil {
+		return fmt.Errorf("register DGD component Pod index: %w", err)
+	}
+
 	ctrlBuilder := ctrl.NewControllerManagedBy(mgr).
 		For(&nvidiacomv1beta1.DynamoGraphDeployment{}, builder.WithPredicates(
 			predicate.GenerationChangedPredicate{},
@@ -2868,6 +2879,26 @@ func isDGDManagedWorkerPod(obj client.Object) bool {
 		labels[consts.KubeLabelDynamoComponent] != "" &&
 		labels[consts.KubeLabelDynamoSelector] != "" &&
 		dynamo.IsWorkerComponent(labels[consts.KubeLabelDynamoComponentType])
+}
+
+func dgdComponentPodIndexValues(obj client.Object) []string {
+	pod, ok := obj.(*corev1.Pod)
+	if !ok || pod == nil {
+		return nil
+	}
+	labels := pod.GetLabels()
+	dgdName := labels[consts.KubeLabelDynamoGraphDeploymentName]
+	componentName := labels[consts.KubeLabelDynamoComponent]
+	if dgdName == "" || componentName == "" {
+		return nil
+	}
+	return []string{dgdComponentPodIndexValue(dgdName, componentName)}
+}
+
+func dgdComponentPodIndexValue(dgdName, componentName string) string {
+	// Both inputs are label values, which cannot contain '/', so this encoding
+	// is collision-free.
+	return dgdName + "/" + componentName
 }
 
 // dgdWorkerPodEventPredicate admits only events that can change whether a
