@@ -111,7 +111,6 @@ class KubernetesCapacityManager(CapacityManager):
     def ensure_participant(
         self,
         participant_id: str,
-        *,
         caller_name: str,
         namespace: str,
         deployment_name: str,
@@ -186,7 +185,6 @@ class KubernetesCapacityManager(CapacityManager):
         self,
         participant_id: str,
         targets: list[TargetReplica],
-        *,
         blocking: bool,
     ) -> None:
         """Apply desired replica targets to one participant.

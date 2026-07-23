@@ -122,8 +122,12 @@ def test_floor_pairs_scale_down_across_participants():
     res_b = _mediate(orch, "nsB/b", _targets(decode=3), pools)
     assert res_b.approved
     assert len(res_b.selected_partners) == 1
-    p_id, p_sub, p_desired, _ = res_b.selected_partners[0]
-    assert (p_id, p_sub, p_desired) == ("nsA/a", "decode", 1)
+    partner = res_b.selected_partners[0]
+    assert (partner.participant_id, partner.sub_type, partner.applied_desired) == (
+        "nsA/a",
+        "decode",
+        1,
+    )
 
 
 def test_intent_cache_ttl_expiry_blocks_pairing():
@@ -179,7 +183,7 @@ class FakeCapacityManager(CapacityManager):
         self.pools[key] = entry
 
     def ensure_participant(
-        self, participant_id, *, caller_name, namespace, deployment_name
+        self, participant_id, caller_name, namespace, deployment_name
     ):
         self.pools.setdefault(participant_id, {})
 
@@ -192,7 +196,7 @@ class FakeCapacityManager(CapacityManager):
             for key, pools in self.pools.items()
         }
 
-    async def scale(self, participant_id, targets, *, blocking):
+    async def scale(self, participant_id, targets, blocking):
         for t in targets:
             st = t.sub_component_type.value
             if st in self.pools[participant_id]:

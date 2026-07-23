@@ -6,7 +6,7 @@
 :class:`Orchestrator` is the application core and a deliberate **no-Kubernetes
 zone**. It owns the participant registry and authorization, the GPU-budget
 arbitration (ceiling/floor bounds, multi-partner pairing, intent cache), and the
-observe -> decide -> actuate loop, delegating the infrastructure reads/writes to
+observe -> decide -> scale loop, delegating the infrastructure reads/writes to
 a :class:`~dynamo.global_planner.capacity_manager.CapacityManager`. Its vocabulary
 is neutral — ``participant_id`` / ``caller_name`` / ``deployment_name`` /
 ``namespace`` — and it imports no Kubernetes SDK and no transport types. The
@@ -38,7 +38,7 @@ from dynamo.planner import SubComponentType, TargetReplica
 from dynamo.planner.connectors.protocol import ScaleStatus
 from dynamo.planner.core import budget
 
-# Planner-level "not ready" signal a backend may raise from ``actuate``; the
+# Planner-level "not ready" signal a backend may raise from ``scale``; the
 # orchestrator treats it as a soft rejection. Not a Kubernetes SDK type.
 from dynamo.planner.errors import DynamoGraphDeploymentNotReadyError
 
@@ -54,6 +54,20 @@ class PoolIntent:
 
 
 @dataclass
+class PartnerTransfer:
+    """One pool selected to change alongside a paired transfer.
+
+    Apply ``applied_desired`` replicas to the ``sub_type`` pool of
+    ``participant_id``; ``spec`` is that pool's observed state.
+    """
+
+    participant_id: str
+    sub_type: str
+    applied_desired: int
+    spec: PoolSpec
+
+
+@dataclass
 class MediationResult:
     """Outcome of a budget-arbitration decision.
 
@@ -63,9 +77,9 @@ class MediationResult:
     """
 
     approved: bool
-    # (participant_id, sub_type, applied_desired, spec) — partners to apply
-    # alongside the request. Empty means "standalone / no-budget path".
-    selected_partners: list[tuple[str, str, int, PoolSpec]]
+    # Partners to apply alongside the request. Empty means "standalone /
+    # no-budget path".
+    selected_partners: list[PartnerTransfer]
     reject_message: Optional[str] = None
 
 
@@ -156,7 +170,6 @@ class Orchestrator:
     def register(
         self,
         participant_id: str,
-        *,
         caller_name: str,
         namespace: str,
         deployment_name: str,
@@ -210,21 +223,20 @@ class Orchestrator:
             )
 
     # ------------------------------------------------------------------ #
-    # observe -> decide -> actuate                                       #
+    # observe -> decide -> scale                                       #
     # ------------------------------------------------------------------ #
 
     async def submit(
         self,
         participant_id: str,
         targets: list[TargetReplica],
-        *,
         blocking: bool,
         deployment_name: str,
         caller_name: str,
     ) -> ScaleOutcome:
         """Arbitrate and execute one scale request.
 
-        The observe -> decide -> actuate span is serialized under the scale lock
+        The observe -> decide -> scale span is serialized under the scale lock
         (when enabled) so concurrent requests can't both pass against the same
         pre-scale state. The post-scale replica read-back runs outside the lock,
         matching the original behavior. Patch failures propagate to the caller
@@ -291,16 +303,16 @@ class Orchestrator:
             )
 
         # Apply: request + selected partners (may be empty), grouped by
-        # participant with at most one actuate call per participant.
+        # participant with at most one scale call per participant.
         # Direction-aware order: scale-down participants first (most negative net
         # delta), so GPUs are freed before scale-up participants submit new pods.
         grouped_targets: dict[str, list[TargetReplica]] = defaultdict(list)
         grouped_targets[participant_id].extend(targets)
-        for p_id, p_sub, p_desired, _ in result.selected_partners:
-            grouped_targets[p_id].append(
+        for partner in result.selected_partners:
+            grouped_targets[partner.participant_id].append(
                 TargetReplica(
-                    sub_component_type=SubComponentType(p_sub),
-                    desired_replicas=p_desired,
+                    sub_component_type=SubComponentType(partner.sub_type),
+                    desired_replicas=partner.applied_desired,
                 )
             )
 
@@ -390,7 +402,6 @@ class Orchestrator:
         participant_id: str,
         targets: list[TargetReplica],
         all_pools: PoolSnapshot,
-        *,
         log_deployment_name: str = "",
         log_caller_name: str = "",
     ) -> MediationResult:
@@ -464,11 +475,12 @@ class Orchestrator:
         if selected_partners:
             scope = (
                 "intra-participant"
-                if all(p[0] == participant_id for p in selected_partners)
+                if all(p.participant_id == participant_id for p in selected_partners)
                 else "cross-participant"
             )
             partners_desc = ", ".join(
-                f"{p[0]}/{p[1]}={p[2]}" for p in selected_partners
+                f"{p.participant_id}/{p.sub_type}={p.applied_desired}"
+                for p in selected_partners
             )
             logger.info(
                 f"Paired transfer ({scope}, "
@@ -599,7 +611,7 @@ class Orchestrator:
         request_pool_keys: set[tuple[str, str]],
         all_pools: PoolSnapshot,
         request_net_delta_gpu: int,
-    ) -> Iterator[tuple[str, str, int, PoolSpec]]:
+    ) -> Iterator[PartnerTransfer]:
         """Yield qualifying pair-partner candidates, same-participant first.
 
         A candidate qualifies when it (a) is not in the requesting pool set, (b)
@@ -614,8 +626,8 @@ class Orchestrator:
         if request_net_delta_gpu == 0:
             return
         now = self._now()
-        same: list[tuple[str, str, int, PoolSpec]] = []
-        cross: list[tuple[str, str, int, PoolSpec]] = []
+        same: list[PartnerTransfer] = []
+        cross: list[PartnerTransfer] = []
         for pid, pools in all_pools.items():
             for sub_type, spec in pools.items():
                 if (pid, sub_type) in request_pool_keys:
@@ -638,7 +650,7 @@ class Orchestrator:
                     request_net_delta_gpu < 0 and partner_delta_gpu <= 0
                 ):
                     continue
-                candidate = (pid, sub_type, intent.last_desired, spec)
+                candidate = PartnerTransfer(pid, sub_type, intent.last_desired, spec)
                 if pid == request_participant_id:
                     same.append(candidate)
                 else:
@@ -648,7 +660,7 @@ class Orchestrator:
 
     def _partial_partner(
         self,
-        candidate: tuple[str, str, int, PoolSpec],
+        candidate: PartnerTransfer,
         all_pools: PoolSnapshot,
         current_overrides: dict[tuple[str, str], int],
         tolerance: int,
@@ -663,7 +675,8 @@ class Orchestrator:
         ``min - tolerance`` on the lower side. ``None`` if no feasible partial
         exists.
         """
-        _, _, last_desired, spec = candidate
+        last_desired = candidate.applied_desired
+        spec = candidate.spec
         current = spec.current_replicas
         gpu = spec.gpu_per_replica
         if gpu <= 0 or last_desired == current:
@@ -710,7 +723,7 @@ class Orchestrator:
         request_net_delta_gpu: int,
         standalone_overrides: dict[tuple[str, str], int],
         changing_request_pools: list[PoolSpec],
-    ) -> tuple[list[tuple[str, str, int, PoolSpec]], int, int]:
+    ) -> tuple[list[PartnerTransfer], int, int]:
         """Pack as many opposite-direction cached intents as fit alongside the
         request, partially consuming one over-sized candidate if needed.
 
@@ -740,24 +753,30 @@ class Orchestrator:
             return [], 0, 0
 
         # Tolerance computed once over the universe of changing pools.
-        candidate_specs = [c[3] for c in all_candidates]
+        candidate_specs = [c.spec for c in all_candidates]
         tolerance = budget.compute_tolerance(
             [s.gpu_per_replica for s in changing_request_pools]
             + [s.gpu_per_replica for s in candidate_specs]
         )
 
         # Sort ascending by |delta_gpu| — smaller pieces overshoot less.
-        def cand_delta(c: tuple[str, str, int, PoolSpec]) -> int:
-            _, _, desired, spec = c
-            return (desired - spec.current_replicas) * spec.gpu_per_replica
+        def cand_delta(c: PartnerTransfer) -> int:
+            return (
+                c.applied_desired - c.spec.current_replicas
+            ) * c.spec.gpu_per_replica
 
         all_candidates.sort(key=lambda c: abs(cand_delta(c)))
 
-        selected: list[tuple[str, str, int, PoolSpec]] = []
+        selected: list[PartnerTransfer] = []
         overrides = dict(standalone_overrides)
 
         for cand in all_candidates:
-            cand_pid, cand_sub, cand_desired, cand_spec = cand
+            cand_pid, cand_sub, cand_desired, cand_spec = (
+                cand.participant_id,
+                cand.sub_type,
+                cand.applied_desired,
+                cand.spec,
+            )
 
             # Try full inclusion.
             full_overrides = dict(overrides)
@@ -805,7 +824,7 @@ class Orchestrator:
             # at the appropriate band edge, then stop.
             partial_k = self._partial_partner(cand, all_pools, overrides, tolerance)
             if partial_k is not None and partial_k != cand_spec.current_replicas:
-                partial_cand = (cand_pid, cand_sub, partial_k, cand_spec)
+                partial_cand = PartnerTransfer(cand_pid, cand_sub, partial_k, cand_spec)
                 selected.append(partial_cand)
                 overrides[(cand_pid, cand_sub)] = partial_k
             break
@@ -823,7 +842,11 @@ class Orchestrator:
             )
             if not running_in_band:
                 last = selected[-1]
-                last_pid, last_sub, _, last_spec = last
+                last_pid, last_sub, last_spec = (
+                    last.participant_id,
+                    last.sub_type,
+                    last.spec,
+                )
                 # Roll back the last full inclusion so partial uses the
                 # pre-last-candidate baseline.
                 rollback_overrides = dict(overrides)
@@ -837,7 +860,9 @@ class Orchestrator:
                     last, all_pools, rollback_overrides, tolerance
                 )
                 if partial_k is not None and partial_k != last_spec.current_replicas:
-                    selected[-1] = (last_pid, last_sub, partial_k, last_spec)
+                    selected[-1] = PartnerTransfer(
+                        last_pid, last_sub, partial_k, last_spec
+                    )
                     overrides = dict(rollback_overrides)
                     overrides[(last_pid, last_sub)] = partial_k
 

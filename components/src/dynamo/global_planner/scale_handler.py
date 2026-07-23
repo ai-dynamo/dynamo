@@ -9,9 +9,9 @@ translation between the wire DTOs (``ScaleRequest`` / ``ScaleResponse``) and the
 orchestrator. All budget arbitration and execution live below it:
 
 - :class:`~dynamo.global_planner.orchestrator.Orchestrator` — participants,
-  authorization, GPU-budget arbitration, and observe -> decide -> actuate
+  authorization, GPU-budget arbitration, and observe -> decide -> scale
 - :class:`~dynamo.global_planner.capacity_manager.CapacityManager` — Kubernetes
-  observe/actuate backend
+  observe/scale backend
 
 Behavior is unchanged from the pre-refactor monolithic handler.
 """
@@ -173,7 +173,7 @@ class ScaleRequestHandler:
             )
 
             # Register the participant (idempotent) so it can be observed and
-            # actuated and counts toward the budget. Map the wire fields onto the
+            # scaled and counts toward the budget. Map the wire fields onto the
             # orchestrator's neutral vocabulary.
             participant_id = f"{request.k8s_namespace}/{request.graph_deployment_name}"
             self.orchestrator.register(
