@@ -411,9 +411,28 @@ class DependencyStubber:
         stub.__package__ = name.rsplit(".", 1)[0] if "." in name else name
         return stub
 
+    def _bind_to_parent(self, module_name: str) -> None:
+        """Expose sys.modules[module_name] as an attribute on its parent package."""
+        if "." not in module_name:
+            return
+
+        parent_name, child_name = module_name.rsplit(".", 1)
+        parent = sys.modules.get(parent_name)
+        child = sys.modules.get(module_name)
+        if parent is not None and child is not None:
+            setattr(parent, child_name, child)
+
     def ensure_available(self, module_name: str) -> ModuleType:
-        """Ensure a module is available, stubbing it if not installed."""
-        if module_name in sys.modules:
+        """Ensure a module is available as a stub for test collection.
+
+        Always installs a stub for ``module_name`` so that even partially-built
+        native extensions (e.g. a stale ``dynamo._core`` ``.so`` that is
+        importable but is missing freshly-added symbols) do not cause
+        ``ImportError`` during collection.  Parent packages already present in
+        ``sys.modules`` are left untouched.
+        """
+        # If we already stubbed this exact module, return the existing stub.
+        if module_name in self.stubbed:
             return sys.modules[module_name]
 
         parts = module_name.split(".")
@@ -422,12 +441,17 @@ class DependencyStubber:
         )
 
         if not parent_stubbed:
+            # Attempt the real import solely to populate parent packages (e.g.
+            # the ``dynamo`` namespace package) with their real implementations.
+            # We intentionally do *not* return here: even a successful import
+            # may produce a stale module that is missing newly-added symbols, so
+            # we always fall through and replace it with a stub below.
             try:
-                return importlib.import_module(module_name)
+                importlib.import_module(module_name)
             except (ImportError, AttributeError):
                 pass
 
-        # Create parent packages if needed
+        # Create parent packages if needed (skip any already in sys.modules).
         for i in range(1, len(parts)):
             sub = ".".join(parts[:i])
             if sub not in sys.modules:
@@ -436,12 +460,53 @@ class DependencyStubber:
                 pkg.__spec__ = importlib.machinery.ModuleSpec(sub, loader=None)
                 sys.modules[sub] = pkg
                 self.stubbed.add(sub)
+            self._bind_to_parent(sub)
 
-        # Create stub module with proper attributes
+        # Always install a stub for the leaf module, overriding any real
+        # (possibly stale) module that may have been loaded above.
         stub = self._create_module_stub(module_name)
         sys.modules[module_name] = stub
         self.stubbed.add(module_name)
+        self._bind_to_parent(module_name)
         return stub
+
+
+def test_dependency_stubber_rebinds_replaced_child_on_existing_parent():
+    parent_name = "_marker_report_stub_parent"
+    child_name = f"{parent_name}.child"
+    parent = ModuleType(parent_name)
+    stale_child = ModuleType(child_name)
+    parent.child = stale_child
+    sys.modules[parent_name] = parent
+    sys.modules[child_name] = stale_child
+
+    try:
+        stub = DependencyStubber().ensure_available(child_name)
+
+        assert sys.modules[child_name] is stub
+        assert parent.child is stub
+        assert parent.child is not stale_child
+    finally:
+        sys.modules.pop(child_name, None)
+        sys.modules.pop(parent_name, None)
+
+
+def test_dependency_stubber_binds_created_intermediate_packages():
+    root_name = "_marker_report_created_parent"
+    mid_name = f"{root_name}.mid"
+    leaf_name = f"{mid_name}.leaf"
+
+    try:
+        stub = DependencyStubber().ensure_available(leaf_name)
+
+        root = sys.modules[root_name]
+        mid = sys.modules[mid_name]
+        assert root.mid is mid
+        assert mid.leaf is stub
+    finally:
+        sys.modules.pop(leaf_name, None)
+        sys.modules.pop(mid_name, None)
+        sys.modules.pop(root_name, None)
 
 
 # --------------------------------------------------------------------------- #
