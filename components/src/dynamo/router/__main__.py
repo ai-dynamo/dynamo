@@ -119,6 +119,14 @@ class StandaloneRouterHandler:
         async for worker_output in await self.kv_router.generate_from_request(
             preprocessed_request  # type: ignore[arg-type]
         ):
+            # The kv_router stream can yield None when an in-flight request is
+            # aborted mid-generation, for example when a weight refit pauses and
+            # aborts worker generation. Skip that terminal chunk so the stream
+            # closes cleanly instead of turning worker_output.get(...) below
+            # into a BackendUnknown 500.
+            if worker_output is None:
+                continue
+
             # Wrap worker output into LLMEngineOutput format
             # Worker should return dict with at minimum kv_transfer_params in extra_args
             llm_engine_output = {
