@@ -4,6 +4,8 @@
 use std::time::Instant;
 
 #[cfg(all(test, feature = "kvbm-offload"))]
+use std::sync::{Arc, Mutex};
+#[cfg(all(test, feature = "kvbm-offload"))]
 use std::time::Duration;
 
 use tokio::sync::mpsc;
@@ -276,6 +278,8 @@ mod tests {
     use crate::common::protocols::KvCacheEventSink;
     #[cfg(feature = "kvbm-offload")]
     use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData, StorageTier};
+    #[cfg(feature = "kvbm-offload")]
+    use std::sync::{Arc, Mutex};
 
     #[cfg(feature = "kvbm-offload")]
     #[derive(Default)]

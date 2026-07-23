@@ -20,7 +20,7 @@ pub struct MmRoutingInfoRequest {
     pub block_mm_infos: Vec<Option<BlockExtraInfo>>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct PromptRequest {
     #[serde(default)]
     pub token_ids: Option<Vec<u32>>,

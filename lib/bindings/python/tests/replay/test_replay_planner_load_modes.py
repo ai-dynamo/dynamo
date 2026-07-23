@@ -6,10 +6,10 @@
 Exercises the single offline-replay entrypoints (``run_synthetic_trace_replay`` /
 ``run_trace_replay`` with no ``planner_config``) across the load modes that the
 planner path previously needed bespoke bridge constructors for: synthetic
-open-loop (arrival-timestamp) and closed-loop (concurrency-capped) workloads,
-synthetic prefix-cache sharing, and a concurrency cap on a Mooncake trace file.
-With the unified event-driven path these all run through the same multi-worker
-runtime, so a bare run drives every request to completion.
+fixed and Poisson open-loop workloads, closed-loop (concurrency-capped)
+workloads, synthetic prefix-cache sharing, and a concurrency cap on a Mooncake
+trace file. With the unified event-driven path these all run through the same
+multi-worker runtime, so a bare run drives every request to completion.
 """
 
 import pytest
@@ -28,21 +28,41 @@ pytestmark = [
 ]
 
 
-@pytest.mark.parametrize("replay_concurrency", [None, 2])
-def test_synthetic_agg_load_modes(replay_concurrency):
-    # Synthetic workload through the unified offline path: arrival (None) and
-    # closed-loop (Some) both run every request to completion across two workers.
+@pytest.mark.parametrize(
+    "load_controller",
+    [
+        pytest.param({"arrival_interval_ms": 1.0}, id="fixed-open-loop"),
+        pytest.param(
+            {"request_rate": 1000.0, "arrival_seed": 17},
+            id="poisson-open-loop",
+        ),
+        pytest.param({"replay_concurrency": 2}, id="closed-loop"),
+    ],
+)
+def test_synthetic_agg_load_modes(load_controller):
     report = run_synthetic_trace_replay(
         64,
         16,
         8,
         extra_engine_args=MockEngineArgs(block_size=64, speedup_ratio=1000.0),
         num_workers=2,
-        replay_concurrency=replay_concurrency,
         replay_mode="offline",
-        arrival_interval_ms=1.0,
+        **load_controller,
     )
-    assert report["completed_requests"] == 8
+    assert {
+        key: report[key]
+        for key in (
+            "num_requests",
+            "completed_requests",
+            "total_input_tokens",
+            "total_output_tokens",
+        )
+    } == {
+        "num_requests": 8,
+        "completed_requests": 8,
+        "total_input_tokens": 512,
+        "total_output_tokens": 128,
+    }
 
 
 def test_synthetic_shared_prefix_closed_loop():
@@ -94,7 +114,6 @@ def test_planner_callback_error_preserves_python_exception_type():
         extra_engine_args=MockEngineArgs(block_size=64, speedup_ratio=1000.0),
         num_workers=1,
         replay_concurrency=2,
-        arrival_interval_ms=1.0,
     )
     with pytest.raises(ValueError, match="boom from on_tick"):
         bridge.run(_RaisingPlanner())

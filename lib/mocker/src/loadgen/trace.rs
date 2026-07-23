@@ -25,9 +25,9 @@ use uuid::Uuid;
 
 use super::driver::WorkloadDriver;
 use super::types::{
-    AgenticTrace, AgenticTurnTrace, ArrivalSpec, DelaySpec, DynamoRequestTrace, LengthSpec,
-    ReplayRequestHashes, RouterSequence, SequenceHashMode, SessionPartitionSpec, SessionTrace,
-    SyntheticTraceSpec, Trace, TraceFileFormat, TurnTrace, effective_replay_key,
+    AgenticTrace, AgenticTurnTrace, DelaySpec, DynamoRequestTrace, LengthSpec, ReplayRequestHashes,
+    RouterSequence, SequenceHashMode, SessionPartitionSpec, SessionTrace, SyntheticTraceSpec,
+    Trace, TraceFileFormat, TurnTrace, effective_replay_key,
 };
 use super::{SYNTHETIC_OUTPUT_SEED, planned_output_token_ids};
 use crate::common::protocols::DirectRequest;
@@ -630,19 +630,9 @@ impl Trace {
 
         let mut rng = StdRng::seed_from_u64(spec.seed);
         let mut sessions = Vec::with_capacity(spec.num_sessions);
-        let mut first_arrivals = Vec::with_capacity(spec.num_sessions);
-        let mean_gap_ms = arrival_spec_mean_gap_ms(&spec.first_turn_arrivals)?;
-        let mut next_arrival_ms = 0.0;
-
-        for session_idx in 0..spec.num_sessions {
-            if session_idx == 0 {
-                first_arrivals.push(0.0);
-                continue;
-            }
-            next_arrival_ms +=
-                sample_arrival_gap_ms(&spec.first_turn_arrivals, mean_gap_ms, &mut rng)?;
-            first_arrivals.push(next_arrival_ms);
-        }
+        let first_arrivals = spec
+            .first_turn_arrivals
+            .timestamps(spec.num_sessions, spec.arrival_seed)?;
 
         let mut next_unique_hash = 1_u64;
         for (session_idx, first_arrival_timestamp_ms) in first_arrivals.into_iter().enumerate() {
@@ -1418,34 +1408,6 @@ fn extend_applied_compute_agentic_hash_ids(
     Ok(())
 }
 
-fn arrival_spec_mean_gap_ms(spec: &ArrivalSpec) -> Result<f64> {
-    match spec {
-        ArrivalSpec::Burst => Ok(0.0),
-        ArrivalSpec::ConstantQps { qps }
-        | ArrivalSpec::PoissonQps { qps }
-        | ArrivalSpec::GammaQps { qps, .. } => {
-            if !qps.is_finite() || *qps <= 0.0 {
-                bail!("qps must be a finite positive number, got {qps}");
-            }
-            Ok(1000.0 / qps)
-        }
-    }
-}
-
-fn sample_arrival_gap_ms(spec: &ArrivalSpec, mean_gap_ms: f64, rng: &mut StdRng) -> Result<f64> {
-    match spec {
-        ArrivalSpec::Burst => Ok(0.0),
-        ArrivalSpec::ConstantQps { .. } => Ok(mean_gap_ms),
-        ArrivalSpec::PoissonQps { .. } => Ok(sample_exponential_ms(mean_gap_ms, rng)),
-        ArrivalSpec::GammaQps { smoothness, .. } => {
-            if !smoothness.is_finite() || *smoothness <= 0.0 {
-                bail!("gamma smoothness must be a finite positive number, got {smoothness}");
-            }
-            Ok(sample_gamma_ms(*smoothness, mean_gap_ms / smoothness, rng))
-        }
-    }
-}
-
 fn sample_delay_ms(spec: &DelaySpec, rng: &mut StdRng) -> Result<f64> {
     match spec {
         DelaySpec::None => Ok(0.0),
@@ -1459,7 +1421,7 @@ fn sample_delay_ms(spec: &DelaySpec, rng: &mut StdRng) -> Result<f64> {
             if !mean_ms.is_finite() || *mean_ms < 0.0 {
                 bail!("mean_ms must be a finite non-negative number, got {mean_ms}");
             }
-            Ok(sample_exponential_ms(*mean_ms, rng))
+            Ok(sample_exponential_delay_ms(*mean_ms, rng))
         }
     }
 }
@@ -1477,41 +1439,12 @@ fn sample_length(spec: &LengthSpec, min_value: usize, rng: &mut StdRng) -> usize
     sample.round().max(min_value as f64) as usize
 }
 
-fn sample_exponential_ms(mean_ms: f64, rng: &mut StdRng) -> f64 {
+fn sample_exponential_delay_ms(mean_ms: f64, rng: &mut StdRng) -> f64 {
     if mean_ms == 0.0 {
         return 0.0;
     }
     let u = (1.0 - rng.random::<f64>()).clamp(f64::MIN_POSITIVE, 1.0);
     -mean_ms * u.ln()
-}
-
-fn sample_gamma_ms(shape: f64, scale: f64, rng: &mut StdRng) -> f64 {
-    if scale == 0.0 {
-        return 0.0;
-    }
-    if shape < 1.0 {
-        let u = (1.0 - rng.random::<f64>()).clamp(f64::MIN_POSITIVE, 1.0);
-        return sample_gamma_ms(shape + 1.0, scale, rng) * u.powf(1.0 / shape);
-    }
-
-    let d = shape - 1.0 / 3.0;
-    let c = (1.0 / (9.0 * d)).sqrt();
-    loop {
-        let u1 = (1.0 - rng.random::<f64>()).clamp(f64::MIN_POSITIVE, 1.0);
-        let u2 = rng.random::<f64>();
-        let z = (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos();
-        let v = (1.0 + c * z).powi(3);
-        if v <= 0.0 {
-            continue;
-        }
-        let u = rng.random::<f64>();
-        if u < 1.0 - 0.0331 * z.powi(4) {
-            return d * v * scale;
-        }
-        if u.ln() < 0.5 * z * z + d * (1.0 - v + v.ln()) {
-            return d * v * scale;
-        }
-    }
 }
 
 fn local_block_hash_from_id(hash_id: u64, block_size: usize) -> LocalBlockHash {
