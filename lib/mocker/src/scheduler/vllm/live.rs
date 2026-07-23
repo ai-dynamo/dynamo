@@ -1,9 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+#[cfg(all(test, feature = "kvbm-offload"))]
+use std::sync::{Arc, Mutex};
 #[cfg(all(test, feature = "kvbm-offload"))]
 use std::time::Duration;
 
