@@ -11,13 +11,11 @@ pods. It does not install the Dynamo operator, create a `DynamoGraphDeployment`,
 NATS/JetStream event plane.
 
 For the user-facing walkthrough, start with
-[Experimental: Vanilla vLLM GAIE On-ramp](../../../../../docs/kubernetes/gateway-api/vanilla-vllm-onramp.mdx).
-That page shows the Gateway API, GAIE, agentgateway, Istio, credentials, deployment, verification,
-and cleanup steps in order.
+[Vanilla vLLM GAIE On-ramp](../../../../../docs/kubernetes/gateway-api/vanilla-vllm-onramp.mdx).
 
 ## How the on-ramp works
 
-This on ramp is available for Aggregated serving only at this time.
+This on-ramp is available for Aggregated serving only at this time.
 
 The aggregated on-ramp uses the public `vllm/vllm-openai:latest` image. Replace it with the vLLM
 image your platform standardizes on if you need a pinned or internally mirrored image.
@@ -28,8 +26,8 @@ into one binary, so there is no separate selector Deployment and no HTTP hop. Th
 EPP can run single-replica, or **replicated** with cross-replica active-load sync
 between EPP pods (see [Replicated mode](../../../../../docs/kubernetes/gateway-api/vanilla-vllm-onramp.mdx#replicated-mode)).
 
-
-Whether EPP uses the Dynamo runtime or not is controlled with the enc var: dynamo vs standalone
+No special EPP image is needed. Use the EPP image provided with Dynamo releases.
+Whether EPP uses the Dynamo runtime or not is controlled with the `DYN_EPP_MODE` env var: dynamo vs standalone
 
 ```yaml
 - name: DYN_EPP_MODE
@@ -58,40 +56,25 @@ flowchart LR
 ## What Dynamo-managed GAIE adds
 
 
-- Disaggregated prefill/decode. (Disaggregated  serving is planned follow-up in the standalone mode.)
-- Operator-managed lifecycle for workers, Services, `InferencePool`, and EPP resources.
-- Data parallelism. (The standalone mode which targets DP=1.)
+- Disaggregated prefill/decode (Aggregated  serving is planned follow-up in the standalone mode.)
+- Operator-managed lifecycle for Workers, Services, `InferencePool`, and EPP resources.
+- Request migration, rejection, cancellation - overall admission control 
+- Data parallelism (The standalone mode which targets DP=1.)
 - Cross-replica KV-index warm-up when new replica re-warms from live traffic + replay.
 - Initial worker cache-state synchronization instead of rebuilding the index only from live traffic.
 - Per-tenant KV cache isolation with x-tenant-id / cache_salt. This requires per-engine support and as such is not supported in the Standalone mode.
 - Management of Transient disconnects. In the Dynamo mode the KV-cache updates the worker sent during the gap are recovered from the worker's **replay** socket when `DYN_EPP_KV_EVENT_REPLAY_PORT` is set (and the vLLM worker exposes one); otherwise the index refreshes from new traffic.
 - Dropped events / gaps management. The `SelectionCore` indexer does seq-watermark gap detection and replays missed events from the worker's replay socket when `DYN_EPP_KV_EVENT_REPLAY_PORT` is configured. Without a replay socket, gaps are dropped and the index re-warms from new traffic.
-
-
-## What is Supported with Caveats in the standalone mode
-
-| Concern | Standalone mode, in-process selector (gap vs full Dynamo) |
-|---|---|
-Multi-replica EPP | Supported: set `DYN_EPP_PEER_SERVICE` so replicas sync active load over ZMQ
-Duplicate store/remove (vLLM "retries") | parity
-In-stream ordering | parity
-Backpressure / EPP restart | Slow-subscriber drops (ZMQ HWM) surface as a seq gap: detected and replayed when `DYN_EPP_KV_EVENT_REPLAY_PORT` is set (logged, not silent), lost only without a replay socket. On restart the index starts empty and re-warms from replay-from-0 plus live traffic.
-
-
+- Multi-modal support
+- Topology / Zone aware routing
+- Speculative Decoding awareness 
+- Session affinity 
+- Full list of OpenAI HTTP endpoints
+- Metrics/observability 
 
 ## How it works
 
-```text
-                          ┌───────────── Dynamo EPP (standalone, in-process selector) ────────────┐
-client → Gateway/Envoy ──▶│ tokenize → in-process select (Ready subset) → set routing headers      │
-                          │   ▲ reads InferencePool (selector + target port)                        │
-                          │   └ in-process selector subscribes to each pod's KV-event socket        │
-                          └───────────────────────────────────────────────────────────────┬───────┘
-                                                                                            │ endpoint + dp_rank
-        raw vLLM pods ◀───────────────────────────── Envoy forwards HTTP ◀─────────────────┘
-```
-
-1. The EPP reads the `InferencePool` it backs (read-only) to learn the pod
+1. The EPP reads the `InferencePool` it backs to learn the pod
    selector and HTTP target port — the same object the gateway routes to — and
    watches those pods, Ready-filtered.
 2. For each Ready pod, the EPP registers a worker into its **in-process**

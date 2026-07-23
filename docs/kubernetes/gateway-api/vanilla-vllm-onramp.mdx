@@ -3,16 +3,16 @@
 # SPDX-License-Identifier: Apache-2.0
 title: "Vanilla vLLM GAIE On-ramp"
 sidebar-title: "Vanilla vLLM On-ramp"
-subtitle: Dynamo EPP routing for existing GAIE deployments that run stock vLLM pods.
+subtitle: Dynamo EPP routing for existing GAIE deployments that run vanilla vLLM pods
 ---
-This on-ramp is for Kubernetes stacks that already use
+This on-ramp is for Kubernetes users who already use
 [Gateway API Inference Extension (GAIE)](https://github.com/kubernetes-sigs/gateway-api-inference-extension) with
-stock `vLLM serve` pods, or that want to evaluate the Dynamo kv aware router without installing the Dynamo operator
+vanilla `vLLM serve` pods and want to evaluate the Dynamo kv aware router without installing the Dynamo operator
 first. GAIE still owns endpoint selection at the Gateway API layer. The difference is that the
 Endpoint Picker uses Dynamo Router without the rest of the Dynamo stack.
 
 If you already run GAIE + vLLM, you **replace only your EndpointPicker (EPP) image**
-with the Dynamo EPP image, specify the DYN_EPP_MODE="standalone" and you are done — no need to install the Dynamo operator, Dynamo runtime, or Dynamo worker.
+with the Dynamo EPP image, specify the `DYN_EPP_MODE="standalone"` environment variable, and you are done — no need to install the Dynamo operator, Dynamo runtime, or Dynamo worker.
 
 ## What This Deploys
 
@@ -68,9 +68,7 @@ over ZMQ.
 - Access to a Dynamo EPP image.
 
 
-If you are starting from scratch install the [Prerequisites](#1-prerequisites) and apply the provided example file:
-
-- `agg.yaml` — aggregated: one vLLM pool, KV-aware load balancing, EPP with the in-process selector, replicated (2 replicas with cross-replica active-load sync).
+If you are starting from scratch install the [Prerequisites](#1-prerequisites) and apply the provided example file [`agg.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/inference-gateway/ext-proc/examples/onramp/agg.yaml).
 
 ```bash
 kubectl apply -n <ns> -f agg.yaml
@@ -80,11 +78,9 @@ curl http://$GW/v1/chat/completions -H 'content-type: application/json' -d '{
   "model": "Qwen/Qwen3-0.6B",
   "messages": [{"role":"user","content":"hello"}]
 }'
-``
+```
 Otherwise, if you already have GAIE and raw vLLM workers running follow the steps below.
 
-> Disaggregated prefill/decode serving is a planned follow-up and is not covered
-> by this on-ramp.
 
 ## Example Progression from vLLM to vLLM + Dynamo + GAIE
 
@@ -397,9 +393,6 @@ curl --max-time 120 -sS "$GATEWAY_URL/v1/chat/completions" \
 
 ## Standalone mode environment contract
 
-
-
-## EPP environment contract (standalone mode)
 
 > [!NOTE]
 > The `model` field MUST match `DYN_MODEL_NAME` in the EPP deployment, and the
