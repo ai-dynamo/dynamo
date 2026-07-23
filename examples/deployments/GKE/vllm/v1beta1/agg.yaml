@@ -4,7 +4,7 @@
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: vllm-disagg
+  name: vllm-agg
 spec:
   components:
   - name: Frontend
@@ -24,7 +24,7 @@ spec:
             export LD_LIBRARY_PATH=/usr/local/nvidia/lib64:$LD_LIBRARY_PATH
             export PATH=$PATH:/usr/local/nvidia/bin:/usr/local/nvidia/lib64
             /sbin/ldconfig
-            python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --disaggregation-mode decode
+            python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B
           command:
           - /bin/sh
           - -c
@@ -38,28 +38,4 @@ spec:
               nvidia.com/gpu: "1"
           workingDir: /workspace/examples/backends/vllm
     replicas: 1
-    type: decode
-  - name: VllmPrefillWorker
-    podTemplate:
-      spec:
-        containers:
-        - args:
-          - |
-            export LD_LIBRARY_PATH=/usr/local/nvidia/lib64:$LD_LIBRARY_PATH
-            export PATH=$PATH:/usr/local/nvidia/bin:/usr/local/nvidia/lib64
-            /sbin/ldconfig
-            python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --disaggregation-mode prefill
-          command:
-          - /bin/sh
-          - -c
-          envFrom:
-          - secretRef:
-              name: hf-token-secret
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
-          name: main
-          resources:
-            limits:
-              nvidia.com/gpu: "1"
-          workingDir: /workspace/examples/backends/vllm
-    replicas: 1
-    type: prefill
+    type: worker
