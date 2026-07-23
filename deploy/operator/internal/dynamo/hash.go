@@ -101,5 +101,8 @@ func workerHashSpec(dcd *v1beta1.DynamoComponentDeployment) v1beta1.DynamoCompon
 	spec.MinAvailable = nil
 	spec.ScalingAdapter = nil
 
+	// RuntimeVersionOverride has no rendered Pod effect yet.
+	spec.RuntimeVersionOverride = ""
+
 	return *spec
 }

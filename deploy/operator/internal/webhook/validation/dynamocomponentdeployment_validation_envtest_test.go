@@ -115,6 +115,32 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
+			name: "v1alpha1 accepts four-digit runtime version override segments",
+			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.RuntimeVersionOverride = "9999.9999.9999"
+			}),
+		},
+		{
+			name: "v1alpha1 rejects runtime version override segments longer than four digits",
+			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.RuntimeVersionOverride = "10000.0.0"
+			}),
+			wantSchemaErr: `spec.runtimeVersionOverride: Invalid value: "10000.0.0": spec.runtimeVersionOverride in body should match '^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$'`,
+		},
+		{
+			name: "v1beta1 accepts four-digit runtime version override segments",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.RuntimeVersionOverride = "9999.9999.9999"
+			}),
+		},
+		{
+			name: "v1beta1 rejects runtime version override segments longer than four digits",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.RuntimeVersionOverride = "10000.0.0"
+			}),
+			wantSchemaErr: `spec.runtimeVersionOverride: Invalid value: "10000.0.0": spec.runtimeVersionOverride in body should match '^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$'`,
+		},
+		{
 			checkpointOff: true,
 			name:          "checkpoint configuration requires operator feature gate",
 			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {

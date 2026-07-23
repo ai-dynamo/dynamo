@@ -24,6 +24,11 @@ func TestParse(t *testing.T) {
 			value:   "1.2",
 			wantErr: true,
 		},
+		{
+			name:    "rejects a uint64-overflowing override segment",
+			value:   "18446744073709551616.0.0",
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
