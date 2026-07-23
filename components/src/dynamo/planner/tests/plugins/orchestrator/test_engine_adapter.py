@@ -390,6 +390,8 @@ def test_project_scale_to_budget_preserves_single_component_target_mask():
     assert dec is not None
     assert dec.num_prefill is None
     assert dec.num_decode is not None
+    # Prefill is omitted from the decision (mask keeps None) but still charged
+    # at its ready count (=1) inside the joint GPU clamp.
     assert 1 + dec.num_decode <= 4
 
 

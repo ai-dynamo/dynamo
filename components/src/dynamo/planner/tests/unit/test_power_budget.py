@@ -149,10 +149,12 @@ def _agg_config(**overrides):
     return SimpleNamespace(**base)
 
 
-def test_gpu_budget_then_power_budget_order_is_not_commutative():
+def test_gpu_budget_then_power_budget_order_is_not_commutative(caplog):
     """The GPU floor raises decode to 8, then the power ceiling lowers it to fit
     1200 W — power wins. Applying power first would fit the proposal, then the
     GPU floor would raise it back above budget: the two orders disagree."""
+    import logging
+
     caps = WorkerCapabilities(
         prefill=None,
         decode=EngineCapabilities(num_gpu=1, power_watts_per_replica=400),
@@ -161,8 +163,15 @@ def test_gpu_budget_then_power_budget_order_is_not_commutative():
     wc = WorkerCounts(ready_num_decode=2, expected_num_decode=2)  # stable
 
     # Pipeline order (GPU floor first, then power ceiling): power wins → 3
-    # (3 × 400 W = 1200 W fits; the GPU floor of 8 is violated and reported).
-    assert adapter._apply_final_budget(None, 2, wc) == (None, 3)
+    # (3 × 400 W = 1200 W fits). The GPU floor of 8 is violated by design —
+    # power wins over the GPU floor; the clamp warning records both stages.
+    with caplog.at_level(logging.WARNING):
+        assert adapter._apply_final_budget(None, 2, wc) == (None, 3)
+    assert any(
+        "GPU clamp first adjusted proposed" in r.message
+        and "power wins over GPU floor" in r.message
+        for r in caplog.records
+    )
 
     # Reverse order: power fit leaves 2, then the GPU floor raises to 8 — which
     # is 3200 W, over the 1200 W budget. Different result → non-commutative.

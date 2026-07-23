@@ -321,3 +321,46 @@ def test_guard_sees_cap_only_annotation_change():
         # Must not silently adopt the new 400 W × 4 = 1600 W projection.
         assert env.deployment_state().prefill.power_watts_per_replica == 1200
         assert env.deployment_state().prefill.power_gpu_limit_watts == 300
+
+
+def test_topology_guard_fails_closed_without_startup_fingerprint():
+    """Awareness on without initialize()/startup load must not silently skip."""
+    env = _env(_controller())
+    with pytest.raises(
+        DeploymentValidationError, match="fingerprint was never captured"
+    ):
+        env._assert_power_config_static()
+
+
+@pytest.mark.asyncio
+async def test_refresh_shares_one_dgd_fetch_for_gpu_and_power():
+    """When power awareness is on, GPU counts and the fingerprint guard share
+    one ``get_graph_deployment`` result (no second DGD GET for power)."""
+    from unittest.mock import AsyncMock
+
+    deployment = {"shared": True}
+    controller = Mock()
+    controller.get_graph_deployment = Mock(return_value=deployment)
+    controller.get_gpu_counts = Mock(return_value=(1, 1))
+    controller.get_component_power_configs = Mock(
+        return_value=(_cfg("prefill", 700), _cfg("decode", 1200))
+    )
+    controller.get_actual_worker_counts = AsyncMock(return_value=(1, 1, True))
+    controller.get_model_name = Mock(return_value="test-model")
+
+    env = _env(controller)
+    env._load_static_power_caps_at_startup()
+    controller.get_graph_deployment.reset_mock()
+    controller.get_gpu_counts.reset_mock()
+    controller.get_component_power_configs.reset_mock()
+
+    await env.refresh()
+
+    controller.get_graph_deployment.assert_called_once()
+    controller.get_gpu_counts.assert_called_once()
+    assert controller.get_gpu_counts.call_args.kwargs["deployment"] is deployment
+    controller.get_component_power_configs.assert_called_once()
+    assert (
+        controller.get_component_power_configs.call_args.kwargs["deployment"]
+        is deployment
+    )
