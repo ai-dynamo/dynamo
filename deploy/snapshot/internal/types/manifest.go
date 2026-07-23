@@ -128,12 +128,21 @@ func NewOverlayManifest(exclusions OverlaySettings, upperDir string, ociSpec *sp
 type CUDAManifest struct {
 	PIDs           []int    `yaml:"pids"`
 	SourceGPUUUIDs []string `yaml:"sourceGpuUuids"`
+	// HasJobFile records whether the workload was launched under a
+	// cuda-checkpoint job file (its entrypoint was wrapped with
+	// `cuda-checkpoint --launch-job`, or the entrypoint was unknown, which
+	// is treated the same). When true, restore-side cuda-checkpoint
+	// operations must run serially; when false they may run concurrently.
+	// Manifests written before this field existed unmarshal to false and
+	// restore concurrently.
+	HasJobFile bool `yaml:"hasJobFile"`
 }
 
-func NewCUDAManifest(pids []int, sourceGPUUUIDs []string) CUDAManifest {
+func NewCUDAManifest(pids []int, sourceGPUUUIDs []string, hasJobFile bool) CUDAManifest {
 	return CUDAManifest{
 		PIDs:           append([]int(nil), pids...),
 		SourceGPUUUIDs: append([]string(nil), sourceGPUUUIDs...),
+		HasJobFile:     hasJobFile,
 	}
 }
 

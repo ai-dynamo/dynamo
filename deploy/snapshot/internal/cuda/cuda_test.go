@@ -3,9 +3,11 @@ package cuda
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -86,6 +88,239 @@ func TestBuildDeviceMap(t *testing.T) {
 			}
 			if got != tc.want {
 				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRestoreAndUnlockProcessTreeConcurrentPhaseBarrier(t *testing.T) {
+	pids := []int{101, 202, 303}
+	restoreStarted := make(chan int, len(pids))
+	releaseRestore := make(chan struct{})
+	unlockStarted := make(chan int, len(pids))
+	errCh := make(chan error, 1)
+
+	go func() {
+		_, err := restoreAndUnlockProcessTree(
+			context.Background(),
+			pids,
+			true,
+			func(ctx context.Context, pid int) error {
+				restoreStarted <- pid
+				select {
+				case <-releaseRestore:
+					return nil
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			},
+			func(_ context.Context, pid int) error {
+				unlockStarted <- pid
+				return nil
+			},
+			func(context.Context, int) (string, error) {
+				return "", errors.New("unexpected state check")
+			},
+			logr.Discard(),
+		)
+		errCh <- err
+	}()
+
+	for range pids {
+		select {
+		case <-restoreStarted:
+		case <-time.After(2 * time.Second):
+			t.Fatal("restore operations did not all start concurrently")
+		}
+	}
+	select {
+	case pid := <-unlockStarted:
+		t.Fatalf("unlock for pid %d started before all restores completed", pid)
+	default:
+	}
+
+	close(releaseRestore)
+	for range pids {
+		select {
+		case <-unlockStarted:
+		case <-time.After(2 * time.Second):
+			t.Fatal("unlock operations did not all start")
+		}
+	}
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("restoreAndUnlockProcessTree: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("restoreAndUnlockProcessTree did not complete")
+	}
+}
+
+func TestRestoreAndUnlockProcessTreeSerialOrdering(t *testing.T) {
+	pids := []int{303, 101, 202}
+	var calls []string
+
+	_, err := restoreAndUnlockProcessTree(
+		context.Background(),
+		pids,
+		false,
+		func(_ context.Context, pid int) error {
+			calls = append(calls, fmt.Sprintf("restore:%d", pid))
+			return nil
+		},
+		func(_ context.Context, pid int) error {
+			calls = append(calls, fmt.Sprintf("unlock:%d", pid))
+			return nil
+		},
+		func(context.Context, int) (string, error) {
+			return "", errors.New("unexpected state check")
+		},
+		logr.Discard(),
+	)
+	if err != nil {
+		t.Fatalf("restoreAndUnlockProcessTree: %v", err)
+	}
+
+	want := []string{
+		"restore:303",
+		"restore:101",
+		"restore:202",
+		"unlock:303",
+		"unlock:101",
+		"unlock:202",
+	}
+	if strings.Join(calls, ",") != strings.Join(want, ",") {
+		t.Fatalf("calls %v, want %v", calls, want)
+	}
+}
+
+func TestRestoreAndUnlockProcessTreeWaitsAndOrdersErrors(t *testing.T) {
+	pids := []int{303, 101, 202}
+	var completed atomic.Int32
+	var unlockCalls atomic.Int32
+
+	_, err := restoreAndUnlockProcessTree(
+		context.Background(),
+		pids,
+		true,
+		func(_ context.Context, pid int) error {
+			defer completed.Add(1)
+			if pid == 202 {
+				time.Sleep(20 * time.Millisecond)
+				return nil
+			}
+			return fmt.Errorf("restore error %d", pid)
+		},
+		func(context.Context, int) error {
+			unlockCalls.Add(1)
+			return nil
+		},
+		func(context.Context, int) (string, error) {
+			return "", errors.New("unexpected state check")
+		},
+		logr.Discard(),
+	)
+	if err == nil {
+		t.Fatal("expected restore error")
+	}
+	if completed.Load() != int32(len(pids)) {
+		t.Fatalf("completed %d restores, want %d", completed.Load(), len(pids))
+	}
+	if unlockCalls.Load() != 0 {
+		t.Fatalf("unlock called %d times after restore failure", unlockCalls.Load())
+	}
+	errText := err.Error()
+	first := strings.Index(errText, "pid 303")
+	second := strings.Index(errText, "pid 101")
+	if first < 0 || second < 0 || first >= second {
+		t.Fatalf("errors are not in PID input order: %q", errText)
+	}
+}
+
+func TestRestoreAndUnlockProcessTreeAcceptsAlreadyRunning(t *testing.T) {
+	pids := []int{101, 202}
+
+	_, err := restoreAndUnlockProcessTree(
+		context.Background(),
+		pids,
+		false,
+		func(context.Context, int) error {
+			return nil
+		},
+		func(_ context.Context, pid int) error {
+			return fmt.Errorf("unlock error %d", pid)
+		},
+		func(_ context.Context, pid int) (string, error) {
+			if pid == 101 {
+				return "running", nil
+			}
+			return "checkpointed", nil
+		},
+		logr.Discard(),
+	)
+	if err == nil {
+		t.Fatal("expected unlock error for non-running process")
+	}
+	if strings.Contains(err.Error(), "pid 101") {
+		t.Fatalf("already-running process returned an error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "pid 202") {
+		t.Fatalf("missing PID attribution: %v", err)
+	}
+}
+
+func TestHasJobFile(t *testing.T) {
+	tests := []struct {
+		name           string
+		entrypointArgs []string
+		want           bool
+		reason         string
+	}{
+		{
+			name:           "launch-job wrapped entrypoint",
+			entrypointArgs: []string{"cuda-checkpoint", "--launch-job", "python3"},
+			want:           true,
+			reason:         "is wrapped with cuda-checkpoint --launch-job",
+		},
+		{
+			name:           "launch-job wrapped entrypoint with absolute path",
+			entrypointArgs: []string{"/usr/local/bin/cuda-checkpoint", "--launch-job", "python3"},
+			want:           true,
+			reason:         "is wrapped with cuda-checkpoint --launch-job",
+		},
+		{
+			name:   "nil entrypoint args",
+			want:   true,
+			reason: "unknown",
+		},
+		{
+			name:           "empty entrypoint args",
+			entrypointArgs: []string{},
+			want:           true,
+			reason:         "unknown",
+		},
+		{
+			name:           "ordinary entrypoint",
+			entrypointArgs: []string{"python3", "-m", "dynamo.vllm"},
+			reason:         "is not wrapped with cuda-checkpoint --launch-job",
+		},
+		{
+			name:           "launch-job flag without cuda-checkpoint entrypoint",
+			entrypointArgs: []string{"python3", "--launch-job"},
+			reason:         "is not wrapped with cuda-checkpoint --launch-job",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, reason := HasJobFile(tc.entrypointArgs)
+			if got != tc.want {
+				t.Fatalf("HasJobFile() = %t, want %t (reason %q)", got, tc.want, reason)
+			}
+			if !strings.Contains(reason, tc.reason) {
+				t.Fatalf("reason %q does not contain %q", reason, tc.reason)
 			}
 		})
 	}
