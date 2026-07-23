@@ -12,7 +12,7 @@
 #   trtllm   -> trtllm build and test
 #   frontend -> frontend EPP image build, dynamo build-test
 #   benchmarks -> dynamo build-test (runs tests/benchmarks/** pytest suite)
-#   efa      -> all framework EFA runtime image builds (changes to container/templates/aws.Dockerfile)
+#   efa      -> all framework EFA runtime image builds (EFA template/dependency changes)
 #   docs     -> fern docs lint, sync, and version release (docs/ directory)
 #
 # Filters for coverage only (no CI triggered):
@@ -232,3 +232,4 @@ benchmarks:
 
 efa:
   - 'container/templates/aws.Dockerfile'
+  - 'container/deps/efa/**'
