@@ -143,6 +143,15 @@ class ServiceSpec:
         self._spec["extraPodSpec"]["mainContainer"]["image"] = value
 
     @property
+    def runtime_version_override(self) -> Optional[str]:
+        """Explicit Dynamo runtime compatibility version for the component."""
+        return self._spec.get("runtimeVersionOverride")
+
+    @runtime_version_override.setter
+    def runtime_version_override(self, value: str):
+        self._spec["runtimeVersionOverride"] = value
+
+    @property
     def frontend_sidecar_image(self) -> Optional[str]:
         """Container image for the frontendSidecar (if present)."""
         if self._schema == SCHEMA_V1BETA1:
@@ -510,6 +519,17 @@ class DeploymentSpec:
             envs.append({"name": "HF_HOME", "value": mount_point})
         for service in self.services:
             service.add_pvc_mount(pvc_name, mount_point)
+
+    def set_runtime_version_override(
+        self, runtime_version: str, service_name: Optional[str] = None
+    ):
+        """Set the explicit Dynamo runtime version for one or all components."""
+        if service_name is None:
+            services = self.services
+        else:
+            services = [self[service_name]]
+        for service in services:
+            service.runtime_version_override = runtime_version
 
     def set_frontend_sidecar_image(
         self, image: str, service_name: Optional[str] = None
