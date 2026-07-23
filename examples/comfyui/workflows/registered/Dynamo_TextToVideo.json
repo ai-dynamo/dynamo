@@ -1,0 +1,119 @@
+{
+  "last_node_id": 3,
+  "last_link_id": 2,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "DynamoEndpointConfig",
+      "pos": [50, 100],
+      "size": [320, 130],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "endpoint",
+          "type": "DYNAMO_ENDPOINT",
+          "links": [1],
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "DynamoEndpointConfig"
+      },
+      "widgets_values": [
+        "http://localhost:8000",
+        "",
+        1800
+      ]
+    },
+    {
+      "id": 2,
+      "type": "DynamoTextToVideo",
+      "pos": [400, 100],
+      "size": [380, 560],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "endpoint",
+          "type": "DYNAMO_ENDPOINT",
+          "link": 1,
+          "shape": 7
+        }
+      ],
+      "outputs": [
+        {
+          "name": "video",
+          "type": "VIDEO",
+          "links": [2],
+          "slot_index": 0
+        },
+        {
+          "name": "video_path",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "DynamoTextToVideo"
+      },
+      "widgets_values": [
+        "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+        "a small wave breaking on a sunny beach, slow motion, cinematic",
+        "832x480",
+        17,
+        16,
+        16,
+        5.0,
+        42,
+        "fixed",
+        "",
+        "b64_json",
+        "http://localhost:8000",
+        "",
+        1800
+      ]
+    },
+    {
+      "id": 3,
+      "type": "SaveVideo",
+      "pos": [820, 100],
+      "size": [320, 200],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "video",
+          "type": "VIDEO",
+          "link": 2
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "Node name for S&R": "SaveVideo"
+      },
+      "widgets_values": [
+        "dynamo_t2v",
+        "mp4",
+        "h264"
+      ]
+    }
+  ],
+  "links": [
+    [1, 1, 0, 2, 0, "DYNAMO_ENDPOINT"],
+    [2, 2, 0, 3, 0, "VIDEO"]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 1.0,
+      "offset": [0, 0]
+    }
+  },
+  "version": 0.4
+}
