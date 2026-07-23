@@ -136,15 +136,20 @@ def stop_gc_policy() -> None:
     with _lock:
         if not _started:
             return
-        _stop_event.set()
+        stop_event = _stop_event
         thread = _freeze_thread
-        t0, t1, _ = gc.get_threshold()
-        gc.set_threshold(t0, t1, _saved_gen2_threshold)
+        saved_gen2_threshold = _saved_gen2_threshold
+        if stop_event is not None:
+            stop_event.set()
+        if saved_gen2_threshold is not None:
+            t0, t1, _ = gc.get_threshold()
+            gc.set_threshold(t0, t1, saved_gen2_threshold)
         _started = False
         _stop_event = None
         _freeze_thread = None
         _saved_gen2_threshold = None
-    thread.join(timeout=5.0)
+    if thread is not None:
+        thread.join(timeout=5.0)
     gc.unfreeze()
     gc.collect()
     logger.info("FPM GC policy stopped: auto-gen2 restored (pid=%d)", os.getpid())
