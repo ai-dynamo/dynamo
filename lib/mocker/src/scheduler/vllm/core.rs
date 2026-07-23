@@ -109,6 +109,7 @@ struct ScheduledWork {
     total_tokens: usize,
     prompt_tokens: usize,
     prefix_tokens: usize,
+    terminal_after_schedule: bool,
     /// Full prompt length, captured at schedule time for FPM variance calculation.
     prompt_len: usize,
     /// Total sequence length (prompt + generated) at schedule time, used for
@@ -442,19 +443,24 @@ impl VllmCore {
         Self::new_internal(args, 0, 0, None, KvEventPublishers::default())
     }
 
-    pub(crate) fn new_with_worker_id(args: MockEngineArgs, worker_id: WorkerId) -> Self {
-        Self::new_internal(args, 0, worker_id, None, KvEventPublishers::default())
+    pub(crate) fn new_with_kv_capture(args: MockEngineArgs, worker_id: WorkerId) -> Self {
+        Self::new_with_worker_rank(args, worker_id, 0, worker_id, true)
     }
 
-    pub(crate) fn new_with_kv_capture(args: MockEngineArgs, worker_id: WorkerId) -> Self {
-        let (buffer, sink) = capture_router_event_sink(worker_id);
-        Self::new_internal(
-            args,
-            0,
-            worker_id,
-            Some(buffer),
-            KvEventPublishers::new(Some(sink), None),
-        )
+    pub(crate) fn new_with_worker_rank(
+        args: MockEngineArgs,
+        worker_id: WorkerId,
+        dp_rank: u32,
+        seed_offset: u64,
+        capture_kv_events: bool,
+    ) -> Self {
+        let (buffer, publishers) = if capture_kv_events {
+            let (buffer, sink) = capture_router_event_sink(worker_id);
+            (Some(buffer), KvEventPublishers::new(Some(sink), None))
+        } else {
+            (None, KvEventPublishers::default())
+        };
+        Self::new_internal(args, dp_rank, seed_offset, buffer, publishers)
     }
 
     pub(super) fn new_with_sink(
@@ -468,7 +474,7 @@ impl VllmCore {
     fn new_internal(
         args: MockEngineArgs,
         dp_rank: u32,
-        worker_id: WorkerId,
+        seed_offset: u64,
         kv_event_buffer: Option<CapturedRouterEventBuffer>,
         kv_event_publishers: KvEventPublishers,
     ) -> Self {
@@ -482,7 +488,7 @@ impl VllmCore {
             let rates =
                 normalize_conditional_accept_rates(nextn, args.aic_nextn_accept_rates.as_deref())
                     .expect("normalized MTP acceptance rates");
-            SpeculativeDecodeSampler::new(rates, args.aic_mtp_seed.wrapping_add(worker_id))
+            SpeculativeDecodeSampler::new(rates, args.aic_mtp_seed.wrapping_add(seed_offset))
         });
         Self {
             kv_manager: KvManager::new_with_event_sink(
@@ -567,6 +573,19 @@ impl VllmCore {
                 Ok(SchedulerCommandEffects::new(
                     SchedulerCommandResult::Submitted(self.submit(request)?),
                 ))
+            }
+            SchedulerCommand::CancelRequest { request_id } => {
+                let result = if self.state.requests.contains_key(&request_id) {
+                    self.drop_request(request_id);
+                    SchedulerCommandResult::Applied
+                } else {
+                    SchedulerCommandResult::Noop
+                };
+                if allow_destination_admission {
+                    Ok(self.effects_after_capacity_change(result, reservation_now_ms))
+                } else {
+                    Ok(SchedulerCommandEffects::new(result))
+                }
             }
             SchedulerCommand::SubmitHandoffPrefill {
                 handoff_id,
@@ -1196,7 +1215,7 @@ impl VllmCore {
         &mut self,
         uuid: Uuid,
         now_ms: f64,
-        prefill_cost: &PrefillCost,
+        g1_cached_tokens: usize,
     ) -> SwapInAdmissionAttempt {
         use crate::kv_manager::kvbm_backend::BatchSwapInOutcome;
         if !self.kv_manager.has_offload_engine() {
@@ -1210,13 +1229,16 @@ impl VllmCore {
         if !matches!(request.status, RequestStatus::Waiting) {
             return SwapInAdmissionAttempt::NoHit;
         }
+        // Lower-tier lookup starts after the physical G1 prefix. MTP may
+        // recompute the final matched block, but that changes compute
+        // accounting rather than which blocks are resident in G1.
         let block_size = request.sequence.block_size();
-        let skip_blocks = prefill_cost.cached_tokens / block_size;
+        let skip_blocks = g1_cached_tokens / block_size;
         let plhs = request.sequence.positional_lineage_hashes();
         tracing::trace!(
             %uuid,
             now_ms,
-            cached_tokens = prefill_cost.cached_tokens,
+            cached_tokens = g1_cached_tokens,
             skip_blocks,
             plhs_len = plhs.len(),
             "kvbm-offload: swap-in admission probe"
@@ -1403,25 +1425,32 @@ impl VllmCore {
                                 cached_tokens: request.sequence.num_input_tokens(),
                                 active_cached_tokens: request.sequence.num_input_tokens(),
                             },
+                            g1_cached_tokens: request.sequence.num_input_tokens(),
                         },
                         AdmissionStage::PendingDestinationHead => break,
                         AdmissionStage::FreshKv => {
                             let is_fresh = request.status == RequestStatus::Waiting;
                             policy::decide_waiting_admission(
-                                scheduling_policy,
+                                policy::WaitingAdmissionConfig {
+                                    policy: scheduling_policy,
+                                    num_gpu_blocks: self.args.num_gpu_blocks,
+                                    block_size: self.args.block_size,
+                                    mtp_enabled: self.args.aic_nextn.is_some(),
+                                },
                                 &request.sequence,
                                 is_fresh,
                                 running_seqs,
-                                self.args.num_gpu_blocks,
-                                self.args.block_size,
                                 &self.kv_manager,
                             )
                         }
                     }
                 }
             };
-            let prefill_cost = match decision {
-                AdmissionDecision::Admit { prefill_cost } => prefill_cost,
+            let (prefill_cost, _g1_cached_tokens) = match decision {
+                AdmissionDecision::Admit {
+                    prefill_cost,
+                    g1_cached_tokens,
+                } => (prefill_cost, g1_cached_tokens),
                 AdmissionDecision::Wait => {
                     break;
                 }
@@ -1444,7 +1473,7 @@ impl VllmCore {
                 }
             };
             #[cfg(feature = "kvbm-offload")]
-            match self.try_park_for_swap_in(uuid, now_ms, &prefill_cost) {
+            match self.try_park_for_swap_in(uuid, now_ms, _g1_cached_tokens) {
                 SwapInAdmissionAttempt::Parked => continue,
                 SwapInAdmissionAttempt::BlockedOnG1Offload => break,
                 SwapInAdmissionAttempt::NoHit => {}
@@ -1661,9 +1690,10 @@ impl VllmCore {
             ))
         });
 
-        let scheduled_decodes = scheduled
-            .values()
-            .filter_map(|work| (work.prompt_tokens == 0).then_some(work.sequence_len as u64));
+        let scheduled_decodes = scheduled.values().filter_map(|work| {
+            (work.prompt_tokens == 0 && !work.terminal_after_schedule)
+                .then_some(work.sequence_len as u64)
+        });
 
         let queued_prefills = self.state.waiting.iter().filter_map(|uuid| {
             let request = self.state.requests.get(uuid)?;
@@ -1725,9 +1755,13 @@ impl VllmCore {
             prefill_cost
                 .map(|cost| cost.cached_tokens)
                 .unwrap_or_else(|| {
-                    self.kv_manager
-                        .get_prefill_cost(&request.sequence)
-                        .cached_tokens
+                    policy::apply_mtp_prefix_recompute(
+                        self.args.scheduling_policy(),
+                        self.args.block_size,
+                        self.args.aic_nextn.is_some(),
+                        self.kv_manager.get_prefill_cost(&request.sequence),
+                    )
+                    .cached_tokens
                 })
         } else {
             0
@@ -1862,12 +1896,16 @@ impl VllmCore {
             .get(&uuid)
             .map(|r| r.sequence.len())
             .unwrap_or(0);
+        let terminal_after_schedule = self.state.requests.get(&uuid).is_some_and(|request| {
+            policy::generation_complete(&request.sequence, self.args.max_model_len)
+        });
         scheduled.insert(
             uuid,
             ScheduledWork {
                 total_tokens: tokens_used,
                 prompt_tokens,
                 prefix_tokens: prompt_before,
+                terminal_after_schedule,
                 prompt_len,
                 sequence_len,
             },
@@ -1904,25 +1942,63 @@ impl VllmCore {
         decode_start_ms: f64,
     ) -> (Duration, Vec<OutputSignal>) {
         let mut ready = Vec::with_capacity(self.state.running.len());
+        let mut already_complete = Vec::new();
         let mut total_length = 0usize;
         for uuid in self.state.running.iter().copied() {
             let Some(request) = self.state.requests.get(&uuid) else {
                 continue;
             };
-            if request.num_computed_tokens < request.sequence.len()
-                || policy::generation_complete(&request.sequence, self.args.max_model_len)
-            {
+            if request.num_computed_tokens < request.sequence.len() {
+                continue;
+            }
+            if policy::generation_complete(&request.sequence, self.args.max_model_len) {
+                let handoff_delay_ms = compute_prefill_handoff_delay_ms(
+                    self.args.worker_type,
+                    true,
+                    request.sequence.num_input_tokens(),
+                    self.args.kv_transfer_bandwidth,
+                    self.args.kv_bytes_per_token,
+                );
+                let effects = split_terminal_effects(request.sequence.terminal_signals());
+                debug_assert!(effects.immediate.is_empty());
+                already_complete.push((uuid, handoff_delay_ms, effects.cleanup));
                 continue;
             }
             ready.push(uuid);
             total_length += request.sequence.len();
         }
+
+        // Requests already terminal after prefill must release their running slots
+        // without manufacturing an output token.
+        let mut output_signals = Vec::with_capacity(already_complete.len() + ready.len());
+        for (uuid, handoff_delay_ms, cleanup) in already_complete {
+            self.complete_source(uuid, cleanup);
+            output_signals.push(OutputSignal {
+                uuid,
+                token_id: None,
+                completed: true,
+                rejected: false,
+                handoff_delay_ms,
+            });
+        }
+
         if ready.is_empty() {
-            return (Duration::ZERO, Vec::new());
+            if !output_signals.is_empty() {
+                self.state.compact_running();
+            }
+            return (Duration::ZERO, output_signals);
         }
 
         if self.speculative_sampler.is_some() {
-            return self.emit_speculative_ready_tokens(ready, collector, decode_start_ms);
+            if output_signals.is_empty() {
+                return self.emit_speculative_ready_tokens(ready, collector, decode_start_ms);
+            }
+
+            self.state.compact_running();
+            let (decode_time, mut speculative_signals) =
+                self.emit_speculative_ready_tokens(ready, collector, decode_start_ms);
+            output_signals.append(&mut speculative_signals);
+            return (decode_time, output_signals);
         }
 
         // For prefill workers, the first decode token is produced as part of
@@ -1943,8 +2019,7 @@ impl VllmCore {
             (dt, decode_start_ms + dt.as_secs_f64() * 1000.0)
         };
 
-        let mut output_signals = Vec::with_capacity(ready.len());
-        let mut running_changed = false;
+        let mut running_changed = !output_signals.is_empty();
         for uuid in ready {
             let mut emitted = false;
             let mut emitted_token_id = None;

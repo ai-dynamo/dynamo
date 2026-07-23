@@ -7,19 +7,17 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use dynamo_kv_router::RouterEventSink;
 use dynamo_kv_router::indexer::LocalKvIndexer;
 use dynamo_kv_router::protocols::*;
-use dynamo_runtime::transports::nats::NatsQueue;
 
 use crate::kv_router::metrics::kv_publisher_metrics;
 
 use super::DEFAULT_MAX_BATCH_BLOCKS;
 use super::batching::BatchingState;
 use super::dedup::EventDedupFilter;
-use super::sinks::{JetStreamPublisher, emit};
+use super::sinks::{RouterEventBatchSink, emit};
 
-pub(super) async fn run_event_processor_loop<P: RouterEventSink + Send + Sync + 'static>(
+pub(super) async fn run_event_processor_loop<P: RouterEventBatchSink + 'static>(
     publisher: P,
     worker_id: u64,
     cancellation_token: CancellationToken,
@@ -36,15 +34,20 @@ pub(super) async fn run_event_processor_loop<P: RouterEventSink + Send + Sync + 
         tokio::select! {
             _ = cancellation_token.cancelled() => {
                 tracing::info!("KV Event source received cancellation signal");
-                batching_state.flush(&publisher, &local_indexer, worker_id, &mut dedup).await;
+                let mut output = Vec::new();
+                batching_state.flush(&local_indexer, worker_id, &mut dedup, &mut output).await;
+                publish_output(&publisher, worker_id, &output).await;
                 break;
             }
             event_batch = rx.recv() => {
                 let Some(event_batch) = event_batch else {
                     tracing::debug!("Event processor channel closed.");
-                    batching_state.flush(&publisher, &local_indexer, worker_id, &mut dedup).await;
+                    let mut output = Vec::new();
+                    batching_state.flush(&local_indexer, worker_id, &mut dedup, &mut output).await;
+                    publish_output(&publisher, worker_id, &output).await;
                     break;
                 };
+                let mut output = Vec::new();
 
                 // Process the complete source list before returning to `select!` so
                 // another channel item, the timeout, or cancellation cannot split it.
@@ -92,7 +95,7 @@ pub(super) async fn run_event_processor_loop<P: RouterEventSink + Send + Sync + 
                                 || dp_rank_changed
                                 || storage_tier_changed
                             {
-                                batching_state.flush(&publisher, &local_indexer, worker_id, &mut dedup).await;
+                                batching_state.flush(&local_indexer, worker_id, &mut dedup, &mut output).await;
                             }
                             match &mut batching_state.pending_removed {
                                 Some(pending) => pending.block_hashes.extend(data.block_hashes),
@@ -109,7 +112,7 @@ pub(super) async fn run_event_processor_loop<P: RouterEventSink + Send + Sync + 
                                     data.parent_hash != p.blocks.last().map(|b| b.block_hash)
                                 });
                             if should_flush {
-                                batching_state.flush(&publisher, &local_indexer, worker_id, &mut dedup).await;
+                                batching_state.flush(&local_indexer, worker_id, &mut dedup, &mut output).await;
                             }
                             match &mut batching_state.pending_stored {
                                 Some(pending) => pending.blocks.extend(data.blocks),
@@ -119,10 +122,9 @@ pub(super) async fn run_event_processor_loop<P: RouterEventSink + Send + Sync + 
                             }
                         }
                         KvCacheEventData::Cleared => {
-                            batching_state.flush(&publisher, &local_indexer, worker_id, &mut dedup).await;
-                            dedup.clear();
+                            batching_state.flush(&local_indexer, worker_id, &mut dedup, &mut output).await;
+                            dedup.clear_rank(event.dp_rank);
                             emit(
-                                &publisher,
                                 &local_indexer,
                                 worker_id,
                                 storage_tier,
@@ -131,6 +133,7 @@ pub(super) async fn run_event_processor_loop<P: RouterEventSink + Send + Sync + 
                                     data: KvCacheEventData::Cleared,
                                     dp_rank: event.dp_rank,
                                 },
+                                &mut output,
                             )
                             .await;
                             batching_state.next_publish_id += 1;
@@ -145,7 +148,7 @@ pub(super) async fn run_event_processor_loop<P: RouterEventSink + Send + Sync + 
                     if batching_state.has_pending()
                         && batching_state.pending_block_count() >= max_batch_blocks
                     {
-                        batching_state.flush(&publisher, &local_indexer, worker_id, &mut dedup).await;
+                        batching_state.flush(&local_indexer, worker_id, &mut dedup, &mut output).await;
                     }
                 }
 
@@ -157,21 +160,42 @@ pub(super) async fn run_event_processor_loop<P: RouterEventSink + Send + Sync + 
                         Some(ms) => batching_state.is_timeout_elapsed(ms),
                     }
                 {
-                    batching_state.flush(&publisher, &local_indexer, worker_id, &mut dedup).await;
+                    batching_state.flush(&local_indexer, worker_id, &mut dedup, &mut output).await;
                 }
+                publish_output(&publisher, worker_id, &output).await;
             }
             _ = tokio::time::sleep(
                 timeout_ms
                     .map(|ms| batching_state.remaining_timeout(ms))
                     .unwrap_or(Duration::from_secs(3600))
             ), if timeout_ms.is_some() && batching_state.has_pending() => {
-                batching_state.flush(&publisher, &local_indexer, worker_id, &mut dedup).await;
+                let mut output = Vec::new();
+                batching_state.flush(&local_indexer, worker_id, &mut dedup, &mut output).await;
+                publish_output(&publisher, worker_id, &output).await;
             }
         }
     }
 }
 
-pub(super) async fn start_event_processor<P: RouterEventSink + Send + Sync + 'static>(
+async fn publish_output<P: RouterEventBatchSink>(
+    publisher: &P,
+    worker_id: u64,
+    output: &[RouterEvent],
+) {
+    if output.is_empty() {
+        return;
+    }
+    if let Err(e) = publisher.publish_events(output).await {
+        tracing::error!(
+            worker_id,
+            attempted_event_count = output.len(),
+            error = %e,
+            "One or more KV event publishes failed"
+        );
+    }
+}
+
+pub(super) async fn start_event_processor<P: RouterEventBatchSink + 'static>(
     publisher: P,
     worker_id: u64,
     cancellation_token: CancellationToken,
@@ -181,26 +205,6 @@ pub(super) async fn start_event_processor<P: RouterEventSink + Send + Sync + 'st
 ) {
     run_event_processor_loop(
         publisher,
-        worker_id,
-        cancellation_token,
-        rx,
-        local_indexer,
-        batching_timeout_ms,
-        DEFAULT_MAX_BATCH_BLOCKS,
-    )
-    .await
-}
-
-pub(super) async fn start_event_processor_jetstream(
-    publisher: NatsQueue,
-    worker_id: u64,
-    cancellation_token: CancellationToken,
-    rx: mpsc::UnboundedReceiver<Vec<PlacementEvent>>,
-    local_indexer: Option<Arc<LocalKvIndexer>>,
-    batching_timeout_ms: Option<u64>,
-) {
-    run_event_processor_loop(
-        JetStreamPublisher(publisher),
         worker_id,
         cancellation_token,
         rx,

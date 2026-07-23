@@ -170,7 +170,8 @@ impl KvReplayRouter {
             scheduler_cancel.clone(),
             "replay",
             false,
-        ));
+            Default::default(),
+        )?);
         let (event_tx, mut event_rx) = mpsc::unbounded_channel();
         let indexer_clone = indexer.clone();
         let event_task = tokio::spawn(async move {
@@ -478,6 +479,44 @@ mod tests {
 
         low_task.await.unwrap();
         high_task.await.unwrap();
+        router.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn free_clears_prefill_load_without_first_token() {
+        let args = MockEngineArgs::builder()
+            .block_size(64)
+            .max_num_batched_tokens(Some(64))
+            .build()
+            .unwrap();
+        let router = ReplayRouter::new(
+            ReplayRouterMode::KvRouter,
+            &args,
+            Some(KvRouterConfig {
+                router_track_prefill_tokens: true,
+                ..KvRouterConfig::default()
+            }),
+            None,
+            1,
+        )
+        .unwrap();
+        let uuid = Uuid::from_u128(4);
+
+        router
+            .select_worker(&priority_request(4, 0, 0), 1)
+            .await
+            .unwrap();
+        assert_eq!(
+            router.debug_potential_loads(0, true)[0].potential_prefill_tokens,
+            64
+        );
+
+        router.on_complete(uuid).await.unwrap();
+
+        assert_eq!(
+            router.debug_potential_loads(0, true)[0].potential_prefill_tokens,
+            0
+        );
         router.shutdown().await.unwrap();
     }
 

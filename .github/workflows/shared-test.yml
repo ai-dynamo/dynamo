@@ -151,6 +151,10 @@ jobs:
         # Datadog Test Optimization scoping (settings are per service+env).
         DD_ENV: ${{ inputs.dd_env }}
         DD_CIVISIBILITY_FLAKY_RETRY_ENABLED: ${{ inputs.dd_flaky_retry_enabled }}
+        # dynamo tests run product code in subprocesses, so ddtrace's in-process
+        # coverage.py collects nothing ("No data was collected" warnings) and TIA
+        # gets no signal. Disable ITR (skips the settings API, coverage, skipping).
+        DD_CIVISIBILITY_ITR_ENABLED: 'false'
     permissions:
       contents: read
     services:

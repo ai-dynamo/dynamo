@@ -46,7 +46,7 @@
 //! - ✅ `dynamo_frontend_request_duration_seconds` - Request duration histogram (not `response_time`)
 //! - ✅ `dynamo_component_errors_total` - Total error counter (not `total_errors`)
 //! - ✅ `dynamo_component_memory_usage_bytes` - Memory usage gauge
-//! - ✅ `dynamo_frontend_inflight_requests` - Current inflight requests gauge
+//! - ✅ `dynamo_frontend_active_requests` - Current active requests gauge
 //! - ✅ `dynamo_component_cpu_usage_percent` - CPU usage percentage
 //! - ✅ `dynamo_frontend_tokens_per_second` - Token generation rate
 //! - ✅ `dynamo_messaging_client_connection_duration_ms` - Connection time in milliseconds
@@ -593,7 +593,7 @@ pub mod routing_overhead {
     pub const SHARED_CACHE_ERRORS_TOTAL: &str = "shared_cache_errors_total";
 }
 
-/// Router request metrics (component-scoped aggregate histograms + counter)
+/// Router request metrics (component-scoped aggregate histograms + counters)
 ///
 /// These constants are the suffix portions of full metric names, combined with
 /// [`name_prefix::COMPONENT`] to form the complete name, e.g.
@@ -601,6 +601,9 @@ pub mod routing_overhead {
 ///
 /// ⚠️  Python codegen: Run gen-python-prometheus-names after changes
 pub mod router {
+    /// Total number of requests admitted by the router scheduler
+    pub const REQUESTS_STARTED_TOTAL: &str = "router_requests_started_total";
+
     /// Total number of requests processed by the router
     pub const REQUESTS_TOTAL: &str = "router_requests_total";
 

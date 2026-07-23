@@ -89,6 +89,9 @@ pub mod runtime {
     pub const DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS: &str =
         "DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS";
 
+    /// Maximum duration for local worker inhibition after a request failure. Zero disables it.
+    pub const DYN_RUNTIME_INHIBITED_DURATION_SECS: &str = "DYN_RUNTIME_INHIBITED_DURATION_SECS";
+
     /// Enable Tokio task poll-time histogram (calls enable_metrics_poll_time_histogram on builder).
     /// Set to "1", "true", or "yes" to enable. Adds ~2× overhead of Instant::now() per task poll.
     pub const DYN_ENABLE_POLL_HISTOGRAM: &str = "DYN_ENABLE_POLL_HISTOGRAM";
@@ -340,6 +343,11 @@ pub mod llm {
     /// varies per session and per release, wasting tokens and breaking prompt caching.
     pub const DYN_STRIP_ANTHROPIC_PREAMBLE: &str = "DYN_STRIP_ANTHROPIC_PREAMBLE";
 
+    /// When truthy, force usage in streaming chat and text-completion responses
+    /// regardless of the request's `stream_options.include_usage` value.
+    /// Unset or false preserves request-controlled defaults.
+    pub const DYN_ENABLE_FORCE_INCLUDE_USAGE: &str = "DYN_ENABLE_FORCE_INCLUDE_USAGE";
+
     /// Enable streaming tool call dispatch (`event: tool_call_dispatch` SSE events)
     pub const DYN_ENABLE_STREAMING_TOOL_DISPATCH: &str = "DYN_ENABLE_STREAMING_TOOL_DISPATCH";
 
@@ -571,14 +579,23 @@ pub mod model {
         /// Hugging Face authentication token
         pub const HF_TOKEN: &str = "HF_TOKEN";
 
+        /// Deprecated alias for the Hugging Face authentication token
+        pub const HUGGING_FACE_HUB_TOKEN: &str = "HUGGING_FACE_HUB_TOKEN";
+
+        /// Path to the stored Hugging Face authentication token
+        pub const HF_TOKEN_PATH: &str = "HF_TOKEN_PATH";
+
         /// Hugging Face Hub cache directory
         pub const HF_HUB_CACHE: &str = "HF_HUB_CACHE";
 
         /// Hugging Face home directory
         pub const HF_HOME: &str = "HF_HOME";
 
+        /// Override the Hugging Face Hub API endpoint
+        pub const HF_ENDPOINT: &str = "HF_ENDPOINT";
+
         /// Offline mode - skip API calls when model is cached
-        /// Set to "1" or "true" to enable
+        /// Set to "1", "true", "on", or "yes" to enable
         pub const HF_HUB_OFFLINE: &str = "HF_HUB_OFFLINE";
     }
 }
@@ -595,6 +612,9 @@ pub mod router {
     /// Scheduling policy for the router queue ("fcfs" or "wspt").
     pub const DYN_ROUTER_QUEUE_POLICY: &str = "DYN_ROUTER_QUEUE_POLICY";
     pub const DYN_ROUTER_POLICY_CONFIG: &str = "DYN_ROUTER_POLICY_CONFIG";
+
+    /// Stale active-request cleanup guard in seconds; this is not a request timeout.
+    pub const DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS: &str = "DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS";
 }
 
 /// Request plane transport environment variables
@@ -744,6 +764,7 @@ mod tests {
             runtime::DYN_RUNTIME_NUM_WORKER_THREADS,
             runtime::DYN_RUNTIME_MAX_BLOCKING_THREADS,
             runtime::DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
+            runtime::DYN_RUNTIME_INHIBITED_DURATION_SECS,
             runtime::system::DYN_SYSTEM_ENABLED,
             runtime::system::DYN_SYSTEM_HOST,
             runtime::system::DYN_SYSTEM_PORT,
@@ -796,6 +817,7 @@ mod tests {
             llm::DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
             llm::DYN_DISABLE_FRONTEND_ADMIN_API,
             llm::DYN_STRIP_ANTHROPIC_PREAMBLE,
+            llm::DYN_ENABLE_FORCE_INCLUDE_USAGE,
             llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH,
             llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH,
             llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2,
@@ -844,14 +866,18 @@ mod tests {
             model::model_express::MODEL_EXPRESS_CACHE_PATH,
             model::model_express::MODEL_EXPRESS_NO_SHARED_STORAGE,
             model::huggingface::HF_TOKEN,
+            model::huggingface::HUGGING_FACE_HUB_TOKEN,
+            model::huggingface::HF_TOKEN_PATH,
             model::huggingface::HF_HUB_CACHE,
             model::huggingface::HF_HOME,
+            model::huggingface::HF_ENDPOINT,
             model::huggingface::HF_HUB_OFFLINE,
             // Router
             router::DYN_ROUTER_PREFILL_LOAD_SCALE,
             router::DYN_ROUTER_QUEUE_THRESHOLD,
             router::DYN_ROUTER_QUEUE_POLICY,
             router::DYN_ROUTER_POLICY_CONFIG,
+            router::DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS,
             request_plane::DYN_REQUEST_PLANE_CODEC,
             // TCP Response Stream
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT,

@@ -37,6 +37,7 @@ to it — edit only the canonical copy. Reach for the right group first:
 - `dynamo-clone-hotpath-audit` — audit Rust hot-path `.clone()` calls
 - `dynamo-docs` — Fern docs-site content per the style guide
 - `dynamo-frontend-benchmark` — benchmark/profile the frontend against mock workers
+- `dynamo-kv-replay-parity` — validate offline KV replay parity and performance
 - `graham-code-review` — strict Rust/systems review in Graham King's style
 - `pr-monitor` — CI health check, failure root-cause, and skip analysis
 

@@ -137,6 +137,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         # Prefill encodes the media so the KV it transfers carries the vision
         # context; decode extracts the same URLs to match the token layout.
+        raise_if_unextracted_multimodal(inner_request)
         mm_kwargs = build_disagg_mm_kwargs(inner_request)
 
         routing = inner_request.get("routing") or {}
@@ -153,8 +154,6 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             logging.debug(
                 f"Prefill request {context.id()} will use LoRA adapter: {lora_path}"
             )
-
-        raise_if_unextracted_multimodal(inner_request)
 
         results = await self.engine.async_generate(
             **input_param,

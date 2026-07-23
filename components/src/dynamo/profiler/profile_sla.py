@@ -30,6 +30,7 @@ from dynamo.profiler.thorough import run_thorough
 from dynamo.profiler.utils.config_modifiers.parallelization_mapping import (
     PickedParallelConfig,
 )
+from dynamo.profiler.utils.config_modifiers.trtllm import enable_trtllm_chunked_prefill
 from dynamo.profiler.utils.defaults import SearchStrategy
 from dynamo.profiler.utils.dgd_generation import (
     assemble_final_config,
@@ -465,7 +466,11 @@ async def run_profile(
                     purpose=DGDMaterializationPurpose.INTERPOLATION,
                     override=dgd_override,
                     tolerations=job_tolerations,
+                    runtime_backend=resolved_backend,
+                    model_name_or_path=resolve_model_path(dgdr),
                 )
+                if resolved_backend == "trtllm":
+                    enable_trtllm_chunked_prefill(interpolation_dgd_config)
                 await run_interpolation(
                     dgdr,
                     ops,

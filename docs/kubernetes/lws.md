@@ -76,7 +76,7 @@ The operator injects backend-specific multinode settings into the generated Lead
 
 | Backend | LWS behavior |
 | --- | --- |
-| vLLM | Uses Ray for multi-node tensor or pipeline parallelism, and injects data-parallel flags for DP deployments. |
+| vLLM | Uses PyTorch multiprocessing (mp) for multi-node tensor or pipeline parallelism. Data-parallel flags are injected for DP deployments. |
 | SGLang | Injects `--dist-init-addr`, `--nnodes`, and per-node `--node-rank`. |
 | TensorRT-LLM | Wraps the leader command with `mpirun` and configures worker nodes with SSH. |
 

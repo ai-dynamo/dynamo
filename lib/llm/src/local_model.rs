@@ -46,12 +46,7 @@ fn env_self_host_metadata_default() -> bool {
 }
 
 fn self_host_metadata_default(value: Option<&str>) -> bool {
-    value.is_some_and(|value| {
-        matches!(
-            value.trim().to_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        )
-    })
+    value.is_some_and(dynamo_runtime::config::is_truthy)
 }
 
 pub struct LocalModelBuilder {

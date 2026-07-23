@@ -24,9 +24,8 @@
 
   The operator is configured for namespace: {{ default .Release.Namespace $operatorValues.namespaceRestriction.targetNamespace }}
 
-  This release must use dynamo-operator.upgradeCRD=false and must have been
-  installed with Helm's --skip-crds flag. Use cluster-wide mode for production
-  deployments.
+  This release must use dynamo-operator.upgradeCRD=false and use CRDs managed
+  by the cluster-wide operator. Use cluster-wide mode for production deployments.
 
   See: https://github.com/ai-dynamo/dynamo/blob/main/docs/kubernetes/installation-guide.md
 ================================================================================

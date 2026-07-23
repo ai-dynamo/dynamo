@@ -11,11 +11,9 @@ SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../common/gpu_utils.sh"   # build_sglang_gpu_mem_args
 source "$SCRIPT_DIR/../../../common/launch_utils.sh" # print_launch_banner, wait_any_exit
 
-# Strip --unified via the shared helper, then parse the remaining flags.
-# All of this runs BEFORE installing the kill-process-group EXIT trap so
-# an early exit (--help / unknown option) doesn't tear down the caller.
-pick_worker_module dynamo.sglang dynamo.sglang.unified_main "$@"
-set -- "${REMAINING_ARGS[@]}"
+# Parse flags BEFORE installing the kill-process-group EXIT trap so an early
+# exit (--help / unknown option) doesn't tear down the caller.
+WORKER_MODULE="dynamo.sglang"
 
 ENABLE_OTEL=false
 MODEL="Qwen/Qwen3-0.6B"
@@ -36,8 +34,6 @@ while [[ $# -gt 0 ]]; do
             echo "Options:"
             echo "  --enable-otel        Enable OpenTelemetry tracing"
             echo "  --model <name>       Model to serve (default: $MODEL)"
-            echo "  --unified            Use the unified backend entry point"
-            echo "                       (python -m dynamo.sglang.unified_main)"
             echo "  -h, --help           Show this help message"
             echo ""
             echo "Note: System metrics are enabled by default on ports 8081 (prefill), 8082 (decode)"

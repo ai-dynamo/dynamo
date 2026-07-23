@@ -44,12 +44,11 @@ python -m dynamo.vllm \
 python -m dynamo.thunderagent_router \
     --endpoint dynamo.backend.generate \
     --model-name <model> \
-    --router-block-size 16 \
-    --router-reset-states
+    --router-block-size 16
 
 # 3. Start the frontend (any router mode -- the frontend just needs to find
 #    a model handler, which our service registered)
-python -m dynamo.frontend --router-mode round-robin --router-reset-states
+python -m dynamo.frontend --router-mode round-robin
 ```
 
 The control-loop knobs (`--pause-threshold`, `--pause-target`,

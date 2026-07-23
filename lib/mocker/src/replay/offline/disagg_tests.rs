@@ -1,18 +1,38 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::rc::Rc;
 
 use super::super::entrypoints::{
     run_concurrency_collect, run_concurrency_workload_collect, run_trace_collect,
     run_trace_workload_collect,
 };
+use super::super::extensions::kv_events::HandoffDisaggRuntime;
+use super::super::planner_hook::PlannerTickDecision;
 use super::*;
 use crate::common::protocols::{
     EngineType, KvTransferTimingMode, MockEngineArgs, SglangArgs, WorkerType,
 };
 use crate::loadgen::{SessionTrace, Trace, TurnTrace};
 use crate::replay::TraceSimulationReport;
+
+struct CaptureOnceHook {
+    at_ms: f64,
+    captured: Rc<RefCell<Option<PlannerTickMetrics>>>,
+}
+
+impl PlannerHook for CaptureOnceHook {
+    fn initial_tick_ms(&mut self) -> anyhow::Result<f64> {
+        Ok(self.at_ms)
+    }
+
+    fn on_tick(&mut self, metrics: PlannerTickMetrics) -> anyhow::Result<PlannerTickDecision> {
+        *self.captured.borrow_mut() = Some(metrics);
+        Ok(PlannerTickDecision::default())
+    }
+}
 
 fn staged_args(worker_type: WorkerType, speedup_ratio: f64) -> MockEngineArgs {
     MockEngineArgs::builder()
@@ -238,17 +258,17 @@ fn pending_destination_scale_down_config() -> OfflineDisaggReplayConfig {
     }
 }
 
-fn router_config() -> KvRouterConfig {
-    KvRouterConfig {
+fn router_config() -> ReplayKvRouterConfig {
+    ReplayKvRouterConfig {
         router_queue_threshold: Some(1.25),
-        ..KvRouterConfig::default()
+        ..ReplayKvRouterConfig::default()
     }
 }
 
-fn planner_router_config() -> KvRouterConfig {
-    KvRouterConfig {
+fn planner_router_config() -> ReplayKvRouterConfig {
+    ReplayKvRouterConfig {
         router_queue_threshold: Some(0.5),
-        ..KvRouterConfig::default()
+        ..ReplayKvRouterConfig::default()
     }
 }
 
@@ -268,10 +288,56 @@ fn request(
     }
 }
 
+#[test]
+fn planner_tick_emits_idle_fpm_for_both_disagg_pools() {
+    let mut config = disagg_config();
+    config.num_prefill_workers = 1;
+    config.num_decode_workers = 1;
+    let pending = crate::replay::normalize_trace_requests(
+        vec![request(9_301, 64, 1, 0.0), request(9_302, 64, 1, 3_000.0)],
+        1.0,
+    )
+    .unwrap();
+    let captured = Rc::new(RefCell::new(None));
+    let hook = CaptureOnceHook {
+        at_ms: 2_000.0,
+        captured: Rc::clone(&captured),
+    };
+
+    DisaggRuntime::new(
+        &config,
+        None,
+        None,
+        pending,
+        ReplayMode::Trace,
+        ReplayRouterMode::RoundRobin,
+    )
+    .unwrap()
+    .with_planner_hook(Box::new(hook))
+    .run()
+    .unwrap();
+
+    let metrics = captured
+        .borrow_mut()
+        .take()
+        .expect("planner tick must fire");
+    assert_eq!(metrics.now_ms, 2_000.0);
+    for snapshots in [&metrics.prefill_fpm, &metrics.decode_fpm] {
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].0, 0);
+        assert_eq!(snapshots[0].1.dp_rank, 0);
+        assert_eq!(snapshots[0].1.wall_time_secs, 0.0);
+        assert_eq!(snapshots[0].1.num_prefill_requests, 0);
+        assert_eq!(snapshots[0].1.num_decode_requests, 0);
+        assert_eq!(snapshots[0].1.num_queued_prefill, 0);
+        assert_eq!(snapshots[0].1.num_queued_decode, 0);
+    }
+}
+
 fn run_trace_with_details(
     config: &OfflineDisaggReplayConfig,
     requests: Vec<DirectRequest>,
-    router_config: Option<KvRouterConfig>,
+    router_config: Option<ReplayKvRouterConfig>,
     router_mode: ReplayRouterMode,
 ) -> TraceSimulationReport {
     let pending = crate::replay::normalize_trace_requests(requests, 1.0).unwrap();
@@ -288,6 +354,43 @@ fn run_trace_with_details(
     .run()
     .unwrap();
     collector.finish()
+}
+
+#[rstest::rstest]
+#[case(EngineType::Vllm)]
+#[case(EngineType::Sglang)]
+fn zero_output_disagg_does_not_count_a_source_token(#[case] engine_type: EngineType) {
+    let mut config = match engine_type {
+        EngineType::Vllm => disagg_config(),
+        EngineType::Sglang => sglang_disagg_config(),
+        EngineType::Trtllm => unreachable!(),
+    };
+    config.num_prefill_workers = 1;
+    config.num_decode_workers = 1;
+    let request = DirectRequest {
+        tokens: vec![1; 64],
+        max_output_tokens: 0,
+        uuid: Some(Uuid::from_u128(90_010)),
+        arrival_timestamp_ms: Some(0.0),
+        ..Default::default()
+    };
+    let mut runtime =
+        HandoffDisaggRuntime::new_handoff_conformance(&config, VecDeque::from([request])).unwrap();
+
+    runtime.run_to_completion().unwrap();
+
+    assert_eq!(
+        runtime
+            .flow
+            .conformance_capture
+            .as_ref()
+            .unwrap()
+            .source_output_tokens,
+        0
+    );
+    let report = std::mem::take(&mut runtime.collector).finish();
+    assert_eq!(report.request_counts.completed_requests, 1);
+    assert_eq!(report.request_counts.total_output_tokens, 0);
 }
 
 fn multiturn_trace() -> Trace {
@@ -338,12 +441,12 @@ fn transition_index(transitions: &[DisaggTransition], needle: DisaggTransition) 
 
 #[test]
 fn test_derive_stage_router_configs_force_required_overrides() {
-    let config = KvRouterConfig {
+    let config = ReplayKvRouterConfig {
         overlap_score_credit: 1.0,
         router_track_active_blocks: true,
         router_assume_kv_reuse: true,
         router_track_prefill_tokens: true,
-        ..KvRouterConfig::default()
+        ..ReplayKvRouterConfig::default()
     };
     let args = staged_args(WorkerType::Prefill, 1.0);
     let prefill = derive_prefill_router_config(&args, Some(config.clone()));
@@ -690,7 +793,7 @@ fn chunked_prefill_handoff_waits_for_full_materialization(#[case] engine_type: E
     );
     assert!(runtime.prefill_engine.is_drained());
     assert!(runtime.decode_engine.is_drained());
-    assert!(runtime.action_queues.is_empty());
+    assert!(runtime.flow.action_queues.is_empty());
     assert_eq!(
         runtime.stats.request_snapshots[&uuid].phase,
         DisaggPhase::Done
@@ -1061,14 +1164,14 @@ fn test_source_first_handoff_waits_for_decode_scale_up() {
         assert_eq!(runtime.total_decode_count(), 0);
 
         for _ in 0..16 {
-            if !runtime.action_queues.waiting_decode.is_empty() {
+            if !runtime.flow.action_queues.waiting_decode.is_empty() {
                 break;
             }
             let next = runtime.next_timestamp().unwrap();
             runtime.advance_now_ms(next);
             runtime.drain_current_timestamp().unwrap();
         }
-        assert_eq!(runtime.action_queues.waiting_decode.len(), 1);
+        assert_eq!(runtime.flow.action_queues.waiting_decode.len(), 1);
         assert!(!runtime.state(uuid).unwrap().coordinator.is_complete());
 
         let wait_until = runtime.now_ms() + 100.0;
@@ -1125,11 +1228,7 @@ fn pending_destination_booking_survives_scale_down_until_cleanup() {
             .contains(&DisaggTransition::DestinationReserved { uuid: pending })
     );
     assert_eq!(runtime.state(pending).unwrap().decode_worker_idx(), Some(0));
-    let before = runtime
-        .decode_router
-        .as_ref()
-        .unwrap()
-        .debug_snapshot(runtime.now_ms());
+    let before = runtime.decode_placement.debug_snapshot(runtime.now_ms());
     assert!(
         before
             .active_tokens_by_worker
@@ -1157,11 +1256,7 @@ fn pending_destination_booking_survives_scale_down_until_cleanup() {
     assert_eq!(runtime.state(pending).unwrap().phase, DisaggPhase::Done);
     assert_eq!(runtime.total_decode_count(), 0);
     assert_eq!(runtime.stats.decode_router_freed_count, 1);
-    let after = runtime
-        .decode_router
-        .as_ref()
-        .unwrap()
-        .debug_snapshot(runtime.now_ms());
+    let after = runtime.decode_placement.debug_snapshot(runtime.now_ms());
     assert!(after.pending.is_empty());
     assert!(after.active_tokens_by_worker.is_empty());
     assert!(after.active_blocks_by_worker.is_empty());

@@ -25,7 +25,7 @@ import pytest
 import requests
 
 from tests.frontend.conftest import MockerWorkerProcess, wait_for_http_completions_ready
-from tests.utils.constants import QWEN
+from tests.utils.constants import QWEN, DynamoPortRange
 from tests.utils.managed_process import DynamoFrontendProcess
 from tests.utils.port_utils import allocate_port, deallocate_port
 
@@ -247,7 +247,7 @@ def tracing_services_disagg(
 ):
     """Disaggregated frontend + prefill/decode mocker workers with JSONL logging."""
     ports = dynamo_dynamic_ports
-    decode_system_port = allocate_port(8200)
+    decode_system_port = allocate_port(DynamoPortRange.SERVE.value)
     try:
         with DynamoFrontendProcess(
             request,
@@ -599,7 +599,7 @@ def tracing_services_disagg_slow(
 ):
     """Disaggregated frontend + slow prefill/decode workers for crash testing."""
     ports = dynamo_dynamic_ports
-    decode_system_port = allocate_port(8200)
+    decode_system_port = allocate_port(DynamoPortRange.SERVE.value)
     try:
         with DynamoFrontendProcess(
             request,

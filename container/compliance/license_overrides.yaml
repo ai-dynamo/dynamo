@@ -1011,3 +1011,10 @@ overrides:
   - { ecosystem: dpkg, name: libdrm-radeon1,  license: "MIT", source: "X.Org libdrm (MIT); Radeon DRM component" }
   - { ecosystem: dpkg, name: libdrm2,         license: "MIT", source: "X.Org libdrm (MIT)" }
   - { ecosystem: dpkg, name: libdrm-common,   license: "MIT", source: "X.Org libdrm (MIT); common data" }
+
+  # --- Plotly Kaleido image-export stack (dynamo-planner; PyPI metadata has
+  #     empty license_expression + no classifiers, so the generator reports
+  #     UNKNOWN — resolved from upstream LICENSE) ---
+  - { ecosystem: python, name: kaleido,       license: "MIT", source: "Plotly Kaleido — https://github.com/plotly/kaleido/blob/main/LICENSE.txt (MIT)" }
+  - { ecosystem: python, name: choreographer, license: "MIT", source: "Plotly Choreographer — https://github.com/plotly/choreographer/blob/main/LICENSE.md (MIT)" }
+  - { ecosystem: python, name: logistro,      license: "MIT", source: "GeoPozo logistro — https://github.com/geopozo/logistro/blob/main/LICENSE (MIT)" }

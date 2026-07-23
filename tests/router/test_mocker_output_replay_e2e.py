@@ -171,15 +171,11 @@ async def _run_multi_turn_replay(
 
 @pytest.mark.timeout(120)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
-@pytest.mark.parametrize(
-    "durable_kv_events", [False], ids=["nondurable"], indirect=True
-)
 def test_mocker_output_replay_generate_from_request_multi_turn(
     request,
     runtime_services_dynamic_ports,
     predownload_tokenizers,
     request_plane,
-    durable_kv_events,
     tmp_path,
 ):
     replay_trace_path = tmp_path / "response-replay.jsonl"
@@ -206,7 +202,6 @@ def test_mocker_output_replay_generate_from_request_multi_turn(
     mocker_args = {
         "speedup_ratio": SPEEDUP_RATIO,
         "block_size": BLOCK_SIZE,
-        "durable_kv_events": durable_kv_events,
         "response_replay_trace_path": replay_trace_path,
     }
 

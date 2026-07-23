@@ -93,7 +93,7 @@ pub struct TurnTrace {
     pub max_output_tokens: usize,
     pub output_token_ids: Option<Vec<u32>>,
     pub replay_key: Option<String>,
-    pub hash_ids: Vec<u64>,
+    pub hash_ids: Vec<u32>,
     pub delay_after_previous_ms: f64,
     pub priority: i32,
     pub strict_priority: u32,
@@ -108,7 +108,7 @@ pub struct AgenticTurnTrace {
     pub max_output_tokens: usize,
     pub output_token_ids: Option<Vec<u32>>,
     pub replay_key: Option<String>,
-    pub hash_ids: Vec<u64>,
+    pub hash_ids: Vec<u32>,
     pub first_ready_timestamp_ms: Option<f64>,
     pub delay_after_dependencies_ms: f64,
     pub priority: i32,
@@ -151,6 +151,7 @@ pub struct SyntheticTraceSpec {
     pub first_turn_arrivals: ArrivalSpec,
     pub inter_turn_delays: DelaySpec,
     pub seed: u64,
+    pub arrival_seed: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -199,5 +200,6 @@ pub struct ReadyTurn {
     pub replay_key: Option<String>,
     pub scheduled_ready_at_ms: f64,
     pub replay_hashes: Option<ReplayRequestHashes>,
+    pub(crate) emit_session_metadata: bool,
     pub request: DirectRequest,
 }
