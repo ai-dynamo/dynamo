@@ -129,6 +129,22 @@ impl<'a> RoutingEligibility<'a> {
         false
     }
 
+    /// Classify an empty eligible-candidate scan.
+    pub(crate) fn no_eligible_worker_error<C: WorkerConfigLike>(
+        &self,
+        workers: &HashMap<WorkerId, C>,
+    ) -> KvSchedulerError {
+        if self.has_eligible_worker_ignoring_overload(
+            workers
+                .iter()
+                .map(|(&worker_id, config)| (worker_id, config)),
+        ) {
+            KvSchedulerError::AllEligibleWorkersOverloaded
+        } else {
+            KvSchedulerError::NoEndpoints
+        }
+    }
+
     #[inline]
     pub fn validate_worker_rank<'w, C: WorkerConfigLike>(
         &self,
