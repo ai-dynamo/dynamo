@@ -50,6 +50,7 @@ pub struct DistributedRuntime {
     nats_client: Option<transports::nats::Client>,
     network_manager: Arc<NetworkManager>,
     tcp_server: Arc<OnceCell<Arc<transports::tcp::server::TcpStreamServer>>>,
+    quic_server: Arc<OnceCell<Arc<crate::pipeline::network::quic::QuicStreamServer>>>,
     system_status_server: Arc<OnceLock<Arc<system_status_server::SystemStatusServerInfo>>>,
     request_plane: RequestPlaneMode,
 
@@ -198,6 +199,7 @@ impl DistributedRuntime {
             network_manager: Arc::new(network_manager),
             nats_client,
             tcp_server: Arc::new(OnceCell::new()),
+            quic_server: Arc::new(OnceCell::new()),
             system_status_server: Arc::new(OnceLock::new()),
             discovery_client,
             discovery_metadata,
@@ -230,6 +232,12 @@ impl DistributedRuntime {
                     Ok(())
                 }));
         }
+
+        distributed_runtime
+            .metrics_registry
+            .add_expfmt_callback(std::sync::Arc::new(|| {
+                Ok(crate::pipeline::network::quic::prometheus_exposition())
+            }));
 
         // Handle system status server initialization
         if let Some(cancel_token) = cancel_token {
@@ -365,19 +373,21 @@ impl DistributedRuntime {
         Ok(self
             .tcp_server
             .get_or_try_init(async move {
-                let port = match std::env::var(tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT) {
+                let configured_port = std::env::var(tcp_response_stream::DYN_RESPONSE_STREAM_PORT)
+                    .or_else(|_| std::env::var(tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT));
+                let port = match configured_port {
                     Ok(p) => p.parse::<u16>().map_err(|_| {
                         PipelineError::Generic(format!(
-                            "invalid {}: '{}' is not a valid port number",
-                            tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT,
+                            "invalid response stream port: '{}' is not a valid port number",
                             p
                         ))
                     })?,
                     Err(_) => 0,
                 };
-                let interface = std::env::var(tcp_response_stream::DYN_TCP_RESPONSE_STREAM_HOST)
+                let interface = std::env::var(tcp_response_stream::DYN_RESPONSE_STREAM_HOST)
+                    .or_else(|_| std::env::var(tcp_response_stream::DYN_TCP_RESPONSE_STREAM_HOST))
                     .ok()
-                    .filter(|h| !h.is_empty());
+                    .filter(|host| !host.is_empty());
 
                 let host_suffix = interface
                     .as_ref()
@@ -395,6 +405,43 @@ impl DistributedRuntime {
                 let options = tcp::server::ServerOptions { port, interface };
                 let server = tcp::server::TcpStreamServer::new(options).await?;
                 Ok::<_, PipelineError>(server)
+            })
+            .await?
+            .clone())
+    }
+
+    /// Response-only QUIC server. It intentionally binds UDP to the exact
+    /// address and numeric port selected by the TCP request-stream listener;
+    /// TCP and UDP can share the port number.
+    pub async fn quic_server(
+        &self,
+    ) -> Result<Arc<crate::pipeline::network::quic::QuicStreamServer>> {
+        Ok(self
+            .quic_server
+            .get_or_try_init(async {
+                let tcp_server = self.tcp_server().await.map_err(|error| {
+                    PipelineError::Generic(format!(
+                        "failed to start TCP request stream server: {error:#}"
+                    ))
+                })?;
+                let address = tcp_server.local_ip().parse().map_err(|error| {
+                    PipelineError::Generic(format!(
+                        "invalid resolved response stream address {}: {error}",
+                        tcp_server.local_ip()
+                    ))
+                })?;
+                crate::pipeline::network::quic::QuicStreamServer::new(
+                    crate::pipeline::network::quic::ServerOptions {
+                        address,
+                        port: tcp_server.local_port(),
+                    },
+                )
+                .await
+                .map_err(|error| {
+                    PipelineError::Generic(format!(
+                        "failed to start QUIC response stream server: {error:#}"
+                    ))
+                })
             })
             .await?
             .clone())

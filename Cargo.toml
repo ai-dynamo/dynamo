@@ -181,6 +181,8 @@ rcgen = { version = "0.13" }
 tokio-rustls = { version = "0.26" }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-pemfile = { version = "2" }
+quinn = { version = "0.11.9", default-features = false, features = ["runtime-tokio", "rustls-ring", "qlog"] }
+sha2 = { version = "0.10" }
 
 [profile.dev.package]
 insta.opt-level = 3

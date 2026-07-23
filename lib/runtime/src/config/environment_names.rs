@@ -624,8 +624,18 @@ pub mod request_plane {
     pub const DYN_REQUEST_PLANE_CODEC: &str = "DYN_REQUEST_PLANE_CODEC";
 }
 
-/// TCP response stream server (CallHome listener) environment variables
+/// Response stream listener environment variables.
+///
+/// The canonical names configure both the QUIC response listener and the TCP
+/// request-stream listener. The legacy TCP-prefixed names remain fallbacks.
 pub mod tcp_response_stream {
+    pub const DYN_RESPONSE_STREAM_PORT: &str = "DYN_RESPONSE_STREAM_PORT";
+    pub const DYN_RESPONSE_STREAM_HOST: &str = "DYN_RESPONSE_STREAM_HOST";
+    /// Base path for short diagnostic qlog captures. Unset during performance runs.
+    pub const DYN_RESPONSE_QLOG_PATH: &str = "DYN_RESPONSE_QLOG_PATH";
+    /// Benchmark-only high flow-control window configuration.
+    pub const DYN_RESPONSE_STREAM_HIGH_WINDOW: &str = "DYN_RESPONSE_STREAM_HIGH_WINDOW";
+
     /// Port for the TCP response stream server.
     /// If unset or 0, the OS assigns a free ephemeral port.
     pub const DYN_TCP_RESPONSE_STREAM_PORT: &str = "DYN_TCP_RESPONSE_STREAM_PORT";
@@ -880,6 +890,10 @@ mod tests {
             router::DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS,
             request_plane::DYN_REQUEST_PLANE_CODEC,
             // TCP Response Stream
+            tcp_response_stream::DYN_RESPONSE_STREAM_PORT,
+            tcp_response_stream::DYN_RESPONSE_STREAM_HOST,
+            tcp_response_stream::DYN_RESPONSE_QLOG_PATH,
+            tcp_response_stream::DYN_RESPONSE_STREAM_HIGH_WINDOW,
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT,
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_HOST,
             // Event Plane

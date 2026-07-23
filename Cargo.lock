@@ -2801,14 +2801,18 @@ dependencies = [
  "parking_lot",
  "percent-encoding",
  "prometheus",
+ "quinn",
  "rand 0.9.4",
  "rayon",
+ "rcgen",
  "regex",
  "reqwest 0.12.28",
  "rmp-serde",
  "rstest 0.23.0",
+ "rustls 0.23.40",
  "serde",
  "serde_json",
+ "sha2",
  "socket2 0.5.10",
  "stdio-override",
  "temp-env",
@@ -7097,6 +7101,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "qlog"
+version = "0.15.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0f15b83c59e6b945f2261c95a1dd9faf239187f32ff0a96af1d1d28c4557f919"
+dependencies = [
+ "serde",
+ "serde_json",
+ "serde_with",
+ "smallvec",
+]
+
+[[package]]
 name = "qoi"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7156,6 +7172,7 @@ dependencies = [
  "bytes",
  "getrandom 0.3.4",
  "lru-slab",
+ "qlog",
  "rand 0.9.4",
  "ring",
  "rustc-hash 2.1.2",
@@ -8508,6 +8525,9 @@ name = "smallvec"
 version = "1.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "snap"
