@@ -1,17 +1,33 @@
-<!--
-SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-SPDX-License-Identifier: Apache-2.0
--->
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Vanilla vLLM GAIE On-ramp"
+sidebar-title: "Vanilla vLLM On-ramp without Dynamo runtime"
+subtitle: Dynamo EPP routing for existing GAIE deployments that run stock vLLM pods.
+---
+This on-ramp is for Kubernetes stacks that already use
+[Gateway API Inference Extension (GAIE)](https://github.com/kubernetes-sigs/gateway-api-inference-extension) with
+stock `vLLM serve` pods, or that want to evaluate the Dynamo kv aware router without installing the Dynamo operator
+first. GAIE still owns endpoint selection at the Gateway API layer. The difference is that the
+Endpoint Picker uses Dynamo Router without the rest of the Dynamo stack.
 
-# Dynamo Router on-ramp (raw vLLM workers, no Dynamo control plane)
+If you already run GAIE + vLLM, you **replace only your EndpointPicker (EPP) image**
+with the Dynamo EPP image, specify the DYN_EPP_MODE="standalone" and you are done — no need to install the Dynamo operator, Dynamo runtime, or Dynamo worker.
 
-This directory is the **smallest possible** way to put Dynamo's KV/load-aware
-router in front of an existing **vanilla `vllm serve`** fleet that already sits
-behind a Gateway-API gateway with the Inference Extension (GAIE).
+## What This Deploys
 
-If you already run GAIE + vLLM, you **replace only your EndpointPicker (EPP)**
-with the Dynamo EPP and you are done — no Dynamo operator, no Dynamo runtime,
-no Dynamo worker.
+```mermaid
+flowchart LR
+    Client["Client"] -->|"sends request"| Gateway["Gateway API<br/>Gateway"]
+    Gateway -->|"matches"| Route["HTTPRoute"]
+    Route -->|"targets"| Pool["InferencePool"]
+    Pool -->|"calls"| EPP["Dynamo EPP<br/>standalone mode"]
+    EPP -->|"selects endpoint"| VLLM["raw vLLM pod"]
+    VLLM -. "publishes KV events<br/>ZMQ :5557" .-> EPP
+    EPP -->|"updates"| Index["In-memory KV index"]
+```
+
+This is intentionally not the same lifecycle model as the operator-managed GAIE quickstart. There is no `DynamoGraphDeployment`, no Dynamo worker runtime, and no Dynamo event plane in this on-ramp.
 
 | | This on-ramp (standalone mode) | Full Dynamo (dynamo mode) |
 |---|---|---|
@@ -30,40 +46,27 @@ hop. It runs single-replica, or **replicated** — set `DYN_EPP_PEER_SERVICE` an
 the replicas discover each other and sync active load (admission/prefill/free)
 over ZMQ.
 
-## Limitations
 
-| Concern | Standalone mode, in-process selector (gap vs full Dynamo) |
-|---|---|
-Initial cache state | A fresh or restarted EPP starts with an empty index and re-warms from live traffic + replay. Replicas share active load (admission/prefill/free) but not KV-index state.
-Data parallelism | Not yet supported. Targets DP=1.
-Disaggregated prefill/decode | Not yet supported.
-High availability routing features | Restart-stable kv cache, Protection against workers events loss not supported 
-Cross-replica KV-index warm-up | Not wired; a new replica re-warms from live traffic + replay.
-Per-tenant KV cache isolation x-tenant-id / cache_salt | KV routing per tenant is not supported at this time.This requires per-engine support
-Request migration, rejection, cancellation - overall admission control | Not supported
-Topology / Zone aware routing  | Not supported
-Speculative Decoding awareness | Not supported
-Session affinity | Not supported
-Full list of OpenAI HTTP endpoints|  Not supported
-Multi-modal | Not supported 
-Metrics/observability | Not yet supported
+## Prerequisites
 
+- Kubernetes cluster with GPU nodes.
+- `kubectl`, [Helm](https://helm.sh/docs/intro/install/), and
+  [jq](https://jqlang.org/download/) configured for the cluster.
+- Baseline Gateway API knowledge from the upstream
+  [Gateway API getting started guide](https://gateway-api.sigs.k8s.io/guides/getting-started/introduction/)
+  and the upstream
+  [GAIE guide](https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/main/site-src/guides/index.md).
+- A Gateway API implementation that supports GAIE `InferencePool` resources and `endpointPickerRef`
+  calls. This walkthrough shows the same verified agentgateway path as the GAIE
+  quickstart; other implementations might work when they support that same EPP path. See the upstream
+  [GAIE gateway implementation list](https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/main/site-src/implementations/gateways.md)
+  for other implementations.
+- A model namespace that can run GPU workloads.
+- Hugging Face credentials if the model requires them. The
+  [Kubernetes Quickstart](../README.md#huggingface-token-secret) explains the general secret
+  pattern; it is not GAIE-specific.
+- Access to a Dynamo EPP image.
 
-
-
-## Supported and Caveats
-
-| Concern | Standalone mode, in-process selector (gap vs full Dynamo) |
-|---|---|
-Duplicate store/remove (vLLM "retries") | parity
-In-stream ordering | parity
-Multi-replica EPP | Supported: set `DYN_EPP_PEER_SERVICE` so replicas sync active load over ZMQ
-Dropped events / gaps | The `SelectionCore` indexer does seq-watermark gap detection and replays missed events from the worker's replay socket when `DYN_EPP_KV_EVENT_REPLAY_PORT` is configured. Without a replay socket, gaps are dropped and the index re-warms from new traffic.
-Transient disconnects | The in-process indexer reconnects on its own and keeps routing. KV-cache updates the worker sent during the gap are recovered from the worker's **replay** socket when `DYN_EPP_KV_EVENT_REPLAY_PORT` is set (and the vLLM worker exposes one); otherwise the index refreshes from new traffic.
-Backpressure / EPP restart | Slow-subscriber drops (ZMQ HWM) surface as a seq gap: detected and replayed when `DYN_EPP_KV_EVENT_REPLAY_PORT` is set (logged, not silent), lost only without a replay socket. On restart the index starts empty and re-warms from replay-from-0 plus live traffic.
-
-
-## Examples
 
 If you are starting from scratch install the [Prerequisites](#1-prerequisites) and apply the provided example file:
 
@@ -71,9 +74,14 @@ If you are starting from scratch install the [Prerequisites](#1-prerequisites) a
 
 ```bash
 kubectl apply -n <ns> -f agg.yaml
-```
-
-Otherwise follow the steps below.
+# The Gateway may live in another namespace (e.g. agentgateway-system):
+GW=$(kubectl get gateway inference-gateway -n agentgateway-system -o jsonpath='{.status.addresses[0].value}')
+curl http://$GW/v1/chat/completions -H 'content-type: application/json' -d '{
+  "model": "Qwen/Qwen3-0.6B",
+  "messages": [{"role":"user","content":"hello"}]
+}'
+``
+Otherwise, if you already have GAIE and raw vLLM workers running follow the steps below.
 
 > Disaggregated prefill/decode serving is a planned follow-up and is not covered
 > by this on-ramp.
@@ -149,7 +157,7 @@ kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=<your-toke
 Now that Gateway and GAIE is installed, we can create an InferencePool and an accompanying Dynamo EPP.
 
 Point the `InferencePool` at your vLLM workers (see the
-[`vllm-qwen-pool` InferencePool in `agg.yaml`](./agg.yaml#L222) for a complete example):
+[`vllm-qwen-pool` InferencePool in `agg.yaml`](../../../deploy/inference-gateway/ext-proc/examples/onramp/agg.yaml#L254) for a complete example):
 
 Specifically, these fields depend on the model you deploy, so make sure the settings below are adjusted to match your workers.
 
@@ -176,7 +184,7 @@ Specifically, these fields depend on the model you deploy, so make sure the sett
 ```
 
 Attach the `HTTPRoute` to the gateway and target the pool (see the
-[`vllm-qwen-route` HTTPRoute in `agg.yaml`](./agg.yaml#L238) for a complete example):
+[`vllm-qwen-route` HTTPRoute in `agg.yaml`](../../../deploy/inference-gateway/ext-proc/examples/onramp/agg.yaml#L270) for a complete example):
 
 - `spec.rules[].backendRefs[]` — targets the `InferencePool`.
 ```yaml
@@ -224,7 +232,7 @@ kubectl -n <ns> label deployment <vllm-deployment> app=vllm-qwen --overwrite
 
 Remove the vLLM router (if you have it already installed) and replace it with the EPP (Dynamo Router).
 Add the EPP as a `Deployment` + `Service` (see the
-[`dynamo-epp` Deployment in `agg.yaml`](./agg.yaml#L125) for a complete example) and set:
+[`dynamo-epp` Deployment in `agg.yaml`](../../../deploy/inference-gateway/ext-proc/examples/onramp/agg.yaml#L146) for a complete example) and set:
 
 ```yaml
 kind: Deployment
@@ -271,16 +279,19 @@ metadata:
      value: "5557"
    ```
 
-4. **Set the model, renderer URL, and block size.** The renderer URL points to a
-   vLLM HTTP Service exposing `/v1/chat/completions/render`; it may select the
-   same homogeneous worker pods. The block size MUST equal the vLLM
-   `--block-size`:
+4. **Set the model, tokenizer service, and block size.** The tokenizer service
+   URL points to a vLLM HTTP Service exposing `/v1/chat/completions/render`; it
+   may select the same homogeneous worker pods. `DYN_EPP_TOKENIZER_PROTOCOL`
+   selects its wire protocol (only `vllm-render` is supported today). The block
+   size MUST equal the vLLM `--block-size`:
 
    ```yaml
    - name: DYN_MODEL_NAME
      value: "Qwen/Qwen3-0.6B"
-   - name: DYN_EPP_VLLM_RENDER_URL
+   - name: DYN_EPP_TOKENIZER_SERVICE_URL
      value: "http://vllm-qwen-render:8000"
+   - name: DYN_EPP_TOKENIZER_PROTOCOL
+     value: "vllm-render"
    - name: DYN_KV_CACHE_BLOCK_SIZE
      value: "16"
    ```
@@ -384,31 +395,84 @@ curl --max-time 120 -sS "$GATEWAY_URL/v1/chat/completions" \
 
 ```
 
-## standalone-mode environment contract
+## Standalone mode environment contract
 
-Required:
 
-| Env | Meaning |
-|---|---|
-| `DYN_EPP_MODE=standalone` | Select standalone (on-ramp) mode; `dynamo` (default) keeps Dynamo mode |
-| `DYN_EPP_INFERENCE_POOL_NAME` | Name of the `InferencePool` this EPP backs; its selector + target port drive pod discovery |
-| `DYN_MODEL_NAME` | Model id used for worker registration and request selection |
-| `DYN_EPP_VLLM_RENDER_URL` | Base URL of the vLLM `/v1/chat/completions/render` service |
-| `DYN_KV_CACHE_BLOCK_SIZE` | MUST equal vLLM `--block-size` |
-| `POD_NAMESPACE` | The namespace the EPP, its `InferencePool`, worker pods, and sibling replicas all live in (inject via the downward API) |
 
-Optional:
+## EPP environment contract (standalone mode)
 
-| Env | Default | Meaning |
-|---|---:|---|
-| `DYN_EPP_KV_EVENT_PORT` | `5557` | vLLM `--kv-events-config` PUB port the selector subscribes to |
-| `DYN_EPP_KV_EVENT_REPLAY_PORT` | unset | Per-worker ZMQ replay socket for KV-event gap recovery (requires the vLLM worker to expose one) |
-| `DYN_EPP_SELECTION_INDEXER_THREADS` | `4` | KV indexer thread pool for the in-process selector |
-| `DYN_EPP_TOKENIZATION_TIMEOUT_MS` | `5000` | Deadline for the vLLM render request |
-| `DYN_EPP_PEER_SERVICE` | unset | Replication: the EPP's OWN `Service`; watch its EndpointSlices and resolve the required named `replica-agg` port to discover sibling replicas and sync active load over ZMQ. Set = replicated; unset = single local replica |
-| `POD_IP` | unset | Replication: the EPP's own pod IP (downward API `status.podIP`), so a replica excludes itself from its peer set. Required when `DYN_EPP_PEER_SERVICE` is set |
-| `DYN_EPP_TOTAL_KV_BLOCKS` | unset | Per-worker total KV blocks hint for the load model |
-| `DYN_EPP_MAX_NUM_BATCHED_TOKENS` | unset | Per-worker max batched tokens (needed only when selector queueing is enabled) |
-| `DYN_ROUTER_*` | router defaults | Scoring/queueing knobs parsed by the standard router config (e.g. `DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT`) |
-| `DYN_SECURE_SERVING` | `true` | EPP gRPC TLS toggle |
+> [!NOTE]
+> The `model` field MUST match `DYN_MODEL_NAME` in the EPP deployment, and the
+> EPP's `DYN_KV_CACHE_BLOCK_SIZE` MUST equal the vLLM `--block-size`.
 
+| Env | Meaning | Required? |
+|---|---|---|
+| `DYN_EPP_MODE=standalone` | Select standalone (selector) mode | required |
+| `DYN_EPP_INFERENCE_POOL_NAME` | Name of the `InferencePool` this EPP backs (its selector + target port drive pod discovery) | required |
+| `DYN_MODEL_NAME` | Model id (no model card in this mode) | required |
+| `DYN_EPP_TOKENIZER_SERVICE_URL` | Base URL of the tokenizer service (vLLM `/v1/chat/completions/render`) | required |
+| `DYN_EPP_TOKENIZER_PROTOCOL` | Tokenizer service wire protocol; only `vllm-render` is supported | required |
+| `DYN_KV_CACHE_BLOCK_SIZE` | MUST equal vLLM `--block-size` | required |
+| `DYN_EPP_KV_EVENT_PORT` | vLLM KV-events PUB port (not in the pool spec) | optional; default 5557 |
+| `DYN_EPP_KV_EVENT_REPLAY_PORT` | ZMQ REQ port for live-stream gap replay | optional |
+| `DYN_EPP_TOKENIZATION_TIMEOUT_MS` | Deadline for the tokenizer service request | optional; default 5000 |
+| `DYN_EPP_TOKENIZER_MAX_RESPONSE_BYTES` | Max tokenizer response body accepted | optional; default 16777216 (16 MiB) |
+| `DYN_EPP_TOTAL_KV_BLOCKS` | Per-worker total KV blocks hint | optional |
+| `DYN_EPP_MAX_NUM_BATCHED_TOKENS` | Per-worker max batched tokens | optional |
+| `DYN_EPP_SELECTION_INDEXER_THREADS` | KV indexer thread pool | optional; default 4 |
+| `DYN_EPP_PEER_SERVICE` | The EPP's own Service. Set = replicated; the Service must expose named port `replica-agg`. Unset = single local replica | optional; unset by default |
+| `POD_NAMESPACE` | The namespace the EPP, its `InferencePool`, worker pods, and sibling replicas all live in (downward API) | required |
+| `POD_IP` | EPP's own pod IP (downward API); needed only for replication, so a replica excludes itself from its peer set | required when `DYN_EPP_PEER_SERVICE` is set |
+
+
+## Replicated mode
+
+You can run **more than one** EPP replica. Each replica still runs its own
+in-process selector, but the replicas discover each other and synchronize active
+load so they don't each under-count load and herd onto the same worker. This is
+what `agg.yaml` deploys (`replicas: 2`); set `replicas: 1` and drop
+`DYN_EPP_PEER_SERVICE` for a single local replica.
+
+```yaml
+spec:
+  replicas: 2
+  # ...
+        env:
+          # Watch THIS Deployment's own Service to find sibling replicas:
+          - name: DYN_EPP_PEER_SERVICE
+            value: "dynamo-epp"
+          # Own pod IP, so a replica excludes itself from its peer set:
+          - name: POD_IP
+            valueFrom:
+              fieldRef:
+                fieldPath: status.podIP
+        ports:
+          - name: replica-agg
+            containerPort: 9092
+---
+apiVersion: v1
+kind: Service
+spec:
+  ports:
+    - name: replica-agg
+      port: 9092
+      targetPort: replica-agg
+```
+
+How it works:
+
+1. Each replica builds its in-process selector with **replica-sync enabled**
+   (resolving and binding the Service's named `replica-agg` port).
+2. It watches its **own** `Service`'s EndpointSlices (the `DYN_EPP_PEER_SERVICE`
+   above) and registers/deregisters every other replica as a replica-sync peer
+   as pods come and go — excluding itself via `POD_IP`. Peers connect pod-to-pod
+   on the resolved `replica-agg` endpoint port.
+3. Admission (`select_and_reserve`), `prefill_complete`, and `free` are broadcast
+   over ZMQ, so every replica's selector converges on the same active-load view.
+   This is the same consistency model as the standalone selector — output-block
+   growth stays local by design; admission/prefill/free are synchronized.
+
+
+Replica synchronization is best-effort; see the
+[selection service docs](../../components/router/standalone-selection.md)
+for the consistency invariants.
