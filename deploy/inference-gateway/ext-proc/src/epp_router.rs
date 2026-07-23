@@ -24,8 +24,9 @@ use std::time::Duration;
 
 use anyhow::Result;
 use dynamo_llm::protocols::common::extensions::{
-    HEADER_REQUEST_PRIORITY, HEADER_REQUEST_STRICT_PRIORITY, resolve_request_priority,
+    AgentHints, HEADER_REQUEST_PRIORITY, HEADER_REQUEST_STRICT_PRIORITY, resolve_request_priority,
 };
+use serde::Deserialize;
 
 use crate::epp_standalone_config::EppStandaloneConfig;
 use crate::picker::{Endpoint, EndpointPicker, PickError, PickResult, RequestInfo};
@@ -106,10 +107,14 @@ impl EppRouter {
         priority_header: Option<String>,
         strict_priority_header: Option<String>,
     ) -> Result<(Vec<u32>, Option<f64>, Option<u32>), TokenizeError> {
-        let request: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
+        // Parse only `nvext.agent_hints` for priority — the worker re-parses the
+        // full body anyway, so we skip allocating the large `messages`/tools
+        // fields. Malformed JSON still fails here (→ 400); a well-formed body that
+        // is not a valid chat request is caught by the renderer below.
+        let hints: RoutingHints =
             serde_json::from_slice(&request_body).map_err(TokenizeError::InvalidBody)?;
         let resolved = resolve_request_priority(
-            request.nvext.as_ref().and_then(|n| n.agent_hints.as_ref()),
+            hints.nvext.as_ref().and_then(|n| n.agent_hints.as_ref()),
             priority_header.as_deref(),
             strict_priority_header.as_deref(),
         );
@@ -122,20 +127,15 @@ impl EppRouter {
         Ok((token_ids, resolved.priority_jump, resolved.strict_priority))
     }
 
-    /// Intersect `allowed` Ready workers with an Envoy `candidate_subset`. The
-    /// reflector's endpoints are scheme-less `ip:port`, so a worker matches the
-    /// subset's full `ip:port` or bare `ip`; empty means nothing matched.
-    fn subset_worker_ids(
-        &self,
-        allowed: &HashSet<u64>,
-        candidate_subset: &[String],
-    ) -> HashSet<u64> {
+    /// Ready workers inside an Envoy `candidate_subset`, resolved in a single index
+    /// pass (no full-ready set materialized). The reflector's endpoints are
+    /// scheme-less `ip:port`, so a worker matches the subset's full `ip:port` or
+    /// bare `ip`; empty means nothing matched.
+    fn subset_worker_ids(&self, candidate_subset: &[String]) -> HashSet<u64> {
         let candidates: HashSet<&str> = candidate_subset.iter().map(String::as_str).collect();
-        // Single borrow; the predicate borrows each endpoint (no per-candidate clone).
+        // Single index pass; the predicate borrows each endpoint (no clone).
         self.reflector
-            .filter_workers_by_endpoint(allowed, |endpoint| {
-                endpoint_in_subset(endpoint, &candidates)
-            })
+            .ready_worker_ids_matching(|endpoint| endpoint_in_subset(endpoint, &candidates))
     }
 }
 
@@ -150,6 +150,21 @@ fn compute_ready(pod_ready: bool, peer_ready: Option<bool>) -> bool {
 fn endpoint_in_subset(endpoint: &str, candidates: &HashSet<&str>) -> bool {
     let ip = endpoint.split(':').next().unwrap_or("");
     candidates.contains(endpoint) || candidates.contains(ip)
+}
+
+/// Minimal deserialize target for the routing hot path: only `nvext.agent_hints`
+/// is needed for priority resolution, so the large `messages`/tools fields are
+/// never allocated. Unknown fields are ignored (no `deny_unknown_fields`).
+#[derive(Deserialize)]
+struct RoutingHints {
+    #[serde(default)]
+    nvext: Option<RoutingNvExt>,
+}
+
+#[derive(Deserialize)]
+struct RoutingNvExt {
+    #[serde(default)]
+    agent_hints: Option<AgentHints>,
 }
 
 /// Case-insensitive lookup of the first non-empty, trimmed value for `name`.
@@ -212,8 +227,7 @@ impl EndpointPicker for EppRouter {
             // Honor Envoy's subset hint (`x-gateway-destination-endpoint-subset`):
             // constrain to Ready workers in the subset, refusing (not falling back
             // to the full set) when nothing matches.
-            let filtered =
-                self.subset_worker_ids(&self.reflector.ready_worker_ids(), &req.candidate_subset);
+            let filtered = self.subset_worker_ids(&req.candidate_subset);
             if filtered.is_empty() {
                 tracing::warn!(
                     subset = ?req.candidate_subset,
@@ -266,17 +280,8 @@ impl EndpointPicker for EppRouter {
         // server stores `booking_id`, and a booked (past-queue) reservation is not
         // reclaimed by the queue's drop-retraction. Disarmed on the handled paths
         // below; until then, dropping this future frees the reservation.
-        let mut reservation_guard = {
-            let selector = self.selector.clone();
-            let reservation_id = reservation_id.clone();
-            ReservationGuard::new(move || {
-                tokio::spawn(async move {
-                    if let Err(e) = selector.free_reservation(&reservation_id).await {
-                        tracing::debug!(%reservation_id, error = %e, "reservation cleanup on dropped pick");
-                    }
-                });
-            })
-        };
+        let mut reservation_guard =
+            ReservationGuard::new(self.selector.clone(), reservation_id.clone());
 
         let select_req = SelectRequest {
             model_name: self.model_name.clone(),
@@ -341,31 +346,55 @@ impl EndpointPicker for EppRouter {
     }
 }
 
-/// RAII cleanup for a minted reservation. Armed when `reservation_id` is minted;
-/// if the pick future is dropped before the result is adopted (ext-proc stream
-/// closed after a booking), `Drop` runs the cleanup (which schedules an
-/// idempotent `free_reservation`). Disarmed once the pick is handled, so a
-/// successful, adopted pick or an error return does not double-free.
-struct ReservationGuard {
-    on_drop: Option<Box<dyn FnOnce() + Send>>,
+/// Releases a minted reservation when its [`ReservationGuard`] fires. The
+/// production impl (`Arc<Selector>`) spawns the idempotent `free_reservation`;
+/// tests use a lightweight stub. Kept a monomorphized trait so the guard is a
+/// plain struct — no per-request `Box<dyn FnOnce>` allocation on the hot path.
+trait ReservationReleaser: Send + 'static {
+    fn release(&self, reservation_id: String);
 }
 
-impl ReservationGuard {
-    fn new(on_drop: impl FnOnce() + Send + 'static) -> Self {
+impl ReservationReleaser for Arc<Selector> {
+    fn release(&self, reservation_id: String) {
+        let selector = self.clone();
+        tokio::spawn(async move {
+            if let Err(e) = selector.free_reservation(&reservation_id).await {
+                tracing::debug!(%reservation_id, error = %e, "reservation cleanup on dropped pick");
+            }
+        });
+    }
+}
+
+/// RAII cleanup for a minted reservation. Armed when `reservation_id` is minted;
+/// if the pick future is dropped before the result is adopted (ext-proc stream
+/// closed after a booking), `Drop` releases it (an idempotent `free_reservation`).
+/// Disarmed once the pick is handled, so a successful, adopted pick or an error
+/// return does not double-free. Holds the releaser + id by value (no boxing).
+struct ReservationGuard<R: ReservationReleaser> {
+    releaser: R,
+    reservation_id: String,
+    armed: bool,
+}
+
+impl<R: ReservationReleaser> ReservationGuard<R> {
+    fn new(releaser: R, reservation_id: String) -> Self {
         Self {
-            on_drop: Some(Box::new(on_drop)),
+            releaser,
+            reservation_id,
+            armed: true,
         }
     }
 
     fn disarm(&mut self) {
-        self.on_drop = None;
+        self.armed = false;
     }
 }
 
-impl Drop for ReservationGuard {
+impl<R: ReservationReleaser> Drop for ReservationGuard<R> {
     fn drop(&mut self) {
-        if let Some(on_drop) = self.on_drop.take() {
-            on_drop();
+        if self.armed {
+            self.releaser
+                .release(std::mem::take(&mut self.reservation_id));
         }
     }
 }
@@ -447,20 +476,26 @@ mod tests {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
 
+        // Small test seam: a releaser that records whether it fired.
+        struct StubReleaser(Arc<AtomicBool>);
+        impl ReservationReleaser for StubReleaser {
+            fn release(&self, _reservation_id: String) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
         // Dropped while armed — the pick future cancelled after the scheduler
         // booked but before the server adopts the result: cleanup runs.
         let fired = Arc::new(AtomicBool::new(false));
         {
-            let fired = fired.clone();
-            let _guard = ReservationGuard::new(move || fired.store(true, Ordering::SeqCst));
+            let _guard = ReservationGuard::new(StubReleaser(fired.clone()), "r1".to_string());
         }
         assert!(fired.load(Ordering::SeqCst));
 
         // Disarmed (successful, adopted pick): cleanup does not run.
         let fired = Arc::new(AtomicBool::new(false));
         {
-            let fired = fired.clone();
-            let mut guard = ReservationGuard::new(move || fired.store(true, Ordering::SeqCst));
+            let mut guard = ReservationGuard::new(StubReleaser(fired.clone()), "r1".to_string());
             guard.disarm();
         }
         assert!(!fired.load(Ordering::SeqCst));
