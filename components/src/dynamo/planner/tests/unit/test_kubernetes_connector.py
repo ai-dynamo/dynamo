@@ -102,6 +102,22 @@ def _deployment(*components):
     }
 
 
+def _model_card_cr(name, worker_type="decode"):
+    return {
+        "metadata": {"name": name},
+        "spec": {
+            "data": {
+                "model_cards": {
+                    "model": {
+                        "type": "Model",
+                        "card_json": {"worker_type": worker_type},
+                    }
+                }
+            }
+        },
+    }
+
+
 def _deployment_with_worker_status(
     component_kind, runtime_namespace=None, annotations=None
 ):
@@ -1255,6 +1271,53 @@ async def test_get_actual_worker_counts_no_components(
 # returning the DGD component name for the filter would cause every real-world MDC
 # entry to be skipped, leaving WorkerInfo without ``context_length`` and
 # silently breaking easy-mode load scaling.
+
+
+@pytest.mark.parametrize("pod_suffix", ["", "-f4k85"])
+def test_extract_mdc_entries_uses_truncated_grove_component_name(
+    kubernetes_connector, mock_kube_api, pod_suffix
+):
+    dgd_name = "live-verify-accept-len-win-df9e"
+    component_name = "live-verify-accept-len--473a-0-vllmdecodeworker"
+    cr_name = f"{component_name}{pod_suffix}"
+    deployment = _deployment(_component("VllmDecodeWorker", "decode", replicas=1))
+    deployment["metadata"]["name"] = dgd_name
+    deployment["status"] = {
+        "components": {
+            "VllmDecodeWorker": {"componentNames": [component_name]},
+        }
+    }
+    kubernetes_connector.graph_deployment_name = dgd_name
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    kubernetes_connector._list_worker_metadata_crs = Mock(
+        return_value=[_model_card_cr(cr_name)]
+    )
+
+    assert not cr_name.startswith(f"{dgd_name}-")
+    entries = kubernetes_connector._extract_mdc_entries()
+
+    assert len(entries) == 1
+    assert entries[0].card_json["worker_type"] == "decode"
+
+
+def test_extract_mdc_entries_uses_dgd_prefix_with_partial_component_names(
+    kubernetes_connector, mock_kube_api
+):
+    deployment = _deployment(_component("VllmDecodeWorker", "decode", replicas=1))
+    deployment["status"] = {
+        "components": {
+            "Frontend": {"componentNames": ["test-graph-0-frontend"]},
+        }
+    }
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    kubernetes_connector._list_worker_metadata_crs = Mock(
+        return_value=[_model_card_cr("test-graph-0-vllmdecodeworker-f4k85")]
+    )
+
+    entries = kubernetes_connector._extract_mdc_entries()
+
+    assert len(entries) == 1
+    assert entries[0].card_json["worker_type"] == "decode"
 
 
 def test_resolve_dgd_service_prefill_uses_backend_default_for_filter(

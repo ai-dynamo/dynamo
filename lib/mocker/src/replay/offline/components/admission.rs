@@ -2,25 +2,60 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::VecDeque;
+use std::marker::PhantomData;
 
 use anyhow::Result;
 use uuid::Uuid;
 
-use super::{ReadyArrival, ReplayMode};
+use super::ReplayMode;
 use crate::common::protocols::DirectRequest;
-use crate::loadgen::WorkloadDriver;
+use crate::loadgen::{ReplayRequestHashes, WorkloadDriver};
+use crate::replay::offline::core::{AdmissionSource as CoreAdmissionSource, ReadyArrival};
+
+pub(in crate::replay) trait ReplayAdmissionMetadata: Sized {
+    fn from_hashes(hashes: Option<ReplayRequestHashes>) -> Self;
+    fn into_hashes(self) -> Option<ReplayRequestHashes>;
+}
+
+pub(in crate::replay) type NoReplayMetadata = ();
+
+impl ReplayAdmissionMetadata for () {
+    #[inline]
+    fn from_hashes(_hashes: Option<ReplayRequestHashes>) -> Self {}
+
+    #[inline]
+    fn into_hashes(self) -> Option<ReplayRequestHashes> {
+        None
+    }
+}
+
+#[derive(Debug, Default)]
+pub(in crate::replay) struct KvReplayMetadata(Option<ReplayRequestHashes>);
+
+impl ReplayAdmissionMetadata for KvReplayMetadata {
+    #[inline]
+    fn from_hashes(hashes: Option<ReplayRequestHashes>) -> Self {
+        Self(hashes)
+    }
+
+    #[inline]
+    fn into_hashes(self) -> Option<ReplayRequestHashes> {
+        self.0
+    }
+}
 
 enum AdmissionSource {
     Requests(VecDeque<DirectRequest>),
     Workload(WorkloadDriver),
 }
 
-pub(in crate::replay::offline) struct AdmissionQueue {
+pub(in crate::replay::offline) struct AdmissionQueue<Metadata = KvReplayMetadata> {
     source: AdmissionSource,
     mode: ReplayMode,
+    metadata: PhantomData<Metadata>,
 }
 
-impl AdmissionQueue {
+impl<Metadata: ReplayAdmissionMetadata> AdmissionQueue<Metadata> {
     pub(in crate::replay::offline) fn new_requests(
         source: VecDeque<DirectRequest>,
         mode: ReplayMode,
@@ -28,6 +63,7 @@ impl AdmissionQueue {
         Self {
             source: AdmissionSource::Requests(source),
             mode,
+            metadata: PhantomData,
         }
     }
 
@@ -38,6 +74,7 @@ impl AdmissionQueue {
         Self {
             source: AdmissionSource::Workload(driver),
             mode,
+            metadata: PhantomData,
         }
     }
 
@@ -64,7 +101,7 @@ impl AdmissionQueue {
         &mut self,
         now_ms: f64,
         cluster_in_flight: usize,
-    ) -> Result<Vec<ReadyArrival>> {
+    ) -> Result<Vec<ReadyArrival<DirectRequest, Metadata>>> {
         match (&self.mode, &mut self.source) {
             (ReplayMode::Trace, AdmissionSource::Requests(pending)) => {
                 let mut ready = Vec::new();
@@ -82,7 +119,7 @@ impl AdmissionQueue {
                     ready.push(ReadyArrival {
                         request,
                         arrival_time_ms,
-                        replay_hashes: None,
+                        metadata: Metadata::from_hashes(None),
                         session_id: None,
                         turn_index: None,
                     });
@@ -98,7 +135,7 @@ impl AdmissionQueue {
                     ReadyArrival {
                         request: ready.request,
                         arrival_time_ms: ready.scheduled_ready_at_ms,
-                        replay_hashes: ready.replay_hashes,
+                        metadata: Metadata::from_hashes(ready.replay_hashes),
                         session_id,
                         turn_index,
                     }
@@ -114,7 +151,7 @@ impl AdmissionQueue {
                     ready.push(ReadyArrival {
                         request,
                         arrival_time_ms: now_ms,
-                        replay_hashes: None,
+                        metadata: Metadata::from_hashes(None),
                         session_id: None,
                         turn_index: None,
                     });
@@ -134,7 +171,7 @@ impl AdmissionQueue {
                         ReadyArrival {
                             request: ready.request,
                             arrival_time_ms: now_ms,
-                            replay_hashes: ready.replay_hashes,
+                            metadata: Metadata::from_hashes(ready.replay_hashes),
                             session_id,
                             turn_index,
                         }
@@ -142,14 +179,6 @@ impl AdmissionQueue {
                     .collect())
             }
         }
-    }
-
-    pub(in crate::replay::offline) fn on_request_completed(
-        &mut self,
-        uuid: Uuid,
-        now_ms: f64,
-    ) -> Result<()> {
-        self.on_request_terminal(uuid, now_ms, false)
     }
 
     pub(in crate::replay::offline) fn on_request_terminal(
@@ -192,5 +221,38 @@ impl AdmissionQueue {
             AdmissionSource::Requests(pending) => pending.len(),
             AdmissionSource::Workload(driver) => driver.total_turns(),
         }
+    }
+}
+
+impl<Metadata: ReplayAdmissionMetadata> CoreAdmissionSource for AdmissionQueue<Metadata> {
+    type Request = DirectRequest;
+    type Metadata = Metadata;
+
+    fn next_ready_time_ms(&mut self) -> Option<f64> {
+        AdmissionQueue::next_ready_time_ms(self)
+    }
+
+    fn drain_ready(
+        &mut self,
+        now_ms: f64,
+        cluster_in_flight: usize,
+    ) -> Result<Vec<ReadyArrival<Self::Request, Self::Metadata>>> {
+        AdmissionQueue::drain_ready(self, now_ms, cluster_in_flight)
+    }
+
+    fn on_output_token(&mut self, request_id: Uuid, token_id: u32) -> Result<()> {
+        AdmissionQueue::on_output_token(self, request_id, token_id)
+    }
+
+    fn on_terminal(&mut self, request_id: Uuid, now_ms: f64, rejected: bool) -> Result<()> {
+        AdmissionQueue::on_request_terminal(self, request_id, now_ms, rejected)
+    }
+
+    fn is_drained(&self) -> bool {
+        AdmissionQueue::is_drained(self)
+    }
+
+    fn total_requests(&self) -> usize {
+        AdmissionQueue::total_requests(self)
     }
 }
