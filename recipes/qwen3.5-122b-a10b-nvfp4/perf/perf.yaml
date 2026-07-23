@@ -1,0 +1,218 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# AIPerf trace-replay benchmark for Qwen3.5-122B-A10B-NVFP4 DGDs.
+#
+# One Job covers the aggregate and disaggregated B200 agentic variants. Edit
+# ENDPOINT below to select a DGD. Restart the DGD pods between independent
+# concurrency points so vLLM and Dynamo routing state are reset.
+#
+# Prerequisites:
+# - Target DGD is Ready (see ../README.md)
+# - model-cache PVC contains TRACE_FILE
+#
+# Results: /model-cache/perf/<epoch>_<job-name>/
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: qwen35-122b-bench
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: 10800
+  completions: 1
+  parallelism: 1
+  template:
+    metadata:
+      labels:
+        app: qwen35-122b-bench
+    spec:
+      # Co-locate the benchmark pod with a DGD frontend. Keep only the target
+      # DGD in values when both variants are deployed in the same namespace.
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: nvidia.com/dynamo-component-type
+                operator: In
+                values:
+                - frontend
+              - key: nvidia.com/dynamo-graph-deployment-name
+                operator: In
+                values:
+                - qwen35-122b-agg-b200-agentic
+                - qwen35-122b-disagg-b200-agentic
+            topologyKey: kubernetes.io/hostname
+      # tolerations: # Uncomment and populate for tainted frontend nodes.
+      containers:
+      - name: perf
+        image: nvcr.io/nvidia/ai-dynamo/aiperf:0.11.0
+        imagePullPolicy: IfNotPresent
+        workingDir: /app
+        command:
+        - /bin/bash
+        - -c
+        - |
+          set -euo pipefail
+          ulimit -n 600000
+          export COLUMNS=200
+          EPOCH=$(/busybox/date +%s)
+
+          wait_for_model_ready() {
+            python3 - <<'PY'
+          import json
+          import os
+          import time
+          import urllib.request
+
+          endpoint = os.environ["ENDPOINT"]
+          model = os.environ["TARGET_MODEL"]
+          max_attempts = int(os.environ.get("WAIT_FOR_MODEL_MAX_ATTEMPTS", "720"))
+          url = f"http://{endpoint}/v1/models"
+
+          print(f"Waiting for model '{model}' at {url} (max {max_attempts} attempts) ...")
+          for attempt in range(1, max_attempts + 1):
+              try:
+                  with urllib.request.urlopen(url, timeout=5) as response:
+                      payload = json.load(response)
+                  if any(item.get("id") == model for item in payload.get("data", [])):
+                      print(json.dumps(payload, indent=2))
+                      raise SystemExit(0)
+              except Exception:
+                  pass
+
+              if attempt == max_attempts:
+                  break
+              timestamp = time.strftime("%H:%M:%S")
+              print(f"[{timestamp}] not ready (attempt {attempt}/{max_attempts}), sleeping 5s")
+              time.sleep(5)
+
+          raise SystemExit(
+              f"model '{model}' did not become ready after {max_attempts} attempts"
+          )
+          PY
+          }
+
+          if [ ! -f "$TRACE_FILE" ]; then
+            echo "ERROR: trace file not found at ${TRACE_FILE}"
+            echo "Copy it onto the PVC via a helper pod, e.g.:"
+            echo " kubectl cp <local_trace.jsonl> <ns>/<helper-pod>:${TRACE_FILE}"
+            exit 1
+          fi
+
+          wait_for_model_ready
+          ROOT_DIR="${ROOT_ARTIFACT_DIR}/${EPOCH}_${JOB_NAME}"
+          /busybox/mkdir -p "$ROOT_DIR"
+          echo "=============================================="
+          echo "Trace Replay Benchmark (aiperf)"
+          echo "=============================================="
+          echo "Endpoint:     http://${ENDPOINT}"
+          echo "Model:        ${TARGET_MODEL}"
+          echo "Trace file:   ${TRACE_FILE}"
+          echo "Concurrency:  ${CONCURRENCY}"
+          echo "Artifact root:${ROOT_DIR}"
+          echo "=============================================="
+
+          # Warmup
+          WARMUP_DIR="${ROOT_DIR}/warmup"
+          /busybox/mkdir -p "$WARMUP_DIR"
+          aiperf profile \
+            -m "$TARGET_MODEL" \
+            --tokenizer "$TARGET_MODEL" \
+            --tokenizer-trust-remote-code \
+            --url "http://$ENDPOINT" \
+            --streaming \
+            --ui simple \
+            --isl 8000 \
+            --osl 400 \
+            --concurrency 1 \
+            --request-count 5 \
+            --artifact-dir "$WARMUP_DIR"
+          echo "Warmup complete"
+
+          MODEL_BASE="${TARGET_MODEL##*/}"
+          TS=$(/busybox/date +'%Y%m%d_%H%M%S')
+          RUN_DIR="${ROOT_DIR}/${MODEL_BASE}_trace_c${CONCURRENCY}_${TS}"
+          /busybox/mkdir -p "$RUN_DIR"
+          aiperf profile \
+            -m "$TARGET_MODEL" \
+            --tokenizer "$TARGET_MODEL" \
+            --tokenizer-trust-remote-code \
+            --input-file "$TRACE_FILE" \
+            --custom-dataset-type mooncake_trace \
+            --synthesis-max-isl 500000 \
+            --synthesis-max-osl 12000 \
+            --num-requests $(/busybox/wc -l < "${TRACE_FILE}") \
+            --dataset-sampling-strategy sequential \
+            --url "http://$ENDPOINT" \
+            --streaming \
+            --use-server-token-count \
+            --extra-inputs ignore_eos:true \
+            --concurrency "$CONCURRENCY" \
+            --random-seed 42 \
+            --ui simple \
+            --artifact-dir "$RUN_DIR" \
+            --request-timeout-seconds 3900 \
+            --workers-max "$CONCURRENCY" \
+            --export-http-trace
+          echo "Concurrency ${CONCURRENCY} complete; artifacts in ${RUN_DIR}"
+          /busybox/ls -la "$RUN_DIR" || true
+          echo ""
+          echo "Done. Root: ${ROOT_DIR}"
+        env:
+        # --- Edit ENDPOINT to target the aggregate or disaggregated DGD. ---
+        - name: ENDPOINT
+          value: qwen35-122b-agg-b200-agentic-frontend:8000
+        - name: TRACE_FILE
+          value: /model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl
+        - name: CONCURRENCY
+          value: "64"
+        # --- The remainder is shared across both variants. ---
+        - name: TARGET_MODEL
+          value: Qwen/Qwen3.5-122B-A10B
+        - name: AIPERF_HTTP_CONNECTION_LIMIT
+          value: "200"
+        - name: AIPERF_HTTP_SO_RCVTIMEO
+          value: "120"
+        - name: AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT
+          value: "3600"
+        - name: AIPERF_DATASET_CONFIGURATION_TIMEOUT
+          value: "3600"
+        - name: JOB_NAME
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.labels['job-name']
+        - name: ROOT_ARTIFACT_DIR
+          value: /model-cache/perf
+        - name: HF_HOME
+          value: /model-cache
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        resources:
+          requests:
+            cpu: "4"
+            memory: 8Gi
+          limits:
+            cpu: "16"
+            memory: 64Gi
+        volumeMounts:
+        - name: model-cache
+          mountPath: /model-cache
+      restartPolicy: Never
+      volumes:
+      - name: model-cache
+        persistentVolumeClaim:
+          claimName: model-cache
