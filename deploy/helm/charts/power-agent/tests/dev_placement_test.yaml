@@ -1,0 +1,86 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Dev-pod placement contract. The dev pod supports two mutually exclusive
+# placement targets, guarded by validateMutex in templates/_helpers.tpl:
+#   - dev.nodeName  → pin directly to a node (scheduler bypassed)
+#   - dev.affinity  → let the scheduler place the pod (only when nodeName empty)
+# validateMutex fails at `helm template` time when dev.enabled=true but
+# neither is provided. nodeName wins when both are set, and dev.affinity is
+# then intentionally not rendered (Kubernetes ignores affinity once nodeName
+# is set, so emitting it would be misleading dead config).
+
+suite: dev-pod placement (nodeName / affinity)
+templates:
+  - templates/dev-pod.yaml
+release:
+  name: power-agent
+  namespace: dynamo-system
+
+tests:
+  - it: pins the dev pod via nodeName when dev.nodeName is set
+    set:
+      daemonset.enabled: false
+      dev.enabled: true
+      dev.nodeName: gpu-node-0
+    asserts:
+      - notFailedTemplate: {}
+      - equal:
+          path: spec.nodeName
+          value: gpu-node-0
+      # nodeName wins: no affinity block even if the default {} were populated
+      - notExists:
+          path: spec.affinity
+
+  - it: renders affinity and omits nodeName when only dev.affinity is set
+    set:
+      daemonset.enabled: false
+      dev.enabled: true
+      dev.nodeName: ""
+      dev.affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: nvidia.com/gpu.present
+                    operator: In
+                    values:
+                      - "true"
+    asserts:
+      - notFailedTemplate: {}
+      - notExists:
+          path: spec.nodeName
+      - equal:
+          path: spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].key
+          value: nvidia.com/gpu.present
+
+  - it: nodeName takes precedence when both nodeName and affinity are set
+    set:
+      daemonset.enabled: false
+      dev.enabled: true
+      dev.nodeName: gpu-node-0
+      dev.affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: nvidia.com/gpu.present
+                    operator: In
+                    values:
+                      - "true"
+    asserts:
+      - notFailedTemplate: {}
+      - equal:
+          path: spec.nodeName
+          value: gpu-node-0
+      - notExists:
+          path: spec.affinity
+
+  - it: fails to render when dev.enabled but neither nodeName nor affinity is set
+    set:
+      daemonset.enabled: false
+      dev.enabled: true
+      dev.nodeName: ""
+    asserts:
+      - failedTemplate:
+          errorPattern: "dev.enabled requires a placement target"

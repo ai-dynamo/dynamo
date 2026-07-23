@@ -207,15 +207,16 @@ would mask validator regressions.
 
 {{/*
 Validate that production DaemonSet mode and in-cluster dev-pod mode are
-not both enabled, and that dev mode has a pinned nodeName. Surfaces at
-`helm install` / `helm template` time, not as two competing Pods at runtime.
+not both enabled, and that dev mode has a placement target — either a
+pinned nodeName or scheduler affinity. Surfaces at `helm install` /
+`helm template` time, not as two competing Pods at runtime.
 */}}
 {{- define "power-agent.validateMutex" -}}
 {{- if and .Values.daemonset.enabled .Values.dev.enabled -}}
 {{- fail "daemonset.enabled and dev.enabled are mutually exclusive. Set exactly one." -}}
 {{- end -}}
-{{- if and .Values.dev.enabled (not .Values.dev.nodeName) -}}
-{{- fail "dev.enabled requires dev.nodeName (the GPU node to pin the dev pod to)." -}}
+{{- if and .Values.dev.enabled (not .Values.dev.nodeName) (not .Values.dev.affinity) -}}
+{{- fail "dev.enabled requires a placement target: set dev.nodeName to pin the dev pod to a GPU node, or dev.affinity to let the scheduler place it. Set exactly one (nodeName wins if both are set)." -}}
 {{- end -}}
 {{- end -}}
 

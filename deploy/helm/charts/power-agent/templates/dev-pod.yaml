@@ -46,7 +46,18 @@ spec:
   restartPolicy: Never                   # let it stay Failed if it crashes so we can read logs
   terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}  # graceful shutdown restores TGP
   runtimeClassName: {{ .Values.runtimeClassName | quote }}
+  {{- if .Values.dev.nodeName }}
+  # Explicit pin: bypasses the scheduler entirely, so dev.affinity (if any)
+  # is intentionally not rendered here — Kubernetes would ignore it anyway.
   nodeName: {{ .Values.dev.nodeName | quote }}
+  {{- else }}
+  {{- with .Values.dev.affinity }}
+  # No nodeName: let the scheduler place the dev pod using these affinity
+  # rules. validateMutex guarantees one of nodeName/affinity is set.
+  affinity:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- end }}
   {{- with .Values.tolerations }}
   tolerations:
     {{- toYaml . | nindent 4 }}
