@@ -243,35 +243,43 @@ export function ReleaseTimeline({ variant = "artifacts" }: { variant?: TimelineV
             variant={variant}
           />
         ))}
-
-        {variant === "artifacts" && (
-        <div className="dynref-tl-crates">
-          <h3 className="dynref-h">Crates on crates.io — first publication</h3>
-          <table className="dynref-tl-table">
-            <thead>
-              <tr>
-                <th>Crate</th>
-                <th>First version</th>
-                <th>Published</th>
-              </tr>
-            </thead>
-            <tbody>
-              {CRATES_FIRST_PUBLISHED.map((entry) => (
-                <tr key={entry.crate}>
-                  <td className="dynref-mono">{entry.crate}</td>
-                  <td className="dynref-mono">{entry.version}</td>
-                  <td className="dynref-tl-cell-muted">{entry.date}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          <p className="dynref-grid-note">
-            dynamo-async-openai is deprecated; 1.0.2 is its final release. Use dynamo-protocols for new
-            dependencies.
-          </p>
-        </div>
-        )}
       </section>
+    </>
+  );
+}
+
+/* Crates.io first-publication table — crate-publishing metadata that lives on
+   the Release Artifacts page (extracted from the timeline so it renders once,
+   not duplicated alongside the release history). Reuses the .dynref-tl-* table
+   styles. */
+export function CratesFirstPublished() {
+  return (
+    <>
+      <style>{TL_CSS}</style>
+      <div className="dynref-tl-crates">
+        <table className="dynref-tl-table">
+          <thead>
+            <tr>
+              <th>Crate</th>
+              <th>First version</th>
+              <th>Published</th>
+            </tr>
+          </thead>
+          <tbody>
+            {CRATES_FIRST_PUBLISHED.map((entry) => (
+              <tr key={entry.crate}>
+                <td className="dynref-mono">{entry.crate}</td>
+                <td className="dynref-mono">{entry.version}</td>
+                <td className="dynref-tl-cell-muted">{entry.date}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <p className="dynref-grid-note">
+          dynamo-async-openai is deprecated; 1.0.2 is its final release. Use dynamo-protocols for new
+          dependencies.
+        </p>
+      </div>
     </>
   );
 }

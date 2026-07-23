@@ -759,9 +759,9 @@ navigation:
             path: reference/compatibility.mdx
           - page: Release Artifacts
             path: reference/release-artifacts.mdx
-          - section: Release Notes
+          - section: Releases
             contents:
-              - page: Overview
+              - page: Release History
                 path: reference/release-notes/README.mdx
               - page: Dynamo v1.3.0
                 path: reference/release-notes/v1-3-0.mdx
@@ -775,10 +775,10 @@ navigation:
               - page: Dynamo v1.0.0
                 path: reference/release-notes/v1-0-0.mdx
                 slug: v1-0-0
-          - page: Known Issues
-            path: reference/known-issues.mdx
-          - page: Deprecations
-            path: reference/deprecations.mdx
+              - page: Known Issues
+                path: reference/known-issues.mdx
+              - page: Deprecations
+                path: reference/deprecations.mdx
           - page: Model Early Access Builds
             path: reference/model-early-access-builds.mdx
           - page: Glossary
