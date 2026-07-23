@@ -1714,7 +1714,6 @@ func betaDGDForAdmission(
 	if mutate != nil {
 		mutate(dgd)
 	}
-	// ensureBetaDGDMainImages(dgd)
 	return dgd
 }
 
