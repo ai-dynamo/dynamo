@@ -67,11 +67,6 @@ func readPrefillEnabled(cycleState *schedtypes.CycleState) bool {
 	return false
 }
 
-// buildRequestJSON builds an OpenAI-compatible JSON string from a GAIE LLMRequest.
-func buildRequestJSON(req *schedtypes.InferenceRequest) (string, error) {
-	return dynscorer.BuildOpenAIRequestJSON(req)
-}
-
 // serializeEndpoints converts endpoints to a JSON string for the FFI filter.
 func serializeEndpoints(endpoints []schedtypes.Endpoint) string {
 	if len(endpoints) == 0 {

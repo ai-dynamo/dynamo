@@ -94,7 +94,7 @@ func (s *DynPrefillScorer) Score(ctx context.Context, cycleState *schedtypes.Cyc
 		return uniformScores(endpoints, 0)
 	}
 
-	requestJSON, err := buildRequestJSON(req)
+	requestJSON, err := dynscorer.BuildOpenAIRequestJSON(req)
 	if err != nil {
 		logger.V(logutil.DEFAULT).Error(err, "DynPrefillScorer: failed to build request")
 		return uniformScores(endpoints, 0)

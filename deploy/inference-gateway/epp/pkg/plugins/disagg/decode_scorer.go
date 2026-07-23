@@ -136,7 +136,7 @@ func (s *DynDecodeScorer) Score(ctx context.Context, cycleState *schedtypes.Cycl
 
 	isDisaggregated := readPrefillEnabled(cycleState)
 
-	requestJSON, err := buildRequestJSON(req)
+	requestJSON, err := dynscorer.BuildOpenAIRequestJSON(req)
 	if err != nil {
 		logger.V(logutil.DEFAULT).Error(err, "DynDecodeScorer: failed to build request")
 		return uniformScores(endpoints, 1.0)

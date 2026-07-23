@@ -283,10 +283,8 @@ func SerializeEndpointsToJSON(endpoints []schedtypes.Endpoint) (string, error) {
 	return string(data), nil
 }
 
-// BuildOpenAIRequestJSON forwards the full request body (req.Body.Payload) to
-// the Rust router's FFI, overriding only the model, so tool-calling and
-// reasoning fields survive the router's parse and chat-template render. Errors
-// when no payload is available so the scorer falls back to non-KV routing.
+// BuildOpenAIRequestJSON marshals a copy of the request payload, overriding its
+// model with a non-empty TargetModel.
 func BuildOpenAIRequestJSON(req *schedtypes.InferenceRequest) (string, error) {
 	if req == nil || req.Body == nil {
 		return "", fmt.Errorf("missing request body")
