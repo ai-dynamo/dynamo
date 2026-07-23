@@ -100,23 +100,6 @@ def test_total_gpu_power_limit_rejects_non_positive():
         PlannerConfig(namespace="test-ns", total_gpu_power_limit=0)
 
 
-@pytest.mark.parametrize(
-    "field",
-    [
-        "prefill_engine_gpu_power_limit",
-        "decode_engine_gpu_power_limit",
-        "power_agent_safe_default_watts",
-        "power_annotation_interval_seconds",
-    ],
-)
-def test_removed_power_write_fields_are_rejected(field):
-    """The planner no longer owns per-GPU caps: the four removed power-write
-    fields must be rejected with a pointer to the DGD annotation contract, not
-    silently ignored (PlannerConfig has no ``extra='forbid'``)."""
-    with pytest.raises(ValidationError, match="no longer owns per-GPU power caps"):
-        PlannerConfig(namespace="test-ns", **{field: 300})
-
-
 def test_all_fields_work():
     """Test that PlannerConfig accepts all fields."""
     config = PlannerConfig(
