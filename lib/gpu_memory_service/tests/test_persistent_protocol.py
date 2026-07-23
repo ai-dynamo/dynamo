@@ -10,6 +10,7 @@ from gpu_memory_service.common.locks import RequestedLockType
 from gpu_memory_service.common.protocol.messages import (
     ClaimPersistentAllocationRequest,
     ClaimPersistentAllocationResponse,
+    ErrorResponse,
     ExportPersistentAllocationRequest,
     ExportPersistentAllocationResponse,
     HandshakeRequest,
@@ -21,6 +22,8 @@ from gpu_memory_service.common.protocol.messages import (
     decode_message,
     encode_message,
 )
+from gpu_memory_service.server import rpc as rpc_module
+from gpu_memory_service.server.rpc import GMSRPCServer
 from gpu_memory_service.server.session import GMSSessionManager, OperationNotAllowed
 
 
@@ -92,5 +95,53 @@ def test_persistent_lock_request_fails_closed_until_implemented():
                 timeout_ms=0,
                 session_id="session-0",
             )
+
+    asyncio.run(exercise())
+
+
+def test_persistent_lock_handshake_rejects_only_requesting_client(monkeypatch):
+    class RejectingGMS:
+        committed = False
+
+        async def acquire_lock(self, mode, timeout_ms, session_id):
+            raise OperationNotAllowed(
+                "persistent allocation sessions are not implemented"
+            )
+
+    class Writer:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    responses = []
+
+    async def fake_recv_message(reader, recv_buffer):
+        return (
+            HandshakeRequest(lock_type=RequestedLockType.RW_PERSISTENT),
+            -1,
+            recv_buffer,
+        )
+
+    async def fake_send_message(writer, response):
+        responses.append(response)
+
+    async def exercise():
+        server = object.__new__(GMSRPCServer)
+        server._gms = RejectingGMS()
+        writer = Writer()
+        monkeypatch.setattr(rpc_module, "recv_message", fake_recv_message)
+        monkeypatch.setattr(rpc_module, "send_message", fake_send_message)
+
+        conn = await server._do_handshake(object(), writer, "session-0")
+
+        assert conn is None
+        assert responses == [
+            ErrorResponse(
+                error="persistent allocation sessions are not implemented",
+            )
+        ]
+        assert writer.closed
 
     asyncio.run(exercise())
