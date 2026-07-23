@@ -45,9 +45,7 @@ spec:
         - {name: HF_MODULES_CACHE, value: /model-cache/.cache/hfmods}
         - {name: KV_JSON, value: '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'}
         - {name: SPEC_JSON, value: '{"method":"eagle3","model":"nvidia/gpt-oss-120b-Eagle3-v3","num_speculative_tokens":3}'}
-        - {name: ETCD_ENDPOINTS, value: "dynamo-platform-etcd.dynamo-system.svc.cluster.local:2379"}
         - {name: NATS_SERVER, value: "nats://dynamo-platform-nats.dynamo-system.svc.cluster.local:4222"}
-        - {name: DYN_DISCOVERY_BACKEND, value: etcd}
         - {name: DYN_NAMESPACE, value: gptoss-disagg-h200}
         - {name: NCCL_IB_DISABLE, value: "1"}
         - {name: NCCL_NET_PLUGIN, value: "none"}
