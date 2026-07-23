@@ -73,7 +73,7 @@ See [Health Checks](../observability/health-checks.md) for details.
 
 ### Local Worker Inhibition
 
-After a request-path failure, a runtime client temporarily removes that worker from its local routing set while service discovery propagates the worker's state. `DYN_INHIBITED_DURATION_SECS` sets the maximum local inhibition window and is read once during client initialization. The default is `5` seconds; set it to `0` to disable local inhibition. Discovery updates remain authoritative and can restore or remove workers sooner. Direct dispatch bypasses local inhibition and honors an upstream-selected worker as long as it remains present in service discovery.
+After a request-path failure, a runtime client temporarily removes that worker from its local routing set while service discovery propagates the worker's state. `DYN_RUNTIME_INHIBITED_DURATION_SECS` sets the maximum local inhibition window and is read once during client initialization. The default is `5` seconds; set it to `0` to disable local inhibition. Discovery updates remain authoritative and can restore or remove workers sooner. Direct dispatch bypasses local inhibition and honors an upstream-selected worker as long as it remains present in service discovery.
 
 Changes to the environment variable take effect the next time the process starts.
 
@@ -92,7 +92,7 @@ For Kubernetes deployments, [Shadow Engine Failover](../kubernetes/shadow-engine
 | Decode blocks threshold | `DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD` | unset |
 | Prefill tokens threshold | `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD` | unset |
 | Prefill tokens fraction threshold | `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC` | unset |
-| Local worker inhibition | `DYN_INHIBITED_DURATION_SECS` | `5` seconds (`0` disables) |
+| Local worker inhibition | `DYN_RUNTIME_INHIBITED_DURATION_SECS` | `5` seconds (`0` disables) |
 
 ## Failure Scenarios and Recovery
 

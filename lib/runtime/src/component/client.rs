@@ -150,7 +150,7 @@ static INHIBITED_DURATION: LazyLock<Duration> =
     LazyLock::new(|| inhibited_duration_from_env(|name| std::env::var(name).ok()));
 
 fn inhibited_duration_from_env(mut lookup: impl FnMut(&str) -> Option<String>) -> Duration {
-    let seconds = match lookup(env_runtime::DYN_INHIBITED_DURATION_SECS) {
+    let seconds = match lookup(env_runtime::DYN_RUNTIME_INHIBITED_DURATION_SECS) {
         None => DEFAULT_INHIBITED_DURATION_SECS,
         Some(raw) => match raw.parse::<u64>() {
             Ok(seconds) => seconds,
@@ -159,7 +159,7 @@ fn inhibited_duration_from_env(mut lookup: impl FnMut(&str) -> Option<String>) -
                     value = raw,
                     %err,
                     "invalid {}; using the default of {} seconds",
-                    env_runtime::DYN_INHIBITED_DURATION_SECS,
+                    env_runtime::DYN_RUNTIME_INHIBITED_DURATION_SECS,
                     DEFAULT_INHIBITED_DURATION_SECS,
                 );
                 DEFAULT_INHIBITED_DURATION_SECS
