@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Protocol types for the `/pooling` endpoint (raw pooler output from
+//! Protocol types for the `/v1/pooling` endpoint (raw pooler output from
 //! pooling-runner models: token-level embeddings, per-token classification
 //! logits, reward-model scores, …).
 //!
@@ -49,7 +49,7 @@ fn default_encoding_format() -> String {
     "float".to_string()
 }
 
-/// Request for the `/pooling` endpoint.
+/// Request for the `/v1/pooling` endpoint.
 #[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreatePoolingRequest {
     /// The model to run the pooling pass on.
@@ -137,7 +137,7 @@ pub struct PoolingUsage {
     pub completion_tokens: u32,
 }
 
-/// Response for the `/pooling` endpoint.
+/// Response for the `/v1/pooling` endpoint.
 #[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreatePoolingResponse {
     pub id: String,

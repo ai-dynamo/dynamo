@@ -897,9 +897,9 @@ static HTTP_SVC_CHAT_PATH_ENV: &str = "DYN_HTTP_SVC_CHAT_PATH";
 static HTTP_SVC_CMP_PATH_ENV: &str = "DYN_HTTP_SVC_CMP_PATH";
 /// Environment variable to set the embeddings endpoint path (default: `/v1/embeddings`)
 static HTTP_SVC_EMB_PATH_ENV: &str = "DYN_HTTP_SVC_EMB_PATH";
-/// Environment variable to set the classify endpoint path (default: `/classify`)
+/// Environment variable to set the classify endpoint path (default: `/v1/classify`)
 static HTTP_SVC_CLASSIFY_PATH_ENV: &str = "DYN_HTTP_SVC_CLASSIFY_PATH";
-/// Environment variable to set the pooling endpoint path (default: `/pooling`)
+/// Environment variable to set the pooling endpoint path (default: `/v1/pooling`)
 static HTTP_SVC_POOLING_PATH_ENV: &str = "DYN_HTTP_SVC_POOLING_PATH";
 /// Environment variable to set the responses endpoint path (default: `/v1/responses`)
 static HTTP_SVC_RESPONSES_PATH_ENV: &str = "DYN_HTTP_SVC_RESPONSES_PATH";

@@ -1613,9 +1613,9 @@ class ModelType:
     Audios: ModelType
     Videos: ModelType
     Realtime: ModelType
-    # Sequence-classification / cross-encoder pooling models served on /classify.
+    # Sequence-classification / cross-encoder pooling models served on /v1/classify.
     Classify: ModelType
-    # Raw pooler output served on /pooling (token embeddings, logits, rewards).
+    # Raw pooler output served on /v1/pooling (token embeddings, logits, rewards).
     # Usually combined with Classify or Embedding: ModelType.Classify | ModelType.Pooling.
     Pooling: ModelType
 
@@ -1631,11 +1631,11 @@ class ModelType:
         ...
 
     def supports_classify(self) -> bool:
-        """Return True if this model type supports /classify."""
+        """Return True if this model type supports /v1/classify."""
         ...
 
     def supports_pooling(self) -> bool:
-        """Return True if this model type supports /pooling."""
+        """Return True if this model type supports /v1/pooling."""
         ...
 
 class RouterMode:

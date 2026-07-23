@@ -3034,14 +3034,16 @@ pub fn embeddings_router(
     (vec![doc], router)
 }
 
-/// Create an Axum [`Router`] for the `/classify` endpoint (sequence
+/// Create an Axum [`Router`] for the `/v1/classify` endpoint (sequence
 /// classification / cross-encoder pooling). If no path is provided, the
-/// default path is `/classify`.
+/// default path is `/v1/classify`. Deployments migrating clients from native
+/// `vllm-serve` (which mounts a bare `/classify`) can set the path via
+/// `DYN_HTTP_SVC_CLASSIFY_PATH`.
 pub fn classify_router(
     state: Arc<service_v2::State>,
     path: Option<String>,
 ) -> (Vec<RouteDoc>, Router) {
-    let path = path.unwrap_or("/classify".to_string());
+    let path = path.unwrap_or("/v1/classify".to_string());
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let router = Router::new()
         .route(&path, post(classify))
@@ -3051,14 +3053,16 @@ pub fn classify_router(
     (vec![doc], router)
 }
 
-/// Create an Axum [`Router`] for the `/pooling` endpoint (raw pooler output
+/// Create an Axum [`Router`] for the `/v1/pooling` endpoint (raw pooler output
 /// from pooling-runner models). If no path is provided, the default path is
-/// `/pooling`.
+/// `/v1/pooling`. Deployments migrating clients from native `vllm-serve`
+/// (which mounts a bare `/pooling`) can set the path via
+/// `DYN_HTTP_SVC_POOLING_PATH`.
 pub fn pooling_router(
     state: Arc<service_v2::State>,
     path: Option<String>,
 ) -> (Vec<RouteDoc>, Router) {
-    let path = path.unwrap_or("/pooling".to_string());
+    let path = path.unwrap_or("/v1/pooling".to_string());
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let router = Router::new()
         .route(&path, post(pooling))

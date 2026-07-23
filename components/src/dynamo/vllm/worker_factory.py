@@ -576,7 +576,7 @@ class WorkerFactory:
 
         # Classify worker: same pooling-AsyncLLM shape as embedding, but
         # registers ModelType.Classify | ModelType.Pooling (frontend mounts
-        # POST /classify and POST /pooling).
+        # POST /v1/classify and POST /v1/pooling).
         # Aggregated-only — enforced in _validate_classify_worker_exclusivity.
         if config.classify_worker:
             await self._create_classify_worker(
@@ -779,8 +779,9 @@ class WorkerFactory:
         ``AsyncLLM``, no KV cache / decode / stat-logger — but the handler
         runs ``task="classify"`` and registers the model as
         ``ModelType.Classify | ModelType.Pooling`` so the frontend mounts
-        ``POST /classify`` and ``POST /pooling`` (native vLLM exposes both
-        for every pooling-runner model; the handler dispatches per request).
+        ``POST /v1/classify`` and ``POST /v1/pooling`` (native vLLM exposes the
+        same two surfaces for every pooling-runner model, at bare ``/classify``
+        and ``/pooling``; the handler dispatches per request).
         See ``_create_embedding_worker`` for the rationale behind the
         skipped decode-worker machinery (all of it applies here too).
         """

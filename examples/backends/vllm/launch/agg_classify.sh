@@ -51,7 +51,7 @@ HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner --no-curl "Launching Classify Worker (1 GPU)" "$MODEL" "$HTTP_PORT"
 
 print_curl_footer <<CURL
-  curl http://localhost:${HTTP_PORT}/classify \\
+  curl http://localhost:${HTTP_PORT}/v1/classify \\
     -H 'Content-Type: application/json' \\
     -d '{
       "model": "${MODEL}",

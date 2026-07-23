@@ -1281,7 +1281,7 @@ class EmbeddingPayload(BasePayload):
 
 @dataclass
 class ClassifyPayload(BasePayload):
-    """Payload for the ``/classify`` endpoint (sequence classification /
+    """Payload for the ``/v1/classify`` endpoint (sequence classification /
     cross-encoder pooling).
 
     Validates the ``NvCreateClassifyResponse`` shape end-to-end and returns a
@@ -1291,7 +1291,7 @@ class ClassifyPayload(BasePayload):
     satisfy the check.
     """
 
-    endpoint: str = "/classify"
+    endpoint: str = "/v1/classify"
 
     @staticmethod
     def extract_classifications(response):
@@ -1327,7 +1327,7 @@ class ClassifyPayload(BasePayload):
 
 @dataclass
 class PoolingPayload(BasePayload):
-    """Payload for the ``/pooling`` endpoint (raw pooler output).
+    """Payload for the ``/v1/pooling`` endpoint (raw pooler output).
 
     Validates the ``NvCreatePoolingResponse`` shape end-to-end. Each item's
     ``data`` is the raw pooler output whose shape depends on the resolved
@@ -1336,7 +1336,7 @@ class PoolingPayload(BasePayload):
     The summary reports the item count and the first item's decoded shape.
     """
 
-    endpoint: str = "/pooling"
+    endpoint: str = "/v1/pooling"
 
     @staticmethod
     def _shape(data: Any) -> str:

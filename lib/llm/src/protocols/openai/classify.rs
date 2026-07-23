@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Protocol types for the `/classify` endpoint (sequence-classification /
+//! Protocol types for the `/v1/classify` endpoint (sequence-classification /
 //! cross-encoder pooling models, e.g. NLI or sentiment).
 //!
 //! There is no OpenAI-native classification schema, so — unlike embeddings,

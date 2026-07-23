@@ -53,13 +53,13 @@ bitflags! {
         const Videos = 1 << 7;
         const Realtime = 1 << 8;
         /// Sequence-classification / cross-encoder pooling models served on
-        /// the `/classify` endpoint (e.g. NLI, sentiment). Like `Embedding`,
+        /// the `/v1/classify` endpoint (e.g. NLI, sentiment). Like `Embedding`,
         /// this is a pooling capability, not a token-generating surface.
         const Classify = 1 << 9;
-        /// Raw pooler output served on the `/pooling` endpoint (token-level
+        /// Raw pooler output served on the `/v1/pooling` endpoint (token-level
         /// embeddings, per-token classification logits, reward scores, …).
         /// Usually combined with `Classify` or `Embedding`: native vLLM
-        /// mounts `/pooling` alongside those surfaces for every
+        /// mounts its `/pooling` alongside those surfaces for every
         /// pooling-runner model.
         const Pooling = 1 << 10;
     }
