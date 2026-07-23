@@ -5,8 +5,8 @@
 //!
 //! Reference: sglang/python/sglang/srt/mem_cache/radix_cache.py
 
+use rustc_hash::{FxHashMap, FxHashSet};
 use slotmap::{SlotMap, new_key_type};
-use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 new_key_type! {
@@ -16,23 +16,32 @@ new_key_type! {
 
 /// Manages free / allocated token slot indices for the KV cache pool.
 pub struct TokenPool {
+    next_fresh: usize,
     free: Vec<usize>,
     total: usize,
 }
 
 impl TokenPool {
     pub fn new(total: usize) -> Self {
-        let free: Vec<usize> = (0..total).rev().collect();
-        Self { free, total }
+        Self {
+            next_fresh: 0,
+            free: Vec::new(),
+            total,
+        }
     }
 
     /// Allocate `n` token slots. Returns `None` if not enough free slots.
     pub fn allocate(&mut self, n: usize) -> Option<Vec<usize>> {
-        if self.free.len() < n {
+        if self.available() < n {
             return None;
         }
-        let start = self.free.len() - n;
-        let indices: Vec<usize> = self.free.drain(start..).collect();
+
+        let recycled = n.min(self.free.len());
+        let fresh = n - recycled;
+        let mut indices = Vec::with_capacity(n);
+        indices.extend(self.free.drain(self.free.len() - recycled..));
+        indices.extend(self.next_fresh..self.next_fresh + fresh);
+        self.next_fresh += fresh;
         Some(indices)
     }
 
@@ -42,7 +51,7 @@ impl TokenPool {
     }
 
     pub fn available(&self) -> usize {
-        self.free.len()
+        self.free.len() + self.total - self.next_fresh
     }
 
     pub fn total(&self) -> usize {
@@ -53,7 +62,7 @@ impl TokenPool {
 /// A single node in the radix tree.
 pub struct TreeNode {
     /// Children keyed by `child.key[..page_size]` (a "child key").
-    pub children: HashMap<Vec<u64>, NodeId>,
+    pub children: FxHashMap<Vec<u64>, NodeId>,
     pub parent: Option<NodeId>,
     /// Token IDs stored at this edge.
     pub key: Vec<u64>,
@@ -72,7 +81,7 @@ pub struct RadixCache {
     pub token_pool: TokenPool,
     page_size: usize,
     /// Total token count in evictable nodes.
-    pub evictable_leaves: HashSet<NodeId>,
+    pub evictable_leaves: FxHashSet<NodeId>,
     pub evictable_size: usize,
     /// Total token count in protected (locked) nodes.
     pub protected_size: usize,
@@ -83,7 +92,7 @@ impl RadixCache {
         assert!(page_size >= 1, "page_size must be >= 1");
         let mut nodes = SlotMap::with_key();
         let root = nodes.insert(TreeNode {
-            children: HashMap::new(),
+            children: FxHashMap::default(),
             parent: None,
             key: Vec::new(),
             value: Vec::new(),
@@ -95,7 +104,7 @@ impl RadixCache {
             root,
             token_pool: TokenPool::new(total_tokens),
             page_size,
-            evictable_leaves: HashSet::new(),
+            evictable_leaves: FxHashSet::default(),
             evictable_size: 0,
             protected_size: 0,
         }
@@ -114,8 +123,8 @@ impl RadixCache {
         self.nodes.len()
     }
 
-    fn child_key(&self, key: &[u64]) -> Vec<u64> {
-        key[..self.page_size.min(key.len())].to_vec()
+    fn child_key<'a>(&self, key: &'a [u64]) -> &'a [u64] {
+        &key[..self.page_size.min(key.len())]
     }
 
     fn page_align(&self, len: usize) -> usize {
@@ -147,15 +156,17 @@ impl RadixCache {
 
         while matched < key.len() {
             let ck = self.child_key(&key[matched..]);
-            let child_id = match self.nodes[current].children.get(&ck).copied() {
+            let child_id = match self.nodes[current].children.get(ck).copied() {
                 Some(id) => id,
                 None => break,
             };
 
-            let child_key = self.nodes[child_id].key.clone();
-            let common_len = self.key_match(&child_key, &key[matched..]);
+            let (common_len, child_len) = {
+                let child_key = &self.nodes[child_id].key;
+                (self.key_match(child_key, &key[matched..]), child_key.len())
+            };
 
-            if common_len < child_key.len() {
+            if common_len < child_len {
                 if common_len > 0 {
                     let intermediate = self.split_node(child_id, common_len);
                     current = intermediate;
@@ -180,7 +191,7 @@ impl RadixCache {
 
         while matched < key.len() {
             let ck = self.child_key(&key[matched..]);
-            let child_id = match self.nodes[current].children.get(&ck).copied() {
+            let child_id = match self.nodes[current].children.get(ck).copied() {
                 Some(id) => id,
                 None => break,
             };
@@ -202,10 +213,45 @@ impl RadixCache {
     }
 
     /// Insert a token sequence into the tree. Key is page-aligned before insertion.
-    pub fn insert(&mut self, key: &[u64], value: &[usize]) {
+    pub fn insert(&mut self, key: &[u64], value: &[usize]) -> NodeId {
+        self.insert_from(self.root, 0, key, value, false)
+    }
+
+    /// Insert only the suffix after a retained, page-aligned prefix.
+    ///
+    /// `prefix_node` must be the locked terminal node for `prefix_len`. Keeping
+    /// that handle lets decode growth avoid walking the full sequence from the
+    /// root on every completed page.
+    pub fn insert_from_node(
+        &mut self,
+        prefix_node: NodeId,
+        prefix_len: usize,
+        key: &[u64],
+        value: &[usize],
+    ) -> NodeId {
+        self.insert_from(prefix_node, prefix_len, key, value, true)
+    }
+
+    fn insert_from(
+        &mut self,
+        start_node: NodeId,
+        prefix_len: usize,
+        key: &[u64],
+        value: &[usize],
+        allow_locked_tail_extension: bool,
+    ) -> NodeId {
         let aligned_len = self.page_align(key.len());
-        if aligned_len == 0 {
-            return;
+        assert_eq!(
+            prefix_len,
+            self.page_align(prefix_len),
+            "prefix length must be page-aligned"
+        );
+        assert!(
+            prefix_len <= aligned_len,
+            "prefix length {prefix_len} exceeds aligned key length {aligned_len}"
+        );
+        if aligned_len == prefix_len {
+            return start_node;
         }
         assert!(
             value.len() >= aligned_len,
@@ -216,25 +262,39 @@ impl RadixCache {
         let value = &value[..aligned_len];
 
         let now = Instant::now();
-        self.nodes[self.root].last_access_time = now;
+        self.touch_path(start_node, now);
 
-        let mut current = self.root;
-        let mut key_offset: usize = 0;
+        let mut current = start_node;
+        let mut key_offset = prefix_len;
 
         while key_offset < key.len() {
+            let can_extend_leaf = current != self.root
+                && self.nodes[current].children.is_empty()
+                && (self.nodes[current].lock_ref == 0
+                    || (allow_locked_tail_extension
+                        && current == start_node
+                        && self.nodes[current].lock_ref == 1));
+            if can_extend_leaf {
+                return self.extend_leaf(current, &key[key_offset..], &value[key_offset..], now);
+            }
+
             let ck = self.child_key(&key[key_offset..]);
-            let child_id = match self.nodes[current].children.get(&ck).copied() {
+            let child_id = match self.nodes[current].children.get(ck).copied() {
                 Some(id) => id,
                 None => {
-                    self.create_child(current, &key[key_offset..], &value[key_offset..]);
-                    return;
+                    return self.create_child(current, &key[key_offset..], &value[key_offset..]);
                 }
             };
 
-            let child_key = self.nodes[child_id].key.clone();
-            let common_len = self.key_match(&child_key, &key[key_offset..]);
+            let (common_len, child_len) = {
+                let child_key = &self.nodes[child_id].key;
+                (
+                    self.key_match(child_key, &key[key_offset..]),
+                    child_key.len(),
+                )
+            };
 
-            if common_len == child_key.len() {
+            if common_len == child_len {
                 key_offset += common_len;
                 current = child_id;
                 self.nodes[current].last_access_time = now;
@@ -243,42 +303,87 @@ impl RadixCache {
                     let intermediate = self.split_node(child_id, common_len);
                     key_offset += common_len;
                     if key_offset < key.len() {
-                        self.create_child(intermediate, &key[key_offset..], &value[key_offset..]);
+                        return self.create_child(
+                            intermediate,
+                            &key[key_offset..],
+                            &value[key_offset..],
+                        );
                     }
+                    return intermediate;
                 }
-                return;
+                return current;
             }
+        }
+
+        current
+    }
+
+    fn touch_path(&mut self, node_id: NodeId, now: Instant) {
+        let mut current = Some(node_id);
+        while let Some(id) = current {
+            self.nodes[id].last_access_time = now;
+            current = self.nodes[id].parent;
         }
     }
 
-    fn split_node(&mut self, child_id: NodeId, split_pos: usize) -> NodeId {
-        let child = &self.nodes[child_id];
-        let child_parent = child.parent;
-        let child_key = child.key.clone();
-        let child_value = child.value.clone();
-        let child_lock_ref = child.lock_ref;
-        let child_last_access = child.last_access_time;
+    fn extend_leaf(
+        &mut self,
+        node_id: NodeId,
+        key: &[u64],
+        value: &[usize],
+        now: Instant,
+    ) -> NodeId {
+        let node = &mut self.nodes[node_id];
+        debug_assert!(node.children.is_empty());
+        debug_assert!(node.lock_ref <= 1);
+        node.key.extend_from_slice(key);
+        node.value.extend_from_slice(value);
+        node.last_access_time = now;
+        if node.lock_ref == 0 {
+            self.evictable_size += key.len();
+        } else {
+            self.protected_size += key.len();
+        }
+        node_id
+    }
 
-        let suffix_ck = self.child_key(&child_key[split_pos..]);
-        let mut inter_children = HashMap::new();
+    fn split_node(&mut self, child_id: NodeId, split_pos: usize) -> NodeId {
+        let (child_parent, original_ck, prefix_key, prefix_value, suffix_ck, lock_ref, accessed) = {
+            let child = &mut self.nodes[child_id];
+            let child_parent = child.parent;
+            let original_ck = child.key[..self.page_size].to_vec();
+            let suffix_key = child.key.split_off(split_pos);
+            let prefix_key = std::mem::replace(&mut child.key, suffix_key);
+            let suffix_value = child.value.split_off(split_pos);
+            let prefix_value = std::mem::replace(&mut child.value, suffix_value);
+            let suffix_ck = child.key[..self.page_size].to_vec();
+            (
+                child_parent,
+                original_ck,
+                prefix_key,
+                prefix_value,
+                suffix_ck,
+                child.lock_ref,
+                child.last_access_time,
+            )
+        };
+
+        let mut inter_children = FxHashMap::default();
         inter_children.insert(suffix_ck, child_id);
 
         let intermediate = TreeNode {
             children: inter_children,
             parent: child_parent,
-            key: child_key[..split_pos].to_vec(),
-            value: child_value[..split_pos].to_vec(),
-            lock_ref: child_lock_ref,
-            last_access_time: child_last_access,
+            key: prefix_key,
+            value: prefix_value,
+            lock_ref,
+            last_access_time: accessed,
         };
         let inter_id = self.nodes.insert(intermediate);
 
         let child = &mut self.nodes[child_id];
-        child.key = child_key[split_pos..].to_vec();
-        child.value = child_value[split_pos..].to_vec();
         child.parent = Some(inter_id);
 
-        let original_ck = self.child_key(&child_key);
         if let Some(parent_id) = child_parent {
             self.nodes[parent_id].children.insert(original_ck, inter_id);
         }
@@ -289,16 +394,16 @@ impl RadixCache {
         inter_id
     }
 
-    fn create_child(&mut self, parent_id: NodeId, key: &[u64], value: &[usize]) {
+    fn create_child(&mut self, parent_id: NodeId, key: &[u64], value: &[usize]) -> NodeId {
         let new_node = TreeNode {
-            children: HashMap::new(),
+            children: FxHashMap::default(),
             parent: Some(parent_id),
             key: key.to_vec(),
             value: value.to_vec(),
             lock_ref: 0,
             last_access_time: Instant::now(),
         };
-        let ck = self.child_key(key);
+        let ck = self.child_key(key).to_vec();
         let new_id = self.nodes.insert(new_node);
 
         self.evictable_leaves.remove(&parent_id);
@@ -307,6 +412,8 @@ impl RadixCache {
 
         self.evictable_leaves.insert(new_id);
         self.evictable_size += key.len();
+
+        new_id
     }
 
     pub fn is_leaf(&self, id: NodeId) -> bool {
@@ -355,11 +462,11 @@ impl RadixCache {
         }
     }
 
-    /// Evict tokens from the cache by LRU order.
+    /// Evict tokens from the cache by LRU order, rounding partial leaves to full pages.
     /// Returns `(num_tokens_evicted, evicted_page_indices)`.
     pub fn evict(&mut self, num_tokens: usize) -> (usize, Vec<usize>) {
         let mut evicted = 0;
-        let mut evicted_indices = Vec::new();
+        let mut evicted_indices = Vec::with_capacity(num_tokens.min(self.evictable_size));
         while evicted < num_tokens {
             let victim = self
                 .evictable_leaves
@@ -371,22 +478,47 @@ impl RadixCache {
                 break;
             };
 
-            let victim_node = &self.nodes[victim_id];
+            let victim_tokens = self.nodes[victim_id].key.len();
+            let remaining = num_tokens - evicted;
+            let eviction_len = remaining
+                .div_ceil(self.page_size)
+                .saturating_mul(self.page_size)
+                .min(victim_tokens);
+
+            // A compressed leaf may span pages. Preserve its indexed prefix when
+            // only the newest suffix pages are needed to satisfy this eviction.
+            if eviction_len < victim_tokens {
+                let split_pos = victim_tokens - eviction_len;
+                let (nodes, token_pool) = (&mut self.nodes, &mut self.token_pool);
+                let victim_node = &mut nodes[victim_id];
+                victim_node.key.truncate(split_pos);
+                let evicted_values = &victim_node.value[split_pos..];
+                token_pool.free(evicted_values);
+                evicted_indices.extend_from_slice(evicted_values);
+                victim_node.value.truncate(split_pos);
+
+                self.evictable_size -= eviction_len;
+                evicted += eviction_len;
+                continue;
+            }
+
+            let victim_node = self
+                .nodes
+                .remove(victim_id)
+                .expect("evictable leaf disappeared before removal");
             let tokens = victim_node.key.len();
-            let pool_indices = victim_node.value.clone();
             let parent_id = victim_node.parent;
-            let victim_key = victim_node.key.clone();
 
             self.evictable_leaves.remove(&victim_id);
             self.evictable_size -= tokens;
             evicted += tokens;
 
-            evicted_indices.extend_from_slice(&pool_indices);
-            self.token_pool.free(&pool_indices);
+            evicted_indices.extend_from_slice(&victim_node.value);
+            self.token_pool.free(&victim_node.value);
 
             if let Some(pid) = parent_id {
-                let ck = self.child_key(&victim_key);
-                self.nodes[pid].children.remove(&ck);
+                let ck = self.child_key(&victim_node.key);
+                self.nodes[pid].children.remove(ck);
 
                 if pid != self.root
                     && self.nodes[pid].children.is_empty()
@@ -395,8 +527,6 @@ impl RadixCache {
                     self.evictable_leaves.insert(pid);
                 }
             }
-
-            self.nodes.remove(victim_id);
         }
         (evicted, evicted_indices)
     }
@@ -480,6 +610,50 @@ mod tests {
         assert_eq!(cache.match_prefix(&[1, 2, 3, 4, 5, 6, 7, 8]).0, 5);
         cache.insert(&[1, 2, 3, 4, 5, 6, 7, 8], &[10, 20, 30, 40, 50, 60, 70, 80]);
         assert_eq!(cache.match_prefix(&[1, 2, 3, 4, 5, 6, 7, 8]).0, 8);
+    }
+
+    #[test]
+    fn test_retained_tail_extends_unique_leaf_in_place() {
+        let mut cache = RadixCache::new(100, 4);
+        cache.insert(&[1, 2, 3, 4], &[0, 1, 2, 3]);
+        let (_, tail) = cache.match_prefix(&[1, 2, 3, 4]);
+        cache.inc_lock_ref(tail);
+        let nodes_before = cache.num_nodes();
+
+        let extended = cache.insert_from_node(
+            tail,
+            4,
+            &[1, 2, 3, 4, 5, 6, 7, 8],
+            &[0, 1, 2, 3, 4, 5, 6, 7],
+        );
+
+        assert_eq!(extended, tail);
+        assert_eq!(cache.num_nodes(), nodes_before);
+        assert_eq!(cache.node(tail).key, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(cache.protected_size, 8);
+        assert_eq!(cache.match_prefix(&[1, 2, 3, 4, 5, 6, 7, 8]).0, 8);
+    }
+
+    #[test]
+    fn test_retained_tail_does_not_extend_shared_leaf_in_place() {
+        let mut cache = RadixCache::new(100, 4);
+        cache.insert(&[1, 2, 3, 4], &[0, 1, 2, 3]);
+        let (_, tail) = cache.match_prefix(&[1, 2, 3, 4]);
+        cache.inc_lock_ref(tail);
+        cache.inc_lock_ref(tail);
+        let nodes_before = cache.num_nodes();
+
+        let extended = cache.insert_from_node(
+            tail,
+            4,
+            &[1, 2, 3, 4, 5, 6, 7, 8],
+            &[0, 1, 2, 3, 4, 5, 6, 7],
+        );
+
+        assert_ne!(extended, tail);
+        assert_eq!(cache.num_nodes(), nodes_before + 1);
+        assert_eq!(cache.node(tail).key, vec![1, 2, 3, 4]);
+        assert_eq!(cache.node(extended).key, vec![5, 6, 7, 8]);
     }
 
     #[test]

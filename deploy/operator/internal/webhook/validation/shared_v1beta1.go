@@ -20,12 +20,11 @@ package validation
 import (
 	"context"
 	"fmt"
-	"os"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -221,7 +220,7 @@ func (v *sharedValidation) validateExperimentalSpec(
 	}
 
 	if experimental.Checkpoint != nil && experimental.Checkpoint.Enabled &&
-		experimental.GPUMemoryService != nil && os.Getenv(consts.DynamoOperatorAllowGMSSnapshotEnvVar) != "1" {
+		experimental.GPUMemoryService != nil && !features.MustGateFrom(v.ctx).Enabled(features.GMSSnapshot) {
 		allErrs = append(allErrs, field.Forbidden(
 			fldPath.Child("checkpoint"),
 			"GMS + Snapshot is temporarily disabled; disable gpuMemoryService or enable the internal GMS + Snapshot gate",
@@ -284,14 +283,18 @@ func (v *sharedValidation) validateFailoverSpec(
 // validateComponentCheckpointConfig validates checkpoint. checkpoint and fldPath must not be nil.
 // gms may be nil because checkpoint validates that sibling relationship.
 func (v *sharedValidation) validateComponentCheckpointConfig(
-	checkpoint *nvidiacomv1beta1.ComponentCheckpointConfig,
+	checkpointConfig *nvidiacomv1beta1.ComponentCheckpointConfig,
 	fldPath *field.Path,
 	gms *nvidiacomv1beta1.GPUMemoryServiceSpec,
 ) field.ErrorList {
-	if checkpoint.Job == nil {
-		return nil
+	var allErrs field.ErrorList
+	if checkpointConfig.Enabled && !features.MustGateFrom(v.ctx).Enabled(features.Checkpoint) {
+		allErrs = append(allErrs, field.Forbidden(fldPath, "checkpoint functionality is disabled in the operator configuration"))
 	}
-	return v.validateComponentCheckpointJobConfig(checkpoint.Job, fldPath.Child("job"), gms)
+	if checkpointConfig.Job == nil {
+		return allErrs
+	}
+	return append(allErrs, v.validateComponentCheckpointJobConfig(checkpointConfig.Job, fldPath.Child("job"), gms)...)
 }
 
 // validateComponentCheckpointJobConfig validates job. job and fldPath must not be nil.

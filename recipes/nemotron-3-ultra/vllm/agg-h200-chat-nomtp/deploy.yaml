@@ -90,7 +90,6 @@ spec:
                     --router-mode kv
                     --router-kv-events
                     --kv-cache-block-size 64
-                    --router-reset-states
                     --http-host 0.0.0.0
                     --http-port 8000
                   )

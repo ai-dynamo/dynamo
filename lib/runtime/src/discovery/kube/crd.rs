@@ -122,6 +122,8 @@ pub async fn apply_cr(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::discovery::{DiscoveryInstance, DiscoveryQuery, EventScope, EventSourceQuery};
+    use crate::protocols::EndpointId;
     use kube::Resource;
 
     #[test]
@@ -159,5 +161,34 @@ mod tests {
             serde_json::from_str(&json).expect("Failed to deserialize CR");
 
         assert_eq!(deserialized.spec.data, data);
+    }
+
+    #[test]
+    fn event_source_round_trips_through_kubernetes_metadata() {
+        let mut metadata = DiscoveryMetadata::new();
+        let endpoint = EndpointId {
+            namespace: "workers".to_string(),
+            component: "backend".to_string(),
+            name: "kv-state".to_string(),
+        };
+        let source = DiscoveryInstance::EventSource {
+            scope: EventScope::Endpoint {
+                endpoint: endpoint.clone(),
+            },
+            topic: "kv-events".to_string(),
+            publisher_id: 205,
+            metadata: serde_json::json!({"worker_id": 7, "dp_rank": 0}),
+        };
+        metadata.register_event_source(source.clone()).unwrap();
+
+        let cr = build_cr("test-pod", "test-pod", "pod-uid", &metadata).unwrap();
+        let round_trip: DiscoveryMetadata = serde_json::from_value(cr.spec.data).unwrap();
+
+        assert_eq!(
+            round_trip.filter(&DiscoveryQuery::EventSources(
+                EventSourceQuery::endpoint_topic(endpoint, "kv-events")
+            )),
+            vec![source]
+        );
     }
 }

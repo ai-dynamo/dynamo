@@ -12,9 +12,7 @@ use std::{
 use dashmap::DashMap;
 use dynamo_kv_router::protocols::WorkerId;
 use dynamo_runtime::{
-    component::{Component, Endpoint},
-    pipeline::MultimodalCacheIndex,
-    traits::DistributedRuntimeProvider,
+    component::Endpoint, pipeline::MultimodalCacheIndex, traits::DistributedRuntimeProvider,
     transports::event_plane::EventSubscriber,
 };
 use tokio::sync::Mutex;
@@ -44,7 +42,7 @@ pub async fn try_build_cache_indexer(endpoint: &Endpoint) -> Option<Arc<dyn Mult
         return Some(Arc::clone(indexer));
     }
 
-    match EmbeddingCacheIndexer::for_component(endpoint.component()).await {
+    match EmbeddingCacheIndexer::for_endpoint(endpoint).await {
         Ok(indexer) => {
             let indexer = Arc::new(indexer) as Arc<dyn MultimodalCacheIndex>;
             indexers.insert(endpoint_id, Arc::clone(&indexer));
@@ -61,9 +59,9 @@ pub async fn try_build_cache_indexer(endpoint: &Endpoint) -> Option<Arc<dyn Mult
 }
 
 impl EmbeddingCacheIndexer {
-    pub async fn for_component(component: &Component) -> anyhow::Result<Self> {
+    pub async fn for_endpoint(endpoint: &Endpoint) -> anyhow::Result<Self> {
         let indexer = Self::default();
-        indexer.start_subscriber(component).await?;
+        indexer.start_subscriber(endpoint).await?;
         Ok(indexer)
     }
 
@@ -126,24 +124,26 @@ impl EmbeddingCacheIndexer {
         }
     }
 
-    pub async fn start_subscriber(&self, component: &Component) -> anyhow::Result<()> {
+    pub async fn start_subscriber(&self, endpoint: &Endpoint) -> anyhow::Result<()> {
         if self.started.swap(true, Ordering::AcqRel) {
             tracing::debug!("Embedding cache indexer subscriber already started, skipping");
             return Ok(());
         }
 
-        let cancellation_token = component.drt().child_token();
-        let namespace = component.namespace().clone();
-        let subscriber =
-            match EventSubscriber::for_namespace(&namespace, MULTIMODAL_EMBEDDING_CACHE_SUBJECT)
-                .await
-            {
-                Ok(subscriber) => subscriber.typed::<MultimodalEmbeddingCacheEvent>(),
-                Err(error) => {
-                    self.started.store(false, Ordering::Release);
-                    return Err(error);
-                }
-            };
+        let cancellation_token = endpoint.drt().child_token();
+        let endpoint = endpoint.clone();
+        let subscriber = match EventSubscriber::for_endpoint(
+            &endpoint,
+            MULTIMODAL_EMBEDDING_CACHE_SUBJECT,
+        )
+        .await
+        {
+            Ok(subscriber) => subscriber.typed::<MultimodalEmbeddingCacheEvent>(),
+            Err(error) => {
+                self.started.store(false, Ordering::Release);
+                return Err(error);
+            }
+        };
 
         let indexer = self.clone();
         tokio::spawn(async move {
@@ -187,8 +187,8 @@ impl EmbeddingCacheIndexer {
                         }
                     }
 
-                    match EventSubscriber::for_namespace(
-                        &namespace,
+                    match EventSubscriber::for_endpoint(
+                        &endpoint,
                         MULTIMODAL_EMBEDDING_CACHE_SUBJECT,
                     )
                     .await

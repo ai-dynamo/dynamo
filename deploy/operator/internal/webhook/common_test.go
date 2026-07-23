@@ -7,12 +7,15 @@ package webhook
 
 import (
 	"context"
+	"net/http"
 	"testing"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
 type testExcludedNamespaces map[string]bool
@@ -59,6 +62,31 @@ func TestLeaseAwareDefaulterWithoutChecker(t *testing.T) {
 	if wrapped != defaulter {
 		t.Fatal("defaulter without a checker should be returned unchanged")
 	}
+}
+
+func TestWithGate(t *testing.T) {
+	webhook := WithGate(&admission.Webhook{Handler: admission.HandlerFunc(func(context.Context, admission.Request) admission.Response {
+		return admission.Allowed("handled")
+	})}, features.Gates{Grove: true})
+	ctx := webhook.WithContextFunc(context.Background(), &http.Request{})
+	if !features.MustGateFrom(ctx).Enabled(features.Grove) {
+		t.Fatal("Grove gate missing from webhook context")
+	}
+	if response := webhook.Handler.Handle(ctx, admission.Request{}); !response.Allowed {
+		t.Fatal("handler rejected request with gate context")
+	}
+}
+
+func TestWithGateRequiresGateContext(t *testing.T) {
+	webhook := WithGate(&admission.Webhook{Handler: admission.HandlerFunc(func(context.Context, admission.Request) admission.Response {
+		return admission.Allowed("handled")
+	})}, features.Defaults())
+	defer func() {
+		if recover() == nil {
+			t.Fatal("handler did not panic without gate context")
+		}
+	}()
+	webhook.Handler.Handle(context.Background(), admission.Request{})
 }
 
 func TestCanModifyDGDReplicas(t *testing.T) {

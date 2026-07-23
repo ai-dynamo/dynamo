@@ -13,9 +13,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from dynamo.planner import SubComponentType, TargetReplica
+from dynamo.planner.connectors.clients.remote_client import RemotePlannerClient
 from dynamo.planner.connectors.global_planner import GlobalPlannerConnector
 from dynamo.planner.connectors.protocol import ScaleRequest, ScaleResponse, ScaleStatus
-from dynamo.planner.connectors.remote_client import RemotePlannerClient
 from dynamo.planner.errors import DeploymentValidationError, EmptyTargetReplicasError
 from dynamo.planner.monitoring.worker_info import WorkerInfo
 
@@ -236,7 +236,7 @@ async def test_connector_initialization(connector, connector_runtime):
     ) as mock_client_class:
         mock_client = MagicMock()
         mock_client_class.return_value = mock_client
-        await connector._async_init()
+        await connector.async_init()
         mock_client_class.assert_called_once_with(
             connector_runtime, "global-ns", "GlobalPlanner"
         )
@@ -501,7 +501,10 @@ def test_connector_get_worker_info_falls_back_on_local_init_failure(connector_ru
     assert info.component_name is not None
 
 
-def test_connector_get_actual_worker_counts_delegates_to_local_k8s(connector_runtime):
+@pytest.mark.asyncio
+async def test_connector_get_actual_worker_counts_delegates_to_local_k8s(
+    connector_runtime,
+):
     """get_actual_worker_counts should report real pool DGD status by
     delegating to the pool-local KubernetesConnector. Without this, the
     base planner falls through to a runtime path that always reports
@@ -510,22 +513,25 @@ def test_connector_get_actual_worker_counts_delegates_to_local_k8s(connector_run
     """
     c = GlobalPlannerConnector(connector_runtime, "ns", "gns", "GP", model_name="test")
     fake_local = MagicMock()
-    fake_local.get_actual_worker_counts = MagicMock(return_value=(2, 3, False))
+    fake_local.get_actual_worker_counts = AsyncMock(return_value=(2, 3, False))
     c._local_k8s_connector = fake_local
     c._local_k8s_init_attempted = True
 
-    counts = c.get_actual_worker_counts(
+    counts = await c.get_actual_worker_counts(
         prefill_component_name="VllmPrefillWorker",
         decode_component_name="VllmDecodeWorker",
     )
     assert counts == (2, 3, False)
-    fake_local.get_actual_worker_counts.assert_called_once_with(
+    fake_local.get_actual_worker_counts.assert_awaited_once_with(
         prefill_component_name="VllmPrefillWorker",
         decode_component_name="VllmDecodeWorker",
     )
 
 
-def test_connector_get_actual_worker_counts_out_of_cluster_fallback(connector_runtime):
+@pytest.mark.asyncio
+async def test_connector_get_actual_worker_counts_out_of_cluster_fallback(
+    connector_runtime,
+):
     """When no local KubernetesConnector is available (e.g. running outside
     a cluster), get_actual_worker_counts must return (0, 0, True) rather
     than raising — mirroring the capability-discovery fallback path so
@@ -538,7 +544,7 @@ def test_connector_get_actual_worker_counts_out_of_cluster_fallback(connector_ru
         c = GlobalPlannerConnector(
             connector_runtime, "ns", "gns", "GP", model_name="test"
         )
-        counts = c.get_actual_worker_counts(
+        counts = await c.get_actual_worker_counts(
             prefill_component_name="p", decode_component_name="d"
         )
 

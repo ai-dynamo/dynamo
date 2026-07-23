@@ -65,11 +65,13 @@ class VllmPromptEmbedsWorkerProcess(ManagedProcess):
         *,
         frontend_port: int,
         system_port: int,
+        fpm_port: int,
         worker_id: str = "vllm-prompt-embeds-worker",
     ):
         self.worker_id = worker_id
         self.frontend_port = int(frontend_port)
         self.system_port = int(system_port)
+        self.fpm_port = int(fpm_port)
 
         # On XPU, set an explicit max-num-seqs to ensure the worker can handle
         # concurrent requests without OOM or scheduling timeouts on single-device CI.
@@ -101,6 +103,7 @@ class VllmPromptEmbedsWorkerProcess(ManagedProcess):
         env["DYN_LOG"] = "debug"
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         env["DYN_SYSTEM_PORT"] = str(self.system_port)
+        env["DYN_FORWARDPASS_METRIC_PORT"] = str(self.fpm_port)
 
         log_dir = f"{request.node.name}_{worker_id}"
 
@@ -159,6 +162,7 @@ def start_services(
     _ = predownload_models  # Ensures model is downloaded before starting services
     frontend_port = dynamo_dynamic_ports.frontend_port
     system_port = dynamo_dynamic_ports.system_ports[0]
+    fpm_port = dynamo_dynamic_ports.fpm_port
 
     with DynamoFrontendProcess(
         request,
@@ -178,6 +182,7 @@ def start_services(
             request,
             frontend_port=frontend_port,
             system_port=system_port,
+            fpm_port=fpm_port,
         ):
             logger.info("Vllm Worker with prompt embeds started for tests")
             yield dynamo_dynamic_ports
@@ -265,10 +270,6 @@ class TestPromptEmbedsE2E:
     def test_usage_prompt_tokens_not_zero(self, dynamo_client):
         """
         CRITICAL REGRESSION TEST: Ensure prompt_tokens is correctly reported.
-
-        This validates the v2.0.4 fix where prompt_tokens was incorrectly
-        reported as 0 when using embeddings. The worker extracts sequence
-        length from tensor shape and includes it in completion_usage.
 
         Rust tests cannot verify this - it requires E2E validation.
         """

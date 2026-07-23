@@ -605,7 +605,7 @@ impl DisaggRuntime {
     ) -> Result<()> {
         if matches!(outcome, HandoffActionOutcome::Failed(_)) {
             self.collector
-                .on_terminal(uuid, ReplayTerminalStatus::Failed);
+                .on_terminal(uuid, self.now_ms, ReplayTerminalStatus::Failed);
         }
         let actions = self
             .state_mut(uuid)?
@@ -624,7 +624,7 @@ impl DisaggRuntime {
             _ => None,
         };
         if let Some(status) = terminal_status {
-            self.collector.on_terminal(uuid, status);
+            self.collector.on_terminal(uuid, self.now_ms, status);
         }
         let actions = self.state_mut(uuid)?.coordinator.on_fact(fact)?;
         self.action_queues.enqueue_all(uuid, actions);
@@ -1168,7 +1168,7 @@ impl DisaggRuntime {
             }
             Some(HandoffCompletion::Canceled) => {
                 self.collector
-                    .on_terminal(uuid, ReplayTerminalStatus::Canceled);
+                    .on_terminal(uuid, self.now_ms, ReplayTerminalStatus::Canceled);
                 self.cancel_prefill_route(uuid)?;
                 self.cancel_decode_route(uuid)?;
                 self.finish_logical_request(uuid, true)?;
@@ -1371,6 +1371,7 @@ impl DisaggRuntime {
     /// Process one prefill output signal, including router updates and decode handoff scheduling.
     fn process_prefill_signal(&mut self, signal: OutputSignal) -> Result<()> {
         if !signal.rejected
+            && signal.token_id.is_some()
             && let Some(capture) = self.conformance_capture.as_mut()
         {
             capture.source_output_tokens += 1;
@@ -1382,7 +1383,7 @@ impl DisaggRuntime {
         if signal.rejected {
             let handoff_id = self.state(signal.uuid)?.handoff_id;
             self.collector
-                .on_terminal(signal.uuid, ReplayTerminalStatus::Rejected);
+                .on_terminal(signal.uuid, self.now_ms, ReplayTerminalStatus::Rejected);
             return self.apply_handoff_fact(signal.uuid, HandoffFact::Failed { handoff_id });
         }
 
@@ -1454,7 +1455,8 @@ impl DisaggRuntime {
         } else {
             ReplayTerminalStatus::Completed
         };
-        self.collector.on_terminal(signal.uuid, terminal_status);
+        self.collector
+            .on_terminal(signal.uuid, self.now_ms, terminal_status);
         self.finish_logical_request(signal.uuid, false)?;
         self.dispatch_decode_admissions(admissions)?;
         Ok(())

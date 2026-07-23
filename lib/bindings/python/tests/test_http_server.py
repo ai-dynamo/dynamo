@@ -16,6 +16,7 @@
 # This test verifies that the HTTP server can be started and responds correctly to requests.
 
 import asyncio
+import contextlib
 import json
 import time
 from typing import AsyncGenerator, Dict
@@ -127,22 +128,47 @@ async def http_server(runtime: DistributedRuntime):
             raise ValueError(f"Server failed to start: {e}")
 
     server_task = asyncio.create_task(worker())
-    await asyncio.wait_for(start_done.wait(), timeout=30.0)
-    if server_task.done() and server_task.exception():
-        raise ValueError(f"Server task failed to start {server_task.exception()}")
+
+    def raise_if_server_exited():
+        # A finished startup task means the server never came up.
+        if server_task.done():
+            raise ValueError(
+                "HTTP server exited during startup"
+            ) from server_task.exception()
+
+    async def wait_until_accepting():
+        # start_done fires when service.run() returns, but the socket is bound
+        # later on the runtime's background threads; wait until it accepts.
+        while True:
+            try:
+                _, writer = await asyncio.open_connection("localhost", port)
+                writer.close()
+            except OSError:
+                # open_connection raises a bare OSError, not ConnectionError,
+                # when every resolved address is refused; don't narrow this.
+                raise_if_server_exited()
+                await asyncio.sleep(0.1)
+                continue
+            raise_if_server_exited()  # a stale listener may answer; confirm ours bound
+            return
+
+    async def stop_server():
+        service.shutdown()
+        server_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await asyncio.wait_for(server_task, timeout=10.0)
+
+    try:
+        await asyncio.wait_for(start_done.wait(), timeout=30.0)
+        raise_if_server_exited()
+        await asyncio.wait_for(wait_until_accepting(), timeout=10.0)
+    except BaseException:
+        await stop_server()  # teardown past the yield won't run on setup failure
+        raise
+
     yield f"http://localhost:{port}", model_name
 
-    # Teardown: Cancel the server task if it's still running
-    service.shutdown()  # Shutdown service
-    await asyncio.sleep(0.1)  # Give some time for graceful shutdown
-    if not server_task.done():
-        server_task.cancel()
-        try:
-            # Await cancellation to ensure proper cleanup for up to 10s
-            await asyncio.wait_for(server_task, timeout=10.0)
-        except asyncio.CancelledError:
-            print("Server task cancelled during teardown.")
-            pass
+    await stop_server()
 
 
 @pytest.mark.asyncio

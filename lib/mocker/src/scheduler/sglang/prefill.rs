@@ -105,7 +105,7 @@ pub(super) fn get_new_batch_prefill(
 
         let chunk_end = req.materialized_tokens + chunk_tokens;
         let old_allocated_tokens = req.allocated_tokens;
-        let prev_node = req.last_node.take();
+        let mut lease = std::mem::take(&mut req.kv_lease);
         let alloc_tokens = req.sequence_prefix(chunk_end);
         let actual_new_tokens = alloc_tokens.len().saturating_sub(req.materialized_tokens);
         let available = kv_manager.cache().token_pool.available();
@@ -113,52 +113,48 @@ pub(super) fn get_new_batch_prefill(
             kv_manager.evict(actual_new_tokens - available);
         }
 
-        let alloc = if req.materialized_tokens > 0 {
-            let last_node = prev_node.unwrap_or_else(|| {
+        let prefix_len = if req.materialized_tokens > 0 {
+            if !lease.is_active() {
                 panic!(
-                    "prefill: request {} has materialized_tokens={} but last_node is None",
+                    "prefill: request {} has materialized_tokens={} but no active KV lease",
                     req.uuid, req.materialized_tokens
-                )
-            });
-            kv_manager.allocate_after_prefix(
-                &alloc_tokens,
-                req.materialized_tokens,
-                &req.kv_indices[..req.materialized_tokens],
-                last_node,
-            )
+                );
+            }
+            kv_manager
+                .extend_allocation(&alloc_tokens, &mut lease)
+                .then_some(req.materialized_tokens)
         } else {
-            kv_manager.allocate_for_request(&alloc_tokens)
+            kv_manager.allocate_for_request(&alloc_tokens).map(|alloc| {
+                lease = alloc.lease;
+                alloc.prefix_len
+            })
         };
 
-        let Some(alloc) = alloc else {
-            req.last_node = prev_node;
+        let Some(prefix_len) = prefix_len else {
+            req.kv_lease = lease;
             rejected.push_back(req);
             oom = true;
             break;
         };
+        let tokens_computed = chunk_end.saturating_sub(prefix_len);
 
-        if let Some(node) = prev_node {
-            kv_manager.free_request(node);
-        }
-
-        req.last_node = Some(alloc.last_node);
-        req.kv_indices = alloc.kv_indices;
+        req.kv_lease = lease;
         req.materialized_tokens = chunk_end;
         req.allocated_tokens = ceil_to_block(chunk_end, config.block_size);
         req.debug_assert_invariants(config.block_size);
 
         admissions.push(AdmissionEvent {
             uuid: req.uuid,
-            reused_input_tokens: alloc.prefix_len,
+            reused_input_tokens: prefix_len,
         });
         prefill_fpm.push(PrefillFpmItem {
             prompt_len: req.prompt_len(),
-            tokens_computed: chunk_tokens,
-            prefix_tokens: alloc.prefix_len,
+            tokens_computed,
+            prefix_tokens: prefix_len,
         });
 
         total_isl += chunk_end;
-        total_prefix += alloc.prefix_len;
+        total_prefix += prefix_len;
         rem_total_tokens -= (req.allocated_tokens - old_allocated_tokens + output_reserve) as f64;
         rem_input_tokens -= charged_input_tokens;
         rem_chunk_tokens -= charged_input_tokens;

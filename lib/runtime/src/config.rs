@@ -418,50 +418,14 @@ impl RuntimeConfigBuilder {
     }
 }
 
-/// Check if a string is truthy
-/// This will be used to evaluate environment variables or any other subjective
-/// configuration parameters that can be set by the user that should be evaluated
-/// as a boolean value.
-pub fn is_truthy(val: &str) -> bool {
-    matches!(val.to_lowercase().as_str(), "1" | "true" | "on" | "yes")
-}
-
-pub fn parse_bool(val: &str) -> anyhow::Result<bool> {
-    if is_truthy(val) {
-        Ok(true)
-    } else if is_falsey(val) {
-        Ok(false)
-    } else {
-        anyhow::bail!(
-            "Invalid boolean value: '{}'. Expected one of: true/false, 1/0, on/off, yes/no",
-            val
-        )
-    }
-}
-
-/// Check if a string is falsey
-/// This will be used to evaluate environment variables or any other subjective
-/// configuration parameters that can be set by the user that should be evaluated
-/// as a boolean value (opposite of is_truthy).
-pub fn is_falsey(val: &str) -> bool {
-    matches!(val.to_lowercase().as_str(), "0" | "false" | "off" | "no")
-}
-
-/// Check if an environment variable is truthy
-pub fn env_is_truthy(env: &str) -> bool {
-    match std::env::var(env) {
-        Ok(val) => is_truthy(val.as_str()),
-        Err(_) => false,
-    }
-}
-
-/// Check if an environment variable is falsey
-pub fn env_is_falsey(env: &str) -> bool {
-    match std::env::var(env) {
-        Ok(val) => is_falsey(val.as_str()),
-        Err(_) => false,
-    }
-}
+// Canonical truthy/falsy/bool parsing for user-supplied configuration
+// (environment variables, headers, config values). The single implementation
+// lives in the zero-dependency `dynamo-truthy` crate so that crates which
+// cannot depend on `dynamo-runtime` share it too; this re-export is the
+// canonical import path for everything that can.
+pub use dynamo_truthy::{
+    env_is_falsey, env_is_truthy, is_falsey, is_truthy, parse_bool, parse_bool_opt,
+};
 
 /// Check whether JSONL logging enabled
 /// Set the `DYN_LOGGING_JSONL` environment variable a [`is_truthy`] value

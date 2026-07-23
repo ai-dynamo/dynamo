@@ -58,10 +58,9 @@ export DYN_REQUEST_TRACE DYN_REQUEST_TRACE_SINKS DYN_REQUEST_TRACE_OUTPUT_PATH D
 print_launch_banner "Launching Aggregated Agent Serving" "$MODEL" "$HTTP_PORT"
 echo "Request trace output: $DYN_REQUEST_TRACE_OUTPUT_PATH"
 
-# Frontend with KV routing and state reset
+# Frontend with KV routing
 python3 -m dynamo.frontend \
   --router-mode kv \
-  --router-reset-states \
   --enable-anthropic-api &
 
 # Use priority-based radix eviction for agent requests.
