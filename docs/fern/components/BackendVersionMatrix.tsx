@@ -245,6 +245,13 @@ export function BackendVersionMatrix({ mode = "current" }: { mode?: "current" | 
       {mode === "all" && (
         <>
           <p className="dynref-grid-note">
+            <span className="dynref-vm-changed">
+              <span className="dynref-mono">Highlighted</span>
+            </span>{" "}
+            pins changed relative to the previous release; unmarked pins are unchanged (patch
+            releases typically re-ship their base release&rsquo;s pins).
+          </p>
+          <p className="dynref-grid-note">
             Early access rows show branch build pins from container/context.yaml; not every backend
             ships a published container for those tags.
           </p>

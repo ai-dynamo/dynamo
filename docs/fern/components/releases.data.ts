@@ -334,8 +334,6 @@ export interface Feature {
   sglang: FeatureCell;
   trtllm: FeatureCell;
   vllm: FeatureCell;
-  learnMoreLabel?: string;
-  learnMoreHref?: string;
 }
 
 export const FEATURES: Feature[] = [
@@ -344,32 +342,24 @@ export const FEATURES: Feature[] = [
     sglang: { status: "yes" },
     trtllm: { status: "yes" },
     vllm: { status: "yes", note: "Prefill/decode separation with NIXL KV transfer" },
-    learnMoreLabel: "Design doc",
-    learnMoreHref: "../design-docs/disagg-serving.md",
   },
   {
     name: "KV-Aware Routing",
     sglang: { status: "yes" },
     trtllm: { status: "yes" },
     vllm: { status: "yes" },
-    learnMoreLabel: "Router doc",
-    learnMoreHref: "../components/router/README.md",
   },
   {
     name: "SLA-Based Planner",
     sglang: { status: "yes" },
     trtllm: { status: "yes" },
     vllm: { status: "yes" },
-    learnMoreLabel: "Planner doc",
-    learnMoreHref: "../components/planner/planner-guide.md",
   },
   {
     name: "KV Block Manager",
     sglang: { status: "wip", note: "Work in progress across all combinations" },
     trtllm: { status: "yes" },
     vllm: { status: "yes" },
-    learnMoreLabel: "KVBM doc",
-    learnMoreHref: "../components/kvbm/README.md",
   },
   {
     name: "Multimodal (Image)",
@@ -385,32 +375,24 @@ export const FEATURES: Feature[] = [
       status: "yes",
       note: "With KV-aware routing, image-aware routing on documented paths",
     },
-    learnMoreLabel: "Multimodal doc",
-    learnMoreHref: "../features/multimodal/README.md",
   },
   {
     name: "Multimodal (Video)",
     sglang: { status: "yes" },
     trtllm: { status: "no" },
     vllm: { status: "yes", note: "Video input with frame sampling" },
-    learnMoreLabel: "Multimodal doc",
-    learnMoreHref: "../features/multimodal/README.md",
   },
   {
     name: "Multimodal (Audio)",
     sglang: { status: "no" },
     trtllm: { status: "no" },
     vllm: { status: "wip", note: "Qwen2-Audio, experimental" },
-    learnMoreLabel: "Multimodal doc",
-    learnMoreHref: "../features/multimodal/README.md",
   },
   {
     name: "Request Migration",
     sglang: { status: "yes" },
     trtllm: { status: "yes", note: "Work in progress with multimodal" },
     vllm: { status: "yes" },
-    learnMoreLabel: "Migration doc",
-    learnMoreHref: "../fault-tolerance/request-migration.md",
   },
   {
     name: "Request Cancellation",
@@ -429,16 +411,12 @@ export const FEATURES: Feature[] = [
     sglang: { status: "no" },
     trtllm: { status: "no" },
     vllm: { status: "yes", note: "Dynamic load/unload; KV-aware routing supports adapter affinity" },
-    learnMoreLabel: "LoRA doc",
-    learnMoreHref: "../features/lora/README.md",
   },
   {
     name: "Tool Calling",
     sglang: { status: "yes" },
     trtllm: { status: "yes" },
     vllm: { status: "yes" },
-    learnMoreLabel: "Tool calling doc",
-    learnMoreHref: "../tool-calling/README.mdx",
   },
   {
     name: "Speculative Decoding",
@@ -451,8 +429,6 @@ export const FEATURES: Feature[] = [
     sglang: { status: "yes" },
     trtllm: { status: "no" },
     vllm: { status: "yes" },
-    learnMoreLabel: "Snapshot docs",
-    learnMoreHref: "../kubernetes/snapshot.md",
   },
 ];
 
