@@ -40,8 +40,7 @@ from dynamo.common.utils.video_utils import (
 logger = logging.getLogger(__name__)
 
 # Wire protocol constants -- must match the Rust frontend
-# (lib/llm/src/http/service/openai.rs) and the reference worker
-# (examples/custom_backend/cmaf_binary_video_streaming/worker.py).
+# (lib/llm/src/http/service/openai.rs).
 CMAF_ANNOTATION = "experimental_binary_cmaf"
 CMAF_PROTOCOL = "dynamo-video-binary-cmaf-v1"
 CMAF_METADATA_TAG = "cmaf:metadata"
