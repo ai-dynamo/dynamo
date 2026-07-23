@@ -10,6 +10,7 @@ import { CompatibilityHero } from "@/components/CompatibilityHero";
 import { FeatureHeatmap } from "@/components/FeatureHeatmap";
 import { BackendVersionMatrix } from "@/components/BackendVersionMatrix";
 import { CudaDriverMatrix } from "@/components/CudaDriverMatrix";
+import { RunsWhereWizard } from "@/components/RunsWhereWizard";
 
 <ReferenceStyles />
 
@@ -40,6 +41,12 @@ For extended driver compatibility beyond these minimums (forward compatibility, 
 <Accordion title="CUDA & driver requirements by release">
   <CudaDriverMatrix mode="all" />
 </Accordion>
+
+### What Runs Where
+
+Pick your backend and the CUDA generation your host driver supports to see which Dynamo releases you can run — and what to pull for the current one.
+
+<RunsWhereWizard />
 
 ## Platform Notes
 

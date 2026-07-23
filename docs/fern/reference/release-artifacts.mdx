@@ -9,6 +9,8 @@ import { ReferenceStyles } from "@/components/ReferenceStyles";
 import { ArtifactBrowser } from "@/components/ArtifactBrowser";
 import { ReleaseTimeline } from "@/components/ReleaseTimeline";
 import { EaCoverageDots } from "@/components/ModelEABuildCards";
+import { PinnedEnvironment } from "@/components/PinnedEnvironment";
+import { TagLookup } from "@/components/TagLookup";
 
 <ReferenceStyles />
 
@@ -23,6 +25,12 @@ See [Compatibility](compatibility.mdx) for hardware, platform, and backend featu
 <ArtifactBrowser />
 
 **CUDA and driver requirements:** for the CUDA toolkit versions and minimum drivers for each container image, see [Compatibility](compatibility.mdx#cuda--driver-requirements).
+
+### Pinned Environment
+
+One copy-paste block that pins every install path — the backend runtime container, frontend and operator images, Helm chart, and wheel — to the same release.
+
+<PinnedEnvironment />
 
 ## Known Issues
 
@@ -61,6 +69,12 @@ Full-platform preview of v1.3.0, cut from `main` after the TensorRT-LLM `1.3.0rc
 <EaCoverageDots version="v1.3.0-dev.1" />
 
 Complete runtime and component container matrix, `ai-dynamo` / `ai-dynamo-runtime` / `kvbm` wheels at `1.3.0.dev1` on pypi.nvidia.com, Rust crates at `1.3.0-dev.1` on crates.io, and the `dynamo-platform` and `snapshot` Helm charts.
+
+### Tag Lookup
+
+Reverse lookup for any tag on this page or in [Model Early Access Builds](model-early-access-builds.mdx): pick a tag to see the release or build it belongs to, the runtimes it applies to, and its status.
+
+<TagLookup />
 
 ## Release History
 

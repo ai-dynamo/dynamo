@@ -783,6 +783,12 @@ navigation:
             path: reference/model-early-access-builds.mdx
           - page: Glossary
             path: reference/glossary.md
+          # Machine-readable mirror of releases.data.ts for agents; reachable
+          # by URL and llms indexes, not the sidebar.
+          - page: Releases (machine-readable)
+            path: reference/releases-data.mdx
+            slug: releases-data
+            hidden: true
 
       # ==================== Kubernetes API variant ====================
       - title: Kubernetes API

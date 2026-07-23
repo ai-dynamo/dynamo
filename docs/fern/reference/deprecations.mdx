@@ -6,11 +6,16 @@ subtitle: Breaking changes, deprecations, and removals across Dynamo releases
 ---
 
 import { ReferenceStyles } from "@/components/ReferenceStyles";
+import { UpgradeSelector } from "@/components/UpgradeSelector";
 import { RELEASE_STATS } from "@/components/releases.data";
 
 <ReferenceStyles />
 
 This page is the ledger of breaking changes, behavioral changes, and deprecations and removals for each Dynamo release, mirrored verbatim from the GitHub release notes. Each entry carries a badge: <span className="dynref-badge dynref-badge--red">Removed</span> means the surface is gone, <span className="dynref-badge dynref-badge--amber">Deprecated</span> means it still works but emits warnings, and <span className="dynref-badge dynref-badge--blue">Behavioral</span> means defaults or behavior changed.
+
+Upgrading? Pick the version you run today to see the dependency migration and the exact reading list.
+
+<UpgradeSelector />
 
 <a id="v130"></a>
 

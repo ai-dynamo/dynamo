@@ -19,6 +19,11 @@
  * pills are neutral, target pills green — except when a pin pair is
  * identical, where the target pill stays neutral with an "unchanged" note
  * (no false green).
+ *
+ * The internals — buildRows, the migration strip, the reading-list footer,
+ * and the .dynref-up-* stylesheet (UpgradePanelStyles) — are exported for
+ * reuse by UpgradeSelector, which renders one pre-built panel body per
+ * from-line. The MDX-facing surface of UpgradePanel itself is unchanged.
  */
 
 import { RELEASES, CUDA_HISTORY, RELEASE_STATS, type BackendPins } from "./releases.data";
@@ -155,7 +160,7 @@ const PIN_ROWS: { key: PinKey; label: string }[] = [
   { key: "nixlVllm", label: "NIXL · vLLM" },
 ];
 
-interface MigrationRow {
+export interface MigrationRow {
   label: string;
   from: string;
   to: string;
@@ -172,7 +177,7 @@ function cudaRowsFor(versionTag: string) {
   return CUDA_HISTORY.filter((row) => row.version === version);
 }
 
-function buildRows(
+export function buildRows(
   fromTag: string,
   toTag: string,
   fromPins: BackendPins | undefined,
@@ -209,19 +214,21 @@ function buildRows(
   return rows;
 }
 
-export function UpgradePanel(props: {
-  toVersion: string;
-  fromVersion: { version: string; label: string };
-  readingList: { version: string; kind: "breaking" | "known-issues" }[];
-}) {
-  const from = RELEASES.find((r) => r.version === props.fromVersion.version);
-  const to = RELEASES.find((r) => r.version === props.toVersion);
+/* The .dynref-up-* stylesheet as a component, so UpgradeSelector can carry
+   the same visual vocabulary without duplicating the CSS. */
+export function UpgradePanelStyles() {
+  return <style>{UP_CSS}</style>;
+}
 
-  const rows = buildRows(props.fromVersion.version, props.toVersion, from?.pins, to?.pins);
+export interface ReadingItem {
+  version: string;
+  kind: "breaking" | "known-issues";
+}
 
-  /* Labels and hrefs derive from RELEASE_STATS + the shared "v1.3.0" -> "v130"
-     anchor rule (same as ReleaseHeader); versions without stats are skipped. */
-  const readingChips = props.readingList.flatMap((item) => {
+/* Labels and hrefs derive from RELEASE_STATS + the shared "v1.3.0" -> "v130"
+   anchor rule (same as ReleaseHeader); versions without stats are skipped. */
+export function buildReadingChips(readingList: ReadingItem[]): { label: string; href: string }[] {
+  return readingList.flatMap((item) => {
     const stats = RELEASE_STATS[item.version];
     if (!stats) return [];
     const anchor = item.version.replace(/\./g, "");
@@ -239,10 +246,73 @@ export function UpgradePanel(props: {
           },
         ];
   });
+}
+
+/* Migration strip — one from -> to row per pin, CUDA, and driver. Renders
+   nothing when there are no rows. */
+export function MigrationStrip({ rows }: { rows: MigrationRow[] }) {
+  if (rows.length === 0) return null;
+  return (
+    <div className="dynref-up-strip">
+      {rows.map((row) => {
+        const unchanged = row.from === row.to;
+        return (
+          <div className="dynref-up-row" key={row.label}>
+            <span className="dynref-up-rowlabel">{row.label}</span>
+            <span className="dynref-up-pill dynref-up-pill--src">{row.from}</span>
+            <span className="dynref-up-arrow">&#8594;</span>
+            <span
+              className={
+                unchanged
+                  ? "dynref-up-pill dynref-up-pill--src"
+                  : "dynref-up-pill dynref-up-pill--dst"
+              }
+            >
+              {row.to}
+            </span>
+            {unchanged && <span className="dynref-up-unchanged">unchanged</span>}
+            {row.badge && (
+              <span className="dynref-badge dynref-badge--red dynref-up-rowbadge">
+                {row.badge}
+              </span>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/* "Read before upgrading" footer — link chips derived from RELEASE_STATS.
+   Renders nothing when every item was skipped (no stats). */
+export function ReadingListFooter({ items }: { items: ReadingItem[] }) {
+  const readingChips = buildReadingChips(items);
+  if (readingChips.length === 0) return null;
+  return (
+    <div className="dynref-up-footer">
+      <span className="dynref-up-footerlabel">Read before upgrading</span>
+      {readingChips.map((item) => (
+        <a className="dynref-up-read" href={item.href} key={item.href}>
+          {item.label}
+        </a>
+      ))}
+    </div>
+  );
+}
+
+export function UpgradePanel(props: {
+  toVersion: string;
+  fromVersion: { version: string; label: string };
+  readingList: ReadingItem[];
+}) {
+  const from = RELEASES.find((r) => r.version === props.fromVersion.version);
+  const to = RELEASES.find((r) => r.version === props.toVersion);
+
+  const rows = buildRows(props.fromVersion.version, props.toVersion, from?.pins, to?.pins);
 
   return (
     <>
-      <style>{UP_CSS}</style>
+      <UpgradePanelStyles />
       <section className="dynref-panel">
         <div className="dynref-panel-header">
           <p className="dynref-h">Upgrade to {props.toVersion}</p>
@@ -252,46 +322,9 @@ export function UpgradePanel(props: {
           </div>
         </div>
 
-        {rows.length > 0 && (
-          <div className="dynref-up-strip">
-            {rows.map((row) => {
-              const unchanged = row.from === row.to;
-              return (
-                <div className="dynref-up-row" key={row.label}>
-                  <span className="dynref-up-rowlabel">{row.label}</span>
-                  <span className="dynref-up-pill dynref-up-pill--src">{row.from}</span>
-                  <span className="dynref-up-arrow">&#8594;</span>
-                  <span
-                    className={
-                      unchanged
-                        ? "dynref-up-pill dynref-up-pill--src"
-                        : "dynref-up-pill dynref-up-pill--dst"
-                    }
-                  >
-                    {row.to}
-                  </span>
-                  {unchanged && <span className="dynref-up-unchanged">unchanged</span>}
-                  {row.badge && (
-                    <span className="dynref-badge dynref-badge--red dynref-up-rowbadge">
-                      {row.badge}
-                    </span>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        )}
+        <MigrationStrip rows={rows} />
 
-        {readingChips.length > 0 && (
-          <div className="dynref-up-footer">
-            <span className="dynref-up-footerlabel">Read before upgrading</span>
-            {readingChips.map((item) => (
-              <a className="dynref-up-read" href={item.href} key={item.href}>
-                {item.label}
-              </a>
-            ))}
-          </div>
-        )}
+        <ReadingListFooter items={props.readingList} />
       </section>
     </>
   );
