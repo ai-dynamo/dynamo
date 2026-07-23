@@ -738,8 +738,7 @@ async def register_vllm_model(
     # Set topology and KV transfer policy for topology-aware routing
     apply_topology_config(runtime_config)
 
-    # Configure media decoder for frontend image decoding when enabled
-    # This enables frontend to decode images and transfer via NIXL RDMA
+    # Configure frontend media decoding and transfer via NIXL RDMA.
     media_decoder, media_fetcher = create_frontend_media_config(
         config.frontend_decoding
     )

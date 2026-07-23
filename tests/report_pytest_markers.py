@@ -201,6 +201,7 @@ STUB_MODULES = [
     "sglang.srt.utils",
     "sglang.srt.utils.hf_transformers_utils",
     "sglang.srt.utils.network",
+    "sglang.srt.utils.video_decoder",
     "sglang.srt.disaggregation",
     "sglang.srt.disaggregation.kv_events",
     "sglang.srt.disaggregation.utils",
@@ -316,6 +317,15 @@ def missing_categories(markers: Set[str]) -> List[str]:
 # --------------------------------------------------------------------------- #
 
 
+class _StubMeta(type):
+    def __getattr__(cls, attr):
+        if attr.startswith("__") and attr.endswith("__"):
+            raise AttributeError(attr)
+        sub = _make_stub_class(f"{cls.__name__}.{attr}")
+        setattr(cls, attr, sub)
+        return sub
+
+
 def _make_stub_class(name: str) -> type:
     """Permissive class usable as a base, a pydantic field type, or a callable.
 
@@ -325,14 +335,6 @@ def _make_stub_class(name: str) -> type:
     - __init_subclass__ tolerates arbitrary keyword args from typing tricks.
     - __get_pydantic_core_schema__ returns any_schema for pydantic field use.
     """
-
-    class _StubMeta(type):
-        def __getattr__(cls, attr):
-            if attr.startswith("__") and attr.endswith("__"):
-                raise AttributeError(attr)
-            sub = _make_stub_class(f"{cls.__name__}.{attr}")
-            setattr(cls, attr, sub)
-            return sub
 
     def _init(self, *args, **kwargs):  # type: ignore[no-untyped-def]
         pass

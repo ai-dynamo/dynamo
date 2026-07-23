@@ -14,6 +14,7 @@ from tests.utils.port_utils import allocate_port, deallocate_port
 # Shared constants for multimodal testing
 IMAGE_SERVER_PORT = allocate_port(8765)
 MULTIMODAL_IMG_URL = f"http://localhost:{IMAGE_SERVER_PORT}/llm-graphic.png"
+MULTIMODAL_VIDEO_URL = f"http://localhost:{IMAGE_SERVER_PORT}/240p_10.mp4"
 MULTIMODAL_VIDEO_PATH = os.path.join(
     WORKSPACE_DIR, "lib/llm/tests/data/media/240p_10.mp4"
 )

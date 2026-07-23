@@ -6,14 +6,18 @@ import logging
 import time
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
+import numpy as np
 import sglang as sgl
+import torch
 from PIL.Image import Image as PILImage
+from sglang.srt.utils.video_decoder import VideoDecoderWrapper
 
 from dynamo._core import Context
 from dynamo.common.backend import logprobs as _shared_logprobs
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.metadata_upload import MetadataUploader
 from dynamo.common.multimodal.image_loader import ImageLoader
+from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.sglang._compat import (
     filter_supported_async_generate_kwargs,
@@ -40,6 +44,59 @@ _SAMPLING_OPTION_FIELDS = (
     "top_k",
     "min_p",
 )
+
+
+class FrontendDecodedVideo(np.ndarray, VideoDecoderWrapper):
+    def __new__(
+        cls, video_frames: Any, video_metadata: Dict[str, Any]
+    ) -> "FrontendDecodedVideo":
+        video = np.ascontiguousarray(video_frames).view(cls)
+        duration = float(video_metadata.get("duration") or 0)
+        source_fps = float(video_metadata.get("fps") or 0)
+        # TODO: SGLang does not yet provide a model-independent contract for
+        # pre-sampled video inputs with source frame indices and timestamps. Use the
+        # effective FPS as a best-effort workaround until SGLang video processors can
+        # preserve the supplied sampling metadata and skip redundant temporal sampling.
+        effective_fps = len(video_frames) / duration if duration > 0 else source_fps
+        frame_indices = video_metadata.get("frames_indices")
+        if (
+            source_fps > 0
+            and frame_indices is not None
+            and len(frame_indices) == len(video_frames)
+            and len(frame_indices) > 1
+        ):
+            span_frames = float(frame_indices[-1]) - float(frame_indices[0])
+            if span_frames > 0:
+                effective_fps = (len(video_frames) - 1) * source_fps / span_frames
+        video._avg_fps = effective_fps
+        if video._avg_fps <= 0:
+            raise ValueError("Frontend-decoded video metadata must contain a valid fps")
+        return video
+
+    def __init__(self, video_frames: Any, video_metadata: Dict[str, Any]):
+        pass
+
+    def __array_finalize__(self, source: Any) -> None:
+        if source is not None:
+            self._avg_fps = getattr(source, "_avg_fps", 0.0)
+
+    @property
+    def avg_fps(self) -> float:
+        return self._avg_fps
+
+    def get_frames_as_tensor(self, indices: list[int]):
+        return torch.from_numpy(np.asarray(self)[indices])
+
+    def get_frames_at(self, indices: list[int]):
+        return np.asarray(self)[indices]
+
+    def close(self) -> None:
+        pass
+
+
+def _as_sglang_video(frames: Any, metadata: Dict[str, Any]) -> FrontendDecodedVideo:
+    """Expose transferred frames through SGLang's predecoded video contract."""
+    return FrontendDecodedVideo(frames, metadata)
 
 
 def _nvext_extra_field_requested(request: Dict[str, Any], field: str) -> bool:
@@ -158,9 +215,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             publisher: Metrics publisher for the worker.
             shutdown_event: Optional event to signal shutdown.
             generate_endpoint: The endpoint handle for discovery registration.
-            enable_frontend_decoding: If True, multimodal images arrive as
+            enable_frontend_decoding: If True, multimodal media arrives as
                 ``Decoded`` variants over NIXL RDMA from the Rust frontend
-                and must be read+converted to PIL before passing to SGLang.
+                and must be read before passing to SGLang.
                 Off by default; the worker keeps the URL-string fast path.
         """
         super().__init__(
@@ -180,9 +237,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         ] = self._resolve_routed_experts_kwargs(self.engine, self.config.server_args)
         self._enable_frontend_decoding = enable_frontend_decoding
         self._image_loader: Optional[ImageLoader] = None
+        self._video_loader: Optional[VideoLoader] = None
         if self._enable_frontend_decoding:
             # Lazy-inits a NIXL connector internally for Decoded variants.
             self._image_loader = ImageLoader(enable_frontend_decoding=True)
+            self._video_loader = VideoLoader(enable_frontend_decoding=True)
         self._mm_hashes_supported: bool = self._resolve_mm_hashes_supported(self.engine)
         if self.serving_mode == DisaggregationMode.DECODE:
             logging.info(
@@ -429,9 +488,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             # handles loading/preprocessing, and the scheduler does vision encoding.
             mm_data = request.get("multi_modal_data", {})
             audio_data = extract_media_urls(mm_data, AUDIO_URL_KEY)
-            video_data = extract_media_urls(mm_data, VIDEO_URL_KEY)
-
             image_data: list[str] | list[PILImage] | None
+            video_data: list[str] | list[FrontendDecodedVideo] | None
             if self._enable_frontend_decoding:
                 # Invariant from __init__: _image_loader is non-None iff
                 # _enable_frontend_decoding is True. Assert narrows the
@@ -442,8 +500,22 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     image_data = await self._image_loader.load_image_batch(image_items)
                 else:
                     image_data = None
+
+                video_items = mm_data.get(VIDEO_URL_KEY) or []
+                if video_items:
+                    assert self._video_loader is not None
+                    decoded_videos = await self._video_loader.load_video_batch(
+                        video_items
+                    )
+                    video_data = [
+                        _as_sglang_video(frames, metadata)
+                        for frames, metadata in decoded_videos
+                    ]
+                else:
+                    video_data = None
             else:
                 image_data = extract_media_urls(mm_data, IMAGE_URL_KEY)
+                video_data = extract_media_urls(mm_data, VIDEO_URL_KEY)
 
             trace_header = context.trace_headers() if self.enable_trace else None
 
