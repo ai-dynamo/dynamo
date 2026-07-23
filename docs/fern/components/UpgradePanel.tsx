@@ -227,7 +227,7 @@ export interface ReadingItem {
 
 /* Labels and hrefs derive from RELEASE_STATS + the shared "v1.3.0" -> "v130"
    anchor rule (same as ReleaseHeader); versions without stats are skipped. */
-export function buildReadingChips(readingList: ReadingItem[]): { label: string; href: string }[] {
+function buildReadingChips(readingList: ReadingItem[]): { label: string; href: string }[] {
   return readingList.flatMap((item) => {
     const stats = RELEASE_STATS[item.version];
     if (!stats) return [];

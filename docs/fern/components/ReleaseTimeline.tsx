@@ -3,15 +3,12 @@
  * SPDX-License-Identifier: Apache-2.0
  *
  * ReleaseTimeline — vertical timeline of every tracked release (newest first,
- * data order from releases.data.ts), followed by the crates.io first-
- * publication table. Node shape encodes the release kind: solid green =
- * stable, solid neutral = patch, dashed amber = platform preview /
- * model build.
- *
- * variant="artifacts" (default) keeps the artifact-delta blurbs and the
- * crates table — the Release Artifacts page. variant="notes" swaps stable
- * releases to their feature-voice notesSummary and suppresses the crates
- * table — the Release Notes overview.
+ * data order from releases.data.ts). Node shape encodes the release kind:
+ * solid green = stable, solid neutral = patch, dashed amber = platform
+ * preview / model build. Stable releases show their feature-voice
+ * notesSummary; others show their delta. The Release History landing page
+ * is the only consumer. (The crates.io first-publication table lives on
+ * Release Artifacts via the sibling CratesFirstPublished export.)
  *
  * Server component; shared vocabulary (headings, badges, mono) comes from
  * ReferenceStyles — place <ReferenceStyles /> on the page alongside this
@@ -182,20 +179,10 @@ const NODE_CLASS: Record<ReleaseKind, string> = {
   "model-build": "dynref-tl-node--preview",
 };
 
-type TimelineVariant = "artifacts" | "notes";
-
-function TimelineEntry({
-  release,
-  isLast,
-  variant,
-}: {
-  release: Release;
-  isLast: boolean;
-  variant: TimelineVariant;
-}) {
+function TimelineEntry({ release, isLast }: { release: Release; isLast: boolean }) {
   const badge = KIND_BADGE[release.kind];
   const summary =
-    variant === "notes" && release.kind === "stable"
+    release.kind === "stable"
       ? release.notesSummary ?? release.note ?? release.delta
       : release.delta ?? release.note;
   return (
@@ -230,7 +217,7 @@ function TimelineEntry({
   );
 }
 
-export function ReleaseTimeline({ variant = "artifacts" }: { variant?: TimelineVariant }) {
+export function ReleaseTimeline() {
   return (
     <>
       <style>{TL_CSS}</style>
@@ -240,7 +227,6 @@ export function ReleaseTimeline({ variant = "artifacts" }: { variant?: TimelineV
             key={release.version}
             release={release}
             isLast={index === RELEASES.length - 1}
-            variant={variant}
           />
         ))}
       </section>

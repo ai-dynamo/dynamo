@@ -79,6 +79,7 @@ REQUIRED_EXPORTS = [
     "RELEASES",
     "MAIN_TOT",
     "CURRENT_VERSION",
+    "CURRENT_DATE",
     "CURRENT_TAG",
     "CURRENT_WHEEL",
     "CUDA_HISTORY",
@@ -86,8 +87,10 @@ REQUIRED_EXPORTS = [
     "ARTIFACTS",
     "MODEL_EA_BUILDS",
     "PLATFORM",
+    "PLATFORM_PREVIEW_COVERAGE",
     "KNOWN_ARTIFACT_ISSUES",
     "CRATES_FIRST_PUBLISHED",
+    "RELEASE_STATS",
 ]
 
 
@@ -379,6 +382,119 @@ def feature_cell(fc: dict) -> str:
     return f"{label} ({note})" if note else label
 
 
+# ---------------------------------------------------------------------------
+# Shared section renderers (composed by both the per-page <llms-only> twins
+# and the machine-readable releases-data.mdx page; each returns a headerless
+# fragment so every call site can supply its own heading style).
+# ---------------------------------------------------------------------------
+
+
+def cuda_table(data: dict) -> str:
+    """CUDA toolkit and minimum-driver history table."""
+    rows = [
+        [r["version"], r["backend"], r["toolkit"], r["minDriver"], r.get("note")]
+        for r in data["CUDA_HISTORY"]
+    ]
+    return md_table(["Dynamo", "Backend", "CUDA Toolkit", "Min Driver", "Note"], rows)
+
+
+def feature_table(data: dict) -> str:
+    """Feature-support-by-backend table."""
+    rows = [
+        [
+            f["name"],
+            feature_cell(f["sglang"]),
+            feature_cell(f["trtllm"]),
+            feature_cell(f["vllm"]),
+        ]
+        for f in data["FEATURES"]
+    ]
+    return md_table(["Feature", "SGLang", "TensorRT-LLM", "vLLM"], rows)
+
+
+def artifact_table(data: dict) -> str:
+    """Artifact-inventory table."""
+    rows: list[list] = []
+    for art in data["ARTIFACTS"]:
+        name = art["name"]
+        if art.get("badge"):
+            name = f"{name} ({art['badge']})"
+        tags = "; ".join(f"`{t['clipboard']}`" for t in art.get("tags", []))
+        rows.append([art["category"], name, art["description"], art.get("meta"), tags])
+    return md_table(["Category", "Name", "Description", "Meta", "Tags / install"], rows)
+
+
+def known_issues_table(data: dict) -> str:
+    """Known-artifact-issues table."""
+    rows = [
+        [i["version"], i["artifact"], i["issue"], i["status"]]
+        for i in data["KNOWN_ARTIFACT_ISSUES"]
+    ]
+    return md_table(["Release", "Artifact", "Issue", "Status"], rows)
+
+
+def crates_table(data: dict) -> str:
+    """First-published-version-on-crates.io table."""
+    rows = [
+        [c["crate"], c["version"], c["date"]] for c in data["CRATES_FIRST_PUBLISHED"]
+    ]
+    return md_table(["Crate", "First version", "Date"], rows)
+
+
+def platform_lines(data: dict) -> str:
+    """Platform-support bullet lines (GPUs / OS / CSP / CPU arch / wheels)."""
+    plat = data["PLATFORM"]
+    lines = [f"- GPU architectures: {', '.join(plat['gpus'])}"]
+    for os_row in plat["os"]:
+        lines.append(
+            f"- OS: {os_row['name']} {os_row['version']} ({os_row['arch']}) — {os_row['status']}"
+        )
+    for csp in plat.get("csp", []):
+        lines.append(
+            f"- CSP: {csp['provider']} — {csp['os']} ({csp['arch']}) — {csp['status']}"
+        )
+    lines.append(f"- CPU architectures: {', '.join(plat['arch'])}")
+    if plat.get("wheelsNote"):
+        lines.append(f"- Wheels: {plat['wheelsNote']}")
+    return "\n".join(lines)
+
+
+def ea_table(data: dict) -> str:
+    """Model early-access builds table."""
+    rows: list[list] = []
+    for b in data["MODEL_EA_BUILDS"]:
+        cov = b["coverage"]
+        cov_cell = " / ".join(
+            "yes" if cov.get(k) else "no"
+            for k in ("images", "wheels", "helm", "crates")
+        )
+        rows.append(
+            [
+                b["model"],
+                f"`{b['tag']}`",
+                b["releaseLine"],
+                ", ".join(b["runtimes"]),
+                b["shipped"],
+                b["gaLabel"],
+                b["statusLine"],
+                cov_cell,
+            ]
+        )
+    return md_table(
+        [
+            "Model",
+            "Tag",
+            "Release line",
+            "Runtimes",
+            "Shipped",
+            "GA path",
+            "Status",
+            "Coverage (images / wheels / helm / crates)",
+        ],
+        rows,
+    )
+
+
 def render_compatibility(data: dict) -> str:
     parts: list[str] = []
     parts.append(
@@ -427,45 +543,17 @@ def render_compatibility(data: dict) -> str:
     )
 
     parts.append("**CUDA toolkit and minimum driver per Dynamo release**")
-    cuda_rows = [
-        [r["version"], r["backend"], r["toolkit"], r["minDriver"], r.get("note")]
-        for r in data["CUDA_HISTORY"]
-    ]
-    parts.append(
-        md_table(["Dynamo", "Backend", "CUDA Toolkit", "Min Driver", "Note"], cuda_rows)
-    )
+    parts.append(cuda_table(data))
     cuda_notes = data.get("CUDA_NOTES") or []
     if cuda_notes:
         parts.append("\n".join(f"- {note}" for note in cuda_notes))
 
     parts.append(f"**Feature support by backend ({data['CURRENT_VERSION']})**")
-    feature_rows = [
-        [
-            f["name"],
-            feature_cell(f["sglang"]),
-            feature_cell(f["trtllm"]),
-            feature_cell(f["vllm"]),
-        ]
-        for f in data["FEATURES"]
-    ]
-    parts.append(md_table(["Feature", "SGLang", "TensorRT-LLM", "vLLM"], feature_rows))
+    parts.append(feature_table(data))
 
     # Platform support (GPUs / OS / arch) — rendered by CompatibilityHero.
-    plat = data["PLATFORM"]
     parts.append("**Platform support**")
-    plat_lines = [f"- GPU architectures: {', '.join(plat['gpus'])}"]
-    for os_row in plat["os"]:
-        plat_lines.append(
-            f"- OS: {os_row['name']} {os_row['version']} ({os_row['arch']}) — {os_row['status']}"
-        )
-    for csp in plat.get("csp", []):
-        plat_lines.append(
-            f"- CSP: {csp['provider']} — {csp['os']} ({csp['arch']}) — {csp['status']}"
-        )
-    plat_lines.append(f"- CPU architectures: {', '.join(plat['arch'])}")
-    if plat.get("wheelsNote"):
-        plat_lines.append(f"- Wheels: {plat['wheelsNote']}")
-    parts.append("\n".join(plat_lines))
+    parts.append(platform_lines(data))
 
     return "\n\n".join(parts)
 
@@ -478,33 +566,13 @@ def render_release_artifacts(data: dict) -> str:
     )
 
     parts.append(f"**Artifact inventory ({data['CURRENT_VERSION']})**")
-    art_rows: list[list] = []
-    for art in data["ARTIFACTS"]:
-        name = art["name"]
-        if art.get("badge"):
-            name = f"{name} ({art['badge']})"
-        tags = "; ".join(f"`{t['clipboard']}`" for t in art.get("tags", []))
-        art_rows.append(
-            [art["category"], name, art["description"], art.get("meta"), tags]
-        )
-    parts.append(
-        md_table(
-            ["Category", "Name", "Description", "Meta", "Tags / install"], art_rows
-        )
-    )
+    parts.append(artifact_table(data))
 
     parts.append("**Known artifact issues**")
-    issue_rows = [
-        [i["version"], i["artifact"], i["issue"], i["status"]]
-        for i in data["KNOWN_ARTIFACT_ISSUES"]
-    ]
-    parts.append(md_table(["Release", "Artifact", "Issue", "Status"], issue_rows))
+    parts.append(known_issues_table(data))
 
     parts.append("**Crates: first published version on crates.io**")
-    crate_rows = [
-        [c["crate"], c["version"], c["date"]] for c in data["CRATES_FIRST_PUBLISHED"]
-    ]
-    parts.append(md_table(["Crate", "First version", "Date"], crate_rows))
+    parts.append(crates_table(data))
 
     return "\n\n".join(parts)
 
@@ -512,40 +580,7 @@ def render_release_artifacts(data: dict) -> str:
 def render_model_ea_builds(data: dict) -> str:
     parts: list[str] = []
     parts.append("**Model early-access builds**")
-    rows: list[list] = []
-    for b in data["MODEL_EA_BUILDS"]:
-        cov = b["coverage"]
-        cov_cell = " / ".join(
-            "yes" if cov.get(k) else "no"
-            for k in ("images", "wheels", "helm", "crates")
-        )
-        rows.append(
-            [
-                b["model"],
-                f"`{b['tag']}`",
-                b["releaseLine"],
-                ", ".join(b["runtimes"]),
-                b["shipped"],
-                b["gaLabel"],
-                b["statusLine"],
-                cov_cell,
-            ]
-        )
-    parts.append(
-        md_table(
-            [
-                "Model",
-                "Tag",
-                "Release line",
-                "Runtimes",
-                "Shipped",
-                "GA path",
-                "Status",
-                "Coverage (images / wheels / helm / crates)",
-            ],
-            rows,
-        )
-    )
+    parts.append(ea_table(data))
     return "\n\n".join(parts)
 
 
@@ -648,93 +683,25 @@ def render_releases_data(data: dict) -> str:
         parts.append("\n".join(summaries))
 
     parts.append("## CUDA toolkit and minimum driver history")
-    cuda_rows = [
-        [r["version"], r["backend"], r["toolkit"], r["minDriver"], r.get("note")]
-        for r in data["CUDA_HISTORY"]
-    ]
-    parts.append(
-        md_table(["Dynamo", "Backend", "CUDA Toolkit", "Min Driver", "Note"], cuda_rows)
-    )
+    parts.append(cuda_table(data))
     cuda_notes = data.get("CUDA_NOTES") or []
     if cuda_notes:
         parts.append("\n".join(f"- {note}" for note in cuda_notes))
 
     parts.append(f"## Feature support by backend ({data['CURRENT_VERSION']})")
-    feature_rows = [
-        [
-            f["name"],
-            feature_cell(f["sglang"]),
-            feature_cell(f["trtllm"]),
-            feature_cell(f["vllm"]),
-        ]
-        for f in data["FEATURES"]
-    ]
-    parts.append(md_table(["Feature", "SGLang", "TensorRT-LLM", "vLLM"], feature_rows))
+    parts.append(feature_table(data))
 
     parts.append(f"## Artifact inventory ({data['CURRENT_VERSION']})")
-    art_rows: list[list] = []
-    for art in data["ARTIFACTS"]:
-        name = art["name"]
-        if art.get("badge"):
-            name = f"{name} ({art['badge']})"
-        tags = "; ".join(f"`{t['clipboard']}`" for t in art.get("tags", []))
-        art_rows.append(
-            [art["category"], name, art["description"], art.get("meta"), tags]
-        )
-    parts.append(
-        md_table(
-            ["Category", "Name", "Description", "Meta", "Tags / install"], art_rows
-        )
-    )
+    parts.append(artifact_table(data))
 
     parts.append("## Known artifact issues")
-    issue_rows = [
-        [i["version"], i["artifact"], i["issue"], i["status"]]
-        for i in data["KNOWN_ARTIFACT_ISSUES"]
-    ]
-    parts.append(md_table(["Release", "Artifact", "Issue", "Status"], issue_rows))
+    parts.append(known_issues_table(data))
 
     parts.append("## Crates: first published version on crates.io")
-    crate_rows = [
-        [c["crate"], c["version"], c["date"]] for c in data["CRATES_FIRST_PUBLISHED"]
-    ]
-    parts.append(md_table(["Crate", "First version", "Date"], crate_rows))
+    parts.append(crates_table(data))
 
     parts.append("## Model early-access builds")
-    ea_rows: list[list] = []
-    for b in data["MODEL_EA_BUILDS"]:
-        cov = b["coverage"]
-        cov_cell = " / ".join(
-            "yes" if cov.get(k) else "no"
-            for k in ("images", "wheels", "helm", "crates")
-        )
-        ea_rows.append(
-            [
-                b["model"],
-                f"`{b['tag']}`",
-                b["releaseLine"],
-                ", ".join(b["runtimes"]),
-                b["shipped"],
-                b["gaLabel"],
-                b["statusLine"],
-                cov_cell,
-            ]
-        )
-    parts.append(
-        md_table(
-            [
-                "Model",
-                "Tag",
-                "Release line",
-                "Runtimes",
-                "Shipped",
-                "GA path",
-                "Status",
-                "Coverage (images / wheels / helm / crates)",
-            ],
-            ea_rows,
-        )
-    )
+    parts.append(ea_table(data))
 
     parts.append("## Platform-preview artifact coverage")
     ppc_rows = [
@@ -750,20 +717,7 @@ def render_releases_data(data: dict) -> str:
     parts.append(md_table(["Preview", "Images", "Wheels", "Helm", "Crates"], ppc_rows))
 
     parts.append("## Platform support")
-    plat = data["PLATFORM"]
-    plat_lines = [f"- GPU architectures: {', '.join(plat['gpus'])}"]
-    for os_row in plat["os"]:
-        plat_lines.append(
-            f"- OS: {os_row['name']} {os_row['version']} ({os_row['arch']}) — {os_row['status']}"
-        )
-    for csp in plat.get("csp", []):
-        plat_lines.append(
-            f"- CSP: {csp['provider']} — {csp['os']} ({csp['arch']}) — {csp['status']}"
-        )
-    plat_lines.append(f"- CPU architectures: {', '.join(plat['arch'])}")
-    if plat.get("wheelsNote"):
-        plat_lines.append(f"- Wheels: {plat['wheelsNote']}")
-    parts.append("\n".join(plat_lines))
+    parts.append(platform_lines(data))
 
     parts.append("## Release statistics")
     stat_rows = [
@@ -820,6 +774,9 @@ def build_json(data: dict) -> str:
         out = dict(b)
         out["shippedIso"] = iso_date(b["shipped"])
         ea_builds.append(out)
+
+    if not any("dateIso" in r for r in releases):
+        raise TSParseError("no dated RELEASES entries — cannot build releases.json")
 
     payload = {
         "source": "docs/fern/components/releases.data.ts",
