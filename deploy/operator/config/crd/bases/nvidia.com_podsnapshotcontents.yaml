@@ -111,6 +111,9 @@ spec:
                             annotation. v1alpha1 supports exactly one container; the cap is lifted when
                             the runtime supports multi-container capture.
                           items:
+                            maxLength: 63
+                            minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                             type: string
                           maxItems: 1
                           minItems: 1

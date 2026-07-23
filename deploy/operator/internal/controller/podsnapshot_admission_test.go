@@ -66,6 +66,20 @@ var _ = Describe("PodSnapshot containers admission", func() {
 		Expect(k8sClient.Delete(context.Background(), snap)).To(Succeed())
 	})
 
+	It("rejects a blank container name (items minLength)", func() {
+		err := k8sClient.Create(context.Background(), newPodSnapshot("snap-blank", []string{""}))
+		Expect(err).To(HaveOccurred())
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected an Invalid admission error, got %v", err)
+		Expect(err.Error()).To(ContainSubstring("containers"))
+	})
+
+	It("rejects a non-DNS-1123 container name (items pattern)", func() {
+		err := k8sClient.Create(context.Background(), newPodSnapshot("snap-badname", []string{"Bad_Name"}))
+		Expect(err).To(HaveOccurred())
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected an Invalid admission error, got %v", err)
+		Expect(err.Error()).To(ContainSubstring("containers"))
+	})
+
 	It("rejects missing containers (required)", func() {
 		// Build the object with the containers key genuinely absent (a nil slice would
 		// serialize as "containers": null, which exercises type validation, not the
@@ -119,6 +133,20 @@ var _ = Describe("PodSnapshotContent containers admission", func() {
 		content := newPodSnapshotContent("content-len1", []string{"main"})
 		Expect(k8sClient.Create(context.Background(), content)).To(Succeed())
 		Expect(k8sClient.Delete(context.Background(), content)).To(Succeed())
+	})
+
+	It("rejects a blank container name (items minLength)", func() {
+		err := k8sClient.Create(context.Background(), newPodSnapshotContent("content-blank", []string{""}))
+		Expect(err).To(HaveOccurred())
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected an Invalid admission error, got %v", err)
+		Expect(err.Error()).To(ContainSubstring("containers"))
+	})
+
+	It("rejects a non-DNS-1123 container name (items pattern)", func() {
+		err := k8sClient.Create(context.Background(), newPodSnapshotContent("content-badname", []string{"Bad_Name"}))
+		Expect(err).To(HaveOccurred())
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected an Invalid admission error, got %v", err)
+		Expect(err.Error()).To(ContainSubstring("containers"))
 	})
 
 	It("rejects missing containers (required)", func() {
