@@ -1086,7 +1086,7 @@ jobs:
     uses: ./.github/workflows/shared-deploy-test.yml
     with:
       framework: sglang
-      profiles: '["agg", "agg_logging", "agg_router"]'
+      profiles: '["agg", "agg_router"]'
       image_suffix: sglang-runtime
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
