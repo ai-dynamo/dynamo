@@ -4405,3 +4405,316 @@ article:has(.dynamo-blog-article) img.dynamo-blog-image-reveal[data-revealed="tr
     filter: none;
   }
 }
+
+/* Article masthead: Community-meeting contrast with the cover above the title. */
+article:has(.dynamo-blog-article) {
+  position: relative;
+  max-width: 940px !important;
+}
+
+article:has(.dynamo-blog-article) > header {
+  margin: 2.2rem 0 0;
+  padding:
+    calc(clamp(320px, 44vw, 430px) + 4.8rem)
+    clamp(1.5rem, 4vw, 3.25rem)
+    1.35rem;
+  border: 1px solid rgba(255, 255, 255, 0.1) !important;
+  border-bottom: 0 !important;
+  border-radius: 32px 32px 0 0;
+  background:
+    radial-gradient(circle at 15% 22%, rgba(118, 185, 0, 0.13), transparent 34%),
+    linear-gradient(rgba(118, 185, 0, 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(118, 185, 0, 0.035) 1px, transparent 1px),
+    #10120e;
+  background-size: auto, 38px 38px, 38px 38px, auto;
+  color: white;
+  box-shadow: 0 28px 90px rgba(0, 0, 0, 0.17);
+}
+
+article:has(.dynamo-blog-article) > header::before {
+  margin-bottom: 1.15rem;
+  color: #8ed600;
+}
+
+article:has(.dynamo-blog-article) > header .fern-page-heading {
+  color: white;
+}
+
+.dynamo-blog-article {
+  position: static;
+  margin: 0 0 clamp(4rem, 8vw, 6.5rem);
+  padding: 0 clamp(1.5rem, 4vw, 3.25rem) clamp(2rem, 5vw, 3.4rem);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-top: 0;
+  border-radius: 0 0 32px 32px;
+  background: #10120e;
+  color: white;
+  box-shadow: 0 34px 90px rgba(0, 0, 0, 0.17);
+}
+
+.dynamo-blog-cover {
+  position: absolute;
+  top: 3.6rem;
+  left: clamp(1.5rem, 4vw, 3.25rem);
+  right: clamp(1.5rem, 4vw, 3.25rem);
+  z-index: 3;
+  width: auto;
+  margin: 0;
+  box-shadow:
+    0 32px 72px rgba(0, 0, 0, 0.34),
+    inset 0 1px 0 rgba(255, 255, 255, 0.12);
+}
+
+.dynamo-blog-article__byline {
+  padding-top: 0.4rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.dynamo-blog-article__authors,
+.dynamo-blog-article__authors a {
+  color: rgba(255, 255, 255, 0.88);
+}
+
+.dynamo-blog-article__authors a:hover {
+  color: #a1dc38;
+}
+
+.dynamo-blog-article .dynamo-blog-meta-line {
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.dynamo-blog-article__category {
+  background: rgba(118, 185, 0, 0.17);
+  color: #a1dc38;
+}
+
+.dynamo-blog-author-avatar {
+  border-color: #10120e;
+  background: linear-gradient(145deg, rgba(142, 214, 0, 0.22), rgba(255, 255, 255, 0.07));
+  color: white !important;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.dynamo-blog-article__actions button,
+.dynamo-blog-article__actions a {
+  border-color: rgba(255, 255, 255, 0.15);
+  background: rgba(255, 255, 255, 0.045);
+  color: white !important;
+  backdrop-filter: blur(12px);
+}
+
+.dynamo-blog-article__actions button:hover,
+.dynamo-blog-article__actions a:hover {
+  border-color: rgba(142, 214, 0, 0.5);
+  background: rgba(118, 185, 0, 0.13);
+}
+
+/* Keep the reading surface neutral; the masthead carries the forced dark treatment. */
+article:has(.dynamo-blog-article) > p:first-of-type {
+  margin-top: 0;
+}
+
+@media (max-width: 680px) {
+  article:has(.dynamo-blog-article) > header {
+    margin-top: 1rem;
+    padding:
+      calc(420px + 3.6rem)
+      1.1rem
+      1.1rem;
+    border-radius: 22px 22px 0 0;
+  }
+
+  .dynamo-blog-cover {
+    top: 2.1rem;
+    left: 1.1rem;
+    right: 1.1rem;
+  }
+
+  .dynamo-blog-article {
+    padding: 0 1.1rem 1.5rem;
+    border-radius: 0 0 22px 22px;
+  }
+
+  .dynamo-blog-article__byline {
+    padding-top: 0.9rem;
+  }
+}
+
+/* Community CTA refinements. */
+.dynamo-community-app svg {
+  width: 1.72rem;
+  height: 1.72rem;
+  fill: currentColor;
+}
+
+.dynamo-community-app--calendar {
+  background: linear-gradient(145deg, #ff5a52, #e5241c);
+  color: white;
+}
+
+.dynamo-community-calendar__toolbar > a {
+  flex: none;
+  white-space: nowrap;
+}
+
+.dynamo-community-meeting__links a.is-primary,
+.dynamo-community-meeting__links a.is-secondary {
+  min-height: 4.8rem;
+  padding: 1rem 1.15rem;
+}
+
+.dynamo-community-meeting__links a.is-primary {
+  background: var(--dynamo-community-green);
+  color: #0a1300 !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.35);
+}
+
+.dynamo-community-meeting__links a.is-primary:hover {
+  background: var(--dynamo-community-green-bright);
+}
+
+.dynamo-community-meeting__links a.is-secondary {
+  background: rgba(255, 255, 255, 0.075);
+}
+
+.dynamo-community-meeting__links a.is-secondary:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.dynamo-community-meeting__links a.is-primary > span,
+.dynamo-community-meeting__links a.is-secondary > span {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.dynamo-community-meeting__links a.is-primary > span {
+  font-size: 0.88rem;
+}
+
+.dynamo-community-meeting__links a small {
+  color: rgba(255, 255, 255, 0.52);
+  font-size: 0.65rem;
+  font-weight: 500;
+}
+
+.dynamo-community-meeting__links a.is-primary small {
+  color: rgba(10, 19, 0, 0.68);
+}
+
+/* Wide editorial masthead: use the former TOC column for a shorter, cinematic cover. */
+body:has(.dynamo-blog-article) #fern-toc {
+  display: none !important;
+}
+
+article:has(.dynamo-blog-article) {
+  width: min(100%, 1120px) !important;
+  max-width: 1120px !important;
+}
+
+article:has(.dynamo-blog-article) > header {
+  padding-top: calc(clamp(245px, 24vw, 300px) + 4.5rem);
+}
+
+.dynamo-blog-cover {
+  min-height: clamp(245px, 24vw, 300px);
+}
+
+.dynamo-blog-cover__flow {
+  inset: 3.75rem clamp(2rem, 6vw, 5.5rem) 1.65rem;
+  gap: clamp(1rem, 3vw, 2.5rem);
+}
+
+.dynamo-blog-cover__node,
+.dynamo-blog-cover__node:nth-child(2) {
+  min-height: 6.7rem;
+  padding: 0.85rem 1rem;
+  border-radius: 16px;
+}
+
+.dynamo-blog-cover__node:nth-child(2) {
+  min-height: 7.8rem;
+}
+
+.dynamo-blog-cover__node strong {
+  font-size: clamp(1rem, 2vw, 1.35rem);
+}
+
+.dynamo-blog-cover__wordmark {
+  bottom: -24%;
+  font-size: clamp(10rem, 24vw, 17rem);
+}
+
+/* Keep long-form reading measure narrow while allowing mastheads and media to breathe. */
+article:has(.dynamo-blog-article) .fern-prose > *:not(.dynamo-blog-article) {
+  width: 100%;
+  max-width: 790px;
+  margin-inline: auto;
+}
+
+article:has(.dynamo-blog-article) .fern-prose > p:has(> img),
+article:has(.dynamo-blog-article) .fern-prose > figure,
+article:has(.dynamo-blog-article) .fern-prose > table,
+article:has(.dynamo-blog-article) .fern-prose > div:has(> table),
+article:has(.dynamo-blog-article) .fern-prose > div:has(> img) {
+  max-width: 1000px;
+}
+
+@media (max-width: 680px) {
+  article:has(.dynamo-blog-article) > header {
+    padding-top: calc(330px + 3.45rem);
+  }
+
+  .dynamo-blog-cover {
+    min-height: 330px;
+  }
+
+  .dynamo-blog-cover__flow {
+    inset: 3.7rem 0.85rem 0.85rem;
+    gap: 0.48rem;
+  }
+
+  .dynamo-blog-cover__node,
+  .dynamo-blog-cover__node:nth-child(2) {
+    min-height: 0;
+    padding: 0.68rem 0.8rem;
+    border-radius: 14px;
+  }
+
+  .dynamo-blog-cover__node strong {
+    margin-block: 0.2rem 0.4rem;
+  }
+}
+
+/* Let the cover run full-bleed across the masthead; title and metadata keep editorial margins. */
+.dynamo-blog-cover {
+  top: 2.2rem;
+  left: 0;
+  right: 0;
+  border-radius: 32px 32px 18px 18px;
+}
+
+@media (max-width: 680px) {
+  .dynamo-blog-cover {
+    top: 1rem;
+    left: 0;
+    right: 0;
+    border-radius: 22px 22px 16px 16px;
+  }
+}
+
+/* Fern mounts MDX inside one wrapper div; constrain that wrapper's children, not the wrapper itself. */
+article:has(.dynamo-blog-article) .fern-prose > div:has(> .dynamo-blog-article) > *:not(.dynamo-blog-article) {
+  width: 100%;
+  max-width: 790px;
+  margin-inline: auto;
+}
+
+article:has(.dynamo-blog-article) .fern-prose > div:has(> .dynamo-blog-article) > p:has(img),
+article:has(.dynamo-blog-article) .fern-prose > div:has(> .dynamo-blog-article) > figure,
+article:has(.dynamo-blog-article) .fern-prose > div:has(> .dynamo-blog-article) > table,
+article:has(.dynamo-blog-article) .fern-prose > div:has(> .dynamo-blog-article) > .fern-code-block,
+article:has(.dynamo-blog-article) .fern-prose > div:has(> .dynamo-blog-article) > div:has(> table),
+article:has(.dynamo-blog-article) .fern-prose > div:has(> .dynamo-blog-article) > div:has(img) {
+  max-width: 1000px;
+}
