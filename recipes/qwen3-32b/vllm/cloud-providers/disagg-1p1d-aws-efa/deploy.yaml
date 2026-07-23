@@ -1,0 +1,170 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Qwen3-32B BF16 disagg, 1 prefill + 1 decode, cross-node over AWS EFA.
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: q32b-1p1d-efa
+spec:
+  pvcs:
+  - create: false
+    name: shared-model-cache
+  services:
+    Frontend:
+      componentType: frontend
+      envs:
+        - name: HF_HOME
+          value: /shared-models
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.1
+          workingDir: /workspace
+      replicas: 1
+      resources:
+        requests: { cpu: "4" }
+        limits:   { cpu: "8" }
+      subComponentType: null
+      volumeMounts:
+      # Frontend needs read access to the model cache to register the model
+      # card (tokenizer config, max-context, chat template).
+      - name: shared-model-cache
+        mountPoint: /shared-models
+
+    VllmPrefillWorker:
+      componentType: worker
+      envFromSecret: hf-token-secret
+      extraPodMetadata:
+        annotations:
+          prometheus.io/scrape: "true"
+          prometheus.io/port: "19090"
+          prometheus.io/path: "/metrics"
+      extraPodSpec:
+        mainContainer:
+          command: [python3, -m, dynamo.vllm]
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1-efa-amd64
+          workingDir: /workspace
+          args:
+          - --model
+          - Qwen/Qwen3-32B
+          - --disaggregation-mode
+          - prefill
+          - --kv-transfer-config
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config":{"backends":["LIBFABRIC"]}}'
+          - --tensor-parallel-size
+          - '4'
+          - --no-enable-log-requests
+          - --gpu-memory-utilization
+          - '0.90'
+          - --async-scheduling
+          - --block-size
+          - '64'
+          - --hf-overrides
+          - '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768},"max_position_embeddings":131072}'
+          - --max-model-len
+          - '131072'
+          securityContext:
+            privileged: true
+            runAsUser: 0
+            capabilities:
+              add: [IPC_LOCK, SYS_PTRACE]
+          env:
+          # --- NIXL libfabric backend ---
+          - { name: DYN_KVBM_NIXL_BACKEND_LIBFABRIC, value: "true" }
+          - { name: DYN_KVBM_NIXL_BACKEND_UCX,       value: "false" }
+          - { name: NIXL_TELEMETRY_ENABLE,           value: "y" }
+          - { name: NIXL_TELEMETRY_EXPORTER,         value: "prometheus" }
+          - { name: NIXL_TELEMETRY_PROMETHEUS_PORT,  value: "19090" }
+          # --- libfabric EFA provider ---
+          - { name: FI_PROVIDER,               value: "efa" }
+          - { name: FI_EFA_USE_DEVICE_RDMA,    value: "1" }
+          - { name: FI_EFA_ENABLE_SHM_TRANSFER, value: "0" }
+          - { name: FI_LOG_LEVEL,              value: "warn" }
+          - { name: NCCL_DEBUG,                value: "WARN" }
+          # --- Dynamo / vLLM ---
+          - { name: DYN_HEALTH_CHECK_ENABLED,  value: "false" }
+          - { name: HF_HOME,                   value: /shared-models }
+          - { name: VLLM_LOGGING_LEVEL,        value: "INFO" }
+      replicas: 1
+      resources:
+        limits:
+          gpu: '4'
+          custom:
+            vpc.amazonaws.com/efa: "16"
+        requests:
+          gpu: '4'
+          custom:
+            vpc.amazonaws.com/efa: "16"
+            ephemeral-storage: "2Gi"
+      subComponentType: prefill
+      volumeMounts:
+      - name: shared-model-cache
+        mountPoint: /shared-models
+
+    VllmDecodeWorker:
+      componentType: worker
+      envFromSecret: hf-token-secret
+      extraPodMetadata:
+        annotations:
+          prometheus.io/scrape: "true"
+          prometheus.io/port: "19090"
+          prometheus.io/path: "/metrics"
+      extraPodSpec:
+        mainContainer:
+          command: [python3, -m, dynamo.vllm]
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1-efa-amd64
+          workingDir: /workspace
+          args:
+          - --model
+          - Qwen/Qwen3-32B
+          - --disaggregation-mode
+          - decode
+          - --kv-transfer-config
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config":{"backends":["LIBFABRIC"]}}'
+          - --tensor-parallel-size
+          - '4'
+          - --no-enable-log-requests
+          - --gpu-memory-utilization
+          - '0.90'
+          - --no-enable-prefix-caching
+          - --async-scheduling
+          - --block-size
+          - '64'
+          - --hf-overrides
+          - '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768},"max_position_embeddings":131072}'
+          - --max-model-len
+          - '131072'
+          securityContext:
+            privileged: true
+            runAsUser: 0
+            capabilities:
+              add: [IPC_LOCK, SYS_PTRACE]
+          env:
+          - { name: DYN_KVBM_NIXL_BACKEND_LIBFABRIC, value: "true" }
+          - { name: DYN_KVBM_NIXL_BACKEND_UCX,       value: "false" }
+          - { name: NIXL_TELEMETRY_ENABLE,           value: "y" }
+          - { name: NIXL_TELEMETRY_EXPORTER,         value: "prometheus" }
+          - { name: NIXL_TELEMETRY_PROMETHEUS_PORT,  value: "19090" }
+          - { name: FI_PROVIDER,                value: "efa" }
+          - { name: FI_EFA_USE_DEVICE_RDMA,     value: "1" }
+          - { name: FI_EFA_ENABLE_SHM_TRANSFER, value: "0" }
+          - { name: FI_LOG_LEVEL,               value: "warn" }
+          - { name: NCCL_DEBUG,                 value: "WARN" }
+          - { name: DYN_HEALTH_CHECK_ENABLED,   value: "false" }
+          - { name: HF_HOME,                    value: /shared-models }
+          - { name: VLLM_LOGGING_LEVEL,         value: "INFO" }
+      replicas: 1
+      resources:
+        limits:
+          gpu: '4'
+          custom:
+            vpc.amazonaws.com/efa: "16"
+        requests:
+          gpu: '4'
+          custom:
+            vpc.amazonaws.com/efa: "16"
+            ephemeral-storage: "2Gi"
+      subComponentType: decode
+      volumeMounts:
+      - name: shared-model-cache
+        mountPoint: /shared-models
