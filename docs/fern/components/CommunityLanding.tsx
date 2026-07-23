@@ -118,37 +118,6 @@ function FontAwesomeIcon({ name }: { name: keyof typeof FONT_AWESOME_ICONS }) {
   );
 }
 
-const PARTICIPATION = [
-  {
-    index: "01",
-    title: "Ask and answer",
-    copy: "Bring deployment questions, share what worked, and help other builders move forward.",
-    href: "https://github.com/ai-dynamo/dynamo/discussions",
-    cta: "Open Discussions",
-  },
-  {
-    index: "02",
-    title: "Contribute",
-    copy: "Improve code, docs, examples, integrations, and the day-to-day developer experience.",
-    href: "/dynamo/dev/contributing/contribution-guide",
-    cta: "Read the contribution guide",
-  },
-  {
-    index: "03",
-    title: "Shape the roadmap",
-    copy: "Propose substantial changes through Dynamo Enhancement Proposals and review ideas in progress.",
-    href: "https://github.com/ai-dynamo/enhancements",
-    cta: "Explore enhancements",
-  },
-  {
-    index: "04",
-    title: "Share your work",
-    copy: "Show the community what you are building, measuring, or learning with Dynamo.",
-    href: NOTES_URL,
-    cta: "Add a meeting topic",
-  },
-] as const;
-
 function Arrow({ diagonal = false }: { diagonal?: boolean }) {
   return (
     <svg viewBox="0 0 20 20" aria-hidden="true">
@@ -169,12 +138,8 @@ function buildMonthCells(year: number, month: number) {
     ...Array.from({ length: count }, (_, index) => index + 1),
   ];
 
-  while (cells.length % 7 !== 0 || cells.length < 42) cells.push(null);
+  while (cells.length % 7 !== 0) cells.push(null);
   return cells;
-}
-
-function eventDay(event: DynamoEvent) {
-  return Number(event.day);
 }
 
 function FullCalendar() {
@@ -187,19 +152,20 @@ function FullCalendar() {
   const eventsByDay = new Map<number, DynamoEvent[]>();
 
   events.forEach((event) => {
-    const day = eventDay(event);
+    const day = Number(event.day);
     eventsByDay.set(day, [...(eventsByDay.get(day) ?? []), event]);
   });
 
   return (
     <section className="dynamo-community-calendar" aria-labelledby="community-calendar-title">
-      <div className="dynamo-community-calendar__toolbar">
+      <div className="dynamo-community-section-heading">
         <div>
-          <p className="dynamo-community-kicker">Community calendar</p>
-          <h2 id="community-calendar-title">See where the community meets next</h2>
+          <p className="dynamo-community-eyebrow">Community calendar</p>
+          <h2 id="community-calendar-title">Upcoming events</h2>
+          <p>Meetups, community calls, and other opportunities to connect with Dynamo contributors.</p>
         </div>
-        <a href={CALENDAR_URL} target="_blank" rel="noreferrer">
-          Open calendar <Arrow diagonal />
+        <a className="dynamo-community-button" href={CALENDAR_URL} target="_blank" rel="noreferrer">
+          Open full calendar <Arrow diagonal />
         </a>
       </div>
 
@@ -243,14 +209,14 @@ function FullCalendar() {
         <div>
           {UPCOMING_EVENTS.length > 0 ? UPCOMING_EVENTS.slice(0, 3).map((event) => (
             <a href={event.addUrl} target="_blank" rel="noreferrer" key={`${event.start}-${event.title}`}>
-              <span><strong>{event.month}</strong>{event.day}</span>
-              <span><strong>{event.title}</strong><small>{event.dateLabel}{event.location ? ` · ${event.location}` : ''}</small></span>
+              <span className="dynamo-community-event-date"><strong>{event.month}</strong>{event.day}</span>
+              <span className="dynamo-community-event-copy"><strong>{event.title}</strong><small>{event.dateLabel}{event.location ? ` · ${event.location}` : ''}</small></span>
               <Arrow diagonal />
             </a>
           )) : (
             <a href={CALENDAR_URL} target="_blank" rel="noreferrer">
-              <span><strong>NEW</strong>+</span>
-              <span><strong>More events are on the way</strong><small>Follow the public calendar for updates.</small></span>
+              <span className="dynamo-community-event-date"><strong>New</strong>+</span>
+              <span className="dynamo-community-event-copy"><strong>More events are on the way</strong><small>Follow the public calendar for updates.</small></span>
               <Arrow diagonal />
             </a>
           )}
@@ -260,116 +226,80 @@ function FullCalendar() {
   );
 }
 
-export function CommunityLanding() {
+function CommunityChannels() {
   return (
-    <div className="dynamo-community-page">
-      <section className="dynamo-community-hero">
-        <div className="dynamo-community-hero__copy">
-          <p className="dynamo-community-kicker"><span /> Open source, in the open</p>
-          <h1>Build the future of inference, together.</h1>
-          <p className="dynamo-community-hero__lede">
-            Meet the people building Dynamo, trade hard-won lessons, and help shape an open inference platform.
-          </p>
-          <div className="dynamo-community-actions">
-            <a className="is-primary" href="https://communityinviter.com/apps/cloud-native/cncf" target="_blank" rel="noreferrer">
-              Join on Slack <Arrow />
-            </a>
-            <a href="https://github.com/ai-dynamo/dynamo" target="_blank" rel="noreferrer">
-              Explore on GitHub <Arrow diagonal />
-            </a>
-          </div>
-        </div>
-
-        <div className="dynamo-community-launcher" aria-label="Community channels">
-          <div className="dynamo-community-launcher__bar">
-            <span /><span /><span />
-            <p>Community</p>
-          </div>
-          <div className="dynamo-community-launcher__grid">
-            {CHANNELS.map((channel) => (
-              <a href={channel.href} target="_blank" rel="noreferrer" key={channel.name}>
-                <span className={`dynamo-community-app dynamo-community-app--${channel.tone}`}>
-                  <FontAwesomeIcon name={channel.icon} />
-                </span>
-                <strong>{channel.name}</strong>
-                <small>{channel.label}</small>
-              </a>
-            ))}
-          </div>
-        </div>
-      </section>
-
-      <div className="dynamo-community-marquee" aria-label="Ways to participate">
+    <section className="dynamo-community-channels" aria-labelledby="community-channels-title">
+      <div className="dynamo-community-section-heading">
         <div>
-          <span>Ask questions</span><i />
-          <span>Review ideas</span><i />
-          <span>Share benchmarks</span><i />
-          <span>Build integrations</span><i />
-          <span>Improve docs</span><i />
-          <span>Meet maintainers</span><i />
-          <span aria-hidden="true">Ask questions</span><i aria-hidden="true" />
-          <span aria-hidden="true">Review ideas</span><i aria-hidden="true" />
-          <span aria-hidden="true">Share benchmarks</span><i aria-hidden="true" />
+          <p className="dynamo-community-eyebrow">Community links</p>
+          <h2 id="community-channels-title">Find the right channel</h2>
+          <p>Follow project work, ask questions, join live conversations, or catch up on recordings.</p>
         </div>
       </div>
 
-      <FullCalendar />
-
-      <section className="dynamo-community-participate" aria-labelledby="participate-title">
-        <div className="dynamo-community-section-heading">
-          <p className="dynamo-community-kicker">Choose your path in</p>
-          <h2 id="participate-title">There is more than one way to contribute</h2>
-          <p>Start with the part of the project and community that matches how you want to help.</p>
+      <div className="dynamo-community-channels__window">
+        <div className="dynamo-community-window-bar" aria-hidden="true">
+          <span className="dynamo-community-window-dots"><i /><i /><i /></span>
+          <strong>Community</strong>
+          <span />
         </div>
-        <div className="dynamo-community-participate__grid">
-          {PARTICIPATION.map((item) => (
-            <a href={item.href} target={item.href.startsWith('http') ? '_blank' : undefined} rel={item.href.startsWith('http') ? 'noreferrer' : undefined} key={item.index}>
-              <span>{item.index}</span>
-              <h3>{item.title}</h3>
-              <p>{item.copy}</p>
-              <strong>{item.cta} <Arrow /></strong>
+        <div className="dynamo-community-channels__grid">
+          {CHANNELS.map((channel) => (
+            <a href={channel.href} target="_blank" rel="noreferrer" key={channel.name}>
+              <span className={`dynamo-community-app dynamo-community-app--${channel.tone}`}>
+                <FontAwesomeIcon name={channel.icon} />
+              </span>
+              <span><strong>{channel.name}</strong><small>{channel.label}</small></span>
+              <Arrow diagonal />
             </a>
           ))}
         </div>
-      </section>
+      </div>
+    </section>
+  );
+}
 
-      <section className="dynamo-community-meeting" aria-labelledby="meeting-title">
-        <div className="dynamo-community-meeting__date" aria-hidden="true">
-          <span>WED</span>
+export function CommunityLanding() {
+  return (
+    <div className="dynamo-community-page">
+      <section className="dynamo-community-meeting" aria-labelledby="community-meeting-title">
+        <div className="dynamo-community-meeting__cadence" aria-hidden="true">
+          <span>Every Wednesday</span>
           <strong>10:30</strong>
-          <small>AM PT</small>
+          <small>AM Pacific Time</small>
         </div>
         <div className="dynamo-community-meeting__copy">
-          <p className="dynamo-community-kicker">Weekly community meeting</p>
-          <h2 id="meeting-title">Bring a question. Leave with context.</h2>
-          <p>
-            Join maintainers and contributors every Wednesday for project updates, design discussions, demos, and open Q&amp;A.
-          </p>
-          <div className="dynamo-community-meeting__links">
-            <a className="is-primary" href={MEETING_URL} target="_blank" rel="noreferrer">
-              <span>Join Google Meet<small>Enter the weekly community call</small></span>
-              <Arrow diagonal />
+          <p className="dynamo-community-eyebrow">Weekly community meeting</p>
+          <h2 id="community-meeting-title">Join the project conversation</h2>
+          <p>Meet maintainers and contributors for project updates, design discussions, demos, and open Q&amp;A.</p>
+          <div className="dynamo-community-meeting__actions">
+            <a className="dynamo-community-button is-primary" href={MEETING_URL} target="_blank" rel="noreferrer">
+              Join Google Meet <Arrow diagonal />
             </a>
-            <a className="is-secondary" href={NOTES_URL} target="_blank" rel="noreferrer">
-              <span>Agenda and notes<small>Add a topic or follow along</small></span>
-              <Arrow diagonal />
+            <a className="dynamo-community-button" href={NOTES_URL} target="_blank" rel="noreferrer">
+              Agenda and notes <Arrow diagonal />
             </a>
-            <a className="is-utility" href="https://www.youtube.com/@ai-dynamo-community" target="_blank" rel="noreferrer">Watch recordings <Arrow diagonal /></a>
-            <a className="is-utility" href={INVITE_URL} target="_blank" rel="noreferrer">Download .ics <Arrow diagonal /></a>
+            <a className="dynamo-community-text-link" href={INVITE_URL} target="_blank" rel="noreferrer">
+              Download calendar invite <Arrow diagonal />
+            </a>
           </div>
         </div>
       </section>
 
-      <section className="dynamo-community-cncf">
-        <div className="dynamo-community-cncf__mark" aria-hidden="true">CNCF</div>
+      <FullCalendar />
+      <CommunityChannels />
+
+      <section className="dynamo-community-contribute" aria-labelledby="community-contribute-title">
         <div>
-          <p className="dynamo-community-kicker">Part of the cloud native ecosystem</p>
-          <h2>Open source works best when the doors stay open.</h2>
-          <p>
-            Dynamo participates in the Cloud Native Computing Foundation ecosystem. Join the conversation, learn in public, and help build durable infrastructure for generative AI.
-          </p>
+          <p className="dynamo-community-eyebrow">Contribute</p>
+          <h2 id="community-contribute-title">Help improve Dynamo</h2>
+          <p>Contribute code or documentation, propose a larger change, or bring a topic to the community meeting.</p>
         </div>
-        <a href="https://www.cncf.io/about/join/" target="_blank" rel="noreferrer">Learn about CNCF <Arrow diagonal /></a>
+        <ul>
+          <li><a href="/dynamo/dev/contributing/contribution-guide">Contribution guide <Arrow /></a></li>
+          <li><a href="https://github.com/ai-dynamo/enhancements" target="_blank" rel="noreferrer">Enhancement proposals <Arrow diagonal /></a></li>
+          <li><a href={NOTES_URL} target="_blank" rel="noreferrer">Add a meeting topic <Arrow diagonal /></a></li>
+        </ul>
       </section>
     </div>
   );

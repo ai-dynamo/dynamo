@@ -88,69 +88,29 @@ function ArticleArt({ variant }: { variant: string }) {
 }
 
 export function BlogLanding() {
-  const featured = ARTICLES[3];
-
   return (
     <div className="dynamo-blog-home">
-      <section className="dynamo-blog-hero">
-        <div className="dynamo-blog-hero__eyebrow">
-          <span /> NVIDIA Dynamo Blog
-        </div>
-        <h1>Ideas, systems, and stories behind fast inference</h1>
-        <p>
-          Engineering deep dives, architecture notes, and project updates from
-          the people building NVIDIA Dynamo.
-        </p>
-        <div className="dynamo-blog-hero__actions">
-          <a className="dynamo-blog-button dynamo-blog-button--primary" href="#latest">
-            Explore the latest
-            <ArrowIcon />
-          </a>
-          <a
-            className="dynamo-blog-button dynamo-blog-button--secondary"
-            href="https://github.com/ai-dynamo/dynamo/subscription"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Subscribe on GitHub
-          </a>
-        </div>
-      </section>
-
-      <section className="dynamo-blog-feature" aria-labelledby="featured-story">
-        <a className="dynamo-blog-feature__art-link" href={featured.href} tabIndex={-1} aria-hidden="true">
-          <ArticleArt variant={featured.art} />
-        </a>
-        <div className="dynamo-blog-feature__copy">
-          <span className="dynamo-blog-kicker">Featured story</span>
-          <h2 id="featured-story">
-            <a href={featured.href}>{featured.title}</a>
-          </h2>
-          <p>{featured.description}</p>
-          <div className="dynamo-blog-meta-line">
-            <span>{featured.date}</span>
-            <span aria-hidden="true">·</span>
-            <span>{featured.readTime}</span>
-            <span aria-hidden="true">·</span>
-            <span>{featured.category}</span>
-          </div>
-          <a className="dynamo-blog-text-link" href={featured.href}>
-            Read the story <ArrowIcon />
-          </a>
-        </div>
-      </section>
-
       <section className="dynamo-blog-latest" id="latest" aria-labelledby="latest-heading">
         <div className="dynamo-blog-section-heading">
           <div>
             <span className="dynamo-blog-kicker">From the team</span>
             <h2 id="latest-heading">Latest articles</h2>
           </div>
-          <p>Technical perspectives on distributed inference, performance, and the Dynamo ecosystem.</p>
+          <div className="dynamo-blog-section-heading__aside">
+            <p>Technical perspectives on distributed inference, performance, and the Dynamo ecosystem.</p>
+            <a
+              className="dynamo-blog-button dynamo-blog-button--secondary"
+              href="https://github.com/ai-dynamo/dynamo/subscription"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Subscribe on GitHub
+            </a>
+          </div>
         </div>
 
         <div className="dynamo-blog-grid">
-          {ARTICLES.filter((article) => article.href !== featured.href).map((article) => (
+          {ARTICLES.map((article) => (
             <article className="dynamo-blog-card" key={article.href}>
               <a className="dynamo-blog-card__art-link" href={article.href} tabIndex={-1} aria-hidden="true">
                 <ArticleArt variant={article.art} />
@@ -172,22 +132,6 @@ export function BlogLanding() {
             </article>
           ))}
         </div>
-      </section>
-
-      <section className="dynamo-blog-subscribe">
-        <div>
-          <span className="dynamo-blog-kicker">Keep up with Dynamo</span>
-          <h2>Follow new releases, research, and engineering notes</h2>
-        </div>
-        <a
-          className="dynamo-blog-button dynamo-blog-button--primary"
-          href="https://github.com/ai-dynamo/dynamo/subscription"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          Subscribe
-          <ArrowIcon />
-        </a>
       </section>
     </div>
   );

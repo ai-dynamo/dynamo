@@ -155,6 +155,7 @@ navigation:
 
           - section: Auto Deployment
             icon: wand-magic-sparkles
+            collapsed: open-by-default
             contents:
               - page: DGDR Walkthrough
                 path: kubernetes/dgdr-guide.md
