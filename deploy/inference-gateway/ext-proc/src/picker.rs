@@ -8,6 +8,26 @@
 //! routing decision.
 
 use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
+
+/// Format an endpoint without losing the delimiters required by IPv6.
+///
+/// Kubernetes pod IPs are IP literals, while external endpoint lists may also
+/// contain hostnames. Keep the existing hostname behavior and use
+/// `SocketAddr` whenever both fields are valid socket-address components.
+pub(crate) fn format_address_port(address: &str, port: &str) -> String {
+    let parsed_ip = address
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(address)
+        .parse::<IpAddr>();
+    let parsed_port = port.parse::<u16>();
+
+    match (parsed_ip, parsed_port) {
+        (Ok(ip), Ok(port)) => SocketAddr::new(ip, port).to_string(),
+        _ => format!("{address}:{port}"),
+    }
+}
 
 /// Endpoint represents a model server pod endpoint available for serving requests.
 /// Mirrors Go `epplight.Endpoint` in pkg/lwepp/datastore/datastore.go
@@ -24,9 +44,9 @@ pub struct Endpoint {
 }
 
 impl Endpoint {
-    /// Returns the endpoint in "ip:port" format.
+    /// Returns the endpoint in socket-address format.
     pub fn address_port(&self) -> String {
-        format!("{}:{}", self.address, self.port)
+        format_address_port(&self.address, &self.port)
     }
 }
 
