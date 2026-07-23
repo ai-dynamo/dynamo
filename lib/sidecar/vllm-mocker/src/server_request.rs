@@ -4,7 +4,6 @@
 use std::collections::BTreeMap;
 
 use dynamo_mocker::common::protocols::DirectRequest;
-use dynamo_mocker::live::MAX_BUFFERED_OUTPUT_SIGNALS;
 use dynamo_vllm_grpc as pb;
 use prost_types::{ListValue, Struct, Value, value::Kind};
 use tonic::Status;
@@ -13,7 +12,9 @@ use uuid::Uuid;
 use super::{BoxedStatusResult, DP_RANK, MockerServerConfig, ServerMode};
 
 pub(super) const DEFAULT_MAX_NEW_TOKENS: u32 = 20;
-pub(super) const MAX_NEW_TOKENS: u32 = MAX_BUFFERED_OUTPUT_SIGNALS as u32;
+// Bound the request-owned synthetic token plan independently of LiveEngine's
+// fixed per-request delivery buffer.
+pub(super) const MAX_NEW_TOKENS: u32 = 32_768;
 const MAX_CANDIDATES: usize = 20;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
