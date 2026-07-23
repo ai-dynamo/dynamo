@@ -20,7 +20,7 @@ Without the event wiring described below, offloading still works inside each wor
 
 ## Support Matrix
 
-Status legend: ✅ validated end to end · ⚠️ expected to work, not yet validated · ❌ not yet supported.
+Status legend: ✅ validated end to end · ⚠️ available but not yet validated end to end · 🚧 Dynamo integration in progress · ❌ not yet supported.
 
 | Combination | Status | Notes |
 | --- | --- | --- |
@@ -30,7 +30,8 @@ Status legend: ✅ validated end to end · ⚠️ expected to work, not yet vali
 | Disaggregated serving (`MultiConnector`: `NixlConnector` + `OffloadingConnector`) | ⚠️ | vLLM tests this composition upstream; not yet validated behind the Dynamo KV router. |
 | Tensor parallelism (TP > 1) | ⚠️ | Events are published once per engine and the CPU pool is sharded across TP workers by design; not yet validated end to end. |
 | Models with sliding-window or Mamba/SSM layers | ⚠️ | Offloading works; self-describing events cover full-attention KV cache groups only, so the router sees a subset of CPU-resident blocks. |
-| Disk and multi-tier offloading (`TieringOffloadingSpec`) | ❌ | Router-usable events for tiers other than CPU are not available in a released vLLM. |
+| Disk and multi-tier offloading (`TieringOffloadingSpec`) | ⚠️ | Router-usable events are available on the vLLM main branch. Use vLLM v0.26.0 or later once released. |
+| Shared-pool routing | 🚧 | The vLLM main branch publishes optional locality metadata on FS and OBJ events. Dynamo shared-pool indexing is in progress. |
 
 ## Requirements
 
@@ -38,6 +39,7 @@ Status legend: ✅ validated end to end · ⚠️ expected to work, not yet vali
 > Router-visible CPU offloading requires **vLLM v0.24.0 or later** and **Dynamo 1.3.0 or later**.
 >
 > - vLLM v0.24.0 adds self-describing KV events for the `OffloadingConnector`, opt-in via `"self_describing_kv_events": true`. Earlier versions publish placeholder CPU events with no token payload, which the router cannot index.
+> - The vLLM main branch adds router-usable multi-tier events and optional FS/OBJ locality metadata. Use vLLM v0.26.0 or later once released.
 > - Dynamo 1.3.0 maps vLLM's `medium=CPU` events to the router's host tier and adds the `--router-host-cache-hit-weight` and `--router-disk-cache-hit-weight` flags.
 
 Running an older vLLM or an older Dynamo fails silently: serving continues normally and no error is raised — the router just never learns about the CPU tier. Use [Verification](#verification) to confirm the wiring end to end.
