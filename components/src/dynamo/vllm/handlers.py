@@ -1031,6 +1031,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         # Default names used by base _resolve_lora_request(); specialized
         # handlers can override these fields after super().__init__.
         self._served_model_name = config.served_model_name or config.model
+        self._served_model_aliases = tuple(config.served_model_aliases or ())
         self.engine_args = config.engine_args
         self._lora_state = LoRAState()
         # Adapters known to have been handed to vLLM. Prefill registration is
@@ -1971,6 +1972,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         **Contract for subclasses**: This method requires the following attributes
         to be defined by subclasses:
         - `self._served_model_name` (str): The model name served by this worker
+        - `self._served_model_aliases` (tuple[str, ...]): Additional served-model aliases that should resolve to the base model
         - `self.engine_args.model` (str): The base model path/name from engine args
         - `self._lora_enabled()` (method): Returns bool indicating if LoRA is enabled
 
@@ -1980,7 +1982,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         """
         return self._lora_state.resolve_request(
             model_name,
-            base_model_names=(self._served_model_name, self.engine_args.model),
+            base_model_names=(
+                self._served_model_name,
+                self.engine_args.model,
+                *self._served_model_aliases,
+            ),
             lora_enabled=self._lora_enabled,
         )
 

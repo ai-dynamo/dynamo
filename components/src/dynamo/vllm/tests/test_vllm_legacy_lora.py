@@ -60,6 +60,7 @@ def _make_prefill_handler():
 
     handler.engine_args = handler.config.engine_args
     handler._served_model_name = "llama2-7b"
+    handler._served_model_aliases = ("llama2-7b-alias",)
     handler._lora_state = LoRAState()
     handler._engine_loaded_loras = set()
     return handler
@@ -305,6 +306,13 @@ async def test_legacy_prefill_request_rejects_adapter_unloaded_before_admission(
         )
 
     assert "adapterA was unloaded before vLLM admission" in caplog.text
+
+
+def test_resolve_lora_request_treats_served_alias_as_base_model_when_enabled():
+    handler = _make_prefill_handler()
+    handler.config.engine_args.enable_lora = True
+
+    assert handler._resolve_lora_request("llama2-7b-alias") is None
 
 
 @pytest.mark.asyncio

@@ -350,3 +350,37 @@ async def test_lora_registration_persists_base_and_lora_model_cards(temp_file_st
         assert lora_cards[0]["model_suffix"] == "adaptera"
     finally:
         rt.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_tensor_registration_preserves_distinct_source_path(temp_file_store):
+    rt = _runtime()
+    try:
+        ep = rt.endpoint("test.tensor_source_path.generate")
+        await ep.register_endpoint_instance()
+
+        await register_model(
+            ModelInput.Tensor,
+            ModelType.TensorBased,
+            ep,
+            "/models/base",
+            model_name="served-name",
+            worker_type=WorkerType.Aggregated,
+        )
+
+        model_card_files = sorted(pathlib.Path(temp_file_store).glob("v1/mdc/**/*"))
+        model_card_json = [
+            json.loads(path.read_text()) for path in model_card_files if path.is_file()
+        ]
+
+        matching_cards = [
+            card
+            for card in model_card_json
+            if card["card_json"]["display_name"] == "served-name"
+        ]
+
+        assert len(matching_cards) == 1
+        assert matching_cards[0]["card_json"]["source_path"] == "/models/base"
+        assert "lora" not in matching_cards[0]["card_json"]
+    finally:
+        rt.shutdown()
