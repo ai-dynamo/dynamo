@@ -133,7 +133,7 @@ html.dark,
     --pst-color-accent: var(--nv-color-green);
 }
 
-/* Product and version selector styling */
+/* Version selector styling */
 
 /* Fern simulates emphasis on active navigation labels with a text stroke.
    NVIDIA Sans renders that stroke as a doubled glyph, so use font weight instead. */
@@ -141,192 +141,6 @@ html.dark,
 .fern-sidebar-link[data-state="active"] .fern-sidebar-link-title-inner {
     -webkit-text-stroke: 0 !important;
     font-weight: 600;
-}
-
-/* Fern's toggle product switcher provides the pill-shaped top-level navigation. */
-.fern-product-selector {
-    border-radius: var(--rounded);
-}
-
-/* Docs stays first in docs.yml to preserve the unprefixed versioned URLs.
-   Reorder only the selector presentation so the global Home link appears first. */
-.fern-product-selector[data-testid="product-toggle"] > :nth-child(1),
-.fern-product-selector-radio-group > :nth-child(1) {
-    order: 2;
-}
-
-.fern-product-selector[data-testid="product-toggle"] > :nth-child(2),
-.fern-product-selector-radio-group > :nth-child(2) {
-    order: 1;
-}
-
-.fern-product-selector[data-testid="product-toggle"] > :nth-child(3),
-.fern-product-selector-radio-group > :nth-child(3) {
-    order: 3;
-}
-
-.fern-product-selector[data-testid="product-toggle"] > :nth-child(4),
-.fern-product-selector-radio-group > :nth-child(4) {
-    order: 4;
-}
-
-/* Tab variant selector
-
-   Fern tab variants only expose a dropdown. custom.js replaces configured
-   variant dropdowns with this vertical, always-visible, version-aware selector. */
-#fern-sidebar .fern-variant-selector {
-    position: absolute !important;
-    width: 1px !important;
-    height: 1px !important;
-    overflow: hidden !important;
-    clip-path: inset(50%) !important;
-    opacity: 0 !important;
-    pointer-events: none !important;
-}
-
-/* Reserve space while custom.js attaches. This prevents Fern's dropdown from
-   flashing during initial navigation. */
-#fern-sidebar
-    .relative:has(> .fern-variant-selector):not(:has(> .dynamo-variant-selector))::before {
-    display: block;
-    width: auto;
-    height: 84px;
-    margin: 0 0.75rem 0.75rem;
-    border-radius: 10px;
-    background: linear-gradient(
-        100deg,
-        var(--grayscale-3) 20%,
-        var(--grayscale-4) 40%,
-        var(--grayscale-3) 60%
-    );
-    background-size: 200% 100%;
-    content: "";
-    animation: dynamo-variant-selector-loading 1.2s ease-in-out infinite;
-}
-
-@keyframes dynamo-variant-selector-loading {
-    from {
-        background-position: 100% 0;
-    }
-    to {
-        background-position: -100% 0;
-    }
-}
-
-.dynamo-variant-selector {
-    --dynamo-variant-row-height: 38px;
-    --dynamo-variant-row-gap: 2px;
-    --dynamo-variant-active-index: 0;
-    position: relative;
-    display: flex;
-    flex-direction: column;
-    gap: var(--dynamo-variant-row-gap);
-    width: auto;
-    margin: 0 0.75rem 0.75rem;
-    padding: 3px;
-    border: 0 !important;
-    border-radius: 10px;
-    outline: 0 !important;
-    background: var(--grayscale-3);
-    box-shadow: none !important;
-    isolation: isolate;
-}
-
-/* The active surface uses the same colors as Fern's product toggle. */
-.dynamo-variant-selector::before {
-    position: absolute;
-    z-index: 0;
-    top: 3px;
-    right: 3px;
-    left: 3px;
-    height: var(--dynamo-variant-row-height);
-    border-radius: 6px;
-    background: var(--background);
-    content: "";
-    transform: translateY(
-        calc(
-            var(--dynamo-variant-active-index) *
-                (var(--dynamo-variant-row-height) + var(--dynamo-variant-row-gap))
-        )
-    );
-    transition: transform 140ms ease;
-}
-
-.dynamo-variant-selector-option {
-    position: relative;
-    z-index: 1;
-    display: flex;
-    min-width: 0;
-    height: var(--dynamo-variant-row-height);
-    align-items: center;
-    gap: 0.5rem;
-    padding: 0.25rem 0.55rem;
-    border-radius: 6px;
-    color: var(--grayscale-11);
-    font-size: 0.8125rem;
-    font-weight: 600;
-    line-height: 1.25;
-    text-decoration: none !important;
-    transition: background-color 140ms ease, color 140ms ease;
-}
-
-.dynamo-variant-selector-option[data-state="inactive"]:hover {
-    background: var(--grayscale-4);
-}
-
-.dynamo-variant-selector-option[data-state="active"] {
-    color: var(--grayscale-12);
-}
-
-.dynamo-variant-selector-option:focus-visible {
-    background: var(--grayscale-4);
-    outline: none;
-}
-
-.dark .dynamo-variant-selector {
-    background: var(--grayscale-4);
-}
-
-.dark .dynamo-variant-selector::before {
-    background: var(--grayscale-6);
-}
-
-.dark .dynamo-variant-selector-option[data-state="inactive"]:hover,
-.dark .dynamo-variant-selector-option:focus-visible {
-    background: var(--grayscale-5);
-}
-
-.dynamo-variant-selector-icon {
-    display: flex;
-    width: 24px;
-    height: 24px;
-    flex: 0 0 auto;
-    align-items: center;
-    justify-content: center;
-    color: currentColor;
-}
-
-.dynamo-variant-selector-icon svg {
-    width: 16px;
-    height: 16px;
-    fill: currentColor;
-}
-
-.dynamo-variant-selector-label {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
-@media (prefers-reduced-motion: reduce) {
-    #fern-sidebar
-        .relative:has(> .fern-variant-selector):not(:has(> .dynamo-variant-selector))::before {
-        animation: none;
-    }
-
-    .dynamo-variant-selector::before {
-        transition: none;
-    }
 }
 
 .fern-version-selector {
@@ -369,16 +183,6 @@ html.dark,
 /* Section-level sidebar links (pages that have children) should match sidebar heading padding */
 .fern-sidebar-group > li > .fern-sidebar-link:has(+ .fern-sidebar-group) {
     padding-left: 0.25rem !important;
-}
-/* Top-level section headings (e.g. Getting Started, Installation, Model
-   Deployment, Operations) in the User Guide's Kubernetes and Local CLI
-   variants should match the pre-variant fixed headers. Scope the heavier
-   weight to the User Guide selector so ungrouped Reference pages stay at the
-   normal sidebar weight. */
-#fern-sidebar:has(.dynamo-variant-selector[data-selector-configuration="user-guide"])
-    .fern-sidebar-link.fern-sidebar-level-1
-    .fern-sidebar-link-title {
-    font-weight: 600 !important;
 }
 .fern-sidebar-group{
     padding: 0 !important
@@ -3380,8 +3184,8 @@ body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group-level-1 a[href$
 body:has(.dynamo-blog-home) #fern-sidebar .fern-sidebar-group-level-1 a[href$="/flash-indexer"]::before,
 body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group-level-1 a[href$="/flash-indexer"]::before { content: "FEB 23"; }
 
-body:has(.dynamo-blog-home) #fern-sidebar .fern-sidebar-group-level-1 a[href*="/dynamo/blog/"]::before,
-body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group-level-1 a[href*="/dynamo/blog/"]::before {
+body:has(.dynamo-blog-home) #fern-sidebar .fern-sidebar-group-level-1 a[href*="/dynamo/dev/digest/"]::before,
+body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group-level-1 a[href*="/dynamo/dev/digest/"]::before {
   display: block;
   margin-bottom: 0.18rem;
   color: var(--dynamo-blog-green);
@@ -3421,8 +3225,8 @@ body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group {
   gap: 0.35rem;
 }
 
-body:has(.dynamo-blog-home) #fern-sidebar .fern-sidebar-group > li > a[href="/dynamo/blog"],
-body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group > li > a[href="/dynamo/blog"] {
+body:has(.dynamo-blog-home) #fern-sidebar .fern-sidebar-group > li > a[href="/dynamo/dev/digest"],
+body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group > li > a[href="/dynamo/dev/digest"] {
   position: relative;
   min-height: 4.2rem;
   align-items: flex-start;
@@ -3437,8 +3241,8 @@ body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group > li > a[href="
   color: var(--dynamo-blog-ink);
 }
 
-body:has(.dynamo-blog-home) #fern-sidebar a[href="/dynamo/blog"] > svg,
-body:has(.dynamo-blog-article) #fern-sidebar a[href="/dynamo/blog"] > svg {
+body:has(.dynamo-blog-home) #fern-sidebar a[href="/dynamo/dev/digest"] > svg,
+body:has(.dynamo-blog-article) #fern-sidebar a[href="/dynamo/dev/digest"] > svg {
   width: 1.15rem;
   height: 1.15rem;
   margin-top: 0.08rem;
@@ -3449,8 +3253,8 @@ body:has(.dynamo-blog-article) #fern-sidebar a[href="/dynamo/blog"] > svg {
   color: #0b1400;
 }
 
-body:has(.dynamo-blog-home) #fern-sidebar a[href="/dynamo/blog"] .fern-sidebar-link-title-inner,
-body:has(.dynamo-blog-article) #fern-sidebar a[href="/dynamo/blog"] .fern-sidebar-link-title-inner {
+body:has(.dynamo-blog-home) #fern-sidebar a[href="/dynamo/dev/digest"] .fern-sidebar-link-title-inner,
+body:has(.dynamo-blog-article) #fern-sidebar a[href="/dynamo/dev/digest"] .fern-sidebar-link-title-inner {
   display: flex;
   flex-direction: column;
   gap: 0.28rem;
@@ -3459,8 +3263,8 @@ body:has(.dynamo-blog-article) #fern-sidebar a[href="/dynamo/blog"] .fern-sideba
   letter-spacing: -0.015em;
 }
 
-body:has(.dynamo-blog-home) #fern-sidebar a[href="/dynamo/blog"] .fern-sidebar-link-title-inner::after,
-body:has(.dynamo-blog-article) #fern-sidebar a[href="/dynamo/blog"] .fern-sidebar-link-title-inner::after {
+body:has(.dynamo-blog-home) #fern-sidebar a[href="/dynamo/dev/digest"] .fern-sidebar-link-title-inner::after,
+body:has(.dynamo-blog-article) #fern-sidebar a[href="/dynamo/dev/digest"] .fern-sidebar-link-title-inner::after {
   content: "2026  ·  ENGINEERING STORIES";
   color: var(--dynamo-blog-muted);
   font-size: 0.58rem;
@@ -4024,8 +3828,8 @@ article:has(.dynamo-community-page) > header {
 }
 
 /* Blog archive refinement: remove the literal timeline and use soft editorial rows. */
-body:has(.dynamo-blog-home) #fern-sidebar .fern-sidebar-group > li > a[href="/dynamo/blog"],
-body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group > li > a[href="/dynamo/blog"] {
+body:has(.dynamo-blog-home) #fern-sidebar .fern-sidebar-group > li > a[href="/dynamo/dev/digest"],
+body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group > li > a[href="/dynamo/dev/digest"] {
   border-color: transparent;
   background:
     radial-gradient(circle at 92% 5%, rgba(118, 185, 0, 0.18), transparent 46%),
@@ -4036,8 +3840,8 @@ body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group > li > a[href="
   backdrop-filter: blur(14px);
 }
 
-.dark body:has(.dynamo-blog-home) #fern-sidebar .fern-sidebar-group > li > a[href="/dynamo/blog"],
-.dark body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group > li > a[href="/dynamo/blog"] {
+.dark body:has(.dynamo-blog-home) #fern-sidebar .fern-sidebar-group > li > a[href="/dynamo/dev/digest"],
+.dark body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group > li > a[href="/dynamo/dev/digest"] {
   background:
     radial-gradient(circle at 92% 5%, rgba(118, 185, 0, 0.2), transparent 46%),
     linear-gradient(135deg, rgba(118, 185, 0, 0.1), rgba(255, 255, 255, 0.025));
@@ -4736,8 +4540,8 @@ article:has(.dynamo-blog-article) {
 }
 
 /* The landing page is a normal nav entry; the archive year supplies hierarchy. */
-body:has(.dynamo-blog-home) #fern-sidebar a[href="/dynamo/blog"],
-body:has(.dynamo-blog-article) #fern-sidebar a[href="/dynamo/blog"] {
+body:has(.dynamo-blog-home) #fern-sidebar a[href="/dynamo/dev/digest"],
+body:has(.dynamo-blog-article) #fern-sidebar a[href="/dynamo/dev/digest"] {
   min-height: 2.8rem;
   align-items: center;
   margin: 0.2rem 0.35rem 0.65rem;
@@ -4749,21 +4553,21 @@ body:has(.dynamo-blog-article) #fern-sidebar a[href="/dynamo/blog"] {
   backdrop-filter: none;
 }
 
-body:has(.dynamo-blog-home) #fern-sidebar a[href="/dynamo/blog"]:hover,
-body:has(.dynamo-blog-article) #fern-sidebar a[href="/dynamo/blog"]:hover,
-body:has(.dynamo-blog-home) #fern-sidebar a[href="/dynamo/blog"][data-state="active"],
-body:has(.dynamo-blog-article) #fern-sidebar a[href="/dynamo/blog"][data-state="active"] {
+body:has(.dynamo-blog-home) #fern-sidebar a[href="/dynamo/dev/digest"]:hover,
+body:has(.dynamo-blog-article) #fern-sidebar a[href="/dynamo/dev/digest"]:hover,
+body:has(.dynamo-blog-home) #fern-sidebar a[href="/dynamo/dev/digest"][data-state="active"],
+body:has(.dynamo-blog-article) #fern-sidebar a[href="/dynamo/dev/digest"][data-state="active"] {
   background: linear-gradient(90deg, rgba(118, 185, 0, 0.12), rgba(118, 185, 0, 0.025));
   box-shadow: inset 2px 0 0 rgba(118, 185, 0, 0.8);
 }
 
-body:has(.dynamo-blog-home) #fern-sidebar a[href="/dynamo/blog"] > svg,
-body:has(.dynamo-blog-article) #fern-sidebar a[href="/dynamo/blog"] > svg {
+body:has(.dynamo-blog-home) #fern-sidebar a[href="/dynamo/dev/digest"] > svg,
+body:has(.dynamo-blog-article) #fern-sidebar a[href="/dynamo/dev/digest"] > svg {
   display: none;
 }
 
-body:has(.dynamo-blog-home) #fern-sidebar a[href="/dynamo/blog"] .fern-sidebar-link-title-inner,
-body:has(.dynamo-blog-article) #fern-sidebar a[href="/dynamo/blog"] .fern-sidebar-link-title-inner {
+body:has(.dynamo-blog-home) #fern-sidebar a[href="/dynamo/dev/digest"] .fern-sidebar-link-title-inner,
+body:has(.dynamo-blog-article) #fern-sidebar a[href="/dynamo/dev/digest"] .fern-sidebar-link-title-inner {
   display: block;
   font-size: 0.8rem;
   font-weight: 720;
@@ -4771,8 +4575,8 @@ body:has(.dynamo-blog-article) #fern-sidebar a[href="/dynamo/blog"] .fern-sideba
   letter-spacing: 0;
 }
 
-body:has(.dynamo-blog-home) #fern-sidebar a[href="/dynamo/blog"] .fern-sidebar-link-title-inner::after,
-body:has(.dynamo-blog-article) #fern-sidebar a[href="/dynamo/blog"] .fern-sidebar-link-title-inner::after {
+body:has(.dynamo-blog-home) #fern-sidebar a[href="/dynamo/dev/digest"] .fern-sidebar-link-title-inner::after,
+body:has(.dynamo-blog-article) #fern-sidebar a[href="/dynamo/dev/digest"] .fern-sidebar-link-title-inner::after {
   content: none;
 }
 
@@ -4802,23 +4606,23 @@ body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-link-title-inner {
 }
 
 /* Keep Latest visibly clickable without presenting it as another section masthead. */
-body:has(.dynamo-blog-home) #fern-sidebar .fern-sidebar-group > li > a[href="/dynamo/blog"],
-body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group > li > a[href="/dynamo/blog"] {
+body:has(.dynamo-blog-home) #fern-sidebar .fern-sidebar-group > li > a[href="/dynamo/dev/digest"],
+body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group > li > a[href="/dynamo/dev/digest"] {
   background: transparent !important;
   box-shadow: none !important;
 }
 
-body:has(.dynamo-blog-home) #fern-sidebar .fern-sidebar-group > li > a[href="/dynamo/blog"]:hover,
-body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group > li > a[href="/dynamo/blog"]:hover,
-body:has(.dynamo-blog-home) #fern-sidebar .fern-sidebar-group > li > a[href="/dynamo/blog"][data-state="active"],
-body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group > li > a[href="/dynamo/blog"][data-state="active"] {
+body:has(.dynamo-blog-home) #fern-sidebar .fern-sidebar-group > li > a[href="/dynamo/dev/digest"]:hover,
+body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group > li > a[href="/dynamo/dev/digest"]:hover,
+body:has(.dynamo-blog-home) #fern-sidebar .fern-sidebar-group > li > a[href="/dynamo/dev/digest"][data-state="active"],
+body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group > li > a[href="/dynamo/dev/digest"][data-state="active"] {
   background: linear-gradient(90deg, rgba(118, 185, 0, 0.11), rgba(118, 185, 0, 0.02)) !important;
   box-shadow: inset 2px 0 0 rgba(118, 185, 0, 0.78) !important;
 }
 
 /* Nested Fern links use their anchor ::before for the active indicator; dates live with the title. */
-body:has(.dynamo-blog-home) #fern-sidebar a[href*="/dynamo/blog/"]::before,
-body:has(.dynamo-blog-article) #fern-sidebar a[href*="/dynamo/blog/"]::before {
+body:has(.dynamo-blog-home) #fern-sidebar a[href*="/dynamo/dev/digest/"]::before,
+body:has(.dynamo-blog-article) #fern-sidebar a[href*="/dynamo/dev/digest/"]::before {
   content: "" !important;
 }
 
@@ -4835,8 +4639,8 @@ body:has(.dynamo-blog-article) #fern-sidebar a[href$="/agentic-inference"] .fern
 body:has(.dynamo-blog-home) #fern-sidebar a[href$="/flash-indexer"] .fern-sidebar-link-title-inner::before,
 body:has(.dynamo-blog-article) #fern-sidebar a[href$="/flash-indexer"] .fern-sidebar-link-title-inner::before { content: "FEB 23"; }
 
-body:has(.dynamo-blog-home) #fern-sidebar a[href*="/dynamo/blog/"] .fern-sidebar-link-title-inner,
-body:has(.dynamo-blog-article) #fern-sidebar a[href*="/dynamo/blog/"] .fern-sidebar-link-title-inner {
+body:has(.dynamo-blog-home) #fern-sidebar a[href*="/dynamo/dev/digest/"] .fern-sidebar-link-title-inner,
+body:has(.dynamo-blog-article) #fern-sidebar a[href*="/dynamo/dev/digest/"] .fern-sidebar-link-title-inner {
   display: flex !important;
   overflow: visible !important;
   flex-direction: column;
@@ -4846,8 +4650,8 @@ body:has(.dynamo-blog-article) #fern-sidebar a[href*="/dynamo/blog/"] .fern-side
   -webkit-line-clamp: unset;
 }
 
-body:has(.dynamo-blog-home) #fern-sidebar a[href*="/dynamo/blog/"] .fern-sidebar-link-title-inner::before,
-body:has(.dynamo-blog-article) #fern-sidebar a[href*="/dynamo/blog/"] .fern-sidebar-link-title-inner::before {
+body:has(.dynamo-blog-home) #fern-sidebar a[href*="/dynamo/dev/digest/"] .fern-sidebar-link-title-inner::before,
+body:has(.dynamo-blog-article) #fern-sidebar a[href*="/dynamo/dev/digest/"] .fern-sidebar-link-title-inner::before {
   display: block;
   color: var(--dynamo-blog-green);
   font-size: 0.57rem;

@@ -14,11 +14,15 @@
 # limitations under the License.
 
 # Navigation structure for Dynamo docs
-# Documentation tabs: User Guide, Features, Walkthroughs, Recipes, Developer Guide, and Reference.
-# Home, Blog, and Community are separate products configured in docs.yml. Each documentation
-# tab sets skip-slug: true so page URLs stay independent of the tab that contains them.
+# Tab-based navigation: Home, User Guide, Features, Walkthroughs, Recipes, Developer Guide,
+# Reference, Blog, and Community. Each content tab sets skip-slug: true so page URLs stay
+# independent of which tab contains them. The Recipes tab keeps its recipes/ URL prefix.
 
 tabs:
+  home:
+    display-name: Home
+    icon: house
+    skip-slug: true
   user-guide:
     display-name: User Guide
     icon: book-open
@@ -42,8 +46,21 @@ tabs:
     display-name: Reference
     icon: book
     skip-slug: true
+  blog:
+    display-name: Blog
+    icon: newspaper
+    skip-slug: true
+  community:
+    display-name: Community
+    icon: users
+    skip-slug: true
 
 navigation:
+  - tab: home
+    layout:
+      - page: Welcome
+        path: ./welcome.mdx
+
   - tab: user-guide
     variants:
       # ==================== Kubernetes Deployment variant ====================
@@ -856,3 +873,36 @@ navigation:
             path: api/nixl-connect/operation-status.mdx
           - page: RDMA Metadata
             path: api/nixl-connect/rdma-metadata.mdx
+
+  - tab: blog
+    layout:
+      - section: Blog
+        icon: newspaper
+        path: digest/index.mdx
+        slug: digest
+        contents:
+          # Keep this archive in reverse chronological order. Publication dates are
+          # rendered in each article header and on the custom landing page.
+          - page: "DynoSim Pareto Frontier"
+            path: digest/dynosim/dynosim-pareto-frontier.mdx
+            slug: dynosim-pareto-frontier
+          - page: "Dynamo Snapshot"
+            path: digest/snapshot/dynamo-snapshot-fast-startup.mdx
+            slug: dynamo-snapshot-fast-startup
+          - page: "TokenSpeed Day 0 Support"
+            path: digest/tokenspeed/tokenspeed-day-0.mdx
+            slug: tokenspeed-day-0
+          - page: "Agentic Harness Support"
+            path: digest/agentic-inference/agentic-harnesses.mdx
+            slug: agentic-harnesses
+          - page: "Agentic Inference Optimizations"
+            path: digest/agentic-inference/agentic-inference.mdx
+            slug: agentic-inference
+          - page: "Flash Indexer"
+            path: digest/flash-indexer/flash-indexer.mdx
+            slug: flash-indexer
+
+  - tab: community
+    layout:
+      - page: Community
+        path: community/README.mdx

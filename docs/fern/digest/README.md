@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Adding a Blog Post
 
-Follow these steps to publish a post in the Dynamo Blog product.
+Follow these steps to publish a post in the Dynamo Blog tab.
 
 ## Step 1: Write the Post
 
@@ -54,16 +54,16 @@ images in the article body receive the standard focus-to-sharp scroll reveal aut
 
 ## Step 2: Add the Post to the Blog Navigation
 
-Open `docs/fern/products/blog.yml` and add the post at the correct position in the reverse-chronological list:
+Open `docs/fern/index.yml`, find the `blog` tab, and add the post at the correct position in the reverse-chronological list:
 
 ```yaml
 contents:
   - page: Your Blog Post Title
-    path: ../digest/my-post/my-post.mdx
+    path: digest/my-post/my-post.mdx
     slug: my-post
 ```
 
-Keep the explicit `slug` stable after publication. The public URL is `/dynamo/blog/my-post`.
+Keep the explicit `slug` stable after publication. The public URL is `/dynamo/dev/digest/my-post`.
 
 ## Step 3: Add the Post to the Landing Page
 
@@ -73,7 +73,7 @@ Open `docs/fern/components/BlogLanding.tsx` and add an entry to `ARTICLES` in re
 {
   title: "Your Blog Post Title",
   description: "A concise summary of the post.",
-  href: "/dynamo/blog/my-post",
+  href: "/dynamo/dev/digest/my-post",
   date: "July 22, 2026",
   readTime: "8 min read",
   category: "Engineering",
@@ -92,7 +92,7 @@ Add the post date to the Blog archive selectors in `docs/fern/main.css`. Scope t
 - [ ] MDX post includes SPDX frontmatter and metadata
 - [ ] `BlogArticleMeta` includes author, publication date, category, and reading time
 - [ ] Generated cover labels and category palette fit the article
-- [ ] Post is added to `products/blog.yml` in reverse chronological order
+- [ ] Post is added to the `blog` tab in `index.yml` in reverse chronological order
 - [ ] Post is added to `BlogLanding.tsx`
 - [ ] Sidebar date label is added to `main.css`
 - [ ] Internal links include the `.mdx` extension

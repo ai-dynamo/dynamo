@@ -8,7 +8,7 @@ const ARTICLES = [
     title: "DynoSim: Simulating the Pareto Frontier",
     description:
       "Explore serving configurations with a workload-driven Dynamo simulator before committing scarce GPU time to cluster validation.",
-    href: "/dynamo/blog/dynosim-pareto-frontier",
+    href: "/dynamo/dev/digest/dynosim-pareto-frontier",
     date: "May 29, 2026",
     readTime: "1 min read",
     category: "Simulation",
@@ -18,7 +18,7 @@ const ARTICLES = [
     title: "NVIDIA Dynamo Snapshot: Fast Startup for Inference Workloads on Kubernetes",
     description:
       "See how checkpoint and restore techniques bring warm inference workers online in seconds instead of minutes.",
-    href: "/dynamo/blog/dynamo-snapshot-fast-startup",
+    href: "/dynamo/dev/digest/dynamo-snapshot-fast-startup",
     date: "May 28, 2026",
     readTime: "1 min read",
     category: "Kubernetes",
@@ -28,7 +28,7 @@ const ARTICLES = [
     title: "Dynamo Day 0 Support for TokenSpeed",
     description:
       "A launch note on TokenSpeed, its scheduler and kernel work, and the first Dynamo backend integration.",
-    href: "/dynamo/blog/tokenspeed-day-0",
+    href: "/dynamo/dev/digest/tokenspeed-day-0",
     date: "May 6, 2026",
     readTime: "1 min read",
     category: "Ecosystem",
@@ -38,7 +38,7 @@ const ARTICLES = [
     title: "Streaming Tokens and Tools: Multi-Turn Agentic Harness Support in Dynamo",
     description:
       "Lessons from running Claude Code, Codex, and OpenClaw against Dynamo, from prompt stability to streaming tool dispatch.",
-    href: "/dynamo/blog/agentic-harnesses",
+    href: "/dynamo/dev/digest/agentic-harnesses",
     date: "April 30, 2026",
     readTime: "18 min read",
     category: "Agentic AI",
@@ -48,7 +48,7 @@ const ARTICLES = [
     title: "Full-Stack Optimizations for Agentic Inference with Dynamo",
     description:
       "How the frontend API, KV router, and cache-management layers work together for long-running agentic workloads.",
-    href: "/dynamo/blog/agentic-inference",
+    href: "/dynamo/dev/digest/agentic-inference",
     date: "March 2026",
     readTime: "16 min read",
     category: "Architecture",
@@ -58,7 +58,7 @@ const ARTICLES = [
     title: "Flash Indexer: A Story of Inter-Galactic KV Routing",
     description:
       "The six design iterations behind a concurrent global KV index capable of sustaining more than 100 million operations per second.",
-    href: "/dynamo/blog/flash-indexer",
+    href: "/dynamo/dev/digest/flash-indexer",
     date: "February 23, 2026",
     readTime: "13 min read",
     category: "Engineering",

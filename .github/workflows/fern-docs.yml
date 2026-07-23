@@ -179,15 +179,10 @@ jobs:
             cp -r source-checkout/docs/fern/components docs-checkout/fern/components
           fi
 
-          # Sync product navigation configs and the standalone Home page.
+          # Remove the legacy product configs and sync the standalone Home page
+          # used by docs.yml and the Home tab.
           rm -rf docs-checkout/fern/products
-          cp -r source-checkout/docs/fern/products docs-checkout/fern/products
           cp source-checkout/docs/fern/welcome.mdx docs-checkout/fern/welcome.mdx
-
-          # Community pages move under pages-dev on docs-website. Home and Blog
-          # continue to reference root-level welcome.mdx and digest/, respectively.
-          yq -i '(.. | select(has("path")).path) |= sub("^../", "../pages-dev/")' \
-            docs-checkout/fern/products/community.yml
 
           # Sync digest/ directory
           if [ -d source-checkout/docs/fern/digest ]; then
@@ -197,17 +192,12 @@ jobs:
             cp -r source-checkout/docs/fern/digest docs-checkout/fern/digest
           fi
 
-          # Sync main.css
+          # Sync main.css and remove the legacy custom variant selector script.
           if [ -f source-checkout/docs/fern/main.css ]; then
             echo "Syncing main.css to docs-website branch..."
             cp source-checkout/docs/fern/main.css docs-checkout/fern/main.css
           fi
-
-          # Sync custom JavaScript used by the docs shell.
-          if [ -f source-checkout/docs/fern/custom.js ]; then
-            echo "Syncing custom.js to docs-website branch..."
-            cp source-checkout/docs/fern/custom.js docs-checkout/fern/custom.js
-          fi
+          rm -f docs-checkout/fern/custom.js
 
       - name: Transform paths in dev.yml for docs-website layout
         run: |
