@@ -413,6 +413,10 @@ def _shrink_pair(
     if budget < min_endpoint * (p_watts + d_watts):
         # Infeasible under the ceiling (startup validation should have caught
         # it). Best effort: hold each pool at the floor.
+        # May return a count above a role's proposal when that floor exceeds
+        # the proposal; ``apply_power_budget`` immediately ``min()``s against
+        # ``proposed_p``/``proposed_d``, so the emitted decision never raises
+        # a role above what was proposed.
         return min_endpoint, min_endpoint
     scale = budget / projected
     max_p = math.floor((budget - min_endpoint * d_watts) / p_watts)

@@ -983,9 +983,14 @@ class OrchestratorEngineAdapter:
         the requested caps, not a proven hardware limit). Applied here once, it
         covers builtin and external-plugin proposals alike.
         """
+        proposed_p, proposed_d = num_p, num_d
         num_p, num_d = self._apply_gpu_final_budget(num_p, num_d, worker_counts)
-        num_p, num_d = self._apply_power_final_budget(num_p, num_d, worker_counts)
-        return num_p, num_d
+        return self._apply_power_final_budget(
+            num_p,
+            num_d,
+            worker_counts,
+            proposed_before_gpu=(proposed_p, proposed_d),
+        )
 
     def _hold_scale_up_during_rollout(
         self,
@@ -1053,6 +1058,7 @@ class OrchestratorEngineAdapter:
         num_p: Optional[int],
         num_d: Optional[int],
         worker_counts: WorkerCounts,
+        proposed_before_gpu: Optional[tuple[Optional[int], Optional[int]]] = None,
     ) -> tuple[Optional[int], Optional[int]]:
         """Clamp the GPU-clamped proposal to the DGD-owned power budget.
 
@@ -1095,9 +1101,20 @@ class OrchestratorEngineAdapter:
             self._config.min_endpoint,
         )
         if reason is not None and (new_p, new_d) != (num_p, num_d):
+            gpu_then_power = ""
+            if proposed_before_gpu is not None and proposed_before_gpu != (
+                num_p,
+                num_d,
+            ):
+                gpu_then_power = (
+                    f" [GPU clamp first adjusted proposed "
+                    f"prefill {proposed_before_gpu[0]}->{num_p} "
+                    f"decode {proposed_before_gpu[1]}->{num_d}; "
+                    f"power wins over GPU floor]"
+                )
             log.warning(
                 "power budget clamp (%s): prefill %s->%s decode %s->%s "
-                "(budget=%sW, prefill=%sW/replica, decode=%sW/replica)",
+                "(budget=%sW, prefill=%sW/replica, decode=%sW/replica)%s",
                 reason,
                 num_p,
                 new_p,
@@ -1106,6 +1123,7 @@ class OrchestratorEngineAdapter:
                 budget,
                 p_watts,
                 d_watts,
+                gpu_then_power,
             )
         return new_p, new_d
 

@@ -122,8 +122,11 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
         await self.controller.wait_for_deployment_ready(include_planner=False)
         if self.runtime_namespace_source is not None:
             await self.runtime_namespace_source.refresh_runtime_namespace()
-        await self._refresh_deployment_state()
-        self._load_static_power_caps_at_startup()
+        # Share one DGD GET across GPU-count refresh and power-cap load when
+        # the connector exposes get_graph_deployment (Kubernetes only).
+        deployment = self._shared_dgd_deployment()
+        await self._refresh_deployment_state(deployment=deployment)
+        self._load_static_power_caps_at_startup(deployment=deployment)
         await self.fpm_provider.async_init(self._runtime_namespace_or_none())
         await self._refresh_deployment_state()
 
@@ -134,11 +137,13 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
                 await self.runtime_namespace_source.refresh_runtime_namespace()
             )
 
-        await self._refresh_deployment_state()
+        deployment = self._shared_dgd_deployment()
+        await self._refresh_deployment_state(deployment=deployment)
         if namespace_changed:
             await self.fpm_provider.async_init(self._runtime_namespace_or_none())
-            await self._refresh_deployment_state()
-        self._assert_power_config_static()
+            deployment = self._shared_dgd_deployment()
+            await self._refresh_deployment_state(deployment=deployment)
+        self._assert_power_config_static(deployment=deployment)
         await self.fpm_provider.refresh(self._state)
         return self._state
 
@@ -173,11 +178,37 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
     async def shutdown(self) -> None:
         await self.fpm_provider.shutdown()
 
-    async def _refresh_deployment_state(self) -> None:
+    async def _refresh_deployment_state(
+        self, deployment: Optional[dict] = None
+    ) -> None:
         self._refresh_worker_info()
-        self._refresh_gpu_counts()
+        self._refresh_gpu_counts(deployment=deployment)
         await self._refresh_replica_counts()
         self._refresh_model_name()
+
+    def _shared_dgd_deployment(self) -> Optional[dict]:
+        """One DGD GET for GPU + power reads when power awareness is on.
+
+        Uses the Kubernetes-only ``get_graph_deployment`` duck-type; other
+        connectors keep separate (or no-op) paths. Not added to
+        ``PlannerConnector``.
+        """
+        if not self.config.enable_power_awareness:
+            return None
+        fetch = getattr(self.controller, "get_graph_deployment", None)
+        if not callable(fetch):
+            return None
+        return fetch()
+
+    @staticmethod
+    def _call_with_optional_deployment(method, *, deployment=None, **kwargs):
+        """Invoke a connector method, forwarding ``deployment`` when accepted."""
+        if deployment is not None:
+            try:
+                return method(**kwargs, deployment=deployment)
+            except TypeError:
+                pass
+        return method(**kwargs)
 
     def _refresh_worker_info(self) -> None:
         get_worker_info = getattr(self.controller, "get_worker_info", None)
@@ -227,10 +258,12 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
             ):
                 setattr(component_state.info, field_name, fresh_val)
 
-    def _refresh_gpu_counts(self) -> None:
+    def _refresh_gpu_counts(self, deployment: Optional[dict] = None) -> None:
         state = self.deployment_state()
         try:
-            prefill_gpus, decode_gpus = self.controller.get_gpu_counts(
+            prefill_gpus, decode_gpus = self._call_with_optional_deployment(
+                self.controller.get_gpu_counts,
+                deployment=deployment,
                 require_prefill=self.require_prefill,
                 require_decode=self.require_decode,
             )
@@ -265,7 +298,9 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
         if self.require_decode:
             state.decode.num_gpus = decode_gpus
 
-    def _load_static_power_caps_at_startup(self) -> None:
+    def _load_static_power_caps_at_startup(
+        self, deployment: Optional[dict] = None
+    ) -> None:
         """Read DGD-owned per-GPU caps once at startup; fail closed if bad.
 
         The annotation is treated as static for the planner lifetime. Cap
@@ -276,7 +311,7 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
             return
 
         try:
-            prefill_cfg, decode_cfg = self._resolve_power_configs()
+            prefill_cfg, decode_cfg = self._resolve_power_configs(deployment=deployment)
         except Exception as exc:
             raise DeploymentValidationError(
                 [f"Failed to resolve DGD-owned power caps at startup: {exc}"]
@@ -295,9 +330,11 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
         # and named generic workers are visible, and both topology and
         # per-GPU annotation drifts are caught.
         self._power_startup_fingerprint = (
-            self._power_config_fingerprint(prefill_cfg)
-            if self.require_prefill
-            else None,
+            (
+                self._power_config_fingerprint(prefill_cfg)
+                if self.require_prefill
+                else None
+            ),
             self._power_config_fingerprint(decode_cfg) if self.require_decode else None,
         )
 
@@ -311,6 +348,7 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
 
     def _resolve_power_configs(
         self,
+        deployment: Optional[dict] = None,
     ) -> tuple[Optional[ComponentPowerConfig], Optional[ComponentPowerConfig]]:
         """Resolve DGD power configs with the same name/generic semantics as startup.
 
@@ -329,14 +367,16 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
             )
 
         prefill_name, decode_name = self._power_component_names()
-        return get_configs(
+        return self._call_with_optional_deployment(
+            get_configs,
+            deployment=deployment,
             require_prefill=self.require_prefill,
             require_decode=self.require_decode,
             prefill_component_name=prefill_name,
             decode_component_name=decode_name,
         )
 
-    def _assert_power_config_static(self) -> None:
+    def _assert_power_config_static(self, deployment: Optional[dict] = None) -> None:
         """Fail closed if DGD power topology or per-GPU caps changed since startup.
 
         ``power_watts_per_replica`` is read once at startup and treated as
@@ -361,10 +401,20 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
             return
         baseline = self._power_startup_fingerprint
         if baseline is None:
-            return
+            # Fail closed: awareness is on but initialize() never captured
+            # the fingerprint (skipped load, or a test/miswire). Do not
+            # silently skip the runtime guard.
+            raise DeploymentValidationError(
+                [
+                    "Power awareness is enabled but the startup power "
+                    "fingerprint was never captured. Call initialize() "
+                    "before refresh(), or restart the Planner so DGD-owned "
+                    "caps are loaded once."
+                ]
+            )
 
         try:
-            prefill_cfg, decode_cfg = self._resolve_power_configs()
+            prefill_cfg, decode_cfg = self._resolve_power_configs(deployment=deployment)
         except Exception as exc:
             raise DeploymentValidationError(
                 [
