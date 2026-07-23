@@ -149,9 +149,7 @@ func (v *dynamoGraphDeploymentRequestValidation) validateDynamoGraphDeploymentRe
 		))
 	}
 
-	newRequiresRuntimeVersion := dgdrRuntimeVersionOverrideRequired(newSpec)
-	oldRequiresRuntimeVersion := dgdrRuntimeVersionOverrideRequired(oldSpec)
-	if newRequiresRuntimeVersion && !oldRequiresRuntimeVersion {
+	if dgdrRuntimeVersionOverrideRequired(newSpec) {
 		allErrs = append(allErrs, field.Required(
 			fldPath.Child("runtimeVersionOverride"),
 			"is required when spec.image has no parseable semantic-version tag",
