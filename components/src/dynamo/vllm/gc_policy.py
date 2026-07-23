@@ -33,8 +33,9 @@ Coverage:
     imports this module inside every worker, which auto-starts the
     policy (no collective_rpc required). The RPC methods remain
     available for explicit control.
-  * engine-core process - ``InstrumentedScheduler`` imports this module
-    and calls :func:`start_gc_policy` when benchmarking starts.
+  * engine-core process - ``InstrumentedScheduler`` imports this module,
+    calls :func:`start_gc_policy` when benchmarking starts, and
+    :func:`stop_gc_policy` when it deactivates.
 """
 
 from __future__ import annotations
@@ -43,12 +44,14 @@ import gc
 import logging
 import os
 import threading
-import time
 
 logger = logging.getLogger(__name__)
 
 _lock = threading.Lock()
 _started = False
+_stop_event: threading.Event | None = None
+_freeze_thread: threading.Thread | None = None
+_saved_gen2_threshold: int | None = None
 
 WORKER_EXTENSION_CLS = "dynamo.vllm.gc_policy.FpmGcWorkerExtension"
 
@@ -68,15 +71,21 @@ def _interval_seconds() -> float:
 
 
 def gc_maintain() -> int:
-    """Collect unfrozen cycles, then freeze survivors. Returns frozen count."""
+    """Reclaim cyclic garbage from an untimed window, then re-freeze.
+
+    Unfreeze first: the periodic ticks freeze unreachable-but-uncollected
+    cycles into the permanent generation, which ``gc.collect()`` never
+    scans. The full-heap walk this costs is why callers must be outside
+    any measured window.
+    """
+    gc.unfreeze()
     gc.collect()
     gc.freeze()
     return gc.get_freeze_count()
 
 
-def _freeze_loop(interval: float) -> None:
-    while True:
-        time.sleep(interval)
+def _freeze_loop(interval: float, stop: threading.Event) -> None:
+    while not stop.wait(interval):
         try:
             # freeze only: O(1) generation-list splice, no heap traversal,
             # no pause. Never collect on the timer (a periodic collect walks
@@ -90,7 +99,7 @@ def _freeze_loop(interval: float) -> None:
 
 def start_gc_policy() -> bool:
     """Idempotently start the env-gated freeze loop in this process."""
-    global _started
+    global _started, _stop_event, _freeze_thread, _saved_gen2_threshold
     if _policy() != "freeze":
         return False
     with _lock:
@@ -100,14 +109,18 @@ def start_gc_policy() -> bool:
         # source: they walk every tracked object and grow with the heap
         # (measured 0.4s -> 9s over a sweep). Disable them outright; gen0/1
         # stay enabled and only walk objects younger than the last freeze.
-        t0, t1, _t2 = gc.get_threshold()
+        t0, t1, _saved_gen2_threshold = gc.get_threshold()
         gc.set_threshold(t0, t1, 1 << 30)
         gc.freeze()
         interval = _interval_seconds()
-        thread = threading.Thread(
-            target=_freeze_loop, args=(interval,), name="fpm-gc-freeze", daemon=True
+        _stop_event = threading.Event()
+        _freeze_thread = threading.Thread(
+            target=_freeze_loop,
+            args=(interval, _stop_event),
+            name="fpm-gc-freeze",
+            daemon=True,
         )
-        thread.start()
+        _freeze_thread.start()
         _started = True
     logger.info(
         "FPM GC policy active: auto-gen2 disabled, gc.freeze() every %.0fs (pid=%d)",
@@ -117,11 +130,36 @@ def start_gc_policy() -> bool:
     return True
 
 
+def stop_gc_policy() -> None:
+    """Restore normal GC once benchmarking ends: stop the freeze loop,
+    re-enable automatic gen2 collections, and reclaim everything frozen so
+    far. Idempotent; no-op if the policy never started."""
+    global _started, _stop_event, _freeze_thread, _saved_gen2_threshold
+    with _lock:
+        if not _started:
+            return
+        _stop_event.set()
+        thread = _freeze_thread
+        t0, t1, _ = gc.get_threshold()
+        gc.set_threshold(t0, t1, _saved_gen2_threshold)
+        _started = False
+        _stop_event = None
+        _freeze_thread = None
+        _saved_gen2_threshold = None
+    thread.join(timeout=5.0)
+    gc.unfreeze()
+    gc.collect()
+    logger.info("FPM GC policy stopped: auto-gen2 restored (pid=%d)", os.getpid())
+
+
 class FpmGcWorkerExtension:
     """vLLM worker extension exposing GC control inside worker processes."""
 
     def fpm_gc_start(self) -> bool:
         return start_gc_policy()
+
+    def fpm_gc_stop(self) -> None:
+        return stop_gc_policy()
 
     def fpm_gc_maintain(self) -> int:
         return gc_maintain()

@@ -3,10 +3,16 @@
 
 import gc
 import importlib
+import weakref
 
 import pytest
 
-pytestmark = pytest.mark.pre_merge
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.vllm,
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+]
 
 
 def _fresh_module(monkeypatch, policy: str | None):
@@ -33,8 +39,22 @@ def test_policy_starts_and_is_idempotent(monkeypatch):
         assert gc_policy.start_gc_policy() is True
         assert gc.get_threshold()[2] == 1 << 30, "auto gen2 must be disabled"
     finally:
-        gc.set_threshold(*thresholds)
-        gc.unfreeze()
+        gc_policy.stop_gc_policy()
+    assert gc.get_threshold() == thresholds, "stop must restore the thresholds"
+
+
+def test_stop_is_idempotent_and_allows_restart(monkeypatch):
+    monkeypatch.setenv("DYN_FPM_GC_FREEZE_INTERVAL_S", "3600")
+    thresholds = gc.get_threshold()
+    gc_policy = _fresh_module(monkeypatch, "freeze")
+    assert gc_policy.start_gc_policy() is True
+    gc_policy.stop_gc_policy()
+    assert gc.get_threshold() == thresholds
+    gc_policy.stop_gc_policy()  # no-op when already stopped
+    assert gc.get_threshold() == thresholds
+    assert gc_policy.start_gc_policy() is True, "restart after stop"
+    gc_policy.stop_gc_policy()
+    assert gc.get_threshold() == thresholds
 
 
 def test_gc_maintain_freezes_objects(monkeypatch):
@@ -45,6 +65,28 @@ def test_gc_maintain_freezes_objects(monkeypatch):
         assert frozen > 0
         assert frozen == gc.get_freeze_count()
     finally:
+        gc.unfreeze()
+
+
+def test_gc_maintain_reclaims_cycles_frozen_by_earlier_ticks(monkeypatch):
+    gc_policy = _fresh_module(monkeypatch, None)
+
+    class Node:
+        pass
+
+    gc.disable()
+    try:
+        node = Node()
+        node.self_ref = node
+        ref = weakref.ref(node)
+        del node
+        # Simulate a periodic tick freezing the still-uncollected cycle
+        # into the permanent generation.
+        gc.freeze()
+        gc_policy.gc_maintain()
+        assert ref() is None, "cycles frozen by a tick must still be reclaimed"
+    finally:
+        gc.enable()
         gc.unfreeze()
 
 

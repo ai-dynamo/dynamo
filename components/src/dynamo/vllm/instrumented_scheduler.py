@@ -1624,11 +1624,12 @@ class InstrumentedScheduler(AsyncScheduler):
 
     def _bench_init(self, vllm_config: "VllmConfig") -> None:
         """Parse benchmark config and initialise state machine."""
-        _fpm_gc_policy.start_gc_policy()
         bench_cfg = vllm_config.additional_config.get("benchmark")
         if not bench_cfg:
             self._bench_active = False
             return
+
+        _fpm_gc_policy.start_gc_policy()
 
         cfg = bench_cfg if isinstance(bench_cfg, dict) else {}
         raw_mode = cfg.get("mode", "agg")
@@ -1889,7 +1890,28 @@ class InstrumentedScheduler(AsyncScheduler):
                     logger.warning("Benchmark decode phase generated no points")
         warmup_points = self._bench_eager_warmup_points()
         if warmup_points:
-            self._bench_grid.extendleft(reversed(warmup_points))
+            # _bench_pop_next() treats a type mismatch at the queue front as
+            # "phase complete", so each warmup block must stay contiguous
+            # with its phase's real block; mixed-type warmups prepended as a
+            # single run would end PREFILL_SWEEP at the first decode warmup
+            # and DECODE_SWEEP at the first real prefill point.
+            warmup = {
+                point_type: [
+                    point for point in warmup_points if point.point_type == point_type
+                ]
+                for point_type in ("prefill", "decode")
+            }
+            real = {
+                point_type: [
+                    point
+                    for point in self._bench_grid
+                    if point.point_type == point_type
+                ]
+                for point_type in ("prefill", "decode")
+            }
+            self._bench_grid = deque(
+                warmup["prefill"] + real["prefill"] + warmup["decode"] + real["decode"]
+            )
             logger.info(
                 "Benchmark grid: prepending %d eager-shape warmup point(s); "
                 "their results are discarded",
@@ -2884,6 +2906,9 @@ class InstrumentedScheduler(AsyncScheduler):
         self._last_update_time = 0.0
         if resume_publisher:
             self._publisher.resume()
+        # Benchmark over: re-enable automatic gen2 collections and reclaim
+        # the frozen heap before regular serving resumes.
+        _fpm_gc_policy.stop_gc_policy()
 
     def _bench_abort(self, error: Exception) -> None:
         if self._bench_synchronizer is not None:
