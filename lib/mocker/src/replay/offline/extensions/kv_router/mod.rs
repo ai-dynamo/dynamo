@@ -22,8 +22,9 @@ use dynamo_kv_router::scheduling::{
 };
 use dynamo_kv_router::sequences::topology::WorkerDpRange;
 use dynamo_kv_router::{
-    ActiveSequencesMultiWorker, DefaultWorkerSelector, RadixTree, SchedulingRequest,
-    SequenceRequest, WorkerLoadProjection, WorkerSelector, scheduling::TierOverlapBlocks,
+    ActiveSequencesMultiWorker, DefaultWorkerSelector, RadixTree, RoutingPartitionRef,
+    SchedulingRequest, SequenceRequest, TrackingHashAlgorithm, TrackingHashContext,
+    TrackingHashScope, WorkerLoadProjection, WorkerSelector, scheduling::TierOverlapBlocks,
 };
 use dynamo_tokens::SequenceHash;
 use rustc_hash::FxHashMap;
@@ -232,6 +233,7 @@ pub(crate) struct OfflineReplayRouter {
     indexer: SyncReplayIndexer,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     decay_time_epoch: Instant,
+    tracking_hash: TrackingHashContext,
 }
 
 pub(in crate::replay) struct KvRouterPlacement {
@@ -364,6 +366,7 @@ impl OfflineReplayRouter {
         num_workers: usize,
     ) -> Result<Self> {
         let config = replay_router_config(args, router_config);
+        let tracking_hash = TrackingHashContext::from_config(&config)?;
         let worker_config_template = replay_worker_config(args);
         let workers_with_configs = replay_workers_with_configs(args, num_workers);
         let slots = replay_slots(args, &workers_with_configs);
@@ -388,6 +391,7 @@ impl OfflineReplayRouter {
             // synthetic `Instant`s. All subsequent decay/accounting uses virtual replay
             // time derived from this epoch, not wall-clock progression.
             decay_time_epoch: Instant::now(),
+            tracking_hash,
         })
     }
 
@@ -642,12 +646,15 @@ impl OfflineReplayRouter {
                     .find_matches_for_hashes(replay_hashes.local_block_hashes);
                 let token_seq = if !self.config.router_track_active_blocks {
                     None
-                } else if self.config.router_assume_kv_reuse {
+                } else if self.config.router_assume_kv_reuse
+                    && self.tracking_hash.algorithm() == TrackingHashAlgorithm::PublicXxh3V1
+                {
                     Some(replay_hashes.sequence_hashes)
                 } else {
-                    self.config.compute_seq_hashes_for_tracking(
+                    self.config.compute_seq_hashes_for_tracking_with_context(
+                        &self.tracking_hash,
+                        self.tracking_hash_scope(),
                         &request.tokens,
-                        self.block_size,
                         None,
                         BlockHashOptions::default(),
                         None,
@@ -657,9 +664,10 @@ impl OfflineReplayRouter {
             }
             None => {
                 let overlaps = self.indexer.find_matches_for_request(&request.tokens, None);
-                let token_seq = self.config.compute_seq_hashes_for_tracking(
+                let token_seq = self.config.compute_seq_hashes_for_tracking_with_context(
+                    &self.tracking_hash,
+                    self.tracking_hash_scope(),
                     &request.tokens,
-                    self.block_size,
                     None,
                     BlockHashOptions::default(),
                     None,
@@ -683,6 +691,13 @@ impl OfflineReplayRouter {
             policy_class: request.policy_class.clone(),
             session_id,
         })
+    }
+
+    fn tracking_hash_scope(&self) -> TrackingHashScope<'_> {
+        TrackingHashScope {
+            partition: RoutingPartitionRef::new("replay", "default"),
+            block_size: self.block_size,
+        }
     }
 
     fn admit_request(
@@ -843,16 +858,19 @@ impl OfflineReplayRouter {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
     use std::sync::Arc;
     use std::time::Duration;
 
-    use dynamo_kv_router::PrefillLoadEstimator;
     use dynamo_kv_router::config::{KvRouterConfig, RouterPrefillLoadModel, RouterQueuePolicy};
     use dynamo_kv_router::protocols::{
-        ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
-        KvCacheStoredBlockData, LocalBlockHash, RouterEvent, StorageTier, WorkerId,
+        BlockHashOptions, ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData,
+        KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash, RouterEvent, StorageTier,
+        WorkerId,
     };
+    use dynamo_kv_router::{PrefillLoadEstimator, TrackingHashAlgorithm};
     use rustc_hash::FxHashMap;
+    use tempfile::NamedTempFile;
     use uuid::Uuid;
 
     use super::{OfflineReplayRouter, ReplayRequestHashes, SyncReplayIndexer, WorkerAdmission};
@@ -982,6 +1000,36 @@ mod tests {
         let scheduling_request = pending.scheduling_request(64, FxHashMap::default());
 
         assert_eq!(scheduling_request.session_id.as_deref(), Some("session-a"));
+    }
+
+    #[test]
+    fn keyed_replay_hashes_derive_tracking_identities_from_tokens() {
+        let mut key_file = NamedTempFile::new().unwrap();
+        key_file.write_all(&[0x39; 32]).unwrap();
+        let config = KvRouterConfig {
+            router_tracking_hash: TrackingHashAlgorithm::KeyedXxh3V1,
+            router_tracking_key_file: Some(key_file.path().to_path_buf()),
+            router_tracking_key_id: Some("2026-01".to_string()),
+            ..Default::default()
+        };
+        let router = OfflineReplayRouter::new(&replay_args(), Some(config), None, 1).unwrap();
+        let request = request(1, 7);
+        let replay_hashes = ReplayRequestHashes::from_tokens(&request.tokens, router.block_size);
+        let expected = router.config.compute_seq_hashes_for_tracking_with_context(
+            &router.tracking_hash,
+            router.tracking_hash_scope(),
+            &request.tokens,
+            None,
+            BlockHashOptions::default(),
+            None,
+        );
+
+        let pending = router
+            .build_pending_request(&request, Some(replay_hashes.clone()), None)
+            .unwrap();
+
+        assert_eq!(pending.token_seq, expected);
+        assert_ne!(pending.token_seq, Some(replay_hashes.sequence_hashes));
     }
 
     #[test]

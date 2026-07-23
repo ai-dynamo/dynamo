@@ -12,9 +12,8 @@ use std::time::{Duration, Instant};
 use dynamo_tokens::SequenceHash;
 use parking_lot::Mutex;
 
+use crate::identity::RoutingPartitionId;
 use crate::protocols::WorkerWithDpRank;
-
-use super::types::SelectionKey;
 
 /// How long a pending selection lives before it is evicted.
 const SELECTION_CACHE_TTL: Duration = Duration::from_secs(120);
@@ -49,7 +48,7 @@ impl Default for SelectionCacheConfig {
 
 /// Booking inputs captured by `select`, replayed by a later `create_reservation`.
 pub(super) struct PendingSelection {
-    pub key: SelectionKey,
+    pub key: RoutingPartitionId,
     pub worker: WorkerWithDpRank,
     pub sequence_hashes: Vec<SequenceHash>,
     pub isl_tokens: usize,
@@ -66,8 +65,8 @@ struct Entry {
     bytes: usize,
 }
 
-/// Scoped by `(SelectionKey, selection_id)`; `SelectionKey` is (model, routing_group).
-type CacheKey = (SelectionKey, String);
+/// Scoped by `(RoutingPartitionId, selection_id)`.
+type CacheKey = (RoutingPartitionId, String);
 
 /// Approximate resident bytes: sequence hashes plus id and scope strings.
 fn entry_bytes(key: &CacheKey, selection: &PendingSelection) -> usize {
@@ -87,7 +86,7 @@ struct State {
     total_bytes: usize,
 }
 
-/// Maps `(SelectionKey, selection_id)` -> the booking inputs computed during `select`.
+/// Maps `(RoutingPartitionId, selection_id)` to the booking inputs computed during `select`.
 pub(super) struct SelectionCache {
     ttl: Duration,
     max_entries: usize,
@@ -183,7 +182,7 @@ impl SelectionCache {
     /// once the booking lands.
     pub(super) fn peek(
         &self,
-        key: &SelectionKey,
+        key: &RoutingPartitionId,
         selection_id: &str,
         now: Instant,
     ) -> Option<(Arc<PendingSelection>, u64)> {
@@ -198,7 +197,7 @@ impl SelectionCache {
 
     /// Consume the entry after a booking lands, only if its `generation` still
     /// matches the peek; a newer `select` for the id survives.
-    pub(super) fn remove(&self, key: &SelectionKey, selection_id: &str, generation: u64) {
+    pub(super) fn remove(&self, key: &RoutingPartitionId, selection_id: &str, generation: u64) {
         let cache_key = (key.clone(), selection_id.to_string());
         let mut state = self.state.lock();
         if state
@@ -211,7 +210,7 @@ impl SelectionCache {
     }
 
     /// Drop any cached selection for the id (an explicit booking supersedes it).
-    pub(super) fn discard(&self, key: &SelectionKey, selection_id: &str) {
+    pub(super) fn discard(&self, key: &RoutingPartitionId, selection_id: &str) {
         let cache_key = (key.clone(), selection_id.to_string());
         let mut state = self.state.lock();
         self.remove_locked(&mut state, &cache_key);
@@ -254,8 +253,8 @@ mod tests {
         cache_with(CAP, usize::MAX)
     }
 
-    fn key() -> SelectionKey {
-        SelectionKey::new("model", "default")
+    fn key() -> RoutingPartitionId {
+        RoutingPartitionId::new("model", "default")
     }
 
     fn pending(worker_id: u64) -> PendingSelection {
