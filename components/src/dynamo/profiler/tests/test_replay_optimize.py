@@ -709,6 +709,70 @@ def test_optimizer_supports_round_robin_router_mode(monkeypatch) -> None:
     assert set(seen_prefill_scales) == {1.0}
 
 
+@pytest.mark.parametrize("topology", ["aggregated", "disaggregated"])
+def test_optimizer_starts_with_requested_kv_router_mode(
+    monkeypatch, topology: str
+) -> None:
+    seen_router_modes: list[str] = []
+    seen_credits: list[float] = []
+    seen_prefill_scales: list[float] = []
+
+    def fake_run(**kwargs):
+        state = kwargs["state"]
+        seen_router_modes.append(state.router_mode)
+        seen_credits.append(state.overlap_score_credit)
+        seen_prefill_scales.append(state.prefill_load_scale)
+        return {
+            "output_throughput_tok_s": 1000.0,
+            "mean_ttft_ms": 100.0,
+            "p95_ttft_ms": 120.0,
+            "mean_tpot_ms": 10.0,
+            "p95_tpot_ms": 12.0,
+            "mean_e2e_latency_ms": 200.0,
+            "p95_e2e_latency_ms": 220.0,
+        }
+
+    monkeypatch.setattr(
+        replay_optimize.aic,
+        "_enumerate_dense_tp_candidates",
+        lambda backend, system: ([1, 2], [1, 2]),
+    )
+    if topology == "aggregated":
+        monkeypatch.setattr(
+            replay_optimize.evaluate, "_run_agg_replay_for_state", fake_run
+        )
+        optimize_dense_agg_with_replay(
+            _agg_spec(overlap_credits=[0.5], prefill_load_scales=[2.0])
+        )
+    else:
+        monkeypatch.setattr(replay_optimize.evaluate, "_run_replay_for_state", fake_run)
+        optimize_dense_disagg_with_replay(
+            _disagg_spec(overlap_credits=[0.5], prefill_load_scales=[2.0])
+        )
+
+    assert set(seen_router_modes) == {"kv_router"}
+    assert set(seen_credits) == {0.5}
+    assert set(seen_prefill_scales) == {2.0}
+
+
+def test_agg_optimizer_rejects_single_worker_kv_state_before_replay(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        replay_optimize.aic,
+        "_enumerate_dense_tp_candidates",
+        lambda backend, system: ([4], [4]),
+    )
+    monkeypatch.setattr(
+        replay_optimize.evaluate,
+        "_run_agg_replay_for_state",
+        lambda **kwargs: pytest.fail("unsupported state reached replay"),
+    )
+
+    with pytest.raises(ValueError, match="no TP candidates fit"):
+        optimize_dense_agg_with_replay(_agg_spec(total_gpus=4))
+
+
 def test_disagg_optimizer_supports_latency_objective(monkeypatch) -> None:
     def fake_run(**kwargs):
         state = kwargs["state"]

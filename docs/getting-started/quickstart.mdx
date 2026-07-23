@@ -5,6 +5,8 @@ title: Quickstart
 subtitle: Get a Dynamo OpenAI-compatible endpoint running in a container in about 5 minutes.
 ---
 
+import { InstallSelector } from "@/components/InstallSelector";
+
 {/* Looking for the project README? See /README.md at the repo root: https://github.com/ai-dynamo/dynamo/blob/main/README.md */}
 
 ## Choose Your Path
@@ -28,33 +30,19 @@ subtitle: Get a Dynamo OpenAI-compatible endpoint running in a container in abou
 Dynamo is backend-agnostic and Kubernetes-native without being Kubernetes-only. Use this container path to try the same frontend/router/worker stack locally; use the Kubernetes path when you want the operator, CRDs, Gateway API integration, autoscaling, scheduling, and cluster lifecycle management.
 </Note>
 
-## Pull a Container
+## Get Dynamo
 
 <Tabs>
   <Tab title="CUDA">
+    {/* BEGIN:install-selector — dev-only interactive selector; the docs release job replaces this block with static, version-pinned commands */}
+    Pick your backend, a stable or nightly build, and the version you need — then copy the container or wheel command. The default (stable release, container) gives a `docker run` that drops you straight into a ready-to-use container with all dependencies pre-installed:
 
-    Containers have all dependencies pre-installed. Pick your backend:
+    <InstallSelector />
 
-    <Tabs>
-      <Tab title="SGLang" language="sglang">
-        ```bash
-        docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.3.0
-        ```
-      </Tab>
-      <Tab title="TensorRT-LLM" language="trtllm">
-        ```bash
-        docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0
-        ```
-      </Tab>
-      <Tab title="vLLM" language="vllm">
-        ```bash
-        docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
-        ```
-      </Tab>
-    </Tabs>
-
-    For container versions and tags, see [Release Artifacts](../reference/release-artifacts.md#container-images).
-
+    <Note>
+    The steps below run inside the container. If you installed the wheel instead, run the same `python3 -m dynamo.*` commands in your Python environment — see [Local Installation](local-installation.md).
+    </Note>
+    {/* END:install-selector */}
   </Tab>
   <Tab title="XPU">
 
