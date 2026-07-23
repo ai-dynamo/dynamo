@@ -554,8 +554,8 @@ navigation:
                 path: api/nixl-connect/connector.md
               - page: Device
                 path: api/nixl-connect/device.md
-              - page: Device Kind
-                path: api/nixl-connect/device-kind.md
+              - page: Device Mem Type
+                path: api/nixl-connect/device-mem-type.md
               - page: Descriptor
                 path: api/nixl-connect/descriptor.md
               - page: Read Operation

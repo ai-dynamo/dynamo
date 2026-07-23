@@ -24,18 +24,29 @@ def id(self) -> int:
 
 Gets the identity, or ordinal, of the device.
 
-When the device is the [`HOST`](device-kind.md#host), this value is always `0`.
+For [`DRAM`](device-mem-type.md#dram) devices, this value is always `0`.
 
-When the device is a [`GPU`](device-kind.md#cuda), this value identifies a specific GPU.
+For [`VRAM`](device-mem-type.md#vram) devices, this value identifies a specific accelerator.
 
-### `kind`
+### `mem_type`
 
 ```python
 @property
-def kind(self) -> DeviceKind:
+def mem_type(self) -> DeviceMemType:
 ```
 
-Gets the [`DeviceKind`](device-kind.md) of device the instance references.
+Gets the [`DeviceMemType`](device-mem-type.md) of the memory segment the instance references.
+
+### `name`
+
+```python
+@property
+def name(self) -> str:
+```
+
+Gets the framework device name (`"cpu"`, `"cuda"`, `"xpu"`, etc.).
+
+This is the string used for display and for serialization via [`SerializedDescriptor`](rdma-metadata.md).
 
 
 ## Related Classes
