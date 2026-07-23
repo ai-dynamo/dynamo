@@ -10,6 +10,11 @@ The **GPU Memory Service (GMS)** is an out-of-process GPU memory manager that de
 
 GMS provides PyTorch integration via `CUDAPluggableAllocator` and pre-built integrations for inference frameworks like **vLLM** and **SGLang**.
 
+### Documentation
+
+- [Standalone usage and shadow-engine failover](docs/standalone-usage.md) — using GMS without the Dynamo Kubernetes operator (user flow, single- and multi-node failover).
+- [Shadow-failover recipe](examples/shadow_failover/README.md) — runnable single-GPU, no-Kubernetes example.
+
 ## Problem Statement
 
 In traditional LLM inference deployments, each worker process:
