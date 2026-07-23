@@ -6,7 +6,6 @@
 import asyncio
 
 import pytest
-
 from gpu_memory_service.common.locks import RequestedLockType
 from gpu_memory_service.common.protocol.messages import (
     ClaimPersistentAllocationRequest,
