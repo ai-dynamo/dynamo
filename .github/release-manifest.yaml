@@ -1,0 +1,98 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Release-pin manifest: the exact dependency pins the NEXT mainline
+# release (release/X.Y.Z) must ship with.
+#
+# OWNERSHIP: the release manager reviews and updates `release.version`
+# and every `required` value below as part of release planning, BEFORE
+# the release branch is cut. The pins are enforced by
+# .github/scripts/release_manifest/check_release_pins.py:
+#   - at cut time (release-branch-guard.yml): a stale pin with
+#     auto_upgrade: true is rewritten as the first commit on the fresh
+#     release branch; any other mismatch turns the guard red and alerts
+#     the release Slack channel.
+#   - at publish time (release.yml prepare-release): ANY mismatch at the
+#     commit being published blocks the RC.
+#
+# Semantics: exact string match only - there is no version ordering. A
+# pin intentionally upgraded past the manifest requires a one-line edit
+# here. If a suffix matters (e.g. -ubuntu2404), it is part of the match.
+# Suffixed dev branches (release/1.3.0-*-dev.N) and patch cuts from
+# release branches are out of scope; the guard skips them.
+
+schema_version: 1
+
+release:
+  version: "1.4.0"
+
+pins:
+  - name: vllm-cuda-runtime-image
+    file: container/context.yaml
+    path: vllm.cuda13.0.runtime_image_tag
+    required: v0.24.0-ubuntu2404
+    auto_upgrade: true
+
+  - name: vllm-cpu-runtime-image
+    file: container/context.yaml
+    path: vllm.cpu.runtime_image_tag
+    required: v0.24.0
+    auto_upgrade: true
+
+  # Commit-SHA tag; upgrades need a matching base_image_tag change, so
+  # never auto-upgrade - a mismatch must block and get human eyes.
+  - name: vllm-xpu-runtime-image
+    file: container/context.yaml
+    path: vllm.xpu.runtime_image_tag
+    required: ee0da84ab9e04ac7610e28580af62c365e898389-xpu
+    auto_upgrade: false
+
+  - name: sglang-cuda-runtime-image
+    file: container/context.yaml
+    path: sglang.cuda13.0.runtime_image_tag
+    required: v0.5.14-cu130-runtime
+    auto_upgrade: true
+
+  - name: trtllm-runtime-image
+    file: container/context.yaml
+    path: trtllm.cuda13.1.runtime_image_tag
+    required: 1.3.0rc20
+    auto_upgrade: true
+
+  - name: dynamo-nixl
+    file: container/context.yaml
+    path: dynamo.nixl_ref
+    required: v1.0.1
+    auto_upgrade: true
+
+  - name: vllm-nixl
+    file: container/context.yaml
+    path: vllm.nixl_ref
+    required: v1.1.0
+    auto_upgrade: true
+
+  # Framework default; deliberately NOT sglang.xpu.nixl_ref, which is
+  # scoped newer on purpose (see the comment in context.yaml).
+  - name: sglang-nixl
+    file: container/context.yaml
+    path: sglang.nixl_ref
+    required: v1.0.1
+    auto_upgrade: true
+
+  - name: trtllm-nixl
+    file: container/context.yaml
+    path: trtllm.nixl_ref
+    required: v1.0.1
+    auto_upgrade: true
+
+  - name: nats
+    file: container/context.yaml
+    path: dynamo.nats_version
+    required: v2.10.28
+    auto_upgrade: true
+
+  - name: etcd
+    file: container/context.yaml
+    path: dynamo.etcd_version
+    required: v3.5.30
+    auto_upgrade: true

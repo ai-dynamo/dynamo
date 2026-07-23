@@ -204,10 +204,64 @@ jobs:
   # Sources images from ECR using SHA-based tags produced by post-merge CI.
   # ============================================================================
 
+  # ============================================================================
+  # GATE: Release-Pin Manifest
+  # ============================================================================
+
+  # Blocks RC publishes when the commit being published does not satisfy
+  # .github/release-manifest.yaml (cut-time counterpart:
+  # release-branch-guard.yml). Always runs; the non-applicable cases
+  # (nightly, pre-manifest branches, non-mainline versions) succeed as
+  # documented skips inside the step so downstream `needs` never
+  # skip-cascade. Runs on ubuntu-latest: the prod runners are not
+  # guaranteed a python3 + pip toolchain.
+  release-manifest-gate:
+    name: Release-Pin Manifest Gate
+    needs: prepare-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.prepare-release.outputs.version }}
+      NIGHTLY: ${{ needs.prepare-release.outputs.nightly }}
+    steps:
+      - name: Checkout at source commit
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ needs.prepare-release.outputs.commit_sha }}
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: '3.12'
+
+      - name: Enforce release-pin manifest
+        run: |
+          set -euo pipefail
+          if [[ "${NIGHTLY}" == "true" ]]; then
+            echo "Nightly publish; release-pin gate does not apply." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          # Backward compat: branches cut before the manifest existed
+          # (e.g. release/1.3.0) do not have it at this commit.
+          if [ ! -f .github/scripts/release_manifest/check_release_pins.py ] \
+             || [ ! -f .github/release-manifest.yaml ]; then
+            echo "No release manifest at this commit; skipping gate." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          # Mainline scope only, same as release-branch-guard.yml.
+          if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Non-mainline version '${VERSION}'; skipping gate." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          pip install pyyaml
+          python3 .github/scripts/release_manifest/check_release_pins.py \
+            --check --strict --version "${VERSION}"
+
   release-publish:
     name: Publish to NGC
-    needs: [prepare-release]
-    if: needs.prepare-release.result == 'success'
+    needs: [prepare-release, release-manifest-gate]
+    if: needs.prepare-release.result == 'success' && needs.release-manifest-gate.result == 'success'
     runs-on: prod-builder-amd-v1 # TODO: needs to identify the correct runner here, definitely should not be prod-builder-amd-v1
     environment: automated-release
     env:
@@ -531,8 +585,8 @@ jobs:
 
   stage-wheels-artifactory:
     name: Stage Wheels to Artifactory
-    needs: [prepare-release]
-    if: needs.prepare-release.result == 'success'
+    needs: [prepare-release, release-manifest-gate]
+    if: needs.prepare-release.result == 'success' && needs.release-manifest-gate.result == 'success'
     runs-on: prod-tester-amd-v1
     environment: automated-release
     env:
