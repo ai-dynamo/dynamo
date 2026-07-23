@@ -32,6 +32,7 @@ pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.unit,
     pytest.mark.pre_merge,
+    pytest.mark.timeout(30),
 ]
 
 
@@ -56,6 +57,16 @@ def _wait_for_pid_death(pid: int, timeout: float = 10.0) -> bool:
         if not _pid_alive(pid):
             return True
         time.sleep(0.1)
+    return False
+
+
+def _wait_for_file(path: str, timeout: float = 5.0) -> bool:
+    """Poll until a file exists or timeout. Returns True if it appeared."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if os.path.exists(path):
+            return True
+        time.sleep(0.05)
     return False
 
 
@@ -353,3 +364,174 @@ class TestSigtermGracePeriod:
         assert os.path.exists(
             marker_file
         ), "Process was SIGKILLed before SIGTERM handler could run"
+
+    def test_main_process_keeps_grace_after_children_exit(self, tmp_path):
+        """A main process must retain its grace period after helpers exit."""
+        marker_file = str(tmp_path / "cleanup_finished")
+        ready_file = str(tmp_path / "ready")
+        script = "\n".join(
+            [
+                "import pathlib, signal, subprocess, sys, time",
+                f"marker = pathlib.Path({marker_file!r})",
+                f"ready = pathlib.Path({ready_file!r})",
+                "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)'])",
+                "def on_term(*_):",
+                "    child.wait(timeout=5)",
+                "    time.sleep(0.3)",
+                "    marker.touch()",
+                "    raise SystemExit(0)",
+                "signal.signal(signal.SIGTERM, on_term)",
+                "ready.touch()",
+                "while True:",
+                "    time.sleep(0.1)",
+            ]
+        )
+        mp = ManagedProcess(
+            command=["python3", "-c", script],
+            timeout=10,
+            display_output=False,
+            terminate_all_matching_process_names=False,
+            graceful_shutdown_timeout=2.0,
+            log_dir=str(tmp_path),
+        )
+
+        with mp:
+            assert _wait_for_file(ready_file)
+
+        assert os.path.exists(
+            marker_file
+        ), "Main process was killed before graceful cleanup finished"
+
+
+# ---------------------------------------------------------------------------
+# Scenario 7: parent-first graceful teardown
+# ---------------------------------------------------------------------------
+class TestParentOnlyFirstTeardown:
+    def test_parent_only_signal_lets_parent_cleanup_child(self, tmp_path):
+        parent_marker = str(tmp_path / "parent_sigterm")
+        child_marker = str(tmp_path / "child_cleaned")
+        ready_file = str(tmp_path / "ready")
+        child_pid_file = str(tmp_path / "child_pid")
+        script = "\n".join(
+            [
+                "import pathlib, signal, subprocess, sys, time",
+                f"parent_marker = pathlib.Path({parent_marker!r})",
+                f"child_marker = pathlib.Path({child_marker!r})",
+                f"ready = pathlib.Path({ready_file!r})",
+                f"child_pid_file = pathlib.Path({child_pid_file!r})",
+                "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)'])",
+                "child_pid_file.write_text(str(child.pid))",
+                "def on_term(*_):",
+                "    parent_marker.touch()",
+                "    child.terminate()",
+                "    child.wait(timeout=5)",
+                "    child_marker.touch()",
+                "    raise SystemExit(0)",
+                "signal.signal(signal.SIGTERM, on_term)",
+                "ready.touch()",
+                "while True:",
+                "    time.sleep(0.1)",
+            ]
+        )
+        mp = ManagedProcess(
+            command=["python3", "-c", script],
+            timeout=10,
+            display_output=False,
+            terminate_all_matching_process_names=False,
+            terminate_parent_only_first=True,
+            graceful_shutdown_timeout=5.0,
+            log_dir=str(tmp_path),
+        )
+
+        child_pid = None
+        with mp:
+            assert _wait_for_file(ready_file)
+            with open(child_pid_file, encoding="utf-8") as f:
+                child_pid = int(f.read())
+            assert _pid_alive(child_pid)
+
+        assert os.path.exists(parent_marker)
+        assert os.path.exists(child_marker)
+        assert child_pid is not None
+        assert _wait_for_pid_death(child_pid, timeout=5)
+
+    def test_parent_only_final_sweep_kills_child_spawned_during_sigterm(self, tmp_path):
+        ready_file = str(tmp_path / "ready")
+        late_child_pid_file = str(tmp_path / "late_child_pid")
+        script = "\n".join(
+            [
+                "import pathlib, signal, subprocess, sys, time",
+                f"ready = pathlib.Path({ready_file!r})",
+                f"late_child_pid_file = pathlib.Path({late_child_pid_file!r})",
+                "def on_term(*_):",
+                "    child = subprocess.Popen([sys.executable, '-c', 'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(300)'], start_new_session=True)",
+                "    late_child_pid_file.write_text(str(child.pid))",
+                "    time.sleep(0.2)",
+                "    raise SystemExit(0)",
+                "signal.signal(signal.SIGTERM, on_term)",
+                "ready.touch()",
+                "while True:",
+                "    time.sleep(0.1)",
+            ]
+        )
+        mp = ManagedProcess(
+            command=["python3", "-c", script],
+            timeout=10,
+            display_output=False,
+            terminate_all_matching_process_names=False,
+            terminate_parent_only_first=True,
+            graceful_shutdown_timeout=1.0,
+            log_dir=str(tmp_path),
+        )
+
+        with mp:
+            assert _wait_for_file(ready_file)
+
+        assert os.path.exists(late_child_pid_file)
+        with open(late_child_pid_file, encoding="utf-8") as f:
+            late_child_pid = int(f.read())
+        assert _wait_for_pid_death(late_child_pid, timeout=5)
+
+    def test_parent_only_ignores_zombie_child_process_group(self, tmp_path):
+        ready_file = str(tmp_path / "ready")
+        child_pid_file = str(tmp_path / "child_pid")
+        script = "\n".join(
+            [
+                "import os, pathlib, time",
+                f"ready = pathlib.Path({ready_file!r})",
+                f"child_pid_file = pathlib.Path({child_pid_file!r})",
+                "pid = os.fork()",
+                "if pid == 0:",
+                "    os.setpgid(0, 0)",
+                "    os._exit(0)",
+                "child_pid_file.write_text(str(pid))",
+                "ready.touch()",
+                "while True:",
+                "    time.sleep(0.1)",
+            ]
+        )
+        mp = ManagedProcess(
+            command=["python3", "-c", script],
+            timeout=10,
+            display_output=False,
+            terminate_all_matching_process_names=False,
+            terminate_parent_only_first=True,
+            graceful_shutdown_timeout=2.0,
+            log_dir=str(tmp_path),
+        )
+
+        with mp:
+            assert _wait_for_file(ready_file)
+            with open(child_pid_file, encoding="utf-8") as f:
+                child_pid = int(f.read())
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                try:
+                    if psutil.Process(child_pid).status() == psutil.STATUS_ZOMBIE:
+                        break
+                except psutil.NoSuchProcess:
+                    break
+                time.sleep(0.05)
+            started = time.monotonic()
+
+        assert time.monotonic() - started < 1.0
