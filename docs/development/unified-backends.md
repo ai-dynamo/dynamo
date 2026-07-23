@@ -105,10 +105,7 @@ alongside this guide.
 
 The unified backend is in beta. The summary below is the common
 contract — what every engine on the unified path gets — plus the
-gaps that apply to all three engines. Per-engine specifics (vLLM
-sleep/wake, SGLang diffusion, TRT-LLM custom logits processors,
-etc.) live in the
-[package README](../../components/src/dynamo/common/backend/README.md#feature-gaps).
+gaps that apply to all three engines.
 
 **Supported today**
 
@@ -901,9 +898,7 @@ guide.
 The unified backend is in beta. The summary below is the common
 contract — what every engine on the unified path gets, whether
 written in Rust directly or plugged in from Python via the PyO3
-`Worker` shim. Per-engine specifics (vLLM sleep/wake, SGLang
-diffusion, TRT-LLM custom logits processors, etc.) live in the
-[Python package README](../../components/src/dynamo/common/backend/README.md#feature-gaps).
+`Worker` shim.
 
 **Supported today**
 

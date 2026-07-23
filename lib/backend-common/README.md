@@ -12,9 +12,7 @@ SPDX-License-Identifier: Apache-2.0
 > guided decoding, and both completion-side and prompt-side
 > logprobs. Multimodal, diffusion (image/video/DLLM), LoRA, engine
 > routes (pause/resume, profiling, weight updates), text-in-text-out,
-> and snapshot/CRIU are still on the non-unified path. See the
-> [Python package README](../../components/src/dynamo/common/backend/README.md#feature-gaps)
-> for the per-engine matrix. The Python `Worker`
+> and snapshot/CRIU are still on the non-unified path. The Python `Worker`
 > ([`dynamo.common.backend`](../../components/src/dynamo/common/backend/))
 > is a thin shim over this crate.
 
