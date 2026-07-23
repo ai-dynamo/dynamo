@@ -16,7 +16,8 @@
 # yaml-language-server: $schema=https://schema.buildwithfern.dev/docs-yml.json
 
 instances:
-  - url: ai-dynamo.docs.buildwithfern.com/dynamo
+  - url: dynamo.docs.buildwithfern.com/dynamo
+    custom-domain: [docs.nvidia.com/dynamo, docs.dynamo.nvidia.com/dynamo]
     multi-source: true
 
 title: NVIDIA Dynamo Documentation
