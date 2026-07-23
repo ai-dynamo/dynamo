@@ -2,15 +2,36 @@
   "description": "Maps (from_image:tag, baseline_image:tag) pairs to slim CycloneDX SBOMs of the baseline. Each entry records the engineer-specified compliance boundary: NGC (or other upstream) owns everything in the baseline; we own everything from_image adds on top. The captured SBOM is the BASELINE -- runtime licenses stages subtract its components from final-image NOTICES to filter out NGC-owned content. CI runs container/compliance/base_sboms/check_drift.py on every PR/post-merge; if either digest moved or the from_image's layer prefix no longer matches the recorded baseline, CI fails and a refresh PR is required.",
   "entries": [
     {
-      "baseline_digest": "sha256:2ab6381d970b211fb93853796dc6707eb8a72575a375c422b17cf4d8b2641701",
-      "baseline_image": "nvidia/cuda",
-      "baseline_sbom": "cuda@2ab6381d-amd64.cdx.json",
-      "baseline_tag": "13.0.2-base-ubuntu24.04",
-      "capture_note": "ubuntu rootfs drift only (CUDA layers identical); delta-validation skipped, validated at runtime in CI",
-      "from_digest": "sha256:525c7fb8b20102c501bf9d066a4671c94468e58db9b072972d743a327e8ab909",
-      "from_image": "vllm/vllm-openai",
-      "from_tag": "v0.22.1-ubuntu2404",
-      "layer_prefix_check_skipped": true,
+      "baseline_digest": "sha256:68d089cdb1e5262812d0853a03583d1a91bb5626c4470d123f38d0f9a935ed59",
+      "baseline_image": "lmsysorg/sglang",
+      "baseline_sbom": "lmsysorg-sglang@68d089cd-amd64.cdx.json",
+      "baseline_tag": "dev-nemotron3-ultra",
+      "capture_note": "Opaque vendor runtime baseline; the image is not layer-compatible with Dynamo's CUDA baseline. The baseline is pinned by manifest digest and covers the vendor-provided dpkg floor only.",
+      "from_digest": "sha256:68d089cdb1e5262812d0853a03583d1a91bb5626c4470d123f38d0f9a935ed59",
+      "from_image": "lmsysorg/sglang",
+      "from_tag": "dev-nemotron3-ultra",
+      "platform": "linux/amd64"
+    },
+    {
+      "baseline_digest": "sha256:5099f18aec336b30eb733524d2a277d1b348e4bf77a1c8950f90c96e6741f22e",
+      "baseline_image": "lmsysorg/sglang",
+      "baseline_sbom": "lmsysorg-sglang@5099f18a-amd64.cdx.json",
+      "baseline_tag": "inkling-cu13",
+      "capture_note": "Opaque vendor runtime baseline; the image is not layer-compatible with Dynamo's CUDA baseline. The baseline is pinned by manifest digest and covers the vendor-provided dpkg floor only.",
+      "from_digest": "sha256:5099f18aec336b30eb733524d2a277d1b348e4bf77a1c8950f90c96e6741f22e",
+      "from_image": "lmsysorg/sglang",
+      "from_tag": "inkling-cu13",
+      "platform": "linux/amd64"
+    },
+    {
+      "baseline_digest": "sha256:00c53fe4c31bf22d7b37537f28bbdfd924c02de13cdfb4bff7378c9c34d75ab2",
+      "baseline_image": "lmsysorg/sglang",
+      "baseline_sbom": "lmsysorg-sglang@00c53fe4-amd64.cdx.json",
+      "baseline_tag": "latest",
+      "capture_note": "Opaque vendor runtime baseline; the image is not layer-compatible with Dynamo's CUDA baseline. The baseline is pinned by manifest digest and covers the vendor-provided dpkg floor only.",
+      "from_digest": "sha256:00c53fe4c31bf22d7b37537f28bbdfd924c02de13cdfb4bff7378c9c34d75ab2",
+      "from_image": "lmsysorg/sglang",
+      "from_tag": "latest",
       "platform": "linux/amd64"
     },
     {
@@ -36,16 +57,26 @@
       "platform": "linux/amd64"
     },
     {
+      "baseline_digest": "sha256:22b2291f0d515dbffde9d9f2333d82051b72781149fb5c2664076224dd8c53de",
+      "baseline_image": "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo",
+      "baseline_sbom": "vllm-ci-test-repo@22b2291f-amd64.cdx.json",
+      "baseline_tag": "ee0da84ab9e04ac7610e28580af62c365e898389-xpu",
+      "from_digest": "sha256:22b2291f0d515dbffde9d9f2333d82051b72781149fb5c2664076224dd8c53de",
+      "from_image": "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo",
+      "from_tag": "ee0da84ab9e04ac7610e28580af62c365e898389-xpu",
+      "platform": "linux/amd64"
+    },
+    {
       "baseline_digest": "sha256:2ab6381d970b211fb93853796dc6707eb8a72575a375c422b17cf4d8b2641701",
       "baseline_image": "nvidia/cuda",
-      "baseline_sbom": "cuda@2ab6381d-arm64.cdx.json",
+      "baseline_sbom": "cuda@2ab6381d-amd64.cdx.json",
       "baseline_tag": "13.0.2-base-ubuntu24.04",
       "capture_note": "ubuntu rootfs drift only (CUDA layers identical); delta-validation skipped, validated at runtime in CI",
       "from_digest": "sha256:525c7fb8b20102c501bf9d066a4671c94468e58db9b072972d743a327e8ab909",
       "from_image": "vllm/vllm-openai",
       "from_tag": "v0.22.1-ubuntu2404",
       "layer_prefix_check_skipped": true,
-      "platform": "linux/arm64"
+      "platform": "linux/amd64"
     },
     {
       "baseline_digest": "sha256:8b2705ea7a8653ad3451b46ab835eced92d77b44e671b9cf3ad4f95fbb2efe5e",
@@ -70,14 +101,16 @@
       "platform": "linux/arm64"
     },
     {
-      "baseline_digest": "sha256:22b2291f0d515dbffde9d9f2333d82051b72781149fb5c2664076224dd8c53de",
-      "baseline_image": "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo",
-      "baseline_sbom": "vllm-ci-test-repo@22b2291f-amd64.cdx.json",
-      "baseline_tag": "ee0da84ab9e04ac7610e28580af62c365e898389-xpu",
-      "from_digest": "sha256:22b2291f0d515dbffde9d9f2333d82051b72781149fb5c2664076224dd8c53de",
-      "from_image": "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo",
-      "from_tag": "ee0da84ab9e04ac7610e28580af62c365e898389-xpu",
-      "platform": "linux/amd64"
+      "baseline_digest": "sha256:2ab6381d970b211fb93853796dc6707eb8a72575a375c422b17cf4d8b2641701",
+      "baseline_image": "nvidia/cuda",
+      "baseline_sbom": "cuda@2ab6381d-arm64.cdx.json",
+      "baseline_tag": "13.0.2-base-ubuntu24.04",
+      "capture_note": "ubuntu rootfs drift only (CUDA layers identical); delta-validation skipped, validated at runtime in CI",
+      "from_digest": "sha256:525c7fb8b20102c501bf9d066a4671c94468e58db9b072972d743a327e8ab909",
+      "from_image": "vllm/vllm-openai",
+      "from_tag": "v0.22.1-ubuntu2404",
+      "layer_prefix_check_skipped": true,
+      "platform": "linux/arm64"
     }
   ],
   "entry_schema": {
