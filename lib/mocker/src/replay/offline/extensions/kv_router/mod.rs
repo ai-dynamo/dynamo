@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -328,23 +327,20 @@ impl<Request: PlacementRequestView> PlacementPolicy<Request> for KvRouterPlaceme
         session_id: Option<String>,
         now_ms: f64,
     ) -> Result<PlacementEffects> {
-        let request_metadata = match metadata.max_output_tokens_override() {
-            Some(max_output_tokens) => {
-                let mut overridden = request.metadata().clone();
-                overridden.max_output_tokens = overridden.max_output_tokens.min(max_output_tokens);
-                Cow::Owned(overridden)
-            }
-            None => Cow::Borrowed(request.metadata()),
-        };
+        let request_metadata = request.metadata();
+        let max_output_tokens = metadata
+            .max_output_tokens_override()
+            .map_or(request_metadata.max_output_tokens, |override_tokens| {
+                request_metadata.max_output_tokens.min(override_tokens)
+            });
         let request_id = request_metadata
             .uuid
             .ok_or_else(|| anyhow!("KV placement requires a request UUID"))?;
         let admissions = self
             .router
             .on_compact_request_arrival_for_session(
-                &request_metadata,
-                request.input_length(),
-                request.materialized_tokens(),
+                request,
+                max_output_tokens,
                 metadata.into_hashes(),
                 session_id,
                 now_ms,
@@ -462,27 +458,26 @@ impl OfflineReplayRouter {
     ) -> Result<RouterEffects> {
         self.on_compact_request_arrival_for_session(
             request,
-            request.tokens.len(),
-            Some(&request.tokens),
+            request.max_output_tokens,
             replay_hashes,
             session_id,
             now_ms,
         )
     }
 
-    pub(crate) fn on_compact_request_arrival_for_session(
+    fn on_compact_request_arrival_for_session<Request: PlacementRequestView>(
         &mut self,
-        request: &DirectRequest,
-        input_length: usize,
-        materialized_tokens: Option<&[u32]>,
+        request: &Request,
+        max_output_tokens: usize,
         replay_hashes: Option<ReplayRequestHashes>,
         session_id: Option<String>,
         now_ms: f64,
     ) -> Result<RouterEffects> {
         let pending = self.build_pending_request(
-            request,
-            input_length,
-            materialized_tokens,
+            request.metadata(),
+            request.input_length(),
+            max_output_tokens,
+            request.materialized_tokens(),
             replay_hashes,
             session_id,
         )?;
@@ -529,6 +524,7 @@ impl OfflineReplayRouter {
         }
 
         let uuid = request
+            .metadata()
             .uuid
             .expect("offline replay requests must have UUIDs before router submission");
         let outcome = self.admit_request(pending, decay_now)?;
@@ -707,6 +703,7 @@ impl OfflineReplayRouter {
         &self,
         request: &DirectRequest,
         input_length: usize,
+        max_output_tokens: usize,
         materialized_tokens: Option<&[u32]>,
         replay_hashes: Option<ReplayRequestHashes>,
         session_id: Option<String>,
@@ -753,7 +750,7 @@ impl OfflineReplayRouter {
             overlaps,
             track_prefill_tokens: self.config.router_track_prefill_tokens,
             expected_output_tokens: Some(
-                u32::try_from(request.max_output_tokens)
+                u32::try_from(max_output_tokens)
                     .context("max_output_tokens does not fit into u32")?,
             ),
             priority_jump,
@@ -1059,6 +1056,7 @@ mod tests {
             .build_pending_request(
                 &request,
                 request.tokens.len(),
+                request.max_output_tokens,
                 Some(&request.tokens),
                 None,
                 Some("session-a".to_string()),
