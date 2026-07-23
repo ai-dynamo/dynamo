@@ -52,6 +52,7 @@ spec:
 |---|---|---|---|
 | `model` | Yes | — | HuggingFace model ID (e.g. `Qwen/Qwen3-0.6B`) |
 | `image` | No | — | Container image for the profiling job. Dynamo >= 1.1.0: use `dynamo-planner`; earlier versions: use `dynamo-frontend`. |
+| `runtimeVersionOverride` | Conditional | — | Dynamo runtime version propagated to generated DGD components when `image` has no parseable semantic-version tag or its tag does not identify the intended runtime. |
 | `backend` | No | `auto` | Inference engine: `auto`, `vllm`, `sglang`, `trtllm` |
 | `searchStrategy` | No | `rapid` | Profiling depth: `rapid` (AIC-backed DynoSim-style modeling, ~30s) or `thorough` (real GPU, 2–4h) |
 | `autoApply` | No | `true` | Automatically deploy the profiler's recommended config |
@@ -77,6 +78,42 @@ spec:
 | `overrides.dgd` | No | — | Partial `v1alpha1` or `v1beta1` DGD override applied to the generated deployment |
 
 For the complete CRD spec, see the [API Reference](api-reference.md).
+
+### Profiler Image Version Compatibility
+
+When `spec.image` is omitted, the operator defaults it on creation to
+`nvcr.io/nvidia/ai-dynamo/dynamo-planner:<operatorVersion>`. The operator
+requires `operatorVersion` to be valid semantic versioning, so the default
+image has a parseable version tag.
+
+> [!WARNING]
+> When using Dynamo Operator 1.4.0 or later, explicitly setting `spec.image` to
+> a profiler based on Dynamo 1.3.0 or earlier requires a semantic-version tag
+> that accurately identifies the generated runtime version, such as
+> `dynamo-planner:1.3.0`.
+>
+> Profilers through 1.3.0 do not recognize the DGDR-level
+> `spec.runtimeVersionOverride` field and silently discard it while parsing the
+> DGDR configuration. These profilers derive generated DGD component images
+> from `spec.image` but cannot propagate the DGDR-level override into those
+> components. The DGD admission webhook must therefore infer compatibility from
+> the generated component image tags. Do not use tags such as `:latest`,
+> `:custom`, or `:sha-abc123` for this version combination.
+
+Images supplied through `spec.overrides.dgd` follow the DGD component rules
+independently. An overridden worker image with no parseable semantic-version tag
+requires `runtimeVersionOverride` in the effective DGD component.
+
+Profilers from Dynamo 1.4.0 or later propagate the DGDR-level override to every
+generated component, so `spec.runtimeVersionOverride` also covers a worker image
+replaced through `overrides.dgd`.
+
+With a profiler based on Dynamo 1.3.0 or earlier, the DGDR-level field is
+ignored. However, `overrides.dgd` is a raw embedded resource and preserves a
+per-component `runtimeVersionOverride`. Use the legacy `v1alpha1`
+service-shaped DGD override understood by those profilers, and set the field on
+the affected service rather than relying on the DGDR-level
+`spec.runtimeVersionOverride`.
 
 ### Planner
 
