@@ -31,7 +31,7 @@ def fast_failover_exit_enabled() -> bool:
     value = os.getenv(_FAST_FAILOVER_EXIT_ENV)
     if value is None:
         return False
-    return value.strip().lower() not in {"", "0", "false", "no", "off"}
+    return value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
 
 
 def failover_unregister_timeout_secs() -> float:

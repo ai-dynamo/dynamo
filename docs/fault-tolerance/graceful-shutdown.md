@@ -61,8 +61,13 @@ process-owned failover locks. The unregister attempt is bounded by
 
 This mode is disabled by default. When it is disabled, endpoint unregister is
 not subject to the failover timeout and the normal grace, drain, cleanup, and
-runtime shutdown sequence is unchanged. Enable it only for a deployment whose
-replacement worker is fenced by a process-owned failover lock.
+runtime shutdown sequence is unchanged.
+
+Fast exit deliberately skips the grace period, transfer drain, engine cleanup,
+and runtime shutdown. Do not enable it on a prefill worker, or on any process
+whose NIXL peers rely on graceful drain for transfer safety. Enable it only when
+the replacement is fenced by a process-owned failover lock and abrupt process
+termination is safe for all peers.
 
 | Environment variable | Default | Meaning |
 |---|---:|---|

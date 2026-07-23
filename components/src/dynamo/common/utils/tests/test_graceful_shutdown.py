@@ -359,7 +359,7 @@ def test_fast_failover_exit_env_parsing(monkeypatch):
         monkeypatch.setenv("DYN_GMS_FAILOVER_FAST_EXIT_ON_SIGTERM", value)
         assert fast_failover_exit_enabled() is True
 
-    for value in ("", "0", "false", "no", "off"):
+    for value in ("", "0", "false", "no", "off", "disabled", "none", "invalid"):
         monkeypatch.setenv("DYN_GMS_FAILOVER_FAST_EXIT_ON_SIGTERM", value)
         assert fast_failover_exit_enabled() is False
 
