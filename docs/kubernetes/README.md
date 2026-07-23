@@ -106,6 +106,12 @@ Optionally, verify your cluster is ready:
 ./deploy/pre-deployment/pre-deployment-check.sh
 ```
 
+For Intel XPU clusters, run:
+
+```bash
+./deploy/pre-deployment/pre-deployment-check.sh --device xpu
+```
+
 ## Install Dynamo
 
 ```bash
