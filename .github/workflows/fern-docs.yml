@@ -184,6 +184,15 @@ jobs:
           cp -r source-checkout/docs/fern/products docs-checkout/fern/products
           cp source-checkout/docs/fern/welcome.mdx docs-checkout/fern/welcome.mdx
 
+          # Sync root-level assets/ (docs.yml logos/fonts and welcome.mdx reference
+          # ./assets/ relative to the fern root, not pages-dev). Merge-copy without
+          # deleting so assets still referenced by older versioned pages survive
+          # even if they are later removed from the source tree.
+          if [ -d source-checkout/docs/fern/assets ]; then
+            echo "Syncing assets/ to docs-website branch..."
+            cp -r source-checkout/docs/fern/assets/. docs-checkout/fern/assets/
+          fi
+
           # Community pages move under pages-dev on docs-website. Home and Blog
           # continue to reference root-level welcome.mdx and digest/, respectively.
           yq -i '(.. | select(has("path")).path) |= sub("^../", "../pages-dev/")' \
@@ -195,6 +204,10 @@ jobs:
             # Keep fern/blogs for older versioned docs that still reference ../blogs.
             rm -rf docs-checkout/fern/digest
             cp -r source-checkout/docs/fern/digest docs-checkout/fern/digest
+            # The digest posts were renamed .md -> .mdx at the source; retarget the
+            # release-managed versions/v*.yml snapshots that still point at the old
+            # extension. Harmless no-op once every snapshot references .mdx.
+            sed -i 's|\(path: \.\./digest/.*\)\.md$|\1.mdx|' docs-checkout/fern/versions/v*.yml
           fi
 
           # Sync main.css
