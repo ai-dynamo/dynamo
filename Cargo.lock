@@ -4785,7 +4785,7 @@ dependencies = [
 
 [[package]]
 name = "kvbm-consolidator"
-version = "1.2.0"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "dynamo-kv-hashing",
