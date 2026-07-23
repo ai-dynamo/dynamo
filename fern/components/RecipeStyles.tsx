@@ -2262,6 +2262,31 @@ body:has(input[name="recipe-sku"][value="blackwell"]:checked):has(input[name="re
     position: relative;
     z-index: 1;
 }
+
+/* ---------------------------------------------------------------------------
+   Provider axis (cloud-fabric overlays). Generic is the default; selecting a
+   provider reveals its [data-provider] block. Overlay blocks also carry
+   data-variant="disagg" so the existing topology gating only surfaces them on
+   the disaggregated topology (where KV transfer crosses the provider fabric).
+--------------------------------------------------------------------------- */
+body:has(input[name="recipe-provider"][value="generic"]:checked) [data-provider]:not([data-provider~="generic"]),
+body:has(input[name="recipe-provider"][value="aws"]:checked) [data-provider]:not([data-provider~="aws"]),
+body:has(input[name="recipe-provider"][value="gke"]:checked) [data-provider]:not([data-provider~="gke"]),
+body:has(input[name="recipe-provider"][value="aks"]:checked) [data-provider]:not([data-provider~="aks"]),
+body:has(input[name="recipe-provider"][value="nebius"]:checked) [data-provider]:not([data-provider~="nebius"]),
+body:has(input[name="recipe-provider"][value="nscale"]:checked) [data-provider]:not([data-provider~="nscale"]) {
+    display: none;
+}
+
+/* "Not applicable to aggregated" note — shown only when a non-generic provider
+   is selected while the aggregated topology is active. */
+.dynamo-provider-agg-note {
+    display: none;
+}
+
+body:has(input[name="recipe-variant"][value="agg"]:checked):has(input[name="recipe-provider"]:checked:not([value="generic"])) .dynamo-provider-agg-note {
+    display: block;
+}
 `;
 
 export function RecipeStyles() {

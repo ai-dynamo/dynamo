@@ -9,7 +9,7 @@ import { RecipeStyles } from "@/components/RecipeStyles";
 
 <RecipeStyles />
 
-Each target below is a validated TensorRT-LLM deployment of Qwen3-235B-A22B-FP8 — a 235B-parameter Mixture-of-Experts model with ~22B active parameters per token — on 16 GPUs with KV-aware routing, benchmarked at 4K ISL / 200 OSL. Hopper and Blackwell need different MoE backends, and you can serve aggregated or with prefill/decode disaggregation. Pick your GPU architecture and serving topology; every command on this page updates to match.
+Each target below is a validated TensorRT-LLM deployment of Qwen3-235B-A22B-FP8 — a 235B-parameter Mixture-of-Experts model with ~22B active parameters per token — on 16 GPUs with KV-aware routing, benchmarked at 4K ISL / 200 OSL. Hopper and Blackwell need different MoE backends, and you can serve aggregated or with prefill/decode disaggregation. Pick your GPU architecture, serving topology, and (on the disaggregated topology) cloud provider; every command on this page updates to match.
 
 <div className="dynamo-target-picker">
 <p className="dynamo-target-picker-title">Choose your deployment target</p>
@@ -26,6 +26,21 @@ Each target below is a validated TensorRT-LLM deployment of Qwen3-235B-A22B-FP8 
 <label htmlFor="recipe-variant-agg">Aggregated</label>
 <input type="radio" id="recipe-variant-disagg" name="recipe-variant" value="disagg" />
 <label htmlFor="recipe-variant-disagg">Disaggregated</label>
+</div>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Provider</span>
+<input type="radio" id="recipe-provider-generic" name="recipe-provider" value="generic" defaultChecked />
+<label htmlFor="recipe-provider-generic">Generic</label>
+<input type="radio" id="recipe-provider-aws" name="recipe-provider" value="aws" />
+<label htmlFor="recipe-provider-aws">AWS · EFA</label>
+<input type="radio" id="recipe-provider-gke" name="recipe-provider" value="gke" />
+<label htmlFor="recipe-provider-gke">GCP · RoCE</label>
+<input type="radio" id="recipe-provider-aks" name="recipe-provider" value="aks" />
+<label htmlFor="recipe-provider-aks">Azure · IB</label>
+<input type="radio" id="recipe-provider-nebius" name="recipe-provider" value="nebius" />
+<label htmlFor="recipe-provider-nebius">Nebius · IB</label>
+<input type="radio" id="recipe-provider-nscale" name="recipe-provider" value="nscale" />
+<label htmlFor="recipe-provider-nscale">Nscale · IB</label>
 </div>
 <div className="dynamo-target-picker-summary" data-sku="blackwell" data-variant="agg">
 <span><b>Checkpoint</b> Qwen/Qwen3-235B-A22B-FP8</span>
@@ -133,6 +148,104 @@ kubectl apply -f recipes/qwen3-235b-a22b-fp8/trtllm/agg/hopper/deploy.yaml -n ${
 ```bash
 kubectl apply -f recipes/qwen3-235b-a22b-fp8/trtllm/disagg/hopper/deploy.yaml -n ${NAMESPACE}
 ```
+
+</div>
+
+## Provider-specific setup
+
+<div data-provider="generic">
+
+Pick a cloud provider to fold its **RDMA fabric profile** into the disaggregated deployment above. The profiles ([`recipes/addons/providers/`](https://github.com/ai-dynamo/dynamo/pull/10979)) are **model-agnostic** — an agent (or you) materializes one onto the prefill + decode workers, resolving the per-cluster `@param` values rather than copying them. Step-by-step: [`AGENTS.md`](https://github.com/ai-dynamo/dynamo/blob/jihao/csp-kustomize-addons/recipes/addons/providers/AGENTS.md).
+
+</div>
+
+<div className="dynamo-provider-agg-note">
+
+Fabric profiles apply to the **disaggregated** topology only — aggregated serving keeps KV transfer on-node, so no fabric layer is needed. Switch **Topology** to **Disaggregated** to see the provider setup.
+
+</div>
+
+<div data-provider="aws" data-variant="disagg">
+
+**AWS · EFA** — fabric profile [`aws-efa.yaml`](https://github.com/ai-dynamo/dynamo/blob/jihao/csp-kustomize-addons/recipes/addons/providers/aws-efa.yaml). LIBFABRIC KV backend; arch-suffixed image. Materialize onto the prefill + decode workers:
+
+```yaml
+# recipes/addons/providers/aws-efa.yaml  ->  merge onto prefill + decode workers
+image:    {base_tag}-efa-{arch}        # @param arch: amd64 (H100/B200) | arm64 (GB200); verify the tag exists
+device:   vpc.amazonaws.com/efa: {{ gpus_per_worker * 4 }}   # @param from base GPU count (p5 = 4/GPU)
+env:      FI_PROVIDER=efa, FI_EFA_USE_DEVICE_RDMA=1, FI_EFA_ENABLE_SHM_TRANSFER=0
+kv_backend: LIBFABRIC                   # the one non-UCX fabric -- select per engine (vLLM / TRT-LLM / SGLang)
+securityContext: privileged + IPC_LOCK, SYS_PTRACE
+```
+
+**To apply:** append the `env`, apply the image rule (verify the `-efa` tag exists), and set LIBFABRIC for your engine; after deploy, confirm `NIXL ... Backend LIBFABRIC was instantiated` (UCX is a *silent* slow fallback). Full step-by-step: [AGENTS.md →](https://github.com/ai-dynamo/dynamo/blob/jihao/csp-kustomize-addons/recipes/addons/providers/AGENTS.md).
+
+</div>
+
+<div data-provider="gke" data-variant="disagg">
+
+**GCP GKE · RoCE** (A4X) — fabric profile [`gke-roce.yaml`](https://github.com/ai-dynamo/dynamo/blob/jihao/csp-kustomize-addons/recipes/addons/providers/gke-roce.yaml). UCX over RoCEv2; NIC auto-probe. Materialize onto the prefill + decode workers:
+
+```yaml
+# recipes/addons/providers/gke-roce.yaml  ->  merge onto prefill + decode workers
+device:      networking.gke.io.networks/rdma-0..3 (+ .IP)    # @param RDMA network names/count for your A4X pool
+annotations: networking.gke.io/interfaces  [eth2->rdma-0 ... eth5->rdma-3]   # webhook attaches the NICs
+env:         NCCL_SOCKET_IFNAME=eth0, NCCL_CROSS_NIC=0       # no UCX_NET_DEVICES -- UCX auto-probes the RoCE NICs
+kv_backend:  UCX                        # default -- nothing to select
+securityContext: privileged + IPC_LOCK, SYS_PTRACE
+```
+
+**To apply:** the `device` RDMA networks and the `interfaces` annotation must match your A4X pool; the GKE GIB driver host-mounts stay in the base recipe. Full step-by-step: [AGENTS.md →](https://github.com/ai-dynamo/dynamo/blob/jihao/csp-kustomize-addons/recipes/addons/providers/AGENTS.md).
+
+</div>
+
+<div data-provider="aks" data-variant="disagg">
+
+**Azure AKS · InfiniBand** — fabric profile [`aks-ib.yaml`](https://github.com/ai-dynamo/dynamo/blob/jihao/csp-kustomize-addons/recipes/addons/providers/aks-ib.yaml). UCX over IB; **NIC pin required**. Materialize onto the prefill + decode workers:
+
+```yaml
+# recipes/addons/providers/aks-ib.yaml  ->  merge onto prefill + decode workers
+device:   rdma/ib: "1"                  # device-plugin slot (grants all HCAs) -- keep "1", not GPU-derived
+env:      UCX_NET_DEVICES: <compute IB NICs>   # @param from ibv_devinfo (default mlx5_0..3 on ND_H100_v5)
+          NCCL_SOCKET_IFNAME: eth0
+kv_backend: UCX                         # default -- nothing to select
+securityContext: privileged + IPC_LOCK, SYS_PTRACE
+```
+
+**To apply:** `UCX_NET_DEVICES` is load-bearing — omit it and UCX binds a side NIC (degraded BW + a zeroed KV counter); prefill + decode must share **one agentpool** (per-agentpool IB pkeys), pinned via `nodeSelector` in the base DGD. Full step-by-step: [AGENTS.md →](https://github.com/ai-dynamo/dynamo/blob/jihao/csp-kustomize-addons/recipes/addons/providers/AGENTS.md).
+
+</div>
+
+<div data-provider="nebius" data-variant="disagg">
+
+**Nebius · InfiniBand** — fabric profile [`nebius-ib.yaml`](https://github.com/ai-dynamo/dynamo/blob/jihao/csp-kustomize-addons/recipes/addons/providers/nebius-ib.yaml). UCX over IB; NIC auto-probe. Materialize onto the prefill + decode workers:
+
+```yaml
+# recipes/addons/providers/nebius-ib.yaml  ->  merge onto prefill + decode workers
+device:   rdma/ib: "1"                  # slot count (grants all 8 HCAs) -- keep "1"
+env:      NCCL_SOCKET_IFNAME: eth0       # no UCX_NET_DEVICES -- all 8 CX-7 HCAs are compute fabric, UCX auto-probes
+kv_backend: UCX                         # default -- nothing to select
+securityContext: privileged + IPC_LOCK, SYS_PTRACE
+```
+
+**To apply:** the simplest IB case — base image + the IB device slot; no NIC list to derive. Full step-by-step: [AGENTS.md →](https://github.com/ai-dynamo/dynamo/blob/jihao/csp-kustomize-addons/recipes/addons/providers/AGENTS.md).
+
+</div>
+
+<div data-provider="nscale" data-variant="disagg">
+
+**Nscale · InfiniBand** — fabric profile [`nscale-ib.yaml`](https://github.com/ai-dynamo/dynamo/blob/jihao/csp-kustomize-addons/recipes/addons/providers/nscale-ib.yaml). UCX over IB; **NIC pin required** (mixed fabric). Materialize onto the prefill + decode workers:
+
+```yaml
+# recipes/addons/providers/nscale-ib.yaml  ->  merge onto prefill + decode workers
+device:   rdma/ib: "1"                  # slot count (grants all HCAs) -- keep "1"
+env:      UCX_NET_DEVICES: <COMPUTE NICs only>   # @param from ibv_devinfo (default mlx5_0..5,10,11)
+          NCCL_SOCKET_IFNAME: eth0
+kv_backend: UCX                         # default -- nothing to select
+securityContext: privileged + IPC_LOCK, SYS_PTRACE
+```
+
+**To apply:** list only the compute NICs (`mlx5_0..5,10,11`) and exclude the side fabric (`mlx5_6..9`) — Nscale exposes a *mixed* fabric, and mixing them fails the first KV transfer with `NIXL_ERR_REMOTE_DISCONNECT`. Full step-by-step: [AGENTS.md →](https://github.com/ai-dynamo/dynamo/blob/jihao/csp-kustomize-addons/recipes/addons/providers/AGENTS.md).
 
 </div>
 
