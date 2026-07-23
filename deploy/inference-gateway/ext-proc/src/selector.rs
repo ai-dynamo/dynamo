@@ -364,6 +364,221 @@ mod tests {
         }
     }
 
+    /// A registration the core marks `Schedulable` purely in-process. It carries
+    /// every field the schedulable-metadata check needs: a non-empty endpoint, a
+    /// non-zero `block_size`, and a well-formed KV-event endpoint per dp_rank.
+    /// The KV-event endpoint is only a `tcp://` address string — the core's ZMQ
+    /// SUB listener connects lazily and never needs a live publisher (see the
+    /// `WorkerRegistry` register tests in `lib/kv-router`), so no network infra is
+    /// required. Queueing is disabled under the default router policy, so
+    /// `max_num_batched_tokens` is not required here.
+    fn schedulable_registration(worker_id: u64) -> WorkerRegistration {
+        WorkerRegistration {
+            worker_id,
+            model_name: "test-model".to_string(),
+            endpoint: format!("http://10.0.0.{worker_id}:8000"),
+            block_size: 16,
+            kv_events_endpoints: HashMap::from([(
+                0u32,
+                format!("tcp://127.0.0.1:{}", 45_000 + worker_id),
+            )]),
+            replay_endpoint: None,
+            total_kv_blocks: None,
+            max_num_batched_tokens: None,
+            stable_routing_id: Some(format!("vllm-{worker_id}")),
+        }
+    }
+
+    /// A selection request keyed by `reservation_id` for the schedulable worker's
+    /// model. The prompt is long enough to book non-trivial prefill load.
+    fn select_request(reservation_id: &str) -> SelectRequest {
+        SelectRequest {
+            model_name: "test-model".to_string(),
+            reservation_id: reservation_id.to_string(),
+            token_ids: (1..=16).collect(),
+            allowed_worker_ids: None,
+            priority_jump: None,
+            strict_priority: None,
+        }
+    }
+
+    /// Reconcile a single schedulable worker into a fresh selector, asserting the
+    /// core admitted it (so the reserve paths below actually book).
+    async fn selector_with_schedulable_worker() -> Selector {
+        let selector = Selector::new(&test_config())
+            .await
+            .expect("selector should build");
+        selector
+            .reconcile(&HashMap::from([(1u64, schedulable_registration(1))]))
+            .await
+            .expect("reconcile should succeed");
+        assert!(
+            selector.any_ready().await,
+            "a complete worker must be schedulable in-process"
+        );
+        selector
+    }
+
+    /// Item 1: a successful reserve books load, and the final free releases it.
+    /// `free_reservation` is idempotent: a second free of the same id is a no-op
+    /// success (matching a duplicate completion signal from the gateway).
+    #[tokio::test]
+    async fn reserve_then_free_succeeds_and_is_idempotent() {
+        let selector = selector_with_schedulable_worker().await;
+
+        let resp = selector
+            .select_and_reserve(select_request("res-1"))
+            .await
+            .expect("reserve should succeed against a schedulable worker");
+        assert_eq!(
+            resp.reservation_id, "res-1",
+            "the booking key is echoed back"
+        );
+        assert_eq!(resp.worker_id, 1, "the only schedulable worker is chosen");
+        assert_eq!(
+            resp.effective_prefill_tokens, 16,
+            "the full uncached prompt is booked as prefill load"
+        );
+
+        selector
+            .free_reservation("res-1")
+            .await
+            .expect("freeing a live booking succeeds");
+        selector
+            .free_reservation("res-1")
+            .await
+            .expect("freeing an already-freed booking is an idempotent no-op");
+    }
+
+    /// Item 5: prefill completion releases prompt load exactly once and is
+    /// idempotent — a repeated first-token signal must not error — and the final
+    /// free still succeeds afterwards.
+    #[tokio::test]
+    async fn prefill_complete_then_free_is_idempotent() {
+        let selector = selector_with_schedulable_worker().await;
+
+        selector
+            .select_and_reserve(select_request("res-p"))
+            .await
+            .expect("reserve should succeed");
+
+        selector
+            .prefill_complete("res-p")
+            .await
+            .expect("first prefill-complete succeeds");
+        selector
+            .prefill_complete("res-p")
+            .await
+            .expect("a repeated prefill-complete is an idempotent no-op");
+
+        selector
+            .free_reservation("res-p")
+            .await
+            .expect("free after prefill-complete succeeds");
+        // Prefill-complete after free targets a gone booking → idempotent no-op.
+        selector
+            .prefill_complete("res-p")
+            .await
+            .expect("prefill-complete on a freed booking is a no-op");
+    }
+
+    /// Item 6 (core keying): bookings are tracked by their `reservation_id`, so
+    /// freeing one reservation must not touch another. The booking id is the only
+    /// key — freeing an unknown id is a no-op, freeing one live id leaves the
+    /// other booked (a duplicate reserve of it still conflicts), and the freed id
+    /// becomes reusable while the untouched one does not.
+    #[tokio::test]
+    async fn reservations_are_isolated_by_reservation_id() {
+        let selector = selector_with_schedulable_worker().await;
+
+        selector
+            .select_and_reserve(select_request("res-a"))
+            .await
+            .expect("reserve res-a");
+        selector
+            .select_and_reserve(select_request("res-b"))
+            .await
+            .expect("reserve res-b");
+
+        // A live booking id conflicts on re-reserve, proving the id is tracked.
+        assert!(
+            selector
+                .select_and_reserve(select_request("res-b"))
+                .await
+                .is_err(),
+            "re-reserving a live booking id must conflict"
+        );
+
+        // Freeing an unknown id must not disturb any live booking.
+        selector
+            .free_reservation("res-unknown")
+            .await
+            .expect("freeing an unknown id is a no-op");
+
+        // Free only res-a. res-b must stay booked (still conflicts), while res-a
+        // becomes reusable — so free() acted on exactly the id it was given.
+        selector
+            .free_reservation("res-a")
+            .await
+            .expect("free res-a");
+        assert!(
+            selector
+                .select_and_reserve(select_request("res-b"))
+                .await
+                .is_err(),
+            "freeing res-a must leave res-b booked"
+        );
+        selector
+            .select_and_reserve(select_request("res-a"))
+            .await
+            .expect("res-a is reusable once freed");
+    }
+
+    /// Item 2 (selection-failure path): with no schedulable worker the core
+    /// cannot admit the request, so `select_and_reserve` surfaces an error (which
+    /// the picker maps to `PickError::RoutingFailed`). Uses `incomplete_registration`
+    /// so a worker exists in the catalog but is never schedulable.
+    #[tokio::test]
+    async fn select_and_reserve_errors_without_a_schedulable_worker() {
+        let selector = Selector::new(&test_config())
+            .await
+            .expect("selector should build");
+        selector
+            .reconcile(&HashMap::from([(1u64, incomplete_registration(1))]))
+            .await
+            .expect("reconcile should succeed");
+        assert!(
+            !selector.any_ready().await,
+            "an incomplete worker must not be schedulable"
+        );
+
+        assert!(
+            selector
+                .select_and_reserve(select_request("res-x"))
+                .await
+                .is_err(),
+            "reserving with no schedulable worker must fail"
+        );
+    }
+
+    /// Lifecycle callbacks are idempotent for a booking that never existed (e.g. a
+    /// body-less request that never reserved): both `free_reservation` and
+    /// `prefill_complete` treat an unknown id as success (NotFound → Ok).
+    #[tokio::test]
+    async fn free_and_prefill_of_unknown_reservation_are_noops() {
+        let selector = Selector::new(&test_config())
+            .await
+            .expect("selector should build");
+        selector
+            .free_reservation("never-booked")
+            .await
+            .expect("free of an unknown id is a no-op");
+        selector
+            .prefill_complete("never-booked")
+            .await
+            .expect("prefill-complete of an unknown id is a no-op");
+    }
+
     #[tokio::test]
     async fn incomplete_worker_is_not_cached_as_reconciled() {
         let selector = Selector::new(&test_config())
