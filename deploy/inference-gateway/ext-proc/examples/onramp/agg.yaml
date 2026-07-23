@@ -182,11 +182,16 @@ spec:
             # KV-event port can't live in the InferencePool, so it stays here.
             - name: DYN_EPP_KV_EVENT_PORT
               value: "5557"
-            # Model identity and external vLLM renderer used for tokenization.
+            # Model identity and tokenizer service used for routing tokens.
             - name: DYN_MODEL_NAME
               value: "Qwen/Qwen3-0.6B"
-            - name: DYN_EPP_VLLM_RENDER_URL
+            # Tokenizer service base URL + wire protocol. Points at vLLM's
+            # /v1/chat/completions/render endpoint; "vllm-render" is the only
+            # supported protocol today. Both are required.
+            - name: DYN_EPP_TOKENIZER_SERVICE_URL
               value: "http://vllm-qwen-render:8000"
+            - name: DYN_EPP_TOKENIZER_PROTOCOL
+              value: "vllm-render"
             - name: DYN_KV_CACHE_BLOCK_SIZE
               value: "16"
             # Per-worker max batched tokens. REQUIRED: the router's

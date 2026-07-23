@@ -79,11 +79,13 @@ curl http://$GW/v1/chat/completions -H 'content-type: application/json' -d '{
 | `DYN_EPP_MODE=standalone` | Select standalone (selector) mode | required |
 | `DYN_EPP_INFERENCE_POOL_NAME` | Name of the `InferencePool` this EPP backs (its selector + target port drive pod discovery) | required |
 | `DYN_MODEL_NAME` | Model id (no model card in this mode) | required |
-| `DYN_EPP_VLLM_RENDER_URL` | Base URL of the vLLM `/v1/chat/completions/render` service | required |
+| `DYN_EPP_TOKENIZER_SERVICE_URL` | Base URL of the tokenizer service (vLLM `/v1/chat/completions/render`) | required |
+| `DYN_EPP_TOKENIZER_PROTOCOL` | Tokenizer service wire protocol; only `vllm-render` is supported | required |
 | `DYN_KV_CACHE_BLOCK_SIZE` | MUST equal vLLM `--block-size` | required |
 | `DYN_EPP_KV_EVENT_PORT` | vLLM KV-events PUB port (not in the pool spec) | optional; default 5557 |
 | `DYN_EPP_KV_EVENT_REPLAY_PORT` | ZMQ REQ port for live-stream gap replay | optional |
-| `DYN_EPP_TOKENIZATION_TIMEOUT_MS` | Deadline for the vLLM render request | optional; default 5000 |
+| `DYN_EPP_TOKENIZATION_TIMEOUT_MS` | Deadline for the tokenizer service request | optional; default 5000 |
+| `DYN_EPP_TOKENIZER_MAX_RESPONSE_BYTES` | Max tokenizer response body accepted | optional; default 16777216 (16 MiB) |
 | `DYN_EPP_TOTAL_KV_BLOCKS` | Per-worker total KV blocks hint | optional |
 | `DYN_EPP_MAX_NUM_BATCHED_TOKENS` | Per-worker max batched tokens | optional |
 | `DYN_EPP_SELECTION_INDEXER_THREADS` | KV indexer thread pool | optional; default 4 |
@@ -150,11 +152,3 @@ own Service (already included in `agg.yaml`).
 Replica synchronization is best-effort; see the
 [selection service docs](../../../../../docs/components/router/standalone-selection.md)
 for the consistency invariants.
-
-## Limitations (V1)
-
-- Aggregated serving only (no disaggregated prefill/decode).
-- Cross-replica sync covers active load (admission/prefill/free), not the KV
-  index — a new replica re-warms its index from live traffic + replay.
-- `worker_id` is a stable hash of the pod name. A pod restart yields a new
-  `worker_id`; sticky routing is preserved separately via `stable_routing_id`.
