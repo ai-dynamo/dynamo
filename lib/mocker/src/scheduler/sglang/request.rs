@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
@@ -13,10 +12,10 @@ use crate::kv_manager::sglang_backend::ActiveKvLease;
 #[derive(Debug)]
 pub(super) struct SglangRequest {
     pub(super) uuid: Uuid,
-    pub(super) prompt_tokens: Vec<u64>,
+    pub(super) sequence_tokens: Vec<u32>,
+    pub(super) prompt_len: usize,
     pub(super) max_output_tokens: usize,
     pub(super) planned_output_ids: Option<Vec<u32>>,
-    pub(super) output_ids: Vec<u32>,
     pub(super) kv_lease: ActiveKvLease,
     pub(super) materialized_tokens: usize,
     pub(super) allocated_tokens: usize,
@@ -24,15 +23,15 @@ pub(super) struct SglangRequest {
 
 impl SglangRequest {
     pub(super) fn prompt_len(&self) -> usize {
-        self.prompt_tokens.len()
+        self.prompt_len
     }
 
     pub(super) fn output_len(&self) -> usize {
-        self.output_ids.len()
+        self.sequence_tokens.len() - self.prompt_len
     }
 
     pub(super) fn current_sequence_len(&self) -> usize {
-        self.prompt_len() + self.output_len()
+        self.sequence_tokens.len()
     }
 
     pub(super) fn extend_input_len(&self) -> usize {
@@ -65,29 +64,21 @@ impl SglangRequest {
         self.materialized_tokens / block_size * block_size
     }
 
-    pub(super) fn sequence_tokens(&self) -> Cow<'_, [u64]> {
-        if self.output_ids.is_empty() {
-            return Cow::Borrowed(&self.prompt_tokens);
-        }
-
-        let mut sequence = self.prompt_tokens.clone();
-        sequence.extend(self.output_ids.iter().map(|&token| token as u64));
-        Cow::Owned(sequence)
+    pub(super) fn prompt_tokens(&self) -> &[u32] {
+        &self.sequence_tokens[..self.prompt_len]
     }
 
-    pub(super) fn sequence_prefix(&self, len: usize) -> Cow<'_, [u64]> {
-        let prompt_len = self.prompt_len();
-        if len <= prompt_len {
-            return Cow::Borrowed(&self.prompt_tokens[..len]);
-        }
+    pub(super) fn sequence_tokens(&self) -> &[u32] {
+        &self.sequence_tokens
+    }
 
-        let mut prefix = self.prompt_tokens.clone();
-        prefix.extend(
-            self.output_ids[..len - prompt_len]
-                .iter()
-                .map(|&token| token as u64),
-        );
-        Cow::Owned(prefix)
+    pub(super) fn sequence_prefix(&self, len: usize) -> &[u32] {
+        &self.sequence_tokens[..len]
+    }
+
+    #[cfg(test)]
+    pub(super) fn output_tokens(&self) -> &[u32] {
+        &self.sequence_tokens[self.prompt_len..]
     }
 
     pub(super) fn next_output_token(&self) -> u32 {
@@ -106,7 +97,7 @@ impl SglangRequest {
     }
 
     pub(super) fn append_output_token(&mut self, token: u32) {
-        self.output_ids.push(token);
+        self.sequence_tokens.push(token);
         self.materialized_tokens += 1;
     }
 
@@ -115,6 +106,12 @@ impl SglangRequest {
         {
             let block_size = _block_size;
             let sequence_len = self.current_sequence_len();
+            debug_assert!(
+                self.prompt_len <= sequence_len,
+                "request {} has prompt_len={} but only {sequence_len} sequence tokens",
+                self.uuid,
+                self.prompt_len
+            );
             debug_assert!(
                 self.cached_tokens() <= self.materialized_tokens,
                 "request {} cached {} tokens but materialized {}",
@@ -182,15 +179,18 @@ impl SglangRequest {
 
 impl From<DirectRequest> for SglangRequest {
     fn from(req: DirectRequest) -> Self {
+        let prompt_len = req.tokens.len();
+        let max_output_tokens = req
+            .output_token_ids
+            .as_ref()
+            .map_or(req.max_output_tokens, Vec::len);
+        let sequence_tokens = req.tokens;
         Self {
             uuid: req.uuid.unwrap_or_else(Uuid::new_v4),
-            prompt_tokens: req.tokens.iter().map(|&t| t as u64).collect(),
-            max_output_tokens: req
-                .output_token_ids
-                .as_ref()
-                .map_or(req.max_output_tokens, Vec::len),
+            sequence_tokens,
+            prompt_len,
+            max_output_tokens,
             planned_output_ids: req.output_token_ids,
-            output_ids: Vec::new(),
             kv_lease: ActiveKvLease::default(),
             materialized_tokens: 0,
             allocated_tokens: 0,

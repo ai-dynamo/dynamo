@@ -4,18 +4,26 @@
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 
 use anyhow::{Result, anyhow, bail};
-use dynamo_kv_router::config::KvRouterConfig;
-use dynamo_kv_router::protocols::{KvCacheEventData, LocalBlockHash, RouterEvent};
 use uuid::Uuid;
 
 pub(super) use super::components::ReplayMode;
 #[cfg(test)]
 use super::components::TrafficStats;
 use super::components::{
-    AdmissionQueue, EngineComponent, EngineEffects, EnginePassMode, OfflineReplayRouter,
-    ReadyArrival, ScheduledWorkerCompletion, TrafficAccumulator, WorkerAdmission,
+    AdmissionQueue, EngineComponent, EngineEffects, EnginePassMode, NoReplayMetadata,
+    ReplayAdmissionMetadata, ReplayEngineObservation, ScheduledWorkerCompletion,
+    TrafficAccumulator,
+};
+use super::core::round_robin::PoolRoundRobinPlacement;
+use super::core::{
+    AdmissionSource as CoreAdmissionSource, EngineEventBatch, NoEngineEvents, Placement,
+    PlacementDecision, PlacementPolicy, ReadyArrival, WorkerTopology,
 };
 use super::events::{SimulationEvent, SimulationWorkerStage};
+#[cfg(test)]
+use super::extensions::kv_router::{
+    DisaggRuntime, ReplayKvRouterConfig, derive_decode_router_config, derive_prefill_router_config,
+};
 use super::planner_hook::{LatestFpmBuffer, PlannerHook, PlannerTickMetrics};
 use super::progress::ReplayProgress;
 use super::runtime_utils::{
@@ -35,9 +43,10 @@ use crate::common::handoff::{
 use crate::common::protocols::ForwardPassSnapshot;
 use crate::common::protocols::{DirectRequest, EngineType, MockEngineArgs, OutputSignal};
 use crate::loadgen::{ReplayRequestHashes, WorkloadDriver};
+#[cfg(test)]
+use crate::replay::ReplayRouterMode;
 use crate::replay::{
-    OfflineDisaggReplayConfig, ReplayPrefillLoadEstimator, ReplayRouterMode, ReplayTerminalStatus,
-    SlaThresholds, TraceCollector,
+    OfflineDisaggReplayConfig, ReplayTerminalStatus, SlaThresholds, TraceCollector,
 };
 use crate::scheduler::{
     AdmissionEvent, SchedulerCommand, SchedulerCommandResult, SchedulerLifecycleEvent,
@@ -86,37 +95,28 @@ struct HandoffConformanceCapture {
     source_output_tokens: usize,
     stored_before_activation: usize,
     stored_on_activation: usize,
-    activation_stored_hashes: HashSet<LocalBlockHash>,
+    activation_stored_hashes: HashSet<u64>,
     repeated_activation_hashes_after_activation: usize,
 }
 
 impl HandoffConformanceCapture {
-    fn record_before_activation(&mut self, events: &[RouterEvent]) {
-        self.stored_before_activation += stored_hashes(events).count();
+    fn record_before_activation(&mut self, stored_hashes: &[u64]) {
+        self.stored_before_activation += stored_hashes.len();
     }
 
-    fn record_activation(&mut self, events: &[RouterEvent]) {
-        for hash in stored_hashes(events) {
+    fn record_activation(&mut self, stored_hashes: &[u64]) {
+        for &hash in stored_hashes {
             self.stored_on_activation += 1;
             self.activation_stored_hashes.insert(hash);
         }
     }
 
-    fn record_after_activation(&mut self, events: &[RouterEvent]) {
-        self.repeated_activation_hashes_after_activation += stored_hashes(events)
+    fn record_after_activation(&mut self, stored_hashes: &[u64]) {
+        self.repeated_activation_hashes_after_activation += stored_hashes
+            .iter()
             .filter(|hash| self.activation_stored_hashes.contains(hash))
             .count();
     }
-}
-
-fn stored_hashes(events: &[RouterEvent]) -> impl Iterator<Item = LocalBlockHash> + '_ {
-    events
-        .iter()
-        .flat_map(|event| match &event.event.data {
-            KvCacheEventData::Stored(store) => store.blocks.as_slice(),
-            KvCacheEventData::Removed(_) | KvCacheEventData::Cleared => &[],
-        })
-        .map(|block| block.tokens_hash)
 }
 
 enum ActionExecution {
@@ -263,29 +263,648 @@ impl DisaggActionQueues {
     }
 }
 
-pub(in crate::replay) struct DisaggRuntime {
-    now_ms: f64,
-    next_prefill_worker_idx: usize,
-    next_decode_worker_idx: usize,
-    next_event_seq: u64,
-    admission: AdmissionQueue,
-    prefill_engine: EngineComponent,
-    decode_engine: EngineComponent,
-    prefill_router: Option<OfflineReplayRouter>,
-    decode_router: Option<OfflineReplayRouter>,
+struct DisaggFlowState {
     requests: HashMap<Uuid, DisaggRequestState>,
     requests_by_handoff: HashMap<HandoffId, Uuid>,
     handoff_order: HandoffOrder,
-    prefill_block_size: usize,
-    decode_block_size: usize,
     action_queues: DisaggActionQueues,
     logical_in_flight: usize,
     stale_transfer_events: usize,
+    conformance_capture: Option<HandoffConformanceCapture>,
+}
+
+enum PrefillSignalDisposition {
+    Pending,
+    Rejected,
+    Completed,
+}
+
+struct ScheduledTransfer {
+    at_ms: f64,
+    handoff_id: HandoffId,
+}
+
+impl DisaggFlowState {
+    fn new(handoff_order: HandoffOrder, capture_conformance: bool) -> Self {
+        Self {
+            requests: HashMap::new(),
+            requests_by_handoff: HashMap::new(),
+            handoff_order,
+            action_queues: DisaggActionQueues::default(),
+            logical_in_flight: 0,
+            stale_transfer_events: 0,
+            conformance_capture: capture_conformance.then(HandoffConformanceCapture::default),
+        }
+    }
+
+    #[inline(never)]
+    fn state(&self, uuid: Uuid) -> Result<&DisaggRequestState> {
+        self.requests
+            .get(&uuid)
+            .ok_or_else(|| anyhow!("offline disagg replay missing request state for {uuid}"))
+    }
+
+    #[inline(never)]
+    fn state_mut(&mut self, uuid: Uuid) -> Result<&mut DisaggRequestState> {
+        self.requests
+            .get_mut(&uuid)
+            .ok_or_else(|| anyhow!("offline disagg replay missing request state for {uuid}"))
+    }
+
+    #[inline(never)]
+    fn acknowledge_action(
+        &mut self,
+        uuid: Uuid,
+        action: IssuedHandoffAction,
+        outcome: HandoffActionOutcome,
+        now_ms: f64,
+        collector: &mut TraceCollector,
+    ) -> Result<()> {
+        if matches!(outcome, HandoffActionOutcome::Failed(_)) {
+            collector.on_terminal(uuid, now_ms, ReplayTerminalStatus::Failed);
+        }
+        let actions = self
+            .state_mut(uuid)?
+            .coordinator
+            .on_action_outcome(action.id, outcome)?;
+        self.action_queues.enqueue_all(uuid, actions);
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn apply_handoff_fact(
+        &mut self,
+        uuid: Uuid,
+        fact: HandoffFact,
+        now_ms: f64,
+        collector: &mut TraceCollector,
+    ) -> Result<()> {
+        let terminal_status = match fact {
+            HandoffFact::Failed { .. } | HandoffFact::TimedOut { .. } => {
+                Some(ReplayTerminalStatus::Failed)
+            }
+            HandoffFact::Canceled { .. } => Some(ReplayTerminalStatus::Canceled),
+            _ => None,
+        };
+        if let Some(status) = terminal_status {
+            collector.on_terminal(uuid, now_ms, status);
+        }
+        let actions = self.state_mut(uuid)?.coordinator.on_fact(fact)?;
+        self.action_queues.enqueue_all(uuid, actions);
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn record_prefill_placement(
+        &self,
+        placement: Placement,
+        traffic: &mut TrafficAccumulator,
+        collector: &mut TraceCollector,
+    ) -> Result<()> {
+        if let Some(sample) = placement.planner_cache_sample {
+            traffic.on_admission(sample.overlap_blocks, sample.isl_blocks);
+        }
+        let input_tokens = self
+            .state(placement.request_id)?
+            .original_request()?
+            .tokens
+            .len();
+        collector.on_prefill_route_overlap(
+            placement.request_id,
+            placement.reported_overlap_tokens.min(input_tokens),
+        );
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn record_decode_placement(
+        &self,
+        placement: Placement,
+        collector: &mut TraceCollector,
+    ) -> Result<()> {
+        let input_tokens = self
+            .state(placement.request_id)?
+            .original_request()?
+            .tokens
+            .len();
+        collector.on_decode_route_overlap(
+            placement.request_id,
+            placement.reported_overlap_tokens.min(input_tokens),
+        );
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn prepare_prefill_submission(&self, uuid: Uuid) -> Result<(DirectRequest, HandoffId)> {
+        Ok((
+            self.state(uuid)?.build_prefill_request()?,
+            self.state(uuid)?.handoff_id,
+        ))
+    }
+
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn finish_prefill_submission(
+        &mut self,
+        uuid: Uuid,
+        worker_idx: usize,
+        action: IssuedHandoffAction,
+        lifecycle_events: Vec<SchedulerLifecycleEvent>,
+        now_ms: f64,
+        collector: &mut TraceCollector,
+        stats: &mut DisaggRuntimeStats,
+    ) -> Result<()> {
+        self.state_mut(uuid)?.start_prefill(worker_idx);
+        collector.on_prefill_assigned(uuid, worker_idx);
+        #[cfg(test)]
+        {
+            stats.prefill_assignments.insert(uuid, worker_idx);
+        }
+        self.acknowledge_action(
+            uuid,
+            action,
+            HandoffActionOutcome::Submitted,
+            now_ms,
+            collector,
+        )?;
+        self.process_lifecycle_events(lifecycle_events, now_ms, collector, stats)
+    }
+
+    #[inline(never)]
+    fn prepare_destination_reservation(&self, uuid: Uuid) -> Result<(DirectRequest, HandoffId)> {
+        Ok((
+            self.state(uuid)?.original_request()?.clone(),
+            self.state(uuid)?.handoff_id,
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[inline(never)]
+    fn finish_destination_reservation(
+        &mut self,
+        uuid: Uuid,
+        worker_idx: usize,
+        action: IssuedHandoffAction,
+        stored_hashes: &[u64],
+        lifecycle_events: Vec<SchedulerLifecycleEvent>,
+        now_ms: f64,
+        collector: &mut TraceCollector,
+        stats: &mut DisaggRuntimeStats,
+    ) -> Result<()> {
+        if let Some(capture) = self.conformance_capture.as_mut() {
+            capture.record_before_activation(stored_hashes);
+            capture
+                .lifecycle
+                .push(NormalizedHandoffEvent::DestinationAccepted);
+        }
+        self.state_mut(uuid)?.assign_decode(worker_idx);
+        collector.on_decode_assigned(uuid, worker_idx);
+        #[cfg(test)]
+        {
+            stats.decode_assignments.insert(uuid, worker_idx);
+            stats
+                .transition_log
+                .push(DisaggTransition::DestinationAccepted { uuid });
+        }
+        self.acknowledge_action(
+            uuid,
+            action,
+            HandoffActionOutcome::Accepted,
+            now_ms,
+            collector,
+        )?;
+        self.process_lifecycle_events(lifecycle_events, now_ms, collector, stats)
+    }
+
+    #[inline(never)]
+    fn take_prefill_placement(
+        &mut self,
+        placement: Placement,
+        traffic: &mut TrafficAccumulator,
+        collector: &mut TraceCollector,
+    ) -> Result<(Uuid, usize, IssuedHandoffAction)> {
+        let uuid = placement.request_id;
+        let worker_idx = placement.scheduler_id;
+        self.record_prefill_placement(placement, traffic, collector)?;
+        if self.state(uuid)?.phase != DisaggPhase::QueuedPrefill {
+            bail!("offline disagg replay expected queued prefill request for {uuid}");
+        }
+        let action = self
+            .state_mut(uuid)?
+            .pending_prefill_action
+            .take()
+            .ok_or_else(|| anyhow!("missing coordinator prefill action for {uuid}"))?;
+        Ok((uuid, worker_idx, action))
+    }
+
+    #[inline(never)]
+    fn take_decode_placement(
+        &mut self,
+        placement: Placement,
+        collector: &mut TraceCollector,
+    ) -> Result<(Uuid, usize, IssuedHandoffAction)> {
+        let uuid = placement.request_id;
+        let worker_idx = placement.scheduler_id;
+        self.record_decode_placement(placement, collector)?;
+        if self.state(uuid)?.phase != DisaggPhase::AwaitingDestination {
+            bail!("offline disagg replay expected destination-waiting request for {uuid}");
+        }
+        let action = self
+            .state_mut(uuid)?
+            .pending_destination_action
+            .take()
+            .ok_or_else(|| anyhow!("missing coordinator destination action for {uuid}"))?;
+        Ok((uuid, worker_idx, action))
+    }
+
+    fn uuid_for_handoff(&self, handoff_id: HandoffId) -> Result<Uuid> {
+        self.requests_by_handoff
+            .get(&handoff_id)
+            .copied()
+            .ok_or_else(|| anyhow!("offline disagg replay missing handoff {handoff_id:?}"))
+    }
+
+    #[inline(never)]
+    fn process_lifecycle_events(
+        &mut self,
+        events: Vec<SchedulerLifecycleEvent>,
+        now_ms: f64,
+        collector: &mut TraceCollector,
+        _stats: &mut DisaggRuntimeStats,
+    ) -> Result<()> {
+        for event in events {
+            match event {
+                SchedulerLifecycleEvent::SourceHeld {
+                    handoff_id,
+                    request_id,
+                    transfer_timing,
+                } => {
+                    let uuid = self.uuid_for_handoff(handoff_id)?;
+                    if uuid != request_id {
+                        bail!("source lifecycle request ID does not match its handoff");
+                    }
+                    #[cfg(test)]
+                    _stats
+                        .transition_log
+                        .push(DisaggTransition::SourceHeld { uuid });
+                    if let Some(capture) = self.conformance_capture.as_mut() {
+                        capture.lifecycle.push(NormalizedHandoffEvent::SourceHeld);
+                    }
+                    collector.on_source_held(uuid, now_ms);
+                    self.apply_handoff_fact(
+                        uuid,
+                        HandoffFact::SourceHeld {
+                            handoff_id,
+                            transfer_timing,
+                        },
+                        now_ms,
+                        collector,
+                    )?;
+                }
+                SchedulerLifecycleEvent::DestinationReserved {
+                    handoff_id,
+                    request_id,
+                    transferable_prompt_tokens,
+                } => {
+                    let uuid = self.uuid_for_handoff(handoff_id)?;
+                    if uuid != request_id {
+                        bail!("destination lifecycle request ID does not match its handoff");
+                    }
+                    #[cfg(test)]
+                    _stats
+                        .transition_log
+                        .push(DisaggTransition::DestinationReserved { uuid });
+                    if let Some(capture) = self.conformance_capture.as_mut() {
+                        capture
+                            .lifecycle
+                            .push(NormalizedHandoffEvent::DestinationReserved);
+                    }
+                    collector.on_destination_reserved(uuid, now_ms);
+                    self.apply_handoff_fact(
+                        uuid,
+                        HandoffFact::DestinationReserved {
+                            handoff_id,
+                            transferable_prompt_tokens,
+                        },
+                        now_ms,
+                        collector,
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn on_external_arrival(
+        &mut self,
+        mut request: DirectRequest,
+        arrival_time_ms: f64,
+        replay_hashes: Option<ReplayRequestHashes>,
+        session_id: Option<String>,
+        collector: &mut TraceCollector,
+    ) -> Result<Uuid> {
+        let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
+        request.uuid = Some(uuid);
+        request.arrival_timestamp_ms = Some(arrival_time_ms);
+
+        collector.on_arrival(
+            uuid,
+            arrival_time_ms,
+            request.tokens.len(),
+            request.max_output_tokens,
+        );
+        if self.requests.contains_key(&uuid) {
+            bail!("offline disagg replay request {uuid} is already active");
+        }
+        let handoff_id = HandoffId::new();
+        let mut state = DisaggRequestState::new(
+            request,
+            arrival_time_ms,
+            handoff_id,
+            self.handoff_order,
+            replay_hashes,
+            session_id,
+        );
+        let actions = state.coordinator.start()?;
+        self.requests.insert(uuid, state);
+        self.requests_by_handoff.insert(handoff_id, uuid);
+        self.logical_in_flight = self
+            .logical_in_flight
+            .checked_add(1)
+            .expect("logical in-flight request count overflow");
+        self.action_queues.enqueue_all(uuid, actions);
+        Ok(uuid)
+    }
+
+    #[inline(never)]
+    fn inspect_prefill_signal(
+        &mut self,
+        signal: &OutputSignal,
+        now_ms: f64,
+        collector: &mut TraceCollector,
+    ) -> Result<PrefillSignalDisposition> {
+        if !signal.rejected
+            && signal.token_id.is_some()
+            && let Some(capture) = self.conformance_capture.as_mut()
+        {
+            capture.source_output_tokens += 1;
+        }
+        if !signal.completed {
+            return Ok(PrefillSignalDisposition::Pending);
+        }
+        if !signal.rejected {
+            return Ok(PrefillSignalDisposition::Completed);
+        }
+
+        let handoff_id = self.state(signal.uuid)?.handoff_id;
+        collector.on_terminal(signal.uuid, now_ms, ReplayTerminalStatus::Rejected);
+        self.apply_handoff_fact(
+            signal.uuid,
+            HandoffFact::Failed { handoff_id },
+            now_ms,
+            collector,
+        )?;
+        Ok(PrefillSignalDisposition::Rejected)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[inline(never)]
+    fn start_transfer(
+        &mut self,
+        uuid: Uuid,
+        action: IssuedHandoffAction,
+        delay_ms: f64,
+        now_ms: f64,
+        collector: &mut TraceCollector,
+    ) -> Result<Option<ScheduledTransfer>> {
+        self.acknowledge_action(
+            uuid,
+            action,
+            HandoffActionOutcome::Scheduled,
+            now_ms,
+            collector,
+        )?;
+        self.state_mut(uuid)?.transfer_pending();
+        let handoff_id = self.state(uuid)?.handoff_id;
+        if delay_ms > 0.0 {
+            return Ok(Some(ScheduledTransfer {
+                at_ms: now_ms + delay_ms,
+                handoff_id,
+            }));
+        }
+        self.apply_handoff_fact(
+            uuid,
+            HandoffFact::TransferCompleted { handoff_id },
+            now_ms,
+            collector,
+        )?;
+        Ok(None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[inline(never)]
+    fn finish_destination_activation(
+        &mut self,
+        uuid: Uuid,
+        action: IssuedHandoffAction,
+        stored_hashes: &[u64],
+        lifecycle_events: Vec<SchedulerLifecycleEvent>,
+        now_ms: f64,
+        collector: &mut TraceCollector,
+        stats: &mut DisaggRuntimeStats,
+    ) -> Result<()> {
+        if let Some(capture) = self.conformance_capture.as_mut() {
+            capture.record_activation(stored_hashes);
+            capture
+                .lifecycle
+                .push(NormalizedHandoffEvent::DestinationActivated);
+        }
+        self.state_mut(uuid)?.ready_decode();
+        collector.on_destination_activated(uuid, now_ms);
+        #[cfg(test)]
+        stats
+            .transition_log
+            .push(DisaggTransition::DestinationActivated { uuid });
+        self.acknowledge_action(
+            uuid,
+            action,
+            HandoffActionOutcome::Applied,
+            now_ms,
+            collector,
+        )?;
+        self.process_lifecycle_events(lifecycle_events, now_ms, collector, stats)
+    }
+
+    #[inline(never)]
+    fn record_source_release(&mut self, _uuid: Uuid, _stats: &mut DisaggRuntimeStats) {
+        #[cfg(test)]
+        _stats
+            .transition_log
+            .push(DisaggTransition::SourceReleased { uuid: _uuid });
+        if let Some(capture) = self.conformance_capture.as_mut() {
+            capture
+                .lifecycle
+                .push(NormalizedHandoffEvent::SourceReleased);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[inline(never)]
+    fn finish_source_release(
+        &mut self,
+        uuid: Uuid,
+        action: IssuedHandoffAction,
+        outcome: HandoffActionOutcome,
+        lifecycle_events: Vec<SchedulerLifecycleEvent>,
+        now_ms: f64,
+        collector: &mut TraceCollector,
+        stats: &mut DisaggRuntimeStats,
+    ) -> Result<()> {
+        collector.on_source_released(uuid, now_ms);
+        self.acknowledge_action(uuid, action, outcome, now_ms, collector)?;
+        self.process_lifecycle_events(lifecycle_events, now_ms, collector, stats)
+    }
+
+    #[inline(never)]
+    fn complete_successful_handoff(
+        &mut self,
+        uuid: Uuid,
+        _now_ms: f64,
+        _stats: &mut DisaggRuntimeStats,
+    ) -> Result<()> {
+        #[cfg(test)]
+        {
+            _stats.handoff_ms.insert(uuid, _now_ms);
+            _stats
+                .transition_log
+                .push(DisaggTransition::HandoffCompleted { uuid });
+        }
+        if let Some(capture) = self.conformance_capture.as_mut() {
+            capture.lifecycle.push(NormalizedHandoffEvent::Completed);
+        }
+        self.retire_completed_request(uuid)
+    }
+
+    #[inline(never)]
+    fn record_decode_terminal(
+        &self,
+        signal: &OutputSignal,
+        now_ms: f64,
+        collector: &mut TraceCollector,
+        traffic: &mut TrafficAccumulator,
+    ) -> Result<()> {
+        if !signal.rejected {
+            let (input_tokens, requested_output_tokens) = {
+                let state = self.state(signal.uuid)?;
+                let original = state.original_request()?;
+                (original.tokens.len(), original.max_output_tokens)
+            };
+            let actual_output_tokens =
+                collector.actual_output_length(signal.uuid).ok_or_else(|| {
+                    anyhow!("offline replay missing collector state for {}", signal.uuid)
+                })?;
+            debug_assert!(actual_output_tokens <= requested_output_tokens);
+            let latencies = collector.request_latencies(signal.uuid);
+            traffic.on_request(input_tokens, actual_output_tokens, latencies);
+        }
+        let terminal_status = if signal.rejected {
+            ReplayTerminalStatus::Rejected
+        } else {
+            ReplayTerminalStatus::Completed
+        };
+        collector.on_terminal(signal.uuid, now_ms, terminal_status);
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn prepare_logical_finish(&mut self, uuid: Uuid, remove_actions: bool) -> Result<()> {
+        let transfer_was_pending = {
+            let state = self.state_mut(uuid)?;
+            if !state.counted_in_flight || state.phase == DisaggPhase::Done {
+                bail!("offline disagg replay finalized request {uuid} more than once");
+            }
+            let transfer_was_pending = state.phase == DisaggPhase::TransferPending;
+            state.counted_in_flight = false;
+            state.complete_decode();
+            transfer_was_pending
+        };
+        self.logical_in_flight = self
+            .logical_in_flight
+            .checked_sub(1)
+            .expect("logical in-flight request count underflow");
+        if transfer_was_pending {
+            self.stale_transfer_events = self
+                .stale_transfer_events
+                .checked_add(1)
+                .expect("stale transfer event count overflow");
+        }
+        if remove_actions {
+            self.action_queues.remove(uuid);
+        }
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn retire_completed_request(&mut self, uuid: Uuid) -> Result<()> {
+        let ready = {
+            let state = self.state(uuid)?;
+            !state.counted_in_flight && state.coordinator.is_complete()
+        };
+        if !ready {
+            return Ok(());
+        }
+        if self.action_queues.contains(uuid) {
+            bail!("offline disagg replay completed handoff still has queued actions for {uuid}");
+        }
+
+        let handoff_id = self.state(uuid)?.handoff_id;
+        self.state_mut(uuid)?.mark_done();
+        let removed = self.requests_by_handoff.remove(&handoff_id);
+        if removed != Some(uuid) {
+            bail!("offline disagg replay handoff index is inconsistent for {uuid}");
+        }
+        Ok(())
+    }
+}
+
+pub(in crate::replay) trait PoolPlacement<Events, Metadata>:
+    PlacementPolicy<DirectRequest, Metadata = Metadata, Observation = Events> + Sized
+where
+    Events: EngineEventBatch,
+    Metadata: ReplayAdmissionMetadata,
+{
+    fn is_router(&self) -> bool;
+}
+
+impl<Events: EngineEventBatch> PoolPlacement<Events, ()> for PoolRoundRobinPlacement<Events> {
+    #[inline]
+    fn is_router(&self) -> bool {
+        false
+    }
+}
+
+pub(in crate::replay) type RoundRobinDisaggRuntime =
+    DisaggRuntimeImpl<PoolRoundRobinPlacement<()>, NoEngineEvents, NoReplayMetadata>;
+
+pub(in crate::replay) struct DisaggRuntimeImpl<PlacementPolicyImpl, Observation, Metadata>
+where
+    Observation: ReplayEngineObservation,
+    Metadata: ReplayAdmissionMetadata,
+    PlacementPolicyImpl: PoolPlacement<Observation::Batch, Metadata>,
+{
+    now_ms: f64,
+    next_event_seq: u64,
+    admission: AdmissionQueue<Metadata>,
+    prefill_engine: EngineComponent<Observation>,
+    decode_engine: EngineComponent<Observation>,
+    prefill_placement: PlacementPolicyImpl,
+    decode_placement: PlacementPolicyImpl,
+    flow: DisaggFlowState,
     collector: TraceCollector,
-    events: BinaryHeap<SimulationEvent>,
+    events: BinaryHeap<SimulationEvent<Observation::Batch>>,
     progress: ReplayProgress,
     stats: DisaggRuntimeStats,
-    conformance_capture: Option<HandoffConformanceCapture>,
     /// Latest forward pass metric per worker/rank since the previous planner tick.
     prefill_fpm_buffer: LatestFpmBuffer,
     decode_fpm_buffer: LatestFpmBuffer,
@@ -305,69 +924,62 @@ pub(in crate::replay) struct DisaggRuntime {
     collect_fpm: bool,
 }
 
-impl DisaggRuntime {
-    /// Create a disaggregated offline runtime seeded from an explicit request queue.
-    pub(in crate::replay) fn new(
+impl DisaggRuntimeImpl<PoolRoundRobinPlacement<()>, NoEngineEvents, NoReplayMetadata> {
+    pub(in crate::replay) fn new_round_robin(
         config: &OfflineDisaggReplayConfig,
-        router_config: Option<KvRouterConfig>,
-        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         pending: VecDeque<DirectRequest>,
         mode: ReplayMode,
-        router_mode: ReplayRouterMode,
     ) -> Result<Self> {
-        Self::new_with_source(
+        Self::new_composed(
             config,
-            router_config,
-            prefill_load_estimator,
             AdmissionQueue::new_requests(pending, mode),
-            router_mode,
             false,
+            false,
+            false,
+            |_, topology| Ok(PoolRoundRobinPlacement::new(topology)),
+            |_, topology| Ok(PoolRoundRobinPlacement::new(topology)),
         )
     }
 
-    /// Create a disaggregated offline runtime whose admissions come from a workload driver.
-    pub(in crate::replay) fn new_workload(
+    pub(in crate::replay) fn new_round_robin_workload(
         config: &OfflineDisaggReplayConfig,
-        router_config: Option<KvRouterConfig>,
-        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         driver: WorkloadDriver,
         mode: ReplayMode,
-        router_mode: ReplayRouterMode,
     ) -> Result<Self> {
-        Self::new_with_source(
+        Self::new_composed(
             config,
-            router_config,
-            prefill_load_estimator,
             AdmissionQueue::new_workload(driver, mode),
-            router_mode,
             false,
+            false,
+            false,
+            |_, topology| Ok(PoolRoundRobinPlacement::new(topology)),
+            |_, topology| Ok(PoolRoundRobinPlacement::new(topology)),
         )
     }
+}
 
-    /// Construct the deterministic one-request runtime used by cross-surface
-    /// handoff conformance tests.
-    pub(super) fn new_handoff_conformance(
+impl<PlacementPolicyImpl, Observation, Metadata>
+    DisaggRuntimeImpl<PlacementPolicyImpl, Observation, Metadata>
+where
+    Observation: ReplayEngineObservation,
+    Metadata: ReplayAdmissionMetadata,
+    PlacementPolicyImpl: PoolPlacement<Observation::Batch, Metadata>,
+{
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::replay::offline) fn new_composed(
         config: &OfflineDisaggReplayConfig,
-        pending: VecDeque<DirectRequest>,
-    ) -> Result<Self> {
-        Self::new_with_source(
-            config,
-            None,
-            None,
-            AdmissionQueue::new_requests(pending, ReplayMode::Trace),
-            ReplayRouterMode::RoundRobin,
-            true,
-        )
-    }
-
-    /// Shared constructor for both raw-request and workload-driven admissions.
-    fn new_with_source(
-        config: &OfflineDisaggReplayConfig,
-        router_config: Option<KvRouterConfig>,
-        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
-        admission: AdmissionQueue,
-        router_mode: ReplayRouterMode,
+        admission: AdmissionQueue<Metadata>,
+        prefill_capture_raw: bool,
+        decode_capture_raw: bool,
         capture_conformance: bool,
+        create_prefill_placement: impl FnOnce(
+            &MockEngineArgs,
+            Vec<WorkerTopology>,
+        ) -> Result<PlacementPolicyImpl>,
+        create_decode_placement: impl FnOnce(
+            &MockEngineArgs,
+            Vec<WorkerTopology>,
+        ) -> Result<PlacementPolicyImpl>,
     ) -> Result<Self> {
         let handoff_order = match (
             config.prefill_args.engine_type,
@@ -380,33 +992,11 @@ impl DisaggRuntime {
             }
             _ => bail!("offline disaggregated replay requires matching backend engine types"),
         };
-        let progress = ReplayProgress::new(admission.total_requests(), "offline disagg replay");
-        let (prefill_router, decode_router) = match router_mode {
-            ReplayRouterMode::RoundRobin => (None, None),
-            ReplayRouterMode::KvRouter => {
-                let prefill_router_config =
-                    derive_prefill_router_config(&config.prefill_args, router_config.clone());
-                let decode_router_config =
-                    derive_decode_router_config(&config.decode_args, router_config);
-                (
-                    Some(OfflineReplayRouter::new(
-                        &config.prefill_args,
-                        Some(prefill_router_config),
-                        prefill_load_estimator,
-                        config.num_prefill_workers,
-                    )?),
-                    Some(OfflineReplayRouter::new(
-                        &config.decode_args,
-                        Some(decode_router_config),
-                        None,
-                        config.num_decode_workers,
-                    )?),
-                )
-            }
-        };
-
-        let prefill_capture_kv = prefill_router.is_some();
-        let mut prefill_engine = EngineComponent::new(
+        let progress = ReplayProgress::new(
+            CoreAdmissionSource::total_requests(&admission),
+            "offline disagg replay",
+        );
+        let mut prefill_engine = EngineComponent::<Observation>::new(
             SimulationWorkerStage::Prefill,
             EnginePassMode::Hidden,
             (0..config.num_prefill_workers)
@@ -414,13 +1004,13 @@ impl DisaggRuntime {
                     super::state::OfflineWorkerState::new(
                         worker_idx,
                         config.prefill_args.clone(),
-                        prefill_capture_kv,
+                        prefill_capture_raw,
                     )
                 })
                 .collect(),
         );
-        prefill_engine.set_scaling_args(config.prefill_args.clone(), prefill_capture_kv);
-        let mut decode_engine = EngineComponent::new(
+        prefill_engine.set_scaling_args(config.prefill_args.clone(), prefill_capture_raw);
+        let mut decode_engine = EngineComponent::<Observation>::new(
             SimulationWorkerStage::Decode,
             EnginePassMode::Visible,
             (0..config.num_decode_workers)
@@ -428,12 +1018,16 @@ impl DisaggRuntime {
                     super::state::OfflineWorkerState::new(
                         worker_idx,
                         config.decode_args.clone(),
-                        capture_conformance,
+                        decode_capture_raw,
                     )
                 })
                 .collect(),
         );
-        decode_engine.set_scaling_args(config.decode_args.clone(), capture_conformance);
+        decode_engine.set_scaling_args(config.decode_args.clone(), decode_capture_raw);
+        let prefill_placement =
+            create_prefill_placement(&config.prefill_args, prefill_engine.active_topology())?;
+        let decode_placement =
+            create_decode_placement(&config.decode_args, decode_engine.active_topology())?;
 
         // Record each pool's GPUs/worker from its engine parallelism so the
         // report can express GPU-hours from the mocker's own config.
@@ -445,22 +1039,13 @@ impl DisaggRuntime {
 
         Ok(Self {
             now_ms: 0.0,
-            next_prefill_worker_idx: 0,
-            next_decode_worker_idx: 0,
             next_event_seq: 0,
             admission,
             prefill_engine,
             decode_engine,
-            prefill_router,
-            decode_router,
-            requests: HashMap::new(),
-            requests_by_handoff: HashMap::new(),
-            handoff_order,
-            prefill_block_size: config.prefill_args.block_size,
-            decode_block_size: config.decode_args.block_size,
-            action_queues: DisaggActionQueues::default(),
-            logical_in_flight: 0,
-            stale_transfer_events: 0,
+            prefill_placement,
+            decode_placement,
+            flow: DisaggFlowState::new(handoff_order, capture_conformance),
             collector,
             events: BinaryHeap::new(),
             progress,
@@ -468,7 +1053,6 @@ impl DisaggRuntime {
             stats: DisaggRuntimeStats::default(),
             #[cfg(not(test))]
             stats: DisaggRuntimeStats,
-            conformance_capture: capture_conformance.then(HandoffConformanceCapture::default),
             prefill_fpm_buffer: LatestFpmBuffer::default(),
             decode_fpm_buffer: LatestFpmBuffer::default(),
             traffic: TrafficAccumulator::new(),
@@ -537,64 +1121,32 @@ impl DisaggRuntime {
 
     /// Count all requests consuming cluster capacity across prefill, decode, and router queues.
     fn cluster_in_flight(&self) -> usize {
-        self.logical_in_flight
-    }
-
-    /// Pick the next active prefill worker in round-robin order.
-    fn next_prefill_worker(&mut self) -> usize {
-        let active = self.prefill_engine.active_worker_ids();
-        debug_assert!(
-            !active.is_empty(),
-            "no active prefill workers for round-robin"
-        );
-        let idx = self.next_prefill_worker_idx % active.len();
-        self.next_prefill_worker_idx = idx + 1;
-        active[idx]
-    }
-
-    /// Pick the next active decode worker in round-robin order.
-    fn next_decode_worker(&mut self) -> usize {
-        let active = self.decode_engine.active_worker_ids();
-        debug_assert!(
-            !active.is_empty(),
-            "no active decode workers for round-robin"
-        );
-        let idx = self.next_decode_worker_idx % active.len();
-        self.next_decode_worker_idx = idx + 1;
-        active[idx]
+        self.flow.logical_in_flight
     }
 
     /// Track the peak number of requests parked in each stage router.
     fn record_router_pending(&mut self) {
         #[cfg(test)]
         {
-            self.stats.max_prefill_router_pending_count =
-                self.stats.max_prefill_router_pending_count.max(
-                    self.prefill_router
-                        .as_ref()
-                        .map_or(0, OfflineReplayRouter::pending_count),
-                );
-            self.stats.max_decode_router_pending_count =
-                self.stats.max_decode_router_pending_count.max(
-                    self.decode_router
-                        .as_ref()
-                        .map_or(0, OfflineReplayRouter::pending_count),
-                );
+            self.stats.max_prefill_router_pending_count = self
+                .stats
+                .max_prefill_router_pending_count
+                .max(self.prefill_placement.pending_count());
+            self.stats.max_decode_router_pending_count = self
+                .stats
+                .max_decode_router_pending_count
+                .max(self.decode_placement.pending_count());
         }
     }
 
     /// Borrow immutable request state with a structured missing-request error.
     fn state(&self, uuid: Uuid) -> Result<&DisaggRequestState> {
-        self.requests
-            .get(&uuid)
-            .ok_or_else(|| anyhow!("offline disagg replay missing request state for {uuid}"))
+        self.flow.state(uuid)
     }
 
     /// Borrow mutable request state with a structured missing-request error.
     fn state_mut(&mut self, uuid: Uuid) -> Result<&mut DisaggRequestState> {
-        self.requests
-            .get_mut(&uuid)
-            .ok_or_else(|| anyhow!("offline disagg replay missing request state for {uuid}"))
+        self.flow.state_mut(uuid)
     }
 
     fn acknowledge_action(
@@ -603,32 +1155,13 @@ impl DisaggRuntime {
         action: IssuedHandoffAction,
         outcome: HandoffActionOutcome,
     ) -> Result<()> {
-        if matches!(outcome, HandoffActionOutcome::Failed(_)) {
-            self.collector
-                .on_terminal(uuid, self.now_ms, ReplayTerminalStatus::Failed);
-        }
-        let actions = self
-            .state_mut(uuid)?
-            .coordinator
-            .on_action_outcome(action.id, outcome)?;
-        self.action_queues.enqueue_all(uuid, actions);
-        Ok(())
+        self.flow
+            .acknowledge_action(uuid, action, outcome, self.now_ms, &mut self.collector)
     }
 
     fn apply_handoff_fact(&mut self, uuid: Uuid, fact: HandoffFact) -> Result<()> {
-        let terminal_status = match fact {
-            HandoffFact::Failed { .. } | HandoffFact::TimedOut { .. } => {
-                Some(ReplayTerminalStatus::Failed)
-            }
-            HandoffFact::Canceled { .. } => Some(ReplayTerminalStatus::Canceled),
-            _ => None,
-        };
-        if let Some(status) = terminal_status {
-            self.collector.on_terminal(uuid, self.now_ms, status);
-        }
-        let actions = self.state_mut(uuid)?.coordinator.on_fact(fact)?;
-        self.action_queues.enqueue_all(uuid, actions);
-        Ok(())
+        self.flow
+            .apply_handoff_fact(uuid, fact, self.now_ms, &mut self.collector)
     }
 
     /// Submit a coordinator-owned prefill onto a selected worker.
@@ -638,8 +1171,7 @@ impl DisaggRuntime {
         worker_idx: usize,
         action: IssuedHandoffAction,
     ) -> Result<()> {
-        let request = self.state(uuid)?.build_prefill_request()?;
-        let handoff_id = self.state(uuid)?.handoff_id;
+        let (request, handoff_id) = self.flow.prepare_prefill_submission(uuid)?;
         let effects = match self.prefill_engine.apply_command(
             worker_idx,
             SchedulerCommand::SubmitHandoffPrefill {
@@ -660,15 +1192,15 @@ impl DisaggRuntime {
         if !matches!(effects.result, SchedulerCommandResult::Submitted(id) if id == uuid) {
             bail!("offline disagg replay prefill submission returned an unexpected result");
         }
-        self.state_mut(uuid)?.start_prefill(worker_idx);
-        self.collector.on_prefill_assigned(uuid, worker_idx);
-        #[cfg(test)]
-        {
-            self.stats.prefill_assignments.insert(uuid, worker_idx);
-        }
-        self.acknowledge_action(uuid, action, HandoffActionOutcome::Submitted)?;
-        self.process_lifecycle_events(effects.lifecycle_events)?;
-        Ok(())
+        self.flow.finish_prefill_submission(
+            uuid,
+            worker_idx,
+            action,
+            effects.lifecycle_events,
+            self.now_ms,
+            &mut self.collector,
+            &mut self.stats,
+        )
     }
 
     /// Accept destination ownership on a selected decode worker.
@@ -678,8 +1210,7 @@ impl DisaggRuntime {
         worker_idx: usize,
         action: IssuedHandoffAction,
     ) -> Result<()> {
-        let request = self.state(uuid)?.original_request()?.clone();
-        let handoff_id = self.state(uuid)?.handoff_id;
+        let (request, handoff_id) = self.flow.prepare_destination_reservation(uuid)?;
         let effects = match self.decode_engine.apply_command(
             worker_idx,
             SchedulerCommand::ReserveDestination {
@@ -703,75 +1234,51 @@ impl DisaggRuntime {
         ) {
             bail!("offline disagg replay destination acceptance returned an unexpected result");
         }
-        if let Some(capture) = self.conformance_capture.as_mut() {
-            capture.record_before_activation(&effects.kv_events);
-            capture
-                .lifecycle
-                .push(NormalizedHandoffEvent::DestinationAccepted);
-        }
-        self.state_mut(uuid)?.assign_decode(worker_idx);
-        self.collector.on_decode_assigned(uuid, worker_idx);
-        #[cfg(test)]
-        {
-            self.stats.decode_assignments.insert(uuid, worker_idx);
-            self.stats
-                .transition_log
-                .push(DisaggTransition::DestinationAccepted { uuid });
-        }
-        self.acknowledge_action(uuid, action, HandoffActionOutcome::Accepted)?;
-        self.process_lifecycle_events(effects.lifecycle_events)?;
-        Ok(())
-    }
-
-    /// Turn prefill router admissions into concrete worker dispatches.
-    fn dispatch_prefill_admissions(&mut self, admissions: Vec<WorkerAdmission>) -> Result<()> {
-        for WorkerAdmission {
+        let stored_hashes = self
+            .flow
+            .conformance_capture
+            .as_ref()
+            .map(|_| Observation::stored_hashes(&effects.engine_events))
+            .unwrap_or_default();
+        self.flow.finish_destination_reservation(
             uuid,
             worker_idx,
-            overlap_blocks,
-            isl_blocks,
-        } in admissions
-        {
-            self.traffic.on_admission(overlap_blocks, isl_blocks);
-            let input_tokens = self.state(uuid)?.original_request()?.tokens.len();
-            let overlap_tokens =
-                (overlap_blocks as usize * self.prefill_block_size).min(input_tokens);
-            self.collector
-                .on_prefill_route_overlap(uuid, overlap_tokens);
-            if self.state(uuid)?.phase != DisaggPhase::QueuedPrefill {
-                bail!("offline disagg replay expected queued prefill request for {uuid}");
-            }
-            let action = self
-                .state_mut(uuid)?
-                .pending_prefill_action
-                .take()
-                .ok_or_else(|| anyhow!("missing coordinator prefill action for {uuid}"))?;
+            action,
+            &stored_hashes,
+            effects.lifecycle_events,
+            self.now_ms,
+            &mut self.collector,
+            &mut self.stats,
+        )
+    }
+
+    fn record_prefill_placement(&mut self, placement: Placement) -> Result<()> {
+        self.flow
+            .record_prefill_placement(placement, &mut self.traffic, &mut self.collector)
+    }
+
+    fn dispatch_prefill_placements(&mut self, placements: Vec<Placement>) -> Result<()> {
+        for placement in placements {
+            let (uuid, worker_idx, action) = self.flow.take_prefill_placement(
+                placement,
+                &mut self.traffic,
+                &mut self.collector,
+            )?;
             self.dispatch_prefill(uuid, worker_idx, action)?;
         }
         Ok(())
     }
 
-    /// Turn decode-router admissions into destination ownership commands.
-    fn dispatch_decode_admissions(&mut self, admissions: Vec<WorkerAdmission>) -> Result<()> {
-        for WorkerAdmission {
-            uuid,
-            worker_idx,
-            overlap_blocks,
-            ..
-        } in admissions
-        {
-            let input_tokens = self.state(uuid)?.original_request()?.tokens.len();
-            let overlap_tokens =
-                (overlap_blocks as usize * self.decode_block_size).min(input_tokens);
-            self.collector.on_decode_route_overlap(uuid, overlap_tokens);
-            if self.state(uuid)?.phase != DisaggPhase::AwaitingDestination {
-                bail!("offline disagg replay expected destination-waiting request for {uuid}");
-            }
-            let action = self
-                .state_mut(uuid)?
-                .pending_destination_action
-                .take()
-                .ok_or_else(|| anyhow!("missing coordinator destination action for {uuid}"))?;
+    fn record_decode_placement(&mut self, placement: Placement) -> Result<()> {
+        self.flow
+            .record_decode_placement(placement, &mut self.collector)
+    }
+
+    fn dispatch_decode_placements(&mut self, placements: Vec<Placement>) -> Result<()> {
+        for placement in placements {
+            let (uuid, worker_idx, action) = self
+                .flow
+                .take_decode_placement(placement, &mut self.collector)?;
             self.reserve_destination(uuid, worker_idx, action)?;
         }
         Ok(())
@@ -779,70 +1286,76 @@ impl DisaggRuntime {
 
     fn route_prefill(&mut self, uuid: Uuid, action: IssuedHandoffAction) -> Result<()> {
         self.state_mut(uuid)?.phase = DisaggPhase::QueuedPrefill;
-        if self.prefill_router.is_none() {
-            self.collector.on_prefill_route_overlap(uuid, 0);
-            let worker_idx = self.next_prefill_worker();
-            return self.dispatch_prefill(uuid, worker_idx, action);
-        }
-        {
-            let state = self.state_mut(uuid)?;
-            state.pending_prefill_action = Some(action);
-            state.prefill_routed = true;
-        }
         let request = self.state(uuid)?.build_prefill_request()?;
-        let replay_hashes = self.state_mut(uuid)?.take_replay_hashes();
+        let metadata = Metadata::from_hashes(self.state_mut(uuid)?.take_replay_hashes());
         let session_id = self.state(uuid)?.session_id().map(str::to_owned);
-        let admissions = self
-            .prefill_router
-            .as_mut()
-            .expect("prefill router presence checked above")
-            .on_request_arrival_for_session(&request, replay_hashes, session_id, self.now_ms)?
-            .admissions;
+        let effects = self
+            .prefill_placement
+            .place(&request, metadata, session_id, self.now_ms)?;
+        self.dispatch_prefill_placements(effects.released)?;
+        match effects.decision {
+            PlacementDecision::Immediate(placement) => {
+                let routed = self.prefill_placement.is_router();
+                self.state_mut(uuid)?.prefill_routed = routed;
+                self.record_prefill_placement(placement)?;
+                self.dispatch_prefill(uuid, placement.scheduler_id, action)?;
+            }
+            PlacementDecision::Queued => {
+                let state = self.state_mut(uuid)?;
+                state.pending_prefill_action = Some(action);
+                state.prefill_routed = true;
+            }
+        }
         self.record_router_pending();
-        self.dispatch_prefill_admissions(admissions)
+        Ok(())
     }
 
     fn route_destination(&mut self, uuid: Uuid, action: IssuedHandoffAction) -> Result<()> {
         self.state_mut(uuid)?.await_destination();
-        if self.decode_router.is_none() {
-            self.collector.on_decode_route_overlap(uuid, 0);
-            let worker_idx = self.next_decode_worker();
-            return self.reserve_destination(uuid, worker_idx, action);
-        }
-        {
-            let state = self.state_mut(uuid)?;
-            state.pending_destination_action = Some(action);
-            state.destination_routed = true;
-        }
         let request = self.state(uuid)?.original_request()?.clone();
         let session_id = self.state(uuid)?.session_id().map(str::to_owned);
-        let admissions = self
-            .decode_router
-            .as_mut()
-            .expect("decode router presence checked above")
-            .on_request_arrival_for_session(&request, None, session_id, self.now_ms)?
-            .admissions;
+        let effects = self.decode_placement.place(
+            &request,
+            Metadata::from_hashes(None),
+            session_id,
+            self.now_ms,
+        )?;
+        self.dispatch_decode_placements(effects.released)?;
+        match effects.decision {
+            PlacementDecision::Immediate(placement) => {
+                let routed = self.decode_placement.is_router();
+                self.state_mut(uuid)?.destination_routed = routed;
+                self.record_decode_placement(placement)?;
+                self.reserve_destination(uuid, placement.scheduler_id, action)?;
+            }
+            PlacementDecision::Queued => {
+                let state = self.state_mut(uuid)?;
+                state.pending_destination_action = Some(action);
+                state.destination_routed = true;
+            }
+        }
         self.record_router_pending();
-        self.dispatch_decode_admissions(admissions)?;
         Ok(())
     }
 
     fn drive_pending_actions(&mut self) -> Result<bool> {
         let mut changed = false;
-        while let Some((uuid, action)) = self.action_queues.pop_pending() {
+        while let Some((uuid, action)) = self.flow.action_queues.pop_pending() {
             match self.execute_action(uuid, action)? {
                 ActionExecution::Applied => {
                     changed = true;
                 }
                 ActionExecution::WaitingForWorker { action, stage } => {
-                    self.action_queues.wait_for_worker(uuid, action, stage);
+                    self.flow.action_queues.wait_for_worker(uuid, action, stage);
                 }
                 ActionExecution::Deferred {
                     action,
                     stage,
                     worker_idx,
                 } => {
-                    self.action_queues.defer(uuid, action, stage, worker_idx);
+                    self.flow
+                        .action_queues
+                        .defer(uuid, action, stage, worker_idx);
                 }
             }
         }
@@ -850,11 +1363,11 @@ impl DisaggRuntime {
     }
 
     fn wake_worker_waiters(&mut self, stage: SimulationWorkerStage) {
-        self.action_queues.wake_worker_waiters(stage);
+        self.flow.action_queues.wake_worker_waiters(stage);
     }
 
     fn wake_deferred_actions(&mut self, stage: SimulationWorkerStage, worker_idx: usize) {
-        self.action_queues.wake_deferred(stage, worker_idx);
+        self.flow.action_queues.wake_deferred(stage, worker_idx);
     }
 
     fn execute_action(
@@ -882,23 +1395,23 @@ impl DisaggRuntime {
                 self.route_destination(uuid, issued)?;
             }
             HandoffAction::StartTransfer { delay_ms, .. } => {
-                self.acknowledge_action(uuid, issued, HandoffActionOutcome::Scheduled)?;
-                self.state_mut(uuid)?.transfer_pending();
-                if delay_ms > 0.0 {
-                    let handoff_id = self.state(uuid)?.handoff_id;
+                if let Some(transfer) = self.flow.start_transfer(
+                    uuid,
+                    issued,
+                    delay_ms,
+                    self.now_ms,
+                    &mut self.collector,
+                )? {
                     push_transfer_complete(
                         &mut self.events,
                         &mut self.next_event_seq,
-                        self.now_ms + delay_ms,
-                        handoff_id,
+                        transfer.at_ms,
+                        transfer.handoff_id,
                     );
                     #[cfg(test)]
                     self.stats
                         .transition_log
                         .push(DisaggTransition::TransferQueued { uuid });
-                } else {
-                    let handoff_id = self.state(uuid)?.handoff_id;
-                    self.apply_handoff_fact(uuid, HandoffFact::TransferCompleted { handoff_id })?;
                 }
             }
             HandoffAction::ActivateDestination { handoff_id } => {
@@ -927,20 +1440,21 @@ impl DisaggRuntime {
                     )?;
                     return Ok(ActionExecution::Applied);
                 }
-                if let Some(capture) = self.conformance_capture.as_mut() {
-                    capture.record_activation(&effects.kv_events);
-                    capture
-                        .lifecycle
-                        .push(NormalizedHandoffEvent::DestinationActivated);
-                }
-                self.state_mut(uuid)?.ready_decode();
-                self.collector.on_destination_activated(uuid, self.now_ms);
-                #[cfg(test)]
-                self.stats
-                    .transition_log
-                    .push(DisaggTransition::DestinationActivated { uuid });
-                self.acknowledge_action(uuid, issued, HandoffActionOutcome::Applied)?;
-                self.process_lifecycle_events(effects.lifecycle_events)?;
+                let stored_hashes = self
+                    .flow
+                    .conformance_capture
+                    .as_ref()
+                    .map(|_| Observation::stored_hashes(&effects.engine_events))
+                    .unwrap_or_default();
+                self.flow.finish_destination_activation(
+                    uuid,
+                    issued,
+                    &stored_hashes,
+                    effects.lifecycle_events,
+                    self.now_ms,
+                    &mut self.collector,
+                    &mut self.stats,
+                )?;
             }
             HandoffAction::ReleaseSource { handoff_id } => {
                 let worker_idx = self
@@ -962,19 +1476,17 @@ impl DisaggRuntime {
                     SchedulerCommandResult::Noop => HandoffActionOutcome::Noop,
                     _ => bail!("source release returned an unexpected result"),
                 };
-                #[cfg(test)]
-                self.stats
-                    .transition_log
-                    .push(DisaggTransition::SourceReleased { uuid });
-                if let Some(capture) = self.conformance_capture.as_mut() {
-                    capture
-                        .lifecycle
-                        .push(NormalizedHandoffEvent::SourceReleased);
-                }
-                self.apply_prefill_router_events(effects.kv_events)?;
-                self.collector.on_source_released(uuid, self.now_ms);
-                self.acknowledge_action(uuid, issued, outcome)?;
-                self.process_lifecycle_events(effects.lifecycle_events)?;
+                self.flow.record_source_release(uuid, &mut self.stats);
+                self.apply_prefill_observations(effects.engine_events)?;
+                self.flow.finish_source_release(
+                    uuid,
+                    issued,
+                    outcome,
+                    effects.lifecycle_events,
+                    self.now_ms,
+                    &mut self.collector,
+                    &mut self.stats,
+                )?;
             }
             HandoffAction::CancelSource { handoff_id } => {
                 let Some(worker_idx) = self.state(uuid)?.prefill_worker_idx() else {
@@ -993,7 +1505,7 @@ impl DisaggRuntime {
                     .prefill_engine
                     .apply_command(worker_idx, SchedulerCommand::CancelSource { handoff_id })?;
                 let outcome = command_cleanup_outcome(effects.result)?;
-                self.apply_prefill_router_events(effects.kv_events)?;
+                self.apply_prefill_observations(effects.engine_events)?;
                 self.acknowledge_action(uuid, issued, outcome)?;
                 self.process_lifecycle_events(effects.lifecycle_events)?;
             }
@@ -1024,70 +1536,12 @@ impl DisaggRuntime {
     }
 
     fn process_lifecycle_events(&mut self, events: Vec<SchedulerLifecycleEvent>) -> Result<()> {
-        for event in events {
-            match event {
-                SchedulerLifecycleEvent::SourceHeld {
-                    handoff_id,
-                    request_id,
-                    transfer_timing,
-                } => {
-                    let uuid = self.uuid_for_handoff(handoff_id)?;
-                    if uuid != request_id {
-                        bail!("source lifecycle request ID does not match its handoff");
-                    }
-                    #[cfg(test)]
-                    self.stats
-                        .transition_log
-                        .push(DisaggTransition::SourceHeld { uuid });
-                    if let Some(capture) = self.conformance_capture.as_mut() {
-                        capture.lifecycle.push(NormalizedHandoffEvent::SourceHeld);
-                    }
-                    self.collector.on_source_held(uuid, self.now_ms);
-                    self.apply_handoff_fact(
-                        uuid,
-                        HandoffFact::SourceHeld {
-                            handoff_id,
-                            transfer_timing,
-                        },
-                    )?;
-                }
-                SchedulerLifecycleEvent::DestinationReserved {
-                    handoff_id,
-                    request_id,
-                    transferable_prompt_tokens,
-                } => {
-                    let uuid = self.uuid_for_handoff(handoff_id)?;
-                    if uuid != request_id {
-                        bail!("destination lifecycle request ID does not match its handoff");
-                    }
-                    #[cfg(test)]
-                    self.stats
-                        .transition_log
-                        .push(DisaggTransition::DestinationReserved { uuid });
-                    if let Some(capture) = self.conformance_capture.as_mut() {
-                        capture
-                            .lifecycle
-                            .push(NormalizedHandoffEvent::DestinationReserved);
-                    }
-                    self.collector.on_destination_reserved(uuid, self.now_ms);
-                    self.apply_handoff_fact(
-                        uuid,
-                        HandoffFact::DestinationReserved {
-                            handoff_id,
-                            transferable_prompt_tokens,
-                        },
-                    )?;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn uuid_for_handoff(&self, handoff_id: HandoffId) -> Result<Uuid> {
-        self.requests_by_handoff
-            .get(&handoff_id)
-            .copied()
-            .ok_or_else(|| anyhow!("offline disagg replay missing handoff {handoff_id:?}"))
+        self.flow.process_lifecycle_events(
+            events,
+            self.now_ms,
+            &mut self.collector,
+            &mut self.stats,
+        )
     }
 
     fn cancel_prefill_route(&mut self, uuid: Uuid) -> Result<()> {
@@ -1095,18 +1549,14 @@ impl DisaggRuntime {
             return Ok(());
         }
         self.state_mut(uuid)?.pending_prefill_action = None;
-        let router = self
-            .prefill_router
-            .as_mut()
-            .expect("prefill route flag requires a router");
-        let admissions = if router.cancel_pending(uuid) {
+        let placements = if self.prefill_placement.cancel_pending(uuid) {
             Vec::new()
         } else {
-            router.on_request_completed(uuid, self.now_ms)?.admissions
+            self.prefill_placement.request_terminal(uuid, self.now_ms)?
         };
         self.state_mut(uuid)?.prefill_routed = false;
         self.record_router_pending();
-        self.dispatch_prefill_admissions(admissions)
+        self.dispatch_prefill_placements(placements)
     }
 
     fn cancel_decode_route(&mut self, uuid: Uuid) -> Result<()> {
@@ -1114,30 +1564,21 @@ impl DisaggRuntime {
             return Ok(());
         }
         self.state_mut(uuid)?.pending_destination_action = None;
-        let router = self
-            .decode_router
-            .as_mut()
-            .expect("destination route flag requires a router");
-        let admissions = if router.cancel_pending(uuid) {
+        let placements = if self.decode_placement.cancel_pending(uuid) {
             Vec::new()
         } else {
-            router.on_request_completed(uuid, self.now_ms)?.admissions
+            self.decode_placement.request_terminal(uuid, self.now_ms)?
         };
         self.state_mut(uuid)?.destination_routed = false;
         self.record_router_pending();
-        self.dispatch_decode_admissions(admissions)
+        self.dispatch_decode_placements(placements)
     }
 
     fn complete_prefill_route(&mut self, uuid: Uuid) -> Result<()> {
         if !self.state(uuid)?.prefill_routed {
             return Ok(());
         }
-        let admissions = self
-            .prefill_router
-            .as_mut()
-            .expect("prefill route flag requires a router")
-            .on_request_completed(uuid, self.now_ms)?
-            .admissions;
+        let placements = self.prefill_placement.request_terminal(uuid, self.now_ms)?;
         self.state_mut(uuid)?.prefill_routed = false;
         #[cfg(test)]
         {
@@ -1147,24 +1588,15 @@ impl DisaggRuntime {
                 .push(DisaggTransition::PrefillFree { uuid });
         }
         self.record_router_pending();
-        self.dispatch_prefill_admissions(admissions)
+        self.dispatch_prefill_placements(placements)
     }
 
     fn complete_handoff(&mut self, uuid: Uuid) -> Result<()> {
         match self.state(uuid)?.coordinator.completion() {
             Some(HandoffCompletion::Success) => {
                 self.complete_prefill_route(uuid)?;
-                #[cfg(test)]
-                {
-                    self.stats.handoff_ms.insert(uuid, self.now_ms);
-                    self.stats
-                        .transition_log
-                        .push(DisaggTransition::HandoffCompleted { uuid });
-                }
-                if let Some(capture) = self.conformance_capture.as_mut() {
-                    capture.lifecycle.push(NormalizedHandoffEvent::Completed);
-                }
-                self.retire_completed_request(uuid)?;
+                self.flow
+                    .complete_successful_handoff(uuid, self.now_ms, &mut self.stats)?;
             }
             Some(HandoffCompletion::Canceled) => {
                 self.collector
@@ -1179,30 +1611,8 @@ impl DisaggRuntime {
     }
 
     fn finish_logical_request(&mut self, uuid: Uuid, remove_actions: bool) -> Result<()> {
-        let transfer_was_pending = {
-            let state = self.state_mut(uuid)?;
-            if !state.counted_in_flight || state.phase == DisaggPhase::Done {
-                bail!("offline disagg replay finalized request {uuid} more than once");
-            }
-            let transfer_was_pending = state.phase == DisaggPhase::TransferPending;
-            state.counted_in_flight = false;
-            state.complete_decode();
-            transfer_was_pending
-        };
-        self.logical_in_flight = self
-            .logical_in_flight
-            .checked_sub(1)
-            .expect("logical in-flight request count underflow");
-        if transfer_was_pending {
-            self.stale_transfer_events = self
-                .stale_transfer_events
-                .checked_add(1)
-                .expect("stale transfer event count overflow");
-        }
-        if remove_actions {
-            self.action_queues.remove(uuid);
-        }
-        self.admission.on_request_completed(uuid, self.now_ms)?;
+        self.flow.prepare_logical_finish(uuid, remove_actions)?;
+        CoreAdmissionSource::on_terminal(&mut self.admission, uuid, self.now_ms, false)?;
         self.progress.inc_completed();
         #[cfg(test)]
         {
@@ -1215,70 +1625,24 @@ impl DisaggRuntime {
                     .push(DisaggTransition::WorkloadCompleted { uuid });
             }
         }
-        self.retire_completed_request(uuid)?;
-        Ok(())
-    }
-
-    fn retire_completed_request(&mut self, uuid: Uuid) -> Result<()> {
-        let ready = {
-            let state = self.state(uuid)?;
-            !state.counted_in_flight && state.coordinator.is_complete()
-        };
-        if !ready {
-            return Ok(());
-        }
-        if self.action_queues.contains(uuid) {
-            bail!("offline disagg replay completed handoff still has queued actions for {uuid}");
-        }
-
-        let handoff_id = self.state(uuid)?.handoff_id;
-        self.state_mut(uuid)?.mark_done();
-        let removed = self.requests_by_handoff.remove(&handoff_id);
-        if removed != Some(uuid) {
-            bail!("offline disagg replay handoff index is inconsistent for {uuid}");
-        }
-        Ok(())
+        self.flow.retire_completed_request(uuid)
     }
 
     /// Admit one external request into prefill-side state, collector state, and optional router.
     fn on_external_arrival(
         &mut self,
-        mut request: DirectRequest,
+        request: DirectRequest,
         arrival_time_ms: f64,
         replay_hashes: Option<ReplayRequestHashes>,
         session_id: Option<String>,
     ) -> Result<Uuid> {
-        let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
-        request.uuid = Some(uuid);
-        request.arrival_timestamp_ms = Some(arrival_time_ms);
-
-        self.collector.on_arrival(
-            uuid,
-            arrival_time_ms,
-            request.tokens.len(),
-            request.max_output_tokens,
-        );
-        if self.requests.contains_key(&uuid) {
-            bail!("offline disagg replay request {uuid} is already active");
-        }
-        let handoff_id = HandoffId::new();
-        let mut state = DisaggRequestState::new(
+        self.flow.on_external_arrival(
             request,
             arrival_time_ms,
-            handoff_id,
-            self.handoff_order,
             replay_hashes,
             session_id,
-        );
-        let actions = state.coordinator.start()?;
-        self.requests.insert(uuid, state);
-        self.requests_by_handoff.insert(handoff_id, uuid);
-        self.logical_in_flight = self
-            .logical_in_flight
-            .checked_add(1)
-            .expect("logical in-flight request count overflow");
-        self.action_queues.enqueue_all(uuid, actions);
-        Ok(uuid)
+            &mut self.collector,
+        )
     }
 
     /// Return true once both stages, both routers, and all admissions are fully
@@ -1288,22 +1652,22 @@ impl DisaggRuntime {
     fn is_done(&self) -> bool {
         self.only_idle_events_remain()
             && self.cluster_in_flight() == 0
-            && self.admission.is_drained()
+            && CoreAdmissionSource::is_drained(&self.admission)
             && self.prefill_engine.is_drained()
             && self.decode_engine.is_drained()
-            && self.action_queues.is_empty()
-            && self.requests_by_handoff.is_empty()
+            && self.flow.action_queues.is_empty()
+            && self.flow.requests_by_handoff.is_empty()
     }
 
     /// Return true once the request workload is complete, even if `WorkerReady`
     /// or `PlannerTick` events remain in the queue.
     fn is_workload_done(&self) -> bool {
         self.cluster_in_flight() == 0
-            && self.admission.is_drained()
+            && CoreAdmissionSource::is_drained(&self.admission)
             && self.prefill_engine.is_drained()
             && self.decode_engine.is_drained()
-            && self.action_queues.is_empty()
-            && self.requests_by_handoff.is_empty()
+            && self.flow.action_queues.is_empty()
+            && self.flow.requests_by_handoff.is_empty()
             && self.only_idle_events_remain()
     }
 
@@ -1323,45 +1687,40 @@ impl DisaggRuntime {
     /// Pick the next logical timestamp from arrivals, worker completions, or decode handoffs.
     fn next_timestamp(&mut self) -> Option<f64> {
         let next_event_ms = self.events.peek().map(|event| event.at_ms);
-        let next = choose_next_timestamp(self.admission.next_ready_time_ms(), next_event_ms);
+        let next = choose_next_timestamp(
+            CoreAdmissionSource::next_ready_time_ms(&mut self.admission),
+            next_event_ms,
+        );
         #[cfg(feature = "kvbm-offload")]
         {
             let next_offload = choose_next_timestamp(
                 self.prefill_engine.earliest_offload_deadline(),
                 self.decode_engine.earliest_offload_deadline(),
             );
-            return choose_next_timestamp(next, next_offload);
+            choose_next_timestamp(next, next_offload)
         }
         #[cfg(not(feature = "kvbm-offload"))]
-        next
+        {
+            next
+        }
     }
 
-    /// Apply prefill-side KV router events at the scheduler-selected visibility phase.
-    fn apply_prefill_router_events(&mut self, events: Vec<RouterEvent>) -> Result<()> {
-        let Some(prefill_router) = self.prefill_router.as_mut() else {
-            return Ok(());
-        };
-        let effects = prefill_router.on_kv_events(events)?;
-        if !effects.admissions.is_empty() {
-            bail!("offline disagg replay prefill KV events must not admit requests");
-        }
-        Ok(())
+    fn apply_prefill_observations(&mut self, events: Observation::Batch) -> Result<()> {
+        let placements = self.prefill_placement.observe(events, self.now_ms)?;
+        self.dispatch_prefill_placements(placements)
     }
 
     #[cfg(feature = "kvbm-offload")]
     fn tick_offload_engines(&mut self) -> Result<bool> {
         let prefill = self.prefill_engine.tick_offload_engines(self.now_ms);
         let decode = self.decode_engine.tick_offload_engines(self.now_ms);
-        let changed = !prefill.kv_events.is_empty()
-            || !decode.kv_events.is_empty()
+        let changed = prefill.progress.made_progress
+            || decode.progress.made_progress
             || !prefill.lifecycle_events.is_empty()
             || !decode.lifecycle_events.is_empty();
-        self.apply_prefill_router_events(prefill.kv_events)?;
-        if !decode.kv_events.is_empty() {
-            tracing::debug!(
-                events = decode.kv_events.len(),
-                "offline disagg replay dropping decode-side offload router events"
-            );
+        self.apply_prefill_observations(prefill.engine_events)?;
+        if !decode.engine_events.is_empty() {
+            tracing::debug!("offline disagg replay dropping decode-side offload router events");
         }
         self.process_lifecycle_events(prefill.lifecycle_events)?;
         self.process_lifecycle_events(decode.lifecycle_events)?;
@@ -1370,30 +1729,20 @@ impl DisaggRuntime {
 
     /// Process one prefill output signal, including router updates and decode handoff scheduling.
     fn process_prefill_signal(&mut self, signal: OutputSignal) -> Result<()> {
-        if !signal.rejected
-            && signal.token_id.is_some()
-            && let Some(capture) = self.conformance_capture.as_mut()
+        match self
+            .flow
+            .inspect_prefill_signal(&signal, self.now_ms, &mut self.collector)?
         {
-            capture.source_output_tokens += 1;
-        }
-        if !signal.completed {
-            return Ok(());
-        }
-
-        if signal.rejected {
-            let handoff_id = self.state(signal.uuid)?.handoff_id;
-            self.collector
-                .on_terminal(signal.uuid, self.now_ms, ReplayTerminalStatus::Rejected);
-            return self.apply_handoff_fact(signal.uuid, HandoffFact::Failed { handoff_id });
+            PrefillSignalDisposition::Pending | PrefillSignalDisposition::Rejected => {
+                return Ok(());
+            }
+            PrefillSignalDisposition::Completed => {}
         }
 
-        if self.prefill_router.is_some() {
-            let prefill_complete_admissions = {
-                let prefill_router = self.prefill_router.as_mut().expect("router checked above");
-                prefill_router
-                    .on_prefill_completed(signal.uuid, self.now_ms)?
-                    .admissions
-            };
+        if self.prefill_placement.is_router() {
+            let prefill_complete_placements = self
+                .prefill_placement
+                .prefill_completed(signal.uuid, self.now_ms)?;
             #[cfg(test)]
             {
                 self.stats.prefill_marked_count += 1;
@@ -1402,7 +1751,7 @@ impl DisaggRuntime {
                     .push(DisaggTransition::PrefillMarkCompleted { uuid: signal.uuid });
             }
             self.record_router_pending();
-            self.dispatch_prefill_admissions(prefill_complete_admissions)?;
+            self.dispatch_prefill_placements(prefill_complete_placements)?;
         }
         Ok(())
     }
@@ -1413,10 +1762,10 @@ impl DisaggRuntime {
             return Ok(());
         }
 
-        let admissions = if let Some(decode_router) = self.decode_router.as_mut() {
-            let admissions = decode_router
-                .on_request_completed(signal.uuid, self.now_ms)?
-                .admissions;
+        let placements = if self.decode_placement.is_router() {
+            let placements = self
+                .decode_placement
+                .request_terminal(signal.uuid, self.now_ms)?;
             self.state_mut(signal.uuid)?.destination_routed = false;
             #[cfg(test)]
             {
@@ -1425,40 +1774,19 @@ impl DisaggRuntime {
                     .transition_log
                     .push(DisaggTransition::DecodeFree { uuid: signal.uuid });
             }
-            admissions
+            placements
         } else {
             Vec::new()
         };
         self.record_router_pending();
-        // A request rejected at decode never ran, so it produced no tokens or
-        // latency — keep it out of the planner-facing traffic deltas (mirror the
-        // aggregated path). It still frees its slot, advances, and is marked done.
-        if !signal.rejected {
-            let (input_tokens, requested_output_tokens) = {
-                let state = self.state(signal.uuid)?;
-                let original = state.original_request()?;
-                (original.tokens.len(), original.max_output_tokens)
-            };
-            let actual_output_tokens = self
-                .collector
-                .actual_output_length(signal.uuid)
-                .ok_or_else(|| {
-                    anyhow!("offline replay missing collector state for {}", signal.uuid)
-                })?;
-            debug_assert!(actual_output_tokens <= requested_output_tokens);
-            let latencies = self.collector.request_latencies(signal.uuid);
-            self.traffic
-                .on_request(input_tokens, actual_output_tokens, latencies);
-        }
-        let terminal_status = if signal.rejected {
-            ReplayTerminalStatus::Rejected
-        } else {
-            ReplayTerminalStatus::Completed
-        };
-        self.collector
-            .on_terminal(signal.uuid, self.now_ms, terminal_status);
+        self.flow.record_decode_terminal(
+            &signal,
+            self.now_ms,
+            &mut self.collector,
+            &mut self.traffic,
+        )?;
         self.finish_logical_request(signal.uuid, false)?;
-        self.dispatch_decode_admissions(admissions)?;
+        self.dispatch_decode_placements(placements)?;
         Ok(())
     }
 
@@ -1469,9 +1797,9 @@ impl DisaggRuntime {
         _completed_requests: usize,
         output_signals: Vec<OutputSignal>,
         lifecycle_events: Vec<SchedulerLifecycleEvent>,
-        kv_events: Vec<RouterEvent>,
+        engine_events: Observation::Batch,
     ) -> Result<()> {
-        self.apply_prefill_router_events(kv_events)?;
+        self.apply_prefill_observations(engine_events)?;
         for signal in output_signals {
             self.process_prefill_signal(signal)?;
         }
@@ -1484,13 +1812,15 @@ impl DisaggRuntime {
         &mut self,
         output_signals: Vec<OutputSignal>,
         lifecycle_events: Vec<SchedulerLifecycleEvent>,
-        kv_events: Vec<RouterEvent>,
+        engine_events: Observation::Batch,
         accept_length_output_tokens: usize,
         accept_length_decode_forwards: usize,
     ) -> Result<()> {
-        if let Some(capture) = self.conformance_capture.as_mut() {
-            capture.record_after_activation(&kv_events);
+        if let Some(capture) = self.flow.conformance_capture.as_mut() {
+            capture.record_after_activation(&Observation::stored_hashes(&engine_events));
         }
+        let placements = self.decode_placement.observe(engine_events, self.now_ms)?;
+        self.dispatch_decode_placements(placements)?;
         self.traffic
             .on_accept_length_sample(accept_length_output_tokens, accept_length_decode_forwards);
         for signal in output_signals {
@@ -1519,7 +1849,7 @@ impl DisaggRuntime {
                         payload.completed_requests,
                         payload.output_signals,
                         payload.lifecycle_events,
-                        payload.kv_events,
+                        payload.engine_events,
                     )?;
                 }
                 SimulationWorkerStage::Decode => {
@@ -1534,7 +1864,7 @@ impl DisaggRuntime {
                     self.process_decode_pass(
                         payload.output_signals,
                         payload.lifecycle_events,
-                        payload.kv_events,
+                        payload.engine_events,
                         payload.accept_length_output_tokens,
                         payload.accept_length_decode_forwards,
                     )?;
@@ -1552,7 +1882,7 @@ impl DisaggRuntime {
     fn apply_transfer_completions(&mut self) -> Result<bool> {
         let mut changed = false;
         while let Some(handoff_id) = pop_ready_transfer_complete(&mut self.events, self.now_ms) {
-            let Some(uuid) = self.requests_by_handoff.get(&handoff_id).copied() else {
+            let Some(uuid) = self.flow.requests_by_handoff.get(&handoff_id).copied() else {
                 continue;
             };
             self.apply_handoff_fact(uuid, HandoffFact::TransferCompleted { handoff_id })?;
@@ -1564,20 +1894,24 @@ impl DisaggRuntime {
     /// Release every admission made ready by the shared admission queue.
     fn release_ready_arrivals(&mut self) -> Result<bool> {
         let mut released_any = false;
-        for ready in self
-            .admission
-            .drain_ready(self.now_ms, self.cluster_in_flight())?
+        let cluster_in_flight = self.cluster_in_flight();
+        for ready in
+            CoreAdmissionSource::drain_ready(&mut self.admission, self.now_ms, cluster_in_flight)?
         {
             let ReadyArrival {
                 request,
                 arrival_time_ms,
-                replay_hashes,
+                metadata,
                 session_id,
                 turn_index,
             } = ready;
             let session_metadata = session_id.clone().zip(turn_index);
-            let uuid =
-                self.on_external_arrival(request, arrival_time_ms, replay_hashes, session_id)?;
+            let uuid = self.on_external_arrival(
+                request,
+                arrival_time_ms,
+                metadata.into_hashes(),
+                session_id,
+            )?;
             if let Some((session_id, turn_index)) = session_metadata {
                 self.collector
                     .on_session_metadata(uuid, session_id, turn_index);
@@ -1615,9 +1949,12 @@ impl DisaggRuntime {
         }
     }
 
-    fn handle_prefill_engine_effects(&mut self, effects: EngineEffects) -> Result<()> {
+    fn handle_prefill_engine_effects(
+        &mut self,
+        effects: EngineEffects<Observation::Batch>,
+    ) -> Result<()> {
         self.record_prefill_admissions(effects.admissions);
-        self.apply_prefill_router_events(effects.pass_start_kv_events)?;
+        self.apply_prefill_observations(effects.pass_start_events)?;
         for payload in effects.immediate_completions {
             let payload = self.prefill_engine.on_scheduled_completion(payload)?;
             if self.collect_fpm
@@ -1631,7 +1968,7 @@ impl DisaggRuntime {
                 payload.completed_requests,
                 payload.output_signals,
                 payload.lifecycle_events,
-                payload.kv_events,
+                payload.engine_events,
             )?;
         }
         for ScheduledWorkerCompletion { at_ms, payload } in effects.scheduled_completions {
@@ -1677,7 +2014,10 @@ impl DisaggRuntime {
         Ok(())
     }
 
-    fn handle_decode_engine_effects(&mut self, effects: EngineEffects) -> Result<()> {
+    fn handle_decode_engine_effects(
+        &mut self,
+        effects: EngineEffects<Observation::Batch>,
+    ) -> Result<()> {
         self.record_decode_admissions(effects.admissions)?;
         for payload in effects.immediate_completions {
             let payload = self.decode_engine.on_scheduled_completion(payload)?;
@@ -1690,7 +2030,7 @@ impl DisaggRuntime {
             self.process_decode_pass(
                 payload.output_signals,
                 payload.lifecycle_events,
-                payload.kv_events,
+                payload.engine_events,
                 payload.accept_length_output_tokens,
                 payload.accept_length_decode_forwards,
             )?;
@@ -1715,11 +2055,19 @@ impl DisaggRuntime {
                                 self.now_ms,
                             );
                         }
-                        if let Some(router) = self.prefill_router.as_mut() {
-                            router.add_worker(worker_id)?;
-                            let effects = router.try_drain_pending(self.now_ms)?;
-                            self.dispatch_prefill_admissions(effects.admissions)?;
-                        }
+                        let topology =
+                            self.prefill_engine
+                                .worker_topology(worker_id)
+                                .ok_or_else(|| {
+                                    anyhow!(
+                                        "ready prefill worker {worker_id} has no engine topology"
+                                    )
+                                })?;
+                        let placements =
+                            self.prefill_placement.worker_ready(topology, self.now_ms)?;
+                        self.dispatch_prefill_placements(placements)?;
+                        let placements = self.prefill_placement.topology_settled(self.now_ms)?;
+                        self.dispatch_prefill_placements(placements)?;
                         self.wake_worker_waiters(SimulationWorkerStage::Prefill);
                         changed = true;
                     }
@@ -1733,11 +2081,19 @@ impl DisaggRuntime {
                                 self.now_ms,
                             );
                         }
-                        if let Some(router) = self.decode_router.as_mut() {
-                            router.add_worker(worker_id)?;
-                            let effects = router.try_drain_pending(self.now_ms)?;
-                            self.dispatch_decode_admissions(effects.admissions)?;
-                        }
+                        let topology =
+                            self.decode_engine
+                                .worker_topology(worker_id)
+                                .ok_or_else(|| {
+                                    anyhow!(
+                                        "ready decode worker {worker_id} has no engine topology"
+                                    )
+                                })?;
+                        let placements =
+                            self.decode_placement.worker_ready(topology, self.now_ms)?;
+                        self.dispatch_decode_placements(placements)?;
+                        let placements = self.decode_placement.topology_settled(self.now_ms)?;
+                        self.dispatch_decode_placements(placements)?;
                         self.wake_worker_waiters(SimulationWorkerStage::Decode);
                         changed = true;
                     }
@@ -1767,17 +2123,27 @@ impl DisaggRuntime {
             changed |= self.drive_prefill_workers()?;
             changed |= self.drive_decode_workers()?;
             let removed_prefill = self.prefill_engine.try_remove_drained();
-            if let Some(router) = self.prefill_router.as_mut() {
-                for worker_id in &removed_prefill {
-                    router.finalize_worker_removal(*worker_id)?;
-                }
+            for worker_id in &removed_prefill {
+                let placements = self.prefill_placement.worker_removed(
+                    WorkerTopology {
+                        worker_id: *worker_id,
+                        scheduler_ids: Vec::new(),
+                    },
+                    self.now_ms,
+                )?;
+                self.dispatch_prefill_placements(placements)?;
             }
             changed |= !removed_prefill.is_empty();
             let removed_decode = self.decode_engine.try_remove_drained();
-            if let Some(router) = self.decode_router.as_mut() {
-                for worker_id in &removed_decode {
-                    router.finalize_worker_removal(*worker_id)?;
-                }
+            for worker_id in &removed_decode {
+                let placements = self.decode_placement.worker_removed(
+                    WorkerTopology {
+                        worker_id: *worker_id,
+                        scheduler_ids: Vec::new(),
+                    },
+                    self.now_ms,
+                )?;
+                self.dispatch_decode_placements(placements)?;
             }
             changed |= !removed_decode.is_empty();
             // Planner ticks fire LAST so the planner observes a fully settled
@@ -1800,20 +2166,21 @@ impl DisaggRuntime {
             matches!(
                 &event.kind,
                 super::events::SimulationEventKind::TransferComplete { handoff_id }
-                    if !self.requests_by_handoff.contains_key(handoff_id)
+                    if !self.flow.requests_by_handoff.contains_key(handoff_id)
             )
         }) {
             self.events.pop();
-            self.stale_transfer_events = self
+            self.flow.stale_transfer_events = self
+                .flow
                 .stale_transfer_events
                 .checked_sub(1)
                 .expect("stale transfer event count underflow");
             removed = true;
         }
-        if self.stale_transfer_events > 32
-            && self.stale_transfer_events.saturating_mul(2) > self.events.len()
+        if self.flow.stale_transfer_events > 32
+            && self.flow.stale_transfer_events.saturating_mul(2) > self.events.len()
         {
-            let requests_by_handoff = &self.requests_by_handoff;
+            let requests_by_handoff = &self.flow.requests_by_handoff;
             self.events.retain(|event| {
                 !matches!(
                     &event.kind,
@@ -1821,7 +2188,7 @@ impl DisaggRuntime {
                         if !requests_by_handoff.contains_key(handoff_id)
                 )
             });
-            self.stale_transfer_events = 0;
+            self.flow.stale_transfer_events = 0;
             removed = true;
         }
         removed
@@ -1925,18 +2292,20 @@ impl DisaggRuntime {
         #[cfg(test)]
         {
             let counted = self
+                .flow
                 .requests
                 .values()
                 .filter(|state| state.counted_in_flight)
                 .count();
-            assert_eq!(self.logical_in_flight, counted);
-            for state in self.requests.values() {
+            assert_eq!(self.flow.logical_in_flight, counted);
+            for state in self.flow.requests.values() {
                 assert_eq!(
                     state.counted_in_flight,
                     !matches!(state.phase, DisaggPhase::CleanupPending | DisaggPhase::Done)
                 );
             }
             self.stats.request_snapshots = self
+                .flow
                 .requests
                 .iter()
                 .map(|(uuid, state)| (*uuid, state.debug_snapshot()))
@@ -2013,23 +2382,40 @@ impl DisaggRuntime {
                             self.now_ms,
                         );
                     }
-                    if let Some(router) = self.prefill_router.as_mut() {
-                        router.add_worker(id)?;
-                    }
+                    let topology = self
+                        .prefill_engine
+                        .worker_topology(id)
+                        .ok_or_else(|| anyhow!("new prefill worker {id} has no engine topology"))?;
+                    let placements = self.prefill_placement.worker_ready(topology, self.now_ms)?;
+                    self.dispatch_prefill_placements(placements)?;
                 }
             }
         }
-        let prefill_admissions = if let Some(router) = self.prefill_router.as_mut() {
-            for id in newly_marked {
-                router.remove_worker(id)?;
-            }
-            for id in removed {
-                router.finalize_worker_removal(id)?;
-            }
-            router.on_topology_changed(self.now_ms)?.admissions
-        } else {
-            Vec::new()
-        };
+        for id in newly_marked {
+            let topology = self
+                .prefill_engine
+                .worker_topology(id)
+                .unwrap_or(WorkerTopology {
+                    worker_id: id,
+                    scheduler_ids: Vec::new(),
+                });
+            let placements = self
+                .prefill_placement
+                .worker_draining(topology, self.now_ms)?;
+            self.dispatch_prefill_placements(placements)?;
+        }
+        for id in removed {
+            let placements = self.prefill_placement.worker_removed(
+                WorkerTopology {
+                    worker_id: id,
+                    scheduler_ids: Vec::new(),
+                },
+                self.now_ms,
+            )?;
+            self.dispatch_prefill_placements(placements)?;
+        }
+        let placements = self.prefill_placement.topology_settled(self.now_ms)?;
+        self.dispatch_prefill_placements(placements)?;
         if !added.is_empty() && prefill_delay.is_none() {
             self.wake_worker_waiters(SimulationWorkerStage::Prefill);
         }
@@ -2056,29 +2442,44 @@ impl DisaggRuntime {
                             self.now_ms,
                         );
                     }
-                    if let Some(router) = self.decode_router.as_mut() {
-                        router.add_worker(id)?;
-                    }
+                    let topology = self
+                        .decode_engine
+                        .worker_topology(id)
+                        .ok_or_else(|| anyhow!("new decode worker {id} has no engine topology"))?;
+                    let placements = self.decode_placement.worker_ready(topology, self.now_ms)?;
+                    self.dispatch_decode_placements(placements)?;
                 }
             }
         }
-        let decode_admissions = if let Some(router) = self.decode_router.as_mut() {
-            for id in newly_marked {
-                router.remove_worker(id)?;
-            }
-            for id in removed {
-                router.finalize_worker_removal(id)?;
-            }
-            router.on_topology_changed(self.now_ms)?.admissions
-        } else {
-            Vec::new()
-        };
+        for id in newly_marked {
+            let topology = self
+                .decode_engine
+                .worker_topology(id)
+                .unwrap_or(WorkerTopology {
+                    worker_id: id,
+                    scheduler_ids: Vec::new(),
+                });
+            let placements = self
+                .decode_placement
+                .worker_draining(topology, self.now_ms)?;
+            self.dispatch_decode_placements(placements)?;
+        }
+        for id in removed {
+            let placements = self.decode_placement.worker_removed(
+                WorkerTopology {
+                    worker_id: id,
+                    scheduler_ids: Vec::new(),
+                },
+                self.now_ms,
+            )?;
+            self.dispatch_decode_placements(placements)?;
+        }
+        let placements = self.decode_placement.topology_settled(self.now_ms)?;
+        self.dispatch_decode_placements(placements)?;
         if !added.is_empty() && decode_delay.is_none() {
             self.wake_worker_waiters(SimulationWorkerStage::Decode);
         }
         self.record_router_pending();
-        self.dispatch_prefill_admissions(prefill_admissions)?;
-        self.dispatch_decode_admissions(decode_admissions)?;
         Ok(())
     }
 
@@ -2191,19 +2592,14 @@ impl DisaggRuntime {
         let source_drained = self.prefill_engine.is_drained();
         let destination_drained = self.decode_engine.is_drained();
         let driver_drained = self.is_done()
-            && self.action_queues.is_empty()
-            && self
-                .prefill_router
-                .as_ref()
-                .is_none_or(|router| router.pending_count() == 0)
-            && self
-                .decode_router
-                .as_ref()
-                .is_none_or(|router| router.pending_count() == 0)
-            && self.requests.values().all(|state| {
+            && self.flow.action_queues.is_empty()
+            && self.prefill_placement.pending_count() == 0
+            && self.decode_placement.pending_count() == 0
+            && self.flow.requests.values().all(|state| {
                 !state.counted_in_flight && !state.prefill_routed && !state.destination_routed
             });
         let capture = self
+            .flow
             .conformance_capture
             .take()
             .ok_or_else(|| anyhow!("offline handoff conformance capture was not enabled"))?;
@@ -2212,7 +2608,7 @@ impl DisaggRuntime {
         let report = self.collector.finish();
         let conformance = NormalizedHandoffConformance {
             engine_type,
-            order: self.handoff_order,
+            order: self.flow.handoff_order,
             lifecycle: capture.lifecycle,
             source_output_tokens: capture.source_output_tokens,
             destination_output_tokens: report.request_counts.total_output_tokens,
@@ -2238,38 +2634,6 @@ fn command_cleanup_outcome(result: SchedulerCommandResult) -> Result<HandoffActi
         SchedulerCommandResult::Noop => Ok(HandoffActionOutcome::Noop),
         _ => bail!("handoff cleanup returned an unexpected scheduler result"),
     }
-}
-
-fn base_router_config(
-    args: &MockEngineArgs,
-    router_config: Option<KvRouterConfig>,
-) -> KvRouterConfig {
-    let mut config = router_config.unwrap_or_default();
-    if let Some(policy) = args.router_queue_policy {
-        config.router_queue_policy = policy;
-    }
-    config
-}
-
-fn derive_prefill_router_config(
-    args: &MockEngineArgs,
-    router_config: Option<KvRouterConfig>,
-) -> KvRouterConfig {
-    let mut config = base_router_config(args, router_config);
-    config.router_track_active_blocks = false;
-    config
-}
-
-fn derive_decode_router_config(
-    args: &MockEngineArgs,
-    router_config: Option<KvRouterConfig>,
-) -> KvRouterConfig {
-    let mut config = base_router_config(args, router_config);
-    config.overlap_score_credit = 0.0;
-    config.router_assume_kv_reuse = false;
-    config.router_track_prefill_tokens = false;
-    config.router_prefill_load_model = dynamo_kv_router::config::RouterPrefillLoadModel::None;
-    config
 }
 
 #[cfg(test)]

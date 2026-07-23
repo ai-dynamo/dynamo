@@ -12,7 +12,8 @@ use crate::common::protocols::{
 use crate::scheduler::{
     AdmissionEvent, LiveBoundaryCore, LivePassExecution, LiveSchedulerState, MockerMetrics,
     SchedulerCancellationEnvelope, SchedulerCommand, SchedulerCommandEffects,
-    SchedulerCommandEnvelope, SchedulerHandle, SchedulerLifecycleEvent, spawn_live_scheduler,
+    SchedulerCommandEnvelope, SchedulerHandle, SchedulerLifecycleEvent, SchedulerOutputSender,
+    spawn_live_scheduler,
 };
 
 use super::core::SglangCore;
@@ -21,11 +22,30 @@ use super::core::SglangCore;
 pub struct SglangScheduler {
     inner: LiveSchedulerState,
 }
+
 impl SglangScheduler {
     pub fn new(
         args: MockEngineArgs,
         dp_rank: u32,
         output_tx: Option<mpsc::UnboundedSender<Vec<OutputSignal>>>,
+        kv_event_publishers: KvEventPublishers,
+        cancellation_token: Option<CancellationToken>,
+        fpm_publisher: FpmPublisher,
+    ) -> Self {
+        Self::new_with_output_sender(
+            args,
+            dp_rank,
+            output_tx.map(SchedulerOutputSender::from),
+            kv_event_publishers,
+            cancellation_token,
+            fpm_publisher,
+        )
+    }
+
+    pub(crate) fn new_with_output_sender(
+        args: MockEngineArgs,
+        dp_rank: u32,
+        output_tx: Option<SchedulerOutputSender>,
         kv_event_publishers: KvEventPublishers,
         cancellation_token: Option<CancellationToken>,
         fpm_publisher: FpmPublisher,
@@ -53,7 +73,7 @@ impl SglangScheduler {
         Self::new_internal(
             args,
             dp_rank,
-            output_tx,
+            output_tx.map(SchedulerOutputSender::from),
             kv_event_publishers,
             cancellation_token,
             admission_tx,
@@ -64,7 +84,7 @@ impl SglangScheduler {
     fn new_internal(
         args: MockEngineArgs,
         dp_rank: u32,
-        output_tx: Option<mpsc::UnboundedSender<Vec<OutputSignal>>>,
+        output_tx: Option<SchedulerOutputSender>,
         kv_event_publishers: KvEventPublishers,
         cancellation_token: Option<CancellationToken>,
         admission_tx: Option<mpsc::UnboundedSender<AdmissionEvent>>,

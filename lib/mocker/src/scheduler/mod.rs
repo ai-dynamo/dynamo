@@ -431,6 +431,33 @@ pub struct SchedulerCommandEnvelope {
     pub reply: oneshot::Sender<anyhow::Result<SchedulerCommandEffects>>,
 }
 
+/// Output channel used by a live scheduler.
+///
+/// Existing replay callers use the unbounded variant. Network-facing adapters
+/// use the bounded variant to cap scheduler-to-dispatcher accumulation. The
+/// live adapter also uses fixed-capacity request streams and cancels consumers
+/// that cannot keep up.
+#[derive(Clone)]
+pub(crate) enum SchedulerOutputSender {
+    Unbounded(mpsc::UnboundedSender<Vec<OutputSignal>>),
+    Bounded(mpsc::Sender<Vec<OutputSignal>>),
+}
+
+impl SchedulerOutputSender {
+    pub(crate) async fn send(&self, signals: Vec<OutputSignal>) -> Result<(), Vec<OutputSignal>> {
+        match self {
+            Self::Unbounded(tx) => tx.send(signals).map_err(|error| error.0),
+            Self::Bounded(tx) => tx.send(signals).await.map_err(|error| error.0),
+        }
+    }
+}
+
+impl From<mpsc::UnboundedSender<Vec<OutputSignal>>> for SchedulerOutputSender {
+    fn from(tx: mpsc::UnboundedSender<Vec<OutputSignal>>) -> Self {
+        Self::Unbounded(tx)
+    }
+}
+
 pub struct SchedulerCancellationEnvelope {
     pub request_id: Uuid,
     pub discard_pending_output: bool,
@@ -462,7 +489,7 @@ pub trait SchedulerHandle: Send + Sync {
     /// Get a watch receiver for scheduler metrics (active decode blocks, etc.).
     fn metrics_receiver(&self) -> tokio::sync::watch::Receiver<MockerMetrics>;
 
-    /// Bounded lifecycle-control channel for disaggregated handoff sessions.
+    /// Bounded ordered channel for request and disaggregated lifecycle commands.
     fn command_sender(&self) -> mpsc::Sender<SchedulerCommandEnvelope>;
 
     /// Bounded cancellation channel observed even while a modeled pass is running.
@@ -658,7 +685,6 @@ mod tests {
             }
         }
     }
-
     #[test]
     fn welford_acc_empty() {
         let acc = WelfordAcc::default();

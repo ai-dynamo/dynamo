@@ -4,8 +4,6 @@
 use std::time::Instant;
 
 #[cfg(all(test, feature = "kvbm-offload"))]
-use std::sync::{Arc, Mutex};
-#[cfg(all(test, feature = "kvbm-offload"))]
 use std::time::Duration;
 
 use tokio::sync::mpsc;
@@ -17,7 +15,8 @@ use crate::common::protocols::{
 use crate::scheduler::{
     AdmissionEvent, LiveBoundaryCore, LivePassExecution, LiveSchedulerState,
     SchedulerCancellationEnvelope, SchedulerCommand, SchedulerCommandEffects,
-    SchedulerCommandEnvelope, SchedulerHandle, SchedulerLifecycleEvent, spawn_live_scheduler,
+    SchedulerCommandEnvelope, SchedulerHandle, SchedulerLifecycleEvent, SchedulerOutputSender,
+    spawn_live_scheduler,
 };
 
 use super::core::VllmCore;
@@ -34,6 +33,7 @@ pub struct MockerMetrics {
     pub sglang_cache_hit_tokens: u64,
     pub sglang_cache_total_tokens: u64,
 }
+
 impl MockerMetrics {
     pub fn new(
         dp_rank: dynamo_kv_router::protocols::DpRank,
@@ -87,6 +87,24 @@ impl Scheduler {
         cancellation_token: Option<CancellationToken>,
         fpm_publisher: FpmPublisher,
     ) -> Self {
+        Self::new_with_output_sender(
+            args,
+            dp_rank,
+            output_tx.map(SchedulerOutputSender::from),
+            kv_event_publishers,
+            cancellation_token,
+            fpm_publisher,
+        )
+    }
+
+    pub(crate) fn new_with_output_sender(
+        args: MockEngineArgs,
+        dp_rank: u32,
+        output_tx: Option<SchedulerOutputSender>,
+        kv_event_publishers: KvEventPublishers,
+        cancellation_token: Option<CancellationToken>,
+        fpm_publisher: FpmPublisher,
+    ) -> Self {
         Self::new_internal(
             args,
             dp_rank,
@@ -110,7 +128,7 @@ impl Scheduler {
         Self::new_internal(
             args,
             dp_rank,
-            output_tx,
+            output_tx.map(SchedulerOutputSender::from),
             kv_event_publishers,
             cancellation_token,
             admission_tx,
@@ -121,7 +139,7 @@ impl Scheduler {
     fn new_internal(
         args: MockEngineArgs,
         dp_rank: u32,
-        output_tx: Option<mpsc::UnboundedSender<Vec<OutputSignal>>>,
+        output_tx: Option<SchedulerOutputSender>,
         kv_event_publishers: KvEventPublishers,
         cancellation_token: Option<CancellationToken>,
         admission_tx: Option<mpsc::UnboundedSender<AdmissionEvent>>,

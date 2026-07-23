@@ -7,7 +7,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use dynamo_kv_router::LocalBlockHash;
+pub(in crate::replay) use dynamo_kv_router::config::KvRouterConfig as ReplayKvRouterConfig;
 use dynamo_kv_router::config::KvRouterConfig;
+#[cfg(test)]
+pub(in crate::replay) use dynamo_kv_router::config::RouterQueuePolicy;
 use dynamo_kv_router::protocols::{
     BlockHashOptions, OverlapScores, PrefillLoadHint, RouterEvent, RoutingConstraints,
     WorkerConfigLike, WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
@@ -27,15 +30,42 @@ use rustc_hash::FxHashMap;
 use tokio::time::Instant;
 use uuid::Uuid;
 
-use super::{RouterEffects, WorkerAdmission};
 use crate::common::protocols::DirectRequest;
 use crate::common::protocols::MockEngineArgs;
 use crate::loadgen::ReplayRequestHashes;
 use crate::replay::ReplayPrefillLoadEstimator;
+use crate::replay::offline::components::{KvReplayMetadata, ReplayAdmissionMetadata};
+use crate::replay::offline::core::{
+    Placement, PlacementDecision, PlacementEffects, PlacementPolicy, PlannerCacheSample,
+    WorkerTopology,
+};
+use crate::replay::offline::extensions::kv_events::RouterEventBatch;
 use crate::replay::router_shared::{
     ReplayNoopPublisher, ReplayWorkerConfig, replay_router_config, replay_selector, replay_slots,
     replay_worker_config, replay_workers_with_configs,
 };
+
+mod composition_agg;
+pub(in crate::replay) use composition_agg::AggRuntime;
+mod composition_disagg;
+pub(in crate::replay) use composition_disagg::DisaggRuntime;
+#[cfg(test)]
+pub(in crate::replay::offline) use composition_disagg::{
+    derive_decode_router_config, derive_prefill_router_config,
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WorkerAdmission {
+    uuid: Uuid,
+    worker_idx: usize,
+    overlap_blocks: u32,
+    isl_blocks: u32,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct RouterEffects {
+    admissions: Vec<WorkerAdmission>,
+}
 
 /// Internal result of a successful ``admit_request`` call: the chosen
 /// worker plus the router's view of prefix-cache overlap, so callers can
@@ -204,6 +234,128 @@ pub(crate) struct OfflineReplayRouter {
     decay_time_epoch: Instant,
 }
 
+pub(in crate::replay) struct KvRouterPlacement {
+    router: OfflineReplayRouter,
+}
+
+impl KvRouterPlacement {
+    pub(in crate::replay) fn new(
+        args: &MockEngineArgs,
+        router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+        num_workers: usize,
+    ) -> Result<Self> {
+        Ok(Self {
+            router: OfflineReplayRouter::new(
+                args,
+                router_config,
+                prefill_load_estimator,
+                num_workers,
+            )?,
+        })
+    }
+
+    fn placement(&self, admission: WorkerAdmission) -> Placement {
+        Placement {
+            request_id: admission.uuid,
+            scheduler_id: admission.worker_idx,
+            reported_overlap_tokens: admission.overlap_blocks as usize
+                * self.router.block_size as usize,
+            planner_cache_sample: Some(PlannerCacheSample {
+                overlap_blocks: admission.overlap_blocks,
+                isl_blocks: admission.isl_blocks,
+            }),
+        }
+    }
+
+    fn placements(&self, admissions: Vec<WorkerAdmission>) -> Vec<Placement> {
+        admissions
+            .into_iter()
+            .map(|admission| self.placement(admission))
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(in crate::replay::offline) fn debug_snapshot(&self, now_ms: f64) -> OfflineRouterSnapshot {
+        self.router.debug_snapshot(now_ms)
+    }
+}
+
+impl PlacementPolicy<DirectRequest> for KvRouterPlacement {
+    type Metadata = KvReplayMetadata;
+    type Observation = RouterEventBatch;
+
+    fn place(
+        &mut self,
+        request: &DirectRequest,
+        metadata: Self::Metadata,
+        session_id: Option<String>,
+        now_ms: f64,
+    ) -> Result<PlacementEffects> {
+        let request_id = request
+            .uuid
+            .ok_or_else(|| anyhow!("KV placement requires a request UUID"))?;
+        let admissions = self
+            .router
+            .on_request_arrival_for_session(request, metadata.into_hashes(), session_id, now_ms)?
+            .admissions;
+        let mut decision = PlacementDecision::Queued;
+        let mut released = Vec::with_capacity(admissions.len().saturating_sub(1));
+        for admission in admissions {
+            let placement = self.placement(admission);
+            if placement.request_id == request_id {
+                decision = PlacementDecision::Immediate(placement);
+            } else {
+                released.push(placement);
+            }
+        }
+        Ok(PlacementEffects { decision, released })
+    }
+
+    fn observe(&mut self, observation: RouterEventBatch, _now_ms: f64) -> Result<Vec<Placement>> {
+        let effects = self.router.on_kv_events(observation.0)?;
+        Ok(self.placements(effects.admissions))
+    }
+
+    fn cancel_pending(&mut self, request_id: Uuid) -> bool {
+        self.router.cancel_pending(request_id)
+    }
+
+    fn request_terminal(&mut self, request_id: Uuid, now_ms: f64) -> Result<Vec<Placement>> {
+        let effects = self.router.on_request_completed(request_id, now_ms)?;
+        Ok(self.placements(effects.admissions))
+    }
+
+    fn prefill_completed(&mut self, request_id: Uuid, now_ms: f64) -> Result<Vec<Placement>> {
+        let effects = self.router.on_prefill_completed(request_id, now_ms)?;
+        Ok(self.placements(effects.admissions))
+    }
+
+    fn pending_count(&self) -> usize {
+        self.router.pending_count()
+    }
+
+    fn worker_ready(&mut self, worker: WorkerTopology, _now_ms: f64) -> Result<Vec<Placement>> {
+        self.router.add_worker(worker.worker_id)?;
+        Ok(Vec::new())
+    }
+
+    fn worker_draining(&mut self, worker: WorkerTopology, _now_ms: f64) -> Result<Vec<Placement>> {
+        self.router.remove_worker(worker.worker_id)?;
+        Ok(Vec::new())
+    }
+
+    fn worker_removed(&mut self, worker: WorkerTopology, _now_ms: f64) -> Result<Vec<Placement>> {
+        self.router.finalize_worker_removal(worker.worker_id)?;
+        Ok(Vec::new())
+    }
+
+    fn topology_settled(&mut self, now_ms: f64) -> Result<Vec<Placement>> {
+        let effects = self.router.on_topology_changed(now_ms)?;
+        Ok(self.placements(effects.admissions))
+    }
+}
+
 impl OfflineReplayRouter {
     pub(crate) fn new(
         args: &MockEngineArgs,
@@ -353,15 +505,6 @@ impl OfflineReplayRouter {
         let before = self.pending.pending_count();
         self.pending.retain(|request| request.uuid != uuid);
         self.pending.pending_count() != before
-    }
-
-    /// Drain queued requests that can now be admitted (e.g. after a new worker
-    /// becomes available).
-    pub(crate) fn try_drain_pending(&mut self, now_ms: f64) -> Result<RouterEffects> {
-        let decay_now = self.decay_now(now_ms);
-        Ok(RouterEffects {
-            admissions: self.drain_pending(decay_now)?,
-        })
     }
 
     pub(crate) fn pending_count(&self) -> usize {
