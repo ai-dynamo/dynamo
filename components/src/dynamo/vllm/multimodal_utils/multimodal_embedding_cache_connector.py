@@ -23,7 +23,11 @@ if TYPE_CHECKING:
 
 MINIMUM_VLLM_VERSION = "0.17.0"
 
-logger = logging.getLogger(__name__)
+# This connector runs inside vLLM's spawned EngineCore process, where Dynamo's
+# logging bridge is unavailable. Use a vLLM child logger so
+# VLLM_LOGGING_LEVEL controls these diagnostics.
+logger = logging.getLogger("vllm.dynamo.multimodal_embedding_cache_connector")
+EMBEDDING_CACHE_HIT_LOG = "Dynamo multimodal embedding cache hit: identifier=%r"
 
 
 def _get_device(vllm_config: "VllmConfig") -> str:
@@ -145,6 +149,8 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
         """
         if identifier in self._cache_order:
             self._cache_order.move_to_end(identifier)
+            # The UUID-specific E2E assertion relies on this diagnostic.
+            logger.debug(EMBEDDING_CACHE_HIT_LOG, identifier)
             return True
         return False
 

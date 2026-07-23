@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
-use std::future;
 use std::sync::Arc;
 
 use crate::common::protocols::MockEngineArgs;
@@ -19,11 +18,8 @@ use dynamo_kv_router::{
 pub(super) struct ReplayNoopPublisher;
 
 impl SequencePublisher for ReplayNoopPublisher {
-    fn publish_event(
-        &self,
-        _event: &ActiveSequenceEvent,
-    ) -> impl future::Future<Output = anyhow::Result<()>> + Send {
-        future::ready(Ok(()))
+    fn enqueue_event(&self, _event: ActiveSequenceEvent) -> anyhow::Result<()> {
+        Ok(())
     }
 
     fn publish_load(&self, _load: ActiveLoad) {}
@@ -111,6 +107,10 @@ pub(super) fn replay_slots(
 }
 
 pub(super) fn replay_selector(config: &KvRouterConfig) -> DefaultWorkerSelector {
+    #[cfg(feature = "replay-bench")]
+    return DefaultWorkerSelector::new_seeded(Some(config.clone()), "replay", 0xD1A0_5EED);
+
+    #[cfg(not(feature = "replay-bench"))]
     DefaultWorkerSelector::new(Some(config.clone()), "replay")
 }
 
