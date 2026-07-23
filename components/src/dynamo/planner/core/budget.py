@@ -438,10 +438,11 @@ def _shrink_single(
     """
     if avail < min_endpoint * watts:
         held, capped = _hold_at_current(proposed, current)
-        # ``suppressed`` tracks whether the proposal was actually held back.
-        # When ``current`` is None, ``_hold_at_current`` leaves the proposal
+        # ``proposed`` is non-optional, so ``_hold_at_current`` never returns
+        # ``None`` here. When ``current`` is None it leaves the proposal
         # unchanged and ``capped`` is False — do not claim a suppression.
-        return (held if held is not None else min_endpoint), capped
+        assert held is not None
+        return held, capped
     max_fit = math.floor(avail / watts)
     return max(min_endpoint, min(proposed, max_fit)), False
 
