@@ -145,11 +145,29 @@ impl AsyncEngine<SingleIn<WorkerKvQueryRequest>, ManyOut<WorkerKvQueryResponse>,
             .local_indexer
             .get_events_in_id_range(request.start_event_id, request.end_event_id)
             .await;
+        let response = negotiate_tree_dump_failure(response, request.supports_tree_dump_failed);
 
         Ok(ResponseStream::new(
             Box::pin(stream::iter(vec![response])),
             ctx.context(),
         ))
+    }
+}
+
+fn negotiate_tree_dump_failure(
+    response: WorkerKvQueryResponse,
+    supports_tree_dump_failed: bool,
+) -> WorkerKvQueryResponse {
+    match response {
+        WorkerKvQueryResponse::TreeDumpFailed { last_event_id, .. }
+            if !supports_tree_dump_failed =>
+        {
+            WorkerKvQueryResponse::TreeDump {
+                events: Vec::new(),
+                last_event_id,
+            }
+        }
+        response => response,
     }
 }
 
@@ -176,5 +194,33 @@ impl SlowQueryGuard {
 impl Drop for SlowQueryGuard {
     fn drop(&mut self) {
         self.0.abort();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_dump_failure_is_capability_negotiated() {
+        let failure = || WorkerKvQueryResponse::TreeDumpFailed {
+            last_event_id: 17,
+            message: "offline".to_string(),
+        };
+
+        assert!(matches!(
+            negotiate_tree_dump_failure(failure(), true),
+            WorkerKvQueryResponse::TreeDumpFailed {
+                last_event_id: 17,
+                ..
+            }
+        ));
+        assert!(matches!(
+            negotiate_tree_dump_failure(failure(), false),
+            WorkerKvQueryResponse::TreeDump {
+                events,
+                last_event_id: 17,
+            } if events.is_empty()
+        ));
     }
 }

@@ -269,8 +269,11 @@ impl SyncIndexer for PositionalIndexer {
                         tracing::warn!(?error, "Failed to apply anchor");
                     }
                 }
-                WorkerTask::RemoveWorker { worker_id, .. } => {
+                WorkerTask::RemoveWorker {
+                    worker_id, resp, ..
+                } => {
                     self.remove_worker_blocks_impl(&mut worker_blocks, worker_id);
+                    let _ = resp.send(());
                 }
                 WorkerTask::RemoveWorkerDpRank {
                     worker_id, dp_rank, ..

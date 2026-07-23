@@ -64,6 +64,11 @@ impl RankState {
         self.cursor.last_applied_id()
     }
 
+    #[cfg(feature = "ckf-diagnostics")]
+    pub(super) fn pending_live_event_count(&self) -> usize {
+        self.pending_live_events.len()
+    }
+
     pub(super) fn observe_live_event(
         &mut self,
         event: RouterEvent,

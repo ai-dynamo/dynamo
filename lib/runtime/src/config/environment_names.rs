@@ -340,6 +340,11 @@ pub mod llm {
     /// varies per session and per release, wasting tokens and breaking prompt caching.
     pub const DYN_STRIP_ANTHROPIC_PREAMBLE: &str = "DYN_STRIP_ANTHROPIC_PREAMBLE";
 
+    /// When truthy, force usage in streaming chat and text-completion responses
+    /// regardless of the request's `stream_options.include_usage` value.
+    /// Unset or false preserves request-controlled defaults.
+    pub const DYN_ENABLE_FORCE_INCLUDE_USAGE: &str = "DYN_ENABLE_FORCE_INCLUDE_USAGE";
+
     /// Enable streaming tool call dispatch (`event: tool_call_dispatch` SSE events)
     pub const DYN_ENABLE_STREAMING_TOOL_DISPATCH: &str = "DYN_ENABLE_STREAMING_TOOL_DISPATCH";
 
@@ -808,6 +813,7 @@ mod tests {
             llm::DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
             llm::DYN_DISABLE_FRONTEND_ADMIN_API,
             llm::DYN_STRIP_ANTHROPIC_PREAMBLE,
+            llm::DYN_ENABLE_FORCE_INCLUDE_USAGE,
             llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH,
             llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH,
             llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2,
