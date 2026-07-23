@@ -255,9 +255,9 @@ checksum = "4288f83726785267c6f2ef073a3d83dc3f9b81464e9f99898240cced85fce35a"
 
 [[package]]
 name = "async-openai"
-version = "0.34.0"
+version = "0.41.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec08254d61379df136135d3d1ac04301be7699fd7d9e57655c63ac7d650a6922"
+checksum = "3007014661d5b98168b7b6f1014147bce8b1362a194783543eeb9f6117a20be9"
 dependencies = [
  "bytes",
  "derive_builder",
@@ -1714,9 +1714,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers"
-version = "5.1.0"
+version = "5.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf45340e7f5beb8f3055c1fb933394f05256b6548a1b1434ae3df27bfc8d2f6e"
+checksum = "0c933db4d1347e1e2855c2a0405d3eb2f8e938bc36edb4ccdf7021232a3d0363"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -1752,9 +1752,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-protocols"
-version = "3.1.0"
+version = "4.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "92d05c9671ed19fd2ad5c7062e79c3ee83533d9d5a602a41b1fc5a0279c0dbef"
+checksum = "2c4b32c5f7709c5797d30c3949ac1e79b02d833e4467af92af7c4a3eef321155"
 dependencies = [
  "async-openai",
  "derive_builder",
@@ -1769,9 +1769,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-renderer"
-version = "2.0.0"
+version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1afd1dc880ea81af098f1d0586af1ab37865c82f87d14265b7e72bf00696ffef"
+checksum = "1cb98f4d3624bc51dcd445422f19a3b974f8fb604e924875990a72d2d16b5538"
 dependencies = [
  "anyhow",
  "chrono",
