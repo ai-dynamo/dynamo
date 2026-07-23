@@ -547,6 +547,10 @@ pub struct WorkerSelectionResult {
 
     /// Approximate cached-token count derived from the weighted cache hit.
     pub cached_tokens: usize,
+
+    /// Selected worker's projected decode load after adding this request's
+    /// prompt blocks, in scheduler-tracked block units.
+    pub potential_decode_blocks: usize,
 }
 
 /// Active load metrics for a worker, used for overload detection.
