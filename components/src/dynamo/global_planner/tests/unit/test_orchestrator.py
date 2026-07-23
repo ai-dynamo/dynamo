@@ -190,7 +190,7 @@ class FakeCapacityManager(CapacityManager):
     def participant_exists(self, participant_id):
         return participant_id in self.pools
 
-    def observe(self):
+    def observe(self, require_complete=False):
         return {
             key: {st: PoolSpec(st, r, g) for st, (r, g) in pools.items()}
             for key, pools in self.pools.items()

@@ -7,8 +7,9 @@
 :class:`~dynamo.global_planner.orchestrator.Orchestrator` drives to **observe**
 current pool state and **scale** replicas. It defines a neutral,
 infrastructure-agnostic surface (``observe`` / ``scale`` / ``discover`` /
-``ensure_participant`` / ``participant_exists`` / ``current_replicas``) keyed by
-opaque ``participant_id``; the orchestrator never sees Kubernetes concepts.
+``ensure_participant`` / ``participant_exists`` / ``remember_roles`` /
+``current_replicas``) keyed by opaque ``participant_id``; the orchestrator never
+sees Kubernetes concepts.
 
 The concrete Kubernetes backend is
 :class:`~dynamo.global_planner.kubernetes_capacity_manager.KubernetesCapacityManager`.
@@ -26,14 +27,17 @@ from dynamo.planner import TargetReplica
 class PoolSpec:
     """Snapshot of one pool's state read from a backend.
 
-    Infrastructure-agnostic: the budget math consumes only these three fields.
-    Pools with ``gpu_per_replica == 0`` are included for completeness but
-    contribute 0 to budget totals.
+    Infrastructure-agnostic: the budget math consumes only ``current_replicas``
+    and ``gpu_per_replica``. ``component_name`` is an opaque backend handle for
+    the pool (empty for backends that don't need one); it round-trips through the
+    orchestrator so a paired scale can target the right component. Pools with
+    ``gpu_per_replica == 0`` contribute 0 to budget totals.
     """
 
     sub_type: str
     current_replicas: int
     gpu_per_replica: int
+    component_name: str = ""
 
 
 # participant_id -> (sub_type -> PoolSpec)
@@ -71,8 +75,22 @@ class CapacityManager:
         """Whether ``participant_id`` has been registered/discovered."""
         raise NotImplementedError
 
-    def observe(self) -> PoolSnapshot:
-        """Read current pool state for every known participant."""
+    def remember_roles(self, participant_id: str, targets: list[TargetReplica]) -> None:
+        """Record any backend-specific hints carried by a request's targets
+        (e.g. ``TargetReplica.component_name``) before the next ``observe``.
+
+        No-op by default; backends that need request context to read pool state
+        override it. The orchestrator forwards ``targets`` opaquely.
+        """
+        return None
+
+    def observe(self, require_complete: bool = False) -> PoolSnapshot:
+        """Read current pool state for every known participant.
+
+        When ``require_complete`` is true, a failure to read any participant
+        raises instead of being skipped, so budget enforcement cannot
+        under-count usage from a partially-read snapshot.
+        """
         raise NotImplementedError
 
     async def scale(
