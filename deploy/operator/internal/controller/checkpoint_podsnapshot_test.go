@@ -171,11 +171,11 @@ func TestCreatePodSnapshot_CreatesWhenAbsent(t *testing.T) {
 
 func TestCaptureTargetContainer_ReturnsName(t *testing.T) {
 	ckpt := newOwnedCheckpoint()
-	ckpt.Spec.Job.TargetContainerName = "worker"
+	ckpt.Spec.Job.TargetContainerName = "engine"
 
 	got, err := captureTargetContainer(ckpt)
 	require.NoError(t, err)
-	assert.Equal(t, "worker", got)
+	assert.Equal(t, "engine", got)
 }
 
 func TestCaptureTargetContainer_ErrorsOnEmpty(t *testing.T) {
