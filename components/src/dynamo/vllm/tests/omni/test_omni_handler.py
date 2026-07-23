@@ -7,6 +7,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from dynamo.common.lora.manager import LoRAInfo
+
 try:
     from PIL import Image
     from vllm.sampling_params import SamplingParams
@@ -68,11 +70,14 @@ def _make_handler(stage_types=("diffusion",)):
     handler.loaded_loras = handler._lora_state.loaded_loras
     handler._lora_load_locks = handler._lora_state.lora_load_locks
     handler._lora_load_locks_guard = handler._lora_state.lora_load_locks_guard
-    handler._lora_capacity = 1
+    handler._lora_capacity = None
     handler._engine_loaded_loras = set()
 
     # Add attributes required by _resolve_lora_request() (called by _resolve_and_apply_lora)
     handler._served_model_name = config.served_model_name or config.model
+    handler._served_model_aliases = tuple(
+        getattr(config, "served_model_aliases", ()) or ()
+    )
     handler.engine_args = SimpleNamespace(model=config.model)
 
     return handler
@@ -347,16 +352,50 @@ class TestLoraEnablement:
         with patch("dynamo.vllm.omni.omni_handler.get_lora_manager", return_value=None):
             assert handler._resolve_lora_request("ghost-adapter") is None
 
+    def test_resolve_lora_request_served_alias_is_treated_as_base_model(self):
+        handler = _make_handler()
+        handler.config.engine_args.enable_lora = True
+        handler.config.served_model_aliases = ["test-model-alias"]
+        handler._served_model_aliases = tuple(handler.config.served_model_aliases)
+
+        with patch(
+            "dynamo.vllm.omni.omni_handler.get_lora_manager",
+            return_value=MagicMock(),
+        ):
+            assert handler._resolve_lora_request("test-model-alias") is None
+
 
 class TestLoraCapacity:
-    def test_constructor_rejects_oversized_capacity(self):
-        """OmniHandler should reject max_loras > 1 at construction time."""
-        with patch(
-            "dynamo.vllm.omni.omni_handler.BaseOmniHandler.__init__",
-            side_effect=ValueError("at most one loaded LoRA adapter"),
-        ):
-            with pytest.raises(ValueError, match="at most one loaded LoRA adapter"):
-                OmniHandler("test-model", MagicMock(), MagicMock())
+    def test_resolve_lora_capacity_uses_configured_max_loras(self):
+        """Omni Base handler should defer LoRA capacity to configured max_loras."""
+        from dynamo.vllm.omni.base_handler import BaseOmniHandler
+
+        handler = BaseOmniHandler.__new__(BaseOmniHandler)
+        config = SimpleNamespace(
+            engine_args=SimpleNamespace(enable_lora=True, max_loras=4)
+        )
+
+        assert handler._resolve_lora_capacity(config) == 4
+
+    @pytest.mark.asyncio
+    async def test_second_distinct_adapter_load_is_rejected_at_capacity_one(self):
+        handler = _make_handler()
+        handler._lora_capacity = 1
+        handler._lora_state.loaded_loras = {
+            "adapterA": LoRAInfo(id=123, path="/cache/adapterA")
+        }
+        handler.loaded_loras = handler._lora_state.loaded_loras
+
+        results = [
+            result
+            async for result in handler.load_lora(
+                {"lora_name": "adapterB", "source": {"uri": "file:///adapter-b"}}
+            )
+        ]
+
+        assert results[-1]["status"] == "error"
+        assert "LoRA capacity exceeded" in results[-1]["message"]
+        handler.engine_client.add_lora.assert_not_called()
 
 
 class TestBuildOriginalPrompt:

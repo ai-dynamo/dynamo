@@ -2206,6 +2206,23 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         }
                         return
 
+                    lora_capacity = getattr(self, "_lora_capacity", None)
+                    if (
+                        old_info is None
+                        and not hot_swap_enabled
+                        and lora_capacity is not None
+                        and len(self._lora_state.loaded_loras) >= lora_capacity
+                    ):
+                        yield {
+                            "status": "error",
+                            "message": (
+                                "LoRA capacity exceeded: "
+                                f"at most {lora_capacity} adapter(s) may be loaded"
+                            ),
+                            "lora_name": lora_name,
+                        }
+                        return
+
                     logger.info(
                         f"Downloading LoRA adapter: {lora_name} from {lora_uri}"
                     )

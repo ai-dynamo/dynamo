@@ -90,13 +90,7 @@ class BaseOmniHandler(BaseWorkerHandler[Dict[str, Any], Dict[str, Any]]):
             return None
 
         requested_capacity = getattr(config.engine_args, "max_loras", None)
-        if requested_capacity is not None and requested_capacity != 1:
-            raise ValueError(
-                "vLLM-Omni supports at most one loaded LoRA adapter; "
-                f"requested max_loras={requested_capacity}"
-            )
-
-        return 1
+        return requested_capacity
 
     def _build_omni_kwargs(self, config) -> Dict[str, Any]:
         """Build keyword arguments for AsyncOmni constructor."""
