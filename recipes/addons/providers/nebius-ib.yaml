@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Nebius InfiniBand fabric profile (UCX over IB). The leanest profile.
+#
+# An agent materializes this onto a base DynamoGraphDeployment. NOT a kustomize
+# artifact — see ./README.md.
+provider: nebius-ib
+fabric: ib
+
+target:
+  by: subComponentType
+  match: [prefill, decode]
+
+image:
+  rule: "{base_tag}"             # keep the base image — a standard runtime; UCX/IB is built in
+
+device:
+  rdma/ib: "1"                   # device-plugin SLOT count (grants all 8 HCAs); NOT GPU-derived — keep "1"
+
+securityContext:
+  privileged: true
+  capabilities: { add: [IPC_LOCK, SYS_PTRACE] }
+
+env:
+  # No UCX_NET_DEVICES: all 8 ConnectX-7 HCAs are compute fabric with no side fabric,
+  # so UCX auto-probe binds the right NICs on its own.
+  NCCL_SOCKET_IFNAME: eth0
+
+kv_backend: UCX                  # default for both engines
+backend: {}                      # nothing to select
+
+skip: [base_image_choice, storage_pvc, volume_mounts]
