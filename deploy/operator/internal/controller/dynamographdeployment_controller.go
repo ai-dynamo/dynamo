@@ -44,7 +44,6 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/scale"
 	"k8s.io/client-go/tools/record"
-	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -437,18 +436,18 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 	restartStatus := r.computeRestartStatus(ctx, dynamoDeployment)
 	restartState := dynamo.DetermineRestartState(dynamoDeployment, restartStatus)
 
-	var result ReconcileResult
-	if r.isGrovePathway(dynamoDeployment) {
-		logger.Info("Reconciling Grove resources", "hasMultinode", hasMultinode, "lwsEnabled", r.RuntimeConfig.Gate.Enabled(features.LWS))
-		result, err = r.reconcileGroveResources(ctx, dynamoDeployment, restartState, checkpointInfos)
-	} else {
-		logger.Info("Reconciling Dynamo components deployments", "hasMultinode", hasMultinode, "lwsEnabled", r.RuntimeConfig.Gate.Enabled(features.LWS))
-		result, err = r.reconcileDynamoComponentsDeployments(ctx, dynamoDeployment, restartState, checkpointInfos)
+	state := &graphReconcileState{
+		DGD:             dynamoDeployment,
+		HasMultinode:    hasMultinode,
+		RestartState:    restartState,
+		CheckpointInfos: checkpointInfos,
 	}
-	if err != nil {
+	program := r.selectWorkloadProgram(state)
+	if err := program.Reconcile(ctx, state); err != nil {
 		logger.Error(err, "Failed to reconcile Dynamo components deployments")
 		return ReconcileResult{}, fmt.Errorf("failed to reconcile Dynamo components deployments: %w", err)
 	}
+	result := state.Result
 	result.RestartStatus = restartStatus
 	result = applyCheckpointStartupReadiness(result, checkpointInfos)
 
@@ -1659,163 +1658,6 @@ func applyCheckpointStartupReadiness(
 	result.Reason = "waiting_for_checkpoint"
 	result.Message = Message(fmt.Sprintf("Waiting for checkpoints: %s", strings.Join(waiting, ", ")))
 	return result
-}
-
-func (r *DynamoGraphDeploymentReconciler) reconcileDynamoComponentsDeployments(ctx context.Context, dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment, restartState *dynamo.RestartState, checkpointInfos map[string]*checkpoint.CheckpointInfo) (ReconcileResult, error) {
-	resources := []Resource{}
-	logger := log.FromContext(ctx)
-
-	rollingUpdateCtx, err := r.buildRollingUpdateContext(ctx, dynamoDeployment)
-	if err != nil {
-		return ReconcileResult{}, fmt.Errorf("failed to build rolling update context: %w", err)
-	}
-
-	existingRestartAnnotations, err := r.getExistingRestartAnnotationsDCD(ctx, dynamoDeployment)
-	if err != nil {
-		logger.Error(err, "failed to get existing restart annotations")
-		return ReconcileResult{}, fmt.Errorf("failed to get existing restart annotations: %w", err)
-	}
-	if rollingUpdateCtx.InProgress() {
-		logger.Info("Rolling update in progress",
-			"newWorkerHash", rollingUpdateCtx.NewWorkerHash,
-			"oldWorkerComponentReplicas", rollingUpdateCtx.OldWorkerReplicaTargetsByComponent)
-	}
-
-	// Generate all DCDs (handles both normal and rolling update cases)
-	dynamoComponentsDeployments, err := dynamo.GenerateDynamoComponentsDeployments(
-		dynamoDeployment, restartState, existingRestartAnnotations, rollingUpdateCtx,
-	)
-	if err != nil {
-		logger.Error(err, "failed to generate the DynamoComponentsDeployments")
-		return ReconcileResult{}, fmt.Errorf("failed to generate the DynamoComponentsDeployments: %w", err)
-	}
-
-	// Sync all generated DCDs
-	for key, dcd := range dynamoComponentsDeployments {
-		if err := applyDCDCheckpointStartupPolicy(dcd, checkpointInfos[key]); err != nil {
-			return ReconcileResult{}, fmt.Errorf("failed to apply checkpoint startup policy for %s: %w", key, err)
-		}
-		logger.Info("Reconciling DynamoComponentDeployment", "key", key, "name", dcd.Name)
-		if err := r.preserveExistingDCDBackendFramework(ctx, dcd); err != nil {
-			logger.Error(err, "failed to preserve existing DynamoComponentDeployment backendFramework", "name", dcd.Name)
-			return ReconcileResult{}, fmt.Errorf("failed to preserve existing DynamoComponentDeployment backendFramework: %w", err)
-		}
-		_, syncedDCD, err := commoncontroller.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*nvidiacomv1beta1.DynamoComponentDeployment, bool, error) {
-			return dcd, false, nil
-		})
-		if err != nil {
-			logger.Error(err, "failed to sync the DynamoComponentDeployment", "name", dcd.Name)
-			return ReconcileResult{}, fmt.Errorf("failed to sync the DynamoComponentDeployment: %w", err)
-		}
-		resources = append(resources, syncedDCD)
-	}
-
-	// During rolling update, scale old worker DCDs via direct patching.
-	// This is done separately from DCD generation to avoid overwriting the old spec
-	// with the new spec (which would trigger an unwanted rolling update on old workers).
-	if rollingUpdateCtx.InProgress() {
-		if err := r.scaleOldWorkerDCDs(ctx, dynamoDeployment, rollingUpdateCtx); err != nil {
-			logger.Error(err, "failed to scale old worker DCDs")
-			return ReconcileResult{}, fmt.Errorf("failed to scale old worker DCDs: %w", err)
-		}
-	}
-
-	// Check resource readiness
-	result := r.checkResourcesReadiness(resources)
-
-	// During rolling updates, aggregate old worker component statuses into the result
-	// so that Replicas, ReadyReplicas, etc. reflect the total across old and new DCDs.
-	if rollingUpdateCtx.InProgress() {
-		oldWorkerStatuses, err := r.aggregateOldWorkerComponentStatuses(ctx, dynamoDeployment, rollingUpdateCtx)
-		if err != nil {
-			logger.Error(err, "failed to aggregate old worker component statuses")
-			// Non-fatal: continue with partial status
-		} else if len(oldWorkerStatuses) > 0 {
-			mergeWorkerComponentStatuses(result.ComponentStatus, oldWorkerStatuses)
-		}
-	}
-
-	return result, nil
-}
-
-func applyDCDCheckpointStartupPolicy(
-	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
-	checkpointInfo *checkpoint.CheckpointInfo,
-) error {
-	if dcd == nil || checkpointInfo == nil || !checkpointInfo.Enabled {
-		return nil
-	}
-
-	// DGD-managed automatic checkpoints deliberately bypass identity lookup and
-	// are resolved by the exact DynamoCheckpoint CR created for this
-	// DGD/component generation. Propagate that resolved reference into the child
-	// DCD so the DCD controller does not independently fall back to legacy
-	// identity-based reuse logic.
-	if checkpointInfo.Exists && checkpointInfo.CheckpointName != "" {
-		if dcd.Spec.Experimental == nil {
-			dcd.Spec.Experimental = &nvidiacomv1beta1.ExperimentalSpec{}
-		}
-		if dcd.Spec.Experimental.Checkpoint == nil {
-			dcd.Spec.Experimental.Checkpoint = &nvidiacomv1beta1.ComponentCheckpointConfig{}
-		}
-		checkpointName := checkpointInfo.CheckpointName
-		dcd.Spec.Experimental.Checkpoint.Enabled = true
-		dcd.Spec.Experimental.Checkpoint.CheckpointRef = &checkpointName
-		dcd.Spec.Experimental.Checkpoint.Identity = nil
-		dcd.Spec.Experimental.Checkpoint.Job = nil
-		startupPolicy := checkpointInfo.StartupPolicy
-		if startupPolicy == "" {
-			startupPolicy = nvidiacomv1alpha1.CheckpointStartupPolicyImmediate
-		}
-		dcd.Spec.Experimental.Checkpoint.StartupPolicy = nvidiacomv1beta1.CheckpointStartupPolicy(startupPolicy)
-	}
-
-	if checkpointInfo.StartupPolicy == nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint && !checkpointInfo.Ready {
-		dcd.Spec.Replicas = ptr.To(int32(0))
-		return nil
-	}
-	if checkpointInfo.StartupPolicy == "" ||
-		checkpointInfo.StartupPolicy == nvidiacomv1alpha1.CheckpointStartupPolicyImmediate {
-		labels := dynamo.GetPodTemplateLabels(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
-		if labels == nil {
-			if dcd.Spec.PodTemplate == nil {
-				dcd.Spec.PodTemplate = &corev1.PodTemplateSpec{}
-			}
-			if dcd.Spec.PodTemplate.Labels == nil {
-				dcd.Spec.PodTemplate.Labels = map[string]string{}
-			}
-			labels = dcd.Spec.PodTemplate.Labels
-		}
-		annotations := dynamo.GetPodTemplateAnnotations(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
-		if annotations == nil {
-			if dcd.Spec.PodTemplate == nil {
-				dcd.Spec.PodTemplate = &corev1.PodTemplateSpec{}
-			}
-			if dcd.Spec.PodTemplate.Annotations == nil {
-				dcd.Spec.PodTemplate.Annotations = map[string]string{}
-			}
-			annotations = dcd.Spec.PodTemplate.Annotations
-		}
-		return checkpoint.ApplyRestoreCandidateMetadata(labels, annotations, checkpointInfo)
-	}
-	return nil
-}
-
-func (r *DynamoGraphDeploymentReconciler) preserveExistingDCDBackendFramework(ctx context.Context, desired *nvidiacomv1beta1.DynamoComponentDeployment) error {
-	existing := &nvidiacomv1beta1.DynamoComponentDeployment{}
-	err := r.Get(ctx, types.NamespacedName{Name: desired.Name, Namespace: desired.Namespace}, existing)
-	if errors.IsNotFound(err) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("failed to get existing DynamoComponentDeployment %s/%s: %w", desired.Namespace, desired.Name, err)
-	}
-
-	// backendFramework is immutable on DCDs. Older generated children may have
-	// an empty value, so preserve the stored value on update while allowing new
-	// children to be created with the inferred backend.
-	desired.Spec.BackendFramework = existing.Spec.BackendFramework
-	return nil
 }
 
 func (r *DynamoGraphDeploymentReconciler) getExistingRestartAnnotationsDCD(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment) (map[string]string, error) {

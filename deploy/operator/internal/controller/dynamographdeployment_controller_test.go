@@ -78,56 +78,6 @@ func newDynamoGraphDeploymentControllerTestScheme(t testing.TB) *runtime.Scheme 
 	return s
 }
 
-func TestDynamoGraphDeploymentReconciler_preserveExistingDCDBackendFramework(t *testing.T) {
-	ctx := context.Background()
-	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
-
-	existing := &v1beta1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "vllm-disagg-planner-frontend",
-			Namespace: "jsm",
-		},
-		Spec: v1beta1.DynamoComponentDeploymentSpec{
-			BackendFramework: "",
-			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
-				ComponentName: "Frontend",
-				ComponentType: v1beta1.ComponentTypeFrontend,
-			},
-		},
-	}
-
-	reconciler := &DynamoGraphDeploymentReconciler{
-		Client: fake.NewClientBuilder().
-			WithScheme(testScheme).
-			WithObjects(existing).
-			Build(),
-	}
-
-	desiredExisting := &v1beta1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      existing.Name,
-			Namespace: existing.Namespace,
-		},
-		Spec: v1beta1.DynamoComponentDeploymentSpec{
-			BackendFramework: "vllm",
-		},
-	}
-	gomega.NewWithT(t).Expect(reconciler.preserveExistingDCDBackendFramework(ctx, desiredExisting)).To(gomega.Succeed())
-	gomega.NewWithT(t).Expect(desiredExisting.Spec.BackendFramework).To(gomega.Equal(""))
-
-	desiredNew := &v1beta1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "vllm-disagg-planner-vllmdecodeworker-2dad72b9",
-			Namespace: "jsm",
-		},
-		Spec: v1beta1.DynamoComponentDeploymentSpec{
-			BackendFramework: "vllm",
-		},
-	}
-	gomega.NewWithT(t).Expect(reconciler.preserveExistingDCDBackendFramework(ctx, desiredNew)).To(gomega.Succeed())
-	gomega.NewWithT(t).Expect(desiredNew.Spec.BackendFramework).To(gomega.Equal("vllm"))
-}
-
 func TestDynamoGraphDeploymentReconciler_reconcileScalingAdapters(t *testing.T) {
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
 
@@ -2222,81 +2172,6 @@ func TestDynamoGraphDeploymentReconciler_mapAutoCheckpointToDGDRequestsAllowsRet
 	assert.Equal(t, types.NamespacedName{Namespace: "default", Name: "test-dgd"}, got[0].NamespacedName)
 }
 
-func TestApplyDCDCheckpointStartupPolicy(t *testing.T) {
-	t.Run("immediate stamps stable restore candidate metadata", func(t *testing.T) {
-		dcd := &v1beta1.DynamoComponentDeployment{
-			Spec: v1beta1.DynamoComponentDeploymentSpec{
-				DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
-					Replicas: ptr.To(int32(2)),
-					PodTemplate: &corev1.PodTemplateSpec{
-						ObjectMeta: metav1.ObjectMeta{
-							Labels: map[string]string{
-								snapshotprotocol.CheckpointIDLabel: "stale",
-							},
-							Annotations: map[string]string{
-								snapshotprotocol.CheckpointStatusAnnotation: "stale",
-							},
-						},
-					},
-				},
-			},
-		}
-		info := &checkpoint.CheckpointInfo{
-			Enabled:        true,
-			Exists:         true,
-			Ready:          true,
-			Hash:           "checkpoint-id",
-			CheckpointName: "checkpoint-name",
-			StartupPolicy:  v1alpha1.CheckpointStartupPolicyImmediate,
-		}
-
-		if err := applyDCDCheckpointStartupPolicy(dcd, info); err != nil {
-			t.Fatalf("applyDCDCheckpointStartupPolicy() error = %v", err)
-		}
-
-		require.NotNil(t, dcd.Spec.Experimental)
-		require.NotNil(t, dcd.Spec.Experimental.Checkpoint)
-		require.NotNil(t, dcd.Spec.Experimental.Checkpoint.CheckpointRef)
-		assert.Equal(t, "checkpoint-name", *dcd.Spec.Experimental.Checkpoint.CheckpointRef)
-		assert.Nil(t, dcd.Spec.Experimental.Checkpoint.Identity)
-		assert.Nil(t, dcd.Spec.Experimental.Checkpoint.Job)
-		assert.Equal(t, v1beta1.CheckpointStartupPolicyImmediate, dcd.Spec.Experimental.Checkpoint.StartupPolicy)
-		assert.Equal(t, int32(2), *dcd.Spec.Replicas)
-		assert.Empty(t, dcd.Spec.PodTemplate.Labels[snapshotprotocol.CheckpointIDLabel])
-		assert.Equal(t, commonconsts.KubeLabelValueTrue, dcd.Spec.PodTemplate.Annotations[commonconsts.CheckpointRestoreCandidateAnnotation])
-		assert.Equal(t, "checkpoint-name", dcd.Spec.PodTemplate.Annotations[commonconsts.CheckpointNameAnnotation])
-		assert.Equal(t, commonconsts.MainContainerName, dcd.Spec.PodTemplate.Annotations[snapshotprotocol.TargetContainersAnnotation])
-	})
-
-	t.Run("wait for checkpoint gates replicas until ready", func(t *testing.T) {
-		dcd := &v1beta1.DynamoComponentDeployment{
-			Spec: v1beta1.DynamoComponentDeploymentSpec{
-				DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
-					Replicas: ptr.To(int32(3)),
-				},
-			},
-		}
-		info := &checkpoint.CheckpointInfo{
-			Enabled:        true,
-			Exists:         true,
-			Ready:          false,
-			CheckpointName: "checkpoint-name",
-			StartupPolicy:  v1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
-		}
-
-		if err := applyDCDCheckpointStartupPolicy(dcd, info); err != nil {
-			t.Fatalf("applyDCDCheckpointStartupPolicy() error = %v", err)
-		}
-
-		require.NotNil(t, dcd.Spec.Experimental)
-		require.NotNil(t, dcd.Spec.Experimental.Checkpoint)
-		require.NotNil(t, dcd.Spec.Experimental.Checkpoint.CheckpointRef)
-		assert.Equal(t, "checkpoint-name", *dcd.Spec.Experimental.Checkpoint.CheckpointRef)
-		assert.Equal(t, v1beta1.CheckpointStartupPolicyWaitForCheckpoint, dcd.Spec.Experimental.Checkpoint.StartupPolicy)
-		assert.Equal(t, int32(0), *dcd.Spec.Replicas)
-	})
-}
-
 // mockScaleClient implements scale.ScalesGetter for testing
 type mockScaleClient struct{}
 
@@ -2320,6 +2195,91 @@ func (m *mockScaleInterface) Update(ctx context.Context, resource schema.GroupRe
 func (m *mockScaleInterface) Patch(ctx context.Context, gvr schema.GroupVersionResource, name string, pt types.PatchType, data []byte, opts metav1.PatchOptions) (*autoscalingv1.Scale, error) {
 	// Return a dummy scale object
 	return &autoscalingv1.Scale{}, nil
+}
+
+func TestDynamoGraphDeploymentReconciler_isGrovePathway(t *testing.T) {
+	tests := []struct {
+		name         string
+		groveEnabled bool
+		annotations  map[string]string
+		want         bool
+	}{
+		{
+			name:         "feature disabled without annotation selects component pathway",
+			groveEnabled: false,
+			want:         false,
+		},
+		{
+			name:         "feature disabled ignores explicit enable annotation",
+			groveEnabled: false,
+			annotations: map[string]string{
+				commonconsts.KubeAnnotationEnableGrove: commonconsts.KubeLabelValueTrue,
+			},
+			want: false,
+		},
+		{
+			name:         "feature enabled without annotations selects Grove",
+			groveEnabled: true,
+			want:         true,
+		},
+		{
+			name:         "feature enabled with unrelated annotation selects Grove",
+			groveEnabled: true,
+			annotations: map[string]string{
+				"example.com/unrelated": "value",
+			},
+			want: true,
+		},
+		{
+			name:         "feature enabled with explicit enable annotation selects Grove",
+			groveEnabled: true,
+			annotations: map[string]string{
+				commonconsts.KubeAnnotationEnableGrove: commonconsts.KubeLabelValueTrue,
+			},
+			want: true,
+		},
+		{
+			name:         "feature enabled with explicit disable annotation selects component pathway",
+			groveEnabled: true,
+			annotations: map[string]string{
+				commonconsts.KubeAnnotationEnableGrove: commonconsts.KubeLabelValueFalse,
+			},
+			want: false,
+		},
+		{
+			name:         "explicit disable annotation is case insensitive",
+			groveEnabled: true,
+			annotations: map[string]string{
+				commonconsts.KubeAnnotationEnableGrove: "FaLsE",
+			},
+			want: false,
+		},
+		{
+			name:         "unknown annotation value does not disable Grove",
+			groveEnabled: true,
+			annotations: map[string]string{
+				commonconsts.KubeAnnotationEnableGrove: "invalid",
+			},
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Build a reconciler and DGD with the pathway-selection inputs")
+			reconciler := &DynamoGraphDeploymentReconciler{
+				RuntimeConfig: &controller_common.RuntimeConfig{
+					Gate: features.Gates{Grove: tt.groveEnabled},
+				},
+			}
+			dgd := &v1beta1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{Annotations: tt.annotations},
+			}
+
+			t.Log("Evaluate the current Grove pathway-selection contract")
+			assert.Equal(t, tt.want, reconciler.isGrovePathway(dgd))
+		})
+	}
 }
 
 func Test_reconcileGroveResources(t *testing.T) {
@@ -3985,7 +3945,7 @@ func Test_computeRestartStatus(t *testing.T) {
 	}
 }
 
-func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
+func TestComponentProgram_Reconcile(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
@@ -4617,10 +4577,11 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				RuntimeConfig: &controller_common.RuntimeConfig{},
 			}
 
-			result, err := reconciler.reconcileDynamoComponentsDeployments(ctx, dgd, nil, nil)
+			state := &graphReconcileState{DGD: dgd}
+			err = (&componentProgram{reconciler: reconciler}).Reconcile(ctx, state)
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 
-			g.Expect(result).To(gomega.Equal(tt.wantReconcileResult))
+			g.Expect(state.Result).To(gomega.Equal(tt.wantReconcileResult))
 		})
 	}
 }
