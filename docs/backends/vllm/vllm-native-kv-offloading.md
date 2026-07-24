@@ -33,9 +33,6 @@ Status legend: ✅ validated end to end · ⚠️ available but not yet validate
 > - vLLM v0.24.0 adds self-describing KV events for the `OffloadingConnector`, opt-in via `"self_describing_kv_events": true`. Earlier versions publish placeholder CPU events with no token payload, which the router cannot index.
 > - Dynamo 1.3.0 maps vLLM's `medium=CPU` events to the router's host tier and adds `--router-host-cache-hit-weight`.
 
-With an older vLLM or Dynamo, serving continues but the router does not learn
-about the CPU tier. Use [Verification](#verification) to confirm the wiring.
-
 Three settings are required, and none is on by default:
 
 1. On every worker, enable KV event publishing with `--kv-events-config` — `--router-mode kv` on the frontend does not enable it (see [KV Routing Requirements](README.md#kv-routing-requirements)).

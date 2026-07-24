@@ -23,7 +23,6 @@ Legend: ✅ tier-aware routing · 🟡 router-visible, tier-agnostic · 🚧 Dyn
 
 - **Router-visible (tier-aware).** The worker publishes KV cache events annotated with the storage tier (`medium`). The router tracks per-tier residency and credits lower-tier prefix hits when selecting workers, weighted by `--router-host-cache-hit-weight` and `--router-disk-cache-hit-weight`.
 - **Router-visible (tier-agnostic).** The router keeps blocks indexed across engine-managed tiers but cannot distinguish which tier currently holds them, so per-tier weights do not apply.
-- **Engine-side only.** Offloading works inside each worker, but the router receives no event lifecycle that preserves offloaded-block residency. It treats offloaded prefixes as cache misses.
 
 > [!NOTE]
 > Offloading support changes quickly on both the framework and the Dynamo side. Version gates are summarized in the matrix and expanded in the per-framework sections below. Capabilities merged upstream but not yet released are listed as main-branch support. vLLM tier-aware routing and the `--router-host-cache-hit-weight` / `--router-disk-cache-hit-weight` tuning flags require Dynamo 1.3.0 or later; SGLang HiCache tier-aware routing also works on Dynamo 1.2.x, with the lower-tier weights fixed at their defaults.
