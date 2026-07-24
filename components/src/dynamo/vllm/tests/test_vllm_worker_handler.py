@@ -44,7 +44,6 @@ pytestmark = [
 
 def _make_config(
     model: str = "test-model",
-    is_prefill_worker: bool = False,
     enable_multimodal: bool = True,
     multimodal_embedding_cache_capacity_gb: float = 0,
     disaggregation_mode: str | None = None,
@@ -54,11 +53,8 @@ def _make_config(
 
     config = MagicMock()
     config.model = model
-    config.is_prefill_worker = is_prefill_worker
     if disaggregation_mode is not None:
         config.disaggregation_mode = getattr(DisaggregationMode, disaggregation_mode)
-    elif is_prefill_worker:
-        config.disaggregation_mode = DisaggregationMode.PREFILL
     else:
         config.disaggregation_mode = DisaggregationMode.AGGREGATED
     # NIXL_WRITE / NIXL_READ modes require GPU, the tests may run in CPU-only environments,
@@ -564,7 +560,7 @@ class TestGenerateDisagg:
     @pytest.mark.asyncio
     async def test_prefills_then_forwards_to_decode(self):
         """_generate_disagg prefills locally, then round-robins to decode worker."""
-        config = _make_config(model="test-model", is_prefill_worker=True)
+        config = _make_config(model="test-model", disaggregation_mode="PREFILL")
         decode_client = MagicMock()
         handler = _make_handler(config=config, decode_worker_client=decode_client)
         handler.engine_client = MagicMock()

@@ -154,7 +154,8 @@ spec:
           - ${MODEL_A}
           - --tensor-parallel-size
           - "1"
-          - --is-prefill-worker
+          - --disaggregation-mode
+          - prefill
           command:
           - python3
           - -m
@@ -255,7 +256,8 @@ spec:
           - ${MODEL_B}
           - --tensor-parallel-size
           - "1"
-          - --is-prefill-worker
+          - --disaggregation-mode
+          - prefill
           command:
           - python3
           - -m
