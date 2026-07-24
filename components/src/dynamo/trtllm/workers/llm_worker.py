@@ -14,6 +14,8 @@ import os
 import sys
 from typing import Optional
 
+from huggingface_hub import try_to_load_from_cache
+from huggingface_hub.utils import HFValidationError
 from prometheus_client import REGISTRY
 from tensorrt_llm.llmapi import (
     CapacitySchedulerPolicy,
@@ -67,9 +69,42 @@ from dynamo.trtllm.request_handlers.handlers import (
 )
 from dynamo.trtllm.utils.trtllm_utils import deep_update, get_spec_decode_runtime_data
 
+try:
+    # Available only when the bindings include the `mm-routing` feature.
+    from dynamo._core import resolve_routing_image_token_id
+except ImportError:
+    resolve_routing_image_token_id = None  # type: ignore[assignment]
+
 # Default buffer size for kv cache events.
 DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 100_000
 SPEC_DECODE_RUNTIME_KEY = "spec_decode"
+
+# TRT-LLM 1.3.0rc21 keeps in-vocab image markers for these validated families.
+# Leave other families unresolved until their KV-event convention is verified.
+_MM_ROUTING_MODEL_TYPES = frozenset({"qwen2_vl", "qwen2_5_vl", "qwen3_vl", "kimi_k25"})
+
+
+def _resolve_model_dir(config: Config) -> str:
+    """Return the cached model directory, or the raw local-path argument."""
+    try:
+        cached = try_to_load_from_cache(
+            repo_id=config.model,
+            filename="config.json",
+            revision=config.revision,
+        )
+    except (HFValidationError, OSError):
+        return config.model
+    return os.path.dirname(cached) if isinstance(cached, str) else config.model
+
+
+def _resolve_image_token_id(model_type: str, config: Config) -> Optional[int]:
+    """Resolve rc21's in-vocab image marker for a validated model family."""
+    if (
+        model_type not in _MM_ROUTING_MODEL_TYPES
+        or resolve_routing_image_token_id is None
+    ):
+        return None
+    return resolve_routing_image_token_id(config.model, _resolve_model_dir(config))
 
 
 def build_kv_connector_config(config: Config):
@@ -360,6 +395,17 @@ async def init_llm_worker(
             ] = DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
         event_buffer_max_size = int(current_kv_config["event_buffer_max_size"])
 
+        # TRT-LLM enables block reuse by default; warn only when it is explicitly
+        # disabled, since without reuse events the router has no cache overlap to
+        # route on.
+        if current_kv_config.get("enable_block_reuse") is False:
+            logging.warning(
+                "kv_cache_config.enable_block_reuse is set to false; TRT-LLM will "
+                "not publish KV-cache-reuse events. KV-aware routing, if used, "
+                "falls back to load-balancing; set enable_block_reuse: true to "
+                "enable it (harmless if events are published only for metrics)."
+            )
+
         # Only pytorch backend is supported for now to publish events and metrics.
         if "backend" not in arg_map:
             arg_map["backend"] = Backend.PYTORCH
@@ -460,6 +506,7 @@ async def init_llm_worker(
             )
 
     multimodal_processor = None
+    image_token_id: Optional[int] = None
 
     if os.getenv("DYN_ENABLE_TEST_LOGITS_PROCESSOR") == "1":
         # We need to initialize the tokenizer for the test logits processor
@@ -474,6 +521,28 @@ async def init_llm_worker(
             config.model,
             trust_remote_code=engine_args.get("trust_remote_code", False),
         )
+        # MM-aware KV routing is aggregated-only, so the image marker is resolved
+        # only in aggregated mode; disaggregated MM requests are not routed on it.
+        if config.disaggregation_mode == DisaggregationMode.AGGREGATED:
+            image_token_id = _resolve_image_token_id(model_config.model_type, config)
+            if image_token_id is not None:
+                logging.info(
+                    "MM-aware KV routing enabled (model_type=%s, image_token_id=%d)",
+                    model_config.model_type,
+                    image_token_id,
+                )
+            else:
+                logging.warning(
+                    "MM-aware KV routing NOT enabled for model_type=%s; multimodal "
+                    "requests will fall back to text-prefix routing",
+                    model_config.model_type,
+                )
+        else:
+            logging.warning(
+                "Native MM-aware KV routing is only supported in aggregated mode; "
+                "multimodal requests in the %s role will not be KV-routed",
+                config.disaggregation_mode.value,
+            )
         multimodal_processor = MultimodalRequestProcessor(
             model_type=model_config.model_type,
             model_dir=config.model,
@@ -798,6 +867,7 @@ async def init_llm_worker(
                     zmq_topic="",
                     enable_local_indexer=config.enable_local_indexer,
                     kv_state_endpoint=config.kv_state_endpoint,
+                    image_token_id=image_token_id,
                 )
                 logging.info(
                     f"Created worker-side publisher for consolidated events: "
@@ -817,6 +887,7 @@ async def init_llm_worker(
                 enable_local_indexer=config.enable_local_indexer,
                 metrics_collector=metrics_collector,
                 kv_state_endpoint=config.kv_state_endpoint,
+                image_token_id=image_token_id,
             ) as publisher:
                 handler_config.publisher = publisher
                 handler = RequestHandlerFactory().get_request_handler(handler_config)

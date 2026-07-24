@@ -42,7 +42,7 @@ use crate::common::handoff::{
 #[cfg(test)]
 use crate::common::protocols::ForwardPassSnapshot;
 use crate::common::protocols::{DirectRequest, EngineType, MockEngineArgs, OutputSignal};
-use crate::loadgen::{ReplayRequestHashes, WorkloadDriver};
+use crate::loadgen::{ReplayRequestHashes, ReplayRequestPayload, WorkloadDriver};
 #[cfg(test)]
 use crate::replay::ReplayRouterMode;
 use crate::replay::{
@@ -364,11 +364,7 @@ impl DisaggFlowState {
         if let Some(sample) = placement.planner_cache_sample {
             traffic.on_admission(sample.overlap_blocks, sample.isl_blocks);
         }
-        let input_tokens = self
-            .state(placement.request_id)?
-            .original_request()?
-            .tokens
-            .len();
+        let input_tokens = self.state(placement.request_id)?.input_length()?;
         collector.on_prefill_route_overlap(
             placement.request_id,
             placement.reported_overlap_tokens.min(input_tokens),
@@ -382,11 +378,7 @@ impl DisaggFlowState {
         placement: Placement,
         collector: &mut TraceCollector,
     ) -> Result<()> {
-        let input_tokens = self
-            .state(placement.request_id)?
-            .original_request()?
-            .tokens
-            .len();
+        let input_tokens = self.state(placement.request_id)?.input_length()?;
         collector.on_decode_route_overlap(
             placement.request_id,
             placement.reported_overlap_tokens.min(input_tokens),
@@ -395,11 +387,9 @@ impl DisaggFlowState {
     }
 
     #[inline(never)]
-    fn prepare_prefill_submission(&self, uuid: Uuid) -> Result<(DirectRequest, HandoffId)> {
-        Ok((
-            self.state(uuid)?.build_prefill_request()?,
-            self.state(uuid)?.handoff_id,
-        ))
+    fn prepare_prefill_submission(&mut self, uuid: Uuid) -> Result<(DirectRequest, HandoffId)> {
+        let handoff_id = self.state(uuid)?.handoff_id;
+        Ok((self.state_mut(uuid)?.build_prefill_request()?, handoff_id))
     }
 
     #[inline(never)]
@@ -431,10 +421,16 @@ impl DisaggFlowState {
     }
 
     #[inline(never)]
-    fn prepare_destination_reservation(&self, uuid: Uuid) -> Result<(DirectRequest, HandoffId)> {
+    fn prepare_destination_reservation(
+        &mut self,
+        uuid: Uuid,
+    ) -> Result<(DirectRequest, HandoffId)> {
+        let handoff_id = self.state(uuid)?.handoff_id;
         Ok((
-            self.state(uuid)?.original_request()?.clone(),
-            self.state(uuid)?.handoff_id,
+            self.state_mut(uuid)?
+                .materialize_original_request()?
+                .clone(),
+            handoff_id,
         ))
     }
 
@@ -598,22 +594,19 @@ impl DisaggFlowState {
     #[inline(never)]
     fn on_external_arrival(
         &mut self,
-        mut request: DirectRequest,
+        mut request: ReplayRequestPayload,
         arrival_time_ms: f64,
         replay_hashes: Option<ReplayRequestHashes>,
         session_id: Option<String>,
         collector: &mut TraceCollector,
     ) -> Result<Uuid> {
-        let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
-        request.uuid = Some(uuid);
-        request.arrival_timestamp_ms = Some(arrival_time_ms);
+        let uuid = request.metadata().uuid.unwrap_or_else(Uuid::new_v4);
+        let input_length = request.input_length();
+        let output_length = request.metadata().max_output_tokens;
+        request.metadata_mut().uuid = Some(uuid);
+        request.metadata_mut().arrival_timestamp_ms = Some(arrival_time_ms);
 
-        collector.on_arrival(
-            uuid,
-            arrival_time_ms,
-            request.tokens.len(),
-            request.max_output_tokens,
-        );
+        collector.on_arrival(uuid, arrival_time_ms, input_length, output_length);
         if self.requests.contains_key(&uuid) {
             bail!("offline disagg replay request {uuid} is already active");
         }
@@ -869,7 +862,7 @@ impl DisaggFlowState {
 }
 
 pub(in crate::replay) trait PoolPlacement<Events, Metadata>:
-    PlacementPolicy<DirectRequest, Metadata = Metadata, Observation = Events> + Sized
+    PlacementPolicy<ReplayRequestPayload, Metadata = Metadata, Observation = Events> + Sized
 where
     Events: EngineEventBatch,
     Metadata: ReplayAdmissionMetadata,
@@ -1286,12 +1279,13 @@ where
 
     fn route_prefill(&mut self, uuid: Uuid, action: IssuedHandoffAction) -> Result<()> {
         self.state_mut(uuid)?.phase = DisaggPhase::QueuedPrefill;
-        let request = self.state(uuid)?.build_prefill_request()?;
-        let metadata = Metadata::from_hashes(self.state_mut(uuid)?.take_replay_hashes());
+        let metadata =
+            Metadata::from_hashes(self.state_mut(uuid)?.take_replay_hashes()).for_prefill();
         let session_id = self.state(uuid)?.session_id().map(str::to_owned);
+        let request = self.flow.state(uuid)?.request_payload()?;
         let effects = self
             .prefill_placement
-            .place(&request, metadata, session_id, self.now_ms)?;
+            .place(request, metadata, session_id, self.now_ms)?;
         self.dispatch_prefill_placements(effects.released)?;
         match effects.decision {
             PlacementDecision::Immediate(placement) => {
@@ -1312,10 +1306,16 @@ where
 
     fn route_destination(&mut self, uuid: Uuid, action: IssuedHandoffAction) -> Result<()> {
         self.state_mut(uuid)?.await_destination();
-        let request = self.state(uuid)?.original_request()?.clone();
+        // TODO: Keep the destination side compact through decode routing and
+        // reservation once decode-block hashes can be derived without prompt
+        // expansion and the scheduler accepts compact metadata. Destination-
+        // first SGLang currently materializes here before prefill; source-first
+        // vLLM has already materialized at prefill worker submission.
+        self.state_mut(uuid)?.materialize_original_request()?;
         let session_id = self.state(uuid)?.session_id().map(str::to_owned);
+        let request = self.flow.state(uuid)?.request_payload()?;
         let effects = self.decode_placement.place(
-            &request,
+            request,
             Metadata::from_hashes(None),
             session_id,
             self.now_ms,
@@ -1631,7 +1631,7 @@ where
     /// Admit one external request into prefill-side state, collector state, and optional router.
     fn on_external_arrival(
         &mut self,
-        request: DirectRequest,
+        request: ReplayRequestPayload,
         arrival_time_ms: f64,
         replay_hashes: Option<ReplayRequestHashes>,
         session_id: Option<String>,
