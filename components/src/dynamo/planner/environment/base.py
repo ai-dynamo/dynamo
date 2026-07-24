@@ -90,6 +90,10 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
         self.runtime_namespace_source = runtime_namespace_source
         self._state = DeploymentState()
         self._metrics_state = Metrics()
+        # role -> (gpu_power_limit_watts, gpus_per_replica) captured at startup.
+        # refresh() re-resolves and fails closed on drift so scaling cannot
+        # resume with a stale watts_per_replica after topology/cap changes.
+        self._startup_power_fingerprints: dict[str, tuple[int, int]] = {}
 
     async def initialize(self) -> None:
         await self.controller.async_init()
@@ -135,14 +139,15 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
                 await self.runtime_namespace_source.refresh_runtime_namespace()
             )
 
-        # Power caps are static for the planner lifetime: read once at startup
-        # (see ``_load_static_power_caps_at_startup``) and never re-read here.
-        # A cap change requires a worker rollout plus a Planner restart, so
-        # refresh() does not re-resolve or drift-check the DGD annotation.
+        # Power caps stay startup-static (never re-adopted here). Re-resolve
+        # only to fail closed when the annotation or per-replica GPU topology
+        # drifts — otherwise scale-ups would charge the stale startup watts.
         await self._refresh_deployment_state()
+        self._assert_startup_power_fingerprint_unchanged()
         if namespace_changed:
             await self.fpm_provider.async_init(self._runtime_namespace_or_none())
             await self._refresh_deployment_state()
+            self._assert_startup_power_fingerprint_unchanged()
         await self.fpm_provider.refresh(self._state)
         return self._state
 
@@ -201,18 +206,19 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
         return fetch()
 
     async def _wait_for_startup_dgd_snapshot(self) -> Optional[dict]:
-        """Wait for a settled DGD and return that same snapshot for static reads.
+        """Wait for readiness; when power is on, return a settled DGD snapshot.
 
-        Kubernetes connectors expose ``wait_for_settled_graph_deployment``,
-        which requires observedGeneration catch-up plus worker stability and
-        returns the snapshot that passed. Other connectors fall back to the
-        generic ready wait plus an optional shared GET.
+        The settled wait (observedGeneration + DCD/Grove backing readiness) is
+        only required to permanently cache DGD-owned power caps. Power-disabled
+        planners keep ``wait_for_deployment_ready`` so existing service accounts
+        without dynamocomponentdeployments / Grove RBAC stay compatible.
         """
-        wait_settled = getattr(
-            self.controller, "wait_for_settled_graph_deployment", None
-        )
-        if inspect.iscoroutinefunction(wait_settled):
-            return await wait_settled(include_planner=False)
+        if self.config.enable_power_awareness:
+            wait_settled = getattr(
+                self.controller, "wait_for_settled_graph_deployment", None
+            )
+            if inspect.iscoroutinefunction(wait_settled):
+                return await wait_settled(include_planner=False)
         await self.controller.wait_for_deployment_ready(include_planner=False)
         return self._shared_dgd_deployment()
 
@@ -331,9 +337,9 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
     ) -> None:
         """Read DGD-owned per-GPU caps once at startup; fail closed if bad.
 
-        The annotation is treated as static for the planner lifetime. Cap
-        changes take effect after the worker rollout completes and the planner
-        restarts (re-running this hook).
+        Caps are adopted only here. Cap or topology changes after startup are
+        detected on ``refresh()`` (fingerprint drift) and require a Planner
+        restart so this hook re-runs against a settled post-rollout snapshot.
         """
         if not self.config.enable_power_awareness:
             return
@@ -346,11 +352,74 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
             ) from exc
 
         state = self.deployment_state()
+        fingerprints: dict[str, tuple[int, int]] = {}
         if self.require_prefill and prefill_cfg is not None:
             self._adopt_power_config(state.prefill, prefill_cfg)
+            fingerprints["prefill"] = (
+                prefill_cfg.gpu_power_limit_watts,
+                prefill_cfg.gpus_per_replica,
+            )
         if self.require_decode and decode_cfg is not None:
             self._adopt_power_config(state.decode, decode_cfg)
+            fingerprints["decode"] = (
+                decode_cfg.gpu_power_limit_watts,
+                decode_cfg.gpus_per_replica,
+            )
+        self._startup_power_fingerprints = fingerprints
         self._validate_minimum_power_footprint(prefill_cfg, decode_cfg)
+
+    def _assert_startup_power_fingerprint_unchanged(
+        self, deployment: Optional[dict] = None
+    ) -> None:
+        """Fail closed if DGD power topology/caps drifted since startup.
+
+        ``watts_per_replica`` depends on the mutable annotation, per-pod GPU
+        request, and ``multinode.nodeCount``. Refresh updates replica/GPU
+        counts but never re-adopts power watts; if those inputs change after
+        a worker rollout, continuing with the startup value undercharges the
+        budget. Detect via the production resolver and require a Planner
+        restart (re-running ``_load_static_power_caps_at_startup``).
+        """
+        if not self.config.enable_power_awareness:
+            return
+        if not self._startup_power_fingerprints:
+            return
+
+        try:
+            prefill_cfg, decode_cfg = self._resolve_power_configs(deployment=deployment)
+        except Exception as exc:
+            raise DeploymentValidationError(
+                [
+                    "Failed to re-resolve DGD-owned power caps after refresh; "
+                    f"refusing to scale with an unverified fingerprint: {exc}"
+                ]
+            ) from exc
+
+        drifts: list[str] = []
+        for role, cfg in (("prefill", prefill_cfg), ("decode", decode_cfg)):
+            expected = self._startup_power_fingerprints.get(role)
+            if expected is None or cfg is None:
+                continue
+            current = (cfg.gpu_power_limit_watts, cfg.gpus_per_replica)
+            if current == expected:
+                continue
+            drifts.append(
+                f"{role}: startup cap={expected[0]}W × gpus={expected[1]} "
+                f"({expected[0] * expected[1]}W/replica) vs current "
+                f"cap={current[0]}W × gpus={current[1]} "
+                f"({current[0] * current[1]}W/replica)"
+            )
+        if drifts:
+            raise DeploymentValidationError(
+                [
+                    "Worker power topology or per-GPU cap changed since Planner "
+                    "startup ("
+                    + "; ".join(drifts)
+                    + "). Restart the Planner after the worker rollout completes "
+                    "so watts_per_replica is re-resolved from a settled DGD "
+                    "snapshot; refusing to scale with a stale charge."
+                ]
+            )
 
     def _resolve_power_configs(
         self,
@@ -359,8 +428,9 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
         """Resolve DGD power configs with the same name/generic semantics as startup.
 
         Uses ``get_component_power_configs`` (explicit backend names + unique
-        generic ``type: worker`` fallback). Read once at startup to adopt the
-        static caps; not called on the per-tick refresh path.
+        generic ``type: worker`` fallback). Called at startup to adopt static
+        caps and on ``refresh()`` only to fail closed on fingerprint drift —
+        never to re-adopt watts mid-lifetime.
         """
         get_configs = getattr(self.controller, "get_component_power_configs", None)
         if not callable(get_configs):
