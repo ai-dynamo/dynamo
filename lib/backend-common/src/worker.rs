@@ -36,7 +36,10 @@ use crate::engine::{
 use crate::error::{BackendError, DynamoError, ErrorType};
 use crate::publisher::{PublisherHandles, setup_publishers};
 
-/// Default grace-period in seconds between discovery unregister and engine drain.
+/// Default grace-period in seconds reserved for request-plane propagation
+/// during shutdown. In-process engines use it between discovery unregister
+/// and engine drain. Remote engines use it after terminal engine drain and
+/// before discovery unregister so terminal responses can reach callers.
 /// Mirrors the Python `_DEFAULT_GRACE_PERIOD_SECS` constant.
 const DEFAULT_GRACE_PERIOD_SECS: f64 = 5.0;
 
@@ -455,10 +458,10 @@ impl Worker {
     /// in `components/src/dynamo/common/utils/graceful_shutdown.py`:
     /// unregister, grace period, engine drain/quiescence, cleanup. Remote
     /// engines may opt into drain-before-unregister when their Drain RPC
-    /// atomically closes admission. This preserves admitted response streams
-    /// until terminal drain completion instead of discovery removal cancelling
-    /// their request-plane transports. The caller (`run.rs`) drives
-    /// `runtime.shutdown()` after this sequence returns.
+    /// atomically closes admission. They drain, retain discovery for the grace
+    /// period so terminal responses can finish crossing the request plane, and
+    /// only then unregister. The caller (`run.rs`) drives `runtime.shutdown()`
+    /// after this sequence returns.
     ///
     /// A SIGTERM/SIGINT listener is installed at the top of `run` and
     /// shared via a [`CancellationToken`]:
@@ -813,6 +816,7 @@ impl Worker {
             terminal_error.is_none() && self.engine.drain_before_discovery_unregister();
         if drain_before_unregister {
             self.run_engine_drain_steps().await;
+            self.wait_for_request_plane_flush().await;
         }
 
         if let Some(endpoint) = endpoint {
@@ -829,6 +833,22 @@ impl Worker {
             self.run_engine_shutdown_steps().await;
         }
         terminal_error.map_or(Ok(()), Err)
+    }
+
+    /// Keep the registered request-plane endpoint alive briefly after a
+    /// remote engine reports terminal drain. The engine's gRPC stream can
+    /// finish before Dynamo has forwarded its final response through the
+    /// endpoint transport; unregistering immediately can otherwise cancel an
+    /// admitted caller between those two events.
+    async fn wait_for_request_plane_flush(&self) {
+        let grace = grace_period_secs();
+        if grace > 0.0 {
+            tracing::info!(
+                "Grace period {:.2}s after drain for request-plane flush",
+                grace
+            );
+            tokio::time::sleep(Duration::from_secs_f64(grace)).await;
+        }
     }
 
     /// Start the engine exactly once. `Worker::run` consumes `self`, so all
