@@ -15,12 +15,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use dynamo_kv_router::RoutingPartitionId;
 use dynamo_kv_router::protocols::{
     BlockHashOptions, ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
     KvCacheStoredBlockData, LocalBlockHash, RouterEvent, StorageTier, compute_block_hash_for_seq,
     compute_seq_hash_for_block,
 };
-use dynamo_kv_router::services::indexer::registry::{IndexerKey, WorkerRegistry};
+use dynamo_kv_router::services::indexer::registry::WorkerRegistry;
 use dynamo_kv_router::services::indexer::server::{AppState, create_router};
 use dynamo_kv_router::zmq_wire::{BlockHashValue, RawKvEvent};
 use serde_json::json;
@@ -127,22 +128,14 @@ async fn add_group_events(
     block_size: u32,
     events: Vec<RouterEvent>,
 ) {
-    let indexer = registry.get_or_create_indexer(
-        IndexerKey {
-            model_name: model.to_string(),
-            routing_group: routing_group.to_string(),
-        },
-        block_size,
-    );
+    let indexer =
+        registry.get_or_create_indexer(RoutingPartitionId::new(model, routing_group), block_size);
     for event in events {
         indexer.apply_event_routed(event).await;
     }
     // Force the in-flight events through KvIndexer's mpsc channel before the
     // first query lands; otherwise the test races the indexer worker.
-    if let Some(entry) = registry.get_indexer(&IndexerKey {
-        model_name: model.to_string(),
-        routing_group: routing_group.to_string(),
-    }) {
+    if let Some(entry) = registry.get_indexer(&RoutingPartitionId::new(model, routing_group)) {
         let dump = entry.indexer.dump_events().await.expect("dump events");
         // dump_events provides the FIFO barrier we need; we don't care about
         // its contents here.
@@ -492,10 +485,7 @@ async fn duplicate_store_warning_is_exported() {
     let state = Arc::new(AppState::new(4).expect("create app state"));
     state.registry.signal_ready();
 
-    let key = IndexerKey {
-        model_name: MODEL.to_string(),
-        routing_group: ROUTING_GROUP.to_string(),
-    };
+    let key = RoutingPartitionId::new(MODEL, ROUTING_GROUP);
     let indexer = state
         .registry
         .get_or_create_indexer(key.clone(), BLOCK_SIZE);

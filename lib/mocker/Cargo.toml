@@ -59,6 +59,7 @@ uuid = { workspace = true }
 validator = { workspace = true }
 
 # crate-specific
+ddsketchy = "0.1.7"
 ndarray = "0.16"
 slotmap = "1"
 ndarray-npy = "0.9"
