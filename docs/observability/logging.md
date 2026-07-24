@@ -29,6 +29,7 @@ enabled via the `DYN_LOGGING_SPAN_EVENTS` environment variable.
 | `DYN_SKIP_SGLANG_LOG_FORMATTING` | Disable Dynamo's SGLang log configuration | `false` | `true` |
 | `OTEL_SERVICE_NAME` | Service name for trace and span information | `dynamo` | `dynamo-frontend` |
 | `OTEL_EXPORT_ENABLED` | Enable OTLP export of both traces and logs | `false` | `true` |
+| `OTEL_EXPORT_LOGS_ENABLED` | Export logs when OTLP export is enabled; set to a falsy value to export traces only (e.g. when the collector accepts traces but not logs) | `true` | `false` |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | Default OTLP endpoint for traces and logs when signal-specific endpoints are unset | `http://localhost:4317` (`grpc`) / `http://localhost:4318` (`http/protobuf`) | `http://otel-collector:4317` |
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | Override endpoint for traces, used as-is | unset | `http://tempo:4317` |
 | `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | Override endpoint for logs, used as-is | unset | `http://loki-collector:4317` |
@@ -55,6 +56,13 @@ export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
 # Optional per-signal overrides:
 # export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://tempo:4317
 # export OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://loki-collector:4317
+```
+
+To export **traces only** — for example when the collector accepts traces but not logs — set `OTEL_EXPORT_LOGS_ENABLED=false`. Traces continue to flow and the OTLP log exporter is not created, so the process does not emit repeated log-endpoint errors:
+
+```bash
+export OTEL_EXPORT_ENABLED=true
+export OTEL_EXPORT_LOGS_ENABLED=false
 ```
 
 The local observability stack (see [Getting Started](README.md#getting-started-quickly)) includes an OpenTelemetry Collector that receives OTLP on `localhost:4317` and routes traces to Tempo and logs to Loki. In Grafana, the Loki datasource is pre-configured with a derived field that links `trace_id` labels to Tempo, so you can jump directly from a log line to its corresponding trace.
