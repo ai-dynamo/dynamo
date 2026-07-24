@@ -43,6 +43,7 @@ impl SglangRequest {
         self.max_output_tokens.saturating_sub(self.output_len())
     }
 
+    #[cfg(debug_assertions)]
     pub(super) fn extra_reserved_tokens(&self) -> usize {
         self.allocated_tokens.saturating_sub(self.kv_len())
     }
@@ -52,6 +53,7 @@ impl SglangRequest {
         self.kv_lease.indices()
     }
 
+    #[cfg(debug_assertions)]
     pub(super) fn kv_len(&self) -> usize {
         self.kv_lease.len()
     }
