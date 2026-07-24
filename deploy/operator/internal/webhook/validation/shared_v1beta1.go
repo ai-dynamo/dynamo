@@ -466,14 +466,9 @@ func runtimeVersionOverrideError(
 	image := ""
 	imagePath := fldPath.Child("podTemplate", "spec", "containers")
 	if spec.PodTemplate != nil {
-		for i := range spec.PodTemplate.Spec.Containers {
-			container := &spec.PodTemplate.Spec.Containers[i]
-			if container.Name != consts.MainContainerName {
-				continue
-			}
-			image = container.Image
-			imagePath = imagePath.Index(i).Child("image")
-			break
+		if index := containerIndexByName(spec.PodTemplate.Spec.Containers, consts.MainContainerName); index >= 0 {
+			image = spec.PodTemplate.Spec.Containers[index].Image
+			imagePath = imagePath.Index(index).Child("image")
 		}
 	}
 	if image == "" {
