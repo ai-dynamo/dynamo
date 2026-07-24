@@ -1822,6 +1822,11 @@ fn validate_request_capabilities(
                         "OpenEngine sidecar cannot dereference decoded/RDMA media; configure URL/data passthrough",
                     ));
                 }
+                MultimodalData::UuidOnly(_) => {
+                    return Err(client::invalid_arg(
+                        "OpenEngine sidecar cannot resolve UUID-only media from a backend-local cache; configure URL/data passthrough",
+                    ));
+                }
             };
             if !capabilities.source_types.contains(&(source_type as i32)) {
                 return Err(client::invalid_arg(format!(

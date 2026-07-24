@@ -360,6 +360,11 @@ fn build_media(request: &PreprocessedRequest) -> Result<Vec<pb::MediaItem>, Dyna
                     "OpenEngine sidecar cannot dereference decoded/RDMA media; configure the frontend for URL/data passthrough",
                 ));
             }
+            MultimodalData::UuidOnly(_) => {
+                return Err(client::invalid_arg(
+                    "OpenEngine sidecar cannot resolve UUID-only media from a backend-local cache; configure the frontend for URL/data passthrough",
+                ));
+            }
         };
         let modality = modality_for_key(key).expect("filtered modality");
         let uuid = if modality == pb::Modality::Image {

@@ -9,7 +9,8 @@
 //! a ZMQ listener that ingests its KV events into a per-(model, routing group)
 //! [`backend::Indexer`].
 //!
-//! `IndexerKey { model_name, routing_group }` remains this service's sole registry authority.
+//! [`RoutingPartitionId`](crate::identity::RoutingPartitionId) remains this service's sole registry
+//! authority for `(model_name, routing_group)`.
 //! Resolving it to `IndexerDomainId` is intentionally deferred until registration can carry
 //! authoritative explicit identity material; hashing local defaults here would create a second
 //! authority without enabling safe cross-service identity.

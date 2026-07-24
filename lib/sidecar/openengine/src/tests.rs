@@ -208,6 +208,16 @@ fn decoded_media_fails_closed() {
 }
 
 #[test]
+fn uuid_only_media_fails_closed() {
+    let mut request = request();
+    request.multi_modal_data = Some(HashMap::from([(
+        "image_url".to_string(),
+        vec![MultimodalData::UuidOnly("cached-image".to_string())],
+    )]));
+    assert!(convert::build_generate_request(&request, "r1", "m", false, false).is_err());
+}
+
+#[test]
 fn decode_handoff_preserves_media_and_media_options_for_mrope() {
     let mut request = request();
     request.multi_modal_data = Some(HashMap::from([(

@@ -1501,25 +1501,48 @@ impl<S> Filter<S> for LoggingFilter {
     }
 }
 
+#[derive(Debug)]
+enum TargetsFilterFallback {
+    Dynamic,
+    Other,
+}
+
 fn filters(config: LoggingConfig) -> LoggingFilter {
     let targets = match std::env::var(env_logging::DYN_LOG) {
         Ok(value) => targets_filter(&config, Some(&value)),
         Err(std::env::VarError::NotPresent) => targets_filter(&config, None),
-        Err(std::env::VarError::NotUnicode(_)) => None,
+        Err(std::env::VarError::NotUnicode(_)) => Err(TargetsFilterFallback::Other),
     };
 
-    if let Some(filter) = targets {
-        return LoggingFilter::Targets(filter);
+    match targets {
+        Ok(filter) => LoggingFilter::Targets(filter),
+        Err(TargetsFilterFallback::Dynamic) => {
+            // Logging has not been initialized yet, so write directly to stderr
+            // rather than through tracing. This must remain visible even when the
+            // configured dynamic filter excludes WARN-level events.
+            eprintln!(
+                "\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n\
+                 !!! WARNING: DYNAMIC LOG FILTERS FORCE THE EnvFilter FALLBACK !!!\n\
+                 !!! This disables Dynamo's lock-free logging fast path and can severely\n\
+                 !!! degrade request performance, especially for streaming responses.\n\
+                 !!! Remove span/field selectors ([...]) from DYN_LOG or log_filters to\n\
+                 !!! re-enable the fast target/level filter.\n\
+                 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+            );
+            LoggingFilter::Env(env_filter(&config))
+        }
+        Err(TargetsFilterFallback::Other) => LoggingFilter::Env(env_filter(&config)),
     }
-
-    LoggingFilter::Env(env_filter(&config))
 }
 
 /// Use the lock-free target/level filter when `DYN_LOG` contains no dynamic
 /// span or field directives. `EnvFilter` tracks dynamic span matches behind an
 /// `RwLock`, and its span lifecycle callbacks acquire that lock even when the
 /// configured directives are all static.
-fn targets_filter(config: &LoggingConfig, dyn_log: Option<&str>) -> Option<Targets> {
+fn targets_filter(
+    config: &LoggingConfig,
+    dyn_log: Option<&str>,
+) -> Result<Targets, TargetsFilterFallback> {
     // `EnvFilter::parse_lossy` ignores zero-length comma-separated segments,
     // but leaves all other text untouched. In particular, do not trim here:
     // whitespace may make the directive dynamic or invalid.
@@ -1545,11 +1568,11 @@ fn targets_filter(config: &LoggingConfig, dyn_log: Option<&str>) -> Option<Targe
     for (module, level) in &config.log_filters {
         let directive = format!("{module}={level}");
         match targets_compatible(&directive) {
-            Some(()) => directives.push(directive),
-            None => match directive.parse::<Directive>() {
+            Ok(()) => directives.push(directive),
+            Err(fallback) => match directive.parse::<Directive>() {
                 // Valid span or field directives require EnvFilter's dynamic
                 // matching, so do not silently drop a configured filter.
-                Ok(_) => return None,
+                Ok(_) => return Err(fallback),
                 // Preserve the pre-fast-path warn-and-ignore behavior for
                 // directives that neither parser accepts.
                 Err(e) => {
@@ -1564,15 +1587,24 @@ fn targets_filter(config: &LoggingConfig, dyn_log: Option<&str>) -> Option<Targe
     }
 
     directives.push("request_span=trace".to_string());
-    directives.join(",").parse::<Targets>().ok()
+    directives
+        .join(",")
+        .parse::<Targets>()
+        .map_err(|_| TargetsFilterFallback::Other)
 }
 
 /// An opening `[` begins EnvFilter's span or field selector grammar. Targets
 /// accepts some bracketed forms as literal targets or static field filters, but
 /// routing every bracketed directive through EnvFilter keeps the configuration
 /// language consistent. Curly braces alone remain ordinary target characters.
-fn targets_compatible(directive: &str) -> Option<()> {
-    (!directive.contains('[') && directive.parse::<Targets>().is_ok()).then_some(())
+fn targets_compatible(directive: &str) -> Result<(), TargetsFilterFallback> {
+    if directive.contains('[') {
+        Err(TargetsFilterFallback::Dynamic)
+    } else if directive.parse::<Targets>().is_ok() {
+        Ok(())
+    } else {
+        Err(TargetsFilterFallback::Other)
+    }
 }
 
 fn env_filter(config: &LoggingConfig) -> EnvFilter {
@@ -1999,35 +2031,35 @@ pub mod tests {
 
     #[test]
     fn dynamic_span_directives_fall_back_to_env_filter() {
-        assert!(
+        assert!(matches!(
             targets_filter(
                 &LoggingConfig::default(),
                 Some("dynamo_runtime[request{model=foo}]=debug"),
-            )
-            .is_none()
-        );
+            ),
+            Err(TargetsFilterFallback::Dynamic)
+        ));
     }
 
     #[test]
     fn span_selector_dyn_log_falls_back_to_env_filter() {
-        assert!(
+        assert!(matches!(
             targets_filter(
                 &LoggingConfig::default(),
                 Some("dynamo_runtime[request]=debug"),
-            )
-            .is_none()
-        );
+            ),
+            Err(TargetsFilterFallback::Dynamic)
+        ));
     }
 
     #[test]
     fn field_presence_dyn_log_falls_back_to_env_filter() {
-        assert!(
+        assert!(matches!(
             targets_filter(
                 &LoggingConfig::default(),
                 Some("dynamo_runtime[{request_id}]=debug"),
-            )
-            .is_none()
-        );
+            ),
+            Err(TargetsFilterFallback::Dynamic)
+        ));
     }
 
     #[test]
@@ -2040,7 +2072,10 @@ pub mod tests {
             )]),
         };
 
-        assert!(targets_filter(&config, None).is_none());
+        assert!(matches!(
+            targets_filter(&config, None),
+            Err(TargetsFilterFallback::Dynamic)
+        ));
     }
 
     #[test]
@@ -2053,7 +2088,10 @@ pub mod tests {
             )]),
         };
 
-        assert!(targets_filter(&config, None).is_none());
+        assert!(matches!(
+            targets_filter(&config, None),
+            Err(TargetsFilterFallback::Dynamic)
+        ));
     }
 
     #[test]
@@ -2066,7 +2104,10 @@ pub mod tests {
             )]),
         };
 
-        assert!(targets_filter(&config, None).is_none());
+        assert!(matches!(
+            targets_filter(&config, None),
+            Err(TargetsFilterFallback::Dynamic)
+        ));
     }
 
     #[test]

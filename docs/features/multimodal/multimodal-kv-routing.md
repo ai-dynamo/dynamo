@@ -7,7 +7,7 @@ subtitle: Route multimodal requests to workers with the best KV cache overlap
 
 ## Overview
 
-Multimodal KV routing extends Dynamo's KV-aware router to account for image content when computing cache overlap scores. An image hash (`mm_hash`) is computed per request — in the Rust frontend by default for vLLM backends, by vLLM's own processor when the chat-processor variant is enabled, or by a dedicated MM router worker for TRT-LLM backends — and included in per-block routing metadata. The KV router then selects the backend worker with the highest cache overlap, including overlap on image embedding blocks.
+Multimodal KV routing extends Dynamo's KV-aware router to account for image content when computing cache overlap scores. An image hash (`mm_hash`) is computed per request — in the Rust frontend by default (vLLM, SGLang, and TRT-LLM backends), or by vLLM's own processor when the chat-processor variant is enabled — and included in per-block routing metadata. The KV router then selects the backend worker with the highest cache overlap, including overlap on image embedding blocks.
 
 Repeated requests containing the same image are routed to the worker that already has the corresponding KV cache blocks, maximizing prefix cache reuse.
 
@@ -29,7 +29,7 @@ Without MM-aware routing, the standard router treats image token blocks as opaqu
 |---------|------|-----------|-------|
 | **vLLM** | Rust frontend (default) | ✅ | Uses `llm-multimodal` crate for image-token counting + placeholder expansion. Supported models tracked below. |
 | **vLLM** | Python chat-processor (`--dyn-chat-processor vllm --router-mode kv`) | ✅ | Uses vLLM's own multimodal processor — supports any VLM that vLLM supports. |
-| **TRT-LLM** | — | ✅ | Uses dedicated MM Router Worker. Requires `--publish-events-and-metrics` on TRT-LLM workers. |
+| **TRT-LLM** | Rust frontend (default) | ✅ | Uses the shared `llm-multimodal` registry for image-token counting; frontend forwards each image's `mm_hash` as `multi_modal_uuids`. Requires `--publish-events-and-metrics` and `enable_block_reuse: true` on TRT-LLM workers. Supported families in the TRT-LLM notes below. |
 | **SGLang** | Rust frontend (default) | ✅ (\*) | Uses `llm-multimodal` crate for image-token counting; engaged automatically when the worker reports `backend_framework="sglang"`. |
 
 (\*) The SGLang Rust-frontend path substitutes per-image `pad_value` tokens in the routing-side view so SGLang's RadixAttention prefix cache key (`MM_PAD_SHIFT_VALUE + mm_hash % 2^30`) matches byte-for-byte. Requires the sglang fork with the `mm_hashes` field on `GenerateReqInput` ([sgl-project/sglang#25300](https://github.com/sgl-project/sglang/pull/25300)).
@@ -91,15 +91,23 @@ Use this variant (`--dyn-chat-processor=vllm`) when you want the frontend to run
 ### TRT-LLM
 
 ```text
-Frontend (round-robin) → MM Router Worker → Backend Workers
-                              │
-                              ├─ Download image
-                              ├─ Compute mm_hash
-                              ├─ Build per-block MM metadata
-                              └─ KvRouter selects best worker
+Frontend (Rust + KV router) → TRT-LLM Workers
+        │
+        ├─ Hash image (same path as vLLM Rust)
+        ├─ Represent image identity as pad_value(mm_hash) tokens in the routing stream (block_mm_infos left empty)
+        ├─ KV router selects best worker
+        └─ Forward mm_hash to worker via extra_args["mm_hashes"] →
+              TRT-LLM's multi_modal_uuids (cache key match)
 ```
 
-For TRT-LLM, a dedicated MM Router Worker sits between the frontend and backend workers. See the [TRT-LLM MM Router README](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/mm_router_worker/README.md) for setup instructions.
+For TRT-LLM 1.3.0rc21, supported models keep an in-vocabulary image marker in the processed token IDs. The worker resolves that marker through the same model registry used by the frontend, then rewrites each image-token run in the KV-reuse events to the image's `pad_value`. The frontend hashes the same `pad_value` sequence for routing. It also forwards each image's `mm_hash` as `multi_modal_uuids`, which TRT-LLM echoes in `mm_keys[].hash` so the worker can associate each run with the correct image.
+
+#### Notes / limitations
+
+- **Routing identity is the image URL hash by default.** Two different URLs for the same image route independently; pass `--frontend-decoding` to hash the decoded image content instead.
+- **Supported model scope is the Qwen2-VL family (Qwen2-VL / Qwen2.5-VL / Qwen3-VL) and Kimi (Kimi-K2.5 / Kimi-K2.6).** Other multimodal models fall back to text-prefix routing.
+- **KV-event consolidation does not yet support multimodal events.** Use the direct event-publisher path, which is the launcher default.
+- **Requests mixing image URLs with precomputed `.safetensors` embeddings skip MM-aware routing.**
 
 ### SGLang
 
@@ -195,11 +203,11 @@ delivery channel between frontend and worker.
 ### TRT-LLM
 
 ```bash
-cd $DYNAMO_HOME/examples/backends/trtllm/mm_router_worker
-./launch.sh
+cd $DYNAMO_HOME
+bash examples/backends/trtllm/launch/agg_multimodal_router.sh
 ```
 
-See the [TRT-LLM MM Router README](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/mm_router_worker/README.md) for full setup instructions and configuration options.
+The launcher starts a single aggregated multimodal TRT-LLM worker with `--enable-multimodal --publish-events-and-metrics` and a `--router-mode kv` frontend. Key environment variables: `MODEL_PATH`, `SERVED_MODEL_NAME`, `AGG_ENGINE_ARGS`, `BLOCK_SIZE`, `DYN_HTTP_PORT`, `DYN_SYSTEM_PORT`.
 
 ### SGLang
 
@@ -267,4 +275,3 @@ The default Rust frontend path doesn't run the HF processor or pre-render `mm_kw
 - **`shm`** (default): POSIX shared memory via a `/dev/shm` segment. Intended for same-node deployments, where frontend and backend share the host filesystem. If the backend can't access the segment (e.g., running on a different node), it falls back to re-processing the image from the URL.
 - **`nixl`**: NIXL RDMA transfer. Required for cross-node deployments where `/dev/shm` is not shared between frontend and backend. Works across nodes over InfiniBand or TCP (whichever UCX selects).
 - **`DYNAMO_DISABLE_NIXL_MM=1`**: Disables pre-processed mm_kwargs transfer entirely. The backend downloads and processes images itself from the original URLs. Useful for debugging or when transfer overhead exceeds re-processing cost.
-

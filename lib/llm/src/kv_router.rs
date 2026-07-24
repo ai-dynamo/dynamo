@@ -5,7 +5,8 @@ use std::{collections::HashSet, sync::Arc, time::Instant};
 
 use anyhow::Result;
 use dynamo_kv_router::{
-    KvSchedulerError, PrefillLoadEstimator, SharedKvCache,
+    DEFAULT_ROUTING_GROUP, KvSchedulerError, PrefillLoadEstimator, RoutingPartitionRef,
+    SharedKvCache, TrackingHashAlgorithm, TrackingHashContext, TrackingHashScope,
     config::{KvRouterConfig, RouterConfigOverride, min_initial_workers_from_env},
     indexer::{KvRouterError, RoutingDecisionHashes},
     protocols::KV_EVENT_SUBJECT,
@@ -216,6 +217,8 @@ where
     client: Client,
     is_eagle: bool,
     kv_event_subscription: Option<indexer::KvEventSubscriptionHandle>,
+    tracking_hash: TrackingHashContext,
+    tracking_model_name: String,
     _served_indexer_handle: Option<ServedIndexerHandle>,
     /// Optional external shared KV cache pool. When present, `find_best_match`
     /// queries it in parallel with the indexer and factors shared hits into scoring.
@@ -224,6 +227,21 @@ where
     /// narrowed to the LoRA's allocated/loaded replicas inside `find_best_match_details`,
     /// covering both the decode and prefill routers (both built via `kv_chooser_for`).
     lora_filter: Option<Arc<crate::lora::LoraFilter>>,
+}
+
+fn resolve_tracking_model_name(
+    algorithm: TrackingHashAlgorithm,
+    model_name: Option<&str>,
+) -> Result<String> {
+    if algorithm == TrackingHashAlgorithm::KeyedXxh3V1 {
+        return model_name
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                anyhow::anyhow!("model_name is required for keyed router tracking hashes")
+            });
+    }
+    Ok(model_name.unwrap_or_default().to_owned())
 }
 
 impl<Sel> KvRouter<Sel>
@@ -248,6 +266,9 @@ where
     ) -> Result<Self> {
         let kv_router_config = kv_router_config.unwrap_or_default();
         kv_router_config.validate().map_err(anyhow::Error::msg)?;
+        let tracking_hash = TrackingHashContext::from_config(&kv_router_config)?;
+        let tracking_model_name =
+            resolve_tracking_model_name(tracking_hash.algorithm(), model_name.as_deref())?;
         let component = endpoint.component();
         // Router-owned tasks derive from this token so a rebuild cannot cancel the runtime.
         let cancellation_token = component.drt().child_token();
@@ -363,6 +384,8 @@ where
             client,
             is_eagle,
             kv_event_subscription,
+            tracking_hash,
+            tracking_model_name,
             _served_indexer_handle: served_indexer_handle,
             shared_cache,
             lora_filter,
@@ -392,6 +415,13 @@ where
 
     pub fn is_eagle(&self) -> bool {
         self.is_eagle
+    }
+
+    fn tracking_hash_scope(&self) -> TrackingHashScope<'_> {
+        TrackingHashScope {
+            partition: RoutingPartitionRef::new(&self.tracking_model_name, DEFAULT_ROUTING_GROUP),
+            block_size: self.block_size,
+        }
     }
 
     fn cache_hit_estimates_from_tiered_matches(
@@ -626,13 +656,15 @@ where
         let hash_elapsed = start.elapsed();
         // Compute seq_hashes only if scheduler needs it for active blocks tracking
         let maybe_seq_hashes = tracing::info_span!("kv_router.compute_seq_hashes").in_scope(|| {
-            self.kv_router_config.compute_seq_hashes_for_tracking(
-                tokens,
-                self.block_size,
-                router_config_override,
-                hash_options,
-                Some(&block_hashes),
-            )
+            self.kv_router_config
+                .compute_seq_hashes_for_tracking_with_context(
+                    &self.tracking_hash,
+                    self.tracking_hash_scope(),
+                    tokens,
+                    router_config_override,
+                    hash_options,
+                    Some(&block_hashes),
+                )
         });
         let seq_hash_elapsed = start.elapsed();
 
@@ -842,13 +874,16 @@ where
             is_eagle: Some(self.is_eagle),
         };
 
-        let maybe_seq_hashes = self.kv_router_config.compute_seq_hashes_for_tracking(
-            tokens,
-            self.block_size,
-            router_config_override,
-            hash_options,
-            None,
-        );
+        let maybe_seq_hashes = self
+            .kv_router_config
+            .compute_seq_hashes_for_tracking_with_context(
+                &self.tracking_hash,
+                self.tracking_hash_scope(),
+                tokens,
+                router_config_override,
+                hash_options,
+                None,
+            );
         let track_prefill_tokens = self
             .kv_router_config
             .track_prefill_tokens(router_config_override);
@@ -1042,13 +1077,16 @@ where
         };
         let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, hash_options);
 
-        let maybe_seq_hashes = self.kv_router_config.compute_seq_hashes_for_tracking(
-            tokens,
-            self.block_size,
-            router_config_override,
-            hash_options,
-            Some(&block_hashes),
-        );
+        let maybe_seq_hashes = self
+            .kv_router_config
+            .compute_seq_hashes_for_tracking_with_context(
+                &self.tracking_hash,
+                self.tracking_hash_scope(),
+                tokens,
+                router_config_override,
+                hash_options,
+                Some(&block_hashes),
+            );
         let track_prefill_tokens = self
             .kv_router_config
             .track_prefill_tokens(router_config_override);
@@ -1286,6 +1324,29 @@ mod tests {
 
     use crate::kv_router::scheduler::KvSchedulerError;
     use crate::local_model::runtime_config::ModelRuntimeConfig;
+
+    #[test]
+    fn keyed_tracking_requires_nonempty_model_name() {
+        assert!(resolve_tracking_model_name(TrackingHashAlgorithm::KeyedXxh3V1, None).is_err());
+        assert!(resolve_tracking_model_name(TrackingHashAlgorithm::KeyedXxh3V1, Some("")).is_err());
+        assert_eq!(
+            resolve_tracking_model_name(TrackingHashAlgorithm::KeyedXxh3V1, Some("model-a"))
+                .unwrap(),
+            "model-a"
+        );
+    }
+
+    #[test]
+    fn public_tracking_preserves_optional_model_name() {
+        assert_eq!(
+            resolve_tracking_model_name(TrackingHashAlgorithm::PublicXxh3V1, None).unwrap(),
+            ""
+        );
+        assert_eq!(
+            resolve_tracking_model_name(TrackingHashAlgorithm::PublicXxh3V1, Some("")).unwrap(),
+            ""
+        );
+    }
 
     #[test]
     fn weighted_cache_hit_estimates_include_lower_tiers() {
