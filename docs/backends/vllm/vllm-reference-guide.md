@@ -25,6 +25,35 @@ The `--help` output is organized into the following groups:
 - **Dynamo vLLM Options** — Disaggregation mode, tokenizer selection, sleep mode, multimodal flags, vLLM-Omni pipeline configuration, headless mode, and ModelExpress. These use `DYN_VLLM_*` env vars.
 - **vLLM Engine Options** — All native vLLM arguments (`--model`, `--tensor-parallel-size`, `--kv-transfer-config`, `--kv-events-config`, `--enable-prefix-caching`, etc.). See the [vLLM serve args documentation](https://docs.vllm.ai/en/stable/configuration/serve_args.html).
 
+### KV Event Publication for KV Routing
+
+`--router-mode kv` configures the frontend router but does not enable KV event publication in vLLM.
+For event-driven KV routing, pass `--kv-events-config` to every aggregated worker or disaggregated
+prefill worker:
+
+```bash
+python -m dynamo.vllm --model Qwen/Qwen3-0.6B \
+  --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
+```
+
+KV events are disabled by default when `--kv-events-config` is absent. Decode-only workers do not
+publish KV events, so omit the flag from those workers. For approximate routing without events,
+omit the flag from all workers and start the frontend with `--no-router-kv-events` or set
+`DYN_ROUTER_USE_KV_EVENTS=false`.
+
+### Recommended Stream Interval
+
+For vLLM workers, start with `--stream-interval 20`. vLLM otherwise defaults to an interval of `1`,
+which can emit one engine output per generated token. An interval of `20` reduces the frequency of
+host-side engine outputs and Dynamo bridge crossings. This lowers host overhead and can improve
+engine host latency under load.
+
+Dynamo propagates the worker's `--stream-interval` value to the frontend. Set
+`DYN_VLLM_STREAM_INTERVAL` on the frontend only when you need to override the worker value. The first
+streaming chunk is emitted immediately, but later updates can contain more tokens and arrive less
+frequently. Use a lower interval when finer-grained streaming updates matter more than host
+efficiency.
+
 ### Tool and Reasoning Parsers
 
 Use `--dyn-tool-call-parser` and `--dyn-reasoning-parser` to match the model's output format when the model emits tool calls and/or reasoning content. The current supported values are documented in [Tool Call Parsing (Dynamo)](../../tool-calling/README.md#supported-tool-call-parsers) and [Reasoning Parsing (Dynamo)](../../reasoning/README.md#supported-reasoning-parsers).

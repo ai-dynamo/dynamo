@@ -308,11 +308,11 @@ spec:
                         value: "false"
 ```
 
-For event-driven prefix-cache state, enable worker event publication only
-where prefill happens: the single worker in aggregated serving, or prefill
-workers in disaggregated serving. Decode workers are scored by load
-(`dyn-decode-scorer`), not prefix overlap (`dyn-prefill-scorer`), so vLLM
-decode workers omit both `--enable-prefix-caching` and `--kv-events-config`.
+For event-driven prefix-cache state with vLLM, enable worker event publication only where prefill
+happens: the single worker in aggregated serving, or prefill workers in disaggregated serving.
+Decode workers are scored by load (`dyn-decode-scorer`), not prefix overlap
+(`dyn-prefill-scorer`), so vLLM decode workers omit `--kv-events-config`. SGLang publishes from both
+prefill and decode workers in disaggregated serving, as shown in the backend matrix below.
 Component names depend on the selected backend and topology, so inspect the
 generated DGD first, especially when `autoApply: false`.
 
@@ -342,7 +342,8 @@ spec:
             extraPodSpec:
               mainContainer:
                 args:
-                  - --enable-prefix-caching
+                  - --stream-interval
+                  - "20"
                   - --kv-events-config
                   - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
 ```
@@ -352,9 +353,15 @@ Worker KV-event flags are backend-specific. For cross-backend behavior, see
 
 | Backend | Detailed docs | Worker-side event publishing |
 |---|---|---|
-| vLLM | [vLLM Reference Guide](../backends/vllm/vllm-reference-guide.md#argument-reference), [vLLM Examples](../backends/vllm/vllm-examples.md#aggregated-serving-with-kv-routing) | `--enable-prefix-caching` and `--kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'` on the aggregated worker or disaggregated prefill worker |
-| SGLang | [SGLang KV Events](../backends/sglang/sglang-reference-guide.md#kv-events), [SGLang Examples](../backends/sglang/sglang-examples.md#aggregated-serving-with-kv-routing) | `--kv-events-config` with the SGLang event endpoint |
+| vLLM | [vLLM KV Events](../backends/vllm/vllm-reference-guide.md#kv-event-publication-for-kv-routing), [vLLM Examples](../backends/vllm/vllm-examples.md#aggregated-serving-with-kv-routing) | `--kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'` on aggregated workers or disaggregated prefill workers; omit it from decode-only workers |
+| SGLang | [SGLang KV Events](../backends/sglang/sglang-reference-guide.md#kv-events), [SGLang Examples](../backends/sglang/sglang-examples.md#aggregated-serving-with-kv-routing) | `--kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'` on aggregated workers or on both prefill and decode workers in disaggregated serving |
 | TRT-LLM | [TRT-LLM DP Rank Routing](../backends/trtllm/trtllm-dp-rank-routing.md#enabling-dp-rank-routing), [TRT-LLM Observability](../backends/trtllm/trtllm-observability.md) | `--publish-events-and-metrics` |
+
+The router manifests pass `--stream-interval 20` to vLLM and SGLang workers as a host-efficiency
+starting point. This is tuning, not a KV-routing requirement. See the
+[vLLM](../backends/vllm/vllm-reference-guide.md#recommended-stream-interval) and
+[SGLang](../backends/sglang/sglang-reference-guide.md#recommended-stream-interval) reference guides
+for the latency and streaming-granularity tradeoffs.
 
 In Kubernetes deployments the Dynamo runtime normally uses Kubernetes
 discovery and the NATS event plane. Some backends, such as vLLM and SGLang,

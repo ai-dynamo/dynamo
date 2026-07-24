@@ -38,6 +38,8 @@ spec:
           args:
             - --model
             - Qwen/Qwen3-0.6B
+            - --stream-interval
+            - "20"
             - --disaggregation-mode
             - decode
     VllmPrefillWorker:
@@ -62,6 +64,8 @@ spec:
           args:
             - --model
             - Qwen/Qwen3-0.6B
+            - --stream-interval
+            - "20"
             - --disaggregation-mode
             - prefill
             - --kv-transfer-config
