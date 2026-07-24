@@ -36,6 +36,7 @@ jobs:
       benchmarks: ${{ steps.changes.outputs.benchmarks }}
       sample: ${{ steps.changes.outputs.sample }}
       efa: ${{ steps.changes.outputs.efa }}
+      ci: ${{ steps.changes.outputs.ci }}
       base_ref: ${{ steps.changes.outputs.base_ref }}
       merge_base_sha: ${{ steps.changes.outputs.merge_base_sha }}
       builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
@@ -80,6 +81,7 @@ jobs:
       - trtllm-copy-to-acr
       - vllm-efa-build
       - sglang-efa-build
+      - sglang-efa-copy-to-acr
       - trtllm-efa-build
       - planner-build
       - planner-test
