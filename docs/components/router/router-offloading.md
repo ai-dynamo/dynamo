@@ -11,11 +11,11 @@ Use this matrix to see which KV offloading tiers the Dynamo KV router can use fo
 
 Legend: ✅ tier-aware routing · 🟡 router-visible, tier-agnostic · 🚧 Dynamo integration in progress · ❌ not yet supported · — does not exist for this framework.
 
-| Framework | GPU | CPU RAM | Disk | Shared pool |
-| --- | --- | --- | --- | --- |
-| [**vLLM**](#vllm) | ✅ KV events | ✅ `OffloadingConnector` + self-describing KV events — vLLM v0.24.0+, aggregated serving | 🚧 vLLM main emits FS/OBJ events; Dynamo tier mapping is in progress | 🚧 vLLM locality events are merged; Dynamo shared-pool indexing is in progress |
-| [**SGLang**](#sglang) | ✅ KV events | ✅ HiCache + KV events — SGLang 0.5.11+ | — no separate disk tier; HiCache's third tier is the shared pool (next column) | ✅ HiCache + Mooncake + `--shared-cache-type hicache` |
-| [**TensorRT-LLM**](#tensorrt-llm) | 🟡 `--publish-kv-events`; merged GPU + RAM view | 🟡 native host cache shares one router view with GPU; per-tier weights do not apply | — no native disk tier | — |
+| Framework | Version gates | GPU | CPU RAM | Disk | Shared pool |
+| --- | --- | --- | --- | --- | --- |
+| [**vLLM**](#vllm) | vLLM v0.24.0+; Dynamo v1.3.0+ | ✅ KV events | ✅ `OffloadingConnector` + self-describing KV events (aggregated) | 🚧 vLLM main emits FS/OBJ events; Dynamo tier mapping is in progress | 🚧 vLLM locality events are merged; Dynamo shared-pool indexing is in progress |
+| [**SGLang**](#sglang) | SGLang v0.5.11+; v0.5.13+ with Mooncake; Dynamo v1.2+ | ✅ KV events | ✅ HiCache + KV events | — no separate disk tier; HiCache's third tier is the shared pool (next column) | ✅ HiCache + Mooncake + `--shared-cache-type hicache` |
+| [**TensorRT-LLM**](#tensorrt-llm) | Dynamo v1.3.0+ for the current event flag | 🟡 `--publish-kv-events`; merged GPU + RAM view | 🟡 native host cache shares one router view with GPU; per-tier weights do not apply | — no native disk tier | — |
 
 [KVBM](../kvbm/README.md), [LMCache](../../integrations/lmcache-integration.md), and [FlexKV](../../integrations/flexkv-integration.md) add CPU and disk tiers outside the frameworks' native paths; their router interaction is covered in [Other Offloading Backends](#other-offloading-backends).
 
@@ -26,7 +26,7 @@ Legend: ✅ tier-aware routing · 🟡 router-visible, tier-agnostic · 🚧 Dyn
 - **Engine-side only.** Offloading works inside each worker, but the router receives no event lifecycle that preserves offloaded-block residency. It treats offloaded prefixes as cache misses.
 
 > [!NOTE]
-> Offloading support changes quickly on both the framework and the Dynamo side. Version gates are stated in the matrix cells where they limit support, with full version requirements in the per-framework sections below. Capabilities merged upstream but not yet released are listed as main-branch support. vLLM tier-aware routing and the `--router-host-cache-hit-weight` / `--router-disk-cache-hit-weight` tuning flags require Dynamo 1.3.0 or later; SGLang HiCache tier-aware routing also works on Dynamo 1.2.x, with the lower-tier weights fixed at their defaults.
+> Offloading support changes quickly on both the framework and the Dynamo side. Version gates are summarized in the matrix and expanded in the per-framework sections below. Capabilities merged upstream but not yet released are listed as main-branch support. vLLM tier-aware routing and the `--router-host-cache-hit-weight` / `--router-disk-cache-hit-weight` tuning flags require Dynamo 1.3.0 or later; SGLang HiCache tier-aware routing also works on Dynamo 1.2.x, with the lower-tier weights fixed at their defaults.
 
 ## Common Frontend Setup
 
