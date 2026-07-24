@@ -862,7 +862,7 @@ impl Metrics {
         let image_tokens_per_request = HistogramVec::new(
             HistogramOpts::new(
                 frontend_metric_name(frontend_service::IMAGE_TOKENS_PER_REQUEST),
-                "SMG-derived image-placeholder token estimate per image-bearing request; \
+                "Image token estimate per image-bearing request; \
                  recorded from the response path only when every image resolves and \
                  processor overrides are absent",
             )
