@@ -397,11 +397,13 @@ class NativePlannerBase:
         """Emit power-budget gauges from DGD-resolved caps (read-only observe path).
 
         Per-replica watts come from the cached deployment state
-        (``power_watts_per_replica``, resolved from the DGD worker podTemplate
-        annotation during refresh), so this performs no apiserver I/O and never
-        blocks the tick loop. These gauges are advisory observability; the
-        projected power budget (over the requested caps, not the effective
-        hardware draw) is applied separately by the final budget clamp.
+        (``power_watts_per_replica``, resolved once from the DGD worker
+        podTemplate annotation during Planner startup), so this performs no
+        apiserver I/O and never blocks the tick loop. Cap changes require a
+        worker rollout plus Planner restart. These gauges are advisory
+        observability; the projected power budget (over the requested caps,
+        not the effective hardware draw) is applied separately by the final
+        budget clamp.
 
         The projection gauges are published only once every required role has
         a resolved per-replica watt value and the total budget is a positive

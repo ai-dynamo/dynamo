@@ -4,7 +4,7 @@
 """Power-budget clamp (Phase 4): pure ceiling math + engine_adapter wiring.
 
 Covers the ceiling-only clamp on projected watts (fit → no-op, proportional
-shrink, decode-no-upscale, partial proposals, scale-up-blocked hold) and the
+shrink, decode-no-upscale, partial proposals, mid-rollout scale-up hold) and the
 final-boundary ordering guarantee in ``OrchestratorEngineAdapter``: GPU budget
 first, then power budget (non-commutative; power wins over the GPU floor).
 """

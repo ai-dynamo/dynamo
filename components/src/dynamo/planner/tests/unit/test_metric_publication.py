@@ -441,9 +441,9 @@ def _power_planner(
 ):
     """A power-aware planner whose deployment state carries DGD-resolved caps.
 
-    Per-replica watts live on the cached ``DeploymentState`` (resolved from the
-    DGD worker podTemplate annotation during refresh), so the projection reads
-    them directly — no config caps, no apiserver I/O.
+    Per-replica watts live on the cached ``DeploymentState`` (resolved once
+    from the DGD worker podTemplate annotation during Planner startup), so the
+    projection reads them directly — no config caps, no apiserver I/O.
     """
     planner = _make_planner(prometheus_enabled=True)
     planner.config.enable_power_awareness = True

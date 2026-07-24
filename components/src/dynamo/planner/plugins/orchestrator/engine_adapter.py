@@ -1064,10 +1064,10 @@ class OrchestratorEngineAdapter:
     ) -> tuple[Optional[int], Optional[int]]:
         """Clamp the GPU-clamped proposal to the DGD-owned power budget.
 
-        Reads per-replica watts and the scale-up-blocked flag off the cached
-        ``WorkerCapabilities`` (no DGD I/O). No-op unless power awareness is on
-        and a total budget is configured. Power wins over the GPU floor when
-        they conflict — this runs after the GPU clamp and only lowers counts.
+        Reads startup-cached per-replica watts from ``WorkerCapabilities`` (no
+        DGD I/O). No-op unless power awareness is on and a total budget is
+        configured. Power wins over the GPU floor when they conflict — this
+        runs after the GPU clamp and only lowers counts.
 
         Fails closed during a rollout: while any power-relevant role is
         mid-rollout (its settled target unknown), every role's scale-up is held
