@@ -1850,6 +1850,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a4ae5f15dda3c708c0ade84bfee31ccab44a3da4f88015ed22f63732abe300c8"
 
 [[package]]
+name = "ddsketchy"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "724389b6953e2cef5558663e625e64220f473443132a7c64477742a0caeff621"
+
+[[package]]
 name = "defmac"
 version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2088,7 +2094,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "dynamo-backend-common"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2111,7 +2117,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-data-gen"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "dynamo-kv-hashing",
@@ -2123,7 +2129,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-kv-hashing"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "derive_builder",
  "dynamo-tokens",
@@ -2134,12 +2140,13 @@ dependencies = [
 
 [[package]]
 name = "dynamo-kv-router"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "arc-swap",
  "async-trait",
  "axum",
+ "blake3",
  "chrono",
  "crossbeam-queue",
  "dashmap",
@@ -2169,12 +2176,13 @@ dependencies = [
  "tracing-appender",
  "uuid",
  "xxhash-rust",
+ "zeroize",
  "zmq",
 ]
 
 [[package]]
 name = "dynamo-llm"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "aligned-vec",
  "anyhow",
@@ -2270,7 +2278,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-memory"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "cudarc",
@@ -2287,12 +2295,13 @@ dependencies = [
 
 [[package]]
 name = "dynamo-mocker"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "aiconfigurator-core",
  "anyhow",
  "bytes",
  "dashmap",
+ "ddsketchy",
  "derive-getters",
  "derive_builder",
  "dynamo-data-gen",
@@ -2382,7 +2391,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-py3"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "aiconfigurator-core",
  "anyhow",
@@ -2440,7 +2449,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-rl"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2454,7 +2463,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-runtime"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2522,7 +2531,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-sglang-sidecar"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2566,7 +2575,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokens"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "bs58",
  "bytemuck",
@@ -2580,7 +2589,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-truthy"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "anyhow",
 ]
@@ -4253,7 +4262,7 @@ dependencies = [
 
 [[package]]
 name = "kvbm-common"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "dynamo-tokens",
  "serde",
@@ -4261,7 +4270,7 @@ dependencies = [
 
 [[package]]
 name = "kvbm-config"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "dynamo-memory",
@@ -4277,7 +4286,7 @@ dependencies = [
 
 [[package]]
 name = "kvbm-engine"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "aws-config",
@@ -4309,14 +4318,14 @@ dependencies = [
 
 [[package]]
 name = "kvbm-kernels"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "cudarc",
 ]
 
 [[package]]
 name = "kvbm-logical"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -4341,7 +4350,7 @@ dependencies = [
 
 [[package]]
 name = "kvbm-physical"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "aligned-vec",
  "anyhow",
