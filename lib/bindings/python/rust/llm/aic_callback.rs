@@ -113,9 +113,8 @@ fn build_rust_engine(
     // iteration from `nextn`. Dynamo retains the per-position acceptance rates
     // for scheduler burst sampling above core, so validate them here but do not
     // include them in the compiled-engine identity.
-    let nextn = u32::try_from(nextn.unwrap_or(0)).map_err(|_| {
-        pyo3::exceptions::PyValueError::new_err("AIC: nextn does not fit in u32")
-    })?;
+    let nextn = u32::try_from(nextn.unwrap_or(0))
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("AIC: nextn does not fit in u32"))?;
     let aic_module = py.import("dynamo._internal.aic")?;
     if nextn > 0 {
         aic_module.call_method1("_pad_nextn_accept_rates", (nextn_accept_rates,))?;
