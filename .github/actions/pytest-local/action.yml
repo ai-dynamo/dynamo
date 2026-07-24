@@ -221,6 +221,23 @@ runs:
             COVERAGE_FLAGS="--cov=components/src/dynamo --cov=lib/bindings/python/src/dynamo --cov-report="
             export COVERAGE_FILE="${TEST_RESULTS_DIR}/.coverage"
             export PYTHONPATH="${CONTAINER_WORKSPACE}/components/src:${CONTAINER_WORKSPACE}/lib/bindings/python/src${PYTHONPATH:+:${PYTHONPATH}}"
+            # Product code (frontend, workers) runs in separate `python -m dynamo.*`
+            # processes — usually spawned by a launch shell script, so the worker is a
+            # grandchild of the test process. Install coverage's site .pth bootstrap so any
+            # python descendant self-instruments when COVERAGE_PROCESS_START is set in its
+            # env; tests/utils/managed_process.py injects COVERAGE_PROCESS_START (pointing at
+            # the subprocess rcfile) into the processes it launches. Their `.coverage.*`
+            # files land next to COVERAGE_FILE and are picked up by `coverage combine`.
+            export DYN_SUBPROCESS_COVERAGE="${CONTAINER_WORKSPACE}/.coveragerc.subprocess"
+            # Install the bootstrap module + a .pth that imports it, so every python
+            # descendant self-instruments when COVERAGE_PROCESS_START is set in its env.
+            # Prefer site-packages; fall back to the writable user-site when site-packages
+            # is read-only (CI runner uid differs from the image build uid).
+            COV_PTH_DIR="$(python -c 'import os, sysconfig, site; p = sysconfig.get_path("purelib"); print(p if os.access(p, os.W_OK) else site.getusersitepackages())')"
+            mkdir -p "${COV_PTH_DIR}"
+            cp "${CONTAINER_WORKSPACE}/tests/utils/coverage_subprocess_bootstrap.py" "${COV_PTH_DIR}/coverage_subprocess_bootstrap.py"
+            echo 'import coverage_subprocess_bootstrap' > "${COV_PTH_DIR}/dynamo_coverage_subprocess.pth"
+            echo "🧩 Subprocess coverage bootstrap: ${COV_PTH_DIR}/dynamo_coverage_subprocess.pth"
           fi
 
           PYTEST_CMD="python -m pytest ${PARALLEL_OPTS} ${VRAM_OPTS} ${DIST_OPTS} --continue-on-collection-errors -v --tb=short --basetemp=${WORK_DIR}/pytest_temp -o cache_dir=${WORK_DIR}/.pytest_cache --junitxml=${TEST_RESULTS_DIR}/${{ env.PYTEST_XML_FILE }} --alluredir=${TEST_RESULTS_DIR}/allure-results --durations=10 ${COVERAGE_FLAGS} -m \"${{ inputs.pytest_marks }}\""
