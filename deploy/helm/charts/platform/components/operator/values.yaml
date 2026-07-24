@@ -31,6 +31,9 @@ featureGates:
 # Prefer featureGates.gmsSnapshot for the temporary GMS + Snapshot gate.
 env: []
 
+# -- DEVELOPMENT AND TESTING ONLY: Termination grace period in seconds.
+terminationGracePeriodSeconds: 30
+
 # -- DEVELOPMENT AND TESTING ONLY: Namespace-restricted mode is not supported for production. Use cluster-wide mode for production deployments.
 namespaceRestriction:
   # -- DEVELOPMENT AND TESTING ONLY: Enable namespace-restricted reconciliation and admission. Not supported for production.

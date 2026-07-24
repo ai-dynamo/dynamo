@@ -144,7 +144,7 @@ spec:
       securityContext:
         runAsNonRoot: true
       serviceAccountName: {{ include "dynamo-operator.fullname" . }}-controller-manager
-      terminationGracePeriodSeconds: 30
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
       volumes:
       - name: operator-config
         configMap:
