@@ -72,12 +72,12 @@ jobs:
             --repo . \
             --strict
 
-      # Regenerate, then fail if the committed CODEOWNERS or CONTRIBUTORS.md
-      # drifted from what the sources produce. emit_codeowners.py is a PURE
-      # FUNCTION of areas.yaml + external_contributors.yaml (no tree walk),
-      # so this diff only ever fires when a policy input or a committed output
-      # actually changed -- never because unrelated files moved on the base
-      # branch.
+      # Regenerate, then fail if any committed generated artifact drifted from
+      # its sources. emit_codeowners.py is a PURE FUNCTION of areas.yaml +
+      # external_contributors.yaml (no tree walk), so this status only changes
+      # when a policy input or generated output changed -- never because
+      # unrelated files moved on the base branch. `git status` also catches a
+      # newly generated, untracked advisory-reviewers.yaml.
       - name: Regenerate and check for drift
         run: |
           python .github/codeowners/emit_codeowners.py \
@@ -85,5 +85,12 @@ jobs:
             --out CODEOWNERS \
             --external .github/codeowners/external_contributors.yaml \
             --contributors-out CONTRIBUTORS.md
-          git diff --exit-code CODEOWNERS CONTRIBUTORS.md \
-            || { echo "::error::CODEOWNERS/CONTRIBUTORS.md are out of date. Regenerate from areas.yaml + external_contributors.yaml and commit."; exit 1; }
+          GENERATED_STATUS="$(git status --porcelain -- \
+            CODEOWNERS \
+            CONTRIBUTORS.md \
+            .github/codeowners/advisory-reviewers.yaml)"
+          if [[ -n "${GENERATED_STATUS}" ]]; then
+            echo "${GENERATED_STATUS}"
+            echo "::error::Generated CODEOWNERS artifacts are out of date. Regenerate from areas.yaml + external_contributors.yaml and commit."
+            exit 1
+          fi

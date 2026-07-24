@@ -27,9 +27,10 @@ adding required approvals.
 |------|------------|
 | `areas.yaml` | The single source of truth: path globs to GitHub team, by subsystem. **Edit this.** |
 | `external_contributors.yaml` | External individuals granted area-scoped codeownership. Attaches a person to an area **label** (not a copy of its globs); drives the `@handle` co-owner lines and `CONTRIBUTORS.md`. **Edit this.** |
+| `advisory-reviewers.yaml` | Generated non-blocking reviewer routes declared by advisory policy. Commit this artifact when present. |
 | `codeowners_match.py` | Shared matcher + policy resolver. Build, emit, and who_owns share its CODEOWNERS semantics. |
 | `build_codeowners.py` | Validates the resolved policy against the tracked tree for 100% explicit coverage (CI gate). |
-| `emit_codeowners.py` | Generates root `CODEOWNERS` directly from declared policy globs, plus `CONTRIBUTORS.md`; it never reads the git tree. |
+| `emit_codeowners.py` | Generates root `CODEOWNERS`, `CONTRIBUTORS.md`, and advisory reviewer config directly from policy; it never reads the git tree. |
 | `who_owns.py` | Answers "who reviews this?" for a path or a whole PR. |
 | `test_codeowners.py` | Unit tests for matching, policy resolution, deterministic emission, precedence, and external-contributor co-ownership. |
 
@@ -123,8 +124,9 @@ generated outputs together.
 - final last-match resolution removes an owner promised by `required_owners`,
   or a blocking file-type declaration (**ownership contract gate**) - coverage
   by the wrong team no longer counts as success; or
-- the committed `CODEOWNERS` or `CONTRIBUTORS.md` differs from what the sources
-  produce (**drift check**) - so the outputs always match their sources.
+- committed `CODEOWNERS`, `CONTRIBUTORS.md`, or advisory reviewer config differs
+  from what the sources produce (**drift check**) - so generated outputs always
+  match their sources.
 
 ## Notes
 
