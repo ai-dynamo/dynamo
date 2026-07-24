@@ -6243,6 +6243,42 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 	}
 }
 
+func TestGenerateBasePodSpec_WorkerPreservesHealthCheckOverride(t *testing.T) {
+	component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		ComponentType:   commonconsts.ComponentTypeWorker,
+		DynamoNamespace: ptr.To("default-test-deployment"),
+		ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+			MainContainer: &corev1.Container{
+				Env: []corev1.EnvVar{{Name: "DYN_HEALTH_CHECK_ENABLED", Value: "false"}},
+			},
+		},
+	})
+
+	podSpec, err := GenerateBasePodSpec(
+		component,
+		BackendFrameworkSGLang,
+		&mockSecretsRetriever{},
+		"test-deployment",
+		"default",
+		RoleMain,
+		1,
+		&configv1alpha1.OperatorConfiguration{},
+		commonconsts.MultinodeDeploymentTypeGrove,
+		"test-service",
+		nil,
+		nil,
+	)
+	require.NoError(t, err)
+
+	for _, env := range podSpec.Containers[0].Env {
+		if env.Name == "DYN_HEALTH_CHECK_ENABLED" {
+			assert.Equal(t, "false", env.Value)
+			return
+		}
+	}
+	t.Fatal("expected DYN_HEALTH_CHECK_ENABLED in main container")
+}
+
 func TestGenerateBasePodSpec_GPUMemoryServiceExtraClientContainers(t *testing.T) {
 	podSpec, err := GenerateBasePodSpec(
 		betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{

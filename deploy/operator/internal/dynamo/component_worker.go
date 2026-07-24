@@ -94,7 +94,7 @@ func (w *WorkerDefaults) GetBaseContainer(context ComponentContext) (corev1.Cont
 		},
 		{
 			Name:  "DYN_HEALTH_CHECK_ENABLED",
-			Value: "false",
+			Value: "true",
 		},
 		{
 			Name:  "NIXL_TELEMETRY_ENABLE",

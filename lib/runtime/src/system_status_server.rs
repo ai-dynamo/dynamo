@@ -1181,6 +1181,101 @@ mod integration_tests {
         .await;
     }
 
+    #[tokio::test]
+    async fn test_payloadless_endpoint_is_healthy_with_canary_enabled() {
+        temp_env::async_with_vars(
+            [
+                (env_system::DYN_SYSTEM_PORT, Some("0")),
+                (
+                    env_system::DYN_SYSTEM_STARTING_HEALTH_STATUS,
+                    Some("notready"),
+                ),
+                (
+                    env_system::DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS,
+                    Some("[\"generate\"]"),
+                ),
+                ("DYN_HEALTH_CHECK_ENABLED", Some("true")),
+            ],
+            async {
+                let runtime = crate::Runtime::from_current().unwrap();
+                let drt = Arc::new(
+                    crate::DistributedRuntime::new(
+                        runtime,
+                        crate::distributed::DistributedConfig::process_local(),
+                    )
+                    .await
+                    .unwrap(),
+                );
+                let addr = drt
+                    .system_status_server_info()
+                    .expect("System status server should be started")
+                    .socket_addr;
+
+                use crate::pipeline::{
+                    AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, SingleIn, async_trait,
+                    network::Ingress,
+                };
+                use crate::protocols::annotated::Annotated;
+
+                struct PayloadlessHandler;
+
+                #[async_trait]
+                impl AsyncEngine<SingleIn<String>, ManyOut<Annotated<String>>, anyhow::Error>
+                    for PayloadlessHandler
+                {
+                    async fn generate(
+                        &self,
+                        input: SingleIn<String>,
+                    ) -> anyhow::Result<ManyOut<Annotated<String>>> {
+                        let (data, ctx) = input.into_parts();
+                        Ok(crate::pipeline::ResponseStream::new(
+                            Box::pin(crate::stream::iter(vec![Annotated::from_data(data)])),
+                            ctx.context(),
+                        ))
+                    }
+                }
+
+                let namespace = drt.namespace("test").unwrap();
+                let component = namespace.component("backend").unwrap();
+                let ingress = Ingress::for_engine(Arc::new(PayloadlessHandler)).unwrap();
+                tokio::spawn(async move {
+                    // Unified decode workers deliberately follow this path: the
+                    // endpoint is registered without a canary payload.
+                    let _ = component
+                        .endpoint("generate")
+                        .endpoint_builder()
+                        .handler(ingress)
+                        .start()
+                        .await;
+                });
+
+                let client = reqwest::Client::new();
+                for path in ["/health", "/live"] {
+                    let url = format!("http://{addr}{path}");
+                    let mut last_response = None;
+                    for _ in 0..50 {
+                        let response = client.get(&url).send().await.unwrap();
+                        let status = response.status();
+                        let body = response.text().await.unwrap();
+                        if status == 200 && body.contains("\"status\":\"ready\"") {
+                            last_response = Some((status, body));
+                            break;
+                        }
+                        last_response = Some((status, body));
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                    let (status, body) = last_response.unwrap();
+                    assert_eq!(status, 200, "{path} response: {body}");
+                    assert!(
+                        body.contains("\"status\":\"ready\""),
+                        "{path} response: {body}"
+                    );
+                }
+            },
+        )
+        .await;
+    }
+
     #[cfg(feature = "integration")]
     #[tokio::test]
     async fn test_health_check_with_payload_and_timeout() {
