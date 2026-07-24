@@ -1,20 +1,19 @@
 # lib/llm/src/kv_router
 
-This module chooses a worker, sends the request to that worker, and wraps the response stream. The scheduler decides when work may run and owns queue state; this module owns cleanup after worker selection. See the [scheduling lifecycle walkthrough](../../../kv-router/src/scheduling/CLAUDE.md#policy-class-admission-lifecycle) for the full admission flow.
+This module chooses a worker, sends the request to that worker, and wraps the response stream. The scheduler owns queue state; this module owns request cleanup after worker selection.
 
 ## Module map
 
-- `kv_router.rs` estimates how much of a request each worker already has cached, then asks the scheduler to choose a worker. It selects a worker but does not send the request.
-- `scheduler.rs` connects discovered workers and their current load to the scheduling code in `lib/kv-router`.
-- `indexer/` and `route_lookup.rs` track which KV-cache blocks each worker holds and look for reusable blocks before selection.
-- `publisher/` receives KV-cache events and worker metrics from inference engines.
-- `push_router.rs` sends a request to the selected worker and wraps its response stream. `push_router/selection.rs` chooses the worker, `push_router/request_guard.rs` tracks progress and cleanup, and `push_router/cancellation.rs` stops unfinished work when the client cancels.
-- `prefill_router/` optionally runs a request on a prefill worker before sending it to decode.
-- `encoder_router.rs` optionally runs multimodal inputs through an encoder worker before token generation.
+- `kv_router.rs` estimates cache overlap and asks the scheduler to choose a worker.
+- `scheduler.rs` connects discovered workers and their current load to `lib/kv-router`.
+- `indexer/` and `route_lookup.rs` track and query KV-cache blocks.
+- `publisher/` receives KV-cache events and worker metrics.
+- `push_router.rs` sends the request and wraps its response stream. `push_router/selection.rs` selects the worker, `push_router/request_guard.rs` tracks progress and cleanup, and `push_router/cancellation.rs` stops unfinished work when the client cancels.
+- `prefill_router/` and `encoder_router.rs` handle optional prefill and multimodal stages.
 
 ## Response-stream rules
 
-- Immediately after selection, move the token counter and `RequestLifecycleLease` cleanup handle into `RequestGuard`. The counter tracks the request's current prompt-plus-output length. Do this before sending the request to the worker so failure or cancellation still releases the worker reservation. Do not split cleanup ownership across another guard or spawned task.
-- After the worker accepts the request, call `RequestGuard::mark_dispatched`. It records dispatch on the cleanup handle before notifying the scheduler, so cleanup still reports `Dispatched` before `Completed` or `Aborted` if that notification is cancelled.
-- Mark `Stop`, `EoS`, or `Length` complete before sending the item to the caller, then stop when the caller asks for the next item. A normal stream close also completes; cancellation and error response items abort.
-- For requests with a `RequestLifecycleLease`, dropping the handle performs scheduler cleanup. Do not also call `KvRouter::free`.
+- Move the optional progress updater and `RequestLifecycleLease` into `RequestGuard` immediately after selection and before backend dispatch.
+- Publish prompt-plus-output progress at output-block boundaries. On a successful terminal item, publish authoritative completion usage before yielding the item; a normal stream close repeats that update idempotently.
+- A normal stream close finishes the request. Cancellation, transport errors, and typed error or cancellation finish reasons abort it.
+- Dropping `RequestLifecycleLease` performs generation-safe scheduler cleanup. Do not also call `KvRouter::free` for the same request.

@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_kv_router::protocols::{LocalBlockHash, SharedCacheHits};
-use dynamo_kv_router::scheduling::PolicyClassAdmissionPolicies;
 pub use dynamo_kv_router::scheduling::overlap_refresh::{
     NoopOverlapScoresRefresh, OverlapScoresRefresh, RefreshedOverlap,
 };
@@ -63,7 +62,6 @@ where
         model_name: Option<&str>,
         worker_type: &'static str,
         cancellation_token: CancellationToken,
-        admission_policies: PolicyClassAdmissionPolicies,
     ) -> Result<Self, KvSchedulerError> {
         let initial_workers: HashMap<WorkerId, ModelRuntimeConfig> =
             workers_with_configs.borrow().clone();
@@ -88,7 +86,6 @@ where
         let profile = kv_router_config
             .policy_profile(model_name)
             .map_err(|error| KvSchedulerError::InitFailed(error.to_string()))?;
-        let queue_recheck_interval = kv_router_config.router_queue_recheck_interval();
         let metric_model = model_name.unwrap_or("unknown");
         let queue_metrics = profile
             .classes()
@@ -111,13 +108,12 @@ where
             prefill_load_estimator,
             overlap_scores_refresh,
             overloaded_worker_provider,
-            queue_recheck_interval,
+            kv_router_config.router_queue_recheck_interval(),
             kv_router_config.router_track_prefill_tokens,
             cancellation_token.child_token(),
             worker_type,
             watch_worker_configs,
-            admission_policies,
-        )?);
+        ));
 
         let metrics_scheduler = Arc::clone(&inner);
         let background_metrics = queue_metrics.clone();
@@ -493,7 +489,6 @@ mod tests {
             Some("test-model"),
             "decode",
             cancellation_token.clone(),
-            Default::default(),
         )
         .await
         .unwrap();
