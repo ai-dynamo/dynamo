@@ -8,14 +8,19 @@ x-backend-base: &backend-base
   build:
     context: ..
     dockerfile: Dockerfile
-    args:
-      TORCH_CUDA_ARCH_LIST: ${TORCH_CUDA_ARCH_LIST:-10.0 10.0a}
-      MAX_JOBS: ${MAX_JOBS:-4}
   image: dynamo-fastvideo-diffusers:latest
-  restart: on-failure
+  # Bounded so a deterministic startup failure (e.g. the compute-capability
+  # gate on pre-Hopper GPUs) stops instead of crash-looping forever.
+  restart: on-failure:3
   command: python worker.py
+  cap_add:
+    # SYS_PTRACE lets PyTorch's torch.compile profiler/autotuner
+    # (max-autotune-no-cudagraphs in the FastVideo worker) ptrace-profile
+    # during compilation and inference.
+    - SYS_PTRACE
   environment:
     - DYN_DISCOVERY_BACKEND=file
+    - DYN_EVENT_PLANE=zmq
     - DYN_FILE_KV=/tmp/dynamo-discovery
     - LD_LIBRARY_PATH=
     - TORCHINDUCTOR_CACHE_DIR=/cache/torchinductor
@@ -36,16 +41,17 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
-      args:
-        TORCH_CUDA_ARCH_LIST: ${TORCH_CUDA_ARCH_LIST:-10.0 10.0a}
-        MAX_JOBS: ${MAX_JOBS:-4}
     image: dynamo-fastvideo-diffusers:latest
     restart: on-failure
     command: >
       python -m dynamo.frontend
         --http-port 8000
         --discovery-backend file
+        --request-plane tcp
+        --event-plane zmq
     environment:
+      - DYN_DISCOVERY_BACKEND=file
+      - DYN_EVENT_PLANE=zmq
       - DYN_FILE_KV=/tmp/dynamo-discovery
     volumes:
       - dynamo-discovery:/tmp/dynamo-discovery
