@@ -58,6 +58,7 @@ For basic model registration without KV routing, use `--router-mode round-robin`
 
 - **[Router Guide](router-guide.md)**: Deployment modes, quick start, and page map
 - **[Routing Concepts](router-concepts.md)**: Cost model and worker-selection behavior
+- **[Multi-DC KV Routing and the DC Relay](multi-dc-kv-routing.md)**: DC-local aggregation, pools, publication, and global CKF ingestion
 - **[Router Filtering](router-filtering.md)**: Candidate eligibility, DP-rank filtering, and busy-threshold overload handling
 - **[Frontend Configuration Reference](../frontend/configuration.md#router)**: Canonical embedded-router flags and environment variables
 - **[Configuration and Tuning](router-configuration.md)**: Router behavior, transport modes, and tuning guidance

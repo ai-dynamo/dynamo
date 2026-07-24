@@ -24,7 +24,10 @@ from dynamo.trtllm.args import Config, parse_args
 from dynamo.trtllm.constants import DisaggregationMode, Modality
 from dynamo.trtllm.tests.conftest import make_cli_args_fixture
 from dynamo.trtllm.utils.trtllm_utils import deep_update, warn_override_collisions
-from dynamo.trtllm.workers.llm_worker import init_llm_worker
+from dynamo.trtllm.workers.llm_worker import (
+    _populate_kv_cache_capacity,
+    init_llm_worker,
+)
 
 # Get path relative to this test file
 REPO_ROOT = Path(__file__).resolve().parents[5]
@@ -46,6 +49,46 @@ pytestmark = [
 # Create TRTLLM-specific CLI args fixture
 # This will use monkeypatch to write to argv
 mock_trtllm_cli = make_cli_args_fixture("dynamo.trtllm")
+
+
+def test_populate_kv_cache_capacity_publishes_engine_values():
+    runtime_config = mock.Mock()
+    engine = mock.Mock()
+    engine.get_kv_cache_capacity.return_value = {
+        "maxNumBlocks": 123,
+        "tokensPerBlock": 64,
+        "maxNumTokens": 7872,
+    }
+
+    block_size = _populate_kv_cache_capacity(runtime_config, engine, 32)
+
+    assert runtime_config.total_kv_blocks == 123
+    assert block_size == 64
+
+
+def test_populate_kv_cache_capacity_falls_back_when_unavailable(caplog):
+    runtime_config = mock.Mock()
+    engine = mock.Mock()
+    engine.get_kv_cache_capacity.return_value = {}
+
+    with caplog.at_level("WARNING"):
+        block_size = _populate_kv_cache_capacity(runtime_config, engine, 32)
+
+    assert block_size == 32
+    assert "Planner KV-rate scaling will remain unavailable" in caplog.text
+
+
+def test_populate_kv_cache_capacity_rejects_invalid_values():
+    runtime_config = mock.Mock()
+    engine = mock.Mock()
+    engine.get_kv_cache_capacity.return_value = {
+        "maxNumBlocks": 0,
+        "tokensPerBlock": 64,
+        "maxNumTokens": 0,
+    }
+
+    with pytest.raises(ValueError, match="Invalid TRT-LLM KV-cache capacity"):
+        _populate_kv_cache_capacity(runtime_config, engine, 32)
 
 
 def test_custom_jinja_template_invalid_path(mock_trtllm_cli):

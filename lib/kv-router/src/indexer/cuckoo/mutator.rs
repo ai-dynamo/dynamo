@@ -27,15 +27,15 @@ impl CuckooInsertionScratch {
     pub(super) fn new(max_kicks: usize) -> Result<Self, KvCacheEventError> {
         let capacity = max_kicks
             .checked_add(1)
-            .ok_or(KvCacheEventError::CapacityExhausted)?;
+            .ok_or(KvCacheEventError::AllocationFailed)?;
         let mut touched = Vec::new();
         let mut dirty_buckets = Vec::new();
         touched
             .try_reserve_exact(capacity)
-            .map_err(|_| KvCacheEventError::CapacityExhausted)?;
+            .map_err(|_| KvCacheEventError::AllocationFailed)?;
         dirty_buckets
             .try_reserve_exact(capacity)
-            .map_err(|_| KvCacheEventError::CapacityExhausted)?;
+            .map_err(|_| KvCacheEventError::AllocationFailed)?;
         Ok(Self {
             touched,
             dirty_buckets,
@@ -69,7 +69,7 @@ impl DcWriterState {
         let mut resident = FxHashSet::default();
         resident
             .try_reserve(expected_blocks)
-            .map_err(|_| KvCacheEventError::CapacityExhausted)?;
+            .map_err(|_| KvCacheEventError::AllocationFailed)?;
         Ok(Self {
             resident,
             rng,
@@ -106,16 +106,20 @@ impl<'a, S: CuckooBucketStore> CuckooMutator<'a, S> {
         Ok(())
     }
 
-    pub(super) fn insert_touched(
+    /// Insert one logical hash and report every physical bucket's value before
+    /// the successful mutation. A bucket written more than once is reported in
+    /// write order, allowing publication-window tracking to retain its first
+    /// pre-mutation image without observing rolled-back insertions.
+    pub(super) fn insert_with_originals(
         &self,
         hash: ExternalSequenceBlockHash,
         rng: &mut u64,
         scratch: &mut CuckooInsertionScratch,
-        mut on_touched: impl FnMut(usize),
+        mut on_touched: impl FnMut(usize, PackedBucket),
     ) -> Result<(), KvCacheEventError> {
         self.insert_inner(hash, rng, scratch)?;
-        for &bucket in &scratch.dirty_buckets {
-            on_touched(bucket);
+        for &(bucket, before) in &scratch.touched {
+            on_touched(bucket, before);
         }
         scratch.clear();
         Ok(())
@@ -157,6 +161,8 @@ impl<'a, S: CuckooBucketStore> CuckooMutator<'a, S> {
             }
         }
 
+        // NOTE: Exhausting this bounded kick search does not prove the table is full. Roll back
+        // every speculative write so the caller can treat it as a pre-commit capacity omission.
         self.rollback(scratch);
         Err(KvCacheEventError::CapacityExhausted)
     }
@@ -185,10 +191,10 @@ impl<'a, S: CuckooBucketStore> CuckooMutator<'a, S> {
         Err(KvCacheEventError::IndexerInvariantViolation)
     }
 
-    pub(super) fn remove_touched(
+    pub(super) fn remove_with_original(
         &self,
         hash: ExternalSequenceBlockHash,
-        mut on_touched: impl FnMut(usize),
+        mut on_touched: impl FnMut(usize, PackedBucket),
     ) -> Result<(), KvCacheEventError> {
         let probe = self.addressing.prepare(hash.0);
         for bucket in [probe.bucket_a, probe.bucket_b] {
@@ -197,7 +203,7 @@ impl<'a, S: CuckooBucketStore> CuckooMutator<'a, S> {
                 continue;
             };
             self.store.store_bucket(bucket, before.with_slot(slot, 0));
-            on_touched(bucket);
+            on_touched(bucket, before);
             return Ok(());
         }
 

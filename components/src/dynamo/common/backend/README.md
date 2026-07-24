@@ -65,22 +65,6 @@ This starts a backend that generates rotating token IDs. Point a frontend at
 `dynamo.sample.generate` to test the full request flow without any ML
 dependencies.
 
-### Running a real engine
-
-```bash
-# vLLM
-python -m dynamo.vllm.unified_main --model Qwen/Qwen3-0.6B ...
-
-# SGLang
-python -m dynamo.sglang.unified_main --model-path Qwen/Qwen3-0.6B ...
-
-# TensorRT-LLM
-python -m dynamo.trtllm.unified_main --model Qwen/Qwen3-0.6B ...
-```
-
-Each `unified_main.py` calls `run(MyLLMEngine)` from the common
-`run.py` module.
-
 ## Implementing a New Engine
 
 Subclass `LLMEngine` and implement the required methods:
@@ -137,9 +121,9 @@ class MyEngine(LLMEngine):
 Then create an entry point:
 
 ```python
-# my_backend/unified_main.py
+# my_backend/my_backend_main.py
 from dynamo.common.backend.run import run
-from my_backend.llm_engine import MyEngine
+from my_backend.my_backend_engine import MyEngine
 
 def main():
     run(MyEngine)
@@ -285,19 +269,6 @@ examples/backends/sample/launch/disagg.sh
 Spawns the frontend plus a sample prefill worker and a sample decode
 worker; the frontend's `PrefillRouter` forwards the synthetic
 `disaggregated_params` from prefill to decode.
-
-### Switching production backends to the unified path
-
-Each backend's `disagg.sh` accepts `--unified` to swap in the unified
-entry point. With it, the launch script exercises the same disagg flow
-through `dynamo.<backend>.unified_main` instead of the legacy
-`dynamo.<backend>` dispatch:
-
-```bash
-examples/backends/vllm/launch/disagg.sh --unified
-examples/backends/sglang/launch/disagg.sh --unified
-examples/backends/trtllm/launch/disagg.sh --unified
-```
 
 ### Helpers
 
@@ -480,15 +451,6 @@ common/backend/
     tests/               # test_backend_bindings, test_disagg_helpers,
                          #   test_logprobs, test_sample_engine
     CLAUDE.md            # Design notes (rationale, invariants)
-
-vllm/llm_engine.py       # VllmLLMEngine (agg + disagg)
-vllm/unified_main.py     # Entry point -> run(VllmLLMEngine)
-
-sglang/llm_engine.py     # SglangLLMEngine (agg + disagg, bootstrap handshake)
-sglang/unified_main.py   # Entry point -> run(SglangLLMEngine)
-
-trtllm/llm_engine.py     # TrtllmLLMEngine (agg + disagg)
-trtllm/unified_main.py   # Entry point -> run(TrtllmLLMEngine)
 ```
 
 ## Feature Gaps
@@ -544,17 +506,17 @@ Lifecycle and runtime:
   control runs directly without pausing generation or draining requests;
   if blocks are still in use, retry after the active requests finish.
 - **Elastic EP scaling (vLLM)** — `scale_elastic_ep` control at parity
-  with the legacy handler: `new_data_parallel_size` validation, a
+  with `new_data_parallel_size` validation, a
   single-flight lock (concurrent scales rejected, not queued), and the
   `ray.util.state.list_nodes` → GCS shim for ray `--minimal`. Served at
   `/engine/control/scale_elastic_ep` on the system port (the unified
   Worker namespaces controls under `/engine/control/<name>`, matching the
-  legacy backend). Requires the Ray DP backend
+  existing backend behavior). Requires the Ray DP backend
   (`--data-parallel-backend ray`, `nnodes == 1`) **and `ray` installed**
-  (the vLLM runtime image does not ship it). The single head-node backend
-  drives `add_dp_placement_groups` to place DP-worker Ray actors across
-  the Ray cluster, so multi-node is a Ray-cluster-membership concern
-  (operator-managed `ray start`), not a per-node backend concern.
+  (`pip install "ray>=2.55.0"`; the vLLM runtime image does not ship it).
+  The single head-node backend drives `add_dp_placement_groups` to place DP-worker
+  Ray actors across the Ray cluster, so multi-node is a Ray-cluster-membership
+  concern (operator-managed `ray start`), not a per-node backend concern.
   Locally GPU-validated on H200 GPUs with vLLM 0.24.0: scale-**up** (2→4)
   and scale-**down** (4→2) return `status:ok`, and serving continues after
   each transition. The integration test remains skipped in CI because each
@@ -563,7 +525,7 @@ Lifecycle and runtime:
   least 80 GiB per GPU for weights and runtime headroom.
 - **Headless multi-node (vLLM)** — `--headless` secondary nodes run
   vLLM workers only (multi-node TP/PP with `--data-parallel-backend mp`),
-  bypassing DistributedRuntime; `unified_main` routes them to
+  bypassing DistributedRuntime; `dynamo.vllm.main` routes them to
   `run_dynamo_headless` before the Worker/engine path. Distinct from
   elastic EP, which uses the Ray backend above.
 - **Disaggregated serving** (`agg`/`prefill`/`decode`) — KV transfer

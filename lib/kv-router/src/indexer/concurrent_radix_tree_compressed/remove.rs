@@ -253,12 +253,4 @@ impl ConcurrentRadixTreeCompressed {
             queue.extend(children);
         }
     }
-
-    pub(super) fn clear_all_blocks(
-        &self,
-        lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
-        worker_id: WorkerId,
-    ) {
-        self.erase_worker_coverage(lookup, WorkerRemovalTarget::WorkerId(worker_id), true);
-    }
 }

@@ -193,6 +193,9 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<AsyncResponseStream>()?;
     m.add_class::<PyAsyncRequestStream>()?;
     m.add_class::<llm::entrypoint::EntrypointArgs>()?;
+    m.add_class::<llm::frontend_routes::PyFrontendRoute>()?;
+    m.add_class::<llm::frontend_routes::PyFrontendResponse>()?;
+    m.add_class::<llm::frontend_routes::PyFrontendExtensionContext>()?;
     m.add_class::<llm::entrypoint::EngineConfig>()?;
     m.add_class::<llm::entrypoint::EngineType>()?;
     m.add_class::<llm::entrypoint::AicPerfConfig>()?;
@@ -240,6 +243,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ModelInput>()?;
     m.add_class::<WorkerType>()?;
     m.add_class::<llm::kv::KvRouter>()?;
+    m.add_class::<llm::kv_dc_relay::KvDcRelay>()?;
     m.add_class::<llm::routed_engine::RoutedEngine>()?;
     m.add_class::<RouterMode>()?;
     m.add_class::<kserve_grpc::KserveGrpcService>()?;

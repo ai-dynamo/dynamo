@@ -37,6 +37,47 @@ const RECIPE_CSS = `
     --pst-color-surface: #1a1a1a !important;
 }
 
+/* Layout: recipe/benchmark pages intentionally inherit Fern's default
+   --page-width (1376px) and --content-width (812px) -- NO width override
+   here -- so the content column matches the Documentation tab. Do NOT raise
+   --page-width (shifts the sidebar out of alignment) or --content-width
+   (fills edge-to-edge, removing the right gap).
+
+   One alignment fix IS needed. The browse pages set hide-toc: true, which
+   removes the right-hand table-of-contents <aside>. The content article
+   (.fern-layout-guide > article) is width-capped to --content-width and
+   centered by Tailwind's mx-auto (margin-inline:auto) -- NOT the guide itself,
+   which is full-width with no max-width. With the TOC gone, the guide stretches
+   to fill the freed width, so mx-auto centers the article: the space splits
+   into two equal gaps, pushing content ~180px right of the sidebar.
+   Documentation-tab pages don't show this because their TOC holds that space.
+
+   Left-align the article on TOC-less pages so it sits right after the sidebar
+   and the entire freed width becomes the (intended) right gap -- matching the
+   Docs tab. Scoped via :has() to a fern-main with NO <aside> after the content
+   wrapper (i.e. hide-toc pages only: the sidebar <aside> is before it, the TOC
+   <aside> -- when present -- is after it), so individual recipe pages that keep
+   their TOC are untouched. Overriding the guide's margin does nothing (the
+   guide isn't the centered box) -- the override must hit the article's
+   mx-auto. Verified with a headless render; server-rendered, so no flash. */
+main.fern-main:not(:has(> .fern-layout-content-wrapper ~ aside)) .fern-layout-guide > article {
+    margin-left: 0 !important;
+    margin-right: auto !important;
+}
+
+/* Product switcher: hide the FontAwesome "code" glyph (</>) placeholder.
+   This rule also lives in SiteStyles, but SiteStyles is injected from the
+   footer and is NOT in the server-rendered HTML (it only applies once the
+   footer hydrates client-side). On this long page that leaves the header
+   product switcher showing the </> placeholder above the fold. RecipeStyles
+   IS server-rendered, so re-declaring the rule here hides the placeholder
+   immediately on recipe/benchmark pages. Scoped to the code glyph via :has()
+   so the version selector keeps its own (Lucide "tag") icon. Same
+   compensate-for-client-only-SiteStyles pattern as the .dark re-bind above. */
+.fern-selection-item-icon:has(svg[icon="code"]) {
+    display: none !important;
+}
+
 /* Recipe catalog */
 .dynamo-recipe-selector {
     margin: 24px 0;
@@ -430,16 +471,24 @@ const RECIPE_CSS = `
     padding: 10px;
     border: 1px solid var(--border, var(--grayscale-a5));
     border-radius: 8px;
-    background: var(--nv-color-bg-default);
+    /* Literal fallbacks: the --nv-* palette lives in SiteStyles, which is
+       injected from the footer and therefore not applied until the footer
+       renders. Above the fold on this (long) page the card would otherwise
+       resolve to a transparent background, letting the empty-state message
+       painted behind the grid (.dynamo-model-grid::before) bleed through the
+       card text. The fallback keeps the tile opaque regardless of SiteStyles
+       load order. */
+    background: var(--nv-color-bg-default, #ffffff);
     color: var(--pst-color-text-base);
     text-decoration: none;
 }
 
 /* --nv-color-bg-default does not flip in the dark theme (stays #FFFFFF), so
    in dark mode the card would be a white tile with light text. Flip the
-   surface to match the other dark-aware components (chip, search box, etc.). */
+   surface to match the other dark-aware components (chip, search box, etc.).
+   Same fallback rationale as above (SiteStyles may not be loaded yet). */
 .dark .dynamo-model-card {
-    background: var(--nv-dark-grey-2);
+    background: var(--nv-dark-grey-2, #1a1a1a);
 }
 
 .dynamo-model-card:hover {
@@ -2198,7 +2247,10 @@ body:has(input[name="recipe-sku"][value="blackwell"]:checked):has(input[name="re
     position: absolute;
     top: 0;
     left: 0;
-    max-width: 230px;
+    /* Kept under the minimum grid-column width (minmax floor is 184px) so the
+       message stays fully behind the first card and never spills into the gap
+       beside it; the opaque card then covers it whenever any card is visible. */
+    max-width: 180px;
     padding: 12px 2px;
     font-size: 13.5px;
     line-height: 1.45;

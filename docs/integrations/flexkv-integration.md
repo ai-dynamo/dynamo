@@ -121,7 +121,7 @@ FLEXKV_CPU_CACHE_GB=32 \
 CUDA_VISIBLE_DEVICES=1 \
   python -m dynamo.vllm \
   --model Qwen/Qwen3-0.6B \
-  --is-prefill-worker \
+  --disaggregation-mode prefill \
   --kv-transfer-config '{"kv_connector":"PdConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"FlexKVConnectorV1","kv_role":"kv_both"},{"kv_connector":"NixlConnector","kv_role":"kv_both"}]},"kv_connector_module_path":"kvbm.vllm_integration.connector"}' \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}'
 ```

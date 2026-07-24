@@ -128,7 +128,7 @@ graph TD
 
 ## Additional Notes
 
-Request-plane transport is independent of KV event transport. The request plane (`DYN_REQUEST_PLANE` or `--request-plane`) controls how requests reach workers. KV events use NATS Core when `--event-plane nats` is set, or ZMQ when `--event-plane zmq` is set. With `--event-plane zmq` and `--discovery-backend file` or `mem`, the router can run without etcd or NATS. When using a NATS-based event plane, NATS is initialized automatically; set `NATS_SERVER=nats://...` to override the default `localhost:4222`.
+Request-plane transport is independent of KV event transport. The request plane (`DYN_REQUEST_PLANE` or `--request-plane`) controls how requests reach workers. ZMQ is the default event plane for every discovery backend, including etcd. Set `--event-plane nats` or `DYN_EVENT_PLANE=nats` to opt into NATS Core. With the default ZMQ event plane, the router does not require NATS; the selected discovery backend still determines whether etcd is required. When using the NATS event plane, NATS is initialized automatically; set `NATS_SERVER=nats://...` to override the default `localhost:4222`.
 
 When `--router-kv-overlap-score-credit` is set to 0, no KV indexer is created and prefix matching is disabled. When `--no-router-kv-events` is set, a KV indexer is still created but no event subscriber is launched; the router predicts cache state from its own routing decisions with TTL-based expiration.
 

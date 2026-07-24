@@ -243,6 +243,17 @@ def _resolve_compliance_inputs(framework, target, device_key, context):
             "python,rust,native",
             "--ecosystem rust --ecosystem native",
         )
+    if target == "frontend":
+        # frontend is framework-agnostic (its ubuntu base is shared across
+        # frameworks), so it carries its own baseline stem under `dynamo`.
+        # It additionally attributes EPP's Go modules (`go`): compliance.Dockerfile
+        # feeds the EPP-emitted CycloneDX SBOM in via --go-sbom for this target.
+        return (
+            "pre_frontend",
+            context.get("dynamo", {}).get("frontend_baseline_sbom", ""),
+            "python,rust,dpkg,go,native",
+            "--ecosystem dpkg --ecosystem rust --ecosystem native --ecosystem go",
+        )
     # runtime / dev / local-dev / wheel_builder / base / framework
     return (
         "pre_runtime",

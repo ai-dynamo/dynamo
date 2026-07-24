@@ -21,6 +21,7 @@ from tests.router.helper import (
     assert_event_dumps_equal,
     get_runtime,
     managed_runtime,
+    parse_sse_json_chunks,
     poll_for_worker_instances,
     send_inflight_requests,
     send_request_via_python_kv_router,
@@ -514,13 +515,8 @@ def _test_session_affinity(
                     assert response.status == 200, body
 
                 worker_info = None
-                for line in body.splitlines():
-                    if not line.startswith("data:"):
-                        continue
-                    data = line[5:].strip()
-                    if data == "[DONE]":
-                        continue
-                    candidate = json.loads(data).get("nvext", {}).get("worker_id")
+                for chunk in parse_sse_json_chunks(body):
+                    candidate = chunk.get("nvext", {}).get("worker_id")
                     if candidate:
                         worker_info = candidate
 
@@ -1069,40 +1065,19 @@ def _test_router_query_instance_id(
                         f"Full SSE response ({len(full_response)} bytes):\n{full_response}"
                     )
 
-                    # Parse the SSE response to extract the first chunk with nvext data
-                    # New format: nvext contains worker_id and token_ids
-                    sse_parts = full_response.split("\n\n")
                     worker_id_info = None
                     token_list = None
 
-                    for part in sse_parts:
-                        part = part.strip()
-                        if not part or not part.startswith("data:"):
-                            continue
+                    for chunk in parse_sse_json_chunks(full_response):
+                        logger.info(f"Parsed chunk: {json.dumps(chunk, indent=2)}")
 
-                        data_str = part.split("data:", 1)[1].strip()
-                        if data_str == "[DONE]":
-                            continue
-
-                        try:
-                            chunk = json.loads(data_str)
-                            logger.info(f"Parsed chunk: {json.dumps(chunk, indent=2)}")
-
-                            # Extract nvext data containing worker_id and token_ids
-                            nvext = chunk.get("nvext", {})
-                            if nvext:
-                                if "worker_id" in nvext:
-                                    worker_id_info = nvext["worker_id"]
-                                    logger.info(
-                                        f"Found worker_id info: {worker_id_info}"
-                                    )
-                                if "token_ids" in nvext:
-                                    token_list = nvext["token_ids"]
-                                    logger.info(
-                                        f"Found token_ids: {len(token_list)} tokens"
-                                    )
-                        except json.JSONDecodeError:
-                            continue
+                        nvext = chunk.get("nvext", {})
+                        if "worker_id" in nvext:
+                            worker_id_info = nvext["worker_id"]
+                            logger.info(f"Found worker_id info: {worker_id_info}")
+                        if "token_ids" in nvext:
+                            token_list = nvext["token_ids"]
+                            logger.info(f"Found token_ids: {len(token_list)} tokens")
 
                     # Validate worker_id info
                     assert (
@@ -2249,39 +2224,16 @@ def _test_router_decisions_disagg(
                         decode_wid = None
                         timing_info = None
 
-                        async for line in response.content:
-                            if not line:
-                                continue
-
-                            line_str = line.decode("utf-8", errors="replace").strip()
-                            if not line_str.startswith("data:"):
-                                continue
-
-                            data_str = line_str[5:].strip()
-                            if data_str == "[DONE]":
-                                break
-
-                            try:
-                                data = json.loads(data_str)
-                                # Check for nvext in the response
-                                nvext = data.get("nvext", {})
-                                if nvext:
-                                    worker_id_info = nvext.get("worker_id", {})
-                                    if worker_id_info:
-                                        if "prefill_worker_id" in worker_id_info:
-                                            prefill_wid = worker_id_info[
-                                                "prefill_worker_id"
-                                            ]
-                                        if "decode_worker_id" in worker_id_info:
-                                            decode_wid = worker_id_info[
-                                                "decode_worker_id"
-                                            ]
-                                    # Timing info appears in final chunk
-                                    if "timing" in nvext:
-                                        timing_info = nvext["timing"]
-
-                            except json.JSONDecodeError:
-                                continue
+                        body = await response.text()
+                        for data in parse_sse_json_chunks(body):
+                            nvext = data.get("nvext", {})
+                            worker_id_info = nvext.get("worker_id", {})
+                            if "prefill_worker_id" in worker_id_info:
+                                prefill_wid = worker_id_info["prefill_worker_id"]
+                            if "decode_worker_id" in worker_id_info:
+                                decode_wid = worker_id_info["decode_worker_id"]
+                            if "timing" in nvext:
+                                timing_info = nvext["timing"]
 
                         logger.info(
                             f"Request {i + 1}: prefill_worker_id={prefill_wid}, "
