@@ -18,7 +18,7 @@ fn vendored_proto_source_matches_the_pinned_contract() {
 
 #[test]
 fn generate_request_keeps_its_released_wire_tags() {
-    let request = dynamo_sglang_grpc::GenerateRequest {
+    let request = dynamo_sglang_sidecar::proto::GenerateRequest {
         input_ids: vec![1, 2],
         rid: Some("rid".to_string()),
         ..Default::default()

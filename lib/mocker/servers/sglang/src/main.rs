@@ -9,8 +9,8 @@ use clap::Parser;
 #[cfg(test)]
 use dynamo_mocker::common::protocols::EngineType;
 use dynamo_mocker::common::protocols::MockEngineArgs;
-use dynamo_sglang_grpc::sglang_service_server::SglangServiceServer;
 use dynamo_sglang_mocker::{MockerServerConfig, ServerMode, SglangMockerService};
+use dynamo_sglang_sidecar::proto::sglang_service_server::SglangServiceServer;
 use serde_json::{Map, Value};
 
 #[derive(Parser, Debug)]

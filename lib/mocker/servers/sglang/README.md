@@ -11,9 +11,9 @@ on CPU using the Dynamo Mocker scheduler, so sidecar discovery, streaming,
 cancellation, capacity, and disaggregated handoff behavior can be tested
 without SGLang, a model, or a GPU.
 
-The mock server and sidecar share generated types from `dynamo-sglang-grpc`.
-Only tokenized `Generate`, `Abort`, health, and discovery RPCs are implemented;
-unrelated SGLang RPCs return `Unimplemented`.
+The mock server temporarily imports the generated contract from
+`dynamo_sglang_sidecar::proto`. Only tokenized `Generate`, `Abort`, health, and
+discovery RPCs are implemented; unrelated SGLang RPCs return `Unimplemented`.
 
 ## Aggregated serving
 

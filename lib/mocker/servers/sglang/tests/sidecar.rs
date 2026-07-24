@@ -8,9 +8,10 @@ use dynamo_backend_common::{
     PreprocessedRequest, SamplingOptions, StopConditions,
 };
 use dynamo_mocker::common::protocols::{EngineType, MockEngineArgs};
-use dynamo_sglang_grpc::sglang_service_server::SglangServiceServer;
 use dynamo_sglang_mocker::{MockerServerConfig, ServerMode, SglangMockerService};
-use dynamo_sglang_sidecar::SglangSidecarEngine;
+use dynamo_sglang_sidecar::{
+    SglangSidecarEngine, proto::sglang_service_server::SglangServiceServer,
+};
 use futures::StreamExt;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;

@@ -16,7 +16,7 @@ use dynamo_mocker::live::{
     LiveEngine, LiveRequest, deterministic_output_tokens, stable_request_uuid,
 };
 use dynamo_mocker::scheduler::MockerMetrics;
-use dynamo_sglang_grpc as pb;
+use dynamo_sglang_sidecar::proto as pb;
 use futures::Stream;
 use serde_json::{Value, json};
 use tonic::{Request, Response, Status};
@@ -695,7 +695,7 @@ fn insert_json(meta: &mut HashMap<String, String>, key: &str, value: Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynamo_sglang_grpc::sglang_service_server::SglangService;
+    use dynamo_sglang_sidecar::proto::sglang_service_server::SglangService;
 
     fn engine_args() -> MockEngineArgs {
         MockEngineArgs::builder()

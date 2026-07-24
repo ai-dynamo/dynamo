@@ -26,9 +26,8 @@ members = [
     "lib/sidecar/common",
     "lib/sidecar/vllm",
     "lib/mocker/servers/vllm",
-    "lib/sidecar/sglang-grpc",
     "lib/sidecar/sglang",
-    "lib/sidecar/sglang-mocker",
+    "lib/mocker/servers/sglang",
     "lib/sidecar/trtllm",
     "lib/bindings/c",
     "lib/bindings/python/codegen",
@@ -69,7 +68,6 @@ dynamo-parsers = { version = "7.0.1" }
 dynamo-parsers-v2 = { version = "0.1.23" }
 dynamo-backend-common = { path = "lib/backend-common", version = "1.4.0" }
 dynamo-sidecar-common = { path = "lib/sidecar/common", version = "1.4.0" }
-dynamo-sglang-grpc = { path = "lib/sidecar/sglang-grpc", version = "1.4.0" }
 fastokens = { version = "0.2.0" }
 
 

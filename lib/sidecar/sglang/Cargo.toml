@@ -11,6 +11,10 @@ homepage.workspace = true
 repository.workspace = true
 description = "Dynamo SGLang sidecar for an out-of-process engine exposed through its native gRPC service."
 
+[package.metadata.cargo-machete]
+# Referenced by protobuf code generated into OUT_DIR.
+ignored = ["prost"]
+
 [[bin]]
 name = "dynamo-sglang-sidecar"
 path = "src/main.rs"
@@ -18,7 +22,6 @@ path = "src/main.rs"
 [dependencies]
 dynamo-backend-common = { workspace = true }
 dynamo-runtime = { workspace = true }
-dynamo-sglang-grpc = { workspace = true }
 
 anyhow = { workspace = true }
 async-stream = { workspace = true }
@@ -32,7 +35,12 @@ tokio-util = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
 
+prost = { workspace = true }
 tonic = { workspace = true }
+
+[build-dependencies]
+tonic-build = { workspace = true }
 
 [dev-dependencies]
 dynamo-backend-common = { workspace = true, features = ["testing"] }
+sha2 = "0.10"

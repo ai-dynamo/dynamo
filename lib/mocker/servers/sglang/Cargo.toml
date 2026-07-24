@@ -18,7 +18,7 @@ path = "src/main.rs"
 
 [dependencies]
 dynamo-mocker = { workspace = true }
-dynamo-sglang-grpc = { workspace = true }
+dynamo-sglang-sidecar = { path = "../../../sidecar/sglang" }
 
 anyhow = { workspace = true }
 async-stream = { workspace = true }
@@ -33,5 +33,4 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 dynamo-backend-common = { workspace = true, features = ["testing"] }
-dynamo-sglang-sidecar = { path = "../sglang" }
 tokio-stream = { workspace = true, features = ["net"] }
