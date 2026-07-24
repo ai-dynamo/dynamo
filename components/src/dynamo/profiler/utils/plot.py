@@ -23,7 +23,7 @@ from matplotlib import cm
 from scipy.interpolate import griddata
 
 from dynamo.profiler.utils.defaults import DEFAULT_GPU_COST_PER_HOUR
-from dynamo.profiler.utils.pareto import compute_pareto
+from dynamo.profiler.utils.pareto import ParetoDirection, compute_pareto
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -321,17 +321,28 @@ def plot_pd_joint_results(
         decode_data: DecodeProfileData instance containing profiling results
         output_dir: directory to save the plot
     """
-    # compute pareto front for prefill
-    p_ttft, p_thpt, _ = compute_pareto(prefill_data.ttft, prefill_data.thpt_per_gpu)
+    directions = (ParetoDirection.MINIMIZE, ParetoDirection.MAXIMIZE)
+    prefill_ttft = np.asarray(prefill_data.ttft, dtype=float)
+    prefill_thpt = np.asarray(prefill_data.thpt_per_gpu, dtype=float)
+    decode_itl = np.asarray(decode_data.itl, dtype=float)
+    decode_thpt = np.asarray(decode_data.thpt_per_gpu, dtype=float)
+    prefill_indices = compute_pareto(
+        (prefill_ttft, prefill_thpt),
+        directions,
+        keep_equivalent=False,
+    )
+    prefill_indices.sort(key=prefill_ttft.__getitem__)
+    decode_indices = compute_pareto(
+        (decode_itl, decode_thpt),
+        directions,
+        keep_equivalent=False,
+    )
+    decode_indices.sort(key=decode_itl.__getitem__)
 
-    # compute pareto front for decode
-    d_itl, d_thpt, _ = compute_pareto(decode_data.itl, decode_data.thpt_per_gpu)
-
-    # convert to cost per thousand requests
-    p_ttft = np.array(p_ttft)
-    p_thpt = np.array(p_thpt)
-    d_itl = np.array(d_itl)
-    d_thpt = np.array(d_thpt)
+    p_ttft = prefill_ttft[prefill_indices]
+    p_thpt = prefill_thpt[prefill_indices]
+    d_itl = decode_itl[decode_indices]
+    d_thpt = decode_thpt[decode_indices]
 
     tokens_per_user = []
     cost = []
