@@ -276,22 +276,20 @@ func restoreSharedAlphaOnlyPodFields(dst *DynamoComponentDeploymentSharedSpec, p
 }
 
 func restorePreservedFrontendSidecarConflict(dst, preserved *ExtraPodSpec) {
-	if dst == nil || preserved == nil || !extraPodSpecHasContainer(preserved, defaultFrontendSidecarContainerName) {
+	if dst == nil || preserved == nil || preserved.PodSpec == nil {
+		return
+	}
+	container, found := findContainerByName(preserved.PodSpec.Containers, defaultFrontendSidecarContainerName)
+	if !found {
 		return
 	}
 	if dst.PodSpec == nil {
 		dst.PodSpec = &corev1.PodSpec{}
 	}
-	if extraPodSpecHasContainer(dst, defaultFrontendSidecarContainerName) {
+	if _, found := findContainerByName(dst.PodSpec.Containers, defaultFrontendSidecarContainerName); found {
 		return
 	}
-	for i := range preserved.PodSpec.Containers {
-		container := preserved.PodSpec.Containers[i]
-		if container.Name == defaultFrontendSidecarContainerName {
-			dst.PodSpec.Containers = append(dst.PodSpec.Containers, *container.DeepCopy())
-			return
-		}
-	}
+	dst.PodSpec.Containers = append(dst.PodSpec.Containers, container)
 }
 
 func restoreSharedAlphaOnlyDisabledFeatures(dst *DynamoComponentDeploymentSharedSpec, preserved *DynamoComponentDeploymentSharedSpec) {
