@@ -51,6 +51,11 @@ const (
 	DefaultCheckpointJobTTLSeconds      = int32(300)
 	DefaultSeccompLocalhostProfile      = "profiles/block-iouring.json"
 	StorageTypePVC                      = "pvc"
+	// StorageTypeS3 mirrors checkpoint artifacts to an S3-compatible object
+	// store. The agent stages the artifact at BasePath on its own filesystem,
+	// then uploads the tree under the object key prefix derived from the
+	// checkpoint ID and artifact version.
+	StorageTypeS3 = "s3"
 
 	CheckpointStatusCompleted = "completed"
 	CheckpointStatusFailed    = "failed"
@@ -64,6 +69,17 @@ type Storage struct {
 	Location string
 	PVCName  string
 	BasePath string
+
+	// S3 restore staging volume (used when Type == StorageTypeS3). The restore
+	// pod gets a volume mounted at BasePath that the agent fills with the
+	// downloaded artifact (reached via /host/proc) before CRIU restore reads it
+	// from the container's mount namespace. Defaults to an emptyDir;
+	// StagingSizeLimit/StagingMedium tune it, or StagingPVCName/StagingHostPath
+	// override the source for artifacts that exceed node ephemeral storage.
+	StagingSizeLimit string
+	StagingMedium    string
+	StagingPVCName   string
+	StagingHostPath  string
 }
 
 type RestoreStatusAnnotationKeys struct {
@@ -244,12 +260,25 @@ func applyCheckpointSourceMetadata(labels map[string]string, annotations map[str
 	annotations[CheckpointArtifactVersionAnnotation] = ArtifactVersion(artifactVersion)
 }
 
+// ObjectKeyPrefix returns the object-store key prefix for a checkpoint
+// artifact: "<prefix/>?<checkpointId>/versions/<version>" with no leading or
+// trailing slash. The optional prefix lets a single bucket host several
+// independent checkpoint roots.
+func ObjectKeyPrefix(prefix, checkpointID, version string) string {
+	parts := make([]string, 0, 4)
+	if p := strings.Trim(strings.TrimSpace(prefix), "/"); p != "" {
+		parts = append(parts, p)
+	}
+	parts = append(parts, strings.Trim(checkpointID, "/"), "versions", ArtifactVersion(version))
+	return strings.Join(parts, "/")
+}
+
 func resolveStorageConfig(storage Storage) (Storage, error) {
 	storageType := strings.TrimSpace(storage.Type)
 	if storageType == "" {
 		storageType = StorageTypePVC
 	}
-	if storageType != StorageTypePVC {
+	if storageType != StorageTypePVC && storageType != StorageTypeS3 {
 		return Storage{}, fmt.Errorf("checkpoint storage type %q is not supported", storageType)
 	}
 	basePath := strings.TrimSpace(storage.BasePath)
@@ -264,8 +293,12 @@ func resolveStorageConfig(storage Storage) (Storage, error) {
 		basePath = "/"
 	}
 	return Storage{
-		Type:     storageType,
-		PVCName:  strings.TrimSpace(storage.PVCName),
-		BasePath: basePath,
+		Type:             storageType,
+		PVCName:          strings.TrimSpace(storage.PVCName),
+		BasePath:         basePath,
+		StagingSizeLimit: strings.TrimSpace(storage.StagingSizeLimit),
+		StagingMedium:    strings.TrimSpace(storage.StagingMedium),
+		StagingPVCName:   strings.TrimSpace(storage.StagingPVCName),
+		StagingHostPath:  strings.TrimSpace(storage.StagingHostPath),
 	}, nil
 }

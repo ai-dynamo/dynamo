@@ -185,6 +185,26 @@ checkpoint:
   #     # ReadWriteMany is safest. ReadWriteOnce can be used with podMount for
   #     # sequential checkpoint/restore on suitable storage backends.
   #     accessMode: ReadWriteMany
+  #
+  # S3 object-store example. No PVC is created or mounted; the snapshot-agent
+  # stages artifacts locally and uploads them to the bucket. The S3
+  # endpoint/bucket/credentials are configured on the snapshot chart
+  # (snapshot.storage.s3); here the operator only needs basePath (which must
+  # match snapshot.storage.s3.basePath) so workload pods are stamped correctly.
+  # storage:
+  #   type: s3
+  #   s3:
+  #     basePath: /var/lib/dynamo/checkpoints
+  #     bucket: checkpoints      # informational; authoritative on the agent
+  #     endpoint: s3.example.com
+  #     prefix: ""
+  #     # Restore-pod staging volume (mounted at basePath). Defaults to an
+  #     # emptyDir; override for artifacts that exceed node ephemeral storage.
+  #     staging:
+  #       sizeLimit: ""          # e.g. "200Gi"
+  #       medium: ""             # "" (disk) or "Memory"
+  #       hostPath: ""           # e.g. /mnt/nvme/checkpoints
+  #       pvcName: ""            # existing PVC
   storage: {}
 
 # Webhook configuration

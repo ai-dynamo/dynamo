@@ -26,6 +26,13 @@ const (
 	// StorageAccessModePodMount means workload pods mount the checkpoint PVC,
 	// and snapshot-agent reaches it through /host/proc/<pid>/root.
 	StorageAccessModePodMount = "podMount"
+
+	// StorageTypePVC stores checkpoint artifacts on a shared filesystem volume.
+	StorageTypePVC = "pvc"
+	// StorageTypeS3 mirrors artifacts to an S3-compatible object store. These
+	// mirror snapshotprotocol.StorageType* but are duplicated here so the
+	// low-level types package stays free of a protocol dependency.
+	StorageTypeS3 = "s3"
 )
 
 func (c *AgentConfig) LoadEnvOverrides() {
@@ -35,16 +42,29 @@ func (c *AgentConfig) LoadEnvOverrides() {
 	if v := os.Getenv("RESTRICTED_NAMESPACE"); v != "" {
 		c.RestrictedNamespace = v
 	}
+	// S3 credentials are sourced from the environment (typically projected from
+	// a Secret) so they never live in the agent ConfigMap. Standard AWS_* names
+	// are honored for compatibility with existing tooling.
+	if v := os.Getenv("AWS_ACCESS_KEY_ID"); v != "" {
+		c.Storage.S3.AccessKeyID = v
+	}
+	if v := os.Getenv("AWS_SECRET_ACCESS_KEY"); v != "" {
+		c.Storage.S3.SecretAccessKey = v
+	}
+	if v := os.Getenv("AWS_SESSION_TOKEN"); v != "" {
+		c.Storage.S3.SessionToken = v
+	}
 }
 
 func (c *AgentConfig) Validate() error {
 	storageType := strings.TrimSpace(c.Storage.Type)
 	if storageType == "" {
-		storageType = "pvc"
+		storageType = StorageTypePVC
 	}
-	if storageType != "pvc" {
-		return &ConfigError{Field: "storage.type", Message: fmt.Sprintf("unsupported storage type %q; only pvc is implemented today", storageType)}
+	if storageType != StorageTypePVC && storageType != StorageTypeS3 {
+		return &ConfigError{Field: "storage.type", Message: fmt.Sprintf("unsupported storage type %q; expected %q or %q", storageType, StorageTypePVC, StorageTypeS3)}
 	}
+	c.Storage.Type = storageType
 	basePath := strings.TrimSpace(c.Storage.BasePath)
 	if basePath == "" {
 		return &ConfigError{Field: "storage.basePath", Message: "storage.basePath is required"}
@@ -66,6 +86,17 @@ func (c *AgentConfig) Validate() error {
 		}
 	}
 	c.Storage.AccessMode = accessMode
+	if storageType == StorageTypeS3 {
+		// The agent stages artifacts on its own filesystem at basePath, then
+		// uploads them, so S3 requires agent-local staging rather than reaching
+		// into a workload pod's mount namespace.
+		if accessMode != StorageAccessModeAgentMount {
+			return &ConfigError{Field: "storage.accessMode", Message: fmt.Sprintf("storage type %q requires access mode %q", StorageTypeS3, StorageAccessModeAgentMount)}
+		}
+		if err := c.Storage.S3.validate(); err != nil {
+			return err
+		}
+	}
 	if c.CRIU.TcpClose && c.CRIU.TcpEstablished {
 		return &ConfigError{
 			Field:   "criu",
@@ -88,6 +119,44 @@ type StorageSpec struct {
 	Type       string `yaml:"type"`
 	BasePath   string `yaml:"basePath"`
 	AccessMode string `yaml:"accessMode"`
+	// S3 configures the object-store backend when Type is "s3". BasePath then
+	// serves as the agent-local staging directory for checkpoint artifacts.
+	S3 S3StorageSpec `yaml:"s3"`
+}
+
+// S3StorageSpec configures the S3-compatible checkpoint store.
+// Connection details come from the agent ConfigMap; credentials are loaded from
+// the environment (see AgentConfig.LoadEnvOverrides) so they stay out of config.
+type S3StorageSpec struct {
+	Endpoint string `yaml:"endpoint"`
+	Bucket   string `yaml:"bucket"`
+	Region   string `yaml:"region"`
+	Prefix   string `yaml:"prefix"`
+	UseSSL   bool   `yaml:"useSSL"`
+	// ForcePathStyle selects path-style addressing instead of the default
+	// virtual-hosted (bucket DNS) style. Enable for endpoints without bucket
+	// DNS support.
+	ForcePathStyle bool   `yaml:"forcePathStyle"`
+	Concurrency    int    `yaml:"concurrency"`
+	PartSize       uint64 `yaml:"partSize"`
+
+	// Credentials, populated from the environment rather than the ConfigMap.
+	AccessKeyID     string `yaml:"-"`
+	SecretAccessKey string `yaml:"-"`
+	SessionToken    string `yaml:"-"`
+}
+
+func (s *S3StorageSpec) validate() error {
+	if strings.TrimSpace(s.Endpoint) == "" {
+		return &ConfigError{Field: "storage.s3.endpoint", Message: "storage.s3.endpoint is required for s3 storage"}
+	}
+	if strings.TrimSpace(s.Bucket) == "" {
+		return &ConfigError{Field: "storage.s3.bucket", Message: "storage.s3.bucket is required for s3 storage"}
+	}
+	if strings.TrimSpace(s.AccessKeyID) == "" || strings.TrimSpace(s.SecretAccessKey) == "" {
+		return &ConfigError{Field: "storage.s3", Message: "s3 credentials are required (set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY)"}
+	}
+	return nil
 }
 
 // RestoreSpec holds settings for the CRIU restore process.

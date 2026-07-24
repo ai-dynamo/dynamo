@@ -385,13 +385,14 @@ func (c *CheckpointConfiguration) EffectiveSeccompProfile() string {
 }
 
 // CheckpointStorageConfiguration configures checkpoint storage for operator
-// pod mutations. Only PVC storage is implemented today.
+// pod mutations. Supported types are "pvc" (shared filesystem volume) and "s3"
+// (any S3-compatible object store).
 type CheckpointStorageConfiguration struct {
-	// Type is the storage backend type. Only pvc is implemented today.
+	// Type is the storage backend type: "pvc" or "s3".
 	Type string `json:"type"`
 	// PVC configuration for pvc-based settings.
 	PVC CheckpointPVCConfig `json:"pvc"`
-	// Deprecated: S3 is retained for compatibility and ignored.
+	// S3 configuration for object-store-based settings.
 	S3 CheckpointS3Config `json:"s3"`
 	// Deprecated: OCI is retained for compatibility and ignored.
 	OCI CheckpointOCIConfig `json:"oci"`
@@ -415,13 +416,47 @@ type CheckpointPVCConfig struct {
 	AccessMode string `json:"accessMode"`
 }
 
-// Deprecated: CheckpointS3Config is retained for compatibility and ignored by
-// the current snapshot flow.
+// CheckpointS3Config configures S3-compatible checkpoint storage. The
+// authoritative S3 endpoint, bucket, and credentials are
+// configured on the snapshot-agent DaemonSet (credentials are projected from a
+// Secret so they never enter pod annotations). The fields here drive the
+// operator's pod mutations and are stamped as non-secret annotations.
 type CheckpointS3Config struct {
-	// URI is the legacy S3 URI (s3://[endpoint/]bucket/prefix).
-	URI string `json:"uri"`
-	// CredentialsSecretRef is the legacy credentials secret name.
-	CredentialsSecretRef string `json:"credentialsSecretRef"`
+	// BasePath is the agent-local staging directory that checkpoint and restore
+	// pods inherit via the storage annotation. It must be an absolute path that
+	// the snapshot-agent can write to. Required for s3 storage.
+	BasePath string `json:"basePath"`
+	// Bucket, Endpoint, and Prefix are informational mirrors of the
+	// snapshot-agent S3 configuration, retained for documentation and future
+	// validation. They are non-secret.
+	Bucket   string `json:"bucket,omitempty"`
+	Endpoint string `json:"endpoint,omitempty"`
+	Prefix   string `json:"prefix,omitempty"`
+
+	// Staging configures the restore-pod staging volume the operator injects at
+	// BasePath. The agent downloads the artifact into it before CRIU restore.
+	Staging CheckpointS3StagingConfig `json:"staging,omitempty"`
+
+	// Deprecated: URI is retained for compatibility and ignored.
+	URI string `json:"uri,omitempty"`
+	// Deprecated: CredentialsSecretRef is retained for compatibility. S3
+	// credentials are configured on the snapshot-agent, not the operator.
+	CredentialsSecretRef string `json:"credentialsSecretRef,omitempty"`
+}
+
+// CheckpointS3StagingConfig configures the restore-pod staging volume for s3
+// checkpoint storage. It defaults to an emptyDir sized by the node's ephemeral
+// storage; SizeLimit/Medium tune that emptyDir, while PVCName or HostPath
+// override the source for artifacts that exceed node ephemeral storage.
+type CheckpointS3StagingConfig struct {
+	// SizeLimit caps the staging emptyDir (e.g. "100Gi"). Empty uses the node default.
+	SizeLimit string `json:"sizeLimit,omitempty"`
+	// Medium is the emptyDir medium ("" for disk, "Memory" for tmpfs).
+	Medium string `json:"medium,omitempty"`
+	// PVCName, when set, backs staging with an existing PVC instead of an emptyDir.
+	PVCName string `json:"pvcName,omitempty"`
+	// HostPath, when set, backs staging with a node host path (e.g. local NVMe).
+	HostPath string `json:"hostPath,omitempty"`
 }
 
 // Deprecated: CheckpointOCIConfig is retained for compatibility and ignored by
