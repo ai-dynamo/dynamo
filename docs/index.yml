@@ -515,6 +515,8 @@ navigation:
                 path: design-docs/kvbm-design.md
               - page: Planner Design
                 path: design-docs/planner-design.md
+              - page: Power-Aware Planner Design
+                path: design-docs/power-planner.md
 
       # ==================== Documentation ====================
       - section: Documentation

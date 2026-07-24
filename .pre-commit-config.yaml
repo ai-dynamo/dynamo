@@ -94,6 +94,7 @@ repos:
         - pyyaml
         - prometheus_client>=0.23.1
         - openai
+        - uvloop
     - id: DCO check
       name: Checks the commit message for a developer certificate of origin signature
       entry: python3 scripts/dco_check.py
