@@ -187,8 +187,14 @@ class AudioGenerationHandler:
         if not req.input or not req.input.strip():
             raise ValueError("Input text cannot be empty")
 
+        stream_audio = (
+            req.data_source != "url"
+            and (req.response_format or "wav").lower() in {"pcm", "wav"}
+            and (req.speed is None or req.speed == 1.0)
+        )
+
         if self._is_tts_model():
-            return await self._engine_inputs_tts(req)
+            return await self._engine_inputs_tts(req, stream_audio=stream_audio)
 
         # Generic audio model – plain text prompt (same as image/video)
         prompt = OmniTextPrompt(prompt=req.input)
@@ -200,11 +206,14 @@ class AudioGenerationHandler:
             response_format=req.data_source,
             output_format=req.response_format,
             speed=req.speed or 1.0,
+            stream_audio=stream_audio,
         )
 
     # -- Qwen3-TTS-specific helpers -------------------------------------------
 
-    async def _engine_inputs_tts(self, req: NvCreateAudioSpeechRequest):
+    async def _engine_inputs_tts(
+        self, req: NvCreateAudioSpeechRequest, *, stream_audio: bool
+    ):
         """Build engine inputs for Qwen3-TTS models."""
         from dynamo.vllm.omni.omni_handler import EngineInputs
 
@@ -257,6 +266,7 @@ class AudioGenerationHandler:
             response_format=req.data_source,
             output_format=req.response_format,
             speed=req.speed or 1.0,
+            stream_audio=stream_audio,
         )
 
     def _validate_tts_request(self, req: NvCreateAudioSpeechRequest) -> None:
