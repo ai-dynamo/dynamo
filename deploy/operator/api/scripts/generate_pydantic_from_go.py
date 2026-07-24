@@ -611,7 +611,10 @@ def main():
     parser.add_argument(
         "--input",
         type=Path,
-        default=script_dir.parent / "dynamo" / "v1beta1" / "dynamographdeploymentrequest_types.go",
+        default=script_dir.parent
+        / "dynamo"
+        / "v1beta1"
+        / "dynamographdeploymentrequest_types.go",
         help="Input Go file path",
     )
     parser.add_argument(

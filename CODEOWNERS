@@ -239,6 +239,7 @@
 /components/src/dynamo/common/utils/                                         @ai-dynamo/dynamo-runtime-codeowners
 /components/src/dynamo/common/memory/                                        @ai-dynamo/dynamo-runtime-codeowners
 /components/src/dynamo/common/backend/                                       @ai-dynamo/dynamo-runtime-codeowners
+/components/src/dynamo/squeeze_evolve/                                       @ai-dynamo/dynamo-runtime-codeowners
 /components/src/dynamo/common/config_dump/                                   @ai-dynamo/dynamo-runtime-codeowners
 /components/src/dynamo/common/configuration/                                 @ai-dynamo/dynamo-runtime-codeowners
 
