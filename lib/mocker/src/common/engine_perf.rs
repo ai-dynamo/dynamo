@@ -160,17 +160,12 @@ impl EnginePerfLimits {
 }
 
 /// Capacity search objective.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum OptimizationTarget {
+    #[default]
     Throughput,
     Latency,
-}
-
-impl Default for OptimizationTarget {
-    fn default() -> Self {
-        Self::Throughput
-    }
 }
 
 /// Capacity query request.
@@ -1738,7 +1733,7 @@ mod tests {
         )
         .unwrap();
         model
-            .tune_with_fpms(&vec![
+            .tune_with_fpms(&[
                 vec![prefill_observation(50, 0.005)],
                 vec![prefill_observation(100, 0.010)],
             ])
@@ -1825,7 +1820,7 @@ mod tests {
             EnginePerfModel::from_regression(WorkerType::Prefill, limits(), Some(fast_options()))
                 .unwrap();
         model
-            .tune_with_fpms(&vec![
+            .tune_with_fpms(&[
                 vec![prefill_observation(100, 0.010)],
                 vec![prefill_observation(200, 0.020)],
             ])
@@ -1864,7 +1859,7 @@ mod tests {
         )
         .unwrap();
         model
-            .tune_with_fpms(&vec![
+            .tune_with_fpms(&[
                 vec![prefill_observation(1, 0.001)],
                 vec![prefill_observation(2, 0.002)],
             ])
@@ -1885,7 +1880,7 @@ mod tests {
             EnginePerfModel::from_regression(WorkerType::Decode, limits(), Some(fast_options()))
                 .unwrap();
         model
-            .tune_with_fpms(&vec![
+            .tune_with_fpms(&[
                 vec![decode_observation(1, 100, 0.010)],
                 vec![decode_observation(2, 200, 0.020)],
             ])
@@ -1910,9 +1905,11 @@ mod tests {
 
     #[test]
     fn tune_with_fpms_accepts_multiple_attention_dp_ranks() {
-        let mut args = MockEngineArgs::default();
-        args.worker_type = WorkerType::Decode;
-        args.aic_attention_dp_size = Some(2);
+        let args = MockEngineArgs {
+            worker_type: WorkerType::Decode,
+            aic_attention_dp_size: Some(2),
+            ..Default::default()
+        };
         let mut model = EnginePerfModel::best_available(EnginePerfModelInputs {
             engine_args: Some(args),
             options: Some(fast_options()),
@@ -1920,7 +1917,7 @@ mod tests {
         })
         .unwrap();
         model
-            .tune_with_fpms(&vec![
+            .tune_with_fpms(&[
                 vec![
                     with_rank(decode_observation(1, 100, 0.010), 0),
                     with_rank(decode_observation(2, 200, 0.020), 1),
@@ -1942,9 +1939,11 @@ mod tests {
 
     #[test]
     fn attention_dp_rank_validation_rejects_duplicate_ranks() {
-        let mut args = MockEngineArgs::default();
-        args.worker_type = WorkerType::Decode;
-        args.aic_attention_dp_size = Some(2);
+        let args = MockEngineArgs {
+            worker_type: WorkerType::Decode,
+            aic_attention_dp_size: Some(2),
+            ..Default::default()
+        };
         let model = EnginePerfModel::best_available(EnginePerfModelInputs {
             engine_args: Some(args),
             options: Some(fast_options()),
@@ -1969,7 +1968,7 @@ mod tests {
         )
         .unwrap();
         model
-            .tune_with_fpms(&vec![
+            .tune_with_fpms(&[
                 vec![mixed_observation(100, 1, 100, 0.020)],
                 vec![mixed_observation(100, 2, 200, 0.040)],
                 vec![mixed_observation(200, 1, 100, 0.030)],
@@ -2017,7 +2016,7 @@ mod tests {
         )
         .unwrap();
         model
-            .tune_with_fpms(&vec![
+            .tune_with_fpms(&[
                 vec![mixed_observation(10, 1, 105, 0.011)],
                 vec![mixed_observation(25, 1, 105, 0.026)],
                 vec![mixed_observation(50, 1, 105, 0.051)],
@@ -2046,7 +2045,7 @@ mod tests {
             EnginePerfModel::from_regression(WorkerType::Decode, limits(), Some(fast_options()))
                 .unwrap();
         model
-            .tune_with_fpms(&vec![
+            .tune_with_fpms(&[
                 vec![decode_observation(1, 100, 0.010)],
                 vec![decode_observation(2, 200, 0.020)],
             ])
@@ -2101,7 +2100,7 @@ mod tests {
         )
         .unwrap();
         model
-            .tune_with_fpms(&vec![
+            .tune_with_fpms(&[
                 vec![mixed_observation(10, 1, 150, 0.010)],
                 vec![mixed_observation(50, 1, 150, 0.050)],
                 vec![mixed_observation(100, 1, 150, 0.100)],
@@ -2140,7 +2139,7 @@ mod tests {
         )
         .unwrap();
         model
-            .tune_with_fpms(&vec![
+            .tune_with_fpms(&[
                 vec![mixed_observation(1, 1, 2_147_483_648, 1.0e12)],
                 vec![mixed_observation(2, 1, 2_147_483_649, 1.0e12)],
             ])
@@ -2176,7 +2175,7 @@ mod tests {
         )
         .unwrap();
         model
-            .tune_with_fpms(&vec![
+            .tune_with_fpms(&[
                 vec![prefill_observation(100, 0.020)],
                 vec![prefill_observation(400, 0.050)],
             ])
@@ -2216,7 +2215,7 @@ mod tests {
         )
         .unwrap();
         model
-            .tune_with_fpms(&vec![
+            .tune_with_fpms(&[
                 vec![prefill_observation(100, 0.020)],
                 vec![prefill_observation(400, 0.080)],
             ])
@@ -2318,7 +2317,7 @@ mod tests {
         )
         .unwrap();
         model
-            .tune_with_fpms(&vec![
+            .tune_with_fpms(&[
                 vec![decode_observation(1, 100, 0.010)],
                 vec![decode_observation(2, 200, 0.020)],
             ])
@@ -2346,7 +2345,7 @@ mod tests {
             EnginePerfModel::from_regression(WorkerType::Prefill, limits(), Some(fast_options()))
                 .unwrap();
         prefill
-            .tune_with_fpms(&vec![
+            .tune_with_fpms(&[
                 vec![prefill_observation(100, 0.010)],
                 vec![prefill_observation(200, 0.020)],
             ])
@@ -2370,7 +2369,7 @@ mod tests {
             EnginePerfModel::from_regression(WorkerType::Decode, limits(), Some(fast_options()))
                 .unwrap();
         decode
-            .tune_with_fpms(&vec![
+            .tune_with_fpms(&[
                 vec![decode_observation(1, 100, 0.010)],
                 vec![decode_observation(2, 200, 0.020)],
             ])
@@ -2397,7 +2396,7 @@ mod tests {
             EnginePerfModel::from_regression(WorkerType::Decode, limits(), Some(fast_options()))
                 .unwrap();
         model
-            .tune_with_fpms(&vec![
+            .tune_with_fpms(&[
                 vec![decode_observation(1, 100, 0.010)],
                 vec![decode_observation(2, 200, 0.020)],
             ])
