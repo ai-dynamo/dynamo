@@ -308,7 +308,7 @@ _Appears in:_
 | `sharedMemory` _[SharedMemorySpec](#sharedmemoryspec)_ | SharedMemory controls the tmpfs mounted at /dev/shm for the checkpoint Job pod.<br />When omitted, checkpoint Jobs use the same default 8Gi tmpfs as Dynamo components. |  | Optional: \{\} <br /> |
 | `activeDeadlineSeconds` _integer_ | ActiveDeadlineSeconds specifies the maximum time the Job can run | 3600 | Minimum: 1 <br />Optional: \{\} <br /> |
 | `backoffLimit` _integer_ | Deprecated: BackoffLimit is ignored. Checkpoint Jobs never retry. |  | Minimum: 0 <br />Optional: \{\} <br /> |
-| `ttlSecondsAfterFinished` _integer_ | Deprecated: TTLSecondsAfterFinished is ignored. Checkpoint Jobs use a fixed<br />300 second TTL. |  | Minimum: 0 <br />Optional: \{\} <br /> |
+| `ttlSecondsAfterFinished` _integer_ | Deprecated: TTLSecondsAfterFinished is ignored. The operator deletes checkpoint<br />Jobs after recording their terminal outcome. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 
 
 #### DynamoCheckpointPhase

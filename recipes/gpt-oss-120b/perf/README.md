@@ -19,8 +19,8 @@ Edit the `env` block in [perf.yaml](perf.yaml):
 |----------------------|---------------------------------------------------|
 | B200 agg, agentic    | `turbo-gptoss-120b-agg-b200-agentic-frontend:8000`|
 | H200 agg, agentic    | `turbo-gptoss-120b-agg-h200-agentic-frontend:8000`|
-| B200 disagg, agentic | `turbo-gptoss-120b-disagg-b200-agentic:8000`      |
-| H200 disagg, agentic | `turbo-gptoss-120b-disagg-h200-agentic:8000`      |
+| B200 disagg, agentic | `turbo-gptoss-120b-disagg-b200-agentic-frontend:8000`      |
+| H200 disagg, agentic | `turbo-gptoss-120b-disagg-h200-agentic-frontend:8000`      |
 
 All variants serve `openai/gpt-oss-120b`, so any trace can be replayed against any variant by swapping `TRACE_FILE`.
 
@@ -147,9 +147,8 @@ kubectl wait --for=condition=Ready pod -n ${NAMESPACE} \
   -l nvidia.com/dynamo-graph-deployment-name=${DGD},nvidia.com/dynamo-component-type=worker \
   --timeout=900s
 
-#    disagg (single Pod): delete and re-apply the Pod instead.
-# kubectl delete pod turbo-gptoss-120b-disagg-b200-agentic -n ${NAMESPACE}
-# kubectl apply -f ../vllm/disagg-b200-agentic/deploy.yaml -n ${NAMESPACE}
+#    disagg (also a DGD): delete its worker pods and let the operator recreate them.
+# kubectl delete pods -n ${NAMESPACE} -l nvidia.com/dynamo-graph-deployment-name=turbo-gptoss-120b-disagg-b200-agentic,nvidia.com/dynamo-component-type=worker
 
 # 3. Bump CONCURRENCY in perf.yaml, then re-apply
 kubectl apply -f perf.yaml -n ${NAMESPACE}

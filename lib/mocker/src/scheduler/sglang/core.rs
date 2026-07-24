@@ -63,12 +63,9 @@ impl ReservedSglangDecode {
     fn activate(self, kv_manager: &mut SglangKvManager, block_size: usize) -> SglangRequest {
         let Self { mut request, kv } = self;
         let allocated_tokens = kv.allocated_tokens;
-        let prompt_tokens = request.prompt_tokens.clone();
-        let alloc = kv_manager.activate_destination(kv, &prompt_tokens);
-        request.last_node = Some(alloc.last_node);
-        request.kv_indices = alloc.kv_indices;
+        let alloc = kv_manager.activate_destination(kv, request.prompt_tokens());
+        request.kv_lease = alloc.lease;
         request.materialized_tokens = request.prompt_len();
-        request.cached_tokens = request.page_aligned_materialized_tokens(block_size);
         request.allocated_tokens = allocated_tokens;
         request.debug_assert_invariants(block_size);
         request
@@ -269,12 +266,12 @@ impl SglangCore {
                 let Some((_, reservation)) = self.destination_holds.remove(handoff_id) else {
                     return Ok(SchedulerCommandEffects::new(SchedulerCommandResult::Noop));
                 };
-                let available_before = self.kv_manager.cache().token_pool.available();
+                let available_before = self.kv_manager.cache().available_tokens();
                 let request = reservation.activate(&mut self.kv_manager, self.config.block_size);
                 self.active_destination_handoffs
                     .insert(handoff_id, request.uuid);
                 self.prebuilt_ready.push_back(request);
-                if self.kv_manager.cache().token_pool.available() > available_before {
+                if self.kv_manager.cache().available_tokens() > available_before {
                     self.bump_capacity_generation();
                 }
                 Ok(self.effects_after_capacity_change(SchedulerCommandResult::Applied))
@@ -325,7 +322,7 @@ impl SglangCore {
         {
             self.destination_reservation_attempts += 1;
         }
-        let reservation = self.kv_manager.reserve_destination(&request.prompt_tokens);
+        let reservation = self.kv_manager.reserve_destination(request.prompt_tokens());
         self.pending_destinations.mark_front_attempted(generation);
         let Some(kv) = reservation else {
             return Vec::new();
@@ -458,12 +455,7 @@ impl SglangCore {
         let Some(mut request) = request else {
             return false;
         };
-        let capacity_improved = !request.kv_indices.is_empty() || request.last_node.is_some();
-        self.kv_manager
-            .free_indices(&request.kv_indices[request.cached_tokens..]);
-        if let Some(last_node) = request.last_node.take() {
-            self.kv_manager.free_request(last_node);
-        }
+        let capacity_improved = self.kv_manager.abort(std::mem::take(&mut request.kv_lease));
         self.source_holds.remove_request(request_id);
         self.active_destination_handoffs.remove_request(request_id);
         if capacity_improved {
@@ -635,6 +627,7 @@ impl SglangCore {
         let scheduled_decode_lens: Vec<u64> = self
             .running
             .iter()
+            .filter(|req| req.remaining_output_tokens() > 0)
             .map(|req| req.current_sequence_len() as u64)
             .collect();
 
@@ -654,7 +647,9 @@ impl SglangCore {
 
         if let Some(collector) = collector {
             for signal in &decode.output_signals {
-                collector.on_token(signal.uuid, decode.end_ms);
+                if signal.token_id.is_some() {
+                    collector.on_token(signal.uuid, decode.end_ms);
+                }
             }
         }
 
@@ -713,13 +708,16 @@ impl SglangCore {
                     .map(|reservation| reservation.request.prompt_len() as u64),
             );
         let fpm = build_fpm_snapshot(
-            prefill_fpm.iter().map(|p| {
-                (
-                    p.prompt_len as u64,
-                    p.prefix_tokens as u64,
-                    p.tokens_computed as u64,
-                )
-            }),
+            prefill_fpm
+                .iter()
+                .filter(|p| p.tokens_computed > 0)
+                .map(|p| {
+                    (
+                        p.prompt_len as u64,
+                        p.prefix_tokens as u64,
+                        p.tokens_computed as u64,
+                    )
+                }),
             scheduled_decode_lens.into_iter(),
             queued_prefills,
             ordinary_queued_decodes.chain(preactivation_decodes),
@@ -754,24 +752,9 @@ impl SglangCore {
     }
 
     fn active_kv_blocks(&self) -> u64 {
-        let active_reserved = self
-            .waiting
-            .iter()
-            .map(SglangRequest::extra_reserved_tokens)
-            .sum::<usize>()
-            + self
-                .prebuilt_ready
-                .iter()
-                .map(SglangRequest::extra_reserved_tokens)
-                .sum::<usize>()
-            + self
-                .running
-                .iter()
-                .map(SglangRequest::extra_reserved_tokens)
-                .sum::<usize>();
         let actual_used =
             self.kv_manager.cache().total_tokens() - self.kv_manager.cache().available_tokens();
-        (actual_used + active_reserved).div_ceil(self.config.block_size) as u64
+        actual_used.div_ceil(self.config.block_size) as u64
     }
 
     fn promote_prebuilt_ready(&mut self) -> Vec<crate::scheduler::AdmissionEvent> {

@@ -125,12 +125,12 @@ pub(crate) fn build_fpm_snapshot(
 }
 
 /// Return (visible output tokens, request-forwards) for accept-length
-/// accounting. One output signal corresponds to one visible token; multiple
-/// signals with the same UUID in a pass are an MTP/spec-decode burst.
+/// accounting. A signal with a token corresponds to one visible token; multiple
+/// token signals with the same UUID in a pass are an MTP/spec-decode burst.
 pub(crate) fn accept_length_sample(output_signals: &[OutputSignal]) -> (usize, usize) {
     let visible_tokens = output_signals
         .iter()
-        .filter(|signal| !signal.rejected)
+        .filter(|signal| !signal.rejected && signal.token_id.is_some())
         .count();
     if visible_tokens == 0 {
         return (0, 0);
@@ -138,7 +138,7 @@ pub(crate) fn accept_length_sample(output_signals: &[OutputSignal]) -> (usize, u
 
     let request_forwards = output_signals
         .iter()
-        .filter(|signal| !signal.rejected)
+        .filter(|signal| !signal.rejected && signal.token_id.is_some())
         .map(|signal| signal.uuid)
         .collect::<std::collections::HashSet<_>>()
         .len();
@@ -431,6 +431,33 @@ pub struct SchedulerCommandEnvelope {
     pub reply: oneshot::Sender<anyhow::Result<SchedulerCommandEffects>>,
 }
 
+/// Output channel used by a live scheduler.
+///
+/// Existing replay callers use the unbounded variant. Network-facing adapters
+/// use the bounded variant to cap scheduler-to-dispatcher accumulation. The
+/// live adapter also uses fixed-capacity request streams and cancels consumers
+/// that cannot keep up.
+#[derive(Clone)]
+pub(crate) enum SchedulerOutputSender {
+    Unbounded(mpsc::UnboundedSender<Vec<OutputSignal>>),
+    Bounded(mpsc::Sender<Vec<OutputSignal>>),
+}
+
+impl SchedulerOutputSender {
+    pub(crate) async fn send(&self, signals: Vec<OutputSignal>) -> Result<(), Vec<OutputSignal>> {
+        match self {
+            Self::Unbounded(tx) => tx.send(signals).map_err(|error| error.0),
+            Self::Bounded(tx) => tx.send(signals).await.map_err(|error| error.0),
+        }
+    }
+}
+
+impl From<mpsc::UnboundedSender<Vec<OutputSignal>>> for SchedulerOutputSender {
+    fn from(tx: mpsc::UnboundedSender<Vec<OutputSignal>>) -> Self {
+        Self::Unbounded(tx)
+    }
+}
+
 pub struct SchedulerCancellationEnvelope {
     pub request_id: Uuid,
     pub discard_pending_output: bool,
@@ -462,7 +489,7 @@ pub trait SchedulerHandle: Send + Sync {
     /// Get a watch receiver for scheduler metrics (active decode blocks, etc.).
     fn metrics_receiver(&self) -> tokio::sync::watch::Receiver<MockerMetrics>;
 
-    /// Bounded lifecycle-control channel for disaggregated handoff sessions.
+    /// Bounded ordered channel for request and disaggregated lifecycle commands.
     fn command_sender(&self) -> mpsc::Sender<SchedulerCommandEnvelope>;
 
     /// Bounded cancellation channel observed even while a modeled pass is running.
@@ -489,7 +516,7 @@ pub(crate) fn handoff_channel_capacity(args: &crate::common::protocols::MockEngi
 #[cfg(feature = "kvbm-offload")]
 pub async fn init_kvbm_live(
     args: &crate::common::protocols::MockEngineArgs,
-    kv_manager: &mut crate::kv_manager::KvManager,
+    kv_manager: &mut crate::kv_manager::G1Manager,
 ) -> anyhow::Result<Option<std::sync::Arc<std::sync::Mutex<crate::kvbm_offload::MockOffloadEngine>>>>
 {
     use crate::kvbm_offload::KvbmOffloadConfig;
@@ -508,7 +535,7 @@ pub async fn init_kvbm_live(
 #[cfg(feature = "kvbm-offload")]
 pub fn init_kvbm_offline(
     args: &crate::common::protocols::MockEngineArgs,
-    kv_manager: &mut crate::kv_manager::KvManager,
+    kv_manager: &mut crate::kv_manager::G1Manager,
 ) -> anyhow::Result<Option<std::sync::Arc<std::sync::Mutex<crate::kvbm_offload::MockOffloadEngine>>>>
 {
     use crate::kvbm_offload::KvbmOffloadConfig;
@@ -658,13 +685,49 @@ mod tests {
             }
         }
     }
-
     #[test]
     fn welford_acc_empty() {
         let acc = WelfordAcc::default();
         assert_eq!(acc.count, 0);
         assert_eq!(acc.sum, 0.0);
         assert_eq!(acc.variance(), 0.0);
+    }
+
+    #[test]
+    fn accept_length_ignores_terminal_signals_without_tokens() {
+        let token_uuid = Uuid::from_u128(1);
+        let signals = [
+            OutputSignal {
+                uuid: Uuid::from_u128(2),
+                token_id: None,
+                completed: true,
+                rejected: false,
+                handoff_delay_ms: None,
+            },
+            OutputSignal {
+                uuid: token_uuid,
+                token_id: Some(7),
+                completed: false,
+                rejected: false,
+                handoff_delay_ms: None,
+            },
+            OutputSignal {
+                uuid: token_uuid,
+                token_id: Some(8),
+                completed: true,
+                rejected: false,
+                handoff_delay_ms: None,
+            },
+            OutputSignal {
+                uuid: Uuid::from_u128(3),
+                token_id: Some(9),
+                completed: true,
+                rejected: true,
+                handoff_delay_ms: None,
+            },
+        ];
+
+        assert_eq!(accept_length_sample(&signals), (2, 1));
     }
 
     #[test]
@@ -1216,10 +1279,10 @@ mod tests {
 mod offload_init_tests {
     use super::{init_kvbm_live, init_kvbm_offline};
     use crate::common::protocols::{KvEventPublishers, MockEngineArgs};
-    use crate::kv_manager::KvManager;
+    use crate::kv_manager::G1Manager;
 
-    fn make_kv_manager() -> KvManager {
-        KvManager::new_with_event_sink(8, 4, KvEventPublishers::default(), 0)
+    fn make_kv_manager() -> G1Manager {
+        G1Manager::new_with_event_sink(8, 4, KvEventPublishers::default(), 0)
     }
 
     fn args_with_g2_and_bpt(bpt: usize) -> MockEngineArgs {

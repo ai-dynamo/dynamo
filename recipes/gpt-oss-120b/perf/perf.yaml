@@ -102,7 +102,6 @@ spec:
           --input-file "${TRACE_FILE}" \
           --custom-dataset-type mooncake_trace \
           --num-requests "${WARMUP_REQUESTS}" \
-          --prompt-input-tokens-block-size 512 \
           --url "http://${ENDPOINT}" \
           --streaming \
           --use-server-token-count \
@@ -123,7 +122,6 @@ spec:
           --input-file "${TRACE_FILE}" \
           --custom-dataset-type mooncake_trace \
           --num-requests $(wc -l < "${TRACE_FILE}") \
-          --prompt-input-tokens-block-size 512 \
           --url "http://${ENDPOINT}" \
           --streaming \
           --use-server-token-count \
