@@ -29,7 +29,7 @@ The router maintains block information through two complementary systems:
 
 ## KV Cache Router
 
-The leading Large Language Models (LLMs) today are auto-regressive and based off of the [transformer architecture](https://proceedings.neurips.cc/paper_files/paper/2017/file/3f5ee243547dee91fbd053c1c4a845aa-Paper.pdf). One key inference optimization technique is to cache the already computed keys and values and to reuse them for the future tokens. This is called the [KV Cache](https://developer.nvidia.com/blog/mastering-llm-techniques-inference-optimization/#key-value_caching).
+The leading Large Language Models (LLMs) today are auto-regressive and based off of the [transformer architecture](https://arxiv.org/abs/1706.03762). One key inference optimization technique is to cache the already computed keys and values and to reuse them for the future tokens. This is called the [KV Cache](https://developer.nvidia.com/blog/mastering-llm-techniques-inference-optimization/#key-value_caching).
 
 ### KV Cache Routing and Load Balancing
 
@@ -161,70 +161,14 @@ Each event carries a unique router ID to prevent self-event processing. This asy
 
 ## Event Transport Modes
 
-The router supports two event transport modes for KV cache state synchronization:
+KV cache events use fire-and-forget pub/sub through the configured event plane. Workers maintain local radix trees, and routers rebuild state by querying workers on startup. The event plane supports both NATS Core and ZMQ.
 
-- **NATS Core / Event Plane with Local Indexer (default)**: Fire-and-forget pub/sub where workers maintain local radix trees (enabled by default). Router rebuilds state by querying workers on startup. Lower latency, simpler setup. Works with both NATS Core and ZMQ event planes.
-
-- **JetStream** (`--durable-kv-events` on **both** frontend **and** workers): Persistent event stream with durable consumers. State persists across router restarts via snapshots in NATS object store. Best for production with multi-replica consistency. **Important:** Both the frontend and all workers must specify `--durable-kv-events` for JetStream mode to work correctly.
-
-### JetStream Mode (Opt-in)
-
-KV events are sent to a persistent NATS JetStream. Each KV router/indexer replica acts as a durable consumer, pulling messages from this shared stream. This architecture ensures consistency across router replicas and persistence across restarts.
-
-- **Best for**: Production deployments requiring durability and multi-replica router consistency
-- **Tradeoffs**: Requires JetStream setup; slightly higher latency due to persistence guarantees
-- **Enable with**: `--durable-kv-events` flag on **both** the frontend **and** all workers
-
-> [!Note]
-> **Both frontend and workers must specify `--durable-kv-events`** for JetStream mode to work correctly. The frontend uses this flag to consume from JetStream, while workers use it to publish to JetStream instead of the local indexer.
-
-```mermaid
-graph TD
-    subgraph Engines
-        E1[Engine 1<br/>KVPublisher]
-        E2[Engine 2<br/>KVPublisher]
-        E3[Engine 3<br/>KVPublisher]
-    end
-
-    subgraph "NATS JetStream"
-        JS[(Persistent KV Events Stream<br/>- Block created<br/>- Block removed)]
-    end
-
-    subgraph "NATS Object Store"
-        OS[(Radix Tree<br/>State Snapshot)]
-    end
-
-    subgraph "Router Replicas"
-        R1[Router 1<br/>KVIndexer]
-        R2[Router 2<br/>KVIndexer]
-    end
-
-    E1 -->|Publish Events| JS
-    E2 -->|Publish Events| JS
-    E3 -->|Publish Events| JS
-
-    JS -->|Consume as Durable Consumer| R1
-    JS -->|Consume as Durable Consumer| R2
-    JS -->|Periodic Snapshot| OS
-
-    style JS fill:#e1f5fe,stroke:#333,color:#333
-    style OS fill:#e1f5fe,stroke:#333,color:#333
-    style E1 fill:#f3e5f5,stroke:#333,color:#333
-    style E2 fill:#f3e5f5,stroke:#333,color:#333
-    style E3 fill:#f3e5f5,stroke:#333,color:#333
-    style R1 fill:#2e8b57,stroke:#333,color:#fff
-    style R2 fill:#2e8b57,stroke:#333,color:#fff
-
-    linkStyle 0,1,2,3,4,5 stroke:#2196f3,stroke-width:2px
-```
-
-### NATS Core / Event Plane with Local Indexer (Default)
+### Event Plane with Local Indexers
 
 By default, workers have local indexer enabled. Each worker maintains its own local radix tree (local indexer) and publishes events over the generic event plane (NATS Core or ZMQ, depending on `--event-plane`). Each worker assigns monotonically increasing event IDs to its events. The router detects gaps in event sequences and recovers missed events by querying the worker's local indexer directly.
 
-- **Best for**: Lower-latency setups; simpler deployments without JetStream; single-router scenarios; deployments without NATS (using ZMQ event plane)
+- **Best for**: Low-latency event delivery, multi-router deployments, and deployments without NATS (using the ZMQ event plane)
 - **Tradeoffs**: State persists on workers (not centralized); recovery depends on workers being available
-- **Switch to JetStream**: Use `--durable-kv-events` flag on **both** workers (SGLang, TRT-LLM, vLLM, mocker) **and** frontend
 
 ```mermaid
 graph TD
@@ -271,8 +215,8 @@ graph TD
 - When a worker is discovered, the router queries and ingests its full local indexer state
 - When a worker is removed, the router removes all its blocks from the global radix tree
 
->[!Note]
-> By default, all workers have `enable_local_indexer=true`, so the router uses NATS Core / Event Plane mode with local indexer. To use JetStream mode instead, specify `--durable-kv-events` on **both** the frontend and all workers.
+> [!NOTE]
+> Workers enable their local indexer by default so routers can recover missed events and rebuild state after a restart.
 
 ### Local Active Block Management with Replica Sync
 
@@ -321,7 +265,7 @@ sequenceDiagram
     Note over R1,R2: Both routers have consistent<br/>view of active blocks
 ```
 
-This dual-layer approach—persistent global KV cache state via JetStream and ephemeral active block synchronization via router replicas—enables the system to make optimal routing decisions that balance cache reuse with load distribution.
+This dual-layer approach—worker-recoverable KV cache state and ephemeral active-block synchronization across router replicas—balances cache reuse with current load.
 
 ## See Also
 

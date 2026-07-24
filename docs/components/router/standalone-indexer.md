@@ -127,6 +127,9 @@ python -m dynamo.indexer --port 8090 [--threads 4] [--block-size 16 --model-name
 | `--model-name` | `default` | Model name for initial `--workers` |
 | `--routing-group` | `default` | Routing group for initial `--workers` |
 | `--peers` | (none) | Comma-separated peer indexer URLs for P2P recovery on startup |
+| `--access-log` | (none) | Write one JSON access-log record per request to this file |
+| `--trace-id-header` | `x-trace-id` | Request header copied into each access-log record's `trace_id` field |
+| `--access-log-local-time` | disabled | Use local time for access-log timestamps instead of UTC |
 
 ### Shared Startup Gate
 
@@ -167,7 +170,26 @@ The core event counters aggregate process-wide across model and routing-group in
 across all indexer threads. A `duplicate_store` warning is not necessarily an error:
 peer recovery replay can reapply content already restored from a snapshot. Lower-tier
 events and listener transport or replay failures are not represented by these core
-event counters; use the standalone service metrics and logs for those paths.
+event counters; use the standalone service metrics and logs for those paths. These
+device-tier-only semantics apply to the standalone indexer. The frontend-embedded
+router's component-scoped `dynamo_component_kv_cache_events_applied` counter includes
+both device- and lower-tier events. See [KV Indexer Metrics](../../observability/metrics.md#kv-indexer-metrics).
+
+### `POST /reopen_logs` — Reopen the access log
+
+Reopen the file configured by `--access-log` after an external log rotation renames or
+moves the active file. When access logging is disabled, the endpoint returns the same
+successful no-op response.
+
+```bash
+curl -X POST http://localhost:8090/reopen_logs
+```
+
+Returns:
+
+```json
+{"status":"ok"}
+```
 
 ### `POST /register` — Register an endpoint
 

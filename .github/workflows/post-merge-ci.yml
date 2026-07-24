@@ -124,6 +124,11 @@ jobs:
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
           extra_tags: |
             ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-snapshot-agent
+          # OSRB CSV diff baseline: post-merge context. main -> previous commit;
+          # release/* -> prior release tag (see resolve_diff_base.py).
+          diff_event_context: push
+          diff_current_branch: ${{ github.ref_name }}
+          gh_token: ${{ secrets.GITHUB_TOKEN }}
 
 # ============================================================================
 # Power Agent
@@ -411,10 +416,16 @@ jobs:
       cuda_version: '[""]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      inline_compliance: true
       build_timeout_minutes: 45
+      # OSRB CSV diff baseline: post-merge context. main -> previous commit;
+      # release/* -> prior release tag (see resolve_diff_base.py).
+      diff_event_context: push
+      diff_current_branch: ${{ github.ref_name }}
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-dynamo-frontend' || '' }}
         ${{ github.ref_name == 'main' && format('main-dynamo-frontend-{0}', github.sha) || '' }}
+      archive_sources: false
     secrets: inherit
 
   # ============================================================================
@@ -643,8 +654,8 @@ jobs:
   # the /sources.zip OSRB artifact; EFA images are covered (make_efa flows to the
   # extract). A compliance failure fails the build.
   #
-  # planner/frontend stay on the legacy shared-compliance scan until they
-  # migrate to the inline system.
+  # planner stays on the legacy shared-compliance scan until it migrates to
+  # the inline system.
   planner-compliance:
     name: planner # This name overlaps with other planner jobs to group them in the UI
     needs: [planner-build]
@@ -653,18 +664,6 @@ jobs:
       framework: dynamo
       target: planner
       target_tag_plain: ${{ needs.planner-build.outputs.target_tag_plain }}
-      cuda_version: '[""]'
-      platform: '["amd64", "arm64"]'
-    secrets: inherit
-
-  frontend-compliance:
-    name: frontend # This name overlaps with other frontend jobs to group them in the UI
-    needs: [frontend-build]
-    uses: ./.github/workflows/shared-compliance.yml
-    with:
-      framework: dynamo
-      target: frontend
-      target_tag_plain: ${{ needs.frontend-build.outputs.target_tag_plain }}
       cuda_version: '[""]'
       platform: '["amd64", "arm64"]'
     secrets: inherit

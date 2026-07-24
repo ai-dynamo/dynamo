@@ -4,6 +4,14 @@
 """Unit tests for the GMS snapshot loader CLI."""
 
 import pytest
+from _deps import HAS_GMS
+
+if not HAS_GMS:
+    pytest.skip(
+        "gpu_memory_service package is not available in this test image",
+        allow_module_level=True,
+    )
+
 from _fake_vmm import FakeVMM
 
 try:

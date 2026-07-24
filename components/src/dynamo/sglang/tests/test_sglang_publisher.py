@@ -404,7 +404,7 @@ def test_init_kv_event_publish_uses_worker_id_override(monkeypatch):
     )
     config = SimpleNamespace(
         server_args=server_args,
-        dynamo_args=SimpleNamespace(enable_local_indexer=True),
+        dynamo_args=SimpleNamespace(enable_local_indexer=True, kv_state_endpoint=None),
     )
     publisher = DynamoSglangPublisher(
         engine=SimpleNamespace(),
@@ -461,7 +461,7 @@ def test_init_kv_event_publish_allows_zero_worker_id_override(monkeypatch):
     )
     config = SimpleNamespace(
         server_args=server_args,
-        dynamo_args=SimpleNamespace(enable_local_indexer=True),
+        dynamo_args=SimpleNamespace(enable_local_indexer=True, kv_state_endpoint=None),
     )
     publisher = DynamoSglangPublisher(
         engine=SimpleNamespace(

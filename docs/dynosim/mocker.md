@@ -109,7 +109,6 @@ python -m dynamo.mocker \
 | `--extra-engine-args` | None | Path to a JSON file with mocker configuration; overrides individual CLI arguments |
 | `--stagger-delay` | -1 (auto) | Delay between worker launches (seconds). 0 disables, -1 enables auto mode |
 | `--disaggregation-mode` | `agg` | Worker mode: `agg` (aggregated), `prefill`, or `decode` |
-| `--durable-kv-events` | False | Deprecated JetStream KV-event mode; prefer the local indexer / event-plane subscriber path |
 | `--zmq-kv-events-ports` | None | Comma-separated ZMQ PUB base ports for KV event publishing, one per worker |
 | `--zmq-replay-ports` | None | Comma-separated ZMQ ROUTER base ports for gap recovery, one per worker |
 | `--bootstrap-ports` | None | Comma-separated rendezvous base ports, one per worker in disaggregated mode |
@@ -350,7 +349,7 @@ To generate profile data for your own model and hardware, run the profiler and t
 
 ## Event Transport and Router Testing
 
-The default event path uses the local indexer / event-plane subscriber flow. The older durable KV-events mode is still available through `--durable-kv-events`, but it is deprecated and should not be the preferred setup for new tests.
+The event path uses the local indexer and event-plane subscriber flow.
 
 For router and indexer experiments that need native wire-format event forwarding, the mocker also supports a ZMQ path:
 

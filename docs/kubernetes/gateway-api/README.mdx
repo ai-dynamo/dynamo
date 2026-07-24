@@ -47,7 +47,7 @@ flowchart LR
     EPP -->|"x-dynamo-worker-instance-id"| Gateway
     Gateway -->|"forward request"| Sidecar["Frontend sidecar<br/>--router-mode direct"]
     Sidecar -->|"forwards"| Worker["Dynamo worker"]
-    Worker -. "publishes KV events" .-> Runtime["Dynamo runtime<br/>NATS/JetStream"]
+    Worker -. "publishes KV events" .-> Runtime["Dynamo runtime<br/>NATS Core event plane"]
     Runtime -. "updates routing state" .-> EPP
 ```
 
@@ -57,8 +57,8 @@ the EPP. The EPP receives Dynamo routing state from the runtime event plane and 
 worker ID to the gateway. The gateway forwards the request to the selected worker's Frontend sidecar,
 which runs in direct routing mode.
 
-In this operator-managed path, the EPP consumes routing state through the Dynamo event plane using
-NATS/JetStream. Direct vLLM ZMQ KV-event subscriptions are used by other integration shapes, but not
+In this operator-managed path, the EPP consumes live routing state through the Dynamo event plane using
+NATS Core. Direct vLLM ZMQ KV-event subscriptions are used by other integration shapes, but not
 by this quickstart path.
 
 ## Shared Prerequisites
@@ -246,9 +246,9 @@ available to the EPP.
 | KV cache aware routing | Worker-published KV cache events delivered through the Dynamo event plane. | Default path when workers publish KV events and you want cache locality to influence endpoint selection. |
 | Approximate routing | Endpoint availability plus local bookkeeping from tokenized requests and request lifecycle. | Fallback path when precise worker-published KV events are unavailable, disabled, or not yet supported by the chosen backend or deployment shape. |
 
-With operator-managed GAIE, NATS/JetStream backs routing-state delivery. The EPP can receive startup
-state and subsequent updates through the Dynamo event plane instead of rebuilding all state from new
-traffic after every EPP restart.
+With operator-managed GAIE, NATS Core backs live routing-state delivery. After a restart, the EPP
+rebuilds prefix state from worker-local indexers and then consumes subsequent updates through the
+Dynamo event plane.
 
 ## Compatibility and Defaults
 

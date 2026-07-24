@@ -12,6 +12,12 @@ use modelexpress_common::download as mx;
 
 use dynamo_runtime::config::environment_names::model as env_model;
 
+mod huggingface;
+
+pub(crate) use huggingface::{
+    HfRepoSpec, cached_hf_snapshot, download_hf_snapshot, finalize_hf_snapshot, huggingface_cache,
+};
+
 /// Check if a model is already cached in the HuggingFace hub cache directory.
 /// Returns the path to the cached model directory if found, None otherwise.
 ///
@@ -253,6 +259,16 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    #[serial_test::serial]
+    #[test]
+    fn hf_offline_mode_accepts_huggingface_truthy_values() {
+        for value in ["1", "true", "TRUE", "on", "ON", "yes", "YES"] {
+            temp_env::with_var(env_model::huggingface::HF_HUB_OFFLINE, Some(value), || {
+                assert!(is_offline_mode(), "rejected {value}")
+            });
+        }
+    }
 
     #[test]
     fn cache_dir_precedence_and_fallback() {

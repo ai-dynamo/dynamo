@@ -45,7 +45,6 @@ def make_args(**overrides):
         "decode_speedup_ratio": 1.0,
         "dp_size": 1,
         "startup_time": None,
-        "durable_kv_events": False,
         "kv_transfer_bandwidth": 64.0,
         "kv_transfer_timing_mode": "full_prompt",
         "reasoning": None,
@@ -225,9 +224,7 @@ def test_g4_args_allow_kv_bytes_per_token_worker_override():
 
 
 def test_runtime_config_disables_local_indexer_for_decode_worker():
-    engine_args = CONFIG.build_mocker_engine_args(
-        make_args(is_decode_worker=True, durable_kv_events=False)
-    )
+    engine_args = CONFIG.build_mocker_engine_args(make_args(is_decode_worker=True))
 
     _, runtime_config = CONFIG.build_runtime_config(engine_args)
 
@@ -274,7 +271,6 @@ def test_build_mocker_engine_args_preserves_cli_mapped_fields(tmp_path):
         planner_profile_data=planner_profile_data,
         is_prefill_worker=True,
         is_decode_worker=False,
-        durable_kv_events=False,
         kv_bytes_per_token=131072,
         kv_transfer_bandwidth=123.0,
         kv_transfer_timing_mode="destination_missing",

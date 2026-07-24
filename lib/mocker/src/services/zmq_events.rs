@@ -55,7 +55,7 @@ enum ZmqRawKvEvent {
 }
 
 pub struct ZmqKvEventSink {
-    tx: mpsc::UnboundedSender<RawKvEvent>,
+    tx: mpsc::UnboundedSender<Vec<RawKvEvent>>,
 }
 
 impl ZmqKvEventSink {
@@ -65,7 +65,7 @@ impl ZmqKvEventSink {
         dp_rank: u32,
         block_size: u32,
     ) -> Result<Self> {
-        let (tx, mut rx) = mpsc::unbounded_channel::<RawKvEvent>();
+        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<RawKvEvent>>();
 
         let endpoint = format!("tcp://0.0.0.0:{port}");
         let pub_socket = bind_pub_socket(&endpoint)
@@ -182,29 +182,13 @@ impl ZmqKvEventSink {
                     }
 
                     msg_opt = rx.recv() => {
-                        let Some(msg) = msg_opt else { break };
+                        let Some(raw_events) = msg_opt else { break };
 
-                        let events = convert_to_zmq_events(
-                            &msg.event,
-                            msg.block_token_ids.as_deref(),
-                            block_size,
-                            msg.storage_tier,
-                        );
-                        if events.is_empty() {
-                            continue;
-                        }
-
-                        let timestamp = SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs_f64();
-
-                        let batch: (f64, Vec<ZmqRawKvEvent>, Option<i32>) =
-                            (timestamp, events, Some(dp_rank as i32));
-                        let payload: Bytes = match rmp_serde::to_vec(&batch) {
-                            Ok(p) => p.into(),
+                        let payload = match encode_event_batch(&raw_events, block_size, dp_rank) {
+                            Ok(Some(payload)) => payload,
+                            Ok(None) => continue,
                             Err(e) => {
-                                tracing::warn!("Failed to serialize ZMQ KV event: {e}");
+                                tracing::warn!("Failed to serialize ZMQ KV event batch: {e}");
                                 continue;
                             }
                         };
@@ -233,14 +217,53 @@ impl ZmqKvEventSink {
 
         Ok(Self { tx })
     }
+
+    fn enqueue(&self, events: Vec<RawKvEvent>) -> anyhow::Result<()> {
+        if events.is_empty() {
+            return Ok(());
+        }
+        self.tx
+            .send(events)
+            .map_err(|_| anyhow::anyhow!("ZMQ event sink channel closed"))
+    }
 }
 
 impl RawKvEventSink for ZmqKvEventSink {
     fn publish(&self, event: RawKvEvent) -> anyhow::Result<()> {
-        self.tx
-            .send(event)
-            .map_err(|_| anyhow::anyhow!("ZMQ event sink channel closed"))
+        self.enqueue(vec![event])
     }
+
+    fn publish_batch(&self, events: Vec<RawKvEvent>) -> anyhow::Result<()> {
+        self.enqueue(events)
+    }
+}
+
+pub(crate) fn encode_event_batch(
+    raw_events: &[RawKvEvent],
+    block_size: u32,
+    dp_rank: u32,
+) -> std::result::Result<Option<Bytes>, rmp_serde::encode::Error> {
+    let events = raw_events
+        .iter()
+        .flat_map(|event| {
+            convert_to_zmq_events(
+                &event.event,
+                event.block_token_ids.as_deref(),
+                block_size,
+                event.storage_tier,
+            )
+        })
+        .collect::<Vec<_>>();
+    if events.is_empty() {
+        return Ok(None);
+    }
+
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
+    let batch: (f64, Vec<ZmqRawKvEvent>, Option<i32>) = (timestamp, events, Some(dp_rank as i32));
+    rmp_serde::to_vec(&batch).map(|payload| Some(payload.into()))
 }
 
 fn convert_to_zmq_events(

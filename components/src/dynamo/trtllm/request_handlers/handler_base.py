@@ -37,6 +37,7 @@ from dynamo._core import Client, Context
 from dynamo.common.backend import logprobs as _shared_logprobs
 from dynamo.common.backend.engine import is_generation_stage
 from dynamo.common.constants import DisaggregationMode as CommonDisaggregationMode
+from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.health_check import HEALTH_CHECK_KEY
 from dynamo.llm.exceptions import EngineShutdown
@@ -63,6 +64,7 @@ from dynamo.trtllm.utils.disagg_utils import (
 )
 from dynamo.trtllm.utils.request_utils import (
     apply_stop_conditions_to_sampling_params,
+    normalize_top_k_for_trtllm,
     request_cache_salt,
 )
 
@@ -953,6 +955,8 @@ class HandlerBase(BaseGenerativeHandler):
             embeddings: Optional tensor or dict containing embeddings for multimodal processing
             ep_disaggregated_params: Optional DisaggregatedParams from encode worker (full EPD flow)
         """
+        reject_unsupported_multimodal_uuids(request.get("multi_modal_uuids"))
+
         request_token_ids = request.get("token_ids")
         logging.debug(
             "Request summary: token_ids=%s keys=%s has_embeddings=%s has_ep_disaggregated_params=%s",
@@ -1436,6 +1440,8 @@ class HandlerBase(BaseGenerativeHandler):
             for key, value in request["sampling_options"].items()
             if value is not None
         }
+        if "top_k" in overrides:
+            overrides["top_k"] = normalize_top_k_for_trtllm(overrides["top_k"])
 
         # Convert guided_decoding dict (from Rust serialization) to GuidedDecodingParams.
         # Explicit field mapping avoids breakage if either side adds fields the other
