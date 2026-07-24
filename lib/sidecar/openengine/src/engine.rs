@@ -105,12 +105,21 @@ impl LoraDiscovery {
 }
 
 impl OpenEngineSidecar {
+    pub fn from_cli() -> Result<(Self, WorkerConfig), DynamoError> {
+        let args = <Args as clap::Parser>::try_parse().unwrap_or_else(|error| error.exit());
+        Self::from_parsed_args(args)
+    }
+
     pub fn from_args(argv: Option<Vec<String>>) -> Result<(Self, WorkerConfig), DynamoError> {
         let args = match argv {
             Some(argv) => <Args as clap::Parser>::try_parse_from(argv),
             None => <Args as clap::Parser>::try_parse(),
         }
         .map_err(|error| client::invalid_arg(error.to_string()))?;
+        Self::from_parsed_args(args)
+    }
+
+    fn from_parsed_args(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
         let endpoint = normalize_endpoint(&args.openengine_endpoint);
         let transport = args.transport();
         let bootstrap = bootstrap_discover(

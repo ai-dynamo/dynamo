@@ -4,6 +4,6 @@
 use std::sync::Arc;
 
 fn main() -> anyhow::Result<()> {
-    let (engine, config) = dynamo_openengine_sidecar::OpenEngineSidecar::from_args(None)?;
+    let (engine, config) = dynamo_openengine_sidecar::OpenEngineSidecar::from_cli()?;
     dynamo_backend_common::run(Arc::new(engine), config)
 }
