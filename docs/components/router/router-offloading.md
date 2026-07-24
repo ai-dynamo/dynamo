@@ -17,8 +17,6 @@ Legend: ✅ tier-aware routing · 🟡 router-visible, tier-agnostic · 🚧 Dyn
 | [**SGLang**](#sglang) | SGLang v0.5.11+; v0.5.13+ with Mooncake; Dynamo v1.2+ | ✅ KV events | ✅ HiCache + KV events | — no separate disk tier; HiCache's third tier is the shared pool (next column) | ✅ HiCache + Mooncake + `--shared-cache-type hicache` |
 | [**TensorRT-LLM**](#tensorrt-llm) | Dynamo v1.3.0+ for the current event flag | 🟡 `--publish-kv-events`; merged GPU + RAM view | 🟡 native host cache shares one router view with GPU; per-tier weights do not apply | — no native disk tier | — |
 
-[KVBM](../kvbm/README.md), [LMCache](../../integrations/lmcache-integration.md), and [FlexKV](../../integrations/flexkv-integration.md) add CPU and disk tiers outside the frameworks' native paths; their router interaction is covered in [Other Offloading Backends](#other-offloading-backends).
-
 ### Status Definitions
 
 - **Router-visible (tier-aware).** The worker publishes KV cache events annotated with the storage tier (`medium`). The router tracks per-tier residency and credits lower-tier prefix hits when selecting workers, weighted by `--router-host-cache-hit-weight` and `--router-disk-cache-hit-weight`.
@@ -104,22 +102,8 @@ python3 -m dynamo.trtllm \
 - Versions: `--publish-kv-events` requires Dynamo 1.3.0 or later and the PyTorch backend. Earlier releases use the deprecated `--publish-events-and-metrics` alias.
 - TensorRT-LLM events do not identify GPU versus host RAM. The router keeps a block indexed while it remains in either tier and removes it after it leaves the lowest tier.
 - Native host offloading therefore extends router-visible reuse, but host-tier weights do not apply.
-- For CPU and disk tiers managed by Dynamo, use KVBM (`--connector kvbm`; see [Other Offloading Backends](#other-offloading-backends)).
 
 See the [TensorRT-LLM backend docs](../../backends/trtllm/README.md) for worker setup.
-
-## Other Offloading Backends
-
-These backends offload KV cache outside the frameworks' native paths. KVBM and FlexKV ship launch scripts that run under `--router-mode kv`; LMCache's shipped examples pair it with the router only in the disaggregated script. In every case, the column to check is what the router sees.
-
-| Backend | Frameworks | Tiers | Router interaction |
-| --- | --- | --- | --- |
-| [KVBM](../kvbm/README.md) | vLLM, TensorRT-LLM | CPU, CPU + disk | Offloaded blocks stay in the router's index as a merged device-tier view: a block evicted from GPU but held in KVBM CPU or disk still earns routing credit. Per-tier weights do not apply. |
-| [LMCache](../../integrations/lmcache-integration.md) | vLLM | CPU, local/remote storage | No documented router integration. The router routes on GPU-tier events; LMCache tiers are worker-internal. |
-| [FlexKV](../../integrations/flexkv-integration.md) | vLLM | CPU, SSD | Runs with KV routing; the router routes on GPU-tier events, and FlexKV tiers are worker-internal. |
-| [Mooncake](https://github.com/kvcache-ai/Mooncake) | SGLang (HiCache) | Shared external pool | Tier-aware and shared-pool-aware as the SGLang HiCache storage backend (the SGLang row above). Dynamo has no direct vLLM + Mooncake integration; with vLLM, Mooncake appears only as an optional LMCache storage backend. |
-
-Launch scripts that combine these backends with the KV router: [`agg_kvbm_router.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_kvbm_router.sh), [`disagg_kvbm_router.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_kvbm_router.sh), and [`agg_flexkv_router.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_flexkv_router.sh).
 
 ## Router Flags for Lower Tiers
 
