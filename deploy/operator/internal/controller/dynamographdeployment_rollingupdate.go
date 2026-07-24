@@ -440,28 +440,47 @@ func (r *DynamoGraphDeploymentReconciler) reconcileRollingUpdate(
 		"desiredV2WorkerHash", desired.v2)
 
 	if rollingUpdateStatus.Phase == nvidiacomv1beta1.RollingUpdatePhaseCompleted && !current.contains(newWorkerHash) {
-		// Check if DCDs with the new hash already exist and are serving.
-		// If so, this is just a stale annotation — update it without starting a new rollout.
+		// Check whether DCDs with the new hash already represent a completed
+		// generation. Recreate also requires its old generation to be fully
+		// drained before a stale annotation can be accepted.
 		newInfo, err := r.getWorkerInfoForWorkerHash(ctx, dgd, newWorkerHash)
 		oldInfo, oldErr := r.getOldWorkerInfo(ctx, dgd, newWorkerHash)
 		if err == nil && oldErr == nil && workerGenerationComplete(dgd, oldInfo, newInfo) {
-			logger.Info("Updating stale worker hash annotation",
+			recreateDrained, err := r.recreateComponentsDrained(ctx, dgd, newWorkerHash)
+			if err != nil {
+				return fmt.Errorf("check Recreate stale-annotation barrier: %w", err)
+			}
+			if recreateDrained {
+				logger.Info("Updating stale worker hash annotation",
+					"currentV1WorkerHash", current.v1,
+					"currentV2WorkerHash", current.v2,
+					"newHash", newWorkerHash)
+				r.setCurrentWorkerHashes(dgd, workerHashesForCompletedGeneration(newWorkerHash, desired))
+				return r.Update(ctx, dgd)
+			}
+			logger.Info("Resuming rolling update while the old Recreate generation drains",
 				"currentV1WorkerHash", current.v1,
 				"currentV2WorkerHash", current.v2,
 				"newHash", newWorkerHash)
-			r.setCurrentWorkerHashes(dgd, workerHashesForCompletedGeneration(newWorkerHash, desired))
-			return r.Update(ctx, dgd)
+			rollingUpdateStatus.Phase = nvidiacomv1beta1.RollingUpdatePhaseInProgress
+			rollingUpdateStatus.EndTime = nil
+			if rollingUpdateStatus.StartTime == nil {
+				now := metav1.Now()
+				rollingUpdateStatus.StartTime = &now
+			}
 		}
-		// New spec change: reset to start a proper rolling update cycle with surge/drain.
-		logger.Info("New worker spec change detected, starting new rolling update cycle",
-			"currentV1WorkerHash", current.v1,
-			"currentV2WorkerHash", current.v2,
-			"newHash", newWorkerHash,
-			"previousPhase", rollingUpdateStatus.Phase)
-		rollingUpdateStatus.Phase = nvidiacomv1beta1.RollingUpdatePhaseNone
-		rollingUpdateStatus.StartTime = nil
-		rollingUpdateStatus.EndTime = nil
-		rollingUpdateStatus.UpdatedComponents = nil
+		if rollingUpdateStatus.Phase == nvidiacomv1beta1.RollingUpdatePhaseCompleted {
+			// New spec change: reset to start a proper rolling update cycle with surge/drain.
+			logger.Info("New worker spec change detected, starting new rolling update cycle",
+				"currentV1WorkerHash", current.v1,
+				"currentV2WorkerHash", current.v2,
+				"newHash", newWorkerHash,
+				"previousPhase", rollingUpdateStatus.Phase)
+			rollingUpdateStatus.Phase = nvidiacomv1beta1.RollingUpdatePhaseNone
+			rollingUpdateStatus.StartTime = nil
+			rollingUpdateStatus.EndTime = nil
+			rollingUpdateStatus.UpdatedComponents = nil
+		}
 	}
 
 	if current.contains(newWorkerHash) &&
@@ -616,6 +635,16 @@ func (r *DynamoGraphDeploymentReconciler) completeRollingUpdate(
 	newWorkerHash string,
 ) error {
 	logger := log.FromContext(ctx)
+
+	recreateDrained, err := r.recreateComponentsDrained(ctx, dgd, newWorkerHash)
+	if err != nil {
+		return fmt.Errorf("check Recreate completion barrier: %w", err)
+	}
+	if !recreateDrained {
+		logger.V(1).Info("Waiting for old Recreate pods to terminate before completing rolling update",
+			"newWorkerHash", newWorkerHash)
+		return nil
+	}
 
 	desired, err := r.desiredWorkerHashes(dgd)
 	if err != nil {
@@ -854,6 +883,67 @@ func oldWorkerPodsTerminated(dcds []*nvidiacomv1beta1.DynamoComponentDeployment,
 		}
 	}
 	return true
+}
+
+func (r *DynamoGraphDeploymentReconciler) oldWorkerComponentDrained(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	componentName string,
+	oldDCDs []*nvidiacomv1beta1.DynamoComponentDeployment,
+) (bool, error) {
+	if !oldWorkerDCDsAtZero(oldDCDs) {
+		return false, nil
+	}
+	pods, err := r.listDGDComponentPods(ctx, dgd, componentName)
+	if err != nil {
+		return false, err
+	}
+	return oldWorkerPodsTerminated(oldDCDs, pods), nil
+}
+
+// recreateComponentsDrained reports whether every Recreate worker component
+// has fully shut down its old generation. Callers use this before accepting a
+// generation as complete, preventing a later scale-up from bypassing the
+// shutdown barrier after the new worker hash has been recorded.
+func (r *DynamoGraphDeploymentReconciler) recreateComponentsDrained(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	newWorkerHash string,
+) (bool, error) {
+	recreateComponents := make([]string, 0)
+	for i := range dgd.Spec.Components {
+		spec := &dgd.Spec.Components[i]
+		if !dynamo.IsWorkerComponent(string(spec.ComponentType)) {
+			continue
+		}
+		annotations := dynamo.GetDGDComponentResourceAnnotations(dgd, spec.ComponentName, spec)
+		if deploymentStrategyFromAnnotations(annotations) == common.DeploymentStrategyRecreate {
+			recreateComponents = append(recreateComponents, spec.ComponentName)
+		}
+	}
+	if len(recreateComponents) == 0 {
+		return true, nil
+	}
+
+	oldDCDsByComponent, _, err := r.getOldWorkerDCDsByComponent(ctx, dgd, newWorkerHash)
+	if err != nil {
+		return false, err
+	}
+	for _, componentName := range recreateComponents {
+		drained, err := r.oldWorkerComponentDrained(
+			ctx,
+			dgd,
+			componentName,
+			oldDCDsByComponent[componentName],
+		)
+		if err != nil {
+			return false, err
+		}
+		if !drained {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func (r *DynamoGraphDeploymentReconciler) listDGDComponentPods(
@@ -1303,14 +1393,12 @@ func (r *DynamoGraphDeploymentReconciler) buildRollingUpdateContext(
 			// then start the replacement generation.
 			maxUnavailable = desired
 			oldDCDs := oldDCDsByComponent[componentName]
-			if oldWorkerDCDsAtZero(oldDCDs) {
-				pods, err := r.listDGDComponentPods(ctx, dgd, componentName)
-				if err != nil {
-					return dynamo.RollingUpdateContext{}, err
-				}
-				if oldWorkerPodsTerminated(oldDCDs, pods) {
-					newTarget = desired
-				}
+			drained, err := r.oldWorkerComponentDrained(ctx, dgd, componentName, oldDCDs)
+			if err != nil {
+				return dynamo.RollingUpdateContext{}, err
+			}
+			if drained {
+				newTarget = desired
 			}
 		default:
 			maxSurge, maxUnavailable = resolveRollingUpdateParams(annotations, desired)

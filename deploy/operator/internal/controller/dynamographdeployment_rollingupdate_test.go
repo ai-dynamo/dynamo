@@ -26,6 +26,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -1219,6 +1220,130 @@ func TestContinueRollingUpdate_AllServicesUpdated(t *testing.T) {
 	// decodes the API server response back into dgd, and status is re-set after the update.
 	assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhaseCompleted, dgd.Status.RollingUpdate.Phase)
 	assert.Equal(t, []string{"decode", "prefill"}, dgd.Status.RollingUpdate.UpdatedComponents)
+}
+
+func TestReconcileRollingUpdate_RecreateAtZeroWaitsForOldPodTermination(t *testing.T) {
+	const oldWorkerHash = "oldhash0"
+
+	tests := []struct {
+		name         string
+		initialPhase nvidiacomv1beta1.RollingUpdatePhase
+	}{
+		{
+			name:         "in-progress rollout",
+			initialPhase: nvidiacomv1beta1.RollingUpdatePhaseInProgress,
+		},
+		{
+			name:         "stale-annotation recovery",
+			initialPhase: nvidiacomv1beta1.RollingUpdatePhaseCompleted,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: consts.ComponentTypeWorker,
+					Replicas:      ptr.To(int32(0)),
+					Envs:          []corev1.EnvVar{{Name: "REVISION", Value: "v2"}},
+					Annotations: map[string]string{
+						KubeAnnotationDeploymentStrategy: string(common.DeploymentStrategyRecreate),
+					},
+				},
+			})
+			dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHash: oldWorkerHash}
+			dgd.Status.RollingUpdate = &nvidiacomv1beta1.RollingUpdateStatus{
+				Phase: tt.initialPhase,
+			}
+			newWorkerHash := betaDGDWorkersSpecHash(t, dgd)
+			require.NotEqual(t, oldWorkerHash, newWorkerHash)
+
+			makeZeroReplicaDCD := func(name, workerHash string) *nvidiacomv1beta1.DynamoComponentDeployment {
+				return &nvidiacomv1beta1.DynamoComponentDeployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:       name,
+						Namespace:  dgd.Namespace,
+						Generation: 1,
+						Labels: map[string]string{
+							consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+							consts.KubeLabelDynamoWorkerHash:          workerHash,
+						},
+					},
+					Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
+						DynamoComponentDeploymentSharedSpec: nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+							ComponentName: "worker",
+							ComponentType: consts.ComponentTypeWorker,
+							Replicas:      ptr.To(int32(0)),
+						},
+					},
+					Status: nvidiacomv1beta1.DynamoComponentDeploymentStatus{
+						ObservedGeneration: 1,
+						Component: &nvidiacomv1beta1.ComponentReplicaStatus{
+							Replicas:      0,
+							ReadyReplicas: ptr.To(int32(0)),
+						},
+					},
+				}
+			}
+			oldDCD := makeZeroReplicaDCD(
+				dynamo.GetDCDResourceName(dgd, "worker", oldWorkerHash),
+				oldWorkerHash,
+			)
+			newDCD := makeZeroReplicaDCD(
+				dynamo.GetDCDResourceName(dgd, "worker", newWorkerHash),
+				newWorkerHash,
+			)
+			oldPod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "terminating-old-worker",
+					Namespace:         dgd.Namespace,
+					DeletionTimestamp: ptr.To(metav1.Now()),
+					Finalizers:        []string{"test.example/finalizer"},
+					Labels: map[string]string{
+						consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+						consts.KubeLabelDynamoComponent:           "worker",
+						consts.KubeLabelDynamoComponentType:       consts.ComponentTypeWorker,
+						consts.KubeLabelDynamoWorkerHash:          oldWorkerHash,
+						consts.KubeLabelDynamoSelector:            oldDCD.Name,
+					},
+				},
+				Status: corev1.PodStatus{Phase: corev1.PodRunning},
+			}
+
+			r := createTestReconcilerWithStatus(dgd, withObjects(oldDCD, newDCD, oldPod))
+			ctx := context.Background()
+
+			// Zero ready replicas satisfy the status-only completion check, but the
+			// running old Pod must keep both the rollout and its hash in place.
+			require.NoError(t, r.reconcileRollingUpdate(ctx, dgd))
+			assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhaseInProgress, dgd.Status.RollingUpdate.Phase)
+			assert.Equal(t, oldWorkerHash, dgd.Annotations[consts.AnnotationCurrentWorkerHash])
+			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(oldDCD), &nvidiacomv1beta1.DynamoComponentDeployment{}))
+
+			// Once the old Pod reaches a terminal phase, the state machine may
+			// complete the rollout and retire the old generation.
+			cachedPod := &corev1.Pod{}
+			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(oldPod), cachedPod))
+			cachedPod.Status.Phase = corev1.PodSucceeded
+			require.NoError(t, r.Status().Update(ctx, cachedPod))
+
+			require.NoError(t, r.reconcileRollingUpdate(ctx, dgd))
+			assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhaseCompleted, dgd.Status.RollingUpdate.Phase)
+			assert.True(t, r.currentWorkerHashes(dgd).contains(newWorkerHash))
+			err := r.Get(ctx, client.ObjectKeyFromObject(oldDCD), &nvidiacomv1beta1.DynamoComponentDeployment{})
+			assert.True(t, apierrors.IsNotFound(err))
+
+			// Replicas are excluded from the worker hash. A later scale-up
+			// therefore stays on the completed generation.
+			dgd.Spec.Components[0].Replicas = ptr.To(int32(1))
+			trigger, err := r.shouldTriggerRollingUpdate(dgd)
+			require.NoError(t, err)
+			assert.False(t, trigger)
+			require.NoError(t, r.reconcileRollingUpdate(ctx, dgd))
+			assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhaseCompleted, dgd.Status.RollingUpdate.Phase)
+			assert.True(t, r.currentWorkerHashes(dgd).contains(newWorkerHash))
+		})
+	}
 }
 
 func TestGetWorkerInfoForWorkerHash(t *testing.T) {
