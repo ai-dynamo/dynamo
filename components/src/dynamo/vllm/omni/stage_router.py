@@ -317,6 +317,9 @@ async def init_omni_stage_router(
         # Aggregated with no peer dependencies.
         worker_type=WorkerType.Aggregated,
         needs=[],
+        rejection_frontend_request_concurrency_limit=(
+            config.rejection_frontend_request_concurrency_limit
+        ),
     )
     logger.info("OmniStageRouter registered at '%s'", generate_endpoint)
 

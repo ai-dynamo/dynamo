@@ -16,7 +16,7 @@ use modelexpress_common::providers::{HuggingFaceProvider, ModelProviderTrait as 
 
 use crate::common::checked_file::CheckedFile;
 use crate::entrypoint::RouterConfig;
-use crate::frontend_config::{FrontendApiConfig, MetricsConfig};
+use crate::frontend_config::{AdmissionGateConfig, FrontendApiConfig, MetricsConfig};
 use crate::model_card::{ModelDeploymentCard, is_weight_file};
 use crate::model_type::{ModelInput, ModelType};
 use crate::preprocessor::media::{MediaDecoder, MediaFetcher};
@@ -63,6 +63,8 @@ pub struct LocalModelBuilder {
     http_metrics_port: Option<u16>,
     metrics_config: MetricsConfig,
     frontend_api_config: FrontendApiConfig,
+    admission_gate_config: AdmissionGateConfig,
+    rejection_frontend_request_concurrency_limit: Option<u64>,
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     migration_limit: u32,
@@ -88,6 +90,8 @@ impl Default for LocalModelBuilder {
             http_metrics_port: None,
             metrics_config: Default::default(),
             frontend_api_config: Default::default(),
+            admission_gate_config: Default::default(),
+            rejection_frontend_request_concurrency_limit: Default::default(),
             tls_cert_path: Default::default(),
             tls_key_path: Default::default(),
             model_path: Default::default(),
@@ -176,6 +180,24 @@ impl LocalModelBuilder {
 
     pub fn frontend_api_config(&mut self, frontend_api_config: FrontendApiConfig) -> &mut Self {
         self.frontend_api_config = frontend_api_config;
+        self
+    }
+
+    pub fn admission_gate_config(
+        &mut self,
+        admission_gate_config: AdmissionGateConfig,
+    ) -> &mut Self {
+        self.admission_gate_config = admission_gate_config;
+        self
+    }
+
+    /// Static per-model/WorkerSet frontend admission concurrency override
+    /// carried on the MDC and included in its checksum.
+    pub fn rejection_frontend_request_concurrency_limit(
+        &mut self,
+        limit: Option<u64>,
+    ) -> &mut Self {
+        self.rejection_frontend_request_concurrency_limit = limit;
         self
     }
 
@@ -306,6 +328,10 @@ impl LocalModelBuilder {
     /// - A folder: The last part of the folder name: "/data/llms/Qwen2.5-3B-Instruct" -> "Qwen2.5-3B-Instruct"
     /// - An HF repo: The HF repo name: "Qwen/Qwen3-0.6B" stays the same
     pub async fn build(&mut self) -> anyhow::Result<LocalModel> {
+        anyhow::ensure!(
+            self.rejection_frontend_request_concurrency_limit != Some(0),
+            "rejection_frontend_request_concurrency_limit must be >= 1"
+        );
         // Generate an endpoint ID for this model if the user didn't provide one.
         // The user only provides one if exposing the model.
         let endpoint_id = self
@@ -343,6 +369,8 @@ impl LocalModelBuilder {
             if !self.model_aliases.is_empty() {
                 card.set_aliases(self.model_aliases.clone());
             }
+            card.rejection_frontend_request_concurrency_limit =
+                self.rejection_frontend_request_concurrency_limit;
 
             return Ok(LocalModel {
                 card,
@@ -354,6 +382,7 @@ impl LocalModelBuilder {
                 http_metrics_port: self.http_metrics_port,
                 metrics_config: self.metrics_config.clone(),
                 frontend_api_config: self.frontend_api_config.clone(),
+                admission_gate_config: self.admission_gate_config.clone(),
                 tls_cert_path: self.tls_cert_path.take(),
                 tls_key_path: self.tls_key_path.take(),
                 router_config: self.router_config.take().unwrap_or_default(),
@@ -399,6 +428,8 @@ impl LocalModelBuilder {
         if !self.model_aliases.is_empty() {
             card.set_aliases(self.model_aliases.clone());
         }
+        card.rejection_frontend_request_concurrency_limit =
+            self.rejection_frontend_request_concurrency_limit;
 
         Ok(LocalModel {
             card,
@@ -410,6 +441,7 @@ impl LocalModelBuilder {
             http_metrics_port: self.http_metrics_port,
             metrics_config: self.metrics_config.clone(),
             frontend_api_config: self.frontend_api_config.clone(),
+            admission_gate_config: self.admission_gate_config.clone(),
             tls_cert_path: self.tls_cert_path.take(),
             tls_key_path: self.tls_key_path.take(),
             router_config: self.router_config.take().unwrap_or_default(),
@@ -434,6 +466,7 @@ pub struct LocalModel {
     http_metrics_port: Option<u16>,
     metrics_config: MetricsConfig,
     frontend_api_config: FrontendApiConfig,
+    admission_gate_config: AdmissionGateConfig,
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     router_config: RouterConfig,
@@ -500,6 +533,10 @@ impl LocalModel {
 
     pub fn frontend_api_config(&self) -> &FrontendApiConfig {
         &self.frontend_api_config
+    }
+
+    pub fn admission_gate_config(&self) -> &AdmissionGateConfig {
+        &self.admission_gate_config
     }
 
     pub fn enable_anthropic_api(&self) -> bool {
@@ -878,6 +915,20 @@ mod env_self_host_metadata_tests {
         for v in ["1", "true", "TRUE", "yes", "Yes", "on", "ON"] {
             assert!(self_host_metadata_default(Some(v)), "expected ON for {v:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn local_model_builder_rejects_zero_request_concurrency_override() {
+        let mut builder = LocalModelBuilder::default();
+        builder.rejection_frontend_request_concurrency_limit(Some(0));
+        let err = builder
+            .build()
+            .await
+            .expect_err("zero admission override must fail validation");
+        assert!(
+            err.to_string()
+                .contains("rejection_frontend_request_concurrency_limit must be >= 1")
+        );
     }
 }
 

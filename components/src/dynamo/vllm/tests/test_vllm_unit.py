@@ -14,7 +14,7 @@ import warnings
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -87,6 +87,87 @@ def test_base_model_lora_capacity(enable_lora, model_type, expected):
     )
 
     assert _load_vllm_main()._base_model_lora_capacity(config, model_type) == expected
+
+
+@pytest.mark.asyncio
+async def test_register_vllm_model_forwards_frontend_concurrency_limit(monkeypatch):
+    vllm_main = _load_vllm_main()
+
+    class FakeRuntimeConfig:
+        def set_structural_tag_mode(self, _mode):
+            pass
+
+        def set_structural_tag_scope(self, _scope):
+            pass
+
+        def set_structural_tag_schema(self, _schema):
+            pass
+
+        def set_engine_specific(self, _key, _value):
+            pass
+
+    register = AsyncMock()
+    monkeypatch.setattr(vllm_main, "ModelRuntimeConfig", FakeRuntimeConfig)
+    monkeypatch.setattr(
+        vllm_main,
+        "get_engine_cache_info",
+        lambda _engine: {
+            "num_gpu_blocks": 8,
+            "max_num_seqs": 4,
+            "max_num_batched_tokens": 1024,
+            "kv_event_block_size": 16,
+        },
+    )
+    monkeypatch.setattr(vllm_main, "get_dp_range_for_worker", lambda _config: (0, 1))
+    monkeypatch.setattr(vllm_main, "per_rank_kv_blocks", lambda blocks, _size: blocks)
+    monkeypatch.setattr(
+        vllm_main, "get_spec_decode_runtime_data", lambda _config, _vllm: None
+    )
+    monkeypatch.setattr(vllm_main, "apply_topology_config", lambda _config: None)
+    monkeypatch.setattr(
+        vllm_main, "create_frontend_media_config", lambda _enabled: (None, None)
+    )
+    monkeypatch.setattr(vllm_main, "register_model", register)
+
+    config = SimpleNamespace(
+        model="/models/base",
+        served_model_name="base",
+        enable_local_indexer=False,
+        disaggregation_mode=DisaggregationMode.AGGREGATED,
+        dyn_tool_call_parser=None,
+        dyn_reasoning_parser=None,
+        exclude_tools_when_tool_choice_none=False,
+        dyn_enable_structural_tag=False,
+        dyn_structural_tag_scope="request",
+        dyn_structural_tag_schema="auto",
+        frontend_decoding=False,
+        custom_jinja_template=None,
+        rejection_frontend_request_concurrency_limit=17,
+        engine_args=SimpleNamespace(
+            enable_lora=False,
+            load_format="auto",
+            max_loras=4,
+            stream_interval=None,
+        ),
+    )
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(max_model_len=4096, model_weights="")
+    )
+
+    await vllm_main.register_vllm_model(
+        dynamo_llm.ModelInput.Tokens,
+        dynamo_llm.ModelType.Chat,
+        object(),
+        config,
+        object(),
+        vllm_config,
+        dynamo_llm.WorkerType.Aggregated,
+    )
+
+    register.assert_awaited_once()
+    assert (
+        register.await_args.kwargs["rejection_frontend_request_concurrency_limit"] == 17
+    )
 
 
 def test_kv_event_block_size_prefers_cached_main_attention_value():

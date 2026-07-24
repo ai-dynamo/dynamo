@@ -395,12 +395,23 @@ async fn generate_dispatch(
     state: Arc<service_v2::State>,
     response_options: GenerateResponseOptions,
 ) -> Response {
+    let metric_model = state.manager().metric_model_for(&model).to_string();
     let mut inflight_guard = state.metrics_clone().create_inflight_guard(
-        state.manager().metric_model_for(&model),
+        &metric_model,
         super::metrics::Endpoint::Generate,
         false,
         &request_id,
     );
+    if let Some(message) =
+        super::admission::evaluate_model_concurrency_gate(&state, &model, &metric_model)
+    {
+        inflight_guard.mark_error(ErrorType::Unavailable);
+        return generate_error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "service_unavailable",
+            message,
+        );
+    }
     let request_context = context.context();
     let generate_result =
         match run_until_killed(request_context.as_ref(), engine.generate(context)).await {
@@ -1123,6 +1134,60 @@ mod tests {
 
         assert_eq!(response.status().as_u16(), 499);
         assert_cancelled_dispatch_metrics(state.as_ref());
+    }
+
+    #[tokio::test]
+    async fn generate_dispatch_enforces_model_concurrency_gate() {
+        let engine: crate::types::openai::generate::GenerateStreamingEngine =
+            Arc::new(TerminalEngine(crate::protocols::common::FinishReason::Stop));
+        let service = HttpService::builder()
+            .admission_gate_config(
+                crate::frontend_config::AdmissionGateConfig::new(Some(1), None, None)
+                    .expect("valid admission gate config"),
+            )
+            .build()
+            .unwrap();
+        let state = service.state_clone();
+        state
+            .manager()
+            .add_generate_model("test-model", "0", engine.clone())
+            .expect("register generate model");
+
+        let metrics = state.metrics_clone();
+        let mut holder = metrics.clone().create_inflight_guard(
+            "test-model",
+            Endpoint::Generate,
+            false,
+            "holder",
+        );
+        let response = generate_dispatch(
+            engine,
+            dispatch_test_context(),
+            "req-over-limit".to_string(),
+            "test-model".to_string(),
+            state,
+            GenerateResponseOptions::default(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read admission response");
+        let body: serde_json::Value =
+            serde_json::from_slice(&body).expect("parse admission response");
+        assert_eq!(body["error"]["type"], "service_unavailable");
+        assert!(body["error"]["message"].as_str().is_some_and(|message| {
+            message.contains("rejection-frontend-request-concurrency-limit")
+        }));
+        assert_eq!(
+            metrics.get_admission_rejection_count(
+                dynamo_runtime::metrics::prometheus_names::frontend_service::admission_gate::REQUEST_CONCURRENCY,
+                "test-model",
+            ),
+            1
+        );
+        holder.mark_ok();
     }
 
     #[test]

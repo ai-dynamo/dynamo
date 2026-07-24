@@ -77,7 +77,3 @@ spec:
   volumes:
     - {name: model-cache, persistentVolumeClaim: {claimName: model-cache}}
     - {name: dshm, emptyDir: {medium: Memory, sizeLimit: 64Gi}}
-
-
-
-

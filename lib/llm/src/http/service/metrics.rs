@@ -414,6 +414,10 @@ pub struct Metrics {
     model_migration_max_seq_len_exceeded_total: IntCounterVec,
     model_cancellation_total: IntCounterVec,
     model_rejection_total: IntCounterVec,
+
+    // Frontend admission gate rejections (DEP: Request Admission and Rejection
+    // Controls). Labeled by gate; `model` is empty for frontend-local gates.
+    admission_rejection_total: IntCounterVec,
 }
 
 // Inflight tracks requests from HTTP handler start until complete response is finished.
@@ -967,6 +971,16 @@ impl Metrics {
         )
         .unwrap();
 
+        let admission_rejection_total = IntCounterVec::new(
+            Opts::new(
+                frontend_metric_name(frontend_service::ADMISSION_REJECTION_TOTAL),
+                "Total number of requests rejected by a configured frontend admission gate \
+                 (model is empty for frontend-local gates)",
+            ),
+            &["gate", "model"],
+        )
+        .unwrap();
+
         Metrics {
             request_started_counter,
             request_counter,
@@ -996,6 +1010,7 @@ impl Metrics {
             model_migration_max_seq_len_exceeded_total,
             model_cancellation_total,
             model_rejection_total,
+            admission_rejection_total,
         }
     }
 
@@ -1157,6 +1172,7 @@ impl Metrics {
         ))?;
         registry.register(Box::new(self.model_cancellation_total.clone()))?;
         registry.register(Box::new(self.model_rejection_total.clone()))?;
+        registry.register(Box::new(self.admission_rejection_total.clone()))?;
 
         Ok(())
     }
@@ -1279,6 +1295,21 @@ impl Metrics {
     pub fn get_rejection_count(&self, model: &str, endpoint: Endpoint) -> u64 {
         self.model_rejection_total
             .with_label_values(&[model, &endpoint.to_string()])
+            .get()
+    }
+
+    /// Increment the frontend admission gate rejection counter. `model` is
+    /// empty for frontend-local gates (runtime task / request-plane connection).
+    pub fn inc_admission_rejection(&self, gate: &str, model: &str) {
+        self.admission_rejection_total
+            .with_label_values(&[gate, model])
+            .inc();
+    }
+
+    /// Get the current admission gate rejection count
+    pub fn get_admission_rejection_count(&self, gate: &str, model: &str) -> u64 {
+        self.admission_rejection_total
+            .with_label_values(&[gate, model])
             .get()
     }
 

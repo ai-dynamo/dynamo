@@ -116,6 +116,39 @@ with a startup warning and no longer gate these thresholds. See
 [Request Rejection](../../fault-tolerance/request-rejection.md#migrate-from-admission-control)
 for migration instructions.
 
+### Frontend Admission Gates
+
+Frontend-owned request rejection gates evaluated before tokenization. Every
+gate is disabled by default and active only when explicitly configured; a
+request that reaches a gate's observed pressure boundary is rejected with HTTP
+503.
+Rejections are counted in the `dynamo_frontend_admission_rejection_total` metric
+(labeled by `gate` and `model`). An empty model label denotes a frontend-local
+gate; a named model identifies a per-model concurrency rejection.
+
+The per-model concurrency gate covers HTTP inference request/response endpoints,
+including `/inference/v1/generate`. It does not count `/v1/realtime` WebSocket
+sessions because their model is selected only after the HTTP 101 upgrade, when
+an HTTP 503 admission response is no longer possible.
+
+The request-plane pressure gate skips the locally evaluated Anthropic
+`/v1/messages/count_tokens` endpoint because that route does not open an
+outbound request-plane stream. The runtime-task gate still applies to it.
+
+These gates are HTTP-only. KServe gRPC inference does not enforce them; gate
+settings are ignored in KServe gRPC mode and produce a startup warning.
+
+| CLI Argument | Env Var | Default | Description |
+|-------------|---------|---------|-------------|
+| `--rejection-frontend-request-concurrency-limit` | `DYN_REJECTION_FRONTEND_REQUEST_CONCURRENCY_LIMIT` | disabled | Max concurrent frontend-admitted HTTP inference requests, enforced separately for each served model. Acts as the per-model default; a worker can override it for its model with the worker-side `--rejection-frontend-request-concurrency-limit` flag (carried on its registration / MDC via `register_llm`) |
+| `--rejection-frontend-runtime-task-limit` | `DYN_REJECTION_FRONTEND_RUNTIME_TASK_LIMIT` | disabled | Max alive tasks on the frontend runtime (frontend-local self-protection, not per-model) |
+| `--rejection-frontend-request-plane-connection-limit` | `DYN_REJECTION_FRONTEND_REQUEST_PLANE_CONNECTION_LIMIT` | disabled | Sampled process-wide in-flight request-plane request/stream threshold. Rejection is best-effort: concurrent arrivals can exceed the configured value before their outbound streams update the gauge. This is an outbound transport-pressure proxy, not a physical TCP connection count (frontend-instance-local, not per-model) |
+
+The worker-side per-model override is static deployment/WorkerSet identity and
+participates in the MDC checksum. All workers in the same namespace and role
+must advertise the same value. To change it, deploy the replacement under a
+new namespace or fully drain the old WorkerSet before registering replacements.
+
 ## Model Discovery
 
 | CLI Argument | Env Var | Default | Description |

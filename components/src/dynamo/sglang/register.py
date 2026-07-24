@@ -170,6 +170,9 @@ async def _register_model_with_runtime_config(
             ignore_weights=use_modelexpress_remote_instance(server_args),
             max_gpu_lora_count=max_gpu_lora_count,
             model_aliases=aliases or None,
+            rejection_frontend_request_concurrency_limit=(
+                dynamo_args.rejection_frontend_request_concurrency_limit
+            ),
         )
         logging.info("Successfully registered LLM with runtime config")
         return True
@@ -568,6 +571,7 @@ async def register_image_diffusion_model(
     server_args: ServerArgs,
     output_modalities: Optional[List[str]] = None,
     readiness_gate: Optional[asyncio.Event] = None,
+    rejection_frontend_request_concurrency_limit: Optional[int] = None,
 ) -> None:
     """Register diffusion model with Dynamo runtime.
 
@@ -578,6 +582,8 @@ async def register_image_diffusion_model(
         output_modalities: Optional list of output modality names to override
             the default ModelType.Images registration.
         readiness_gate: Optional event to signal when registration completes.
+        rejection_frontend_request_concurrency_limit: Optional per-model
+            frontend concurrency override published on the model card.
 
     Note:
         Image diffusion models use ModelInput.Text (text prompts) and ModelType.Images
@@ -615,6 +621,9 @@ async def register_image_diffusion_model(
             # peer dependencies.
             worker_type=WorkerType.Aggregated,
             needs=[],
+            rejection_frontend_request_concurrency_limit=(
+                rejection_frontend_request_concurrency_limit
+            ),
         )
         logging.info(f"Successfully registered diffusion model: {model_name}")
     except Exception as e:
@@ -633,6 +642,7 @@ async def register_video_generation_model(
     endpoint: Endpoint,
     server_args: ServerArgs,
     readiness_gate: Optional[asyncio.Event] = None,
+    rejection_frontend_request_concurrency_limit: Optional[int] = None,
 ) -> None:
     """Register video generation model with Dynamo runtime.
 
@@ -641,6 +651,8 @@ async def register_video_generation_model(
         endpoint: The Dynamo endpoint for generation requests.
         server_args: SGLang server configuration.
         readiness_gate: Optional event to signal when registration completes.
+        rejection_frontend_request_concurrency_limit: Optional per-model
+            frontend concurrency override published on the model card.
 
     Note:
         Video generation models use ModelInput.Text (text prompts) and ModelType.Videos.
@@ -660,6 +672,9 @@ async def register_video_generation_model(
             # Aggregated.
             worker_type=WorkerType.Aggregated,
             needs=[],
+            rejection_frontend_request_concurrency_limit=(
+                rejection_frontend_request_concurrency_limit
+            ),
         )
         logging.info(f"Successfully registered video generation model: {model_name}")
     except Exception as e:

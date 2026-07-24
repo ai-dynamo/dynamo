@@ -4,6 +4,7 @@
 use std::pin::Pin;
 use std::sync::Arc;
 
+use crate::frontend_config::AdmissionGateConfig;
 use crate::grpc::service::kserve::inference::DataType;
 use crate::grpc::service::kserve::inference::ModelInput;
 use crate::grpc::service::kserve::inference::ModelOutput;
@@ -269,6 +270,12 @@ impl KserveServiceConfigBuilder {
             .host(config.http_metrics_host.clone())
             .metrics_prefix(config.metrics_prefix)
             .cancel_token(config.http_cancel_token)
+            // Admission gates apply only to HTTP inference routes. This embedded
+            // service exposes operational endpoints, so do not inherit gate
+            // settings from the process environment.
+            .admission_gate_config(
+                AdmissionGateConfig::new(None, None, None).map_err(anyhow::Error::msg)?,
+            )
             // Disable all inference endpoints - only use for metrics/health
             .enable_chat_endpoints(false)
             .enable_cmpl_endpoints(false)
@@ -916,7 +923,37 @@ mod readiness_gate_tests {
     use crate::discovery::WorkerSet;
     use crate::model_card::ModelDeploymentCard;
     use crate::worker_type::WorkerType;
+    use dynamo_runtime::config::environment_names::llm as env_llm;
     use tonic::Request;
+
+    #[test]
+    #[serial_test::serial]
+    fn embedded_http_service_does_not_inherit_admission_gate_env() {
+        temp_env::with_vars(
+            [
+                (
+                    env_llm::DYN_REJECTION_FRONTEND_REQUEST_CONCURRENCY_LIMIT,
+                    Some("11"),
+                ),
+                (
+                    env_llm::DYN_REJECTION_FRONTEND_RUNTIME_TASK_LIMIT,
+                    Some("12"),
+                ),
+                (
+                    env_llm::DYN_REJECTION_FRONTEND_REQUEST_PLANE_CONNECTION_LIMIT,
+                    Some("13"),
+                ),
+            ],
+            || {
+                let service = KserveService::builder().build().unwrap();
+                let config = service.http_service().state().admission_gate_config();
+
+                assert_eq!(config.request_concurrency_limit(), None);
+                assert_eq!(config.runtime_task_limit(), None);
+                assert_eq!(config.request_plane_connection_limit(), None);
+            },
+        );
+    }
 
     /// A WorkerSet with an explicit role/needs, a live worker, and a chat engine
     /// attached. `namespace` is the WorkerSet's own namespace (sets sharing it

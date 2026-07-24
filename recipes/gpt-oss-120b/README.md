@@ -114,4 +114,3 @@ Measured 2026-07-09 on the agentic 15% trace (see [perf/README.md](perf/README.m
 1. Multi-pod disaggregation is not supported — the disagg recipes run single-node in-pod (see ¹).
 2. Structured output (`response_format: json_object` / `json_schema`) is not working — may return invalid
    JSON while speculative decoding is enabled; use tool calling or validate client-side.
-

@@ -137,6 +137,121 @@ impl Default for StreamingDispatchConfig {
     }
 }
 
+/// Frontend admission gate limits (DEP: Request Admission and Rejection Controls).
+///
+/// Each gate is disabled when its limit is `None` and active only when
+/// explicitly configured. The HTTP service evaluates these before dispatching
+/// a request to the engine and rejects with HTTP 503 at the gate's configured
+/// pressure boundary.
+///
+/// - `request_concurrency_limit` is enforced separately for each served model.
+/// - `runtime_task_limit` and `request_plane_connection_limit` are
+///   frontend-local self-protection gates and are not per-model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdmissionGateConfig {
+    request_concurrency_limit: Option<u64>,
+    runtime_task_limit: Option<u64>,
+    request_plane_connection_limit: Option<u64>,
+}
+
+impl AdmissionGateConfig {
+    pub fn new(
+        request_concurrency_limit: Option<u64>,
+        runtime_task_limit: Option<u64>,
+        request_plane_connection_limit: Option<u64>,
+    ) -> Result<Self, String> {
+        for (name, limit) in [
+            ("request_concurrency_limit", request_concurrency_limit),
+            ("runtime_task_limit", runtime_task_limit),
+            (
+                "request_plane_connection_limit",
+                request_plane_connection_limit,
+            ),
+        ] {
+            if limit == Some(0) {
+                return Err(format!("{name} must be >= 1 (omit it to disable the gate)"));
+            }
+        }
+
+        Ok(Self {
+            request_concurrency_limit,
+            runtime_task_limit,
+            request_plane_connection_limit,
+        })
+    }
+
+    /// Build from optional Python kwargs. Returns `None` when every limit is
+    /// unspecified so env-backed defaults win for direct Rust callers. When
+    /// only some kwargs are specified, env-backed defaults fill the rest.
+    pub fn from_optional_limits(
+        request_concurrency_limit: Option<u64>,
+        runtime_task_limit: Option<u64>,
+        request_plane_connection_limit: Option<u64>,
+    ) -> Result<Option<Self>, String> {
+        if request_concurrency_limit.is_none()
+            && runtime_task_limit.is_none()
+            && request_plane_connection_limit.is_none()
+        {
+            return Ok(None);
+        }
+
+        let defaults = Self::default();
+        Self::new(
+            request_concurrency_limit.or(defaults.request_concurrency_limit),
+            runtime_task_limit.or(defaults.runtime_task_limit),
+            request_plane_connection_limit.or(defaults.request_plane_connection_limit),
+        )
+        .map(Some)
+    }
+
+    pub fn request_concurrency_limit(&self) -> Option<u64> {
+        self.request_concurrency_limit
+    }
+
+    pub fn runtime_task_limit(&self) -> Option<u64> {
+        self.runtime_task_limit
+    }
+
+    pub fn request_plane_connection_limit(&self) -> Option<u64> {
+        self.request_plane_connection_limit
+    }
+
+    /// Read a gate limit from the environment for direct Rust callers.
+    /// Unset means disabled; unparsable or zero values disable the gate with
+    /// a warning because every gate must be enabled explicitly and `0` would
+    /// reject all traffic.
+    fn limit_from_env(var: &str) -> Option<u64> {
+        let raw = std::env::var(var).ok()?;
+        match raw.parse::<u64>() {
+            Ok(0) | Err(_) => {
+                tracing::warn!(
+                    env = var,
+                    value = raw,
+                    "invalid admission gate limit (must be an integer >= 1); gate stays disabled"
+                );
+                None
+            }
+            Ok(limit) => Some(limit),
+        }
+    }
+}
+
+impl Default for AdmissionGateConfig {
+    fn default() -> Self {
+        Self {
+            request_concurrency_limit: Self::limit_from_env(
+                env_llm::DYN_REJECTION_FRONTEND_REQUEST_CONCURRENCY_LIMIT,
+            ),
+            runtime_task_limit: Self::limit_from_env(
+                env_llm::DYN_REJECTION_FRONTEND_RUNTIME_TASK_LIMIT,
+            ),
+            request_plane_connection_limit: Self::limit_from_env(
+                env_llm::DYN_REJECTION_FRONTEND_REQUEST_PLANE_CONNECTION_LIMIT,
+            ),
+        }
+    }
+}
+
 /// Frontend API behavior consumed by the HTTP service.
 ///
 /// Groups endpoint-surface and streaming-behavior settings that originate from
@@ -218,6 +333,28 @@ impl FrontendApiConfig {
 mod tests {
     use super::*;
 
+    fn with_admission_gate_env<T>(
+        request: Option<&str>,
+        runtime: Option<&str>,
+        request_plane: Option<&str>,
+        action: impl FnOnce() -> T,
+    ) -> T {
+        temp_env::with_vars(
+            [
+                (
+                    env_llm::DYN_REJECTION_FRONTEND_REQUEST_CONCURRENCY_LIMIT,
+                    request,
+                ),
+                (env_llm::DYN_REJECTION_FRONTEND_RUNTIME_TASK_LIMIT, runtime),
+                (
+                    env_llm::DYN_REJECTION_FRONTEND_REQUEST_PLANE_CONNECTION_LIMIT,
+                    request_plane,
+                ),
+            ],
+            action,
+        )
+    }
+
     #[test]
     fn optional_flags_return_none_when_all_values_are_unspecified() {
         let config = FrontendApiConfig::from_optional_flags(None, None, None, None);
@@ -242,6 +379,83 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
+    fn admission_gate_all_unspecified_limits_leave_env_defaults_to_the_builder() {
+        with_admission_gate_env(Some("4"), Some("20000"), Some("1024"), || {
+            assert_eq!(
+                AdmissionGateConfig::from_optional_limits(None, None, None)
+                    .expect("unspecified limits should be valid"),
+                None,
+                "all-unspecified kwargs must not materialize an explicit config"
+            );
+        });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn admission_gate_partial_limits_use_env_defaults_for_unspecified_values() {
+        with_admission_gate_env(Some("4"), Some("20000"), Some("1024"), || {
+            let config = AdmissionGateConfig::from_optional_limits(Some(8), None, Some(512))
+                .expect("positive limits should be valid")
+                .expect("partial limits should produce a config");
+
+            assert_eq!(config.request_concurrency_limit(), Some(8));
+            assert_eq!(config.runtime_task_limit(), Some(20000));
+            assert_eq!(config.request_plane_connection_limit(), Some(512));
+        });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn admission_gate_optional_limits_reject_explicit_zero() {
+        with_admission_gate_env(None, None, None, || {
+            for (request, runtime, request_plane, field) in [
+                (Some(0), None, None, "request_concurrency_limit"),
+                (None, Some(0), None, "runtime_task_limit"),
+                (None, None, Some(0), "request_plane_connection_limit"),
+            ] {
+                let error =
+                    AdmissionGateConfig::from_optional_limits(request, runtime, request_plane)
+                        .expect_err("zero must not enable a reject-all gate");
+                assert!(error.contains(field), "unexpected error: {error}");
+            }
+        });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn admission_gate_defaults_follow_env_contract() {
+        with_admission_gate_env(None, None, None, || {
+            let config = AdmissionGateConfig::default();
+            assert_eq!(config.request_concurrency_limit(), None);
+            assert_eq!(config.runtime_task_limit(), None);
+            assert_eq!(config.request_plane_connection_limit(), None);
+        });
+
+        with_admission_gate_env(Some("4"), Some("20000"), Some("1024"), || {
+            let config = AdmissionGateConfig::default();
+            assert_eq!(config.request_concurrency_limit(), Some(4));
+            assert_eq!(config.runtime_task_limit(), Some(20000));
+            assert_eq!(config.request_plane_connection_limit(), Some(1024));
+        });
+
+        for bad in ["0", "-1", "lots"] {
+            temp_env::with_var(
+                env_llm::DYN_REJECTION_FRONTEND_REQUEST_CONCURRENCY_LIMIT,
+                Some(bad),
+                || {
+                    assert_eq!(
+                        AdmissionGateConfig::default().request_concurrency_limit(),
+                        None,
+                        "env value {bad:?} must leave the gate disabled"
+                    );
+                },
+            );
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn optional_flags_use_env_defaults_for_unspecified_values() {
         temp_env::with_vars(
             [

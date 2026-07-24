@@ -771,6 +771,27 @@ impl Model {
         result
     }
 
+    /// Per-model frontend admission concurrency override supplied at model
+    /// registration (on the MDC), used ahead of the frontend-global
+    /// `--rejection-frontend-request-concurrency-limit`. The override is static
+    /// WorkerSet identity: workers in one namespace/role must agree on it. A
+    /// rollout under a new namespace can briefly coexist with the old
+    /// WorkerSet; the most restrictive value wins deterministically until the
+    /// old set drains. Zero is out of contract (registration validates >= 1)
+    /// and is treated as absent so it cannot reject all traffic.
+    pub fn request_concurrency_limit_override(&self) -> Option<u64> {
+        self.worker_sets
+            .iter()
+            .filter_map(|entry| {
+                entry
+                    .value()
+                    .card()
+                    .rejection_frontend_request_concurrency_limit
+                    .filter(|&limit| limit > 0)
+            })
+            .min()
+    }
+
     /// Total worker count across all WorkerSets.
     pub fn total_workers(&self) -> usize {
         self.worker_sets
@@ -1097,6 +1118,29 @@ mod tests {
 
         model.add_worker_set("ns2".to_string(), make_worker_set("ns2", "abc"));
         assert_eq!(model.total_workers(), 2);
+    }
+
+    #[test]
+    fn request_concurrency_override_uses_deterministic_minimum() {
+        fn worker_set(namespace: &str, limit: Option<u64>) -> Arc<WorkerSet> {
+            let mut card = ModelDeploymentCard::with_name_only("llama");
+            card.rejection_frontend_request_concurrency_limit = limit;
+            Arc::new(WorkerSet::new(
+                namespace.to_string(),
+                format!("mdc-{namespace}"),
+                card,
+            ))
+        }
+
+        let model = Model::new("llama".to_string());
+        model.add_worker_set("uncapped".to_string(), worker_set("uncapped", None));
+        model.add_worker_set("roomy".to_string(), worker_set("roomy", Some(3)));
+        model.add_worker_set("strict".to_string(), worker_set("strict", Some(1)));
+        model.add_worker_set("invalid".to_string(), worker_set("invalid", Some(0)));
+
+        assert_eq!(model.request_concurrency_limit_override(), Some(1));
+        model.remove_worker_set("strict");
+        assert_eq!(model.request_concurrency_limit_override(), Some(3));
     }
 
     #[test]
