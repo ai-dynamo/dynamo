@@ -747,7 +747,11 @@ mod tests_startup_helpers {
         GetWorkersRequest, KvIndexer, KvIndexerInterface, WorkerKvQueryResponse,
     };
     use dynamo_kv_router::protocols::{ExternalSequenceBlockHash, LocalBlockHash};
+    use dynamo_runtime::discovery::{
+        Discovery, DiscoveryQuery, EventSourceQuery, MockDiscovery, SharedMockRegistry,
+    };
     use std::sync::{Arc, Mutex};
+    use tokio::sync::oneshot;
 
     // Type alias to resolve clippy::type_complexity warning
     type PublishedEvents = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
@@ -788,6 +792,85 @@ mod tests_startup_helpers {
 
     fn local_gpu_event(worker_id: WorkerId, event: KvCacheEvent) -> Vec<PlacementEvent> {
         vec![PlacementEvent::local_gpu(worker_id, event)]
+    }
+
+    #[tokio::test]
+    async fn unexpected_zmq_listener_exit_retracts_advertised_source() {
+        let discovery = Arc::new(MockDiscovery::new(Some(1), SharedMockRegistry::new()));
+        let kv_state_endpoint = EndpointId {
+            namespace: "ns".to_string(),
+            component: "worker".to_string(),
+            name: "generate".to_string(),
+        };
+        let source_instance = discovery
+            .register(DiscoverySpec::EventSource {
+                scope: EventScope::Endpoint {
+                    endpoint: kv_state_endpoint.clone(),
+                },
+                topic: KV_EVENT_SUBJECT.to_string(),
+                publisher_id: 11,
+                metadata: serde_json::json!({}),
+            })
+            .await
+            .unwrap();
+        let source_query = || {
+            DiscoveryQuery::EventSources(EventSourceQuery::endpoint_topic(
+                kv_state_endpoint.clone(),
+                KV_EVENT_SUBJECT,
+            ))
+        };
+        assert_eq!(discovery.list(source_query()).await.unwrap().len(), 1);
+
+        let cancellation_token = CancellationToken::new();
+        let processor_token = cancellation_token.clone();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let cleanup_discovery = discovery.clone();
+        let processor = tokio::spawn(async move {
+            let (publisher, _) = MockComponent::new();
+            start_event_processor(publisher, 1, processor_token, rx, None, None).await;
+            cleanup_discovery.unregister(source_instance).await.unwrap();
+        });
+        let listener_handle = tokio::spawn(async {});
+
+        let unexpected = supervise_zmq_listener(
+            listener_handle,
+            "ipc://events".to_string(),
+            String::new(),
+            cancellation_token.clone(),
+        )
+        .await;
+
+        assert!(unexpected);
+        assert!(cancellation_token.is_cancelled());
+        tokio::time::timeout(Duration::from_secs(1), processor)
+            .await
+            .expect("event processor did not stop after listener failure")
+            .unwrap();
+        assert!(discovery.list(source_query()).await.unwrap().is_empty());
+        drop(tx);
+    }
+
+    #[tokio::test]
+    async fn silent_zmq_listener_remains_healthy_until_normal_shutdown() {
+        let cancellation_token = CancellationToken::new();
+        let (exit_tx, exit_rx) = oneshot::channel();
+        let listener_handle = tokio::spawn(async move {
+            let _ = exit_rx.await;
+        });
+        let supervisor = tokio::spawn(supervise_zmq_listener(
+            listener_handle,
+            "ipc://events".to_string(),
+            String::new(),
+            cancellation_token.clone(),
+        ));
+
+        tokio::task::yield_now().await;
+        assert!(!cancellation_token.is_cancelled());
+        assert!(!supervisor.is_finished());
+
+        cancellation_token.cancel();
+        exit_tx.send(()).unwrap();
+        assert!(!supervisor.await.unwrap());
     }
 
     //--------------------------------------------------------------------

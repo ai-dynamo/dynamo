@@ -17,12 +17,13 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    IndexerRecoveryTarget, RecoveryTarget, direct_zmq::run_direct_zmq_supervisor,
+    IndexerRecoveryTarget, RecoveryTarget, direct_zmq::run_direct_zmq_supervisor, source_health,
     worker_query::WorkerQueryClient,
 };
 use crate::{
     discovery::{KvSourceMembershipView, KvSourceMembershipWatch, KvSourceStatus},
-    kv_router::{Indexer, metrics::RouterWorkerStatusMetrics},
+    kv_router::{Indexer, KvEventSourceRequirement, metrics::RouterWorkerStatusMetrics},
+    worker_type::WorkerType,
 };
 
 const SUBSCRIPTION_INITIAL_BACKOFF: Duration = Duration::from_millis(100);
@@ -34,6 +35,12 @@ enum ScopeExit {
     Stop,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(super) enum MismatchMetricScope {
+    Generic,
+    Router(KvEventSourceRequirement),
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_subscription_supervisor<T: RecoveryTarget>(
     component: Component,
@@ -43,6 +50,7 @@ async fn run_subscription_supervisor<T: RecoveryTarget>(
     mut membership_watch: KvSourceMembershipWatch,
     model: String,
     worker_type: &'static str,
+    metric_scope: MismatchMetricScope,
     cancellation_token: CancellationToken,
     mut startup_ready: Option<oneshot::Sender<()>>,
 ) {
@@ -51,7 +59,14 @@ async fn run_subscription_supervisor<T: RecoveryTarget>(
 
     loop {
         let view = membership_watch.borrow_and_update().clone();
-        update_mismatch_metric(&metrics, &view, &model, worker_type, &serving_endpoint);
+        update_mismatch_metric(
+            &metrics,
+            &view,
+            &model,
+            worker_type,
+            &serving_endpoint,
+            metric_scope,
+        );
 
         let subscriber = if let Some(kv_state_endpoint) = view.resolved_kv_state_endpoint() {
             tracing::debug!(
@@ -79,6 +94,7 @@ async fn run_subscription_supervisor<T: RecoveryTarget>(
                         &model,
                         worker_type,
                         &serving_endpoint,
+                        metric_scope,
                     );
                     if let Some(ready) = startup_ready.take() {
                         let _ = ready.send(());
@@ -135,6 +151,7 @@ async fn run_subscription_supervisor<T: RecoveryTarget>(
             &model,
             worker_type,
             &serving_endpoint,
+            metric_scope,
             &cancellation_token,
             &mut retry_delay,
         )
@@ -152,6 +169,7 @@ async fn run_subscription_supervisor<T: RecoveryTarget>(
                     &model,
                     worker_type,
                     &serving_endpoint,
+                    metric_scope,
                 );
                 if !wait_for_retry(retry_delay, &mut membership_watch, &cancellation_token).await {
                     break;
@@ -182,6 +200,7 @@ async fn consume_scope<T: RecoveryTarget>(
     model: &str,
     worker_type: &str,
     serving_endpoint: &EndpointId,
+    metric_scope: MismatchMetricScope,
     cancellation_token: &CancellationToken,
     retry_delay: &mut Duration,
 ) -> ScopeExit {
@@ -195,7 +214,14 @@ async fn consume_scope<T: RecoveryTarget>(
                 }
                 membership_watch.borrow_and_update();
                 let view = client.sync_membership().await;
-                update_mismatch_metric(metrics, &view, model, worker_type, serving_endpoint);
+                update_mismatch_metric(
+                    metrics,
+                    &view,
+                    model,
+                    worker_type,
+                    serving_endpoint,
+                    metric_scope,
+                );
                 if view.resolved_kv_state_endpoint() != Some(kv_state_endpoint) {
                     return ScopeExit::Rebind;
                 }
@@ -237,16 +263,9 @@ pub(super) fn update_mismatch_metric(
     model: &str,
     worker_type: &str,
     serving_endpoint: &EndpointId,
+    metric_scope: MismatchMetricScope,
 ) {
-    let mismatch_count = view
-        .sources
-        .iter()
-        .filter(|(worker, status)| match status {
-            KvSourceStatus::Missing | KvSourceStatus::Ambiguous(_) => true,
-            KvSourceStatus::ActiveLiveOnly(_) => view.recovery_expected(worker).unwrap_or(false),
-            KvSourceStatus::ActiveRecoverable(_) => false,
-        })
-        .count();
+    let mismatch_count = mismatch_count(view, metric_scope);
     metrics.set_kv_event_source_mismatch_workers(
         model,
         worker_type,
@@ -257,20 +276,76 @@ pub(super) fn update_mismatch_metric(
     );
 }
 
+fn mismatch_count(view: &KvSourceMembershipView, metric_scope: MismatchMetricScope) -> usize {
+    match metric_scope {
+        MismatchMetricScope::Router(KvEventSourceRequirement::NotRequired) => 0,
+        MismatchMetricScope::Router(KvEventSourceRequirement::Unknown)
+        | MismatchMetricScope::Generic => legacy_mismatch_count(view),
+        MismatchMetricScope::Router(requirement) => {
+            if !requirement.requires_source() {
+                0
+            } else {
+                view.sources
+                    .iter()
+                    .filter(|(worker, status)| {
+                        view.kv_event_publishing_enabled(worker.worker_id) == Some(false)
+                            || if view.observation_state.is_bound() {
+                                source_status_is_mismatch(view, worker, status)
+                            } else {
+                                matches!(
+                                    status,
+                                    KvSourceStatus::Ambiguous(
+                                        crate::discovery::KvSourceAmbiguity::EndpointMapping { .. }
+                                    )
+                                )
+                            }
+                    })
+                    .count()
+            }
+        }
+    }
+}
+
+fn legacy_mismatch_count(view: &KvSourceMembershipView) -> usize {
+    view.sources
+        .iter()
+        .filter(|(worker, status)| source_status_is_mismatch(view, worker, status))
+        .count()
+}
+
+fn source_status_is_mismatch(
+    view: &KvSourceMembershipView,
+    worker: &dynamo_kv_router::protocols::WorkerWithDpRank,
+    status: &KvSourceStatus,
+) -> bool {
+    match status {
+        KvSourceStatus::Missing | KvSourceStatus::Ambiguous(_) => true,
+        KvSourceStatus::ActiveLiveOnly(_) => view.recovery_expected(worker).unwrap_or(false),
+        KvSourceStatus::ActiveRecoverable(_) => false,
+    }
+}
+
 pub(super) fn update_subscription_failure_metric(
     metrics: &RouterWorkerStatusMetrics,
     view: &KvSourceMembershipView,
     model: &str,
     worker_type: &str,
     serving_endpoint: &EndpointId,
+    metric_scope: MismatchMetricScope,
 ) {
+    let count = match metric_scope {
+        MismatchMetricScope::Router(KvEventSourceRequirement::NotRequired) => 0,
+        MismatchMetricScope::Generic
+        | MismatchMetricScope::Router(KvEventSourceRequirement::Unknown)
+        | MismatchMetricScope::Router(_) => view.sources.len(),
+    };
     metrics.set_kv_event_source_mismatch_workers(
         model,
         worker_type,
         &serving_endpoint.namespace,
         &serving_endpoint.component,
         &serving_endpoint.name,
-        view.sources.len(),
+        count,
     );
 }
 
@@ -294,17 +369,22 @@ pub(super) fn clear_mismatch_metric_on_cancellation(
     );
 }
 
-/// Dropping this handle cancels the KV event subscription.
-#[must_use = "dropping the handle cancels the KV event subscription"]
+/// Dropping this handle cancels the KV event subscription and its health monitor.
+#[must_use = "dropping the handle cancels the KV event subscription and health monitor"]
 pub(crate) struct KvEventSubscriptionHandle {
     cancel: CancellationToken,
-    completion: Option<oneshot::Receiver<()>>,
+    source_health_cancel: CancellationToken,
+    completions: Vec<oneshot::Receiver<()>>,
 }
 
 impl KvEventSubscriptionHandle {
+    pub(crate) fn stop_source_health_monitor(&self) {
+        self.source_health_cancel.cancel();
+    }
+
     pub(crate) async fn shutdown(mut self) {
         self.cancel.cancel();
-        if let Some(completion) = self.completion.take() {
+        for completion in self.completions.drain(..) {
             let _ = completion.await;
         }
     }
@@ -321,12 +401,15 @@ pub async fn start_subscriber(
     indexer: Indexer,
     membership_watch: KvSourceMembershipWatch,
     model: String,
+    worker_role: Option<WorkerType>,
+    source_requirement: KvEventSourceRequirement,
     worker_type: &'static str,
     cancellation_token: CancellationToken,
 ) -> Result<KvEventSubscriptionHandle> {
     let transport_kind = endpoint.component().drt().default_event_transport_kind();
     let direct_zmq = uses_direct_zmq(transport_kind);
     let cancel = cancellation_token.child_token();
+    let cancellation_guard = cancel.clone().drop_guard();
     let client = WorkerQueryClient::spawn(
         endpoint.component().clone(),
         IndexerRecoveryTarget::new(indexer),
@@ -334,6 +417,16 @@ pub async fn start_subscriber(
         cancel.child_token(),
     )
     .await?;
+    let source_health_cancel = cancel.child_token();
+    let health_completion = source_health::spawn(
+        membership_watch.clone(),
+        model.clone(),
+        worker_role,
+        source_requirement,
+        endpoint.id(),
+        source_health_cancel.clone(),
+    );
+    let metric_scope = MismatchMetricScope::Router(source_requirement);
 
     if !direct_zmq {
         tracing::info!(
@@ -352,6 +445,7 @@ pub async fn start_subscriber(
                 membership_watch,
                 model,
                 worker_type,
+                metric_scope,
                 task_cancel,
                 Some(startup_tx),
             )
@@ -361,9 +455,11 @@ pub async fn start_subscriber(
         startup_rx.await.map_err(|_| {
             anyhow::anyhow!("KV event subscription supervisor exited before reporting readiness")
         })?;
+        let cancel = cancellation_guard.disarm();
         return Ok(KvEventSubscriptionHandle {
             cancel,
-            completion: Some(completion_rx),
+            source_health_cancel,
+            completions: vec![completion_rx, health_completion],
         });
     }
 
@@ -379,6 +475,7 @@ pub async fn start_subscriber(
             membership_watch,
             model,
             worker_type,
+            metric_scope,
             task_cancel,
             Some(startup_tx),
         )
@@ -392,9 +489,11 @@ pub async fn start_subscriber(
             anyhow::anyhow!("Direct-ZMQ ingress supervisor exited before reporting readiness")
         })?
         .map_err(anyhow::Error::msg)?;
+    let cancel = cancellation_guard.disarm();
     Ok(KvEventSubscriptionHandle {
         cancel,
-        completion: Some(completion_rx),
+        source_health_cancel,
+        completions: vec![completion_rx, health_completion],
     })
 }
 
@@ -452,6 +551,7 @@ pub(crate) async fn start_target_subscriber<T: RecoveryTarget>(
         membership_watch,
         model,
         worker_type,
+        MismatchMetricScope::Generic,
         cancel.clone(),
         Some(startup_tx),
     ));
@@ -468,23 +568,145 @@ pub(crate) async fn start_target_subscriber<T: RecoveryTarget>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
+    use dynamo_kv_router::protocols::WorkerWithDpRank;
+
+    use crate::discovery::{
+        KvEventSource, KvSourceAmbiguity, KvSourceObservationState, KvStateEndpointResolution,
+    };
+
+    fn metric_view(
+        observation_state: KvSourceObservationState,
+        status: KvSourceStatus,
+        capability: Option<bool>,
+    ) -> KvSourceMembershipView {
+        let serving_endpoint = EndpointId {
+            namespace: "ns".to_string(),
+            component: "worker".to_string(),
+            name: "generate".to_string(),
+        };
+        let worker = WorkerWithDpRank::new(7, 0);
+        KvSourceMembershipView {
+            serving_endpoint: serving_endpoint.clone(),
+            endpoint_resolution: KvStateEndpointResolution::Resolved(serving_endpoint),
+            observation_state,
+            sources: HashMap::from([(worker, status)]),
+            kv_event_publishing_enabled: HashMap::from([(7, capability)]),
+            lifecycle_generations: HashMap::from([(worker, 0)]),
+            recovery_expected: HashMap::from([(worker, false)]),
+        }
+    }
+
+    #[test]
+    fn router_mismatch_metric_is_requirement_and_observation_aware() {
+        let rebinding = metric_view(
+            KvSourceObservationState::Rebinding,
+            KvSourceStatus::Missing,
+            Some(true),
+        );
+        assert_eq!(mismatch_count(&rebinding, MismatchMetricScope::Generic), 1);
+        assert_eq!(
+            mismatch_count(
+                &rebinding,
+                MismatchMetricScope::Router(KvEventSourceRequirement::Unknown)
+            ),
+            1
+        );
+        assert_eq!(
+            mismatch_count(
+                &rebinding,
+                MismatchMetricScope::Router(KvEventSourceRequirement::CacheAwareRouting)
+            ),
+            0
+        );
+
+        let worker = WorkerWithDpRank::new(7, 0);
+        let active_disabled = metric_view(
+            KvSourceObservationState::Bound,
+            KvSourceStatus::ActiveLiveOnly(KvEventSource {
+                kv_state_endpoint: rebinding.serving_endpoint.clone(),
+                worker,
+                publisher_id: 11,
+                recovery_target: None,
+            }),
+            Some(false),
+        );
+        assert_eq!(
+            mismatch_count(&active_disabled, MismatchMetricScope::Generic),
+            0
+        );
+        assert_eq!(
+            mismatch_count(
+                &active_disabled,
+                MismatchMetricScope::Router(KvEventSourceRequirement::CacheAwareRouting)
+            ),
+            1
+        );
+        assert_eq!(
+            mismatch_count(
+                &rebinding,
+                MismatchMetricScope::Router(KvEventSourceRequirement::NotRequired)
+            ),
+            0
+        );
+
+        let endpoint_mapping_ambiguity = metric_view(
+            KvSourceObservationState::Rebinding,
+            KvSourceStatus::Ambiguous(KvSourceAmbiguity::EndpointMapping {
+                endpoints: vec![rebinding.serving_endpoint.clone()],
+            }),
+            Some(true),
+        );
+        assert_eq!(
+            mismatch_count(
+                &endpoint_mapping_ambiguity,
+                MismatchMetricScope::Router(KvEventSourceRequirement::CacheAwareRouting)
+            ),
+            1
+        );
+    }
 
     #[tokio::test]
-    async fn subscription_handle_shutdown_waits_for_completion() {
+    async fn subscription_handle_shutdown_waits_for_all_owned_tasks() {
         let cancel = CancellationToken::new();
-        let task_cancel = cancel.clone();
-        let (completion_tx, completion_rx) = oneshot::channel();
-        tokio::spawn(async move {
-            task_cancel.cancelled().await;
-            let _ = completion_tx.send(());
-        });
+        let source_health_cancel = cancel.child_token();
+        let mut completions = Vec::new();
+        for _ in 0..2 {
+            let task_cancel = cancel.clone();
+            let (completion_tx, completion_rx) = oneshot::channel();
+            completions.push(completion_rx);
+            tokio::spawn(async move {
+                task_cancel.cancelled().await;
+                let _ = completion_tx.send(());
+            });
+        }
         let handle = KvEventSubscriptionHandle {
             cancel,
-            completion: Some(completion_rx),
+            source_health_cancel,
+            completions,
         };
 
         tokio::time::timeout(Duration::from_secs(1), handle.shutdown())
             .await
             .expect("subscription shutdown should complete");
+    }
+
+    #[tokio::test]
+    async fn stopping_source_health_preserves_subscription_for_inflight_requests() {
+        let cancel = CancellationToken::new();
+        let source_health_cancel = cancel.child_token();
+        let health_observer = source_health_cancel.clone();
+        let handle = KvEventSubscriptionHandle {
+            cancel: cancel.clone(),
+            source_health_cancel,
+            completions: Vec::new(),
+        };
+
+        handle.stop_source_health_monitor();
+
+        health_observer.cancelled().await;
+        assert!(!cancel.is_cancelled());
+        handle.shutdown().await;
     }
 }

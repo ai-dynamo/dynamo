@@ -664,6 +664,7 @@ async def init_llm_worker(
             config.enable_local_indexer
             and config.disaggregation_mode != DisaggregationMode.DECODE
         )
+        runtime_config.kv_event_publishing_enabled = config.use_kv_events
         # Set data_parallel_size for attention DP mode
         # This enables the router's scheduler to correctly iterate over all dp_ranks
         # Need to name ADP as `data_parallel_size` for parity with other frameworks

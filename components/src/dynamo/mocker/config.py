@@ -376,6 +376,9 @@ def build_runtime_config(
     rc.enable_local_indexer = (
         engine_args.enable_local_indexer and not engine_args.is_decode()
     )
+    rc.kv_event_publishing_enabled = (
+        engine_args.enable_prefix_caching and not engine_args.is_decode()
+    )
     rc.data_parallel_size = engine_args.dp_size
     rc.set_engine_specific("output_replay_consumer", "true")
 

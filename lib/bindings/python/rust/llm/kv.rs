@@ -1636,7 +1636,7 @@ async fn create_kv_router_from_endpoint(
         .as_ref()
         .map(|cfg| cfg.use_remote_indexer || cfg.serve_indexer)
         .unwrap_or(false);
-    let (model_name, enable_eagle) = {
+    let (model_name, enable_eagle, worker_role) = {
         let maybe_card = if needs_model_name {
             let wait_secs: u64 = std::env::var("DYN_ROUTER_MODEL_CARD_WAIT_SECS")
                 .ok()
@@ -1677,7 +1677,11 @@ async fn create_kv_router_from_endpoint(
         match maybe_card {
             Some(card) => {
                 let model_name = needs_model_name.then(|| card.display_name.clone());
-                (model_name, card.runtime_config.enable_eagle)
+                (
+                    model_name,
+                    card.runtime_config.enable_eagle,
+                    card.worker_type,
+                )
             }
             None => {
                 tracing::warn!(
@@ -1686,17 +1690,18 @@ async fn create_kv_router_from_endpoint(
                     endpoint = %endpoint_id.name,
                     "No model card found in discovery; defaulting to non-Eagle routing semantics"
                 );
-                (None, false)
+                (None, false, None)
             }
         }
     };
 
     let kv_router = model_manager
-        .kv_chooser_for(
+        .kv_chooser_for_with_worker_role(
             &endpoint.inner,
             block_size as u32,
             kv_router_config,
             prefill_load_estimator,
+            worker_role,
             worker_type,
             model_name,
             enable_eagle,

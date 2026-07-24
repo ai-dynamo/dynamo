@@ -31,6 +31,11 @@ from tests.router.helper import (
     wait_for_workers_ready,
 )
 from tests.router.router_process import FrontendRouterProcess, KVRouterProcess
+from tests.utils.router_logs import (
+    parse_kv_event_diagnostics,
+    select_kv_event_diagnostics,
+    wait_for_kv_event_diagnostics,
+)
 
 if TYPE_CHECKING:
     from tests.conftest import NatsServer
@@ -224,6 +229,127 @@ def _test_router_basic(
         )
 
         logger.info(f"Successfully completed {num_requests} requests")
+
+
+def _test_kv_event_publisher_disabled_diagnostic(
+    *,
+    frontend,
+    engine_workers,
+    diagnostic_workers,
+    frontend_port: int,
+    test_payload: dict,
+    model_name: str,
+    expected_worker_role: str,
+    expected_requirement: str,
+    expected_rank_count: int,
+    unexpected_worker_roles: tuple[str, ...] = (),
+    expected_total_diagnostics: int = 1,
+    store_backend: str = "etcd",
+    request_plane: str = "tcp",
+):
+    """Assert an explicit disabled publisher is diagnosed without blocking serving."""
+
+    worker_groups = (
+        list(engine_workers)
+        if isinstance(engine_workers, (list, tuple))
+        else [engine_workers]
+    )
+    expected_num_workers = sum(group.num_workers for group in worker_groups)
+
+    async def discover_diagnostic_worker_ids() -> set[int]:
+        runtime = get_runtime(
+            store_backend=store_backend,
+            request_plane=request_plane,
+        )
+        try:
+            endpoint = runtime.endpoint(
+                f"{diagnostic_workers.namespace}."
+                f"{diagnostic_workers.component_name}.generate"
+            )
+            return set(
+                await poll_for_worker_instances(
+                    endpoint,
+                    diagnostic_workers.num_workers,
+                )
+            )
+        finally:
+            runtime.shutdown()
+
+    expected_worker_ids = asyncio.run(discover_diagnostic_worker_ids())
+    expected_serving_endpoint = (
+        f"{diagnostic_workers.namespace}/"
+        f"{diagnostic_workers.component_name}/generate"
+    )
+    expected_dp_ranks = ",".join(str(rank) for rank in range(expected_rank_count))
+
+    frontend_url = f"http://localhost:{frontend_port}"
+    asyncio.run(
+        wait_for_frontend_ready(
+            frontend_url=frontend_url,
+            expected_num_workers=expected_num_workers,
+            timeout=120,
+            test_payload=test_payload,
+            engine_workers=worker_groups,
+            store_backend=store_backend,
+            request_plane=request_plane,
+        )
+    )
+
+    diagnostics = wait_for_kv_event_diagnostics(
+        frontend,
+        diagnostic_code="kv_event_publisher_disabled",
+        expected_count=expected_total_diagnostics,
+        worker_role=expected_worker_role,
+        timeout_s=10,
+    )
+    diagnostic = diagnostics[-1]
+    assert diagnostic.model == model_name
+    assert diagnostic.worker_role == expected_worker_role
+    assert diagnostic.requirement == expected_requirement
+    assert diagnostic.worker_id in expected_worker_ids
+    assert diagnostic.serving_endpoint == expected_serving_endpoint
+    assert diagnostic.kv_event_publishing_enabled is False
+    assert diagnostic.waited_ms == 0
+    assert diagnostic.rank_count == expected_rank_count
+    assert diagnostic.dp_ranks == expected_dp_ranks
+
+    async def assert_inference_succeeds() -> None:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{frontend_url}/v1/chat/completions",
+                json=test_payload,
+            ) as response:
+                body = await response.text()
+                assert response.status == 200, (
+                    "inference must continue when KV event publishing is disabled; "
+                    f"status={response.status}, body={body}"
+                )
+
+    asyncio.run(assert_inference_succeeds())
+
+    final_diagnostics = parse_kv_event_diagnostics(frontend.read_logs())
+    disabled_diagnostics = select_kv_event_diagnostics(
+        final_diagnostics,
+        diagnostic_code="kv_event_publisher_disabled",
+    )
+    assert len(disabled_diagnostics) == expected_total_diagnostics, (
+        "expected exactly one disabled-publisher diagnostic per worker lifecycle "
+        f"after successful inference, got {disabled_diagnostics}"
+    )
+    for worker_role in unexpected_worker_roles:
+        for diagnostic_code in (
+            "kv_event_publisher_disabled",
+            "kv_event_source_not_observed",
+        ):
+            unexpected = select_kv_event_diagnostics(
+                final_diagnostics,
+                diagnostic_code=diagnostic_code,
+                worker_role=worker_role,
+            )
+            assert not unexpected, (
+                f"worker role {worker_role!r} does not require KV events, but "
+                f"emitted {diagnostic_code!r} diagnostics: {unexpected}"
+            )
 
 
 def _test_router_override_router_config(

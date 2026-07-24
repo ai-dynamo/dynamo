@@ -1094,7 +1094,11 @@ impl ModelWatcher {
         if !component_has_instances {
             // No more workers of this component in this namespace — remove its WorkerSet
             let removed = self.manager.remove_worker_set(&model_name, &ws_key);
-            if removed.is_some() {
+            if let Some(worker_set) = &removed {
+                // Active requests can retain a retired router after discovery removes its
+                // WorkerSet. Stop only its diagnostic monitor so a replacement router becomes
+                // the sole reporter without disrupting in-flight request cleanup.
+                worker_set.stop_kv_source_health_monitor();
                 tracing::info!(
                     model_name,
                     namespace = %worker_namespace,
@@ -1591,11 +1595,12 @@ impl ModelWatcher {
                 if router_config.router_mode == RouterMode::KV && needs_preprocessed_routing {
                     Some(
                         self.manager
-                            .kv_chooser_for(
+                            .kv_chooser_for_with_worker_role(
                                 &endpoint,
                                 card.kv_cache_block_size,
                                 Some(router_config.kv_router_config.clone()),
                                 self.prefill_load_estimator.clone(),
+                                card.worker_type,
                                 WORKER_TYPE_DECODE, // This is the decode router
                                 Some(card.display_name.clone()),
                                 card.runtime_config.enable_eagle,

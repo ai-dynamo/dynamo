@@ -68,8 +68,41 @@ pub enum KvEventSourceConfig {
 
 enum KvEventSource {
     Zmq {
-        zmq_handle: tokio::task::JoinHandle<()>,
+        listener_abort_handle: tokio::task::AbortHandle,
+        supervisor_handle: tokio::task::JoinHandle<bool>,
     },
+}
+
+async fn supervise_zmq_listener(
+    listener_handle: tokio::task::JoinHandle<()>,
+    endpoint: String,
+    topic: String,
+    cancellation_token: CancellationToken,
+) -> bool {
+    let result = listener_handle.await;
+    if cancellation_token.is_cancelled() {
+        return false;
+    }
+
+    match result {
+        Ok(()) => {
+            tracing::error!(
+                %endpoint,
+                %topic,
+                "ZMQ listener terminated unexpectedly; stopping KV event publisher"
+            );
+        }
+        Err(error) => {
+            tracing::error!(
+                %endpoint,
+                %topic,
+                %error,
+                "ZMQ listener task failed unexpectedly; stopping KV event publisher"
+            );
+        }
+    }
+    cancellation_token.cancel();
+    true
 }
 
 impl KvEventSource {
@@ -88,30 +121,50 @@ impl KvEventSource {
                 topic,
                 image_token_id,
             } => {
-                let zmq_handle = component
-                    .drt()
-                    .runtime()
-                    .secondary()
-                    .spawn(start_zmq_listener(
-                        endpoint,
-                        topic,
-                        worker_id,
-                        tx,
-                        cancellation_token.clone(),
-                        kv_block_size,
-                        next_event_id,
-                        image_token_id,
-                    ));
+                let listener_handle =
+                    component
+                        .drt()
+                        .runtime()
+                        .secondary()
+                        .spawn(start_zmq_listener(
+                            endpoint.clone(),
+                            topic.clone(),
+                            worker_id,
+                            tx,
+                            cancellation_token.clone(),
+                            kv_block_size,
+                            next_event_id,
+                            image_token_id,
+                        ));
+                let listener_abort_handle = listener_handle.abort_handle();
+                let supervisor_handle =
+                    component
+                        .drt()
+                        .runtime()
+                        .secondary()
+                        .spawn(supervise_zmq_listener(
+                            listener_handle,
+                            endpoint,
+                            topic,
+                            cancellation_token,
+                        ));
 
-                Ok(KvEventSource::Zmq { zmq_handle })
+                Ok(KvEventSource::Zmq {
+                    listener_abort_handle,
+                    supervisor_handle,
+                })
             }
         }
     }
 
     fn shutdown(&self) {
         match self {
-            KvEventSource::Zmq { zmq_handle } => {
-                zmq_handle.abort();
+            KvEventSource::Zmq {
+                listener_abort_handle,
+                supervisor_handle,
+            } => {
+                listener_abort_handle.abort();
+                supervisor_handle.abort();
             }
         }
     }
@@ -331,6 +384,13 @@ impl KvEventPublisher {
             } else {
                 None
             };
+
+            if cancellation_token_clone.is_cancelled() {
+                if let Some(endpoint) = recovery_endpoint {
+                    let _ = endpoint.shutdown().await;
+                }
+                return;
+            }
 
             let source = DiscoveredKvEventSource {
                 kv_state_endpoint: kv_state_endpoint.clone(),
