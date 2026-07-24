@@ -876,6 +876,21 @@ jobs:
       copy_timeout_minutes: 10
     secrets: inherit
 
+  sglang-efa-copy-to-acr:
+    name: sglang-runtime-efa
+    needs: [changed-files, sglang-efa-build]
+    if: |
+      always() && !cancelled() &&
+      (needs.changed-files.outputs.sglang == 'true' ||
+       needs.changed-files.outputs.efa == 'true') &&
+      needs.sglang-efa-build.result == 'success'
+    uses: ./.github/workflows/shared-copy.yml
+    with:
+      target_tag_plain: ${{ needs.sglang-efa-build.outputs.target_tag_plain }}
+      cuda_version: '["13.0"]'
+      copy_timeout_minutes: 10
+    secrets: inherit
+
   snapshot-placeholder-sglang:
     name: SGLang Snapshot Placeholder
     needs: [changed-files, sglang-copy-to-acr]
@@ -1367,6 +1382,7 @@ jobs:
       - sglang-copy-to-acr
       - sglang-multi-gpu-test
       - sglang-efa-build
+      - sglang-efa-copy-to-acr
       - trtllm-copy-to-acr
       - trtllm-multi-gpu-test
       - trtllm-efa-build
