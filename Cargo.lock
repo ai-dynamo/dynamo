@@ -2939,6 +2939,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-vllm-mocker"
+version = "1.4.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "blake3",
+ "clap",
+ "dynamo-backend-common",
+ "dynamo-mocker",
+ "dynamo-vllm-sidecar",
+ "futures",
+ "prost-types 0.13.5",
+ "tokio",
+ "tokio-stream",
+ "tonic 0.13.1",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "dynamo-vllm-sidecar"
 version = "1.4.0"
 dependencies = [
