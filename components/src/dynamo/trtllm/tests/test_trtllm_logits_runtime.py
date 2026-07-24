@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Unit tests for the TRT-LLM slice of the
-DYN_ENABLE_TEST_LOGITS_PROCESSOR hook: the unified `from_args`
-tokenizer-init flip, the unified `generate` attach/skip matrix
+DYN_ENABLE_TEST_LOGITS_PROCESSOR hook: the TRT-LLM `from_args`
+tokenizer-init flip, the `generate` attach/skip matrix
 threaded through the shared spec entry layer in
 `dynamo.common.backend.engine`, the TRT-LLM realizer (spec entry →
 live `BaseLogitsProcessor` → `TrtllmDynamoLogitsAdapter`), the
@@ -13,8 +13,8 @@ no-op-on-empty contract.
 Shared-layer policy itself (generation-stage gating, spec entry
 composition, env-gated spec resolver) is tested in
 `dynamo.common.backend.tests.test_engine` without GPU or tensorrt_llm.
-These tests exercise the same policy through the unified TRT-LLM
-engine to confirm the wiring."""
+These tests exercise the same policy through the TRT-LLM
+backend to confirm the wiring."""
 
 from __future__ import annotations
 
@@ -48,7 +48,7 @@ pytestmark = [
 
 
 def test_attach_logits_processors_no_op_on_empty():
-    """The unified engine calls `attach_logits_processors` unconditionally
+    """The TRT-LLM backend calls `attach_logits_processors` unconditionally
     once `logits_processors_for_request` returns its (possibly empty) list of
     entries. Empty input must not touch
     `sampling_params.logits_processor`."""

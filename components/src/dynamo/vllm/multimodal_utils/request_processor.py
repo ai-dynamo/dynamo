@@ -3,7 +3,7 @@
 
 """Shared vLLM multimodal request preparation.
 
-The legacy handler and unified backend both receive Dynamo's
+The vLLM request handler receives Dynamo's
 ``PreprocessedRequest`` wire shape. This module owns the engine-facing
 translation: media loading, frontend-transferred ``mm_kwargs``, stable
 multimodal UUIDs, and the model-specific prefill/decode handoff.
@@ -232,16 +232,6 @@ def get_mm_processor_kwargs(request: dict[str, Any]) -> Optional[dict[str, Any]]
         if isinstance(extra_args, dict):
             value = extra_args.get("mm_processor_kwargs")
     return value
-
-
-@dataclass
-class PreparedMultimodalPrompt:
-    """Engine-ready prompt plus data needed for a prefill handoff."""
-
-    prompt: Any
-    request: dict[str, Any]
-    multi_modal_data: Optional[dict[str, Any]] = None
-    mm_processor_kwargs: Optional[dict[str, Any]] = None
 
 
 @dataclass
@@ -655,9 +645,8 @@ class VllmMultimodalRequestProcessor:
         """Apply aggregated/P/D media policy to a validated request.
 
         Entry points must call :meth:`validate_multimodal_request` on the raw
-        request before invoking this transformation. ``prepare_prompt`` does
-        that for unified engines; the legacy handler validates at ``generate``
-        so text and token modes share the same security boundary.
+        request before invoking this transformation. The handler validates at
+        ``generate`` so text and token modes share the same security boundary.
         """
         mm_processor_kwargs = get_mm_processor_kwargs(request)
         request_for_prompt = dict(request)
@@ -730,26 +719,4 @@ class VllmMultimodalRequestProcessor:
             multi_modal_data=multi_modal_data,
             mm_processor_kwargs=mm_processor_kwargs,
             pre_rendered_prompt=pre_rendered,
-        )
-
-    async def prepare_prompt(
-        self,
-        request: dict[str, Any],
-        request_id: str,
-        context: Any,
-        mode: DisaggregationMode,
-    ) -> PreparedMultimodalPrompt:
-        """Prepare the complete engine prompt for the unified backend."""
-        self.validate_multimodal_request(request)
-        prepared = await self.prepare_input(request, request_id, context, mode)
-        prompt = prepared.pre_rendered_prompt or self.build_tokens_prompt(
-            prepared.request,
-            prepared.multi_modal_data,
-            prepared.mm_processor_kwargs,
-        )
-        return PreparedMultimodalPrompt(
-            prompt=prompt,
-            request=prepared.request,
-            multi_modal_data=prepared.multi_modal_data,
-            mm_processor_kwargs=prepared.mm_processor_kwargs,
         )
