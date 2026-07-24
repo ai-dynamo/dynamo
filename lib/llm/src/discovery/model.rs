@@ -24,7 +24,8 @@ use crate::types::{
         audios::OpenAIAudiosStreamingEngine,
         chat_completions::OpenAIChatCompletionsStreamingEngine,
         completions::OpenAICompletionsStreamingEngine, embeddings::OpenAIEmbeddingsStreamingEngine,
-        images::OpenAIImagesStreamingEngine, videos::OpenAIVideosStreamingEngine,
+        generate::GenerateStreamingEngine, images::OpenAIImagesStreamingEngine,
+        videos::OpenAIVideosStreamingEngine,
     },
 };
 
@@ -73,6 +74,26 @@ pub struct ModelReadiness {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     pub namespaces: std::collections::BTreeMap<String, NamespaceReadiness>,
+}
+
+/// More than one endpoint leaf for a P/D role is trying to use the
+/// namespace-level prefill rendezvous.
+///
+/// DynamoGraphDeployment convention gives one model topology a namespace and
+/// advertises one prefill endpoint plus one decode endpoint within it.
+/// [`EndpointId`](dynamo_runtime::protocols::EndpointId) identifies each leaf;
+/// it is deliberately not also treated as implicit pairing metadata. Multiple
+/// endpoint leaves for either role are therefore ambiguous, rather than being
+/// paired by discovery arrival order.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "model {model:?} namespace {namespace:?} has ambiguous endpoint-scoped P/D topology (prefill={prefill_endpoints:?}, decode={decode_endpoints:?})"
+)]
+pub(crate) struct AmbiguousPrefillRouterTopology {
+    model: String,
+    namespace: String,
+    prefill_endpoints: Vec<String>,
+    decode_endpoints: Vec<String>,
 }
 
 /// Readiness facts for one namespace, from [`Model::evaluate_namespace`].
@@ -145,12 +166,133 @@ impl Model {
             .map(|entry| entry.value().clone())
     }
 
+    /// Return the decode WorkerSet for the only complete typed P/D topology in
+    /// a namespace.
+    ///
+    /// The rendezvous remains intentionally keyed by `(model, namespace)`: a
+    /// namespace denotes one P/D topology, while exact EndpointIds denote its
+    /// leaves. More than one typed Prefill endpoint or more than one
+    /// typed Decode endpoint is ambiguous, whether or not its prefill router
+    /// has already been attached. Aggregated and Encode WorkerSets do not
+    /// participate and continue serving normally.
+    pub(crate) fn unique_prefill_routed_worker_set_in_namespace(
+        &self,
+        namespace: &str,
+    ) -> Result<Option<Arc<WorkerSet>>, AmbiguousPrefillRouterTopology> {
+        self.prefill_router_topology_in_namespace(namespace, None)
+    }
+
+    pub(crate) fn prefill_router_topology_with_decode_candidate(
+        &self,
+        namespace: &str,
+        decode_endpoint: &dynamo_runtime::protocols::EndpointId,
+    ) -> Result<Option<Arc<WorkerSet>>, AmbiguousPrefillRouterTopology> {
+        self.prefill_router_topology_in_namespace(namespace, Some(decode_endpoint))
+    }
+
+    fn prefill_router_topology_in_namespace(
+        &self,
+        namespace: &str,
+        decode_candidate: Option<&dynamo_runtime::protocols::EndpointId>,
+    ) -> Result<Option<Arc<WorkerSet>>, AmbiguousPrefillRouterTopology> {
+        use crate::worker_type::WorkerType;
+
+        let mut prefill_endpoints = self
+            .worker_sets
+            .iter()
+            .filter(|entry| {
+                entry.value().namespace() == namespace
+                    && entry.value().card().worker_type == Some(WorkerType::Prefill)
+            })
+            .map(|entry| Self::worker_set_identity(entry.key(), entry.value()))
+            .collect::<Vec<_>>();
+        prefill_endpoints.sort();
+
+        let mut decode_worker_sets = self
+            .worker_sets
+            .iter()
+            .filter(|entry| {
+                entry.value().namespace() == namespace
+                    && entry.value().card().worker_type == Some(WorkerType::Decode)
+            })
+            .map(|entry| {
+                let identity = Self::worker_set_identity(entry.key(), entry.value());
+                (identity, entry.value().clone())
+            })
+            .collect::<Vec<_>>();
+        decode_worker_sets.sort_by(|(left, _), (right, _)| left.cmp(right));
+
+        let mut decode_endpoints = decode_worker_sets
+            .iter()
+            .map(|(identity, _)| identity.clone())
+            .collect::<Vec<_>>();
+        if let Some(candidate) = decode_candidate
+            && !decode_endpoints
+                .iter()
+                .any(|identity| identity == &candidate.to_string())
+        {
+            decode_endpoints.push(candidate.to_string());
+        }
+        decode_endpoints.sort();
+
+        if prefill_endpoints.len() > 1 || decode_endpoints.len() > 1 {
+            return Err(AmbiguousPrefillRouterTopology {
+                model: self.name.clone(),
+                namespace: namespace.to_string(),
+                prefill_endpoints,
+                decode_endpoints,
+            });
+        }
+
+        if prefill_endpoints.len() == 1 && decode_endpoints.len() == 1 {
+            Ok(decode_worker_sets.pop().and_then(|(_, worker_set)| {
+                worker_set.prefill_router.is_some().then_some(worker_set)
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn worker_set_identity(key: &str, worker_set: &WorkerSet) -> String {
+        worker_set
+            .endpoint_id()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| format!("worker-set-key={key}"))
+    }
+
+    pub(crate) fn prefill_routed_decode_worker_sets_in_namespace(
+        &self,
+        namespace: &str,
+    ) -> Vec<Arc<WorkerSet>> {
+        use crate::worker_type::WorkerType;
+
+        self.worker_sets
+            .iter()
+            .filter(|entry| {
+                entry.value().namespace() == namespace
+                    && entry.value().card().worker_type == Some(WorkerType::Decode)
+                    && entry.value().prefill_router.is_some()
+            })
+            .map(|entry| entry.value().clone())
+            .collect()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.worker_sets.is_empty()
     }
 
     pub fn worker_set_count(&self) -> usize {
         self.worker_sets.len()
+    }
+
+    /// Snapshot all WorkerSets. Used by cross-role lifecycle coordination
+    /// where storage keys include role/surface suffixes but deployment
+    /// matching is based on `WorkerSet::namespace()`.
+    pub(crate) fn worker_sets(&self) -> Vec<Arc<WorkerSet>> {
+        self.worker_sets
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect()
     }
 
     /// Check if this model has any decode engine (chat or completions) across any WorkerSet.
@@ -221,6 +363,13 @@ impl Model {
         self.worker_sets
             .iter()
             .any(|entry| entry.value().has_realtime_engine())
+    }
+
+    /// Check if any WorkerSet has a generate engine.
+    pub fn has_generate_engine(&self) -> bool {
+        self.worker_sets
+            .iter()
+            .any(|entry| entry.value().has_generate_engine())
     }
 
     // -- Model serving readiness --
@@ -485,7 +634,7 @@ impl Model {
     ///
     /// Differs from [`Self::is_displayable`] in that it does **not** fall back
     /// to prefill-only WorkerSets: requires a WorkerSet that has a serving
-    /// engine attached, workers connected, and `can_serve_requests()` true.
+    /// engine attached and workers connected.
     /// Used by KServe gRPC `model_ready` / `server_ready` to avoid the race
     /// where a `ModelDeploymentCard` is registered before its WorkerSet has
     /// been wired up.
@@ -509,7 +658,7 @@ impl Model {
 
         self.worker_sets.iter().any(|entry| {
             let ws = entry.value();
-            if ws.worker_count() == 0 || !ws.can_serve_requests() {
+            if ws.worker_count() == 0 {
                 return false;
             }
             ws.has_any_serving_engine() || (!any_set_has_engine && ws.is_prefill_set())
@@ -564,6 +713,11 @@ impl Model {
             .ok_or_else(|| self.engine_error(self.has_realtime_engine()))
     }
 
+    pub fn get_generate_engine(&self) -> Result<GenerateStreamingEngine, ModelManagerError> {
+        self.select_worker_set_with(|ws| ws.generate_engine.clone())
+            .ok_or_else(|| self.engine_error(self.has_generate_engine()))
+    }
+
     // -- Combined engine + parsing options (atomically from one WorkerSet) --
 
     pub fn get_chat_engine_with_parsing(
@@ -582,6 +736,17 @@ impl Model {
                 .map(|e| (e, ws.parsing_options()))
         })
         .ok_or_else(|| self.engine_error(self.has_completions_engine()))
+    }
+
+    pub fn get_generate_engine_with_parsing(
+        &self,
+    ) -> Result<(GenerateStreamingEngine, ParsingOptions), ModelManagerError> {
+        self.select_worker_set_with(|ws| {
+            ws.generate_engine
+                .clone()
+                .map(|e| (e, ws.parsing_options()))
+        })
+        .ok_or_else(|| self.engine_error(self.has_generate_engine()))
     }
 
     // -- Worker monitoring (aggregated across WorkerSets) --
@@ -671,28 +836,21 @@ impl Model {
         // Fast path: single set (same zero-worker filtering as the multi-set path below)
         if snapshot.len() == 1 {
             let ws = &snapshot[0];
-            if ws.worker_count() == 0
-                || !ws.can_serve_requests()
-                || !ready_namespaces.contains(ws.namespace())
-            {
+            if ws.worker_count() == 0 || !ready_namespaces.contains(ws.namespace()) {
                 return None;
             }
             return extract(ws);
         }
 
-        // Collect eligible sets with their worker counts, skipping sets with no workers,
-        // sets whose prefill router has died under enforce_disagg, or sets in a namespace
-        // whose worker set is incomplete.
+        // Collect eligible sets with their worker counts, skipping sets with no workers or sets in
+        // a namespace whose worker set is incomplete.
         // In-process models (no discovery watcher) return count=1, so they always participate.
         // Discovery models with count=0 have no available workers and are skipped.
         let eligible: Vec<(T, usize)> = snapshot
             .iter()
             .filter_map(|ws| {
                 let count = ws.worker_count();
-                if count == 0
-                    || !ws.can_serve_requests()
-                    || !ready_namespaces.contains(ws.namespace())
-                {
+                if count == 0 || !ready_namespaces.contains(ws.namespace()) {
                     return None;
                 }
                 extract(ws).map(|val| (val, count))
@@ -1006,7 +1164,7 @@ mod tests {
 
     /// Build a WorkerSet with a deactivated PrefillRouter simulating "was activated, now dead".
     /// worker_count defaults to 1 (no instance_count_rx -> in-process default).
-    fn make_worker_set_with_dead_prefill(namespace: &str, enforce_disagg: bool) -> Arc<WorkerSet> {
+    fn make_worker_set_with_dead_prefill(namespace: &str) -> Arc<WorkerSet> {
         let mut ws = WorkerSet::new(
             namespace.to_string(),
             "abc".to_string(),
@@ -1015,7 +1173,6 @@ mod tests {
         let pr = PrefillRouter::disabled(
             std::sync::Arc::new(crate::discovery::ModelManager::new()),
             dynamo_runtime::pipeline::RouterMode::RoundRobin,
-            enforce_disagg,
             None,
         );
         pr.mark_active_for_test();
@@ -1024,8 +1181,88 @@ mod tests {
         Arc::new(ws)
     }
 
+    fn endpoint_id(
+        namespace: &str,
+        component: &str,
+        name: &str,
+    ) -> dynamo_runtime::protocols::EndpointId {
+        dynamo_runtime::protocols::EndpointId {
+            namespace: namespace.to_string(),
+            component: component.to_string(),
+            name: name.to_string(),
+        }
+    }
+
+    fn make_endpoint_worker_set(
+        namespace: &str,
+        component: &str,
+        endpoint: &str,
+        worker_type: crate::worker_type::WorkerType,
+        with_prefill_router: bool,
+    ) -> Arc<WorkerSet> {
+        let mut card = ModelDeploymentCard::default();
+        card.worker_type = Some(worker_type);
+        let mut worker_set = WorkerSet::new(
+            namespace.to_string(),
+            format!("{component}-{endpoint}"),
+            card,
+        );
+        worker_set.set_endpoint_id(endpoint_id(namespace, component, endpoint));
+        if with_prefill_router {
+            let router = PrefillRouter::disabled(
+                Arc::new(crate::discovery::ModelManager::new()),
+                dynamo_runtime::pipeline::RouterMode::RoundRobin,
+                None,
+            );
+            router.mark_active_for_test();
+            worker_set.prefill_router = Some(router);
+        }
+        Arc::new(worker_set)
+    }
+
+    #[test]
+    fn one_endpoint_scoped_prefill_decode_pair_is_unambiguous() {
+        use crate::worker_type::WorkerType;
+
+        let model = Model::new("llama".to_string());
+        let decode = make_endpoint_worker_set(
+            "deployment-a",
+            "decode",
+            "generate",
+            WorkerType::Decode,
+            true,
+        );
+        model.add_worker_set("decode-leaf".to_string(), decode.clone());
+        model.add_worker_set(
+            "prefill-leaf".to_string(),
+            make_endpoint_worker_set(
+                "deployment-a",
+                "prefill",
+                "generate",
+                WorkerType::Prefill,
+                false,
+            ),
+        );
+        model.add_worker_set(
+            "unrelated-aggregated".to_string(),
+            make_endpoint_worker_set(
+                "deployment-a",
+                "aggregated",
+                "generate",
+                WorkerType::Aggregated,
+                false,
+            ),
+        );
+
+        let selected = model
+            .unique_prefill_routed_worker_set_in_namespace("deployment-a")
+            .expect("one P/D pair is unambiguous")
+            .expect("decode leaf is present");
+        assert!(Arc::ptr_eq(&selected, &decode));
+    }
+
     /// Baseline: a WorkerSet without a PrefillRouter is always displayable
-    /// (worker_count=1, is_prefill_set=true, no can_serve_requests block).
+    /// (worker_count=1, is_prefill_set=true).
     #[test]
     fn test_is_displayable_true_basic() {
         let model = Model::new("llama".to_string());
@@ -1036,77 +1273,16 @@ mod tests {
         );
     }
 
-    /// When the prefill engine dies and enforce_disagg is set, the model must be
-    /// hidden from /v1/models.
+    /// Prefill-router lifecycle is not a separate model-visibility policy. Registered worker
+    /// topology gates the serving-ready model list and request selection.
     #[test]
-    fn test_is_displayable_false_when_prefill_dies_enforce_disagg() {
+    fn test_is_displayable_ignores_prefill_router_lifecycle() {
         let model = Model::new("llama".to_string());
-        model.add_worker_set(
-            "ns1".to_string(),
-            make_worker_set_with_dead_prefill("ns1", true),
-        );
-
-        assert!(
-            !model.is_displayable(),
-            "model must be hidden when prefill died and enforce_disagg=true"
-        );
-    }
-
-    /// When enforce_disagg is false the deployment can fall back to aggregated mode,
-    /// so the model should remain visible in /v1/models.
-    #[test]
-    fn test_is_displayable_true_when_prefill_dies_no_enforce() {
-        let model = Model::new("llama".to_string());
-        model.add_worker_set(
-            "ns1".to_string(),
-            make_worker_set_with_dead_prefill("ns1", false),
-        );
+        model.add_worker_set("ns1".to_string(), make_worker_set_with_dead_prefill("ns1"));
 
         assert!(
             model.is_displayable(),
-            "model must remain visible when prefill died but enforce_disagg=false (fallback)"
-        );
-    }
-
-    /// A single WorkerSet with a deactivated prefill router (enforce_disagg=true) must be
-    /// skipped by select_worker_set_with(), causing engine accessors to return Err.
-    #[test]
-    fn test_dead_prefill_single_set_not_selectable() {
-        let model = Model::new("llama".to_string());
-        model.add_worker_set(
-            "ns1".to_string(),
-            make_worker_set_with_dead_prefill("ns1", true),
-        );
-
-        assert!(model.get_chat_engine().is_err());
-        assert!(model.get_completions_engine().is_err());
-    }
-
-    /// With two WorkerSets -- one healthy, one with dead prefill -- the healthy set
-    /// keeps the model displayable. Removing the healthy set hides the model.
-    #[test]
-    fn test_dead_prefill_multi_set_skips_dead_namespace() {
-        let model = Model::new("llama".to_string());
-
-        // Healthy set (no prefill constraint)
-        model.add_worker_set("healthy".to_string(), make_worker_set("healthy", "abc"));
-
-        // Dead set (deactivated prefill + enforce_disagg)
-        model.add_worker_set(
-            "dead".to_string(),
-            make_worker_set_with_dead_prefill("dead", true),
-        );
-
-        assert!(
-            model.is_displayable(),
-            "model must be displayable when at least one healthy set exists"
-        );
-
-        // Removing the healthy set leaves only the dead set -- model must be hidden.
-        model.remove_worker_set("healthy");
-        assert!(
-            !model.is_displayable(),
-            "model must be hidden when only the dead prefill set remains"
+            "prefill-router lifecycle must not override registered topology"
         );
     }
 

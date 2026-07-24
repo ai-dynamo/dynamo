@@ -29,6 +29,8 @@ from dynamo.common.storage import upload_to_fs
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.output_modalities import RequestType
 from dynamo.common.utils.video_utils import normalize_video_frames
+from dynamo.vllm.handlers import build_prompt_tokens_details
+from dynamo.vllm.omni.utils import is_empty_payload
 
 logger = logging.getLogger(__name__)
 
@@ -101,7 +103,7 @@ class DiffusionFormatter:
         images = (
             stage_output.images if hasattr(stage_output, "images") else stage_output
         )
-        if not images:
+        if is_empty_payload(images):
             return None
 
         if request_type == RequestType.VIDEO_GENERATION:
@@ -191,7 +193,7 @@ class DiffusionFormatter:
         request_type: Any,
         response_format: Optional[str] = None,
     ) -> Dict[str, Any] | None:
-        if not images:
+        if is_empty_payload(images):
             return _error_chunk(request_id, self._model_name, "No images generated")
 
         data_urls = await self._prepare_images(images, request_id, response_format)
@@ -281,7 +283,7 @@ class AudioFormatter:
             if hasattr(stage_output, "multimodal_output")
             else stage_output
         )
-        if not mm_output:
+        if is_empty_payload(mm_output):
             return self._error_response(request_id, "No audio generated")
 
         response_format = ctx.get("response_format")
@@ -427,9 +429,10 @@ def _error_chunk(
 
 def _build_completion_usage(request_output: Any) -> Dict[str, Any]:
     """Build completion usage stats from a vLLM RequestOutput."""
+    prompt_token_ids = getattr(request_output, "prompt_token_ids", None)
     prompt_tokens = (
-        len(request_output.prompt_token_ids)
-        if getattr(request_output, "prompt_token_ids", None)
+        len(prompt_token_ids)
+        if prompt_token_ids is not None and not is_empty_payload(prompt_token_ids)
         else None
     )
     completion_tokens = len(request_output.outputs[0].token_ids)
@@ -440,10 +443,8 @@ def _build_completion_usage(request_output: Any) -> Dict[str, Any]:
         "total_tokens": (
             prompt_tokens + completion_tokens if prompt_tokens is not None else None
         ),
-        "prompt_tokens_details": (
-            {"cached_tokens": num_cached}
-            if (num_cached := getattr(request_output, "num_cached_tokens", None))
-            else None
+        "prompt_tokens_details": build_prompt_tokens_details(
+            getattr(request_output, "num_cached_tokens", None)
         ),
     }
 

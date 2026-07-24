@@ -711,7 +711,7 @@ pub(crate) mod tests {
 
         // Iterate through the generated TokenBlocks and the template Blocks,
         // setting the state and registering each one.
-        for (block, token_block) in blocks.iter_mut().zip(token_blocks.into_iter()) {
+        for (block, token_block) in blocks.iter_mut().zip(token_blocks) {
             assert!(block.state().is_reset()); // Start with empty blocks
             block.update_state(BlockState::Complete(CompleteState::new(token_block)));
             block
@@ -779,7 +779,7 @@ pub(crate) mod tests {
             assert!(unmatched.state().is_reset());
         }
 
-        for (unmatched, token_block) in unmatched_blocks.iter_mut().zip(token_blocks.into_iter()) {
+        for (unmatched, token_block) in unmatched_blocks.iter_mut().zip(token_blocks) {
             assert!(unmatched.state().is_reset());
             unmatched.update_state(BlockState::Complete(CompleteState::new(token_block)));
             unmatched.register(&mut registry).unwrap();

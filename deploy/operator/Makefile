@@ -4,6 +4,8 @@ IMG ?= controller:latest
 
 # ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
 ENVTEST_K8S_VERSION = 1.30.0
+ENVTEST_PACKAGES ?= ./internal/controller ./internal/webhook/validation
+ENVTEST_ASSETS_CMD = $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -214,6 +216,8 @@ tilt-up: kubectl helm ## Start Tilt for local operator development.
 	tilt up
 
 
+HELM_MANAGER_RBAC_ROLE := ../helm/charts/platform/components/operator/files/manager-role.yaml
+
 .PHONY: manifests
 manifests: controller-gen yq ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
 	# Use a large maxDescLen to ensure all field comments are included as OpenAPI descriptions
@@ -229,6 +233,12 @@ manifests: controller-gen yq ## Generate WebhookConfiguration, ClusterRole and C
 	done
 	echo "Removing name from standalone v1beta1 DynamoComponentDeployment required fields"
 	$(YQ) eval '(.spec.versions[] | select(.name == "v1beta1") | .schema.openAPIV3Schema.properties.spec.required) |= (. - ["name"])' -i --indent 2 config/crd/bases/nvidia.com_dynamocomponentdeployments.yaml
+	# PodTemplateSpec is an external Kubernetes type, so its item-level markers cannot be declared on the API field.
+	# Item-scoped rules avoid unbounded list comprehensions without imposing maxItems on the public API.
+	# The annotation value bound matches Kubernetes' total annotation size limit.
+	echo "Adding nested v1beta1 pod template CEL validation"
+	$(YQ) eval 'with(.spec.versions[] | select(.name == "v1beta1") | .schema.openAPIV3Schema.properties.spec.properties.podTemplate.properties; .spec.properties.containers.items."x-kubernetes-validations" = [{"rule": "self.name == \"main\" || (has(self.image) && self.image != \"\")", "message": "sidecar containers must specify a non-empty image"}] | .spec.properties.initContainers.items."x-kubernetes-validations" = [{"rule": "has(self.image) && self.image != \"\"", "message": "init containers must specify a non-empty image"}] | .metadata.properties.annotations."x-kubernetes-validations" = [{"rule": "!(\"nvidia.com/vllm-distributed-executor-backend\" in self) || self[\"nvidia.com/vllm-distributed-executor-backend\"].lowerAscii() in [\"mp\", \"ray\"]", "message": "podTemplate backend annotation must be mp or ray, case-insensitively"}] | .metadata.properties.annotations.additionalProperties.maxLength = 262144)' -i --indent 2 config/crd/bases/nvidia.com_dynamocomponentdeployments.yaml
+	$(YQ) eval 'with(.spec.versions[] | select(.name == "v1beta1") | .schema.openAPIV3Schema.properties.spec.properties.components.items.properties.podTemplate.properties; .spec.properties.containers.items."x-kubernetes-validations" = [{"rule": "self.name == \"main\" || (has(self.image) && self.image != \"\")", "message": "sidecar containers must specify a non-empty image"}] | .spec.properties.initContainers.items."x-kubernetes-validations" = [{"rule": "has(self.image) && self.image != \"\"", "message": "init containers must specify a non-empty image"}] | .metadata.properties.annotations."x-kubernetes-validations" = [{"rule": "!(\"nvidia.com/vllm-distributed-executor-backend\" in self) || self[\"nvidia.com/vllm-distributed-executor-backend\"].lowerAscii() in [\"mp\", \"ray\"]", "message": "podTemplate backend annotation must be mp or ray, case-insensitively"}] | .metadata.properties.annotations.additionalProperties.maxLength = 262144)' -i --indent 2 config/crd/bases/nvidia.com_dynamographdeployments.yaml
 	echo "Fixing PluginSpec parameters field: json.RawMessage needs x-kubernetes-preserve-unknown-fields instead of type: string"
 	for file in config/crd/bases/*.yaml; do \
 		$(YQ) eval '(.. | select(has("parameters")) | .parameters | select(has("format") and .format == "byte")) |= (del(.format) | del(.type) | .x-kubernetes-preserve-unknown-fields = true)' -i --indent 2 $$file || exit 1; \
@@ -254,9 +264,6 @@ manifests: controller-gen yq ## Generate WebhookConfiguration, ClusterRole and C
 			$(YQ) eval '.metadata.annotations."helm.sh/resource-policy" = "keep"' -i "$$file"; \
 		fi; \
 	done
-	echo "Copying CRD files to operator Helm chart crds/ directory"
-	mkdir -p ../helm/charts/platform/components/operator/crds/
-	cp config/crd/bases/*.yaml ../helm/charts/platform/components/operator/crds/
 	echo "Adding NVIDIA header to RBAC files"
 	for file in config/rbac/*.yaml; do \
 		if [ -f "$$file" ] && ! head -20 "$$file" | grep -q "NVIDIA CORPORATION"; then \
@@ -268,6 +275,9 @@ manifests: controller-gen yq ## Generate WebhookConfiguration, ClusterRole and C
 			} > "$$file.tmp" && mv "$$file.tmp" "$$file"; \
 		fi; \
 	done
+	echo "Copying generated manager RBAC role to the operator Helm chart"
+	mkdir -p $(dir $(HELM_MANAGER_RBAC_ROLE))
+	cp config/rbac/role.yaml $(HELM_MANAGER_RBAC_ROLE)
 
 .PHONY: generate
 generate: controller-gen generate-pydantic ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
@@ -290,8 +300,12 @@ vet: ## Run go vet against code.
 	go vet ./...
 
 .PHONY: test
-test: manifests generate fmt vet envtest ## Run tests.
-	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $$(go list ./... | grep -v /e2e | grep -v /test | grep -v /cmd) -coverprofile cover.out
+test: manifests generate fmt vet setup-envtest ## Run tests.
+	KUBEBUILDER_ASSETS="$$($(ENVTEST_ASSETS_CMD))" go test $$(go list ./... | grep -vE '/(e2e|test|cmd)($$|/)') -coverprofile cover.out
+
+.PHONY: envtest
+envtest: setup-envtest ## Run envtest-backed operator tests.
+	KUBEBUILDER_ASSETS="$$($(ENVTEST_ASSETS_CMD))" go test $(ENVTEST_PACKAGES)
 
 # Utilize Kind or modify the e2e tests to load the image locally, enabling compatibility with other vendors.
 .PHONY: test-e2e  # Run the e2e tests against a Kind k8s instance that is spun up.
@@ -596,8 +610,9 @@ controller-gen: $(CONTROLLER_GEN) ## Download controller-gen locally if necessar
 $(CONTROLLER_GEN): $(LOCALBIN)
 	$(call go-install-tool,$(CONTROLLER_GEN),sigs.k8s.io/controller-tools/cmd/controller-gen,$(CONTROLLER_TOOLS_VERSION))
 
-.PHONY: envtest
-envtest: $(ENVTEST) ## Download setup-envtest locally if necessary.
+.PHONY: setup-envtest
+setup-envtest: $(ENVTEST) ## Download setup-envtest and envtest Kubernetes assets locally if necessary.
+	$(ENVTEST_ASSETS_CMD) >/dev/null
 $(ENVTEST): $(LOCALBIN)
 	$(call go-install-tool,$(ENVTEST),sigs.k8s.io/controller-runtime/tools/setup-envtest,$(ENVTEST_VERSION))
 

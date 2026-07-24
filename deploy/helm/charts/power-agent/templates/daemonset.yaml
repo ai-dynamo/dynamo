@@ -1,9 +1,11 @@
 {{- include "power-agent.validateImageTag" . -}}
 {{- include "power-agent.validateMutex" . -}}
+{{- include "power-agent.validateActuator" . -}}
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 {{- if .Values.daemonset.enabled }}
+{{- include "power-agent.validateTerminationGracePeriod" . -}}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -35,8 +37,13 @@ spec:
       # returned by nvmlDeviceGetComputeRunningProcesses. See power_agent.py
       # _extract_pod_uid_from_cgroup.
       hostPID: true
-      # SIGTERM handler restores default TGP on managed GPUs before exit.
-      terminationGracePeriodSeconds: 30
+      # Graceful shutdown restores default TGP on managed GPUs before exit
+      # (the reconcile loop runs the restore after SIGTERM, not the signal
+      # handler itself). Give it headroom to finish within the grace period;
+      # the pod LIST best-effort bounds (see power_agent.py
+      # K8S_LIST_*_TIMEOUT_S) substantially limit cleanup delay if SIGTERM lands
+      # mid-LIST. Configurable so operators on high-density nodes can extend it.
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
       # NVIDIA Container Toolkit injects libnvidia-ml.so via the `nvidia`
       # runtime class. Pairing with NVIDIA_VISIBLE_DEVICES=all in the
       # container env exposes every GPU on the node WITHOUT consuming a
@@ -61,7 +68,7 @@ spec:
       {{- end }}
       containers:
         - name: power-agent
-          image: "{{ include "power-agent.imageRef" (dict "repository" .Values.image.repository "tag" .Values.image.tag) }}"
+          image: {{ include "power-agent.imageRef" (dict "repository" .Values.image.repository "tag" .Values.image.tag "digest" .Values.image.digest) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command:
             - python
@@ -71,13 +78,19 @@ spec:
             {{- if eq (include "power-agent.effectiveNamespaceRestricted" .) "true" }}
             # Namespace-scoped RBAC is in effect (Role + RoleBinding instead of
             # ClusterRole + ClusterRoleBinding — see role.yaml). The agent's
-            # default pod listing (`list_pod_for_all_namespaces`, power_agent.py:444)
-            # would 403 against the namespace-only token; pass --namespace so it
-            # uses `list_namespaced_pod` (:439) instead. Mirrors the dev-pod
-            # template's wiring (dev-pod.yaml:57).
+            # default pod listing (`list_pod_for_all_namespaces` in
+            # power_agent.py `_list_pods_on_node`) would 403 against the
+            # namespace-only token; pass --namespace so it uses
+            # `list_namespaced_pod` instead. Mirrors the dev-pod template's
+            # wiring (dev-pod.yaml).
             - --namespace=$(POD_NAMESPACE)
             {{- end }}
             - --prometheus-port={{ .Values.agent.prometheusPort }}
+            - --actuator={{ .Values.agent.actuator }}
+            {{- if eq .Values.agent.actuator "dcgm" }}
+            - --dcgm-host={{ .Values.agent.dcgm.host }}
+            - --dcgm-port={{ .Values.agent.dcgm.port }}
+            {{- end }}
           env:
             - name: NODE_NAME
               valueFrom:
@@ -98,7 +111,7 @@ spec:
           securityContext:
             # NVML power-cap writes require root, and the agent persists
             # managed-GPU UUID state to a hostPath — non-root images cannot
-            # write there. See plan §1.2 / power_agent.py:apply_cap.
+            # write there. See power_agent.py:apply_cap.
             privileged: true
             readOnlyRootFilesystem: false
             runAsUser: 0

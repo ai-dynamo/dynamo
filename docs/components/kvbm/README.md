@@ -5,10 +5,6 @@ title: KVBM
 subtitle: Unified memory layer and write-through KV cache spanning GPU, host, SSD, and remote storage via NIXL for TensorRT-LLM and vLLM.
 ---
 
-<p align="left">
-  <a href="./README.zh-CN.md" hreflang="zh-CN"><img src="../../assets/img/readme-zh-cn-link.svg" alt="简体中文" height="28" /></a>
-</p>
-
 The Dynamo KV Block Manager (KVBM) is a scalable runtime component designed to handle memory allocation, management, and remote sharing of Key-Value (KV) blocks for inference tasks across heterogeneous and distributed environments. It acts as a unified memory layer and write-through cache for frameworks like vLLM and TensorRT-LLM.
 
 KVBM offers:

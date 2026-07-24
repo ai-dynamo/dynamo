@@ -3,6 +3,7 @@
 
 from dynamo.common.multimodal.image_loader import ImageLoader
 from dynamo.vllm.multimodal_utils.chat_message_utils import extract_user_text
+from dynamo.vllm.multimodal_utils.embed_assembler import build_mixed_embeds
 from dynamo.vllm.multimodal_utils.encode_utils import (
     encode_image_embeddings,
     get_embedding_hash,
@@ -23,11 +24,18 @@ from dynamo.vllm.multimodal_utils.protocol import (
     PatchedTokensPrompt,
     vLLMMultimodalRequest,
 )
+from dynamo.vllm.multimodal_utils.vision_encoder_backend import (
+    Preprocessed,
+    VisionEncoderBackend,
+)
 
 __all__ = [
+    "build_mixed_embeds",
     "encode_image_embeddings",
     "extract_user_text",
     "get_encoder_components",
+    "Preprocessed",
+    "VisionEncoderBackend",
     "ImageLoader",
     "ModelFamily",
     "construct_mm_data",

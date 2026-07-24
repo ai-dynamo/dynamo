@@ -129,8 +129,8 @@ type DynamoCheckpointJobConfig struct {
 	// +kubebuilder:validation:Minimum=0
 	BackoffLimit *int32 `json:"backoffLimit,omitempty"`
 
-	// Deprecated: TTLSecondsAfterFinished is ignored. Checkpoint Jobs use a fixed
-	// 300 second TTL.
+	// Deprecated: TTLSecondsAfterFinished is ignored. The operator deletes checkpoint
+	// Jobs after recording their terminal outcome.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	TTLSecondsAfterFinished *int32 `json:"ttlSecondsAfterFinished,omitempty"`
@@ -198,6 +198,13 @@ type DynamoCheckpointStatus struct {
 	// JobName is the name of the checkpoint creation Job
 	// +optional
 	JobName string `json:"jobName,omitempty"`
+
+	// PodSnapshotName is the name of the PodSnapshot this checkpoint created to drive capture. It is
+	// the authoritative pointer to the snapshot (which is otherwise located by label, not by
+	// reconstructing its name) and lets the controller distinguish a never-created snapshot (empty)
+	// from one that was created and later went missing (set, but no longer found).
+	// +optional
+	PodSnapshotName string `json:"podSnapshotName,omitempty"`
 
 	// CreatedAt is the timestamp when the checkpoint became ready
 	// +optional

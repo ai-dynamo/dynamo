@@ -6,8 +6,15 @@ use super::components::OfflineRouterSnapshot;
 pub(super) use super::components::ReplayMode;
 #[cfg(test)]
 use super::components::TrafficStats;
+use super::core::round_robin::AggregatedRoundRobinPlacement;
+use super::core::{
+    AdmissionSource as CoreAdmissionSource, EngineEventBatch, NoEngineEvents, Placement,
+    PlacementDecision, PlacementPolicy, ReadyArrival, WorkerTopology,
+};
 use super::events::{SimulationEvent, SimulationWorkerStage};
-use super::planner_hook::{PlannerHook, PlannerTickMetrics};
+#[cfg(test)]
+use super::extensions::kv_router::AggRuntime;
+use super::planner_hook::{LatestFpmBuffer, PlannerHook, PlannerTickMetrics};
 use super::progress::ReplayProgress;
 use super::runtime_utils::{
     next_timestamp as choose_next_timestamp, pop_ready_planner_tick, pop_ready_worker_completion,
@@ -19,20 +26,18 @@ use super::state::AggRequestPhase;
 use super::state::OfflineWorkerSnapshot;
 use super::{
     components::{
-        AdmissionQueue, EngineComponent, EngineEffects, EnginePassMode, OfflineReplayRouter,
-        ReadyArrival, ScheduledWorkerCompletion, TrafficAccumulator, WorkerAdmission,
+        AdmissionQueue, EngineComponent, EngineEffects, EnginePassMode, NoReplayMetadata,
+        ReplayAdmissionMetadata, ReplayEngineObservation, ScheduledWorkerCompletion,
+        TrafficAccumulator,
     },
     state::AggRequestState,
 };
 use crate::common::protocols::{DirectRequest, ForwardPassSnapshot, MockEngineArgs, OutputSignal};
-use crate::loadgen::{ReplayRequestHashes, WorkloadDriver};
-use crate::replay::{
-    ReplayPrefillLoadEstimator, ReplayRouterMode, ReplayTerminalStatus, SlaThresholds,
-    TraceCollector,
-};
+use crate::loadgen::{ReplayRequestPayload, WorkloadDriver};
+#[cfg(test)]
+use crate::replay::ReplayRouterMode;
+use crate::replay::{ReplayTerminalStatus, SlaThresholds, TraceCollector};
 use anyhow::bail;
-use dynamo_kv_router::config::KvRouterConfig;
-use dynamo_kv_router::protocols::RouterEvent;
 use rustc_hash::FxHashMap;
 #[cfg(test)]
 use std::collections::HashMap;
@@ -67,20 +72,56 @@ struct AggRuntimeSnapshot {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(in crate::replay) struct AggRuntimeStats;
 
-pub(in crate::replay) struct AggRuntime {
+pub(in crate::replay) trait AggregatedPlacement<Events, Metadata>:
+    PlacementPolicy<ReplayRequestPayload, Metadata = Metadata, Observation = Events> + Sized
+where
+    Events: EngineEventBatch,
+    Metadata: ReplayAdmissionMetadata,
+{
+    #[cfg(test)]
+    fn is_router(&self) -> bool;
+
+    #[cfg(test)]
+    fn debug_router_snapshot(&self, now_ms: f64) -> Option<OfflineRouterSnapshot>;
+}
+
+impl<Events: EngineEventBatch> AggregatedPlacement<Events, ()>
+    for AggregatedRoundRobinPlacement<Events>
+{
+    #[cfg(test)]
+    #[inline]
+    fn is_router(&self) -> bool {
+        false
+    }
+
+    #[cfg(test)]
+    fn debug_router_snapshot(&self, _now_ms: f64) -> Option<OfflineRouterSnapshot> {
+        None
+    }
+}
+
+pub(in crate::replay) type RoundRobinAggRuntime =
+    AggRuntimeImpl<AggregatedRoundRobinPlacement<()>, NoEngineEvents, NoReplayMetadata>;
+
+pub(in crate::replay) struct AggRuntimeImpl<PlacementPolicyImpl, Observation, Metadata>
+where
+    Observation: ReplayEngineObservation,
+    Metadata: ReplayAdmissionMetadata,
+    PlacementPolicyImpl: AggregatedPlacement<Observation::Batch, Metadata>,
+{
     now_ms: f64,
-    next_worker_idx: usize,
+    dp_size: u32,
     next_event_seq: u64,
-    admission: AdmissionQueue,
+    admission: AdmissionQueue<Metadata>,
     requests: FxHashMap<Uuid, AggRequestState>,
-    engine: EngineComponent,
+    engine: EngineComponent<Observation>,
     collector: TraceCollector,
-    events: BinaryHeap<SimulationEvent>,
-    router: Option<OfflineReplayRouter>,
+    events: BinaryHeap<SimulationEvent<Observation::Batch>>,
+    placement: PlacementPolicyImpl,
     progress: ReplayProgress,
     stats: AggRuntimeStats,
-    /// Forward pass metrics accumulated between planner ticks.
-    fpm_buffer: Vec<(usize, ForwardPassSnapshot)>,
+    /// Latest forward pass metric per worker/rank since the previous planner tick.
+    fpm_buffer: LatestFpmBuffer,
     /// Traffic statistics accumulated between planner ticks.
     traffic: TrafficAccumulator,
     /// Optional cap on simulated wall-clock time. When set, `run()` exits
@@ -91,9 +132,8 @@ pub(in crate::replay) struct AggRuntime {
     /// calls back into the planner at each tick (the unified replacement for the
     /// old Python-driven `advance_to` stepping loop).
     planner_hook: Option<Box<dyn PlannerHook>>,
-    /// Whether to retain per-pass FPM snapshots. Only the planner consumes them, so
-    /// the plain `run()` path leaves this `false` (otherwise the buffer grows
-    /// unbounded for the whole run with no reader — the leak this gating fixes).
+    /// Whether to retain the latest FPM snapshot per worker/rank. Only the planner
+    /// consumes them, so the plain `run()` path leaves this `false`.
     collect_fpm: bool,
     #[cfg(test)]
     worker_active_requests: Vec<Vec<Uuid>>,
@@ -101,111 +141,96 @@ pub(in crate::replay) struct AggRuntime {
     stepped: bool,
 }
 
-impl AggRuntime {
-    /// Create an aggregated offline runtime seeded from an explicit request queue.
-    pub(in crate::replay) fn new(
+impl AggRuntimeImpl<AggregatedRoundRobinPlacement<()>, NoEngineEvents, NoReplayMetadata> {
+    pub(in crate::replay) fn new_round_robin(
         args: &MockEngineArgs,
-        router_config: Option<KvRouterConfig>,
-        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         pending: VecDeque<DirectRequest>,
         num_workers: usize,
         mode: ReplayMode,
-        router_mode: ReplayRouterMode,
     ) -> anyhow::Result<Self> {
-        Self::new_with_source(
+        Self::new_composed(
             args,
-            router_config,
-            prefill_load_estimator,
             AdmissionQueue::new_requests(pending, mode),
             num_workers,
-            router_mode,
+            |args, topology| Ok(AggregatedRoundRobinPlacement::new(args.dp_size, topology)),
         )
     }
 
-    /// Create an aggregated offline runtime whose admissions come from a workload driver.
-    pub(in crate::replay) fn new_workload(
+    pub(in crate::replay) fn new_round_robin_workload(
         args: &MockEngineArgs,
-        router_config: Option<KvRouterConfig>,
-        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         driver: WorkloadDriver,
         num_workers: usize,
         mode: ReplayMode,
-        router_mode: ReplayRouterMode,
     ) -> anyhow::Result<Self> {
-        Self::new_with_source(
+        Self::new_composed(
             args,
-            router_config,
-            prefill_load_estimator,
             AdmissionQueue::new_workload(driver, mode),
             num_workers,
-            router_mode,
+            |args, topology| Ok(AggregatedRoundRobinPlacement::new(args.dp_size, topology)),
         )
     }
+}
 
-    /// Shared constructor for both raw-request and workload-driven admissions.
-    fn new_with_source(
+impl<PlacementPolicyImpl, Observation, Metadata>
+    AggRuntimeImpl<PlacementPolicyImpl, Observation, Metadata>
+where
+    Observation: ReplayEngineObservation,
+    Metadata: ReplayAdmissionMetadata,
+    PlacementPolicyImpl: AggregatedPlacement<Observation::Batch, Metadata>,
+{
+    pub(in crate::replay::offline) fn new_composed(
         args: &MockEngineArgs,
-        router_config: Option<KvRouterConfig>,
-        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
-        admission: AdmissionQueue,
+        admission: AdmissionQueue<Metadata>,
         num_workers: usize,
-        router_mode: ReplayRouterMode,
+        create_placement: impl FnOnce(
+            &MockEngineArgs,
+            Vec<WorkerTopology>,
+        ) -> anyhow::Result<PlacementPolicyImpl>,
     ) -> anyhow::Result<Self> {
         let args = args.clone().normalized()?;
-        let decode_gpus_per_worker = args.aic_gpus_per_worker();
-        let progress = ReplayProgress::new(admission.total_requests(), "offline replay");
-        let router = match router_mode {
-            ReplayRouterMode::RoundRobin => None,
-            ReplayRouterMode::KvRouter => Some(OfflineReplayRouter::new(
-                &args,
-                router_config,
-                prefill_load_estimator,
-                num_workers,
-            )?),
-        };
-        let capture_kv_events = router.is_some();
-        let mut engine = EngineComponent::new(
+        let progress = ReplayProgress::new(
+            CoreAdmissionSource::total_requests(&admission),
+            "offline replay",
+        );
+        let mut engine = EngineComponent::<Observation>::new_ranked(
             SimulationWorkerStage::Aggregated,
             EnginePassMode::Visible,
-            (0..num_workers)
-                .map(|worker_idx| {
-                    super::state::OfflineWorkerState::new(
-                        worker_idx,
-                        args.clone(),
-                        capture_kv_events,
-                    )
-                })
-                .collect(),
+            args.clone(),
+            num_workers,
         );
-        engine.set_scaling_args(args, capture_kv_events);
+        engine.set_scaling_args(args.clone(), Observation::CAPTURE_RAW);
+        let placement = create_placement(&args, engine.active_topology())?;
 
         // Aggregated replay has a single (decode) pool; record its GPUs/worker
         // so the report can express GPU-hours from the mocker's own parallelism.
         let mut collector = TraceCollector::default();
-        collector.set_gpus_per_worker(0, decode_gpus_per_worker);
+        collector.set_gpus_per_worker(0, args.aic_gpus_per_worker());
 
         Ok(Self {
             now_ms: 0.0,
-            next_worker_idx: 0,
+            dp_size: args.dp_size.max(1),
             next_event_seq: 0,
             admission,
             requests: FxHashMap::default(),
             engine,
             collector,
             events: BinaryHeap::new(),
-            router,
+            placement,
             progress,
             #[cfg(test)]
             stats: AggRuntimeStats::default(),
             #[cfg(not(test))]
             stats: AggRuntimeStats,
-            fpm_buffer: Vec::new(),
+            fpm_buffer: LatestFpmBuffer::default(),
             traffic: TrafficAccumulator::new(),
             max_sim_time_ms: None,
             planner_hook: None,
             collect_fpm: false,
             #[cfg(test)]
-            worker_active_requests: vec![Vec::new(); num_workers],
+            worker_active_requests: vec![
+                Vec::new();
+                num_workers.saturating_mul(args.dp_size.max(1) as usize)
+            ],
             #[cfg(test)]
             stepped: false,
         })
@@ -248,6 +273,10 @@ impl AggRuntime {
     /// planner via recurring `PlannerTick` events (one `on_tick` callback per tick).
     pub(in crate::replay) fn with_planner_hook(mut self, hook: Box<dyn PlannerHook>) -> Self {
         self.collect_fpm = true;
+        for worker_id in self.engine.active_group_ids() {
+            self.fpm_buffer
+                .activate_worker(worker_id, self.dp_size, self.now_ms);
+        }
         self.planner_hook = Some(hook);
         self
     }
@@ -260,11 +289,7 @@ impl AggRuntime {
 
     /// Count all requests currently consuming cluster capacity, including router-queued ones.
     fn cluster_in_flight(&self) -> usize {
-        self.engine.in_flight()
-            + self
-                .router
-                .as_ref()
-                .map_or(0, OfflineReplayRouter::pending_count)
+        self.engine.in_flight() + self.placement.pending_count()
     }
 
     /// Track the peak cluster occupancy seen during the replay.
@@ -279,25 +304,12 @@ impl AggRuntime {
     /// Track the maximum number of requests parked in the offline router.
     fn record_router_pending(&mut self) {
         #[cfg(test)]
-        let Some(router) = self.router.as_ref() else {
-            return;
-        };
-        #[cfg(test)]
         {
             self.stats.max_router_pending_count = self
                 .stats
                 .max_router_pending_count
-                .max(router.pending_count());
+                .max(self.placement.pending_count());
         }
-    }
-
-    /// Pick the next active worker in round-robin order.
-    fn next_worker(&mut self) -> usize {
-        let active = self.engine.active_worker_ids();
-        debug_assert!(!active.is_empty(), "no active workers for round-robin");
-        let idx = self.next_worker_idx % active.len();
-        self.next_worker_idx = idx + 1;
-        active[idx]
     }
 
     /// Record which worker accepted a request and refresh in-flight stats.
@@ -311,6 +323,22 @@ impl AggRuntime {
                 .insert(_uuid, _worker_idx);
         }
         self.record_in_flight_peak();
+    }
+
+    /// Preserve the live `(worker_id, dp_rank)` identity when forwarding a
+    /// rank-local scheduler snapshot to the planner bridge.
+    fn record_fpm(
+        &mut self,
+        rank_id: usize,
+        mut snapshot: ForwardPassSnapshot,
+    ) -> anyhow::Result<()> {
+        let (worker_id, dp_rank) = self.engine.rank_identity(rank_id).ok_or_else(|| {
+            anyhow::anyhow!("offline replay FPM references unknown rank scheduler {rank_id}")
+        })?;
+        snapshot.worker_id = worker_id.to_string();
+        snapshot.dp_rank = dp_rank;
+        self.fpm_buffer.insert(worker_id, snapshot, self.now_ms);
+        Ok(())
     }
 
     /// Deliver a request to a worker and update the runtime's bookkeeping for that assignment.
@@ -332,21 +360,20 @@ impl AggRuntime {
         Ok(())
     }
 
-    /// Materialize router admissions into concrete worker dispatches.
-    fn dispatch_router_admissions(
-        &mut self,
-        admissions: Vec<WorkerAdmission>,
-    ) -> anyhow::Result<()> {
-        for WorkerAdmission {
-            uuid,
-            worker_idx,
-            overlap_blocks,
-            isl_blocks,
-        } in admissions
-        {
-            self.traffic.on_admission(overlap_blocks, isl_blocks);
+    fn record_placement(&mut self, placement: Placement) {
+        if let Some(sample) = placement.planner_cache_sample {
+            self.traffic
+                .on_admission(sample.overlap_blocks, sample.isl_blocks);
             #[cfg(test)]
-            self.stats.overlap_history.push(overlap_blocks);
+            self.stats.overlap_history.push(sample.overlap_blocks);
+        }
+    }
+
+    /// Materialize policy-released admissions into concrete worker dispatches.
+    fn dispatch_placements(&mut self, placements: Vec<Placement>) -> anyhow::Result<()> {
+        for placement in placements {
+            self.record_placement(placement);
+            let uuid = placement.request_id;
             let request = self
                 .requests
                 .get_mut(&uuid)
@@ -354,7 +381,7 @@ impl AggRuntime {
                     anyhow::anyhow!("offline replay missing queued request state for {uuid}")
                 })?
                 .take_queued_request(uuid)?;
-            self.dispatch_to_worker(request, uuid, worker_idx)?;
+            self.dispatch_to_worker(request, uuid, placement.scheduler_id)?;
         }
         Ok(())
     }
@@ -362,42 +389,51 @@ impl AggRuntime {
     /// Admit one external request into the collector, optional router, and worker pool.
     fn assign_request(
         &mut self,
-        mut request: DirectRequest,
+        mut request: ReplayRequestPayload,
         arrival_time_ms: f64,
-        replay_hashes: Option<ReplayRequestHashes>,
+        metadata: Metadata,
+        session_id: Option<String>,
     ) -> anyhow::Result<Uuid> {
-        let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
-        request.uuid = Some(uuid);
+        let uuid = request.metadata().uuid.unwrap_or_else(Uuid::new_v4);
+        let input_length = request.input_length();
+        let output_length = request.metadata().max_output_tokens;
+        request.metadata_mut().uuid = Some(uuid);
         if matches!(self.admission.mode(), ReplayMode::Concurrency { .. }) {
-            request.arrival_timestamp_ms = Some(arrival_time_ms);
+            request.metadata_mut().arrival_timestamp_ms = Some(arrival_time_ms);
         }
 
-        self.collector.on_arrival(
-            uuid,
-            arrival_time_ms,
-            request.tokens.len(),
-            request.max_output_tokens,
-        );
+        self.collector
+            .on_arrival(uuid, arrival_time_ms, input_length, output_length);
 
-        if self.router.is_none() {
-            self.requests.insert(
-                uuid,
-                AggRequestState::new_running(request.tokens.len(), request.max_output_tokens),
-            );
-            let worker_idx = self.next_worker();
-            self.dispatch_to_worker(request, uuid, worker_idx)?;
-            return Ok(uuid);
+        let effects = self
+            .placement
+            .place(&request, metadata, session_id, self.now_ms)?;
+        match effects.decision {
+            PlacementDecision::Immediate(placement) => {
+                if placement.request_id != uuid {
+                    bail!(
+                        "offline placement returned request {} while placing {uuid}",
+                        placement.request_id
+                    );
+                }
+                self.record_placement(placement);
+                self.requests.insert(
+                    uuid,
+                    AggRequestState::new_running(input_length, output_length),
+                );
+                self.dispatch_to_worker(
+                    request.into_direct_request(),
+                    uuid,
+                    placement.scheduler_id,
+                )?;
+            }
+            PlacementDecision::Queued => {
+                self.requests
+                    .insert(uuid, AggRequestState::new_queued(request));
+            }
         }
-        let admissions = {
-            let router = self.router.as_mut().expect("router presence checked above");
-            router
-                .on_request_arrival(&request, replay_hashes, self.now_ms)?
-                .admissions
-        };
-        self.requests
-            .insert(uuid, AggRequestState::new_queued(request));
         self.record_router_pending();
-        self.dispatch_router_admissions(admissions)?;
+        self.dispatch_placements(effects.released)?;
         self.record_in_flight_peak();
         Ok(uuid)
     }
@@ -408,7 +444,7 @@ impl AggRuntime {
     fn is_done(&self) -> bool {
         self.only_idle_events_remain()
             && self.cluster_in_flight() == 0
-            && self.admission.is_drained()
+            && CoreAdmissionSource::is_drained(&self.admission)
             && self.engine.is_drained()
     }
 
@@ -417,7 +453,7 @@ impl AggRuntime {
     /// workers that will never receive requests should not block completion.
     fn is_workload_done(&self) -> bool {
         self.cluster_in_flight() == 0
-            && self.admission.is_drained()
+            && CoreAdmissionSource::is_drained(&self.admission)
             && self.engine.is_drained()
             && self.only_idle_events_remain()
     }
@@ -438,32 +474,32 @@ impl AggRuntime {
     /// Pick the next logical timestamp from either arrivals or scheduled worker completions.
     fn next_timestamp(&mut self) -> Option<f64> {
         let next_event_ms = self.events.peek().map(|event| event.at_ms);
-        let next = choose_next_timestamp(self.admission.next_ready_time_ms(), next_event_ms);
+        let next = choose_next_timestamp(
+            CoreAdmissionSource::next_ready_time_ms(&mut self.admission),
+            next_event_ms,
+        );
         #[cfg(feature = "kvbm-offload")]
         {
-            return choose_next_timestamp(next, self.engine.earliest_offload_deadline());
+            choose_next_timestamp(next, self.engine.earliest_offload_deadline())
         }
         #[cfg(not(feature = "kvbm-offload"))]
-        next
+        {
+            next
+        }
     }
 
     /// Apply router-visible KV events at the phase chosen by the scheduler core.
-    fn apply_router_events(&mut self, events: Vec<RouterEvent>) -> anyhow::Result<()> {
-        let Some(router) = self.router.as_mut() else {
-            return Ok(());
-        };
-        let effects = router.on_kv_events(events)?;
-        if !effects.admissions.is_empty() {
-            bail!("offline replay router KV event application must not admit requests");
-        }
-        Ok(())
+    fn apply_engine_observations(&mut self, events: Observation::Batch) -> anyhow::Result<()> {
+        let placements = self.placement.observe(events, self.now_ms)?;
+        self.dispatch_placements(placements)
     }
 
     #[cfg(feature = "kvbm-offload")]
     fn tick_offload_engines(&mut self) -> anyhow::Result<bool> {
-        let crate::scheduler::OffloadTickEffects {
-            kv_events,
+        let super::components::ObservedOffloadEffects {
+            engine_events,
             lifecycle_events,
+            progress,
         } = self.engine.tick_offload_engines(self.now_ms);
         if !lifecycle_events.is_empty() {
             bail!(
@@ -471,16 +507,14 @@ impl AggRuntime {
                 lifecycle_events.len()
             );
         }
-        let changed = !kv_events.is_empty();
-        self.apply_router_events(kv_events)?;
-        Ok(changed)
+        self.apply_engine_observations(engine_events)?;
+        Ok(progress.made_progress)
     }
 
     /// Consume one output signal, updating router state, collector state, and completion counts.
     fn process_output_signal(&mut self, signal: OutputSignal) -> anyhow::Result<()> {
-        let mut admissions = Vec::new();
         if let Some(token_id) = signal.token_id {
-            self.admission.on_output_token(signal.uuid, token_id)?;
+            CoreAdmissionSource::on_output_token(&mut self.admission, signal.uuid, token_id)?;
         }
         if signal.completed {
             let status = if signal.rejected {
@@ -488,19 +522,15 @@ impl AggRuntime {
             } else {
                 ReplayTerminalStatus::Completed
             };
-            self.collector.on_terminal(signal.uuid, status);
+            self.collector.on_terminal(signal.uuid, self.now_ms, status);
             #[cfg(test)]
             self.remove_active_request(signal.uuid);
-            if let Some(router) = self.router.as_mut() {
-                admissions = router
-                    .on_request_completed(signal.uuid, self.now_ms)?
-                    .admissions;
-                #[cfg(test)]
-                {
-                    self.stats.router_freed_count += 1;
-                }
-                self.record_router_pending();
+            let placements = self.placement.request_terminal(signal.uuid, self.now_ms)?;
+            #[cfg(test)]
+            if self.placement.is_router() {
+                self.stats.router_freed_count += 1;
             }
+            self.record_router_pending();
             let removed_state = self.requests.remove(&signal.uuid).ok_or_else(|| {
                 anyhow::anyhow!("offline replay missing request state for {}", signal.uuid)
             })?;
@@ -508,16 +538,30 @@ impl AggRuntime {
             // traffic deltas (they still free their slot and advance below).
             if !signal.rejected {
                 let latencies = self.collector.request_latencies(signal.uuid);
+                let actual_output_tokens = self
+                    .collector
+                    .actual_output_length(signal.uuid)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "offline replay missing collector state for {}",
+                            signal.uuid
+                        )
+                    })?;
+                debug_assert!(actual_output_tokens <= removed_state.output_tokens);
                 self.traffic.on_request(
                     removed_state.input_tokens,
-                    removed_state.output_tokens,
+                    actual_output_tokens,
                     latencies,
                 );
             }
-            self.admission
-                .on_request_terminal(signal.uuid, self.now_ms, signal.rejected)?;
+            CoreAdmissionSource::on_terminal(
+                &mut self.admission,
+                signal.uuid,
+                self.now_ms,
+                signal.rejected,
+            )?;
             self.progress.inc_completed();
-            self.dispatch_router_admissions(admissions)?;
+            self.dispatch_placements(placements)?;
             return Ok(());
         }
 
@@ -538,17 +582,13 @@ impl AggRuntime {
                 anyhow::anyhow!("offline replay missing request state for {}", signal.uuid)
             })?
             .prefill_completed = true;
-        if let Some(router) = self.router.as_mut() {
-            admissions = router
-                .on_prefill_completed(signal.uuid, self.now_ms)?
-                .admissions;
-            #[cfg(test)]
-            {
-                self.stats.prefill_marked_count += 1;
-            }
-            self.record_router_pending();
+        let placements = self.placement.prefill_completed(signal.uuid, self.now_ms)?;
+        #[cfg(test)]
+        if self.placement.is_router() {
+            self.stats.prefill_marked_count += 1;
         }
-        self.dispatch_router_admissions(admissions)?;
+        self.record_router_pending();
+        self.dispatch_placements(placements)?;
 
         Ok(())
     }
@@ -574,11 +614,11 @@ impl AggRuntime {
         _worker_idx: usize,
         _completed_requests: usize,
         output_signals: Vec<OutputSignal>,
-        kv_events: Vec<RouterEvent>,
+        engine_events: Observation::Batch,
         accept_length_output_tokens: usize,
         accept_length_decode_forwards: usize,
     ) -> anyhow::Result<()> {
-        self.apply_router_events(kv_events)?;
+        self.apply_engine_observations(engine_events)?;
         self.traffic
             .on_accept_length_sample(accept_length_output_tokens, accept_length_decode_forwards);
         for signal in output_signals {
@@ -590,19 +630,23 @@ impl AggRuntime {
     /// Drain all worker-completion events scheduled for the current logical timestamp.
     fn apply_worker_completions(&mut self) -> anyhow::Result<bool> {
         let mut changed = false;
+        // TODO: Same-time DP-rank completions settle in deterministic event order, and
+        // each pass may drain router-pending work before its sibling ranks are applied.
+        // Preserve this lower-rank-first tie-break for now. Atomic settlement requires
+        // splitting router state mutation from pending-admission draining.
         while let Some(payload) = pop_ready_worker_completion(&mut self.events, self.now_ms) {
             debug_assert_eq!(payload.stage, SimulationWorkerStage::Aggregated);
             let payload = self.engine.on_scheduled_completion(payload)?;
             if self.collect_fpm
                 && let Some(fpm) = payload.fpm
             {
-                self.fpm_buffer.push((payload.worker_idx, fpm));
+                self.record_fpm(payload.worker_idx, fpm)?;
             }
             self.process_completed_pass(
                 payload.worker_idx,
                 payload.completed_requests,
                 payload.output_signals,
-                payload.kv_events,
+                payload.engine_events,
                 payload.accept_length_output_tokens,
                 payload.accept_length_decode_forwards,
             )?;
@@ -615,19 +659,20 @@ impl AggRuntime {
     /// Release every admission made ready by the shared admission queue.
     fn release_ready_arrivals(&mut self) -> anyhow::Result<bool> {
         let mut released_any = false;
+        let cluster_in_flight = self.cluster_in_flight();
         for ready in self
             .admission
-            .drain_ready(self.now_ms, self.cluster_in_flight())?
+            .drain_ready_compact(self.now_ms, cluster_in_flight)?
         {
             let ReadyArrival {
                 request,
                 arrival_time_ms,
-                replay_hashes,
+                metadata,
                 session_id,
                 turn_index,
             } = ready;
-            let session_metadata = session_id.zip(turn_index);
-            let uuid = self.assign_request(request, arrival_time_ms, replay_hashes)?;
+            let session_metadata = session_id.clone().zip(turn_index);
+            let uuid = self.assign_request(request, arrival_time_ms, metadata, session_id)?;
             if let Some((session_id, turn_index)) = session_metadata {
                 self.collector
                     .on_session_metadata(uuid, session_id, turn_index);
@@ -652,23 +697,23 @@ impl AggRuntime {
         }
     }
 
-    fn handle_engine_effects(&mut self, effects: EngineEffects) -> anyhow::Result<()> {
-        if self.collect_fpm {
-            self.fpm_buffer.extend(effects.fpm_snapshots);
-        }
-        self.apply_router_events(effects.pass_start_kv_events)?;
+    fn handle_engine_effects(
+        &mut self,
+        effects: EngineEffects<Observation::Batch>,
+    ) -> anyhow::Result<()> {
+        self.apply_engine_observations(effects.pass_start_events)?;
         for payload in effects.immediate_completions {
             let payload = self.engine.on_scheduled_completion(payload)?;
             if self.collect_fpm
                 && let Some(fpm) = payload.fpm
             {
-                self.fpm_buffer.push((payload.worker_idx, fpm));
+                self.record_fpm(payload.worker_idx, fpm)?;
             }
             self.process_completed_pass(
                 payload.worker_idx,
                 payload.completed_requests,
                 payload.output_signals,
-                payload.kv_events,
+                payload.engine_events,
                 payload.accept_length_output_tokens,
                 payload.accept_length_decode_forwards,
             )?;
@@ -685,13 +730,17 @@ impl AggRuntime {
         while let Some((stage, worker_id)) = pop_ready_worker_ready(&mut self.events, self.now_ms) {
             debug_assert_eq!(stage, SimulationWorkerStage::Aggregated);
             if self.engine.mark_worker_ready(worker_id) {
-                if let Some(router) = self.router.as_mut() {
-                    router.add_worker(worker_id)?;
-                    // Drain any requests that were queued while all workers
-                    // were busy — the new worker may have capacity for them.
-                    let effects = router.try_drain_pending(self.now_ms)?;
-                    self.dispatch_router_admissions(effects.admissions)?;
+                if self.collect_fpm {
+                    self.fpm_buffer
+                        .activate_worker(worker_id, self.dp_size, self.now_ms);
                 }
+                let topology = self.engine.worker_topology(worker_id).ok_or_else(|| {
+                    anyhow::anyhow!("ready worker {worker_id} has no engine topology")
+                })?;
+                let placements = self.placement.worker_ready(topology, self.now_ms)?;
+                self.dispatch_placements(placements)?;
+                let placements = self.placement.topology_settled(self.now_ms)?;
+                self.dispatch_placements(placements)?;
                 changed = true;
             }
             // If mark_worker_ready returned false the worker was cancelled
@@ -714,10 +763,14 @@ impl AggRuntime {
             changed |= self.release_ready_arrivals()?;
             changed |= self.drive_ready_workers()?;
             let removed = self.engine.try_remove_drained();
-            if let Some(router) = self.router.as_mut() {
-                for worker_id in &removed {
-                    router.finalize_worker_removal(*worker_id)?;
-                }
+            for worker_id in &removed {
+                self.placement.worker_removed(
+                    WorkerTopology {
+                        worker_id: *worker_id,
+                        scheduler_ids: Vec::new(),
+                    },
+                    self.now_ms,
+                )?;
             }
             changed |= !removed.is_empty();
             // Planner ticks fire LAST so the planner observes a fully settled
@@ -762,13 +815,16 @@ impl AggRuntime {
             if self.is_workload_done() {
                 continue;
             }
+            let active_decode_ids = self.engine.active_group_ids();
+            self.fpm_buffer
+                .emit_idle_due(&active_decode_ids, self.dp_size, self.now_ms);
             let metrics = PlannerTickMetrics {
                 now_ms: self.now_ms,
                 prefill_fpm: Vec::new(),
-                decode_fpm: std::mem::take(&mut self.fpm_buffer),
+                decode_fpm: self.fpm_buffer.take(),
                 traffic: self.traffic.drain(self.now_ms),
-                active_prefill: 0,
-                active_decode: self.active_worker_count(),
+                active_prefill_ids: Vec::new(),
+                active_decode_ids,
                 total_prefill: 0,
                 total_decode: self.total_worker_count(),
             };
@@ -826,8 +882,9 @@ impl AggRuntime {
     }
 
     /// Number of active (non-pending-removal) workers.
+    #[cfg(test)]
     pub(in crate::replay) fn active_worker_count(&self) -> usize {
-        self.engine.active_worker_ids().len()
+        self.engine.active_group_ids().len()
     }
 
     /// Total worker count including pending-removal.
@@ -847,8 +904,9 @@ impl AggRuntime {
     pub(in crate::replay) fn apply_scaling(&mut self, target_workers: usize) -> anyhow::Result<()> {
         let (added, newly_marked, removed) = self.engine.apply_target_count(target_workers);
         #[cfg(test)]
-        if let Some(new_len) = added.iter().max().map(|id| id + 1) {
-            self.worker_active_requests.resize(new_len, Vec::new());
+        if !added.is_empty() {
+            self.worker_active_requests
+                .resize(self.engine.rank_id_capacity(), Vec::new());
         }
         let startup_delay_ms = self.engine.startup_time_ms();
 
@@ -864,27 +922,41 @@ impl AggRuntime {
                     );
                 }
                 None => {
-                    if let Some(router) = self.router.as_mut() {
-                        router.add_worker(id)?;
+                    if self.collect_fpm {
+                        self.fpm_buffer
+                            .activate_worker(id, self.dp_size, self.now_ms);
                     }
+                    let topology = self
+                        .engine
+                        .worker_topology(id)
+                        .ok_or_else(|| anyhow::anyhow!("new worker {id} has no engine topology"))?;
+                    let placements = self.placement.worker_ready(topology, self.now_ms)?;
+                    self.dispatch_placements(placements)?;
                 }
             }
         }
 
-        let admissions = if let Some(router) = self.router.as_mut() {
-            for id in newly_marked {
-                router.remove_worker(id)?;
-            }
-            for id in removed {
-                router.finalize_worker_removal(id)?;
-            }
-            let admissions = router.on_topology_changed(self.now_ms)?.admissions;
-            self.record_router_pending();
-            admissions
-        } else {
-            Vec::new()
-        };
-        self.dispatch_router_admissions(admissions)?;
+        for id in newly_marked {
+            let topology = self.engine.worker_topology(id).unwrap_or(WorkerTopology {
+                worker_id: id,
+                scheduler_ids: Vec::new(),
+            });
+            let placements = self.placement.worker_draining(topology, self.now_ms)?;
+            self.dispatch_placements(placements)?;
+        }
+        for id in removed {
+            let placements = self.placement.worker_removed(
+                WorkerTopology {
+                    worker_id: id,
+                    scheduler_ids: Vec::new(),
+                },
+                self.now_ms,
+            )?;
+            self.dispatch_placements(placements)?;
+        }
+        let placements = self.placement.topology_settled(self.now_ms)?;
+        self.dispatch_placements(placements)?;
+        self.record_router_pending();
         self.record_in_flight_peak();
         Ok(())
     }
@@ -1006,7 +1078,7 @@ impl AggRuntime {
 
     #[cfg(test)]
     fn drain_fpm(&mut self) -> Vec<(usize, ForwardPassSnapshot)> {
-        std::mem::take(&mut self.fpm_buffer)
+        self.fpm_buffer.take()
     }
 
     #[cfg(test)]
@@ -1033,10 +1105,7 @@ impl AggRuntime {
             workers: self.engine.debug_snapshots(),
             router_pending_request_ids,
             prefill_completed,
-            router: self
-                .router
-                .as_ref()
-                .map(|router| router.debug_snapshot(self.now_ms)),
+            router: self.placement.debug_router_snapshot(self.now_ms),
         }
     }
 }
@@ -1053,9 +1122,30 @@ mod tests {
     use super::*;
     use crate::common::protocols::{EngineType, SglangArgs};
     use crate::loadgen::{AgenticTrace, AgenticTurnTrace, SessionTrace, Trace, TurnTrace};
+    use crate::replay::offline::extensions::kv_router::{ReplayKvRouterConfig, RouterQueuePolicy};
     use crate::replay::{TraceRequestStatsSnapshot, normalize_trace_requests};
-    use dynamo_kv_router::config::{KvRouterConfig, RouterQueuePolicy};
     use rstest::rstest;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    struct CaptureOnceHook {
+        at_ms: f64,
+        captured: Rc<RefCell<Option<PlannerTickMetrics>>>,
+    }
+
+    impl PlannerHook for CaptureOnceHook {
+        fn initial_tick_ms(&mut self) -> anyhow::Result<f64> {
+            Ok(self.at_ms)
+        }
+
+        fn on_tick(
+            &mut self,
+            metrics: PlannerTickMetrics,
+        ) -> anyhow::Result<super::super::planner_hook::PlannerTickDecision> {
+            *self.captured.borrow_mut() = Some(metrics);
+            Ok(super::super::planner_hook::PlannerTickDecision::default())
+        }
+    }
 
     fn replay_args(enable_prefix_caching: bool, enable_chunked_prefill: bool) -> MockEngineArgs {
         MockEngineArgs::builder()
@@ -1249,11 +1339,11 @@ mod tests {
             .unwrap()
     }
 
-    fn queueing_router_config(policy: RouterQueuePolicy) -> KvRouterConfig {
-        KvRouterConfig {
+    fn queueing_router_config(policy: RouterQueuePolicy) -> ReplayKvRouterConfig {
+        ReplayKvRouterConfig {
             router_queue_threshold: Some(0.5),
             router_queue_policy: policy,
-            ..KvRouterConfig::default()
+            ..ReplayKvRouterConfig::default()
         }
     }
 
@@ -1299,10 +1389,10 @@ mod tests {
         .unwrap()
     }
 
-    fn planner_router_config() -> KvRouterConfig {
-        KvRouterConfig {
+    fn planner_router_config() -> ReplayKvRouterConfig {
+        ReplayKvRouterConfig {
             router_queue_threshold: Some(0.5),
-            ..KvRouterConfig::default()
+            ..ReplayKvRouterConfig::default()
         }
     }
 
@@ -1317,6 +1407,57 @@ mod tests {
             }))
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn sglang_zero_output_request_does_not_block_following_work() {
+        let args = MockEngineArgs::builder()
+            .engine_type(EngineType::Sglang)
+            .block_size(4)
+            .num_gpu_blocks(32)
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(1))
+            .speedup_ratio(1000.0)
+            .sglang(Some(SglangArgs {
+                page_size: Some(4),
+                chunked_prefill_size: Some(16),
+                ..Default::default()
+            }))
+            .build()
+            .unwrap();
+        let requests = vec![
+            DirectRequest {
+                tokens: vec![1; 4],
+                max_output_tokens: 0,
+                uuid: Some(Uuid::from_u128(9_000)),
+                arrival_timestamp_ms: Some(0.0),
+                ..Default::default()
+            },
+            DirectRequest {
+                tokens: vec![2; 4],
+                max_output_tokens: 1,
+                uuid: Some(Uuid::from_u128(9_001)),
+                arrival_timestamp_ms: Some(1.0),
+                ..Default::default()
+            },
+        ];
+
+        let (collector, _) =
+            run_trace_multi_collect_with_stats(&args, requests, 1, ReplayRouterMode::RoundRobin);
+        let mut snapshots = collector.snapshots();
+        snapshots.sort_by_key(|snapshot| snapshot.requested_output_length);
+
+        assert_eq!(snapshots.len(), 2);
+        assert_eq!(snapshots[0].requested_output_length, 0);
+        assert_eq!(snapshots[0].output_length, 0);
+        assert!(snapshots[0].first_admit_ms.is_some());
+        assert_eq!(snapshots[0].first_token_ms, None);
+        assert_eq!(snapshots[1].requested_output_length, 1);
+        assert_eq!(snapshots[1].output_length, 1);
+
+        let report = collector.finish();
+        assert_eq!(report.request_counts.completed_requests, 2);
+        assert_eq!(report.request_counts.total_output_tokens, 1);
     }
 
     #[test]
@@ -1351,6 +1492,146 @@ mod tests {
         assert!(
             !runtime.drain_fpm().is_empty(),
             "SGLang pass-end FPM must become planner-visible at completion"
+        );
+    }
+
+    #[test]
+    fn attention_dp_fpm_preserves_logical_worker_and_rank_identity() {
+        let mut args = sglang_replay_args();
+        args.dp_size = 2;
+        let pending = normalize_trace_requests(
+            vec![
+                DirectRequest {
+                    tokens: vec![1; 8],
+                    max_output_tokens: 2,
+                    uuid: Some(Uuid::from_u128(9_101)),
+                    arrival_timestamp_ms: Some(0.0),
+                    ..Default::default()
+                },
+                DirectRequest {
+                    tokens: vec![2; 8],
+                    max_output_tokens: 2,
+                    uuid: Some(Uuid::from_u128(9_102)),
+                    arrival_timestamp_ms: Some(0.0),
+                    ..Default::default()
+                },
+            ],
+            1.0,
+        )
+        .unwrap();
+        let mut runtime = AggRuntime::new(
+            &args,
+            None,
+            None,
+            pending,
+            1,
+            ReplayMode::Trace,
+            ReplayRouterMode::RoundRobin,
+        )
+        .unwrap()
+        .with_fpm_capture();
+
+        while runtime.advance_one_timestamp().unwrap() {}
+        let identities = runtime
+            .drain_fpm()
+            .into_iter()
+            .map(|(worker_id, snapshot)| (worker_id, snapshot.worker_id, snapshot.dp_rank))
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert!(identities.contains(&(0, "0".to_string(), 0)));
+        assert!(identities.contains(&(0, "0".to_string(), 1)));
+    }
+
+    #[test]
+    fn planner_tick_emits_idle_fpm_after_simulated_second() {
+        let mut args = sglang_replay_args();
+        args.dp_size = 2;
+        let pending = normalize_trace_requests(
+            vec![
+                DirectRequest {
+                    tokens: vec![1; 8],
+                    max_output_tokens: 1,
+                    uuid: Some(Uuid::from_u128(9_201)),
+                    arrival_timestamp_ms: Some(0.0),
+                    ..Default::default()
+                },
+                DirectRequest {
+                    tokens: vec![2; 8],
+                    max_output_tokens: 1,
+                    uuid: Some(Uuid::from_u128(9_202)),
+                    arrival_timestamp_ms: Some(3_000.0),
+                    ..Default::default()
+                },
+            ],
+            1.0,
+        )
+        .unwrap();
+        let captured = Rc::new(RefCell::new(None));
+        let hook = CaptureOnceHook {
+            at_ms: 2_000.0,
+            captured: Rc::clone(&captured),
+        };
+
+        AggRuntime::new(
+            &args,
+            None,
+            None,
+            pending,
+            1,
+            ReplayMode::Trace,
+            ReplayRouterMode::RoundRobin,
+        )
+        .unwrap()
+        .with_planner_hook(Box::new(hook))
+        .run()
+        .unwrap();
+
+        let metrics = captured
+            .borrow_mut()
+            .take()
+            .expect("planner tick must fire");
+        assert_eq!(metrics.now_ms, 2_000.0);
+        assert_eq!(metrics.decode_fpm.len(), 2);
+        assert!(metrics.decode_fpm.iter().all(|(worker_id, snapshot)| {
+            *worker_id == 0
+                && snapshot.wall_time_secs == 0.0
+                && snapshot.num_prefill_requests == 0
+                && snapshot.num_decode_requests == 0
+                && snapshot.num_queued_prefill == 0
+                && snapshot.num_queued_decode == 0
+        }));
+        assert_eq!(
+            metrics
+                .decode_fpm
+                .iter()
+                .map(|(_, snapshot)| snapshot.dp_rank)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+    }
+
+    #[test]
+    fn generic_attention_dp_counts_rank_resources_in_gpu_hours() {
+        let mut args = fast_router_args();
+        args.dp_size = 4;
+        let runtime = AggRuntime::new(
+            &args,
+            None,
+            None,
+            simple_requests(4, 0.0),
+            1,
+            ReplayMode::Trace,
+            ReplayRouterMode::RoundRobin,
+        )
+        .unwrap();
+
+        let (collector, _) = runtime.run().unwrap();
+        let report = collector.finish();
+
+        assert_eq!(report.throughput.decode_gpus_per_worker, 4);
+        assert_eq!(
+            report.throughput.gpu_hours,
+            report.throughput.decode_worker_seconds * 4.0 / 3600.0
         );
     }
 
@@ -2053,6 +2334,53 @@ mod tests {
         );
 
         assert_eq!(stats.dispatch_history, vec![0, 1, 2, 3, 0]);
+    }
+
+    #[test]
+    fn test_attention_dp_round_robin_matches_live_worker_then_rank_order() {
+        let mut args = replay_args(false, true);
+        args.dp_size = 2;
+        let requests = (1..=5)
+            .map(|id| DirectRequest {
+                tokens: vec![id as u32; 8],
+                max_output_tokens: 1,
+                uuid: Some(Uuid::from_u128(id)),
+                arrival_timestamp_ms: Some(0.0),
+                ..Default::default()
+            })
+            .collect();
+
+        let (_, stats) =
+            run_trace_multi_collect_with_stats(&args, requests, 2, ReplayRouterMode::RoundRobin);
+
+        // Live routing round-robins mocker workers first, then each worker's
+        // MockEngine independently round-robins its DP ranks.
+        assert_eq!(stats.dispatch_history, vec![0, 2, 1, 3, 0]);
+    }
+
+    #[test]
+    fn test_attention_dp_planner_counts_mocker_workers_not_ranks() {
+        let mut args = replay_args(false, true);
+        args.dp_size = 2;
+        let mut runtime = AggRuntime::new(
+            &args,
+            None,
+            None,
+            VecDeque::new(),
+            2,
+            ReplayMode::Trace,
+            ReplayRouterMode::RoundRobin,
+        )
+        .unwrap();
+
+        assert_eq!(runtime.active_worker_count(), 2);
+        assert_eq!(runtime.total_worker_count(), 2);
+        assert_eq!(runtime.engine.active_worker_ids(), vec![0, 1, 2, 3]);
+
+        runtime.apply_scaling(3).unwrap();
+        assert_eq!(runtime.active_worker_count(), 3);
+        assert_eq!(runtime.total_worker_count(), 3);
+        assert_eq!(runtime.engine.active_worker_ids(), vec![0, 1, 2, 3, 4, 5]);
     }
 
     #[test]
@@ -2958,6 +3286,43 @@ mod tests {
     }
 
     #[test]
+    fn test_drain_traffic_uses_context_capped_output_length() {
+        let args = MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(32)
+            .max_model_len(Some(8))
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(4))
+            .enable_prefix_caching(false)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let requests = VecDeque::from([DirectRequest {
+            tokens: vec![1; 7],
+            max_output_tokens: 4,
+            uuid: Some(Uuid::from_u128(1)),
+            dp_rank: 0,
+            arrival_timestamp_ms: Some(0.0),
+            ..Default::default()
+        }]);
+        let mut rt = AggRuntime::new(
+            &args,
+            None,
+            None,
+            requests,
+            1,
+            ReplayMode::Trace,
+            ReplayRouterMode::RoundRobin,
+        )
+        .unwrap();
+
+        assert!(rt.advance_to(1000.0).unwrap());
+        let stats = rt.drain_traffic();
+        assert_eq!(stats.num_req, 1);
+        assert_eq!(stats.avg_osl, 1.0);
+    }
+
+    #[test]
     fn test_apply_scaling_without_startup_is_immediate() {
         let args = fast_router_args(); // no startup_time
         let requests = simple_requests(4, 100.0);
@@ -2977,6 +3342,30 @@ mod tests {
         // Without startup delay, new worker is immediately active.
         assert_eq!(rt.active_worker_count(), 2);
         assert_eq!(rt.total_worker_count(), 2);
+    }
+
+    #[test]
+    fn scale_down_forgets_retired_round_robin_rank_state() {
+        let args = fast_router_args();
+        let mut rt = AggRuntime::new(
+            &args,
+            None,
+            None,
+            simple_requests(2, 0.0),
+            2,
+            ReplayMode::Trace,
+            ReplayRouterMode::RoundRobin,
+        )
+        .unwrap();
+
+        assert!(rt.advance_one_timestamp().unwrap());
+        assert_eq!(rt.placement.tracked_round_robin_workers().len(), 2);
+        while rt.advance_one_timestamp().unwrap() {}
+
+        rt.apply_scaling(1).unwrap();
+
+        assert_eq!(rt.placement.tracked_round_robin_workers().len(), 1);
+        assert!(!rt.placement.tracked_round_robin_workers().contains_key(&1));
     }
 
     #[test]

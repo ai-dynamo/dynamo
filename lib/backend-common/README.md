@@ -279,6 +279,23 @@ async fn my_engine_passes_conformance() {
 }
 ```
 
+Encode-role engines use the narrower handoff contract:
+
+```rust
+#[tokio::test]
+async fn my_encoder_passes_conformance() {
+    dynamo_backend_common::testing::run_encode_conformance(MyEncoder::new_for_test)
+        .await
+        .expect("encode conformance");
+}
+```
+
+`run_encode_conformance` sends a multimodal request and requires one terminal
+`FinishReason::Stop` chunk, empty `token_ids`, and an object-shaped
+`encoder_result`. When terminal usage is provided, it must consistently report
+zero completion tokens. The suite also applies the same KV source, metrics,
+concurrency, cancellation, and cleanup checks as token-engine conformance.
+
 The kit asserts:
 
 | Check | Failure mode |
@@ -398,8 +415,8 @@ lib/backend-common/
         mocker/          # CPU-only reference backend + docker-compose stack
 ```
 
-The Python `Worker` shim that drives this crate from `dynamo.*.unified_main`
-entry points lives at
+The Python `Worker` shim that drives this crate from a backend's entry point
+(e.g. `dynamo.common.backend.sample_main`) lives at
 [`components/src/dynamo/common/backend/worker.py`](../../components/src/dynamo/common/backend/worker.py).
 
 ## See Also

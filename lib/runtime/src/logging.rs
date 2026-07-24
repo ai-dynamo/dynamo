@@ -37,6 +37,7 @@ use serde::{Deserialize, Serialize};
 use tracing::level_filters::LevelFilter;
 use tracing::{Event, Subscriber};
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::filter::Targets;
 use tracing_subscriber::fmt::time::FormatTime;
 use tracing_subscriber::fmt::time::LocalTime;
 use tracing_subscriber::fmt::time::SystemTime;
@@ -68,6 +69,7 @@ use tracing_subscriber::Registry;
 use tracing_subscriber::field::Visit;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::layer::Context;
+use tracing_subscriber::layer::Filter;
 use tracing_subscriber::registry::SpanData;
 use uuid::Uuid;
 
@@ -284,6 +286,30 @@ fn build_log_exporter(
             .with_http()
             .with_endpoint(endpoint)
             .build(),
+    }
+}
+
+fn span_events_for_logging() -> FmtSpan {
+    if span_events_enabled() {
+        FmtSpan::CLOSE
+    } else {
+        FmtSpan::NONE
+    }
+}
+
+fn log_otel_init_status(service_name: &str, endpoint_opt: Option<(OtlpProtocol, String)>) {
+    if let Some((protocol, endpoint)) = endpoint_opt {
+        tracing::info!(
+            endpoint = %endpoint,
+            protocol = %protocol.as_str(),
+            service = %service_name,
+            "OpenTelemetry OTLP export enabled (traces and logs)"
+        );
+    } else {
+        tracing::info!(
+            service = %service_name,
+            "OpenTelemetry OTLP export disabled, traces local only"
+        );
     }
 }
 
@@ -535,6 +561,9 @@ pub fn make_inference_request_span<B>(req: &Request<B>) -> Span {
         model = tracing::field::Empty,
         input_tokens = tracing::field::Empty,
         output_tokens = tracing::field::Empty,
+        image_count = tracing::field::Empty,
+        video_count = tracing::field::Empty,
+        audio_count = tracing::field::Empty,
         ttft_ms = tracing::field::Empty,
         avg_itl_ms = tracing::field::Empty,
         prefill_worker_id = tracing::field::Empty,
@@ -580,6 +609,9 @@ pub fn make_system_request_span<B>(req: &Request<B>) -> Span {
         model = tracing::field::Empty,
         input_tokens = tracing::field::Empty,
         output_tokens = tracing::field::Empty,
+        image_count = tracing::field::Empty,
+        video_count = tracing::field::Empty,
+        audio_count = tracing::field::Empty,
         ttft_ms = tracing::field::Empty,
         avg_itl_ms = tracing::field::Empty,
         prefill_worker_id = tracing::field::Empty,
@@ -865,6 +897,21 @@ pub fn inject_trace_headers_into_map(headers: &mut std::collections::HashMap<Str
     }
 }
 
+pub fn otel_parent_context_from_distributed(
+    ctx: &DistributedTraceContext,
+) -> Option<opentelemetry::Context> {
+    let mut headers = async_nats::HeaderMap::new();
+    headers.insert("traceparent", ctx.create_traceparent());
+
+    if let Some(ref tracestate) = ctx.tracestate {
+        headers.insert("tracestate", tracestate.as_str());
+    }
+
+    let (otel_context, _trace_id, _parent_span_id) =
+        extract_otel_context_from_nats_headers(&headers);
+    otel_context
+}
+
 /// Create a client_request span linked to the parent trace context
 pub fn make_client_request_span(
     operation: &str,
@@ -873,15 +920,7 @@ pub fn make_client_request_span(
     instance_id: Option<&str>,
 ) -> Span {
     if let Some(ctx) = trace_context {
-        let mut headers = async_nats::HeaderMap::new();
-        headers.insert("traceparent", ctx.create_traceparent());
-
-        if let Some(ref tracestate) = ctx.tracestate {
-            headers.insert("tracestate", tracestate.as_str());
-        }
-
-        let (otel_context, _extracted_trace_id, _extracted_parent_span_id) =
-            extract_otel_context_from_nats_headers(&headers);
+        let otel_context = otel_parent_context_from_distributed(ctx);
 
         let span = if let Some(inst_id) = instance_id {
             tracing::info_span!(
@@ -1234,26 +1273,15 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
     let trace_filter_layer = filters(load_config());
     let otel_filter_layer = filters(load_config());
     let otel_logs_filter_layer = filters(load_config());
+    let jsonl_enabled = jsonl_logging_enabled();
+    let otlp_enabled = otlp_exporter_enabled();
 
-    if jsonl_logging_enabled() {
-        let span_events = if span_events_enabled() {
-            FmtSpan::CLOSE
-        } else {
-            FmtSpan::NONE
-        };
-        let l = fmt::layer()
-            .with_ansi(false)
-            .with_span_events(span_events)
-            .event_format(CustomJsonFormatter::new())
-            .with_writer(std::io::stderr)
-            .with_filter(fmt_filter_layer);
-
-        // Create OpenTelemetry tracer - conditionally export to OTLP based on env var
+    if jsonl_enabled || otlp_enabled {
         let service_name = get_service_name();
         let sample_ratio = trace_sample_ratio_from_env();
 
         // Build tracer and logger providers - with or without OTLP export
-        let (tracer_provider, logger_provider_opt, endpoint_opt) = if otlp_exporter_enabled() {
+        let (tracer_provider, logger_provider_opt, endpoint_opt) = if otlp_enabled {
             // Export enabled: create OTLP exporters with batch processors
             let protocol = otlp_protocol_from_env();
             let traces_protocol = resolve_signal_otlp_protocol(
@@ -1344,50 +1372,45 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
         // Cheap — `SdkTracerProvider` is Arc-shared internally.
         opentelemetry::global::set_tracer_provider(tracer_provider.clone());
 
-        // Get a tracer from the provider
-        let tracer = tracer_provider.tracer(service_name.clone());
-
-        // Build the OTLP logs bridge layer (only when export is enabled)
+        let tracer = tracer_provider.tracer(service_name.to_string());
         let otel_logs_layer = logger_provider_opt
             .as_ref()
             .map(|lp| OpenTelemetryTracingBridge::new(lp).with_filter(otel_logs_filter_layer));
 
-        tracing_subscriber::registry()
-            .with(
-                tracing_opentelemetry::layer()
-                    .with_tracer(tracer)
-                    .with_filter(otel_filter_layer),
-            )
-            .with(otel_logs_layer)
-            .with(DistributedTraceIdLayer.with_filter(trace_filter_layer))
-            .with(l)
-            .init();
+        macro_rules! init_otel_subscriber {
+            ($fmt_layer:expr) => {
+                tracing_subscriber::registry()
+                    .with(
+                        tracing_opentelemetry::layer()
+                            .with_tracer(tracer)
+                            .with_filter(otel_filter_layer),
+                    )
+                    .with(otel_logs_layer)
+                    .with(DistributedTraceIdLayer.with_filter(trace_filter_layer))
+                    .with($fmt_layer)
+                    .init();
+            };
+        }
 
-        // Log initialization status after subscriber is ready
-        if let Some((protocol, endpoint)) = endpoint_opt {
-            tracing::info!(
-                endpoint = %endpoint,
-                protocol = %protocol.as_str(),
-                service = %service_name,
-                "OpenTelemetry OTLP export enabled (traces and logs)"
-            );
+        if jsonl_enabled {
+            let l = fmt::layer()
+                .with_ansi(false)
+                .with_span_events(span_events_for_logging())
+                .event_format(CustomJsonFormatter::new())
+                .with_writer(std::io::stderr)
+                .with_filter(fmt_filter_layer);
+            init_otel_subscriber!(l);
         } else {
-            tracing::info!(
-                service = %service_name,
-                "OpenTelemetry OTLP export disabled, traces local only"
-            );
+            let l = fmt::layer()
+                .with_ansi(!disable_ansi_logging())
+                .event_format(fmt::format().compact().with_timer(TimeFormatter::new()))
+                .with_writer(std::io::stderr)
+                .with_filter(fmt_filter_layer);
+            init_otel_subscriber!(l);
         }
+
+        log_otel_init_status(&service_name, endpoint_opt);
     } else {
-        // Caller asked for OTLP export but the OTel layer is only installed on
-        // the JSONL path — surface the misconfig instead of silently dropping
-        // traces.
-        if otlp_exporter_enabled() {
-            eprintln!(
-                "WARNING: OTEL_EXPORT_ENABLED=1 has no effect without DYN_LOGGING_JSONL=1. \
-                 OTel layers and OTLP exporter are not installed. Set DYN_LOGGING_JSONL=1 \
-                 to enable trace/log export."
-            );
-        }
         let l = fmt::layer()
             .with_ansi(!disable_ansi_logging())
             .event_format(fmt::format().compact().with_timer(TimeFormatter::new()))
@@ -1400,13 +1423,197 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn filters(config: LoggingConfig) -> EnvFilter {
+#[allow(clippy::large_enum_variant)] // Constructed once during logging initialization.
+enum LoggingFilter {
+    Targets(Targets),
+    Env(EnvFilter),
+}
+
+impl<S> Filter<S> for LoggingFilter {
+    #[inline]
+    fn enabled(&self, meta: &tracing::Metadata<'_>, cx: &Context<'_, S>) -> bool {
+        match self {
+            Self::Targets(filter) => <Targets as Filter<S>>::enabled(filter, meta, cx),
+            Self::Env(filter) => <EnvFilter as Filter<S>>::enabled(filter, meta, cx),
+        }
+    }
+
+    #[inline]
+    fn callsite_enabled(
+        &self,
+        meta: &'static tracing::Metadata<'static>,
+    ) -> tracing::subscriber::Interest {
+        match self {
+            Self::Targets(filter) => <Targets as Filter<S>>::callsite_enabled(filter, meta),
+            Self::Env(filter) => <EnvFilter as Filter<S>>::callsite_enabled(filter, meta),
+        }
+    }
+
+    #[inline]
+    fn event_enabled(&self, event: &Event<'_>, cx: &Context<'_, S>) -> bool {
+        match self {
+            Self::Targets(filter) => <Targets as Filter<S>>::event_enabled(filter, event, cx),
+            Self::Env(filter) => <EnvFilter as Filter<S>>::event_enabled(filter, event, cx),
+        }
+    }
+
+    #[inline]
+    fn max_level_hint(&self) -> Option<LevelFilter> {
+        match self {
+            Self::Targets(filter) => <Targets as Filter<S>>::max_level_hint(filter),
+            Self::Env(filter) => <EnvFilter as Filter<S>>::max_level_hint(filter),
+        }
+    }
+
+    #[inline]
+    fn on_new_span(&self, attrs: &span::Attributes<'_>, id: &Id, cx: Context<'_, S>) {
+        if let Self::Env(filter) = self {
+            <EnvFilter as Filter<S>>::on_new_span(filter, attrs, id, cx);
+        }
+    }
+
+    #[inline]
+    fn on_record(&self, id: &Id, values: &span::Record<'_>, cx: Context<'_, S>) {
+        if let Self::Env(filter) = self {
+            <EnvFilter as Filter<S>>::on_record(filter, id, values, cx);
+        }
+    }
+
+    #[inline]
+    fn on_enter(&self, id: &Id, cx: Context<'_, S>) {
+        if let Self::Env(filter) = self {
+            <EnvFilter as Filter<S>>::on_enter(filter, id, cx);
+        }
+    }
+
+    #[inline]
+    fn on_exit(&self, id: &Id, cx: Context<'_, S>) {
+        if let Self::Env(filter) = self {
+            <EnvFilter as Filter<S>>::on_exit(filter, id, cx);
+        }
+    }
+
+    #[inline]
+    fn on_close(&self, id: Id, cx: Context<'_, S>) {
+        if let Self::Env(filter) = self {
+            <EnvFilter as Filter<S>>::on_close(filter, id, cx);
+        }
+    }
+}
+
+#[derive(Debug)]
+enum TargetsFilterFallback {
+    Dynamic,
+    Other,
+}
+
+fn filters(config: LoggingConfig) -> LoggingFilter {
+    let targets = match std::env::var(env_logging::DYN_LOG) {
+        Ok(value) => targets_filter(&config, Some(&value)),
+        Err(std::env::VarError::NotPresent) => targets_filter(&config, None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(TargetsFilterFallback::Other),
+    };
+
+    match targets {
+        Ok(filter) => LoggingFilter::Targets(filter),
+        Err(TargetsFilterFallback::Dynamic) => {
+            // Logging has not been initialized yet, so write directly to stderr
+            // rather than through tracing. This must remain visible even when the
+            // configured dynamic filter excludes WARN-level events.
+            eprintln!(
+                "\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n\
+                 !!! WARNING: DYNAMIC LOG FILTERS FORCE THE EnvFilter FALLBACK !!!\n\
+                 !!! This disables Dynamo's lock-free logging fast path and can severely\n\
+                 !!! degrade request performance, especially for streaming responses.\n\
+                 !!! Remove span/field selectors ([...]) from DYN_LOG or log_filters to\n\
+                 !!! re-enable the fast target/level filter.\n\
+                 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+            );
+            LoggingFilter::Env(env_filter(&config))
+        }
+        Err(TargetsFilterFallback::Other) => LoggingFilter::Env(env_filter(&config)),
+    }
+}
+
+/// Use the lock-free target/level filter when `DYN_LOG` contains no dynamic
+/// span or field directives. `EnvFilter` tracks dynamic span matches behind an
+/// `RwLock`, and its span lifecycle callbacks acquire that lock even when the
+/// configured directives are all static.
+fn targets_filter(
+    config: &LoggingConfig,
+    dyn_log: Option<&str>,
+) -> Result<Targets, TargetsFilterFallback> {
+    // `EnvFilter::parse_lossy` ignores zero-length comma-separated segments,
+    // but leaves all other text untouched. In particular, do not trim here:
+    // whitespace may make the directive dynamic or invalid.
+    let dyn_directives = dyn_log
+        .into_iter()
+        .flat_map(|value| value.split(',').filter(|directive| !directive.is_empty()));
+
+    let mut directives = Vec::new();
+    for directive in dyn_directives {
+        // Parsing as `Targets` is also the feature test for whether the
+        // configured directive requires EnvFilter's dynamic span matching.
+        targets_compatible(directive)?;
+        directives.push(directive.to_string());
+    }
+
+    // EnvFilter uses the configured default only when DYN_LOG is absent or
+    // contains no directives. A target-only DYN_LOG must leave other targets
+    // disabled rather than inheriting the configured default level.
+    if directives.is_empty() {
+        directives.push(config.log_level.clone());
+    }
+
+    for (module, level) in &config.log_filters {
+        let directive = format!("{module}={level}");
+        match targets_compatible(&directive) {
+            Ok(()) => directives.push(directive),
+            Err(fallback) => match directive.parse::<Directive>() {
+                // Valid span or field directives require EnvFilter's dynamic
+                // matching, so do not silently drop a configured filter.
+                Ok(_) => return Err(fallback),
+                // Preserve the pre-fast-path warn-and-ignore behavior for
+                // directives that neither parser accepts.
+                Err(e) => {
+                    eprintln!("Failed parsing filter '{level}' for module '{module}': {e}");
+                }
+            },
+        }
+    }
+
+    if span_events_enabled() {
+        directives.push("span_event=trace".to_string());
+    }
+
+    directives.push("request_span=trace".to_string());
+    directives
+        .join(",")
+        .parse::<Targets>()
+        .map_err(|_| TargetsFilterFallback::Other)
+}
+
+/// An opening `[` begins EnvFilter's span or field selector grammar. Targets
+/// accepts some bracketed forms as literal targets or static field filters, but
+/// routing every bracketed directive through EnvFilter keeps the configuration
+/// language consistent. Curly braces alone remain ordinary target characters.
+fn targets_compatible(directive: &str) -> Result<(), TargetsFilterFallback> {
+    if directive.contains('[') {
+        Err(TargetsFilterFallback::Dynamic)
+    } else if directive.parse::<Targets>().is_ok() {
+        Ok(())
+    } else {
+        Err(TargetsFilterFallback::Other)
+    }
+}
+
+fn env_filter(config: &LoggingConfig) -> EnvFilter {
     let mut filter_layer = EnvFilter::builder()
         .with_default_directive(config.log_level.parse().unwrap())
         .with_env_var(env_logging::DYN_LOG)
         .from_env_lossy();
 
-    for (module, level) in config.log_filters {
+    for (module, level) in &config.log_filters {
         match format!("{module}={level}").parse::<Directive>() {
             Ok(d) => {
                 filter_layer = filter_layer.add_directive(d);
@@ -1770,6 +1977,138 @@ pub mod tests {
     use std::io::{BufRead, BufReader};
     use stdio_override::*;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn unset_dyn_log_uses_configured_default() {
+        let filter = targets_filter(&LoggingConfig::default(), None)
+            .expect("an unset DYN_LOG should use Targets");
+
+        assert!(filter.would_enable("request_span", &tracing::Level::TRACE));
+        assert!(filter.would_enable("unlisted_target", &tracing::Level::INFO));
+        assert!(!filter.would_enable("unlisted_target", &tracing::Level::DEBUG));
+        assert!(!filter.would_enable("tower", &tracing::Level::WARN));
+    }
+
+    #[test]
+    fn empty_dyn_log_uses_configured_default() {
+        for dyn_log in ["", ",,"] {
+            let filter = targets_filter(&LoggingConfig::default(), Some(dyn_log))
+                .expect("an empty DYN_LOG should use Targets");
+
+            assert!(filter.would_enable("request_span", &tracing::Level::TRACE));
+            assert!(filter.would_enable("unlisted_target", &tracing::Level::INFO));
+            assert!(!filter.would_enable("unlisted_target", &tracing::Level::DEBUG));
+            assert!(!filter.would_enable("tower", &tracing::Level::WARN));
+        }
+    }
+
+    #[test]
+    fn target_only_dyn_log_does_not_use_configured_default() {
+        let filter = targets_filter(
+            &LoggingConfig::default(),
+            Some("dynamo_runtime::logging=debug"),
+        )
+        .expect("target/level directives should use Targets");
+
+        assert!(filter.would_enable("request_span", &tracing::Level::TRACE));
+        assert!(!filter.would_enable("unlisted_target", &tracing::Level::INFO));
+        assert!(!filter.would_enable("unlisted_target", &tracing::Level::DEBUG));
+        assert!(filter.would_enable("dynamo_runtime::logging::child", &tracing::Level::DEBUG));
+        assert!(!filter.would_enable("tower", &tracing::Level::WARN));
+    }
+
+    #[test]
+    fn trailing_empty_dyn_log_segments_do_not_enable_trace() {
+        let filter = targets_filter(
+            &LoggingConfig::default(),
+            Some("dynamo_runtime::logging=debug,"),
+        )
+        .expect("target/level directives should use Targets");
+
+        assert!(filter.would_enable("dynamo_runtime::logging", &tracing::Level::DEBUG));
+        assert!(!filter.would_enable("unlisted_target", &tracing::Level::TRACE));
+    }
+
+    #[test]
+    fn dynamic_span_directives_fall_back_to_env_filter() {
+        assert!(matches!(
+            targets_filter(
+                &LoggingConfig::default(),
+                Some("dynamo_runtime[request{model=foo}]=debug"),
+            ),
+            Err(TargetsFilterFallback::Dynamic)
+        ));
+    }
+
+    #[test]
+    fn span_selector_dyn_log_falls_back_to_env_filter() {
+        assert!(matches!(
+            targets_filter(
+                &LoggingConfig::default(),
+                Some("dynamo_runtime[request]=debug"),
+            ),
+            Err(TargetsFilterFallback::Dynamic)
+        ));
+    }
+
+    #[test]
+    fn field_presence_dyn_log_falls_back_to_env_filter() {
+        assert!(matches!(
+            targets_filter(
+                &LoggingConfig::default(),
+                Some("dynamo_runtime[{request_id}]=debug"),
+            ),
+            Err(TargetsFilterFallback::Dynamic)
+        ));
+    }
+
+    #[test]
+    fn dynamic_log_filters_fall_back_to_env_filter() {
+        let config = LoggingConfig {
+            log_level: DEFAULT_FILTER_LEVEL.to_string(),
+            log_filters: HashMap::from([(
+                "dynamo_runtime[request{model=foo}]".to_string(),
+                "debug".to_string(),
+            )]),
+        };
+
+        assert!(matches!(
+            targets_filter(&config, None),
+            Err(TargetsFilterFallback::Dynamic)
+        ));
+    }
+
+    #[test]
+    fn span_selector_log_filters_fall_back_to_env_filter() {
+        let config = LoggingConfig {
+            log_level: DEFAULT_FILTER_LEVEL.to_string(),
+            log_filters: HashMap::from([(
+                "dynamo_runtime[request]".to_string(),
+                "debug".to_string(),
+            )]),
+        };
+
+        assert!(matches!(
+            targets_filter(&config, None),
+            Err(TargetsFilterFallback::Dynamic)
+        ));
+    }
+
+    #[test]
+    fn field_presence_log_filters_fall_back_to_env_filter() {
+        let config = LoggingConfig {
+            log_level: DEFAULT_FILTER_LEVEL.to_string(),
+            log_filters: HashMap::from([(
+                "dynamo_runtime[{request_id}]".to_string(),
+                "debug".to_string(),
+            )]),
+        };
+
+        assert!(matches!(
+            targets_filter(&config, None),
+            Err(TargetsFilterFallback::Dynamic)
+        ));
+    }
 
     #[test]
     fn otlp_protocol_defaults_to_grpc() {
@@ -2434,6 +2773,59 @@ pub mod tests {
         )
         .await;
         Ok(())
+    }
+
+    #[test]
+    fn test_otlp_export_works_without_json_logging() {
+        use std::process::Command;
+
+        let output = Command::new("cargo")
+            .args([
+                "test",
+                "-p",
+                "dynamo-runtime",
+                "logging::tests::test_otlp_export_without_json_logging_subprocess",
+                "--",
+                "--exact",
+                "--nocapture",
+            ])
+            .env("OTEL_EXPORT_ENABLED", "1")
+            .env_remove("DYN_LOGGING_JSONL")
+            .output()
+            .expect("Failed to execute subprocess test");
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !output.status.success() {
+            eprintln!(
+                "=== STDOUT ===\n{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            eprintln!("=== STDERR ===\n{}", stderr);
+        }
+
+        assert!(
+            output.status.success(),
+            "Subprocess test failed with exit code: {:?}",
+            output.status.code()
+        );
+        assert!(
+            !stderr.contains("has no effect without DYN_LOGGING_JSONL"),
+            "OTLP export should not depend on JSONL logging: {stderr}"
+        );
+        assert!(
+            stderr.contains("OpenTelemetry OTLP export enabled"),
+            "OTLP export should initialize with readable logging: {stderr}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_otlp_export_without_json_logging_subprocess() {
+        if std::env::var("OTEL_EXPORT_ENABLED").is_err() {
+            return;
+        }
+
+        init();
+        tracing::info!("readable log with OTLP export");
     }
 
     // Test functions at different log levels for filtering tests

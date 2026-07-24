@@ -8,21 +8,39 @@ subtitle: Quickstart for deploying a model on Kubernetes with Helm and the Dynam
 Get a model running on Kubernetes in minutes.
 
 Dynamo's production path is Kubernetes-native: you install the platform with
-Helm, submit Dynamo CRDs, and let the operator reconcile inference graphs into
-pods, services, routing, model-loading, and scaling resources. The local and
-container guides remain useful for development, but Kubernetes is the canonical
-path for shared GPU clusters and multi-node serving.
+Helm, submit Dynamo custom resources, and let the operator reconcile inference
+graphs into pods, services, routing, model-loading, and scaling resources. The
+local and container guides remain useful for development, but Kubernetes is the
+canonical path for shared GPU clusters and multi-node serving.
 
 > [!NOTE]
-> **Deployment modes.** Dynamo supports two deployment modes on Kubernetes. This quickstart uses **standalone mode**, where the Dynamo Frontend serves requests and the integrated Dynamo Router does KV-aware routing. Dynamo can also run in **gateway mode** behind a [Gateway API Inference Extension](https://gateway-api-inference-extension.sigs.k8s.io/) gateway, where KV-aware routing happens in the Dynamo Endpoint Picker Plugin (EPP) at the gateway layer and the Frontend runs as a sidecar in `--router-mode direct`. See the [Inference Gateway (GAIE) guide](inference-gateway.md) to set up gateway mode.
+> **Request entry.** This quickstart uses Dynamo-native Frontend routing: the Dynamo Frontend
+> receives requests and the integrated Dynamo Router selects workers. Dynamo can also integrate
+> Kubernetes-natively with [Gateway API Inference Extension](https://github.com/kubernetes-sigs/gateway-api-inference-extension),
+> where Gateway API receives requests and calls the Dynamo EPP for endpoint selection. See the
+> [GAIE guide](gateway-api/README.mdx) for the Gateway API path.
 
 ## Prerequisites
 
-- Kubernetes cluster (v1.24+) with GPU nodes
-- [kubectl](https://kubernetes.io/docs/tasks/tools/#kubectl) (v1.24+)
 - [Helm](https://helm.sh/docs/intro/install/) (v3.0+) installed
+
+<Tabs>
+<Tab title="CUDA">
+
+- Kubernetes cluster (v1.30+) with GPU nodes
+- [kubectl](https://kubernetes.io/docs/tasks/tools/#kubectl) (v1.30+)
 - [NVIDIA GPU Operator](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/getting-started.html) installed on the cluster
-- HuggingFace token secret on cluster
+
+</Tab>
+<Tab title="XPU">
+
+- Kubernetes cluster (v1.34+) with XPU nodes and Dynamic Resource Allocation (DRA) API v1 enabled
+- [kubectl](https://kubernetes.io/docs/tasks/tools/#kubectl) matching your Kubernetes minor version (v1.34+ for these DRA API v1 templates)
+- [Intel resource drivers for Kubernetes](https://github.com/intel/intel-resource-drivers-for-kubernetes) installed with a `gpu.intel.com` `DeviceClass`
+- vLLM XPU runtime image built from this repository
+
+</Tab>
+</Tabs>
 
 ### HuggingFace token secret
 
@@ -35,7 +53,10 @@ kubectl create secret generic hf-token-secret \
   --from-literal=HF_TOKEN="$HF_TOKEN"
 ```
 
-### GPU Operator quick install
+### Accelerator resource setup
+
+<Tabs>
+<Tab title="CUDA">
 
 If you don't have the GPU Operator yet:
 
@@ -53,9 +74,26 @@ helm install gpu-operator nvidia/gpu-operator \
 > --set driver.enabled=false --set toolkit.enabled=false
 > ```
 
+</Tab>
+<Tab title="XPU">
+
+Install the Intel resource drivers for Kubernetes by following the [Intel resource drivers for Kubernetes](https://github.com/intel/intel-resource-drivers-for-kubernetes) instructions.
+
+Verify that the cluster exposes the DRA resources used by the XPU templates:
+
+```bash
+kubectl get deviceclasses
+kubectl get resourceslices
+```
+
+The vLLM XPU templates expect a `gpu.intel.com` `DeviceClass`.
+
+</Tab>
+</Tabs>
+
 ### Detailed installation
 
-The GPU Operator is the only prerequisite for a basic deployment. For additional features like RDMA, Prometheus, or multinode scheduling with Grove/KAI Scheduler, see the [Installation Guide](installation-guide.md).
+CUDA deployments require the GPU Operator. XPU deployments require the Intel resource drivers for Kubernetes and DRA. For additional features like RDMA, Prometheus, or multinode scheduling with Grove/KAI Scheduler, see the [Installation Guide](installation-guide.md).
 
 > [!TIP]
 > If your GPU SKU and cloud provider are supported, you can use [AICR](https://github.com/NVIDIA/aicr) for rapid installation of prerequisites and the Dynamo Helm chart.
@@ -74,7 +112,7 @@ Optionally, verify your cluster is ready:
 export NAMESPACE=dynamo-system
 helm install dynamo-platform \
   oci://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform \
-  --version "1.0.2" \
+  --version "1.2.1" \
   --namespace "$NAMESPACE" \
   --create-namespace
 ```
@@ -122,6 +160,9 @@ For tuned production-style manifests, start from
 full deployment model, see the [Deployment Overview](model-deployment-guide.md).
 
 ## Deploy Your First Model
+
+<Tabs>
+<Tab title="CUDA">
 
 Save this DGDR to generate and deploy a DGD for `Qwen/Qwen3-0.6B`:
 
@@ -207,6 +248,44 @@ to `Deployed`:
 kubectl get dgdr qwen3-quickstart -n $NAMESPACE -w
 ```
 
+</Tab>
+<Tab title="XPU">
+
+Build and push a vLLM XPU runtime image:
+
+```bash
+container/render.py --framework=vllm --device=xpu --target=runtime --output-short-filename
+docker build -t <registry>/vllm-runtime-xpu:<tag> \
+  -f container/rendered.Dockerfile .
+docker push <registry>/vllm-runtime-xpu:<tag>
+```
+
+Use the DRA-based vLLM XPU templates from the repository:
+
+```bash
+cd <dynamo-source-root>/examples/backends/vllm/deploy/v1beta1/xpu
+```
+
+Update the template image fields to use `<registry>/vllm-runtime-xpu:<tag>`, then apply one template:
+
+```bash
+# Aggregated deployment
+kubectl apply -f agg_xpu_dra.yaml -n $NAMESPACE
+
+# Or disaggregated deployment
+kubectl apply -f disagg_xpu_dra.yaml -n $NAMESPACE
+```
+
+Verify DRA allocation:
+
+```bash
+kubectl get resourceclaim -n $NAMESPACE
+kubectl get resourceslices
+```
+
+</Tab>
+</Tabs>
+
 In both paths, the DGD is the live serving resource:
 
 ```bash
@@ -247,7 +326,7 @@ kubectl delete dynamographdeployment qwen3-quickstart qwen3-direct \
 
 ## Next Steps
 
-- **[Installation Guide](installation-guide.md)** — Cloud provider setup, GPU Operator details, optional components (Grove, RDMA, model caching, Prometheus)
+- **[Installation Guide](installation-guide.md)** — Cloud provider setup, accelerator resource components, and optional components (Grove, RDMA, model caching, Prometheus)
 - **[Deployment Overview](model-deployment-guide.md)** — DGD, DCD, DGDR, recipes, strategy selection, and common pitfalls
 - **[DGDR Reference](dgdr.md)** — Spec reference, lifecycle phases, monitoring commands, and generated DGD behavior
 - **[Creating Deployments](deployment/create-deployment.md)** — Hand-craft a DGD spec for full control

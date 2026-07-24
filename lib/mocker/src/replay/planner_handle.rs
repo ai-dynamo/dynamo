@@ -12,24 +12,25 @@
 use std::path::Path;
 use std::time::Instant;
 
-use anyhow::Result;
-use dynamo_kv_router::config::KvRouterConfig;
-
-use super::offline::agg::AggRuntime;
+use super::offline::agg::RoundRobinAggRuntime;
 use super::offline::components::ReplayMode;
-use super::offline::disagg::DisaggRuntime;
+use super::offline::disagg::RoundRobinDisaggRuntime;
+use super::offline::extensions::kv_router::{AggRuntime, DisaggRuntime, ReplayKvRouterConfig};
 use super::offline::planner_hook::PlannerHook;
 use super::{
     OfflineDisaggReplayConfig, ReplayPrefillLoadEstimator, ReplayRouterMode, SlaThresholds,
     TraceSimulationReport,
 };
 use crate::common::protocols::MockEngineArgs;
-use crate::loadgen::Trace;
+use crate::loadgen::{Trace, WorkloadDriver};
+use anyhow::Result;
 
 #[allow(clippy::large_enum_variant)]
 enum RuntimeKind {
-    Agg(AggRuntime),
-    Disagg(DisaggRuntime),
+    AggRoundRobin(RoundRobinAggRuntime),
+    AggKv(AggRuntime),
+    DisaggRoundRobin(RoundRobinDisaggRuntime),
+    DisaggKv(DisaggRuntime),
 }
 
 pub struct PlannerReplayHandle {
@@ -46,6 +47,19 @@ fn replay_mode(max_in_flight: Option<usize>) -> Result<ReplayMode> {
         Some(0) => anyhow::bail!("max_in_flight must be at least 1"),
         Some(max_in_flight) => Ok(ReplayMode::Concurrency { max_in_flight }),
         None => Ok(ReplayMode::Trace),
+    }
+}
+
+fn workload_driver(
+    trace: Trace,
+    engine_block_size: usize,
+    mode: ReplayMode,
+) -> Result<WorkloadDriver> {
+    match mode {
+        ReplayMode::Concurrency { max_in_flight } => {
+            trace.into_concurrency_driver_with_block_size(engine_block_size, max_in_flight)
+        }
+        ReplayMode::Trace => trace.into_trace_driver_with_block_size(engine_block_size),
     }
 }
 
@@ -77,7 +91,7 @@ impl PlannerReplayHandle {
     #[allow(clippy::too_many_arguments)]
     pub fn from_trace(
         args: MockEngineArgs,
-        router_config: Option<KvRouterConfig>,
+        router_config: Option<ReplayKvRouterConfig>,
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         trace: Trace,
         num_workers: usize,
@@ -86,18 +100,32 @@ impl PlannerReplayHandle {
         sla: SlaThresholds,
     ) -> Result<Self> {
         let args = args.normalized()?;
-        let runtime = AggRuntime::new_workload(
-            &args,
-            router_config,
-            prefill_load_estimator,
-            trace.into_trace_driver_with_block_size(args.block_size)?,
-            num_workers,
-            replay_mode(max_in_flight)?,
-            router_mode,
-        )?
-        .with_sla_thresholds(sla);
+        let mode = replay_mode(max_in_flight)?;
+        let runtime = match router_mode {
+            ReplayRouterMode::RoundRobin => RuntimeKind::AggRoundRobin(
+                RoundRobinAggRuntime::new_round_robin_workload(
+                    &args,
+                    workload_driver(trace, args.block_size, mode)?,
+                    num_workers,
+                    mode,
+                )?
+                .with_sla_thresholds(sla),
+            ),
+            ReplayRouterMode::KvRouter => RuntimeKind::AggKv(
+                AggRuntime::new_workload(
+                    &args,
+                    router_config,
+                    prefill_load_estimator,
+                    workload_driver(trace, args.block_size, mode)?,
+                    num_workers,
+                    mode,
+                    router_mode,
+                )?
+                .with_sla_thresholds(sla),
+            ),
+        };
         Ok(Self {
-            runtime: RuntimeKind::Agg(runtime),
+            runtime,
             started_at: Instant::now(),
         })
     }
@@ -107,7 +135,7 @@ impl PlannerReplayHandle {
     #[allow(clippy::too_many_arguments)]
     pub fn from_trace_file(
         args: MockEngineArgs,
-        router_config: Option<KvRouterConfig>,
+        router_config: Option<ReplayKvRouterConfig>,
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         trace_path: &Path,
         trace_block_size: usize,
@@ -140,7 +168,7 @@ impl PlannerReplayHandle {
     #[allow(clippy::too_many_arguments)]
     pub fn from_trace_disagg(
         config: OfflineDisaggReplayConfig,
-        router_config: Option<KvRouterConfig>,
+        router_config: Option<ReplayKvRouterConfig>,
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         trace: Trace,
         max_in_flight: Option<usize>,
@@ -148,17 +176,30 @@ impl PlannerReplayHandle {
         sla: SlaThresholds,
     ) -> Result<Self> {
         let config = config.normalized()?;
-        let runtime = DisaggRuntime::new_workload(
-            &config,
-            router_config,
-            prefill_load_estimator,
-            trace.into_trace_driver_with_block_size(config.decode_args.block_size)?,
-            replay_mode(max_in_flight)?,
-            router_mode,
-        )?
-        .with_sla_thresholds(sla);
+        let mode = replay_mode(max_in_flight)?;
+        let runtime = match router_mode {
+            ReplayRouterMode::RoundRobin => RuntimeKind::DisaggRoundRobin(
+                RoundRobinDisaggRuntime::new_round_robin_workload(
+                    &config,
+                    workload_driver(trace, config.prefill_args.block_size, mode)?,
+                    mode,
+                )?
+                .with_sla_thresholds(sla),
+            ),
+            ReplayRouterMode::KvRouter => RuntimeKind::DisaggKv(
+                DisaggRuntime::new_workload(
+                    &config,
+                    router_config,
+                    prefill_load_estimator,
+                    workload_driver(trace, config.prefill_args.block_size, mode)?,
+                    mode,
+                    router_mode,
+                )?
+                .with_sla_thresholds(sla),
+            ),
+        };
         Ok(Self {
-            runtime: RuntimeKind::Disagg(runtime),
+            runtime,
             started_at: Instant::now(),
         })
     }
@@ -168,7 +209,7 @@ impl PlannerReplayHandle {
     #[allow(clippy::too_many_arguments)]
     pub fn from_trace_file_disagg(
         config: OfflineDisaggReplayConfig,
-        router_config: Option<KvRouterConfig>,
+        router_config: Option<ReplayKvRouterConfig>,
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         trace_path: &Path,
         trace_block_size: usize,
@@ -202,8 +243,10 @@ impl PlannerReplayHandle {
     pub fn run(self, hook: Box<dyn PlannerHook>) -> Result<TraceSimulationReport> {
         let started_at = self.started_at;
         let collector = match self.runtime {
-            RuntimeKind::Agg(rt) => rt.with_planner_hook(hook).run()?.0,
-            RuntimeKind::Disagg(rt) => rt.with_planner_hook(hook).run()?.0,
+            RuntimeKind::AggRoundRobin(rt) => rt.with_planner_hook(hook).run()?.0,
+            RuntimeKind::AggKv(rt) => rt.with_planner_hook(hook).run()?.0,
+            RuntimeKind::DisaggRoundRobin(rt) => rt.with_planner_hook(hook).run()?.0,
+            RuntimeKind::DisaggKv(rt) => rt.with_planner_hook(hook).run()?.0,
         };
         let wall_time_ms = started_at.elapsed().as_secs_f64() * 1000.0;
         Ok(collector.finish().with_wall_time_ms(wall_time_ms))
@@ -213,10 +256,10 @@ impl PlannerReplayHandle {
 #[cfg(test)]
 mod tests {
     use super::PlannerReplayHandle;
-    use crate::common::protocols::MockEngineArgs;
+    use crate::common::protocols::{MockEngineArgs, WorkerType};
     use crate::loadgen::{ArrivalSpec, DelaySpec, LengthSpec, SyntheticTraceSpec, Trace};
     use crate::replay::NoopPlannerHook;
-    use crate::replay::{ReplayRouterMode, SlaThresholds};
+    use crate::replay::{OfflineDisaggReplayConfig, ReplayRouterMode, SlaThresholds};
 
     const NUM_SESSIONS: usize = 8;
 
@@ -251,29 +294,81 @@ mod tests {
             first_turn_arrivals,
             inter_turn_delays: DelaySpec::None,
             seed: 42,
+            arrival_seed: 42,
         })
         .unwrap()
     }
 
     #[test]
-    fn from_trace_closed_loop_completes_all_requests() {
-        // Burst arrivals + an in-flight cap -> closed-loop: trace timestamps are
-        // ignored and at most `max_in_flight` run at once, but every request still
-        // completes. This is the planner + concurrency path that was previously
-        // unreachable (the handle hard-coded ReplayMode::Trace).
-        let handle = PlannerReplayHandle::from_trace(
-            small_args(),
-            None,
-            None,
-            synthetic_trace(ArrivalSpec::Burst),
-            1,
-            Some(2),
-            ReplayRouterMode::RoundRobin,
-            SlaThresholds::default(),
-        )
-        .unwrap();
-        let report = handle.run(Box::new(NoopPlannerHook)).unwrap();
-        assert_eq!(report.request_counts.completed_requests, NUM_SESSIONS);
+    fn from_trace_closed_loop_honors_concurrency_cap() {
+        let run = |max_in_flight| {
+            PlannerReplayHandle::from_trace(
+                small_args(),
+                None,
+                None,
+                synthetic_trace(ArrivalSpec::Burst),
+                1,
+                Some(max_in_flight),
+                ReplayRouterMode::RoundRobin,
+                SlaThresholds::default(),
+            )
+            .unwrap()
+            .run(Box::new(NoopPlannerHook))
+            .unwrap()
+        };
+
+        let serial = run(1);
+        let concurrent = run(NUM_SESSIONS);
+
+        assert_eq!(serial.request_counts.completed_requests, NUM_SESSIONS);
+        assert_eq!(concurrent.request_counts.completed_requests, NUM_SESSIONS);
+        assert!(
+            serial.throughput.duration_ms > concurrent.throughput.duration_ms,
+            "cap=1 should serialize requests: serial={}ms concurrent={}ms",
+            serial.throughput.duration_ms,
+            concurrent.throughput.duration_ms,
+        );
+    }
+
+    #[test]
+    fn from_trace_disagg_closed_loop_honors_concurrency_cap() {
+        let run = |max_in_flight| {
+            PlannerReplayHandle::from_trace_disagg(
+                OfflineDisaggReplayConfig {
+                    prefill_args: MockEngineArgs {
+                        worker_type: WorkerType::Prefill,
+                        ..small_args()
+                    },
+                    decode_args: MockEngineArgs {
+                        worker_type: WorkerType::Decode,
+                        ..small_args()
+                    },
+                    num_prefill_workers: 1,
+                    num_decode_workers: 1,
+                },
+                None,
+                None,
+                synthetic_trace(ArrivalSpec::Burst),
+                Some(max_in_flight),
+                ReplayRouterMode::RoundRobin,
+                SlaThresholds::default(),
+            )
+            .unwrap()
+            .run(Box::new(NoopPlannerHook))
+            .unwrap()
+        };
+
+        let serial = run(1);
+        let concurrent = run(NUM_SESSIONS);
+
+        assert_eq!(serial.request_counts.completed_requests, NUM_SESSIONS);
+        assert_eq!(concurrent.request_counts.completed_requests, NUM_SESSIONS);
+        assert!(
+            serial.throughput.duration_ms > concurrent.throughput.duration_ms,
+            "cap=1 should serialize requests: serial={}ms concurrent={}ms",
+            serial.throughput.duration_ms,
+            concurrent.throughput.duration_ms,
+        );
     }
 
     #[test]

@@ -5,18 +5,22 @@ title: Request Replay Tracing
 subtitle: Capture live chat and completion traffic for direct DynoSim replay
 ---
 
-Request replay tracing records one `request_end` row for each eligible Rust OpenAI
-chat or completion request. Without session headers, the row stays compact
-and contains only replay metadata. With session headers, the same
-`dynamo.request.trace.v1` stream also includes session identity, request
-metrics, finish metadata, and optional harness tool events.
+Request replay tracing records `dynamo.request.trace.v1` rows for eligible
+OpenAI chat or completion requests. The compact `request_end` row contains
+replay metadata. With session headers, the same stream also includes session
+identity, request metrics, finish metadata, and optional harness tool events.
 
 Session identity enriches traces only. Its presence does not enable sticky sessions or change routing policy.
 
-Request tracing does not record prompts, responses, or tool arguments. Use the
-audit sink when payload capture is required.
+Request trace can also emit `request_payload` rows for OpenAI
+`/v1/chat/completions` requests. Payload rows include the client request and,
+when the response completes, the response. By default, Dynamo does not emit
+request or response payload rows, even when `store=true`. Set
+`DYN_REQUEST_TRACE_RECORDS=request_payload` to emit payload rows for every
+eligible chat request, or include `request_payload` alongside other selected
+record types.
 
-Enable the default rotating gzip sink:
+Enable the default rotating gzip file sink:
 
 ```bash
 export DYN_REQUEST_TRACE=1
@@ -27,23 +31,42 @@ segment prefix:
 
 ```bash
 export DYN_REQUEST_TRACE=1
-export DYN_REQUEST_TRACE_OUTPUT_PATH=/mnt/captures/run-42/request-trace
+export DYN_REQUEST_TRACE_FILE_PATH=/mnt/captures/run-42/request-trace
 ```
 
 ## Configuration
 
-| Variable | Default when enabled | Description |
-| --- | --- | --- |
-| `DYN_REQUEST_TRACE` | unset | Truthy master switch. |
-| `DYN_REQUEST_TRACE_SINKS` | `jsonl_gz` | Comma-separated `jsonl`, `jsonl_gz`, or `stderr`. |
-| `DYN_REQUEST_TRACE_OUTPUT_PATH` | `/tmp/dynamo-request-trace` | Literal JSONL path or gzip segment prefix. |
-| `DYN_REQUEST_TRACE_CAPACITY` | `1024` | Best-effort in-process broadcast capacity. |
-| `DYN_REQUEST_TRACE_JSONL_BUFFER_BYTES` | `1048576` | JSONL or gzip batching threshold. |
-| `DYN_REQUEST_TRACE_JSONL_FLUSH_INTERVAL_MS` | `1000` | Periodic flush interval. |
-| `DYN_REQUEST_TRACE_JSONL_GZ_ROLL_BYTES` | `268435456` | Gzip roll threshold in uncompressed bytes. |
-| `DYN_REQUEST_TRACE_JSONL_GZ_ROLL_LINES` | unset | Optional gzip roll threshold in records. |
-| `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` | unset | Optional ZMQ PULL bind address for harness tool events. |
-| `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC` | `agent-tool-events` | First-frame ZMQ topic filter when endpoint is configured. |
+| Variable | Default when enabled | Values | Description |
+| --- | --- | --- | --- |
+| `DYN_REQUEST_TRACE` | unset | Truthy value | Master switch. When enabled and `DYN_REQUEST_TRACE_RECORDS` is unset, emits `request_end,tool`. |
+| `DYN_REQUEST_TRACE_RECORDS` | `request_end,tool` when `DYN_REQUEST_TRACE=1`; unset otherwise | `request_end`, `request_payload`, `tool` | Comma-separated record types to emit. Setting this variable enables only the listed records. |
+| `DYN_REQUEST_TRACE_SINKS` | `file` | `file`, `stderr`, `nats`, `otel` | Comma-separated record sinks. |
+| `DYN_REQUEST_TRACE_FILE_PATH` | `/tmp/dynamo-request-trace` | File path or segment prefix | Literal path when `DYN_REQUEST_TRACE_FILE_FORMAT=jsonl`; gzip segment prefix when `DYN_REQUEST_TRACE_FILE_FORMAT=jsonl_gz`. |
+| `DYN_REQUEST_TRACE_FILE_FORMAT` | `jsonl_gz` | `jsonl`, `jsonl_gz` | File record format. `jsonl_gz` writes `<prefix>.<index>.jsonl.gz`; `jsonl` writes a literal JSONL path. |
+| `DYN_REQUEST_TRACE_CAPACITY` | `1024` | Positive integer | Best-effort in-process broadcast capacity. |
+| `DYN_REQUEST_TRACE_NATS_SUBJECT` | `dynamo.request_trace.v1` | NATS subject | Subject used when `DYN_REQUEST_TRACE_SINKS` includes `nats`. |
+| `DYN_REQUEST_TRACE_OTEL_MAX_PAYLOAD_BYTES` | `4194304` | Positive integer bytes | Max serialized OTEL payload attribute size. Oversized `request_payload` rows emit a marker with `payload_complete=false` and `payload_drop_reason`. |
+| `DYN_REQUEST_TRACE_FILE_BUFFER_BYTES` | `1048576` | Integer bytes | File batching threshold. |
+| `DYN_REQUEST_TRACE_FILE_FLUSH_INTERVAL_MS` | `1000` | Integer milliseconds | Periodic flush interval. |
+| `DYN_REQUEST_TRACE_FILE_ROLL_BYTES` | `268435456` | Positive integer bytes | Gzip roll threshold in uncompressed bytes. |
+| `DYN_REQUEST_TRACE_FILE_ROLL_LINES` | unset | Positive integer records | Optional gzip roll threshold in records. |
+| `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` | unset | ZMQ bind address | Optional ZMQ PULL bind address for harness tool events. |
+| `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC` | `agent-tool-events` | ZMQ topic | First-frame ZMQ topic filter when endpoint is configured. |
+| `DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST` | unset (none) | Comma/whitespace-separated header names | Allowlist of HTTP request header names to record in `request_payload` rows (`payload.http_request_headers`), case-insensitive. Only listed headers are captured; unset/empty captures none. Applies to every sink. Captured values are unredacted, so avoid allowlisting credential-bearing headers. |
+
+> [!WARNING]
+> Deprecated. The legacy `jsonl` and `jsonl_gz` values for
+> `DYN_REQUEST_TRACE_SINKS`, `DYN_REQUEST_TRACE_OUTPUT_PATH`, and
+> `DYN_REQUEST_TRACE_JSONL_*` aliases remain accepted for compatibility.
+> `DYN_REQUEST_TRACE_SINKS=jsonl` maps to the `file` sink with
+> `DYN_REQUEST_TRACE_FILE_FORMAT=jsonl`; `jsonl_gz` maps to the `file` sink
+> with `DYN_REQUEST_TRACE_FILE_FORMAT=jsonl_gz`. The legacy audit variables
+> `DYN_AUDIT_SINKS`, `DYN_AUDIT_FORCE_LOGGING`, `DYN_AUDIT_OUTPUT_PATH`,
+> `DYN_AUDIT_NATS_SUBJECT`, `DYN_AUDIT_JSONL_*`, and
+> `DYN_AUDIT_OTEL_MAX_PAYLOAD_BYTES` are accepted as migration shims, not
+> legacy wire-compatibility aliases. A truthy `DYN_AUDIT_FORCE_LOGGING` maps to
+> `DYN_REQUEST_TRACE_RECORDS=request_payload`; `DYN_AUDIT_SINKS` only selects
+> destinations and does not enable `request_end` replay metadata.
 
 Set the ZMQ endpoint on the process that should own tool-event ingress, usually
 the frontend process. If the same bind address is exported to multiple Dynamo
@@ -54,6 +77,12 @@ The harness should publish `agent-tool-events` as the first ZMQ frame unless
 The bus and sinks use best-effort delivery behavior.
 A slow sink can report lag and drop records. Validate captured row counts before
 using a trace as a complete workload.
+
+The `otel` sink uses the standard `OTEL_EXPORTER_OTLP_*` variables. Set
+`OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` and `OTEL_EXPORTER_OTLP_LOGS_PROTOCOL` to
+route request trace records through an OpenTelemetry Collector. The `otel`
+sink writes each request trace row as one OTLP log record with the full
+row serialized in the `payload` attribute.
 
 ## Record Shape
 
@@ -122,6 +151,54 @@ Agent-enriched row:
   }
 }
 ```
+
+Payload row:
+
+```json
+{
+  "schema": "dynamo.request.trace.v1",
+  "event_type": "request_payload",
+  "event_time_unix_ms": 1777312800000,
+  "event_source": "dynamo",
+  "payload": {
+    "request_id": "dynamo-request-id",
+    "endpoint": "openai.chat_completion",
+    "model": "my-model",
+    "request": {
+      "model": "my-model",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+    },
+    "response": {
+      "id": "chatcmpl-example",
+      "object": "chat.completion",
+      "created": 1777312801,
+      "model": "my-model",
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "Hello."
+          },
+          "finish_reason": "stop"
+        }
+      ]
+    },
+    "payload_complete": true
+  }
+}
+```
+
+For canceled streams, gateway timeouts, and aggregation failures, the row still
+contains `payload.request`; `payload.response` is omitted. If the `otel`
+sink drops an oversized payload body, the row contains
+`payload_complete=false` and `payload_drop_reason`; captured HTTP headers are
+kept in the marker unless the marker itself still exceeds the limit.
 
 Optional harness tool events use the `RequestTraceToolEventIngress` payload below. Dynamo normalizes these events into request trace rows before writing them to sinks.
 

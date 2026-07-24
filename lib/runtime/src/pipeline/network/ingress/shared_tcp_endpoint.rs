@@ -463,21 +463,13 @@ impl SharedTcpServer {
                 "Unregistered TCP endpoint handler"
             );
 
-            let inflight_count = handler.inflight.load(Ordering::SeqCst);
-            if inflight_count > 0 {
-                tracing::info!(
-                    endpoint_name = %endpoint_name,
-                    inflight_count = inflight_count,
-                    "Waiting for inflight TCP requests to complete"
-                );
-                while handler.inflight.load(Ordering::SeqCst) > 0 {
-                    handler.notify.notified().await;
-                }
-                tracing::info!(
-                    endpoint_name = %endpoint_name,
-                    "All inflight TCP requests completed"
-                );
-            }
+            super::drain_inflight(
+                handler.inflight.clone(),
+                handler.notify.clone(),
+                endpoint_name,
+                crate::runtime::graceful_shutdown_timeout(),
+            )
+            .await;
         }
     }
 

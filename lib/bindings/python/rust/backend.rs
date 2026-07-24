@@ -44,12 +44,14 @@ use crate::ModelInput;
 use crate::context::Context as PyContext;
 use crate::errors::{extract_http_like_error, py_exception_to_backend_error};
 use crate::llm::kv::KvEventPublisher as PyKvEventPublisher;
+use crate::llm::preprocessor::{MediaDecoder, MediaFetcher};
 use crate::to_pyerr;
 
 /// Register `dynamo._core.backend` and its classes on the parent `_core` module.
 pub fn add_to_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = parent.py();
     let m = PyModule::new(py, "backend")?;
+    m.add_function(wrap_pyfunction!(_run_sglang_sidecar, &m)?)?;
     m.add_class::<DisaggregationMode>()?;
     m.add_class::<EngineConfig>()?;
     m.add_class::<LlmRegistration>()?;
@@ -64,6 +66,34 @@ pub fn add_to_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
         .getattr("modules")?
         .set_item("dynamo._core.backend", &m)?;
     Ok(())
+}
+
+const SGLANG_SIDECAR_PROGRAM_NAME: &str = "dynamo-sglang-sidecar";
+
+fn sglang_sidecar_argv(argv: Vec<String>) -> Vec<String> {
+    let mut cli_argv = Vec::with_capacity(argv.len() + 1);
+    cli_argv.push(SGLANG_SIDECAR_PROGRAM_NAME.to_string());
+    cli_argv.extend(argv);
+    cli_argv
+}
+
+/// Run the native SGLang sidecar in the current process.
+///
+/// SGLang's sidecar module contract passes only option arguments, while clap's
+/// `try_parse_from` expects the program name at index zero. Add that stable
+/// name here so Python callers use ordinary `sys.argv[1:]` semantics.
+#[pyfunction]
+#[pyo3(signature = (argv=None))]
+fn _run_sglang_sidecar(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
+    let cli_argv = sglang_sidecar_argv(argv.unwrap_or_default());
+    let (engine, config) = py
+        .allow_threads(move || {
+            dynamo_sglang_sidecar::SglangSidecarEngine::from_args(Some(cli_argv))
+        })
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+
+    py.allow_threads(move || dynamo_backend_common::run(Arc::new(engine), config))
+        .map_err(|err| pyo3::exceptions::PyRuntimeError::new_err(err.to_string()))
 }
 
 // ---------------------------------------------------------------------------
@@ -316,6 +346,9 @@ impl WorkerConfig {
         structural_tag_scope = "auto".to_string(),
         structural_tag_schema = "auto".to_string(),
         route_to_encoder = false,
+        media_decoder = None,
+        media_fetcher = None,
+        kv_state_endpoint = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -341,6 +374,9 @@ impl WorkerConfig {
         structural_tag_scope: String,
         structural_tag_schema: String,
         route_to_encoder: bool,
+        media_decoder: Option<MediaDecoder>,
+        media_fetcher: Option<MediaFetcher>,
+        kv_state_endpoint: Option<String>,
     ) -> PyResult<Self> {
         // Delegating to the same conversion used by `register_model`.
         let model_input_rs = match model_input {
@@ -400,6 +436,9 @@ impl WorkerConfig {
                 namespace,
                 component,
                 endpoint,
+                kv_state_endpoint: kv_state_endpoint
+                    .as_deref()
+                    .map(dynamo_runtime::protocols::EndpointId::from),
                 model_name,
                 served_model_name,
                 model_input: model_input_rs,
@@ -418,6 +457,8 @@ impl WorkerConfig {
                 structural_tag_schema: st_schema,
                 runtime: runtime.map(|r| r.inner).unwrap_or_default(),
                 route_to_encoder,
+                media_decoder: media_decoder.map(|decoder| decoder.inner),
+                media_fetcher: media_fetcher.map(|fetcher| fetcher.inner),
             },
         })
     }

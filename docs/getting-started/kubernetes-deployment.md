@@ -24,7 +24,8 @@ Start with the [Kubernetes Quickstart](../kubernetes/README.md) to run one model
 | Deploy and manage models | [Deployment Overview](../kubernetes/model-deployment-guide.md) |
 | Load models faster across pods | [Model Caching](../kubernetes/model-caching.md) and [ModelExpress](../kubernetes/modelexpress.md) |
 | Operate a cluster deployment | [Autoscaling](../kubernetes/autoscaling.md), [Rolling Update](../kubernetes/rolling-update.md), [Disagg Communication](../kubernetes/disagg-communication-guide.md), and [Observability Metrics](../kubernetes/observability/metrics.md) |
+| Route traffic kube-natively | [Gateway API Inference Extension (GAIE)](../kubernetes/gateway-api/README.mdx) |
 | Scale disaggregated serving | [Multinode Deployments](../kubernetes/deployment/multinode-deployment.md), [Grove](../kubernetes/grove.md), and [Topology Aware Scheduling](../kubernetes/topology-aware-scheduling.md) |
-| Integrate with Kubernetes serving APIs | [Gateway API Inference Extension (GAIE)](../kubernetes/inference-gateway.md) and [LWS](../kubernetes/lws.md) |
+| Scheduler support | [Grove](../kubernetes/grove.md) and [LWS](../kubernetes/lws.md) |
 
 If you are still evaluating Dynamo locally, start with the [Quickstart](quickstart.mdx) and [Local Installation](local-installation.md) first.

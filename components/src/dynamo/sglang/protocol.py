@@ -44,6 +44,7 @@ class PreprocessedRequest(BaseModel):
     token_ids: List[TokenIdType]
     stop_conditions: StopConditions
     sampling_options: SamplingOptions
+    require_reasoning: bool = False
     eos_token_ids: List[TokenIdType] = Field(default_factory=list)
     mdc_sum: Optional[str] = None
     annotations: List[str] = Field(default_factory=list)

@@ -62,6 +62,9 @@ use prometheus::{HistogramOpts, IntCounter, IntCounterVec, IntGauge, IntGaugeVec
 use crate::http::service::metrics::generate_log_buckets;
 
 pub(crate) const ROUTER_WORKER_ID_LABEL: &str = "router_worker_id";
+const TARGET_NAMESPACE_LABEL: &str = "target_namespace";
+const TARGET_COMPONENT_LABEL: &str = "target_component";
+const TARGET_ENDPOINT_LABEL: &str = "target_endpoint";
 
 /// Buckets for CPU-bound compute phases (block hashing, sequence hashing).
 fn compute_overhead_buckets() -> Vec<f64> {
@@ -190,12 +193,194 @@ pub(crate) fn kv_publisher_metrics() -> Option<Arc<KvPublisherMetrics>> {
 }
 
 // ---------------------------------------------------------------------------
+// Direct-ZMQ KV ingress metrics
+// ---------------------------------------------------------------------------
+
+pub(crate) struct KvZmqIngressMetrics {
+    sources: IntGaugeVec,
+    batches_total: IntCounter,
+    lifecycle_total: IntCounterVec,
+}
+
+static KV_ZMQ_INGRESS_METRICS: OnceLock<Arc<KvZmqIngressMetrics>> = OnceLock::new();
+
+impl KvZmqIngressMetrics {
+    pub(crate) fn from_component(component: &Component) -> Arc<Self> {
+        KV_ZMQ_INGRESS_METRICS
+            .get_or_init(|| {
+                let metrics = component.metrics();
+                let sources = metrics
+                    .create_intgaugevec(
+                        "router_kv_zmq_ingress_sources",
+                        "Number of direct-ZMQ KV ingress sources by lifecycle state",
+                        &["state"],
+                        &[],
+                    )
+                    .expect("failed to create router_kv_zmq_ingress_sources gauge");
+                let batches_total = metrics
+                    .create_intcounter(
+                        "router_kv_zmq_ingress_batches_total",
+                        "Total direct-ZMQ KV ingress batches handed to WorkerQueryClient",
+                        &[],
+                    )
+                    .expect("failed to create router_kv_zmq_ingress_batches_total counter");
+                let lifecycle_total = metrics
+                    .create_intcountervec(
+                        "router_kv_zmq_ingress_lifecycle_total",
+                        "Total direct-ZMQ KV ingress lifecycle transitions and errors",
+                        &["action"],
+                        &[],
+                    )
+                    .expect("failed to create router_kv_zmq_ingress_lifecycle_total counter");
+                Arc::new(Self {
+                    sources,
+                    batches_total,
+                    lifecycle_total,
+                })
+            })
+            .clone()
+    }
+
+    pub(crate) fn increment_sources(&self, state: &'static str) {
+        self.sources.with_label_values(&[state]).inc();
+    }
+
+    pub(crate) fn decrement_sources(&self, state: &'static str) {
+        self.sources.with_label_values(&[state]).dec();
+    }
+
+    pub(crate) fn increment_batch(&self) {
+        self.batches_total.inc();
+    }
+
+    pub(crate) fn increment_lifecycle(&self, action: &'static str) {
+        self.lifecycle_total.with_label_values(&[action]).inc();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Direct-ZMQ active-sequence ingress metrics
+// ---------------------------------------------------------------------------
+
+pub(crate) struct ActiveSequenceZmqIngressMetrics {
+    tracked_sources: IntGauge,
+    sequence_gaps_total: IntCounter,
+    out_of_order_total: IntCounter,
+    reconnects_total: IntCounter,
+    replacements_total: IntCounter,
+    envelope_decode_errors_total: IntCounter,
+    payload_decode_errors_total: IntCounter,
+    identity_errors_total: IntCounter,
+    forced_aborts_total: IntCounter,
+}
+
+static ACTIVE_SEQUENCE_ZMQ_INGRESS_METRICS: OnceLock<Arc<ActiveSequenceZmqIngressMetrics>> =
+    OnceLock::new();
+
+impl ActiveSequenceZmqIngressMetrics {
+    pub(crate) fn from_component(component: &Component) -> Arc<Self> {
+        ACTIVE_SEQUENCE_ZMQ_INGRESS_METRICS
+            .get_or_init(|| {
+                let metrics = component.metrics();
+                let counter = |name, help| {
+                    metrics
+                        .create_intcounter(name, help, &[])
+                        .unwrap_or_else(|error| panic!("failed to create {name}: {error}"))
+                };
+                Arc::new(Self {
+                    tracked_sources: metrics
+                        .create_intgauge(
+                            "router_active_sequence_zmq_ingress_sources",
+                            "Number of tracked direct-ZMQ active-sequence sources",
+                            &[],
+                        )
+                        .expect("failed to create router_active_sequence_zmq_ingress_sources"),
+                    sequence_gaps_total: counter(
+                        "router_active_sequence_zmq_ingress_sequence_gaps_total",
+                        "Missing direct-ZMQ active-sequence envelopes inferred from sequence gaps",
+                    ),
+                    out_of_order_total: counter(
+                        "router_active_sequence_zmq_ingress_out_of_order_total",
+                        "Non-increasing direct-ZMQ active-sequence envelope sequences",
+                    ),
+                    reconnects_total: counter(
+                        "router_active_sequence_zmq_ingress_reconnects_total",
+                        "Direct-ZMQ active-sequence source reconnect attempts",
+                    ),
+                    replacements_total: counter(
+                        "router_active_sequence_zmq_ingress_replacements_total",
+                        "Direct-ZMQ active-sequence source task replacements",
+                    ),
+                    envelope_decode_errors_total: counter(
+                        "router_active_sequence_zmq_ingress_envelope_decode_errors_total",
+                        "Direct-ZMQ active-sequence envelope decode errors",
+                    ),
+                    payload_decode_errors_total: counter(
+                        "router_active_sequence_zmq_ingress_payload_decode_errors_total",
+                        "Direct-ZMQ active-sequence payload decode errors",
+                    ),
+                    identity_errors_total: counter(
+                        "router_active_sequence_zmq_ingress_identity_errors_total",
+                        "Direct-ZMQ active-sequence frame and envelope identity mismatches",
+                    ),
+                    forced_aborts_total: counter(
+                        "router_active_sequence_zmq_ingress_forced_aborts_total",
+                        "Direct-ZMQ active-sequence source tasks aborted after join timeout",
+                    ),
+                })
+            })
+            .clone()
+    }
+
+    pub(crate) fn source_started(&self) {
+        self.tracked_sources.inc();
+    }
+
+    pub(crate) fn source_stopped(&self) {
+        self.tracked_sources.dec();
+    }
+
+    pub(crate) fn record_gap(&self, missing: u64) {
+        self.sequence_gaps_total.inc_by(missing);
+    }
+
+    pub(crate) fn record_out_of_order(&self) {
+        self.out_of_order_total.inc();
+    }
+
+    pub(crate) fn record_reconnect(&self) {
+        self.reconnects_total.inc();
+    }
+
+    pub(crate) fn record_replacement(&self) {
+        self.replacements_total.inc();
+    }
+
+    pub(crate) fn record_envelope_decode_error(&self) {
+        self.envelope_decode_errors_total.inc();
+    }
+
+    pub(crate) fn record_payload_decode_error(&self) {
+        self.payload_decode_errors_total.inc();
+    }
+
+    pub(crate) fn record_identity_error(&self) {
+        self.identity_errors_total.inc();
+    }
+
+    pub(crate) fn record_forced_abort(&self) {
+        self.forced_aborts_total.inc();
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Router worker status metrics (component-scoped gauges)
 // ---------------------------------------------------------------------------
 
 /// Component-scoped router gauges for worker discovery.
 pub(crate) struct RouterWorkerStatusMetrics {
     pub registered: IntGaugeVec,
+    pub kv_event_source_mismatch_workers: IntGaugeVec,
 }
 
 static ROUTER_WORKER_STATUS_METRICS: OnceLock<Arc<RouterWorkerStatusMetrics>> = OnceLock::new();
@@ -218,8 +403,25 @@ impl RouterWorkerStatusMetrics {
                         &[],
                     )
                     .expect("failed to create router_worker_registered gauge");
+                let kv_event_source_mismatch_workers = metrics
+                    .create_intgaugevec(
+                        router::KV_EVENT_SOURCE_MISMATCH_WORKERS,
+                        "Number of serving workers with missing or ambiguous KV sources, or without an expected RecoveryTarget",
+                        &[
+                            labels::MODEL,
+                            labels::WORKER_TYPE,
+                            TARGET_NAMESPACE_LABEL,
+                            TARGET_COMPONENT_LABEL,
+                            TARGET_ENDPOINT_LABEL,
+                        ],
+                        &[],
+                    )
+                    .expect("failed to create router_kv_event_source_mismatch_workers gauge");
 
-                Arc::new(Self { registered })
+                Arc::new(Self {
+                    registered,
+                    kv_event_source_mismatch_workers,
+                })
             })
             .clone()
     }
@@ -236,6 +438,26 @@ impl RouterWorkerStatusMetrics {
         let dp_rank = dp_rank.to_string();
         let labels = &[worker_id.as_str(), dp_rank.as_str(), worker_type];
         let _ = self.registered.remove_label_values(labels);
+    }
+
+    pub fn set_kv_event_source_mismatch_workers(
+        &self,
+        model: &str,
+        worker_type: &str,
+        target_namespace: &str,
+        target_component: &str,
+        target_endpoint: &str,
+        count: usize,
+    ) {
+        self.kv_event_source_mismatch_workers
+            .with_label_values(&[
+                model,
+                worker_type,
+                target_namespace,
+                target_component,
+                target_endpoint,
+            ])
+            .set(count as i64);
     }
 }
 
@@ -609,11 +831,19 @@ pub struct RouterRequestMetrics {
 }
 
 static ROUTER_REQUEST_METRICS: OnceLock<Arc<RouterRequestMetrics>> = OnceLock::new();
+static ROUTER_REQUESTS_STARTED_TOTAL: OnceLock<prometheus::IntCounter> = OnceLock::new();
 
 impl RouterRequestMetrics {
     /// Returns the registered metrics if `from_component()` was called earlier.
     pub fn get() -> Option<Arc<Self>> {
         ROUTER_REQUEST_METRICS.get().cloned()
+    }
+
+    /// Total requests admitted by the router scheduler.
+    pub fn requests_started_total(&self) -> &prometheus::IntCounter {
+        ROUTER_REQUESTS_STARTED_TOTAL
+            .get()
+            .expect("router request metrics must be initialized")
     }
 
     /// Create from a Component, memoized in a static OnceLock.
@@ -630,6 +860,19 @@ impl RouterRequestMetrics {
                 let extra_labels: &[(&str, &str)] = &[(labels::ROUTER_ID, &router_id)];
 
                 let metrics = component.metrics();
+                let requests_started_total = metrics
+                    .create_intcounter(
+                        &router_metric(frontend_service::REQUESTS_STARTED_TOTAL),
+                        "Total number of requests admitted by the router scheduler",
+                        extra_labels,
+                    )
+                    .expect("failed to create router_requests_started_total");
+                assert!(
+                    ROUTER_REQUESTS_STARTED_TOTAL
+                        .set(requests_started_total)
+                        .is_ok(),
+                    "router_requests_started_total already initialized"
+                );
                 let requests_total = metrics
                     .create_intcounter(
                         &router_metric(frontend_service::REQUESTS_TOTAL),
@@ -846,17 +1089,56 @@ dynamo_frontend_worker_active_prefill_tokens{dp_rank=\"0\",worker_id=\"123\",wor
                 &[ROUTER_WORKER_ID_LABEL, labels::DP_RANK, labels::WORKER_TYPE],
             )
             .unwrap(),
+            kv_event_source_mismatch_workers: IntGaugeVec::new(
+                Opts::new(
+                    format!(
+                        "{}_{}",
+                        name_prefix::COMPONENT,
+                        router::KV_EVENT_SOURCE_MISMATCH_WORKERS
+                    ),
+                    "Number of workers expected to publish KV events but missing worker-local KV indexer query endpoints",
+                ),
+                &[
+                    labels::MODEL,
+                    labels::WORKER_TYPE,
+                    TARGET_NAMESPACE_LABEL,
+                    TARGET_COMPONENT_LABEL,
+                    TARGET_ENDPOINT_LABEL,
+                ],
+            )
+            .unwrap(),
         };
         registry
             .register(Box::new(metrics.registered.clone()))
             .unwrap();
+        registry
+            .register(Box::new(metrics.kv_event_source_mismatch_workers.clone()))
+            .unwrap();
 
         metrics.set_registered(123, 0, "decode");
+        metrics.set_kv_event_source_mismatch_workers(
+            "model-a", "decode", "ns-a", "decode", "generate", 2,
+        );
+        metrics.set_kv_event_source_mismatch_workers(
+            "model-a", "prefill", "ns-a", "prefill", "generate", 0,
+        );
 
         let output = gather_pef(&registry);
         assert!(
             output.contains(
                 "dynamo_component_router_worker_registered{dp_rank=\"0\",router_worker_id=\"123\",worker_type=\"decode\"} 1"
+            ),
+            "\nActual PEF:\n{output}"
+        );
+        assert!(
+            output.contains(
+                "dynamo_component_router_kv_event_source_mismatch_workers{model=\"model-a\",target_component=\"decode\",target_endpoint=\"generate\",target_namespace=\"ns-a\",worker_type=\"decode\"} 2"
+            ),
+            "\nActual PEF:\n{output}"
+        );
+        assert!(
+            output.contains(
+                "dynamo_component_router_kv_event_source_mismatch_workers{model=\"model-a\",target_component=\"prefill\",target_endpoint=\"generate\",target_namespace=\"ns-a\",worker_type=\"prefill\"} 0"
             ),
             "\nActual PEF:\n{output}"
         );

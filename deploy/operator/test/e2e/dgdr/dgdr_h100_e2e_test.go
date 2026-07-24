@@ -113,7 +113,7 @@ func disaggPlannerBase(
 
 // DGDR Support Matrix on H100 SKU exercises the full DGDR lifecycle (create -> profile ->
 // DGD generation -> DGD readiness) across a curated
-var _ = Describe("DGDR Support Matrix on H100 SKU", Label("gpu_0", "nightly", "integration", "k8s"), func() {
+var _ = Describe("DGDR Support Matrix on H100 SKU", Label("gpu_0", "nightly", "e2e", "integration", "k8s"), func() {
 	// -----------------------------------------------------------------------
 	// Support matrix — rapid profiling (in AIC matrix)
 	// Models with pre-validated configs where rapid search finds a viable

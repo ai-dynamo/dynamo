@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 DEFAULT_IMAGES_PER_REQUEST = 3
+DEFAULT_VIDEOS_PER_REQUEST = 1
 USER_TEXT_TOKENS = 300
 COCO_ANNOTATIONS = Path(__file__).parent / "annotations" / "image_info_test2017.json"
 
@@ -41,13 +42,6 @@ def _common_parser() -> argparse.ArgumentParser:
         default=None,
         help="Random seed for reproducible generation (default: time-based)",
     )
-    p.add_argument(
-        "--uuid",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Emit `image_uuids` parallel to `images` in each JSONL row (default: False). "
-        "Pass --uuid to enable for aiperf --mm-cache-mode {uuid-only,uuid-and-strip} runs.",
-    )
     return p
 
 
@@ -80,12 +74,53 @@ def _image_parser() -> argparse.ArgumentParser:
         default=COCO_ANNOTATIONS,
         help=f"Path to COCO image_info JSON for --image-mode http (default: {COCO_ANNOTATIONS})",
     )
+    p.add_argument(
+        "--uuid",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Emit `image_uuids` parallel to `images` in each JSONL row (default: False). "
+        "Pass --uuid to enable for aiperf --mm-cache-mode {uuid-only,uuid-and-strip} runs.",
+    )
+    return p
+
+
+def _video_parser() -> argparse.ArgumentParser:
+    """Args for synthetic video workloads."""
+    p = argparse.ArgumentParser(add_help=False)
+    p.add_argument(
+        "--synthetic-video-dir",
+        type=Path,
+        default=Path("/tmp/bench_videos"),
+        help="Directory for generated synthetic MP4 videos "
+        "(default: /tmp/bench_videos)",
+    )
+    p.add_argument(
+        "--synthetic-video-size",
+        type=_positive_int,
+        nargs=2,
+        default=[320, 240],
+        metavar=("WIDTH", "HEIGHT"),
+        help="Size of generated synthetic MP4 videos in pixels (default: 320 240)",
+    )
+    p.add_argument(
+        "--synthetic-video-fps",
+        type=_positive_int,
+        default=8,
+        help="Frames per second for generated synthetic MP4 videos (default: 8)",
+    )
+    p.add_argument(
+        "--synthetic-video-seconds",
+        type=_positive_int,
+        default=4,
+        help="Duration for generated synthetic MP4 videos (default: 4)",
+    )
     return p
 
 
 def parse_args(description: str = "") -> argparse.Namespace:
     common = _common_parser()
     image = _image_parser()
+    video = _video_parser()
 
     parser = argparse.ArgumentParser(
         description=description,
@@ -146,10 +181,41 @@ def parse_args(description: str = "") -> argparse.Namespace:
         "with window_size-1 overlap between consecutive turns (default: 5)",
     )
 
+    # --- video-single-turn ---
+    vst = sub.add_parser(
+        "video-single-turn",
+        parents=[common, video],
+        help="Independent requests with random video sampling",
+    )
+    vst.add_argument(
+        "-n",
+        "--num-requests",
+        type=int,
+        default=200,
+        help="Number of requests to generate (default: 200)",
+    )
+    vst.add_argument(
+        "--videos-per-request",
+        type=int,
+        default=DEFAULT_VIDEOS_PER_REQUEST,
+        help=f"Number of videos per request (default: {DEFAULT_VIDEOS_PER_REQUEST})",
+    )
+    vst.add_argument(
+        "--videos-pool",
+        type=int,
+        default=None,
+        help="Unique videos in pool. Smaller pool = more cross-request reuse. "
+        "Default: num_requests * videos_per_request (all unique).",
+    )
+
     # Default to single-turn when no subcommand given, but let top-level
     # `-h`/`--help` flow through the main parser so users see both
     # subcommands and the module description.
-    known_strategies = {"single-turn", "sliding-window"}
+    known_strategies = {
+        "single-turn",
+        "sliding-window",
+        "video-single-turn",
+    }
     argv = sys.argv[1:]
     help_requested = bool(argv) and argv[0] in {"-h", "--help"}
     if not help_requested and (not argv or argv[0] not in known_strategies):

@@ -41,7 +41,8 @@ These metrics come from the `dynamo_frontend_*` namespace and are collected from
 | **Frontend Avg Request Duration** | `dynamo_frontend_request_duration_seconds_{sum,count}` | `1000 * (rate(sum[5m]) / rate(count[5m]))` | Total end-to-end request duration in milliseconds over the last 5 minutes |
 | **Frontend Avg Inter-Token Latency** | `dynamo_frontend_inter_token_latency_seconds_{sum,count}` | `1000 * (rate(sum[5m]) / rate(count[5m]))` | Average time (in ms) between token generations during decode phase over the last 5 minutes |
 | **Frontend Avg Input/Output Sequence Length** | `dynamo_frontend_input_sequence_tokens_{sum,count}` & `dynamo_frontend_output_sequence_tokens_{sum,count}` | `rate(sum[5m]) / rate(count[5m])` for each | Average input prompt length (ISL) and output generation length (OSL) in tokens over the last 5 minutes |
-| **Frontend Queued Requests** ⭐⭐⭐ | `dynamo_frontend_queued_requests` | Raw value | Number of requests waiting in queue. **THE key metric for diagnosing worker saturation.** High values (>10) indicate workers cannot keep up with load. Yellow threshold at 10, red at 50 |
+| **Frontend Active Requests** | `dynamo_frontend_active_requests` | Raw value | Number of requests currently being handled by the frontend, from HTTP handler entry to response completion, labeled by model |
+| **Frontend Queued Requests** ⭐⭐⭐ | `dynamo_frontend_stage_requests{stage=~"preprocess\|route\|dispatch"}` | `sum(...)` | Number of requests in the preprocess/route/dispatch stages (waiting before a worker is dispatched). **THE key metric for diagnosing worker saturation.** High values (>10) indicate workers cannot keep up with load. Yellow threshold at 10, red at 50 |
 
 ### GPU Metrics (from DCGM Exporter)
 These metrics come from the DCGM (Data Center GPU Manager) exporter running as a DaemonSet in the `gpu-operator` namespace. DCGM collects hardware-level GPU metrics.

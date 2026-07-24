@@ -3,17 +3,21 @@
 
 import argparse
 import json
+import logging
 import os
 import socket
 
 from dynamo._internal.aic import (
     DEFAULT_GPU_MEMORY_UTILIZATION,
     DEFAULT_MEM_FRACTION_STATIC,
+    AicMemoryEstimatorUnavailableError,
     estimate_num_gpu_blocks,
 )
 from dynamo.common.utils.topology import apply_topology_config
 from dynamo.llm import ModelRuntimeConfig
 from dynamo.mocker import MockEngineArgs, ReasoningConfig, SglangArgs, TrtllmArgs
+
+logger = logging.getLogger(__name__)
 
 _DEFAULT_NUM_GPU_BLOCKS = 16384
 _DEFAULT_MAX_NUM_SEQS = 256
@@ -106,34 +110,44 @@ def _estimate_aic_num_gpu_blocks(
     resolved_block_size = _resolve_block_size_for_capacity(
         engine_type, block_size, sglang_page_size
     )
-    return estimate_num_gpu_blocks(
-        backend_name=aic_backend,
-        system=aic_system or _DEFAULT_AIC_SYSTEM,
-        model_path=aic_model_path,
-        tp_size=aic_tp_size if aic_tp_size is not None else 1,
-        block_size=resolved_block_size,
-        max_num_batched_tokens=(
-            max_num_batched_tokens
-            if max_num_batched_tokens is not None
-            else _DEFAULT_MAX_NUM_BATCHED_TOKENS
-        ),
-        gpu_memory_utilization=(
-            gpu_memory_utilization
-            if gpu_memory_utilization is not None
-            else DEFAULT_GPU_MEMORY_UTILIZATION
-        ),
-        mem_fraction_static=(
-            mem_fraction_static
-            if mem_fraction_static is not None
-            else DEFAULT_MEM_FRACTION_STATIC
-        ),
-        # None -> aic.py applies the TRT-LLM default (0.9).
-        free_gpu_memory_fraction=free_gpu_memory_fraction,
-        backend_version=aic_backend_version,
-        moe_tp_size=aic_moe_tp_size,
-        moe_ep_size=aic_moe_ep_size,
-        attention_dp_size=aic_attention_dp_size,
-    )
+    try:
+        return estimate_num_gpu_blocks(
+            backend_name=aic_backend,
+            system=aic_system or _DEFAULT_AIC_SYSTEM,
+            model_path=aic_model_path,
+            tp_size=aic_tp_size if aic_tp_size is not None else 1,
+            block_size=resolved_block_size,
+            max_num_batched_tokens=(
+                max_num_batched_tokens
+                if max_num_batched_tokens is not None
+                else _DEFAULT_MAX_NUM_BATCHED_TOKENS
+            ),
+            gpu_memory_utilization=(
+                gpu_memory_utilization
+                if gpu_memory_utilization is not None
+                else DEFAULT_GPU_MEMORY_UTILIZATION
+            ),
+            mem_fraction_static=(
+                mem_fraction_static
+                if mem_fraction_static is not None
+                else DEFAULT_MEM_FRACTION_STATIC
+            ),
+            # None -> aic.py applies the TRT-LLM default (0.9).
+            free_gpu_memory_fraction=free_gpu_memory_fraction,
+            backend_version=aic_backend_version,
+            moe_tp_size=aic_moe_tp_size,
+            moe_ep_size=aic_moe_ep_size,
+            attention_dp_size=aic_attention_dp_size,
+        )
+    except AicMemoryEstimatorUnavailableError as exc:
+        logger.warning(
+            "AIC KV-cache capacity estimation is unavailable: %s. Falling back "
+            "to default num_gpu_blocks=%d; upgrade aiconfigurator or set "
+            "--num-gpu-blocks-override explicitly.",
+            exc,
+            _DEFAULT_NUM_GPU_BLOCKS,
+        )
+        return _DEFAULT_NUM_GPU_BLOCKS
 
 
 def _resolve_num_gpu_blocks(
@@ -243,6 +257,7 @@ def build_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
         aic_moe_ep_size = getattr(args, "aic_moe_ep_size", None)
         aic_attention_dp_size = getattr(args, "aic_attention_dp_size", None)
     engine_type = getattr(args, "engine_type", None) or "vllm"
+    max_model_len = getattr(args, "max_model_len", None)
     num_gpu_blocks = _resolve_num_gpu_blocks(
         explicit_num_gpu_blocks=getattr(args, "num_gpu_blocks", None),
         engine_type=engine_type,
@@ -267,6 +282,7 @@ def build_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
         engine_type=engine_type,
         num_gpu_blocks=num_gpu_blocks,
         block_size=getattr(args, "block_size", 0) or 0,
+        max_model_len=max_model_len,
         max_num_seqs=getattr(args, "max_num_seqs", _DEFAULT_MAX_NUM_SEQS),
         max_num_batched_tokens=getattr(
             args, "max_num_batched_tokens", _DEFAULT_MAX_NUM_BATCHED_TOKENS
@@ -293,7 +309,7 @@ def build_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
         gpu_memory_utilization=getattr(args, "gpu_memory_utilization", None),
         mem_fraction_static=getattr(args, "mem_fraction_static", None),
         free_gpu_memory_fraction=getattr(args, "free_gpu_memory_fraction", None),
-        enable_local_indexer=not getattr(args, "durable_kv_events", False),
+        enable_local_indexer=True,
         kv_bytes_per_token=getattr(args, "kv_bytes_per_token", None),
         kv_transfer_bandwidth=getattr(args, "kv_transfer_bandwidth", None),
         kv_transfer_timing_mode=getattr(args, "kv_transfer_timing_mode", "full_prompt"),
@@ -349,8 +365,7 @@ def build_runtime_config(
     engine_args: MockEngineArgs,
 ) -> tuple[int, ModelRuntimeConfig]:
     rc = ModelRuntimeConfig()
-    # Mocker does not enforce a model context limit.
-    rc.context_length = 0
+    rc.context_length = engine_args.max_model_len or 0
     rc.total_kv_blocks = engine_args.num_gpu_blocks
     rc.max_num_seqs = engine_args.max_num_seqs
     if rc.max_num_seqs is None:

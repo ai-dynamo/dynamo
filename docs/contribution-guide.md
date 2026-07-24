@@ -6,20 +6,16 @@ subtitle: How to contribute to Dynamo
 max-toc-depth: 3
 ---
 
-<p align="left">
-  <a href="./contribution-guide.zh-CN.md" hreflang="zh-CN"><img src="./assets/img/readme-zh-cn-link.svg" alt="简体中文" height="28" /></a>
-</p>
-
 Dynamo is an open-source distributed inference platform, built by a growing community of contributors. The project is licensed under [Apache 2.0](https://github.com/ai-dynamo/dynamo/blob/main/LICENSE) and welcomes contributions of all sizes -- from typo fixes to major features. Community contributions have shaped core areas of Dynamo including backend integrations, documentation, deployment tooling, and performance improvements.
 
-With 200+ external contributors, 220+ merged community PRs, and new contributors joining every month, Dynamo is one of the fastest-growing open-source inference projects. Check out our [commit activity](https://github.com/ai-dynamo/dynamo/graphs/commit-activity) and [GitHub stars](https://github.com/ai-dynamo/dynamo/stargazers). This guide will help you get started.
+With 200+ external contributors, 220+ merged community PRs, and new contributors joining every month, Dynamo is one of the fastest-growing open-source inference projects. Check out our [commit activity](https://github.com/ai-dynamo/dynamo/graphs/commit-activity) and [GitHub stars](https://github.com/ai-dynamo/dynamo). This guide will help you get started.
 
 Join the community:
 
 - [CNCF Slack (`#ai-dynamo`)](https://communityinviter.com/apps/cloud-native/cncf) -- join CNCF Slack and find us in `#ai-dynamo`
 - [Discord](https://discord.gg/D92uqZRjCZ)
 - [GitHub Discussions](https://github.com/ai-dynamo/dynamo/discussions)
-- [Design Proposals](https://github.com/ai-dynamo/enhancements) -- RFCs for major features
+- [Design Proposals](https://github.com/ai-dynamo/dynamo/issues?q=is%3Aissue+label%3A%22dep%3Adraft%22%2C%22dep%3Aproposed%22%2C%22dep%3Aapproved%22%2C%22dep%3Aimplementing%22%2C%22dep%3Acompleted%22%2C%22dep%3Adeferred%22%2C%22dep%3Asuperseeded%22) -- RFCs for major features, tracked as `dep:*` labeled GitHub issues
 - [Office Hours](https://www.youtube.com/playlist?list=PL5B692fm6--tgryKu94h2Zb7jTFM3Go4X) -- biweekly calls
 - [Community Meetings](https://docs.google.com/document/d/1uR8xD_hlYGwV6QspvSc36k1H-wo1BUcVmFbHH9xlXd8/view) ([Youtube](https://www.youtube.com/@ai-dynamo-community)) -- Weekly (Wed 10:30 AM PT) development community meetings
 - [Dynamo Day Recordings](https://nvevents.nvidia.com/dynamoday) -- deep dives from production users
@@ -210,13 +206,13 @@ The contribution process depends on the size and scope of your change. Even when
 | **M** | 100–200 | Feature addition, moderate refactor | [Open an issue](https://github.com/ai-dynamo/dynamo/issues/new?template=contribution_request.yml) first |
 | **L** | 200–500 | Multi-file feature, new component | [Open an issue](https://github.com/ai-dynamo/dynamo/issues/new?template=contribution_request.yml) first |
 | **XL** | 500–1000 | Major feature, cross-component change | [Open an issue](https://github.com/ai-dynamo/dynamo/issues/new?template=contribution_request.yml) first |
-| **XXL** | 1000+ | Architecture change | Requires a [DEP](https://github.com/ai-dynamo/enhancements) |
+| **XXL** | 1000+ | Architecture change | Requires a [DEP](https://github.com/ai-dynamo/dynamo/issues/new?template=dep.yml) |
 
 **Small changes (under 100 lines):** Submit a PR directly -- no issue needed. This includes typos, simple bug fixes, and formatting. If your PR addresses an existing approved issue, link it with "Fixes #123".
 
 **Larger changes (≥100 lines):** [Open a Contribution Request](https://github.com/ai-dynamo/dynamo/issues/new?template=contribution_request.yml) issue first and wait for the `approved-for-pr` label before submitting a PR.
 
-**Architecture changes:** Changes that affect multiple components, introduce or modify public APIs, alter communication plane architecture, or affect backend integration contracts require a [Dynamo Enhancement Proposal (DEP)](https://github.com/ai-dynamo/enhancements). Open a DEP in the [`ai-dynamo/enhancements`](https://github.com/ai-dynamo/enhancements) repo before starting implementation.
+**Architecture changes:** Changes that affect multiple components, introduce or modify public APIs, alter communication plane architecture, or affect backend integration contracts require a Dynamo Enhancement Proposal (DEP). DEPs are tracked as [`dep:*` labeled GitHub issues](https://github.com/ai-dynamo/dynamo/issues?q=is%3Aissue+label%3A%22dep%3Adraft%22%2C%22dep%3Aproposed%22%2C%22dep%3Aapproved%22%2C%22dep%3Aimplementing%22%2C%22dep%3Acompleted%22%2C%22dep%3Adeferred%22%2C%22dep%3Asuperseeded%22) on `ai-dynamo/dynamo` -- [open a DEP issue](https://github.com/ai-dynamo/dynamo/issues/new?template=dep.yml) before starting implementation.
 
 ### Submitting a Pull Request
 
@@ -429,7 +425,7 @@ If you discover a security vulnerability, please follow the instructions in our 
 - **CNCF Slack**: [Join CNCF Slack](https://communityinviter.com/apps/cloud-native/cncf) and find us in `#ai-dynamo`
 - **Discord**: [Join our community](https://discord.gg/D92uqZRjCZ)
 - **Discussions**: [GitHub Discussions](https://github.com/ai-dynamo/dynamo/discussions)
-- **Design Proposals**: [RFCs for major features](https://github.com/ai-dynamo/enhancements)
+- **Design Proposals**: [RFCs for major features, tracked as `dep:*` labeled GitHub issues](https://github.com/ai-dynamo/dynamo/issues?q=is%3Aissue+label%3A%22dep%3Adraft%22%2C%22dep%3Aproposed%22%2C%22dep%3Aapproved%22%2C%22dep%3Aimplementing%22%2C%22dep%3Acompleted%22%2C%22dep%3Adeferred%22%2C%22dep%3Asuperseeded%22)
 - **Office Hours**: [Biweekly calls](https://www.youtube.com/playlist?list=PL5B692fm6--tgryKu94h2Zb7jTFM3Go4X)
 - **Community Meetings**: [Weekly (Wed 10:30 AM PT) development community meetings](https://docs.google.com/document/d/1uR8xD_hlYGwV6QspvSc36k1H-wo1BUcVmFbHH9xlXd8/view) ([Youtube](https://www.youtube.com/@ai-dynamo-community))
 - **Dynamo Day Recordings**: [Deep dives from production users](https://nvevents.nvidia.com/dynamoday)

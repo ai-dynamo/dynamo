@@ -26,6 +26,9 @@ tcp-low-latency = [] # Enable Linux-specific TCP optimizations (TCP_QUICKACK, SO
 nvtx = ["dep:cudarc"]
 
 [dependencies]
+# repo
+dynamo-truthy = { workspace = true }
+
 # Use workspace dependencies where available
 anyhow = { workspace = true }
 async-nats = { workspace = true }
@@ -78,7 +81,8 @@ bincode = { version = "1" }
 console-subscriber = { version = "0.4", optional = true }
 educe = { version = "0.6.0" }
 figment = { version = "0.10.19", features = ["env", "json", "toml", "test"] }
-notify = { version = "6.1", default-features = false, features = ["macos_fsevent"] }
+# FSEvents omits deletes for FileStore's revision-zero hard-link publication path.
+notify = { version = "6.1", default-features = false, features = ["macos_kqueue"] }
 libc = { version = "0.2" }
 local-ip-address = { version = "0.6.3" }
 # `release_max_level_debug` compiles out `log::trace!` in release builds (a

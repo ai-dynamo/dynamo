@@ -46,6 +46,9 @@ func buildCheckpointJob(
 	if podTemplate.Annotations == nil {
 		podTemplate.Annotations = make(map[string]string)
 	}
+	// Stamp the owning checkpoint so the controller's source-pod watch can map the Job's pod back to
+	// this DynamoCheckpoint.
+	podTemplate.Labels[consts.SnapshotOwnerLabel] = ckpt.Name
 	targetContainerName := ckpt.Spec.Job.TargetContainerName
 	if targetContainerName == "" {
 		targetContainerName = consts.MainContainerName
@@ -169,8 +172,6 @@ func buildCheckpointJob(
 		activeDeadlineSeconds = &defaultDeadline
 	}
 
-	ttlSecondsAfterFinish := snapshotprotocol.DefaultCheckpointJobTTLSeconds
-
 	return snapshotprotocol.NewCheckpointJob(podTemplate, snapshotprotocol.CheckpointJobOptions{
 		Namespace:             ckpt.Namespace,
 		CheckpointID:          hash,
@@ -178,7 +179,6 @@ func buildCheckpointJob(
 		SeccompProfile:        config.Checkpoint.EffectiveSeccompProfile(),
 		Name:                  jobName,
 		ActiveDeadlineSeconds: activeDeadlineSeconds,
-		TTLSecondsAfterFinish: &ttlSecondsAfterFinish,
 		WrapLaunchJob:         wrapLaunchJob,
 	})
 }

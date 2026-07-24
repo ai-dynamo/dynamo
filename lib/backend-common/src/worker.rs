@@ -19,9 +19,11 @@ use dynamo_llm::local_model::runtime_config::{
     StructuralTagScope,
 };
 use dynamo_llm::model_type::{ModelInput, ModelType};
+use dynamo_llm::preprocessor::media::{MediaDecoder, MediaFetcher};
 use dynamo_llm::worker_type::WorkerType;
 use dynamo_runtime::engine_routes::EngineRouteCallback;
 use dynamo_runtime::pipeline::network::Ingress;
+use dynamo_runtime::protocols::EndpointId;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::{DistributedRuntime, Runtime};
 use tokio_util::sync::CancellationToken;
@@ -122,6 +124,8 @@ pub struct WorkerConfig {
     pub component: String,
     /// Endpoint name exposed by this worker (e.g. `"generate"`).
     pub endpoint: String,
+    /// Optional KV-state event endpoint. When unset, KV state uses the serving endpoint.
+    pub kv_state_endpoint: Option<EndpointId>,
     /// HF repo name or local model path. Empty means name-only registration
     /// (no tokenizer / chat-template on the card).
     pub model_name: String,
@@ -147,7 +151,7 @@ pub struct WorkerConfig {
     /// Whether this worker should keep an in-process KV indexer.
     pub enable_local_indexer: bool,
     /// Kill switch for KV-aware-routing publishers. When `false`, skip
-    /// `engine.kv_event_sources()` / `metrics_sources()` entirely.
+    /// `engine.kv_event_sources()` and `SnapshotPublisher` setup.
     pub enable_kv_routing: bool,
     /// Per-endpoint Prometheus metric labels appended to every metric.
     /// Common labels: `("model", "<served-name>")`.
@@ -183,6 +187,10 @@ pub struct WorkerConfig {
     /// roles -- setting it on `Decode` or `Encode` is rejected at
     /// `Worker::run` validation time with `BackendError::InvalidArgument`.
     pub route_to_encoder: bool,
+    /// Optional frontend media decoding and fetch policy advertised on the
+    /// model deployment card.
+    pub media_decoder: Option<MediaDecoder>,
+    pub media_fetcher: Option<MediaFetcher>,
 }
 
 impl WorkerConfig {
@@ -202,6 +210,7 @@ impl Default for WorkerConfig {
             namespace: "dynamo".to_string(),
             component: "backend".to_string(),
             endpoint: "generate".to_string(),
+            kv_state_endpoint: None,
             model_name: String::new(),
             served_model_name: None,
             model_input: ModelInput::Tokens,
@@ -220,6 +229,8 @@ impl Default for WorkerConfig {
             structural_tag_schema: StructuralTagSchemaMode::Auto,
             runtime: RuntimeConfig::default(),
             route_to_encoder: false,
+            media_decoder: None,
+            media_fetcher: None,
         }
     }
 }
@@ -588,7 +599,7 @@ impl Worker {
             crate::metrics::LifecycleGauges::new(&engine_metrics, model_load_time_seconds)?;
 
         self.setup_publishing(
-            &component,
+            &endpoint,
             &engine_config,
             &engine_metrics,
             model_load_time_seconds,
@@ -619,7 +630,7 @@ impl Worker {
     /// KV events.
     async fn setup_publishing(
         &mut self,
-        component: &dynamo_runtime::component::Component,
+        endpoint: &dynamo_runtime::component::Endpoint,
         engine_config: &EngineConfig,
         engine_metrics: &crate::metrics::EngineMetrics,
         model_load_time_seconds: f64,
@@ -657,8 +668,20 @@ impl Worker {
             kv_cache_block_size = ?kv_cache_block_size,
             "Starting KV-aware-routing publishers"
         );
+        let kv_state_endpoint = match &self.config.kv_state_endpoint {
+            Some(endpoint) => endpoint.clone(),
+            None => {
+                let endpoint = endpoint.id();
+                tracing::debug!(
+                    %endpoint,
+                    "No KV-state endpoint configured; using the serving endpoint"
+                );
+                endpoint
+            }
+        };
         let handles = setup_publishers(
-            component,
+            endpoint,
+            &kv_state_endpoint,
             engine_metrics,
             kv_sources,
             bindings.dp_ranks,
@@ -1640,6 +1663,7 @@ async fn build_local_model(
         structural_tag_scope: config.structural_tag_scope,
         structural_tag_schema: config.structural_tag_schema,
         enable_local_indexer,
+        kv_state_endpoint: config.kv_state_endpoint.clone(),
         disaggregated_endpoint,
         runtime_data: engine_config.runtime_data.clone(),
         ..ModelRuntimeConfig::default()
@@ -1650,6 +1674,8 @@ async fn build_local_model(
         .model_name(served_name)
         .kv_cache_block_size(llm.kv_cache_block_size)
         .custom_template_path(config.custom_jinja_template.clone())
+        .media_decoder(config.media_decoder.clone())
+        .media_fetcher(config.media_fetcher.clone())
         .runtime_config(rt_cfg);
 
     // Resolve model_name to a local path. Empty string or a raw media engine
@@ -1781,6 +1807,10 @@ mod tests {
             EngineControlPolicy::Direct
         );
         assert_eq!(
+            engine_control_policy("clear_kv_blocks"),
+            EngineControlPolicy::Direct
+        );
+        assert_eq!(
             engine_control_policy("sleep"),
             EngineControlPolicy::UnregisterBefore
         );
@@ -1904,6 +1934,7 @@ mod tests {
             reasoning_parser: Some("kimi_k25".to_string()),
             exclude_tools_when_tool_choice_none: false,
             enable_local_indexer: false,
+            kv_state_endpoint: Some(EndpointId::from("dynamo/kv-state/events")),
             ..WorkerConfig::default()
         };
         let engine_config = EngineConfig {
@@ -1937,6 +1968,10 @@ mod tests {
         assert!(!runtime_config.exclude_tools_when_tool_choice_none);
         assert!(!runtime_config.enable_local_indexer);
         assert_eq!(
+            runtime_config.kv_state_endpoint,
+            Some(EndpointId::from("dynamo/kv-state/events"))
+        );
+        assert_eq!(
             runtime_config
                 .runtime_data
                 .get("sglang_worker_group_id")
@@ -1965,6 +2000,26 @@ mod tests {
         build_local_model(&config, &engine_config, true)
             .await
             .expect("name-only build must not fetch");
+    }
+
+    #[tokio::test]
+    async fn build_local_model_carries_media_configuration() {
+        let config = WorkerConfig {
+            media_decoder: Some(MediaDecoder::default()),
+            media_fetcher: Some(MediaFetcher::default()),
+            ..WorkerConfig::default()
+        };
+        let engine_config = EngineConfig {
+            model: "media-config-test".to_string(),
+            ..EngineConfig::default()
+        };
+
+        let local_model = build_local_model(&config, &engine_config, true)
+            .await
+            .expect("name-only model with media config must build");
+
+        assert!(local_model.card().media_decoder.is_some());
+        assert!(local_model.card().media_fetcher.is_some());
     }
 
     #[test]

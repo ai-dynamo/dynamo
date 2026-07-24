@@ -101,31 +101,35 @@ class TritonEchoClient:
                 user_data._completed_requests.put(result)
 
         user_data = UserData()
-        triton_client.start_stream(
-            callback=partial(callback, user_data),
-        )
+        try:
+            triton_client.start_stream(
+                callback=partial(callback, user_data),
+            )
 
-        triton_client.async_stream_infer(
-            model_name=model_name,
-            inputs=inputs,
-        )
+            triton_client.async_stream_infer(
+                model_name=model_name,
+                inputs=inputs,
+            )
 
-        data_item = user_data._completed_requests.get(timeout=5)
-        assert (
-            isinstance(data_item, Exception) is False
-        ), f"Stream inference failed: {data_item}"
+            data_item = user_data._completed_requests.get(timeout=5)
+            assert (
+                isinstance(data_item, Exception) is False
+            ), f"Stream inference failed: {data_item}"
 
-        output0_data = data_item.as_numpy("INPUT0")
-        output1_data = data_item.as_numpy("INPUT1")
+            output0_data = data_item.as_numpy("INPUT0")
+            output1_data = data_item.as_numpy("INPUT1")
 
-        assert (
-            output0_data is not None
-        ), "Expected response to include output tensor 'INPUT0'"
-        assert (
-            output1_data is not None
-        ), "Expected response to include output tensor 'INPUT1'"
-        assert np.array_equal(input0_data, output0_data)
-        assert np.array_equal(input1_data, output1_data)
+            assert (
+                output0_data is not None
+            ), "Expected response to include output tensor 'INPUT0'"
+            assert (
+                output1_data is not None
+            ), "Expected response to include output tensor 'INPUT1'"
+            assert np.array_equal(input0_data, output0_data)
+            assert np.array_equal(input1_data, output1_data)
+        finally:
+            triton_client.stop_stream(cancel_requests=True)
+            triton_client.close()
 
     def get_config(self) -> None:
         triton_client = self._client()

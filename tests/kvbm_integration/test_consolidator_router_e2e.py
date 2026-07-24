@@ -43,10 +43,12 @@ if HAS_TRTLLM:
 # Test markers
 pytestmark = [
     pytest.mark.kvbm,
+    pytest.mark.kvbm_consolidator,
     pytest.mark.e2e,
     pytest.mark.slow,
     pytest.mark.gpu_1,
-    pytest.mark.pre_merge,
+    pytest.mark.h100,
+    pytest.mark.post_merge,
     pytest.mark.skipif(not (HAS_VLLM or HAS_TRTLLM), reason="requires vllm or trtllm"),
 ]
 
@@ -286,7 +288,6 @@ def frontend_server(test_directory, runtime_services):
         str(FRONTEND_PORT),
         "--router-mode",
         "kv",
-        "--router-reset-states",
     ]
 
     # Environment
@@ -739,7 +740,6 @@ class TestConsolidatorRouterE2E:
             str(FRONTEND_PORT),
             "--router-mode",
             "kv",
-            "--router-reset-states",
         ]
 
         frontend_env = os.environ.copy()
@@ -773,9 +773,11 @@ class TestConsolidatorRouterE2E:
             model_id = os.environ.get("CONSOLIDATOR_MODEL_ID", "Qwen/Qwen3-0.6B")
 
             # Fixed cache tier sizes
+            block_size = 16
             g1_gpu_blocks = 10  # Very small GPU cache to force evictions
             g2_cpu_blocks = 5  # Smaller than GPU but large enough to retain blocks
             g3_disk_blocks = 5  # Smaller than GPU but large enough to retain blocks
+            max_model_len = g1_gpu_blocks * block_size
 
             # Compute optimal test parameters for this configuration
             test_params = compute_deduplication_test_params(
@@ -800,6 +802,10 @@ class TestConsolidatorRouterE2E:
                     "--enable-prefix-caching",
                     "--num-gpu-blocks-override",
                     str(g1_gpu_blocks),
+                    "--block-size",
+                    str(block_size),
+                    "--max-model-len",
+                    str(max_model_len),
                 ]
             else:  # trtllm
                 # Create TensorRT-LLM config file with KVBM connector

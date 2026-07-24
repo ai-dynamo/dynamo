@@ -7,22 +7,43 @@ import json
 import logging
 import os
 import uuid
-from typing import Any
+from typing import Any, Literal
 
 _MASK_64_BITS = (1 << 64) - 1
 
 
-def resolve_chat_template(source_path: str) -> str | None:
+ChatProcessorBackend = Literal["vllm", "sglang"]
+
+
+def read_jinja_chat_template(
+    template_path: str,
+    *,
+    backend: ChatProcessorBackend,
+) -> str:
+    """Read a Jinja chat template using backend-specific file semantics."""
+    with open(template_path, encoding="utf-8") as f:
+        chat_template = f.read()
+    if backend == "sglang":
+        # Match SGLang TemplateManager._load_jinja_template() for SGLang
+        # frontend preprocessing while leaving vLLM's plain file read intact.
+        return chat_template.strip("\n").replace("\\n", "\n")
+    return chat_template
+
+
+def resolve_chat_template(
+    source_path: str,
+    *,
+    backend: ChatProcessorBackend = "vllm",
+) -> str | None:
     """Return a chat template stored beside the model, or None.
 
     Covers models (e.g. Qwen3-Omni) whose template lives in chat_template.json
     or chat_template.jinja rather than tokenizer_config.json, which the HF
-    tokenizer does not merge.
+    tokenizer does not merge. The backend selects native .jinja file semantics.
     """
     jinja_path = os.path.join(source_path, "chat_template.jinja")
     if os.path.exists(jinja_path):
-        with open(jinja_path, encoding="utf-8") as f:
-            return f.read()
+        return read_jinja_chat_template(jinja_path, backend=backend)
 
     json_path = os.path.join(source_path, "chat_template.json")
     if os.path.exists(json_path):
@@ -78,21 +99,23 @@ _MEDIA_CONTENT_TYPES = ("image_url", "audio_url", "video_url")
 
 def extract_mm_urls(
     messages: list[dict[str, Any]],
-) -> dict[str, list[dict[str, str]]] | None:
-    """Extract multimodal URLs from OpenAI chat completion messages.
+) -> tuple[dict[str, list[dict[str, str]]] | None, dict[str, list[str | None]] | None,]:
+    """Extract media and vLLM image processor-cache UUIDs from chat messages.
 
-    Walks user message content arrays and collects ``image_url``, ``audio_url``,
-    and ``video_url`` entries.  Returns them in the format expected by the
-    backend handler's ``_extract_multimodal_data()``::
+    URL-backed parts become ``Url`` variants. Image parts with no URL and an
+    opaque ``uuid`` become ``UuidOnly`` variants for vLLM's multimodal
+    processor cache. Cache UUIDs on audio and video are rejected. Image UUID
+    lists preserve slot order::
 
-        {
-            "image_url": [{"Url": "https://..."}, ...],
-            "audio_url": [{"Url": "data:audio/wav;base64,..."}],
-        }
+        ({"image_url": [{"Url": "https://..."}, {"UuidOnly": "image-1"}]},
+         {"image_url": ["image-1", "image-1"]})
 
-    Returns ``None`` if no multimodal content is found.
+    The UUID map is ``None`` when no user UUID is present. A media content part
+    with neither a URL nor UUID is rejected instead of being silently dropped.
     """
     mm_data: dict[str, list[dict[str, str]]] = {}
+    mm_uuids: dict[str, list[str | None]] = {}
+    has_user_uuid = False
 
     for msg in messages:
         if not isinstance(msg, dict) or msg.get("role") != "user":
@@ -106,14 +129,34 @@ def extract_mm_urls(
             part_type = part.get("type")
             if part_type not in _MEDIA_CONTENT_TYPES:
                 continue
+
             media_value = part.get(part_type)
-            if not isinstance(media_value, dict):
-                continue
-            url = media_value.get("url")
+            uuid_value = part.get("uuid")
+            if uuid_value is not None and (
+                not isinstance(uuid_value, str) or not uuid_value
+            ):
+                raise ValueError(f"{part_type} uuid must be a non-empty string")
+            if uuid_value is not None and part_type != "image_url":
+                raise ValueError(
+                    "multimodal cache UUIDs are supported only for "
+                    "image_url parts with vLLM"
+                )
+
+            url = media_value.get("url") if isinstance(media_value, dict) else None
             if isinstance(url, str) and url:
                 mm_data.setdefault(part_type, []).append({"Url": url})
+            elif isinstance(uuid_value, str):
+                mm_data.setdefault(part_type, []).append({"UuidOnly": uuid_value})
+            else:
+                raise ValueError(
+                    f"{part_type} part must contain a non-empty URL or uuid"
+                )
 
-    return mm_data or None
+            if part_type == "image_url":
+                mm_uuids.setdefault(part_type, []).append(uuid_value)
+                has_user_uuid |= uuid_value is not None
+
+    return mm_data or None, mm_uuids if has_user_uuid else None
 
 
 def make_backend_error(engine_response: dict[str, Any]) -> dict[str, Any]:

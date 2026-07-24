@@ -251,10 +251,53 @@ func GetDCDDynamoNamespace(dcd *v1beta1.DynamoComponentDeployment) string {
 		}
 	}
 	parentName := dcd.GetParentGraphDeploymentName()
+	if parentName == "" && dcd.Labels != nil {
+		parentName = dcd.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName]
+	}
 	if parentName == "" {
 		parentName = dcd.Name
 	}
 	return v1beta1.ComputeDynamoNamespace(dcd.Spec.GlobalDynamoNamespace, dcd.GetNamespace(), parentName)
+}
+
+// ComponentRuntimeNamespace returns the effective Dynamo runtime namespace for a
+// component. Worker-class components append their active worker hash suffix.
+func ComponentRuntimeNamespace(dynamoNamespace string, componentType string, workerHashSuffix string) string {
+	if dynamoNamespace == "" {
+		return ""
+	}
+	if IsWorkerComponent(componentType) && workerHashSuffix != "" {
+		return dynamoNamespace + "-" + workerHashSuffix
+	}
+	return dynamoNamespace
+}
+
+// GetDCDEffectiveWorkerHash returns the worker hash rendered into worker pod
+// templates for this DCD. DCD metadata wins because GenerateBasePodSpecForController
+// copies that label into the pod template before worker env vars are injected.
+func GetDCDEffectiveWorkerHash(dcd *v1beta1.DynamoComponentDeployment) string {
+	if dcd == nil || !IsWorkerComponent(string(dcd.Spec.ComponentType)) {
+		return ""
+	}
+	if workerHash := dcd.GetLabels()[commonconsts.KubeLabelDynamoWorkerHash]; workerHash != "" {
+		return workerHash
+	}
+	labels := GetPodTemplateLabels(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
+	return labels[commonconsts.KubeLabelDynamoWorkerHash]
+}
+
+// GetDCDRuntimeNamespace returns the effective Dynamo runtime namespace used by
+// pods generated for this DCD. It uses the same effective worker hash source as
+// pod rendering, which may come from DCD metadata or the pod template.
+func GetDCDRuntimeNamespace(dcd *v1beta1.DynamoComponentDeployment) string {
+	if dcd == nil {
+		return ""
+	}
+	return ComponentRuntimeNamespace(
+		GetDCDDynamoNamespace(dcd),
+		string(dcd.Spec.ComponentType),
+		GetDCDEffectiveWorkerHash(dcd),
+	)
 }
 
 // GetDCDSubComponentType returns the alpha subcomponent type restored by API

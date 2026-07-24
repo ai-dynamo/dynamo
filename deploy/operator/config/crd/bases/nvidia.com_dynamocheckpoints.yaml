@@ -8373,8 +8373,8 @@ spec:
                       type: string
                     ttlSecondsAfterFinished:
                       description: |-
-                        Deprecated: TTLSecondsAfterFinished is ignored. Checkpoint Jobs use a fixed
-                        300 second TTL.
+                        Deprecated: TTLSecondsAfterFinished is ignored. The operator deletes checkpoint
+                        Jobs after recording their terminal outcome.
                       format: int32
                       minimum: 0
                       type: integer
@@ -8475,6 +8475,13 @@ spec:
                     - Creating
                     - Ready
                     - Failed
+                  type: string
+                podSnapshotName:
+                  description: |-
+                    PodSnapshotName is the name of the PodSnapshot this checkpoint created to drive capture. It is
+                    the authoritative pointer to the snapshot (which is otherwise located by label, not by
+                    reconstructing its name) and lets the controller distinguish a never-created snapshot (empty)
+                    from one that was created and later went missing (set, but no longer found).
                   type: string
                 storageType:
                   description: |-

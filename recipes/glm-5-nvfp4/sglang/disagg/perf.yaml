@@ -13,9 +13,6 @@ spec:
     spec:
       restartPolicy: Never
       securityContext:
-        runAsNonRoot: true
-        runAsUser: 1000
-        runAsGroup: 1000
         seccompProfile:
           type: RuntimeDefault
       containers:
@@ -47,13 +44,6 @@ spec:
           value: "1"
         - name: COLUMNS
           value: "200"
-        # HOME defaults to "/" for uid 1000 with no /etc/passwd entry; pip --user
-        # then tries to write /.local (read-only). Point HOME at /tmp (1777 sticky)
-        # so ~/.local resolves under a writable path.
-        - name: HOME
-          value: /tmp
-        - name: PATH
-          value: /tmp/.local/bin:/usr/local/bin:/usr/bin:/bin
         envFrom:
         - secretRef:
             name: hf-token-secret
@@ -62,15 +52,12 @@ spec:
         - -c
         - |
           set -eu
-          # No apt-get: cluster benchmark pods run as non-root, and Python
-          # stdlib is enough for the readiness probe.
+          # aiperf>=0.8.0 depends on crick, which has no Linux aarch64 wheel.
+          # GB200 benchmark pods need build tools to compile it from source.
+          apt-get update && apt-get install -y --no-install-recommends build-essential && apt-get clean
           # GLM-5's tokenizer_config.json uses tokenizer_class=TokenizersBackend,
           # which is supported by Transformers v5.
-          # NOTE: aiperf>=0.8.0 depends on crick, which has no prebuilt arm64 wheel
-          # and requires gcc/libc6-dev to build from source. This pod runs non-root
-          # with no apt-get access, so this install will fail on arm64 nodes.
-          # Ensure the cluster scheduler places this pod on an x86_64 node.
-          pip install --user -q aiperf==0.10.0 transformers==5.8.0 tokenizers==0.22.2
+          pip install -q aiperf==0.10.0 transformers==5.8.0 tokenizers==0.22.2
 
           echo "Waiting for model at http://$ENDPOINT/v1/models..."
           python3 - <<'PY'

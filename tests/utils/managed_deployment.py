@@ -187,6 +187,12 @@ class ServiceSpec:
             return
         self._spec["envs"] = value
 
+    def add_pvc_mount(self, pvc_name: str, mount_point: str) -> None:
+        """Add a service-level volumeMount for a PVC declared in ``spec.pvcs``. Idempotent."""
+        mounts = self._spec.setdefault("volumeMounts", [])
+        if not any(m.get("name") == pvc_name for m in mounts):
+            mounts.append({"name": pvc_name, "mountPoint": mount_point})
+
     def _get_main_container_for_args(self, create: bool = False) -> Optional[dict]:
         """Locate the main container dict for argv access in either schema."""
         if self._schema == SCHEMA_V1BETA1:
@@ -484,6 +490,26 @@ class DeploymentSpec:
             services = [self[service_name]]
         for service in services:
             service.image = image
+
+    def mount_model_cache_pvc(
+        self, pvc_name: str, mount_point: str = "/models"
+    ) -> None:
+        """Reference a pre-existing PVC and mount it at ``mount_point`` on every
+        service, with ``HF_HOME`` pointed at it so models come from the shared cache
+        instead of HuggingFace. Idempotent; used by CI via --model-cache-pvc.
+        """
+        spec = self._deployment_spec["spec"]
+        pvcs = spec.setdefault("pvcs", [])
+        if not any(p.get("name") == pvc_name for p in pvcs):
+            pvcs.append({"name": pvc_name, "create": False})
+        # HF_HOME once at the deployment level (the operator merges spec.envs into
+        # every component). The volumeMount is per-service — the DGD has no
+        # deployment-wide mount, and each pod must mount the volume itself.
+        envs = spec.setdefault("envs", [])
+        if not any(e.get("name") == "HF_HOME" for e in envs):
+            envs.append({"name": "HF_HOME", "value": mount_point})
+        for service in self.services:
+            service.add_pvc_mount(pvc_name, mount_point)
 
     def set_frontend_sidecar_image(
         self, image: str, service_name: Optional[str] = None
@@ -1557,6 +1583,26 @@ class ManagedDeployment:
                     continue
                 try:
                     port_forward.stop()
+                except Exception as e:
+                    self._logger.debug(
+                        f"Error stopping port forward for pod {pod.name}: {e}"
+                    )
+                # kr8s' sync stop() can return before the background thread has
+                # fully torn down (or even finished starting), so we can't assume
+                # the old forward is dead once stop() returns. Track it so
+                # _cleanup() stops it later regardless of whether stop() raised,
+                # rather than losing the reference when we replace the object.
+                if port_forward not in self._active_port_forwards:
+                    self._active_port_forwards.append(port_forward)
+                # Create a fresh portforward object so local_port=0 picks a new
+                # ephemeral port rather than re-binding the previously assigned
+                # port that may still be in TIME_WAIT.
+                try:
+                    port_forward = pod.portforward(
+                        remote_port=remote_port,
+                        local_port=0,
+                        address="127.0.0.1",
+                    )
                     port_forward.start()
                 except Exception as e:
                     self._logger.debug(

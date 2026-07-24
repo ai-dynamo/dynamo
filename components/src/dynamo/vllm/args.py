@@ -22,6 +22,7 @@ from dynamo.common.configuration.groups.runtime_args import (
     DynamoRuntimeArgGroup,
     DynamoRuntimeConfig,
 )
+from dynamo.common.configuration.utils import split_served_model_names
 from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.vllm.backend_args import DynamoVllmArgGroup, DynamoVllmConfig
 from dynamo.vllm.constants import DisaggregationMode
@@ -63,11 +64,15 @@ def _preprocess_for_encode_config(config: Config) -> Dict[str, Any]:
     return config.__dict__
 
 
-def parse_args(argv: list[str] | None = None) -> Config:
+def parse_args(
+    argv: list[str] | None = None, *, fpm_trace_relay_supported: bool = True
+) -> Config:
     """Parse command-line arguments for the vLLM backend.
 
     Args:
         argv: Command-line arguments.  ``None`` means ``sys.argv[1:]``.
+        fpm_trace_relay_supported: Whether this entry point constructs the
+            Dynamo relay required for trace-based FPM activation.
 
     Returns:
         Config: Parsed configuration object.
@@ -114,7 +119,11 @@ def parse_args(argv: list[str] | None = None) -> Config:
 
     cross_validate_config(dynamo_config, engine_config)
     update_dynamo_config_with_engine(dynamo_config, engine_config)
-    update_engine_config_with_dynamo(dynamo_config, engine_config)
+    update_engine_config_with_dynamo(
+        dynamo_config,
+        engine_config,
+        fpm_trace_relay_supported=fpm_trace_relay_supported,
+    )
 
     dynamo_config.engine_args = engine_config
     return dynamo_config
@@ -161,13 +170,12 @@ def update_dynamo_config_with_engine(
 ) -> None:
     """Update dynamo_config fields from engine_config and worker flags."""
 
-    if getattr(engine_config, "served_model_name", None) is not None:
-        served = engine_config.served_model_name
-        if len(served) > 1:
-            raise ValueError("We do not support multiple model names.")
-        dynamo_config.served_model_name = served[0]
-    else:
-        dynamo_config.served_model_name = None
+    # vLLM's --served-model-name is nargs="+"; each token may itself pack
+    # several comma-separated names. The first is the primary served name; any
+    # remaining names are registered as aliases for the same worker.
+    served_names = split_served_model_names(engine_config.served_model_name)
+    dynamo_config.served_model_name = served_names[0] if served_names else None
+    dynamo_config.served_model_aliases = served_names[1:]
 
     # Capture user-provided --endpoint before defaults overwrite it
     user_endpoint = dynamo_config.endpoint
@@ -226,8 +234,45 @@ def update_dynamo_config_with_engine(
     dynamo_config.connector = []  # type: ignore[assignment]
 
 
+def _unsupported_fpm_trace_role(dynamo_config: Config) -> Optional[str]:
+    """Return the worker role when trace-based FPM activation is unsupported."""
+    if dynamo_config.embedding_worker:
+        return "embedding"
+    if dynamo_config.headless:
+        return "headless"
+    if dynamo_config.disaggregation_mode == DisaggregationMode.ENCODE:
+        return "multimodal encode"
+    return None
+
+
+def _forward_pass_metrics_enabled(
+    dynamo_config: Config, *, fpm_trace_relay_supported: bool = True
+) -> bool:
+    """Resolve FPM activation without changing the legacy explicit-port path."""
+    if envs.is_set("DYN_FORWARDPASS_METRIC_PORT"):
+        return True
+    if not dynamo_config.fpm_trace:
+        return False
+
+    unsupported_role = _unsupported_fpm_trace_role(dynamo_config)
+    if unsupported_role is None and not fpm_trace_relay_supported:
+        unsupported_role = "unified backend"
+    if unsupported_role is None:
+        return True
+
+    logger.warning(
+        "--fpm-trace/DYN_FPM_TRACE is enabled, but vLLM %s workers do not create a Dynamo "
+        "FPM relay. Trace-based FPM activation is disabled for this worker.",
+        unsupported_role,
+    )
+    return False
+
+
 def update_engine_config_with_dynamo(
-    dynamo_config: Config, engine_config: AsyncEngineArgs
+    dynamo_config: Config,
+    engine_config: AsyncEngineArgs,
+    *,
+    fpm_trace_relay_supported: bool = True,
 ) -> None:
     """Update engine config based on Dynamo config."""
     if engine_config.enable_prefix_caching is None:
@@ -267,7 +312,11 @@ def update_engine_config_with_dynamo(
         f"(use_kv_events={dynamo_config.use_kv_events})"
     )
 
-    if envs.is_set("DYN_FORWARDPASS_METRIC_PORT"):
+    fpm_enabled = _forward_pass_metrics_enabled(
+        dynamo_config,
+        fpm_trace_relay_supported=fpm_trace_relay_supported,
+    )
+    if fpm_enabled:
         existing_cls = getattr(engine_config, "scheduler_cls", None)
         if existing_cls is None:
             defaults[
@@ -278,8 +327,13 @@ def update_engine_config_with_dynamo(
                 f"(port={envs.DYN_FORWARDPASS_METRIC_PORT})"
             )
         else:
+            fpm_source = (
+                "DYN_FORWARDPASS_METRIC_PORT is set"
+                if envs.is_set("DYN_FORWARDPASS_METRIC_PORT")
+                else "--fpm-trace/DYN_FPM_TRACE is enabled"
+            )
             logger.warning(
-                f"DYN_FORWARDPASS_METRIC_PORT is set but scheduler_cls "
+                f"{fpm_source} but scheduler_cls "
                 f"is already '{existing_cls}'. InstrumentedScheduler will NOT "
                 f"be injected. To use forward pass metrics, either remove "
                 f"--scheduler-cls or subclass InstrumentedScheduler."
@@ -292,7 +346,7 @@ def update_engine_config_with_dynamo(
                 "Benchmark data will be collected but not served via endpoint."
             )
         existing_cls = getattr(engine_config, "scheduler_cls", None)
-        if existing_cls is None and not envs.is_set("DYN_FORWARDPASS_METRIC_PORT"):
+        if existing_cls is None and not fpm_enabled:
             defaults[
                 "scheduler_cls"
             ] = "dynamo.vllm.instrumented_scheduler.InstrumentedScheduler"
@@ -305,15 +359,36 @@ def update_engine_config_with_dynamo(
                 f"--scheduler-cls is set to '{existing_cls}'. Either remove "
                 f"--scheduler-cls or use a subclass of InstrumentedScheduler."
             )
-        dynamo_config._benchmark_additional_config = {  # type: ignore[attr-defined]
+        benchmark_config: Dict[str, Any] = {
             "mode": dynamo_config.benchmark_mode,
-            "prefill_isl_granularity": dynamo_config.benchmark_prefill_granularity,
-            "decode_length_granularity": dynamo_config.benchmark_decode_length_granularity,
-            "decode_batch_size_granularity": dynamo_config.benchmark_decode_batch_granularity,
             "warmup_iterations": dynamo_config.benchmark_warmup_iterations,
             "output_path": dynamo_config.benchmark_output_path,
             "timeout": dynamo_config.benchmark_timeout,
         }
+        explicit_points = dynamo_config._benchmark_points
+        if explicit_points is not None:
+            benchmark_config["points"] = explicit_points.model_dump(mode="json")
+        else:
+            benchmark_config.update(
+                {
+                    "prefill_max_new_token_samples": (
+                        dynamo_config.prefill_max_new_token_samples
+                    ),
+                    "prefill_max_kv_read_token_samples": (
+                        dynamo_config.prefill_max_kv_read_token_samples
+                    ),
+                    "decode_max_kv_read_token_samples": (
+                        dynamo_config.decode_max_kv_read_token_samples
+                    ),
+                    "decode_max_batch_size_samples": (
+                        dynamo_config.decode_max_batch_size_samples
+                    ),
+                    "prefix_max_batch_size_samples": (
+                        dynamo_config.prefix_max_batch_size_samples
+                    ),
+                }
+            )
+        dynamo_config._benchmark_additional_config = benchmark_config  # type: ignore[attr-defined]
         logger.info(
             "Benchmark mode=%s configured (output=%s)",
             dynamo_config.benchmark_mode,

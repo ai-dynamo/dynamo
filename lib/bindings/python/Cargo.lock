@@ -1388,7 +1388,7 @@ version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1677,9 +1677,9 @@ dependencies = [
 
 [[package]]
 name = "cudarc"
-version = "0.19.3"
+version = "0.19.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6468cb7fa330840f3ebcd8df51edc0e7bf5c18df524792ce6004c6821851cdf3"
+checksum = "42310153e06cf4cd532901f7096beb27504d681736a29ee90728ae4e2d93b2a8"
 dependencies = [
  "libloading 0.9.0",
 ]
@@ -1848,6 +1848,12 @@ name = "data-encoding"
 version = "2.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a4ae5f15dda3c708c0ade84bfee31ccab44a3da4f88015ed22f63732abe300c8"
+
+[[package]]
+name = "ddsketchy"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "724389b6953e2cef5558663e625e64220f473443132a7c64477742a0caeff621"
 
 [[package]]
 name = "defmac"
@@ -2032,7 +2038,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2088,7 +2094,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "dynamo-backend-common"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2111,7 +2117,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-data-gen"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "dynamo-kv-hashing",
@@ -2123,7 +2129,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-kv-hashing"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "derive_builder",
  "dynamo-tokens",
@@ -2134,22 +2140,27 @@ dependencies = [
 
 [[package]]
 name = "dynamo-kv-router"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "anyhow",
+ "arc-swap",
  "async-trait",
  "axum",
+ "blake3",
  "chrono",
+ "crossbeam-queue",
  "dashmap",
  "derive_builder",
+ "dynamo-kv-hashing",
  "dynamo-runtime",
  "dynamo-tokens",
+ "dynamo-truthy",
+ "fastrand",
  "flume",
  "indexmap 2.14.0",
  "ordered-float 4.6.0",
  "parking_lot",
  "prometheus",
- "rand 0.9.4",
  "reqwest",
  "rmp-serde",
  "rustc-hash 2.1.2",
@@ -2157,24 +2168,25 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "slotmap",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
  "tracing",
  "tracing-appender",
  "uuid",
- "validator",
  "xxhash-rust",
+ "zeroize",
  "zmq",
 ]
 
 [[package]]
 name = "dynamo-llm"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
- "aho-corasick",
  "aligned-vec",
  "anyhow",
+ "arc-swap",
  "async-nats 0.49.1",
  "async-stream",
  "async-trait",
@@ -2228,6 +2240,9 @@ dependencies = [
  "object_store",
  "offset-allocator",
  "oneshot",
+ "opentelemetry",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
  "parking_lot",
  "prometheus",
  "prost 0.13.5",
@@ -2263,10 +2278,11 @@ dependencies = [
 
 [[package]]
 name = "dynamo-memory"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "cudarc",
+ "dynamo-truthy",
  "libc",
  "libloading 0.8.9",
  "nix 0.30.1",
@@ -2279,17 +2295,19 @@ dependencies = [
 
 [[package]]
 name = "dynamo-mocker"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "aiconfigurator-core",
  "anyhow",
  "bytes",
  "dashmap",
+ "ddsketchy",
  "derive-getters",
  "derive_builder",
  "dynamo-data-gen",
  "dynamo-kv-router",
  "dynamo-tokens",
+ "dynamo-truthy",
  "futures",
  "indicatif 0.18.4",
  "kvbm-common",
@@ -2318,11 +2336,15 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers"
-version = "3.0.0"
+version = "5.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e1d76028cd9b3d99e733427f6c9fc0e176ddd5269437f4a71492c0ec8838bb5e"
+checksum = "bf45340e7f5beb8f3055c1fb933394f05256b6548a1b1434ae3df27bfc8d2f6e"
 dependencies = [
+ "aho-corasick",
  "anyhow",
+ "async-stream",
+ "dynamo-protocols",
+ "futures",
  "num-traits",
  "openai-harmony",
  "regex",
@@ -2336,9 +2358,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers-v2"
-version = "0.1.11"
+version = "0.1.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf3d2b9c65028a66f05b2db424d5f472b13662e7c7382c36685b884d6c8e2329"
+checksum = "b5a8fca0f27b610454cd33858b5eb01c78c24d3ace7af2728d0723713775a939"
 dependencies = [
  "anyhow",
  "dynamo-parsers",
@@ -2352,9 +2374,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-protocols"
-version = "2.0.1"
+version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "869283188c4868780a16b97e85cd017bbd1c5687ff0410c9aa1767e0c0103482"
+checksum = "92d05c9671ed19fd2ad5c7062e79c3ee83533d9d5a602a41b1fc5a0279c0dbef"
 dependencies = [
  "async-openai",
  "derive_builder",
@@ -2369,12 +2391,13 @@ dependencies = [
 
 [[package]]
 name = "dynamo-py3"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "aiconfigurator-core",
  "anyhow",
  "async-stream",
  "async-trait",
+ "bytes",
  "clap",
  "dashmap",
  "dynamo-backend-common",
@@ -2383,15 +2406,18 @@ dependencies = [
  "dynamo-mocker",
  "dynamo-parsers",
  "dynamo-runtime",
+ "dynamo-sglang-sidecar",
  "futures",
  "once_cell",
  "opentelemetry",
+ "opentelemetry_sdk",
  "parking_lot",
  "pyo3",
  "pyo3-async-runtimes",
  "pythonize",
  "rmp",
  "serde",
+ "serde-transcode",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
@@ -2405,9 +2431,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-renderer"
-version = "1.3.5"
+version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cdad36db205c171171d03036a9cd7641f8824943a528957e26436d5c8ff04a52"
+checksum = "1afd1dc880ea81af098f1d0586af1ab37865c82f87d14265b7e72bf00696ffef"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2423,7 +2449,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-rl"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2437,7 +2463,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-runtime"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2455,6 +2481,7 @@ dependencies = [
  "dashmap",
  "derive-getters",
  "derive_builder",
+ "dynamo-truthy",
  "educe",
  "either",
  "etcd-client",
@@ -2503,10 +2530,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-sglang-sidecar"
+version = "1.4.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "clap",
+ "dynamo-backend-common",
+ "dynamo-runtime",
+ "futures",
+ "prost 0.13.5",
+ "rand 0.9.4",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tonic 0.13.1",
+ "tonic-build 0.13.1",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "dynamo-tokenizers"
-version = "1.3.2"
+version = "1.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "801685a07cfbc87d5e3f3ed55b920707b67f31dd660c62d1b3532a651fc9d013"
+checksum = "2843cd9cd50002ae23f3df525e1c551775b7bc7c9041742539faf63bc35ea225"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2526,7 +2575,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokens"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "bs58",
  "bytemuck",
@@ -2536,6 +2585,13 @@ dependencies = [
  "thiserror 2.0.18",
  "uuid",
  "xxhash-rust",
+]
+
+[[package]]
+name = "dynamo-truthy"
+version = "1.4.0"
+dependencies = [
+ "anyhow",
 ]
 
 [[package]]
@@ -2692,7 +2748,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2993,15 +3049,6 @@ name = "fs_extra"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42703706b716c37f96a77aea830392ad231f44c9e9a67872fa5548707e11b11c"
-
-[[package]]
-name = "fsevent-sys"
-version = "4.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76ee7a02da4d231650c7cea31349b889be2f45ddb3ef3032d2ec8185f6313fd2"
-dependencies = [
- "libc",
-]
 
 [[package]]
 name = "futures"
@@ -3586,7 +3633,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "system-configuration",
  "tokio",
  "tower-service",
@@ -4215,7 +4262,7 @@ dependencies = [
 
 [[package]]
 name = "kvbm-common"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "dynamo-tokens",
  "serde",
@@ -4223,7 +4270,7 @@ dependencies = [
 
 [[package]]
 name = "kvbm-config"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "dynamo-memory",
@@ -4239,7 +4286,7 @@ dependencies = [
 
 [[package]]
 name = "kvbm-engine"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "aws-config",
@@ -4271,14 +4318,14 @@ dependencies = [
 
 [[package]]
 name = "kvbm-kernels"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "cudarc",
 ]
 
 [[package]]
 name = "kvbm-logical"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -4303,7 +4350,7 @@ dependencies = [
 
 [[package]]
 name = "kvbm-physical"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "aligned-vec",
  "anyhow",
@@ -5096,7 +5143,6 @@ checksum = "6205bd8bb1e454ad2e27422015fb5e4f2bcc7e08fa8f27058670d208324a4d2d"
 dependencies = [
  "bitflags 2.13.0",
  "filetime",
- "fsevent-sys",
  "inotify",
  "kqueue",
  "libc",
@@ -5112,7 +5158,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6142,7 +6188,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be769465445e8c1474e9c5dac2018218498557af32d9ed057325ec9a41ae81bf"
 dependencies = [
  "heck",
- "itertools 0.11.0",
+ "itertools 0.14.0",
  "log",
  "multimap",
  "once_cell",
@@ -6162,7 +6208,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "03da047801ff44bb6a4d407d4860c05fd70bb81714e6b2f3812603d5b145b042"
 dependencies = [
  "heck",
- "itertools 0.11.0",
+ "itertools 0.14.0",
  "log",
  "multimap",
  "petgraph 0.8.3",
@@ -6183,7 +6229,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.11.0",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn",
@@ -6196,7 +6242,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.11.0",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn",
@@ -6418,7 +6464,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash 2.1.2",
  "rustls 0.23.40",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -6455,9 +6501,9 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "tracing",
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -6918,7 +6964,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7253,6 +7299,15 @@ checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
 dependencies = [
  "serde_core",
  "serde_derive",
+]
+
+[[package]]
+name = "serde-transcode"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "590c0e25c2a5bb6e85bf5c1bce768ceb86b316e7a01bdf07d2cb4ec2271990e2"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
@@ -7793,7 +7848,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -9375,7 +9430,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

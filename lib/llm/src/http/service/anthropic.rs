@@ -159,8 +159,13 @@ async fn handler_anthropic_messages(
     let request_id = get_or_create_request_id(&headers);
     let streaming = request.stream;
     let resolved_model = resolve_request_model(&request.model, template.as_ref());
+    // Canonicalize alias → primary for the metric label (see anthropic_messages).
+    let canonical_model = state.manager().resolve_canonical_name(resolved_model);
     let cancellation_labels = CancellationLabels {
-        model: state.manager().metric_model_for(resolved_model).to_string(),
+        model: state
+            .manager()
+            .metric_model_for(&canonical_model)
+            .to_string(),
         endpoint: Endpoint::AnthropicMessages.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
@@ -235,6 +240,14 @@ async fn anthropic_messages(
         strip_billing_preamble(&mut request.system);
     }
 
+    // Resolve an alias to its primary served name and rewrite the request so
+    // engine routing, metrics, and the response model all use the canonical
+    // primary (matching the OpenAI handlers). Non-aliases pass through.
+    let canonical = state.manager().resolve_canonical_name(&request.model);
+    if canonical != request.model {
+        request.model = canonical;
+    }
+
     let model = request.model.clone();
     let metric_model = state.manager().metric_model_for(&model).to_string();
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
@@ -266,19 +279,21 @@ async fn anthropic_messages(
     let (orig_request, context) = request.into_parts();
     let model_for_resp = orig_request.model.clone();
 
-    // Check if the Anthropic request explicitly disabled thinking.
-    let thinking_explicitly_disabled = orig_request
-        .thinking
-        .as_ref()
-        .is_some_and(|t| t.thinking_type == "disabled");
-
-    // Estimate input tokens before consuming the request via try_into().
-    // Only used in the streaming path to populate message_start.
+    // Anthropic exposes input usage in `message_start`, before the backend's
+    // authoritative count is available. Seed the stream with the same
+    // best-effort estimate as `/count_tokens`; the converter replaces it when
+    // the backend reports final usage.
     let estimated_input_tokens = if streaming {
         estimate_input_tokens(&orig_request)
     } else {
         0
     };
+
+    // Check if the Anthropic request explicitly disabled thinking.
+    let thinking_explicitly_disabled = orig_request
+        .thinking
+        .as_ref()
+        .is_some_and(|t| t.thinking_type == "disabled");
 
     // Convert Anthropic request -> UnifiedRequest -> Chat Completion request
     let unified_request: UnifiedRequest = orig_request.try_into().map_err(|e: anyhow::Error| {
@@ -595,12 +610,20 @@ fn model_env_overrides() -> (Option<u64>, Option<u64>) {
 }
 
 /// Resolve context_window for a model: env override takes precedence over MDC.
+/// Aliases have no card of their own (the map is keyed by the primary's
+/// display_name), so fall back to the primary's context length.
 fn resolve_context_window(
+    state: &service_v2::State,
     model_name: &str,
     card_map: &std::collections::HashMap<String, u32>,
     env_override: Option<u64>,
 ) -> Option<u64> {
-    env_override.or_else(|| card_map.get(model_name).map(|&cl| cl as u64))
+    env_override.or_else(|| {
+        card_map
+            .get(model_name)
+            .or_else(|| card_map.get(&state.manager().resolve_canonical_name(model_name)))
+            .map(|&cl| cl as u64)
+    })
 }
 
 /// List all models. Returns Anthropic format when `anthropic-version` header
@@ -636,7 +659,7 @@ async fn list_models(
                     "type": "model",
                     "created_at": created_at,
                 });
-                if let Some(cw) = resolve_context_window(name, &card_map, cw_override) {
+                if let Some(cw) = resolve_context_window(&state, name, &card_map, cw_override) {
                     obj["max_input_tokens"] = serde_json::json!(cw);
                 }
                 if let Some(mot) = mot_override {
@@ -668,7 +691,7 @@ async fn list_models(
                 "created": created,
                 "owned_by": "nvidia",
             });
-            if let Some(cw) = resolve_context_window(name, &card_map, cw_override) {
+            if let Some(cw) = resolve_context_window(&state, name, &card_map, cw_override) {
                 obj["context_window"] = serde_json::json!(cw);
             }
             if let Some(mot) = mot_override {
@@ -714,7 +737,7 @@ async fn get_model(
         .as_secs();
     let card_map = build_model_context_map(&state);
     let (cw_override, mot_override) = model_env_overrides();
-    let context_window = resolve_context_window(model_id, &card_map, cw_override);
+    let context_window = resolve_context_window(&state, model_id, &card_map, cw_override);
 
     if headers.contains_key("anthropic-version") {
         let created_at = chrono::DateTime::from_timestamp(created as i64, 0)
@@ -771,21 +794,18 @@ fn strip_billing_preamble(system: &mut Option<SystemContent>) {
     }
 }
 
-/// Estimate input token count for an Anthropic request.
+/// Estimate input usage for a streaming `message_start` event.
 ///
-/// Uses the same heuristic as `AnthropicCountTokensRequest::estimate_tokens()`
-/// (sum character lengths / 3). This populates `input_tokens` in the streaming
-/// `message_start` event, since the engine only reports prompt token counts on
-/// the final chunk.
+/// The backend's rendered prompt and cache-hit split are not available when
+/// the event is emitted. Final `message_delta` usage replaces this estimate.
 fn estimate_input_tokens(req: &AnthropicCreateMessageRequest) -> u32 {
-    // Build a temporary count-tokens request to reuse the existing estimator.
-    let count_req = AnthropicCountTokensRequest {
+    AnthropicCountTokensRequest {
         model: req.model.clone(),
         messages: req.messages.clone(),
         system: req.system.clone(),
         tools: req.tools.clone(),
-    };
-    count_req.estimate_tokens()
+    }
+    .estimate_tokens()
 }
 
 fn gate_anthropic_nvext(request: &mut AnthropicCreateMessageRequest, nvext_enabled: bool) {
@@ -796,7 +816,7 @@ fn gate_anthropic_nvext(request: &mut AnthropicCreateMessageRequest, nvext_enabl
     if request.nvext.is_some() {
         tracing::warn!(
             endpoint = "anthropic_messages",
-            "request carried nvext data but DYN_ENABLE_FRONTEND_NVEXT is disabled; dropping it"
+            "request carried nvext data but the nvext extension is disabled on this frontend; dropping it"
         );
     }
     request.nvext = None;

@@ -3,6 +3,8 @@
 
 import base64
 import os
+import re
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional, Type
@@ -46,7 +48,11 @@ _COLOR_PROMPT_FILLER = (
 
 
 def make_image_payload(
-    expected_response: list[str], *, max_attempts: int = 1
+    expected_response: list[str],
+    *,
+    max_attempts: int = 1,
+    repeat_count: int = 1,
+    expected_log: Optional[list[str]] = None,
 ) -> ChatPayload:
     """Standard image color-identification payload using MULTIMODAL_IMG_URL.
 
@@ -54,6 +60,10 @@ def make_image_payload(
     ``run_serve_deployment`` — set >1 only for known-flaky multimodal
     smoke checks (see tests/README.md "Flaky Tests"). The server stays
     up across attempts; only the request/response is re-issued.
+    ``repeat_count`` sends the same image request repeatedly, which is useful
+    for cache smoke coverage.
+    ``expected_log`` contains regex patterns that must appear in the deployment
+    log, allowing callers to verify that optional multimodal paths were enabled.
     """
     return chat_payload(
         [
@@ -63,8 +73,9 @@ def make_image_payload(
                 "image_url": {"url": MULTIMODAL_IMG_URL},
             },
         ],
-        repeat_count=1,
+        repeat_count=repeat_count,
         expected_response=expected_response,
+        expected_log=expected_log,
         temperature=0.0,
         max_tokens=100,
         max_attempts=max_attempts,
@@ -121,6 +132,131 @@ def make_image_payload_cached_tokens(
         require_vllm_mm_processor_init=require_vllm_mm_processor_init,
         min_routing_total_blocks=min_routing_total_blocks,
         min_avg_kv_hit_rate=min_avg_kv_hit_rate,
+    )
+
+
+class UuidPassthroughChatPayload(ChatPayload):
+    """Send a URL+UUID cache fill followed by a UUID-only cache hit.
+
+    When ``exercise_embedding_cache`` is true, insert a second URL+UUID fill
+    with a different UUID. Tests can pair this sequence with a one-image GPU
+    encoder cache so the final request must load the first embedding from
+    Dynamo's CPU embedding cache.
+    """
+
+    def __init__(
+        self,
+        *,
+        expected_response: list[str],
+        image_uuid: str = "dynamo-mm-cache-image-1",
+        max_tokens: int = 100,
+        temperature: float = 0.0,
+        timeout: int = 60,
+        exercise_embedding_cache: bool = False,
+    ):
+        self._uuid_image_uuid = image_uuid
+        self._uuid_eviction_image_uuid = (
+            f"{image_uuid}-eviction" if exercise_embedding_cache else None
+        )
+        self._uuid_final_expected_log = (
+            [
+                "Dynamo multimodal embedding cache hit: "
+                f"identifier={re.escape(repr(image_uuid))}"
+            ]
+            if exercise_embedding_cache
+            else []
+        )
+        repeat_count = 3 if exercise_embedding_cache else 2
+        self._uuid_bodies = [
+            self._build_uuid_body(index, max_tokens, temperature)
+            for index in range(repeat_count)
+        ]
+        self._uuid_iterations_requested: set[int] = set()
+        super().__init__(
+            body=self._uuid_bodies[0],
+            expected_response=expected_response,
+            expected_log=[],
+            repeat_count=repeat_count,
+            timeout=timeout,
+        )
+
+    def with_model(self, model):
+        payload = deepcopy(self)
+        for body in payload._uuid_bodies:
+            body["model"] = model
+        payload.body = payload._uuid_bodies[0]
+        payload._uuid_iterations_requested = set()
+        payload.expected_log = []
+        return payload
+
+    def _build_uuid_body(
+        self,
+        request_index: int,
+        max_tokens: int,
+        temperature: float,
+    ) -> dict:
+        eviction_image_uuid = self._uuid_eviction_image_uuid
+        if request_index == 0:
+            image_url = {"url": MULTIMODAL_IMG_URL}
+            image_uuid = self._uuid_image_uuid
+            text = _MULTIMODAL_COLOR_PROMPT
+        elif request_index == 1 and eviction_image_uuid is not None:
+            image_url = {"url": MULTIMODAL_IMG_URL}
+            image_uuid = eviction_image_uuid
+            text = _MULTIMODAL_COLOR_PROMPT
+        else:
+            image_url = None
+            image_uuid = self._uuid_image_uuid
+            text = (
+                "What colors are prominent in the same image? "
+                "Respond only with the colors."
+            )
+
+        return {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": text},
+                        {
+                            "type": "image_url",
+                            "image_url": image_url,
+                            "uuid": image_uuid,
+                        },
+                    ],
+                }
+            ],
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "stream": False,
+        }
+
+    def body_for_iteration(self, iteration: int) -> dict:
+        if not 0 <= iteration < self.repeat_count:
+            raise IndexError(f"UUID payload iteration {iteration} is out of range")
+        self._uuid_iterations_requested.add(iteration)
+        self.expected_log = (
+            list(self._uuid_final_expected_log)
+            if iteration == self.repeat_count - 1
+            else []
+        )
+        return self._uuid_bodies[iteration]
+
+    def final_validation(self) -> None:
+        assert self._uuid_iterations_requested == set(
+            range(self.repeat_count)
+        ), "UUID passthrough payload did not send the expected request sequence"
+
+
+def make_image_payload_uuid_passthrough(
+    expected_response: list[str],
+    *,
+    exercise_embedding_cache: bool = False,
+) -> ChatPayload:
+    """Build the maintained vLLM cached multimodal UUID smoke payload."""
+    return UuidPassthroughChatPayload(
+        expected_response=expected_response,
+        exercise_embedding_cache=exercise_embedding_cache,
     )
 
 
@@ -243,6 +379,32 @@ def make_audio_payload(expected_response: list[str]) -> ChatPayload:
         expected_response=expected_response,
         temperature=0.0,
         max_tokens=100,
+    )
+
+
+def make_custom_encoder_payload() -> ChatPayload:
+    """Semantic check for the aggregated CustomEncoder path.
+
+    The example HitchhikersVisionEncoder splices the embeddings of "the
+    Ultimate Question of Life, the Universe, and Everything" at the image
+    placeholder, so the assembled prompt must answer "42". The served image
+    content is irrelevant (the encoder ignores the URL). ``expected_log``
+    asserts the encoder loaded in-process at worker startup.
+    """
+    return chat_payload(
+        [
+            {
+                "type": "text",
+                "text": "Based on The Hitchhiker's Guide to the Galaxy, The Answer to",
+            },
+            {"type": "image_url", "image_url": {"url": MULTIMODAL_IMG_URL}},
+            {"type": "text", "text": " is?"},
+        ],
+        repeat_count=1,
+        expected_response=["42"],
+        expected_log=["Loaded CustomEncoder"],
+        max_tokens=32,
+        temperature=0.0,
     )
 
 

@@ -34,6 +34,12 @@ enum SnapEvent {
         block_size: i32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         lora_name: Option<String>,
+        #[serde(
+            default,
+            rename = "cache_salt",
+            skip_serializing_if = "Option::is_none"
+        )]
+        cache_namespace: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         medium: Option<String>,
     },
@@ -62,6 +68,7 @@ fn make_synthetic_payload_blobs() -> Vec<Vec<u8>> {
                 block_size: 4,
                 lora_name: None,
                 medium: None,
+                cache_namespace: None,
                 block_mm_infos: None,
                 is_eagle: None,
                 group_idx: None,
@@ -80,6 +87,7 @@ fn make_synthetic_payload_blobs() -> Vec<Vec<u8>> {
                 block_size: 4,
                 lora_name: None,
                 medium: None,
+                cache_namespace: None,
                 block_mm_infos: None,
                 is_eagle: None,
                 group_idx: None,
@@ -166,6 +174,7 @@ fn convert_event(e: common::EventMirror) -> SnapEvent {
             token_ids,
             block_size,
             lora_name,
+            cache_namespace,
             medium,
         } => SnapEvent::BlockStored {
             block_hashes,
@@ -173,6 +182,7 @@ fn convert_event(e: common::EventMirror) -> SnapEvent {
             token_ids,
             block_size,
             lora_name,
+            cache_namespace,
             medium,
         },
         common::EventMirror::BlockRemoved {

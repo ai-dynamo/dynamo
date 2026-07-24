@@ -16,9 +16,11 @@ from dynamo.sglang.request_handlers.llm.decode_handler import (
     _user_stop_token_ids,
 )
 from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
+    build_disagg_mm_kwargs,
     extract_media_urls,
     raise_if_unextracted_multimodal,
 )
+from dynamo.sglang.request_handlers.llm.prefill_handler import PrefillWorkerHandler
 from dynamo.sglang.request_handlers.multimodal.worker_handler import StreamProcessor
 
 pytestmark = [
@@ -51,6 +53,61 @@ def test_extract_media_urls_supports_string_and_wire_items():
         "file:///tmp/test.mp4",
         "https://example.com/test.mp4",
     ]
+
+
+def test_build_disagg_mm_kwargs_includes_audio_urls():
+    request = {
+        "multi_modal_data": {
+            "image_url": [{"Url": "https://example.com/image.png"}],
+            "audio_url": [{"Url": "https://example.com/audio.wav"}],
+            "video_url": [{"Url": "https://example.com/video.mp4"}],
+        }
+    }
+
+    assert build_disagg_mm_kwargs(request) == {
+        "image_data": ["https://example.com/image.png"],
+        "audio_data": ["https://example.com/audio.wav"],
+        "video_data": ["https://example.com/video.mp4"],
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.multimodal
+async def test_prefill_rejects_cache_uuid_before_building_media_kwargs(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    build_media_kwargs_called = False
+
+    def record_build_media_kwargs(_request):
+        nonlocal build_media_kwargs_called
+        build_media_kwargs_called = True
+        return {}
+
+    monkeypatch.setattr(
+        "dynamo.sglang.request_handlers.llm.prefill_handler.build_disagg_mm_kwargs",
+        record_build_media_kwargs,
+    )
+
+    handler = PrefillWorkerHandler.__new__(PrefillWorkerHandler)
+    handler.bootstrap_host = "127.0.0.1"
+    handler.bootstrap_port = 1234
+    handler._generate_bootstrap_room = lambda: "room"
+    handler._get_input_param = lambda request: {}
+    context = SimpleNamespace(
+        id=lambda: "request-id",
+        trace_id="trace-id",
+    )
+    request = {
+        "token_ids": [1, 2, 3],
+        "multi_modal_data": {"image_url": [{"UuidOnly": "cached-image"}]},
+        "multi_modal_uuids": {"image_url": ["cached-image"]},
+    }
+
+    with pytest.raises(ValueError, match="supported only by the vLLM backend"):
+        async for _ in handler.generate(request, context):
+            pass
+
+    assert not build_media_kwargs_called
 
 
 def test_extract_media_urls_returns_none_for_missing_modality():
@@ -218,6 +275,28 @@ def test_build_sampling_params_forwards_repetition_controls_for_token_requests()
     assert "seed" not in sampling_params
 
 
+def test_build_sampling_params_maps_guided_decoding_to_json_schema():
+    handler = _new_decode_handler(use_sglang_tokenizer=False)
+
+    sampling_params = handler._build_sampling_params(
+        {
+            "sampling_options": {
+                "guided_decoding": {
+                    "json": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                    }
+                }
+            },
+            "stop_conditions": {"max_tokens": 8},
+        }
+    )
+
+    assert sampling_params["json_schema"] == (
+        '{"type": "object", "properties": {"city": {"type": "string"}}}'
+    )
+
+
 def test_build_sampling_params_passes_n_for_sglang_tokenizer_requests():
     handler = _new_decode_handler(use_sglang_tokenizer=True)
 
@@ -293,8 +372,37 @@ class TestMultimodalGuard:
         with pytest.raises(RuntimeError, match="multi_modal_data"):
             raise_if_unextracted_multimodal(request_factory(self._image_message()))
 
+    def test_raises_for_audio_url(self):
+        request = {
+            "token_ids": [1, 2, 3],
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "audio_url",
+                            "audio_url": {"url": "https://example.com/audio.wav"},
+                        }
+                    ],
+                }
+            ],
+        }
+
+        with pytest.raises(RuntimeError, match="audio_url"):
+            raise_if_unextracted_multimodal(request)
+
     def test_text_only_request_bypasses_guard(self):
         raise_if_unextracted_multimodal({"token_ids": [10, 20, 30]})
+
+    @pytest.mark.multimodal
+    def test_rejects_multimodal_cache_uuid(self):
+        with pytest.raises(ValueError, match="supported only by the vLLM backend"):
+            raise_if_unextracted_multimodal(
+                {
+                    "token_ids": [10, 20, 30],
+                    "multi_modal_uuids": {"image_url": ["cached-image"]},
+                }
+            )
 
 
 def test_build_logprob_kwargs_allows_chosen_token_logprobs(monkeypatch):
@@ -454,6 +562,53 @@ async def test_metadata_upload_normalizes_numpy_values(tmp_path):
     assert uploaded_array["dtype"] == "float32"
     assert uploaded_array["shape"] == [2, 2]
     assert uploaded_array["data"] == expected.tobytes()
+
+
+@pytest.mark.asyncio
+async def test_process_token_stream_treats_completion_usage_as_optional():
+    handler = _new_decode_handler()
+
+    chunks = await _collect(
+        handler._process_token_stream(
+            _stream(
+                [
+                    {
+                        "index": 0,
+                        "output_ids": [],
+                        "meta_info": {
+                            "id": "request-1",
+                            "finish_reason": {"type": "stop"},
+                        },
+                    },
+                    {
+                        "index": 1,
+                        "output_ids": [],
+                        "meta_info": {
+                            "id": "request-1",
+                            "finish_reason": {"type": "stop"},
+                            "prompt_tokens": 2,
+                            "completion_tokens": 3,
+                        },
+                    },
+                ]
+            ),
+            _Context(),
+        )
+    )
+
+    assert chunks == [
+        {"index": 0, "finish_reason": "stop", "token_ids": []},
+        {
+            "index": 1,
+            "finish_reason": "stop",
+            "token_ids": [],
+            "completion_usage": {
+                "prompt_tokens": 2,
+                "completion_tokens": 3,
+                "total_tokens": 5,
+            },
+        },
+    ]
 
 
 @pytest.mark.asyncio

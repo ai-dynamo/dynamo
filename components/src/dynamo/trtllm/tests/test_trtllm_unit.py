@@ -4,6 +4,7 @@
 """Unit tests for TRTLLM backend components."""
 
 import asyncio
+import os
 import re
 import warnings
 from pathlib import Path
@@ -23,7 +24,10 @@ from dynamo.trtllm.args import Config, parse_args
 from dynamo.trtllm.constants import DisaggregationMode, Modality
 from dynamo.trtllm.tests.conftest import make_cli_args_fixture
 from dynamo.trtllm.utils.trtllm_utils import deep_update, warn_override_collisions
-from dynamo.trtllm.workers.llm_worker import init_llm_worker
+from dynamo.trtllm.workers.llm_worker import (
+    _populate_kv_cache_capacity,
+    init_llm_worker,
+)
 
 # Get path relative to this test file
 REPO_ROOT = Path(__file__).resolve().parents[5]
@@ -45,6 +49,46 @@ pytestmark = [
 # Create TRTLLM-specific CLI args fixture
 # This will use monkeypatch to write to argv
 mock_trtllm_cli = make_cli_args_fixture("dynamo.trtllm")
+
+
+def test_populate_kv_cache_capacity_publishes_engine_values():
+    runtime_config = mock.Mock()
+    engine = mock.Mock()
+    engine.get_kv_cache_capacity.return_value = {
+        "maxNumBlocks": 123,
+        "tokensPerBlock": 64,
+        "maxNumTokens": 7872,
+    }
+
+    block_size = _populate_kv_cache_capacity(runtime_config, engine, 32)
+
+    assert runtime_config.total_kv_blocks == 123
+    assert block_size == 64
+
+
+def test_populate_kv_cache_capacity_falls_back_when_unavailable(caplog):
+    runtime_config = mock.Mock()
+    engine = mock.Mock()
+    engine.get_kv_cache_capacity.return_value = {}
+
+    with caplog.at_level("WARNING"):
+        block_size = _populate_kv_cache_capacity(runtime_config, engine, 32)
+
+    assert block_size == 32
+    assert "Planner KV-rate scaling will remain unavailable" in caplog.text
+
+
+def test_populate_kv_cache_capacity_rejects_invalid_values():
+    runtime_config = mock.Mock()
+    engine = mock.Mock()
+    engine.get_kv_cache_capacity.return_value = {
+        "maxNumBlocks": 0,
+        "tokensPerBlock": 64,
+        "maxNumTokens": 0,
+    }
+
+    with pytest.raises(ValueError, match="Invalid TRT-LLM KV-cache capacity"):
+        _populate_kv_cache_capacity(runtime_config, engine, 32)
 
 
 def test_custom_jinja_template_invalid_path(mock_trtllm_cli):
@@ -114,6 +158,48 @@ def test_config_use_kv_events_derived_from_publish_events(monkeypatch):
     config_off = parse_args(["--no-publish-events"])
     assert config_off.publish_events_and_metrics is False
     assert config_off.use_kv_events is False
+
+
+def test_deprecated_publish_events_flag_alias_maps_and_logs(monkeypatch, caplog):
+    """The deprecated --publish-events-and-metrics alias must still map to
+    publish_events_and_metrics AND surface its deprecation notice on the log
+    stream, which is visible under CPython's default warning filters (a bare
+    warnings.warn(DeprecationWarning) from library code is not)."""
+    monkeypatch.delenv("DYN_TRTLLM_PUBLISH_KV_EVENTS", raising=False)
+    monkeypatch.delenv("DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS", raising=False)
+    with caplog.at_level("WARNING"), pytest.warns(
+        DeprecationWarning, match="--publish-events-and-metrics is deprecated"
+    ):
+        config = parse_args(["--publish-events-and-metrics"])
+    assert config.publish_events_and_metrics is True
+    assert config.use_kv_events is True
+    assert any(
+        "--publish-events-and-metrics is deprecated" in r.message
+        for r in caplog.records
+    )
+
+
+def test_deprecated_publish_events_env_alias_maps_and_logs(monkeypatch, caplog):
+    """The deprecated DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS env var must still
+    map to the new env var AND surface its deprecation notice on the log
+    stream."""
+    # parse_args copies the deprecated env var into the new one via a direct
+    # os.environ write. Swap in a throwaway copy so monkeypatch restores the real
+    # environment on teardown and that write does not leak into later tests.
+    monkeypatch.setattr(os, "environ", os.environ.copy())
+    monkeypatch.delenv("DYN_TRTLLM_PUBLISH_KV_EVENTS", raising=False)
+    monkeypatch.setenv("DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS", "true")
+    with caplog.at_level("WARNING"), pytest.warns(
+        DeprecationWarning, match="DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS is deprecated"
+    ):
+        config = parse_args([])
+    assert config.publish_events_and_metrics is True
+    assert config.use_kv_events is True
+    assert os.environ["DYN_TRTLLM_PUBLISH_KV_EVENTS"] == "true"
+    assert any(
+        "DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS is deprecated" in r.message
+        for r in caplog.records
+    )
 
 
 @pytest.mark.asyncio
@@ -204,6 +290,27 @@ def test_disaggregation_mode_legacy_aggregated_value_warns():
         )
 
     assert config.disaggregation_mode == DisaggregationMode.AGGREGATED
+
+
+def test_conversation_affinity_cli_flag(monkeypatch):
+    """--conversation-affinity sets conversation_affinity=True in Config."""
+    monkeypatch.delenv("DYN_ENGINE_CONV_AFFINITY", raising=False)
+    config = parse_args(["--model", "fake-model", "--conversation-affinity"])
+    assert config.conversation_affinity is True
+
+
+def test_conversation_affinity_env_var(monkeypatch):
+    """DYN_ENGINE_CONV_AFFINITY=true is read and sets conversation_affinity=True."""
+    monkeypatch.setenv("DYN_ENGINE_CONV_AFFINITY", "true")
+    config = parse_args(["--model", "fake-model"])
+    assert config.conversation_affinity is True
+
+
+def test_conversation_affinity_defaults_false(monkeypatch):
+    """conversation_affinity defaults to False when neither flag nor env var is set."""
+    monkeypatch.delenv("DYN_ENGINE_CONV_AFFINITY", raising=False)
+    config = parse_args(["--model", "fake-model"])
+    assert config.conversation_affinity is False
 
 
 def test_enable_multimodal_rejects_diffusion_modality():

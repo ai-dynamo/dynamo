@@ -19,13 +19,25 @@ inputs:
     required: false
     default: ''
   operator_tag:
-    description: 'Operator image tag (default: main-operator)'
+    description: 'Operator image tag. Required when registry is set.'
     required: false
-    default: 'main-operator'
+    default: ''
   hf_token:
     description: 'HuggingFace token for model access'
     required: false
     default: ''
+  model_cache_server:
+    description: 'Server/host of a shared model cache endpoint. When set (with model_cache_path), a PV + PVC is created in the vCluster default namespace so deploy tests mount it instead of downloading from HuggingFace.'
+    required: false
+    default: ''
+  model_cache_path:
+    description: 'Path of the shared model cache endpoint (used with model_cache_server).'
+    required: false
+    default: ''
+  model_cache_pvc:
+    description: 'Name of the model cache PVC to create in the vCluster default namespace.'
+    required: false
+    default: 'model-cache'
   dockerhub_username:
     description: 'Docker Hub username for helm registry login'
     required: false
@@ -207,6 +219,8 @@ runs:
         NAMESPACE: ${{ steps.resolve-names.outputs.namespace }}
         VCLUSTER_HOST_PRIORITY_CLASS: ${{ steps.resolve-vcluster-priority.outputs.priority_class }}
         CHECKPOINT_ENABLED: ${{ inputs.checkpoint_enabled }}
+        MODEL_CACHE_SERVER: ${{ inputs.model_cache_server }}
+        MODEL_CACHE_PATH: ${{ inputs.model_cache_path }}
       run: |
         echo "::group::Create vCluster ${VCLUSTER_NAME} in ${NAMESPACE}"
         set -euo pipefail
@@ -214,6 +228,10 @@ runs:
         VCLUSTER_HELM_ARGS=()
         if [ -n "${VCLUSTER_HOST_PRIORITY_CLASS}" ]; then
           VCLUSTER_HELM_ARGS+=(--set "sync.toHost.pods.priorityClassName=${VCLUSTER_HOST_PRIORITY_CLASS}")
+        fi
+        # Sync the model-cache PV to the host so its mount options are honored.
+        if [ -n "${MODEL_CACHE_SERVER}" ] && [ -n "${MODEL_CACHE_PATH}" ]; then
+          VCLUSTER_HELM_ARGS+=(--set "sync.toHost.persistentVolumes.enabled=true")
         fi
         if [[ "${CHECKPOINT_ENABLED}" == "true" ]]; then
           VCLUSTER_CHECKPOINT_VALUES="$(mktemp)"
@@ -311,6 +329,49 @@ runs:
           -n default || true
         echo "::endgroup::"
 
+    - name: Create shared model cache PV/PVC
+      if: inputs.model_cache_server != '' && inputs.model_cache_path != ''
+      shell: bash
+      env:
+        CACHE_SERVER: ${{ inputs.model_cache_server }}
+        CACHE_PATH: ${{ inputs.model_cache_path }}
+        PVC_NAME: ${{ inputs.model_cache_pvc }}
+      run: |
+        echo "::group::Create shared model cache PV/PVC inside vCluster"
+        set -euo pipefail
+        # Static PV + bound PVC in the default namespace; deploy tests reference
+        # the PVC by name via --model-cache-pvc. Capacity is nominal (not enforced).
+        kubectl --kubeconfig=${{ github.workspace }}/.kubeconfig-vcluster apply -f - <<EOF
+        apiVersion: v1
+        kind: PersistentVolume
+        metadata:
+          name: ${PVC_NAME}
+        spec:
+          capacity:
+            storage: 1024Gi
+          accessModes: [ReadWriteMany]
+          persistentVolumeReclaimPolicy: Retain
+          storageClassName: ""
+          mountOptions: [vers=4, minorversion=1, sec=sys, nconnect=4, rsize=1048576, wsize=1048576, hard]
+          nfs:
+            server: ${CACHE_SERVER}
+            path: ${CACHE_PATH}
+        ---
+        apiVersion: v1
+        kind: PersistentVolumeClaim
+        metadata:
+          name: ${PVC_NAME}
+          namespace: default
+        spec:
+          accessModes: [ReadWriteMany]
+          storageClassName: ""
+          volumeName: ${PVC_NAME}
+          resources:
+            requests:
+              storage: 1024Gi
+        EOF
+        echo "::endgroup::"
+
     - name: Login to Docker Hub for Helm
       if: inputs.dockerhub_username != '' && inputs.dockerhub_password != ''
       shell: bash
@@ -340,16 +401,16 @@ runs:
 
         IMAGE_ARGS=()
         if [ -n "${REGISTRY}" ]; then
+          if [ -z "${OPERATOR_TAG}" ]; then
+            echo "::error::operator_tag is required when registry is set"
+            exit 1
+          fi
           OPERATOR_REPO="${REGISTRY}/ai-dynamo/dynamo"
           echo "Using operator image: ${OPERATOR_REPO}:${OPERATOR_TAG}"
-          # OPERATOR_TAG is a mutable, floating tag (e.g. main-operator) that is
-          # re-pushed on every main build. The chart default
-          # imagePullPolicy=IfNotPresent means a CI node that cached an older copy
-          # never re-pulls it, so a PR that doesn't rebuild the operator can run a
-          # stale crd-apply/manager binary (e.g. missing a newly-added flag) and
-          # land in CrashLoopBackOff. Force Always so the floating tag is refreshed
-          # on every pod start; the chart applies this value to both the manager
-          # and the crd-apply init container.
+          # Automated CI passes a commit-scoped tag so the chart, CRDs,
+          # and manager binary stay in sync. Manual workflows may still pass a
+          # mutable tag, so force a registry lookup on every pod start. The chart
+          # applies this policy to both the manager and crd-apply init container.
           IMAGE_ARGS+=(
             --set dynamo-operator.controllerManager.manager.image.repository="${OPERATOR_REPO}"
             --set dynamo-operator.controllerManager.manager.image.tag="${OPERATOR_TAG}"
@@ -395,13 +456,22 @@ runs:
       shell: bash
       run: |
         echo "::group::Wait for Dynamo operator CRDs inside vCluster"
-        # CRDs live in the chart's crds/ directory so Helm installs them before any pod
-        # starts. Waiting for Established is independent of vCluster syncer pod-Ready
-        # latency, which is unreliable on some clusters (e.g. AWS with LimitRange QoS mismatch).
-        kubectl --kubeconfig=${{ github.workspace }}/.kubeconfig-vcluster \
+        # The crd-apply init container installs CRDs asynchronously after Helm returns.
+        # Poll for the resource because a condition wait fails if it does not exist yet.
+        VKUBECONFIG=${{ github.workspace }}/.kubeconfig-vcluster
+        CRD=dynamographdeployments.nvidia.com
+        end=$((SECONDS + 1800))
+        until kubectl --kubeconfig="${VKUBECONFIG}" get "crd/${CRD}" >/dev/null 2>&1; do
+          if [ $SECONDS -ge $end ]; then
+            echo "::error::CRD ${CRD} was not created after 1800s"
+            exit 1
+          fi
+          sleep 5
+        done
+        kubectl --kubeconfig="${VKUBECONFIG}" \
           wait --for=condition=established \
-          crd/dynamographdeployments.nvidia.com \
-          --timeout=1800s
+          "crd/${CRD}" \
+          --timeout=120s
         echo "::endgroup::"
 
     - name: Wait for operator pod to be ready
@@ -439,6 +509,105 @@ runs:
           wait --for=condition=established \
           crd/dynamographdeployments.nvidia.com \
           --timeout=120s
+
+    - name: Verify operator image and admission webhooks
+      shell: bash
+      env:
+        NAMESPACE: ${{ steps.resolve-names.outputs.namespace }}
+      run: |
+        set -euo pipefail
+        VKUBECONFIG=${{ github.workspace }}/.kubeconfig-vcluster
+
+        OPERATOR_POD=$(kubectl get pods -n "${NAMESPACE}" -o name \
+          | grep 'dynamo-platform-dynamo-operator-controller-manager' \
+          | head -1 || true)
+        if [ -z "${OPERATOR_POD}" ]; then
+          echo "::error::Ready operator pod disappeared before verification"
+          exit 1
+        fi
+
+        echo "::group::Resolved operator image identity"
+        kubectl get "${OPERATOR_POD}" -n "${NAMESPACE}" \
+          -o jsonpath='{range .status.initContainerStatuses[*]}initContainer={.name} image={.image} imageID={.imageID}{"\n"}{end}{range .status.containerStatuses[*]}container={.name} image={.image} imageID={.imageID}{"\n"}{end}'
+        echo "::endgroup::"
+
+        echo "::group::DynamoGraphDeployment admission smoke tests"
+        smoke_v1alpha1() {
+          kubectl --kubeconfig="${VKUBECONFIG}" --request-timeout=15s \
+            create --namespace=default --dry-run=server \
+            -o json \
+            -f - <<'EOF'
+        apiVersion: nvidia.com/v1alpha1
+        kind: DynamoGraphDeployment
+        metadata:
+          name: ci-webhook-smoke-v1alpha1
+        spec:
+          services:
+            Smoke:
+              componentType: worker
+              replicas: 0
+        EOF
+        }
+
+        smoke_v1beta1() {
+          kubectl --kubeconfig="${VKUBECONFIG}" --request-timeout=15s \
+            create --namespace=default --dry-run=server \
+            -o json \
+            -f - <<'EOF'
+        apiVersion: nvidia.com/v1beta1
+        kind: DynamoGraphDeployment
+        metadata:
+          name: ci-webhook-smoke-v1beta1
+        spec:
+          components:
+          - name: Smoke
+            type: worker
+            replicas: 0
+        EOF
+        }
+
+        run_admission_smoke_test() {
+          local version="$1"
+          local output
+          local origin_version
+          local deadline=$((SECONDS + 120))
+          local attempt=1
+          shift
+
+          while true; do
+            if output=$("$@" 2>&1); then
+              origin_version=$(sed -n 's/.*"nvidia\.com\/dynamo-operator-origin-version":[[:space:]]*"\([^"]*\)".*/\1/p' <<<"${output}" | tail -1)
+              if [ -z "${origin_version}" ]; then
+                echo "::error::${version} request succeeded without the operator origin-version mutation"
+                printf '%s\n' "${output}" >&2
+                return 1
+              fi
+              echo "${version} admission succeeded (operator origin version: ${origin_version})"
+              return 0
+            fi
+
+            if ! grep -Eiq \
+              'no endpoints available|connection refused|connection reset by peer|TLS handshake timeout|service .* not found|unexpected EOF|^EOF$' \
+              <<<"${output}"; then
+              printf '%s\n' "${output}" >&2
+              return 1
+            fi
+
+            if [ "${SECONDS}" -ge "${deadline}" ]; then
+              echo "::error::${version} admission smoke test did not become reachable within 120s"
+              printf '%s\n' "${output}" >&2
+              return 1
+            fi
+
+            echo "::warning::${version} admission endpoint not ready (attempt ${attempt}); retrying in 2s"
+            attempt=$((attempt + 1))
+            sleep 2
+          done
+        }
+
+        run_admission_smoke_test v1alpha1 smoke_v1alpha1
+        run_admission_smoke_test v1beta1 smoke_v1beta1
+        echo "::endgroup::"
 
     - name: Debug deployment failure
       if: failure()

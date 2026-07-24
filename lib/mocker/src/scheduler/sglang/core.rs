@@ -63,12 +63,9 @@ impl ReservedSglangDecode {
     fn activate(self, kv_manager: &mut SglangKvManager, block_size: usize) -> SglangRequest {
         let Self { mut request, kv } = self;
         let allocated_tokens = kv.allocated_tokens;
-        let prompt_tokens = request.prompt_tokens.clone();
-        let alloc = kv_manager.activate_destination(kv, &prompt_tokens);
-        request.last_node = Some(alloc.last_node);
-        request.kv_indices = alloc.kv_indices;
+        let alloc = kv_manager.activate_destination(kv, request.prompt_tokens());
+        request.kv_lease = alloc.lease;
         request.materialized_tokens = request.prompt_len();
-        request.cached_tokens = request.page_aligned_materialized_tokens(block_size);
         request.allocated_tokens = allocated_tokens;
         request.debug_assert_invariants(block_size);
         request
@@ -85,19 +82,24 @@ impl SglangCore {
         Self::new_internal(args, 0, 0, None, KvEventPublishers::default())
     }
 
-    pub(crate) fn new_with_worker_id(args: MockEngineArgs, worker_id: WorkerId) -> Self {
-        Self::new_internal(args, 0, worker_id, None, KvEventPublishers::default())
+    pub(crate) fn new_with_kv_capture(args: MockEngineArgs, worker_id: WorkerId) -> Self {
+        Self::new_with_worker_rank(args, worker_id, 0, worker_id, true)
     }
 
-    pub(crate) fn new_with_kv_capture(args: MockEngineArgs, worker_id: WorkerId) -> Self {
-        let (buffer, sink) = capture_router_event_sink(worker_id);
-        Self::new_internal(
-            args,
-            0,
-            worker_id,
-            Some(buffer),
-            KvEventPublishers::new(Some(sink), None),
-        )
+    pub(crate) fn new_with_worker_rank(
+        args: MockEngineArgs,
+        worker_id: WorkerId,
+        dp_rank: u32,
+        seed_offset: u64,
+        capture_kv_events: bool,
+    ) -> Self {
+        let (buffer, publishers) = if capture_kv_events {
+            let (buffer, sink) = capture_router_event_sink(worker_id);
+            (Some(buffer), KvEventPublishers::new(Some(sink), None))
+        } else {
+            (None, KvEventPublishers::default())
+        };
+        Self::new_internal(args, dp_rank, seed_offset, buffer, publishers)
     }
 
     pub(super) fn new_with_sink(
@@ -111,7 +113,7 @@ impl SglangCore {
     fn new_internal(
         args: MockEngineArgs,
         dp_rank: u32,
-        worker_id: WorkerId,
+        seed_offset: u64,
         kv_event_buffer: Option<CapturedRouterEventBuffer>,
         kv_event_publishers: KvEventPublishers,
     ) -> Self {
@@ -122,7 +124,7 @@ impl SglangCore {
             let rates =
                 normalize_conditional_accept_rates(nextn, args.aic_nextn_accept_rates.as_deref())
                     .expect("normalized MTP acceptance rates");
-            SpeculativeDecodeSampler::new(rates, args.aic_mtp_seed.wrapping_add(worker_id))
+            SpeculativeDecodeSampler::new(rates, args.aic_mtp_seed.wrapping_add(seed_offset))
         });
 
         Self {
@@ -181,6 +183,18 @@ impl SglangCore {
                 Ok(SchedulerCommandEffects::new(
                     SchedulerCommandResult::Submitted(self.submit(request)?),
                 ))
+            }
+            SchedulerCommand::CancelRequest { request_id } => {
+                let result = if self.cancel_active_request(request_id) {
+                    SchedulerCommandResult::Applied
+                } else {
+                    SchedulerCommandResult::Noop
+                };
+                if allow_destination_admission {
+                    Ok(self.effects_after_capacity_change(result))
+                } else {
+                    Ok(SchedulerCommandEffects::new(result))
+                }
             }
             SchedulerCommand::SubmitHandoffPrefill {
                 handoff_id,
@@ -308,7 +322,7 @@ impl SglangCore {
         {
             self.destination_reservation_attempts += 1;
         }
-        let reservation = self.kv_manager.reserve_destination(&request.prompt_tokens);
+        let reservation = self.kv_manager.reserve_destination(request.prompt_tokens());
         self.pending_destinations.mark_front_attempted(generation);
         let Some(kv) = reservation else {
             return Vec::new();
@@ -441,12 +455,7 @@ impl SglangCore {
         let Some(mut request) = request else {
             return false;
         };
-        let capacity_improved = !request.kv_indices.is_empty() || request.last_node.is_some();
-        self.kv_manager
-            .free_indices(&request.kv_indices[request.cached_tokens..]);
-        if let Some(last_node) = request.last_node.take() {
-            self.kv_manager.free_request(last_node);
-        }
+        let capacity_improved = self.kv_manager.abort(std::mem::take(&mut request.kv_lease));
         self.source_holds.remove_request(request_id);
         self.active_destination_handoffs.remove_request(request_id);
         if capacity_improved {
@@ -600,16 +609,8 @@ impl SglangCore {
         let prefill_fpm = admit.prefill_fpm;
 
         let batch_size = admit.can_run.len();
-        let mean_isl = if batch_size > 0 {
-            admit.total_isl / batch_size
-        } else {
-            0
-        };
-        let mean_prefix = if batch_size > 0 {
-            admit.total_prefix / batch_size
-        } else {
-            0
-        };
+        let mean_isl = admit.total_isl.checked_div(batch_size).unwrap_or(0);
+        let mean_prefix = admit.total_prefix.checked_div(batch_size).unwrap_or(0);
         let prefill_time =
             simulate_prefill_duration(batch_size, mean_isl, mean_prefix, &self.config, true);
 
@@ -626,6 +627,7 @@ impl SglangCore {
         let scheduled_decode_lens: Vec<u64> = self
             .running
             .iter()
+            .filter(|req| req.remaining_output_tokens() > 0)
             .map(|req| req.current_sequence_len() as u64)
             .collect();
 
@@ -645,7 +647,9 @@ impl SglangCore {
 
         if let Some(collector) = collector {
             for signal in &decode.output_signals {
-                collector.on_token(signal.uuid, decode.end_ms);
+                if signal.token_id.is_some() {
+                    collector.on_token(signal.uuid, decode.end_ms);
+                }
             }
         }
 
@@ -704,13 +708,16 @@ impl SglangCore {
                     .map(|reservation| reservation.request.prompt_len() as u64),
             );
         let fpm = build_fpm_snapshot(
-            prefill_fpm.iter().map(|p| {
-                (
-                    p.prompt_len as u64,
-                    p.prefix_tokens as u64,
-                    p.tokens_computed as u64,
-                )
-            }),
+            prefill_fpm
+                .iter()
+                .filter(|p| p.tokens_computed > 0)
+                .map(|p| {
+                    (
+                        p.prompt_len as u64,
+                        p.prefix_tokens as u64,
+                        p.tokens_computed as u64,
+                    )
+                }),
             scheduled_decode_lens.into_iter(),
             queued_prefills,
             ordinary_queued_decodes.chain(preactivation_decodes),

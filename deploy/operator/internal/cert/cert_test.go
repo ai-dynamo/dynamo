@@ -435,6 +435,69 @@ func TestInjectIntoMutatingWebhooks(t *testing.T) {
 	}
 }
 
+func TestInjectAdmissionDoesNotPatchCRDConversion(t *testing.T) {
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: testSecretName},
+		Data:       map[string][]byte{defaultCACertName: []byte("admission-ca")},
+	}
+	validating := &admissionregistrationv1.ValidatingWebhookConfiguration{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "test-validating",
+			Labels: map[string]string{partOfLabel: partOfValue, operatorNamespaceLabel: testNamespace},
+		},
+		Webhooks: []admissionregistrationv1.ValidatingWebhook{{
+			Name:         "validate.webhook.io",
+			ClientConfig: admissionregistrationv1.WebhookClientConfig{},
+		}},
+	}
+	mutating := &admissionregistrationv1.MutatingWebhookConfiguration{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "test-mutating",
+			Labels: map[string]string{partOfLabel: partOfValue, operatorNamespaceLabel: testNamespace},
+		},
+		Webhooks: []admissionregistrationv1.MutatingWebhook{{
+			Name:         "mutate.webhook.io",
+			ClientConfig: admissionregistrationv1.WebhookClientConfig{},
+		}},
+	}
+	crd := newDGDConversionCRD()
+
+	cfg := &configv1alpha1.OperatorConfiguration{}
+	cfg.Server.Webhook.SecretName = testSecretName
+	injector := newTestInjector(
+		fake.NewClientBuilder().WithScheme(newScheme()).WithObjects(secret, validating, mutating, crd),
+		cfg,
+	)
+	ctx := context.Background()
+	if err := injector.InjectAdmission(ctx); err != nil {
+		t.Fatalf("injecting admission CA: %v", err)
+	}
+
+	updatedValidating := &admissionregistrationv1.ValidatingWebhookConfiguration{}
+	if err := injector.client.Get(ctx, types.NamespacedName{Name: validating.Name}, updatedValidating); err != nil {
+		t.Fatalf("getting validating webhook: %v", err)
+	}
+	if string(updatedValidating.Webhooks[0].ClientConfig.CABundle) != "admission-ca" {
+		t.Fatalf("validating webhook CA = %q, want admission-ca", updatedValidating.Webhooks[0].ClientConfig.CABundle)
+	}
+
+	updatedMutating := &admissionregistrationv1.MutatingWebhookConfiguration{}
+	if err := injector.client.Get(ctx, types.NamespacedName{Name: mutating.Name}, updatedMutating); err != nil {
+		t.Fatalf("getting mutating webhook: %v", err)
+	}
+	if string(updatedMutating.Webhooks[0].ClientConfig.CABundle) != "admission-ca" {
+		t.Fatalf("mutating webhook CA = %q, want admission-ca", updatedMutating.Webhooks[0].ClientConfig.CABundle)
+	}
+
+	updatedCRD := &apiextensionsv1.CustomResourceDefinition{}
+	if err := injector.client.Get(ctx, types.NamespacedName{Name: crd.Name}, updatedCRD); err != nil {
+		t.Fatalf("getting CRD: %v", err)
+	}
+	if updatedCRD.Spec.Conversion.Webhook.ClientConfig.CABundle != nil {
+		t.Fatalf("CRD conversion CA was modified: %q", updatedCRD.Spec.Conversion.Webhook.ClientConfig.CABundle)
+	}
+}
+
 func newConversionCRD(name, plural, singular, kind string) *apiextensionsv1.CustomResourceDefinition {
 	path := testManifestPath
 	return &apiextensionsv1.CustomResourceDefinition{

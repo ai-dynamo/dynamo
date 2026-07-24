@@ -8,7 +8,7 @@ use crate::common::handoff::{
 };
 use crate::common::protocols::DirectRequest;
 use crate::common::protocols::MockEngineArgs;
-use crate::loadgen::ReplayRequestHashes;
+use crate::loadgen::{ReplayRequestHashes, ReplayRequestPayload};
 use crate::replay::TraceCollector;
 use crate::scheduler::{
     EngineCore, EnginePassResult, SchedulerCommand, SchedulerCommandEffects,
@@ -23,7 +23,7 @@ pub(crate) enum AggRequestPhase {
 }
 
 pub(crate) struct AggRequestState {
-    request: Option<DirectRequest>,
+    request: Option<ReplayRequestPayload>,
     pub(in crate::replay::offline) phase: AggRequestPhase,
     pub(in crate::replay::offline) prefill_completed: bool,
     pub(in crate::replay::offline) input_tokens: usize,
@@ -31,9 +31,9 @@ pub(crate) struct AggRequestState {
 }
 
 impl AggRequestState {
-    pub(crate) fn new_queued(request: DirectRequest) -> Self {
-        let input_tokens = request.tokens.len();
-        let output_tokens = request.max_output_tokens;
+    pub(crate) fn new_queued(request: ReplayRequestPayload) -> Self {
+        let input_tokens = request.input_length();
+        let output_tokens = request.metadata().max_output_tokens;
         Self {
             request: Some(request),
             phase: AggRequestPhase::QueuedAtRouter,
@@ -62,7 +62,7 @@ impl AggRequestState {
             .take()
             .ok_or_else(|| anyhow!("offline replay missing queued request payload for {uuid}"))?;
         self.phase = AggRequestPhase::Running;
-        Ok(request)
+        Ok(request.into_direct_request())
     }
 }
 
@@ -79,7 +79,8 @@ pub(crate) enum DisaggPhase {
 }
 
 pub(crate) struct DisaggRequestState {
-    original: Option<DirectRequest>,
+    original: Option<ReplayRequestPayload>,
+    session_id: Option<String>,
     #[cfg(test)]
     arrival_ms: f64,
     pub(in crate::replay::offline) phase: DisaggPhase,
@@ -106,16 +107,18 @@ pub(crate) struct DisaggRequestSnapshot {
 
 impl DisaggRequestState {
     pub(crate) fn new(
-        request: DirectRequest,
+        request: ReplayRequestPayload,
         arrival_ms: f64,
         handoff_id: HandoffId,
         order: HandoffOrder,
         replay_hashes: Option<ReplayRequestHashes>,
+        session_id: Option<String>,
     ) -> Self {
         #[cfg(not(test))]
         let _ = arrival_ms;
         Self {
             original: Some(request),
+            session_id,
             #[cfg(test)]
             arrival_ms,
             phase: match order {
@@ -139,11 +142,49 @@ impl DisaggRequestState {
         self.original
             .as_ref()
             .ok_or_else(|| anyhow!("offline disagg replay request payload was already released"))
+            .and_then(|request| {
+                request.materialized_request().ok_or_else(|| {
+                    anyhow!("offline disagg replay request payload is not materialized")
+                })
+            })
     }
 
-    pub(crate) fn build_prefill_request(&self) -> Result<DirectRequest> {
-        let mut request = self.original_request()?.clone();
-        request.max_output_tokens = 1;
+    pub(crate) fn request_payload(&self) -> Result<&ReplayRequestPayload> {
+        self.original
+            .as_ref()
+            .ok_or_else(|| anyhow!("offline disagg replay request payload was already released"))
+    }
+
+    pub(crate) fn input_length(&self) -> Result<usize> {
+        self.original
+            .as_ref()
+            .map(ReplayRequestPayload::input_length)
+            .ok_or_else(|| anyhow!("offline disagg replay request payload was already released"))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn materialized_tokens(&self) -> Result<Option<&[u32]>> {
+        self.original
+            .as_ref()
+            .map(ReplayRequestPayload::materialized_tokens)
+            .ok_or_else(|| anyhow!("offline disagg replay request payload was already released"))
+    }
+
+    pub(crate) fn materialize_original_request(&mut self) -> Result<&DirectRequest> {
+        self.original
+            .as_mut()
+            .ok_or_else(|| anyhow!("offline disagg replay request payload was already released"))?
+            .materialize()
+            .ok_or_else(|| anyhow!("offline disagg replay request payload failed to materialize"))
+    }
+
+    pub(crate) fn session_id(&self) -> Option<&str> {
+        self.session_id.as_deref()
+    }
+
+    pub(crate) fn build_prefill_request(&mut self) -> Result<DirectRequest> {
+        let mut request = self.materialize_original_request()?.clone();
+        request.max_output_tokens = request.max_output_tokens.min(1);
         Ok(request)
     }
 
@@ -209,6 +250,8 @@ impl DisaggRequestState {
 
 pub(crate) struct OfflineWorkerState {
     core: EngineCore,
+    worker_id: u64,
+    dp_rank: u32,
     busy: bool,
     in_flight: usize,
 }
@@ -224,15 +267,27 @@ pub(crate) struct OfflineWorkerSnapshot {
 
 impl OfflineWorkerState {
     pub(crate) fn new(worker_idx: usize, args: MockEngineArgs, capture_kv_events: bool) -> Self {
+        Self::new_with_rank(worker_idx, worker_idx as u64, 0, args, capture_kv_events)
+    }
+
+    pub(crate) fn new_with_rank(
+        worker_idx: usize,
+        worker_id: u64,
+        dp_rank: u32,
+        args: MockEngineArgs,
+        capture_kv_events: bool,
+    ) -> Self {
         let core = match args.engine_type {
             crate::common::protocols::EngineType::Vllm
             | crate::common::protocols::EngineType::Trtllm => {
                 #[cfg_attr(not(feature = "kvbm-offload"), allow(unused_mut))]
-                let mut core = if capture_kv_events {
-                    crate::scheduler::VllmCore::new_with_kv_capture(args, worker_idx as u64)
-                } else {
-                    crate::scheduler::VllmCore::new_with_worker_id(args, worker_idx as u64)
-                };
+                let mut core = crate::scheduler::VllmCore::new_with_worker_rank(
+                    args,
+                    worker_id,
+                    dp_rank,
+                    worker_idx as u64,
+                    capture_kv_events,
+                );
                 #[cfg(feature = "kvbm-offload")]
                 if let Err(e) = core.init_offload_offline() {
                     tracing::error!(
@@ -242,25 +297,27 @@ impl OfflineWorkerState {
                 EngineCore::Vllm(core)
             }
             crate::common::protocols::EngineType::Sglang => {
-                if capture_kv_events {
-                    EngineCore::Sglang(crate::scheduler::SglangCore::new_with_kv_capture(
-                        args,
-                        worker_idx as u64,
-                    ))
-                } else {
-                    EngineCore::Sglang(crate::scheduler::SglangCore::new_with_worker_id(
-                        args,
-                        worker_idx as u64,
-                    ))
-                }
+                EngineCore::Sglang(crate::scheduler::SglangCore::new_with_worker_rank(
+                    args,
+                    worker_id,
+                    dp_rank,
+                    worker_idx as u64,
+                    capture_kv_events,
+                ))
             }
         };
 
         Self {
             core,
+            worker_id,
+            dp_rank,
             busy: false,
             in_flight: 0,
         }
+    }
+
+    pub(crate) fn rank_identity(&self) -> (u64, u32) {
+        (self.worker_id, self.dp_rank)
     }
 
     pub(crate) fn in_flight(&self) -> usize {
@@ -268,11 +325,12 @@ impl OfflineWorkerState {
         self.in_flight
     }
 
-    pub(crate) fn receive_request(&mut self, request: DirectRequest) {
+    pub(crate) fn receive_request(&mut self, mut request: DirectRequest) {
         self.in_flight = self
             .in_flight
             .checked_add(1)
             .expect("offline worker in-flight request count overflow");
+        request.dp_rank = self.dp_rank;
         self.core.receive(request);
     }
 
@@ -283,6 +341,7 @@ impl OfflineWorkerState {
         enum Accounting {
             Submit,
             ReserveDestination,
+            CancelRequest,
             CancelSource,
             CancelDestination,
             None,
@@ -293,6 +352,7 @@ impl OfflineWorkerState {
                 Accounting::Submit
             }
             SchedulerCommand::ReserveDestination { .. } => Accounting::ReserveDestination,
+            SchedulerCommand::CancelRequest { .. } => Accounting::CancelRequest,
             SchedulerCommand::CancelSource { .. } => Accounting::CancelSource,
             SchedulerCommand::CancelDestination { .. } => Accounting::CancelDestination,
             SchedulerCommand::ReleaseSource { .. }
@@ -308,6 +368,9 @@ impl OfflineWorkerState {
                 SchedulerCommandResult::DestinationAccepted { .. },
             ) => self.increment_in_flight(),
             (Accounting::CancelDestination, SchedulerCommandResult::Applied) => {
+                self.decrement_in_flight(1)
+            }
+            (Accounting::CancelRequest, SchedulerCommandResult::Applied) => {
                 self.decrement_in_flight(1)
             }
             (Accounting::CancelSource, SchedulerCommandResult::Applied) => {
@@ -351,8 +414,8 @@ impl OfflineWorkerState {
         self.core.retry_pending_destinations()
     }
 
-    pub(crate) fn drain_kv_events(&self) -> Vec<dynamo_kv_router::protocols::RouterEvent> {
-        self.core.drain_kv_events()
+    pub(in crate::replay) fn engine_core(&self) -> &EngineCore {
+        &self.core
     }
 
     fn increment_in_flight(&mut self) {
@@ -417,11 +480,12 @@ impl OfflineWorkerState {
 mod tests {
     use uuid::Uuid;
 
-    use super::{DisaggRequestState, OfflineWorkerState};
+    use super::{AggRequestState, DisaggRequestState, OfflineWorkerState};
     use crate::common::handoff::{HandoffId, HandoffOrder};
     use crate::common::protocols::{DirectRequest, EngineType, MockEngineArgs, WorkerType};
+    use crate::loadgen::{ReplayRequestPayload, SessionTrace, Trace, TurnTrace, WorkloadDriver};
+    use crate::replay::offline::extensions::kv_events::KvCacheEventData;
     use crate::scheduler::{SchedulerCommand, SchedulerCommandResult};
-    use dynamo_kv_router::protocols::KvCacheEventData;
 
     fn worker(
         engine_type: EngineType,
@@ -461,9 +525,71 @@ mod tests {
     }
 
     #[test]
+    fn request_cancellation_releases_offline_in_flight_slot() {
+        let mut worker = worker(EngineType::Vllm, WorkerType::Aggregated, 8);
+        let request_id = Uuid::from_u128(850);
+        worker.receive_request(request(request_id.as_u128(), 8));
+        assert_eq!(worker.in_flight(), 1);
+
+        assert_eq!(
+            worker
+                .apply_command(SchedulerCommand::CancelRequest { request_id })
+                .unwrap()
+                .result,
+            SchedulerCommandResult::Applied
+        );
+        assert_eq!(worker.in_flight(), 0);
+        assert!(worker.is_drained());
+
+        assert_eq!(
+            worker
+                .apply_command(SchedulerCommand::CancelRequest { request_id })
+                .unwrap()
+                .result,
+            SchedulerCommandResult::Noop
+        );
+        assert_eq!(worker.in_flight(), 0);
+    }
+
+    #[test]
+    fn ranked_worker_preserves_router_worker_and_dp_rank_identity() {
+        for engine_type in [EngineType::Vllm, EngineType::Sglang] {
+            let mut builder = MockEngineArgs::builder()
+                .engine_type(engine_type)
+                .block_size(4)
+                .num_gpu_blocks(64)
+                .max_num_batched_tokens(Some(64))
+                .max_num_seqs(Some(4))
+                .dp_size(4)
+                .enable_prefix_caching(true)
+                .speedup_ratio(1000.0);
+            if engine_type == EngineType::Sglang {
+                builder = builder.sglang(Some(Default::default()));
+            }
+            let mut worker =
+                OfflineWorkerState::new_with_rank(3, 7, 3, builder.build().unwrap(), true);
+            worker.receive_request(request(900 + engine_type as u128, 8));
+
+            let mut now_ms = 0.0;
+            let mut events = Vec::new();
+            while !worker.core.is_empty() {
+                let pass = worker.execute_hidden_pass(now_ms);
+                now_ms = pass.end_ms;
+                worker.mark_completed(pass.completed_requests);
+                events.extend(pass.kv_events);
+            }
+            events.extend(worker.core.drain_kv_events());
+
+            assert!(!events.is_empty());
+            assert!(events.iter().all(|event| event.worker_id == 7));
+            assert!(events.iter().all(|event| event.event.dp_rank == 3));
+        }
+    }
+
+    #[test]
     fn disagg_prefill_request_preserves_router_priorities() {
-        let state = DisaggRequestState::new(
-            DirectRequest {
+        let mut state = DisaggRequestState::new(
+            ReplayRequestPayload::materialized(DirectRequest {
                 tokens: vec![1; 8],
                 max_output_tokens: 12,
                 output_token_ids: None,
@@ -473,10 +599,11 @@ mod tests {
                 priority: -3,
                 strict_priority: 9,
                 policy_class: None,
-            },
+            }),
             0.0,
             HandoffId::from(Uuid::from_u128(2)),
             HandoffOrder::SourceFirst,
+            None,
             None,
         );
 
@@ -484,6 +611,74 @@ mod tests {
         assert_eq!(request.max_output_tokens, 1);
         assert_eq!(request.priority, -3);
         assert_eq!(request.strict_priority, 9);
+    }
+
+    #[test]
+    fn disagg_prefill_request_materializes_only_for_worker_submission() {
+        let trace = Trace {
+            block_size: 64,
+            sessions: vec![SessionTrace {
+                session_id: "deferred-disagg".to_string(),
+                first_arrival_timestamp_ms: Some(0.0),
+                turns: vec![TurnTrace {
+                    input_length: 128,
+                    max_output_tokens: 4,
+                    hash_ids: vec![21, 22],
+                    ..Default::default()
+                }],
+            }],
+        };
+        let mut driver = WorkloadDriver::new_trace(trace, 64).unwrap();
+        let compact = driver.pop_ready_compact(0.0, 1).pop().unwrap();
+        let mut state = DisaggRequestState::new(
+            compact.request,
+            0.0,
+            HandoffId::from(Uuid::from_u128(3)),
+            HandoffOrder::SourceFirst,
+            compact.replay_hashes,
+            None,
+        );
+
+        assert_eq!(state.input_length().unwrap(), 128);
+        assert!(state.materialized_tokens().unwrap().is_none());
+
+        let request = state.build_prefill_request().unwrap();
+
+        assert_eq!(request.max_output_tokens, 1);
+        assert!(request.tokens[..64].iter().all(|token| *token == 21));
+        assert!(request.tokens[64..].iter().all(|token| *token == 22));
+        assert!(state.materialized_tokens().unwrap().is_some());
+    }
+
+    #[test]
+    fn agg_queued_prompt_materializes_only_when_admitted() {
+        let trace = Trace {
+            block_size: 64,
+            sessions: vec![SessionTrace {
+                session_id: "deferred".to_string(),
+                first_arrival_timestamp_ms: Some(0.0),
+                turns: vec![TurnTrace {
+                    input_length: 128,
+                    max_output_tokens: 4,
+                    hash_ids: vec![11, 12],
+                    ..Default::default()
+                }],
+            }],
+        };
+        let mut driver = WorkloadDriver::new_trace(trace, 64).unwrap();
+        let compact = driver.pop_ready_compact(0.0, 1).pop().unwrap();
+        let uuid = compact.request_uuid;
+        let payload = compact.request;
+        assert!(payload.materialized_tokens().is_none());
+
+        let mut state = AggRequestState::new_queued(payload);
+
+        assert_eq!(state.input_tokens, 128);
+        assert_eq!(state.output_tokens, 4);
+        let request = state.take_queued_request(uuid).unwrap();
+        assert_eq!(request.tokens.len(), 128);
+        assert!(request.tokens[..64].iter().all(|token| *token == 11));
+        assert!(request.tokens[64..].iter().all(|token| *token == 12));
     }
 
     #[test]

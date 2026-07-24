@@ -3,6 +3,8 @@
 
 use super::*;
 use crate::indexer::AnchorCapableSyncIndexer;
+#[cfg(feature = "bench")]
+use crate::indexer::WorkerObservationState;
 
 // ============================================================================
 // SyncIndexer implementation for ConcurrentRadixTreeCompressed
@@ -17,6 +19,8 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
     ) -> anyhow::Result<()> {
         let mut lookup = FxHashMap::default();
         let counters = metrics.as_ref().map(|m| m.prebind());
+        #[cfg(feature = "bench")]
+        let mut observation = WorkerObservationState::default();
 
         while let Ok(task) = event_receiver.recv() {
             match task {
@@ -42,16 +46,56 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
                     }
                     let _ = resp.send(applied);
                 }
+                #[cfg(feature = "bench")]
+                WorkerTask::InstallObservation { writer, resp } => {
+                    observation.install(writer, resp);
+                }
+                #[cfg(feature = "bench")]
+                WorkerTask::ObservedEvent {
+                    event,
+                    correlation_id,
+                } => {
+                    let kind = EventKind::of(&event.event.data);
+                    let result = self.apply_event(&mut lookup, event, counters.as_ref());
+                    observation.record(correlation_id, result.is_ok());
+                    if result.is_err() {
+                        tracing::warn!("Failed to apply event: {:?}", result.as_ref().err());
+                    }
+                    if let Some(ref c) = counters {
+                        c.inc(kind, result);
+                    }
+                }
+                #[cfg(feature = "bench")]
+                WorkerTask::SealObservation(resp) => observation.seal(resp),
+                #[cfg(feature = "bench")]
+                WorkerTask::HarvestObservation(resp) => observation.harvest(resp),
                 WorkerTask::Anchor { worker, anchor } => {
                     if let Err(error) = self.apply_anchor(worker, anchor) {
                         tracing::warn!(?error, "Failed to apply anchor");
                     }
                 }
-                WorkerTask::RemoveWorker(worker_id) => {
-                    self.remove_or_clear_worker_blocks(&mut lookup, worker_id, false);
+                WorkerTask::RemoveWorker {
+                    worker_id,
+                    sweep_tree,
+                    resp,
+                } => {
+                    self.erase_worker_coverage(
+                        &mut lookup,
+                        WorkerRemovalTarget::WorkerId(worker_id),
+                        sweep_tree,
+                    );
+                    let _ = resp.send(());
                 }
-                WorkerTask::RemoveWorkerDpRank(worker_id, dp_rank) => {
-                    self.remove_worker_dp_rank(&mut lookup, worker_id, dp_rank);
+                WorkerTask::RemoveWorkerDpRank {
+                    worker_id,
+                    dp_rank,
+                    sweep_tree,
+                } => {
+                    self.erase_worker_coverage(
+                        &mut lookup,
+                        WorkerRemovalTarget::DpRank(WorkerWithDpRank::new(worker_id, dp_rank)),
+                        sweep_tree,
+                    );
                 }
                 WorkerTask::CleanupStaleChildren => {
                     self.run_cleanup_task();
@@ -184,6 +228,10 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
     }
 
     fn dump_events(&self) -> Option<Vec<RouterEvent>> {
+        // NOTE: A live CRTC dump is intentionally not a consistent cut. Thread-pool markers
+        // drain earlier commands, but mutation lanes may resume while this traversal samples
+        // nodes independently. Core CRTC recovery does not use this diagnostic/parity surface;
+        // do not add a global mutation gate solely to strengthen its snapshot semantics.
         Some(self.dump_tree_as_events())
     }
 }

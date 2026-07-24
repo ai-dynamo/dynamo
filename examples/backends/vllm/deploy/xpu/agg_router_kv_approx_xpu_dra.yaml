@@ -1,0 +1,98 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# XPU Aggregated Deployment with KV Router (No-KV-Events Mode)
+#
+# This example demonstrates KV-aware routing with the --no-kv-events flag.
+# Instead of receiving KV events from workers, the router predicts cache state
+# locally based on routing decisions with TTL-based expiration and pruning.
+#
+# Benefits:
+# - No NATS required
+# - Simpler deployment for lightweight scenarios
+# - Router makes local predictions based on its own routing decisions
+#
+# Requirements:
+# - Intel XPU with DRA (Dynamic Resource Allocation) driver installed
+# - Dynamo Operator with v1alpha1 support
+# - XPU-specific vLLM image (nvcr.io/nvidia/ai-dynamo/vllm-runtime-xpu:my-tag)
+
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: gpu-template
+spec:
+  spec:
+    devices:
+      requests:
+        - name: gpu
+          exactly:
+            deviceClassName: gpu.intel.com
+            count: 1
+---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: xpu-agg-kvap
+spec:
+  services:
+    Frontend:
+      envFromSecret: hf-token-secret
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          imagePullPolicy: IfNotPresent
+          command:
+            - python3
+          args:
+            - -m
+            - dynamo.frontend
+            - --router-mode
+            - kv
+            - --no-kv-events
+    VllmDecodeWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      replicas: 2
+      resources:
+        requests:
+          custom:
+            # Increase this value for larger models
+            ephemeral-storage: "2Gi"
+      extraPodSpec:
+        resourceClaims:
+          - name: gpu
+            resourceClaimTemplateName: gpu-template
+        # NOTE: Uncomment if your environment requires specific group access
+        # securityContext:
+        #   runAsUser: 1000
+        #   runAsGroup: 1000
+        #   supplementalGroups:
+        #     - 44   # render group
+        #     - 991  # video group
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime-xpu:my-tag
+          imagePullPolicy: IfNotPresent
+          resources:
+            claims:
+              - name: gpu
+          env:
+            - name: VLLM_TARGET_DEVICE
+              value: xpu
+          workingDir: /workspace/examples/backends/vllm
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+          args:
+            - --model
+            - Qwen/Qwen3-0.6B
+            - --block-size
+            - "64"
+            # Disable KV events - router will use local prediction
+            - --kv-events-config
+            - '{"enable_kv_cache_events": false}'
+            # Enable prefix caching for KV reuse
+            - --enable-prefix-caching

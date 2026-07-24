@@ -23,6 +23,11 @@ enable_chunked_prefill: true
 # Overlap scheduler not currently supported in prefill only workers.
 disable_overlap_scheduler: true
 
+model_kwargs:
+  torch_dtype: bfloat16
+  text_config:
+    torch_dtype: bfloat16
+
 kv_cache_config:
   free_gpu_memory_fraction: 0.10
   enable_block_reuse: false

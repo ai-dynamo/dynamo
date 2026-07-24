@@ -1,0 +1,71 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: namespace restriction webhook RBAC
+templates:
+  - charts/dynamo-operator/templates/webhook-rbac.yaml
+  - charts/dynamo-operator/templates/manager-rbac.yaml
+tests:
+  - it: allows the cluster-wide operator to patch CRD conversion CA bundles
+    template: charts/dynamo-operator/templates/webhook-rbac.yaml
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups:
+              - apiextensions.k8s.io
+            resources:
+              - customresourcedefinitions
+            verbs:
+              - get
+              - list
+              - watch
+              - update
+              - patch
+        documentIndex: 2
+
+  - it: prevents a namespace-restricted operator from patching CRDs
+    template: charts/dynamo-operator/templates/webhook-rbac.yaml
+    set:
+      dynamo-operator.namespaceRestriction.enabled: true
+      dynamo-operator.upgradeCRD: false
+    asserts:
+      - hasDocuments:
+          count: 4
+      - notContains:
+          path: rules
+          content:
+            apiGroups:
+              - apiextensions.k8s.io
+            resources:
+              - customresourcedefinitions
+            verbs:
+              - get
+              - list
+              - watch
+              - update
+              - patch
+        documentIndex: 2
+
+  - it: omits cluster-scoped admission and CRD rules from the namespace-restricted manager Role
+    template: charts/dynamo-operator/templates/manager-rbac.yaml
+    set:
+      dynamo-operator.namespaceRestriction.enabled: true
+      dynamo-operator.upgradeCRD: false
+    asserts:
+      - notContains:
+          path: rules
+          content:
+            apiGroups:
+              - apiextensions.k8s.io
+            resources:
+              - customresourcedefinitions
+            verbs:
+              - create
+              - delete
+              - get
+              - list
+              - patch
+              - update
+              - watch
+        documentIndex: 0

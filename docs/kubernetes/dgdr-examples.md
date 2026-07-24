@@ -111,7 +111,8 @@ kubectl apply -f sla-moe.yaml -n $NAMESPACE
 ### Customizing the Generated DGD
 
 Use `spec.overrides.dgd` to provide a partial `DynamoGraphDeployment` that is
-merged into the profiler-generated deployment:
+merged into the profiler-generated deployment. Use a `v1beta1` override for
+new DGDRs:
 
 ```yaml
 apiVersion: nvidia.com/v1beta1
@@ -124,6 +125,25 @@ spec:
   image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"  # dynamo-frontend for Dynamo < 1.1.0
   overrides:
     dgd:
+      apiVersion: nvidia.com/v1beta1
+      kind: DynamoGraphDeployment
+      spec:
+        env:
+          - name: CUSTOM_WORKER_ENV
+            value: "enabled"
+```
+
+DGDR merges the override into the generated DGD after profiling selects a
+configuration. Both `.status.profilingResults.selectedConfig` and the DGD
+created when `autoApply: true` use `nvidia.com/v1beta1`.
+
+Existing `v1alpha1` overrides remain supported. Their field shape follows the
+`v1alpha1` DGD schema:
+
+```yaml
+spec:
+  overrides:
+    dgd:
       apiVersion: nvidia.com/v1alpha1
       kind: DynamoGraphDeployment
       spec:
@@ -132,9 +152,12 @@ spec:
             value: "enabled"
 ```
 
-DGDR merges the override into the generated DGD after profiling selects a
-configuration. The controller automatically injects `spec.model` and
-`spec.backend` into the final configuration.
+The override's API version controls its merge semantics. In particular, the
+`v1beta1` graph-level `spec.env` list and container `args` replace their
+generated lists, while nested container environment variables merge by name.
+`v1alpha1` worker arguments append for compatibility. See
+[Generated DGD Overrides](dgdr.md#generated-dgd-overrides) for the complete
+behavior and direct-profiler requirements.
 
 ### Inline Configuration (Simple Use Cases)
 

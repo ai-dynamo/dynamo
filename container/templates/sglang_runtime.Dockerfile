@@ -13,6 +13,16 @@ FROM framework AS runtime
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 {% endif %}
 
+{% if device != "xpu" %}
+# SGLang 0.5.15 JIT-compiles its native HiCache hash extension, which includes
+# OpenSSL headers and links libcrypto.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        libssl-dev
+{% endif %}
+
 ARG MODELEXPRESS_VERSION
 
 WORKDIR /workspace
@@ -34,6 +44,12 @@ RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     # Set umask globally for all subsequent RUN commands (must be done as root before USER dynamo)
     # NOTE: Setting ENV UMASK=002 does NOT work - umask is a shell builtin, not an environment variable
     && mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh
+
+RUN SITE_PACKAGES="$(python3 -c 'import site; print(site.getsitepackages()[0])')" && \
+    CUBINS_DIR="$SITE_PACKAGES/flashinfer_cubin/cubins" && \
+    if [ -d "$CUBINS_DIR" ]; then \
+        find "$CUBINS_DIR" -type d -exec chmod g+rwx {} + ; \
+    fi
 
 {% if device == "xpu" %}
 {# XPU runtime: NIXL + UCX are needed for P2P transport on Intel GPUs.

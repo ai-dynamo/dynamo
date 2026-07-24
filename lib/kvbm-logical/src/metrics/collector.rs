@@ -45,19 +45,19 @@ const COUNTER_DEFS: &[(&str, &str)] = &[
     ),
     (
         "kvbm_match_hashes_requested_total",
-        "Total hashes requested in match_blocks calls",
+        "Total input hash occurrences requested in match_blocks and match_blocks_scattered calls",
     ),
     (
         "kvbm_match_blocks_returned_total",
-        "Total blocks returned from match_blocks calls",
+        "Total block hit occurrences returned from match_blocks and match_blocks_scattered calls",
     ),
     (
         "kvbm_scan_hashes_requested_total",
-        "Total hashes requested in scan_matches calls",
+        "Total input hash occurrences requested in scan_matches calls",
     ),
     (
         "kvbm_scan_blocks_returned_total",
-        "Total blocks returned from scan_matches calls",
+        "Total distinct matching hashes returned from scan_matches calls",
     ),
     (
         "kvbm_eager_primary_to_inactive_total",

@@ -18,6 +18,16 @@ DEFAULT_PREFILL_ENDPOINT = f"dyn://{DYN_NAMESPACE}.prefill.generate"
 logger = logging.getLogger(__name__)
 
 
+def positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError(f"must be positive, got {parsed}")
+    return parsed
+
+
 def non_negative_int(value: str) -> int:
     try:
         parsed = int(value)
@@ -210,6 +220,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Token block size for KV cache blocks. When unset, the default "
         "depends on engine: vLLM 64, SGLang 1, TRTLLM 32.",
+    )
+    parser.add_argument(
+        "--max-model-len",
+        type=positive_int,
+        default=None,
+        help="Maximum vLLM sequence length, including prompt and generated tokens. "
+        "When omitted, no model-length limit is enforced.",
     )
     parser.add_argument(
         "--max-num-seqs",
@@ -509,12 +526,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=False,
         help="DEPRECATED: use --disaggregation-mode=decode. "
         "Mark this as a decode worker which does not publish KV events (default: False)",
-    )
-    parser.add_argument(
-        "--durable-kv-events",
-        action="store_true",
-        default=os.environ.get("DYN_DURABLE_KV_EVENTS", "false").lower() == "true",
-        help="[Deprecated] Enable durable KV events using NATS JetStream. This option will be removed in a future release. The event-plane subscriber (local_indexer mode) is now the recommended path.",
     )
     parser.add_argument(
         "--zmq-kv-events-ports",

@@ -242,6 +242,7 @@ pub const HEADER_DP_RANK: &str = "x-dynamo-dp-rank";
 pub const HEADER_PREFILL_DP_RANK: &str = "x-dynamo-prefill-dp-rank";
 pub const HEADER_REQUEST_PRIORITY: &str = "x-dynamo-request-priority";
 pub const HEADER_REQUEST_STRICT_PRIORITY: &str = "x-dynamo-request-strict-priority";
+pub const HEADER_TENANT_ID: &str = "x-tenant-id";
 // Compatibility aliases for the original unprefixed names. Future agents may remove these after
 // the deprecation window.
 pub const HEADER_WORKER_INSTANCE_ID_ALIAS: &str = "x-worker-instance-id";
@@ -299,6 +300,7 @@ pub fn session_affinity_from_headers(headers: &HeaderMap) -> Option<SessionAffin
 /// - `x-dynamo-prefill-dp-rank` -> `prefill_dp_rank`
 /// - `x-dynamo-request-priority` -> `agent_hints.priority`
 /// - `x-dynamo-request-strict-priority` -> `agent_hints.strict_priority`
+/// - `x-tenant-id` -> `cache_salt`
 ///
 /// Routing headers take priority over existing nvext values when present.
 /// If no headers are present, returns the original nvext unchanged.
@@ -338,6 +340,11 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
         .get(HEADER_REQUEST_STRICT_PRIORITY)
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<u32>().ok());
+    let tenant_id = headers
+        .get(HEADER_TENANT_ID)
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
 
     if worker_id.is_none()
         && prefill_id.is_none()
@@ -345,6 +352,7 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
         && prefill_dp_rank.is_none()
         && priority.is_none()
         && strict_priority.is_none()
+        && tenant_id.is_none()
     {
         return nvext;
     }
@@ -372,6 +380,9 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
             hints.strict_priority = Some(strict_priority);
         }
     }
+    if let Some(salt) = tenant_id {
+        ext.cache_salt = Some(salt);
+    }
     Some(ext)
 }
 
@@ -381,6 +392,26 @@ pub trait NvExtProvider {
     fn unsupported_fields(&self) -> Option<&std::collections::HashMap<String, serde_json::Value>> {
         None
     }
+}
+
+/// Return the request's non-empty cache salt using Dynamo's public precedence rules.
+///
+/// `nvext.cache_salt` is the canonical input. The top-level `cache_salt` field remains a
+/// compatibility fallback for request types that retain unsupported OpenAI fields. Empty strings
+/// are treated as absent so an empty canonical value can still fall back to a non-empty legacy
+/// value.
+pub fn request_cache_salt<R: NvExtProvider>(request: &R) -> Option<&str> {
+    request
+        .nvext()
+        .and_then(|nvext| nvext.cache_salt.as_deref())
+        .filter(|salt| !salt.is_empty())
+        .or_else(|| {
+            request
+                .unsupported_fields()
+                .and_then(|fields| fields.get("cache_salt"))
+                .and_then(|value| value.as_str())
+                .filter(|salt| !salt.is_empty())
+        })
 }
 
 pub fn routing_constraints_to_kv(
@@ -627,6 +658,51 @@ mod tests {
         HEADER_OPENCODE_SESSION_ID,
     };
 
+    #[derive(Default)]
+    struct CacheSaltRequest {
+        nvext: Option<NvExt>,
+        unsupported_fields: HashMap<String, serde_json::Value>,
+    }
+
+    impl NvExtProvider for CacheSaltRequest {
+        fn nvext(&self) -> Option<&NvExt> {
+            self.nvext.as_ref()
+        }
+
+        fn raw_prompt(&self) -> Option<String> {
+            None
+        }
+
+        fn unsupported_fields(&self) -> Option<&HashMap<String, serde_json::Value>> {
+            Some(&self.unsupported_fields)
+        }
+    }
+
+    #[test]
+    fn request_cache_salt_uses_canonical_precedence_and_empty_fallbacks() {
+        let mut request = CacheSaltRequest::default();
+        assert_eq!(request_cache_salt(&request), None);
+
+        request
+            .unsupported_fields
+            .insert("cache_salt".to_string(), serde_json::json!("tenant-legacy"));
+        assert_eq!(request_cache_salt(&request), Some("tenant-legacy"));
+
+        request.nvext = Some(NvExt {
+            cache_salt: Some("tenant-nvext".to_string()),
+            ..Default::default()
+        });
+        assert_eq!(request_cache_salt(&request), Some("tenant-nvext"));
+
+        request.nvext.as_mut().unwrap().cache_salt = Some(String::new());
+        assert_eq!(request_cache_salt(&request), Some("tenant-legacy"));
+
+        request
+            .unsupported_fields
+            .insert("cache_salt".to_string(), serde_json::json!(""));
+        assert_eq!(request_cache_salt(&request), None);
+    }
+
     #[test]
     fn shared_nvext_builder_default() {
         let nv_ext = NvExt::builder().build().unwrap();
@@ -807,6 +883,25 @@ mod tests {
     }
 
     #[test]
+    fn apply_header_routing_overrides_sets_cache_salt_from_tenant_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_TENANT_ID, "tenant-a".parse().unwrap());
+
+        let nvext = apply_header_routing_overrides(None, &headers).unwrap();
+        assert_eq!(nvext.cache_salt.as_deref(), Some("tenant-a"));
+
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_TENANT_ID, "tenant-header".parse().unwrap());
+        let nvext = NvExt {
+            cache_salt: Some("tenant-body".to_string()),
+            ..Default::default()
+        };
+
+        let nvext = apply_header_routing_overrides(Some(nvext), &headers).unwrap();
+        assert_eq!(nvext.cache_salt.as_deref(), Some("tenant-header"));
+    }
+
+    #[test]
     fn apply_header_routing_overrides_supports_unprefixed_aliases() {
         let mut headers = HeaderMap::new();
         headers.insert(HEADER_WORKER_INSTANCE_ID_ALIAS, "123".parse().unwrap());
@@ -876,7 +971,7 @@ mod tests {
     }
 
     #[test]
-    fn session_affinity_requires_explicit_dynamo_header() {
+    fn session_affinity_prefers_dynamo_header_over_agent_mappings() {
         let mut headers = HeaderMap::new();
         headers.insert(
             HEADER_CLAUDE_CODE_SESSION_ID,
@@ -887,20 +982,30 @@ mod tests {
             HEADER_OPENCODE_SESSION_ID,
             "opencode-session".parse().unwrap(),
         );
-        assert!(session_affinity_from_headers(&headers).is_none());
+        // Without a canonical header, affinity falls back to the first matching
+        // agent mapping. Claude precedes Codex and OpenCode in AGENT_HEADER_MAPPINGS.
+        assert_eq!(
+            session_affinity_from_headers(&headers).unwrap().as_str(),
+            "claude-session"
+        );
 
+        // The explicit Dynamo session header always wins over agent mappings.
         headers.insert(HEADER_DYNAMO_SESSION_ID, "canonical".parse().unwrap());
         assert_eq!(
             session_affinity_from_headers(&headers).unwrap().as_str(),
             "canonical"
         );
 
+        // A blank Dynamo header is ignored and affinity falls back to the mapping.
         headers.insert(HEADER_DYNAMO_SESSION_ID, "   ".parse().unwrap());
-        assert!(session_affinity_from_headers(&headers).is_none());
+        assert_eq!(
+            session_affinity_from_headers(&headers).unwrap().as_str(),
+            "claude-session"
+        );
     }
 
     #[test]
-    fn native_agent_session_does_not_enable_affinity() {
+    fn session_affinity_uses_agent_child_session_when_present() {
         let mut headers = HeaderMap::new();
         headers.insert(
             HEADER_CLAUDE_CODE_SESSION_ID,
@@ -908,10 +1013,16 @@ mod tests {
         );
         headers.insert(HEADER_CLAUDE_CODE_AGENT_ID, "claude-agent".parse().unwrap());
 
+        // Affinity keys on the same id the agent context resolves to: the child
+        // (sub-agent) session when present, not the root session.
         let agent_context = agent_context_from_headers(&headers).unwrap();
         assert_eq!(agent_context.session_id, "claude-agent");
-        assert!(session_affinity_from_headers(&headers).is_none());
+        assert_eq!(
+            session_affinity_from_headers(&headers).unwrap().as_str(),
+            "claude-agent"
+        );
 
+        // The explicit Dynamo session header still takes precedence.
         headers.insert(
             HEADER_DYNAMO_SESSION_ID,
             "affinity-session".parse().unwrap(),
@@ -922,6 +1033,16 @@ mod tests {
             session_affinity_from_headers(&headers).unwrap().as_str(),
             "affinity-session"
         );
+    }
+
+    #[test]
+    fn session_affinity_absent_without_any_session_header() {
+        let mut headers = HeaderMap::new();
+        assert!(session_affinity_from_headers(&headers).is_none());
+
+        // A blank canonical header with no agent headers yields no affinity.
+        headers.insert(HEADER_DYNAMO_SESSION_ID, "   ".parse().unwrap());
+        assert!(session_affinity_from_headers(&headers).is_none());
     }
 
     #[test]

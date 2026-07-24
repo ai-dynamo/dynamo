@@ -25,26 +25,32 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
-	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 )
+
+const checkpointDisabledMessage = "checkpoint functionality is disabled in the operator configuration"
 
 var errCheckpointCleanupPending = errors.New("checkpoint cleanup pending")
 
@@ -62,6 +68,7 @@ func (r *CheckpointReconciler) GetRecorder() record.EventRecorder {
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocheckpoints,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=nvidia.com,resources=podsnapshots,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocheckpoints/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocheckpoints/finalizers,verbs=update
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
@@ -132,6 +139,15 @@ func (r *CheckpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		}
 	}
 
+	// A Failed phase, or Ready with the new success proof, is the durable record that permits
+	// deleting its Job. Do this before duplicate or artifact-version normalization can discard the
+	// retained Job reference.
+	if isTerminalCheckpointPhase(ckpt.Status.Phase) && ckpt.Status.JobName != "" {
+		if err := r.cleanupTerminalCheckpointJob(ctx, ckpt); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
 	needsStatusUpdate := false
 	phaseWasEmpty := ckpt.Status.Phase == ""
 	if ckpt.Status.CheckpointID != checkpointID {
@@ -148,14 +164,13 @@ func (r *CheckpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 	if existing != nil {
 		ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhaseFailed
-		ckpt.Status.JobName = ""
 		ckpt.Status.CreatedAt = nil
 		ckpt.Status.Message = fmt.Sprintf("checkpoint ID %s is already owned by %s", checkpointID, existing.Name)
 		if err := r.Status().Update(ctx, ckpt); err != nil {
 			logger.Error(err, "Failed to mark duplicate DynamoCheckpoint as failed")
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{}, nil
+		return ctrl.Result{}, r.cleanupTerminalCheckpointJob(ctx, ckpt)
 	}
 	desiredJobName := snapshotprotocol.GetCheckpointJobName(
 		checkpointID,
@@ -199,7 +214,6 @@ func (r *CheckpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	case nvidiacomv1alpha1.DynamoCheckpointPhaseCreating:
 		return r.handleCreating(ctx, ckpt)
 	case nvidiacomv1alpha1.DynamoCheckpointPhaseReady:
-		// Nothing to do, checkpoint is ready
 		return ctrl.Result{}, nil
 	case nvidiacomv1alpha1.DynamoCheckpointPhaseFailed:
 		return ctrl.Result{}, nil
@@ -216,7 +230,15 @@ func (r *CheckpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 func (r *CheckpointReconciler) handlePending(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	if err := checkpoint.ValidateGMSSnapshotGate("spec.gpuMemoryService", true, ckpt.Spec.GPUMemoryService); err != nil {
+	if !r.RuntimeConfig.Gate.Enabled(features.Checkpoint) {
+		if ckpt.Status.Message == checkpointDisabledMessage {
+			return ctrl.Result{}, nil
+		}
+		ckpt.Status.Message = checkpointDisabledMessage
+		r.Recorder.Event(ckpt, corev1.EventTypeWarning, "CheckpointDisabled", checkpointDisabledMessage)
+		return ctrl.Result{}, r.Status().Update(ctx, ckpt)
+	}
+	if err := checkpoint.ValidateGMSSnapshotGate("spec.gpuMemoryService", true, ckpt.Spec.GPUMemoryService, r.RuntimeConfig.Gate); err != nil {
 		return r.failPendingCheckpoint(ctx, ckpt, "GMSSnapshotDisabled", err)
 	}
 	if err := checkpoint.ValidatePreparedGPUMemoryServicePodTemplate(ckpt); err != nil {
@@ -240,18 +262,37 @@ func (r *CheckpointReconciler) handlePending(ctx context.Context, ckpt *nvidiaco
 		ckpt.Annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation],
 	)
 
-	// Use SyncResource to create/update the checkpoint Job
-	modified, _, err := commonController.SyncResource(ctx, r, ckpt, func(ctx context.Context) (*batchv1.Job, bool, error) {
-		job, err := buildCheckpointJob(ctx, r.Client, r.Config, ckpt, jobName)
-		return job, false, err
-	})
-	if err != nil {
-		logger.Error(err, "Failed to sync checkpoint Job")
+	// Older controllers could create the deterministic Job and crash before recording Creating.
+	// Recover an owned Job without syncing its immutable spec.
+	existingJob := &batchv1.Job{}
+	err := r.Get(ctx, client.ObjectKey{Namespace: ckpt.Namespace, Name: jobName}, existingJob)
+	interruptedCreate := err == nil && metav1.IsControlledBy(existingJob, ckpt)
+	if err != nil && !apierrors.IsNotFound(err) {
 		return ctrl.Result{}, err
 	}
+	if interruptedCreate {
+		if err := r.removeCheckpointJobTTL(ctx, ckpt, existingJob); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 
-	if modified {
-		logger.Info("Created/updated checkpoint Job", "job", jobName)
+	// Use SyncResource to create/update the checkpoint Job
+	if !interruptedCreate {
+		desiredJob, err := buildCheckpointJob(ctx, r.Client, r.Config, ckpt, jobName)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		modified, _, err := commonController.SyncResource(ctx, r, ckpt, func(context.Context) (*batchv1.Job, bool, error) {
+			return desiredJob, false, nil
+		})
+		if err != nil {
+			logger.Error(err, "Failed to sync checkpoint Job")
+			return ctrl.Result{}, err
+		}
+
+		if modified {
+			logger.Info("Created/updated checkpoint Job", "job", jobName)
+		}
 	}
 
 	// Update status to Creating phase
@@ -300,8 +341,6 @@ func (r *CheckpointReconciler) failPendingCheckpoint(
 }
 
 func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (ctrl.Result, error) {
-	logger := log.FromContext(ctx)
-
 	if ckpt.Status.JobName == "" {
 		ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhasePending
 		ckpt.Status.Message = "checkpoint job is missing from status"
@@ -311,93 +350,282 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 		return ctrl.Result{}, nil
 	}
 
-	// Check Job status
 	job := &batchv1.Job{}
 	if err := r.Get(ctx, client.ObjectKey{Namespace: ckpt.Namespace, Name: ckpt.Status.JobName}, job); err != nil {
 		if apierrors.IsNotFound(err) {
-			ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhaseFailed
-			ckpt.Status.Message = "checkpoint job was deleted"
-			meta.SetStatusCondition(&ckpt.Status.Conditions, metav1.Condition{
-				Type:    string(nvidiacomv1alpha1.DynamoCheckpointConditionJobCreated),
-				Status:  metav1.ConditionFalse,
-				Reason:  "JobDeleted",
-				Message: "Checkpoint job was deleted",
-			})
-			if err := r.Status().Update(ctx, ckpt); err != nil {
-				return ctrl.Result{}, err
-			}
-			return ctrl.Result{}, nil
+			return r.handleCreatingJobGone(ctx, ckpt)
 		}
 		return ctrl.Result{}, err
 	}
+	if err := r.removeCheckpointJobTTL(ctx, ckpt, job); err != nil {
+		return ctrl.Result{}, err
+	}
 
-	var lease *coordinationv1.Lease
-	leaseKey := client.ObjectKey{Namespace: job.Namespace, Name: job.Name}
-	lease = &coordinationv1.Lease{}
-	if err := r.Get(ctx, leaseKey, lease); err != nil {
+	checkpointID, err := checkpoint.CheckpointID(ckpt)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Locate this checkpoint's PodSnapshot by owner label (never by status, never by reconstructed
+	// name). A NotFound means none exists yet — create it. Any other list/owner error (including the
+	// >1-owned invariant violation) is non-terminal: return it to requeue.
+	snap, err := r.findOwnedPodSnapshot(ctx, ckpt)
+	if err != nil {
 		if !apierrors.IsNotFound(err) {
 			return ctrl.Result{}, err
 		}
-		lease = nil
+
+		// No owned PodSnapshot exists. A failed Job can never produce a capture, so fail now whether or
+		// not the source pod has appeared (k8s sets JobFailed/DeadlineExceeded on unschedulable Jobs).
+		if failed, message := checkpointJobFailed(job); failed {
+			return r.failCreating(ctx, ckpt, "JobFailed", message)
+		}
+		if !r.RuntimeConfig.Gate.Enabled(features.Checkpoint) {
+			if ckpt.Status.Message == checkpointDisabledMessage {
+				return ctrl.Result{}, nil
+			}
+			ckpt.Status.Message = checkpointDisabledMessage
+			r.Recorder.Event(ckpt, corev1.EventTypeWarning, "CheckpointDisabled", checkpointDisabledMessage)
+			return ctrl.Result{}, r.Status().Update(ctx, ckpt)
+		}
+
+		pod, perr := r.findSourcePod(ctx, job)
+		if perr != nil {
+			if client.IgnoreNotFound(perr) == nil {
+				// The source pod has not been created yet. Do not poll: the scoped pod watch re-enqueues
+				// when it appears, and the Owns(&Job) watch fails the checkpoint if the Job never
+				// produces a pod.
+				return ctrl.Result{}, nil
+			}
+			return ctrl.Result{}, perr
+		}
+
+		created, cerr := r.createPodSnapshot(ctx, ckpt, checkpointID, pod)
+		if cerr != nil {
+			if errors.Is(cerr, errPodSnapshotNameConflict) {
+				return r.failCreating(ctx, ckpt, "PodSnapshotNameConflict", cerr.Error())
+			}
+			if commonController.IgnoreIntermediateError(cerr) != nil {
+				return r.failCreating(ctx, ckpt, "PodSnapshotCreateFailed", cerr.Error())
+			}
+			return ctrl.Result{}, cerr
+		}
+		// Record the pointer for observability (write-only; never read back). The Owns(&PodSnapshot)
+		// watch re-enqueues for observation.
+		ckpt.Status.PodSnapshotName = created.Name
+		return ctrl.Result{}, r.Status().Update(ctx, ckpt)
 	}
 
-	now := time.Now()
-	checkpointWorkerActive := false
-	if lease != nil && lease.Spec.LeaseDurationSeconds != nil {
-		// The snapshot-agent owns and renews this lease while it is still finalizing
-		// checkpoint state. A Job can complete before the agent writes the terminal
-		// checkpoint annotation, so we keep requeuing until the lease is no longer active.
-		lastRenewal := lease.Spec.RenewTime
-		if lastRenewal == nil {
-			lastRenewal = lease.Spec.AcquireTime
-		}
-		if lastRenewal != nil {
-			checkpointWorkerActive = !now.After(lastRenewal.Time.Add(time.Duration(*lease.Spec.LeaseDurationSeconds) * time.Second))
-		}
-	}
+	// Heal podSnapshotName in case the status write after the initial create was lost.
+	ckpt.Status.PodSnapshotName = snap.Name
+	return r.observePodSnapshot(ctx, ckpt, job, snap, checkpointID)
+}
 
-	observation := snapshotprotocol.ObserveCheckpointJob(job, checkpointWorkerActive)
-	switch observation.Phase {
-	case snapshotprotocol.CheckpointObservationPhaseWaitingForConfirmation:
-		logger.V(1).Info("Checkpoint job is complete but checkpoint worker is still active; waiting for terminal watcher status", "job", job.Name)
-		return ctrl.Result{RequeueAfter: time.Second}, nil
-	case snapshotprotocol.CheckpointObservationPhaseReady:
-		logger.Info("Checkpoint Job succeeded", "job", job.Name)
-		r.Recorder.Event(ckpt, corev1.EventTypeNormal, "CheckpointReady", observation.Message)
-
-		now := metav1.Now()
-		ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhaseReady
-		ckpt.Status.CreatedAt = &now
-		ckpt.Status.Message = ""
-		meta.SetStatusCondition(&ckpt.Status.Conditions, metav1.Condition{
-			Type:    string(nvidiacomv1alpha1.DynamoCheckpointConditionJobCompleted),
-			Status:  metav1.ConditionTrue,
-			Reason:  observation.Reason,
-			Message: observation.Message,
-		})
-		if err := r.Status().Update(ctx, ckpt); err != nil {
+// handleCreatingJobGone resolves a Creating checkpoint whose Job no longer exists. Ready is only
+// set while the Job is still present (live JobComplete); if the Job is already gone and we are
+// still Creating, observePodSnapshot fails rather than promoting on PodSnapshot alone.
+func (r *CheckpointReconciler) handleCreatingJobGone(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (ctrl.Result, error) {
+	snap, err := r.findOwnedPodSnapshot(ctx, ckpt)
+	if err != nil {
+		if !apierrors.IsNotFound(err) {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{}, nil
-	case snapshotprotocol.CheckpointObservationPhaseFailed:
-		logger.Info("Checkpoint Job failed", "job", job.Name, "message", observation.Message)
-		r.Recorder.Event(ckpt, corev1.EventTypeWarning, "CheckpointFailed", observation.Message)
-
 		ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhaseFailed
-		ckpt.Status.Message = observation.Message
+		ckpt.Status.Message = "checkpoint job was deleted"
 		meta.SetStatusCondition(&ckpt.Status.Conditions, metav1.Condition{
-			Type:    string(nvidiacomv1alpha1.DynamoCheckpointConditionJobCompleted),
+			Type:    string(nvidiacomv1alpha1.DynamoCheckpointConditionJobCreated),
 			Status:  metav1.ConditionFalse,
-			Reason:  observation.Reason,
-			Message: observation.Message,
+			Reason:  "JobDeleted",
+			Message: "Checkpoint job was deleted",
 		})
 		if err := r.Status().Update(ctx, ckpt); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, nil
-	default:
+	}
+
+	checkpointID, err := checkpoint.CheckpointID(ckpt)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	ckpt.Status.PodSnapshotName = snap.Name
+	return r.observePodSnapshot(ctx, ckpt, nil, snap, checkpointID)
+}
+
+// observePodSnapshot maps PodSnapshot + Job terminal state onto the DynamoCheckpoint phase.
+// Ready requires a successful bound PodSnapshot and a live JobComplete. JobFailed wins even
+// after PodSnapshot Ready. If the Job is already gone while still Creating, fail rather than
+// Ready (phase=Ready is the durable success record, set only while the Job is present).
+func (r *CheckpointReconciler) observePodSnapshot(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint, job *batchv1.Job, snap *nvidiacomv1alpha1.PodSnapshot, checkpointID string) (ctrl.Result, error) {
+	// Failed can land before bind; Ready is only meaningful once bound.
+	if nvidiacomv1alpha1.IsPodSnapshotFailed(snap) {
+		return r.failCreating(ctx, ckpt, "PodSnapshotFailed", podSnapshotConditionMessage(snap, nvidiacomv1alpha1.PodSnapshotConditionFailed))
+	}
+
+	podSnapshotReady := snap.Status.BoundPodSnapshotContentName != nil &&
+		nvidiacomv1alpha1.IsPodSnapshotSucceeded(snap)
+
+	// Helper failure must win even if capture already succeeded (Owns(&Job) watch).
+	if failed, message := checkpointJobFailed(job); failed {
+		return r.failCreating(ctx, ckpt, "JobFailed", message)
+	}
+
+	if !podSnapshotReady {
 		return ctrl.Result{}, nil
 	}
+
+	if job == nil {
+		return r.failCreating(ctx, ckpt, "JobDeletedBeforeComplete",
+			"checkpoint job was deleted before JobComplete was observed")
+	}
+	if !checkpointJobComplete(job) {
+		return ctrl.Result{}, nil
+	}
+
+	return r.markCheckpointReady(ctx, ckpt, checkpointID, podSnapshotConditionMessage(snap, nvidiacomv1alpha1.PodSnapshotConditionReady))
+}
+
+// failCreating marks the DynamoCheckpoint Failed with a completion-condition reason.
+func (r *CheckpointReconciler) failCreating(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint, reason, message string) (ctrl.Result, error) {
+	log.FromContext(ctx).Info("Checkpoint failed", "reason", reason, "message", message)
+	r.Recorder.Event(ckpt, corev1.EventTypeWarning, "CheckpointFailed", message)
+	ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhaseFailed
+	ckpt.Status.Message = message
+	meta.SetStatusCondition(&ckpt.Status.Conditions, metav1.Condition{
+		Type:    string(nvidiacomv1alpha1.DynamoCheckpointConditionJobCompleted),
+		Status:  metav1.ConditionFalse,
+		Reason:  reason,
+		Message: message,
+	})
+	if err := r.Status().Update(ctx, ckpt); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{}, r.cleanupTerminalCheckpointJob(ctx, ckpt)
+}
+
+// markCheckpointReady marks the DynamoCheckpoint Ready after PodSnapshot success and live JobComplete.
+func (r *CheckpointReconciler) markCheckpointReady(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint, checkpointID, message string) (ctrl.Result, error) {
+	log.FromContext(ctx).Info("Checkpoint ready", "checkpointID", checkpointID)
+	r.Recorder.Event(ckpt, corev1.EventTypeNormal, "CheckpointReady", message)
+	ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhaseReady
+	ckpt.Status.CheckpointID = checkpointID
+	ckpt.Status.CreatedAt = ptr.To(metav1.Now())
+	ckpt.Status.Message = ""
+	meta.SetStatusCondition(&ckpt.Status.Conditions, metav1.Condition{
+		Type:    string(nvidiacomv1alpha1.DynamoCheckpointConditionJobCompleted),
+		Status:  metav1.ConditionTrue,
+		Reason:  "PodSnapshotAndJobReady",
+		Message: message,
+	})
+	if err := r.Status().Update(ctx, ckpt); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{}, r.cleanupTerminalCheckpointJob(ctx, ckpt)
+}
+
+// cleanupTerminalCheckpointJob deletes an owned Job only after the checkpoint's terminal phase
+// has been persisted. Terminal-phase reconciles retry API failures.
+func (r *CheckpointReconciler) cleanupTerminalCheckpointJob(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint) error {
+	if !isTerminalCheckpointPhase(ckpt.Status.Phase) {
+		return nil
+	}
+	if ckpt.Status.Phase == nvidiacomv1alpha1.DynamoCheckpointPhaseReady &&
+		!checkpointReadyForJobCleanup(ckpt) {
+		return nil
+	}
+	if ckpt.Status.JobName == "" {
+		return nil
+	}
+
+	job := &batchv1.Job{}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: ckpt.Namespace, Name: ckpt.Status.JobName}, job); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	if !metav1.IsControlledBy(job, ckpt) {
+		return nil
+	}
+	uid := job.UID
+	if err := r.Delete(ctx, job,
+		client.Preconditions{UID: &uid},
+		client.PropagationPolicy(metav1.DeletePropagationBackground),
+	); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("delete terminal checkpoint job %s/%s: %w", job.Namespace, job.Name, err)
+	}
+	return nil
+}
+
+// removeCheckpointJobTTL migrates operator-owned Jobs created before terminal cleanup became
+// controller-driven. Generic snapshot-protocol Jobs and foreign name collisions are untouched.
+func (r *CheckpointReconciler) removeCheckpointJobTTL(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint, job *batchv1.Job) error {
+	if !metav1.IsControlledBy(job, ckpt) ||
+		job.Spec.TTLSecondsAfterFinished == nil ||
+		*job.Spec.TTLSecondsAfterFinished != snapshotprotocol.DefaultCheckpointJobTTLSeconds {
+		return nil
+	}
+	job.Spec.TTLSecondsAfterFinished = nil
+	if err := r.Update(ctx, job); err != nil {
+		return fmt.Errorf("remove legacy TTL from checkpoint job %s/%s: %w", job.Namespace, job.Name, err)
+	}
+	return nil
+}
+
+func isTerminalCheckpointPhase(phase nvidiacomv1alpha1.DynamoCheckpointPhase) bool {
+	return phase == nvidiacomv1alpha1.DynamoCheckpointPhaseReady ||
+		phase == nvidiacomv1alpha1.DynamoCheckpointPhaseFailed
+}
+
+func checkpointReadyForJobCleanup(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) bool {
+	condition := meta.FindStatusCondition(
+		ckpt.Status.Conditions,
+		string(nvidiacomv1alpha1.DynamoCheckpointConditionJobCompleted),
+	)
+	return condition != nil &&
+		condition.Status == metav1.ConditionTrue &&
+		condition.Reason == "PodSnapshotAndJobReady"
+}
+
+// podSnapshotConditionMessage returns the message of the named PodSnapshot condition, or "".
+func podSnapshotConditionMessage(snap *nvidiacomv1alpha1.PodSnapshot, condType string) string {
+	if cond := meta.FindStatusCondition(snap.Status.Conditions, condType); cond != nil {
+		return cond.Message
+	}
+	return ""
+}
+
+// checkpointJobFailed reports whether the Job has JobFailed=True. A nil Job reports false.
+func checkpointJobFailed(job *batchv1.Job) (bool, string) {
+	if job == nil {
+		return false, ""
+	}
+	for _, condition := range job.Status.Conditions {
+		if condition.Type == batchv1.JobFailed && condition.Status == corev1.ConditionTrue {
+			message := "checkpoint job failed"
+			if condition.Message != "" {
+				message = fmt.Sprintf("%s: %s", message, condition.Message)
+			}
+			return true, message
+		}
+	}
+	return false, ""
+}
+
+// checkpointJobComplete reports whether the Job has JobComplete=True.
+func checkpointJobComplete(job *batchv1.Job) bool {
+	if job == nil {
+		return false
+	}
+	for _, condition := range job.Status.Conditions {
+		if condition.Type == batchv1.JobComplete && condition.Status == corev1.ConditionTrue {
+			return true
+		}
+	}
+	return false
 }
 
 //nolint:gocyclo
@@ -483,6 +711,46 @@ func (r *CheckpointReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			UpdateFunc:  func(ue event.UpdateEvent) bool { return true },
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
 		})).
+		Owns(&nvidiacomv1alpha1.PodSnapshot{}, builder.WithPredicates(predicate.Funcs{
+			// Ignore create (we just created it). Watch update (status mirror) and
+			// delete (re-enqueue to recreate / unblock). Delete is safe: reconcile
+			// exits at the deletion-timestamp guard before reaching observePodSnapshot.
+			CreateFunc:  func(ce event.CreateEvent) bool { return false },
+			DeleteFunc:  func(de event.DeleteEvent) bool { return true },
+			UpdateFunc:  func(ue event.UpdateEvent) bool { return true },
+			GenericFunc: func(ge event.GenericEvent) bool { return false },
+		})).
+		Watches(&corev1.Pod{},
+			handler.EnqueueRequestsFromMapFunc(mapSourcePodToCheckpoint),
+			builder.WithPredicates(predicate.Funcs{
+				// Only checkpoint-source pods, and only their appearance: handleCreating waits solely
+				// for the source pod to exist, so Create is the only relevant transition. Update would
+				// fire on every kubelet heartbeat (a reconcile storm); Delete is covered by the
+				// Owns(&Job) terminal transition.
+				CreateFunc:  func(ce event.CreateEvent) bool { return isCheckpointSourcePod(ce.Object) },
+				UpdateFunc:  func(ue event.UpdateEvent) bool { return false },
+				DeleteFunc:  func(de event.DeleteEvent) bool { return false },
+				GenericFunc: func(ge event.GenericEvent) bool { return false },
+			}),
+		).
 		WithEventFilter(commonController.EphemeralDeploymentEventFilter(r.Config, r.RuntimeConfig)).
 		Complete(r)
+}
+
+// isCheckpointSourcePod reports whether an object is a checkpoint-source pod (carries
+// CheckpointSourceLabel=true), scoping the pod watch to checkpoint Job pods rather than all pods.
+func isCheckpointSourcePod(obj client.Object) bool {
+	return obj.GetLabels()[snapshotprotocol.CheckpointSourceLabel] == consts.KubeLabelValueTrue
+}
+
+// mapSourcePodToCheckpoint maps a checkpoint-source pod back to its owning DynamoCheckpoint via the
+// SnapshotOwnerLabel (stamped on the Job pod template by buildCheckpointJob). It enqueues nothing when
+// the label is absent. The pod and its checkpoint always share a namespace because buildCheckpointJob
+// creates the Job in the checkpoint's namespace.
+func mapSourcePodToCheckpoint(ctx context.Context, obj client.Object) []reconcile.Request {
+	owner := obj.GetLabels()[consts.SnapshotOwnerLabel]
+	if owner == "" {
+		return nil
+	}
+	return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: obj.GetNamespace(), Name: owner}}}
 }
