@@ -115,6 +115,30 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export PIP_CACHE_DIR=/root/.cache/pip && \
     pip install --break-system-packages --no-deps "distro==1.9.0"
 
+{% if make_efa == true and device == "cuda" and target == "runtime" %}
+# Release/1.3 SGLang EFA runtime needs a released NIXL wheel with the LIBFABRIC
+# KV transfer fix. Keep this configurable so the release image can move forward
+# without changing the Dockerfile after upstream framework images catch up.
+ARG NIXL_WHEEL_VERSION=1.3.2
+COPY --chmod=755 container/deps/vllm/install_nixl_from_wheel.sh /usr/local/bin/install_nixl_from_wheel
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    set -eux; \
+    export PIP_CACHE_DIR=/root/.cache/pip; \
+    pip install --break-system-packages --force-reinstall --no-deps --only-binary=:all: \
+        "nixl==${NIXL_WHEEL_VERSION}" \
+        "nixl-cu13==${NIXL_WHEEL_VERSION}"; \
+    site_packages=$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])'); \
+    install_nixl_from_wheel \
+        --wheel-lib-dir "${site_packages}/.nixl_cu13.mesonpy.libs" \
+        --prefix /opt/nvidia/nvda_nixl/lib64 \
+        --skip-headers; \
+    ln -sfn /opt/nvidia/nvda_nixl/lib64/plugins /opt/nvidia/nvda_nixl/plugins
+ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
+ENV NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib64
+ENV NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib64/plugins
+ENV LD_LIBRARY_PATH=/opt/nvidia/nvda_nixl/lib64:/opt/nvidia/nvda_nixl/lib64/plugins:${LD_LIBRARY_PATH:-}
+{% endif %}
+
 # Install gpu_memory_service wheel if enabled (all targets)
 ARG ENABLE_GPU_MEMORY_SERVICE
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
