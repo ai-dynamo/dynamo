@@ -584,6 +584,7 @@ spec:
                             - gb200_sxm
                             - gb10
                             - b200_sxm
+                            - rtx_pro_6000_server
                             - h200_sxm
                             - h100_sxm
                             - h100_pcie
@@ -602,6 +603,7 @@ spec:
                             - gb200_sxm
                             - gb10
                             - b200_sxm
+                            - rtx_pro_6000_server
                             - h200_sxm
                             - h100_sxm
                             - h100_pcie
