@@ -456,6 +456,46 @@ fn mock_final_chunk() -> NvCreateChatCompletionStreamResponse {
     }
 }
 
+/// Terminal `finish_reason=Stop` chunk carrying one finish per listed choice
+/// index — the multi-choice analog of `mock_final_chunk`, so an `n > 1` stream
+/// flushes every choice's jail state.
+fn mock_multi_choice_final_chunk(indices: &[u32]) -> NvCreateChatCompletionStreamResponse {
+    use dynamo_protocols::types::{
+        ChatChoiceStream, ChatCompletionStreamResponseDelta, CreateChatCompletionStreamResponse,
+    };
+    #[allow(deprecated)]
+    let choices = indices
+        .iter()
+        .map(|index| ChatChoiceStream {
+            index: *index,
+            delta: ChatCompletionStreamResponseDelta {
+                role: None,
+                content: None,
+                tool_calls: None,
+                function_call: None,
+                refusal: None,
+                reasoning_content: None,
+            },
+            finish_reason: Some(FinishReason::Stop),
+            logprobs: None,
+        })
+        .collect();
+    NvCreateChatCompletionStreamResponse {
+        inner: CreateChatCompletionStreamResponse {
+            id: "test-id".to_string(),
+            choices,
+            created: 0,
+            model: "test-model".to_string(),
+            system_fingerprint: None,
+            object: "chat.completion.chunk".to_string(),
+            usage: None,
+            service_tier: None,
+        },
+        nvext: None,
+        llm_metrics: None,
+    }
+}
+
 /// Regression for DeepSeek V4 tool-continuation turns.
 ///
 /// The V4 formatter seeds `<think>` into the prompt after a merged tool result,
@@ -1494,6 +1534,43 @@ async fn drain_stream(
     }
 }
 
+/// One choice's accumulated stream output, keyed by `choice.index` in
+/// `demux_by_choice`. Tool calls stay keyed by tool index so fragments merge.
+#[derive(Default)]
+struct PerChoice {
+    reasoning: String,
+    content: String,
+    tool_calls: BTreeMap<u32, MergedToolCall>,
+}
+
+/// Demux collected output chunks by `choice.index`, merging each choice's
+/// reasoning/content/tool-call deltas in arrival order.
+fn demux_by_choice(
+    output_chunks: &[Annotated<NvCreateChatCompletionStreamResponse>],
+) -> BTreeMap<u32, PerChoice> {
+    let mut by_choice: BTreeMap<u32, PerChoice> = BTreeMap::new();
+    for output in output_chunks {
+        let Some(data) = output.data.as_ref() else {
+            continue;
+        };
+        for choice in &data.inner.choices {
+            let entry = by_choice.entry(choice.index).or_default();
+            if let Some(r) = &choice.delta.reasoning_content {
+                entry.reasoning.push_str(r);
+            }
+            if let Some(c) = &choice.delta.content {
+                entry.content.push_str(get_text(c));
+            }
+            if let Some(tcs) = &choice.delta.tool_calls {
+                for tc in tcs {
+                    entry.tool_calls.entry(tc.index).or_default().merge_from(tc);
+                }
+            }
+        }
+    }
+    by_choice
+}
+
 /// Assert the standard "tool call extracted, nothing leaks" success shape
 /// shared by every matrix row that expects a successful extraction.
 fn assert_clean_tool_call(
@@ -1618,6 +1695,416 @@ async fn tool_choice_matrix_force_reasoning_named_bare_json() {
         );
         assert_clean_tool_call(&case, &content, &tool_calls, "San Francisco");
     }
+}
+
+/// Regression (GH-11997): with `n > 1`, each choice must decide bare-JSON vs.
+/// reasoning-first INDEPENDENTLY. Choice 0 streams bare guided JSON (bypass →
+/// tool call), choice 1 streams `reasoning</think>{json}` in the SAME chunks.
+/// The pre-fix stream made ONE global bypass decision from whichever choice
+/// emitted content first (choice 0's `[`) and applied it to every choice, so
+/// choice 1's reasoning + `</think>` leaked into `content` and its
+/// `reasoning_content` was lost. Per-choice state keeps the two isolated, and
+/// the different locations (SF vs. Boston) confirm no cross-contamination.
+#[tokio::test]
+async fn postprocessor_parsing_stream_multi_choice_isolates_guided_bypass_decision() {
+    let preprocessor = build_preprocessor(Some("deepseek_r1"), Some("nemotron_nano"));
+    let request = streaming_tool_request(ChatCompletionToolChoiceOption::Required);
+
+    // choice 0: bare guided JSON. choice 1: reasoning, then `</think>`, then JSON.
+    let json0 = r#"[{"name":"get_weather","parameters":{"location":"San Francisco"}}]"#;
+    let json1 = r#"[{"name":"get_weather","parameters":{"location":"Boston"}}]"#;
+
+    let input_chunks = vec![
+        // First content chunk: choice 0 leads with `[` (decides bypass), choice 1
+        // leads with reasoning text (must decide NOT to bypass).
+        mock_multi_choice_content_chunk(&[(0, "["), (1, "Let me check.")]),
+        mock_multi_choice_content_chunk(&[(0, &json0[1..]), (1, "</think>")]),
+        mock_multi_choice_content_chunk(&[(1, json1)]),
+        mock_multi_choice_final_chunk(&[0, 1]),
+    ];
+    let input_stream = stream::iter(input_chunks.into_iter().map(Annotated::from_data));
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .expect("postprocessor_parsing_stream should build");
+    let output_chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> =
+        output_stream.collect().await;
+
+    let by_choice = demux_by_choice(&output_chunks);
+
+    let c0 = by_choice.get(&0).expect("choice 0 produced output");
+    assert!(
+        c0.reasoning.is_empty(),
+        "choice 0 (bare JSON) must not produce reasoning_content, got: {:?}",
+        c0.reasoning
+    );
+    let c0_calls: Vec<MergedToolCall> = c0.tool_calls.values().cloned().collect();
+    assert_clean_tool_call(
+        "choice 0 bare JSON",
+        &c0.content,
+        &c0_calls,
+        "San Francisco",
+    );
+
+    let c1 = by_choice.get(&1).expect("choice 1 produced output");
+    assert_eq!(
+        c1.reasoning, "Let me check.",
+        "choice 1 reasoning must be separated, not bypassed by choice 0's decision"
+    );
+    let c1_calls: Vec<MergedToolCall> = c1.tool_calls.values().cloned().collect();
+    assert_clean_tool_call("choice 1 reasoning-first", &c1.content, &c1_calls, "Boston");
+}
+
+// ---------------------------------------------------------------------------
+// GH-11997 step 3: n>1 synthetic-interleave lane (per-choice state isolation).
+//
+// Invariant: `demux(parse(interleave(A@0, B@1, ...)))[i] == parse(shape_i)`.
+// Each choice's demuxed output must equal what that same single-choice shape
+// produces on its own (n=1). No n>1 fixture is authored — the golden is each
+// shape's own solo run, computed at test time. Single-choice fixtures are
+// mathematically blind to this bug class: with one choice, per-response and
+// per-choice state are identical, so only interleaving two divergent shapes in
+// one stream reveals a stage that keyed state per response instead of per
+// `choice.index`.
+//
+// Sibling lanes over the frontend-crates v1 jail and v2 stream corpus live in
+// ai-dynamo/frontend-crates (`parsers/v1/tests/jail_interleave.rs`,
+// `conformance/tests/parity_toolcalling_stream_interleave.rs`); the schedule
+// core below is the dynamo-side copy of that lane's origin module.
+mod interleave {
+    //! Deterministic multi-choice interleave schedules. No RNG: every failure
+    //! reproduces byte-exactly. A "shape" is one choice's ordered delta texts.
+    //! `interleave` merges k shapes into one ordered list of chunks, each chunk
+    //! a `(choice.index, delta)` list, ready for `mock_multi_choice_content_chunk`.
+
+    #[derive(Clone, Copy, Debug)]
+    pub enum Schedule {
+        /// One delta from each choice per round, in index order: 0,1,0,1,...
+        RoundRobin,
+        /// Choice `i` starts `i * offset` rounds late (choice 0 streams alone
+        /// first), then the rest interleave by global round.
+        FirstByteOffset(usize),
+        /// Split choice 0's delta in half around the other choices' deltas of
+        /// the same round — stresses a marker split across a choice boundary.
+        BoundarySplit,
+    }
+
+    /// Every schedule the lane exercises — shared by the lossless roundtrip
+    /// test and the isolation assertion so the two cannot drift apart.
+    pub const ALL_SCHEDULES: [Schedule; 4] = [
+        Schedule::RoundRobin,
+        Schedule::FirstByteOffset(1),
+        Schedule::FirstByteOffset(2),
+        Schedule::BoundarySplit,
+    ];
+
+    /// Split `s` near the middle on a UTF-8 char boundary. Returns `("", s)`
+    /// when the string is too short to split (single char / empty).
+    fn split_mid(s: &str) -> (&str, &str) {
+        if s.len() < 2 {
+            return ("", s);
+        }
+        let mut mid = s.len() / 2;
+        while mid < s.len() && !s.is_char_boundary(mid) {
+            mid += 1;
+        }
+        if mid == s.len() {
+            return ("", s);
+        }
+        s.split_at(mid)
+    }
+
+    pub fn interleave(shapes: &[Vec<&str>], schedule: Schedule) -> Vec<Vec<(u32, String)>> {
+        let max_len = shapes.iter().map(|s| s.len()).max().unwrap_or(0);
+        let mut chunks: Vec<Vec<(u32, String)>> = Vec::new();
+        match schedule {
+            // RoundRobin is FirstByteOffset(0): every choice starts at round 0.
+            Schedule::RoundRobin | Schedule::FirstByteOffset(_) => {
+                let offset = match schedule {
+                    Schedule::FirstByteOffset(o) => o,
+                    _ => 0,
+                };
+                // Emit (round, index, delta) events, then order by (round, index)
+                // so each choice's stream starts `index * offset` rounds late.
+                let mut events: Vec<(usize, u32, String)> = Vec::new();
+                for (i, shape) in shapes.iter().enumerate() {
+                    for (j, delta) in shape.iter().enumerate() {
+                        events.push((i * offset + j, i as u32, (*delta).to_string()));
+                    }
+                }
+                events.sort_by_key(|(round, idx, _)| (*round, *idx));
+                chunks = events
+                    .into_iter()
+                    .map(|(_, idx, d)| vec![(idx, d)])
+                    .collect();
+            }
+            Schedule::BoundarySplit => {
+                for t in 0..max_len {
+                    // Choice 0's delta halves bracket the other choices' deltas
+                    // of the same round (no halves when choice 0 is exhausted).
+                    let halves = shapes.first().and_then(|s| s.get(t)).map(|d| split_mid(d));
+                    if let Some((h1, _)) = halves
+                        && !h1.is_empty()
+                    {
+                        chunks.push(vec![(0, h1.to_string())]);
+                    }
+                    for (i, shape) in shapes.iter().enumerate().skip(1) {
+                        if let Some(delta) = shape.get(t) {
+                            chunks.push(vec![(i as u32, (*delta).to_string())]);
+                        }
+                    }
+                    if let Some((_, h2)) = halves {
+                        chunks.push(vec![(0, h2.to_string())]);
+                    }
+                }
+            }
+        }
+        chunks
+    }
+
+    /// De-interleave: concatenate every delta per `choice.index` in arrival
+    /// order. The lossless invariant is on concatenated content per choice.
+    pub fn deinterleave(chunks: &[Vec<(u32, String)>]) -> std::collections::BTreeMap<u32, String> {
+        let mut map: std::collections::BTreeMap<u32, String> = std::collections::BTreeMap::new();
+        for chunk in chunks {
+            for (idx, delta) in chunk {
+                map.entry(*idx).or_default().push_str(delta);
+            }
+        }
+        map
+    }
+}
+
+/// Every schedule must be lossless: de-interleaving its output by
+/// `choice.index` recovers each shape's concatenated content byte-exactly.
+#[test]
+fn interleave_schedules_are_lossless() {
+    use interleave::{ALL_SCHEDULES, deinterleave, interleave};
+    let shapes = vec![
+        vec!["Let me ch", "eck.", "</think>", "answer0"],
+        vec!["Short", " reasoning</think>", "answer1"],
+        vec!["one-shot choice2"],
+    ];
+    let expected: BTreeMap<u32, String> = shapes
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (i as u32, s.concat()))
+        .collect();
+    for schedule in ALL_SCHEDULES {
+        let recovered = deinterleave(&interleave(&shapes, schedule));
+        assert_eq!(
+            recovered, expected,
+            "schedule {schedule:?} lost or reordered per-choice content"
+        );
+    }
+}
+
+/// Comparable projection of one choice's demuxed output: reasoning, content,
+/// and assembled tool calls (name + arguments per tool index). This lane
+/// intentionally does not assert finish reasons.
+#[derive(Default, PartialEq, Eq, Debug)]
+struct ChoiceOutput {
+    reasoning: String,
+    content: String,
+    tool_calls: Vec<(Option<String>, String)>,
+}
+
+/// Drive `postprocessor_parsing_stream` over pre-built content chunks (one
+/// `(index, delta)` list per chunk) plus a terminal finish for every index,
+/// then demux the output by `choice.index` into a `ChoiceOutput` per choice.
+async fn run_interleaved(
+    preprocessor: &Arc<OpenAIPreprocessor>,
+    request: &NvCreateChatCompletionRequest,
+    chunks: &[Vec<(u32, String)>],
+) -> BTreeMap<u32, ChoiceOutput> {
+    let mut indices: Vec<u32> = chunks
+        .iter()
+        .flat_map(|c| c.iter().map(|(i, _)| *i))
+        .collect();
+    indices.sort_unstable();
+    indices.dedup();
+
+    let mut input: Vec<NvCreateChatCompletionStreamResponse> = chunks
+        .iter()
+        .map(|chunk| {
+            let refs: Vec<(u32, &str)> = chunk.iter().map(|(i, s)| (*i, s.as_str())).collect();
+            mock_multi_choice_content_chunk(&refs)
+        })
+        .collect();
+    input.push(mock_multi_choice_final_chunk(&indices));
+
+    let input_stream = stream::iter(input.into_iter().map(Annotated::from_data));
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, request, false, false)
+        .expect("postprocessor_parsing_stream should build");
+    let output_chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> =
+        output_stream.collect().await;
+
+    demux_by_choice(&output_chunks)
+        .into_iter()
+        .map(|(idx, acc)| {
+            (
+                idx,
+                ChoiceOutput {
+                    reasoning: acc.reasoning,
+                    content: acc.content,
+                    tool_calls: acc
+                        .tool_calls
+                        .into_values()
+                        .map(|tc| (tc.name, tc.arguments))
+                        .collect(),
+                },
+            )
+        })
+        .collect()
+}
+
+/// Run one shape solo (single choice at index 0) and return its `ChoiceOutput`.
+async fn solo_output(
+    preprocessor: &Arc<OpenAIPreprocessor>,
+    request: &NvCreateChatCompletionRequest,
+    shape: &[&str],
+) -> ChoiceOutput {
+    let chunks = interleave::interleave(&[shape.to_vec()], interleave::Schedule::RoundRobin);
+    let mut out = run_interleaved(preprocessor, request, &chunks).await;
+    out.remove(&0).unwrap_or_default()
+}
+
+/// Core invariant assertion: for `shapes` interleaved under `schedule`, each
+/// choice's demuxed output equals that shape's solo (n=1) output.
+async fn assert_interleave_isolated(
+    label: &str,
+    preprocessor: &Arc<OpenAIPreprocessor>,
+    request: &NvCreateChatCompletionRequest,
+    shapes: &[Vec<&str>],
+) {
+    let mut goldens: Vec<ChoiceOutput> = Vec::new();
+    for shape in shapes {
+        goldens.push(solo_output(preprocessor, request, shape).await);
+    }
+    // Sanity: the shapes must actually diverge, or the lane proves nothing.
+    if shapes.len() >= 2 {
+        assert!(
+            goldens.iter().any(|g| *g != goldens[0]),
+            "{label}: shapes do not diverge; interleave lane would prove nothing"
+        );
+    }
+    for schedule in interleave::ALL_SCHEDULES {
+        let chunks = interleave::interleave(shapes, schedule);
+        let demuxed = run_interleaved(preprocessor, request, &chunks).await;
+        for (i, golden) in goldens.iter().enumerate() {
+            let got = demuxed
+                .get(&(i as u32))
+                .unwrap_or_else(|| panic!("{label} [{schedule:?}]: choice {i} produced no output"));
+            assert_eq!(
+                got, golden,
+                "{label} [{schedule:?}]: choice {i} demuxed output != its solo (n=1) output \
+                 — cross-choice state leak"
+            );
+        }
+    }
+}
+
+/// Guided-JSON bypass + tool-jail stage: a choice that leads with bare guided
+/// JSON must not freeze the bypass decision for a reasoning-first choice.
+/// Generalizes `..._isolates_guided_bypass_decision` across schedules/pairs.
+#[tokio::test]
+async fn postprocessor_parsing_stream_interleave_isolates_tool_bypass_stage() {
+    let preprocessor = build_preprocessor(Some("deepseek_r1"), Some("nemotron_nano"));
+    let request = streaming_tool_request(ChatCompletionToolChoiceOption::Required);
+
+    let json_sf = r#"[{"name":"get_weather","parameters":{"location":"San Francisco"}}]"#;
+    let json_boston = r#"[{"name":"get_weather","parameters":{"location":"Boston"}}]"#;
+    let json_paris = r#"[{"name":"get_weather","parameters":{"location":"Paris"}}]"#;
+    let json_denver = r#"[{"name":"get_weather","parameters":{"location":"Denver"}}]"#;
+
+    let bare_json = vec!["[", &json_sf[1..]];
+    let reasoning_first = vec!["Let me check.", "</think>", json_boston];
+    let reasoning_first2 = vec!["Thinking hard.", "</think>", json_paris];
+    // reasoning text and the `</think>` close marker split across deltas.
+    let tag_split = vec!["Let me ch", "eck.", "</th", "ink>", json_denver];
+
+    // k=2 pairs: the known killer, two reasoning choices, and a split-marker pair.
+    assert_interleave_isolated(
+        "bare-JSON x reasoning-first",
+        &preprocessor,
+        &request,
+        &[bare_json.clone(), reasoning_first.clone()],
+    )
+    .await;
+    assert_interleave_isolated(
+        "reasoning x reasoning (distinct)",
+        &preprocessor,
+        &request,
+        &[reasoning_first.clone(), reasoning_first2.clone()],
+    )
+    .await;
+    assert_interleave_isolated(
+        "bare-JSON x split-marker reasoning",
+        &preprocessor,
+        &request,
+        &[bare_json.clone(), tag_split.clone()],
+    )
+    .await;
+    // k=3: prove the per-choice state map generalizes past two choices.
+    assert_interleave_isolated(
+        "k=3 bare-JSON x reasoning x reasoning",
+        &preprocessor,
+        &request,
+        &[bare_json, reasoning_first, reasoning_first2],
+    )
+    .await;
+}
+
+/// Pure reasoning-split / `<think>`-strip stage (no tools): each choice's
+/// `reasoning_content` vs `content` split must be decided per `choice.index`.
+#[tokio::test]
+async fn postprocessor_parsing_stream_interleave_isolates_reasoning_split_stage() {
+    let preprocessor = build_preprocessor(Some("deepseek_r1"), None);
+    let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "Explain your answer."}],
+        "stream": true,
+        "temperature": 0.0
+    }))
+    .unwrap();
+
+    // deepseek_r1 is force-reasoning: output starts inside reasoning, `</think>`
+    // closes it. Divergent shapes stress per-choice reasoning state.
+    let reason_then_answer_a = vec!["I should compute.", "</think>", "The result is 42."];
+    let reason_then_answer_b = vec!["A different path.", "</think>", "The result is 7."];
+    let reason_only = vec!["Still thinking, never closes."];
+    // `</think>` split across deltas stresses per-choice strip buffering.
+    let tag_split = vec!["Split rea", "soning.", "</th", "ink>", "Final answer."];
+
+    assert_interleave_isolated(
+        "reason+answer A x B",
+        &preprocessor,
+        &request,
+        &[reason_then_answer_a.clone(), reason_then_answer_b.clone()],
+    )
+    .await;
+    assert_interleave_isolated(
+        "reason+answer x reason-only",
+        &preprocessor,
+        &request,
+        &[reason_then_answer_a.clone(), reason_only.clone()],
+    )
+    .await;
+    assert_interleave_isolated(
+        "reason+answer x split-marker",
+        &preprocessor,
+        &request,
+        &[reason_then_answer_a.clone(), tag_split],
+    )
+    .await;
+    // k=3 across the reasoning stage.
+    assert_interleave_isolated(
+        "k=3 reasoning split",
+        &preprocessor,
+        &request,
+        &[reason_then_answer_a, reason_then_answer_b, reason_only],
+    )
+    .await;
 }
 
 /// Per-request thinking disablement must retain the old required-tool behavior
