@@ -264,9 +264,9 @@ Choose the path that matches how much control you need:
 
 Good recipe starting points include:
 
-- [Qwen3-32B vLLM disagg + KV router](https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-32b)
-- [DeepSeek V3.2 TensorRT-LLM disagg + KV router](https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v32-fp4)
-- [Llama 3 70B vLLM disaggregated recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes/llama-3-70b)
+- [DeepSeek-V4 vLLM disaggregated recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v4)
+- [Qwen3-235B TensorRT-LLM disaggregated recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-235b-a22b-fp8)
+- [Nemotron-3-Ultra vLLM disaggregated recipe](https://github.com/ai-dynamo/dynamo/tree/main/recipes/nemotron-3-ultra)
 
 For the Kubernetes resource model, see the [Deployment Overview](../../kubernetes/model-deployment-guide.md).
 
