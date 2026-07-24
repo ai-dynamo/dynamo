@@ -26,7 +26,8 @@ from dynamo.common.forward_pass_metrics import (
     encode,
 )
 from dynamo.planner.config.planner_config import PlannerConfig
-from dynamo.planner.core.adapters import DecodePlanner, PrefillPlanner
+from dynamo.planner.core.decode import DecodePlanner
+from dynamo.planner.core.prefill import PrefillPlanner
 from dynamo.planner.core.state import PlannerSharedState
 from dynamo.planner.monitoring.worker_info import WorkerInfo
 
