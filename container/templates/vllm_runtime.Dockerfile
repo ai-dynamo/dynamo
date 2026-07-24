@@ -18,6 +18,7 @@ FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 ARG PYTHON_VERSION
 ARG ENABLE_KVBM
 ARG ENABLE_GPU_MEMORY_SERVICE
+ARG ENABLE_NIXL_WHEEL_OVERRIDE
 ARG VLLM_OMNI_REF
 ARG NIXL_REF
 {% if device == "cuda" %}
@@ -140,6 +141,26 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \
     uv pip install {{ pip_target }} --no-deps /opt/dynamo/wheelhouse/nixl/nixl*.whl
+{% endif %}
+
+{% if device == "cuda" %}
+# When ENABLE_NIXL_WHEEL_OVERRIDE is true, install the NIXL wheels built in
+# wheel_builder (nixl-cu* + nixl-meta) instead of using the upstream PyPI package
+# pre-installed in the base image. This allows testing a custom NIXL build (e.g. a
+# newer ref or patched version) without waiting for an upstream release.
+COPY --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
+COPY --chown=dynamo:0 --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    if [ "${ENABLE_NIXL_WHEEL_OVERRIDE}" = "true" ]; then \
+        set -eux; \
+        export UV_CACHE_DIR=/root/.cache/uv; \
+        uv pip install {{ pip_target }} --force-reinstall --no-deps /opt/dynamo/wheelhouse/nixl/nixl*.whl; \
+        install_nixl_from_wheel \
+            --cuda-major "${CUDA_MAJOR}" \
+            --site-packages "${SITE_PACKAGES}" \
+            --prefix "${NIXL_PREFIX}" \
+            --skip-headers; \
+    fi
 {% endif %}
 
 {% if target not in ("dev", "local-dev") %}
