@@ -149,6 +149,40 @@ jobs:
             --exclude='watch.sh' \
             source-checkout/docs/fern/ docs-checkout/fern/pages-dev/
 
+          # Component *doc* pages (.md/.mdx) live alongside the React .tsx under
+          # docs/fern/components/. The main rsync excludes components/ wholesale
+          # so the .tsx don't double-sync into pages-dev (they go to
+          # fern/components/ for the docs.yml mdx-components + footer
+          # resolution). But the nav references component doc pages from both
+          # the Developer Guide tab and the Reference tab's Components variant,
+          # and the path transform below rewrites those to
+          # ../pages-dev/components/. Sync ONLY the doc pages here — never the
+          # .tsx — so the paths resolve and the per-version snapshot
+          # (cp -r pages-dev) freezes them correctly.
+          echo "Syncing component doc pages (.md/.mdx only) to pages-dev/components/..."
+          rsync -a \
+            --include='*/' \
+            --include='*.md' \
+            --include='*.mdx' \
+            --exclude='*' \
+            --prune-empty-dirs \
+            source-checkout/docs/fern/components/ docs-checkout/fern/pages-dev/components/
+
+          # Backend deploy manifests are embedded into templates/{vllm,sglang,
+          # trtllm}.mdx via build-time <Code src="../../../examples/backends/
+          # <engine>/deploy/*.yaml"> file reads. Those resolve to the repo-root
+          # examples/ tree in the source layout, which does not exist on
+          # docs-website — sync just the referenced deploy/ subtrees to the
+          # branch root so both ../../../examples (from pages-dev) and the
+          # versioned snapshots resolve.
+          echo "Syncing examples/backends/*/deploy/ to branch root..."
+          rsync -a \
+            --include='*/' \
+            --include='backends/*/deploy/**' \
+            --exclude='*' \
+            --prune-empty-dirs \
+            source-checkout/examples/ docs-checkout/examples/
+
           # Sync index.yml as versions/dev.yml and transform paths for docs-website layout
           echo "Syncing index.yml to docs-website branch as versions/dev.yml..."
           cp source-checkout/docs/fern/index.yml docs-checkout/fern/versions/dev.yml
