@@ -22,6 +22,12 @@ pytestmark = [
     pytest.mark.filterwarnings("ignore::pydantic.warnings.PydanticDeprecatedSince20"),
 ]
 
+# TODO(global-planner): Add invariant coverage for HA/shared state, cancellation
+# and intermediate PATCH failure, out-of-bound recovery, selected-only tolerance,
+# and duplicate-target execution; patch discovery by default in handler unit
+# tests and repair the concurrent-insert test so its _read_pools monkeypatch
+# accepts role_hints and actually runs instead of having TypeError swallowed.
+
 
 @pytest.fixture
 def mock_runtime():

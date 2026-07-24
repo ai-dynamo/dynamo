@@ -128,6 +128,10 @@ class Orchestrator:
     ):
         self.capacity_manager = capacity_manager
 
+        # TODO(global-planner): Validate configuration and requests at the
+        # boundary: reject min > max and invalid TTLs, preserve an explicit empty
+        # allowlist instead of treating it as None, and reject empty, duplicate,
+        # unknown, or negative targets before caching, mediation, or execution.
         # Budget bounds + intent cache.
         self.max_total_gpus = max_total_gpus
         self.min_total_gpus = min_total_gpus
@@ -135,6 +139,11 @@ class Orchestrator:
         # Injected clock — production uses wall-clock; offline replay passes a
         # sim-time source so intent-cache TTL is meaningful there too.
         self._now = now
+        # TODO(global-planner): Replace process-local discovery,
+        # participant/intent state, and locking with fail-closed cluster-wide
+        # coordination, and register participants inside the same serialized
+        # boundary as observe/decide/apply so the hard GPU ceiling always uses a
+        # complete snapshot.
         # Per-pool cached desired replicas from recent requests, keyed by
         # f"{participant_id}/{sub_type}". Used to pair opposite-direction intents
         # across requests when one request alone would breach bounds.
@@ -195,6 +204,10 @@ class Orchestrator:
         below the floor. Only runs when budget enforcement is enabled."""
         if not self.budget_enforcement_enabled():
             return
+        # TODO(global-planner): Add ongoing lifecycle reconciliation after
+        # startup: discover new participants, evict deleted participants,
+        # connectors, and role hints, and prune expired or satisfied intents
+        # instead of only skipping them.
         self.capacity_manager.discover(self.managed_deployments)
         if self.min_total_gpus >= 0:
             self._warn_if_below_floor()
@@ -287,6 +300,10 @@ class Orchestrator:
         # correctly (e.g. component-name role hints for generic workers).
         self.capacity_manager.remember_roles(participant_id, targets)
 
+        # TODO(global-planner): Make the request path scale: avoid full-cluster
+        # observation when budget enforcement is disabled, move synchronous
+        # Kubernetes readback and PATCH work off the event loop, and do not hold
+        # the budget lock through blocking readiness waits.
         # Read ALL known participants' current state once. Cross-participant
         # partner search needs every pool's current replicas and gpu_per_replica;
         # cross-participant budget math also consumes this. Run the synchronous
@@ -313,6 +330,10 @@ class Orchestrator:
                 current_replicas={},
             )
 
+        # TODO(global-planner): Make an approved plan equivalent to execution:
+        # apply same-DGD targets atomically and confirm downscale capacity is
+        # released before dependent upscales (especially with blocking=False),
+        # so intermediate or partial state cannot exceed the hard ceiling.
         # Apply: request + selected partners (may be empty), grouped by
         # participant with at most one scale call per participant.
         # Direction-aware order: scale-down participants first (most negative net
@@ -346,6 +367,10 @@ class Orchestrator:
             grouped_targets.keys(), key=lambda k: net_deltas[k]
         )
 
+        # TODO(global-planner): Give multi-participant apply transaction or
+        # reconciliation semantics: on failure or cancellation, stop subsequent
+        # patches, report a non-success outcome, and persist enough state to
+        # repair or roll back the partially applied transfer.
         applied: list[str] = []
         for i, pid in enumerate(ordered_participants):
             tgts = grouped_targets[pid]
@@ -464,6 +489,11 @@ class Orchestrator:
             total_standalone, internally_paired, standalone_tolerance
         )
 
+        # TODO(global-planner): Rework boundary and partner selection to allow
+        # monotonic recovery from an already-out-of-bounds state, compute
+        # tolerance only from selected pools, continue after an unpartializable
+        # candidate, prefer an already-valid standalone request, and preserve
+        # same-participant priority during sorting.
         # Multi-partner packing: pack as many opposite-direction cached intents
         # as fit within the band, partially consuming one over-sized candidate if
         # needed.

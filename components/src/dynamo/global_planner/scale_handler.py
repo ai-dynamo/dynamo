@@ -70,6 +70,9 @@ class ScaleRequestHandler:
         self.runtime = runtime
         self.no_operation = no_operation
 
+        # TODO(global-planner): Separate the caller authorization allowlist from
+        # the Kubernetes backend's discovery scope instead of deriving both from
+        # managed_namespaces and a namespace-prefix convention.
         # The wire vocabulary (K8s namespace / DGD name) is mapped here onto the
         # orchestrator's neutral vocabulary; the orchestrator is a no-K8s zone.
         capacity_manager = KubernetesCapacityManager(namespace=k8s_namespace)
@@ -116,6 +119,9 @@ class ScaleRequestHandler:
     # Compatibility accessors (handler-level config)                     #
     # ------------------------------------------------------------------ #
 
+    # TODO(global-planner): Preserve the pre-refactor writable handler API
+    # with forwarding setters for max_total_gpus, min_total_gpus, and
+    # managed_namespaces (including its previous shape), or document the break.
     @property
     def max_total_gpus(self) -> int:
         return self.orchestrator.max_total_gpus
@@ -140,6 +146,9 @@ class ScaleRequestHandler:
         """
         try:
             # Validate caller namespace (if authorization is enabled)
+            # TODO(global-planner): Authenticate a trusted runtime principal
+            # instead of relying on payload-claimed caller_namespace, and bind
+            # authorization to the requested Kubernetes namespace and DGD.
             if not self.orchestrator.is_authorized(request.caller_namespace):
                 yield {
                     "status": ScaleStatus.ERROR.value,
