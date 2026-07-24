@@ -76,12 +76,10 @@ relay:
 | --- | --- | --- |
 | vLLM (`python -m dynamo.vllm`) | Aggregated, prefill, or decode, including native multimodal workers | Supported |
 | vLLM (`python -m dynamo.vllm`) | Embedding, multimodal encode, or headless | Not supported; Dynamo warns and does not inject the FPM scheduler |
-| vLLM (`python -m dynamo.vllm.unified_main`) | All worker topologies | Not supported; the unified path does not yet construct an FPM relay |
 | SGLang (`python -m dynamo.sglang`) | Standard aggregated, prefill, decode, or LLM diffusion; this includes `--enable-multimodal` without a dedicated encoder | Supported |
 | SGLang (`python -m dynamo.sglang`) | Embedding or the dedicated multimodal topology selected by `--dedicated-mm-encoder` (and its legacy worker flags) | Not supported; Dynamo warns and does not auto-enable FPM |
 | SGLang (`python -m dynamo.sglang`) | Image diffusion or video generation | Not supported; these paths do not run the SGLang FPM publisher |
 | SGLang (`python -m dynamo.sglang`) | Snapshot mode | Not supported; FPM is disabled during snapshot startup with a warning |
-| SGLang (`python -m dynamo.sglang.unified_main`) | All worker topologies | Not supported; the unified path does not yet construct an FPM relay |
 
 `DYN_FORWARDPASS_METRIC_PORT` remains a separate legacy opt-in and takes
 precedence when it is set, including on topologies where trace-based activation
