@@ -9,7 +9,7 @@ import (
 	"context"
 	"fmt"
 
-	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/dynamo/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"

@@ -20,7 +20,7 @@ package controller
 import (
 	"testing"
 
-	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/dynamo/v1beta1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"

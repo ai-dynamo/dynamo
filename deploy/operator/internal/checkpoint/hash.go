@@ -24,7 +24,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/dynamo/v1alpha1"
 )
 
 // NewCheckpointID returns a fresh snapshot artifact ID. It is intentionally

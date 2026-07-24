@@ -23,8 +23,8 @@ import (
 	"fmt"
 	"testing"
 
-	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
-	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/dynamo/v1alpha1"
+	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/dynamo/v1beta1"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"k8s.io/apimachinery/pkg/runtime"

@@ -23,7 +23,7 @@ import (
 	"testing"
 	"time"
 
-	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/dynamo/v1beta1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	batchv1 "k8s.io/api/batch/v1"

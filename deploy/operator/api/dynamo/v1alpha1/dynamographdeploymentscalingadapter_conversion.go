@@ -17,7 +17,7 @@
 
 // Conversion between v1alpha1 and v1beta1 DynamoGraphDeploymentScalingAdapter.
 //
-// v1beta1 is the hub (see api/v1beta1/dynamographdeploymentscalingadapter_conversion.go).
+// v1beta1 is the hub (see api/dynamo/v1beta1/dynamographdeploymentscalingadapter_conversion.go).
 // The DGDSA shapes differ only in the embedded DGDRef carrier:
 //
 //   - v1alpha1: spec.dgdRef is a DynamoGraphDeploymentServiceRef{Name, ServiceName}
@@ -34,7 +34,7 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/conversion"
 
-	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/dynamo/v1beta1"
 )
 
 // ConvertTo converts this DynamoGraphDeploymentScalingAdapter (v1alpha1) into

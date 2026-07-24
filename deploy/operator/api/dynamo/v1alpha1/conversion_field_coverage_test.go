@@ -26,7 +26,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 
-	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/dynamo/v1beta1"
 )
 
 const knownV1Beta1ConversionFieldSet = `

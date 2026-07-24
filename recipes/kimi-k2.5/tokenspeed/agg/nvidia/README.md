@@ -20,7 +20,7 @@ Kimi K2.5 / K2.6.
 
 > **Note: raw Kubernetes primitives, not `DynamoGraphDeployment`.** The Dynamo
 > Operator's CRD currently only validates `backendFramework` values `vllm`, `sglang`,
-> `trtllm` (see `deploy/operator/api/v1beta1/common.go`). Until `tokenspeed` is added
+> `trtllm` (see `deploy/operator/api/dynamo/v1beta1/common.go`). Until `tokenspeed` is added
 > to that enum, this recipe wires the four processes the operator would otherwise
 > generate (etcd discovery + NATS event-plane + frontend HTTP router + worker engine)
 > as plain `Deployment`s and `Service`s. The frontend Service is named

@@ -276,7 +276,7 @@ class KubernetesAPI:
         updated = service_status.get("updatedReplicas", 0)
 
         # availableReplicas takes precedence over readyReplicas for the count
-        # refer to ComponentReplicaStatus in deploy/operator/api/v1beta1/common.go
+        # refer to ComponentReplicaStatus in deploy/operator/api/dynamo/v1beta1/common.go
         if available is not None:
             traffic_serving_replicas = available
         else:

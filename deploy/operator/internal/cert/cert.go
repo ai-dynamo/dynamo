@@ -54,7 +54,7 @@ const (
 
 // convertibleCRDs is the list of CRDs whose conversion webhook this operator
 // patches at startup. Each of these resources has at least two API versions
-// with distinct shapes (see api/v1alpha1/*_conversion.go) and relies on the
+// with distinct shapes (see api/dynamo/v1alpha1/*_conversion.go) and relies on the
 // operator's /convert endpoint to translate between them.
 var convertibleCRDs = []string{
 	dgdrCRDName,

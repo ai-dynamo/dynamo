@@ -4,7 +4,7 @@
 """Pydantic specs for replay_optimize, shaped to mirror DGDR v1beta1.
 
 Field names follow DGDR's lowerCamelCase convention so that the eventual
-upstream-back into `deploy/operator/api/v1beta1/...` is a clean merge.
+upstream-back into `deploy/operator/api/dynamo/v1beta1/...` is a clean merge.
 Method names follow Python / Pydantic convention (snake_case), matching how
 `dgdr_v1beta1_types.py` itself defines its one internal method
 (`_validate_sla_options`).

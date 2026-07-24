@@ -177,7 +177,7 @@ const (
 // v1beta1 is a served version: the API server accepts reads and writes
 // against it, and transparently converts to/from v1alpha1 (still the
 // storage version until a later MR flips it). Conversion goes through the
-// operator's conversion webhook; see api/v1alpha1/*_conversion.go.
+// operator's conversion webhook; see api/dynamo/v1alpha1/*_conversion.go.
 type DynamoGraphDeployment struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

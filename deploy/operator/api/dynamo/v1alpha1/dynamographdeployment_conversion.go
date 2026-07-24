@@ -17,7 +17,7 @@
 
 // Conversion between v1alpha1 and v1beta1 DynamoGraphDeployment.
 //
-// v1beta1 is the hub (see api/v1beta1/dynamographdeployment_conversion.go).
+// v1beta1 is the hub (see api/dynamo/v1beta1/dynamographdeployment_conversion.go).
 // This file implements v1alpha1 as a spoke in the hub-and-spoke model used by
 // controller-runtime's conversion webhook.
 //
@@ -43,7 +43,7 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/conversion"
 
-	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/dynamo/v1beta1"
 )
 
 const (
