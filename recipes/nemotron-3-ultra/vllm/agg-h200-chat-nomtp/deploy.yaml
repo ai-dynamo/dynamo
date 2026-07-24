@@ -141,7 +141,6 @@ spec:
         spec:
           imagePullSecrets:
             - name: nvcr-secret
-          runtimeClassName: nvidia
           nodeSelector:
             nvidia.com/gpu.product: NVIDIA-H200
           tolerations:
