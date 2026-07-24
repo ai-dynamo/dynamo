@@ -39,7 +39,8 @@ export const INSTALL_DATA = {
         "backend_version": "v0.25.1",
         "latest": true,
         "commands": {
-          "container": "docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly:latest"
+          "container": "docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly:latest",
+          "wheel": "uv pip install --pre --extra-index-url https://pypi.nvidia.com/ \"ai-dynamo[vllm]==1.4.0.dev20260723\""
         }
       },
       {
@@ -106,7 +107,8 @@ export const INSTALL_DATA = {
         "backend_version": "v0.5.15",
         "latest": true,
         "commands": {
-          "container": "docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime-nightly:latest"
+          "container": "docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime-nightly:latest",
+          "wheel": "uv pip install --pre --extra-index-url https://pypi.nvidia.com/ \"ai-dynamo[sglang]==1.4.0.dev20260723\""
         }
       },
       {
