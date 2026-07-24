@@ -457,7 +457,6 @@ models:
             replay_endpoint: None,
             total_kv_blocks: None,
             max_num_batched_tokens: None,
-            stable_routing_id: Some(format!("vllm-{worker_id}")),
         }
     }
 
@@ -481,7 +480,7 @@ models:
             .await
             .expect("selector should build");
         selector
-            .reconcile(&HashMap::from([(1u64, schedulable_registration(1))]))
+            .reconcile(&[schedulable_registration(1)])
             .await
             .expect("reconcile should succeed");
         assert!(
@@ -616,7 +615,7 @@ models:
             .await
             .expect("selector should build");
         selector
-            .reconcile(&HashMap::from([(1u64, incomplete_registration(1))]))
+            .reconcile(&[incomplete_registration(1)])
             .await
             .expect("reconcile should succeed");
         assert!(
