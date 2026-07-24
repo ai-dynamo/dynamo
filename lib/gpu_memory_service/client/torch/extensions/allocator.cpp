@@ -14,11 +14,9 @@
 //
 // PEP 703 (free-threaded CPython) note: the callback pair is held in a magic-
 // statics singleton, so reads from my_malloc/my_free are data-race-free without
-// explicit synchronization. The C++ contract is "first call to callbacks() wins";
-// in practice that is init_module, because the Python wrapper
-// _ensure_callbacks_initialized invokes init_module synchronously before any
-// allocation path can reach my_malloc / my_free. Subsequent calls to callbacks()
-// with new arguments are silent no-ops on the stored pointers.
+// explicit synchronization. Both registration APIs accept only the identical
+// stored Python callback objects. This prevents legacy and V1 allocators from
+// silently sharing callbacks owned by whichever initialized first.
 
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
@@ -116,16 +114,43 @@ py_init_module(PyObject* self, PyObject* args)
     return nullptr;
   }
 
-  // First call to callbacks() wins; subsequent calls do not rebind the stored
-  // pointers. In practice this is invoked exactly once by the Python wrapper
-  // _ensure_callbacks_initialized.
-  callbacks(malloc_cb, free_cb);
+  const Callbacks& installed = callbacks(malloc_cb, free_cb);
+  if (installed.malloc_cb != malloc_cb || installed.free_cb != free_cb) {
+    PyErr_SetString(PyExc_RuntimeError, "allocator callbacks are already registered by another owner");
+    return nullptr;
+  }
+
+  Py_RETURN_NONE;
+}
+
+static PyObject*
+py_init_module_strict(PyObject* self, PyObject* args)
+{
+  PyObject* malloc_cb = nullptr;
+  PyObject* free_cb = nullptr;
+
+  if (!PyArg_ParseTuple(args, "OO", &malloc_cb, &free_cb)) {
+    return nullptr;
+  }
+
+  if (!PyCallable_Check(malloc_cb) || !PyCallable_Check(free_cb)) {
+    PyErr_SetString(PyExc_TypeError, "Both arguments must be callables");
+    return nullptr;
+  }
+
+  const Callbacks& installed = callbacks(malloc_cb, free_cb);
+  if (installed.malloc_cb != malloc_cb || installed.free_cb != free_cb) {
+    PyErr_SetString(PyExc_RuntimeError, "allocator callbacks are already registered by another owner");
+    return nullptr;
+  }
 
   Py_RETURN_NONE;
 }
 
 static PyMethodDef module_methods[] = {
-    {"init_module", py_init_module, METH_VARARGS, "Set malloc/free callbacks"}, {nullptr, nullptr, 0, nullptr}};
+    {"init_module", py_init_module, METH_VARARGS, "Set malloc/free callbacks"},
+    {"init_module_strict", py_init_module_strict, METH_VARARGS, "Set one exact malloc/free callback owner"},
+    {nullptr, nullptr, 0, nullptr}};
 
 static struct PyModuleDef allocator_module = {
     PyModuleDef_HEAD_INIT, "_allocator_ext", "CUDAPluggableAllocator shim for GPU Memory Service", -1, module_methods};
