@@ -35,13 +35,41 @@ pub trait MediaRequestExt {
     fn media_io_kwargs(&self) -> Option<&MediaDecoder>;
 }
 
+/// Parse `tool_calls[*].function.arguments` from JSON string to object in a
+/// serialized messages array before handing it to MiniJinja.
+/// GLM-5.2's Jinja template iterates arguments with `{% for k, v in _args.items() %}`
+/// which requires a dict; the OpenAI wire schema stores arguments as a JSON-object string.
+pub(crate) fn normalize_tool_call_arguments(messages_json: &mut serde_json::Value) {
+    if let Some(msgs) = messages_json.as_array_mut() {
+        for msg in msgs.iter_mut() {
+            if let Some(tool_calls) = msg.get_mut("tool_calls").and_then(|v| v.as_array_mut()) {
+                for tc in tool_calls.iter_mut() {
+                    if let Some(args_str) = tc
+                        .pointer("/function/arguments")
+                        .and_then(|v| v.as_str())
+                    {
+                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(args_str) {
+                            if let Some(fn_obj) = tc.get_mut("function") {
+                                if let Some(obj) = fn_obj.as_object_mut() {
+                                    obj.insert("arguments".to_string(), parsed);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
     fn model(&self) -> String {
         self.inner.model.clone()
     }
 
     fn messages(&self) -> Value {
-        let messages_json = serde_json::to_value(&self.inner.messages).unwrap();
+        let mut messages_json = serde_json::to_value(&self.inner.messages).unwrap();
+        normalize_tool_call_arguments(&mut messages_json);
         Value::from_serialize(&messages_json)
     }
 

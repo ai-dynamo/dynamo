@@ -464,29 +464,7 @@ impl OAIChatLikeRequest for UnifiedRequest {
 
     fn messages(&self) -> minijinja::value::Value {
         let mut messages_json = serde_json::to_value(&self.inner.inner.messages).unwrap();
-        // GLM-5.2 Jinja template iterates tool_calls[*].function.arguments as a dict
-        // but the wire schema stores arguments as a JSON-object string. Parse to object
-        // here so MiniJinja can iterate with `for k, v in _args.items()`.
-        if let Some(msgs) = messages_json.as_array_mut() {
-            for msg in msgs.iter_mut() {
-                if let Some(tool_calls) = msg.get_mut("tool_calls").and_then(|v| v.as_array_mut()) {
-                    for tc in tool_calls.iter_mut() {
-                        if let Some(args_str) = tc
-                            .pointer("/function/arguments")
-                            .and_then(|v| v.as_str())
-                        {
-                            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(args_str) {
-                                if let Some(fn_obj) = tc.get_mut("function") {
-                                    if let Some(obj) = fn_obj.as_object_mut() {
-                                        obj.insert("arguments".to_string(), parsed);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        crate::preprocessor::prompt::normalize_tool_call_arguments(&mut messages_json);
         minijinja::value::Value::from_serialize(&messages_json)
     }
 

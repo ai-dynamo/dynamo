@@ -2729,12 +2729,29 @@ impl OpenAIPreprocessor {
         let pending = Arc::new(Mutex::new(PendingMetrics::default()));
         let pending_in = Arc::clone(&pending);
 
+        // Buffer raw input text so truncated tool_call blocks can be recovered as
+        // content if the jail drops them on finish_reason=length (Fix: GLM-5.2
+        // glm47_parser allow_eof_recovery=false silently drops incomplete blocks).
+        let input_text_buf: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+        let input_text_buf_in = Arc::clone(&input_text_buf);
+
         // dynamo `Annotated<Nv>` -> jail `Annotated<Create>` (buffer llm_metrics)
         let jail_input = stream.map(move |mut a| {
             if let Some(metrics) = a.data.as_mut().and_then(|nv| nv.llm_metrics.take()) {
                 let mut p = pending_in.lock().expect("jail metrics buffer poisoned");
                 p.chunk_tokens = p.chunk_tokens.saturating_add(metrics.chunk_tokens);
                 p.template = Some(metrics);
+            }
+            // Accumulate input content for truncation recovery below.
+            if let Some(data) = &a.data {
+                for choice in &data.inner.choices {
+                    if let Some(content) = &choice.delta.content {
+                        input_text_buf_in
+                            .lock()
+                            .expect("input text buffer poisoned")
+                            .push_str(content);
+                    }
+                }
             }
             JailAnnotated {
                 data: a.data.map(|nv| nv.inner),
@@ -2745,6 +2762,11 @@ impl OpenAIPreprocessor {
             }
         });
 
+        // Track how many bytes the jail has emitted as content so we can compute
+        // what was silently dropped on a length-truncation finish.
+        let output_content_len: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+        let output_content_len_track = Arc::clone(&output_content_len);
+
         // jail `Annotated<Create>` -> dynamo `Annotated<Nv>` (re-attach llm_metrics)
         jail_apply(
             tool_call_parser,
@@ -2753,7 +2775,7 @@ impl OpenAIPreprocessor {
             uses_tool_call_structural_tag,
             jail_input,
         )
-        .map(move |a| {
+        .flat_map(move |a| {
             // Stamp the accumulated metrics onto the next emitted data chunk;
             // data-less/synthesized chunks carry it forward (or `None`).
             let llm_metrics = a.data.as_ref().and_then(|_| {
@@ -2765,7 +2787,7 @@ impl OpenAIPreprocessor {
                     metrics
                 })
             });
-            Annotated {
+            let nv_chunk = Annotated {
                 data: a.data.map(|inner| NvCreateChatCompletionStreamResponse {
                     inner,
                     nvext: None,
@@ -2775,7 +2797,68 @@ impl OpenAIPreprocessor {
                 event: a.event,
                 comment: a.comment,
                 error: a.error.map(DynamoError::msg),
+            };
+
+            // Track output content length and detect truncated tool_call drops.
+            // When finish_reason=length arrives with no tool_calls in the output
+            // but the input contained <tool_call>, the jail dropped the block.
+            // Emit the dropped text as content before the finish chunk so the
+            // client sees it rather than receiving a silent empty assistant turn.
+            let mut extra: Option<Annotated<NvCreateChatCompletionStreamResponse>> = None;
+            if let Some(ref data) = nv_chunk.data {
+                for choice in &data.inner.choices {
+                    // Track emitted content bytes.
+                    if let Some(content) = &choice.delta.content {
+                        *output_content_len_track
+                            .lock()
+                            .expect("output content len poisoned") += content.len();
+                    }
+                    // On length finish with no tool_calls, recover dropped text.
+                    if matches!(
+                        choice.finish_reason,
+                        Some(dynamo_protocols::types::FinishReason::Length)
+                    ) && choice.delta.tool_calls.is_none()
+                    {
+                        let input_text = input_text_buf
+                            .lock()
+                            .expect("input text buffer poisoned")
+                            .clone();
+                        let emitted = *output_content_len_track
+                            .lock()
+                            .expect("output content len poisoned");
+                        let dropped = if emitted < input_text.len() {
+                            &input_text[emitted..]
+                        } else {
+                            ""
+                        };
+                        if !dropped.is_empty() && dropped.contains("<tool_call>") {
+                            tracing::debug!(
+                                dropped_len = dropped.len(),
+                                "glm47 streaming: preserving truncated tool_call as content"
+                            );
+                            // Synthesize a content-only chunk carrying the dropped text.
+                            let mut recovery = nv_chunk.clone();
+                            if let Some(ref mut rd) = recovery.data {
+                                rd.inner.usage = None;
+                                rd.llm_metrics = None;
+                                for rc in &mut rd.inner.choices {
+                                    rc.delta.content = Some(dropped.to_string());
+                                    rc.delta.tool_calls = None;
+                                    rc.finish_reason = None;
+                                }
+                            }
+                            extra = Some(recovery);
+                        }
+                    }
+                }
             }
+
+            let mut out = Vec::with_capacity(2);
+            if let Some(e) = extra {
+                out.push(e);
+            }
+            out.push(nv_chunk);
+            futures::stream::iter(out)
         })
     }
 
