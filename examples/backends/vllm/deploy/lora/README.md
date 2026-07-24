@@ -26,6 +26,7 @@ The examples cover direct Hugging Face Hub downloads and an HF-to-MinIO synchron
 |------|-------------|
 | `agg_lora.yaml` | DynamoGraphDeployment for vLLM with LoRA support |
 | `agg_lora_hf.yaml` | DynamoGraphDeployment and DynamoModel for direct Hugging Face Hub loading |
+| `agg_lora_xpu_dra.yaml` | Intel XPU DRA DynamoGraphDeployment for vLLM with LoRA support |
 | `minio-secret.yaml` | Kubernetes secret for MinIO credentials |
 | `sync-lora-job.yaml` | Job to download a LoRA from Hugging Face Hub and upload it to MinIO |
 | `lora-model.yaml` | DynamoModel CRD for registering LoRA adapters |
@@ -224,6 +225,17 @@ kubectl apply -f lora-model.yaml -n ${NAMESPACE}
 This creates a declarative way to manage LoRA adapters in your cluster.
 
 ---
+
+## Deploy on Intel XPU with DRA
+
+To use `agg_lora_xpu_dra.yaml`, install Kubernetes DRA v1 and the Intel
+resource drivers for Kubernetes with the `gpu.intel.com` DeviceClass. Build and
+push the `vllm-runtime-xpu:my-tag` worker image before deployment. See the
+[Intel XPU Deployment Examples](../xpu/README.md) for the image build commands.
+
+```bash
+kubectl apply -f agg_lora_xpu_dra.yaml -n ${NAMESPACE}
+```
 
 ## Configuration Reference
 
