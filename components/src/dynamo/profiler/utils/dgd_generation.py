@@ -45,6 +45,7 @@ from dynamo.profiler.utils.profile_common import (
     is_mocker_enabled,
     is_planner_enabled,
     needs_profile_data,
+    resolve_model_path,
 )
 
 logger = logging.getLogger(__name__)
@@ -238,7 +239,10 @@ def generate_mocker_config(
             ].get("mainContainer"):
                 service_config["extraPodSpec"]["mainContainer"]["image"] = image
 
-    model = dgdr.model
+    # #11650: served name stays the model id (so requests match); load path
+    # prefers the local PVC mount so an offline worker doesn't reach for HF.
+    model_name = dgdr.model
+    model_path = resolve_model_path(dgdr)
     aic_workers = _mocker_aic_worker_picks(aic_spec)
     for worker_name in _mocker_worker_names():
         service_config = (
@@ -249,14 +253,52 @@ def generate_mocker_config(
                 "mainContainer", {}
             )
             args_list = main_container.get("args", [])
-            args_list = set_argument_value(args_list, "--model-path", model)
-            args_list = set_argument_value(args_list, "--model-name", model)
+            args_list = set_argument_value(args_list, "--model-path", model_path)
+            args_list = set_argument_value(args_list, "--model-name", model_name)
             pick = aic_workers.get(worker_name) if aic_workers else None
             if pick is not None and aic_spec is not None:
                 args_list = _inject_mocker_aic_args(args_list, aic_spec, pick)
             main_container["args"] = args_list
+            # #11650: mount the model-cache PVC so the offline worker reads from it.
+            _mount_model_cache_pvc(service_config, dgdr)
 
     return mocker_config
+
+
+def _mount_model_cache_pvc(service_dict: dict, dgdr) -> None:
+    """Mount the DGDR's model-cache PVC into a service's mainContainer.
+
+    Mirrors the real-backend path (protocol.py): mount whenever the PVC is
+    configured. When pvcModelPath is set the weights live at a known path and
+    --model-path already points there (resolve_model_path); when it is absent
+    the PVC is an HF cache, so point HF_HOME at the mount so an offline worker
+    reads from it instead of fetching from HuggingFace.
+    """
+    model_cache = dgdr.modelCache
+    if not (model_cache and model_cache.pvcName and model_cache.pvcMountPath):
+        return
+
+    volume_name = "model-cache"
+    extra_pod_spec = service_dict.setdefault("extraPodSpec", {})
+    extra_pod_spec.setdefault("volumes", []).append(
+        {
+            "name": volume_name,
+            "persistentVolumeClaim": {"claimName": model_cache.pvcName},
+        }
+    )
+    main_container = extra_pod_spec.setdefault("mainContainer", {})
+    main_container.setdefault("volumeMounts", []).append(
+        {"name": volume_name, "mountPath": model_cache.pvcMountPath}
+    )
+
+    if not model_cache.pvcModelPath:
+        # HF-cache PVC mode: no explicit checkpoint dir, so --model-path stays
+        # the HF id and the PVC serves as the HF cache. Point HF_HOME at it.
+        env = main_container.setdefault("env", [])
+        env[:] = [
+            e for e in env if not (isinstance(e, dict) and e.get("name") == "HF_HOME")
+        ]
+        env.append({"name": "HF_HOME", "value": model_cache.pvcMountPath})
 
 
 def enable_planner_worker_scaling_adapters(
