@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -103,6 +104,46 @@ def test_strict_request_token_limit_matches_sglang_policy(
     )
 
     assert _get_strict_request_token_limit(engine, server_args) == expected
+
+
+def test_runtime_config_without_engine_omits_strict_request_limit(monkeypatch, caplog):
+    from dynamo.sglang import register
+
+    server_args = SimpleNamespace(
+        allow_auto_truncate=False,
+        context_length=4096,
+        disaggregation_mode=None,
+        max_prefill_tokens=None,
+        page_size=16,
+        speculative_algorithm="NONE",
+        speculative_num_steps=None,
+    )
+    dynamo_args = register.DynamoConfig()
+    dynamo_args.enable_local_indexer = False
+    capacity = SimpleNamespace(
+        max_num_seqs=None,
+        max_num_batched_tokens=None,
+        total_kv_blocks=None,
+    )
+
+    monkeypatch.setattr(register, "model_card_dp_rank_bounds", lambda _: (0, 1))
+    monkeypatch.setattr(register, "get_sglang_worker_group_id", lambda _: None)
+    monkeypatch.setattr(register, "apply_topology_config", lambda _: None)
+    monkeypatch.setattr(
+        register, "_get_bootstrap_info_for_config", lambda _: (None, None)
+    )
+    monkeypatch.setattr(register, "get_spec_decode_runtime_data", lambda _: None)
+    monkeypatch.setattr(register, "_get_mooncake_runtime_data", lambda _: None)
+    monkeypatch.setattr(register, "runtime_capacity", lambda *_: capacity)
+
+    runtime_config = asyncio.run(
+        register._get_runtime_config(None, server_args, dynamo_args)
+    )
+
+    assert register.STRICT_REQUEST_TOKEN_LIMIT_RUNTIME_KEY not in (
+        runtime_config.runtime_data
+    )
+    assert "Failed to get runtime config" not in caplog.text
 
 
 def test_hicache_publishes_native_offloading_capacity():

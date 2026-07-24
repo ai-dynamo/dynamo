@@ -41,7 +41,9 @@ SPEC_DECODE_RUNTIME_KEY = "spec_decode"
 STRICT_REQUEST_TOKEN_LIMIT_RUNTIME_KEY = "strict_request_token_limit"
 
 
-def _register_model_source_path(engine: sgl.Engine, server_args: ServerArgs) -> str:
+def _register_model_source_path(
+    engine: Optional[sgl.Engine], server_args: ServerArgs
+) -> str:
     """Pick the path passed to `register_model` for MDC construction.
 
     When `--model-path` is a remote URI (`s3://...`, `gs://...`), SGLang's
@@ -63,6 +65,8 @@ def _register_model_source_path(engine: sgl.Engine, server_args: ServerArgs) -> 
     the Rust-side HF download entirely (lib/bindings/python/rust/lib.rs:314)
     and don't need this rewrite.
     """
+    if engine is None:
+        return server_args.model_path
     try:
         mc = engine.tokenizer_manager.model_config
     except AttributeError:
@@ -91,7 +95,7 @@ def _build_media_decoder_and_fetcher():
 
 
 async def _register_model_with_runtime_config(
-    engine: sgl.Engine,
+    engine: Optional[sgl.Engine],
     endpoint: Endpoint,
     server_args: ServerArgs,
     dynamo_args: DynamoConfig,
@@ -105,7 +109,7 @@ async def _register_model_with_runtime_config(
     """Register LLM with the Dynamo runtime.
 
     Args:
-        engine: The SGLang engine instance.
+        engine: The SGLang engine instance, or None for multimodal encode workers.
         endpoint: The Dynamo endpoint for communication.
         server_args: SGLang server configuration.
         dynamo_args: Dynamo-specific configuration.
@@ -182,12 +186,14 @@ async def _register_model_with_runtime_config(
 
 
 def _get_bootstrap_info_for_config(
-    engine: sgl.Engine,
+    engine: Optional[sgl.Engine],
 ) -> tuple[Optional[str], Optional[int]]:
     """Thin wrapper for the shared `_disagg.compute_bootstrap_address`,
     kept for source-compat with this module's callers."""
     from dynamo.sglang._disagg import compute_bootstrap_address
 
+    if engine is None:
+        return None, None
     return compute_bootstrap_address(engine)
 
 
@@ -348,14 +354,18 @@ def _eagle_enabled_for(speculative_algorithm: Optional[str]) -> bool:
 
 
 def _get_strict_request_token_limit(
-    engine: sgl.Engine, server_args: ServerArgs
+    engine: Optional[sgl.Engine], server_args: ServerArgs
 ) -> Optional[int]:
     """Return SGLang's strict input-plus-output limit, if it has one.
 
     SGLang can instead auto-truncate over-budget requests, and some modes
     disable total-token validation. In either case the frontend must defer to
-    the engine. ``num_reserved_tokens`` covers speculative draft-token space.
+    the engine. Multimodal encode workers do not own a tokenizer manager, so
+    they cannot publish this text-request policy. ``num_reserved_tokens``
+    covers speculative draft-token space.
     """
+    if engine is None:
+        return None
     tokenizer_manager = engine.tokenizer_manager
     if server_args.allow_auto_truncate:
         return None
@@ -366,12 +376,14 @@ def _get_strict_request_token_limit(
 
 
 async def _get_runtime_config(
-    engine: sgl.Engine, server_args: ServerArgs, dynamo_args: DynamoConfig
+    engine: Optional[sgl.Engine],
+    server_args: ServerArgs,
+    dynamo_args: DynamoConfig,
 ) -> Optional[ModelRuntimeConfig]:
     """Extract runtime configuration from SGLang engine and args.
 
     Args:
-        engine: The SGLang engine instance.
+        engine: The SGLang engine instance, or None for multimodal encode workers.
         server_args: SGLang server configuration.
         dynamo_args: Dynamo-specific configuration.
 
@@ -483,6 +495,9 @@ async def _get_runtime_config(
                 f"Failed to attach Mooncake HiCache runtime metadata to registration: {e}"
             )
 
+    if engine is None:
+        return runtime_config
+
     try:
         scheduler_info = engine._scheduler_init_result.scheduler_infos[0]
         capacity = runtime_capacity(server_args, scheduler_info)
@@ -537,7 +552,7 @@ async def _get_runtime_config(
 
 
 async def register_model_with_readiness_gate(
-    engine: sgl.Engine,
+    engine: Optional[sgl.Engine],
     generate_endpoint: Endpoint,
     server_args: ServerArgs,
     dynamo_args: DynamoConfig,
@@ -552,7 +567,7 @@ async def register_model_with_readiness_gate(
     """Wrapper function to register LLM with the Dynamo runtime and use optional readiness gate to signal success.
 
     Args:
-        engine: The SGLang engine instance.
+        engine: The SGLang engine instance, or None for multimodal encode workers.
         generate_endpoint: The Dynamo endpoint for generation requests.
         server_args: SGLang server configuration.
         dynamo_args: Dynamo-specific configuration.
