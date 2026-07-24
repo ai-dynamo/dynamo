@@ -23,8 +23,6 @@ pub struct RouterHint {
     /// Root-aligned source-side KV block hashes. `block_hashes[i]`
     /// corresponds to request block `i`; the target decides which suffix to fetch.
     pub block_hashes: Vec<ExternalSequenceBlockHash>,
-    /// Router's view of the selected target's locally cached contiguous prefix.
-    pub target_cached_prefix_blocks: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
