@@ -297,6 +297,9 @@ pub mod llm {
     /// HTTP body size limit in MB
     pub const DYN_HTTP_BODY_LIMIT_MB: &str = "DYN_HTTP_BODY_LIMIT_MB";
 
+    /// Object-store URL used for OpenAI Batch API files
+    pub const DYN_BATCH_STORAGE_URL: &str = "DYN_BATCH_STORAGE_URL";
+
     pub const DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS: &str =
         "DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS";
 
@@ -807,6 +810,7 @@ mod tests {
             kvbm::leader::DYN_KVBM_LEADER_ZMQ_ACK_PORT,
             // LLM
             llm::DYN_HTTP_BODY_LIMIT_MB,
+            llm::DYN_BATCH_STORAGE_URL,
             llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
             llm::DYN_HTTP_OVERLOAD_STATUS_CODE,
             llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS,

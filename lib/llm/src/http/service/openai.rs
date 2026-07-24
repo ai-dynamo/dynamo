@@ -11,9 +11,12 @@ use std::{
 use axum::{
     Json, Router,
     body::Body,
-    extract::State,
+    extract::{Multipart, State, multipart::MultipartRejection},
     http::Request,
-    http::{HeaderMap, StatusCode},
+    http::{
+        HeaderMap, StatusCode,
+        header::{CONTENT_LENGTH, CONTENT_TYPE},
+    },
     middleware::{self, Next},
     response::{
         IntoResponse, Response,
@@ -45,6 +48,7 @@ use super::{
     },
     service_v2,
 };
+use crate::batch::storage::{BatchFileStorageError, PendingFile};
 use crate::engines::ValidateRequest;
 use crate::preprocessor::PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY;
 use crate::protocols::common::extensions::{
@@ -54,6 +58,7 @@ use crate::protocols::common::extensions::{
 use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
 use crate::protocols::openai::{
     audios::{NvAudioSpeechResponse, NvCreateAudioSpeechRequest},
+    batches::NvFile,
     chat_completions::{
         NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
         NvCreateChatCompletionStreamResponse,
@@ -72,6 +77,7 @@ use dynamo_protocols::types::ChatCompletionMessageContent;
 use dynamo_protocols::types::ChatCompletionMessageToolCallChunk;
 use dynamo_protocols::types::ChatCompletionStreamResponseDelta;
 use dynamo_protocols::types::Choice;
+use dynamo_protocols::types::OpenAIFilePurpose;
 use dynamo_runtime::logging::get_distributed_tracing_context;
 use tracing::Instrument;
 
@@ -81,11 +87,8 @@ pub const DYNAMO_REQUEST_ID_HEADER: &str = "x-dynamo-request-id";
 pub const ANNOTATION_REQUEST_ID: &str = "request_id";
 
 const VALIDATION_PREFIX: &str = "Validation: ";
-const BATCH_FILE_STORAGE_NOT_IMPLEMENTED: &str = "Batch file storage is not implemented yet.";
 const BATCH_JOB_STATE_NOT_IMPLEMENTED: &str =
     "Batch job lifecycle persistence is not implemented yet.";
-const BATCH_OUTPUT_RETRIEVAL_NOT_IMPLEMENTED: &str =
-    "Batch output file retrieval is not implemented yet.";
 
 static FORCE_INCLUDE_USAGE: LazyLock<bool> =
     LazyLock::new(|| env_is_truthy(env_llm::DYN_ENABLE_FORCE_INCLUDE_USAGE));
@@ -2914,12 +2917,7 @@ pub fn embeddings_router(
     (vec![doc], router)
 }
 
-/// Create an Axum [`Router`] for the OpenAI Batch API skeleton.
-///
-/// The first slice exposes the route and protocol shape. Durable file storage,
-/// batch job persistence, dispatch, and output assembly are implemented by
-/// follow-up work, so handlers return explicit 501 responses instead of
-/// accepting work that cannot complete yet.
+/// Create an Axum [`Router`] for the OpenAI Batch API.
 pub fn batch_router(
     state: Arc<service_v2::State>,
     files_path: Option<String>,
@@ -2949,10 +2947,127 @@ pub fn batch_router(
     (docs, router)
 }
 
-async fn create_batch_file() -> Result<Response, ErrorResponse> {
-    Err(ErrorMessage::not_implemented_error(
-        BATCH_FILE_STORAGE_NOT_IMPLEMENTED,
-    ))
+async fn create_batch_file(
+    State(state): State<Arc<service_v2::State>>,
+    multipart: Result<Multipart, MultipartRejection>,
+) -> Result<Response, ErrorResponse> {
+    let mut multipart = multipart.map_err(|error| {
+        ErrorMessage::from_http_error(HttpError {
+            code: StatusCode::BAD_REQUEST.as_u16(),
+            message: format!("{VALIDATION_PREFIX}{error}"),
+        })
+    })?;
+    let store = state.batch_file_store().ok_or_else(|| {
+        ErrorMessage::internal_server_error("Batch file storage is not configured")
+    })?;
+    let mut uploaded = None;
+    let mut purpose = None;
+
+    loop {
+        let field = match multipart.next_field().await {
+            Ok(Some(field)) => field,
+            Ok(None) => break,
+            Err(error) => {
+                return Err(reject_batch_file_form_with_status(
+                    uploaded.take(),
+                    error.status(),
+                    &format!("Invalid multipart form: {error}"),
+                )
+                .await);
+            }
+        };
+        let field_name = field.name().map(str::to_owned);
+        match field_name.as_deref() {
+            Some("file") => {
+                if uploaded.is_some() {
+                    return Err(
+                        reject_batch_file_form(uploaded.take(), "Duplicate 'file' field").await,
+                    );
+                }
+                let filename = match field.file_name() {
+                    Some(filename) if filename.ends_with(".jsonl") => filename.to_string(),
+                    Some(_) => {
+                        return Err(reject_batch_file_form(
+                            uploaded.take(),
+                            "Batch input file must use the .jsonl extension",
+                        )
+                        .await);
+                    }
+                    None => {
+                        return Err(reject_batch_file_form(
+                            uploaded.take(),
+                            "Missing filename for 'file' field",
+                        )
+                        .await);
+                    }
+                };
+                let chunks = field.map(|chunk| {
+                    chunk.map_err(|error| {
+                        if error.status() == StatusCode::PAYLOAD_TOO_LARGE {
+                            BatchFileStorageError::FileTooLarge
+                        } else {
+                            BatchFileStorageError::UploadStream(error.to_string())
+                        }
+                    })
+                });
+                uploaded = Some(
+                    store
+                        .upload_file(filename, OpenAIFilePurpose::Batch, chunks)
+                        .await
+                        .map_err(map_batch_file_storage_error)?,
+                );
+            }
+            Some("purpose") => {
+                if purpose.is_some() {
+                    return Err(reject_batch_file_form(
+                        uploaded.take(),
+                        "Duplicate 'purpose' field",
+                    )
+                    .await);
+                }
+                purpose = Some(match field.text().await {
+                    Ok(purpose) => purpose,
+                    Err(error) => {
+                        return Err(reject_batch_file_form(
+                            uploaded.take(),
+                            &format!("Invalid 'purpose' field: {error}"),
+                        )
+                        .await);
+                    }
+                });
+            }
+            Some(name) => {
+                return Err(reject_batch_file_form(
+                    uploaded.take(),
+                    &format!("Unsupported multipart field '{name}'"),
+                )
+                .await);
+            }
+            None => {
+                return Err(reject_batch_file_form(
+                    uploaded.take(),
+                    "Multipart field is missing a name",
+                )
+                .await);
+            }
+        }
+    }
+
+    if purpose.as_deref() != Some("batch") {
+        return Err(
+            reject_batch_file_form(uploaded.take(), "The 'purpose' field must be 'batch'").await,
+        );
+    }
+    let file = uploaded
+        .ok_or_else(|| {
+            ErrorMessage::from_http_error(HttpError {
+                code: StatusCode::BAD_REQUEST.as_u16(),
+                message: format!("{VALIDATION_PREFIX}Missing 'file' field"),
+            })
+        })?
+        .commit()
+        .map_err(map_batch_file_storage_error)?;
+    Ok(Json(NvFile { inner: file }).into_response())
 }
 
 async fn create_batch() -> Result<Response, ErrorResponse> {
@@ -2970,11 +3085,71 @@ async fn retrieve_batch(
 }
 
 async fn retrieve_batch_file_content(
-    axum::extract::Path(_file_id): axum::extract::Path<String>,
+    State(state): State<Arc<service_v2::State>>,
+    axum::extract::Path(file_id): axum::extract::Path<String>,
 ) -> Result<Response, ErrorResponse> {
-    Err(ErrorMessage::not_implemented_error(
-        BATCH_OUTPUT_RETRIEVAL_NOT_IMPLEMENTED,
-    ))
+    let store = state.batch_file_store().ok_or_else(|| {
+        ErrorMessage::internal_server_error("Batch file storage is not configured")
+    })?;
+    let (file, content) = store
+        .get_file(&file_id)
+        .await
+        .map_err(map_batch_file_storage_error)?;
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "application/jsonl")
+        .header(CONTENT_LENGTH, file.bytes)
+        .body(Body::from_stream(content.into_stream()))
+        .map_err(|error| {
+            ErrorMessage::internal_server_error_with_details(
+                "Failed to construct batch file response",
+                error,
+            )
+        })
+}
+
+async fn reject_batch_file_form(uploaded: Option<PendingFile>, message: &str) -> ErrorResponse {
+    reject_batch_file_form_with_status(uploaded, StatusCode::BAD_REQUEST, message).await
+}
+
+async fn reject_batch_file_form_with_status(
+    uploaded: Option<PendingFile>,
+    status: StatusCode,
+    message: &str,
+) -> ErrorResponse {
+    if let Some(file) = uploaded {
+        file.abort().await;
+    }
+    ErrorMessage::from_http_error(HttpError {
+        code: status.as_u16(),
+        message: format!("{VALIDATION_PREFIX}{message}"),
+    })
+}
+
+fn map_batch_file_storage_error(error: BatchFileStorageError) -> ErrorResponse {
+    match error {
+        BatchFileStorageError::NotFound => ErrorMessage::from_http_error(HttpError {
+            code: StatusCode::NOT_FOUND.as_u16(),
+            message: "Batch file not found".to_string(),
+        }),
+        BatchFileStorageError::FileTooLarge => ErrorMessage::from_http_error(HttpError {
+            code: StatusCode::PAYLOAD_TOO_LARGE.as_u16(),
+            message: format!("{VALIDATION_PREFIX}Batch file is too large"),
+        }),
+        BatchFileStorageError::UploadStream(details) => ErrorMessage::from_http_error(HttpError {
+            code: StatusCode::BAD_REQUEST.as_u16(),
+            message: format!("{VALIDATION_PREFIX}Invalid file upload: {details}"),
+        }),
+        error @ (BatchFileStorageError::UploadNotActive
+        | BatchFileStorageError::InvalidSystemTime(_)
+        | BatchFileStorageError::InvalidMetadata(_)
+        | BatchFileStorageError::ObjectStore(_)) => {
+            ErrorMessage::internal_server_error_with_details(
+                "Batch file storage operation failed",
+                error,
+            )
+        }
+    }
 }
 
 /// List Models

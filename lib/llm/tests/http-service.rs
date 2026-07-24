@@ -577,11 +577,12 @@ async fn wait_for_service_ready(port: u16) {
 }
 
 #[tokio::test]
-async fn test_batch_api_skeleton_routes_return_not_implemented() {
+async fn test_batch_file_routes_store_and_retrieve_content() {
     let (listener, port) = bind_random_port().await;
     let service = HttpService::builder()
         .port(port)
         .enable_batch_endpoints(true)
+        .batch_storage_url("memory:///")
         .build()
         .unwrap();
 
@@ -593,19 +594,138 @@ async fn test_batch_api_skeleton_routes_return_not_implemented() {
     let client = reqwest::Client::new();
     let base = format!("http://localhost:{port}");
 
+    let input =
+        "{\"custom_id\":\"r1\",\"method\":\"POST\",\"url\":\"/v1/completions\",\"body\":{}}\n";
+    let form = reqwest::multipart::Form::new()
+        .part(
+            "file",
+            reqwest::multipart::Part::bytes(input.as_bytes().to_vec())
+                .file_name("batch.jsonl")
+                .mime_str("application/jsonl")
+                .unwrap(),
+        )
+        .text("purpose", "batch");
     let response = client
         .post(format!("{base}/v1/files"))
-        .body("{\"custom_id\":\"r1\"}\n")
+        .multipart(form)
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+    assert_eq!(response.status(), StatusCode::OK);
     let body: serde_json::Value = response.json().await.unwrap();
-    assert_eq!(body["code"], 501);
+    assert_eq!(body["object"], "file");
+    assert_eq!(body["filename"], "batch.jsonl");
+    assert_eq!(body["purpose"], "batch");
+    assert_eq!(body["bytes"], input.len());
+    let file_id = body["id"].as_str().unwrap();
+
+    let response = client
+        .get(format!("{base}/v1/files/{file_id}/content"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
-        body["message"],
-        "Batch file storage is not implemented yet."
+        response.headers()[reqwest::header::CONTENT_TYPE],
+        "application/jsonl"
     );
+    assert_eq!(response.text().await.unwrap(), input);
+
+    let response = client
+        .get(format!("{base}/v1/files/file-does-not-exist/content"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["message"], "Batch file not found");
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn test_batch_file_upload_rejects_invalid_forms() {
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder()
+        .port(port)
+        .enable_batch_endpoints(true)
+        .batch_storage_url("memory:///")
+        .build()
+        .unwrap();
+
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+    let task = tokio::spawn(async move { service.run_with_listener(token, listener).await });
+    wait_for_service_ready(port).await;
+
+    let client = reqwest::Client::new();
+    let base = format!("http://localhost:{port}");
+    let file = || {
+        reqwest::multipart::Part::bytes(b"{}\n".to_vec())
+            .file_name("batch.jsonl")
+            .mime_str("application/jsonl")
+            .unwrap()
+    };
+    let response = client
+        .post(format!("{base}/v1/files"))
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["code"], 400);
+
+    let forms = [
+        reqwest::multipart::Form::new()
+            .part("file", file())
+            .text("purpose", "assistants"),
+        reqwest::multipart::Form::new()
+            .part(
+                "file",
+                reqwest::multipart::Part::bytes(b"{}\n".to_vec())
+                    .file_name("batch.json")
+                    .mime_str("application/json")
+                    .unwrap(),
+            )
+            .text("purpose", "batch"),
+        reqwest::multipart::Form::new().text("purpose", "batch"),
+    ];
+
+    for form in forms {
+        let response = client
+            .post(format!("{base}/v1/files"))
+            .multipart(form)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(body["code"], 400);
+    }
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn test_batch_job_routes_remain_not_implemented() {
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder()
+        .port(port)
+        .enable_batch_endpoints(true)
+        .batch_storage_url("memory:///")
+        .build()
+        .unwrap();
+
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+    let task = tokio::spawn(async move { service.run_with_listener(token, listener).await });
+    wait_for_service_ready(port).await;
+
+    let client = reqwest::Client::new();
+    let base = format!("http://localhost:{port}");
 
     let response = client
         .post(format!("{base}/v1/batches"))
@@ -633,18 +753,6 @@ async fn test_batch_api_skeleton_routes_return_not_implemented() {
     assert_eq!(
         body["message"],
         "Batch job lifecycle persistence is not implemented yet."
-    );
-
-    let response = client
-        .get(format!("{base}/v1/files/file-123/content"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
-    let body: serde_json::Value = response.json().await.unwrap();
-    assert_eq!(
-        body["message"],
-        "Batch output file retrieval is not implemented yet."
     );
 
     cancel_token.cancel();
