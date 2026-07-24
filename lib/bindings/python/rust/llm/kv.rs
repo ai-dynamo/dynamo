@@ -1880,6 +1880,7 @@ impl KvRouter {
                         config.comm_dtype(),
                         config.nextn(),
                         config.nextn_accept_rates(),
+                        config.systems_path(),
                     )
                 })
             })

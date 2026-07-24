@@ -40,6 +40,7 @@ def test_replay_cli_aic_perf_config_includes_moe_kwargs(monkeypatch):
         SimpleNamespace(
             aic_backend="vllm",
             aic_system="h200_sxm",
+            aic_systems_path="/tmp/aic-systems",
             aic_model_path="moonshotai/Kimi-K2-Instruct",
             aic_backend_version=None,
             aic_tp_size=2,
@@ -60,6 +61,7 @@ def test_replay_cli_aic_perf_config_includes_moe_kwargs(monkeypatch):
     assert captured_kwargs == {
         "aic_backend": "vllm",
         "aic_system": "h200_sxm",
+        "aic_systems_path": "/tmp/aic-systems",
         "aic_model_path": "moonshotai/Kimi-K2-Instruct",
         "aic_tp_size": 2,
         "aic_backend_version": None,
@@ -74,6 +76,52 @@ def test_replay_cli_aic_perf_config_includes_moe_kwargs(monkeypatch):
         "aic_kv_cache_dtype": None,
         "aic_comm_dtype": None,
     }
+
+
+def test_replay_cli_aic_systems_path_overrides_engine_json(monkeypatch):
+    captured = {}
+
+    class FakeMockEngineArgs:
+        @staticmethod
+        def from_json(value):
+            captured.update(json.loads(value))
+            return captured
+
+    monkeypatch.setattr(replay_main, "MockEngineArgs", FakeMockEngineArgs)
+
+    config = replay_main._load_engine_args(
+        '{"block_size":64,"aic_systems_path":"/embedded"}',
+        aic_systems_path="/explicit",
+    )
+
+    assert config == captured
+    assert captured["block_size"] == 64
+    assert captured["aic_systems_path"] == "/explicit"
+
+
+def test_replay_cli_aic_systems_path_alone_does_not_enable_router_aic():
+    config = replay_main._load_aic_perf_config(
+        SimpleNamespace(
+            aic_backend=None,
+            aic_system=None,
+            aic_systems_path="/tmp/aic-systems",
+            aic_model_path=None,
+            aic_backend_version=None,
+            aic_tp_size=None,
+            aic_moe_tp_size=None,
+            aic_moe_ep_size=None,
+            aic_attention_dp_size=None,
+            aic_nextn=None,
+            aic_nextn_accept_rates=None,
+            aic_gemm_dtype=None,
+            aic_moe_dtype=None,
+            aic_fmha_dtype=None,
+            aic_kv_cache_dtype=None,
+            aic_comm_dtype=None,
+        )
+    )
+
+    assert config is None
 
 
 def test_replay_policy_config_flag_overrides_router_json(monkeypatch):

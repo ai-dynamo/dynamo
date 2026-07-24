@@ -186,16 +186,22 @@ class AicSession:
         comm_dtype: str | None = None,
         nextn: int | None = None,
         nextn_accept_rates: list[float] | str | None = None,
+        systems_path: str | None = None,
     ):
         aic = _load_aiconfigurator()
         version = resolve_backend_version(backend_name, backend_version)
 
+        database_kwargs = (
+            {"systems_paths": systems_path} if systems_path is not None else {}
+        )
         database = aic["get_database"](
-            system=system, backend=backend_name, version=version
+            system=system, backend=backend_name, version=version, **database_kwargs
         )
         if database is None:
             supported = (
-                aic["get_supported_databases"]().get(system, {}).get(backend_name, [])
+                aic["get_supported_databases"](**database_kwargs)
+                .get(system, {})
+                .get(backend_name, [])
             )
             supported_versions = ", ".join(supported) if supported else "<none>"
             raise RuntimeError(
@@ -380,6 +386,7 @@ def create_session(
     comm_dtype: str | None = None,
     nextn: int | None = None,
     nextn_accept_rates: list[float] | str | None = None,
+    systems_path: str | None = None,
 ) -> AicSession:
     """Factory function called from Rust via PyO3."""
     return AicSession(
@@ -398,6 +405,7 @@ def create_session(
         comm_dtype=comm_dtype,
         nextn=nextn,
         nextn_accept_rates=nextn_accept_rates,
+        systems_path=systems_path,
     )
 
 
@@ -408,6 +416,7 @@ def estimate_num_gpu_blocks(
     tp_size: int,
     block_size: int,
     max_num_batched_tokens: int,
+    systems_path: str | None = None,
     gpu_memory_utilization: float = DEFAULT_GPU_MEMORY_UTILIZATION,
     mem_fraction_static: float | None = None,
     free_gpu_memory_fraction: float | None = None,
@@ -505,5 +514,6 @@ def estimate_num_gpu_blocks(
             fmha_quant_mode=_resolve_quant_mode_name("fmha", fmha_dtype),
             kvcache_quant_mode=_resolve_quant_mode_name("kvcache", kv_cache_dtype),
             comm_quant_mode=_resolve_quant_mode_name("comm", comm_dtype),
+            systems_path=systems_path,
         )
     )

@@ -86,6 +86,7 @@ impl KvRouterConfig {
 pub struct AicPerfConfig {
     aic_backend: String,
     aic_system: String,
+    aic_systems_path: Option<String>,
     aic_backend_version: Option<String>,
     aic_tp_size: usize,
     aic_model_path: String,
@@ -108,6 +109,10 @@ impl AicPerfConfig {
 
     pub(crate) fn system(&self) -> &str {
         &self.aic_system
+    }
+
+    pub(crate) fn systems_path(&self) -> Option<&str> {
+        self.aic_systems_path.as_deref()
     }
 
     pub(crate) fn backend_version(&self) -> Option<&str> {
@@ -166,7 +171,7 @@ impl AicPerfConfig {
 #[pymethods]
 impl AicPerfConfig {
     #[new]
-    #[pyo3(signature = (aic_backend, aic_system, aic_model_path, aic_tp_size=1, aic_backend_version=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, aic_nextn=None, aic_nextn_accept_rates=None, aic_gemm_dtype=None, aic_moe_dtype=None, aic_fmha_dtype=None, aic_kv_cache_dtype=None, aic_comm_dtype=None))]
+    #[pyo3(signature = (aic_backend, aic_system, aic_model_path, aic_tp_size=1, aic_backend_version=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, aic_nextn=None, aic_nextn_accept_rates=None, aic_gemm_dtype=None, aic_moe_dtype=None, aic_fmha_dtype=None, aic_kv_cache_dtype=None, aic_comm_dtype=None, aic_systems_path=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         aic_backend: String,
@@ -184,6 +189,7 @@ impl AicPerfConfig {
         aic_fmha_dtype: Option<String>,
         aic_kv_cache_dtype: Option<String>,
         aic_comm_dtype: Option<String>,
+        aic_systems_path: Option<String>,
     ) -> PyResult<Self> {
         if aic_backend.is_empty() {
             return Err(PyValueError::new_err("aic_backend must be non-empty"));
@@ -218,6 +224,7 @@ impl AicPerfConfig {
         Ok(Self {
             aic_backend,
             aic_system,
+            aic_systems_path,
             aic_backend_version,
             aic_tp_size,
             aic_model_path,
@@ -827,6 +834,7 @@ async fn select_engine(
                             config.comm_dtype(),
                             config.nextn(),
                             config.nextn_accept_rates(),
+                            config.systems_path(),
                         )
                     })
                 })
@@ -875,6 +883,7 @@ async fn select_engine(
                 let comm_dtype = mocker_args.aic_comm_dtype.as_deref();
                 let nextn = mocker_args.aic_nextn;
                 let undiscounted_accept_rates = mocker_args.undiscounted_aic_accept_rates();
+                let systems_path = mocker_args.aic_systems_path.as_deref();
                 match Python::with_gil(|py| {
                     create_aic_callback(
                         py,
@@ -893,6 +902,7 @@ async fn select_engine(
                         comm_dtype,
                         nextn,
                         undiscounted_accept_rates.as_deref(),
+                        systems_path,
                     )
                 }) {
                     Ok(callback) => {

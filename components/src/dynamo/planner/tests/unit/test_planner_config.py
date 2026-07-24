@@ -161,9 +161,11 @@ def test_aic_perf_model_accepts_mode_required_picks():
             "hf_id": "model",
             "system": "h200_sxm",
             "backend": "vllm",
+            "systems_path": "/tmp/aic-systems",
             "decode_pick": pick.model_dump(),
         },
     )
 
     assert config.aic_perf_model is not None
     assert config.aic_perf_model.decode_pick == pick
+    assert config.aic_perf_model.systems_path == "/tmp/aic-systems"

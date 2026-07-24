@@ -83,6 +83,10 @@ class AICPerfModelSpec(BaseModel):
     hf_id: str = Field(description="HuggingFace model id, e.g. Qwen/Qwen3-32B")
     system: str = Field(description="AIC system identifier, e.g. h200_sxm")
     backend: Literal["trtllm", "vllm", "sglang"]
+    systems_path: Optional[str] = Field(
+        default=None,
+        description="Local AIC systems root containing system specs and performance data.",
+    )
     backend_version: Optional[str] = None
 
     prefill_pick: Optional[PickedParallelConfig] = None
