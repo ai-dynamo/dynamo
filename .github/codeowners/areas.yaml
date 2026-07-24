@@ -223,6 +223,7 @@ areas:
   - components/src/dynamo/common/memory/
   - components/src/dynamo/common/tests/
   - components/src/dynamo/common/utils/
+  - components/src/dynamo/squeeze_evolve/
   - examples/backends/sample/
   - examples/backends/tritonserver/
   - examples/common/
@@ -386,8 +387,8 @@ areas:
   - deploy/operator/api/
   - deploy/operator/api/config/
   - deploy/operator/api/scripts/
-  - deploy/operator/api/v1alpha1/
-  - deploy/operator/api/v1beta1/
+  - deploy/operator/api/dynamo/v1alpha1/
+  - deploy/operator/api/dynamo/v1beta1/
   - deploy/operator/cmd/
   - deploy/operator/cmd/crd-apply/
   - deploy/operator/config/

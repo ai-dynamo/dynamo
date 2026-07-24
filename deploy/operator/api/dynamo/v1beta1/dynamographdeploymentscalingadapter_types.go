@@ -92,7 +92,7 @@ type DynamoGraphDeploymentScalingAdapterStatus struct {
 //
 // v1alpha1 remains the storage version; conversion between served versions is
 // handled by the operator's conversion webhook
-// (see api/v1alpha1/dynamographdeploymentscalingadapter_conversion.go).
+// (see api/dynamo/v1alpha1/dynamographdeploymentscalingadapter_conversion.go).
 type DynamoGraphDeploymentScalingAdapter struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

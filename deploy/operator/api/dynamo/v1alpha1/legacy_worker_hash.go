@@ -18,7 +18,7 @@ import (
 // v1/v2 worker generations, but API conversion must not derive controller
 // rollout state from it.
 //
-// Keep this in the api/v1alpha1 package so internal controller helpers can
+// Keep this in the api/dynamo/v1alpha1 package so internal controller helpers can
 // reproduce the legacy hash without duplicating the old algorithm.
 func ComputeDGDWorkersSpecHash(dgd *DynamoGraphDeployment) (string, error) {
 	if dgd == nil {

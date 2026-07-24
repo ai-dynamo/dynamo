@@ -240,7 +240,7 @@ For detailed installation options, see the [Installation Guide](./installation-g
 The operator is built using Kubebuilder and the operator-sdk, with the following structure:
 
 - `controllers/`: Reconciliation logic
-- `api/v1alpha1/`: CRD types
+- `api/dynamo/v1alpha1/`: CRD types
 - `config/`: Manifests and Helm charts
 
 

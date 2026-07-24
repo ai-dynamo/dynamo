@@ -251,7 +251,7 @@ compare other and other2, ignoring only private spec/status annotations
 Run for conversion changes:
 
 ```sh
-GOCACHE=/tmp/dynamo-go-cache go test ./api/v1alpha1 -count=1
+GOCACHE=/tmp/dynamo-go-cache go test ./api/dynamo/v1alpha1 -count=1
 GOCACHE=/tmp/dynamo-go-cache go test ./api/... -count=1
 GOCACHE=/tmp/dynamo-go-cache go test ./api -run TestFuzzRoundTrip -roundtrip-fuzz-iters=3000 -count=1 -v
 ```

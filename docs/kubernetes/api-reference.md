@@ -2080,7 +2080,7 @@ DynamoComponentDeployment is the Schema for the dynamocomponentdeployments API.
 v1beta1 is a served version: the API server accepts reads and writes
 against it, and transparently converts to/from v1alpha1 (still the
 storage version until a later MR flips it). Conversion goes through the
-operator's conversion webhook; see api/v1alpha1/*_conversion.go.
+operator's conversion webhook; see api/dynamo/v1alpha1/*_conversion.go.
 
 
 
@@ -2175,7 +2175,7 @@ DynamoGraphDeployment is the Schema for the dynamographdeployments API.
 v1beta1 is a served version: the API server accepts reads and writes
 against it, and transparently converts to/from v1alpha1 (still the
 storage version until a later MR flips it). Conversion goes through the
-operator's conversion webhook; see api/v1alpha1/*_conversion.go.
+operator's conversion webhook; see api/dynamo/v1alpha1/*_conversion.go.
 
 
 
@@ -2323,7 +2323,7 @@ This prevents conflicts when multiple autoscaling mechanisms are in play.
 
 v1alpha1 remains the storage version; conversion between served versions is
 handled by the operator's conversion webhook
-(see api/v1alpha1/dynamographdeploymentscalingadapter_conversion.go).
+(see api/dynamo/v1alpha1/dynamographdeploymentscalingadapter_conversion.go).
 
 
 

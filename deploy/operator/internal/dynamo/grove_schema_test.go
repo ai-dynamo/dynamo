@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
-	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/dynamo/v1alpha1"
 	controller_common "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	grovecrds "github.com/ai-dynamo/grove/operator/api/core/v1alpha1/crds"

@@ -21,7 +21,7 @@ import (
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/dynamo/v1alpha1"
 )
 
 // snapshotScheme returns a scheme with the operator CRD and core types registered.

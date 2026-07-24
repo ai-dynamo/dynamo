@@ -239,6 +239,7 @@
 /components/src/dynamo/common/utils/                                         @ai-dynamo/dynamo-runtime-codeowners
 /components/src/dynamo/common/memory/                                        @ai-dynamo/dynamo-runtime-codeowners
 /components/src/dynamo/common/backend/                                       @ai-dynamo/dynamo-runtime-codeowners
+/components/src/dynamo/squeeze_evolve/                                       @ai-dynamo/dynamo-runtime-codeowners
 /components/src/dynamo/common/config_dump/                                   @ai-dynamo/dynamo-runtime-codeowners
 /components/src/dynamo/common/configuration/                                 @ai-dynamo/dynamo-runtime-codeowners
 
@@ -342,9 +343,7 @@
 /deploy/operator/test/utils/                                                 @ai-dynamo/dynamo-operator-codeowners
 /deploy/helm/charts/platform/                                                @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/api/scripts/                                                @ai-dynamo/dynamo-operator-codeowners
-/deploy/operator/api/v1beta1/                                                @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/config/rbac/                                                @ai-dynamo/dynamo-operator-codeowners
-/deploy/operator/api/v1alpha1/                                               @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/internal/dra/                                               @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/internal/gpu/                                               @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/cmd/crd-apply/                                              @ai-dynamo/dynamo-operator-codeowners
@@ -360,7 +359,9 @@
 /deploy/operator/internal/secrets/                                           @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/internal/webhook/                                           @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/config/prometheus/                                          @ai-dynamo/dynamo-operator-codeowners
+/deploy/operator/api/dynamo/v1beta1/                                         @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/internal/discovery/                                         @ai-dynamo/dynamo-operator-codeowners
+/deploy/operator/api/dynamo/v1alpha1/                                        @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/internal/controller/                                        @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/internal/workerpool/                                        @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/internal/featuregate/                                       @ai-dynamo/dynamo-operator-codeowners
