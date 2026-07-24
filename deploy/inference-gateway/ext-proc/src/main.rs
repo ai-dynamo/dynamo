@@ -177,6 +177,7 @@ async fn main() -> Result<()> {
 
     tracing::info!("Initializing KV-aware router from discovery...");
     let router = Router::from_discovery(&config.namespace, &config.component).await?;
+    metrics::set_served_model(router.served_model());
 
     // Gate SERVING on pod-reflector readiness. `from_discovery` returns once
     // worker discovery and the model card are ready, but the K8s pod reflector's

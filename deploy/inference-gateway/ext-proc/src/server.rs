@@ -682,7 +682,7 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
             if ctx.body_routed && !ctx.request_id.is_empty() {
                 let usage = ctx.parsed_usage.take();
                 if let Some(cached_tokens) = usage.as_ref().and_then(|u| u.cached_tokens) {
-                    crate::metrics::observe_cached_tokens(&ctx.target_model_name, cached_tokens);
+                    crate::metrics::observe_cached_tokens(cached_tokens);
                 }
                 picker
                     .on_request_complete_with_usage(&ctx.request_id, usage)
