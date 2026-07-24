@@ -27,6 +27,10 @@ apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:
   name: dynamo-frontend
+  {{- with .Values.dynamo.metrics.podMonitors.labels }}
+  labels:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
   {{- if .Values.namespaceRestriction.enabled }}
   namespaceSelector:
@@ -57,6 +61,10 @@ apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:
   name: dynamo-worker
+  {{- with .Values.dynamo.metrics.podMonitors.labels }}
+  labels:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
   {{- if .Values.namespaceRestriction.enabled }}
   namespaceSelector:
@@ -132,6 +140,10 @@ apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:
   name: dynamo-planner
+  {{- with .Values.dynamo.metrics.podMonitors.labels }}
+  labels:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
   {{- if .Values.namespaceRestriction.enabled }}
   namespaceSelector:
@@ -160,6 +172,10 @@ apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:
   name: dynamo-router
+  {{- with .Values.dynamo.metrics.podMonitors.labels }}
+  labels:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
   {{- if .Values.namespaceRestriction.enabled }}
   namespaceSelector:

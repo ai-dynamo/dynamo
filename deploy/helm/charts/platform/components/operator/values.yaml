@@ -121,6 +121,8 @@ dynamo:
       # true=always create (use for helm template / GitOps workflows),
       # false=never create
       enabled: null
+      # -- Extra labels to add to every PodMonitor resource.
+      labels: {}
       # -- Enable the NIXL telemetry metrics collection on workers.
       # Requires workers with NIXL_TELEMETRY_ENABLE=y in their environment
       nixlTelemetry: false
