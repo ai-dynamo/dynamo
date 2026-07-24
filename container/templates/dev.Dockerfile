@@ -396,6 +396,15 @@ RUN if [ ! -d /opt/dynamo/venv ]; then \
     fi
 {% endif %}
 
+{% if framework == "trtllm" %}
+# TRT-LLM dev images build Dynamo from source, but still need the third-party
+# packages listed for the runtime image.
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    --mount=type=bind,source=./container/deps/requirements.trtllm.txt,target=/tmp/requirements.trtllm.txt \
+    export UV_CACHE_DIR=/root/.cache/uv && \
+    uv pip install --no-deps --requirement /tmp/requirements.trtllm.txt
+{% endif %}
+
 # Install only the ADDITIONAL dev/test dependencies.
 # Runtime deps (common, framework, planner, benchmark) are already installed
 # in the parent runtime image — re-resolving them here would risk version drift.
