@@ -3,7 +3,8 @@
 # Filters that trigger CI jobs:
 #   core     -> dynamo build-test, all backend builds (vllm/sglang/trtllm)
 #   operator -> operator build and test
-#   snapshot -> snapshot-agent build and test
+#   snapshot -> snapshot-agent build/test + all-framework DynamoCheckpoint deploy tests
+#   snapshot_vllm / snapshot_sglang / snapshot_trtllm -> that framework's DynamoCheckpoint suite
 #   power_agent -> power-agent image build
 #   deploy   -> deploy tests
 #   planner  -> dynamo build-test
@@ -151,6 +152,21 @@ snapshot:
   - 'components/src/dynamo/common/snapshot/**'
   - 'deploy/operator/internal/checkpoint/**'
   - 'tests/deploy/test_dynamocheckpoint.py'
+
+# Framework-local snapshot lifecycle + unit tests. These gate that framework's
+# DynamoCheckpoint deploy jobs (and shared snapshot-agent/operator deps) without
+# forcing the other backends' checkpoint suites.
+snapshot_vllm:
+  - 'components/src/dynamo/vllm/snapshot.py'
+  - 'components/src/dynamo/vllm/tests/test_vllm_snapshot.py'
+
+snapshot_sglang:
+  - 'components/src/dynamo/sglang/snapshot.py'
+  - 'components/src/dynamo/sglang/tests/test_sglang_snapshot.py'
+
+snapshot_trtllm:
+  - 'components/src/dynamo/trtllm/snapshot.py'
+  - 'components/src/dynamo/trtllm/tests/test_trtllm_snapshot.py'
 
 power_agent:
   - *ci

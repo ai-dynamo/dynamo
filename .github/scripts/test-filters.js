@@ -169,6 +169,72 @@ const testCases = [
     expect: { core: false, deploy: true },
     desc: 'helm file triggers deploy'
   },
+
+  // Framework snapshot lifecycle: backend filter + that framework's DynamoCheckpoint filter
+  {
+    file: 'components/src/dynamo/vllm/snapshot.py',
+    expect: {
+      vllm: true,
+      snapshot: false,
+      snapshot_vllm: true,
+      snapshot_sglang: false,
+      snapshot_trtllm: false,
+    },
+    desc: 'vllm snapshot.py gates only vllm DynamoCheckpoint'
+  },
+  {
+    file: 'components/src/dynamo/vllm/tests/test_vllm_snapshot.py',
+    expect: { vllm: true, snapshot_vllm: true, snapshot: false },
+    desc: 'vllm snapshot unit test gates only vllm DynamoCheckpoint'
+  },
+  {
+    file: 'components/src/dynamo/sglang/snapshot.py',
+    expect: {
+      sglang: true,
+      snapshot: false,
+      snapshot_vllm: false,
+      snapshot_sglang: true,
+      snapshot_trtllm: false,
+    },
+    desc: 'sglang snapshot.py gates only sglang DynamoCheckpoint'
+  },
+  {
+    file: 'components/src/dynamo/sglang/tests/test_sglang_snapshot.py',
+    expect: {
+      sglang: true,
+      snapshot: false,
+      snapshot_vllm: false,
+      snapshot_sglang: true,
+      snapshot_trtllm: false,
+    },
+    desc: 'sglang snapshot unit test gates only sglang DynamoCheckpoint'
+  },
+  {
+    file: 'components/src/dynamo/trtllm/snapshot.py',
+    expect: {
+      trtllm: true,
+      snapshot: false,
+      snapshot_vllm: false,
+      snapshot_sglang: false,
+      snapshot_trtllm: true,
+    },
+    desc: 'trtllm snapshot.py gates only trtllm DynamoCheckpoint'
+  },
+  {
+    file: 'components/src/dynamo/trtllm/tests/test_trtllm_snapshot.py',
+    expect: { trtllm: true, snapshot_trtllm: true, snapshot: false },
+    desc: 'trtllm snapshot unit test gates only trtllm DynamoCheckpoint'
+  },
+  {
+    file: 'components/src/dynamo/common/snapshot/lifecycle.py',
+    expect: { snapshot: true, snapshot_vllm: false, core: true },
+    desc: 'shared snapshot lifecycle triggers shared snapshot filter'
+  },
+  {
+    file: 'tests/deploy/test_dynamocheckpoint.py',
+    expect: { snapshot: true, deploy: true },
+    desc: 'DynamoCheckpoint deploy test triggers shared snapshot'
+  },
 ];
 
 // Print available filters
