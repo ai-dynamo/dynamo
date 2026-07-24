@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Vizier-backed sampler over a :class:`spica.search_space.BranchSpace`.
+"""Vizier-backed sampler over a :class:`aisimulate.spica.search_space.BranchSpace`.
 
 One Vizier study per branch (per the design). The study's parameters are:
 
@@ -14,7 +14,7 @@ One Vizier study per branch (per the design). The study's parameters are:
   constants (not Vizier params).
 
 ``suggest`` decodes each trial into a ``selection`` dict (the shape
-:func:`spica.sample.unroll_sample` consumes) plus the chosen parallel-config
+:func:`aisimulate.spica.sample.unroll_sample` consumes) plus the chosen parallel-config
 object; ``observe`` reports the (higher-is-better) score back to Vizier.
 
 The sampler is swappable behind the :class:`BranchSampler` Protocol so a lighter

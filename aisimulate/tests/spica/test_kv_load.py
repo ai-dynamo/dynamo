@@ -4,15 +4,15 @@
 from types import SimpleNamespace
 
 import pytest
-import spica.kv_estimate as kv_estimate_mod
-from spica.config import Workload
-from spica.kv_load import InfeasibleKVCapacity, resolve_kv_load
-from spica.parallel_enum import (
+
+import aisimulate.spica.kv_estimate as kv_estimate_mod
+from aisimulate.spica.config import Workload
+from aisimulate.spica.kv_load import InfeasibleKVCapacity, resolve_kv_load
+from aisimulate.spica.parallel_enum import (
     DisaggParallelConfig,
     ParallelShape,
     ReplicaParallelConfig,
 )
-
 from dynamo._internal.aic import AicMemoryEstimatorUnavailableError
 
 
@@ -41,7 +41,7 @@ def test_agg_capacity_scales_by_attention_dp_and_replicas(monkeypatch):
     shape = ParallelShape(tp=1, dp=2, moe_tp=1, moe_ep=2)
     config = ReplicaParallelConfig(shape=shape, replicas=3)
     monkeypatch.setattr(
-        "spica.kv_load._per_rank_capacity_tokens",
+        "aisimulate.spica.kv_load._per_rank_capacity_tokens",
         lambda *args, **kwargs: 10_000,
     )
 
@@ -73,7 +73,7 @@ def test_disagg_load_uses_decode_capacity_but_validates_prefill(monkeypatch):
         seen.append(role)
         return {"prefill": 100_000, "decode": 300_000}[role]
 
-    monkeypatch.setattr("spica.kv_load._role_capacity_tokens", fake_role)
+    monkeypatch.setattr("aisimulate.spica.kv_load._role_capacity_tokens", fake_role)
     resolution = resolve_kv_load(
         _sample("disagg"),
         workload=Workload(isl=1000, osl=1000, kv_load_ratio=1.0, num_request_ratio=10),
@@ -92,7 +92,7 @@ def test_zero_ratio_maps_to_one_request(monkeypatch):
         ParallelShape(tp=1, dp=1, moe_tp=1, moe_ep=1), replicas=1
     )
     monkeypatch.setattr(
-        "spica.kv_load._role_capacity_tokens",
+        "aisimulate.spica.kv_load._role_capacity_tokens",
         lambda *args, **kwargs: 10_000,
     )
 
@@ -112,7 +112,7 @@ def test_capacity_smaller_than_one_average_request_is_infeasible(monkeypatch):
         ParallelShape(tp=1, dp=1, moe_tp=1, moe_ep=1), replicas=1
     )
     monkeypatch.setattr(
-        "spica.kv_load._role_capacity_tokens",
+        "aisimulate.spica.kv_load._role_capacity_tokens",
         lambda *args, **kwargs: 100,
     )
 
@@ -152,7 +152,7 @@ def test_average_tokens_per_request_must_be_positive(monkeypatch):
         ParallelShape(tp=1, dp=1, moe_tp=1, moe_ep=1), replicas=1
     )
     monkeypatch.setattr(
-        "spica.kv_load._role_capacity_tokens",
+        "aisimulate.spica.kv_load._role_capacity_tokens",
         lambda *args, **kwargs: 10_000,
     )
 

@@ -149,7 +149,7 @@ spread within the `load_180_10` family is noise).
 ## Reproduce
 
 ```bash
-python -m spica --config path/to/planner-sweep.yaml
+python -m aisimulate.spica --config path/to/planner-sweep.yaml
 ```
 
 Notes: the planner path needs the `aic-forward-pass` binding; a per-throughput-interval

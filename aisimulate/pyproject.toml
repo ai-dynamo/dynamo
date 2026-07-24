@@ -62,16 +62,15 @@ Repository = "https://github.com/ai-dynamo/dynamo.git"
 Documentation = "https://github.com/ai-dynamo/dynamo/tree/main/docs/components/aisimulate"
 
 [tool.hatch.build.targets.wheel]
-packages = ["spica"]
+packages = ["src/aisimulate"]
 
 [tool.hatch.build.targets.sdist]
 include = [
     "/LICENSE",
     "/README.md",
     "/pyproject.toml",
-    "/spica",
+    "/src",
     "/tests",
-    "/examples",
 ]
 
 [tool.pytest.ini_options]

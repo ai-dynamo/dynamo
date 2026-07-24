@@ -32,9 +32,9 @@ def test_import_spica_has_no_jax_process_side_effects():
         logging.getLogger("jax._src.xla_bridge").setLevel(logging.WARNING)
         logging.getLogger("absl").setLevel(logging.WARNING)
 
-        import spica as spica
+        import aisimulate.spica as spica
 
-        assert spica.__name__ == "spica"
+        assert spica.__name__ == "aisimulate.spica"
         assert "JAX_PLATFORMS" not in os.environ
         assert logging.getLogger("jax._src.xla_bridge").level == logging.WARNING
         assert logging.getLogger("absl").level == logging.WARNING
@@ -49,7 +49,7 @@ def test_configure_vizier_runtime_is_explicit_opt_in():
         import os
 
         os.environ.pop("JAX_PLATFORMS", None)
-        from spica._quiet import configure_vizier_runtime
+        from aisimulate.spica._quiet import configure_vizier_runtime
 
         configure_vizier_runtime()
 

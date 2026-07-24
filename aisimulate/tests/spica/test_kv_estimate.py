@@ -6,16 +6,16 @@
 import types
 
 import pytest
-import spica.kv_estimate as kv_estimate_mod
-from spica.kv_estimate import (
+
+import aisimulate.spica.kv_estimate as kv_estimate_mod
+from aisimulate.spica.kv_estimate import (
     NoPerfDatabase,
     estimate_kv_tokens,
     feasible_shape_tokens,
     memory_fraction_kind,
     resolve_backend_version,
 )
-from spica.parallel_enum import ParallelShape
-
+from aisimulate.spica.parallel_enum import ParallelShape
 from dynamo._internal.aic import AicMemoryEstimatorUnavailableError
 
 _COMMON = dict(model_name="m", hardware_sku="hw", backend="trtllm", backend_version="v")
@@ -90,7 +90,7 @@ def test_feasible_shape_tokens_filters_short_and_oom_and_dedups(monkeypatch):
 
 def test_feasible_shape_tokens_resolves_version_when_missing(monkeypatch):
     monkeypatch.setattr(
-        "spica.kv_estimate.get_latest_database_version",
+        "aisimulate.spica.kv_estimate.get_latest_database_version",
         lambda *a, **k: None,
     )
     with pytest.raises(NoPerfDatabase):
@@ -105,7 +105,7 @@ def test_feasible_shape_tokens_resolves_version_when_missing(monkeypatch):
 
 def test_resolve_backend_version_missing(monkeypatch):
     monkeypatch.setattr(
-        "spica.kv_estimate.get_latest_database_version",
+        "aisimulate.spica.kv_estimate.get_latest_database_version",
         lambda *a, **k: None,
     )
     with pytest.raises(NoPerfDatabase):

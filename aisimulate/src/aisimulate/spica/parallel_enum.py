@@ -19,7 +19,7 @@ separately in its sweep layer.
 Kept standalone (no aiconfigurator import) so it is light and unit-testable;
 parity with AIC's rules is covered by tests. ``is_moe`` is an input here
 (resolved from the model via AIC's ``check_is_moe`` by the caller); the KV-cache
-feasibility of each shape is applied separately by :mod:`spica.model_hw`.
+feasibility of each shape is applied separately by :mod:`aisimulate.spica.model_hw`.
 """
 
 from __future__ import annotations
@@ -199,7 +199,7 @@ def enumerate_parallel_configs(
     ``[min_gpu_budget, gpu_budget]``.
 
     ``min_gpus_per_worker`` is an optional lower bound on a worker's GPU count
-    (default 1). :func:`spica.model_hw.parallel_configs_for` leaves it at 1 and
+    (default 1). :func:`aisimulate.spica.model_hw.parallel_configs_for` leaves it at 1 and
     applies the KV-cache feasibility filter instead of a static weight floor.
 
     This is branch-agnostic: call once for an ``agg`` worker, or once per role

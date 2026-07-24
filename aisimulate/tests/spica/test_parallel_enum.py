@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from spica.parallel_enum import (
+from aisimulate.spica.parallel_enum import (
     enumerate_disagg_configs,
     enumerate_parallel_configs,
     enumerate_worker_shapes,

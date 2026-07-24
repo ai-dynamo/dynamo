@@ -12,8 +12,8 @@ SPDX-License-Identifier: Apache-2.0
 > guarantees.
 
 AI Simulate is a standalone Python distribution in the Dynamo repository. Its first package,
-`spica`, searches engine and Dynamo deployment settings by evaluating candidates with Dynamo
-Replay.
+`aisimulate.spica`, searches engine and Dynamo deployment settings by evaluating candidates with
+Dynamo Replay.
 
 Spica uses replay APIs and Rust features from the same Dynamo revision. For local source use,
 build and install the matching runtime before AI Simulate:
@@ -35,9 +35,9 @@ Do not combine a source checkout of AI Simulate with an older released `ai-dynam
 Run Spica with a YAML configuration:
 
 ```bash
-python -m spica --config aisimulate/examples/spica/configs/smart_sweep.yaml
+python -m aisimulate.spica --config examples/aisimulate/spica/configs/smart_sweep.yaml
 ```
 
-Read the [Spica documentation](https://github.com/ai-dynamo/dynamo/tree/main/docs/components/aisimulate/spica)
+Read the [Spica documentation](../docs/components/aisimulate/spica/README.md)
 for its configuration, search-space, and replay behavior. Runnable configurations and tools live
-under [`aisimulate/examples/spica`](examples/spica/README.md).
+under [`examples/aisimulate/spica`](../examples/aisimulate/spica/README.md).

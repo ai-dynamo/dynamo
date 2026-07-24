@@ -24,21 +24,21 @@ YAML (`SmartSearchConfig`):
 Spica returns the **best deployment config(s)** — a parallel shape + replica count +
 backend + engine/router/planner knobs — each scored by a **Dynamo Replay** (the
 mocker bridge), not an analytical estimate. `run_smart_search`
-(`aisimulate/spica/search.py`)
+(`aisimulate/src/aisimulate/spica/search.py`)
 returns a `list[Candidate]`: best-first for a scalar goal, or the non-dominated set for a
 `pareto` goal.
 
 ## End-to-end flow
 
 The steps below follow `run_smart_search`
-(`aisimulate/spica/search.py`). Steps **3** (load-predictor
+(`aisimulate/src/aisimulate/spica/search.py`). Steps **3** (load-predictor
 sub-sweep) and **4** (branch enumeration) are independent pre-loop stages — the code happens to
 enumerate branches first, but neither depends on the other; we describe the load-predictor sweep
 first to keep the planner-scaling story together.
 
 ### 1. Parse & validate the config
 
-`SmartSearchConfig.from_yaml` (`aisimulate/spica/config.py`) loads the YAML and runs every
+`SmartSearchConfig.from_yaml` (`aisimulate/src/aisimulate/spica/config.py`) loads the YAML and runs every
 pydantic validator: the per-knob choice/dict-key checks (`SearchSpace._validate_search_choices`),
 GPU-budget bounds, single-mode-when-pinning-`parallel_configs`, the goal's SLA requirement
 (`goodput`/`goodput_per_gpu` need a `ttft_ms`+`itl_ms` or `e2e_ms` SLA), and the rule that
@@ -52,7 +52,7 @@ planner's `"sla"` target. `goal.target.planner_optimization_target`
 (`OptimizationTarget.planner_optimization_target`) maps `goodput`/`goodput_per_gpu` → `"sla"`;
 everything else (`throughput`*, `e2e_latency`, `pareto`) → `"throughput"`/`"latency"`.
 
-`filter_scaling_policies` (`aisimulate/spica/planner.py`) is called with
+`filter_scaling_policies` (`aisimulate/src/aisimulate/spica/planner.py`) is called with
 `allow_throughput=(planner_optimization_target == "sla")`. When `False`, every
 `planner_scaling_policy` entry whose `enable_throughput_scaling` is true (the `throughput_*` /
 `hybrid_*` presets, or any dict that sets it) is **dropped up front** — before either the
@@ -68,7 +68,7 @@ sampling candidates that would fail during deployment-plan construction.
 
 ### 3. Load-predictor sub-sweep (`sweep_load_predictor`) — separate from Vizier
 
-`sweep_load_predictor` (`aisimulate/spica/load_predictor_sweep.py`) picks the forecaster for
+`sweep_load_predictor` (`aisimulate/src/aisimulate/spica/load_predictor_sweep.py`) picks the forecaster for
 predictive throughput scaling. This is a **standalone brute-force grid**, not part of the
 main Vizier loop, and its single winner is injected into every unrolled sample.
 
@@ -87,7 +87,7 @@ main Vizier loop, and its single winner is injected into every unrolled sample.
 
 ### 4. Enumerate branches (`enumerate_branches`)
 
-`enumerate_branches` (`aisimulate/spica/search_space.py`) builds **one `BranchSpace` per
+`enumerate_branches` (`aisimulate/src/aisimulate/spica/search_space.py`) builds **one `BranchSpace` per
 `deployment_mode`** (agg / disagg) — one Vizier study each, because agg and disagg have
 structurally different parallel configs. **`backend` is a searched knob, not a branch**: for
 each mode the valid projection pool is the **union** of every configured backend's
@@ -140,7 +140,7 @@ targets already bake the SLA into the metric). Each trial's outcome is tallied a
 ### 6. Merge by the goal
 
 After all branches finish, candidates from every branch are merged
-(`aisimulate/spica/score.py`):
+(`aisimulate/src/aisimulate/spica/score.py`):
 
 - **single-objective** → `rank()` returns them best-first by signed score, ties broken toward
   fewer GPUs (across branches — backends and modes compete on one list).

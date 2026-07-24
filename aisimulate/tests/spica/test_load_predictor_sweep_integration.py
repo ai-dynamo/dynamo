@@ -14,8 +14,8 @@ import pytest
 pytest.importorskip("dynamo.planner.core.load.predictors")
 pytest.importorskip("dynamo.planner.offline.trace_data")
 
-from spica import SmartSearchConfig, sweep_load_predictor
-from spica.load_predictor_sweep import build_windows
+from aisimulate.spica import SmartSearchConfig, sweep_load_predictor
+from aisimulate.spica.load_predictor_sweep import build_windows
 
 
 def _trace(tmp_path, rows):

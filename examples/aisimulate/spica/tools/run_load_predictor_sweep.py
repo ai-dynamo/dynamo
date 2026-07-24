@@ -17,7 +17,7 @@
 
 This utility supports the experimental Spica feature and may change with its configuration schema.
 
-python aisimulate/examples/spica/tools/run_load_predictor_sweep.py \
+python examples/aisimulate/spica/tools/run_load_predictor_sweep.py \
     --trace traffic.jsonl --policies throughput_180_5
 """
 
@@ -25,8 +25,8 @@ from __future__ import annotations
 
 import argparse
 
-from spica import SmartSearchConfig
-from spica.load_predictor_sweep import sweep_load_predictor
+from aisimulate.spica import SmartSearchConfig
+from aisimulate.spica.load_predictor_sweep import sweep_load_predictor
 
 
 def main() -> None:

@@ -7,7 +7,7 @@ A *branch* is one **deployment_mode** (agg / disagg) — one Vizier study each, 
 agg and disagg have structurally different parallel configs. ``backend`` is NOT a
 branch: it is a searched categorical knob within the study. For each mode we take the
 **union** of every configured backend's KV-feasible parallel configs
-(:func:`spica.model_hw.parallel_configs_for`) as the valid projection pool, recording per
+(:func:`aisimulate.spica.model_hw.parallel_configs_for`) as the valid projection pool, recording per
 config which backends support it. The sampler projects structured latent features onto this
 pool. Backends with no perf DB, no viable config, or no replay support for a mode are dropped
 from the backend knob.

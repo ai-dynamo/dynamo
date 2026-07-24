@@ -16,7 +16,7 @@ Trigger rules:
 - Otherwise brute-force every configured preset, once per distinct interval.
 
 The dynamo predictors (Rust runtime + prophet/pmdarima/filterpy) are imported
-lazily so ``import spica`` and the config schema stay light.
+lazily so ``import aisimulate.spica`` and the config schema stay light.
 """
 
 from __future__ import annotations

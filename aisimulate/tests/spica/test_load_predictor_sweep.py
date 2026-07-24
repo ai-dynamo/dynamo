@@ -7,9 +7,10 @@ trigger paths that return before touching the real predictors."""
 import math
 
 import pytest
-import spica.load_predictor_sweep as lps
-from spica import SmartSearchConfig, sweep_load_predictor, window_loss
-from spica.load_predictor_sweep import (
+
+import aisimulate.spica.load_predictor_sweep as lps
+from aisimulate.spica import SmartSearchConfig, sweep_load_predictor, window_loss
+from aisimulate.spica.load_predictor_sweep import (
     Window,
     _entry_label,
     _internal_preset,

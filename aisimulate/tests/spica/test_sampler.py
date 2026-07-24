@@ -7,15 +7,21 @@ import json
 import uuid
 
 import pytest
-from spica.parallel_enum import ParallelShape, ReplicaParallelConfig
-from spica.parallel_projection import (
+
+from aisimulate.spica.parallel_enum import ParallelShape, ReplicaParallelConfig
+from aisimulate.spica.parallel_projection import (
     AGG_ATTENTION_MODE,
     AGG_FFN_MODE,
     AGG_GPUS_PER_ENGINE,
     USED_GPU_RATIO,
 )
-from spica.sampler import Suggestion, _decoder_for, _index_decoder, make_branch_sampler
-from spica.search_space import BranchSpace
+from aisimulate.spica.sampler import (
+    Suggestion,
+    _decoder_for,
+    _index_decoder,
+    make_branch_sampler,
+)
+from aisimulate.spica.search_space import BranchSpace
 
 pytest.importorskip("vizier")
 

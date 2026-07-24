@@ -8,14 +8,14 @@ suggestion), plus the one chosen parallel config (an element of the generated
 ``parallel_configs``) and the independent load-predictor sweep result.
 :func:`unroll_sample` expands the composite knobs and folds in the pinned scalars
 to produce a flat, self-contained deployment config (the *selected sample*,
-i.e. :class:`spica.config.Candidate`'s ``config``) so downstream code never has
+i.e. :class:`aisimulate.spica.config.Candidate`'s ``config``) so downstream code never has
 to re-decode preset strings or structured objects.
 
 Composite knobs that get unrolled:
 
 - the chosen **parallel config** -> ``tp``/``pp``/``attention_dp``/``moe_tp``/
   ``moe_ep`` (+ ``replicas``, ``strategy``, ``used_gpus``); ``prefill_*`` +
-  ``decode_*`` for disagg (see :mod:`spica.parallel_enum`);
+  ``decode_*`` for disagg (see :mod:`aisimulate.spica.parallel_enum`);
 - ``planner_scaling_policy`` -> the four scaling fields (:data:`SCALING_POLICIES`);
 - ``planner_fpm_sampling`` / ``planner_load_sensitivity`` -> numeric planner
   fields (:data:`FPM_SAMPLING` / :data:`LOAD_SENSITIVITY`);
@@ -178,7 +178,7 @@ def unroll_sample(
 
     ``selection`` holds one value per searchable knob (atomic knobs + the planner
     preset ids); ``parallel_config`` is the chosen ``parallel_configs`` element;
-    ``load_predictor`` is the result of :func:`spica.load_predictor_sweep.sweep_load_predictor`
+    ``load_predictor`` is the result of :func:`aisimulate.spica.load_predictor_sweep.sweep_load_predictor`
     (its per-interval winner is consulted only under throughput scaling). Composite
     knobs are unrolled and only mode/router/planner-relevant knobs are emitted.
     """

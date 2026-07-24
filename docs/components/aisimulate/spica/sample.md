@@ -15,9 +15,9 @@ The [Spica search space](search-space.md) defines what gets explored. A single *
 one concrete point in it: a **selection** (one value per searched knob, chosen by the
 sampler), the one **`parallel_config`** the sampler selected or projected from the branch's valid pool, and
 the **load-predictor winner** from the independent forecast sub-sweep.
-`unroll_sample` (`aisimulate/spica/sample.py`) expands those into a **flat,
+`unroll_sample` (`aisimulate/src/aisimulate/spica/sample.py`) expands those into a **flat,
 self-contained deployment-config dict** — the `config` of a `Candidate`
-(`aisimulate/spica/config.py`). It
+(`aisimulate/src/aisimulate/spica/config.py`). It
 unrolls every composite knob (parallel shape, planner presets, load predictor) and folds
 in the pinned scalars, so downstream DGD generation never re-decodes a preset string or a
 structured config object.
@@ -99,7 +99,7 @@ Under `round_robin` none of these are emitted.
 ### Planner fields (`_unroll_planner`)
 
 `planner_scaling_policy` decodes via `scaling_fields`
-(`aisimulate/spica/planner.py`). (For a
+(`aisimulate/src/aisimulate/spica/planner.py`). (For a
 non-goodput goal, `filter_scaling_policies` has already dropped any throughput-scaling
 policy candidates before the sampler runs, so a selection can only carry a policy the goal
 actually supports.) Always emitted:
@@ -121,7 +121,7 @@ sensitivity, or predictor fields. Otherwise it also emits:
 and a non-`None` `load_predictor`). The winner for *this policy's*
 `throughput_adjustment_interval_seconds` is looked up in
 `load_predictor.best_by_interval` and expanded by `predictor_fields`
-(`aisimulate/spica/load_predictor_sweep.py`): always `load_predictor` (family) +
+(`aisimulate/src/aisimulate/spica/load_predictor_sweep.py`): always `load_predictor` (family) +
 `load_predictor_log1p`; plus **only the family's own knobs** — `prophet_window_size` for
 prophet, `kalman_q_level` / `kalman_q_trend` / `kalman_r` / `kalman_min_points` for kalman,
 nothing extra for constant/arima. If the interval has no winner, no predictor fields are

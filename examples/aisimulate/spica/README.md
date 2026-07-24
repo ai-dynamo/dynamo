@@ -36,8 +36,8 @@ The `dynamo-planner` image already builds and installs both wheels from the same
 Validate and run the general search example:
 
 ```bash
-python -m spica \
-  --config aisimulate/examples/spica/configs/smart_sweep.yaml
+python -m aisimulate.spica \
+  --config examples/aisimulate/spica/configs/smart_sweep.yaml
 ```
 
 Run the GLM-5-FP8 Pareto-front search:
@@ -49,8 +49,8 @@ Run the GLM-5-FP8 Pareto-front search:
 > the default image.
 
 ```bash
-python -m spica \
-  --config aisimulate/examples/spica/configs/glm5-disagg-pareto-frontier.yaml
+python -m aisimulate.spica \
+  --config examples/aisimulate/spica/configs/glm5-disagg-pareto-frontier.yaml
 ```
 
 Update `workload.trace_path` before running a trace-backed configuration.
@@ -60,19 +60,19 @@ Update `workload.trace_path` before running a trace-backed configuration.
 Generate a Mooncake-format trace whose request rate follows a sine wave:
 
 ```bash
-python aisimulate/examples/spica/tools/gen_sine_trace.py \
+python examples/aisimulate/spica/tools/gen_sine_trace.py \
   --out /tmp/spica-sine-trace.jsonl
 ```
 
 Compare Planner load predictors on that trace:
 
 ```bash
-python aisimulate/examples/spica/tools/run_load_predictor_sweep.py \
+python examples/aisimulate/spica/tools/run_load_predictor_sweep.py \
   --trace /tmp/spica-sine-trace.jsonl \
   --policies throughput_180_5 throughput_600_5
 ```
 
 ## Documentation
 
-Read the [Spica documentation](https://github.com/ai-dynamo/dynamo/tree/main/docs/components/aisimulate/spica)
+Read the [Spica documentation](../../../docs/components/aisimulate/spica/README.md)
 for the search flow, workload schema, optimization goals, and search-space reference.

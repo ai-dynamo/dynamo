@@ -12,7 +12,7 @@ It directly reuses AIConfigurator:
 
 Validity is **KV-cache based**: :func:`parallel_configs_for` enumerates shapes
 from 1 GPU/worker and keeps a shape iff its estimated KV capacity exceeds the
-workload's ``max_seq_len`` (:mod:`spica.kv_estimate`). That is per-shape (TEP /
+workload's ``max_seq_len`` (:mod:`aisimulate.spica.kv_estimate`). That is per-shape (TEP /
 DEP / TP differ at the same GPU count) and uses the real quantized weights — it
 replaces the old BF16 min-GPU weight floor entirely.
 """
@@ -157,7 +157,7 @@ def parallel_configs_for(
 
     Validity is **KV-cache based**: shapes are enumerated from 1 GPU/worker and a
     shape is kept iff its estimated KV capacity exceeds ``max_seq_len`` (the
-    accurate, per-shape check; see :mod:`spica.kv_estimate`). ``max_num_tokens`` /
+    accurate, per-shape check; see :mod:`aisimulate.spica.kv_estimate`). ``max_num_tokens`` /
     ``max_batch_size`` / ``memory_fraction`` are the runtime knobs the estimate
     reserves around the KV budget.
 

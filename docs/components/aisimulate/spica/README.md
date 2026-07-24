@@ -30,12 +30,11 @@ evaluates each candidate with Dynamo Replay, and returns a ranked candidate set
 - [Unrolled Samples](sample.md) explains the flat unrolled sample and the three ways to
   pin/override what it emits.
 
-Spica's source lives in `aisimulate/spica` and is published by the standalone `aisimulate`
+Spica's source lives in `aisimulate/src/aisimulate/spica` and is published by the standalone `aisimulate`
 distribution in the Dynamo repository. Installing that distribution provides the canonical
-`spica` Python package and its CPU Vizier and JAX dependencies. See the
-[Spica examples](https://github.com/ai-dynamo/dynamo/tree/main/aisimulate/examples/spica) for runnable
-configuration files and tools. Spica uses AI Configurator's lower-layer forward-pass and memory
-provider, then evaluates candidates with Dynamo Replay.
+`aisimulate.spica` Python package and its CPU Vizier and JAX dependencies. Runnable configuration
+files and tools live in `examples/aisimulate/spica`. Spica uses AI Configurator's lower-layer
+forward-pass and memory provider, then evaluates candidates with Dynamo Replay.
 
 ## Spica and Replay Optimize
 
@@ -106,11 +105,11 @@ JAX just warns and falls back to CPU, so there's no reason to install them witho
 one. When a Spica sampler is constructed, it detects the installed CUDA plugin and
 leaves JAX's platform selection enabled; an explicit `JAX_PLATFORMS=cpu` or
 `JAX_PLATFORMS=cuda` still overrides that behavior. Importing
-`spica` alone does not modify JAX, logging, or warning settings.
+Importing `aisimulate.spica` alone does not modify JAX, logging, or warning settings.
 
 ### Real Replay
 
-The replay-backed evaluator (`spica.evaluator.ReplayEvaluator`) drives the Dynamo
+The replay-backed evaluator (`aisimulate.spica.evaluator.ReplayEvaluator`) drives the Dynamo
 mocker's AI Configurator performance model. Dynamo's `dynamo-planner` image includes the required
 `aic-forward-pass` Cargo feature. The development setup above builds both required features. If
 the bindings are already installed without them, rebuild from the repository root:
@@ -126,5 +125,5 @@ real-replay integration tests skip when it is absent.
 After replacing the example's placeholder `workload.trace_path`, run the search:
 
 ```bash
-python -m spica --config aisimulate/examples/spica/configs/smart_sweep.yaml
+python -m aisimulate.spica --config examples/aisimulate/spica/configs/smart_sweep.yaml
 ```

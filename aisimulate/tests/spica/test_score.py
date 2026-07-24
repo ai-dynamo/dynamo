@@ -6,8 +6,9 @@
 import math
 
 import pytest
-from spica.config import Candidate, OptimizationTarget
-from spica.score import (
+
+from aisimulate.spica.config import Candidate, OptimizationTarget
+from aisimulate.spica.score import (
     is_feasible,
     make_candidate,
     objective_value,

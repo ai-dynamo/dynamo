@@ -6,14 +6,14 @@
 Pure — selection + parallel_config are inputs, so no perf DB / aiconfigurator
 model build is needed."""
 
-from spica.config import SearchSpace
-from spica.load_predictor_sweep import LoadPredictorResult
-from spica.parallel_enum import (
+from aisimulate.spica.config import SearchSpace
+from aisimulate.spica.load_predictor_sweep import LoadPredictorResult
+from aisimulate.spica.parallel_enum import (
     DisaggParallelConfig,
     ParallelShape,
     ReplicaParallelConfig,
 )
-from spica.sample import unroll_sample
+from aisimulate.spica.sample import unroll_sample
 
 
 def _space(**overrides) -> SearchSpace:

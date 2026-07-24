@@ -12,12 +12,11 @@ import pytest
 
 pytest.importorskip("aiconfigurator")
 
-from spica.config import SmartSearchConfig
-from spica.kv_estimate import NoPerfDatabase, _load_memory_estimator
-from spica.model_hw import NoViableParallelConfig
-from spica.parallel_enum import ParallelShape, ReplicaParallelConfig
-from spica.search_space import branch_knob_choices, enumerate_branches
-
+from aisimulate.spica.config import SmartSearchConfig
+from aisimulate.spica.kv_estimate import NoPerfDatabase, _load_memory_estimator
+from aisimulate.spica.model_hw import NoViableParallelConfig
+from aisimulate.spica.parallel_enum import ParallelShape, ReplicaParallelConfig
+from aisimulate.spica.search_space import branch_knob_choices, enumerate_branches
 from dynamo._internal.aic import AicMemoryEstimatorUnavailableError
 
 TRACE = str(Path(__file__).parent / "data" / "mooncake_tiny.jsonl")
@@ -166,7 +165,7 @@ def test_replay_incompatible_backend_is_removed_before_sampling(monkeypatch):
         calls.append((deployment_mode, backend))
         return [_AGG_CFG]
 
-    monkeypatch.setattr("spica.search_space.parallel_configs_for", fake_pcf)
+    monkeypatch.setattr("aisimulate.spica.search_space.parallel_configs_for", fake_pcf)
     cfg = _config(deployment_mode=["disagg"], backend=["trtllm", "vllm"], gpu_budget=8)
 
     (branch,) = enumerate_branches(cfg)
@@ -236,7 +235,7 @@ def test_infeasible_mode_is_skipped_with_warning(monkeypatch):
             raise NoViableParallelConfig("disagg doesn't fit the budget")
         return [_AGG_CFG]
 
-    monkeypatch.setattr("spica.search_space.parallel_configs_for", fake_pcf)
+    monkeypatch.setattr("aisimulate.spica.search_space.parallel_configs_for", fake_pcf)
     cfg = _config(deployment_mode=["agg", "disagg"], backend=["trtllm"], gpu_budget=8)
     with pytest.warns(UserWarning, match="disagg.* skipped"):
         branches = enumerate_branches(cfg)
@@ -251,7 +250,9 @@ def test_all_modes_infeasible_raises(monkeypatch):
     def _always_raise(*args, **kwargs):
         raise NoViableParallelConfig("nothing fits")
 
-    monkeypatch.setattr("spica.search_space.parallel_configs_for", _always_raise)
+    monkeypatch.setattr(
+        "aisimulate.spica.search_space.parallel_configs_for", _always_raise
+    )
     cfg = _config(deployment_mode=["agg", "disagg"], backend=["trtllm"], gpu_budget=1)
     with pytest.raises(NoViableParallelConfig, match="no deployment_mode"):
         enumerate_branches(cfg)
@@ -275,7 +276,7 @@ def test_backend_without_perf_db_is_dropped_from_knob(monkeypatch):
             raise NoPerfDatabase("no vllm perf DB for this mode")
         return [_AGG_CFG]
 
-    monkeypatch.setattr("spica.search_space.parallel_configs_for", fake_pcf)
+    monkeypatch.setattr("aisimulate.spica.search_space.parallel_configs_for", fake_pcf)
     cfg = _config(deployment_mode=["agg"], backend=["vllm", "trtllm"], gpu_budget=8)
     (branch,) = enumerate_branches(cfg)
     assert branch.knob_choices["backend"] == ["trtllm"]  # vllm dropped (no perf DB)
@@ -286,7 +287,7 @@ def test_backend_without_perf_db_is_dropped_from_knob(monkeypatch):
 
 def test_viable_backend_knob_preserves_user_order(monkeypatch):
     monkeypatch.setattr(
-        "spica.search_space.parallel_configs_for",
+        "aisimulate.spica.search_space.parallel_configs_for",
         lambda *args, **kwargs: [_AGG_CFG],
     )
     cfg = _config(deployment_mode=["agg"], backend=["trtllm", "vllm"], gpu_budget=8)
@@ -298,7 +299,7 @@ def test_viable_backend_knob_preserves_user_order(monkeypatch):
 
 def test_kv_load_range_becomes_continuous_branch_dimension(monkeypatch):
     monkeypatch.setattr(
-        "spica.search_space.parallel_configs_for",
+        "aisimulate.spica.search_space.parallel_configs_for",
         lambda *args, **kwargs: [_AGG_CFG],
     )
     cfg = SmartSearchConfig(
@@ -325,7 +326,7 @@ def test_kv_load_range_becomes_continuous_branch_dimension(monkeypatch):
 
 def test_scalar_kv_load_is_pinned_in_branch_selection(monkeypatch):
     monkeypatch.setattr(
-        "spica.search_space.parallel_configs_for",
+        "aisimulate.spica.search_space.parallel_configs_for",
         lambda *args, **kwargs: [_AGG_CFG],
     )
     cfg = SmartSearchConfig(
@@ -364,7 +365,7 @@ def test_partial_illegal_pinned_config_raises(monkeypatch):
     ):
         return [_AGG_CFG]  # only the tp=1 config is ever legal; the pinned tp=2 is not
 
-    monkeypatch.setattr("spica.search_space.parallel_configs_for", fake_pcf)
+    monkeypatch.setattr("aisimulate.spica.search_space.parallel_configs_for", fake_pcf)
     cfg = _config(
         deployment_mode=["agg"],
         backend=["trtllm"],

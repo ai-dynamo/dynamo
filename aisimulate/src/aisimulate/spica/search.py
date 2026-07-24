@@ -226,7 +226,7 @@ def run_smart_search(
     the Vizier-backed sampler. Within a round, suggestions are evaluated across
     ``SweepConfig.parallel_evals`` **spawned** worker processes (``<= 1`` -> sequential,
     no pool). With ``parallel_evals > 1`` the caller must guard its entrypoint with
-    ``if __name__ == "__main__":`` (spawn re-imports the module) — the ``python -m spica``
+    ``if __name__ == "__main__":`` (spawn re-imports the module) — the ``python -m aisimulate.spica``
     CLI already does; ad-hoc scripts must too, or set ``parallel_evals=1``.
     ``show_progress`` draws a tqdm bar over the
     candidate evaluations (live feasible/failed tally + best score) and prints a

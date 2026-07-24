@@ -1,12 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from spica.parallel_enum import (
+from aisimulate.spica.parallel_enum import (
     DisaggParallelConfig,
     ParallelShape,
     ReplicaParallelConfig,
 )
-from spica.parallel_projection import (
+from aisimulate.spica.parallel_projection import (
     AGG_ATTENTION_MODE,
     AGG_FFN_MODE,
     AGG_GPUS_PER_ENGINE,
@@ -20,7 +20,7 @@ from spica.parallel_projection import (
     USED_GPU_RATIO,
     ParallelConfigProjector,
 )
-from spica.search_space import BranchSpace
+from aisimulate.spica.search_space import BranchSpace
 
 
 def _role(

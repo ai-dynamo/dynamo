@@ -25,7 +25,7 @@ Spica requires the matching Dynamo runtime from the same source revision. Follow
 [Spica development setup](spica/README.md#develop), then invoke the package module:
 
 ```bash
-python -m spica --config aisimulate/examples/spica/configs/smart_sweep.yaml
+python -m aisimulate.spica --config examples/aisimulate/spica/configs/smart_sweep.yaml
 ```
 
 The `dynamo-planner` container builds and installs this distribution. AI Simulate is not included

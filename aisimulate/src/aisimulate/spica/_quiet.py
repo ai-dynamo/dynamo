@@ -15,8 +15,8 @@ install the matching JAX CUDA plugin separately for large sweeps. So we:
   *"JAXopt is no longer maintained"* notice.
 
 Importing this module is side-effect free: the package root does not call
-``configure_vizier_runtime``, so importing ``spica`` does not mutate process-wide
-environment, logging, or warning state. :class:`~spica.sampler.VizierBranchSampler` calls
+``configure_vizier_runtime``, so importing ``aisimulate.spica`` does not mutate process-wide
+environment, logging, or warning state. :class:`~aisimulate.spica.sampler.VizierBranchSampler` calls
 :func:`configure_vizier_runtime` immediately before importing Vizier. An explicit
 ``JAX_PLATFORMS`` always wins.
 """

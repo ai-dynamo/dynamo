@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from spica.planner import (
+from aisimulate.spica.planner import (
     SCALING_POLICIES,
     filter_scaling_policies,
     fpm_fields,

@@ -72,8 +72,8 @@ provide one config as a strict pin or several configs as a custom projection poo
 
 ## Configuration
 
-The runnable configuration is available in
-[glm5-disagg-pareto-frontier.yaml](https://github.com/ai-dynamo/dynamo/blob/main/aisimulate/examples/spica/configs/glm5-disagg-pareto-frontier.yaml):
+The runnable configuration is
+`examples/aisimulate/spica/configs/glm5-disagg-pareto-frontier.yaml`:
 
 ```yaml
 search_space:
@@ -155,8 +155,8 @@ after round 53 consumed about 4 hours 39 minutes for 1.05% additional hypervolum
 ## Reproduce
 
 ```bash
-python -m spica \
-  --config aisimulate/examples/spica/configs/glm5-disagg-pareto-frontier.yaml
+python -m aisimulate.spica \
+  --config examples/aisimulate/spica/configs/glm5-disagg-pareto-frontier.yaml
 ```
 
 The AI Configurator performance model needs the `aic-forward-pass` binding. Dynamo must include the

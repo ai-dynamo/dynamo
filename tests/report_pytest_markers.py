@@ -293,7 +293,7 @@ STUB_MODULES = [
 # Project paths for local imports
 PROJECT_PATHS = [
     os.getcwd(),
-    os.path.join(os.getcwd(), "aisimulate"),
+    os.path.join(os.getcwd(), "aisimulate", "src"),
     os.path.join(os.getcwd(), "components", "src"),
     os.path.join(os.getcwd(), "lib", "bindings", "python", "src"),
 ]

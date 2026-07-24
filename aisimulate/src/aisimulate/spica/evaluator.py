@@ -28,7 +28,7 @@ classifies SLA-satisfying requests per-request to compute goodput); it is indepe
 the planner's own scaling SLA. Under ``kv_router`` the searched router-weight knobs are
 built into a real ``KvRouterConfig``; ``round_robin`` passes ``router_config=None``.
 
-dynamo is imported lazily so ``import spica`` stays light and unit tests can stub the
+dynamo is imported lazily so ``import aisimulate.spica`` stays light and unit tests can stub the
 replay entrypoints.
 """
 
@@ -42,7 +42,7 @@ from .deploy import DeploymentPlan
 
 
 def _build_kv_router_config(payload: dict | None):
-    """A dynamo ``KvRouterConfig`` from spica's router-knob dict (its keys map 1:1 to
+    """A Dynamo ``KvRouterConfig`` from Spica's router-knob dict (its keys map 1:1 to
     KvRouterConfig kwargs), or ``None`` under round_robin (empty/None payload)."""
     if not payload:
         return None

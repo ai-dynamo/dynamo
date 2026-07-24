@@ -18,7 +18,7 @@ runs one Vizier study per `deployment_mode` branch and ranks candidates across b
 
 This document is the reference for **every knob**: its type, default, whether it is
 searched or pinned, and its allowed choices. Source of truth:
-`aisimulate/spica/config.py`
+`aisimulate/src/aisimulate/spica/config.py`
 (`SearchSpace`, `SEARCH_CHOICES`, `COMPOSITE_DICT_KEYS`, `COMPOSITE_REQUIRED_KEYS`).
 
 ## Kinds of knob
@@ -218,7 +218,7 @@ downstream by Dynamo's `PlannerConfig`.
 
 ### `planner_scaling_policy`
 
-Decoded by `SCALING_POLICIES` in `aisimulate/spica/planner.py`.
+Decoded by `SCALING_POLICIES` in `aisimulate/src/aisimulate/spica/planner.py`.
 
 | preset | `enable_throughput_scaling` | `enable_load_scaling` | `throughput_adjustment_interval_seconds` | `load_adjustment_interval_seconds` |
 |---|---|---|---|---|
@@ -262,7 +262,7 @@ Dict keys (all required): `load_scaling_down_sensitivity` (0–100), `load_min_o
 ### `load_predictor_candidates`
 
 Decoded by `LOAD_PREDICTOR_PRESETS` in
-`aisimulate/spica/load_predictor_sweep.py`.
+`aisimulate/src/aisimulate/spica/load_predictor_sweep.py`.
 
 | preset | `load_predictor` | `load_predictor_log1p` | extra family fields |
 |---|---|---|---|
@@ -282,8 +282,8 @@ family fields take the planner defaults (`prophet_window_size`=50, `kalman_q_lev
 ## Parallel configs (derived)
 
 Left empty, `parallel_configs` is **enumerated** by `parallel_configs_for`
-(`aisimulate/spica/model_hw.py`) on top of `enumerate_parallel_configs` /
-`enumerate_disagg_configs` (`aisimulate/spica/parallel_enum.py`). Per `(model, hardware,
+(`aisimulate/src/aisimulate/spica/model_hw.py`) on top of `enumerate_parallel_configs` /
+`enumerate_disagg_configs` (`aisimulate/src/aisimulate/spica/parallel_enum.py`). Per `(model, hardware,
 gpu_budget, backend)`:
 
 1. **GPUs per worker** is drawn from the ladder `{1, 2, 4, 8, 16}`
@@ -305,7 +305,7 @@ gpu_budget, backend)`:
    - `vllm` forbids `moe_tp > 1 & moe_ep > 1`.
    Large MoE that a node can't hold (`gpus_per_node * vram_per_gpu < 2 * weight_bytes`)
    auto-enables multi-node wideEP.
-5. **KV feasibility** (`spica.kv_estimate.feasible_shape_tokens`, via AI
+5. **KV feasibility** (`aisimulate.spica.kv_estimate.feasible_shape_tokens`, via AI
    Configurator's `estimate_kv_cache`): when the compatible memory estimator is installed, a shape
    is kept iff its total KV capacity in tokens (after quantized weights + activation reservations)
    holds at least one longest sequence —

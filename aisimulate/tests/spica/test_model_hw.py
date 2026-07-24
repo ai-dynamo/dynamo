@@ -12,14 +12,13 @@ import pytest
 
 pytest.importorskip("aiconfigurator")
 
-import spica.model_hw as mh_mod
-from spica.kv_estimate import NoPerfDatabase, _load_memory_estimator
-from spica.model_hw import (
+import aisimulate.spica.model_hw as mh_mod
+from aisimulate.spica.kv_estimate import NoPerfDatabase, _load_memory_estimator
+from aisimulate.spica.model_hw import (
     NoViableParallelConfig,
     parallel_configs_for,
     resolve_model_hardware,
 )
-
 from dynamo._internal.aic import AicMemoryEstimatorUnavailableError
 
 DEEPSEEK = "deepseek-ai/DeepSeek-V3"

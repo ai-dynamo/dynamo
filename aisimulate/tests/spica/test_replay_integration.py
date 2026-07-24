@@ -26,17 +26,16 @@ import pytest
 
 pytest.importorskip("dynamo.mocker")
 
-from spica.config import OptimizationTarget, SLATarget, SmartSearchConfig
-from spica.deploy import build_deployment
-from spica.evaluator import ReplayEvaluator
-from spica.kv_estimate import resolve_backend_version
-from spica.sample import unroll_sample
-from spica.score import objective_value
-from spica.search import run_smart_search
-from spica.search_space import enumerate_branches
-
 import dynamo._core as _core
 import dynamo.replay.main as _replay_main
+from aisimulate.spica.config import OptimizationTarget, SLATarget, SmartSearchConfig
+from aisimulate.spica.deploy import build_deployment
+from aisimulate.spica.evaluator import ReplayEvaluator
+from aisimulate.spica.kv_estimate import resolve_backend_version
+from aisimulate.spica.sample import unroll_sample
+from aisimulate.spica.score import objective_value
+from aisimulate.spica.search import run_smart_search
+from aisimulate.spica.search_space import enumerate_branches
 
 pytestmark = pytest.mark.filterwarnings(
     "ignore:\\[EXPERIMENTAL\\] Spica cannot apply KV-capacity filtering.*:UserWarning"

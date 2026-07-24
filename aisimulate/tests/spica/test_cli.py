@@ -7,8 +7,9 @@ import subprocess
 import sys
 
 import pytest
-import spica as spica
-import spica.__main__ as cli
+
+import aisimulate.spica as spica
+import aisimulate.spica.__main__ as cli
 
 
 def test_package_is_marked_experimental():
@@ -18,7 +19,7 @@ def test_package_is_marked_experimental():
 @pytest.mark.timeout(30)
 def test_cli_help_is_marked_experimental():
     result = subprocess.run(
-        [sys.executable, "-m", "spica", "--help"],
+        [sys.executable, "-m", "aisimulate.spica", "--help"],
         check=True,
         capture_output=True,
         text=True,
@@ -37,7 +38,7 @@ def test_cli_rejects_malformed_yaml(tmp_path):
         [
             sys.executable,
             "-m",
-            "spica",
+            "aisimulate.spica",
             "--config",
             str(config_path),
         ],
@@ -60,7 +61,7 @@ def test_cli_rejects_invalid_config(tmp_path):
         [
             sys.executable,
             "-m",
-            "spica",
+            "aisimulate.spica",
             "--config",
             str(config_path),
         ],
@@ -90,7 +91,7 @@ def test_cli_reports_no_feasible_candidates(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(
         sys,
         "argv",
-        ["spica", "--config", str(config_path)],
+        ["aisimulate.spica", "--config", str(config_path)],
     )
 
     with pytest.raises(SystemExit, match="1"):

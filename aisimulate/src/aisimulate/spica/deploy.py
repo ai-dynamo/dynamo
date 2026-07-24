@@ -3,7 +3,7 @@
 
 """Translate an unrolled sample (flat config dict) into replay deployment inputs.
 
-Produces the JSON payloads + worker counts the :class:`spica.evaluator.ReplayEvaluator`
+Produces the JSON payloads + worker counts the :class:`aisimulate.spica.evaluator.ReplayEvaluator`
 feeds to Dynamo replay: per-role ``MockEngineArgs`` dicts (built from the AIC
 parallelism), an optional ``PlannerConfig`` dict, worker counts, and router config.
 

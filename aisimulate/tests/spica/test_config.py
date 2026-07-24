@@ -5,12 +5,20 @@ from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
-from spica import OptimizationTarget, SmartSearchConfig
-from spica.config import OptimizationGoal, SearchSpace, SLATarget, SweepConfig, Workload
+
+from aisimulate.spica import OptimizationTarget, SmartSearchConfig
+from aisimulate.spica.config import (
+    OptimizationGoal,
+    SearchSpace,
+    SLATarget,
+    SweepConfig,
+    Workload,
+)
 
 EXAMPLE = (
-    Path(__file__).resolve().parents[2]
+    Path(__file__).resolve().parents[3]
     / "examples"
+    / "aisimulate"
     / "spica"
     / "configs"
     / "smart_sweep.yaml"

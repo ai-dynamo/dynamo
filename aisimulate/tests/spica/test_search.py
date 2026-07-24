@@ -9,15 +9,15 @@ real replay."""
 from pathlib import Path
 
 import pytest
-import spica.search as search_mod
-from spica.config import SmartSearchConfig
-from spica.kv_load import KVLoadResolution
-from spica.load_predictor_sweep import LoadPredictorResult
-from spica.parallel_enum import ParallelShape, ReplicaParallelConfig
-from spica.sampler import Suggestion
-from spica.search import run_smart_search
-from spica.search_space import BranchSpace
 
+import aisimulate.spica.search as search_mod
+from aisimulate.spica.config import SmartSearchConfig
+from aisimulate.spica.kv_load import KVLoadResolution
+from aisimulate.spica.load_predictor_sweep import LoadPredictorResult
+from aisimulate.spica.parallel_enum import ParallelShape, ReplicaParallelConfig
+from aisimulate.spica.sampler import Suggestion
+from aisimulate.spica.search import run_smart_search
+from aisimulate.spica.search_space import BranchSpace
 from dynamo._internal.aic import AicMemoryEstimatorUnavailableError
 
 TRACE = str(Path(__file__).parent / "data" / "mooncake_tiny.jsonl")

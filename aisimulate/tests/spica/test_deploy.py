@@ -7,17 +7,20 @@ Feeds real ``unroll_sample`` output into ``build_deployment`` so the field names
 the two modules agree on are exercised."""
 
 import pytest
-from spica.config import SearchSpace, SLATarget
-from spica.deploy import build_deployment
-from spica.load_predictor_sweep import LoadPredictorResult
-from spica.parallel_enum import (
+
+from aisimulate.spica.config import SearchSpace, SLATarget
+from aisimulate.spica.deploy import build_deployment
+from aisimulate.spica.load_predictor_sweep import LoadPredictorResult
+from aisimulate.spica.parallel_enum import (
     DisaggParallelConfig,
     ParallelShape,
     ReplicaParallelConfig,
 )
-from spica.sample import unroll_sample
+from aisimulate.spica.sample import unroll_sample
 
-BV = "1.3.0rc10"  # backend_version (normally from kv_estimate.resolve_backend_version)
+# AI Configurator performance-database version used by these deployment fixtures.
+# Production code resolves the matching value for each selected inference backend.
+AIC_PERF_DB_VERSION = "1.3.0rc10"
 
 
 def _space(**ov):
@@ -50,12 +53,15 @@ def test_agg_static_disabled_uses_plain_path():
     sample = unroll_sample(
         search_space=_space(), selection=_agg_sel(), parallel_config=AGG_MOE
     )
-    plan = build_deployment(sample, backend_version=BV)
+    plan = build_deployment(sample, backend_version=AIC_PERF_DB_VERSION)
     assert plan.deployment_mode == "agg" and plan.is_static
     assert plan.planner_config is None  # disabled -> plain replay
     assert plan.num_workers == 2
     ea = plan.agg_engine_args
-    assert ea["aic_backend"] == "trtllm" and ea["aic_backend_version"] == BV
+    assert (
+        ea["aic_backend"] == "trtllm"
+        and ea["aic_backend_version"] == AIC_PERF_DB_VERSION
+    )
     assert (
         ea["aic_model_path"] == "deepseek-ai/DeepSeek-V3"
         and ea["aic_system"] == "gb200"
@@ -79,7 +85,7 @@ def test_agg_scaling_builds_planner_config():
     # a goodput sweep -> planner optimization_target="sla" (passed in by the caller)
     plan = build_deployment(
         sample,
-        backend_version=BV,
+        backend_version=AIC_PERF_DB_VERSION,
         optimization_target="sla",
         planner_sla=SLATarget(ttft_ms=2000.0, itl_ms=30.0),
     )
@@ -109,7 +115,7 @@ def test_scaling_planner_config_validates_without_prometheus_query_env(monkeypat
 
     plan = build_deployment(
         sample,
-        backend_version=BV,
+        backend_version=AIC_PERF_DB_VERSION,
         optimization_target="sla",
         planner_sla=SLATarget(ttft_ms=2000.0, itl_ms=30.0),
     )
@@ -131,7 +137,7 @@ def test_scaling_preserves_search_space_runtime_limits():
         parallel_config=AGG_MOE,
     )
     plan = build_deployment(
-        sample, backend_version=BV, optimization_target="throughput"
+        sample, backend_version=AIC_PERF_DB_VERSION, optimization_target="throughput"
     )
 
     assert sample["context_length"] == 32768
@@ -160,7 +166,7 @@ def test_disagg_builds_both_roles():
     # the load_* policy); pass an SLA too to confirm it is NOT seeded for a non-sla target.
     plan = build_deployment(
         sample,
-        backend_version=BV,
+        backend_version=AIC_PERF_DB_VERSION,
         optimization_target="throughput",
         planner_sla=SLATarget(ttft_ms=2000.0, itl_ms=30.0),
     )
@@ -198,7 +204,7 @@ def test_kv_router_emits_router_config():
     sample = unroll_sample(
         search_space=_space(), selection=sel, parallel_config=AGG_MOE
     )
-    plan = build_deployment(sample, backend_version=BV)
+    plan = build_deployment(sample, backend_version=AIC_PERF_DB_VERSION)
     assert plan.router_mode == "kv_router"
     assert (
         plan.router_config["overlap_score_credit"] == 0.5
@@ -209,7 +215,7 @@ def test_kv_router_emits_router_config():
         unroll_sample(
             search_space=_space(), selection=_agg_sel(), parallel_config=AGG_MOE
         ),
-        backend_version=BV,
+        backend_version=AIC_PERF_DB_VERSION,
     )
     assert rr.router_config is None  # round_robin
 
@@ -223,7 +229,7 @@ def test_dense_shape_omits_moe_sizes():
         selection=_agg_sel(),
         parallel_config=dense,
     )
-    ea = build_deployment(sample, backend_version=BV).agg_engine_args
+    ea = build_deployment(sample, backend_version=AIC_PERF_DB_VERSION).agg_engine_args
     assert ea["aic_tp_size"] == 2
     assert "aic_moe_tp_size" not in ea and "aic_moe_ep_size" not in ea  # dense
 
@@ -236,7 +242,9 @@ def test_engine_type_tracks_swept_backend():
             selection=_agg_sel(backend=backend),
             parallel_config=AGG_MOE,
         )
-        ea = build_deployment(sample, backend_version=BV).agg_engine_args
+        ea = build_deployment(
+            sample, backend_version=AIC_PERF_DB_VERSION
+        ).agg_engine_args
         assert ea["engine_type"] == backend and ea["aic_backend"] == backend
 
     # disagg: both roles carry the swept backend
@@ -253,7 +261,7 @@ def test_engine_type_tracks_swept_backend():
         decode_max_num_seqs=1024,
     )
     sample = unroll_sample(search_space=_space(), selection=sel, parallel_config=cfg)
-    plan = build_deployment(sample, backend_version=BV)
+    plan = build_deployment(sample, backend_version=AIC_PERF_DB_VERSION)
     assert plan.prefill_engine_args["engine_type"] == "sglang"
     assert plan.decode_engine_args["engine_type"] == "sglang"
 
@@ -270,7 +278,7 @@ def test_offload_knobs_thread_into_payload():
     sample = unroll_sample(
         search_space=space, selection=_agg_sel(), parallel_config=AGG_MOE
     )
-    ea = build_deployment(sample, backend_version=BV).agg_engine_args
+    ea = build_deployment(sample, backend_version=AIC_PERF_DB_VERSION).agg_engine_args
     assert ea["num_g2_blocks"] == 1024
     assert ea["kv_bytes_per_token"] == 131072
     assert ea["offload_batch_size"] == 64
@@ -281,7 +289,7 @@ def test_offload_knobs_thread_into_payload():
         unroll_sample(
             search_space=_space(), selection=_agg_sel(), parallel_config=AGG_MOE
         ),
-        backend_version=BV,
+        backend_version=AIC_PERF_DB_VERSION,
     ).agg_engine_args
     assert "num_g2_blocks" not in default
     assert "offload_batch_size" not in default
@@ -295,7 +303,7 @@ def test_offload_knobs_thread_into_payload():
             selection=_agg_sel(),
             parallel_config=AGG_MOE,
         ),
-        backend_version=BV,
+        backend_version=AIC_PERF_DB_VERSION,
     ).agg_engine_args
     assert "num_g2_blocks" not in disabled
     assert "kv_bytes_per_token" not in disabled
@@ -320,7 +328,7 @@ def test_disagg_offload_is_scored_on_prefill_only():
         ),
         parallel_config=cfg,
     )
-    plan = build_deployment(sample, backend_version=BV)
+    plan = build_deployment(sample, backend_version=AIC_PERF_DB_VERSION)
 
     assert plan.prefill_engine_args["num_g2_blocks"] == 1024
     assert plan.prefill_engine_args["kv_bytes_per_token"] == 131072
@@ -340,14 +348,14 @@ def test_e2e_only_sla_with_sla_target_raises():
     with pytest.raises(ValueError, match="ttft_ms"):
         build_deployment(
             sample,
-            backend_version=BV,
+            backend_version=AIC_PERF_DB_VERSION,
             optimization_target="sla",
             planner_sla=SLATarget(e2e_ms=5000.0),
         )
     # ttft+itl SLA is accepted for the same sla target.
     plan = build_deployment(
         sample,
-        backend_version=BV,
+        backend_version=AIC_PERF_DB_VERSION,
         optimization_target="sla",
         planner_sla=SLATarget(ttft_ms=2000.0, itl_ms=30.0),
     )

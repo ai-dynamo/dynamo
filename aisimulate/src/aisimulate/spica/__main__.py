@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Experimental ``python -m spica`` entry point."""
+"""Experimental ``python -m aisimulate.spica`` entry point."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from .search import run_smart_search
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        prog="python -m spica",
+        prog="python -m aisimulate.spica",
         description=(
             "[EXPERIMENTAL] Spica smart sweeper. Its configuration, output, and "
             "optimization behavior may change without notice."

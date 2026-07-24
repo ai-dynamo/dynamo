@@ -14,12 +14,16 @@ import pytest
 
 pytest.importorskip("dynamo.mocker")
 
-from spica.config import OptimizationGoal, OptimizationTarget, SLATarget, Workload
-from spica.deploy import DeploymentPlan
-from spica.evaluator import ReplayEvaluator
-
 import dynamo.mocker
 import dynamo.replay.api
+from aisimulate.spica.config import (
+    OptimizationGoal,
+    OptimizationTarget,
+    SLATarget,
+    Workload,
+)
+from aisimulate.spica.deploy import DeploymentPlan
+from aisimulate.spica.evaluator import ReplayEvaluator
 
 TRACE = str(Path(__file__).parent / "data" / "mooncake_tiny.jsonl")
 
