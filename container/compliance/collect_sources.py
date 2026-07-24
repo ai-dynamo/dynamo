@@ -29,7 +29,7 @@ Per-ecosystem strategy (matches the plan in
            snapshot-agent / EPP have it.
 
   native   preserve source tarballs for from-source components
-           (criu, ucx, libfabric, ffmpeg, gdrcopy, NIXL, etc.).
+           (criu, ucx, ffmpeg, gdrcopy, NIXL, etc.).
            These were downloaded by the wheel_builder stage and
            are COPYd in by the Dockerfile.
 
@@ -508,7 +508,7 @@ runtime this archive belongs to).
 | `dpkg/`    | `.dsc` + tarballs for Debian/Ubuntu packages we install on top of the baseline image. Scoped to the delta against the baseline SBOM. NVIDIA-proprietary packages (CUDA repos) have no public source repo and are not included; see "skipped packages" in the build log. |
 | `rust/`    | `cargo vendor` tree filtered to the third-party crates that appear in the installed wheels' embedded SBOMs. Excludes first-party crates (`dynamo-*`, `kvbm-*`, `nixl-*`) — those are NVIDIA-authored and source is public at github.com/ai-dynamo. Includes the workspace `Cargo.toml` + `Cargo.lock` for context. |
 | `go/`      | `go mod vendor` tree for the operator / snapshot / EPP binaries. Excludes first-party modules (`github.com/ai-dynamo/...`). |
-| `native/`  | Upstream source tarballs (or git clones) for from-source builds — CRIU, cuda-checkpoint, ucx, libfabric, gdrcopy, ffmpeg, NIXL where applicable. Excludes first-party native helpers (`cuda-checkpoint-helper`). |
+| `native/`  | Upstream source tarballs (or git clones) for from-source builds — CRIU, cuda-checkpoint, ucx, gdrcopy, ffmpeg, NIXL where applicable. Excludes first-party native helpers (`cuda-checkpoint-helper`). |
 
 ## Python sources are not in this archive
 

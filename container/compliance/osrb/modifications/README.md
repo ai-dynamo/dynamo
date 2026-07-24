@@ -30,10 +30,9 @@ Each entry here is required for:
   CVE databases against our patches)
 - Engineering hygiene (every patch needs a path back to upstream)
 
-## Today
+## Current modifications
 
-This directory is empty. dynamo doesn't currently patch any vendored
-upstream sources. If that changes, follow the layout above.
+None.
 
 The OSRB packager (`container/compliance/osrb/package.py`) walks this
 directory and includes every patch + README in the submission bundle

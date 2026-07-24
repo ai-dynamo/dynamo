@@ -36,6 +36,7 @@ jobs:
       benchmarks: ${{ steps.changes.outputs.benchmarks }}
       sample: ${{ steps.changes.outputs.sample }}
       efa: ${{ steps.changes.outputs.efa }}
+      ci: ${{ steps.changes.outputs.ci }}
       base_ref: ${{ steps.changes.outputs.base_ref }}
       merge_base_sha: ${{ steps.changes.outputs.merge_base_sha }}
       builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
@@ -80,6 +81,7 @@ jobs:
       - trtllm-copy-to-acr
       - vllm-efa-build
       - sglang-efa-build
+      - sglang-efa-copy-to-acr
       - trtllm-efa-build
       - planner-build
       - planner-test
@@ -452,7 +454,7 @@ jobs:
   sglang-efa-build:
     name: sglang-runtime-efa
     needs: [changed-files]
-    if: needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.efa == 'true'
+    if: needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.efa == 'true' || needs.changed-files.outputs.ci == 'true'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: sglang
@@ -873,6 +875,22 @@ jobs:
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]' # Deploy tests only use CUDA 13
       override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
+      copy_timeout_minutes: 10
+    secrets: inherit
+
+  sglang-efa-copy-to-acr:
+    name: sglang-runtime-efa
+    needs: [changed-files, sglang-efa-build]
+    if: |
+      always() && !cancelled() &&
+      (needs.changed-files.outputs.sglang == 'true' ||
+       needs.changed-files.outputs.efa == 'true' ||
+       needs.changed-files.outputs.ci == 'true') &&
+      needs.sglang-efa-build.result == 'success'
+    uses: ./.github/workflows/shared-copy.yml
+    with:
+      target_tag_plain: ${{ needs.sglang-efa-build.outputs.target_tag_plain }}
+      cuda_version: '["13.0"]'
       copy_timeout_minutes: 10
     secrets: inherit
 
@@ -1367,6 +1385,7 @@ jobs:
       - sglang-copy-to-acr
       - sglang-multi-gpu-test
       - sglang-efa-build
+      - sglang-efa-copy-to-acr
       - trtllm-copy-to-acr
       - trtllm-multi-gpu-test
       - trtllm-efa-build

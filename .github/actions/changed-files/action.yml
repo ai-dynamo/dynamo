@@ -52,6 +52,9 @@ outputs:
   docs:
     description: 'Whether docs files changed'
     value: ${{ steps.filter.outputs.docs_any_modified }}
+  ci:
+    description: 'Whether CI files changed'
+    value: ${{ steps.filter.outputs.ci_any_modified }}
   base_ref:
     description: 'PR target branch (baseRefName) for push-to-pull-request/N events; empty otherwise. Used for OSRB compliance-diff baseline selection.'
     value: ${{ steps.merge-base.outputs.base_ref }}

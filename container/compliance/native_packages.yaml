@@ -34,39 +34,96 @@
 
 packages:
   # --- EFA (Elastic Fabric Adapter) components ---
-  # Installed by container/templates/aws.Dockerfile via the AWS-published
-  # `efa_installer.sh` (efa_version 1.47.0). The installer drops binaries
-  # directly without registering with apt, so dpkg/python/rust/go
-  # generators can't see them. This YAML overlay attributes them.
+  # Installed after the licenses stage by the AWS-published EFA Installer
+  # 1.49.0, so this YAML overlay attributes the final EFA additions.
   #
   # Image filter:
   #   - vllm-runtime-efa: baseline (nvcr.io/nvidia/cuda:X.Y-runtime) has
   #     no libfabric, so EFA legitimately adds both libs.
-  #   - trtllm-runtime-efa: baseline (cuda-dl-base) already ships
-  #     libfabric-aws@2.1.0amzn5.0, but the EFA installer may install a
-  #     different version; explicit attribution closes the version-skew
-  #     gap defensively.
-  #   - (sglang-runtime-efa intentionally omitted: sglang's upstream
-  #     image already ships libfabric1@1.17.0-3build2; the make_efa
-  #     build is redundant and appears to be dead config.)
-  - name: libfabric
-    # AWS fork: shipped by EFA installer 1.47.0 as libfabric1-aws_2.4.0amzn1.0
-    # (Ubuntu 24.04 DEB). The `amzn1.0` suffix indicates an AWS patch set on
-    # top of upstream libfabric 2.4.0; preserved here for OSRB traceability.
-    version: 2.4.0amzn1.0
+  #   - trtllm-runtime-efa and sglang-runtime-efa replace older base-image
+  #     copies with the same pinned EFA stack.
+  - &efa149_libfabric
+    name: libfabric1-aws
+    # AWS patch set shipped by EFA Installer 1.49.0.
+    version: 2.4.0amzn5.0
     license: BSD-2-Clause
-    source: https://github.com/ofiwg/libfabric
+    source: https://github.com/aws/libfabric/tree/v2.4.0amzn5.0
     images:
       - vllm-runtime-efa
+      - sglang-runtime-efa
       - trtllm-runtime-efa
 
-  - name: aws-ofi-nccl
-    # Shipped by EFA installer 1.47.0 as libnccl-ofi_1.18.0-1 (Ubuntu 24.04 DEB).
-    version: 1.18.0
+  - <<: *efa149_libfabric
+    name: libfabric-aws-bin
+
+  - <<: *efa149_libfabric
+    name: libfabric-aws-dev
+
+  # EFA Installer 1.49.0 installs its matching rdma-core 63 package closure.
+  - &efa149_rdma_core
+    name: rdma-core
+    version: "63.0-1"
+    license: LicenseRef-BSD-MIT AND BSD-2-Clause AND BSD-3-Clause AND MIT AND CC0-1.0
+    source: https://github.com/linux-rdma/rdma-core/tree/v63.0
+    license_text_path: /opt/compliance/native_licenses/rdma-core-v63.0-debian-copyright
+    images:
+      - vllm-runtime-efa
+      - sglang-runtime-efa
+      - trtllm-runtime-efa
+
+  - <<: *efa149_rdma_core
+    name: ibacm
+
+  - <<: *efa149_rdma_core
+    name: ibverbs-providers
+
+  - <<: *efa149_rdma_core
+    name: ibverbs-utils
+
+  - <<: *efa149_rdma_core
+    name: infiniband-diags
+
+  - <<: *efa149_rdma_core
+    name: libibmad-dev
+
+  - <<: *efa149_rdma_core
+    name: libibmad5
+
+  - <<: *efa149_rdma_core
+    name: libibnetdisc-dev
+
+  - <<: *efa149_rdma_core
+    name: libibnetdisc5
+
+  - <<: *efa149_rdma_core
+    name: libibumad-dev
+
+  - <<: *efa149_rdma_core
+    name: libibumad3
+
+  - <<: *efa149_rdma_core
+    name: libibverbs-dev
+
+  - <<: *efa149_rdma_core
+    name: libibverbs1
+
+  - <<: *efa149_rdma_core
+    name: librdmacm-dev
+
+  - <<: *efa149_rdma_core
+    name: librdmacm1
+
+  - <<: *efa149_rdma_core
+    name: rdmacm-utils
+
+  - name: libnccl-ofi-ngc-v3
+    # Shipped by EFA Installer 1.49.0 as libnccl-ofi-ngc-v3_1.20.0-1.
+    version: 1.20.0-1
     license: Apache-2.0
     source: https://github.com/aws/aws-ofi-nccl
     images:
       - vllm-runtime-efa
+      - sglang-runtime-efa
       - trtllm-runtime-efa
 
   # --- From-source binaries built in wheel_builder / dynamo_base and copied

@@ -73,8 +73,6 @@ ARG NIXL_REF={{ context[framework].nixl_ref }}
 {% endif -%}
 {% if device == "cuda" %}
 ARG NIXL_GDRCOPY_REF={{ context.dynamo.nixl_gdrcopy_ref }}
-ARG NIXL_LIBFABRIC_REPO={{ context.dynamo.nixl_libfabric_repo }}
-ARG NIXL_LIBFABRIC_REF={{ context.dynamo.nixl_libfabric_ref }}
 ARG HWLOC_VERSION={{ context.dynamo.hwloc_version }}
 {% endif %}
 
@@ -114,6 +112,7 @@ ARG AWS_SDK_CPP_VERSION={{ context.vllm.aws_sdk_cpp_version }}
 {% if framework in ["vllm", "sglang"] -%}
 # ModelExpress Python client for model loading (optional)
 ARG MODELEXPRESS_VERSION={{ context[framework].modelexpress_version }}
+ARG ENABLE_NIXL_WHEEL_OVERRIDE={{ context[framework].enable_nixl_wheel_override }}
 {%- endif -%}
 
 {% if framework == "sglang" and device == "xpu" -%}
@@ -126,5 +125,6 @@ ARG SGLANG_KERNEL_REF={{ context.sglang.xpu.sglang_kernel_ref }}
 
 {% if make_efa == true %}
 ARG EFA_VERSION={{ context.dynamo.efa_version }}
+ARG EFA_INSTALLER_SHA256={{ context.dynamo.efa_installer_sha256 }}
 ARG EFA_BASE_IMAGE={{ "runtime" if target=="runtime" else "dev" }}
 {%- endif -%}
