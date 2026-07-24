@@ -20,6 +20,22 @@ pub(super) struct DecodeResult {
     pub(super) end_ms: f64,
 }
 
+fn decode_page_growth_needed(
+    running: &[SglangRequest],
+    block_size: usize,
+    max_burst: usize,
+) -> usize {
+    running
+        .iter()
+        .map(|req| {
+            let burst = max_burst.min(req.remaining_output_tokens());
+            let target =
+                super::config::ceil_to_block(req.current_sequence_len() + burst, block_size);
+            target.saturating_sub(req.allocated_tokens)
+        })
+        .sum()
+}
+
 fn decode_capacity_state(
     running: &[SglangRequest],
     kv_manager: &SglangKvManager,
@@ -31,15 +47,7 @@ fn decode_capacity_state(
     // Full partial pages are already owned by PagePool and excluded from
     // `actual_available`; subtracting their slack again would double-charge it.
     let logical_available = actual_available;
-    let page_growth_needed = running
-        .iter()
-        .map(|req| {
-            let burst = max_burst.min(req.remaining_output_tokens());
-            let target =
-                super::config::ceil_to_block(req.current_sequence_len() + burst, config.block_size);
-            target.saturating_sub(req.allocated_tokens)
-        })
-        .sum();
+    let page_growth_needed = decode_page_growth_needed(running, config.block_size, max_burst);
 
     (actual_available, logical_available, page_growth_needed)
 }
@@ -109,15 +117,7 @@ fn check_decode_mem_for_burst(
     }
 
     let available = kv_manager.cache().available_tokens();
-    let page_growth_needed = running
-        .iter()
-        .map(|req| {
-            let burst = max_burst.min(req.remaining_output_tokens());
-            let target =
-                super::config::ceil_to_block(req.current_sequence_len() + burst, config.block_size);
-            target.saturating_sub(req.allocated_tokens)
-        })
-        .sum::<usize>();
+    let page_growth_needed = decode_page_growth_needed(running, config.block_size, max_burst);
     if available < page_growth_needed {
         kv_manager.evict(page_growth_needed - available);
     }
@@ -261,16 +261,7 @@ pub(super) fn simulate_decode_step_with_sampler(
         unscaled_time
     };
 
-    let reserved_page_tokens = running
-        .iter()
-        .map(|req| {
-            let target = super::config::ceil_to_block(
-                req.current_sequence_len() + max_burst.min(req.remaining_output_tokens()),
-                config.block_size,
-            );
-            target.saturating_sub(req.allocated_tokens)
-        })
-        .sum::<usize>();
+    let reserved_page_tokens = decode_page_growth_needed(running, config.block_size, max_burst);
     let reserved_pages = reserved_page_tokens / config.block_size;
     let Some(mut reservation) = kv_manager.reserve_decode_pages(reserved_pages) else {
         tracing::warn!(
