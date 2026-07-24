@@ -1698,18 +1698,15 @@ const MAX_LEADING_ANNOTATIONS: usize = 16;
 /// Returns Err(ErrorResponse) if error detected, Ok(stream) otherwise — the
 /// returned stream replays any buffered annotation frames in their original
 /// order before yielding the remaining items.
-pub(super) async fn check_for_backend_error(
-    mut stream: impl futures::Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>>
-    + Send
-    + Unpin
-    + 'static,
-) -> Result<
-    impl futures::Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send,
-    ErrorResponse,
-> {
+pub(super) async fn check_for_backend_error<T>(
+    mut stream: impl futures::Stream<Item = Annotated<T>> + Send + Unpin + 'static,
+) -> Result<impl futures::Stream<Item = Annotated<T>> + Send, ErrorResponse>
+where
+    T: Serialize + Send + 'static,
+{
     use futures::stream::StreamExt;
 
-    let mut buffered: Vec<Annotated<NvCreateChatCompletionStreamResponse>> = Vec::new();
+    let mut buffered: Vec<Annotated<T>> = Vec::new();
     while let Some(event) = stream.next().await {
         if is_annotation_frame(&event) && buffered.len() < MAX_LEADING_ANNOTATIONS {
             buffered.push(event);
@@ -3548,6 +3545,34 @@ pub fn videos_router(
     (vec![doc, stream_doc], router)
 }
 
+fn audio_content_type(format: &str) -> &'static str {
+    match format {
+        "mp3" => "audio/mpeg",
+        "flac" => "audio/flac",
+        "pcm" => "audio/pcm",
+        "aac" => "audio/aac",
+        "opus" => "audio/ogg; codecs=opus",
+        _ => "audio/wav",
+    }
+}
+
+fn decode_audio_chunks(response: &NvAudioSpeechResponse) -> Result<Vec<Bytes>, String> {
+    response
+        .data
+        .iter()
+        .map(|audio| {
+            let encoded = audio
+                .b64_json
+                .as_deref()
+                .ok_or_else(|| "Audio response did not contain base64 data".to_string())?;
+            base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map(Bytes::from)
+                .map_err(|e| format!("Failed to decode audio data: {e}"))
+        })
+        .collect()
+}
+
 async fn audio_speech(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
@@ -3562,7 +3587,7 @@ async fn audio_speech(
     let request = context_from_headers(request, request_id, &headers)?;
     let request_id = request.id().to_string();
 
-    let streaming = false;
+    let streaming = request.data_source.as_deref() != Some("url");
 
     // model is optional in the request; fall back to a model that can actually
     // serve right now (complete worker set), not just any displayable one, so
@@ -3598,10 +3623,19 @@ async fn audio_speech(
 
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
-    let stream = engine
-        .generate(request)
+    let stream = engine.generate(request).await.map_err(|e| {
+        let err_response = ErrorMessage::from_anyhow(e, "Failed to generate audio");
+        inflight.mark_error(extract_error_type_from_response(&err_response));
+        err_response
+    })?;
+
+    let ctx = stream.context();
+    let stream = check_for_backend_error(stream)
         .await
-        .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate audio"))?;
+        .map_err(|error_response| {
+            inflight.mark_error(extract_error_type_from_response(&error_response));
+            error_response
+        })?;
 
     let mut http_queue_guard = Some(http_queue_guard);
     let stream = stream.inspect(move |response| {
@@ -3611,6 +3645,135 @@ async fn audio_speech(
             &mut http_queue_guard,
         );
     });
+
+    if streaming {
+        let mut stream = Box::pin(stream);
+        let first_response = loop {
+            let Some(annotated) = stream.next().await else {
+                let err_response = ErrorMessage::internal_server_error(
+                    "Audio stream ended without producing data",
+                );
+                inflight.mark_error(extract_error_type_from_response(&err_response));
+                return Err(err_response);
+            };
+            let annotated = annotated.ok().map_err(|e| {
+                let err_response = ErrorMessage::internal_server_error_with_details(
+                    "Audio stream failed before producing data",
+                    e.to_string(),
+                );
+                inflight.mark_error(extract_error_type_from_response(&err_response));
+                err_response
+            })?;
+            if let Some(response) = annotated.data {
+                break response;
+            }
+        };
+
+        if first_response.status == "failed" {
+            inflight.mark_error(ErrorType::Internal);
+            return Ok((StatusCode::BAD_REQUEST, Json(first_response)).into_response());
+        }
+
+        let content_type = first_response
+            .data
+            .first()
+            .map(|audio| audio_content_type(&audio.output_format))
+            .unwrap_or("audio/wav");
+        let first_chunks = decode_audio_chunks(&first_response).map_err(|e| {
+            let err_response = ErrorMessage::internal_server_error_with_details(
+                "Failed to decode audio stream",
+                e,
+            );
+            inflight.mark_error(extract_error_type_from_response(&err_response));
+            err_response
+        })?;
+        if first_chunks.is_empty() {
+            let err_response =
+                ErrorMessage::internal_server_error("Audio response did not contain data");
+            inflight.mark_error(extract_error_type_from_response(&err_response));
+            return Err(err_response);
+        }
+
+        let (mut connection_handle, mut stream_handle) = create_connection_monitor(
+            ctx.clone(),
+            Some(state.metrics_clone()),
+            CancellationLabels {
+                model: model.clone(),
+                endpoint: Endpoint::Audios.to_string(),
+                request_type: "stream".to_string(),
+            },
+        )
+        .await;
+        connection_handle.disarm();
+        stream_handle.arm();
+        inflight.mark_error(ErrorType::Cancelled);
+
+        let body_stream = async_stream::stream! {
+            for chunk in first_chunks {
+                yield Ok::<Bytes, std::io::Error>(chunk);
+            }
+
+            loop {
+                tokio::select! {
+                    item = stream.next() => {
+                        let Some(annotated) = item else {
+                            inflight.mark_ok();
+                            stream_handle.disarm();
+                            break;
+                        };
+                        let annotated = match annotated.ok() {
+                            Ok(annotated) => annotated,
+                            Err(e) => {
+                                inflight.mark_error(ErrorType::Internal);
+                                stream_handle.disarm();
+                                yield Err(std::io::Error::other(e.to_string()));
+                                break;
+                            }
+                        };
+                        let Some(response) = annotated.data else {
+                            continue;
+                        };
+                        if response.status == "failed" {
+                            inflight.mark_error(ErrorType::Internal);
+                            stream_handle.disarm();
+                            yield Err(std::io::Error::other(
+                                response.error.unwrap_or_else(|| "Audio generation failed".to_string())
+                            ));
+                            break;
+                        }
+                        match decode_audio_chunks(&response) {
+                            Ok(chunks) => {
+                                for chunk in chunks {
+                                    yield Ok(chunk);
+                                }
+                            }
+                            Err(e) => {
+                                inflight.mark_error(ErrorType::Internal);
+                                stream_handle.disarm();
+                                yield Err(std::io::Error::other(e));
+                                break;
+                            }
+                        }
+                    }
+                    _ = ctx.stopped() => {
+                        inflight.mark_error(ErrorType::Cancelled);
+                        stream_handle.disarm();
+                        break;
+                    }
+                }
+            }
+        };
+
+        return Response::builder()
+            .header("content-type", content_type)
+            .body(Body::from_stream(body_stream))
+            .map_err(|e| {
+                ErrorMessage::internal_server_error_with_details(
+                    "Failed to build audio response",
+                    e.to_string(),
+                )
+            });
+    }
 
     let response = NvAudioSpeechResponse::from_annotated_stream(stream)
         .await
@@ -3626,28 +3789,7 @@ async fn audio_speech(
 
     inflight.mark_ok();
 
-    // If b64_json is present (data_source defaulted or explicitly "b64_json"),
-    // decode and return binary with content-type from AudioData.output_format.
-    // (matching OpenAI/vLLM-Omni behavior: curl --output file.wav)
-    if let Some(first) = response.data.first()
-        && let Some(b64) = &first.b64_json
-        && let Ok(audio_bytes) = base64::engine::general_purpose::STANDARD.decode(b64)
-    {
-        let content_type = match first.output_format.as_str() {
-            "mp3" => "audio/mpeg",
-            "flac" => "audio/flac",
-            "pcm" => "audio/pcm",
-            "aac" => "audio/aac",
-            "opus" => "audio/ogg; codecs=opus",
-            _ => "audio/wav",
-        };
-        return Ok(Response::builder()
-            .header("content-type", content_type)
-            .body(axum::body::Body::from(audio_bytes))
-            .unwrap());
-    }
-
-    // Fallback: return JSON (url format responses)
+    // URL responses remain JSON because they contain metadata rather than audio bytes.
     Ok(Json(response).into_response())
 }
 

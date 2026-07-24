@@ -21,12 +21,13 @@ from dynamo.common.utils.video_utils import compute_num_frames, parse_size
 from dynamo.llm.exceptions import EngineShutdown
 from dynamo.vllm.omni.audio_handler import AudioGenerationHandler
 from dynamo.vllm.omni.base_handler import BaseOmniHandler
-from dynamo.vllm.omni.output_formatter import OutputFormatter
+from dynamo.vllm.omni.output_formatter import AudioStreamState, OutputFormatter
 from dynamo.vllm.omni.utils import (
     build_image_generation_prompt,
     image_generation_negative_prompt_from_request,
     image_generation_sampling_overrides,
     image_generation_size_from_request,
+    streaming_sampling_params,
 )
 
 logger = logging.getLogger(__name__)
@@ -57,6 +58,7 @@ class EngineInputs:
     speed: float = 1.0
     response_format: str | None = None
     output_format: str | None = None
+    stream_audio: bool = False
 
 
 class OmniHandler(BaseOmniHandler):
@@ -180,8 +182,13 @@ class OmniHandler(BaseOmniHandler):
         }
         if inputs.sampling_params_list is not None:
             generate_kwargs["sampling_params_list"] = inputs.sampling_params_list
+        elif inputs.stream_audio:
+            sampling_params = streaming_sampling_params(self.engine_client)
+            if sampling_params is not None:
+                generate_kwargs["sampling_params_list"] = sampling_params
 
         previous_text = ""
+        audio_stream_state = AudioStreamState() if inputs.stream_audio else None
 
         async with self._abort_monitor(context, request_id):
             try:
@@ -197,6 +204,7 @@ class OmniHandler(BaseOmniHandler):
                         output_format=inputs.output_format,
                         previous_text=previous_text,
                         speed=inputs.speed,
+                        audio_stream_state=audio_stream_state,
                     )
                     if chunk:
                         # Track text state for streaming delta

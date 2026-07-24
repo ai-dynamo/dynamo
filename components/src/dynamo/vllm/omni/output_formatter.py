@@ -11,9 +11,11 @@ output without creating an engine or loading model weights.
 import asyncio
 import base64
 import logging
+import struct
 import tempfile
 import time
 import uuid
+from dataclasses import dataclass
 from io import BytesIO
 from typing import Any, Dict, Optional
 
@@ -33,6 +35,14 @@ from dynamo.vllm.handlers import build_prompt_tokens_details
 from dynamo.vllm.omni.utils import is_empty_payload
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class AudioStreamState:
+    """Request-local state for de-duplicating incremental audio output."""
+
+    emitted_chunks: int = 0
+    first_chunk: bool = True
 
 
 class TextFormatter:
@@ -289,16 +299,30 @@ class AudioFormatter:
         response_format = ctx.get("response_format")
         output_format = ctx.get("output_format")
         speed = ctx.get("speed", 1.0)
+        stream_state = ctx.get("audio_stream_state")
 
         try:
             start_time = time.time()
-            audio_np, sample_rate = self._extract_audio_tensor(mm_output)
-
-            encode_fmt = "wav" if output_format is None else output_format
-            assert encode_fmt is not None
-            audio_bytes, media_type = await asyncio.to_thread(
-                self._encode_audio, audio_np, sample_rate, encode_fmt, speed
+            audio_np, sample_rate = self._extract_audio_tensor(
+                mm_output, stream_state=stream_state
             )
+            if audio_np.size == 0:
+                return None
+
+            encode_fmt = ("wav" if output_format is None else output_format).lower()
+            assert encode_fmt is not None
+            if stream_state is not None:
+                audio_bytes, media_type = await asyncio.to_thread(
+                    self._encode_audio_chunk,
+                    audio_np,
+                    sample_rate,
+                    encode_fmt,
+                    stream_state,
+                )
+            else:
+                audio_bytes, media_type = await asyncio.to_thread(
+                    self._encode_audio, audio_np, sample_rate, encode_fmt, speed
+                )
 
             logger.info(
                 "Audio encoded for request %s: %d samples, sr=%d, %d bytes %s",
@@ -339,7 +363,12 @@ class AudioFormatter:
             logger.error("Failed to process audio for request %s: %s", request_id, e)
             return self._error_response(request_id, str(e))
 
-    def _extract_audio_tensor(self, mm_output: Dict[str, Any]) -> tuple:
+    def _extract_audio_tensor(
+        self,
+        mm_output: Dict[str, Any],
+        *,
+        stream_state: AudioStreamState | None = None,
+    ) -> tuple[np.ndarray, int]:
         audio_key = "audio" if "audio" in mm_output else "model_outputs"
         audio_val = mm_output.get(audio_key)
         if audio_val is None:
@@ -348,6 +377,12 @@ class AudioFormatter:
             )
 
         if isinstance(audio_val, list):
+            if stream_state is not None:
+                new_audio = audio_val[stream_state.emitted_chunks :]
+                stream_state.emitted_chunks = len(audio_val)
+                audio_val = new_audio
+                if not audio_val:
+                    return np.empty(0, dtype=np.float32), self._sample_rate(mm_output)
             audio_val = torch.cat(audio_val, dim=-1)
 
         if hasattr(audio_val, "float"):
@@ -360,12 +395,47 @@ class AudioFormatter:
         if audio_np.ndim > 1:
             audio_np = audio_np.squeeze()
 
+        return audio_np, self._sample_rate(mm_output)
+
+    @staticmethod
+    def _sample_rate(mm_output: Dict[str, Any]) -> int:
         sr_raw = mm_output.get("sr", 24000)
         if isinstance(sr_raw, list):
             sr_raw = sr_raw[-1] if sr_raw else 24000
-        sample_rate = sr_raw.item() if hasattr(sr_raw, "item") else int(sr_raw)
+        return sr_raw.item() if hasattr(sr_raw, "item") else int(sr_raw)
 
-        return audio_np, sample_rate
+    def _encode_audio_chunk(
+        self,
+        audio_np: np.ndarray,
+        sample_rate: int,
+        fmt: str,
+        stream_state: AudioStreamState,
+    ) -> tuple[bytes, str]:
+        pcm_bytes, _ = self._encode_audio(audio_np, sample_rate, "pcm")
+        if fmt == "wav" and stream_state.first_chunk:
+            pcm_bytes = self._wav_stream_header(sample_rate) + pcm_bytes
+        stream_state.first_chunk = False
+        return pcm_bytes, "audio/wav" if fmt == "wav" else "audio/pcm"
+
+    @staticmethod
+    def _wav_stream_header(sample_rate: int) -> bytes:
+        """Build a PCM WAV header whose payload length is not known yet."""
+        return struct.pack(
+            "<4sI4s4sIHHIIHH4sI",
+            b"RIFF",
+            0xFFFFFFFF,
+            b"WAVE",
+            b"fmt ",
+            16,
+            1,
+            1,
+            sample_rate,
+            sample_rate * 2,
+            2,
+            16,
+            b"data",
+            0xFFFFFFFF,
+        )
 
     def _encode_audio(
         self, audio_np: Any, sample_rate: int, fmt: str = "wav", speed: float = 1.0

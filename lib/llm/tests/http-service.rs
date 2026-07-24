@@ -3,16 +3,19 @@
 
 use anyhow::Error;
 use async_stream::stream;
+use base64::Engine as _;
 use dynamo_llm::protocols::{
     Annotated,
     codec::SseLineCodec,
     convert_sse_stream,
     openai::{
+        audios::{AudioData, NvAudioSpeechResponse, NvCreateAudioSpeechRequest},
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     },
 };
 use dynamo_llm::{
+    endpoint_type::EndpointType,
     http::service::{
         Metrics,
         error::HttpError,
@@ -40,6 +43,51 @@ mod ports;
 use ports::bind_random_port;
 
 struct CounterEngine {}
+
+struct ChunkedAudioEngine;
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateAudioSpeechRequest>,
+        ManyOut<Annotated<NvAudioSpeechResponse>>,
+        Error,
+    > for ChunkedAudioEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateAudioSpeechRequest>,
+    ) -> Result<ManyOut<Annotated<NvAudioSpeechResponse>>, Error> {
+        let (request, context) = request.transfer(());
+        let ctx = context.context();
+        let response_ctx = ctx.clone();
+        let model = request.model.clone().unwrap_or_default();
+        let response = move |bytes: &[u8], status: &str| {
+            Annotated::from_data(NvAudioSpeechResponse {
+                id: ctx.id().to_string(),
+                object: "audio.speech".to_string(),
+                model: model.clone(),
+                status: status.to_string(),
+                progress: 100,
+                created: 0,
+                data: vec![AudioData {
+                    output_format: "pcm".to_string(),
+                    url: None,
+                    b64_json: Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
+                }],
+                error: None,
+                inference_time_s: None,
+            })
+        };
+        let stream = stream! {
+            yield response(b"first-", "in_progress");
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            yield response(b"second", "completed");
+        };
+
+        Ok(ResponseStream::new(Box::pin(stream), response_ctx))
+    }
+}
 
 // Add a new long-running test engine
 struct LongRunningEngine {
@@ -1209,6 +1257,62 @@ async fn test_nvext_disabled_strips_request_and_response() {
         !body.contains("\"nvext\""),
         "nvext gate off: response must not contain an `nvext` field, got: {body}"
     );
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn test_audio_speech_streams_worker_chunks() {
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder().port(port).build().unwrap();
+    service.enable_model_endpoint(EndpointType::Audios, true);
+    let state = service.state_clone();
+    let manager = state.manager();
+
+    let card = ModelDeploymentCard::with_name_only("audio-model");
+    manager
+        .add_audios_model("audio-model", card.mdcsum(), Arc::new(ChunkedAudioEngine))
+        .unwrap();
+
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+    let task = tokio::spawn(async move { service.run_with_listener(token, listener).await });
+    wait_for_service_ready(port).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("http://localhost:{port}/v1/audio/speech"))
+        .json(&serde_json::json!({
+            "model": "audio-model",
+            "input": "hello",
+            "response_format": "pcm"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+    assert_eq!(response.headers().get("content-type").unwrap(), "audio/pcm");
+
+    let mut chunks = response.bytes_stream();
+    let first = timeout(std::time::Duration::from_secs(1), chunks.next())
+        .await
+        .expect("first chunk should be available immediately")
+        .unwrap()
+        .unwrap();
+    assert_eq!(first, "first-");
+    assert!(
+        timeout(std::time::Duration::from_millis(100), chunks.next())
+            .await
+            .is_err(),
+        "the response must not wait for and coalesce the delayed second chunk"
+    );
+    let second = timeout(std::time::Duration::from_secs(1), chunks.next())
+        .await
+        .expect("second chunk should arrive after the worker delay")
+        .unwrap()
+        .unwrap();
+    assert_eq!(second, "second");
+    assert!(chunks.next().await.is_none());
 
     cancel_token.cancel();
     task.await.unwrap().unwrap();
