@@ -6,12 +6,18 @@ use serde::Deserialize;
 
 use crate::protocols::{
     BlockExtraInfo, BlockHashOptions, LocalBlockHash, compute_block_hash_for_seq,
-    compute_seq_hash_for_block,
 };
+use crate::tracking_hash::{TrackingHashContext, TrackingHashScope};
 
 use super::error::SelectionError;
 
 type RoutingTokensAndMmInfos<'a> = (&'a [u32], Option<&'a [Option<BlockExtraInfo>]>);
+
+pub(super) struct TrackingHashInput<'a> {
+    pub(super) context: &'a TrackingHashContext,
+    pub(super) scope: TrackingHashScope<'a>,
+    pub(super) assume_kv_reuse: bool,
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct MmRoutingInfoRequest {
@@ -45,17 +51,17 @@ pub struct PromptRequest {
 impl PromptRequest {
     pub(super) fn normalize_for_selection(
         &self,
-        block_size: u32,
         default_is_eagle: bool,
+        tracking: TrackingHashInput<'_>,
     ) -> Result<NormalizedPrompt, SelectionError> {
         if let Some((token_ids, block_mm_infos)) = self.routing_tokens_and_mm_infos() {
-            return Ok(normalize_tokens(
+            return Ok(normalize_tokens_for_selection(
                 token_ids,
-                block_size,
                 self.lora_name.as_deref(),
                 self.cache_namespace.as_deref(),
                 block_mm_infos,
                 self.is_eagle.unwrap_or(default_is_eagle),
+                tracking,
             ));
         }
 
@@ -73,22 +79,18 @@ impl PromptRequest {
 
     pub(super) fn normalize_for_reservation(
         &self,
-        block_size: u32,
         default_is_eagle: bool,
+        tracking: TrackingHashInput<'_>,
     ) -> Result<NormalizedReservation, SelectionError> {
         if let Some((token_ids, block_mm_infos)) = self.routing_tokens_and_mm_infos() {
-            let normalized = normalize_tokens(
+            return Ok(normalize_tokens_for_reservation(
                 token_ids,
-                block_size,
                 self.lora_name.as_deref(),
                 self.cache_namespace.as_deref(),
                 block_mm_infos,
                 self.is_eagle.unwrap_or(default_is_eagle),
-            );
-            return Ok(NormalizedReservation {
-                sequence_hashes: normalized.sequence_hashes,
-                isl_tokens: normalized.isl_tokens,
-            });
+                tracking,
+            ));
         }
 
         let sequence_hashes = self.sequence_hashes.as_ref().ok_or_else(|| {
@@ -103,6 +105,36 @@ impl PromptRequest {
             sequence_hashes: signed_sequence_hashes(sequence_hashes),
             isl_tokens: self.isl_tokens.expect("validated above"),
         })
+    }
+
+    pub(super) fn block_hashes_for_indexer(
+        &self,
+        block_size: u32,
+        default_is_eagle: bool,
+    ) -> Result<Vec<LocalBlockHash>, SelectionError> {
+        if let Some((token_ids, block_mm_infos)) = self.routing_tokens_and_mm_infos() {
+            return Ok(compute_block_hash_for_seq(
+                token_ids,
+                block_size,
+                BlockHashOptions {
+                    block_mm_infos,
+                    lora_name: self.lora_name.as_deref(),
+                    cache_namespace: self.cache_namespace.as_deref(),
+                    is_eagle: Some(self.is_eagle.unwrap_or(default_is_eagle)),
+                },
+            ));
+        }
+
+        let block_hashes = self.block_hashes.as_ref().ok_or_else(|| {
+            SelectionError::BadRequest("block_hashes is required without token_ids".to_string())
+        })?;
+        let sequence_hashes = self.sequence_hashes.as_ref().ok_or_else(|| {
+            SelectionError::BadRequest("sequence_hashes is required without token_ids".to_string())
+        })?;
+        let isl_tokens = self.isl_tokens.ok_or_else(|| {
+            SelectionError::BadRequest("isl_tokens is required without token_ids".to_string())
+        })?;
+        Ok(normalize_hashes(block_hashes, sequence_hashes, isl_tokens)?.block_hashes)
     }
 
     fn routing_tokens_and_mm_infos(&self) -> Option<RoutingTokensAndMmInfos<'_>> {
@@ -121,27 +153,58 @@ impl PromptRequest {
     }
 }
 
-fn normalize_tokens(
+fn normalize_tokens_for_selection(
     token_ids: &[u32],
-    block_size: u32,
     lora_name: Option<&str>,
     cache_namespace: Option<&str>,
     block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
     is_eagle: bool,
+    tracking: TrackingHashInput<'_>,
 ) -> NormalizedPrompt {
-    let block_hashes = compute_block_hash_for_seq(
+    let hash_options = BlockHashOptions {
+        block_mm_infos,
+        lora_name,
+        cache_namespace,
+        is_eagle: Some(is_eagle),
+    };
+    let block_hashes =
+        compute_block_hash_for_seq(token_ids, tracking.scope.block_size, hash_options);
+    let sequence_hashes = tracking.context.compute_sequence_hashes_for_tracking(
+        tracking.scope,
         token_ids,
-        block_size,
-        BlockHashOptions {
-            block_mm_infos,
-            lora_name,
-            cache_namespace,
-            is_eagle: Some(is_eagle),
-        },
+        hash_options,
+        tracking.assume_kv_reuse,
+        Some(&block_hashes),
     );
-    let sequence_hashes = compute_seq_hash_for_block(&block_hashes);
     NormalizedPrompt {
         block_hashes,
+        sequence_hashes,
+        isl_tokens: token_ids.len(),
+    }
+}
+
+fn normalize_tokens_for_reservation(
+    token_ids: &[u32],
+    lora_name: Option<&str>,
+    cache_namespace: Option<&str>,
+    block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
+    is_eagle: bool,
+    tracking: TrackingHashInput<'_>,
+) -> NormalizedReservation {
+    let hash_options = BlockHashOptions {
+        block_mm_infos,
+        lora_name,
+        cache_namespace,
+        is_eagle: Some(is_eagle),
+    };
+    let sequence_hashes = tracking.context.compute_sequence_hashes_for_tracking(
+        tracking.scope,
+        token_ids,
+        hash_options,
+        tracking.assume_kv_reuse,
+        None,
+    );
+    NormalizedReservation {
         sequence_hashes,
         isl_tokens: token_ids.len(),
     }

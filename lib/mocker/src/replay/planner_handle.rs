@@ -294,6 +294,7 @@ mod tests {
             first_turn_arrivals,
             inter_turn_delays: DelaySpec::None,
             seed: 42,
+            arrival_seed: 42,
         })
         .unwrap()
     }

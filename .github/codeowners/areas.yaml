@@ -50,6 +50,7 @@ areas:
   - components/src/dynamo/global_router/
   - components/src/dynamo/global_router/tests/
   - components/src/dynamo/router/
+  - components/src/dynamo/squeeze_evolve/
   - components/src/dynamo/thunderagent_router/
   - lib/kv-router/
   - lib/kv-router/src/indexer/

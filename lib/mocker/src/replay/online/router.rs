@@ -6,7 +6,6 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::{Context, Result, anyhow};
-use dynamo_kv_router::ConcurrentRadixTree;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::indexer::{
     KvIndexer, KvIndexerInterface, KvIndexerMetrics, ThreadPoolIndexer,
@@ -15,6 +14,9 @@ use dynamo_kv_router::protocols::{
     BlockHashOptions, OverlapScores, RouterEvent, RoutingConstraints, StorageTier, WorkerId,
 };
 use dynamo_kv_router::scheduling::TierOverlapBlocks;
+use dynamo_kv_router::{
+    ConcurrentRadixTree, RoutingPartitionRef, TrackingHashContext, TrackingHashScope,
+};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -135,6 +137,7 @@ pub(crate) struct KvReplayRouter {
     event_tx: Mutex<Option<mpsc::UnboundedSender<RouterEvent>>>,
     event_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     indexer: ReplayIndexer,
+    tracking_hash: TrackingHashContext,
 }
 
 impl KvReplayRouter {
@@ -145,6 +148,7 @@ impl KvReplayRouter {
         num_workers: usize,
     ) -> Result<Self> {
         let config = replay_router_config(args, router_config);
+        let tracking_hash = TrackingHashContext::from_config(&config)?;
         let indexer =
             create_replay_indexer(args.block_size as u32, config.router_event_threads as usize);
         let workers_with_configs = replay_workers_with_configs(args, num_workers);
@@ -189,6 +193,7 @@ impl KvReplayRouter {
             event_tx: Mutex::new(Some(event_tx)),
             event_task: Mutex::new(Some(event_task)),
             indexer,
+            tracking_hash,
         })
     }
 
@@ -229,9 +234,13 @@ impl KvReplayRouter {
                 )
             })
             .collect();
-        let token_seq = self.config.compute_seq_hashes_for_tracking(
+        let token_seq = self.config.compute_seq_hashes_for_tracking_with_context(
+            &self.tracking_hash,
+            TrackingHashScope {
+                partition: RoutingPartitionRef::new("replay", "default"),
+                block_size: self.block_size,
+            },
             &request.tokens,
-            self.block_size,
             None,
             BlockHashOptions::default(),
             None,

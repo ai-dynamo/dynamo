@@ -33,7 +33,7 @@ use super::{
     state::AggRequestState,
 };
 use crate::common::protocols::{DirectRequest, ForwardPassSnapshot, MockEngineArgs, OutputSignal};
-use crate::loadgen::WorkloadDriver;
+use crate::loadgen::{ReplayRequestPayload, WorkloadDriver};
 #[cfg(test)]
 use crate::replay::ReplayRouterMode;
 use crate::replay::{ReplayTerminalStatus, SlaThresholds, TraceCollector};
@@ -73,7 +73,7 @@ struct AggRuntimeSnapshot {
 pub(in crate::replay) struct AggRuntimeStats;
 
 pub(in crate::replay) trait AggregatedPlacement<Events, Metadata>:
-    PlacementPolicy<DirectRequest, Metadata = Metadata, Observation = Events> + Sized
+    PlacementPolicy<ReplayRequestPayload, Metadata = Metadata, Observation = Events> + Sized
 where
     Events: EngineEventBatch,
     Metadata: ReplayAdmissionMetadata,
@@ -389,23 +389,21 @@ where
     /// Admit one external request into the collector, optional router, and worker pool.
     fn assign_request(
         &mut self,
-        mut request: DirectRequest,
+        mut request: ReplayRequestPayload,
         arrival_time_ms: f64,
         metadata: Metadata,
         session_id: Option<String>,
     ) -> anyhow::Result<Uuid> {
-        let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
-        request.uuid = Some(uuid);
+        let uuid = request.metadata().uuid.unwrap_or_else(Uuid::new_v4);
+        let input_length = request.input_length();
+        let output_length = request.metadata().max_output_tokens;
+        request.metadata_mut().uuid = Some(uuid);
         if matches!(self.admission.mode(), ReplayMode::Concurrency { .. }) {
-            request.arrival_timestamp_ms = Some(arrival_time_ms);
+            request.metadata_mut().arrival_timestamp_ms = Some(arrival_time_ms);
         }
 
-        self.collector.on_arrival(
-            uuid,
-            arrival_time_ms,
-            request.tokens.len(),
-            request.max_output_tokens,
-        );
+        self.collector
+            .on_arrival(uuid, arrival_time_ms, input_length, output_length);
 
         let effects = self
             .placement
@@ -421,9 +419,13 @@ where
                 self.record_placement(placement);
                 self.requests.insert(
                     uuid,
-                    AggRequestState::new_running(request.tokens.len(), request.max_output_tokens),
+                    AggRequestState::new_running(input_length, output_length),
                 );
-                self.dispatch_to_worker(request, uuid, placement.scheduler_id)?;
+                self.dispatch_to_worker(
+                    request.into_direct_request(),
+                    uuid,
+                    placement.scheduler_id,
+                )?;
             }
             PlacementDecision::Queued => {
                 self.requests
@@ -658,8 +660,9 @@ where
     fn release_ready_arrivals(&mut self) -> anyhow::Result<bool> {
         let mut released_any = false;
         let cluster_in_flight = self.cluster_in_flight();
-        for ready in
-            CoreAdmissionSource::drain_ready(&mut self.admission, self.now_ms, cluster_in_flight)?
+        for ready in self
+            .admission
+            .drain_ready_compact(self.now_ms, cluster_in_flight)?
         {
             let ReadyArrival {
                 request,
