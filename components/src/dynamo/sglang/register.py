@@ -376,6 +376,7 @@ async def _get_runtime_config(
     runtime_config.enable_local_indexer = (
         dynamo_args.enable_local_indexer and not is_decode_worker
     )
+    runtime_config.kv_event_publishing_enabled = dynamo_args.use_kv_events
 
     start_dp_rank, end_dp_rank = model_card_dp_rank_bounds(server_args)
     registered_dp_size = end_dp_rank - start_dp_rank

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{collections::HashSet, sync::Arc, time::Instant};
+use std::{collections::HashSet, fmt, sync::Arc, time::Instant};
 
 use anyhow::Result;
 use dynamo_kv_router::{
@@ -69,8 +69,65 @@ use crate::{
         sequence::{SequenceError, SequenceRequest},
     },
     local_model::runtime_config::ModelRuntimeConfig,
+    worker_type::WorkerType,
 };
 use route_lookup::{TieredLookupResult, query_tiered_matches, split_retained_block_hashes};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KvEventSourceRequirement {
+    NotRequired,
+    CacheAwareRouting,
+    ConditionalDisaggDecodeCache,
+    Unknown,
+}
+
+impl KvEventSourceRequirement {
+    pub(crate) fn derive(worker_role: Option<WorkerType>, config: &KvRouterConfig) -> Self {
+        let Some(worker_role) = worker_role else {
+            return Self::Unknown;
+        };
+        if config.use_remote_indexer || !config.should_subscribe_to_kv_events() {
+            return Self::NotRequired;
+        }
+
+        match worker_role {
+            WorkerType::Prefill | WorkerType::Aggregated => Self::CacheAwareRouting,
+            WorkerType::Decode if config.conditional_disagg_enabled => {
+                Self::ConditionalDisaggDecodeCache
+            }
+            WorkerType::Decode | WorkerType::Encode => Self::NotRequired,
+        }
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::NotRequired => "not_required",
+            Self::CacheAwareRouting => "cache_aware_routing",
+            Self::ConditionalDisaggDecodeCache => "conditional_disagg_decode_cache",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    pub(crate) fn requires_source(self) -> bool {
+        matches!(
+            self,
+            Self::CacheAwareRouting | Self::ConditionalDisaggDecodeCache
+        )
+    }
+
+    pub(crate) fn should_subscribe(self, config: &KvRouterConfig) -> bool {
+        match self {
+            Self::Unknown => !config.use_remote_indexer && config.should_subscribe_to_kv_events(),
+            requirement => requirement.requires_source(),
+        }
+    }
+}
+
+impl fmt::Display for KvEventSourceRequirement {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
 
 pub enum FindBestMatchOutcome {
     Routed {
@@ -253,7 +310,43 @@ where
         selector: Sel,
         kv_router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
-        worker_type: &'static str,
+        metric_worker_type: &'static str,
+        model_name: Option<String>,
+        is_eagle: bool,
+        shared_cache: Option<Box<dyn SharedKvCache>>,
+        lora_filter: Option<Arc<crate::lora::LoraFilter>>,
+    ) -> Result<Self> {
+        Self::new_with_worker_role(
+            endpoint,
+            client,
+            workers_with_configs,
+            kv_source_membership,
+            block_size,
+            selector,
+            kv_router_config,
+            prefill_load_estimator,
+            None,
+            metric_worker_type,
+            model_name,
+            is_eagle,
+            shared_cache,
+            lora_filter,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn new_with_worker_role(
+        endpoint: Endpoint,
+        client: Client,
+        workers_with_configs: RuntimeConfigWatch,
+        kv_source_membership: Option<KvSourceMembershipWatch>,
+        block_size: u32,
+        selector: Sel,
+        kv_router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        worker_role: Option<WorkerType>,
+        metric_worker_type: &'static str,
         model_name: Option<String>,
         is_eagle: bool,
         shared_cache: Option<Box<dyn SharedKvCache>>,
@@ -264,6 +357,8 @@ where
         let tracking_hash = TrackingHashContext::from_config(&kv_router_config)?;
         let tracking_model_name =
             resolve_tracking_model_name(tracking_hash.algorithm(), model_name.as_deref())?;
+        let kv_event_source_requirement =
+            KvEventSourceRequirement::derive(worker_role, &kv_router_config);
         let component = endpoint.component();
         // Router-owned tasks derive from this token so a rebuild cannot cancel the runtime.
         let cancellation_token = component.drt().child_token();
@@ -313,17 +408,16 @@ where
             overlap_scores_refresh,
             Some(overloaded_worker_provider),
             model_name.as_deref(),
-            worker_type,
+            metric_worker_type,
             cancellation_token.child_token(),
             Default::default(),
         )
         .await?;
 
         // Start KV event subscription if needed — skip when using a remote indexer.
-        let kv_event_subscription = if kv_router_config.use_remote_indexer {
-            tracing::info!("Skipping KV event subscription (using remote indexer)");
-            None
-        } else if kv_router_config.should_subscribe_to_kv_events() {
+        let kv_event_subscription = if kv_event_source_requirement
+            .should_subscribe(&kv_router_config)
+        {
             let membership_watch = kv_source_membership.ok_or_else(|| {
                 anyhow::anyhow!(
                     "KV source membership watch is required when local KV event subscription is enabled"
@@ -335,16 +429,20 @@ where
                     indexer.clone(),
                     membership_watch,
                     model_name.clone().unwrap_or_else(|| "unknown".to_string()),
-                    worker_type,
+                    worker_role,
+                    kv_event_source_requirement,
+                    metric_worker_type,
                     cancellation_token.child_token(),
                 )
                 .await?,
             )
         } else {
             tracing::info!(
-                "Skipping KV event subscription (use_kv_events={}, overlap_score_credit={})",
+                requirement = %kv_event_source_requirement,
+                "Skipping KV event subscription (use_kv_events={}, overlap_score_credit={}, use_remote_indexer={})",
                 kv_router_config.use_kv_events,
                 kv_router_config.overlap_score_credit,
+                kv_router_config.use_remote_indexer,
             );
             None
         };
@@ -1344,6 +1442,100 @@ mod tests {
     }
 
     #[test]
+    fn kv_event_source_requirement_matrix() {
+        let default = KvRouterConfig::default();
+        let mut cases = vec![
+            (
+                Some(WorkerType::Prefill),
+                default.clone(),
+                KvEventSourceRequirement::CacheAwareRouting,
+                true,
+            ),
+            (
+                Some(WorkerType::Aggregated),
+                default.clone(),
+                KvEventSourceRequirement::CacheAwareRouting,
+                true,
+            ),
+            (
+                Some(WorkerType::Decode),
+                default.clone(),
+                KvEventSourceRequirement::NotRequired,
+                false,
+            ),
+            (
+                Some(WorkerType::Encode),
+                default.clone(),
+                KvEventSourceRequirement::NotRequired,
+                false,
+            ),
+            (
+                None,
+                default.clone(),
+                KvEventSourceRequirement::Unknown,
+                true,
+            ),
+        ];
+        for policy in [
+            dynamo_kv_router::ConditionalDisaggPolicyKind::IslBounding,
+            dynamo_kv_router::ConditionalDisaggPolicyKind::PrefillLoad,
+            dynamo_kv_router::ConditionalDisaggPolicyKind::IslOrLoad,
+        ] {
+            cases.push((
+                Some(WorkerType::Decode),
+                KvRouterConfig {
+                    conditional_disagg_enabled: true,
+                    conditional_disagg_policy: policy,
+                    ..default.clone()
+                },
+                KvEventSourceRequirement::ConditionalDisaggDecodeCache,
+                true,
+            ));
+        }
+        for config in [
+            KvRouterConfig {
+                use_remote_indexer: true,
+                ..Default::default()
+            },
+            KvRouterConfig {
+                use_kv_events: false,
+                ..Default::default()
+            },
+            KvRouterConfig {
+                overlap_score_credit: 0.0,
+                ..Default::default()
+            },
+        ] {
+            cases.extend([
+                (
+                    None,
+                    config.clone(),
+                    KvEventSourceRequirement::Unknown,
+                    false,
+                ),
+                (
+                    Some(WorkerType::Aggregated),
+                    config.clone(),
+                    KvEventSourceRequirement::NotRequired,
+                    false,
+                ),
+                (
+                    Some(WorkerType::Decode),
+                    config,
+                    KvEventSourceRequirement::NotRequired,
+                    false,
+                ),
+            ]);
+        }
+
+        for (role, config, expected, should_subscribe) in cases {
+            let requirement = KvEventSourceRequirement::derive(role, &config);
+            assert_eq!(requirement, expected);
+            assert_eq!(requirement.should_subscribe(&config), should_subscribe);
+        }
+    }
+
+    #[test]
     fn weighted_cache_hit_estimates_include_lower_tiers() {
         let worker_1 = WorkerWithDpRank::new(1, 0);
         let worker_2 = WorkerWithDpRank::new(2, 0);
@@ -1458,6 +1650,54 @@ mod tests {
             .unwrap()
     }
 
+    async fn make_router_without_membership(worker_role: Option<WorkerType>) -> Result<KvRouter> {
+        let component = make_test_component("role-aware-subscription").await;
+        let endpoint = component.endpoint("backend");
+        let client = endpoint.client().await?;
+        let (_tx, workers) = watch::channel(HashMap::from([(7, ModelRuntimeConfig::default())]));
+        let config = KvRouterConfig {
+            skip_initial_worker_wait: true,
+            router_event_threads: 1,
+            ..Default::default()
+        };
+
+        KvRouter::new_with_worker_role(
+            endpoint,
+            client,
+            workers,
+            None,
+            16,
+            DefaultWorkerSelector::new(Some(config.clone()), "decode"),
+            Some(config),
+            None,
+            worker_role,
+            "decode",
+            None,
+            false,
+            None,
+            None,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn constructor_skips_sources_for_decode_but_preserves_unknown_behavior() {
+        let router = make_router_without_membership(Some(WorkerType::Decode))
+            .await
+            .expect("ordinary decode must not require KV source membership");
+        assert!(router.kv_event_subscription.is_none());
+
+        let error = make_router_without_membership(None)
+            .await
+            .err()
+            .expect("unknown role must preserve config-driven subscription");
+        assert!(
+            error
+                .to_string()
+                .contains("KV source membership watch is required")
+        );
+    }
+
     async fn make_test_router(
         selector: impl dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig>
         + Send
@@ -1486,7 +1726,7 @@ mod tests {
             ..Default::default()
         };
 
-        KvRouter::new(
+        KvRouter::new_with_worker_role(
             endpoint,
             client,
             rx,
@@ -1494,6 +1734,7 @@ mod tests {
             2,
             selector,
             Some(config),
+            None,
             None,
             "decode",
             None,

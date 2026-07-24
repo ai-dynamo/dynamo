@@ -171,6 +171,12 @@ pub struct ModelRuntimeConfig {
     #[serde(default = "default_local_indexer")]
     pub enable_local_indexer: bool,
 
+    /// Whether the running engine is configured to publish KV cache events.
+    ///
+    /// `None` indicates a legacy worker that does not declare this capability.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_event_publishing_enabled: Option<bool>,
+
     /// Endpoint whose event sources describe this worker's KV state.
     ///
     /// When unset, consumers use the worker's serving endpoint. This keeps existing
@@ -276,6 +282,7 @@ impl Default for ModelRuntimeConfig {
             data_parallel_start_rank: default_data_parallel_start_rank(),
             data_parallel_size: default_data_parallel_size(),
             enable_local_indexer: true,
+            kv_event_publishing_enabled: None,
             kv_state_endpoint: None,
             runtime_data: HashMap::new(),
             disaggregated_endpoint: None,
@@ -621,6 +628,27 @@ mod tests {
             !serde_json::to_string(&legacy)
                 .unwrap()
                 .contains("kv_state_endpoint")
+        );
+    }
+
+    #[test]
+    fn kv_event_publishing_capability_roundtrips_and_preserves_legacy_unknown() {
+        for enabled in [true, false] {
+            let cfg = ModelRuntimeConfig {
+                kv_event_publishing_enabled: Some(enabled),
+                ..Default::default()
+            };
+            let json = serde_json::to_string(&cfg).unwrap();
+            let parsed: ModelRuntimeConfig = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed.kv_event_publishing_enabled, Some(enabled));
+        }
+
+        let legacy: ModelRuntimeConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(legacy.kv_event_publishing_enabled, None);
+        assert!(
+            !serde_json::to_string(&legacy)
+                .unwrap()
+                .contains("kv_event_publishing_enabled")
         );
     }
 

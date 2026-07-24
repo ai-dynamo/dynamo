@@ -29,7 +29,7 @@ use tokio_util::sync::CancellationToken;
 use super::{
     IndexerRecoveryTarget,
     subscriber::{
-        clear_mismatch_metric_on_cancellation, update_mismatch_metric,
+        MismatchMetricScope, clear_mismatch_metric_on_cancellation, update_mismatch_metric,
         update_subscription_failure_metric,
     },
     worker_query::{ReadyKvSource, WorkerQueryClient},
@@ -98,6 +98,7 @@ pub(super) async fn run_direct_zmq_supervisor(
     mut membership_watch: KvSourceMembershipWatch,
     model: String,
     worker_type: &'static str,
+    metric_scope: MismatchMetricScope,
     cancellation_token: CancellationToken,
     mut startup_ready: Option<oneshot::Sender<Result<(), String>>>,
 ) {
@@ -113,6 +114,7 @@ pub(super) async fn run_direct_zmq_supervisor(
             &model,
             worker_type,
             &serving_endpoint,
+            metric_scope,
         );
 
         let Some(kv_state_endpoint) = view.resolved_kv_state_endpoint().cloned() else {
@@ -153,6 +155,7 @@ pub(super) async fn run_direct_zmq_supervisor(
                     &model,
                     worker_type,
                     &serving_endpoint,
+                    metric_scope,
                 );
                 client
                     .sync_membership_with_ready_sources(&HashSet::new())
@@ -185,6 +188,7 @@ pub(super) async fn run_direct_zmq_supervisor(
             &model,
             worker_type,
             &serving_endpoint,
+            metric_scope,
             &cancellation_token,
         )
         .await;
@@ -200,6 +204,7 @@ pub(super) async fn run_direct_zmq_supervisor(
                     &model,
                     worker_type,
                     &serving_endpoint,
+                    metric_scope,
                 );
                 if !wait_for_retry(retry_delay, &mut membership_watch, &cancellation_token).await {
                     break;
@@ -231,6 +236,7 @@ async fn consume_scope(
     model: &str,
     worker_type: &str,
     serving_endpoint: &EndpointId,
+    metric_scope: MismatchMetricScope,
     cancellation_token: &CancellationToken,
 ) -> ScopeExit {
     let expected_scope = EventScope::Endpoint {
@@ -275,6 +281,7 @@ async fn consume_scope(
                     model,
                     worker_type,
                     serving_endpoint,
+                    metric_scope,
                 );
             }
             signal = signal_rx.recv() => {

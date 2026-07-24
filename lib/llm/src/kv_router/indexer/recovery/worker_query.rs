@@ -2620,6 +2620,7 @@ mod tests {
             serving_endpoint: serving_endpoint.clone(),
             endpoint_resolution: KvStateEndpointResolution::Resolved(kv_state_endpoint.clone()),
             sources: statuses,
+            kv_event_publishing_enabled: HashMap::new(),
             lifecycle_generations: generations,
             recovery_expected: HashMap::new(),
         }
@@ -2779,6 +2780,8 @@ mod tests {
                 indexer,
                 membership_watch,
                 "test-model".to_string(),
+                None,
+                crate::kv_router::KvEventSourceRequirement::Unknown,
                 "decode",
                 cancel.child_token(),
             )

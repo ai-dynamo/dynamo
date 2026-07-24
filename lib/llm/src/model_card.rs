@@ -2993,6 +2993,17 @@ mod ownership_tests {
             Some("tensor")
         );
     }
+
+    #[test]
+    fn runtime_kv_event_capability_does_not_change_mdcsum() {
+        let mut disabled = ModelDeploymentCard::with_name_only("model");
+        disabled.runtime_config.kv_event_publishing_enabled = Some(false);
+
+        let mut enabled = ModelDeploymentCard::with_name_only("model");
+        enabled.runtime_config.kv_event_publishing_enabled = Some(true);
+
+        assert_eq!(disabled.mdcsum(), enabled.mdcsum());
+    }
 }
 
 #[cfg(test)]
