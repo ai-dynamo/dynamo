@@ -473,6 +473,33 @@ impl FromStr for KvTransferTimingMode {
     }
 }
 
+/// Contention model applied to disaggregated KV transfers from one prefill worker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum KvTransferBandwidthModel {
+    /// One transfer per prefill worker uses the full configured bandwidth;
+    /// later transfers wait in FIFO order.
+    #[default]
+    Fifo,
+    /// Preserve the legacy model where every transfer independently receives
+    /// the full configured bandwidth.
+    Independent,
+}
+
+impl FromStr for KvTransferBandwidthModel {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_ascii_lowercase().as_str() {
+            "fifo" => Ok(Self::Fifo),
+            "independent" => Ok(Self::Independent),
+            _ => Err(format!(
+                "Invalid kv_transfer_bandwidth_model '{value}'. Must be 'fifo' or 'independent'."
+            )),
+        }
+    }
+}
+
 /// Configuration for reasoning/thinking token output in the mocker.
 ///
 /// When set, the mocker wraps the first portion of each response in thinking
@@ -623,6 +650,7 @@ struct MockEngineArgsSerde {
     handoff_session_timeout_ms: OptionalConfigValue<u64>,
     kv_bytes_per_token: OptionalConfigValue<usize>,
     kv_transfer_bandwidth: OptionalConfigValue<f64>,
+    kv_transfer_bandwidth_model: OptionalConfigValue<String>,
     kv_transfer_timing_mode: OptionalConfigValue<String>,
     num_g2_blocks: OptionalConfigValue<usize>,
     num_g3_blocks: OptionalConfigValue<usize>,
@@ -879,6 +907,11 @@ pub struct MockEngineArgs {
     #[builder(default = "None")]
     #[validate(range(min = 0.0))]
     pub kv_transfer_bandwidth: Option<f64>,
+
+    /// Selects whether a prefill worker serializes KV transfers through one
+    /// FIFO bandwidth queue or models every transfer independently.
+    #[builder(default = "KvTransferBandwidthModel::Fifo")]
+    pub kv_transfer_bandwidth_model: KvTransferBandwidthModel,
 
     /// Selects whether disaggregated transfer timing charges the full prompt
     /// or only the physical prompt footprint missing at the destination.
@@ -1280,6 +1313,12 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
         if let Some(kv_transfer_bandwidth) = compat.kv_transfer_bandwidth.into_nullable() {
             builder = builder.kv_transfer_bandwidth(kv_transfer_bandwidth);
         }
+        if let Some(model) = compat
+            .kv_transfer_bandwidth_model
+            .into_non_null("kv_transfer_bandwidth_model")?
+        {
+            builder = builder.kv_transfer_bandwidth_model(model.parse()?);
+        }
         if let Some(mode) = compat
             .kv_transfer_timing_mode
             .into_non_null("kv_transfer_timing_mode")?
@@ -1641,6 +1680,7 @@ mod tests {
         });
         payload["max_model_len"] = serde_json::json!(args.max_model_len);
         payload["g1_backend"] = serde_json::json!(args.g1_backend);
+        payload["kv_transfer_bandwidth_model"] = serde_json::json!("fifo");
 
         let restored = MockEngineArgs::from_json_str(&payload.to_string()).unwrap();
 
@@ -1650,8 +1690,36 @@ mod tests {
         assert_eq!(restored.max_num_batched_tokens, None);
         assert_eq!(restored.g1_backend, G1Backend::Native);
         assert_eq!(
+            restored.kv_transfer_bandwidth_model,
+            KvTransferBandwidthModel::Fifo
+        );
+        assert_eq!(
             restored.kv_transfer_timing_mode,
             KvTransferTimingMode::FullPrompt
+        );
+    }
+
+    #[test]
+    fn kv_transfer_bandwidth_model_defaults_to_fifo_and_accepts_independent() {
+        assert_eq!(
+            MockEngineArgs::default().kv_transfer_bandwidth_model,
+            KvTransferBandwidthModel::Fifo
+        );
+
+        let args = MockEngineArgs::from_json_str(
+            &json!({
+                "kv_transfer_bandwidth_model": "independent",
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            args.kv_transfer_bandwidth_model,
+            KvTransferBandwidthModel::Independent
+        );
+        assert_eq!(
+            serde_json::to_value(args).unwrap()["kv_transfer_bandwidth_model"],
+            "independent"
         );
     }
 

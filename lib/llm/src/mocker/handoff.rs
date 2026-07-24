@@ -25,6 +25,8 @@ use tokio::sync::{OwnedSemaphorePermit, mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
+use super::KvTransferGate;
+
 const SESSION_INBOX_CAPACITY: usize = 32;
 const PARTICIPANT_RENDEZVOUS_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -175,22 +177,49 @@ struct SourceHandoffManagerTestState {
     retired: HashSet<HandoffId>,
 }
 
+struct SourceHandoffManagerOptions {
+    max_sessions: usize,
+    session_timeout: Duration,
+    rendezvous_timeout: Duration,
+    transfer_gate: KvTransferGate,
+}
+
 impl SourceHandoffManager {
+    #[cfg(test)]
     pub(crate) fn start(
         incoming_rx: mpsc::Receiver<IncomingBootstrapConnection>,
         max_sessions: usize,
         session_timeout: Duration,
         shutdown: CancellationToken,
     ) -> Self {
-        Self::start_with_rendezvous_timeout(
+        Self::start_with_options(
             incoming_rx,
             max_sessions,
             session_timeout,
             PARTICIPANT_RENDEZVOUS_TIMEOUT,
+            KvTransferGate::default(),
             shutdown,
         )
     }
 
+    pub(crate) fn start_with_transfer_gate(
+        incoming_rx: mpsc::Receiver<IncomingBootstrapConnection>,
+        max_sessions: usize,
+        session_timeout: Duration,
+        transfer_gate: KvTransferGate,
+        shutdown: CancellationToken,
+    ) -> Self {
+        Self::start_with_options(
+            incoming_rx,
+            max_sessions,
+            session_timeout,
+            PARTICIPANT_RENDEZVOUS_TIMEOUT,
+            transfer_gate,
+            shutdown,
+        )
+    }
+
+    #[cfg(test)]
     fn start_with_rendezvous_timeout(
         incoming_rx: mpsc::Receiver<IncomingBootstrapConnection>,
         max_sessions: usize,
@@ -198,17 +227,39 @@ impl SourceHandoffManager {
         rendezvous_timeout: Duration,
         shutdown: CancellationToken,
     ) -> Self {
+        Self::start_with_options(
+            incoming_rx,
+            max_sessions,
+            session_timeout,
+            rendezvous_timeout,
+            KvTransferGate::default(),
+            shutdown,
+        )
+    }
+
+    fn start_with_options(
+        incoming_rx: mpsc::Receiver<IncomingBootstrapConnection>,
+        max_sessions: usize,
+        session_timeout: Duration,
+        rendezvous_timeout: Duration,
+        transfer_gate: KvTransferGate,
+        shutdown: CancellationToken,
+    ) -> Self {
         let (source_tx, source_rx) = mpsc::channel(max_sessions.max(1));
         let (closed_tx, closed_rx) = watch::channel(false);
         #[cfg(test)]
         let (state_tx, state_rx) = watch::channel(SourceHandoffManagerTestState::default());
+        let options = SourceHandoffManagerOptions {
+            max_sessions: max_sessions.max(1),
+            session_timeout,
+            rendezvous_timeout,
+            transfer_gate,
+        };
         tokio::spawn(async move {
             run_manager(
                 source_rx,
                 incoming_rx,
-                max_sessions.max(1),
-                session_timeout,
-                rendezvous_timeout,
+                options,
                 shutdown,
                 #[cfg(test)]
                 state_tx,
@@ -280,12 +331,16 @@ struct PendingSession {
 async fn run_manager(
     mut source_rx: mpsc::Receiver<SourceRegistration>,
     mut incoming_rx: mpsc::Receiver<IncomingBootstrapConnection>,
-    max_sessions: usize,
-    session_timeout: Duration,
-    rendezvous_timeout: Duration,
+    options: SourceHandoffManagerOptions,
     shutdown: CancellationToken,
     #[cfg(test)] state_tx: watch::Sender<SourceHandoffManagerTestState>,
 ) {
+    let SourceHandoffManagerOptions {
+        max_sessions,
+        session_timeout,
+        rendezvous_timeout,
+        transfer_gate,
+    } = options;
     let mut pending = HashMap::<HandoffId, PendingSession>::new();
     let mut active = HashSet::<HandoffId>::new();
     let mut retired = HashMap::<HandoffId, Instant>::new();
@@ -334,6 +389,7 @@ async fn run_manager(
                     &mut pending,
                     &mut active,
                     session_timeout,
+                    transfer_gate.clone(),
                     shutdown.clone(),
                     done_tx.clone(),
                     &sessions,
@@ -383,6 +439,7 @@ async fn run_manager(
                     &mut pending,
                     &mut active,
                     session_timeout,
+                    transfer_gate.clone(),
                     shutdown.clone(),
                     done_tx.clone(),
                     &sessions,
@@ -528,6 +585,7 @@ fn maybe_start_session(
     pending: &mut HashMap<HandoffId, PendingSession>,
     active: &mut HashSet<HandoffId>,
     session_timeout: Duration,
+    transfer_gate: KvTransferGate,
     shutdown: CancellationToken,
     done_tx: mpsc::Sender<HandoffId>,
     sessions: &TaskTracker,
@@ -570,7 +628,14 @@ fn maybe_start_session(
 
     active.insert(handoff_id);
     sessions.spawn(async move {
-        let _ = run_source_session(source, destination.connection, session_timeout, shutdown).await;
+        let _ = run_source_session(
+            source,
+            destination.connection,
+            session_timeout,
+            transfer_gate,
+            shutdown,
+        )
+        .await;
         let _ = done_tx.try_send(handoff_id);
     });
 }
@@ -799,6 +864,7 @@ async fn run_source_session(
     source: SourceRegistration,
     connection: BootstrapConnection,
     session_timeout: Duration,
+    transfer_gate: KvTransferGate,
     shutdown: CancellationToken,
 ) -> Result<()> {
     let SourceRegistration {
@@ -904,17 +970,27 @@ async fn run_source_session(
                         );
                         let event_tx = event_tx.clone();
                         let action_stop = action_stop.clone();
+                        let transfer_gate = transfer_gate.clone();
+                        let queue_deadline = session_started + session_timeout;
                         action_tasks.spawn(async move {
                             tokio::select! {
                                 biased;
                                 _ = action_stop.cancelled() => {}
-                                _ = tokio::time::sleep(Duration::from_secs_f64(
+                                completed = transfer_gate.wait_with_queue_deadline(
+                                    Duration::from_secs_f64(
                                     delay_ms.max(0.0) / 1000.0,
-                                )) => {
+                                    ),
+                                    queue_deadline,
+                                ) => {
+                                    let event = if completed {
+                                        SourceSessionEvent::TransferCompleted
+                                    } else {
+                                        SourceSessionEvent::Deadline
+                                    };
                                     send_source_session_event(
                                         &event_tx,
                                         &action_stop,
-                                        SourceSessionEvent::TransferCompleted,
+                                        event,
                                     ).await;
                                 }
                             }

@@ -572,6 +572,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "For intra-node NVLink, typical value is ~450.",
     )
     parser.add_argument(
+        "--kv-transfer-bandwidth-model",
+        choices=("fifo", "independent"),
+        default="fifo",
+        help="Per-prefill-worker KV transfer contention model. 'fifo' allows one transfer "
+        "at full bandwidth and queues later transfers; 'independent' gives every transfer "
+        "the full bandwidth concurrently.",
+    )
+    parser.add_argument(
         "--kv-transfer-timing-mode",
         choices=("full_prompt", "destination_missing"),
         default="full_prompt",

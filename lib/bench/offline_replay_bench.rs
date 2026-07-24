@@ -19,7 +19,8 @@ use anyhow::ensure;
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use dynamo_mocker::common::protocols::{
-    EngineType, KvTransferTimingMode, MockEngineArgs, SglangArgs, WorkerType,
+    EngineType, KvTransferBandwidthModel, KvTransferTimingMode, MockEngineArgs, SglangArgs,
+    WorkerType,
 };
 use dynamo_mocker::loadgen::Trace;
 use dynamo_mocker::replay::{
@@ -89,6 +90,12 @@ enum KvTransferTimingModeArg {
     DestinationMissing,
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+enum KvTransferBandwidthModelArg {
+    Fifo,
+    Independent,
+}
+
 impl From<EngineTypeArg> for EngineType {
     fn from(value: EngineTypeArg) -> Self {
         match value {
@@ -113,6 +120,15 @@ impl From<KvTransferTimingModeArg> for KvTransferTimingMode {
         match value {
             KvTransferTimingModeArg::FullPrompt => KvTransferTimingMode::FullPrompt,
             KvTransferTimingModeArg::DestinationMissing => KvTransferTimingMode::DestinationMissing,
+        }
+    }
+}
+
+impl From<KvTransferBandwidthModelArg> for KvTransferBandwidthModel {
+    fn from(value: KvTransferBandwidthModelArg) -> Self {
+        match value {
+            KvTransferBandwidthModelArg::Fifo => KvTransferBandwidthModel::Fifo,
+            KvTransferBandwidthModelArg::Independent => KvTransferBandwidthModel::Independent,
         }
     }
 }
@@ -193,6 +209,10 @@ struct Args {
     #[arg(long)]
     kv_transfer_bandwidth: Option<f64>,
 
+    /// Per-prefill-worker KV-transfer contention model
+    #[arg(long, value_enum, default_value_t = KvTransferBandwidthModelArg::Fifo)]
+    kv_transfer_bandwidth_model: KvTransferBandwidthModelArg,
+
     /// Disaggregated transfer timing model
     #[arg(long, value_enum, default_value_t = KvTransferTimingModeArg::FullPrompt)]
     kv_transfer_timing_mode: KvTransferTimingModeArg,
@@ -269,6 +289,7 @@ fn build_engine_args(args: &Args) -> Result<MockEngineArgs> {
         .block_size(args.block_size)
         .kv_bytes_per_token(args.kv_bytes_per_token)
         .kv_transfer_bandwidth(args.kv_transfer_bandwidth)
+        .kv_transfer_bandwidth_model(args.kv_transfer_bandwidth_model.into())
         .kv_transfer_timing_mode(args.kv_transfer_timing_mode.into());
     if args.engine_type == EngineTypeArg::Sglang {
         builder = builder.sglang(Some(SglangArgs {

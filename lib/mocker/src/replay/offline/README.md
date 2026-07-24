@@ -231,6 +231,13 @@ aggregate approximation.
 It keeps one logical clock and one completion-event heap, but request ownership moves through a
 two-stage state machine instead of the aggregated single-pool lifecycle.
 
+KV transfer delay uses one FIFO queue per logical prefill worker by default. Only the active
+transfer owns a future completion event; completion or cancellation starts the next queued transfer
+at the same logical timestamp. Set `kv_transfer_bandwidth_model` to `independent` to schedule every
+transfer from its start timestamp without source-side contention. Zero transfer delay bypasses the
+queue. This model shares source bandwidth across a worker's DP ranks, but does not coordinate
+bandwidth across separate prefill workers or destination network interfaces.
+
 The prefill router is derived from the main router config with `router_track_active_blocks = false`.
 The decode router is derived with:
 

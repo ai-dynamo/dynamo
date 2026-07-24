@@ -157,6 +157,10 @@ cargo bench --package dynamo-bench --bench offline_replay_bench \
   --kv-bytes-per-token 131072
 ```
 
+Disaggregated replay defaults to `--kv-transfer-bandwidth-model fifo`, which runs one
+full-bandwidth transfer at a time for each prefill worker. Use
+`--kv-transfer-bandwidth-model independent` to preserve overlapping full-bandwidth transfers.
+
 KVBM offload is available only when the benchmark is built with
 `mocker-kvbm-offload`. Build and run this configuration on a supported Linux
 environment:
