@@ -35,10 +35,6 @@ use crate::selector::{SelectRequest, Selector};
 use crate::topology_adapter::{RegistrationDefaults, TopologyAdapter};
 use crate::vllm_render_client::{VllmRenderClient, VllmRenderError};
 
-/// Best-effort bound on how long startup waits for a selection-service replica
-/// to report ready before serving anyway (readiness is also enforced per-pick).
-const SELECTOR_READY_WAIT: Duration = Duration::from_secs(30);
-
 /// Standalone endpoint picker backed by the standalone selection service.
 pub struct EppRouter {
     renderer: VllmRenderClient,
@@ -74,9 +70,9 @@ impl EppRouter {
         let adapter =
             TopologyAdapter::spawn(reflector.as_ref().clone(), selector.clone(), defaults);
 
-        // Best-effort, bounded wait for the selector to admit a Ready worker
-        wait_for_selector_ready(selector.as_ref()).await;
-
+        // Readiness is driven solely by the live pod+pool signal (see `is_ready`);
+        // we do not block startup on a schedulable worker. A valid, empty pool is
+        // ready immediately and returns 503 per-request until capacity appears.
         Ok(Self {
             renderer,
             reflector,
@@ -174,24 +170,6 @@ fn first_header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a s
         .find(|(k, _)| k.eq_ignore_ascii_case(name))
         .map(|(_, v)| v.trim())
         .filter(|v| !v.is_empty())
-}
-
-async fn wait_for_selector_ready(selector: &Selector) {
-    let deadline = tokio::time::Instant::now() + SELECTOR_READY_WAIT;
-    loop {
-        if selector.any_ready().await {
-            tracing::info!("Selection service reports ready");
-            return;
-        }
-        if tokio::time::Instant::now() >= deadline {
-            tracing::warn!(
-                "Selection service not ready after {}s; serving anyway (per-pick checks apply)",
-                SELECTOR_READY_WAIT.as_secs()
-            );
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
 }
 
 #[tonic::async_trait]
