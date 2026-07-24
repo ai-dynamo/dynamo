@@ -231,6 +231,7 @@ areas:
   - lib/backend-common/examples/
   - lib/sidecar/README.md
   - lib/sidecar/common/
+  - lib/sidecar/openengine/
   - lib/bindings/
   - lib/bindings/c/
   - lib/bindings/python/

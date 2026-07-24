@@ -216,6 +216,7 @@
 /lib/llm/src/discovery/                                                      @ai-dynamo/dynamo-runtime-codeowners
 /lib/runtime/src/utils/                                                      @ai-dynamo/dynamo-runtime-codeowners
 /lib/runtime/src/config/                                                     @ai-dynamo/dynamo-runtime-codeowners
+/lib/sidecar/openengine/                                                     @ai-dynamo/dynamo-runtime-codeowners
 /examples/custom_backend/                                                    @ai-dynamo/dynamo-runtime-codeowners
 /lib/llm/src/local_model/                                                    @ai-dynamo/dynamo-runtime-codeowners
 /lib/runtime/src/compute/                                                    @ai-dynamo/dynamo-runtime-codeowners

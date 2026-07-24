@@ -126,6 +126,37 @@ fn test_deserialize_extra_keys_cache_namespace_fallback() {
 }
 
 #[test]
+fn test_deserialize_sglang_positional_lora_and_cache_namespace() {
+    let encoded = to_vec(&(
+        "BlockStored",
+        vec![BlockHashValue::Unsigned(11)],
+        Option::<BlockHashValue>::None,
+        vec![10_u32, 11],
+        2_usize,
+        Option::<u64>::None,
+        Some("GPU"),
+        Some("adapter-a"),
+        Some(vec![Some(vec!["dynamo-cache-salt:tenant-a".to_string()])]),
+    ))
+    .unwrap();
+
+    let event: RawKvEvent = from_slice(&encoded).unwrap();
+    let RawKvEvent::BlockStored {
+        lora_name,
+        cache_namespace,
+        block_mm_infos,
+        ..
+    } = event
+    else {
+        panic!("expected BlockStored");
+    };
+
+    assert_eq!(lora_name.as_deref(), Some("adapter-a"));
+    assert_eq!(cache_namespace.as_deref(), Some("tenant-a"));
+    assert!(block_mm_infos.is_none());
+}
+
+#[test]
 fn test_deserialize_hex_cache_namespace_is_not_multimodal() {
     let cache_namespace = "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210";
     let encoded = to_vec_named(&MapBlockStoredFixture {
@@ -147,6 +178,60 @@ fn test_deserialize_hex_cache_namespace_is_not_multimodal() {
     };
     assert_eq!(decoded_namespace.as_deref(), Some(cache_namespace));
     assert!(block_mm_infos.is_none());
+}
+
+#[test]
+fn test_deserialize_u64_offset_mm_hashes_normalize_distinctly() {
+    const IMAGE_TOKEN_ID: u32 = 151655;
+    let decode = |mm_hash: &str, block_hash: u64| {
+        let encoded = to_vec(&(
+            "BlockStored",
+            vec![BlockHashValue::Unsigned(block_hash)],
+            Option::<BlockHashValue>::None,
+            vec![10_u32, IMAGE_TOKEN_ID],
+            2_usize,
+            Option::<u64>::None,
+            Some("GPU"),
+            Option::<String>::None,
+            Some(vec![Some(vec![(mm_hash.to_string(), 1_i64)])]),
+        ))
+        .unwrap();
+        from_slice::<RawKvEvent>(&encoded).unwrap()
+    };
+
+    let x = decode("4481d94bb3130554", 11);
+    let y = decode("f6dd7a67154607a5", 12);
+    for (event, expected) in [(&x, 0x4481d94bb3130554), (&y, 0xf6dd7a67154607a5)] {
+        let RawKvEvent::BlockStored { block_mm_infos, .. } = event else {
+            panic!("expected BlockStored");
+        };
+        assert_eq!(
+            block_mm_infos.as_ref().unwrap()[0]
+                .as_ref()
+                .unwrap()
+                .mm_objects[0]
+                .mm_hash,
+            expected
+        );
+    }
+
+    let normalize = |event| {
+        let placement = convert_event(
+            event,
+            1,
+            2,
+            WorkerWithDpRank::new(3, 0),
+            &Arc::new(AtomicU32::new(0)),
+            Some(IMAGE_TOKEN_ID),
+        )
+        .unwrap();
+        let KvCacheEventData::Stored(stored) = placement.event.data else {
+            panic!("expected Stored event");
+        };
+        stored.blocks[0].tokens_hash
+    };
+
+    assert_ne!(normalize(x), normalize(y));
 }
 
 fn block_stored_sequence(

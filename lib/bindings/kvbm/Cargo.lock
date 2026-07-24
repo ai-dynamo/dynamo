@@ -1585,6 +1585,7 @@ dependencies = [
  "anyhow",
  "arc-swap",
  "async-nats",
+ "async-openai",
  "async-stream",
  "async-trait",
  "axum",

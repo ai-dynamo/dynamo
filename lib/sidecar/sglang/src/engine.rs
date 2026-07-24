@@ -588,6 +588,7 @@ fn build_engine_config(
     Ok(EngineConfig {
         model: discovery.model_path.clone(),
         served_model_name: discovery.served_model_name.clone(),
+        model_aliases: Vec::new(),
         runtime_data,
         llm: Some(LlmRegistration {
             context_length: discovery.max_model_len,

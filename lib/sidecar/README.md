@@ -6,6 +6,7 @@ runs in a separate process.
 
 ```text
 common/  Shared gRPC arguments, transport, and errors
+openengine/  Engine-neutral OpenEngine sidecar
 sglang/  SGLang sidecar
 trtllm/  TensorRT-LLM sidecar
 vllm/    vLLM sidecar

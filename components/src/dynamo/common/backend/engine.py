@@ -6,7 +6,7 @@ from __future__ import annotations
 import os
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Optional, TypedDict
 
 from typing_extensions import Required
@@ -137,9 +137,9 @@ class LlmRegistration:
 class EngineConfig:
     """Registration metadata returned by an engine's :meth:`start`.
 
-    The neutral fields (``model``, ``served_model_name``, ``runtime_data``)
-    apply to every modality; token-pipeline metadata lives in the optional
-    :attr:`llm` sub-record, which raw media engines leave ``None``.
+    The neutral fields (``model``, ``served_model_name``, ``model_aliases``,
+    ``runtime_data``) apply to every modality; token-pipeline metadata lives in
+    the optional :attr:`llm` sub-record, which raw media engines leave ``None``.
     """
 
     model: str
@@ -148,6 +148,8 @@ class EngineConfig:
     # Token-pipeline registration metadata (KV cache, DP, bootstrap).
     # ``Some`` for LLMEngines; ``None`` for RawEngines.
     llm: Optional[LlmRegistration] = None
+    # Kept after existing fields to preserve positional-constructor compatibility.
+    model_aliases: list[str] = field(default_factory=list)
 
 
 class BaseEngine(ABC):
