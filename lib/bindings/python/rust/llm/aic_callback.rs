@@ -109,24 +109,17 @@ fn build_rust_engine(
     nextn: Option<usize>,
     nextn_accept_rates: Option<&str>,
 ) -> PyResult<Arc<AicEngine>> {
-    // Speculative (MTP) decoding: Dynamo's mocker still accepts per-position
-    // conditional rates so it can sample integer burst lengths. AIC now accepts
-    // their scalar expectation instead. Fold at this boundary to preserve the
-    // mocker contract while consuming AIC's new build API.
-    let nextn = nextn.unwrap_or(0) as u32;
+    // Speculative (MTP) decoding: aic-core models the cost of one verification
+    // iteration from `nextn`. Dynamo retains the per-position acceptance rates
+    // for scheduler burst sampling above core, so validate them here but do not
+    // include them in the compiled-engine identity.
+    let nextn = u32::try_from(nextn.unwrap_or(0)).map_err(|_| {
+        pyo3::exceptions::PyValueError::new_err("AIC: nextn does not fit in u32")
+    })?;
     let aic_module = py.import("dynamo._internal.aic")?;
-    let nextn_accepted: Option<f64> = if nextn > 0 {
-        Some(
-            aic_module
-                .call_method1(
-                    "_nextn_accepted_from_accept_rates",
-                    (nextn, nextn_accept_rates),
-                )?
-                .extract()?,
-        )
-    } else {
-        None
-    };
+    if nextn > 0 {
+        aic_module.call_method1("_pad_nextn_accept_rates", (nextn_accept_rates,))?;
+    }
     // Resolve each quant-mode string through the single Python source of truth
     // (`dynamo._internal.aic._resolve_quant_mode_name`) so this latency-engine
     // path matches the Python paths (`create_session`/`estimate_num_gpu_blocks`)
@@ -153,17 +146,17 @@ fn build_rust_engine(
     // paid once per unique config (speculative config included).
     static CACHE: OnceLock<Mutex<HashMap<String, Arc<AicEngine>>>> = OnceLock::new();
     let key = format!(
-        "{backend_name}|{system}|{backend_version:?}|{model_path}|{tp_size}|{moe_tp_size:?}|{moe_ep_size:?}|{attention_dp_size:?}|{gemm_dtype:?}|{moe_dtype:?}|{fmha_dtype:?}|{kv_cache_dtype:?}|{comm_dtype:?}|{nextn}|{nextn_accepted:?}"
+        "{backend_name}|{system}|{backend_version:?}|{model_path}|{tp_size}|{moe_tp_size:?}|{moe_ep_size:?}|{attention_dp_size:?}|{gemm_dtype:?}|{moe_dtype:?}|{fmha_dtype:?}|{kv_cache_dtype:?}|{comm_dtype:?}|{nextn}"
     );
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Some(existing) = cache.lock().unwrap().get(&key) {
         return Ok(Arc::clone(existing));
     }
-    // Reuse aiconfigurator's own systems-path resolution: this sets
+    // Reuse aiconfigurator-core's own systems-path resolution: this sets
     // AICONFIGURATOR_SYSTEMS_PATH in the process env, which build_aic_engine
     // reads for the Rust-side perf-DB load.
     if let Err(e) = py
-        .import("aiconfigurator.sdk.rust_engine_step")
+        .import("aiconfigurator_core.sdk.rust_engine_step")
         .and_then(|m| m.call_method0("_configure_default_data_roots"))
     {
         tracing::warn!("AIC: could not configure data roots ({e}); relying on build-time default");
@@ -184,7 +177,6 @@ fn build_rust_engine(
         fmha_dtype.as_deref(),     // fmha_quant_mode
         comm_dtype.as_deref(),     // comm_quant_mode
         nextn,                     // speculative (MTP) tokens; 0 for dense
-        nextn_accepted,            // average accepted draft tokens per step
         None,                      // kv_block_size
         None,                      // systems_path (resolved via env above / build-time default)
     )
