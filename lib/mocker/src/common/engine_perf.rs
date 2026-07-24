@@ -68,6 +68,14 @@ impl AicEngineConfig {
         // `model_arch` is intentionally not forwarded: aiconfigurator main
         // dropped it from `EngineConfig` (architecture is inferred from the HF
         // model_path) and its deserializer ignores a stray `model_arch` key.
+        // AIC core no longer consumes acceptance-rate/progress inputs, but it
+        // still needs `nextn` to compile the MTP verification work. Dynamo
+        // applies accepted-token progress above core.
+        //
+        // TODO: AIC FPM consumes already-packed telemetry. Before exercising
+        // MTP through this path, pack Dynamo's logical decode-request and KV
+        // counts by `(nextn + 1)`, or switch to an AIC API that accepts raw
+        // logical counts.
         let nextn = self
             .extra
             .remove(AIC_NEXTN_KEY)
@@ -120,10 +128,6 @@ impl AicEngineConfig {
             extra: self.extra,
         })
     }
-}
-
-fn aic_engine_config_for_raw_iteration_time(config: AicEngineConfig) -> Result<EngineConfig> {
-    config.into_aic_config()
 }
 
 impl EnginePerfLimits {
@@ -368,7 +372,7 @@ impl EnginePerfModel {
         let options = resolve_options(inputs.options, &limits);
         let load_averages = AggLoadAverages::new(options.max_observations);
         let aic_config = match inputs.aic_config {
-            Some(config) => Some(aic_engine_config_for_raw_iteration_time(config)?),
+            Some(config) => Some(config.into_aic_config()?),
             None => inputs
                 .engine_args
                 .as_ref()
@@ -422,7 +426,7 @@ impl EnginePerfModel {
         limits: EnginePerfLimits,
         options: Option<ForwardPassPerfOptions>,
     ) -> Result<Self> {
-        let aic_config = aic_engine_config_for_raw_iteration_time(aic_config)?;
+        let aic_config = aic_config.into_aic_config()?;
         let attention_dp_size = aic_config.parallel.attention_dp_size.unwrap_or(1).max(1) as usize;
         limits.validate().context("invalid engine perf limits")?;
         let resolved_options = resolve_options(options, &limits);
@@ -1566,7 +1570,7 @@ mod tests {
     }
 
     #[test]
-    fn raw_iteration_time_aic_config_carries_only_nextn() {
+    fn aic_engine_config_maps_nextn_to_speculative_config() {
         let mut extra = BTreeMap::new();
         extra.insert(AIC_NEXTN_KEY.to_string(), "3".to_string());
         let config = AicEngineConfig {
@@ -1588,7 +1592,7 @@ mod tests {
             extra,
         };
 
-        let config = aic_engine_config_for_raw_iteration_time(config).unwrap();
+        let config = config.into_aic_config().unwrap();
 
         assert!(config.extra.is_empty());
         let speculative = config.speculative.expect("MTP config");
