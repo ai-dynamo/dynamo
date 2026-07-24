@@ -122,7 +122,8 @@ pub struct KvEventPublisher {
     /// The size of the KV block.
     kv_block_size: u32,
     /// The source of KV events.
-    /// Can be `None` if all events provided through [`KvEventPublisher::publish`].
+    /// Can be `None` if all events are provided through
+    /// [`KvEventPublisher::publish`] or [`KvEventPublisher::publish_batch`].
     source: Option<KvEventSource>,
     /// The cancellation token.
     cancellation_token: CancellationToken,
@@ -404,6 +405,29 @@ impl KvEventPublisher {
 
     pub fn publish(&self, event: KvCacheEvent) -> Result<(), mpsc::error::SendError<KvCacheEvent>> {
         self.send_singleton(PlacementEvent::local_gpu(self.worker_id, event))
+    }
+
+    /// Publish an ordered list of engine events as one processor input.
+    ///
+    /// The processor handles the complete list without receiving another list
+    /// or servicing its batching timer between source events. Existing
+    /// coalescing and block-count limits still apply within the list. Empty
+    /// lists are ignored.
+    pub fn publish_batch(
+        &self,
+        events: Vec<KvCacheEvent>,
+    ) -> Result<(), mpsc::error::SendError<Vec<KvCacheEvent>>> {
+        if events.is_empty() {
+            return Ok(());
+        }
+
+        let placement_events = events
+            .into_iter()
+            .map(|event| PlacementEvent::local_gpu(self.worker_id, event))
+            .collect();
+        self.tx.send(placement_events).map_err(|err| {
+            mpsc::error::SendError(err.0.into_iter().map(|event| event.event).collect())
+        })
     }
 
     pub fn publish_with_storage_tier(

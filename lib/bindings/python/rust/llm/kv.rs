@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use pythonize::{depythonize, pythonize};
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::sync::Arc;
@@ -20,7 +21,9 @@ use crate::Endpoint;
 ))]
 use clap::Parser;
 #[cfg(feature = "select-service")]
-use dynamo_kv_router::config::kv_router_config_from_dynamo_env;
+use dynamo_kv_router::TrackingHashAlgorithm;
+#[cfg(feature = "select-service")]
+use dynamo_kv_router::config::try_kv_router_config_from_dynamo_env;
 use dynamo_kv_router::config::{KvRouterConfig, RouterConfigOverride};
 use dynamo_kv_router::protocols::compute_block_hash_for_seq;
 use dynamo_kv_router::protocols::*;
@@ -305,6 +308,39 @@ struct SelectServiceCli {
     /// Approximate byte budget across resident pending selections
     #[arg(long)]
     selection_cache_max_bytes: Option<usize>,
+
+    /// Assume KV cache reuse when deriving active-sequence identities
+    #[arg(long, conflicts_with = "no_router_assume_kv_reuse")]
+    router_assume_kv_reuse: bool,
+
+    /// Generate random active-sequence identities instead of assuming KV reuse
+    #[arg(long, conflicts_with = "router_assume_kv_reuse")]
+    no_router_assume_kv_reuse: bool,
+
+    /// Hash function for router-derived active-sequence identities
+    #[arg(long)]
+    router_tracking_hash: Option<TrackingHashAlgorithm>,
+
+    /// File containing the 32-byte provider tracking key
+    #[arg(long)]
+    router_tracking_key_file: Option<std::path::PathBuf>,
+
+    /// Provider-managed tracking-key epoch identifier
+    #[arg(long)]
+    router_tracking_key_id: Option<String>,
+}
+
+#[cfg(feature = "select-service")]
+impl SelectServiceCli {
+    fn router_assume_kv_reuse_override(&self) -> Option<bool> {
+        if self.router_assume_kv_reuse {
+            Some(true)
+        } else if self.no_router_assume_kv_reuse {
+            Some(false)
+        } else {
+            None
+        }
+    }
 }
 
 #[cfg(all(test, feature = "select-service"))]
@@ -366,6 +402,32 @@ mod select_service_cli_tests {
         assert_eq!(config.max_entries, 100);
         assert_eq!(config.max_bytes, 1_048_576);
     }
+
+    #[test]
+    fn parses_router_assume_kv_reuse_overrides() {
+        let default = SelectServiceCli::try_parse_from(["dynamo.select_service"]).unwrap();
+        assert_eq!(default.router_assume_kv_reuse_override(), None);
+
+        let enabled =
+            SelectServiceCli::try_parse_from(["dynamo.select_service", "--router-assume-kv-reuse"])
+                .unwrap();
+        assert_eq!(enabled.router_assume_kv_reuse_override(), Some(true));
+
+        let disabled = SelectServiceCli::try_parse_from([
+            "dynamo.select_service",
+            "--no-router-assume-kv-reuse",
+        ])
+        .unwrap();
+        assert_eq!(disabled.router_assume_kv_reuse_override(), Some(false));
+
+        let conflict = SelectServiceCli::try_parse_from([
+            "dynamo.select_service",
+            "--router-assume-kv-reuse",
+            "--no-router-assume-kv-reuse",
+        ])
+        .unwrap_err();
+        assert_eq!(conflict.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
 }
 
 pub fn run_select_service_cli<I, T>(args: I) -> anyhow::Result<()>
@@ -383,13 +445,27 @@ where
         init_standalone_logging();
 
         let rt = tokio::runtime::Runtime::new()?;
+        let mut kv_router_config =
+            try_kv_router_config_from_dynamo_env().map_err(anyhow::Error::msg)?;
+        if let Some(assume_kv_reuse) = cli.router_assume_kv_reuse_override() {
+            kv_router_config.router_assume_kv_reuse = assume_kv_reuse;
+        }
+        if let Some(algorithm) = cli.router_tracking_hash {
+            kv_router_config.router_tracking_hash = algorithm;
+        }
+        if let Some(key_file) = cli.router_tracking_key_file {
+            kv_router_config.router_tracking_key_file = Some(key_file);
+        }
+        if let Some(key_id) = cli.router_tracking_key_id {
+            kv_router_config.router_tracking_key_id = Some(key_id);
+        }
         rt.block_on(selection::run_server(SelectionServiceConfig {
             port: cli.port,
             threads: cli.threads,
             indexer_peers: cli.indexer_peers,
             replica_sync_port: cli.replica_sync_port,
             replica_sync_peers: cli.replica_sync_peers,
-            kv_router_config: kv_router_config_from_dynamo_env(),
+            kv_router_config,
             selection_cache: selection_cache_config_from_overrides(
                 cli.selection_cache_ttl_secs,
                 cli.selection_cache_max_entries,
@@ -497,7 +573,9 @@ impl SelectionService {
                 "replica_sync_peers requires replica_sync_port",
             ));
         }
-        let mut builder = SelectionServiceBuilder::new(kv_router_config_from_dynamo_env())
+        let kv_router_config =
+            try_kv_router_config_from_dynamo_env().map_err(PyValueError::new_err)?;
+        let mut builder = SelectionServiceBuilder::new(kv_router_config)
             .indexer_threads(indexer_threads)
             .indexer_peers(indexer_peers.unwrap_or_default())
             .selection_cache(selection_cache.unwrap_or_default().inner);
@@ -949,6 +1027,30 @@ pub(crate) struct KvEventPublisher {
     kv_block_size: usize,
     dp_rank: DpRank,
     warning_count: Arc<AtomicU32>,
+    image_token_id: Option<u32>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+enum KvEventInput {
+    Stored {
+        token_ids: Vec<u32>,
+        num_block_tokens: Vec<u64>,
+        block_hashes: Vec<i64>,
+        parent_hash: Option<i64>,
+        block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
+        lora_name: Option<String>,
+        is_eagle: Option<bool>,
+        cache_salt: Option<String>,
+    },
+    Removed {
+        block_hashes: Vec<i64>,
+    },
+}
+
+fn depythonize_kv_event_inputs(events: &Bound<'_, PyAny>) -> PyResult<Vec<KvEventInput>> {
+    depythonize(events)
+        .map_err(|error| PyValueError::new_err(format!("invalid KV event batch: {error}")))
 }
 
 impl KvEventPublisher {
@@ -968,6 +1070,59 @@ impl KvEventPublisher {
             kv_block_size,
             dp_rank,
             warning_count: Arc::new(AtomicU32::new(0)),
+            // The unified backend does not run TRT-LLM multimodal, so this bridge
+            // carries no image marker; the non-unified path sets it via the
+            // constructor.
+            image_token_id: None,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn stored_event(
+        &self,
+        event_id: u64,
+        token_ids: &[u32],
+        num_block_tokens: &[u64],
+        block_hashes: &[i64],
+        parent_hash: Option<i64>,
+        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
+        lora_name: Option<&str>,
+        is_eagle: Option<bool>,
+        cache_salt: Option<&str>,
+    ) -> KvCacheEvent {
+        let block_hashes_u64: Vec<u64> = block_hashes.iter().map(|&hash| hash as u64).collect();
+        KvCacheEvent {
+            event_id,
+            data: KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: parent_hash.map(ExternalSequenceBlockHash::from),
+                start_position: None,
+                blocks: create_stored_blocks(
+                    self.kv_block_size as u32,
+                    token_ids,
+                    num_block_tokens,
+                    &block_hashes_u64,
+                    lora_name,
+                    cache_salt,
+                    &self.warning_count,
+                    block_mm_infos,
+                    is_eagle,
+                    self.image_token_id,
+                ),
+            }),
+            dp_rank: self.dp_rank,
+        }
+    }
+
+    fn removed_event(&self, event_id: u64, block_hashes: Vec<i64>) -> KvCacheEvent {
+        KvCacheEvent {
+            event_id,
+            data: KvCacheEventData::Removed(KvCacheRemoveData {
+                block_hashes: block_hashes
+                    .into_iter()
+                    .map(ExternalSequenceBlockHash::from)
+                    .collect(),
+            }),
+            dp_rank: self.dp_rank,
         }
     }
 }
@@ -1043,6 +1198,7 @@ impl KvEventPublisher {
             kv_block_size,
             dp_rank,
             warning_count: Arc::new(AtomicU32::new(0)),
+            image_token_id,
         })
     }
 
@@ -1060,12 +1216,7 @@ impl KvEventPublisher {
         is_eagle: Option<bool>,
         cache_salt: Option<String>,
     ) -> PyResult<()> {
-        let kv_block_size = self.kv_block_size as u32;
-        let dp_rank = self.dp_rank;
-        let warning_count = self.warning_count.clone();
         let inner = self.inner.clone();
-
-        let event_id = inner.next_event_id();
 
         let mm_infos = block_mm_infos
             .as_ref()
@@ -1073,51 +1224,71 @@ impl KvEventPublisher {
             .transpose()?;
 
         py.allow_threads(|| {
-            let block_hashes_u64: Vec<u64> = block_hashes.iter().map(|&h| h as u64).collect();
-            let event = KvCacheEvent {
-                event_id,
-                data: KvCacheEventData::Stored(KvCacheStoreData {
-                    parent_hash: parent_hash.map(ExternalSequenceBlockHash::from),
-                    start_position: None,
-                    blocks: create_stored_blocks(
-                        kv_block_size,
-                        &token_ids,
-                        &num_block_tokens,
-                        &block_hashes_u64,
-                        lora_name.as_deref(),
-                        cache_salt.as_deref(),
-                        &warning_count,
-                        mm_infos.as_deref(),
-                        is_eagle,
-                        None, // image_token_id: publish path keeps caller-supplied mm_infos
-                    ),
-                }),
-                dp_rank,
-            };
-
+            let event = self.stored_event(
+                inner.next_event_id(),
+                &token_ids,
+                &num_block_tokens,
+                &block_hashes,
+                parent_hash,
+                mm_infos.as_deref(),
+                lora_name.as_deref(),
+                is_eagle,
+                cache_salt.as_deref(),
+            );
             inner.publish(event).map_err(to_pyerr)
         })
     }
 
     fn publish_removed(&self, py: Python, block_hashes: Vec<i64>) -> PyResult<()> {
-        let dp_rank = self.dp_rank;
         let inner = self.inner.clone();
 
-        // Use shared monotonic event_id counter from the inner publisher
-        let event_id = inner.next_event_id();
-
         py.allow_threads(|| {
-            let block_hashes: Vec<ExternalSequenceBlockHash> = block_hashes
-                .into_iter()
-                .map(ExternalSequenceBlockHash::from)
-                .collect();
-            let event = KvCacheEvent {
-                event_id,
-                data: KvCacheEventData::Removed(KvCacheRemoveData { block_hashes }),
-                dp_rank,
-            };
-
+            let event = self.removed_event(inner.next_event_id(), block_hashes);
             inner.publish(event).map_err(to_pyerr)
+        })
+    }
+
+    /// Publish an ordered list of typed KV events as one processor input.
+    ///
+    /// The complete Python list is deserialized before anything is enqueued,
+    /// so invalid input cannot partially publish a batch. Event construction
+    /// and block hashing run without holding the Python GIL.
+    fn publish_batch(&self, py: Python, events: Bound<PyAny>) -> PyResult<()> {
+        let inputs = depythonize_kv_event_inputs(&events)?;
+        let inner = self.inner.clone();
+        py.allow_threads(|| {
+            let mut converted = Vec::with_capacity(inputs.len());
+            for input in inputs {
+                let event_id = inner.next_event_id();
+                let event = match input {
+                    KvEventInput::Stored {
+                        token_ids,
+                        num_block_tokens,
+                        block_hashes,
+                        parent_hash,
+                        block_mm_infos,
+                        lora_name,
+                        is_eagle,
+                        cache_salt,
+                    } => self.stored_event(
+                        event_id,
+                        &token_ids,
+                        &num_block_tokens,
+                        &block_hashes,
+                        parent_hash,
+                        block_mm_infos.as_deref(),
+                        lora_name.as_deref(),
+                        is_eagle,
+                        cache_salt.as_deref(),
+                    ),
+                    KvEventInput::Removed { block_hashes } => {
+                        self.removed_event(event_id, block_hashes)
+                    }
+                };
+                converted.push(event);
+            }
+
+            inner.publish_batch(converted).map_err(to_pyerr)
         })
     }
 

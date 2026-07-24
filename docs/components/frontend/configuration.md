@@ -74,6 +74,9 @@ explains when to adjust these settings.
 | `--router-track-active-blocks` / `--no-router-track-active-blocks` | `DYN_ROUTER_TRACK_ACTIVE_BLOCKS` | `true` | Track blocks used by in-progress requests for load balancing |
 | `--router-track-output-blocks` / `--no-router-track-output-blocks` | `DYN_ROUTER_TRACK_OUTPUT_BLOCKS` | `false` | Track output blocks with fractional decay during generation |
 | `--router-assume-kv-reuse` / `--no-router-assume-kv-reuse` | `DYN_ROUTER_ASSUME_KV_REUSE` | `true` | Assume KV cache reuse when tracking active blocks |
+| `--router-tracking-hash` | `DYN_ROUTER_TRACKING_HASH` | `public-xxh3-v1` | Tracking-identity algorithm: `public-xxh3-v1` or experimental `keyed-xxh3-v1` |
+| `--router-tracking-key-file` | `DYN_ROUTER_TRACKING_KEY_FILE` | — | File containing exactly 32 raw key bytes. Required by `keyed-xxh3-v1` |
+| `--router-tracking-key-id` | `DYN_ROUTER_TRACKING_KEY_ID` | — | Nonempty provider-managed key epoch. Required by `keyed-xxh3-v1` |
 | `--router-track-prefill-tokens` / `--no-router-track-prefill-tokens` | `DYN_ROUTER_TRACK_PREFILL_TOKENS` | `true` | Include prompt-side prefill tokens in active-load accounting |
 | `--router-prefill-load-model` | `DYN_ROUTER_PREFILL_LOAD_MODEL` | `none` | Prompt-side load model: `none` for static load or `aic` for oldest-prefill decay using an AIC prediction |
 | `--router-queue-threshold` | `DYN_ROUTER_QUEUE_THRESHOLD` | unset | Queue threshold fraction of prefill capacity. Setting a numeric value enables queueing; priority hints only affect requests waiting in this queue |
