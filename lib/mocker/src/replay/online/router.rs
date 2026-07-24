@@ -6,7 +6,6 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::{Context, Result, anyhow};
-use dynamo_kv_router::ConcurrentRadixTree;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::indexer::{
     KvIndexer, KvIndexerInterface, KvIndexerMetrics, ThreadPoolIndexer,
@@ -15,6 +14,9 @@ use dynamo_kv_router::protocols::{
     BlockHashOptions, OverlapScores, RouterEvent, RoutingConstraints, StorageTier, WorkerId,
 };
 use dynamo_kv_router::scheduling::TierOverlapBlocks;
+use dynamo_kv_router::{
+    ConcurrentRadixTree, RoutingPartitionRef, TrackingHashContext, TrackingHashScope,
+};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -135,6 +137,7 @@ pub(crate) struct KvReplayRouter {
     event_tx: Mutex<Option<mpsc::UnboundedSender<RouterEvent>>>,
     event_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     indexer: ReplayIndexer,
+    tracking_hash: TrackingHashContext,
 }
 
 impl KvReplayRouter {
@@ -145,6 +148,7 @@ impl KvReplayRouter {
         num_workers: usize,
     ) -> Result<Self> {
         let config = replay_router_config(args, router_config);
+        let tracking_hash = TrackingHashContext::from_config(&config)?;
         let indexer =
             create_replay_indexer(args.block_size as u32, config.router_event_threads as usize);
         let workers_with_configs = replay_workers_with_configs(args, num_workers);
@@ -189,6 +193,7 @@ impl KvReplayRouter {
             event_tx: Mutex::new(Some(event_tx)),
             event_task: Mutex::new(Some(event_task)),
             indexer,
+            tracking_hash,
         })
     }
 
@@ -229,9 +234,13 @@ impl KvReplayRouter {
                 )
             })
             .collect();
-        let token_seq = self.config.compute_seq_hashes_for_tracking(
+        let token_seq = self.config.compute_seq_hashes_for_tracking_with_context(
+            &self.tracking_hash,
+            TrackingHashScope {
+                partition: RoutingPartitionRef::new("replay", "default"),
+                block_size: self.block_size,
+            },
             &request.tokens,
-            self.block_size,
             None,
             BlockHashOptions::default(),
             None,
@@ -479,6 +488,44 @@ mod tests {
 
         low_task.await.unwrap();
         high_task.await.unwrap();
+        router.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn free_clears_prefill_load_without_first_token() {
+        let args = MockEngineArgs::builder()
+            .block_size(64)
+            .max_num_batched_tokens(Some(64))
+            .build()
+            .unwrap();
+        let router = ReplayRouter::new(
+            ReplayRouterMode::KvRouter,
+            &args,
+            Some(KvRouterConfig {
+                router_track_prefill_tokens: true,
+                ..KvRouterConfig::default()
+            }),
+            None,
+            1,
+        )
+        .unwrap();
+        let uuid = Uuid::from_u128(4);
+
+        router
+            .select_worker(&priority_request(4, 0, 0), 1)
+            .await
+            .unwrap();
+        assert_eq!(
+            router.debug_potential_loads(0, true)[0].potential_prefill_tokens,
+            64
+        );
+
+        router.on_complete(uuid).await.unwrap();
+
+        assert_eq!(
+            router.debug_potential_loads(0, true)[0].potential_prefill_tokens,
+            0
+        );
         router.shutdown().await.unwrap();
     }
 

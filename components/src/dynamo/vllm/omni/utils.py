@@ -20,6 +20,23 @@ DEFAULT_IMAGE_SIZE = "1024x1024"
 DEFAULT_VIDEO_SIZE = "832x480"
 
 
+def streaming_sampling_params(engine_client) -> list | None:
+    """Return vLLM-Omni defaults configured for incremental output."""
+    try:
+        from vllm_omni.entrypoints.utils import coerce_param_message_types
+
+        defaults = list(engine_client.default_sampling_params_list or [])
+        if not defaults:
+            return None
+        return coerce_param_message_types(defaults, is_streaming=True)
+    except Exception as e:  # noqa: BLE001 - retain engine defaults as fallback
+        logging.warning(
+            "Could not coerce streaming sampling params; using engine defaults: %s",
+            e,
+        )
+        return None
+
+
 def shm_deserialize(shm_meta: dict) -> Any:
     """Read and deserialize an OmniRequestOutput from shared memory."""
     return OmniSerializer.deserialize(shm_read_bytes(shm_meta))

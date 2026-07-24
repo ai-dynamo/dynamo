@@ -3,6 +3,7 @@
 
 import asyncio
 import re as re_mod
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 from unittest import mock
@@ -540,6 +541,29 @@ class TestMultimodalGuard:
         handler = self._make_handler(multimodal_processor=None)
         result = await self._prepare(handler, {"token_ids": [10, 20, 30]})
         assert result == [10, 20, 30]
+
+    @pytest.mark.asyncio
+    @pytest.mark.multimodal
+    async def test_rejected_cache_uuid_does_not_mutate_request(self):
+        handler = _ConcreteHandler.__new__(_ConcreteHandler)
+        request = {
+            "token_ids": [1, 2, 3],
+            "multi_modal_uuids": {"image_url": ["cached-image"]},
+            "max_tokens": 8,
+            "prefill_result": {
+                "disaggregated_params": {
+                    "worker_id": 7,
+                    "_epd_metadata": {"_prefill_prompt": "describe image"},
+                }
+            },
+        }
+        original_request = deepcopy(request)
+
+        with pytest.raises(ValueError, match="supported only by the vLLM backend"):
+            async for _ in handler._generate_locally_impl(request, MagicMock()):
+                pass
+
+        assert request == original_request
 
     @pytest.mark.asyncio
     async def test_decode_with_prefill_metadata_bypasses_guard(self):

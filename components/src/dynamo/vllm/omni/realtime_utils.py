@@ -21,6 +21,7 @@ from dynamo.vllm.omni.realtime_handler import RealtimeOmniHandler
 from dynamo.vllm.realtime.serving import build_realtime_serving
 
 from .args import OmniConfig
+from .utils import streaming_sampling_params
 
 logger = logging.getLogger(__name__)
 
@@ -107,25 +108,3 @@ async def init_omni_realtime(
     finally:
         logger.debug("Cleaning up realtime Omni worker")
         base.cleanup()
-
-
-def streaming_sampling_params(engine_client) -> list | None:
-    """Default per-stage sampling params coerced for streaming generation.
-
-    vLLM-Omni requires streaming requests to emit incremental (delta) outputs;
-    ``coerce_param_message_types`` flips the engine defaults accordingly. Falls
-    back to ``None`` (engine defaults) if anything is unavailable.
-    """
-    try:
-        from vllm_omni.entrypoints.utils import coerce_param_message_types
-
-        defaults = list(engine_client.default_sampling_params_list or [])
-        if not defaults:
-            return None
-        return coerce_param_message_types(defaults, is_streaming=True)
-    except Exception as e:  # noqa: BLE001 - fall back to engine defaults
-        logger.warning(
-            "Could not coerce streaming sampling params; using engine defaults: %s",
-            e,
-        )
-        return None

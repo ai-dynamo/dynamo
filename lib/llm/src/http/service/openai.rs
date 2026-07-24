@@ -4,7 +4,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fmt::Display,
-    sync::Arc,
+    sync::{Arc, LazyLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -23,7 +23,7 @@ use axum::{
 };
 use base64::Engine as _;
 use bytes::Bytes;
-use dynamo_runtime::config::environment_names::llm as env_llm;
+use dynamo_runtime::config::{env_is_truthy, environment_names::llm as env_llm};
 use dynamo_runtime::{
     pipeline::{AsyncEngineContextProvider, Context},
     protocols::annotated::AnnotationsProvider,
@@ -59,6 +59,7 @@ use crate::protocols::openai::{
         NvCreateChatCompletionStreamResponse,
     },
     completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
+    delta_common,
     embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
     images::{NvCreateImageRequest, NvImagesResponse},
     responses::{NvCreateResponse, NvResponse, ResponseParams, chat_completion_to_response},
@@ -80,6 +81,14 @@ pub const DYNAMO_REQUEST_ID_HEADER: &str = "x-dynamo-request-id";
 pub const ANNOTATION_REQUEST_ID: &str = "request_id";
 
 const VALIDATION_PREFIX: &str = "Validation: ";
+const BATCH_FILE_STORAGE_NOT_IMPLEMENTED: &str = "Batch file storage is not implemented yet.";
+const BATCH_JOB_STATE_NOT_IMPLEMENTED: &str =
+    "Batch job lifecycle persistence is not implemented yet.";
+const BATCH_OUTPUT_RETRIEVAL_NOT_IMPLEMENTED: &str =
+    "Batch output file retrieval is not implemented yet.";
+
+static FORCE_INCLUDE_USAGE: LazyLock<bool> =
+    LazyLock::new(|| env_is_truthy(env_llm::DYN_ENABLE_FORCE_INCLUDE_USAGE));
 
 use super::error::{SanitizedError, overload_status_code};
 
@@ -630,6 +639,9 @@ async fn handler_completions(
 ) -> Result<Response, ErrorResponse> {
     ensure_json_content_type(&headers)?;
     let mut request: NvCreateCompletionRequest = parse_json_request("completions", &body)?;
+    if *FORCE_INCLUDE_USAGE && request.inner.stream.unwrap_or(false) {
+        delta_common::force_include_usage(&mut request.inner.stream_options);
+    }
 
     // return a 503 if the service or model is not ready
     check_ready(&state)?;
@@ -873,6 +885,86 @@ async fn completions_single(
     }
 }
 
+fn add_optional_token_count(total: &mut Option<u32>, value: Option<u32>) {
+    if let Some(value) = value {
+        *total = Some(total.unwrap_or_default().saturating_add(value));
+    }
+}
+
+fn merge_completion_usage(
+    total: &mut dynamo_protocols::types::CompletionUsage,
+    usage: dynamo_protocols::types::CompletionUsage,
+) {
+    total.prompt_tokens = total.prompt_tokens.saturating_add(usage.prompt_tokens);
+    total.completion_tokens = total
+        .completion_tokens
+        .saturating_add(usage.completion_tokens);
+    total.total_tokens = total.total_tokens.saturating_add(usage.total_tokens);
+
+    if let Some(details) = usage.prompt_tokens_details {
+        let total_details = total.prompt_tokens_details.get_or_insert_default();
+        add_optional_token_count(&mut total_details.audio_tokens, details.audio_tokens);
+        add_optional_token_count(&mut total_details.cached_tokens, details.cached_tokens);
+    }
+
+    if let Some(details) = usage.completion_tokens_details {
+        let total_details = total.completion_tokens_details.get_or_insert_default();
+        add_optional_token_count(
+            &mut total_details.accepted_prediction_tokens,
+            details.accepted_prediction_tokens,
+        );
+        add_optional_token_count(&mut total_details.audio_tokens, details.audio_tokens);
+        add_optional_token_count(
+            &mut total_details.reasoning_tokens,
+            details.reasoning_tokens,
+        );
+        add_optional_token_count(
+            &mut total_details.rejected_prediction_tokens,
+            details.rejected_prediction_tokens,
+        );
+    }
+}
+
+/// Combine the terminal usage-only chunks from per-prompt streams into one
+/// request-level chunk. Continuous usage attached to content chunks passes
+/// through unchanged because those values are cumulative snapshots.
+fn aggregate_batch_completion_usage(
+    stream: impl futures::Stream<Item = Annotated<NvCreateCompletionResponse>>,
+    request_id: String,
+) -> impl futures::Stream<Item = Annotated<NvCreateCompletionResponse>> {
+    async_stream::stream! {
+        let mut stream = Box::pin(stream);
+        let mut aggregate_usage = dynamo_protocols::types::CompletionUsage::default();
+        let mut final_usage_chunk = None;
+
+        while let Some(mut response) = stream.next().await {
+            let terminal_usage = response.data.as_mut().and_then(|data| {
+                data.inner
+                    .choices
+                    .is_empty()
+                    .then(|| data.inner.usage.take())
+                    .flatten()
+            });
+
+            if let Some(usage) = terminal_usage {
+                merge_completion_usage(&mut aggregate_usage, usage);
+                final_usage_chunk = Some(response);
+                continue;
+            }
+
+            yield response;
+        }
+
+        if let Some(mut response) = final_usage_chunk {
+            if let Some(data) = response.data.as_mut() {
+                data.inner.id = format!("cmpl-{request_id}");
+                data.inner.usage = Some(aggregate_usage);
+            }
+            yield response;
+        }
+    }
+}
+
 /// Handle batch prompt completions (multiple prompts with n choices each)
 #[tracing::instrument(skip_all)]
 async fn completions_batch(
@@ -977,6 +1069,7 @@ async fn completions_batch(
 
     // Merge all streams
     let merged_stream = stream::select_all(all_streams);
+    let merged_stream = aggregate_batch_completion_usage(merged_stream, request_id.clone());
 
     // capture the context to cancel the stream if the client disconnects
     let ctx = first_ctx.expect("At least one stream should be generated");
@@ -1251,6 +1344,9 @@ async fn handler_chat_completions(
 ) -> Result<Response, ErrorResponse> {
     ensure_json_content_type(&headers)?;
     let mut request: NvCreateChatCompletionRequest = parse_json_request("chat completions", &body)?;
+    if *FORCE_INCLUDE_USAGE && request.inner.stream.unwrap_or(false) {
+        delta_common::force_include_usage(&mut request.inner.stream_options);
+    }
 
     // return a 503 if the service is not ready (process-level + per-model
     // serving readiness). An aggregated request to a decode-only namespace
@@ -1602,18 +1698,15 @@ const MAX_LEADING_ANNOTATIONS: usize = 16;
 /// Returns Err(ErrorResponse) if error detected, Ok(stream) otherwise — the
 /// returned stream replays any buffered annotation frames in their original
 /// order before yielding the remaining items.
-pub(super) async fn check_for_backend_error(
-    mut stream: impl futures::Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>>
-    + Send
-    + Unpin
-    + 'static,
-) -> Result<
-    impl futures::Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send,
-    ErrorResponse,
-> {
+pub(super) async fn check_for_backend_error<T>(
+    mut stream: impl futures::Stream<Item = Annotated<T>> + Send + Unpin + 'static,
+) -> Result<impl futures::Stream<Item = Annotated<T>> + Send, ErrorResponse>
+where
+    T: Serialize + Send + 'static,
+{
     use futures::stream::StreamExt;
 
-    let mut buffered: Vec<Annotated<NvCreateChatCompletionStreamResponse>> = Vec::new();
+    let mut buffered: Vec<Annotated<T>> = Vec::new();
     while let Some(event) = stream.next().await {
         if is_annotation_frame(&event) && buffered.len() < MAX_LEADING_ANNOTATIONS {
             buffered.push(event);
@@ -2818,6 +2911,69 @@ pub fn embeddings_router(
     (vec![doc], router)
 }
 
+/// Create an Axum [`Router`] for the OpenAI Batch API skeleton.
+///
+/// The first slice exposes the route and protocol shape. Durable file storage,
+/// batch job persistence, dispatch, and output assembly are implemented by
+/// follow-up work, so handlers return explicit 501 responses instead of
+/// accepting work that cannot complete yet.
+pub fn batch_router(
+    state: Arc<service_v2::State>,
+    files_path: Option<String>,
+    batches_path: Option<String>,
+) -> (Vec<RouteDoc>, Router) {
+    let files_path = files_path.unwrap_or("/v1/files".to_string());
+    let file_content_path = format!("{}/{{file_id}}/content", files_path);
+    let batches_path = batches_path.unwrap_or("/v1/batches".to_string());
+    let batch_path = format!("{}/{{batch_id}}", batches_path);
+
+    let docs = vec![
+        RouteDoc::new(axum::http::Method::POST, &files_path),
+        RouteDoc::new(axum::http::Method::GET, &file_content_path),
+        RouteDoc::new(axum::http::Method::POST, &batches_path),
+        RouteDoc::new(axum::http::Method::GET, &batch_path),
+    ];
+
+    let router = Router::new()
+        .route(&files_path, post(create_batch_file))
+        .route(&file_content_path, get(retrieve_batch_file_content))
+        .route(&batches_path, post(create_batch))
+        .route(&batch_path, get(retrieve_batch))
+        .layer(middleware::from_fn(smart_json_error_middleware))
+        .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
+        .with_state(state);
+
+    (docs, router)
+}
+
+async fn create_batch_file() -> Result<Response, ErrorResponse> {
+    Err(ErrorMessage::not_implemented_error(
+        BATCH_FILE_STORAGE_NOT_IMPLEMENTED,
+    ))
+}
+
+async fn create_batch() -> Result<Response, ErrorResponse> {
+    Err(ErrorMessage::not_implemented_error(
+        BATCH_JOB_STATE_NOT_IMPLEMENTED,
+    ))
+}
+
+async fn retrieve_batch(
+    axum::extract::Path(_batch_id): axum::extract::Path<String>,
+) -> Result<Response, ErrorResponse> {
+    Err(ErrorMessage::not_implemented_error(
+        BATCH_JOB_STATE_NOT_IMPLEMENTED,
+    ))
+}
+
+async fn retrieve_batch_file_content(
+    axum::extract::Path(_file_id): axum::extract::Path<String>,
+) -> Result<Response, ErrorResponse> {
+    Err(ErrorMessage::not_implemented_error(
+        BATCH_OUTPUT_RETRIEVAL_NOT_IMPLEMENTED,
+    ))
+}
+
 /// List Models
 pub fn list_models_router(
     state: Arc<service_v2::State>,
@@ -2983,6 +3139,7 @@ async fn images(
         .model
         .as_ref()
         .map(|m| match m {
+            dynamo_protocols::types::ImageModel::GptImage2 => "gpt-image-2".to_string(),
             dynamo_protocols::types::ImageModel::DallE2 => "dall-e-2".to_string(),
             dynamo_protocols::types::ImageModel::DallE3 => "dall-e-3".to_string(),
             dynamo_protocols::types::ImageModel::GptImage1 => "gpt-image-1".to_string(),
@@ -3388,6 +3545,34 @@ pub fn videos_router(
     (vec![doc, stream_doc], router)
 }
 
+fn audio_content_type(format: &str) -> &'static str {
+    match format {
+        "mp3" => "audio/mpeg",
+        "flac" => "audio/flac",
+        "pcm" => "audio/pcm",
+        "aac" => "audio/aac",
+        "opus" => "audio/ogg; codecs=opus",
+        _ => "audio/wav",
+    }
+}
+
+fn decode_audio_chunks(response: &NvAudioSpeechResponse) -> Result<Vec<Bytes>, String> {
+    response
+        .data
+        .iter()
+        .map(|audio| {
+            let encoded = audio
+                .b64_json
+                .as_deref()
+                .ok_or_else(|| "Audio response did not contain base64 data".to_string())?;
+            base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map(Bytes::from)
+                .map_err(|e| format!("Failed to decode audio data: {e}"))
+        })
+        .collect()
+}
+
 async fn audio_speech(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
@@ -3402,7 +3587,7 @@ async fn audio_speech(
     let request = context_from_headers(request, request_id, &headers)?;
     let request_id = request.id().to_string();
 
-    let streaming = false;
+    let streaming = request.data_source.as_deref() != Some("url");
 
     // model is optional in the request; fall back to a model that can actually
     // serve right now (complete worker set), not just any displayable one, so
@@ -3438,10 +3623,19 @@ async fn audio_speech(
 
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
-    let stream = engine
-        .generate(request)
+    let stream = engine.generate(request).await.map_err(|e| {
+        let err_response = ErrorMessage::from_anyhow(e, "Failed to generate audio");
+        inflight.mark_error(extract_error_type_from_response(&err_response));
+        err_response
+    })?;
+
+    let ctx = stream.context();
+    let stream = check_for_backend_error(stream)
         .await
-        .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate audio"))?;
+        .map_err(|error_response| {
+            inflight.mark_error(extract_error_type_from_response(&error_response));
+            error_response
+        })?;
 
     let mut http_queue_guard = Some(http_queue_guard);
     let stream = stream.inspect(move |response| {
@@ -3451,6 +3645,135 @@ async fn audio_speech(
             &mut http_queue_guard,
         );
     });
+
+    if streaming {
+        let mut stream = Box::pin(stream);
+        let first_response = loop {
+            let Some(annotated) = stream.next().await else {
+                let err_response = ErrorMessage::internal_server_error(
+                    "Audio stream ended without producing data",
+                );
+                inflight.mark_error(extract_error_type_from_response(&err_response));
+                return Err(err_response);
+            };
+            let annotated = annotated.ok().map_err(|e| {
+                let err_response = ErrorMessage::internal_server_error_with_details(
+                    "Audio stream failed before producing data",
+                    e.to_string(),
+                );
+                inflight.mark_error(extract_error_type_from_response(&err_response));
+                err_response
+            })?;
+            if let Some(response) = annotated.data {
+                break response;
+            }
+        };
+
+        if first_response.status == "failed" {
+            inflight.mark_error(ErrorType::Internal);
+            return Ok((StatusCode::BAD_REQUEST, Json(first_response)).into_response());
+        }
+
+        let content_type = first_response
+            .data
+            .first()
+            .map(|audio| audio_content_type(&audio.output_format))
+            .unwrap_or("audio/wav");
+        let first_chunks = decode_audio_chunks(&first_response).map_err(|e| {
+            let err_response = ErrorMessage::internal_server_error_with_details(
+                "Failed to decode audio stream",
+                e,
+            );
+            inflight.mark_error(extract_error_type_from_response(&err_response));
+            err_response
+        })?;
+        if first_chunks.is_empty() {
+            let err_response =
+                ErrorMessage::internal_server_error("Audio response did not contain data");
+            inflight.mark_error(extract_error_type_from_response(&err_response));
+            return Err(err_response);
+        }
+
+        let (mut connection_handle, mut stream_handle) = create_connection_monitor(
+            ctx.clone(),
+            Some(state.metrics_clone()),
+            CancellationLabels {
+                model: model.clone(),
+                endpoint: Endpoint::Audios.to_string(),
+                request_type: "stream".to_string(),
+            },
+        )
+        .await;
+        connection_handle.disarm();
+        stream_handle.arm();
+        inflight.mark_error(ErrorType::Cancelled);
+
+        let body_stream = async_stream::stream! {
+            for chunk in first_chunks {
+                yield Ok::<Bytes, std::io::Error>(chunk);
+            }
+
+            loop {
+                tokio::select! {
+                    item = stream.next() => {
+                        let Some(annotated) = item else {
+                            inflight.mark_ok();
+                            stream_handle.disarm();
+                            break;
+                        };
+                        let annotated = match annotated.ok() {
+                            Ok(annotated) => annotated,
+                            Err(e) => {
+                                inflight.mark_error(ErrorType::Internal);
+                                stream_handle.disarm();
+                                yield Err(std::io::Error::other(e.to_string()));
+                                break;
+                            }
+                        };
+                        let Some(response) = annotated.data else {
+                            continue;
+                        };
+                        if response.status == "failed" {
+                            inflight.mark_error(ErrorType::Internal);
+                            stream_handle.disarm();
+                            yield Err(std::io::Error::other(
+                                response.error.unwrap_or_else(|| "Audio generation failed".to_string())
+                            ));
+                            break;
+                        }
+                        match decode_audio_chunks(&response) {
+                            Ok(chunks) => {
+                                for chunk in chunks {
+                                    yield Ok(chunk);
+                                }
+                            }
+                            Err(e) => {
+                                inflight.mark_error(ErrorType::Internal);
+                                stream_handle.disarm();
+                                yield Err(std::io::Error::other(e));
+                                break;
+                            }
+                        }
+                    }
+                    _ = ctx.stopped() => {
+                        inflight.mark_error(ErrorType::Cancelled);
+                        stream_handle.disarm();
+                        break;
+                    }
+                }
+            }
+        };
+
+        return Response::builder()
+            .header("content-type", content_type)
+            .body(Body::from_stream(body_stream))
+            .map_err(|e| {
+                ErrorMessage::internal_server_error_with_details(
+                    "Failed to build audio response",
+                    e.to_string(),
+                )
+            });
+    }
 
     let response = NvAudioSpeechResponse::from_annotated_stream(stream)
         .await
@@ -3466,28 +3789,7 @@ async fn audio_speech(
 
     inflight.mark_ok();
 
-    // If b64_json is present (data_source defaulted or explicitly "b64_json"),
-    // decode and return binary with content-type from AudioData.output_format.
-    // (matching OpenAI/vLLM-Omni behavior: curl --output file.wav)
-    if let Some(first) = response.data.first()
-        && let Some(b64) = &first.b64_json
-        && let Ok(audio_bytes) = base64::engine::general_purpose::STANDARD.decode(b64)
-    {
-        let content_type = match first.output_format.as_str() {
-            "mp3" => "audio/mpeg",
-            "flac" => "audio/flac",
-            "pcm" => "audio/pcm",
-            "aac" => "audio/aac",
-            "opus" => "audio/ogg; codecs=opus",
-            _ => "audio/wav",
-        };
-        return Ok(Response::builder()
-            .header("content-type", content_type)
-            .body(axum::body::Body::from(audio_bytes))
-            .unwrap());
-    }
-
-    // Fallback: return JSON (url format responses)
+    // URL responses remain JSON because they contain metadata rather than audio bytes.
     Ok(Json(response).into_response())
 }
 
@@ -6221,6 +6523,139 @@ mod tests {
             !is_empty_completion_stream_response(&make_completion_chunk("", None, Some(usage))),
             "usage present → not empty",
         );
+    }
+
+    fn make_completion_usage_chunk(
+        id: &str,
+        usage: dynamo_protocols::types::CompletionUsage,
+    ) -> NvCreateCompletionResponse {
+        NvCreateCompletionResponse {
+            inner: CreateCompletionResponse {
+                id: id.to_string(),
+                choices: vec![],
+                created: 0,
+                model: "m".to_string(),
+                system_fingerprint: None,
+                object: "text_completion".to_string(),
+                usage: Some(usage),
+            },
+            nvext: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_completion_usage_is_aggregated_once() {
+        use dynamo_protocols::types::{
+            CompletionTokensDetails, CompletionUsage, PromptTokensDetails,
+        };
+
+        let continuous_usage = CompletionUsage {
+            prompt_tokens: 3,
+            completion_tokens: 1,
+            total_tokens: 4,
+            prompt_tokens_details: None,
+            completion_tokens_details: None,
+        };
+        let first_usage = CompletionUsage {
+            prompt_tokens: 3,
+            completion_tokens: 2,
+            total_tokens: 5,
+            prompt_tokens_details: Some(PromptTokensDetails {
+                audio_tokens: Some(1),
+                cached_tokens: Some(2),
+            }),
+            completion_tokens_details: Some(CompletionTokensDetails {
+                accepted_prediction_tokens: Some(1),
+                audio_tokens: None,
+                reasoning_tokens: Some(2),
+                rejected_prediction_tokens: Some(0),
+            }),
+        };
+        let second_usage = CompletionUsage {
+            prompt_tokens: 4,
+            completion_tokens: 1,
+            total_tokens: 5,
+            prompt_tokens_details: Some(PromptTokensDetails {
+                audio_tokens: Some(2),
+                cached_tokens: Some(3),
+            }),
+            completion_tokens_details: Some(CompletionTokensDetails {
+                accepted_prediction_tokens: Some(2),
+                audio_tokens: Some(1),
+                reasoning_tokens: None,
+                rejected_prediction_tokens: Some(1),
+            }),
+        };
+
+        let chunks = vec![
+            Annotated::from_data(make_completion_chunk(
+                "first",
+                None,
+                Some(continuous_usage.clone()),
+            )),
+            Annotated::from_data(make_completion_usage_chunk("cmpl-request-0", first_usage)),
+            Annotated::from_data(make_completion_chunk("second", None, None)),
+            Annotated::from_data(make_completion_usage_chunk("cmpl-request-1", second_usage)),
+        ];
+
+        let output: Vec<_> =
+            aggregate_batch_completion_usage(futures::stream::iter(chunks), "request".to_string())
+                .collect()
+                .await;
+
+        assert_eq!(output.len(), 3, "two content chunks and one usage chunk");
+        assert_eq!(
+            output[0]
+                .data
+                .as_ref()
+                .and_then(|data| data.inner.usage.as_ref()),
+            Some(&continuous_usage),
+            "continuous usage must pass through unchanged",
+        );
+
+        let final_response = output[2].data.as_ref().expect("final data chunk");
+        assert_eq!(final_response.inner.id, "cmpl-request");
+        assert!(final_response.inner.choices.is_empty());
+        let usage = final_response
+            .inner
+            .usage
+            .as_ref()
+            .expect("aggregate usage");
+        assert_eq!(usage.prompt_tokens, 7);
+        assert_eq!(usage.completion_tokens, 3);
+        assert_eq!(usage.total_tokens, 10);
+        let prompt_details = usage
+            .prompt_tokens_details
+            .as_ref()
+            .expect("prompt token details");
+        assert_eq!(prompt_details.audio_tokens, Some(3));
+        assert_eq!(prompt_details.cached_tokens, Some(5));
+        let completion_details = usage
+            .completion_tokens_details
+            .as_ref()
+            .expect("completion token details");
+        assert_eq!(completion_details.accepted_prediction_tokens, Some(3));
+        assert_eq!(completion_details.audio_tokens, Some(1));
+        assert_eq!(completion_details.reasoning_tokens, Some(2));
+        assert_eq!(completion_details.rejected_prediction_tokens, Some(1));
+    }
+
+    #[tokio::test]
+    async fn batch_completion_without_usage_is_unchanged() {
+        let chunks = vec![Annotated::from_data(make_completion_chunk(
+            "content", None, None,
+        ))];
+
+        let output: Vec<_> =
+            aggregate_batch_completion_usage(futures::stream::iter(chunks), "request".to_string())
+                .collect()
+                .await;
+
+        assert_eq!(output.len(), 1);
+        let response = output[0].data.as_ref().expect("content chunk");
+        assert_eq!(response.inner.id, "test");
+        assert_eq!(response.inner.choices[0].text, "content");
+        assert!(response.inner.usage.is_none());
     }
 
     // ── decode_base64_embedding_to_floats ────────────────────────────────

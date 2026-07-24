@@ -729,13 +729,26 @@ class GMSClientMemoryManager:
             scratch_handle=scratch_handle,
         )
         logger.info(
-            "[GMS] Reserved %d MiB VA at 0x%x, aliased 1x %d MiB scratch across %d chunks",
+            "[GMS] Reserved %d MiB VA at 0x%x, aliased a %d MiB scratch block across %d chunks",
             va_reserved_size // (1 << 20),
             va,
             self.scratch_size // (1 << 20),
             va_reserved_size // self.scratch_size,
         )
         return va
+
+    def scratch_summary(self) -> tuple[int, int, int]:
+        """Return (count, virtual_bytes, physical_bytes) of live scratch mappings.
+
+        virtual_bytes is the VA range reserved; physical_bytes is the DRAM
+        actually committed (distinct scratch blocks * scratch_size), far smaller
+        since each mapping aliases one block across its whole range.
+        """
+        mappings = self._scratch_mappings.values()
+        virtual = sum(m.size for m in mappings)
+        live_blocks = {m.scratch_handle for m in mappings if m.scratch_handle}
+        physical = len(live_blocks) * self.scratch_size
+        return len(self._scratch_mappings), virtual, physical
 
     def prepare_scratch_for_reallocation(self) -> None:
         """Move scratch bookkeeping into _mappings as preserved-VA records.

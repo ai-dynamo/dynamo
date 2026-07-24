@@ -274,6 +274,46 @@ def test_load_aware_preserves_prefill_load_scale() -> None:
     assert kwargs["prefill_load_scale"] == 2.5
 
 
+def test_tracking_hash_cli_flows_to_binding_kwargs(tmp_path: Path) -> None:
+    key_file = tmp_path / "tracking-key"
+    parser = argparse.ArgumentParser()
+    KvRouterArgGroup().add_arguments(parser)
+
+    args = parser.parse_args(
+        [
+            "--router-tracking-hash",
+            "keyed-xxh3-v1",
+            "--router-tracking-key-file",
+            str(key_file),
+            "--router-tracking-key-id",
+            "2026-01",
+        ]
+    )
+    kwargs = KvRouterConfigBase.from_cli_args(args).kv_router_kwargs()
+
+    assert kwargs["router_tracking_hash"] == "keyed-xxh3-v1"
+    assert kwargs["router_tracking_key_file"] == str(key_file)
+    assert kwargs["router_tracking_key_id"] == "2026-01"
+
+
+def test_tracking_hash_environment_flows_to_binding_kwargs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    key_file = tmp_path / "tracking-key"
+    monkeypatch.setenv("DYN_ROUTER_TRACKING_HASH", "keyed-xxh3-v1")
+    monkeypatch.setenv("DYN_ROUTER_TRACKING_KEY_FILE", str(key_file))
+    monkeypatch.setenv("DYN_ROUTER_TRACKING_KEY_ID", "2026-01")
+    parser = argparse.ArgumentParser()
+    KvRouterArgGroup().add_arguments(parser)
+
+    args = parser.parse_args([])
+    kwargs = KvRouterConfigBase.from_cli_args(args).kv_router_kwargs()
+
+    assert kwargs["router_tracking_hash"] == "keyed-xxh3-v1"
+    assert kwargs["router_tracking_key_file"] == str(key_file)
+    assert kwargs["router_tracking_key_id"] == "2026-01"
+
+
 def test_load_aware_preserves_cache_hit_weights() -> None:
     parser = argparse.ArgumentParser()
     KvRouterArgGroup().add_arguments(parser)

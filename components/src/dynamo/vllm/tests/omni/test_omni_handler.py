@@ -69,6 +69,7 @@ class TestEngineInputs:
         assert ei.sampling_params_list is None
         assert ei.response_format is None
         assert ei.output_format is None
+        assert ei.stream_audio is False
 
 
 class TestBuildEngineInputs:
