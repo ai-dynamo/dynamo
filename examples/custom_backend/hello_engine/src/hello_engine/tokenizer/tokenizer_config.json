@@ -1,0 +1,5 @@
+{
+  "tokenizer_class": "PreTrainedTokenizerFast",
+  "model_max_length": 4096,
+  "chat_template": "{% for message in messages %}<|{{ message.role }}|>{{ message.content }}\n{% endfor %}<|assistant|>"
+}
