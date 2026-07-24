@@ -396,12 +396,12 @@ def test_project_scale_to_budget_preserves_single_component_target_mask():
 
 
 def test_partial_decode_proposal_respects_residual_gpu_ceiling():
-    """Asymmetric ready counts: decode-only proposal must not assume prefill shrinks.
+    """Power-aware path: decode-only proposal must not assume prefill shrinks.
 
-    Current (7, 1), one GPU each, ceiling 8. A decode-only (or ready-echoed
-    prefill) proposal of 7 must leave prefill fixed and size decode against
-    the residual 1 GPU — never emit decode 4 from a joint clamp that assumed
-    prefill also dropped to 4 (applied (7, 4) = 11 GPUs).
+    Current (7, 1), one GPU each, ceiling 8. With power awareness on, the
+    ready-equal prefill echo is masked to None before the GPU clamp, so the
+    residual path sizes decode against the residual 1 GPU — never emit decode
+    4 from a joint clamp that assumed prefill also dropped to 4.
     """
     cfg = PlannerConfig(
         mode="disagg",
@@ -437,6 +437,33 @@ def test_partial_decode_proposal_respects_residual_gpu_ceiling():
     applied_d = 1 if (dec is None or dec.num_decode is None) else dec.num_decode
     assert applied_d <= 1
     assert 7 + applied_d <= 8
+
+
+def test_power_off_partial_proposal_keeps_joint_gpu_clamp():
+    """Power-off disagg keeps the historical joint-then-discard GPU clamp.
+
+    Same (7,1)/decode-7/ceiling-8 inputs as the power-aware residual test, but
+    without power awareness the joint clamp emits decode 4 (Ted P2 scope
+    guard: residual sizing must not change power-off behavior).
+    """
+    cfg = PlannerConfig(
+        mode="disagg",
+        enable_load_scaling=True,
+        enable_throughput_scaling=True,
+        optimization_target="sla",
+        served_model_name="test",
+        max_gpu_budget=8,
+        min_gpu_budget=-1,
+        enable_power_awareness=False,
+    )
+    adapter = OrchestratorEngineAdapter(cfg, _disagg_caps())
+    wc = WorkerCounts(
+        ready_num_prefill=7,
+        ready_num_decode=1,
+        expected_num_prefill=7,
+        expected_num_decode=1,
+    )
+    assert adapter._apply_gpu_final_budget(None, 7, wc) == (None, 4)
 
 
 def test_project_scale_to_does_not_apply_budget_on_baseline_only_noop():
