@@ -285,6 +285,8 @@ struct StateFlags {
     chat_endpoints_enabled: AtomicBool,
     cmpl_endpoints_enabled: AtomicBool,
     embeddings_endpoints_enabled: AtomicBool,
+    classify_endpoints_enabled: AtomicBool,
+    pooling_endpoints_enabled: AtomicBool,
     images_endpoints_enabled: AtomicBool,
     videos_endpoints_enabled: AtomicBool,
     audios_endpoints_enabled: AtomicBool,
@@ -301,6 +303,8 @@ impl StateFlags {
             EndpointType::Chat => self.chat_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Completion => self.cmpl_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Embedding => self.embeddings_endpoints_enabled.load(Ordering::Relaxed),
+            EndpointType::Classify => self.classify_endpoints_enabled.load(Ordering::Relaxed),
+            EndpointType::Pooling => self.pooling_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Images => self.images_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Videos => self.videos_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Audios => self.audios_endpoints_enabled.load(Ordering::Relaxed),
@@ -324,6 +328,12 @@ impl StateFlags {
                 .store(enabled, Ordering::Relaxed),
             EndpointType::Embedding => self
                 .embeddings_endpoints_enabled
+                .store(enabled, Ordering::Relaxed),
+            EndpointType::Classify => self
+                .classify_endpoints_enabled
+                .store(enabled, Ordering::Relaxed),
+            EndpointType::Pooling => self
+                .pooling_endpoints_enabled
                 .store(enabled, Ordering::Relaxed),
             EndpointType::Images => self
                 .images_endpoints_enabled
@@ -370,6 +380,8 @@ impl State {
                 chat_endpoints_enabled: AtomicBool::new(false),
                 cmpl_endpoints_enabled: AtomicBool::new(false),
                 embeddings_endpoints_enabled: AtomicBool::new(false),
+                classify_endpoints_enabled: AtomicBool::new(false),
+                pooling_endpoints_enabled: AtomicBool::new(false),
                 images_endpoints_enabled: AtomicBool::new(false),
                 videos_endpoints_enabled: AtomicBool::new(false),
                 audios_endpoints_enabled: AtomicBool::new(false),
