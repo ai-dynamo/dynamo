@@ -497,6 +497,7 @@ func crdDirectoryPaths(opts Options) []string {
 		filepath.Join(root, "internal", "controller", "testing", "volcano.sh"),
 		filepath.Join(root, "internal", "controller", "testing", "run.ai"),
 		filepath.Join(root, "internal", "controller", "testing", "nvidia"),
+		filepath.Join(root, "internal", "controller", "testing", "disaggregatedset"),
 		filepath.Join(root, "internal", "controller", "testing", "inference.networking.k8s.io"),
 		filepath.Join(root, "internal", "controller", "testing", "grove.io"),
 	}

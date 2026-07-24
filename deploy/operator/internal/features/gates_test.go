@@ -56,6 +56,7 @@ func allEnabledGates() Gates {
 		Checkpoint:       true,
 		Grove:            true,
 		LWS:              true,
+		DisaggregatedSet: true,
 		KaiScheduler:     true,
 		VolcanoScheduler: true,
 		DRA:              true,

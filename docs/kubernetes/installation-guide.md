@@ -235,6 +235,26 @@ helm install lws oci://registry.k8s.io/lws/charts/lws \
 
 See the [LWS docs](https://lws.sigs.k8s.io/docs/) and [Volcano docs](https://github.com/volcano-sh/volcano#quick-start-guide) for configuration options, and the [Multinode Deployment Guide](./deployment/multinode-deployment.md) for orchestrator selection.
 
+#### DisaggregatedSet on top of LWS
+
+If you want Dynamo to place multiple multinode worker roles into a single DisaggregatedSet, install LWS `v0.9.0` or newer. Dynamo builds and tests against `v0.9.0` as the current compatibility baseline for the `disaggregatedset.x-k8s.io/v1` API. Dynamo detects that API at runtime; there is no Helm value for DS in the `dynamo-platform` chart. Validate DS behavior when upgrading beyond the tested baseline.
+
+To request the DS path on a `DynamoGraphDeployment`, add:
+
+```yaml
+metadata:
+  annotations:
+    nvidia.com/enable-grove: "false"
+    nvidia.com/enable-disaggregatedset: "true"
+```
+
+The operator routes workloads in this order: Grove, opt-in DS, then the standard DCD pathway. This is routing precedence, not mutual exclusion between Grove and DS. When Grove is available and enabled, selecting DS requires both annotations shown above. If Grove is unavailable, `nvidia.com/enable-grove: "false"` is not required.
+
+Installing the DS API does not automatically move existing DGDs to DS. The `nvidia.com/enable-disaggregatedset: "true"` annotation is always required.
+
+> [!NOTE]
+> The current non-DS LWS pathway requires both the LWS and Volcano APIs. The DS pathway detects `disaggregatedset.x-k8s.io/v1` separately because DS itself does not rely on Volcano.
+
 ### Network Operator / RDMA
 
 RDMA setup is cloud-provider-specific. See the [Disaggregated Communication Guide](disagg-communication-guide.md) for transport options, UCX configuration, and performance expectations, and your cloud provider guide for setup instructions:

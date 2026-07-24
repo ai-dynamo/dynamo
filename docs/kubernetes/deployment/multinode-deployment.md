@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Multinode Deployments
-subtitle: Scales Dynamo inference across multiple GPU nodes with Grove and KAI-Scheduler for large-model tensor parallelism.
+subtitle: Scales Dynamo inference across multiple GPU nodes with Grove, LWS, and DisaggregatedSet.
 ---
 
 This guide explains how to deploy Dynamo workloads across multiple nodes. Multinode deployments enable you to scale compute-intensive LLM workloads across multiple physical machines, maximizing GPU utilization and supporting larger models.
@@ -70,19 +70,24 @@ LWS is a simple multinode deployment mechanism that allows you to deploy a workl
 
 Volcano is a Kubernetes native scheduler optimized for AI workloads at scale. It is used in conjunction with LWS to provide gang scheduling support.
 
+#### Using DisaggregatedSet
+
+DisaggregatedSet (DS) is an opt-in multinode path for clusters that install the `disaggregatedset.x-k8s.io/v1` API. Dynamo uses it to group multiple eligible multinode worker roles under one DS object instead of creating one LeaderWorkerSet per selected component.
+
 
 ## Core Concepts
 
 ### Orchestrator Selection Algorithm
 
-Dynamo automatically selects the best available orchestrator for multinode deployments using the following logic:
+Dynamo uses an ordered routing decision for multinode deployments:
 
-#### When Both Grove and LWS are Available:
-- **Grove is selected by default** (recommended for advanced AI workloads)
-- **LWS is selected** if you explicitly set `nvidia.com/enable-grove: "false"` annotation on your DGD resource
+1. **Grove:** selected when Grove is available and `nvidia.com/enable-grove` is not `"false"`.
+2. **DisaggregatedSet:** considered only when Grove was not selected and the DGD sets `nvidia.com/enable-disaggregatedset: "true"`. The DS API and requested role configuration must also be supported.
+3. **Standard DCD pathway:** used when neither Grove nor DS is selected. Multinode components on this pathway require LWS + Volcano.
 
-#### When Only One Orchestrator is Available:
-- The installed orchestrator (Grove or LWS) is automatically selected
+Grove and DS are not mutually exclusive features. Grove has higher routing priority, while DS requires explicit opt-in. Installing the DS API alone does not move existing DGDs from Grove or DCD to DS.
+
+To select DS when Grove is available, set both `nvidia.com/enable-grove: "false"` and `nvidia.com/enable-disaggregatedset: "true"`. If Grove is unavailable, only the DS opt-in annotation is required.
 
 #### Scheduler Integration:
 - **With Grove**: Dynamo uses Grove for multinode orchestration when the Grove API is available, unless you set `nvidia.com/enable-grove: "false"` on the DGD resource. Scheduler integration is configured separately:
@@ -90,6 +95,7 @@ Dynamo automatically selects the best available orchestrator for multinode deplo
   - **EXPERIMENTAL:** Volcano: Dynamo does not install Volcano. Set `global.volcano-scheduler.enabled=true` only when Volcano is already installed and the Volcano API is available. Select queues with `nvidia.com/volcano-queue`.
   - KAI-Scheduler and Volcano scheduler integration are mutually exclusive for a single Dynamo operator configuration because both set pod `schedulerName`. Helm rejects configurations that enable both integrations.
 - **With LWS**: Uses Volcano scheduler for gang scheduling and resource coordination
+- **With DisaggregatedSet**: Reuses the same multinode pod-template rendering as the LWS path, but groups selected worker roles into one DS. DS API detection is separate from Volcano detection.
 
 > **EXPERIMENTAL:** The Dynamo/Grove Volcano scheduler integration is newly introduced and opt-in. Volcano itself is a mature CNCF scheduler, but this integration is intended for clusters where Volcano is already installed and understood by the platform operator.
 >
@@ -152,6 +158,27 @@ metadata:
 spec:
   # ... your deployment spec
 ```
+
+**Request DisaggregatedSet:**
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: my-ds-deployment
+  annotations:
+    nvidia.com/enable-grove: "false"
+    nvidia.com/enable-disaggregatedset: "true"
+spec:
+  # ... your deployment spec
+```
+
+DS requests fall back to the standard DCD pathway when any of these conditions apply. Multinode components require LWS + Volcano after fallback; without that pathway, reconciliation reports that no multinode orchestrator is available.
+
+- The `disaggregatedset.x-k8s.io/v1` API is not available.
+- Fewer than two eligible multinode worker roles are selected.
+- A selected component uses `scalingAdapter`.
+- Selected roles mix zero replicas with positive replicas.
+- More than 10 eligible multinode worker roles are selected.
 
 
 ### The `multinode` Section
