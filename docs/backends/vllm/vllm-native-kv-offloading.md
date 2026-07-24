@@ -21,7 +21,7 @@ Status legend: ✅ validated end to end · ⚠️ available but not yet validate
 | Approximate KV routing (`--no-router-kv-events`) | ✅ | Validated with two workers. The router predicts GPU-tier reuse only, so lower-tier weights have no effect. |
 | Disaggregated serving (`MultiConnector`: `NixlConnector` + `OffloadingConnector`) | ⚠️ | Validated end to end with the pending Dynamo fix in [#11219](https://github.com/ai-dynamo/dynamo/pull/11219). |
 | Tensor parallelism (TP > 1) | ✅ | Validated with TP=2, including GPU eviction, CPU reload, and one event stream per engine. |
-| Models with sliding-window or Mamba/SSM layers | ⚠️ | The router sees only full-attention KV cache groups. |
+| Models with sliding-window or Mamba/SSM layers | ✅ | Validated with Gemma-2 and Falcon-H1. The router sees only full-attention KV cache groups. |
 | Disk and multi-tier offloading (`TieringOffloadingSpec`) | 🚧 | vLLM main emits FS and OBJ events; Dynamo tier mapping is in progress. |
 | Shared-pool routing | 🚧 | vLLM main emits optional locality metadata; Dynamo shared-pool indexing is in progress. |
 
