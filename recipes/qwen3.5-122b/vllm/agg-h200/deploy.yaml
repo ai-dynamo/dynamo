@@ -118,10 +118,7 @@ spec:
                 - --served-model-name
                 - Qwen/Qwen3.5-122B-A10B-FP8
                 - --trust-remote-code
-                # Multimodal (Image/Video): enables the vision path. Verified on H200 —
-                # boots without OOM alongside MTP at util 0.95, and image requests return
-                # real responses. Note: http:// image URLs are blocked by policy (use https,
-                # or set DYN_MM_ALLOW_INTERNAL=1 for internal hosts).
+                # Enables the vision path for Image/Video input.
                 - --enable-multimodal
                 - --moe-backend
                 - triton

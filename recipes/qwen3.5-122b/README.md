@@ -164,10 +164,6 @@ real acceptance.
 
 ## Limitations
 
-- **Multimodal (Image/Video) requires `--enable-multimodal`** (shipped). Image input is
-  verified on H200 (boots without OOM alongside MTP; image requests return real responses).
-  `http://` image URLs are rejected by policy — use `https://`, or set `DYN_MM_ALLOW_INTERNAL=1`
-  for internal hosts. Multiple images/videos per prompt need `--limit-mm-per-prompt` (default 1).
 - **`--max-num-seqs` must stay ≤ 228.** The Mamba/DeltaNet SSM cache is block-allocated
   at TP1; the vLLM default (`1024`) crashes at startup. The recipe ships `128`.
 - **`--kv-cache-dtype auto` (BF16 KV) is intentional** — the FP8 checkpoint ships no KV
