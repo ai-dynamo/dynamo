@@ -37,12 +37,11 @@ const (
 	DynamoComponentDeploymentConditionTypeDynamoComponentReady = "DynamoComponentReady"
 
 	// MainContainerName is the well-known name of the primary Dynamo workload
-	// container inside a component's `podTemplate.spec.containers`. The operator
-	// injects its defaults (image, command, env, ports, probes, resources,
-	// volume mounts) into this container. If no container with this name is
-	// present in the user-supplied `podTemplate`, the operator auto-generates
-	// it. Any other container in the `podTemplate` is treated as a user-managed
-	// sidecar.
+	// container inside a component's podTemplate.spec.containers. The
+	// podTemplate must include this container with a non-empty image. The
+	// operator injects its defaults (command, env, ports, probes, resources,
+	// volume mounts) into this container. Any other container in the
+	// podTemplate is treated as a user-managed sidecar.
 	MainContainerName = "main"
 )
 
@@ -113,18 +112,15 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +optional
 	GlobalDynamoNamespace bool `json:"globalDynamoNamespace,omitempty"`
 
-	// podTemplate is the pod template used to create the component's pods.
-	// The operator injects its defaults (image, command, env, ports, probes,
-	// resources, volume mounts) into the container named `"main"` inside
-	// `podTemplate.spec.containers`, merging user overrides by name. If no
-	// container named `"main"` is present, the operator auto-generates it
-	// with standard defaults. All other containers in `podTemplate.spec.containers`
-	// are treated as user-managed sidecars: the operator does not inject
-	// defaults into them, so sidecars must specify required fields (e.g. `image`)
-	// themselves. The validation webhook rejects pod templates where a
-	// non-`"main"` container is missing a required field such as `image`.
-	// +optional
-	PodTemplate *corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
+	// podTemplate is required and must include a container named "main" with
+	// a non-empty image. The operator merges defaults into that container.
+	// If the main image tag is not a Dynamo semantic version, set
+	// runtimeVersionOverride explicitly.
+	//
+	// All other containers are user-managed sidecars and must specify their
+	// required fields, including image.
+	// +required
+	PodTemplate *corev1.PodTemplateSpec `json:"podTemplate"`
 
 	// replicas is the desired number of Pods for this component. When
 	// `scalingAdapter` is set on this component, this field is managed by
