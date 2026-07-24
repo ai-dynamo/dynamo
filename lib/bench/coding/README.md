@@ -12,7 +12,8 @@ Rust-native exporters for privacy-preserving coding-agent traces.
 The Claude exporter lives in `dynamo-bench` and is invoked as:
 
 ```bash
-cargo run -p dynamo-bench --bin claude_trace_export -- \
+cargo run -p dynamo-bench --bin claude_trace_export \
+  --no-default-features --features claude-trace-export -- \
   --output-file /tmp/claude_trace.jsonl
 ```
 
@@ -39,7 +40,8 @@ If `--input-path` is omitted, the exporter:
 Use `--input-path` to restrict the export to a specific file or directory:
 
 ```bash
-cargo run -p dynamo-bench --bin claude_trace_export -- \
+cargo run -p dynamo-bench --bin claude_trace_export \
+  --no-default-features --features claude-trace-export -- \
   --input-path ~/.claude/projects/<encoded-path> \
   --output-file /tmp/claude_trace.jsonl
 ```
@@ -54,7 +56,8 @@ cargo run -p dynamo-bench --bin claude_trace_export -- \
 ## Important Flags
 
 ```bash
-cargo run -p dynamo-bench --bin claude_trace_export -- \
+cargo run -p dynamo-bench --bin claude_trace_export \
+  --no-default-features --features claude-trace-export -- \
   --input-path ~/.claude/projects/<encoded-path> \
   --tokenizer deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
   --block-size 64 \

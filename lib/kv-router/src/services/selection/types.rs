@@ -2,64 +2,26 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::{HashMap, HashSet};
-use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::identity::{RoutingPartitionId, default_routing_group};
 use crate::protocols::{
     DpRank, KvTransferEnforcement, RoutingConstraints, WorkerConfigLike, WorkerId, WorkerWithDpRank,
 };
 use crate::scheduling::PotentialLoad;
 use crate::scheduling::config::RouterConfigOverride;
 pub use crate::scheduling::{OverlapScoresResponse, SharedCacheOverlapScore, WorkerOverlapScore};
-use crate::services::indexer::registry::IndexerKey;
 use crate::services::overlap::MooncakeOverlapSummary;
 
 use super::input::PromptRequest;
 
 const DEFAULT_MODEL_NAME: &str = "default";
-const DEFAULT_ROUTING_GROUP: &str = "default";
 pub(super) const WORKER_TYPE: &str = "select";
 pub(super) const REQUEST_BODY_LIMIT_BYTES: usize = 8 * 1024 * 1024;
 
 fn default_model_name() -> String {
     DEFAULT_MODEL_NAME.to_string()
-}
-
-fn default_routing_group() -> String {
-    DEFAULT_ROUTING_GROUP.to_string()
-}
-
-#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize)]
-pub struct SelectionKey {
-    pub model_name: String,
-    pub routing_group: String,
-}
-
-impl SelectionKey {
-    pub(super) fn new(model_name: impl Into<String>, routing_group: impl Into<String>) -> Self {
-        Self {
-            model_name: model_name.into(),
-            routing_group: routing_group.into(),
-        }
-    }
-
-    pub(super) fn indexer_key(&self) -> IndexerKey {
-        IndexerKey {
-            model_name: self.model_name.clone(),
-            routing_group: self.routing_group.clone(),
-        }
-    }
-}
-
-impl fmt::Display for SelectionKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "model={} routing_group={}",
-            self.model_name, self.routing_group
-        )
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -187,8 +149,8 @@ impl WorkerCatalogRecord {
         }
     }
 
-    pub(super) fn key(&self) -> SelectionKey {
-        SelectionKey::new(self.model_name.clone(), self.routing_group.clone())
+    pub(super) fn key(&self) -> RoutingPartitionId {
+        RoutingPartitionId::new(self.model_name.clone(), self.routing_group.clone())
     }
 
     pub(super) fn dp_start(&self) -> u32 {
@@ -266,6 +228,34 @@ impl WorkerCatalogRecord {
         }
 
         missing
+    }
+}
+
+// Implemented manually because `model_name` and `routing_group` have custom
+// default values.
+impl Default for WorkerRequest {
+    fn default() -> Self {
+        Self {
+            worker_id: 0,
+            model_name: default_model_name(),
+            routing_group: default_routing_group(),
+            endpoint: None,
+            kv_events_endpoint: None,
+            kv_events_endpoints: HashMap::new(),
+            replay_endpoint: None,
+            block_size: None,
+            data_parallel_start_rank: None,
+            data_parallel_size: None,
+            max_num_batched_tokens: None,
+            total_kv_blocks: None,
+            stable_routing_id: None,
+            is_eagle: None,
+            taints: HashSet::new(),
+            topology_domains: HashMap::new(),
+            kv_transfer_domain: None,
+            kv_transfer_enforcement: None,
+            kv_transfer_preferred_weight: None,
+        }
     }
 }
 

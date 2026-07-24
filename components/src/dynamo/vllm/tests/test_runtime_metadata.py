@@ -2,14 +2,15 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
+from dynamo.llm import ModelType
 from dynamo.vllm.capacity import (
     STRICT_REQUEST_TOKEN_LIMIT_RUNTIME_KEY,
     get_metrics_model_name,
     get_spec_decode_runtime_data,
-    get_strict_request_runtime_data,
 )
 
 pytestmark = [
@@ -49,11 +50,23 @@ def test_metrics_model_name_falls_back_to_model():
     assert get_metrics_model_name(config) == "meta-llama/Llama-3.1-8B"
 
 
-def test_strict_request_runtime_data_uses_vllm_model_limit():
-    assert get_strict_request_runtime_data(4096) == {
-        STRICT_REQUEST_TOKEN_LIMIT_RUNTIME_KEY: 4096
-    }
-    assert get_strict_request_runtime_data(None) == {}
+@pytest.mark.parametrize(
+    ("model_type", "expected_limit"),
+    [(ModelType.Chat, "4096"), (ModelType.Embedding, None)],
+)
+def test_vllm_request_token_limit_is_generation_only(model_type, expected_limit):
+    from dynamo.vllm.main import _set_vllm_request_token_limit
+
+    runtime_config = SimpleNamespace(set_engine_specific=Mock())
+
+    _set_vllm_request_token_limit(runtime_config, model_type, 4096)
+
+    if expected_limit is None:
+        runtime_config.set_engine_specific.assert_not_called()
+    else:
+        runtime_config.set_engine_specific.assert_called_once_with(
+            STRICT_REQUEST_TOKEN_LIMIT_RUNTIME_KEY, expected_limit
+        )
 
 
 def test_spec_decode_runtime_data_falls_back_to_engine_args_json():

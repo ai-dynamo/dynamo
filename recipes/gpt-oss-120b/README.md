@@ -1,58 +1,117 @@
-# GPT-OSS-120B Recipes
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
 
-Production-ready deployment for **GPT-OSS-120B** using TensorRT-LLM on Blackwell (GB200) hardware.
+# gpt-oss-120b Recipes
 
-## Available Configurations
+Recipes for **openai/gpt-oss-120b** (MXFP4 MoE, 128 experts / top-4, GQA + sliding-window + attention sinks).
 
-| Configuration | GPUs | Mode | Description |
-|--------------|------|------|-------------|
-| [**trtllm/agg**](trtllm/agg/) | 4x GB200 | Aggregated | WideEP, ARM64 |
-| [**trtllm/disagg**](trtllm/disagg/) | 5x Blackwell (GB200/B200) | Disaggregated | Prefill/Decode split |
+## Configurations
+
+Dynamo + vLLM deployment profiles for the Mooncake agentic trace (64k/400/90%-KV) across two GPU SKUs and two topologies:
+
+|                          | B200 agentic (agg)                 | H200 agentic (agg)                 | B200 agentic (disagg)              | H200 agentic (disagg)              |
+|--------------------------|------------------------------------|------------------------------------|------------------------------------|------------------------------------|
+| **GPUs** (per node)      | 8x B200                            | 8x H200                            | 8x B200 (2 prefill + 6 decode)     | 8x H200 (4 prefill + 4 decode)     |
+| **Mode**                 | aggregated                         | aggregated                         | disaggregated                      | disaggregated                      |
+| **Framework**            | Dynamo 1.3.0 / vLLM 0.23           | Dynamo 1.3.0 / vLLM 0.23           | Dynamo 1.3.0 / vLLM 0.23¹          | Dynamo 1.3.0 / vLLM 0.23¹          |
+| **Deployment**           | DGD (8 pods, KV router)            | DGD (8 pods, KV router)            | single Pod, in-pod co-located¹     | single Pod, in-pod co-located¹     |
+| **Precision**            | MXFP4 + FP8 KV                     | MXFP4 + FP8 KV                     | MXFP4 + FP8 KV                     | MXFP4 + FP8 KV                     |
+| **Parallelism**          | 8x TP1 replicas                    | 8x TP1 replicas                    | 2x TP1 prefill + 6x TP1 decode³    | 4x TP1 prefill + 4x TP1 decode³    |
+| **MoE backend**          | flashinfer_trtllm (MXFP4xFP8)      | flashinfer_cutlass                 | flashinfer_trtllm                  | flashinfer_cutlass                 |
+| **Attention backend**    | FlashInfer                         | FlashInfer                         | FlashInfer                         | FlashInfer                         |
+| **Routing**              | KV-aware                           | KV-aware                           | KV-aware                           | KV-aware                           |
+| **Speculative decoding** | EAGLE3-v3 (DL=3), ON               | EAGLE3-v3 (DL=3), ON               | EAGLE3-v3 (DL=3), ON (both)¹       | EAGLE3-v3 (DL=3), ON (both)        |
+| **KV cache offloading**  | none (SimpleCPUOffload opt-in)     | **SimpleCPUOffload ON**            | none (NIXL-incompatible)           | none (NIXL-incompatible)           |
+
+
+## Supported features
+
+- Modality: Text (gpt-oss "harmony" format: reasoning + tool calls)
+- Reasoning (`gpt_oss` parser)
+- Tool / function calling (`harmony` tool-call parser) — `tool_calls` populates, `finish_reason: tool_calls`
 
 ## Prerequisites
 
-1. **Dynamo Platform installed** — See [Kubernetes Deployment Guide](../../docs/kubernetes/README.md)
-2. **GPU cluster** with GB200 (Blackwell) GPUs
-3. **HuggingFace token** with access to the model
+1. **Dynamo Platform installed** — see [Kubernetes Deployment Guide](../../docs/kubernetes/README.md). The recipes pull
+   `nvcr.io/nvidia/ai-dynamo/vllm-runtime` images via the `dynamo-ngc-token` image pull secret.
+2. **HuggingFace token** with access to `openai/gpt-oss-120b` and `nvidia/gpt-oss-120b-Eagle3-v3`:
+   ```bash
+   export NAMESPACE=your-namespace
+   kubectl create secret generic hf-token-secret \
+     --from-literal=HF_TOKEN="your-token" \
+     -n ${NAMESPACE}
+   ```
 
 ## Quick Start
 
+### 1. Create namespace
+
 ```bash
-# Set namespace
-export NAMESPACE=dynamo-demo
+export NAMESPACE=your-namespace
 kubectl create namespace ${NAMESPACE}
-
-# Create HuggingFace token secret
-kubectl create secret generic hf-token-secret \
-  --from-literal=HF_TOKEN="your-token-here" \
-  -n ${NAMESPACE}
-
-# Download model (update storageClassName in model-cache/model-cache.yaml first!)
-kubectl apply -f model-cache/ -n ${NAMESPACE}
-kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=3600s
-
-# Deploy
-kubectl apply -f trtllm/agg/deploy.yaml -n ${NAMESPACE}
 ```
 
-## Test the Deployment
+### 2. Create Storage
+
+> **Note:** Edit `model-cache/model-cache.yaml` first and update `storageClassName` to match your cluster (`kubectl get storageclass`).
 
 ```bash
-# Port-forward the frontend
-kubectl port-forward svc/gpt-oss-agg-frontend 8000:8000 -n ${NAMESPACE}
-
-# Send a test request
-curl http://localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "openai/gpt-oss-120b",
-    "messages": [{"role": "user", "content": "Hello!"}],
-    "max_tokens": 50
-  }'
+kubectl apply -f model-cache/model-cache.yaml -n ${NAMESPACE}
 ```
 
-## Notes
+### 3. Download model + EAGLE3 head
 
-- Update `storageClassName` in `model-cache/model-cache.yaml` before deploying
-- This recipe requires ARM64 (GB200) nodes — it will not run on x86 Hopper/Ampere hardware
-- Update the container image tag in `deploy.yaml` to match your Dynamo release version
+```bash
+kubectl apply -f model-cache/model-download.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=3600s
+```
+
+### 4. Deploy
+
+`agg` applies a DynamoGraphDeployment (8 worker pods); `disagg` applies a single co-located Pod + Service. Same command:
+
+```bash
+SKU=b200   # or h200
+TOPO=agg   # or disagg
+
+kubectl apply -f vllm/${TOPO}-${SKU}-agentic/deploy.yaml -n ${NAMESPACE}
+```
+
+### 5. Benchmark
+
+See [perf/README.md](perf/README.md) for the full benchmark workflow — trace staging on the PVC, running the AIPerf trace-replay Job ([perf/perf.yaml](perf/perf.yaml)), running a concurrency sweep, and fetching artifacts.
+
+## Optimization targets
+
+Recipes are optimized for the following configuration, at the target user interactivity:
+
+| Workload | Median ISL | Median OSL | KV cache hit rate | User output tok/s |
+|----------|------------|------------|-------------------|-------------------|
+| Agentic  | 64k        | 400        | 90%               | 50                |
+
+The benchmark reuses the Mooncake-format traces shipped with the Kimi-K2.6 recipe
+([../kimi-k2.6/perf/traces/](../kimi-k2.6/perf/traces/)); only the **agentic 15% subset** is needed. The traces
+are stored in Git LFS — run `git lfs pull --include "recipes/kimi-k2.6/perf/traces/*"` to fetch the actual
+files before staging. See [perf/README.md](perf/README.md) for details.
+
+## Performance results
+
+Measured 2026-07-09 on the agentic 15% trace (see [perf/README.md](perf/README.md)), 8 GPUs, with the
+**synthetic-acceptance EAGLE3 throughput proxy** (AL=2.72 on all workers — output is garbage by design; use for
+*relative* comparisons) and each recipe's KV-offload default. Per-GPU = system throughput / 8.
+
+| SKU  | config (shipped)                 | conc | tok/s/GPU | tok/s/user | TTFT avg | note                                        |
+|------|----------------------------------|------|-----------|------------|----------|---------------------------------------------|
+| B200 | **agg** — 8x TP1                 | c512 | **2896**  | 58         | 4.4s     | offload quality-neutral                     |
+| B200 | disagg — 2P6D in-pod             | c256 | 2069      | 99         | 5.6s     | plateau; TTFT-limited above c256            |
+| H200 | **agg** — 8x TP1 + CPU offload   | c256 | **1256**  | 47.5       | 1.4s     | at the 50-tps floor; offload = +9%, quality-neutral |
+| H200 | disagg — 4P4D in-pod             | c256 | 1046      | 43         | 4.4s     | best usable H200 split                      |
+
+## Known issues
+
+1. Multi-pod disaggregation is not supported — the disagg recipes run single-node in-pod (see ¹).
+2. Structured output (`response_format: json_object` / `json_schema`) is not working — may return invalid
+   JSON while speculative decoding is enabled; use tool calling or validate client-side.
+

@@ -27,6 +27,7 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
@@ -993,7 +994,7 @@ func newUpgradeDCDReconciler(
 		Config: &configv1alpha1.OperatorConfiguration{
 			Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
 		},
-		RuntimeConfig: &controller_common.RuntimeConfig{LWSEnabled: true},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{LWS: true}},
 		DockerSecretRetriever: &mockDockerSecretRetriever{
 			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 				return nil, nil

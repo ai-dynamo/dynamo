@@ -531,6 +531,7 @@ impl OpenAIOutputOptionsProvider for NvCreateChatCompletionRequest {
 impl ValidateRequest for NvCreateChatCompletionRequest {
     fn validate(&self) -> Result<(), anyhow::Error> {
         validate::validate_no_unsupported_fields(&self.unsupported_fields)?;
+        validate::validate_chat_template_args(self.chat_template_args.as_ref())?;
         validate::validate_messages(&self.inner.messages)?;
         validate::validate_model(&self.inner.model)?;
         // none for store
@@ -540,7 +541,10 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
         validate::validate_logit_bias(&self.inner.logit_bias)?;
         // none for logprobs
         validate::validate_top_logprobs(self.inner.top_logprobs)?;
-        // validate::validate_max_tokens(self.inner.max_tokens)?; // warning depricated field
+        // `max_tokens` is deprecated but still accepted as a fallback for
+        // `max_completion_tokens`, so it must be validated too.
+        #[allow(deprecated)]
+        validate::validate_max_tokens(self.inner.max_tokens)?;
         validate::validate_max_completion_tokens(self.inner.max_completion_tokens)?;
         validate::validate_n(self.inner.n)?;
         validate_completion_token_ids_single_choice(
@@ -580,9 +584,54 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
 mod tests {
     use super::*;
     use crate::engines::ValidateRequest;
-    use crate::protocols::common::{OutputOptionsProvider, StopConditionsProvider};
+    use crate::protocols::common::{
+        OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider,
+    };
     use dynamo_protocols::types::{ChatCompletionTool, ChatCompletionToolType, FunctionObject};
     use serde_json::json;
+
+    #[test]
+    fn test_top_k_sentinel_contract() {
+        for (top_k, expected) in [(-1, Some(-1)), (0, Some(-1)), (1, Some(1))] {
+            let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "top_k": top_k
+            }))
+            .expect("Failed to deserialize request");
+
+            ValidateRequest::validate(&request).expect("top_k must be valid");
+            assert_eq!(
+                request
+                    .extract_sampling_options()
+                    .expect("Failed to extract sampling options")
+                    .top_k,
+                expected
+            );
+        }
+
+        let null_request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "top_k": null
+        }))
+        .expect("Failed to deserialize request");
+        assert_eq!(
+            null_request
+                .extract_sampling_options()
+                .expect("Failed to extract sampling options")
+                .top_k,
+            None
+        );
+
+        let invalid_request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "top_k": -2
+        }))
+        .expect("Failed to deserialize request");
+        assert!(ValidateRequest::validate(&invalid_request).is_err());
+    }
 
     #[test]
     fn test_skip_special_tokens_none() {
@@ -806,6 +855,33 @@ mod tests {
             err.to_string()
                 .contains("tool named \"search\" in tool_choice is not present in tools")
         );
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_max_tokens() {
+        let request_json = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "max_tokens": 0
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(request_json).expect("Failed to deserialize request");
+
+        let err = ValidateRequest::validate(&request).expect_err("max_tokens: 0 must be rejected");
+        assert!(err.to_string().contains("Max tokens"));
+    }
+
+    #[test]
+    fn test_validate_accepts_positive_max_tokens() {
+        let request_json = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "max_tokens": 1
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(request_json).expect("Failed to deserialize request");
+
+        assert!(ValidateRequest::validate(&request).is_ok());
     }
 
     #[test]

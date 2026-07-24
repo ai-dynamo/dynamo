@@ -57,7 +57,6 @@ from .capacity import (
     per_rank_kv_blocks,
     set_strict_request_token_limit,
 )
-from .constants import DisaggregationMode
 from .handlers import get_dp_range_for_worker
 from .headless import run_dynamo_headless
 from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKER_ID
@@ -368,11 +367,6 @@ def setup_kv_event_publisher(
     if not config.engine_args.enable_prefix_caching:
         return None
 
-    # Skip KV event publishing for decode workers
-    if config.disaggregation_mode == DisaggregationMode.DECODE:
-        logger.info("Skipping KV event publisher setup for decode worker")
-        return None
-
     if config.engine_args.kv_events_config is None:
         return None
 
@@ -420,6 +414,7 @@ def setup_kv_event_publisher(
             enable_local_indexer=config.enable_local_indexer,
             dp_rank=dp_rank,
             image_token_id=image_token_id,
+            kv_state_endpoint=config.kv_state_endpoint,
         )
         kv_publishers.append(kv_publisher)
 
@@ -640,6 +635,15 @@ def setup_vllm_engine(
     )
 
 
+def _set_vllm_request_token_limit(
+    runtime_config: ModelRuntimeConfig,
+    model_type: ModelType,
+    max_model_len: int,
+) -> None:
+    if model_type != ModelType.Embedding:
+        set_strict_request_token_limit(runtime_config, max_model_len)
+
+
 async def register_vllm_model(
     model_input: ModelInput,
     model_type: ModelType,
@@ -672,8 +676,8 @@ async def register_vllm_model(
     """
     runtime_config = ModelRuntimeConfig()
     runtime_config.context_length = vllm_config.model_config.max_model_len
-    set_strict_request_token_limit(
-        runtime_config, vllm_config.model_config.max_model_len
+    _set_vllm_request_token_limit(
+        runtime_config, model_type, vllm_config.model_config.max_model_len
     )
 
     # Get runtime configuration from vLLM engine
@@ -699,11 +703,8 @@ async def register_vllm_model(
     runtime_config.total_kv_blocks = per_rank_kv_blocks(num_gpu_blocks, dp_range[1])
     runtime_config.max_num_seqs = runtime_values["max_num_seqs"]
     runtime_config.max_num_batched_tokens = runtime_values["max_num_batched_tokens"]
-    # Decode workers don't create the WorkerKvQuery endpoint, so don't advertise local indexer
-    runtime_config.enable_local_indexer = (
-        config.enable_local_indexer
-        and config.disaggregation_mode != DisaggregationMode.DECODE
-    )
+    runtime_config.enable_local_indexer = config.enable_local_indexer
+    runtime_config.kv_state_endpoint = config.kv_state_endpoint
 
     # Add tool/reasoning parsers for decode/aggregated workers. Prefill
     # workers have no OpenAI surface and don't run a parser — key off
@@ -760,22 +761,20 @@ async def register_vllm_model(
         worker_type=worker_type,
         needs=needs,
         ignore_weights=should_register_model_ignore_weights(config),
-        # Advertise the worker's LoRA slot budget on the BASE registration so the frontend
-        # allocator can place adapters onto idle-but-LoRA-capable workers before any adapter is
-        # loaded here. Only generative decode/aggregated workers serve the LoRA load endpoints
-        # (load_lora/unload_lora). Prefill and embedding workers register through this same path
-        # but do NOT serve them, so they must not advertise capacity they cannot fulfill — gate on
-        # the model type rather than worker_type (vLLM embedding registers as Aggregated). None
-        # (no capacity) for non-LoRA, prefill, or embedding workers.
-        max_gpu_lora_count=(
-            config.engine_args.max_loras
-            if (
-                getattr(config.engine_args, "enable_lora", False)
-                and model_type not in (ModelType.Prefill, ModelType.Embedding)
-            )
-            else None
-        ),
+        model_aliases=config.served_model_aliases or None,
+        # Advertise LoRA capacity on the BASE card so the frontend can place the first
+        # adapter onto an idle worker. Decode, aggregated, and prefill workers all serve
+        # lifecycle registration; embeddings still do not.
+        max_gpu_lora_count=_base_model_lora_capacity(config, model_type),
     )
+
+
+def _base_model_lora_capacity(config: Config, model_type: ModelType) -> int | None:
+    if not getattr(config.engine_args, "enable_lora", False):
+        return None
+    if model_type == ModelType.Embedding:
+        return None
+    return config.engine_args.max_loras
 
 
 def get_engine_cache_info(engine: AsyncLLM) -> dict[str, Any]:

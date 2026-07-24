@@ -5,14 +5,16 @@ use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
 use axum::response::Response;
+use std::io::Write;
 use std::net::TcpListener as StdTcpListener;
 use std::sync::Arc;
 use std::time::Duration;
 use tower::ServiceExt;
 
-use super::input::{MmRoutingInfoRequest, PromptRequest};
+use super::input::{MmRoutingInfoRequest, PromptRequest, TrackingHashInput};
 use super::server::create_router;
 use super::*;
+use crate::identity::RoutingPartitionRef;
 use crate::indexer::{LowerTierMatchDetails, MatchDetails, TieredMatchDetails};
 use crate::protocols::{
     BlockExtraInfo, BlockHashOptions, BlockMmObjectInfo, OverlapScores, StorageTier,
@@ -20,6 +22,8 @@ use crate::protocols::{
 };
 use crate::scheduling::config::RouterConfigOverride;
 use crate::scheduling::overlap::build_overlap_scores_response;
+use crate::{TrackingHashContext, TrackingHashScope};
+use tempfile::NamedTempFile;
 
 fn test_config() -> crate::config::KvRouterConfig {
     crate::config::KvRouterConfig {
@@ -32,6 +36,24 @@ fn test_config() -> crate::config::KvRouterConfig {
 fn app() -> Router {
     let service = Arc::new(SelectionService::new_local_for_test(test_config(), 1));
     create_router(Arc::new(AppState { service }))
+}
+
+fn normalize_prompt(request: &PromptRequest) -> super::input::NormalizedPrompt {
+    let config = test_config();
+    let context = TrackingHashContext::from_config(&config).unwrap();
+    request
+        .normalize_for_selection(
+            false,
+            TrackingHashInput {
+                context: &context,
+                scope: TrackingHashScope {
+                    partition: RoutingPartitionRef::new("model", "default"),
+                    block_size: 4,
+                },
+                assume_kv_reuse: true,
+            },
+        )
+        .expect("normalize prompt")
 }
 
 async fn response_json(response: Response) -> serde_json::Value {
@@ -131,9 +153,7 @@ fn prompt_normalization_uses_mm_routing_info_and_eagle_hashing() {
         is_eagle: Some(true),
     };
 
-    let normalized = request
-        .normalize_for_selection(4, false)
-        .expect("normalize prompt");
+    let normalized = normalize_prompt(&request);
     let expected_block_hashes = compute_block_hash_for_seq(
         &[10, 11, 12, 13, 14, 15, 16, 17],
         4,
@@ -164,15 +184,230 @@ fn prompt_request_cache_salt_changes_normalized_hashes() {
     }))
     .expect("deserialize unsalted prompt");
 
-    let salted = salted
-        .normalize_for_selection(4, false)
-        .expect("normalize salted prompt");
-    let unsalted = unsalted
-        .normalize_for_selection(4, false)
-        .expect("normalize unsalted prompt");
+    let salted = normalize_prompt(&salted);
+    let unsalted = normalize_prompt(&unsalted);
 
     assert_ne!(salted.block_hashes, unsalted.block_hashes);
     assert_ne!(salted.sequence_hashes, unsalted.sequence_hashes);
+}
+
+#[test]
+fn keyed_prompt_tracking_leaves_indexer_hashes_public() {
+    let mut key_file = NamedTempFile::new().unwrap();
+    key_file.write_all(&[0x35; 32]).unwrap();
+    let config = crate::config::KvRouterConfig {
+        router_tracking_hash: crate::TrackingHashAlgorithm::KeyedXxh3V1,
+        router_tracking_key_file: Some(key_file.path().to_path_buf()),
+        router_tracking_key_id: Some("2026-01".to_string()),
+        ..test_config()
+    };
+    let context = TrackingHashContext::from_config(&config).unwrap();
+    let request: PromptRequest = serde_json::from_value(serde_json::json!({
+        "token_ids": [1, 2, 3, 4, 5, 6, 7, 8],
+        "cache_salt": "tenant-a"
+    }))
+    .unwrap();
+
+    let normalized = request
+        .normalize_for_selection(
+            false,
+            TrackingHashInput {
+                context: &context,
+                scope: TrackingHashScope {
+                    partition: RoutingPartitionRef::new("model", "default"),
+                    block_size: 4,
+                },
+                assume_kv_reuse: true,
+            },
+        )
+        .unwrap();
+    let public_blocks = compute_block_hash_for_seq(
+        &[1, 2, 3, 4, 5, 6, 7, 8],
+        4,
+        BlockHashOptions {
+            cache_namespace: Some("tenant-a"),
+            ..Default::default()
+        },
+    );
+
+    assert_eq!(normalized.block_hashes, public_blocks);
+    assert_ne!(
+        normalized.sequence_hashes,
+        compute_seq_hash_for_block(&public_blocks)
+    );
+}
+
+#[test]
+fn disabled_kv_reuse_keeps_public_indexer_hashes_and_randomizes_tracking() {
+    let config = test_config();
+    let context = TrackingHashContext::from_config(&config).unwrap();
+    let request: PromptRequest = serde_json::from_value(serde_json::json!({
+        "token_ids": [1, 2, 3, 4, 5, 6, 7, 8]
+    }))
+    .unwrap();
+    let normalize = || {
+        request
+            .normalize_for_selection(
+                false,
+                TrackingHashInput {
+                    context: &context,
+                    scope: TrackingHashScope {
+                        partition: RoutingPartitionRef::new("model", "default"),
+                        block_size: 4,
+                    },
+                    assume_kv_reuse: false,
+                },
+            )
+            .unwrap()
+    };
+
+    let first = normalize();
+    let second = normalize();
+    let public_blocks =
+        compute_block_hash_for_seq(&[1, 2, 3, 4, 5, 6, 7, 8], 4, BlockHashOptions::default());
+
+    assert_eq!(first.block_hashes, public_blocks);
+    assert_eq!(second.block_hashes, public_blocks);
+    assert_ne!(first.sequence_hashes, second.sequence_hashes);
+}
+
+#[test]
+fn keyed_reservation_hashes_directly_from_tokens() {
+    let mut key_file = NamedTempFile::new().unwrap();
+    key_file.write_all(&[0x47; 32]).unwrap();
+    let config = crate::config::KvRouterConfig {
+        router_tracking_hash: crate::TrackingHashAlgorithm::KeyedXxh3V1,
+        router_tracking_key_file: Some(key_file.path().to_path_buf()),
+        router_tracking_key_id: Some("2026-01".to_string()),
+        ..test_config()
+    };
+    let context = TrackingHashContext::from_config(&config).unwrap();
+    let request: PromptRequest = serde_json::from_value(serde_json::json!({
+        "token_ids": [1, 2, 3, 4, 5, 6, 7, 8],
+        "cache_salt": "tenant-a"
+    }))
+    .unwrap();
+    let scope = TrackingHashScope {
+        partition: RoutingPartitionRef::new("model", "default"),
+        block_size: 4,
+    };
+
+    let normalized = request
+        .normalize_for_reservation(
+            false,
+            TrackingHashInput {
+                context: &context,
+                scope,
+                assume_kv_reuse: true,
+            },
+        )
+        .unwrap();
+    let expected = context.compute_sequence_hashes_for_tracking(
+        scope,
+        &[1, 2, 3, 4, 5, 6, 7, 8],
+        BlockHashOptions {
+            cache_namespace: Some("tenant-a"),
+            ..Default::default()
+        },
+        true,
+        None,
+    );
+
+    assert_eq!(normalized.sequence_hashes, expected);
+    assert_eq!(normalized.isl_tokens, 8);
+}
+
+#[test]
+fn keyed_hash_only_inputs_remain_trusted_for_selection_and_reservation() {
+    let mut key_file = NamedTempFile::new().unwrap();
+    key_file.write_all(&[0x59; 32]).unwrap();
+    let config = crate::config::KvRouterConfig {
+        router_tracking_hash: crate::TrackingHashAlgorithm::KeyedXxh3V1,
+        router_tracking_key_file: Some(key_file.path().to_path_buf()),
+        router_tracking_key_id: Some("2026-01".to_string()),
+        ..test_config()
+    };
+    let context = TrackingHashContext::from_config(&config).unwrap();
+    let request: PromptRequest = serde_json::from_value(serde_json::json!({
+        "block_hashes": [11, 29],
+        "sequence_hashes": [-1, 7],
+        "isl_tokens": 8
+    }))
+    .unwrap();
+    let scope = TrackingHashScope {
+        partition: RoutingPartitionRef::new("model", "default"),
+        block_size: 4,
+    };
+
+    let selection = request
+        .normalize_for_selection(
+            false,
+            TrackingHashInput {
+                context: &context,
+                scope,
+                assume_kv_reuse: true,
+            },
+        )
+        .unwrap();
+    let reservation = request
+        .normalize_for_reservation(
+            false,
+            TrackingHashInput {
+                context: &context,
+                scope,
+                assume_kv_reuse: true,
+            },
+        )
+        .unwrap();
+
+    assert_eq!(
+        selection.block_hashes,
+        vec![
+            crate::protocols::LocalBlockHash(11),
+            crate::protocols::LocalBlockHash(29)
+        ]
+    );
+    assert_eq!(selection.sequence_hashes, vec![u64::MAX, 7]);
+    assert_eq!(reservation.sequence_hashes, vec![u64::MAX, 7]);
+    assert_eq!(reservation.isl_tokens, 8);
+}
+
+#[test]
+fn randomized_reservation_uses_canonical_complete_block_count() {
+    let config = test_config();
+    let context = TrackingHashContext::from_config(&config).unwrap();
+    let cases = [
+        (Vec::new(), false, 0),
+        (vec![1, 2, 3], false, 0),
+        (vec![1, 2, 3, 4], false, 1),
+        (vec![1, 2, 3, 4], true, 0),
+        (vec![1, 2, 3, 4, 5], true, 1),
+        (vec![1, 2, 3, 4, 5, 6, 7, 8], true, 1),
+        (vec![1, 2, 3, 4, 5, 6, 7, 8, 9], true, 2),
+    ];
+
+    for (token_ids, is_eagle, expected_blocks) in cases {
+        let request: PromptRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": token_ids,
+            "is_eagle": is_eagle
+        }))
+        .unwrap();
+        let normalized = request
+            .normalize_for_reservation(
+                false,
+                TrackingHashInput {
+                    context: &context,
+                    scope: TrackingHashScope {
+                        partition: RoutingPartitionRef::new("model", "default"),
+                        block_size: 4,
+                    },
+                    assume_kv_reuse: false,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(normalized.sequence_hashes.len(), expected_blocks);
+    }
 }
 
 #[test]

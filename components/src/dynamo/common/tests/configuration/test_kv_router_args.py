@@ -233,7 +233,6 @@ def test_load_aware_cli_applies_no_cache_load_balancing_preset() -> None:
 
     assert kwargs["overlap_score_credit"] == 0.0
     assert kwargs["use_kv_events"] is False
-    assert kwargs["durable_kv_events"] is False
     assert kwargs["router_track_active_blocks"] is True
     assert kwargs["router_assume_kv_reuse"] is False
     assert kwargs["router_track_prefill_tokens"] is True
@@ -273,6 +272,46 @@ def test_load_aware_preserves_prefill_load_scale() -> None:
 
     assert kwargs["overlap_score_credit"] == 0.0
     assert kwargs["prefill_load_scale"] == 2.5
+
+
+def test_tracking_hash_cli_flows_to_binding_kwargs(tmp_path: Path) -> None:
+    key_file = tmp_path / "tracking-key"
+    parser = argparse.ArgumentParser()
+    KvRouterArgGroup().add_arguments(parser)
+
+    args = parser.parse_args(
+        [
+            "--router-tracking-hash",
+            "keyed-xxh3-v1",
+            "--router-tracking-key-file",
+            str(key_file),
+            "--router-tracking-key-id",
+            "2026-01",
+        ]
+    )
+    kwargs = KvRouterConfigBase.from_cli_args(args).kv_router_kwargs()
+
+    assert kwargs["router_tracking_hash"] == "keyed-xxh3-v1"
+    assert kwargs["router_tracking_key_file"] == str(key_file)
+    assert kwargs["router_tracking_key_id"] == "2026-01"
+
+
+def test_tracking_hash_environment_flows_to_binding_kwargs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    key_file = tmp_path / "tracking-key"
+    monkeypatch.setenv("DYN_ROUTER_TRACKING_HASH", "keyed-xxh3-v1")
+    monkeypatch.setenv("DYN_ROUTER_TRACKING_KEY_FILE", str(key_file))
+    monkeypatch.setenv("DYN_ROUTER_TRACKING_KEY_ID", "2026-01")
+    parser = argparse.ArgumentParser()
+    KvRouterArgGroup().add_arguments(parser)
+
+    args = parser.parse_args([])
+    kwargs = KvRouterConfigBase.from_cli_args(args).kv_router_kwargs()
+
+    assert kwargs["router_tracking_hash"] == "keyed-xxh3-v1"
+    assert kwargs["router_tracking_key_file"] == str(key_file)
+    assert kwargs["router_tracking_key_id"] == "2026-01"
 
 
 def test_load_aware_preserves_cache_hit_weights() -> None:
@@ -511,28 +550,37 @@ def test_all_rejection_thresholds_and_queue_override_are_forwarded(
     assert config.kv_router_kwargs()["router_queue_threshold"] == 32.0
 
 
+@pytest.mark.parametrize(
+    ("flag", "expected_value"),
+    [("--enforce-disagg", True), ("--no-enforce-disagg", False)],
+)
 def test_enforce_disagg_cli_is_deprecated_and_not_forwarded(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    flag: str,
+    expected_value: bool,
 ) -> None:
     monkeypatch.delenv("DYN_ENFORCE_DISAGG", raising=False)
     parser = argparse.ArgumentParser()
     FrontendArgGroup().add_arguments(parser)
 
-    config = FrontendConfig.from_cli_args(parser.parse_args(["--enforce-disagg"]))
+    config = FrontendConfig.from_cli_args(parser.parse_args([flag]))
     config.validate()
     kwargs = config.router_kwargs()
 
-    assert config.enforce_disagg is True
+    assert config.enforce_disagg is expected_value
     assert "enforce_disagg" not in kwargs
-    assert "deprecated and ignored" in caplog.text
+    warning = f"{flag} is deprecated and ignored"
+    assert caplog.text.count(warning) == 1
 
 
+@pytest.mark.parametrize("value", ["true", "false"])
 def test_enforce_disagg_environment_is_deprecated_and_not_forwarded(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    value: str,
 ) -> None:
-    monkeypatch.setenv("DYN_ENFORCE_DISAGG", "true")
+    monkeypatch.setenv("DYN_ENFORCE_DISAGG", value)
     parser = argparse.ArgumentParser()
     FrontendArgGroup().add_arguments(parser)
 
@@ -540,9 +588,10 @@ def test_enforce_disagg_environment_is_deprecated_and_not_forwarded(
     config.validate()
     kwargs = config.router_kwargs()
 
-    assert config.enforce_disagg is True
+    assert config.enforce_disagg is (value == "true")
     assert "enforce_disagg" not in kwargs
-    assert "deprecated and ignored" in caplog.text
+    warning = "DYN_ENFORCE_DISAGG is deprecated and ignored"
+    assert caplog.text.count(warning) == 1
 
 
 def test_admission_control_cli_flag_warns_and_is_ignored(

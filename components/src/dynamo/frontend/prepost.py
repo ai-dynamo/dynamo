@@ -17,7 +17,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     DeltaToolCall,
 )
 from vllm.reasoning import ReasoningParser
-from vllm.renderers import ChatParams
+from vllm.renderers import ChatParams, merge_kwargs
 from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
@@ -93,6 +93,7 @@ def _prepare_request(
     tool_parser_class: type[ToolParser] | None,
     exclude_tools_when_tool_choice_none: bool = True,
     enable_auto_tool_choice: bool = False,
+    default_chat_template_kwargs: dict[str, Any] | None = None,
 ) -> tuple[ChatCompletionRequest, ToolParser | None, dict[str, Any], Any, ChatParams]:
     """Validate request and build arguments for template rendering.
 
@@ -141,8 +142,14 @@ def _prepare_request(
     raw_template_args = (
         request.get("chat_template_args") if isinstance(request, dict) else None
     )
+    # Reuse vLLM's merge so unset request values (None/"auto") keep the server
+    # default; copy the result since the default dict is shared across requests
+    # and we mutate reasoning_effort below.
     chat_template_kwargs = dict(
-        request_for_sampling.chat_template_kwargs or raw_template_args or {}
+        merge_kwargs(
+            default_chat_template_kwargs,
+            request_for_sampling.chat_template_kwargs or raw_template_args or {},
+        )
     )
     # Don't let an absent top-level field clobber a nested reasoning_effort.
     if request_for_sampling.reasoning_effort is not None:
@@ -193,6 +200,7 @@ async def preprocess_chat_request(
     tool_parser_class: type[ToolParser] | None,
     exclude_tools_when_tool_choice_none: bool = True,
     enable_auto_tool_choice: bool = False,
+    default_chat_template_kwargs: dict[str, Any] | None = None,
 ) -> PreprocessResult:
     (
         request_for_sampling,
@@ -206,6 +214,7 @@ async def preprocess_chat_request(
         tool_parser_class=tool_parser_class,
         exclude_tools_when_tool_choice_none=exclude_tools_when_tool_choice_none,
         enable_auto_tool_choice=enable_auto_tool_choice,
+        default_chat_template_kwargs=default_chat_template_kwargs,
     )
 
     _, engine_prompt = await renderer.render_messages_async(messages, chat_params)

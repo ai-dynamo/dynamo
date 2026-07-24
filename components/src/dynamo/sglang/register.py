@@ -391,6 +391,7 @@ async def _get_runtime_config(
         ModelRuntimeConfig with extracted values, or None if extraction fails.
     """
     runtime_config = ModelRuntimeConfig()
+    runtime_config.kv_state_endpoint = dynamo_args.kv_state_endpoint
     runtime_config.context_length = server_args.context_length
     strict_request_token_limit = _get_strict_request_token_limit(engine, server_args)
     if strict_request_token_limit is not None:

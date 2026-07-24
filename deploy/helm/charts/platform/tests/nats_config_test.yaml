@@ -13,15 +13,22 @@ tests:
           path: data["config.yaml"]
           pattern: "natsAddress:"
 
-  - it: should not include natsAddress when global.nats.install is false
-    set:
-      global.nats.install: false
+  - it: should not include natsAddress by default
     asserts:
       - notMatchRegex:
           path: data["config.yaml"]
           pattern: "natsAddress:"
 
-  - it: should use explicit natsAddr over global.nats.install
+  - it: should use an explicit external natsAddr when bundled NATS is disabled
+    set:
+      global.nats.install: false
+      dynamo-operator.natsAddr: "nats://external-nats:4222"
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'natsAddress: "nats://external-nats:4222"'
+
+  - it: should prefer an explicit external natsAddr when bundled NATS is enabled
     set:
       global.nats.install: true
       dynamo-operator.natsAddr: "nats://external-nats:4222"
