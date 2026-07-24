@@ -21,6 +21,7 @@ use futures::StreamExt;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
+use super::kv_source_membership::KvSourceObservationState;
 use super::{
     KvEventSource, KvSourceMembership, KvSourceMembershipView, KvSourceStatus,
     KvStateEndpointResolution, RuntimeConfigWatch, resolve_kv_state_endpoint,
@@ -158,7 +159,7 @@ impl LifecycleTracker {
             if expected.contains(worker) {
                 continue;
             }
-            if lifecycle.ever_active && lifecycle.previous.is_some() {
+            if lifecycle.previous.is_some() {
                 lifecycle.generation = lifecycle.generation.saturating_add(1);
             }
             lifecycle.previous = None;
@@ -197,13 +198,22 @@ async fn run_membership_coordinator(
     let mut resolution = resolve_kv_state_endpoint(&serving_endpoint, configs.values());
     let mut membership = KvSourceMembership::new();
     let mut lifecycle = LifecycleTracker::default();
-    let mut source_stream = bind_source_stream(&discovery, &resolution, &cancel).await;
+    let mut observation_state = KvSourceObservationState::Rebinding;
     let mut retry_delay = Duration::from_millis(100);
     publish_view(
         &sender,
         &mut lifecycle,
-        membership.view(&serving_endpoint, &configs),
+        membership.view_with_observation_state(&serving_endpoint, &configs, observation_state),
     );
+    let mut source_stream = bind_source_stream(&discovery, &resolution, &cancel).await;
+    if source_stream.is_some() {
+        observation_state = KvSourceObservationState::Bound;
+        publish_view(
+            &sender,
+            &mut lifecycle,
+            membership.view_with_observation_state(&serving_endpoint, &configs, observation_state),
+        );
+    }
 
     loop {
         enum CoordinatorInput {
@@ -237,48 +247,97 @@ async fn run_membership_coordinator(
                     resolution = next_resolution;
                     membership = KvSourceMembership::new();
                     drop(source_stream.take());
+                    observation_state = KvSourceObservationState::Rebinding;
                     publish_view(
                         &sender,
                         &mut lifecycle,
-                        membership.view(&serving_endpoint, &configs),
+                        membership.view_with_observation_state(
+                            &serving_endpoint,
+                            &configs,
+                            observation_state,
+                        ),
                     );
                     source_stream = bind_source_stream(&discovery, &resolution, &cancel).await;
                     if source_stream.is_some() {
+                        observation_state = KvSourceObservationState::Bound;
                         retry_delay = Duration::from_millis(100);
+                        publish_view(
+                            &sender,
+                            &mut lifecycle,
+                            membership.view_with_observation_state(
+                                &serving_endpoint,
+                                &configs,
+                                observation_state,
+                            ),
+                        );
                     }
                 } else {
                     publish_view(
                         &sender,
                         &mut lifecycle,
-                        membership.view(&serving_endpoint, &configs),
+                        membership.view_with_observation_state(
+                            &serving_endpoint,
+                            &configs,
+                            observation_state,
+                        ),
                     );
                 }
             }
             CoordinatorInput::Source(Some(event)) => {
                 let stream_is_healthy =
                     reconcile_discovery_event(event, &resolution, &mut membership);
+                if !stream_is_healthy {
+                    drop(source_stream.take());
+                    observation_state = KvSourceObservationState::Rebinding;
+                }
                 publish_view(
                     &sender,
                     &mut lifecycle,
-                    membership.view(&serving_endpoint, &configs),
+                    membership.view_with_observation_state(
+                        &serving_endpoint,
+                        &configs,
+                        observation_state,
+                    ),
                 );
-                if !stream_is_healthy {
-                    drop(source_stream.take());
-                }
             }
             CoordinatorInput::Source(None) => {
                 membership = KvSourceMembership::new();
+                source_stream = None;
+                observation_state = KvSourceObservationState::Rebinding;
                 publish_view(
                     &sender,
                     &mut lifecycle,
-                    membership.view(&serving_endpoint, &configs),
+                    membership.view_with_observation_state(
+                        &serving_endpoint,
+                        &configs,
+                        observation_state,
+                    ),
                 );
-                source_stream = None;
             }
             CoordinatorInput::Retry => {
+                observation_state = KvSourceObservationState::Rebinding;
+                publish_view(
+                    &sender,
+                    &mut lifecycle,
+                    membership.view_with_observation_state(
+                        &serving_endpoint,
+                        &configs,
+                        observation_state,
+                    ),
+                );
                 source_stream = bind_source_stream(&discovery, &resolution, &cancel).await;
                 if source_stream.is_some() {
+                    observation_state = KvSourceObservationState::Bound;
                     retry_delay = Duration::from_millis(100);
+                    publish_view(
+                        &sender,
+                        &mut lifecycle,
+                        membership.view_with_observation_state(
+                            &serving_endpoint,
+                            &configs,
+                            observation_state,
+                        ),
+                    );
                 } else {
                     retry_delay = (retry_delay * 2).min(Duration::from_secs(5));
                 }
@@ -396,13 +455,24 @@ fn publish_view(
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, sync::Arc, time::Duration};
+    use std::{
+        collections::HashMap,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
 
     use dynamo_kv_router::protocols::WorkerWithDpRank;
     use dynamo_runtime::{
         component::{Instance, TransportType},
-        discovery::{Discovery, DiscoverySpec, MockDiscovery, SharedMockRegistry},
+        discovery::{
+            Discovery, DiscoveryInstance, DiscoveryQuery, DiscoverySpec, DiscoveryStream,
+            MockDiscovery, SharedMockRegistry,
+        },
     };
+    use tokio::sync::{Notify, Semaphore};
 
     use super::*;
     use crate::discovery::{KvSourceAmbiguity, KvSourceId, KvSourceKey};
@@ -449,6 +519,58 @@ mod tests {
                 device_type: None,
             }),
             ..source(endpoint, worker_id, publisher_id)
+        }
+    }
+
+    struct BlockingSecondBindDiscovery {
+        inner: MockDiscovery,
+        bind_count: AtomicUsize,
+        second_bind_started: Notify,
+        allow_second_bind: Semaphore,
+    }
+
+    impl BlockingSecondBindDiscovery {
+        fn new() -> Self {
+            Self {
+                inner: MockDiscovery::new(Some(1), SharedMockRegistry::new()),
+                bind_count: AtomicUsize::new(0),
+                second_bind_started: Notify::new(),
+                allow_second_bind: Semaphore::new(0),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Discovery for BlockingSecondBindDiscovery {
+        fn instance_id(&self) -> u64 {
+            self.inner.instance_id()
+        }
+
+        async fn register_internal(
+            &self,
+            spec: DiscoverySpec,
+        ) -> anyhow::Result<DiscoveryInstance> {
+            self.inner.register_internal(spec).await
+        }
+
+        async fn unregister(&self, instance: DiscoveryInstance) -> anyhow::Result<()> {
+            self.inner.unregister(instance).await
+        }
+
+        async fn list(&self, query: DiscoveryQuery) -> anyhow::Result<Vec<DiscoveryInstance>> {
+            self.inner.list(query).await
+        }
+
+        async fn list_and_watch(
+            &self,
+            query: DiscoveryQuery,
+            cancel_token: Option<CancellationToken>,
+        ) -> anyhow::Result<DiscoveryStream> {
+            if self.bind_count.fetch_add(1, Ordering::SeqCst) == 1 {
+                self.second_bind_started.notify_waiters();
+                self.allow_second_bind.acquire().await?.forget();
+            }
+            self.inner.list_and_watch(query, cancel_token).await
         }
     }
 
@@ -502,6 +624,7 @@ mod tests {
             watch.borrow().status(&worker),
             Some(&KvSourceStatus::Missing)
         );
+        wait_for(&mut watch, |view| view.observation_state.is_bound()).await;
 
         register_source(discovery.as_ref(), &source(&other, 42, 900)).await;
         register_source(discovery.as_ref(), &source(&kv, 99, 901)).await;
@@ -557,8 +680,8 @@ mod tests {
         let kv_b = endpoint("kv-b");
         let (configs_tx, configs_rx) =
             watch::channel(HashMap::from([(42, runtime_config(Some(kv_a.clone())))]));
-        let discovery: Arc<dyn Discovery> =
-            Arc::new(MockDiscovery::new(Some(1), SharedMockRegistry::new()));
+        let controlled_discovery = Arc::new(BlockingSecondBindDiscovery::new());
+        let discovery: Arc<dyn Discovery> = controlled_discovery.clone();
         let coordinator =
             KvSourceMembershipCoordinator::start(serving.clone(), configs_rx, discovery.clone());
         let mut slow_consumer = coordinator.subscribe();
@@ -576,13 +699,26 @@ mod tests {
             .lifecycle_generation(&worker)
             .unwrap();
 
+        let second_bind_started = controlled_discovery.second_bind_started.notified();
         configs_tx
             .send(HashMap::from([(42, runtime_config(Some(kv_b.clone())))]))
             .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), second_bind_started)
+            .await
+            .unwrap();
+        wait_for(&mut slow_consumer, |view| {
+            view.resolved_kv_state_endpoint() == Some(&kv_b)
+                && view.observation_state == KvSourceObservationState::Rebinding
+                && view.status(&worker) == Some(&KvSourceStatus::Missing)
+        })
+        .await;
+
         register_source(discovery.as_ref(), &source_b).await;
+        controlled_discovery.allow_second_bind.add_permits(1);
         discovery.unregister(instance_a).await.unwrap();
         wait_for(&mut slow_consumer, |view| {
             view.resolved_kv_state_endpoint() == Some(&kv_b)
+                && view.observation_state == KvSourceObservationState::Bound
                 && view.status(&worker)
                     == Some(&KvSourceStatus::ActiveRecoverable(source_b.clone()))
         })
@@ -622,6 +758,63 @@ mod tests {
         assert!(
             active_b.lifecycle_generation(&worker).unwrap()
                 > active_a.lifecycle_generation(&worker).unwrap()
+        );
+    }
+
+    #[test]
+    fn observation_binding_changes_do_not_advance_the_reset_fence() {
+        let serving = endpoint("generate");
+        let kv = endpoint("kv");
+        let configs = HashMap::from([(42, runtime_config(Some(kv.clone())))]);
+        let worker = WorkerWithDpRank::new(42, 4);
+        let mut membership = KvSourceMembership::new();
+        let mut lifecycle = LifecycleTracker::default();
+        membership.add(source(&kv, 42, 100)).unwrap();
+
+        let rebinding = lifecycle.apply(membership.view_with_observation_state(
+            &serving,
+            &configs,
+            KvSourceObservationState::Rebinding,
+        ));
+        let bound = lifecycle.apply(membership.view_with_observation_state(
+            &serving,
+            &configs,
+            KvSourceObservationState::Bound,
+        ));
+
+        assert_eq!(
+            bound.lifecycle_generation(&worker),
+            rebinding.lifecycle_generation(&worker)
+        );
+    }
+
+    #[test]
+    fn missing_worker_remove_rejoin_advances_the_reset_fence() {
+        let serving = endpoint("generate");
+        let kv = endpoint("kv");
+        let configs = HashMap::from([(42, runtime_config(Some(kv)))]);
+        let worker = WorkerWithDpRank::new(42, 4);
+        let mut lifecycle = LifecycleTracker::default();
+
+        let initial = lifecycle.apply(KvSourceMembership::new().view_with_observation_state(
+            &serving,
+            &configs,
+            KvSourceObservationState::Bound,
+        ));
+        lifecycle.apply(KvSourceMembership::new().view_with_observation_state(
+            &serving,
+            &HashMap::new(),
+            KvSourceObservationState::Bound,
+        ));
+        let rejoined = lifecycle.apply(KvSourceMembership::new().view_with_observation_state(
+            &serving,
+            &configs,
+            KvSourceObservationState::Bound,
+        ));
+
+        assert!(
+            rejoined.lifecycle_generation(&worker) > initial.lifecycle_generation(&worker),
+            "a coalesced remove/rejoin must invalidate the old missing-source deadline"
         );
     }
 

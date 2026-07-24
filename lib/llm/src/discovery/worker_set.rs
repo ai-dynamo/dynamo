@@ -223,6 +223,12 @@ impl WorkerSet {
     pub fn set_instance_watcher(&mut self, rx: watch::Receiver<Vec<u64>>) {
         self.instance_count_rx = Some(rx);
     }
+
+    pub(crate) fn stop_kv_source_health_monitor(&self) {
+        if let Some(router) = &self.kv_router {
+            router.stop_source_health_monitor();
+        }
+    }
 }
 
 #[cfg(test)]
