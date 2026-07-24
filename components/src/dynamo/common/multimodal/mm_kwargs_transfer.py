@@ -40,6 +40,61 @@ from dynamo.common.utils.runtime import run_async
 logger = logging.getLogger(__name__)
 
 
+def _compact_nested_tensor_storage(value: Any) -> tuple[Any, bool]:
+    """Compact tensor views whose pickle would include unused backing storage."""
+    if isinstance(value, torch.Tensor):
+        logical_bytes = value.numel() * value.element_size()
+        if value.untyped_storage().nbytes() > logical_bytes:
+            if value.device.type == "cpu" and value.is_contiguous() and value.dim():
+                # vLLM can return one item as a view of a multi-item batch.
+                # NumPy makes a compact, single-threaded copy; otherwise pickle
+                # serializes the full backing storage once per item.
+                byte_array = value.detach().view(torch.uint8).numpy().copy()
+                return (
+                    torch.from_numpy(byte_array).view(value.dtype).reshape(value.shape),
+                    True,
+                )
+            return value.clone(), True
+        return value, False
+    if isinstance(value, list):
+        compacted = [_compact_nested_tensor_storage(item) for item in value]
+        if any(changed for _, changed in compacted):
+            return [item for item, _ in compacted], True
+        return value, False
+    if isinstance(value, tuple):
+        compacted = [_compact_nested_tensor_storage(item) for item in value]
+        if any(changed for _, changed in compacted):
+            return tuple(item for item, _ in compacted), True
+        return value, False
+    return value, False
+
+
+def _compact_mm_kwargs_item(item: Any) -> Any:
+    """Copy a vLLM kwargs item while compacting tensor views for pickling."""
+    if not hasattr(item, "items"):
+        return item
+
+    elements = list(item.items())
+    if not all(
+        hasattr(element, "data") and hasattr(element, "field")
+        for _, element in elements
+    ):
+        return item
+
+    compacted_elements = {}
+    changed = False
+    for name, element in elements:
+        compacted_data, data_changed = _compact_nested_tensor_storage(element.data)
+        compacted_elements[name] = (
+            type(element)(data=compacted_data, field=element.field)
+            if data_changed
+            else element
+        )
+        changed = changed or data_changed
+
+    return type(item)(compacted_elements) if changed else item
+
+
 # ---------------------------------------------------------------------------
 # Wire protocol
 # ---------------------------------------------------------------------------
@@ -148,6 +203,7 @@ class MmKwargsSender(ABC):
             encoded_items: list[Any] = []
             cleanup_items: list[Any] = []
             mm_hashes: list[str] = []
+            compact_tensor_views = len(mm_features) > 1
 
             for i, feat in enumerate(mm_features):
                 if feat.mm_hash:
@@ -156,7 +212,12 @@ class MmKwargsSender(ABC):
                     continue
 
                 with _nvtx.annotate(self._pickle_nvtx_label, color=self._nvtx_color):
-                    pickled = pickle.dumps(feat.data)
+                    item = (
+                        _compact_mm_kwargs_item(feat.data)
+                        if compact_tensor_views
+                        else feat.data
+                    )
+                    pickled = pickle.dumps(item)
 
                 encoded, cleanup = await self._encode_item(i, pickled)
                 encoded_items.append(encoded)
