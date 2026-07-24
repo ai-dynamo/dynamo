@@ -348,7 +348,7 @@ class CounterWorkerProcess:
                     pass
 
 
-@pytest.mark.timeout(300)
+@pytest.mark.timeout(120)
 @pytest.mark.parametrize(
     ("topology", "request_plane"),
     [
