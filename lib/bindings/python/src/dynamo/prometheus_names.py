@@ -120,7 +120,7 @@ class frontend_service:
     VIDEOS_PER_REQUEST = "videos_per_request"
     # Number of `audio_url` content parts per request (histogram)
     AUDIO_PER_REQUEST = "audio_per_request"
-    # Image token estimate per image-bearing request (histogram)
+    # Calculated image-placeholder token count per image-bearing request (histogram)
     IMAGE_TOKENS_PER_REQUEST = "image_tokens_per_request"
     # Model configuration metrics
     # Runtime config metrics (from ModelRuntimeConfig):
