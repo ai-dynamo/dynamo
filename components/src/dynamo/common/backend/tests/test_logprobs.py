@@ -255,23 +255,6 @@ def test_prompt_logprobs_sglang_returns_none_when_absent():
     )
 
 
-def test_prompt_logprobs_sglang_prepends_none_for_bos():
-    # Older SGLang versions start at prompt position 1; add ``None`` at index
-    # 0 to align with the Rust PromptLogprobs invariant (BOS has no logprob).
-    meta = {
-        "input_token_logprobs": [
-            (-0.5, 7, "a"),
-            (-0.6, 8, "b"),
-        ]
-    }
-    payload = extract_prompt_logprobs_from_sglang_meta(meta)
-    assert payload == [
-        None,
-        {"7": {"logprob": -0.5, "decoded_token": "a"}},
-        {"8": {"logprob": -0.6, "decoded_token": "b"}},
-    ]
-
-
 def test_prompt_logprobs_sglang_preserves_engine_bos_none():
     # Current SGLang versions include the BOS position as a tuple with a null
     # logprob, and align input_top_logprobs to that same position.
@@ -297,8 +280,14 @@ def test_prompt_logprobs_sglang_preserves_engine_bos_none():
 
 def test_prompt_logprobs_sglang_merges_input_top_logprobs():
     meta = {
-        "input_token_logprobs": [(-0.5, 7, "a")],
-        "input_top_logprobs": [[(-0.5, 7, "a"), (-1.5, 70, "A")]],
+        "input_token_logprobs": [
+            (None, 6, None),
+            (-0.5, 7, "a"),
+        ],
+        "input_top_logprobs": [
+            None,
+            [(-0.5, 7, "a"), (-1.5, 70, "A")],
+        ],
     }
     payload = extract_prompt_logprobs_from_sglang_meta(meta)
     assert payload[1] == {
@@ -308,7 +297,12 @@ def test_prompt_logprobs_sglang_merges_input_top_logprobs():
 
 
 def test_prompt_logprobs_sglang_handles_missing_decoded_token():
-    meta = {"input_token_logprobs": [(-0.7, 9, None)]}
+    meta = {
+        "input_token_logprobs": [
+            (None, 6, None),
+            (-0.7, 9, None),
+        ]
+    }
     payload = extract_prompt_logprobs_from_sglang_meta(meta)
     assert payload[1] == {"9": {"logprob": -0.7}}
 
@@ -372,17 +366,7 @@ def test_sglang_gate_reads_env(monkeypatch):
 
 
 def test_sglang_extract_returns_none_when_meta_empty():
-    assert extract_from_sglang_meta({}, 0) == (None, None, 0)
-
-
-def test_sglang_extract_slices_cumulative_array():
-    meta = {
-        "output_token_logprobs": [(-0.1, 1, "a"), (-0.2, 2, "b"), (-0.3, 3, "c")],
-    }
-    log_probs, top_logprobs, new_total = extract_from_sglang_meta(meta, 1)
-    assert log_probs == [-0.2, -0.3]
-    assert top_logprobs is None
-    assert new_total == 3
+    assert extract_from_sglang_meta({}) == (None, None)
 
 
 def test_sglang_extract_supports_incremental_streaming_metadata():
@@ -391,8 +375,8 @@ def test_sglang_extract_supports_incremental_streaming_metadata():
         "output_token_logprobs": [(-0.2, 2, "b")],
         "output_top_logprobs": [[(-0.2, 2, "b"), (-1.2, 20, "B")]],
     }
-    log_probs, top_logprobs, new_total = extract_from_sglang_meta(
-        meta, 1, num_output_tokens_in_chunk=1
+    log_probs, top_logprobs = extract_from_sglang_meta(
+        meta, num_output_tokens_in_chunk=1
     )
     assert log_probs == [-0.2]
     assert top_logprobs == [
@@ -401,7 +385,6 @@ def test_sglang_extract_supports_incremental_streaming_metadata():
             {"rank": 2, "token_id": 20, "token": "B", "logprob": -1.2},
         ]
     ]
-    assert new_total == 2
 
 
 def test_sglang_extract_with_top():
@@ -409,7 +392,7 @@ def test_sglang_extract_with_top():
         "output_token_logprobs": [(-0.1, 101, "a")],
         "output_top_logprobs": [[(-0.1, 101, "a"), (-0.2, 102, "b")]],
     }
-    log_probs, top_logprobs, _ = extract_from_sglang_meta(meta, 0)
+    log_probs, top_logprobs = extract_from_sglang_meta(meta)
     assert log_probs == [-0.1]
     assert top_logprobs == [
         [
@@ -424,9 +407,7 @@ def test_sglang_extract_return_tokens_as_token_ids():
         "output_token_logprobs": [(-0.1, 101, "a")],
         "output_top_logprobs": [[(-0.1, 101, "a")]],
     }
-    _, top_logprobs, _ = extract_from_sglang_meta(
-        meta, 0, return_tokens_as_token_ids=True
-    )
+    _, top_logprobs = extract_from_sglang_meta(meta, return_tokens_as_token_ids=True)
     assert top_logprobs[0][0]["token"] == "token_id:101"
 
 
@@ -438,17 +419,19 @@ def test_sglang_extract_none_top_position_becomes_empty_list():
         "output_token_logprobs": [(-0.1, 101, "a"), (-0.2, 102, "b")],
         "output_top_logprobs": [None, [(-0.2, 102, "b")]],
     }
-    _, top_logprobs, _ = extract_from_sglang_meta(meta, 0)
+    _, top_logprobs = extract_from_sglang_meta(meta)
     assert top_logprobs == [
         [],
         [{"rank": 1, "token_id": 102, "token": "b", "logprob": -0.2}],
     ]
 
 
-def test_sglang_extract_returns_offset_unchanged_when_no_new_entries():
-    meta = {"output_token_logprobs": [(-0.1, 1, "a")]}
-    _, _, new_total = extract_from_sglang_meta(meta, 1)
-    assert new_total == 1
+def test_sglang_extract_clamps_metadata_to_output_chunk():
+    meta = {
+        "output_token_logprobs": [(-0.1, 1, "a"), (-0.2, 2, "b")],
+    }
+    log_probs, _ = extract_from_sglang_meta(meta, num_output_tokens_in_chunk=1)
+    assert log_probs == [-0.1]
 
 
 # ---------------------------------------------------------------------------
@@ -589,83 +572,6 @@ def test_parity_trtllm_extraction_is_idempotent_across_call_sites():
     assert "bytes" not in legacy_top[0][0]
 
 
-def test_parity_sglang_per_choice_offset_tracking_multi_choice():
-    """The unified SGLang generate() tracks `num_logprobs_per_choice` —
-    a dict keyed by output_idx. Without per-choice tracking, interleaved
-    n>1 chunks would mis-slice each other's cumulative arrays. Simulate
-    interleaved chunks for choice 0 and choice 1 and confirm each
-    choice's logprobs are extracted correctly."""
-    # SGLang emits ONE cumulative array per choice. The unified engine
-    # receives chunks tagged with `index` and tracks an offset per index.
-    # Sim: choice 0 emits 3 tokens, choice 1 emits 2, interleaved.
-    choice_0_arrays = [
-        {  # after step 1
-            "output_token_logprobs": [(-0.1, 100, "a")],
-        },
-        {  # after step 2 (cumulative)
-            "output_token_logprobs": [(-0.1, 100, "a"), (-0.2, 101, "b")],
-        },
-        {  # after step 3 (cumulative)
-            "output_token_logprobs": [
-                (-0.1, 100, "a"),
-                (-0.2, 101, "b"),
-                (-0.3, 102, "c"),
-            ],
-        },
-    ]
-    choice_1_arrays = [
-        {"output_token_logprobs": [(-0.5, 200, "x")]},
-        {
-            "output_token_logprobs": [(-0.5, 200, "x"), (-0.6, 201, "y")],
-        },
-    ]
-
-    # Interleaved arrival order: c0[0], c1[0], c0[1], c1[1], c0[2].
-    arrival = [
-        (0, choice_0_arrays[0]),
-        (1, choice_1_arrays[0]),
-        (0, choice_0_arrays[1]),
-        (1, choice_1_arrays[1]),
-        (0, choice_0_arrays[2]),
-    ]
-
-    num_logprobs_per_choice: dict[int, int] = {}
-    extracted_per_choice: dict[int, list[float]] = {}
-    for idx, meta in arrival:
-        lp, _, next_total = extract_from_sglang_meta(
-            meta, num_logprobs_per_choice.get(idx, 0)
-        )
-        num_logprobs_per_choice[idx] = next_total
-        if lp:
-            extracted_per_choice.setdefault(idx, []).extend(lp)
-
-    assert extracted_per_choice[0] == [-0.1, -0.2, -0.3]
-    assert extracted_per_choice[1] == [-0.5, -0.6]
-
-
-def test_parity_sglang_single_offset_misslices_under_n_gt_1():
-    """Negative control for the bug we fixed: a *scalar* offset (the
-    pre-fix unified behaviour) would mis-slice when chunks for two
-    different choices are interleaved on the same offset cursor. This
-    test exists so the regression is obvious if the per-choice dict
-    ever gets simplified back into a scalar."""
-    choice_0 = {"output_token_logprobs": [(-0.1, 100, "a")]}
-    choice_1 = {"output_token_logprobs": [(-0.5, 200, "x")]}
-
-    # Single scalar offset across both choices (buggy mode).
-    num_logprobs_so_far = 0
-    extracted_logprobs: list[float] = []
-    for meta in (choice_0, choice_1):
-        lp, _, num_logprobs_so_far = extract_from_sglang_meta(meta, num_logprobs_so_far)
-        if lp:
-            extracted_logprobs.extend(lp)
-
-    # The second extraction returns nothing because the scalar offset
-    # (=1 after the first chunk) skips choice 1's first entry. That's the
-    # bug — we'd lose choice 1's logprobs entirely.
-    assert extracted_logprobs == [-0.1]
-
-
 def test_parity_parse_logprob_options_consistent_across_engines():
     """Every engine path goes through `parse_logprob_options` for the
     options→ints normalization. Confirm the function is the single source
@@ -773,8 +679,8 @@ def test_parity_sglang_legacy_extract_wrapper_matches_shared():
         ],
     }
 
-    wrapper = DecodeWorkerHandler._extract_logprobs(meta, 0)
-    direct = extract_from_sglang_meta(meta, 0)
+    wrapper = DecodeWorkerHandler._extract_logprobs(meta)
+    direct = extract_from_sglang_meta(meta)
     assert wrapper == direct
 
 
@@ -955,22 +861,18 @@ def test_parity_trtllm_selected_token_missing_fallback_consistent():
     assert [len(p) for p in top_logprobs] == [2, 2, 2]
 
 
-def test_parity_sglang_cumulative_two_chunks_yields_full_stream():
-    """SGLang receives cumulative arrays. After two chunks (3 tokens
-    total), the running extracted-logprobs list matches the engine's
-    final state — proving the offset advances correctly."""
+def test_parity_sglang_incremental_two_chunks_yields_full_stream():
+    """Per-chunk SGLang metadata reconstructs the complete output stream."""
     chunk_1_meta = {
         "output_token_logprobs": [(-0.1, 100, "a")],
         "output_top_logprobs": [[(-0.1, 100, "a"), (-0.5, 105, "x")]],
     }
     chunk_2_meta = {
         "output_token_logprobs": [
-            (-0.1, 100, "a"),
             (-0.2, 200, "b"),
             (-0.3, 300, "c"),
         ],
         "output_top_logprobs": [
-            [(-0.1, 100, "a"), (-0.5, 105, "x")],
             [(-0.2, 200, "b"), (-0.6, 205, "y")],
             [(-0.3, 300, "c")],
         ],
@@ -978,9 +880,8 @@ def test_parity_sglang_cumulative_two_chunks_yields_full_stream():
 
     extracted_lp: list[float] = []
     extracted_top: list[list[dict]] = []
-    offset = 0
     for meta in (chunk_1_meta, chunk_2_meta):
-        lp, top, offset = extract_from_sglang_meta(meta, offset)
+        lp, top = extract_from_sglang_meta(meta)
         if lp:
             extracted_lp.extend(lp)
         if top:
@@ -988,6 +889,4 @@ def test_parity_sglang_cumulative_two_chunks_yields_full_stream():
 
     assert extracted_lp == [-0.1, -0.2, -0.3]
     assert [pos[0]["token_id"] for pos in extracted_top] == [100, 200, 300]
-    # First chunk: 1 entry; second chunk: 2 new entries. Total 3.
     assert len(extracted_top) == 3
-    assert offset == 3

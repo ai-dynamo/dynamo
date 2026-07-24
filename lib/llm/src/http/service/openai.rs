@@ -114,6 +114,12 @@ pub(crate) struct ErrorMessage {
     details: Option<Box<serde_json::Value>>,
 }
 
+impl ErrorMessage {
+    pub(crate) fn message(&self) -> &str {
+        &self.message
+    }
+}
+
 fn map_error_code_to_error_type(code: StatusCode) -> String {
     match code.canonical_reason() {
         Some(reason) => reason.to_string(),
@@ -156,7 +162,7 @@ fn extract_error_type_from_response(response: &ErrorResponse) -> ErrorType {
 /// Match `InvalidArgument` at top-level OR under `Backend()`.
 /// `py_err_to_dynamo` wraps Python `ValueError`/`TypeError` as
 /// `Backend(InvalidArgument)`; both variants are 400-worthy.
-fn find_invalid_argument_in_chain<'a>(
+pub(crate) fn find_invalid_argument_in_chain<'a>(
     err: &'a (dyn std::error::Error + 'static),
 ) -> Option<&'a dynamo_runtime::error::DynamoError> {
     use dynamo_runtime::error::{BackendError, ErrorType};

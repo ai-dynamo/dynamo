@@ -573,7 +573,7 @@ Lifecycle and runtime:
 - **Logprobs** — selected-token + top-k logprob extraction and
   streaming, sourced from `dynamo.common.backend.logprobs` and used by
   both unified engines and the legacy handlers (which now delegate
-  here). vLLM/TRT-LLM share an extractor; SGLang has a cumulative-array
+  here). vLLM/TRT-LLM share an extractor; SGLang has an incremental-array
   variant. The sample engine and Rust mocker emit synthetic logprobs
   when `output_options.logprobs` is set.
 - **Multimodal (vLLM)** — image and video inference in aggregated and

@@ -21,6 +21,7 @@ from dynamo.sglang._compat import (
 )
 from dynamo.sglang.args import Config
 from dynamo.sglang.engine_generate import (
+    build_generate_kwargs as build_engine_generate_kwargs,
     build_sampling_params as build_engine_generate_sampling_params,
 )
 from dynamo.sglang.publisher import DynamoSglangPublisher
@@ -178,9 +179,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # Engine.async_generate does not declare it (notably the deepseek_v4
         # branch). Doing this at init keeps the per-request hot path free of
         # signature inspection.
-        self._routed_experts_kwargs: Dict[
-            str, Any
-        ] = self._resolve_routed_experts_kwargs(self.engine, self.config.server_args)
+        self._routed_experts_kwargs: Dict[str, Any] = (
+            self._resolve_routed_experts_kwargs(self.engine, self.config.server_args)
+        )
         self._enable_frontend_decoding = enable_frontend_decoding
         self._image_loader: Optional[ImageLoader] = None
         if self._enable_frontend_decoding:
@@ -324,13 +325,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
     @staticmethod
     def _extract_logprobs(
         meta_info: Dict[str, Any],
-        num_output_logprobs_so_far: int,
         num_output_tokens_in_chunk: Optional[int] = None,
         return_tokens_as_token_ids: bool = False,
     ) -> tuple:
         return _shared_logprobs.extract_from_sglang_meta(
             meta_info,
-            num_output_logprobs_so_far,
             num_output_tokens_in_chunk=num_output_tokens_in_chunk,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
         )
@@ -355,7 +354,28 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         sampling_params = self._build_sampling_params(request)
         input_param = self._get_input_param(request)
         priority = (request.get("routing") or {}).get("priority")
-        logprob_kwargs = self._build_logprob_kwargs(request)
+        native_generate_kwargs = build_engine_generate_kwargs(request)
+        if native_generate_kwargs is None:
+            logprob_kwargs = self._build_logprob_kwargs(request)
+            routed_experts_kwargs = self._routed_experts_kwargs
+        else:
+            logprob_kwargs = {
+                name: value
+                for name, value in native_generate_kwargs.items()
+                if name in {"return_logprob", "logprob_start_len", "top_logprobs_num"}
+            }
+            if (
+                native_generate_kwargs.get("return_routed_experts")
+                and self._routed_experts_kwargs
+            ):
+                routed_experts_kwargs = {
+                    **self._routed_experts_kwargs,
+                    "routed_experts_start_len": native_generate_kwargs.get(
+                        "routed_experts_start_len", 0
+                    ),
+                }
+            else:
+                routed_experts_kwargs = {}
         metadata_uploader = self._metadata_uploader_from_request(request)
 
         output_options = request.get("output_options", {})
@@ -402,7 +422,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 sampling_params=sampling_params,
                 stream=True,
                 **require_reasoning_kwargs(self.engine, request),
-                **self._routed_experts_kwargs,
+                **routed_experts_kwargs,
                 bootstrap_host=bootstrap_info["bootstrap_host"],
                 bootstrap_port=bootstrap_info["bootstrap_port"],
                 bootstrap_room=bootstrap_info["bootstrap_room"],
@@ -474,7 +494,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 sampling_params=sampling_params,
                 stream=True,
                 **require_reasoning_kwargs(self.engine, request),
-                **self._routed_experts_kwargs,
+                **routed_experts_kwargs,
                 **mm_hashes_kwargs,
                 external_trace_header=trace_header,
                 rid=trace_id,
@@ -524,10 +544,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         """
         # Use Future pattern for request ID - will be set when first response arrives
         request_id_future: asyncio.Future[str] = asyncio.Future()
-        # SGLang versions return either cumulative or per-delta logprob arrays.
-        # Track the total seen for cumulative slicing; with n>1, interleaved
-        # chunks need an independent cursor per choice.
-        output_logprobs_per_choice: dict[int, int] = {}
         async with self._cancellation_monitor(request_id_future, context):
             async for res in stream_source:
                 meta_info = res.get("meta_info", {})
@@ -569,26 +585,25 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
                 # Pass through disjoint token segments directly
                 out["token_ids"] = output_ids
+                text = res.get("text")
+                if text is not None:
+                    out["text"] = text
 
                 if metadata_uploader is None:
                     # Extract logprobs for new tokens if available
-                    (
-                        log_probs,
-                        top_logprobs,
-                        next_logprobs_total,
-                    ) = self._extract_logprobs(
+                    log_probs, top_logprobs = self._extract_logprobs(
                         meta_info,
-                        output_logprobs_per_choice.get(output_idx, 0),
                         num_output_tokens_in_chunk=len(output_ids),
                         return_tokens_as_token_ids=return_tokens_as_token_ids,
                     )
-                    output_logprobs_per_choice[output_idx] = next_logprobs_total
                     if log_probs is not None:
                         out["log_probs"] = log_probs
                     if top_logprobs is not None:
                         out["top_logprobs"] = top_logprobs
 
                 engine_data = {}
+                if metadata_uploader is None:
+                    engine_data["sglang_meta_info"] = dict(meta_info)
                 routed_experts = meta_info.get("routed_experts")
                 if routed_experts is not None and metadata_uploader is None:
                     # sglang >= 0.5.11 base64-encodes routed_experts upstream. It rides
@@ -616,9 +631,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                             "total_tokens": input_tokens + completion_tokens,
                         }
                         if prefill_prompt_tokens_details is not None:
-                            completion_usage[
-                                "prompt_tokens_details"
-                            ] = prefill_prompt_tokens_details
+                            completion_usage["prompt_tokens_details"] = (
+                                prefill_prompt_tokens_details
+                            )
                         out["completion_usage"] = completion_usage
                     if metadata_uploader is not None:
                         try:

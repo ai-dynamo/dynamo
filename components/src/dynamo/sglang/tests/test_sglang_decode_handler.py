@@ -8,6 +8,10 @@ from types import SimpleNamespace
 import pytest
 
 from dynamo.common.metadata_upload import MetadataUploader
+from dynamo.sglang.engine_generate import (
+    build_generate_kwargs,
+    clamp_prefill_sampling_params,
+)
 from dynamo.sglang.request_handlers.llm.decode_handler import (
     DecodeWorkerHandler,
     _extract_sglang_stop_reason,
@@ -184,6 +188,29 @@ def _engine_generate_request(sampling_params):
     return {"extra_args": {"sglang_tito": {"sampling_params": sampling_params}}}
 
 
+def test_engine_generate_extracts_native_top_level_controls():
+    request = {
+        "extra_args": {
+            "sglang_tito": {
+                "sampling_params": {"max_new_tokens": 8},
+                "return_logprob": True,
+                "logprob_start_len": 3,
+                "top_logprobs_num": 2,
+                "return_routed_experts": True,
+                "routed_experts_start_len": 4,
+            }
+        }
+    }
+
+    assert build_generate_kwargs(request) == {
+        "return_logprob": True,
+        "logprob_start_len": 3,
+        "top_logprobs_num": 2,
+        "return_routed_experts": True,
+        "routed_experts_start_len": 4,
+    }
+
+
 def test_engine_generate_maps_vllm_sampling_names_to_sglang():
     handler = _new_decode_handler()
     request = _engine_generate_request(
@@ -214,6 +241,19 @@ def test_engine_generate_maps_vllm_sampling_names_to_sglang():
         "n": 2,
         "json_schema": json.dumps({"type": "object", "required": ["answer"]}),
     }
+
+
+def test_prefill_clamp_overrides_engine_generate_multi_output():
+    handler = _new_decode_handler()
+    sampling_params = handler._build_sampling_params(
+        _engine_generate_request({"max_tokens": 32, "n": 4, "temperature": 0.2})
+    )
+
+    clamp_prefill_sampling_params(sampling_params)
+
+    assert sampling_params["max_new_tokens"] == 1
+    assert sampling_params["n"] == 1
+    assert sampling_params["temperature"] == 0.2
 
 
 def test_engine_generate_rejects_ambiguous_or_unsupported_sampling_fields():

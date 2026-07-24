@@ -13,6 +13,7 @@ from dynamo.sglang._compat import require_reasoning_kwargs
 from dynamo.sglang.args import Config
 from dynamo.sglang.engine_generate import (
     build_sampling_params as build_engine_generate_sampling_params,
+    clamp_prefill_sampling_params,
 )
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
@@ -105,6 +106,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         engine_sampling_params = build_engine_generate_sampling_params(inner_request)
         if engine_sampling_params is not None:
             sampling_params = engine_sampling_params
+        clamp_prefill_sampling_params(sampling_params)
 
         # Use provided bootstrap_info if available (e.g., for health checks with FAKE_BOOTSTRAP_HOST)
         # Otherwise use real bootstrap host/port from engine and generate room locally

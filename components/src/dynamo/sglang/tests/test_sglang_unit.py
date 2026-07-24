@@ -109,6 +109,20 @@ def test_unified_runtime_data_can_advertise_engine_generate(monkeypatch):
     ) == {sglang_llm_engine.SGLANG_GENERATE_CAPABILITY: True}
 
 
+@pytest.mark.parametrize(
+    ("serving_mode", "expected"),
+    [
+        (DisaggregationMode.AGGREGATED, True),
+        (DisaggregationMode.PREFILL, True),
+        (DisaggregationMode.DECODE, True),
+        (DisaggregationMode.ENCODE, False),
+    ],
+)
+def test_unified_engine_generate_capability_by_mode(serving_mode, expected):
+    assert sglang_llm_engine._engine_generate_enabled(False, serving_mode) is expected
+    assert not sglang_llm_engine._engine_generate_enabled(True, serving_mode)
+
+
 def _make_sglang_config(**overrides):
     config = DynamoSGLangConfig()
     config.use_sglang_tokenizer = False

@@ -78,9 +78,11 @@ from dynamo.sglang.capacity import (
     local_dp_rank_bounds,
     runtime_capacity,
 )
-from dynamo.sglang.engine_generate import SGLANG_GENERATE_CAPABILITY
 from dynamo.sglang.engine_generate import (
+    SGLANG_GENERATE_CAPABILITY,
+    build_generate_kwargs as build_engine_generate_kwargs,
     build_sampling_params as build_engine_generate_sampling_params,
+    clamp_prefill_sampling_params,
 )
 from dynamo.sglang.logits_processing import activate_logits_processors
 from dynamo.sglang.pause import SGLangEnginePauseController
@@ -100,6 +102,14 @@ _DYN_SGLANG_SKIP_WARMUP_ENV = "DYN_SGLANG_SKIP_PREFILL_WARMUP"
 def _warmup_enabled() -> bool:
     raw = os.environ.get(_DYN_SGLANG_SKIP_WARMUP_ENV, "")
     return raw.strip().lower() not in ("1", "true", "yes", "on")
+
+
+def _engine_generate_enabled(
+    use_sglang_tokenizer: bool, serving_mode: DisaggregationMode
+) -> bool:
+    return not use_sglang_tokenizer and (
+        is_generation_stage(serving_mode) or serving_mode == DisaggregationMode.PREFILL
+    )
 
 
 def _get_runtime_data(
@@ -268,9 +278,8 @@ class SglangLLMEngine(LLMEngine):
             runtime_data=_get_runtime_data(
                 self.server_args,
                 scheduler_info,
-                enable_generate=(
-                    not self._use_sglang_tokenizer
-                    and is_generation_stage(self.serving_mode)
+                enable_generate=_engine_generate_enabled(
+                    self._use_sglang_tokenizer, self.serving_mode
                 ),
             ),
             llm=LlmRegistration(
@@ -380,6 +389,8 @@ class SglangLLMEngine(LLMEngine):
         assert self.engine is not None, "Engine not initialized"
 
         sampling_params = self._build_sampling_params(request)
+        if self.serving_mode == DisaggregationMode.PREFILL:
+            clamp_prefill_sampling_params(sampling_params)
         input_param = self._get_input_param(request)
         priority = (request.get("routing") or {}).get("priority")
         priority_kwargs = {}
@@ -389,13 +400,27 @@ class SglangLLMEngine(LLMEngine):
         # Prefill discards engine output (it only yields bootstrap info) —
         # asking SGLang to compute logprobs there would be wasted work,
         # especially with prompt_logprobs which forces a full prompt pass.
+        native_generate_kwargs = build_engine_generate_kwargs(request)
         if self.serving_mode == DisaggregationMode.PREFILL:
             logprob_kwargs = {}
+            native_output_kwargs = {}
+        elif native_generate_kwargs is not None:
+            logprob_kwargs = {
+                name: value
+                for name, value in native_generate_kwargs.items()
+                if name in {"return_logprob", "logprob_start_len", "top_logprobs_num"}
+            }
+            native_output_kwargs = {
+                name: value
+                for name, value in native_generate_kwargs.items()
+                if name in {"return_routed_experts", "routed_experts_start_len"}
+            }
         else:
             logprob_kwargs = _shared_logprobs.build_sglang_logprob_kwargs(
                 request.get("output_options", {}) or {},
                 allow_top_logprobs=_shared_logprobs.sglang_top_logprobs_allowed(),
             )
+            native_output_kwargs = {}
         return_tokens_as_token_ids = bool(
             (request.get("output_options") or {}).get("return_tokens_as_token_ids")
         )
@@ -446,6 +471,7 @@ class SglangLLMEngine(LLMEngine):
             **bootstrap_kwargs,
             **logits_kwargs,
             **logprob_kwargs,
+            **native_output_kwargs,
             **priority_kwargs,
         )
 
@@ -503,29 +529,23 @@ class SglangLLMEngine(LLMEngine):
             task.add_done_callback(self._prefill_consume_tasks.discard)
             return
 
-        # SGLang versions return either cumulative or per-delta logprob arrays.
-        # Track the total seen per choice because n>1 interleaves chunks.
-        num_logprobs_per_choice: dict[int, int] = {}
         async for res in stream:
             # SGLang sets index when n>1; default to 0 otherwise.
             output_idx = res.get("index") or 0
             out: GenerateChunk = {"token_ids": [], "index": output_idx}
             meta_info = res["meta_info"]
+            text = res.get("text")
+            if text is not None:
+                out["text"] = text
             finish_reason = meta_info["finish_reason"]
 
             output_ids = res.get("output_ids", [])
             if output_ids or finish_reason:
-                (
-                    log_probs,
-                    top_logprobs,
-                    next_total,
-                ) = _shared_logprobs.extract_from_sglang_meta(
+                log_probs, top_logprobs = _shared_logprobs.extract_from_sglang_meta(
                     meta_info,
-                    num_logprobs_per_choice.get(output_idx, 0),
                     num_output_tokens_in_chunk=len(output_ids),
                     return_tokens_as_token_ids=return_tokens_as_token_ids,
                 )
-                num_logprobs_per_choice[output_idx] = next_total
                 if log_probs is not None:
                     out["log_probs"] = log_probs
                 if top_logprobs is not None:
@@ -549,6 +569,7 @@ class SglangLLMEngine(LLMEngine):
                 continue
 
             out["token_ids"] = output_ids
+            engine_data = {"sglang_meta_info": dict(meta_info)}
 
             if finish_reason:
                 prompt_tokens = meta_info["prompt_tokens"]
@@ -568,7 +589,8 @@ class SglangLLMEngine(LLMEngine):
                     _shared_logprobs.extract_prompt_logprobs_from_sglang_meta(meta_info)
                 )
                 if prompt_payload is not None:
-                    out["engine_data"] = {"prompt_logprobs": prompt_payload}
+                    engine_data["prompt_logprobs"] = prompt_payload
+            out["engine_data"] = engine_data
 
             if context.is_stopped():
                 # Mutate `out` instead of building a fresh dict so any

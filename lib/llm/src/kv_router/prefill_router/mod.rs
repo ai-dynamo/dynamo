@@ -134,6 +134,19 @@ struct PrefillCompletion {
 /// - Query-only: `query_instance_id` annotation present → returns worker IDs without execution
 /// - Pre-routed: `prefill_worker_id`/`decode_worker_id` set → routes to specified workers
 /// - Normal: Worker IDs determined by router based on KV cache state
+///
+/// # Future SGLang input-token logprobs
+///
+/// In disaggregated SGLang serving, prompt-side logprob metadata is produced
+/// during the prefill/decode handoff rather than solely by the terminal decode
+/// stream. Supporting it requires retaining the prefill metadata while decode
+/// runs, then concatenating the peers' raw `input_token_logprobs` and
+/// `input_top_logprobs` arrays in prompt order and normalizing them once on the
+/// terminal decode output. Prefill and decode must still run concurrently:
+/// waiting for prefill before starting decode can deadlock the KV transfer.
+/// Client-visible logprobs should not be placed in `disaggregated_params`,
+/// which is an engine-owned KV handoff contract rather than a public response
+/// channel.
 pub struct PrefillRouter {
     prefill_router: OnceLock<InnerPrefillRouter>,
     model_manager: Arc<ModelManager>,
@@ -149,6 +162,13 @@ pub struct PrefillRouter {
     is_eagle: bool,
     /// Initialization and worker availability state.
     lifecycle: AtomicU8,
+}
+
+fn prepare_prefill_request(request: &PreprocessedRequest) -> PreprocessedRequest {
+    let mut prefill_request = request.clone();
+    prefill_request.sampling_options.n = Some(1);
+    prefill_request.stop_conditions.max_tokens = Some(1);
+    prefill_request
 }
 
 impl Drop for PrefillRouter {
@@ -200,9 +220,10 @@ impl
         let tracker = req.tracker.as_ref().unwrap();
         let prefill_phase_barrier = tracker.set_phase(RequestPhase::Prefill).await;
 
-        // Prepare prefill request with max_tokens = 1 (clone after tracker is set)
-        let mut prefill_req = req.clone();
-        prefill_req.stop_conditions.max_tokens = Some(1);
+        // Prepare a single-sequence, single-token prefill request after opaque
+        // engine-native sampling parameters have been projected into the
+        // canonical request.
+        let prefill_req = prepare_prefill_request(&req);
 
         // Try to resolve prefill worker upfront: if we can get bootstrap info early,
         // spawn prefill in background and proceed to decode immediately.
@@ -510,6 +531,20 @@ mod tests {
             }))
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn prefill_request_clamps_multi_output_after_projection() {
+        let mut request = request_with_constraints(None);
+        request.sampling_options.n = Some(4);
+        request.stop_conditions.max_tokens = Some(32);
+
+        let prefill_request = prepare_prefill_request(&request);
+
+        assert_eq!(prefill_request.sampling_options.n, Some(1));
+        assert_eq!(prefill_request.stop_conditions.max_tokens, Some(1));
+        assert_eq!(request.sampling_options.n, Some(4));
+        assert_eq!(request.stop_conditions.max_tokens, Some(32));
     }
 
     #[test]

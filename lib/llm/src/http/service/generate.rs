@@ -3,33 +3,37 @@
 
 //! HTTP handlers for the token-in/token-out `Generate` APIs:
 //! `POST /inference/v1/generate` for vLLM and
-//! `POST /generate` for SGLang.
+//! `POST` or `PUT /generate` for SGLang.
 //!
 //! These experimental engine-native endpoints are **disabled by default**;
 //! opt in via the `enable_engine_apis` builder flag or the
 //! backend-specific `DYN_*_ENABLE_*` env vars. When enabled,
 //! the frontend preserves the complete request in an opaque
-//! backend envelope. Streaming (`stream=true`) remains unimplemented.
+//! backend envelope. SGLang requests support native incremental SSE streaming.
 
 use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    extract::{Extension, State},
+    extract::{State, rejection::JsonRejection},
     http::{HeaderMap, StatusCode},
     middleware,
-    response::{IntoResponse, Response},
+    response::{
+        IntoResponse, Response,
+        sse::{Event, KeepAlive, Sse},
+    },
     routing::post,
 };
 use dynamo_runtime::pipeline::{AsyncEngineContext, AsyncEngineContextProvider, Context};
+use futures::StreamExt;
 use serde::Serialize;
 use tracing::Instrument;
 
-use super::disconnect::create_connection_monitor;
+use super::disconnect::{ConnectionHandle, create_connection_monitor, monitor_for_disconnects};
 use super::metrics::{CancellationLabels, ErrorType};
 use super::openai::{
-    check_model_serving_ready, check_ready, context_from_headers, get_body_limit,
-    get_or_create_request_id, smart_json_error_middleware,
+    check_model_serving_ready, check_ready, context_from_headers, find_invalid_argument_in_chain,
+    get_body_limit, get_or_create_request_id, smart_json_error_middleware,
 };
 use super::{RouteDoc, service_v2};
 use crate::local_model::runtime_config::{
@@ -40,6 +44,10 @@ use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
 use crate::protocols::openai::generate::{
     GenerateRequest, GenerateResponse, GenerateResponseOptions, SamplingParams, StreamOptions,
 };
+use crate::protocols::sglang::generate::{
+    SglangGenerateRequest, SglangGenerateResponse, SglangResponseOptions,
+};
+use crate::protocols::sglang::stream::SglangGenerateStream;
 
 const X_REQUEST_ID_HEADER: &str = "x-request-id";
 const X_DATA_PARALLEL_RANK_HEADER: &str = "x-data-parallel-rank";
@@ -53,43 +61,37 @@ enum GenerateBackend {
 }
 
 impl GenerateBackend {
-    fn default_path(self) -> &'static str {
-        match self {
-            Self::Vllm => VLLM_GENERATE_DEFAULT_PATH,
-            Self::Sglang => SGLANG_GENERATE_DEFAULT_PATH,
-        }
-    }
-
     fn capability(self) -> &'static str {
         match self {
             Self::Vllm => VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
             Self::Sglang => SGLANG_GENERATE_CAPABILITY,
         }
     }
+}
 
-    fn name(self) -> &'static str {
+#[derive(Clone, Copy)]
+enum GenerateResponseFormat {
+    Vllm(GenerateResponseOptions),
+    Sglang(SglangResponseOptions),
+}
+
+enum AggregatedGenerateResponse {
+    Vllm(GenerateResponse),
+    Sglang(serde_json::Value),
+}
+
+impl AggregatedGenerateResponse {
+    fn is_complete_unary(&self) -> bool {
         match self {
-            Self::Vllm => "vLLM",
-            Self::Sglang => "SGLang",
+            Self::Vllm(response) => response.is_complete_unary(),
+            Self::Sglang(_) => true,
         }
     }
 
-    fn worker_envelope(
-        self,
-        request: &GenerateRequest,
-        request_id: &str,
-    ) -> serde_json::Result<(&'static str, serde_json::Value)> {
+    fn into_response(self) -> Response {
         match self {
-            Self::Vllm => Ok((
-                "vllm_tito",
-                serde_json::to_value(VllmTitoEnvelope::new(request, request_id))?,
-            )),
-            Self::Sglang => Ok((
-                "sglang_tito",
-                serde_json::to_value(SglangTitoEnvelope {
-                    sampling_params: &request.sampling_params,
-                })?,
-            )),
+            Self::Vllm(response) => Json(response).into_response(),
+            Self::Sglang(response) => Json(response).into_response(),
         }
     }
 }
@@ -114,64 +116,103 @@ struct GenerateErrorBody {
     code: u16,
 }
 
+/// SGLang unary error body: `{"error": {"message": ...}}`.
+#[derive(Serialize, Debug)]
+struct SglangGenerateError {
+    error: SglangGenerateErrorBody,
+}
+
+#[derive(Serialize, Debug)]
+struct SglangGenerateErrorBody {
+    message: String,
+}
+
+/// SGLang schema-validation error body (its legacy `ErrorResponse`).
+#[derive(Serialize, Debug)]
+struct SglangValidationError {
+    object: &'static str,
+    message: String,
+    #[serde(rename = "type")]
+    error_type: &'static str,
+    param: Option<&'static str>,
+    code: u16,
+}
+
 /// Create the vLLM-compatible token-in/token-out `Generate` route.
 pub fn generate_router(
     state: Arc<service_v2::State>,
     path: Option<String>,
 ) -> (Vec<RouteDoc>, Router) {
-    backend_generate_router(state, path, GenerateBackend::Vllm)
-}
-
-/// Create the SGLang-compatible token-in/token-out `Generate` route.
-pub fn sglang_generate_router(
-    state: Arc<service_v2::State>,
-    path: Option<String>,
-) -> (Vec<RouteDoc>, Router) {
-    backend_generate_router(state, path, GenerateBackend::Sglang)
-}
-
-fn backend_generate_router(
-    state: Arc<service_v2::State>,
-    path: Option<String>,
-    backend: GenerateBackend,
-) -> (Vec<RouteDoc>, Router) {
-    let path = path.unwrap_or_else(|| backend.default_path().to_string());
+    let path = path.unwrap_or_else(|| VLLM_GENERATE_DEFAULT_PATH.to_string());
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let router = Router::new()
-        .route(&path, post(handler_generate))
-        .layer(Extension(backend))
+        .route(&path, post(handler_vllm_generate))
         .layer(middleware::from_fn(smart_json_error_middleware))
         .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state(state);
     (vec![doc], router)
 }
 
-/// Build a vLLM-style nested-`error` response.
-fn generate_error_response(code: StatusCode, error_type: &str, message: String) -> Response {
-    (
-        code,
-        Json(GenerateError {
-            error: GenerateErrorBody {
-                message,
-                error_type: error_type.to_string(),
-                code: code.as_u16(),
-            },
-        }),
-    )
-        .into_response()
+/// Create the native SGLang token-in/token-out `Generate` route.
+pub fn sglang_generate_router(
+    state: Arc<service_v2::State>,
+    path: Option<String>,
+) -> (Vec<RouteDoc>, Router) {
+    let path = path.unwrap_or_else(|| SGLANG_GENERATE_DEFAULT_PATH.to_string());
+    let docs = vec![
+        RouteDoc::new(axum::http::Method::POST, &path),
+        RouteDoc::new(axum::http::Method::PUT, &path),
+    ];
+    let router = Router::new()
+        .route(
+            &path,
+            post(handler_sglang_generate).put(handler_sglang_generate),
+        )
+        .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
+        .with_state(state);
+    (docs, router)
 }
 
-/// Resolve the request metadata that vLLM keeps outside the public JSON body.
+impl GenerateBackend {
+    fn error_response(self, code: StatusCode, error_type: &str, message: String) -> Response {
+        match self {
+            Self::Vllm => (
+                code,
+                Json(GenerateError {
+                    error: GenerateErrorBody {
+                        message,
+                        error_type: error_type.to_string(),
+                        code: code.as_u16(),
+                    },
+                }),
+            )
+                .into_response(),
+            Self::Sglang => (
+                code,
+                Json(SglangGenerateError {
+                    error: SglangGenerateErrorBody { message },
+                }),
+            )
+                .into_response(),
+        }
+    }
+}
+
 fn resolve_generate_request_context(
     headers: &HeaderMap,
     body_request_id: Option<&str>,
+    backend: GenerateBackend,
 ) -> GenerateRequestContext {
-    let request_id = headers
+    let header_request_id = headers
         .get(X_REQUEST_ID_HEADER)
         .and_then(|value| value.to_str().ok())
-        .map(ToOwned::to_owned)
-        .or_else(|| body_request_id.map(ToOwned::to_owned))
-        .unwrap_or_else(|| get_or_create_request_id(headers));
+        .map(ToOwned::to_owned);
+    let body_request_id = body_request_id.map(ToOwned::to_owned);
+    let request_id = match backend {
+        GenerateBackend::Vllm => header_request_id.or(body_request_id),
+        GenerateBackend::Sglang => body_request_id.or(header_request_id),
+    }
+    .unwrap_or_else(|| get_or_create_request_id(headers));
     let data_parallel_rank = headers
         .get(X_DATA_PARALLEL_RANK_HEADER)
         .and_then(|value| value.to_str().ok())
@@ -207,16 +248,16 @@ async fn run_until_killed<T>(
     }
 }
 
-fn generate_cancelled_response() -> Response {
-    generate_error_response(
+fn generate_cancelled_response(backend: GenerateBackend) -> Response {
+    backend.error_response(
         StatusCode::from_u16(499).unwrap_or(StatusCode::BAD_REQUEST),
         "request_cancelled",
         "request was cancelled".to_string(),
     )
 }
 
-fn generate_internal_error_response() -> Response {
-    generate_error_response(
+fn generate_internal_error_response(backend: GenerateBackend) -> Response {
+    backend.error_response(
         StatusCode::INTERNAL_SERVER_ERROR,
         "internal_error",
         "internal server error".to_string(),
@@ -274,98 +315,22 @@ impl<'a> VllmTitoEnvelope<'a> {
     }
 }
 
-/// Minimal SGLang-owned request payload. Routing, response formatting, and
-/// public request validation remain canonical in the Rust frontend.
-#[derive(Serialize)]
-struct SglangTitoEnvelope<'a> {
-    sampling_params: &'a SamplingParams,
-}
-
-fn sglang_logprob_count(name: &str, value: Option<i32>) -> anyhow::Result<Option<u32>> {
-    match value {
-        Some(value) if value < 0 => {
-            anyhow::bail!("sampling_params.{name}={value} is not supported by SGLang")
-        }
-        Some(value) => Ok(Some(u32::try_from(value).map_err(|error| {
-            anyhow::anyhow!("invalid sampling_params.{name}: {error}")
-        })?)),
-        None => Ok(None),
-    }
-}
-fn validate_sglang_request(request: &GenerateRequest) -> Result<(), String> {
-    if request.cache_salt.is_some() {
-        return Err("cache_salt is not supported by the SGLang generate endpoint".to_string());
-    }
-    if request.kv_transfer_params.is_some() {
-        return Err("kv_transfer_params is managed internally by Dynamo for SGLang".to_string());
-    }
-    for field in [
-        "bootstrap_info",
-        "bootstrap_host",
-        "bootstrap_port",
-        "bootstrap_room",
-        "disaggregated_params",
-    ] {
-        if request.passthrough.contains_key(field) {
-            return Err(format!(
-                "`{field}` is internal Dynamo routing state and cannot be set by clients"
-            ));
-        }
-    }
-    if !request.passthrough.is_empty() {
-        let mut unsupported: Vec<_> = request.passthrough.keys().cloned().collect();
-        unsupported.sort();
-        return Err(format!(
-            "unsupported top-level generate field(s) for SGLang: {}",
-            unsupported.join(", ")
-        ));
-    }
-
-    Ok(())
-}
-
-fn generate_output_options(
-    request: &GenerateRequest,
-    backend: GenerateBackend,
-) -> anyhow::Result<OutputOptions> {
-    if matches!(backend, GenerateBackend::Vllm) {
-        return Ok(OutputOptions::default());
-    }
-
-    Ok(OutputOptions {
-        logprobs: sglang_logprob_count("logprobs", request.sampling_params.logprobs())?,
-        prompt_logprobs: sglang_logprob_count(
-            "prompt_logprobs",
-            request.sampling_params.prompt_logprobs(),
-        )?,
-        // SGLang token workers commonly run without a tokenizer. Returning
-        // token-id labels keeps logprob entries aligned without detokenization.
-        return_tokens_as_token_ids: Some(true),
-        ..Default::default()
-    })
-}
-
-/// Project canonical routing and response controls, then attach only the
-/// request payload owned by the selected backend.
-fn preprocessed_from_generate(
+fn preprocessed_from_vllm_generate(
     request: GenerateRequest,
     model: &str,
     data_parallel_rank: Option<u32>,
     request_id: &str,
-    backend: GenerateBackend,
 ) -> anyhow::Result<PreprocessedRequest> {
     let sampling = &request.sampling_params;
     let max_tokens = sampling.max_tokens();
     let min_tokens = sampling.min_tokens();
     let ignore_eos = sampling.ignore_eos();
     let routing_priority = dynamo_routing_priority(request.priority);
-    let output_options = generate_output_options(&request, backend)?;
-    let (envelope_key, engine_tito) = backend.worker_envelope(&request, request_id)?;
     let mut extra_args = serde_json::Map::new();
-    // Do not copy token_ids into this envelope. The worker reconstructs that
-    // field from the canonical PreprocessedRequest token_ids after routing.
-    extra_args.insert(envelope_key.to_string(), engine_tito);
-
+    extra_args.insert(
+        "vllm_tito".to_string(),
+        serde_json::to_value(VllmTitoEnvelope::new(&request, request_id))?,
+    );
     let GenerateRequest {
         token_ids,
         cache_salt,
@@ -385,13 +350,11 @@ fn preprocessed_from_generate(
             n: Some(1),
             ..Default::default()
         })
-        .output_options(output_options)
+        .output_options(OutputOptions::default())
         .routing(Some(crate::protocols::common::preprocessor::RoutingHints {
             dp_rank: data_parallel_rank,
             expected_output_tokens: max_tokens,
             cache_namespace: cache_salt,
-            // `priority_jump` is a boost-only scheduler input. Preserve penalties
-            // in signed `priority`, matching the standard preprocessor projection.
             priority_jump: Some(routing_priority.max(0) as f64),
             priority: Some(routing_priority),
             ..Default::default()
@@ -401,40 +364,186 @@ fn preprocessed_from_generate(
         .map_err(|error| anyhow::anyhow!("failed to build PreprocessedRequest: {error}"))
 }
 
-/// Resolve, route, and dispatch a frontend-native token-in/token-out request.
-async fn handler_generate(
+fn preprocessed_from_sglang_generate(
+    request: SglangGenerateRequest,
+    model: &str,
+    data_parallel_rank: Option<u32>,
+) -> anyhow::Result<PreprocessedRequest> {
+    let max_tokens = request.max_new_tokens();
+    let min_tokens = request.min_new_tokens();
+    let ignore_eos = request.ignore_eos();
+    let routing_priority = request.priority.unwrap_or_default();
+    let return_logprob = request.return_logprob.unwrap_or(false);
+    let top_logprobs_num = request.top_logprobs_num.unwrap_or(0);
+    let output_options = OutputOptions {
+        logprobs: return_logprob.then_some(top_logprobs_num),
+        prompt_logprobs: (return_logprob && request.logprob_start_len.unwrap_or(-1) >= 0)
+            .then_some(top_logprobs_num),
+        return_tokens_as_token_ids: Some(true),
+        ..Default::default()
+    };
+    let mut extra_args = serde_json::Map::new();
+    extra_args.insert("sglang_tito".to_string(), request.worker_envelope());
+
+    PreprocessedRequest::builder()
+        .model(model.to_string())
+        .token_ids(request.input_ids)
+        .stop_conditions(StopConditions {
+            max_tokens: Some(max_tokens),
+            min_tokens: Some(min_tokens),
+            ignore_eos: Some(ignore_eos),
+            ..Default::default()
+        })
+        .sampling_options(SamplingOptions {
+            n: Some(1),
+            ..Default::default()
+        })
+        .output_options(output_options)
+        .routing(Some(crate::protocols::common::preprocessor::RoutingHints {
+            dp_rank: data_parallel_rank,
+            expected_output_tokens: Some(max_tokens),
+            priority_jump: Some(routing_priority.max(0) as f64),
+            priority: Some(routing_priority),
+            ..Default::default()
+        }))
+        .extra_args(Some(serde_json::Value::Object(extra_args)))
+        .build()
+        .map_err(|error| anyhow::anyhow!("failed to build PreprocessedRequest: {error}"))
+}
+
+enum IncomingGenerateRequest {
+    Vllm(GenerateRequest),
+    Sglang(SglangGenerateRequest),
+}
+
+impl IncomingGenerateRequest {
+    fn backend(&self) -> GenerateBackend {
+        match self {
+            Self::Vllm(_) => GenerateBackend::Vllm,
+            Self::Sglang(_) => GenerateBackend::Sglang,
+        }
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        match self {
+            Self::Vllm(request) => request.validate(),
+            Self::Sglang(request) => request.validate(),
+        }
+    }
+
+    fn stream(&self) -> bool {
+        match self {
+            Self::Vllm(request) => request.stream,
+            Self::Sglang(request) => request.stream,
+        }
+    }
+
+    fn body_request_id(&self) -> Option<&str> {
+        match self {
+            Self::Vllm(request) => request.request_id.as_deref(),
+            Self::Sglang(request) => request.rid.as_deref(),
+        }
+    }
+
+    fn model(&self) -> Option<&str> {
+        match self {
+            Self::Vllm(request) => request.model.as_deref(),
+            Self::Sglang(_) => None,
+        }
+    }
+
+    fn response_format(&self) -> GenerateResponseFormat {
+        match self {
+            Self::Vllm(request) => GenerateResponseFormat::Vllm(request.response_options()),
+            Self::Sglang(request) => GenerateResponseFormat::Sglang(request.response_options()),
+        }
+    }
+
+    fn into_preprocessed(
+        self,
+        model: &str,
+        data_parallel_rank: Option<u32>,
+        request_id: &str,
+    ) -> anyhow::Result<PreprocessedRequest> {
+        match self {
+            Self::Vllm(request) => {
+                preprocessed_from_vllm_generate(request, model, data_parallel_rank, request_id)
+            }
+            Self::Sglang(request) => {
+                preprocessed_from_sglang_generate(request, model, data_parallel_rank)
+            }
+        }
+    }
+}
+
+fn adapt_openai_error(
+    backend: GenerateBackend,
+    response: super::openai::ErrorResponse,
+) -> Response {
+    if backend == GenerateBackend::Vllm {
+        return response.into_response();
+    }
+    let (status, Json(error)) = response;
+    backend.error_response(status, "request_error", error.message().to_string())
+}
+
+async fn handler_vllm_generate(
     State(state): State<Arc<service_v2::State>>,
-    Extension(backend): Extension<GenerateBackend>,
     headers: HeaderMap,
     Json(request): Json<GenerateRequest>,
 ) -> Response {
+    handle_generate(state, headers, IncomingGenerateRequest::Vllm(request)).await
+}
+
+async fn handler_sglang_generate(
+    State(state): State<Arc<service_v2::State>>,
+    headers: HeaderMap,
+    request: Result<Json<SglangGenerateRequest>, JsonRejection>,
+) -> Response {
+    let request = match request {
+        Ok(Json(request)) => request,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(SglangValidationError {
+                    object: "error",
+                    message: error.body_text(),
+                    error_type: "Bad Request",
+                    param: None,
+                    code: StatusCode::BAD_REQUEST.as_u16(),
+                }),
+            )
+                .into_response();
+        }
+    };
+    handle_generate(state, headers, IncomingGenerateRequest::Sglang(request)).await
+}
+
+/// Resolve, route, and dispatch a frontend-native token-in/token-out request.
+async fn handle_generate(
+    state: Arc<service_v2::State>,
+    headers: HeaderMap,
+    request: IncomingGenerateRequest,
+) -> Response {
+    let backend = request.backend();
     if let Err(response) = check_ready(&state) {
-        return response.into_response();
+        return adapt_openai_error(backend, response);
     }
-
     if let Err(message) = request.validate() {
-        return generate_error_response(StatusCode::BAD_REQUEST, "invalid_request_error", message);
+        return backend.error_response(StatusCode::BAD_REQUEST, "invalid_request_error", message);
     }
-    if backend == GenerateBackend::Sglang
-        && let Err(message) = validate_sglang_request(&request)
-    {
-        return generate_error_response(StatusCode::BAD_REQUEST, "invalid_request_error", message);
-    }
-
-    if request.stream {
-        return generate_error_response(
+    let streaming = request.stream();
+    if streaming && backend == GenerateBackend::Vllm {
+        return backend.error_response(
             StatusCode::NOT_IMPLEMENTED,
             "not_implemented",
-            format!(
-                "streaming (stream=true) is not implemented for the {} Generate API yet",
-                backend.name()
-            ),
+            "streaming (stream=true) is not implemented for the vLLM Generate API yet".to_string(),
         );
     }
-    let response_options = request.response_options();
+    let response_format = request.response_format();
 
-    let model = match &request.model {
-        Some(model) => model.clone(),
+    let model = match request.model() {
+        Some(model) => model.to_string(),
         None => {
             let models = state
                 .manager()
@@ -442,18 +551,25 @@ async fn handler_generate(
             match models.len() {
                 1 => models.into_iter().next().unwrap(),
                 0 => {
-                    return generate_error_response(
+                    return backend.error_response(
                         StatusCode::NOT_FOUND,
                         "not_found",
                         "no generate-capable model is registered".to_string(),
                     );
                 }
                 _ => {
-                    return generate_error_response(
+                    let message = match backend {
+                        GenerateBackend::Vllm => {
+                            "multiple models are registered; specify `model` in the request"
+                        }
+                        GenerateBackend::Sglang => {
+                            "multiple SGLang models are registered; configure a model-specific generate endpoint"
+                        }
+                    };
+                    return backend.error_response(
                         StatusCode::BAD_REQUEST,
                         "invalid_request_error",
-                        "multiple models are registered; specify `model` in the request"
-                            .to_string(),
+                        message.to_string(),
                     );
                 }
             }
@@ -461,9 +577,8 @@ async fn handler_generate(
     };
 
     if let Err(response) = check_model_serving_ready(&state, &model) {
-        return response.into_response();
+        return adapt_openai_error(backend, response);
     }
-
     let engine = match state
         .manager()
         .get_generate_engine_for_capability(&model, backend.capability())
@@ -476,21 +591,20 @@ async fn handler_generate(
                 }
                 _ => (StatusCode::NOT_FOUND, "not_found"),
             };
-            return generate_error_response(status, error_type, error.to_string());
+            return backend.error_response(status, error_type, error.to_string());
         }
     };
 
-    let request_context = resolve_generate_request_context(&headers, request.request_id.as_deref());
-    let preprocessed = match preprocessed_from_generate(
-        request,
+    let request_context =
+        resolve_generate_request_context(&headers, request.body_request_id(), backend);
+    let preprocessed = match request.into_preprocessed(
         &model,
         request_context.data_parallel_rank,
         &request_context.request_id,
-        backend,
     ) {
         Ok(preprocessed) => preprocessed,
         Err(error) => {
-            return generate_error_response(
+            return backend.error_response(
                 StatusCode::BAD_REQUEST,
                 "invalid_request_error",
                 error.to_string(),
@@ -502,15 +616,15 @@ async fn handler_generate(
     let context: Context<PreprocessedRequest> =
         match context_from_headers(preprocessed, request_id.clone(), &headers) {
             Ok(context) => context,
-            Err(response) => return response.into_response(),
+            Err(response) => return adapt_openai_error(backend, response),
         };
     let engine_context = context.context();
     let cancellation_labels = CancellationLabels {
         model: state.manager().metric_model_for(&model).to_string(),
         endpoint: super::metrics::Endpoint::Generate.to_string(),
-        request_type: "unary".to_string(),
+        request_type: if streaming { "streaming" } else { "unary" }.to_string(),
     };
-    let (mut connection_handle, _stream_handle) = create_connection_monitor(
+    let (mut connection_handle, stream_handle) = create_connection_monitor(
         engine_context,
         Some(state.metrics_clone()),
         cancellation_labels,
@@ -518,9 +632,6 @@ async fn handler_generate(
     .await;
 
     let dispatch_span = generate_dispatch_span(&request_id);
-    // Unary work must outlive the Axum handler so dropping the handler can signal
-    // the armed connection monitor. The detached dispatch observes that kill at
-    // each backend await point and then exits promptly.
     let response = match tokio::spawn(
         generate_dispatch(
             engine,
@@ -528,7 +639,10 @@ async fn handler_generate(
             request_id,
             model,
             state.clone(),
-            response_options,
+            response_format,
+            backend,
+            streaming,
+            stream_handle,
         )
         .instrument(dispatch_span),
     )
@@ -537,7 +651,7 @@ async fn handler_generate(
         Ok(response) => response,
         Err(error) => {
             tracing::error!(%error, "generate dispatch task panicked");
-            generate_internal_error_response()
+            generate_internal_error_response(backend)
         }
     };
 
@@ -551,12 +665,15 @@ async fn generate_dispatch(
     request_id: String,
     model: String,
     state: Arc<service_v2::State>,
-    response_options: GenerateResponseOptions,
+    response_format: GenerateResponseFormat,
+    backend: GenerateBackend,
+    streaming: bool,
+    stream_handle: ConnectionHandle,
 ) -> Response {
     let mut inflight_guard = state.metrics_clone().create_inflight_guard(
         state.manager().metric_model_for(&model),
         super::metrics::Endpoint::Generate,
-        false,
+        streaming,
         &request_id,
     );
     let request_context = context.context();
@@ -565,12 +682,12 @@ async fn generate_dispatch(
             Some(result) => result,
             None => {
                 inflight_guard.mark_error(ErrorType::Cancelled);
-                return generate_cancelled_response();
+                return generate_cancelled_response(backend);
             }
         };
     if request_context.is_killed() {
         inflight_guard.mark_error(ErrorType::Cancelled);
-        return generate_cancelled_response();
+        return generate_cancelled_response(backend);
     }
     let stream = match generate_result {
         Ok(stream) => stream,
@@ -578,62 +695,102 @@ async fn generate_dispatch(
             let was_cancelled = request_context.is_killed()
                 || super::metrics::request_was_cancelled(error.as_ref());
             let was_rejected = super::metrics::request_was_rejected(error.as_ref());
+            let invalid_argument = find_invalid_argument_in_chain(error.as_ref());
             inflight_guard.mark_error(if was_cancelled {
                 ErrorType::Cancelled
             } else if was_rejected {
                 ErrorType::Unavailable
+            } else if invalid_argument.is_some() {
+                ErrorType::Validation
             } else {
                 ErrorType::Internal
             });
             if was_cancelled {
-                return generate_cancelled_response();
+                return generate_cancelled_response(backend);
             }
             if was_rejected {
                 tracing::warn!(%request_id, error = %format!("{error:#}"), "engine rejected generate request");
                 state
                     .metrics_clone()
                     .inc_rejection(&model, super::metrics::Endpoint::Generate);
-                return generate_error_response(
+                return backend.error_response(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "service_unavailable",
                     "engine rejected the request".to_string(),
                 );
             }
+            if let Some(invalid_argument) = invalid_argument {
+                tracing::warn!(%request_id, error = %format!("{error:#}"), "engine rejected invalid generate request");
+                return backend.error_response(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request_error",
+                    invalid_argument.message().to_string(),
+                );
+            }
             tracing::error!(%request_id, error = %format!("{error:#}"), "engine generate call failed");
-            return generate_internal_error_response();
+            return generate_internal_error_response(backend);
         }
     };
 
     let engine_context = stream.context();
-    let response_result = match run_until_killed(
-        request_context.as_ref(),
-        GenerateResponse::from_annotated_stream_with_options(
-            stream,
-            request_id.clone(),
-            response_options,
-        ),
-    )
-    .await
-    {
+    if streaming {
+        let GenerateResponseFormat::Sglang(options) = response_format else {
+            unreachable!("vLLM streaming requests are rejected before dispatch")
+        };
+        let stream =
+            SglangGenerateStream::from_annotated_stream(stream, request_id.clone(), options).map(
+                |result| {
+                    result
+                        .map(|value| Event::default().data(value.to_string()))
+                        .map_err(axum::Error::new)
+                },
+            );
+        let stream = monitor_for_disconnects(stream, engine_context, inflight_guard, stream_handle);
+        let mut response = Sse::new(stream);
+        if let Some(keep_alive) = state.sse_keep_alive() {
+            response = response.keep_alive(KeepAlive::default().interval(keep_alive));
+        }
+        return response.into_response();
+    }
+
+    let aggregate = async {
+        match response_format {
+            GenerateResponseFormat::Vllm(options) => {
+                GenerateResponse::from_annotated_stream_with_options(
+                    stream,
+                    request_id.clone(),
+                    options,
+                )
+                .await
+                .map(AggregatedGenerateResponse::Vllm)
+            }
+            GenerateResponseFormat::Sglang(options) => {
+                SglangGenerateResponse::from_annotated_stream(stream, request_id.clone(), options)
+                    .await
+                    .map(AggregatedGenerateResponse::Sglang)
+            }
+        }
+    };
+    let response_result = match run_until_killed(request_context.as_ref(), aggregate).await {
         Some(result) => result,
         None => {
             inflight_guard.mark_error(ErrorType::Cancelled);
-            return generate_cancelled_response();
+            return generate_cancelled_response(backend);
         }
     };
     match response_result {
         Ok(response) => {
             if request_context.is_killed() || engine_context.is_killed() {
                 inflight_guard.mark_error(ErrorType::Cancelled);
-                return generate_cancelled_response();
+                return generate_cancelled_response(backend);
             }
             if !response.is_complete_unary() {
                 inflight_guard.mark_error(ErrorType::Internal);
                 tracing::error!(%request_id, "generate stream ended without a complete choice");
-                return generate_internal_error_response();
+                return generate_internal_error_response(backend);
             }
             inflight_guard.mark_ok();
-            Json(response).into_response()
+            response.into_response()
         }
         Err(error) => {
             if request_context.is_killed()
@@ -641,11 +798,20 @@ async fn generate_dispatch(
                 || super::metrics::request_was_cancelled(error.as_ref())
             {
                 inflight_guard.mark_error(ErrorType::Cancelled);
-                return generate_cancelled_response();
+                return generate_cancelled_response(backend);
+            }
+            if let Some(invalid_argument) = find_invalid_argument_in_chain(error.as_ref()) {
+                inflight_guard.mark_error(ErrorType::Validation);
+                tracing::warn!(%request_id, %error, "invalid generate stream response");
+                return backend.error_response(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request_error",
+                    invalid_argument.message().to_string(),
+                );
             }
             inflight_guard.mark_error(ErrorType::Internal);
             tracing::error!(%request_id, %error, "failed to fold generate stream");
-            generate_internal_error_response()
+            generate_internal_error_response(backend)
         }
     }
 }
@@ -742,7 +908,11 @@ mod tests {
 
     struct TerminalEngine(crate::protocols::common::FinishReason);
 
+    struct SglangStreamEngine;
+
     struct CancelledEngine;
+
+    struct InvalidArgumentEngine;
 
     #[async_trait::async_trait]
     impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
@@ -762,6 +932,24 @@ mod tests {
 
     #[async_trait::async_trait]
     impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for InvalidArgumentEngine
+    {
+        async fn generate(
+            &self,
+            _request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            Err(dynamo_runtime::error::DynamoError::builder()
+                .error_type(dynamo_runtime::error::ErrorType::Backend(
+                    dynamo_runtime::error::BackendError::InvalidArgument,
+                ))
+                .message("invalid SGLang sampling parameter")
+                .build()
+                .into())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
         for TerminalEngine
     {
         async fn generate(
@@ -773,6 +961,43 @@ mod tests {
                 finish_reason: Some(self.0.clone()),
                 ..Default::default()
             })]);
+            Ok(ResponseStream::new(Box::pin(stream), request.context()))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for SglangStreamEngine
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            let stream = futures::stream::iter([
+                Annotated::from_data(LLMEngineOutput {
+                    token_ids: vec![101],
+                    text: Some("a".to_string()),
+                    index: Some(0),
+                    engine_data: Some(serde_json::json!({
+                        "sglang_meta_info": {"finish_reason": null, "prompt_tokens": 1}
+                    })),
+                    ..Default::default()
+                }),
+                Annotated::from_data(LLMEngineOutput {
+                    token_ids: vec![102],
+                    text: Some("b".to_string()),
+                    index: Some(0),
+                    finish_reason: Some(crate::protocols::common::FinishReason::Length),
+                    engine_data: Some(serde_json::json!({
+                        "sglang_meta_info": {
+                            "finish_reason": {"type": "length", "length": 2},
+                            "prompt_tokens": 1,
+                            "completion_tokens": 2
+                        }
+                    })),
+                    ..Default::default()
+                }),
+            ]);
             Ok(ResponseStream::new(Box::pin(stream), request.context()))
         }
     }
@@ -875,18 +1100,61 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sglang_generate_route_no_model_returns_structured_404() {
+    async fn sglang_generate_post_and_put_use_native_error_shape() {
         let (port, handle) = serve(Some(true)).await;
-        let resp = reqwest::Client::new()
-            .post(format!("http://localhost:{}/generate", port))
-            .header("content-type", "application/json")
-            .body(r#"{"token_ids":[1,2,3],"sampling_params":{}}"#)
+        let client = reqwest::Client::new();
+        let url = format!("http://localhost:{}/generate", port);
+        for request in [
+            client
+                .post(&url)
+                .json(&serde_json::json!({"input_ids": [1, 2, 3]})),
+            client
+                .put(&url)
+                .json(&serde_json::json!({"input_ids": [1, 2, 3]})),
+        ] {
+            let resp = request
+                .send()
+                .await
+                .expect("SGLang generate request failed");
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+            let body: serde_json::Value = resp.json().await.expect("json body");
+            assert!(
+                body["error"]["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("no generate-capable model"))
+            );
+            assert!(body["error"].get("type").is_none());
+            assert!(body["error"].get("code").is_none());
+        }
+        let resp = client
+            .post(&url)
+            .json(&serde_json::json!({"input_ids": "bad"}))
             .send()
             .await
             .expect("SGLang generate request failed");
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let body: serde_json::Value = resp.json().await.expect("json body");
-        assert_eq!(body["error"]["type"], "not_found");
+        assert_eq!(body["object"], "error");
+        assert_eq!(body["type"], "Bad Request");
+        assert_eq!(body["code"], 400);
+
+        let resp = client
+            .post(&url)
+            .json(&serde_json::json!({
+                "input_ids": [1, 2, 3],
+                "sampling_params": {"n": 2}
+            }))
+            .send()
+            .await
+            .expect("SGLang generate request failed");
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = resp.json().await.expect("json body");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("must be 1")
+        );
         handle.abort();
     }
 
@@ -916,8 +1184,7 @@ mod tests {
 
         for (field, value) in private_fields {
             let mut body = serde_json::json!({
-                "token_ids": [1, 2, 3],
-                "sampling_params": {}
+                "input_ids": [1, 2, 3]
             });
             body[field] = value;
             let resp = client
@@ -928,7 +1195,9 @@ mod tests {
                 .expect("SGLang generate request failed");
             assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "field={field}");
             let error: serde_json::Value = resp.json().await.expect("json body");
-            assert_eq!(error["error"]["type"], "invalid_request_error");
+            assert!(error["error"]["message"].is_string());
+            assert!(error["error"].get("type").is_none());
+            assert!(error["error"].get("code").is_none());
         }
 
         handle.abort();
@@ -948,6 +1217,55 @@ mod tests {
         let body: serde_json::Value = resp.json().await.expect("json body");
         assert_eq!(body["error"]["type"], "not_implemented");
         handle.abort();
+    }
+
+    #[tokio::test]
+    async fn sglang_streaming_dispatch_emits_incremental_sse_and_done() {
+        let service = HttpService::builder().build().unwrap();
+        let request: SglangGenerateRequest = serde_json::from_value(serde_json::json!({
+            "input_ids": [1],
+            "stream": true
+        }))
+        .unwrap();
+        let response = generate_dispatch(
+            Arc::new(SglangStreamEngine),
+            dispatch_test_context(),
+            "req-sglang-stream".to_string(),
+            "test-model".to_string(),
+            service.state_clone(),
+            GenerateResponseFormat::Sglang(request.response_options()),
+            GenerateBackend::Sglang,
+            true,
+            disabled_stream_handle(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[axum::http::header::CONTENT_TYPE],
+            "text/event-stream"
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = std::str::from_utf8(&body).unwrap();
+        let data: Vec<_> = body
+            .lines()
+            .filter_map(|line| {
+                line.strip_prefix("data: ")
+                    .or_else(|| line.strip_prefix("data:"))
+            })
+            .collect();
+        assert_eq!(data.len(), 3);
+        let first: serde_json::Value = serde_json::from_str(data[0]).unwrap();
+        let second: serde_json::Value = serde_json::from_str(data[1]).unwrap();
+        assert_eq!(first["text"], "a");
+        assert_eq!(first["output_ids"], serde_json::json!([101]));
+        assert_eq!(first["meta_info"]["finish_reason"], serde_json::Value::Null);
+        assert_eq!(second["text"], "b");
+        assert_eq!(second["output_ids"], serde_json::json!([102]));
+        assert_eq!(second["meta_info"]["finish_reason"]["type"], "length");
+        assert_eq!(data[2], "[DONE]");
     }
 
     #[tokio::test]
@@ -1074,14 +1392,9 @@ mod tests {
         let request: GenerateRequest =
             serde_json::from_value(raw.clone()).expect("deserialize request");
 
-        let preprocessed = preprocessed_from_generate(
-            request,
-            "test-model",
-            None,
-            "resolved-request",
-            GenerateBackend::Vllm,
-        )
-        .expect("build request");
+        let preprocessed =
+            preprocessed_from_vllm_generate(request, "test-model", None, "resolved-request")
+                .expect("build request");
         assert_eq!(preprocessed.stop_conditions.max_tokens, Some(8));
         assert_eq!(preprocessed.stop_conditions.min_tokens, None);
         assert_eq!(
@@ -1132,72 +1445,53 @@ mod tests {
     }
 
     #[test]
-    fn sglang_projection_uses_backend_envelope_and_logprob_controls() {
-        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
-            "token_ids": [11, 12],
+    fn sglang_projection_uses_native_envelope_and_controls() {
+        let request: SglangGenerateRequest = serde_json::from_value(serde_json::json!({
+            "input_ids": [11, 12],
             "sampling_params": {
-                "max_tokens": 8,
-                "min_tokens": 2,
+                "max_new_tokens": 8,
+                "min_new_tokens": 2,
                 "temperature": 0.3,
-                "seed": 4,
-                "logprobs": 2,
-                "prompt_logprobs": 1
+                "sampling_seed": 4
             },
-            "model": "test-model",
+            "return_logprob": true,
+            "logprob_start_len": 0,
+            "top_logprobs_num": 2,
+            "return_routed_experts": true,
+            "routed_experts_start_len": 4,
             "priority": 7
         }))
         .expect("deserialize request");
 
-        let preprocessed = preprocessed_from_generate(
-            request,
-            "test-model",
-            Some(3),
-            "resolved-request",
-            GenerateBackend::Sglang,
-        )
-        .expect("build SGLang request");
+        let preprocessed = preprocessed_from_sglang_generate(request, "test-model", Some(3))
+            .expect("build SGLang request");
 
         assert_eq!(preprocessed.token_ids, vec![11, 12]);
         assert_eq!(preprocessed.stop_conditions.max_tokens, Some(8));
         assert_eq!(preprocessed.stop_conditions.min_tokens, Some(2));
+        assert_eq!(preprocessed.sampling_options.n, Some(1));
         assert_eq!(preprocessed.output_options.logprobs, Some(2));
-        assert_eq!(preprocessed.output_options.prompt_logprobs, Some(1));
+        assert_eq!(preprocessed.output_options.prompt_logprobs, Some(2));
         assert_eq!(
             preprocessed.output_options.return_tokens_as_token_ids,
             Some(true)
         );
         let routing = preprocessed.routing.as_ref().expect("routing hints");
         assert_eq!(routing.dp_rank, Some(3));
-        assert_eq!(routing.priority, Some(-7));
+        assert_eq!(routing.priority, Some(7));
 
         let extra_args = preprocessed.extra_args.as_ref().expect("extra args");
         assert!(extra_args.get("vllm_tito").is_none());
         let envelope = extra_args.get("sglang_tito").expect("sglang_tito envelope");
-        assert_eq!(envelope["sampling_params"]["seed"], 4);
-        assert_eq!(envelope.as_object().map(|object| object.len()), Some(1));
-        assert!(envelope.get("request_id").is_none());
-        assert!(envelope.get("model").is_none());
+        assert_eq!(envelope["sampling_params"]["sampling_seed"], 4);
+        assert_eq!(envelope["return_logprob"], true);
+        assert_eq!(envelope["logprob_start_len"], 0);
+        assert_eq!(envelope["top_logprobs_num"], 2);
+        assert_eq!(envelope["return_routed_experts"], true);
+        assert_eq!(envelope["routed_experts_start_len"], 4);
+        assert!(envelope.get("rid").is_none());
+        assert!(envelope.get("input_ids").is_none());
         assert!(envelope.get("priority").is_none());
-        assert!(envelope.get("token_ids").is_none());
-    }
-
-    #[test]
-    fn sglang_projection_rejects_vllm_all_logprobs_sentinel() {
-        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
-            "token_ids": [1],
-            "sampling_params": {"logprobs": -1}
-        }))
-        .expect("deserialize request");
-
-        let error = preprocessed_from_generate(
-            request,
-            "test-model",
-            None,
-            "resolved-request",
-            GenerateBackend::Sglang,
-        )
-        .expect_err("SGLang cannot request all logprobs with -1");
-        assert!(error.to_string().contains("not supported by SGLang"));
     }
 
     #[test]
@@ -1209,14 +1503,9 @@ mod tests {
         }))
         .expect("deserialize request");
 
-        let preprocessed = preprocessed_from_generate(
-            request,
-            "test-model",
-            None,
-            "resolved-request",
-            GenerateBackend::Vllm,
-        )
-        .expect("build request");
+        let preprocessed =
+            preprocessed_from_vllm_generate(request, "test-model", None, "resolved-request")
+                .expect("build request");
         assert_eq!(preprocessed.stop_conditions.max_tokens, None);
         assert_eq!(preprocessed.stop_conditions.min_tokens, None);
         assert_eq!(
@@ -1237,14 +1526,9 @@ mod tests {
         }))
         .expect("deserialize request");
 
-        let preprocessed = preprocessed_from_generate(
-            request,
-            "test-model",
-            None,
-            "resolved-request",
-            GenerateBackend::Vllm,
-        )
-        .expect("build request");
+        let preprocessed =
+            preprocessed_from_vllm_generate(request, "test-model", None, "resolved-request")
+                .expect("build request");
         assert_eq!(preprocessed.stop_conditions.min_tokens, Some(0));
     }
 
@@ -1254,10 +1538,25 @@ mod tests {
         headers.insert(X_REQUEST_ID_HEADER, "header-request".parse().unwrap());
         headers.insert(X_DATA_PARALLEL_RANK_HEADER, "3".parse().unwrap());
 
-        let context = resolve_generate_request_context(&headers, Some("body-request"));
+        let context =
+            resolve_generate_request_context(&headers, Some("body-request"), GenerateBackend::Vllm);
 
         assert_eq!(context.request_id, "header-request");
         assert_eq!(context.data_parallel_rank, Some(3));
+    }
+
+    #[test]
+    fn generate_request_context_matches_sglang_body_precedence() {
+        let mut headers = HeaderMap::new();
+        headers.insert(X_REQUEST_ID_HEADER, "header-request".parse().unwrap());
+
+        let context = resolve_generate_request_context(
+            &headers,
+            Some("body-request"),
+            GenerateBackend::Sglang,
+        );
+
+        assert_eq!(context.request_id, "body-request");
     }
 
     #[test]
@@ -1265,7 +1564,8 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(X_DATA_PARALLEL_RANK_HEADER, "invalid".parse().unwrap());
 
-        let context = resolve_generate_request_context(&headers, Some("body-request"));
+        let context =
+            resolve_generate_request_context(&headers, Some("body-request"), GenerateBackend::Vllm);
 
         assert_eq!(context.request_id, "body-request");
         assert_eq!(context.data_parallel_rank, None);
@@ -1297,6 +1597,11 @@ mod tests {
                 .build()
                 .expect("build dispatch test request"),
         )
+    }
+
+    fn disabled_stream_handle() -> ConnectionHandle {
+        let (sender, _receiver) = tokio::sync::oneshot::channel();
+        ConnectionHandle::create_disabled(sender)
     }
 
     fn assert_cancelled_dispatch_metrics(state: &service_v2::State) {
@@ -1348,7 +1653,10 @@ mod tests {
             "req-pending-dispatch".to_string(),
             "test-model".to_string(),
             state.clone(),
-            GenerateResponseOptions::default(),
+            GenerateResponseFormat::Vllm(GenerateResponseOptions::default()),
+            GenerateBackend::Vllm,
+            false,
+            disabled_stream_handle(),
         ));
 
         started.notified().await;
@@ -1376,7 +1684,10 @@ mod tests {
             "req-terminal-dispatch".to_string(),
             "test-model".to_string(),
             state.clone(),
-            GenerateResponseOptions::default(),
+            GenerateResponseFormat::Vllm(GenerateResponseOptions::default()),
+            GenerateBackend::Vllm,
+            false,
+            disabled_stream_handle(),
         )
         .await;
         (response, state)
@@ -1432,12 +1743,49 @@ mod tests {
             "req-immediate-cancel".to_string(),
             "test-model".to_string(),
             state.clone(),
-            GenerateResponseOptions::default(),
+            GenerateResponseFormat::Vllm(GenerateResponseOptions::default()),
+            GenerateBackend::Vllm,
+            false,
+            disabled_stream_handle(),
         )
         .await;
 
         assert_eq!(response.status().as_u16(), 499);
         assert_cancelled_dispatch_metrics(state.as_ref());
+    }
+
+    #[tokio::test]
+    async fn worker_invalid_argument_returns_400() {
+        let engine: crate::types::openai::generate::GenerateStreamingEngine =
+            Arc::new(InvalidArgumentEngine);
+        let service = HttpService::builder().build().unwrap();
+        let state = service.state_clone();
+
+        let response = generate_dispatch(
+            engine,
+            dispatch_test_context(),
+            "req-invalid-argument".to_string(),
+            "test-model".to_string(),
+            state,
+            GenerateResponseFormat::Vllm(GenerateResponseOptions::default()),
+            GenerateBackend::Vllm,
+            false,
+            disabled_stream_handle(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read validation response");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("parse response");
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("invalid SGLang")
+        );
     }
 
     #[test]
@@ -1449,14 +1797,9 @@ mod tests {
         }))
         .expect("deserialize request");
 
-        let preprocessed = preprocessed_from_generate(
-            request,
-            "test-model",
-            Some(3),
-            "resolved-request",
-            GenerateBackend::Vllm,
-        )
-        .expect("build request");
+        let preprocessed =
+            preprocessed_from_vllm_generate(request, "test-model", Some(3), "resolved-request")
+                .expect("build request");
         let routing = preprocessed.routing.as_ref().expect("routing hints");
 
         assert_eq!(routing.dp_rank, Some(3));

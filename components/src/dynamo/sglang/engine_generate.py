@@ -35,6 +35,15 @@ _IGNORABLE_STRUCTURED_DEFAULTS = {
     "disable_additional_properties": False,
     "whitespace_pattern": None,
 }
+_GENERATE_KWARG_FIELDS = frozenset(
+    {
+        "return_logprob",
+        "logprob_start_len",
+        "top_logprobs_num",
+        "return_routed_experts",
+        "routed_experts_start_len",
+    }
+)
 
 
 @lru_cache(maxsize=1)
@@ -56,6 +65,16 @@ def _sglang_sampling_fields() -> frozenset[str]:
     )
 
 
+def clamp_prefill_sampling_params(sampling_params: dict[str, Any]) -> None:
+    """Restrict a translated engine-native request to prefill-only work.
+
+    Apply this after opaque SGLang sampling parameters have been translated so
+    caller-provided ``n`` and ``max_tokens`` values cannot override the clamp.
+    """
+    sampling_params["n"] = 1
+    sampling_params["max_new_tokens"] = 1
+
+
 def build_sampling_params(request: Mapping[str, Any]) -> dict[str, Any] | None:
     """Translate an SGLang Generate payload, or return ``None`` when absent."""
     extra_args = request.get("extra_args")
@@ -68,6 +87,21 @@ def build_sampling_params(request: Mapping[str, Any]) -> dict[str, Any] | None:
     if not isinstance(raw_params, dict):
         raise ValueError("extra_args.sglang_tito.sampling_params must be an object")
     return _build_sampling_params(raw_params)
+
+
+def build_generate_kwargs(request: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Return native SGLang ``Engine.async_generate`` controls when present."""
+    extra_args = request.get("extra_args")
+    if not isinstance(extra_args, dict):
+        return None
+    sglang_tito = extra_args.get(_PAYLOAD_KEY)
+    if not isinstance(sglang_tito, dict):
+        return None
+    return {
+        name: sglang_tito[name]
+        for name in _GENERATE_KWARG_FIELDS
+        if name in sglang_tito
+    }
 
 
 def _build_sampling_params(raw_params: dict[str, Any]) -> dict[str, Any]:

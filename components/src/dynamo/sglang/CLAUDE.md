@@ -258,9 +258,9 @@ override once upstream batches `detokenize_top_logprobs_tokens`.
 **Streaming behavior** (`_extract_logprobs`):
 
 Dynamo forces `stream_output=True` (args.py:374), making `output_ids` disjoint per chunk.
-However, SGLang's `meta_info["output_token_logprobs"]` and `meta_info["output_top_logprobs"]`
-are always **cumulative** — they grow with each chunk. The handler tracks
-`num_output_logprobs_so_far` to slice out only new entries per chunk.
+The pinned SGLang release and its N-1 predecessor align
+`meta_info["output_token_logprobs"]` and `meta_info["output_top_logprobs"]`
+with those incremental chunks, so the handler forwards each array directly.
 
 SGLang logprob format: `(logprob, token_id, text_or_None)` tuples.
 Dynamo output format: `log_probs` = list of floats, `top_logprobs` = list of lists of
@@ -308,9 +308,9 @@ text-to-video-diffusion.sh  # 1-2 GPUs - Text-to-video (Wan2.1)
 - **output_modalities default**: Global default is `["text"]`. Image/video diffusion
   workers must override to `["image"]`/`["video"]` or the Rust registration path tries
   to load `config.json` (which doesn't exist for diffusers models).
-- **Cumulative logprobs in streaming**: SGLang's `output_token_logprobs`/`output_top_logprobs`
-  in `meta_info` are cumulative even though `output_ids` are disjoint (stream_output=True).
-  Always slice with an offset, don't assume per-chunk logprobs.
+- **Incremental logprobs in streaming**: SGLang's `output_token_logprobs` and
+  `output_top_logprobs` align with each disjoint `output_ids` chunk. Keep the
+  metadata arrays positionally aligned when adapting the response.
 - **Zombie GPU processes**: `sgl_diffusion::scheduler` spawns a child process that
   survives parent kill. Always check `nvidia-smi` after teardown.
 - **Session identity**: SGLang 0.5.15 supports passive session-aware radix
