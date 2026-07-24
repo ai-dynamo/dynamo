@@ -104,13 +104,6 @@ def test_kubernetes_llms_fallback_contains_complete_schema_details() -> None:
 
 def test_pre_merge_gates_every_api_generator_input() -> None:
     filters = (REPO_ROOT / ".github" / "filters.yaml").read_text(encoding="utf-8")
-    workflow = (REPO_ROOT / ".github" / "workflows" / "pre-merge.yml").read_text(
-        encoding="utf-8"
-    )
-    publish = (REPO_ROOT / ".github" / "workflows" / "fern-docs.yml").read_text(
-        encoding="utf-8"
-    )
-    project = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
     action = (
         REPO_ROOT / ".github" / "actions" / "changed-files" / "action.yml"
     ).read_text(encoding="utf-8")
@@ -123,9 +116,20 @@ def test_pre_merge_gates_every_api_generator_input() -> None:
         "docs/fern/kubernetes/api-reference.md",
     ):
         assert source_path in filters
-    assert "api_docs: ${{ steps.changes.outputs.api_docs }}" in workflow
     assert "api_docs:" in action
     assert "steps.filter.outputs.api_docs_any_modified" in action
+
+
+def test_pre_merge_runs_all_api_generators_hermetically() -> None:
+    workflow = (REPO_ROOT / ".github" / "workflows" / "pre-merge.yml").read_text(
+        encoding="utf-8"
+    )
+    publish = (REPO_ROOT / ".github" / "workflows" / "fern-docs.yml").read_text(
+        encoding="utf-8"
+    )
+    project = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+
+    assert "api_docs: ${{ steps.changes.outputs.api_docs }}" in workflow
     assert "api-docs:" in workflow
     assert "needs.changed-files.outputs.api_docs == 'true'" in workflow
     assert "pytest -c /dev/null -q docs/fern/scripts/tests" in workflow
@@ -134,6 +138,22 @@ def test_pre_merge_gates_every_api_generator_input() -> None:
     assert "griffe==2.1.0" in workflow
     assert "griffe==2.1.0" in publish
     assert '"griffe==2.1.0"' in project
+
+
+def test_pre_merge_runs_fern_from_docs_root() -> None:
+    workflow = (REPO_ROOT / ".github" / "workflows" / "pre-merge.yml").read_text(
+        encoding="utf-8"
+    )
+
+    for step_name, command in (
+        ("Validate Fern configuration", "fern check"),
+        ("Check for broken links", "fern docs broken-links"),
+    ):
+        step = workflow.split(f"- name: {step_name}", maxsplit=1)[1].split(
+            "\n\n", maxsplit=1
+        )[0]
+        assert "working-directory: docs/fern" in step
+        assert f"run: {command}" in step
 
 
 def test_kubernetes_type_anchors_are_globally_unique_and_package_local() -> None:
