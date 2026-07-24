@@ -408,6 +408,13 @@ pub mod llm {
         /// Custom metrics prefix (overrides default "dynamo_frontend")
         pub const DYN_METRICS_PREFIX: &str = "DYN_METRICS_PREFIX";
 
+        /// Extra constant labels to add to Rust Prometheus registry metrics.
+        ///
+        /// Metrics emitted as raw exposition text by backend callbacks are appended unchanged.
+        ///
+        /// Format: `label:value;other_label:other_value`
+        pub const DYN_METRICS_CONST_LABELS: &str = "DYN_METRICS_CONST_LABELS";
+
         /// Histogram bucket configuration (pattern: <PREFIX>_MIN, <PREFIX>_MAX, <PREFIX>_COUNT)
         /// Example: DYN_HISTOGRAM_TTFT_MIN, DYN_HISTOGRAM_TTFT_MAX, DYN_HISTOGRAM_TTFT_COUNT
         pub const HISTOGRAM_PREFIX: &str = "DYN_HISTOGRAM_";

@@ -2134,7 +2134,8 @@ pub fn router(
 /// metrics from the DRT's registry tree (if configured).
 async fn handler_metrics(State(state): State<Arc<MetricsHandlerState>>) -> impl IntoResponse {
     let encoder = prometheus::TextEncoder::new();
-    let metric_families = state.registry.gather();
+    let mut metric_families = state.registry.gather();
+    dynamo_runtime::metrics::inject_env_const_labels(&mut metric_families);
     let mut buffer = vec![];
     if encoder.encode(&metric_families, &mut buffer).is_err() {
         return (

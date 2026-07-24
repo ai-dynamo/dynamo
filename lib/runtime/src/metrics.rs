@@ -16,9 +16,9 @@ pub mod work_handler_pool;
 
 use parking_lot::Mutex;
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
-use crate::component::ComponentBuilder;
+use crate::{component::ComponentBuilder, config::environment_names};
 use anyhow;
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -56,6 +56,103 @@ fn validate_no_duplicate_label_keys(labels: &[(&str, &str)]) -> anyhow::Result<(
         }
     }
     Ok(())
+}
+
+static ENV_CONST_LABELS: OnceLock<Vec<(String, String)>> = OnceLock::new();
+
+fn parse_env_const_labels(raw: &str) -> Vec<(String, String)> {
+    let mut labels = Vec::new();
+    let mut seen = HashSet::new();
+
+    for entry in raw.split(';') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+
+        let Some((raw_key, raw_value)) = entry.split_once(':') else {
+            tracing::warn!(
+                label = %entry,
+                env = environment_names::llm::metrics::DYN_METRICS_CONST_LABELS,
+                "Ignoring malformed metrics const label; expected label:value"
+            );
+            continue;
+        };
+
+        let raw_key = raw_key.trim();
+        let value = raw_value.trim();
+        if raw_key.is_empty() || value.is_empty() {
+            tracing::warn!(
+                label = %entry,
+                env = environment_names::llm::metrics::DYN_METRICS_CONST_LABELS,
+                "Ignoring metrics const label with empty name or value"
+            );
+            continue;
+        }
+
+        let key = match sanitize_prometheus_label(raw_key) {
+            Ok(key) => key,
+            Err(error) => {
+                tracing::warn!(
+                    label = %raw_key,
+                    env = environment_names::llm::metrics::DYN_METRICS_CONST_LABELS,
+                    error = %error,
+                    "Ignoring metrics const label with invalid name"
+                );
+                continue;
+            }
+        };
+
+        if !seen.insert(key.clone()) {
+            tracing::warn!(
+                label = %key,
+                env = environment_names::llm::metrics::DYN_METRICS_CONST_LABELS,
+                "Ignoring duplicate metrics const label"
+            );
+            continue;
+        }
+
+        labels.push((key, value.to_string()));
+    }
+
+    labels
+}
+
+pub fn env_const_labels() -> &'static [(String, String)] {
+    ENV_CONST_LABELS.get_or_init(|| {
+        std::env::var(environment_names::llm::metrics::DYN_METRICS_CONST_LABELS)
+            .map(|raw| parse_env_const_labels(&raw))
+            .unwrap_or_default()
+    })
+}
+
+pub fn inject_env_const_labels(metric_families: &mut [prometheus::proto::MetricFamily]) {
+    inject_const_labels(metric_families, env_const_labels());
+}
+
+fn inject_const_labels(
+    metric_families: &mut [prometheus::proto::MetricFamily],
+    const_labels: &[(String, String)],
+) {
+    if const_labels.is_empty() {
+        return;
+    }
+
+    for family in metric_families {
+        for metric in family.mut_metric() {
+            let mut labels = metric.take_label();
+            for (key, value) in const_labels {
+                if labels.iter().any(|label| label.name() == key) {
+                    continue;
+                }
+                let mut label = prometheus::proto::LabelPair::new();
+                label.set_name(key.clone());
+                label.set_value(value.clone());
+                labels.push(label);
+            }
+            metric.set_label(labels);
+        }
+    }
 }
 
 /// ==============================
@@ -791,7 +888,8 @@ impl MetricsRegistry {
         let mut seen_series: HashSet<String> = HashSet::new();
 
         for (registry_idx, registry) in registries.iter().enumerate() {
-            let families = registry.get_prometheus_registry().gather();
+            let mut families = registry.get_prometheus_registry().gather();
+            inject_env_const_labels(&mut families);
             for mut family in families {
                 let name = family.name().to_string();
 
@@ -856,6 +954,8 @@ impl MetricsRegistry {
         let mut result = String::from_utf8(buffer)?;
 
         // Append expfmt callbacks deterministically in registry order.
+        // These callbacks return backend-authored Prometheus text, so const-label injection
+        // only applies to Rust metrics gathered from Prometheus registries above.
         let mut expfmt = String::new();
         for registry in registries {
             let text = registry.execute_expfmt_callbacks();
@@ -1080,6 +1180,55 @@ mod test_metricsregistry_units {
 
         let result = build_component_metric_name("counter");
         assert_eq!(result, "dynamo_component_counter");
+    }
+
+    #[test]
+    fn test_parse_env_const_labels() {
+        let labels = parse_env_const_labels(
+            "namespace:prod-a; model-version:v1 ;bad-entry;namespace:ignored;empty:",
+        );
+
+        assert_eq!(
+            labels,
+            vec![
+                ("namespace".to_string(), "prod-a".to_string()),
+                ("model_version".to_string(), "v1".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_inject_const_labels_skips_existing_labels() {
+        let mut existing = prometheus::proto::LabelPair::new();
+        existing.set_name("model".to_string());
+        existing.set_value("request-model".to_string());
+
+        let mut metric = prometheus::proto::Metric::new();
+        metric.set_label(vec![existing]);
+
+        let mut family = prometheus::proto::MetricFamily::new();
+        family.mut_metric().push(metric);
+
+        let const_labels = vec![
+            ("model".to_string(), "ignored".to_string()),
+            ("namespace".to_string(), "prod-a".to_string()),
+        ];
+
+        inject_const_labels(std::slice::from_mut(&mut family), &const_labels);
+
+        let labels: Vec<_> = family.get_metric()[0]
+            .get_label()
+            .iter()
+            .map(|label| (label.name().to_string(), label.value().to_string()))
+            .collect();
+
+        assert_eq!(
+            labels,
+            vec![
+                ("model".to_string(), "request-model".to_string()),
+                ("namespace".to_string(), "prod-a".to_string()),
+            ]
+        );
     }
 
     #[test]
