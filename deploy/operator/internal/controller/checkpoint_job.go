@@ -49,11 +49,10 @@ func buildCheckpointJob(
 	// Stamp the owning checkpoint so the controller's source-pod watch can map the Job's pod back to
 	// this DynamoCheckpoint.
 	podTemplate.Labels[consts.SnapshotOwnerLabel] = ckpt.Name
-	targetContainerName := ckpt.Spec.Job.TargetContainerName
-	if targetContainerName == "" {
-		targetContainerName = consts.MainContainerName
+	targetContainerName, err := captureTargetContainer(ckpt)
+	if err != nil {
+		return nil, err
 	}
-	podTemplate.Annotations[snapshotprotocol.TargetContainersAnnotation] = snapshotprotocol.FormatTargetContainers([]string{targetContainerName})
 
 	if len(podTemplate.Spec.Containers) == 0 {
 		return nil, fmt.Errorf("checkpoint job requires at least one container")
@@ -174,6 +173,7 @@ func buildCheckpointJob(
 
 	return snapshotprotocol.NewCheckpointJob(podTemplate, snapshotprotocol.CheckpointJobOptions{
 		Namespace:             ckpt.Namespace,
+		TargetContainer:       targetContainerName,
 		CheckpointID:          hash,
 		ArtifactVersion:       snapshotprotocol.ArtifactVersion(ckpt.Annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation]),
 		SeccompProfile:        config.Checkpoint.EffectiveSeccompProfile(),

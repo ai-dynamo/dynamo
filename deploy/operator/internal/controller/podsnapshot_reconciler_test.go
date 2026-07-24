@@ -128,6 +128,7 @@ func TestSnapshotReconciler_PodUnscheduledBacksOff(t *testing.T) {
 func TestSnapshotReconciler_BuildsWorkOrderAndBinds(t *testing.T) {
 	s := snapshotReconcilerScheme()
 	snap := makeSnapshotForReconcile()
+	snap.Spec.Source.PodRef.Containers = []string{"main"}
 	r := makeSnapshotReconciler(s, snap, scheduledPod("abc123"))
 
 	// Creation path records the binding and returns without a requeue; conditions are mirrored on the
@@ -146,6 +147,8 @@ func TestSnapshotReconciler_BuildsWorkOrderAndBinds(t *testing.T) {
 	assert.Empty(t, content.Finalizers)
 	assert.Equal(t, "inference", content.Spec.PodSnapshotRef.Namespace)
 	assert.Equal(t, snap.Name, content.Spec.PodSnapshotRef.Name)
+	assert.Equal(t, []string{"main"}, content.Spec.Source.PodRef.Containers,
+		"target containers propagate from PodSnapshot to PodSnapshotContent")
 
 	updated := &nvidiacomv1alpha1.PodSnapshot{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "inference", Name: snap.Name}, updated))
@@ -173,6 +176,18 @@ func TestSnapshotReconciler_DisabledCheckpointGateDoesNotCreateContent(t *testin
 	condition := meta.FindStatusCondition(updated.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionReady)
 	require.NotNil(t, condition)
 	assert.Equal(t, "CheckpointDisabled", condition.Reason)
+}
+
+func TestSnapshotReconciler_BuildPodSnapshotContentCopiesContainersVerbatim(t *testing.T) {
+	s := snapshotReconcilerScheme()
+	r := makeSnapshotReconciler(s)
+	snap := makeSnapshotForReconcile()
+	snap.Spec.Source.PodRef.Containers = []string{"engine-0"}
+	pod := scheduledPod("abc123")
+
+	content := r.buildPodSnapshotContent(snap, "content-x", pod)
+	assert.Equal(t, []string{"engine-0"}, content.Spec.Source.PodRef.Containers,
+		"containers are copied verbatim, never defaulted to main")
 }
 
 func TestSnapshotReconciler_StalePodReferenceFails(t *testing.T) {

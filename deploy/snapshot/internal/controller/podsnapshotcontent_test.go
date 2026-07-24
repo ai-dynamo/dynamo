@@ -110,14 +110,14 @@ func makeWorkOrder(name, node, checkpointID string) *nvidiacomv1alpha1.PodSnapsh
 		},
 		Spec: nvidiacomv1alpha1.PodSnapshotContentSpec{
 			PodSnapshotRef: nvidiacomv1alpha1.PodSnapshotReference{Namespace: "inference", Name: "podsnapshot-" + checkpointID},
-			Source:         nvidiacomv1alpha1.PodSnapshotContentSource{PodRef: nvidiacomv1alpha1.PodReference{Name: "worker-0", UID: types.UID("pod-uid")}, NodeName: node},
+			Source:         nvidiacomv1alpha1.PodSnapshotContentSource{PodRef: nvidiacomv1alpha1.PodReference{Name: "worker-0", UID: types.UID("pod-uid"), Containers: []string{"main"}}, NodeName: node},
 		},
 	}
 }
 
 // makeSourcePod builds a ready source pod that carries the capture parameters the agent reads:
-// the checkpoint-id label, the target-container annotation, and the storage/version annotations
-// checkpointLocationsFromPod needs.
+// the checkpoint-id label and the storage/version annotations checkpointLocationsFromPod needs.
+// The target container comes from the work order (PodReference.Containers), not the pod.
 func makeSourcePod(checkpointID string) *corev1.Pod {
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -126,7 +126,6 @@ func makeSourcePod(checkpointID string) *corev1.Pod {
 			UID:       types.UID("pod-uid"),
 			Labels:    map[string]string{snapshotprotocol.CheckpointIDLabel: checkpointID},
 			Annotations: map[string]string{
-				snapshotprotocol.TargetContainersAnnotation:          "main",
 				snapshotprotocol.CheckpointArtifactVersionAnnotation: "1",
 			},
 		},
@@ -137,6 +136,76 @@ func makeSourcePod(checkpointID string) *corev1.Pod {
 				{Name: "main", Ready: true, ContainerID: "containerd://abc123"},
 			},
 		},
+	}
+}
+
+// TestSingleTargetContainer asserts the capture read tolerates only exactly one container. A fake
+// client bypasses CRD admission, so a malformed work order (0 or 2 containers) must fail as a
+// terminal error rather than panic on an out-of-bounds index in the node agent.
+func TestSingleTargetContainer(t *testing.T) {
+	cases := []struct {
+		name       string
+		containers []string
+		want       string
+		wantErr    bool
+	}{
+		{name: "exactly one", containers: []string{"main"}, want: "main"},
+		{name: "empty", containers: []string{}, wantErr: true},
+		{name: "nil", containers: nil, wantErr: true},
+		{name: "two", containers: []string{"main", "sidecar"}, wantErr: true},
+		{name: "single empty string", containers: []string{""}, wantErr: true},
+		{name: "single whitespace", containers: []string{"  "}, wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			content := &nvidiacomv1alpha1.PodSnapshotContent{
+				Spec: nvidiacomv1alpha1.PodSnapshotContentSpec{
+					Source: nvidiacomv1alpha1.PodSnapshotContentSource{
+						PodRef: nvidiacomv1alpha1.PodReference{Name: "worker-0", Containers: tc.containers},
+					},
+				},
+			}
+			got, err := singleTargetContainer(content)
+			if tc.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// TestReconcileSourcePod_InvalidTargetContainerFails proves the capture path self-defends against a
+// work order whose PodReference.Containers violates the exactly-one CRD cap (the fake client bypasses
+// admission). A malformed count must end the work order as a terminal InvalidTargetContainer status
+// rather than panic on an out-of-bounds index.
+func TestReconcileSourcePod_InvalidTargetContainerFails(t *testing.T) {
+	cases := []struct {
+		name       string
+		containers []string
+	}{
+		{name: "empty", containers: []string{}},
+		{name: "two", containers: []string{"main", "sidecar"}},
+		{name: "single blank name", containers: []string{""}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
+			content.Spec.Source.PodRef.Containers = tc.containers
+			pod := makeSourcePod("x")
+			w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
+
+			// A bad cardinality must be a terminal status, not an out-of-bounds panic; a panic
+			// would fail this test directly (no NotPanics wrapper needed).
+			require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
+
+			got := getContent(t, w, content.Name)
+			cond := meta.FindStatusCondition(got.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionFailed)
+			require.NotNil(t, cond)
+			assert.Equal(t, metav1.ConditionTrue, cond.Status)
+			assert.Equal(t, "InvalidTargetContainer", cond.Reason)
+		})
 	}
 }
 
@@ -507,6 +576,44 @@ func TestReconcileSnapshotContent_CapturesFromPod(t *testing.T) {
 		}
 		return meta.FindStatusCondition(c.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionReady) != nil
 	}, time.Second, 5*time.Millisecond)
+}
+
+// TestReconcileSourcePod_ContainersWinsOverLegacyAnnotation proves the agent reads the capture
+// target from PodReference.Containers (the migrated source of truth) and ignores the legacy
+// TargetContainersAnnotation on the pod, even when the two disagree. A hybrid regression that still
+// preferred the annotation would target "main" here instead of "engine".
+func TestReconcileSourcePod_ContainersWinsOverLegacyAnnotation(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
+	content.Spec.Source.PodRef.Containers = []string{"engine"}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "worker-0",
+			Namespace: "inference",
+			UID:       types.UID("pod-uid"),
+			Labels:    map[string]string{snapshotprotocol.CheckpointIDLabel: "abc"},
+			Annotations: map[string]string{
+				snapshotprotocol.CheckpointArtifactVersionAnnotation: "1",
+				// Legacy annotation disagrees with PodRef.Containers on purpose.
+				snapshotprotocol.TargetContainersAnnotation: "main",
+			},
+		},
+		Spec: corev1.PodSpec{NodeName: "node-a"},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			ContainerStatuses: []corev1.ContainerStatus{
+				{Name: "engine", Ready: true, ContainerID: "containerd://engine123"},
+			},
+		},
+	}
+	fc := &fakeCheckpointer{}
+	w := makeNodeController(t, fc, content, pod)
+	w.runtime = &fakeRuntime{resolveContainerPID: 7}
+
+	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
+	require.Eventually(t, fc.wasCalled, time.Second, 5*time.Millisecond)
+
+	assert.Equal(t, "engine", fc.lastParams().ContainerName,
+		"target must come from PodRef.Containers, not the legacy target-containers annotation")
 }
 
 func TestRunCheckpoint_WritesReadyOnSuccess(t *testing.T) {
