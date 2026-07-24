@@ -47,12 +47,13 @@ from dynamo.llm.exceptions import EngineShutdown
 from dynamo.vllm.handlers import get_lora_manager
 from dynamo.vllm.omni.audio_handler import AudioGenerationHandler
 from dynamo.vllm.omni.base_handler import BaseOmniHandler
-from dynamo.vllm.omni.output_formatter import OutputFormatter
+from dynamo.vllm.omni.output_formatter import AudioStreamState, OutputFormatter
 from dynamo.vllm.omni.utils import (
     build_image_generation_prompt,
     image_generation_negative_prompt_from_request,
     image_generation_sampling_overrides,
     image_generation_size_from_request,
+    streaming_sampling_params,
 )
 
 logger = logging.getLogger(__name__)
@@ -84,6 +85,7 @@ class EngineInputs:
     response_format: str | None = None
     output_format: str | None = None
     lora_request: LoRARequest | None = None
+    stream_audio: bool = False
 
 
 class OmniHandler(BaseOmniHandler):
@@ -356,11 +358,16 @@ class OmniHandler(BaseOmniHandler):
             # Note: For diffusion paths, lora_request is embedded in sampling_params_list
             # and will be refreshed in create_generator under the admission lock.
             # We do NOT add it here; instead, it's updated via _apply_lora_to_sampling_params.
+        elif inputs.stream_audio:
+            sampling_params = streaming_sampling_params(self.engine_client)
+            if sampling_params is not None:
+                generate_kwargs["sampling_params_list"] = sampling_params
         # Keep top-level LoRA only for paths that do not carry stage params.
         if inputs.lora_request is not None and inputs.sampling_params_list is None:
             generate_kwargs["lora_request"] = inputs.lora_request
 
         previous_text = ""
+        audio_stream_state = AudioStreamState() if inputs.stream_audio else None
 
         def update_previous_text(stage_output: Any, current: str) -> str:
             if getattr(stage_output, "final_output_type", None) == "text" and getattr(
@@ -404,6 +411,7 @@ class OmniHandler(BaseOmniHandler):
                     output_format=inputs.output_format,
                     previous_text=previous_text,
                     speed=inputs.speed,
+                    audio_stream_state=audio_stream_state,
                 )
                 previous_text = update_previous_text(stage_output, previous_text)
                 yield {"stage_output": stage_output, "formatted_chunk": chunk}
