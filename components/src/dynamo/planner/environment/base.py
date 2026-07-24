@@ -213,7 +213,7 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
             except (TypeError, ValueError):
                 # Builtins / C extensions without an inspectable signature —
                 # fall through to the no-deployment call rather than guess.
-                params = {}
+                return method(**kwargs)
             if "deployment" in params:
                 return method(**kwargs, deployment=deployment)
         return method(**kwargs)

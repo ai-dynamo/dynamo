@@ -1138,10 +1138,12 @@ class OrchestratorEngineAdapter:
         """Clamp proposed counts to the GPU budget band.
 
         Disagg proposals that name both roles use a joint proportional clamp.
-        When exactly one role is proposed, the peer is charged at its ready
+        When power awareness is on and exactly one role is proposed (the
+        power-induced proposal-mask path), the peer is charged at its ready
         count and the adjustable role is sized against the residual GPU
-        ceiling/floor — never jointly shrunk and then discarded, which can
-        leave the applied state over ``max_gpu_budget``.
+        ceiling/floor — joint-then-discard would leave the applied state over
+        ``max_gpu_budget``. Power-off disagg keeps the historical joint clamp
+        and discards the unproposed role's result.
         """
         min_endpoint = self._config.min_endpoint
         min_gpus = self._config.min_gpu_budget
@@ -1209,14 +1211,35 @@ class OrchestratorEngineAdapter:
         if not proposed_p and not proposed_d:
             return None, None
 
-        # Exactly one role proposed: treat the peer as fixed at its ready
-        # count and size the adjustable role against the residual GPU band.
-        # Joint-then-discard would assume the peer was also reduced and can
-        # emit an over-ceiling applied state (e.g. current (7,1), decode-only
-        # proposal 7, ceiling 8 → joint (4,4) discarded to (None,4) → applied
-        # (7,4)=11 GPUs).
-        if proposed_p:
-            fixed_gpus = ready_d * d_gpu
+        # Power-awareness collapses ready-equal peers to None before this
+        # clamp, which makes the latent joint-then-discard over-ceiling bug
+        # reachable on ordinary one-role proposals. Residual sizing is gated
+        # to that power path so power-off disagg keeps historical joint-clamp
+        # behavior (see Ted P2 on #12012). A general residual GPU-budget
+        # correction belongs in a focused follow-up.
+        if self._config.enable_power_awareness:
+            # base_* already proved ready_peer is non-None above.
+            if proposed_p:
+                assert ready_d is not None
+                fixed_gpus = ready_d * d_gpu
+                residual_max = max(0, max_gpus - fixed_gpus) if max_gpus >= 0 else -1
+                residual_min = (
+                    -1
+                    if min_gpus < 0 or (min_gpus - fixed_gpus) <= 0
+                    else (min_gpus - fixed_gpus)
+                )
+                return (
+                    proportional_clamp_single(
+                        max(base_p, min_endpoint),
+                        p_gpu,
+                        residual_min,
+                        residual_max,
+                        min_endpoint,
+                    ),
+                    None,
+                )
+            assert ready_p is not None
+            fixed_gpus = ready_p * p_gpu
             residual_max = max(0, max_gpus - fixed_gpus) if max_gpus >= 0 else -1
             residual_min = (
                 -1
@@ -1224,29 +1247,24 @@ class OrchestratorEngineAdapter:
                 else (min_gpus - fixed_gpus)
             )
             return (
+                None,
                 proportional_clamp_single(
-                    max(base_p, min_endpoint),
-                    p_gpu,
+                    max(base_d, min_endpoint),
+                    d_gpu,
                     residual_min,
                     residual_max,
                     min_endpoint,
                 ),
-                None,
             )
-        fixed_gpus = ready_p * p_gpu
-        residual_max = max(0, max_gpus - fixed_gpus) if max_gpus >= 0 else -1
-        residual_min = (
-            -1
-            if min_gpus < 0 or (min_gpus - fixed_gpus) <= 0
-            else (min_gpus - fixed_gpus)
+
+        # Power off: historical joint clamp, then discard the unproposed role.
+        clamped_p, clamped_d = proportional_clamp_pair(
+            max(base_p, min_endpoint),
+            max(base_d, min_endpoint),
+            p_gpu,
+            d_gpu,
+            min_gpus,
+            max_gpus,
+            min_endpoint,
         )
-        return (
-            None,
-            proportional_clamp_single(
-                max(base_d, min_endpoint),
-                d_gpu,
-                residual_min,
-                residual_max,
-                min_endpoint,
-            ),
-        )
+        return clamped_p if proposed_p else None, clamped_d if proposed_d else None
