@@ -62,7 +62,10 @@ use crate::protocols::openai::{
     completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
     images::{NvCreateImageRequest, NvImagesResponse},
-    pooling::{NvCreatePoolingRequest, NvCreatePoolingResponse},
+    pooling::{
+        NvCreatePoolingRequest, NvCreatePoolingResponse, PoolingEmbedDType, PoolingEncodingFormat,
+        PoolingEndianness, PoolingOutput,
+    },
     responses::{NvCreateResponse, NvResponse, ResponseParams, chat_completion_to_response},
     videos::{NvCreateVideoRequest, NvVideosResponse},
 };
@@ -1259,15 +1262,6 @@ async fn classify(
     }
     validate_pooling_cache_salt(request.cache_salt.as_deref())?;
 
-    // `truncation_side` reaches vLLM's tokenizer through TokenizeParams, not the
-    // raw `tokenization_kwargs` this worker forwards, so it cannot be honored —
-    // reject it rather than silently truncating from the default side.
-    if let Some(side) = request.truncation_side.as_deref() {
-        return Err(pooling_or_classify_bad_request(format!(
-            "Unsupported 'truncation_side' value {side:?}; not currently supported"
-        )));
-    }
-
     // Resolve alias → primary served name before wrapping the request, so
     // engine routing, metrics, and the response model all use the canonical
     // primary (mirrors `embeddings` / `completions_single`).
@@ -1368,6 +1362,148 @@ fn validate_pooling_cache_salt(cache_salt: Option<&str>) -> Result<(), ErrorResp
     Ok(())
 }
 
+#[derive(Serialize)]
+struct PoolingBinaryMetadataItem {
+    index: u32,
+    embed_dtype: &'static str,
+    endianness: &'static str,
+    start: usize,
+    end: usize,
+    shape: Vec<u64>,
+}
+
+#[derive(Serialize)]
+struct PoolingBinaryUsage {
+    prompt_tokens: u32,
+    total_tokens: u32,
+}
+
+#[derive(Serialize)]
+struct PoolingBinaryMetadata {
+    id: String,
+    created: u64,
+    model: String,
+    data: Vec<PoolingBinaryMetadataItem>,
+    usage: PoolingBinaryUsage,
+}
+
+fn build_pooling_binary_response(
+    response: NvCreatePoolingResponse,
+    include_metadata: bool,
+    embed_dtype: PoolingEmbedDType,
+    endianness: PoolingEndianness,
+) -> anyhow::Result<Response> {
+    let NvCreatePoolingResponse {
+        id,
+        created,
+        model,
+        data,
+        usage,
+        ..
+    } = response;
+
+    let mut chunks = Vec::with_capacity(data.len());
+    let mut metadata_items = Vec::with_capacity(if include_metadata { data.len() } else { 0 });
+    let mut offset = 0usize;
+
+    for item in data {
+        let encoded = match item.data {
+            PoolingOutput::Base64(encoded) => encoded,
+            _ => anyhow::bail!(
+                "binary pooling output at index {} was not base64 encoded",
+                item.index
+            ),
+        };
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "invalid base64 in binary pooling output at index {}: {e}",
+                    item.index
+                )
+            })?;
+        let end = offset.checked_add(bytes.len()).ok_or_else(|| {
+            anyhow::anyhow!(
+                "binary pooling response size overflow at index {}",
+                item.index
+            )
+        })?;
+
+        if include_metadata {
+            let shape = item.shape.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "binary pooling output at index {} is missing its tensor shape",
+                    item.index
+                )
+            })?;
+            let expected_len =
+                shape
+                    .iter()
+                    .try_fold(embed_dtype.byte_width(), |size, &dimension| {
+                        let dimension = usize::try_from(dimension).map_err(|_| {
+                            anyhow::anyhow!(
+                                "binary pooling tensor dimension overflow at index {}",
+                                item.index
+                            )
+                        })?;
+                        size.checked_mul(dimension).ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "binary pooling tensor size overflow at index {}",
+                                item.index
+                            )
+                        })
+                    })?;
+            anyhow::ensure!(
+                bytes.len() == expected_len,
+                "binary pooling output at index {} has {} bytes, but shape {:?} with dtype {} requires {}",
+                item.index,
+                bytes.len(),
+                shape,
+                embed_dtype.as_str(),
+                expected_len
+            );
+            metadata_items.push(PoolingBinaryMetadataItem {
+                index: item.index,
+                embed_dtype: embed_dtype.as_str(),
+                endianness: endianness.as_str(),
+                start: offset,
+                end,
+                shape,
+            });
+        }
+
+        chunks.push(Bytes::from(bytes));
+        offset = end;
+    }
+
+    let metadata = if include_metadata {
+        Some(serde_json::to_string(&PoolingBinaryMetadata {
+            id,
+            created,
+            model,
+            data: metadata_items,
+            usage: PoolingBinaryUsage {
+                prompt_tokens: usage.prompt_tokens,
+                total_tokens: usage.total_tokens,
+            },
+        })?)
+    } else {
+        None
+    };
+
+    let body = Body::from_stream(stream::iter(
+        chunks
+            .into_iter()
+            .map(Ok::<Bytes, std::convert::Infallible>),
+    ));
+    let mut builder =
+        Response::builder().header(axum::http::header::CONTENT_TYPE, "application/octet-stream");
+    if let Some(metadata) = metadata {
+        builder = builder.header("metadata", metadata);
+    }
+    Ok(builder.body(body)?)
+}
+
 #[tracing::instrument(skip_all)]
 async fn pooling(
     State(state): State<Arc<service_v2::State>>,
@@ -1384,50 +1520,15 @@ async fn pooling(
     }
     validate_pooling_cache_salt(request.cache_salt.as_deref())?;
 
-    // Cheap request validation mirroring vLLM's `/pooling` server: reject
-    // unsupported `dimensions` and unknown encodings here with a 400 instead
-    // of a worker-side failure.
+    // vLLM currently rejects dimensionality reduction on `/pooling`.
     if request.dimensions.is_some() {
         return Err(pooling_or_classify_bad_request(
             "dimensions is currently not supported".to_string(),
         ));
     }
-    if request.encoding_format != "float" && request.encoding_format != "base64" {
-        return Err(pooling_or_classify_bad_request(format!(
-            "Invalid 'encoding_format' value {:?}; expected 'float' or 'base64'",
-            request.encoding_format
-        )));
-    }
-    // `embed_dtype`/`endianness` only affect base64 packing; for a float JSON
-    // response vLLM ignores them, so only validate under `encoding_format:
-    // "base64"`. There, the worker always packs little-endian float32, so a
-    // non-default value is rejected rather than silently returning a mislabeled
-    // payload.
-    if request.encoding_format == "base64" {
-        if let Some(dtype) = request.embed_dtype.as_deref()
-            && dtype != "float32"
-        {
-            return Err(pooling_or_classify_bad_request(format!(
-                "Unsupported 'embed_dtype' value {dtype:?}; only 'float32' is supported"
-            )));
-        }
-        if let Some(endianness) = request.endianness.as_deref()
-            && endianness != "native"
-            && endianness != "little"
-        {
-            return Err(pooling_or_classify_bad_request(format!(
-                "Unsupported 'endianness' value {endianness:?}; only 'native'/'little' are supported"
-            )));
-        }
-    }
-    // `truncation_side` reaches vLLM's tokenizer through TokenizeParams, not the
-    // raw `tokenization_kwargs` this worker forwards, so it cannot be honored
-    // here — reject it rather than silently truncating from the default side.
-    if let Some(side) = request.truncation_side.as_deref() {
-        return Err(pooling_or_classify_bad_request(format!(
-            "Unsupported 'truncation_side' value {side:?}; not currently supported"
-        )));
-    }
+    let response_encoding = request.encoding_format;
+    let response_dtype = request.embed_dtype.unwrap_or_default();
+    let response_endianness = request.endianness.unwrap_or_default();
 
     // Resolve alias → primary served name before wrapping the request, so
     // engine routing, metrics, and the response model all use the canonical
@@ -1500,8 +1601,28 @@ async fn pooling(
             err_response
         })?;
 
+    let response = match response_encoding {
+        PoolingEncodingFormat::Float | PoolingEncodingFormat::Base64 => {
+            Json(response).into_response()
+        }
+        PoolingEncodingFormat::Bytes | PoolingEncodingFormat::BytesOnly => {
+            build_pooling_binary_response(
+                response,
+                response_encoding == PoolingEncodingFormat::Bytes,
+                response_dtype,
+                response_endianness,
+            )
+            .map_err(|e| {
+                let err_response =
+                    ErrorMessage::from_anyhow(e, "Failed to build pooling binary response");
+                inflight.mark_error(extract_error_type_from_response(&err_response));
+                err_response
+            })?
+        }
+    };
+
     inflight.mark_ok();
-    Ok(Json(response).into_response())
+    Ok(response)
 }
 
 async fn handler_chat_completions(
@@ -3814,6 +3935,7 @@ mod tests {
     use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
     use crate::protocols::openai::common_ext::CommonExt;
     use crate::protocols::openai::completions::NvCreateCompletionRequest;
+    use crate::protocols::openai::pooling::{PoolingData, PoolingUsage};
     use crate::protocols::openai::responses::NvCreateResponse;
     use dynamo_protocols::types::responses::{CreateResponse, Input, PromptConfig};
     use dynamo_protocols::types::{
@@ -3823,6 +3945,139 @@ mod tests {
     };
 
     const BACKUP_ERROR_MESSAGE: &str = "Failed to generate completions";
+
+    fn binary_pooling_response() -> NvCreatePoolingResponse {
+        NvCreatePoolingResponse {
+            id: "pool-request".to_string(),
+            object: "list".to_string(),
+            created: 123,
+            model: "test-model".to_string(),
+            data: vec![
+                PoolingData {
+                    index: 0,
+                    object: "pooling".to_string(),
+                    data: PoolingOutput::Base64(
+                        base64::engine::general_purpose::STANDARD.encode([1, 2, 3, 4]),
+                    ),
+                    shape: Some(vec![2]),
+                },
+                PoolingData {
+                    index: 1,
+                    object: "pooling".to_string(),
+                    data: PoolingOutput::Base64(
+                        base64::engine::general_purpose::STANDARD.encode([5, 6, 7, 8]),
+                    ),
+                    shape: Some(vec![1, 2]),
+                },
+            ],
+            usage: PoolingUsage {
+                prompt_tokens: 7,
+                total_tokens: 7,
+                completion_tokens: 0,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn pooling_bytes_response_has_vllm_metadata_and_chunked_body() {
+        let response = build_pooling_binary_response(
+            binary_pooling_response(),
+            true,
+            PoolingEmbedDType::Float16,
+            PoolingEndianness::Big,
+        )
+        .unwrap();
+
+        assert_eq!(
+            response.headers()[axum::http::header::CONTENT_TYPE],
+            "application/octet-stream"
+        );
+        let metadata: serde_json::Value =
+            serde_json::from_str(response.headers()["metadata"].to_str().unwrap()).unwrap();
+        assert_eq!(
+            metadata,
+            serde_json::json!({
+                "id": "pool-request",
+                "created": 123,
+                "model": "test-model",
+                "data": [
+                    {
+                        "index": 0,
+                        "embed_dtype": "float16",
+                        "endianness": "big",
+                        "start": 0,
+                        "end": 4,
+                        "shape": [2]
+                    },
+                    {
+                        "index": 1,
+                        "embed_dtype": "float16",
+                        "endianness": "big",
+                        "start": 4,
+                        "end": 8,
+                        "shape": [1, 2]
+                    }
+                ],
+                "usage": {"prompt_tokens": 7, "total_tokens": 7}
+            })
+        );
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], &[1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    #[tokio::test]
+    async fn pooling_bytes_only_response_omits_metadata() {
+        let mut source = binary_pooling_response();
+        for item in &mut source.data {
+            item.shape = None;
+        }
+        let response = build_pooling_binary_response(
+            source,
+            false,
+            PoolingEmbedDType::Float32,
+            PoolingEndianness::Native,
+        )
+        .unwrap();
+
+        assert!(response.headers().get("metadata").is_none());
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], &[1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn pooling_bytes_metadata_requires_tensor_shape() {
+        let mut response = binary_pooling_response();
+        response.data[0].shape = None;
+
+        let error = build_pooling_binary_response(
+            response,
+            true,
+            PoolingEmbedDType::Float32,
+            PoolingEndianness::Native,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("missing its tensor shape"));
+    }
+
+    #[test]
+    fn pooling_bytes_metadata_validates_tensor_size() {
+        let mut response = binary_pooling_response();
+        response.data[0].shape = Some(vec![3]);
+
+        let error = build_pooling_binary_response(
+            response,
+            true,
+            PoolingEmbedDType::Float16,
+            PoolingEndianness::Native,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("requires 6"));
+    }
 
     #[test]
     fn test_is_json_content_type() {

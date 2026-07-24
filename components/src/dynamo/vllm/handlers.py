@@ -3971,8 +3971,10 @@ class ClassifyWorkerHandler(EmbeddingWorkerHandler):
         """Handle one ``/classify`` or ``/pooling`` request.
 
         The Rust frontend forwards the request dict directly. Expected keys:
-        ``model: str``, ``input: str | list[str]``. Mirrors vLLM 0.25.1's
-        ``ClassificationRequest`` → ``ClassificationResponse`` contract.
+        ``model: str``,
+        ``input: str | list[str] | list[int] | list[list[int]]``. Mirrors
+        vLLM 0.25.1's ``ClassificationRequest`` →
+        ``ClassificationResponse`` contract.
 
         Pooling wire requests are distinguished by the always-serialized
         ``encoding_format`` key (see class docstring) and delegated to
@@ -4001,9 +4003,13 @@ class ClassifyWorkerHandler(EmbeddingWorkerHandler):
             classify_pooling_kwargs["use_activation"] = use_activation
         pooling_params = PoolingParams(**classify_pooling_kwargs)
 
-        # Forward supported tokenization options (truncate_prompt_tokens,
-        # add_special_tokens) so classification matches vLLM's tokenization.
+        # Forward supported tokenization options so classification matches
+        # vLLM's tokenization.
         tokenization_kwargs = _build_tokenization_kwargs(request)
+        tokenize_params = _build_pooling_tokenize_params(
+            self.engine_client, tokenization_kwargs
+        )
+        tokenizer = getattr(self.engine_client.renderer, "tokenizer", None)
 
         engine_request_id = context.id()
         response_request_id = request.get("request_id") or engine_request_id
@@ -4011,7 +4017,12 @@ class ClassifyWorkerHandler(EmbeddingWorkerHandler):
 
         async def _encode_one(idx: int, prompt: Any):
             request_id = f"{engine_request_id}-{idx}"
-            encode_arg = _build_pooling_prompt(prompt, request)
+            encode_arg = _prepare_pooling_prompt(
+                prompt,
+                request,
+                tokenize_params,
+                tokenizer,
+            )
             final_output = None
             async with self._abort_monitor(context, request_id):
                 encode_kwargs: dict[str, Any] = {
@@ -4021,7 +4032,8 @@ class ClassifyWorkerHandler(EmbeddingWorkerHandler):
                 }
                 if priority != 0:
                     encode_kwargs["priority"] = priority
-                # tokenization only applies to raw-text prompts.
+                # Pre-tokenized prompts were processed with TokenizeParams
+                # before encode; raw text is tokenized inside AsyncLLM.
                 if tokenization_kwargs is not None and isinstance(prompt, str):
                     encode_kwargs["tokenization_kwargs"] = tokenization_kwargs
                 async for out in self.engine_client.encode(**encode_kwargs):
@@ -4077,13 +4089,14 @@ class ClassifyWorkerHandler(EmbeddingWorkerHandler):
         ``model: str``, ``input: str | list[str] | list[int] | list[list[int]]``,
         optional ``task`` (``None`` resolves the model's configured default),
         optional ``use_activation``, ``encoding_format`` (``"float"`` |
-        ``"base64"``), and ``truncate_prompt_tokens``.
+        ``"base64"`` | ``"bytes"`` | ``"bytes_only"``), and
+        ``truncate_prompt_tokens``.
 
         Per-item ``data`` preserves the pooler's output shape: a nested list
         for token-level tasks (``(n_tokens, n_cols)``), a flat list for
-        sequence-level tasks, or a base64 string of little-endian ``float32``
-        bytes when ``encoding_format`` is ``"base64"`` (vLLM's default
-        ``embed_dtype=float32`` + little-endian native byte order).
+        sequence-level tasks, or a base64 string of packed tensor bytes on
+        Dynamo's internal wire for encoded responses. The Rust HTTP boundary
+        emits JSON base64 or native binary according to ``encoding_format``.
         """
         model_name = request.get("model") or self.config.served_model_name or ""
         input_field = request.get("input")
@@ -4092,19 +4105,36 @@ class ClassifyWorkerHandler(EmbeddingWorkerHandler):
 
         prompts: list[Any] = _classify_embedding_input(input_field)
 
-        # The Rust handler already 400s on `dimensions` and unknown encodings
-        # (mirroring vLLM's "dimensions is currently not supported"); keep the
-        # worker defensive in case the wire request came from elsewhere.
+        # The HTTP boundary rejects `dimensions` and unknown enum values; keep
+        # the worker defensive in case the wire request came from elsewhere.
         if request.get("dimensions") is not None:
             raise ValueError("dimensions is currently not supported")
         encoding_format = request.get("encoding_format", "float")
-        if encoding_format not in ("float", "base64"):
+        if encoding_format not in ("float", "base64", "bytes", "bytes_only"):
             raise ValueError(
                 f"Invalid 'encoding_format' value {encoding_format!r}; "
-                "expected 'float' or 'base64'"
+                "expected 'float', 'base64', 'bytes', or 'bytes_only'"
             )
+        raw_embed_dtype = request.get("embed_dtype", "float32")
+        if (
+            not isinstance(raw_embed_dtype, str)
+            or raw_embed_dtype not in _POOLING_EMBED_DTYPES
+        ):
+            raise ValueError(f"Invalid 'embed_dtype' value {raw_embed_dtype!r}")
+        embed_dtype = raw_embed_dtype
+        raw_endianness = request.get("endianness", "native")
+        if (
+            not isinstance(raw_endianness, str)
+            or raw_endianness not in _POOLING_ENDIANNESS
+        ):
+            raise ValueError(f"Invalid 'endianness' value {raw_endianness!r}")
+        endianness = raw_endianness
 
         tokenization_kwargs = _build_tokenization_kwargs(request)
+        tokenize_params = _build_pooling_tokenize_params(
+            self.engine_client, tokenization_kwargs
+        )
+        tokenizer = getattr(self.engine_client.renderer, "tokenizer", None)
 
         pooling_task = await self._resolve_pooling_task(request.get("task"))
         pooling_kwargs: dict[str, Any] = {"task": pooling_task}
@@ -4119,7 +4149,12 @@ class ClassifyWorkerHandler(EmbeddingWorkerHandler):
 
         async def _encode_one(idx: int, prompt: Any):
             request_id = f"{engine_request_id}-{idx}"
-            encode_arg = _build_pooling_prompt(prompt, request)
+            encode_arg = _prepare_pooling_prompt(
+                prompt,
+                request,
+                tokenize_params,
+                tokenizer,
+            )
             final_output = None
             async with self._abort_monitor(context, request_id):
                 encode_kwargs: dict[str, Any] = {
@@ -4145,21 +4180,22 @@ class ClassifyWorkerHandler(EmbeddingWorkerHandler):
         data: list[Dict[str, Any]] = []
         prompt_tokens = 0
         for idx, final_output in enumerate(outputs):
-            if encoding_format == "base64":
-                # vLLM's base64 pooling encoding flattens the tensor bytes
-                # (shape is not recoverable from the payload); match it.
-                item_data: Any = _encode_floats_to_base64(
-                    _pooling_output_to_list(final_output.outputs.data)
-                )
+            item: Dict[str, Any] = {
+                "index": idx,
+                "object": "pooling",
+            }
+            if encoding_format == "float":
+                item["data"] = _pooling_output_to_nested(final_output.outputs.data)
             else:
-                item_data = _pooling_output_to_nested(final_output.outputs.data)
-            data.append(
-                {
-                    "index": idx,
-                    "object": "pooling",
-                    "data": item_data,
-                }
-            )
+                encoded, shape = _encode_pooling_output(
+                    final_output.outputs.data,
+                    embed_dtype,
+                    endianness,
+                )
+                item["data"] = encoded
+                if encoding_format == "bytes":
+                    item["shape"] = shape
+            data.append(item)
             token_ids = getattr(final_output, "prompt_token_ids", None) or []
             prompt_tokens += len(token_ids)
 
@@ -4177,7 +4213,22 @@ class ClassifyWorkerHandler(EmbeddingWorkerHandler):
         }
 
 
-def _build_pooling_prompt(prompt: Any, request: dict) -> Any:
+def _build_pooling_tokenize_params(
+    engine_client: Any, tokenization_kwargs: dict[str, Any] | None
+) -> Any:
+    if tokenization_kwargs is None:
+        return None
+    return engine_client.renderer.default_cmpl_tok_params.with_kwargs(
+        **tokenization_kwargs
+    )
+
+
+def _prepare_pooling_prompt(
+    prompt: Any,
+    request: dict,
+    tokenize_params: Any,
+    tokenizer: Any,
+) -> Any:
     mm_processor_kwargs = request.get("mm_processor_kwargs")
     cache_salt = request.get("cache_salt")
     if isinstance(prompt, str):
@@ -4191,6 +4242,10 @@ def _build_pooling_prompt(prompt: Any, request: dict) -> Any:
         encode_arg["mm_processor_kwargs"] = mm_processor_kwargs
     if cache_salt is not None:
         encode_arg["cache_salt"] = cache_salt
+    # vLLM 0.25.1's AsyncLLM compatibility preprocessor does not forward
+    # tokenization kwargs to TokensPrompt. Apply the same TokenizeParams here.
+    if tokenize_params is not None and not isinstance(prompt, str):
+        encode_arg = tokenize_params.apply_post_tokenization(tokenizer, encode_arg)
     return encode_arg
 
 
@@ -4199,11 +4254,9 @@ def _build_tokenization_kwargs(request: dict) -> "dict[str, Any] | None":
     ``encode`` forwards to the tokenizer (``tokenization_kwargs``).
 
     Covers the completion-request fields that flow through that path:
-    ``truncate_prompt_tokens`` and ``add_special_tokens`` (vLLM pops the latter
-    from ``tokenization_kwargs``). ``truncation_side`` is intentionally absent —
-    it reaches vLLM via ``TokenizeParams``, not this dict, so it is rejected at
-    the frontend rather than silently ignored here. Returns ``None`` when the
-    caller set no option (so the engine tokenizes with its defaults).
+    ``truncate_prompt_tokens``, ``truncation_side``, and ``add_special_tokens``
+    (vLLM pops the latter from ``tokenization_kwargs``). Returns ``None`` when
+    the caller set no option.
     """
     kwargs: dict[str, Any] = {}
 
@@ -4221,6 +4274,15 @@ def _build_tokenization_kwargs(request: dict) -> "dict[str, Any] | None":
                 f"truncate_prompt_tokens must be >= -1, got {truncate_prompt_tokens}"
             )
         kwargs["truncate_prompt_tokens"] = truncate_prompt_tokens
+
+    truncation_side = request.get("truncation_side")
+    if truncation_side is not None:
+        if truncation_side not in ("left", "right"):
+            raise ValueError(
+                f"Invalid 'truncation_side' value {truncation_side!r}; "
+                "expected 'left' or 'right'"
+            )
+        kwargs["truncation_side"] = truncation_side
 
     add_special_tokens = request.get("add_special_tokens")
     if add_special_tokens is not None:
@@ -4352,6 +4414,31 @@ def _pooling_output_to_nested(data: Any) -> Any:
         f"Unsupported PoolingOutput.data type {type(data).__name__}; "
         "expected torch.Tensor or list"
     )
+
+
+_POOLING_EMBED_DTYPES = frozenset(
+    ("float32", "float16", "bfloat16", "fp8_e4m3", "fp8_e5m2")
+)
+_POOLING_ENDIANNESS = frozenset(("native", "big", "little"))
+
+
+def _encode_pooling_output(
+    data: Any, embed_dtype: str, endianness: str
+) -> tuple[str, list[int]]:
+    if isinstance(data, torch.Tensor):
+        tensor = data.detach().cpu()
+    elif isinstance(data, (list, tuple)):
+        tensor = torch.tensor(data)
+    else:
+        raise TypeError(
+            f"Unsupported PoolingOutput.data type {type(data).__name__}; "
+            "expected torch.Tensor or list"
+        )
+
+    # Keep this serialization-only vLLM dependency local to encoded pooling.
+    serial_utils = importlib.import_module("vllm.utils.serial_utils")
+    binary = serial_utils.tensor2binary(tensor, embed_dtype, endianness)
+    return base64.b64encode(binary).decode("ascii"), list(tensor.shape)
 
 
 def _encode_floats_to_base64(floats: list[float]) -> str:

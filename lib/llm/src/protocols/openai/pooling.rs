@@ -15,8 +15,7 @@
 //! and IOProcessor-plugin request variants are not. Pooling controls such as
 //! `task`, `priority`, `cache_salt`, `mm_processor_kwargs`, `use_activation`,
 //! `encoding_format`, `add_special_tokens`, and `truncate_prompt_tokens` are
-//! forwarded; `dimensions`, `truncation_side`, and non-default
-//! `embed_dtype`/`endianness` (base64) are rejected with a 400.
+//! forwarded; `dimensions` is rejected with a 400.
 //!
 //! `task` is forwarded verbatim when set. When omitted, the worker resolves
 //! the model's configured/default task using vLLM's `ModelConfig`.
@@ -30,6 +29,7 @@ use validator::Validate;
 
 mod aggregator;
 
+use super::PromptTruncationSide;
 pub use super::embeddings::{NvExt, NvExtProvider};
 
 /// Pooling input — raw text or pre-tokenized prompts, single or batched.
@@ -48,8 +48,71 @@ pub enum PoolingInput {
     TokenBatch(Vec<Vec<u32>>),
 }
 
-fn default_encoding_format() -> String {
-    "float".to_string()
+/// Client-visible pooling response representation.
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PoolingEncodingFormat {
+    #[default]
+    Float,
+    Base64,
+    Bytes,
+    BytesOnly,
+}
+
+/// Element type used for base64 and binary pooling responses.
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PoolingEmbedDType {
+    #[default]
+    #[serde(rename = "float32")]
+    Float32,
+    #[serde(rename = "float16")]
+    Float16,
+    #[serde(rename = "bfloat16")]
+    Bfloat16,
+    #[serde(rename = "fp8_e4m3")]
+    Fp8E4m3,
+    #[serde(rename = "fp8_e5m2")]
+    Fp8E5m2,
+}
+
+impl PoolingEmbedDType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Float32 => "float32",
+            Self::Float16 => "float16",
+            Self::Bfloat16 => "bfloat16",
+            Self::Fp8E4m3 => "fp8_e4m3",
+            Self::Fp8E5m2 => "fp8_e5m2",
+        }
+    }
+
+    pub(crate) const fn byte_width(self) -> usize {
+        match self {
+            Self::Float32 => 4,
+            Self::Float16 | Self::Bfloat16 => 2,
+            Self::Fp8E4m3 | Self::Fp8E5m2 => 1,
+        }
+    }
+}
+
+/// Byte order used for base64 and binary pooling responses.
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PoolingEndianness {
+    #[default]
+    Native,
+    Big,
+    Little,
+}
+
+impl PoolingEndianness {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Native => "native",
+            Self::Big => "big",
+            Self::Little => "little",
+        }
+    }
 }
 
 /// Request for the `/v1/pooling` endpoint.
@@ -88,12 +151,11 @@ pub struct NvCreatePoolingRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task: Option<String>,
 
-    /// `"float"` (default) or `"base64"`. Always serialized: the classify
-    /// and pooling engines push to the same worker endpoint, and the worker
-    /// dispatches on this key's presence (`ClassifyWorkerHandler.generate`),
-    /// so it must appear in every pooling wire request.
-    #[serde(default = "default_encoding_format")]
-    pub encoding_format: String,
+    /// `"float"` (default), `"base64"`, `"bytes"`, or `"bytes_only"`. Always
+    /// serialized: the classify and pooling engines push to the same worker
+    /// endpoint, and the worker dispatches on this key's presence.
+    #[serde(default)]
+    pub encoding_format: PoolingEncodingFormat,
 
     /// Whether to apply the pooler's activation (sigmoid/softmax) to the
     /// output. `None` uses the pooler's default.
@@ -106,12 +168,10 @@ pub struct NvCreatePoolingRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub add_special_tokens: Option<bool>,
 
-    /// Which side to truncate from. Not currently honored (it reaches vLLM via
-    /// `TokenizeParams`, not the raw `tokenization_kwargs` the worker forwards);
-    /// captured so a value can be rejected with a 400 instead of silently
-    /// truncating from the default side.
+    /// Which side to truncate from. When omitted, the tokenizer default is
+    /// used.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub truncation_side: Option<String>,
+    pub truncation_side: Option<PromptTruncationSide>,
 
     /// Matryoshka dimensionality reduction. vLLM's `/pooling` rejects this
     /// parameter ("dimensions is currently not supported"); accepted here so
@@ -119,24 +179,15 @@ pub struct NvCreatePoolingRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dimensions: Option<u32>,
 
-    /// base64 element dtype. vLLM's `EncodingRequestMixin` supports several
-    /// (`float32`, `float16`, `bfloat16`, …) and packs them via `tensor2binary`,
-    /// but the worker always emits little-endian `float32`. Captured so a
-    /// non-default value is rejected with a 400 rather than silently returning
-    /// a `float32` payload the caller would misinterpret. `None`/`"float32"`
-    /// are accepted.
+    /// Element dtype for base64 and binary responses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub embed_dtype: Option<String>,
+    pub embed_dtype: Option<PoolingEmbedDType>,
 
-    /// base64 byte order. vLLM's default is `"native"` (little-endian on the
-    /// x86 servers this runs on), which the worker matches. Captured so a
-    /// non-default (`"big"`) is rejected with a 400 instead of silently
-    /// returning little-endian bytes. `None`/`"native"`/`"little"` are accepted.
+    /// Byte order for base64 and binary responses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub endianness: Option<String>,
+    pub endianness: Option<PoolingEndianness>,
 
     /// Truncate the tokenized prompt to this many tokens (`-1` = model max).
-    /// Forwarded to the worker's tokenizer path for raw-text inputs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub truncate_prompt_tokens: Option<i64>,
 
@@ -147,12 +198,12 @@ pub struct NvCreatePoolingRequest {
 /// One pooled output within a [`NvCreatePoolingResponse`]. The payload shape
 /// depends on the resolved task: a matrix for token-level tasks
 /// (`token_embed` / `token_classify`), a vector for sequence-level tasks
-/// (`embed` / `classify`), or a base64 string of packed floats when the
-/// request asked for `encoding_format: "base64"`.
+/// (`embed` / `classify`), or a base64 string of packed tensor bytes for an
+/// encoded response. Binary responses are decoded at the HTTP boundary.
 #[derive(ToSchema, Serialize, Deserialize, Debug, Clone)]
 #[serde(untagged)]
 pub enum PoolingOutput {
-    /// Base64-encoded packed float bytes.
+    /// Base64-encoded packed tensor bytes.
     Base64(String),
     /// Sequence-level pooled vector.
     Vector(Vec<f32>),
@@ -176,6 +227,11 @@ pub struct PoolingData {
 
     /// The raw pooler output for this input.
     pub data: PoolingOutput,
+
+    /// Tensor shape carried on Dynamo's internal wire for binary responses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(ignore)]
+    pub shape: Option<Vec<u64>>,
 }
 
 /// Usage information for a pooling response. `completion_tokens` is always 0
@@ -252,7 +308,7 @@ mod tests {
         }))
         .unwrap();
         assert!(matches!(request.input, PoolingInput::Single(_)));
-        assert_eq!(request.encoding_format, "float");
+        assert_eq!(request.encoding_format, PoolingEncodingFormat::Float);
         assert!(request.task.is_none());
 
         // The wire discriminator must survive serialization even when the
@@ -293,24 +349,39 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(request.task.as_deref(), Some("token_classify"));
-        assert_eq!(request.encoding_format, "base64");
+        assert_eq!(request.encoding_format, PoolingEncodingFormat::Base64);
         assert_eq!(request.use_activation, Some(false));
     }
 
     #[test]
-    fn embed_dtype_and_endianness_are_captured() {
-        // Captured (not silently dropped) so the handler can 400 on non-default
-        // values instead of returning a mislabeled base64 payload.
+    fn binary_encoding_options_round_trip() {
         let request: NvCreatePoolingRequest = serde_json::from_value(json!({
             "model": "test-model",
             "input": "hi",
-            "encoding_format": "base64",
+            "encoding_format": "bytes",
             "embed_dtype": "float16",
             "endianness": "big"
         }))
         .unwrap();
-        assert_eq!(request.embed_dtype.as_deref(), Some("float16"));
-        assert_eq!(request.endianness.as_deref(), Some("big"));
+        assert_eq!(request.encoding_format, PoolingEncodingFormat::Bytes);
+        assert_eq!(request.embed_dtype, Some(PoolingEmbedDType::Float16));
+        assert_eq!(request.endianness, Some(PoolingEndianness::Big));
+        let value = serde_json::to_value(&request).unwrap();
+        assert_eq!(value["encoding_format"], "bytes");
+        assert_eq!(value["embed_dtype"], "float16");
+        assert_eq!(value["endianness"], "big");
+
+        let request: NvCreatePoolingRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "input": "hi",
+            "encoding_format": "bytes_only",
+            "embed_dtype": "fp8_e4m3",
+            "endianness": "little"
+        }))
+        .unwrap();
+        assert_eq!(request.encoding_format, PoolingEncodingFormat::BytesOnly);
+        assert_eq!(request.embed_dtype, Some(PoolingEmbedDType::Fp8E4m3));
+        assert_eq!(request.endianness, Some(PoolingEndianness::Little));
 
         // Omitted → None, and not serialized onto the worker wire.
         let request: NvCreatePoolingRequest = serde_json::from_value(json!({
@@ -335,7 +406,7 @@ mod tests {
         .unwrap();
         assert_eq!(request.add_special_tokens, Some(false));
         assert_eq!(request.truncate_prompt_tokens, Some(64));
-        assert_eq!(request.truncation_side.as_deref(), Some("left"));
+        assert_eq!(request.truncation_side, Some(PromptTruncationSide::Left));
     }
 
     #[test]

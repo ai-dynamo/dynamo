@@ -15,8 +15,8 @@
 //! accepts a chat-style variant (`messages`) that renders a chat template;
 //! that is out of scope here. Pooling controls such as `priority`,
 //! `cache_salt`, `mm_processor_kwargs`, `use_activation`,
-//! `add_special_tokens`, and `truncate_prompt_tokens` are forwarded;
-//! `truncation_side` is rejected with a 400 rather than silently ignored.
+//! `add_special_tokens`, `truncate_prompt_tokens`, and `truncation_side` are
+//! forwarded.
 
 use std::collections::HashMap;
 
@@ -27,6 +27,7 @@ use validator::Validate;
 
 mod aggregator;
 
+use super::PromptTruncationSide;
 pub use super::embeddings::{NvExt, NvExtProvider};
 
 /// Classification input — text or pre-tokenized prompts, single or batched.
@@ -89,16 +90,13 @@ pub struct NvCreateClassifyRequest {
     pub add_special_tokens: Option<bool>,
 
     /// Truncate the tokenized prompt to this many tokens (`-1` = model max).
-    /// Forwarded to the worker's tokenizer path for raw-text inputs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub truncate_prompt_tokens: Option<i64>,
 
-    /// Which side to truncate from. Not currently honored (it reaches vLLM via
-    /// `TokenizeParams`, not the raw `tokenization_kwargs` the worker forwards);
-    /// captured so a value can be rejected with a 400 instead of silently
-    /// truncating from the default side.
+    /// Which side to truncate from. When omitted, the tokenizer default is
+    /// used.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub truncation_side: Option<String>,
+    pub truncation_side: Option<PromptTruncationSide>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<NvExt>,
@@ -269,7 +267,7 @@ mod tests {
         .unwrap();
         assert_eq!(request.add_special_tokens, Some(false));
         assert_eq!(request.truncate_prompt_tokens, Some(128));
-        assert_eq!(request.truncation_side.as_deref(), Some("left"));
+        assert_eq!(request.truncation_side, Some(PromptTruncationSide::Left));
 
         // All omitted → None, none serialized onto the worker wire.
         let request: NvCreateClassifyRequest = serde_json::from_value(json!({

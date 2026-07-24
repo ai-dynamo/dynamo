@@ -3,6 +3,7 @@
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use super::{
     ContentProvider,
@@ -33,6 +34,14 @@ use validate::{
     BEST_OF_RANGE, FREQUENCY_PENALTY_RANGE, MIN_P_RANGE, N_RANGE, PRESENCE_PENALTY_RANGE,
     TEMPERATURE_RANGE, TOP_P_RANGE, validate_range,
 };
+
+/// Side from which prompt tokens are truncated.
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptTruncationSide {
+    Left,
+    Right,
+}
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AnnotatedDelta<R> {

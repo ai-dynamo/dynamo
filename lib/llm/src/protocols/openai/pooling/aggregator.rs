@@ -72,6 +72,7 @@ mod tests {
                 index,
                 object: "pooling".to_string(),
                 data,
+                shape: None,
             }],
             usage: PoolingUsage {
                 prompt_tokens,

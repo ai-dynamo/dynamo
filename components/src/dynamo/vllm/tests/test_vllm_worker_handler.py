@@ -2015,8 +2015,7 @@ class TestClassifyPoolingWorkerHandler:
     @pytest.mark.asyncio
     @pytest.mark.timeout(5)
     async def test_classify_forwards_tokenization_kwargs(self):
-        """truncate_prompt_tokens + add_special_tokens are forwarded to the
-        engine's tokenization_kwargs for raw-text inputs."""
+        """Tokenization controls are forwarded to the engine for raw text."""
         handler = self._make_handler()
         context = self._make_context()
         captured: dict = {}
@@ -2034,37 +2033,73 @@ class TestClassifyPoolingWorkerHandler:
             "input": "text",
             "model": "test-model",
             "truncate_prompt_tokens": 64,
+            "truncation_side": "right",
             "add_special_tokens": False,
         }
         [_] = [r async for r in handler.generate(request, context)]
         assert captured["tokenization_kwargs"] == {
             "truncate_prompt_tokens": 64,
+            "truncation_side": "right",
             "add_special_tokens": False,
         }
 
+    @pytest.mark.parametrize(
+        ("input_field", "is_pooling", "expected_token_ids"),
+        [
+            ([101, 102, 103, 104], False, [[103, 104]]),
+            (
+                [[101, 102, 103, 104], [201, 202, 203, 204]],
+                True,
+                [[103, 104], [203, 204]],
+            ),
+        ],
+    )
     @pytest.mark.asyncio
     @pytest.mark.timeout(5)
-    async def test_classify_accepts_pretokenized_input(self):
-        """Pre-tokenized inputs (list[int] / list[list[int]]) are wrapped in
-        TokensPrompt, mirroring vLLM's CompletionRequestMixin input contract."""
+    async def test_pretokenized_input_uses_vllm_truncation(
+        self, input_field, is_pooling, expected_token_ids
+    ):
+        from vllm.renderers import TokenizeParams
+
         handler = self._make_handler()
         context = self._make_context()
-        seen_prompts: list = []
+        handler.engine_client.renderer.default_cmpl_tok_params = TokenizeParams(
+            max_total_tokens=8
+        )
+        # No explicit side uses the tokenizer's configured default.
+        handler.engine_client.renderer.tokenizer = SimpleNamespace(
+            truncation_side="left"
+        )
+        seen_prompts: list[dict] = []
+        seen_kwargs: list[dict] = []
 
-        async def fake_encode(prompt, pooling_params, request_id):
+        async def fake_encode(prompt, pooling_params, request_id, **kwargs):
             seen_prompts.append(prompt)
+            seen_kwargs.append(kwargs)
             output = MagicMock()
             output.outputs.data = torch.tensor([0.5, 0.5])
-            output.prompt_token_ids = [1, 2]
+            output.prompt_token_ids = prompt["prompt_token_ids"]
             yield output
 
         handler.engine_client.encode = fake_encode
 
-        request = {"input": [[101, 102], [103, 104]], "model": "test-model"}
+        request = {
+            "input": input_field,
+            "model": "test-model",
+            "truncate_prompt_tokens": 2,
+        }
+        if is_pooling:
+            request["encoding_format"] = "float"
+
         [response] = [r async for r in handler.generate(request, context)]
-        assert len(response["data"]) == 2
-        # Each prompt was wrapped as a TokensPrompt (not a raw str).
-        assert all(not isinstance(p, str) for p in seen_prompts)
+
+        assert [prompt["prompt_token_ids"] for prompt in seen_prompts] == (
+            expected_token_ids
+        )
+        # Tokenization has already run through TokenizeParams, so the legacy
+        # AsyncLLM raw-prompt path must not receive and drop these kwargs.
+        assert all("tokenization_kwargs" not in kwargs for kwargs in seen_kwargs)
+        assert response["usage"]["prompt_tokens"] == 2 * len(expected_token_ids)
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(5)
@@ -2180,15 +2215,19 @@ class TestClassifyPoolingWorkerHandler:
         assert captured["use_activation"] is False
         assert response["data"][0]["data"] == pytest.approx([0.5, 0.5])
 
+    @pytest.mark.parametrize("encoding_format", ["base64", "bytes", "bytes_only"])
     @pytest.mark.asyncio
     @pytest.mark.timeout(5)
-    async def test_pooling_base64_flattens_and_encodes(self):
+    async def test_pooling_encoded_formats_use_vllm_tensor_encoding(
+        self, encoding_format
+    ):
         handler = self._make_handler()
         context = self._make_context()
+        output_data = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
 
         async def fake_encode(prompt, pooling_params, request_id):
             output = MagicMock()
-            output.outputs.data = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
+            output.outputs.data = output_data
             output.prompt_token_ids = [1, 2]
             yield output
 
@@ -2197,11 +2236,20 @@ class TestClassifyPoolingWorkerHandler:
         request = {
             "input": "text",
             "model": "test-model",
-            "encoding_format": "base64",
+            "encoding_format": encoding_format,
+            "embed_dtype": "float16",
+            "endianness": "big",
         }
         [response] = [r async for r in handler.generate(request, context)]
-        expected = mod._encode_floats_to_base64([1.0, 2.0, 3.0, 4.0])
-        assert response["data"][0]["data"] == expected
+        # IEEE-754 float16 encodings for 1.0, 2.0, 3.0, 4.0 in big-endian
+        # order. Keep this independent of the encoder under test.
+        expected = base64.b64encode(bytes.fromhex("3c00400042004400")).decode("ascii")
+        item = response["data"][0]
+        assert item["data"] == expected
+        if encoding_format == "bytes":
+            assert item["shape"] == [2, 2]
+        else:
+            assert "shape" not in item
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(5)
