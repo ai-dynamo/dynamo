@@ -326,6 +326,45 @@ VllmDecodeWorker:
 
 This avoids creating extra pods but allows up to 2 decode replicas to be unavailable at a time, speeding up the transition.
 
+### Recreate Strategy
+
+For a Deployment-backed worker component that cannot use temporary surge capacity, set
+`nvidia.com/deployment-strategy: Recreate` on its pod template. The operator scales every old DCD
+for that component to zero, waits for the DCDs to observe the scale-down and for every old worker
+pod to reach a terminal phase or be deleted, and then scales the new DCD to the requested replica
+count.
+
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-agg
+spec:
+  components:
+    - name: worker
+      type: worker
+      replicas: 1
+      podTemplate:
+        metadata:
+          annotations:
+            nvidia.com/deployment-strategy: Recreate
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
+```
+
+`Recreate` applies independently to each worker component. Other worker components without the
+annotation continue to use `RollingUpdate`. The operator ignores
+`nvidia.com/deployment-rolling-update-max-surge` and
+`nvidia.com/deployment-rolling-update-max-unavailable` on a component that uses `Recreate`.
+
+> [!WARNING]
+> `Recreate` causes an availability gap while the old workers stop and the new workers start. Use
+> it when old and new generations must not run concurrently or when the cluster has no spare GPU
+> capacity for a surge. This annotation affects only operator-managed, Deployment-backed updates;
+> use `nvidia.com/grove-update-strategy` for Grove-backed DGDs.
+
 ### Worker Hash and DCD Naming
 
 Worker DCDs always include a hash suffix derived from the worker specs: `{dgd-name}-{service-name}-{hash}` (e.g., `vllm-disagg-vllmdecodeworker-a1b2c3d4`). During a rolling update, the new worker DCDs are created with the new spec hash while the old DCDs retain the previous hash, allowing both generations to coexist:
@@ -358,7 +397,8 @@ This provides a holistic view of the deployment's health during the transition.
 | Update mechanism | Native resource rolling update | Operator-managed with DCD lifecycle |
 | Namespace isolation | No — old and new share the same namespace | Yes — hash-based namespace separation |
 | Cross-generation discovery | Possible — old and new workers can see each other | Prevented — new workers only discover new workers |
-| maxSurge / maxUnavailable | Grove uses its native strategy. `nvidia.com/grove-update-strategy: OnDelete` can require manual pod deletion. | Configurable per service via annotations |
+| Update strategy | Grove uses its native strategy. `nvidia.com/grove-update-strategy: OnDelete` can require manual pod deletion. | `RollingUpdate` or component-scoped `Recreate` |
+| maxSurge / maxUnavailable | Determined by the native Grove or LWS strategy | Configurable per component when using `RollingUpdate` |
 | Status tracking | Native resource status | DGD `.status.rollingUpdate` with phase and per-service tracking |
 | Multinode support | Yes | No (single-node only) |
 
