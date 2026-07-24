@@ -1,21 +1,15 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Native SGLang `/generate` request and unary response types.
+//! Native SGLang `/generate` request types.
 //!
 //! Dynamo exposes the token-input subset of SGLang's endpoint. The public
 //! request keeps SGLang's field names and preserves `sampling_params`
 //! opaquely for the version-matched worker. Text, batched, multimodal, and
-//! streaming requests remain outside this token-in/token-out frontend.
+//! non-streaming requests remain outside this token-in/token-out frontend.
 
-use anyhow::Result;
-use futures::{Stream, StreamExt, pin_mut};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
-
-use crate::protocols::Annotated;
-use crate::protocols::common::FinishReason;
-use crate::protocols::common::llm_backend::LLMEngineOutput;
 
 /// SGLang sampling parameters backed by their original JSON object.
 #[derive(Debug, Clone, Default)]
@@ -247,189 +241,6 @@ pub struct SglangResponseOptions {
     pub(super) top_logprobs_num: u32,
 }
 
-#[derive(Debug, Serialize)]
-pub struct SglangGenerateResponse {
-    pub output_ids: Vec<u32>,
-    pub meta_info: Map<String, Value>,
-}
-
-#[derive(Default)]
-struct SglangChoiceAccumulator {
-    output_ids: Vec<u32>,
-    output_token_logprobs: Vec<Value>,
-    output_top_logprobs: Vec<Value>,
-    finish_reason: Option<Value>,
-    completion_usage: Option<Value>,
-    native_meta_info: Map<String, Value>,
-}
-
-impl SglangChoiceAccumulator {
-    fn apply(&mut self, output: &LLMEngineOutput, options: SglangResponseOptions) -> Result<()> {
-        if options.return_logprob && !output.token_ids.is_empty() {
-            let logprobs = output.log_probs.as_ref().ok_or_else(|| {
-                anyhow::anyhow!("SGLang response requested logprobs but returned none")
-            })?;
-            anyhow::ensure!(
-                logprobs.len() == output.token_ids.len(),
-                "SGLang returned {} selected-token logprobs for {} output IDs",
-                logprobs.len(),
-                output.token_ids.len()
-            );
-            for (logprob, token_id) in logprobs.iter().zip(&output.token_ids) {
-                self.output_token_logprobs
-                    .push(serde_json::json!([logprob, token_id, null]));
-            }
-            if options.top_logprobs_num > 0 {
-                let top_logprobs = output.top_logprobs.as_ref().ok_or_else(|| {
-                    anyhow::anyhow!("SGLang response requested top logprobs but returned none")
-                })?;
-                anyhow::ensure!(
-                    top_logprobs.len() == output.token_ids.len(),
-                    "SGLang returned {} top-logprob positions for {} output IDs",
-                    top_logprobs.len(),
-                    output.token_ids.len()
-                );
-                self.output_top_logprobs
-                    .extend(top_logprobs.iter().map(|position| {
-                        Value::Array(
-                            position
-                                .iter()
-                                .take(options.top_logprobs_num as usize)
-                                .map(|entry| {
-                                    serde_json::json!([entry.logprob, entry.token_id, null])
-                                })
-                                .collect(),
-                        )
-                    }));
-            }
-        }
-        self.output_ids.extend_from_slice(&output.token_ids);
-        if let Some(usage) = output.completion_usage.as_ref() {
-            self.completion_usage = Some(serde_json::to_value(usage)?);
-        }
-        if let Some(engine_data) = output.engine_data.as_ref()
-            && let Some(meta_info) = engine_data
-                .get("sglang_meta_info")
-                .and_then(Value::as_object)
-        {
-            self.native_meta_info = meta_info.clone();
-        }
-        if let Some(reason) = output.finish_reason.as_ref() {
-            match reason {
-                FinishReason::Error(message) => anyhow::bail!("{message}"),
-                FinishReason::Cancelled => anyhow::bail!("backend cancelled generation"),
-                reason => {
-                    let mut finish_reason = Map::new();
-                    finish_reason.insert("type".to_string(), Value::String(reason.to_string()));
-                    if let Some(stop_reason) = output.stop_reason.as_ref() {
-                        finish_reason
-                            .insert("matched".to_string(), serde_json::to_value(stop_reason)?);
-                    }
-                    self.finish_reason = Some(Value::Object(finish_reason));
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn into_response(
-        mut self,
-        request_id: String,
-        options: SglangResponseOptions,
-    ) -> Result<SglangGenerateResponse> {
-        let finish_reason = self
-            .finish_reason
-            .ok_or_else(|| anyhow::anyhow!("SGLang stream ended without a finish reason"))?;
-        let finish_reason = self
-            .native_meta_info
-            .remove("finish_reason")
-            .unwrap_or(finish_reason);
-        self.native_meta_info
-            .insert("id".to_string(), Value::String(request_id));
-        self.native_meta_info
-            .insert("finish_reason".to_string(), finish_reason);
-        if let Some(Value::Object(usage)) = self.completion_usage {
-            for key in ["prompt_tokens", "completion_tokens"] {
-                if let Some(value) = usage.get(key) {
-                    self.native_meta_info.insert(key.to_string(), value.clone());
-                }
-            }
-            if let Some(cached_tokens) = usage
-                .get("prompt_tokens_details")
-                .and_then(Value::as_object)
-                .and_then(|details| details.get("cached_tokens"))
-            {
-                self.native_meta_info
-                    .insert("cached_tokens".to_string(), cached_tokens.clone());
-            }
-        }
-        if options.return_logprob {
-            self.native_meta_info.insert(
-                "output_token_logprobs_length".to_string(),
-                Value::from(self.output_token_logprobs.len()),
-            );
-            self.native_meta_info.insert(
-                "output_token_logprobs".to_string(),
-                Value::Array(self.output_token_logprobs),
-            );
-            if options.top_logprobs_num > 0 {
-                self.native_meta_info.insert(
-                    "output_top_logprobs".to_string(),
-                    Value::Array(self.output_top_logprobs),
-                );
-            }
-            if !options.include_input_logprobs {
-                self.native_meta_info
-                    .insert("input_token_logprobs".to_string(), Value::Array(Vec::new()));
-                if options.top_logprobs_num > 0 {
-                    self.native_meta_info
-                        .insert("input_top_logprobs".to_string(), Value::Array(Vec::new()));
-                } else {
-                    self.native_meta_info.remove("input_top_logprobs");
-                }
-            }
-        } else {
-            for key in [
-                "input_token_logprobs",
-                "input_top_logprobs",
-                "output_token_logprobs",
-                "output_top_logprobs",
-                "output_token_logprobs_length",
-            ] {
-                self.native_meta_info.remove(key);
-            }
-        }
-        Ok(SglangGenerateResponse {
-            output_ids: self.output_ids,
-            meta_info: self.native_meta_info,
-        })
-    }
-}
-
-impl SglangGenerateResponse {
-    pub async fn from_annotated_stream(
-        stream: impl Stream<Item = Annotated<LLMEngineOutput>>,
-        request_id: String,
-        options: SglangResponseOptions,
-    ) -> Result<Value> {
-        let mut choice = SglangChoiceAccumulator::default();
-        pin_mut!(stream);
-        while let Some(delta) = stream.next().await {
-            let delta = delta.ok().map_err(anyhow::Error::msg)?;
-            if let Some(output) = delta.data {
-                anyhow::ensure!(
-                    output.index.unwrap_or(0) == 0,
-                    "SGLang returned a non-zero choice index for n=1"
-                );
-                choice.apply(&output, options)?;
-            }
-        }
-        Ok(serde_json::to_value(
-            choice.into_response(request_id, options)?,
-        )?)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -477,68 +288,5 @@ mod tests {
         }))
         .unwrap();
         assert!(request.validate().unwrap_err().contains("must be 1"));
-    }
-
-    #[tokio::test]
-    async fn response_uses_native_output_ids_meta_info_and_logprobs() {
-        let request: SglangGenerateRequest = serde_json::from_value(serde_json::json!({
-            "input_ids": [1, 2],
-            "return_logprob": true,
-            "logprob_start_len": -1
-        }))
-        .unwrap();
-        let stream = futures::stream::iter([
-            Annotated::from_data(LLMEngineOutput {
-                token_ids: vec![101],
-                log_probs: Some(vec![-0.1]),
-                index: Some(0),
-                ..Default::default()
-            }),
-            Annotated::from_data(LLMEngineOutput {
-                token_ids: vec![102],
-                log_probs: Some(vec![-0.2]),
-                finish_reason: Some(FinishReason::Stop),
-                index: Some(0),
-                engine_data: Some(serde_json::json!({
-                    "sglang_meta_info": {
-                        "id": "worker-id",
-                        "finish_reason": {"type": "stop", "matched": 151645},
-                        "prompt_tokens": 2,
-                        "completion_tokens": 2,
-                        "cached_tokens": 1,
-                        "weight_version": "v1",
-                        "num_retractions": 0,
-                        "input_token_logprobs": [[null, 1, null], [-0.3, 2, null]],
-                        "routed_experts": "base64-experts"
-                    }
-                })),
-                ..Default::default()
-            }),
-        ]);
-
-        let response = SglangGenerateResponse::from_annotated_stream(
-            stream,
-            "req-native".to_string(),
-            request.response_options(),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(response["output_ids"], serde_json::json!([101, 102]));
-        assert_eq!(response["meta_info"]["id"], "req-native");
-        assert_eq!(response["meta_info"]["finish_reason"]["type"], "stop");
-        assert_eq!(response["meta_info"]["finish_reason"]["matched"], 151645);
-        assert_eq!(response["meta_info"]["weight_version"], "v1");
-        assert_eq!(response["meta_info"]["routed_experts"], "base64-experts");
-        assert_eq!(
-            response["meta_info"]["output_token_logprobs"],
-            serde_json::json!([[-0.1, 101, null], [-0.2, 102, null]])
-        );
-        assert_eq!(
-            response["meta_info"]["input_token_logprobs"],
-            serde_json::json!([])
-        );
-        assert!(response.get("choices").is_none());
-        assert!(response.get("request_id").is_none());
     }
 }

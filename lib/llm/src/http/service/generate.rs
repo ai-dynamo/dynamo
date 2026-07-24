@@ -44,9 +44,7 @@ use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
 use crate::protocols::openai::generate::{
     GenerateRequest, GenerateResponse, GenerateResponseOptions, SamplingParams, StreamOptions,
 };
-use crate::protocols::sglang::generate::{
-    SglangGenerateRequest, SglangGenerateResponse, SglangResponseOptions,
-};
+use crate::protocols::sglang::generate::{SglangGenerateRequest, SglangResponseOptions};
 use crate::protocols::sglang::stream::SglangGenerateStream;
 
 const X_REQUEST_ID_HEADER: &str = "x-request-id";
@@ -70,29 +68,21 @@ impl GenerateBackend {
 }
 
 #[derive(Clone, Copy)]
-enum GenerateResponseFormat {
+enum GenerateDispatchMode {
     Vllm(GenerateResponseOptions),
     Sglang(SglangResponseOptions),
 }
 
-enum AggregatedGenerateResponse {
-    Vllm(GenerateResponse),
-    Sglang(serde_json::Value),
-}
-
-impl AggregatedGenerateResponse {
-    fn is_complete_unary(&self) -> bool {
+impl GenerateDispatchMode {
+    fn backend(self) -> GenerateBackend {
         match self {
-            Self::Vllm(response) => response.is_complete_unary(),
-            Self::Sglang(_) => true,
+            Self::Vllm(_) => GenerateBackend::Vllm,
+            Self::Sglang(_) => GenerateBackend::Sglang,
         }
     }
 
-    fn into_response(self) -> Response {
-        match self {
-            Self::Vllm(response) => Json(response).into_response(),
-            Self::Sglang(response) => Json(response).into_response(),
-        }
+    fn streaming(self) -> bool {
+        matches!(self, Self::Sglang(_))
     }
 }
 
@@ -116,7 +106,7 @@ struct GenerateErrorBody {
     code: u16,
 }
 
-/// SGLang unary error body: `{"error": {"message": ...}}`.
+/// SGLang request error body: `{"error": {"message": ...}}`.
 #[derive(Serialize, Debug)]
 struct SglangGenerateError {
     error: SglangGenerateErrorBody,
@@ -452,10 +442,10 @@ impl IncomingGenerateRequest {
         }
     }
 
-    fn response_format(&self) -> GenerateResponseFormat {
+    fn dispatch_mode(&self) -> GenerateDispatchMode {
         match self {
-            Self::Vllm(request) => GenerateResponseFormat::Vllm(request.response_options()),
-            Self::Sglang(request) => GenerateResponseFormat::Sglang(request.response_options()),
+            Self::Vllm(request) => GenerateDispatchMode::Vllm(request.response_options()),
+            Self::Sglang(request) => GenerateDispatchMode::Sglang(request.response_options()),
         }
     }
 
@@ -533,14 +523,26 @@ async fn handle_generate(
         return backend.error_response(StatusCode::BAD_REQUEST, "invalid_request_error", message);
     }
     let streaming = request.stream();
-    if streaming && backend == GenerateBackend::Vllm {
-        return backend.error_response(
-            StatusCode::NOT_IMPLEMENTED,
-            "not_implemented",
-            "streaming (stream=true) is not implemented for the vLLM Generate API yet".to_string(),
-        );
+    match (backend, streaming) {
+        (GenerateBackend::Vllm, true) => {
+            return backend.error_response(
+                StatusCode::NOT_IMPLEMENTED,
+                "not_implemented",
+                "streaming (stream=true) is not implemented for the vLLM Generate API yet"
+                    .to_string(),
+            );
+        }
+        (GenerateBackend::Sglang, false) => {
+            return backend.error_response(
+                StatusCode::NOT_IMPLEMENTED,
+                "not_implemented",
+                "non-streaming SGLang generate requests are not implemented; set stream=true"
+                    .to_string(),
+            );
+        }
+        _ => {}
     }
-    let response_format = request.response_format();
+    let dispatch_mode = request.dispatch_mode();
 
     let model = match request.model() {
         Some(model) => model.to_string(),
@@ -639,9 +641,7 @@ async fn handle_generate(
             request_id,
             model,
             state.clone(),
-            response_format,
-            backend,
-            streaming,
+            dispatch_mode,
             stream_handle,
         )
         .instrument(dispatch_span),
@@ -665,11 +665,11 @@ async fn generate_dispatch(
     request_id: String,
     model: String,
     state: Arc<service_v2::State>,
-    response_format: GenerateResponseFormat,
-    backend: GenerateBackend,
-    streaming: bool,
+    dispatch_mode: GenerateDispatchMode,
     stream_handle: ConnectionHandle,
 ) -> Response {
+    let backend = dispatch_mode.backend();
+    let streaming = dispatch_mode.streaming();
     let mut inflight_guard = state.metrics_clone().create_inflight_guard(
         state.manager().metric_model_for(&model),
         super::metrics::Endpoint::Generate,
@@ -734,7 +734,7 @@ async fn generate_dispatch(
 
     let engine_context = stream.context();
     if streaming {
-        let GenerateResponseFormat::Sglang(options) = response_format else {
+        let GenerateDispatchMode::Sglang(options) = dispatch_mode else {
             unreachable!("vLLM streaming requests are rejected before dispatch")
         };
         let stream =
@@ -753,24 +753,11 @@ async fn generate_dispatch(
         return response.into_response();
     }
 
-    let aggregate = async {
-        match response_format {
-            GenerateResponseFormat::Vllm(options) => {
-                GenerateResponse::from_annotated_stream_with_options(
-                    stream,
-                    request_id.clone(),
-                    options,
-                )
-                .await
-                .map(AggregatedGenerateResponse::Vllm)
-            }
-            GenerateResponseFormat::Sglang(options) => {
-                SglangGenerateResponse::from_annotated_stream(stream, request_id.clone(), options)
-                    .await
-                    .map(AggregatedGenerateResponse::Sglang)
-            }
-        }
+    let GenerateDispatchMode::Vllm(options) = dispatch_mode else {
+        unreachable!("non-streaming SGLang requests are rejected before dispatch")
     };
+    let aggregate =
+        GenerateResponse::from_annotated_stream_with_options(stream, request_id.clone(), options);
     let response_result = match run_until_killed(request_context.as_ref(), aggregate).await {
         Some(result) => result,
         None => {
@@ -790,7 +777,7 @@ async fn generate_dispatch(
                 return generate_internal_error_response(backend);
             }
             inflight_guard.mark_ok();
-            response.into_response()
+            Json(response).into_response()
         }
         Err(error) => {
             if request_context.is_killed()
@@ -1107,10 +1094,10 @@ mod tests {
         for request in [
             client
                 .post(&url)
-                .json(&serde_json::json!({"input_ids": [1, 2, 3]})),
+                .json(&serde_json::json!({"input_ids": [1, 2, 3], "stream": true})),
             client
                 .put(&url)
-                .json(&serde_json::json!({"input_ids": [1, 2, 3]})),
+                .json(&serde_json::json!({"input_ids": [1, 2, 3], "stream": true})),
         ] {
             let resp = request
                 .send()
@@ -1220,6 +1207,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sglang_non_streaming_returns_501() {
+        let (port, handle) = serve(Some(true)).await;
+        let resp = reqwest::Client::new()
+            .post(format!("http://localhost:{}/generate", port))
+            .json(&serde_json::json!({"input_ids": [1, 2, 3]}))
+            .send()
+            .await
+            .expect("SGLang generate request failed");
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+        let body: serde_json::Value = resp.json().await.expect("json body");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("set stream=true"))
+        );
+        assert!(body["error"].get("type").is_none());
+        assert!(body["error"].get("code").is_none());
+        handle.abort();
+    }
+
+    #[tokio::test]
     async fn sglang_streaming_dispatch_emits_incremental_sse_and_done() {
         let service = HttpService::builder().build().unwrap();
         let request: SglangGenerateRequest = serde_json::from_value(serde_json::json!({
@@ -1233,9 +1241,7 @@ mod tests {
             "req-sglang-stream".to_string(),
             "test-model".to_string(),
             service.state_clone(),
-            GenerateResponseFormat::Sglang(request.response_options()),
-            GenerateBackend::Sglang,
-            true,
+            GenerateDispatchMode::Sglang(request.response_options()),
             disabled_stream_handle(),
         )
         .await;
@@ -1653,9 +1659,7 @@ mod tests {
             "req-pending-dispatch".to_string(),
             "test-model".to_string(),
             state.clone(),
-            GenerateResponseFormat::Vllm(GenerateResponseOptions::default()),
-            GenerateBackend::Vllm,
-            false,
+            GenerateDispatchMode::Vllm(GenerateResponseOptions::default()),
             disabled_stream_handle(),
         ));
 
@@ -1684,9 +1688,7 @@ mod tests {
             "req-terminal-dispatch".to_string(),
             "test-model".to_string(),
             state.clone(),
-            GenerateResponseFormat::Vllm(GenerateResponseOptions::default()),
-            GenerateBackend::Vllm,
-            false,
+            GenerateDispatchMode::Vllm(GenerateResponseOptions::default()),
             disabled_stream_handle(),
         )
         .await;
@@ -1743,9 +1745,7 @@ mod tests {
             "req-immediate-cancel".to_string(),
             "test-model".to_string(),
             state.clone(),
-            GenerateResponseFormat::Vllm(GenerateResponseOptions::default()),
-            GenerateBackend::Vllm,
-            false,
+            GenerateDispatchMode::Vllm(GenerateResponseOptions::default()),
             disabled_stream_handle(),
         )
         .await;
@@ -1767,9 +1767,7 @@ mod tests {
             "req-invalid-argument".to_string(),
             "test-model".to_string(),
             state,
-            GenerateResponseFormat::Vllm(GenerateResponseOptions::default()),
-            GenerateBackend::Vllm,
-            false,
+            GenerateDispatchMode::Vllm(GenerateResponseOptions::default()),
             disabled_stream_handle(),
         )
         .await;
