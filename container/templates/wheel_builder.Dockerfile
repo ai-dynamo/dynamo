@@ -566,6 +566,13 @@ RUN set -u; injected=0; \
     done; \
     echo "wheel NOTICES bundled into $injected wheel(s)"
 
+# cargo vendor below resolves the FULL root workspace, which lists
+# deploy/inference-gateway/ext-proc as a member; the lib/ + components/ copies
+# above omit deploy/, so its manifest must be present or the resolve fails.
+# Copied here (not in the source block above) to keep the wheel-build layers
+# cached — only the vendor path needs it.
+COPY deploy/inference-gateway/ext-proc/ /opt/dynamo/deploy/inference-gateway/ext-proc/
+
 # Compliance source archival: vendor the workspace lockfile for the OSRB
 # bundle. Gated on ENABLE_SOURCE_ARCHIVAL so PR builds skip the ~200-400 MB
 # vendor pull. The vendor tree is consumed downstream by each runtime
@@ -576,10 +583,12 @@ ARG ENABLE_SOURCE_ARCHIVAL=false
 # Mount cargo registry + git caches so re-runs don't re-download the
 # ~750 crates from crates.io every build. `sharing=shared` lets parallel
 # builds (e.g. multiple frameworks in CI) read the same cache concurrently.
+# mkdir runs unconditionally so the dir always exists for wheel_builder to COPY,
+# even on non-archival builds (empty then); cargo vendor only runs when enabled.
 RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
     --mount=type=cache,target=/root/.cargo/git,sharing=shared \
+    mkdir -p /tmp/dynamo-vendor-full && \
     if [ "$ENABLE_SOURCE_ARCHIVAL" = "true" ]; then \
-        mkdir -p /tmp/dynamo-vendor-full && \
         cd /opt/dynamo && \
         cargo vendor --locked /tmp/dynamo-vendor-full > /dev/null && \
         cp Cargo.toml Cargo.lock /tmp/dynamo-vendor-full/ ; \
@@ -593,8 +602,10 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
 #   uv pip install --no-deps -e /workspace
 # See container/launch_message/dev.txt for the full setup steps.
 
-# Create dist dir with a placeholder so downstream COPY --from=wheel_builder /opt/dynamo/dist/*.whl always has a match.
-RUN mkdir -p /opt/dynamo/dist ${CARGO_TARGET_DIR} && \
+# Create the dist placeholder so downstream COPY --from=wheel_builder /opt/dynamo/dist/*.whl
+# always matches, plus the vendor dir so wheel_builder's unconditional COPY of it succeeds
+# (dev/local-dev run no cargo vendor, so it stays empty here).
+RUN mkdir -p /opt/dynamo/dist ${CARGO_TARGET_DIR} /tmp/dynamo-vendor-full && \
     touch /opt/dynamo/dist/.placeholder.whl
 
 # Dev/local-dev skip the full COPY lib/ above, so copy gpu_memory_service source explicitly for the wheel build below
@@ -754,6 +765,11 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
 
 # Consolidate all wheels from the runtime wheel builder stage
 COPY --from=runtime_wheel_builder /opt/dynamo/dist/ /opt/dynamo/dist/
+
+# cargo vendor runs in runtime_wheel_builder, but compliance's sources_collect
+# copies the vendor tree from wheel_builder (the complete final wheel stage).
+# Bring it up so this stage carries it too. Empty on non-archival builds.
+COPY --from=runtime_wheel_builder /tmp/dynamo-vendor-full/ /tmp/dynamo-vendor-full/
 
 # Compliance: bundle third-party Rust NOTICES into the kvbm wheel built in this
 # stage (the ai-dynamo-runtime wheel was already bundled in runtime_wheel_builder
