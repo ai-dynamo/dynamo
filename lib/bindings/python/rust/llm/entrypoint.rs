@@ -436,12 +436,13 @@ pub struct RouterConfig {
     /// Threshold for active prefill tokens as fraction of max_num_batched_tokens
     active_prefill_tokens_threshold_frac: Option<f64>,
     session_affinity_ttl_secs: Option<u64>,
+    parent_affinity: bool,
 }
 
 #[pymethods]
 impl RouterConfig {
     #[new]
-    #[pyo3(signature = (mode, config=None, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, active_prefill_tokens_threshold_frac=None, enforce_disagg=false, session_affinity_ttl_secs=None))]
+    #[pyo3(signature = (mode, config=None, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, active_prefill_tokens_threshold_frac=None, enforce_disagg=false, session_affinity_ttl_secs=None, parent_affinity=false))]
     pub fn new(
         mode: RouterMode,
         config: Option<KvRouterConfig>,
@@ -450,6 +451,7 @@ impl RouterConfig {
         active_prefill_tokens_threshold_frac: Option<f64>,
         enforce_disagg: bool,
         session_affinity_ttl_secs: Option<u64>,
+        parent_affinity: bool,
     ) -> PyResult<Self> {
         if enforce_disagg {
             static WARN_ONCE: std::sync::Once = std::sync::Once::new();
@@ -462,6 +464,11 @@ impl RouterConfig {
         if session_affinity_ttl_secs.is_some_and(|ttl| !(1..=31_536_000).contains(&ttl)) {
             return Err(PyValueError::new_err(
                 "session_affinity_ttl_secs must be between 1 and 31536000",
+            ));
+        }
+        if parent_affinity && session_affinity_ttl_secs.is_none() {
+            return Err(PyValueError::new_err(
+                "parent_affinity requires session_affinity_ttl_secs",
             ));
         }
         RsLoadThresholdConfig {
@@ -478,6 +485,7 @@ impl RouterConfig {
             active_prefill_tokens_threshold,
             active_prefill_tokens_threshold_frac,
             session_affinity_ttl_secs,
+            parent_affinity,
         })
     }
 }
@@ -494,6 +502,7 @@ impl From<RouterConfig> for RsRouterConfig {
             },
             enforce_disagg: false,
             session_affinity_ttl_secs: rc.session_affinity_ttl_secs,
+            parent_affinity: rc.parent_affinity,
         }
     }
 }

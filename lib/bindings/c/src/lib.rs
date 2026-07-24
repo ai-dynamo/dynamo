@@ -857,6 +857,7 @@ pub unsafe extern "C" fn create_routers(
             Some(prefill_config),
             None,
             None,
+            false,
             model_name.clone(),
             actual_namespace.clone(),
             enable_eagle,

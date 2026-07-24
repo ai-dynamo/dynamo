@@ -20,7 +20,12 @@ from typing import Optional
 
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
-from dynamo.common.configuration.utils import add_argument, nullable_float, nullable_int
+from dynamo.common.configuration.utils import (
+    add_argument,
+    add_negatable_bool_argument,
+    nullable_float,
+    nullable_int,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +35,7 @@ _ROUTER_FIELDS: tuple[str, ...] = (
     "active_prefill_tokens_threshold",
     "active_prefill_tokens_threshold_frac",
     "session_affinity_ttl_secs",
+    "parent_affinity",
 )
 
 _ENFORCE_DISAGG_DEPRECATION = (
@@ -70,6 +76,7 @@ class RouterConfigBase(ConfigBase):
     min_initial_workers: int
     enforce_disagg: bool
     session_affinity_ttl_secs: Optional[int]
+    parent_affinity: bool
     active_decode_blocks_threshold: Optional[float]
     active_prefill_tokens_threshold: Optional[int]
     active_prefill_tokens_threshold_frac: Optional[float]
@@ -203,6 +210,17 @@ class RouterArgGroup(ArgGroup):
             ),
             arg_type=int,
             dest="session_affinity_ttl_secs",
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--router-parent-affinity",
+            env_var="DYN_ROUTER_PARENT_AFFINITY",
+            default=False,
+            help=(
+                "Prefer the parent's affinity target for a child session's first "
+                "placement. Requires --router-session-affinity-ttl-secs."
+            ),
+            dest="parent_affinity",
         )
         add_argument(
             g,

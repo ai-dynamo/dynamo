@@ -34,6 +34,7 @@ impl PrefillRouter {
         model_manager: Arc<ModelManager>,
         router_mode: RouterMode,
         session_affinity_ttl_secs: Option<u64>,
+        parent_affinity: bool,
     ) -> Arc<Self> {
         Arc::new(Self {
             prefill_router: std::sync::OnceLock::new(),
@@ -42,6 +43,7 @@ impl PrefillRouter {
             cancel_token: tokio_util::sync::CancellationToken::new(),
             router_mode,
             session_affinity_ttl: session_affinity_ttl_secs.map(std::time::Duration::from_secs),
+            parent_affinity,
             prefill_load_estimator: None,
             model_name: String::new(), // Not used for disabled router
             namespace: String::new(),  // Not used for disabled router
@@ -59,6 +61,7 @@ impl PrefillRouter {
         kv_router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         session_affinity_ttl_secs: Option<u64>,
+        parent_affinity: bool,
         model_name: String,
         namespace: String,
         is_eagle: bool,
@@ -74,6 +77,7 @@ impl PrefillRouter {
             cancel_token: cancel_token.clone(),
             router_mode,
             session_affinity_ttl: session_affinity_ttl_secs.map(std::time::Duration::from_secs),
+            parent_affinity,
             prefill_load_estimator,
             model_name,
             namespace,
@@ -174,8 +178,12 @@ impl PrefillRouter {
             // Extract client from kv_chooser to ensure shared state
             let client = kv_chooser.client().clone();
             Self::attach_prefill_client(worker_monitor, &client);
-            let affinity =
-                create_affinity_coordinator(self.session_affinity_ttl, client.clone()).await?;
+            let affinity = create_affinity_coordinator(
+                self.session_affinity_ttl,
+                self.parent_affinity,
+                client.clone(),
+            )
+            .await?;
 
             // Build the PushRouter for prefill with KV mode using the shared client
             let push_router = PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_monitor(
@@ -195,8 +203,12 @@ impl PrefillRouter {
             // Create client for simple router
             let client = endpoint.client().await?;
             Self::attach_prefill_client(worker_monitor, &client);
-            let affinity =
-                create_affinity_coordinator(self.session_affinity_ttl, client.clone()).await?;
+            let affinity = create_affinity_coordinator(
+                self.session_affinity_ttl,
+                self.parent_affinity,
+                client.clone(),
+            )
+            .await?;
 
             // Create simple push router with the frontend's router mode
             // Note: Per-worker metrics (active_prefill_tokens, active_decode_blocks) are only

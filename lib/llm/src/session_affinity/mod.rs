@@ -22,12 +22,18 @@ pub type LlmResponse =
 
 pub(crate) async fn create_affinity_coordinator(
     ttl: Option<Duration>,
+    parent_affinity: bool,
     client: Client,
 ) -> Result<Option<AffinityCoordinator>, Error> {
     let Some(ttl) = ttl else {
+        if parent_affinity {
+            return Err(coordinator::invalid_argument(
+                "parent affinity requires session affinity TTL",
+            ));
+        }
         return Ok(None);
     };
-    let coordinator = AffinityCoordinator::new(ttl)?;
+    let coordinator = AffinityCoordinator::new_with_parent_affinity(ttl, parent_affinity)?;
     coordinator.enable_replica_sync(client).await?;
     Ok(Some(coordinator))
 }

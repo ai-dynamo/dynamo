@@ -39,6 +39,7 @@ explains when to adjust these settings.
 | `--router-mode` | `DYN_ROUTER_MODE` | `round-robin` | Routing strategy: `round-robin`, `random`, `power-of-two`, `kv`, `direct`, `least-loaded`, or `device-aware-weighted`. `power-of-two` samples two workers and selects the one with fewer in-flight requests |
 | `--router-min-initial-workers` | `DYN_ROUTER_MIN_INITIAL_WORKERS` | `0` | Minimum workers required before router startup continues. `0` disables the startup wait |
 | `--router-session-affinity-ttl-secs` | `DYN_ROUTER_SESSION_AFFINITY_TTL_SECS` | unset | Enable session affinity and best-effort binding sync with this router-local idle TTL |
+| `--router-parent-affinity` / `--no-router-parent-affinity` | `DYN_ROUTER_PARENT_AFFINITY` | `false` | Experimental preference for the immediate parent's binding when placing a child session for the first time. Requires session affinity |
 | `--decode-fallback` / `--no-decode-fallback` | `DYN_DECODE_FALLBACK` | `false` | Fall back to aggregated mode when prefill workers are unavailable |
 
 ### KV Scoring and Cache Locality

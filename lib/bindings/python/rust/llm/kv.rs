@@ -1847,17 +1847,23 @@ impl KvRouter {
     /// Note: Worker type for Prometheus metrics is inferred from the endpoint name/component
     /// (contains "prefill") or by `router_track_active_blocks` being disabled.
     #[new]
-    #[pyo3(signature = (endpoint, block_size, kv_router_config, aic_perf_config=None, session_affinity_ttl_secs=None))]
+    #[pyo3(signature = (endpoint, block_size, kv_router_config, aic_perf_config=None, session_affinity_ttl_secs=None, parent_affinity=false))]
     fn new(
         endpoint: &Endpoint,
         block_size: usize,
         kv_router_config: &super::entrypoint::KvRouterConfig,
         aic_perf_config: Option<&AicPerfConfig>,
         session_affinity_ttl_secs: Option<u64>,
+        parent_affinity: bool,
     ) -> PyResult<Self> {
         if session_affinity_ttl_secs.is_some_and(|ttl| !(1..=31_536_000).contains(&ttl)) {
             return Err(PyValueError::new_err(
                 "session_affinity_ttl_secs must be between 1 and 31536000",
+            ));
+        }
+        if parent_affinity && session_affinity_ttl_secs.is_none() {
+            return Err(PyValueError::new_err(
+                "parent_affinity requires session_affinity_ttl_secs",
             ));
         }
         let prefill_load_estimator = aic_perf_config
@@ -1916,6 +1922,7 @@ impl KvRouter {
                 push_router,
                 kv_router,
                 session_affinity_ttl_secs.map(Duration::from_secs),
+                parent_affinity,
             )
             .map_err(to_pyerr)?;
 

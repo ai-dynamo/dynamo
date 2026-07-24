@@ -162,6 +162,39 @@ async fn session_affinity_initialization_is_atomic() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn child_affinity_uses_parent_only_for_initial_placement() {
+    let coordinator =
+        AffinityCoordinator::new_with_parent_affinity(Duration::from_secs(10), true).unwrap();
+    let context = Controller::default();
+    let parent_id = SessionAffinityId::new("parent");
+    let child_id = SessionAffinityId::new("child");
+    let parent_target = target(8, Some(1));
+
+    let AffinityAcquire::Initialize(parent) = coordinator.acquire(&parent_id, None).await.unwrap()
+    else {
+        panic!("parent must initialize");
+    };
+    drop(parent.commit(parent_target).unwrap());
+
+    let child = coordinator
+        .acquire_with_parent(&child_id, Some(parent_id.as_str()), None, &context)
+        .await
+        .unwrap();
+    assert_eq!(child.target(), Some(parent_target));
+    let AffinityAcquire::Initialize(child) = child else {
+        panic!("child must initialize");
+    };
+    let fallback = target(9, Some(2));
+    drop(child.commit(fallback).unwrap());
+
+    let child = coordinator
+        .acquire_with_parent(&child_id, Some(parent_id.as_str()), None, &context)
+        .await
+        .unwrap();
+    assert_eq!(child.target(), Some(fallback));
+}
+
+#[tokio::test(start_paused = true)]
 async fn session_affinity_initializer_cancellation_wakes_waiter() {
     let coordinator = coordinator();
     let first = coordinator.acquire(&session_id(), None).await.unwrap();

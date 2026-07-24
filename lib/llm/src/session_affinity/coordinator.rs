@@ -59,6 +59,7 @@ pub(super) struct AffinityCoordinatorInner {
     ttl: Duration,
     max_entries: usize,
     max_session_id_bytes: usize,
+    parent_affinity: bool,
     entry_count: AtomicUsize,
     next_revision: AtomicU64,
     cancel: CancellationToken,
@@ -96,10 +97,15 @@ pub struct AffinityCoordinator {
 
 impl AffinityCoordinator {
     pub fn new(ttl: Duration) -> Result<Self, Error> {
+        Self::new_with_parent_affinity(ttl, false)
+    }
+
+    pub fn new_with_parent_affinity(ttl: Duration, parent_affinity: bool) -> Result<Self, Error> {
         Self::new_with_limits(
             ttl,
             MAX_SESSION_AFFINITY_ENTRIES,
             MAX_SESSION_AFFINITY_ID_BYTES,
+            parent_affinity,
         )
     }
 
@@ -107,6 +113,7 @@ impl AffinityCoordinator {
         ttl: Duration,
         max_entries: usize,
         max_session_id_bytes: usize,
+        parent_affinity: bool,
     ) -> Result<Self, Error> {
         if !(Duration::from_secs(1)..=Duration::from_secs(MAX_SESSION_AFFINITY_TTL_SECS))
             .contains(&ttl)
@@ -120,6 +127,7 @@ impl AffinityCoordinator {
             ttl,
             max_entries,
             max_session_id_bytes,
+            parent_affinity,
             entry_count: AtomicUsize::new(0),
             next_revision: AtomicU64::new(1),
             cancel: CancellationToken::new(),
@@ -133,6 +141,7 @@ impl AffinityCoordinator {
         tracing::info!(
             ttl_secs = ttl.as_secs(),
             max_entries,
+            parent_affinity,
             "session affinity enabled"
         );
         Ok(Self { inner })
@@ -193,7 +202,8 @@ impl AffinityCoordinator {
         session_id: &SessionAffinityId,
         requested_target: Option<AffinityTarget>,
     ) -> Result<AffinityAcquire, Error> {
-        self.acquire_inner(session_id, requested_target, None).await
+        self.acquire_inner(session_id, requested_target, None, None)
+            .await
     }
 
     pub(crate) async fn acquire_with_context(
@@ -202,14 +212,37 @@ impl AffinityCoordinator {
         requested_target: Option<AffinityTarget>,
         request_context: &dyn AsyncEngineContext,
     ) -> Result<AffinityAcquire, Error> {
-        self.acquire_inner(session_id, requested_target, Some(request_context))
+        self.acquire_inner(session_id, requested_target, None, Some(request_context))
             .await
+    }
+
+    pub(crate) async fn acquire_with_parent(
+        &self,
+        session_id: &SessionAffinityId,
+        parent_session_id: Option<&str>,
+        requested_target: Option<AffinityTarget>,
+        request_context: &dyn AsyncEngineContext,
+    ) -> Result<AffinityAcquire, Error> {
+        if self.query_target(session_id, None)?.is_some() {
+            return self
+                .acquire_inner(session_id, requested_target, None, Some(request_context))
+                .await;
+        }
+        let preferred_target = self.parent_preference(parent_session_id, requested_target)?;
+        self.acquire_inner(
+            session_id,
+            requested_target,
+            preferred_target,
+            Some(request_context),
+        )
+        .await
     }
 
     async fn acquire_inner(
         &self,
         session_id: &SessionAffinityId,
         requested_target: Option<AffinityTarget>,
+        preferred_target: Option<AffinityTarget>,
         request_context: Option<&dyn AsyncEngineContext>,
     ) -> Result<AffinityAcquire, Error> {
         self.validate_session_id(session_id)?;
@@ -228,6 +261,7 @@ impl AffinityCoordinator {
                         &self.inner,
                         session_id,
                         requested_target,
+                        preferred_target,
                     )));
                 }
                 Entry::Occupied(mut entry) => match entry.get_mut() {
@@ -258,6 +292,7 @@ impl AffinityCoordinator {
                         revision,
                         active_leases,
                         idle_deadline,
+                        ..
                     } if *active_leases == 0 && *idle_deadline <= now => {
                         tracing::debug!(
                             session_id = %session_id,
@@ -276,6 +311,7 @@ impl AffinityCoordinator {
                             revision,
                             notify,
                             requested_target,
+                            preferred_target,
                             active: true,
                         }));
                     }
@@ -342,6 +378,42 @@ impl AffinityCoordinator {
         Ok(Some(*target))
     }
 
+    pub(crate) fn query_target_with_parent(
+        &self,
+        session_id: &SessionAffinityId,
+        parent_session_id: Option<&str>,
+        requested_target: Option<AffinityTarget>,
+    ) -> Result<Option<AffinityTarget>, Error> {
+        if let Some(target) = self.query_target(session_id, requested_target)? {
+            return Ok(Some(target));
+        }
+        if requested_target.is_some() {
+            return Ok(requested_target);
+        }
+        self.parent_preference(parent_session_id, requested_target)
+    }
+
+    fn parent_preference(
+        &self,
+        parent_session_id: Option<&str>,
+        requested_target: Option<AffinityTarget>,
+    ) -> Result<Option<AffinityTarget>, Error> {
+        if !self.inner.parent_affinity {
+            return Ok(None);
+        }
+        let Some(parent_session_id) = parent_session_id else {
+            return Ok(None);
+        };
+        self.validate_session_id(&SessionAffinityId::new(parent_session_id))?;
+
+        let preferred_target = requested_target
+            .is_none()
+            .then(|| self.query_target(&SessionAffinityId::new(parent_session_id), None))
+            .transpose()?
+            .flatten();
+        Ok(preferred_target)
+    }
+
     #[cfg(test)]
     pub(super) fn entry_count(&self) -> usize {
         self.inner.entry_count.load(Ordering::Relaxed)
@@ -381,7 +453,13 @@ impl AffinityCoordinator {
 
     #[cfg(test)]
     pub(super) fn with_test_limits(max_entries: usize, max_session_id_bytes: usize) -> Self {
-        Self::new_with_limits(Duration::from_secs(10), max_entries, max_session_id_bytes).unwrap()
+        Self::new_with_limits(
+            Duration::from_secs(10),
+            max_entries,
+            max_session_id_bytes,
+            false,
+        )
+        .unwrap()
     }
 
     #[cfg(test)]
@@ -500,6 +578,7 @@ trait VacantEntryExt {
         inner: &Arc<AffinityCoordinatorInner>,
         session_id: String,
         requested_target: Option<AffinityTarget>,
+        preferred_target: Option<AffinityTarget>,
     ) -> AffinityInitialization;
 }
 
@@ -509,6 +588,7 @@ impl<'a> VacantEntryExt for dashmap::mapref::entry::VacantEntry<'a, String, Affi
         inner: &Arc<AffinityCoordinatorInner>,
         session_id: String,
         requested_target: Option<AffinityTarget>,
+        preferred_target: Option<AffinityTarget>,
     ) -> AffinityInitialization {
         let revision = inner.next_revision.fetch_add(1, Ordering::Relaxed);
         let notify = Arc::new(Notify::new());
@@ -522,6 +602,7 @@ impl<'a> VacantEntryExt for dashmap::mapref::entry::VacantEntry<'a, String, Affi
             revision,
             notify,
             requested_target,
+            preferred_target,
             active: true,
         }
     }
@@ -538,7 +619,9 @@ pub(crate) enum AffinityAcquire {
 impl AffinityAcquire {
     pub(crate) fn target(&self) -> Option<AffinityTarget> {
         match self {
-            Self::Initialize(_) => None,
+            Self::Initialize(initialization) => initialization
+                .requested_target
+                .or(initialization.preferred_target),
             Self::Bound { target, .. } => Some(*target),
         }
     }
@@ -579,6 +662,7 @@ pub(crate) struct AffinityInitialization {
     revision: u64,
     notify: Arc<Notify>,
     requested_target: Option<AffinityTarget>,
+    preferred_target: Option<AffinityTarget>,
     active: bool,
 }
 
@@ -680,6 +764,7 @@ impl AffinityLease {
                 revision,
                 active_leases,
                 idle_deadline,
+                ..
             } = entry.value_mut()
             else {
                 return;

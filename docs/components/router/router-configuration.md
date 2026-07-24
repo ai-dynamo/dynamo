@@ -125,6 +125,18 @@ error, or cancellation, the idle timer restarts. A missing bound worker or a
 non-cancellation selection, setup, dispatch, or target-validation failure invalidates
 the binding.
 
+**Experimental.** Set `--router-parent-affinity` (or
+`DYN_ROUTER_PARENT_AFFINITY=1`) to prefer the immediate parent's worker and
+data-parallel rank when placing an unbound child session for the first time. This
+option requires `--router-session-affinity-ttl-secs`.
+
+Parent-aware placement is a soft initialization preference, not a group pin. An
+explicit worker target takes precedence for an unbound child; after binding, normal
+affinity target validation applies. If the preferred target is unavailable or rejected
+by the normal load and eligibility checks, the router falls back to ordinary selection
+and binds the child there. Later child requests use that child's own binding even if
+the parent moves.
+
 The configured value is the idle timeout. It is independent of
 `--router-ttl-secs` and `--router-predicted-ttl-secs`. Omit the session-affinity
 option to keep affinity disabled.
