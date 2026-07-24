@@ -7,15 +7,18 @@
 //! There is no OpenAI-native classification schema, so — unlike embeddings,
 //! which wraps `dynamo_protocols::types::CreateEmbeddingRequest` — these types
 //! are defined fully in-repo. The wire shape mirrors vLLM's `/classify`
-//! endpoint (`vllm/entrypoints/pooling/classify/protocol.py`, vLLM 0.24.0):
+//! endpoint (`vllm/entrypoints/pooling/classify/protocol.py`, vLLM 0.25.1):
 //! request `{model, input, ...}` → response
 //! `{id, object, created, model, data:[{index, label, probs, num_classes}], usage}`.
 //!
 //! Only the **completion-style** request (`input`) is supported. vLLM also
 //! accepts a chat-style variant (`messages`) that renders a chat template;
-//! that is out of scope here. Supported request options: `use_activation`,
-//! `add_special_tokens`, `truncate_prompt_tokens` (forwarded); `truncation_side`
-//! is rejected with a 400 rather than silently ignored.
+//! that is out of scope here. Pooling controls such as `priority`,
+//! `cache_salt`, `mm_processor_kwargs`, `use_activation`,
+//! `add_special_tokens`, and `truncate_prompt_tokens` are forwarded;
+//! `truncation_side` is rejected with a 400 rather than silently ignored.
+
+use std::collections::HashMap;
 
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
@@ -23,9 +26,8 @@ use utoipa::ToSchema;
 use validator::Validate;
 
 mod aggregator;
-mod nvext;
 
-pub use nvext::{NvExt, NvExtProvider};
+pub use super::embeddings::{NvExt, NvExtProvider};
 
 /// Classification input — text or pre-tokenized prompts, single or batched.
 /// Mirrors the `input` field of vLLM's `ClassificationCompletionRequest`
@@ -52,6 +54,27 @@ pub struct NvCreateClassifyRequest {
 
     /// The text (or texts) to classify.
     pub input: ClassificationInput,
+
+    /// A unique identifier representing the end user.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+
+    /// Optional caller-provided identifier used in the response ID. Internal
+    /// engine request IDs remain server-generated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+
+    /// Scheduling priority. Lower values are scheduled first.
+    #[serde(default)]
+    pub priority: i64,
+
+    /// Additional keyword arguments forwarded to the Hugging Face processor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mm_processor_kwargs: Option<HashMap<String, serde_json::Value>>,
+
+    /// Salt applied to prefix-cache keys.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_salt: Option<String>,
 
     /// Whether to apply the classification pooler's activation
     /// (sigmoid/softmax). `None` uses the pooler's default. Forwarded verbatim
@@ -258,6 +281,29 @@ mod tests {
         assert!(value.get("add_special_tokens").is_none());
         assert!(value.get("truncate_prompt_tokens").is_none());
         assert!(value.get("truncation_side").is_none());
+    }
+
+    #[test]
+    fn classify_request_controls_round_trip() {
+        let request: NvCreateClassifyRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "input": "hello",
+            "user": "user-1",
+            "request_id": "request-1",
+            "priority": -2,
+            "mm_processor_kwargs": {"do_resize": false},
+            "cache_salt": "salt"
+        }))
+        .unwrap();
+
+        assert_eq!(request.user.as_deref(), Some("user-1"));
+        assert_eq!(request.request_id.as_deref(), Some("request-1"));
+        assert_eq!(request.priority, -2);
+        assert_eq!(request.cache_salt.as_deref(), Some("salt"));
+
+        let value = serde_json::to_value(request).unwrap();
+        assert_eq!(value["mm_processor_kwargs"]["do_resize"], false);
+        assert_eq!(value["priority"], -2);
     }
 
     #[test]

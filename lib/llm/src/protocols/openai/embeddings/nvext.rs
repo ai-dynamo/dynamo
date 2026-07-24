@@ -11,7 +11,7 @@ pub trait NvExtProvider {
 }
 
 /// NVIDIA LLM extensions to the OpenAI API
-#[derive(ToSchema, Serialize, Deserialize, Builder, Validate, Debug, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Builder, Validate, Debug, Clone, Default)]
 #[validate(schema(function = "validate_nv_ext"))]
 pub struct NvExt {
     /// Annotations
@@ -20,12 +20,6 @@ pub struct NvExt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
     pub annotations: Option<Vec<String>>,
-}
-
-impl Default for NvExt {
-    fn default() -> Self {
-        NvExt::builder().build().unwrap()
-    }
 }
 
 impl NvExt {
@@ -41,9 +35,8 @@ fn validate_nv_ext(_nv_ext: &NvExt) -> Result<(), ValidationError> {
 impl NvExtBuilder {
     pub fn add_annotation(&mut self, annotation: impl Into<String>) -> &mut Self {
         self.annotations
-            .get_or_insert_with(|| Some(vec![]))
-            .as_mut()
-            .expect("stop should always be Some(Vec)")
+            .get_or_insert_with(|| Some(Vec::new()))
+            .get_or_insert_with(Vec::new)
             .push(annotation.into());
         self
     }
@@ -58,5 +51,13 @@ mod tests {
     fn test_nv_ext_builder_default() {
         let nv_ext = NvExt::builder().build().unwrap();
         assert_eq!(nv_ext.annotations, None);
+    }
+
+    #[test]
+    fn test_nv_ext_builder_add_annotation() {
+        let mut builder = NvExt::builder();
+        builder.add_annotation("trace");
+        let nv_ext = builder.build().unwrap();
+        assert_eq!(nv_ext.annotations, Some(vec!["trace".to_string()]));
     }
 }

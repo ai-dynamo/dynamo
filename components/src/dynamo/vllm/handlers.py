@@ -13,7 +13,7 @@ import tempfile
 import time
 from abc import ABC, abstractmethod
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import Awaitable, Mapping
 from contextlib import asynccontextmanager
 from typing import (
     Any,
@@ -107,6 +107,7 @@ _DELTA_REQUEST_OUTPUT_KIND = RequestOutputKind.DELTA
 _RL_INIT_WEIGHTS_TIMEOUT_ENV = "DYN_RL_INIT_WEIGHTS_TIMEOUT_S"
 _RL_INIT_WEIGHTS_TIMEOUT_DEFAULT_S = 30.0
 _LORA_LOCK_STRIPES = 64
+_POOLING_BATCH_CONCURRENCY_FALLBACK: Final = 256
 _DISTRIBUTED_WEIGHT_UPDATE_RESERVED_KEYS: Final = frozenset(
     {
         "allow_unpaused",
@@ -3672,6 +3673,48 @@ class EmbeddingWorkerHandler:
                 # Re-raise EngineShutdown if the monitor task raised it.
                 task.result()
 
+    async def _run_pooling_batch(
+        self,
+        prompts: list[Any],
+        encode_one: Callable[[int, Any], Awaitable[Any]],
+    ) -> list[Any]:
+        scheduler_config = getattr(
+            getattr(self.engine_client, "vllm_config", None),
+            "scheduler_config",
+            None,
+        )
+        max_num_seqs = getattr(scheduler_config, "max_num_seqs", None)
+        if (
+            not isinstance(max_num_seqs, int)
+            or isinstance(max_num_seqs, bool)
+            or max_num_seqs < 1
+        ):
+            max_num_seqs = _POOLING_BATCH_CONCURRENCY_FALLBACK
+
+        outputs: list[Any | None] = [None] * len(prompts)
+        indices = iter(range(len(prompts)))
+
+        async def _worker() -> None:
+            for idx in indices:
+                outputs[idx] = await encode_one(idx, prompts[idx])
+
+        tasks = [
+            asyncio.create_task(_worker())
+            for _ in range(min(len(prompts), max_num_seqs))
+        ]
+        try:
+            await asyncio.gather(*tasks)
+        finally:
+            pending = [task for task in tasks if not task.done()]
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+
+        if any(output is None for output in outputs):
+            raise RuntimeError("vLLM engine.encode did not return every batch item")
+        return cast(list[Any], outputs)
+
     async def generate(
         self, request: dict, context: Context
     ) -> AsyncIterator[Dict[str, Any]]:
@@ -3796,25 +3839,7 @@ class EmbeddingWorkerHandler:
                 )
             return final_output
 
-        # Submit every prompt to the engine in the same event-loop tick so
-        # vLLM's continuous-batching scheduler can coalesce them into a
-        # single forward pass instead of N sequential ones. ``asyncio.gather``
-        # returns results in input order, so ``outputs[k]`` matches ``prompts[k]``
-        # regardless of engine completion order.
-        #
-        # Use explicit tasks + a ``finally`` cancellation pass so that if one
-        # ``_encode_one`` raises, we cancel siblings still in flight instead
-        # of leaving them running -- otherwise vLLM keeps consuming engine
-        # capacity for output that this handler will discard.
-        tasks = [asyncio.create_task(_encode_one(i, p)) for i, p in enumerate(prompts)]
-        try:
-            outputs = await asyncio.gather(*tasks)
-        finally:
-            pending = [t for t in tasks if not t.done()]
-            for t in pending:
-                t.cancel()
-            if pending:
-                await asyncio.gather(*pending, return_exceptions=True)
+        outputs = await self._run_pooling_batch(prompts, _encode_one)
 
         embedding_objects: list[Dict[str, Any]] = []
         prompt_tokens = 0
@@ -3907,6 +3932,7 @@ class ClassifyWorkerHandler(EmbeddingWorkerHandler):
             shutdown_event=shutdown_event,
         )
         self.model_config = model_config
+        self._default_pooling_task: str | None = None
         logger.info("Classify worker handler initialized")
 
     def _id2label(self) -> dict[int, str]:
@@ -3922,13 +3948,30 @@ class ClassifyWorkerHandler(EmbeddingWorkerHandler):
                 continue
         return normalized
 
+    async def _resolve_pooling_task(self, requested_task: str | None) -> str:
+        if requested_task is not None:
+            return requested_task
+        if self._default_pooling_task is not None:
+            return self._default_pooling_task
+        if self.model_config is None:
+            raise RuntimeError("Model config is required to resolve the pooling task")
+
+        supported_tasks = await self.engine_client.get_supported_tasks()
+        pooling_task = self.model_config.get_pooling_task(supported_tasks)
+        if pooling_task is None:
+            raise ValueError(
+                f"No default pooling task is available; supported tasks: {supported_tasks}"
+            )
+        self._default_pooling_task = pooling_task
+        return pooling_task
+
     async def generate(
         self, request: dict, context: Context
     ) -> AsyncIterator[Dict[str, Any]]:
         """Handle one ``/classify`` or ``/pooling`` request.
 
         The Rust frontend forwards the request dict directly. Expected keys:
-        ``model: str``, ``input: str | list[str]``. Mirrors vLLM 0.24.0's
+        ``model: str``, ``input: str | list[str]``. Mirrors vLLM 0.25.1's
         ``ClassificationRequest`` → ``ClassificationResponse`` contract.
 
         Pooling wire requests are distinguished by the always-serialized
@@ -3962,15 +4005,13 @@ class ClassifyWorkerHandler(EmbeddingWorkerHandler):
         # add_special_tokens) so classification matches vLLM's tokenization.
         tokenization_kwargs = _build_tokenization_kwargs(request)
 
-        base_request_id = context.id()
+        engine_request_id = context.id()
+        response_request_id = request.get("request_id") or engine_request_id
+        priority = request.get("priority", 0)
 
         async def _encode_one(idx: int, prompt: Any):
-            request_id = f"{base_request_id}-{idx}"
-            encode_arg: Any = (
-                prompt
-                if isinstance(prompt, str)
-                else TokensPrompt(prompt_token_ids=prompt)
-            )
+            request_id = f"{engine_request_id}-{idx}"
+            encode_arg = _build_pooling_prompt(prompt, request)
             final_output = None
             async with self._abort_monitor(context, request_id):
                 encode_kwargs: dict[str, Any] = {
@@ -3978,8 +4019,10 @@ class ClassifyWorkerHandler(EmbeddingWorkerHandler):
                     "pooling_params": pooling_params,
                     "request_id": request_id,
                 }
+                if priority != 0:
+                    encode_kwargs["priority"] = priority
                 # tokenization only applies to raw-text prompts.
-                if tokenization_kwargs is not None and isinstance(encode_arg, str):
+                if tokenization_kwargs is not None and isinstance(prompt, str):
                     encode_kwargs["tokenization_kwargs"] = tokenization_kwargs
                 async for out in self.engine_client.encode(**encode_kwargs):
                     final_output = out
@@ -3989,15 +4032,7 @@ class ClassifyWorkerHandler(EmbeddingWorkerHandler):
                 )
             return final_output
 
-        tasks = [asyncio.create_task(_encode_one(i, p)) for i, p in enumerate(prompts)]
-        try:
-            outputs = await asyncio.gather(*tasks)
-        finally:
-            pending = [t for t in tasks if not t.done()]
-            for t in pending:
-                t.cancel()
-            if pending:
-                await asyncio.gather(*pending, return_exceptions=True)
+        outputs = await self._run_pooling_batch(prompts, _encode_one)
 
         id2label = self._id2label()
         data: list[Dict[str, Any]] = []
@@ -4021,7 +4056,7 @@ class ClassifyWorkerHandler(EmbeddingWorkerHandler):
             prompt_tokens += len(token_ids)
 
         yield {
-            "id": f"classify-{base_request_id}",
+            "id": f"classify-{response_request_id}",
             "object": "list",
             "created": int(time.time()),
             "model": model_name,
@@ -4040,9 +4075,7 @@ class ClassifyWorkerHandler(EmbeddingWorkerHandler):
         Mirrors vLLM's ``PoolingCompletionRequest`` → ``PoolingResponse``
         contract (`vllm/entrypoints/pooling/pooling/`). Expected keys:
         ``model: str``, ``input: str | list[str] | list[int] | list[list[int]]``,
-        optional ``task`` (``None`` lets the vLLM engine pick its default:
-        ``token_embed`` → ``token_classify`` → ``plugin``; unsupported tasks
-        are rejected engine-side — identical to bare ``vllm serve``),
+        optional ``task`` (``None`` resolves the model's configured default),
         optional ``use_activation``, ``encoding_format`` (``"float"`` |
         ``"base64"``), and ``truncate_prompt_tokens``.
 
@@ -4073,21 +4106,20 @@ class ClassifyWorkerHandler(EmbeddingWorkerHandler):
 
         tokenization_kwargs = _build_tokenization_kwargs(request)
 
-        pooling_kwargs: dict[str, Any] = {"task": request.get("task")}
+        pooling_task = await self._resolve_pooling_task(request.get("task"))
+        pooling_kwargs: dict[str, Any] = {"task": pooling_task}
         use_activation = request.get("use_activation")
         if use_activation is not None:
             pooling_kwargs["use_activation"] = use_activation
         pooling_params = PoolingParams(**pooling_kwargs)
 
-        base_request_id = context.id()
+        engine_request_id = context.id()
+        response_request_id = request.get("request_id") or engine_request_id
+        priority = request.get("priority", 0)
 
         async def _encode_one(idx: int, prompt: Any):
-            request_id = f"{base_request_id}-{idx}"
-            encode_arg: Any = (
-                prompt
-                if isinstance(prompt, str)
-                else TokensPrompt(prompt_token_ids=prompt)
-            )
+            request_id = f"{engine_request_id}-{idx}"
+            encode_arg = _build_pooling_prompt(prompt, request)
             final_output = None
             async with self._abort_monitor(context, request_id):
                 encode_kwargs: dict[str, Any] = {
@@ -4095,7 +4127,9 @@ class ClassifyWorkerHandler(EmbeddingWorkerHandler):
                     "pooling_params": pooling_params,
                     "request_id": request_id,
                 }
-                if tokenization_kwargs is not None and isinstance(encode_arg, str):
+                if priority != 0:
+                    encode_kwargs["priority"] = priority
+                if tokenization_kwargs is not None and isinstance(prompt, str):
                     encode_kwargs["tokenization_kwargs"] = tokenization_kwargs
 
                 async for out in self.engine_client.encode(**encode_kwargs):
@@ -4106,15 +4140,7 @@ class ClassifyWorkerHandler(EmbeddingWorkerHandler):
                 )
             return final_output
 
-        tasks = [asyncio.create_task(_encode_one(i, p)) for i, p in enumerate(prompts)]
-        try:
-            outputs = await asyncio.gather(*tasks)
-        finally:
-            pending = [t for t in tasks if not t.done()]
-            for t in pending:
-                t.cancel()
-            if pending:
-                await asyncio.gather(*pending, return_exceptions=True)
+        outputs = await self._run_pooling_batch(prompts, _encode_one)
 
         data: list[Dict[str, Any]] = []
         prompt_tokens = 0
@@ -4138,7 +4164,7 @@ class ClassifyWorkerHandler(EmbeddingWorkerHandler):
             prompt_tokens += len(token_ids)
 
         yield {
-            "id": f"pool-{base_request_id}",
+            "id": f"pool-{response_request_id}",
             "object": "list",
             "created": int(time.time()),
             "model": model_name,
@@ -4149,6 +4175,23 @@ class ClassifyWorkerHandler(EmbeddingWorkerHandler):
                 "completion_tokens": 0,
             },
         }
+
+
+def _build_pooling_prompt(prompt: Any, request: dict) -> Any:
+    mm_processor_kwargs = request.get("mm_processor_kwargs")
+    cache_salt = request.get("cache_salt")
+    if isinstance(prompt, str):
+        if mm_processor_kwargs is None and cache_salt is None:
+            return prompt
+        encode_arg: Any = TextPrompt(prompt=prompt)
+    else:
+        encode_arg = TokensPrompt(prompt_token_ids=prompt)
+
+    if mm_processor_kwargs is not None:
+        encode_arg["mm_processor_kwargs"] = mm_processor_kwargs
+    if cache_salt is not None:
+        encode_arg["cache_salt"] = cache_salt
+    return encode_arg
 
 
 def _build_tokenization_kwargs(request: dict) -> "dict[str, Any] | None":

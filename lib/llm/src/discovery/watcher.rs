@@ -295,6 +295,26 @@ fn is_model_type_list_empty(manager: &ModelManager, model_type: ModelType) -> bo
     }
 }
 
+fn removed_model_cards(
+    manager: &ModelManager,
+    card: &ModelDeploymentCard,
+) -> Vec<ModelDeploymentCard> {
+    ALL_MODEL_TYPES
+        .iter()
+        .filter_map(|model_type| {
+            if card.model_type.intersects(*model_type)
+                && is_model_type_list_empty(manager, *model_type)
+            {
+                let mut removed_card = card.clone();
+                removed_card.model_type = *model_type;
+                Some(removed_card)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 /// RAII guard that removes a key from a `DashSet` on drop and wakes any tasks
 /// waiting for the registration to finish via the shared [`Notify`].
 /// Ensures `registering_worker_sets` is cleaned up even if the registration
@@ -1189,12 +1209,8 @@ impl ModelWatcher {
         }
 
         if let Some(tx) = &self.model_update_tx {
-            for model_type in ALL_MODEL_TYPES {
-                if card.model_type.intersects(*model_type)
-                    && is_model_type_list_empty(&self.manager, *model_type)
-                {
-                    tx.send(ModelUpdate::Removed(card.clone())).await.ok();
-                }
+            for removed_card in removed_model_cards(&self.manager, &card) {
+                tx.send(ModelUpdate::Removed(removed_card)).await.ok();
             }
         }
 
@@ -2424,6 +2440,33 @@ mod tests {
         assert!(is_model_type_list_empty(&mm, ModelType::Videos));
         assert!(is_model_type_list_empty(&mm, ModelType::TensorBased));
         assert!(is_model_type_list_empty(&mm, ModelType::Realtime));
+        assert!(is_model_type_list_empty(&mm, ModelType::Classify));
+        assert!(is_model_type_list_empty(&mm, ModelType::Pooling));
+    }
+
+    #[test]
+    fn removal_cards_contain_only_the_empty_model_type() {
+        let mm = ModelManager::new();
+        let mut card = ModelDeploymentCard::with_name_only("model");
+        card.model_type = ModelType::Classify | ModelType::Pooling;
+
+        let removed_cards = removed_model_cards(&mm, &card);
+        assert_eq!(removed_cards.len(), 2);
+        assert!(
+            removed_cards
+                .iter()
+                .any(|card| card.model_type == ModelType::Classify)
+        );
+        assert!(
+            removed_cards
+                .iter()
+                .any(|card| card.model_type == ModelType::Pooling)
+        );
+        assert!(
+            removed_cards
+                .iter()
+                .all(|card| card.model_type.bits().count_ones() == 1)
+        );
     }
 
     #[test]

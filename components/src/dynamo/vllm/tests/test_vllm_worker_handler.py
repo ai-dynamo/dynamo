@@ -1253,12 +1253,9 @@ class TestClassifyEmbeddingInput:
 class TestEmbeddingWorkerHandlerCancellation:
     """Tests for partial-failure cleanup in ``EmbeddingWorkerHandler.generate``.
 
-    Each prompt's encode runs as its own asyncio task in ``asyncio.gather``.
-    If one task raises, gather re-raises but does NOT cancel the others by
-    default -- they keep consuming vLLM engine capacity for output that the
-    handler would discard. The handler's ``try/finally`` block must cancel
-    every still-pending task and await them with ``return_exceptions=True``
-    before propagating the failure to the frontend.
+    Pooling batches run through a bounded set of asyncio tasks. If one task
+    raises, the handler must cancel every sibling still in flight before
+    propagating the failure to the frontend.
     """
 
     def _make_embedding_handler(self) -> "mod.EmbeddingWorkerHandler":
@@ -1379,6 +1376,41 @@ class TestEmbeddingWorkerHandlerCancellation:
         # No tasks were in flight at gather completion, so the finally
         # cancel-and-await pass must not have touched the engine.
         assert aborted == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_batch_fanout_is_bounded_by_scheduler_capacity(self):
+        handler = self._make_embedding_handler()
+        handler.engine_client.vllm_config = SimpleNamespace(
+            scheduler_config=SimpleNamespace(max_num_seqs=2)
+        )
+        context = self._make_context()
+        active = 0
+        max_active = 0
+        first_pair_started = asyncio.Event()
+
+        async def fake_encode(prompt, pooling_params, request_id):
+            nonlocal active, max_active
+            active += 1
+            max_active = max(max_active, active)
+            if active == 2:
+                first_pair_started.set()
+            try:
+                await first_pair_started.wait()
+                output = MagicMock()
+                output.outputs.data = torch.tensor([0.1, 0.2])
+                output.prompt_token_ids = [1]
+                yield output
+            finally:
+                active -= 1
+
+        handler.engine_client.encode = fake_encode
+
+        request = {"input": [str(i) for i in range(8)], "model": "test-model"}
+        [response] = [r async for r in handler.generate(request, context)]
+
+        assert len(response["data"]) == 8
+        assert max_active == 2
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(5)
@@ -1889,9 +1921,9 @@ class TestClassifyPoolingWorkerHandler:
     """
 
     def _make_handler(self, id2label=None) -> "mod.ClassifyWorkerHandler":
-        model_config = SimpleNamespace(
-            hf_config=SimpleNamespace(id2label=id2label or {})
-        )
+        model_config = MagicMock()
+        model_config.hf_config = SimpleNamespace(id2label=id2label or {})
+        model_config.get_pooling_task.return_value = "classify"
         with patch.object(mod, "VllmEngineMonitor"):
             handler = mod.ClassifyWorkerHandler(
                 runtime=MagicMock(),
@@ -1902,6 +1934,9 @@ class TestClassifyPoolingWorkerHandler:
             )
         handler.engine_client = MagicMock()
         handler.engine_client.abort = AsyncMock()
+        handler.engine_client.get_supported_tasks = AsyncMock(
+            return_value=("classify",)
+        )
         return handler
 
     def _make_context(self) -> MagicMock:
@@ -2035,7 +2070,7 @@ class TestClassifyPoolingWorkerHandler:
     @pytest.mark.timeout(5)
     async def test_pooling_request_dispatches_on_encoding_format(self):
         """A wire request carrying ``encoding_format`` must run the /pooling
-        path: task passthrough (None -> engine default), per-item ``object:
+        path: omitted task resolution, per-item ``object:
         "pooling"``, and shape-preserving float output."""
         handler = self._make_handler()
         context = self._make_context()
@@ -2060,7 +2095,8 @@ class TestClassifyPoolingWorkerHandler:
 
         assert len(responses) == 1
         response = responses[0]
-        assert captured["task"] is None  # engine resolves the default
+        assert captured["task"] == "classify"
+        handler.model_config.get_pooling_task.assert_called_once_with(("classify",))
         assert response["id"].startswith("pool-")
         item = response["data"][0]
         assert item["object"] == "pooling"
@@ -2070,6 +2106,50 @@ class TestClassifyPoolingWorkerHandler:
             "total_tokens": 2,
             "completion_tokens": 0,
         }
+
+    @pytest.mark.parametrize("is_pooling", [False, True])
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_request_controls_are_forwarded(self, is_pooling):
+        handler = self._make_handler()
+        context = self._make_context()
+        captured: dict = {}
+
+        async def fake_encode(prompt, pooling_params, request_id, **kwargs):
+            captured.update(
+                prompt=prompt,
+                request_id=request_id,
+                priority=kwargs.get("priority"),
+                tokenization_kwargs=kwargs.get("tokenization_kwargs"),
+            )
+            output = MagicMock()
+            output.outputs.data = torch.tensor([0.4, 0.6])
+            output.prompt_token_ids = [1, 2]
+            yield output
+
+        handler.engine_client.encode = fake_encode
+        request = {
+            "input": "text",
+            "model": "test-model",
+            "request_id": "client-request",
+            "priority": -3,
+            "cache_salt": "secret",
+            "mm_processor_kwargs": {"do_resize": False},
+            "truncate_prompt_tokens": 16,
+        }
+        if is_pooling:
+            request.update(encoding_format="float", task="classify")
+
+        [response] = [r async for r in handler.generate(request, context)]
+
+        assert captured["request_id"] == "test-req-0"
+        assert captured["priority"] == -3
+        assert captured["prompt"]["prompt"] == "text"
+        assert captured["prompt"]["cache_salt"] == "secret"
+        assert captured["prompt"]["mm_processor_kwargs"] == {"do_resize": False}
+        assert captured["tokenization_kwargs"] == {"truncate_prompt_tokens": 16}
+        expected_prefix = "pool" if is_pooling else "classify"
+        assert response["id"] == f"{expected_prefix}-client-request"
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(5)

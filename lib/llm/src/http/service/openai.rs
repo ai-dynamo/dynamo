@@ -1180,13 +1180,10 @@ async fn embeddings(
     let mut response = NvCreateEmbeddingResponse::from_annotated_stream(stream)
         .await
         .map_err(|e| {
-            tracing::error!(
-                "Failed to fold embeddings stream for {}: {:?}",
-                request_id,
-                e
+            let err_response = ErrorMessage::from_anyhow(
+                anyhow::Error::new(e),
+                "Failed to fold embeddings stream",
             );
-            let err_response =
-                ErrorMessage::internal_server_error("Failed to fold embeddings stream");
             inflight.mark_error(extract_error_type_from_response(&err_response));
             err_response
         })?;
@@ -1260,6 +1257,7 @@ async fn classify(
         warn_nvext_disabled("classify", request.nvext.is_some(), &headers);
         request.nvext = None;
     }
+    validate_pooling_cache_salt(request.cache_salt.as_deref())?;
 
     // `truncation_side` reaches vLLM's tokenizer through TokenizeParams, not the
     // raw `tokenization_kwargs` this worker forwards, so it cannot be honored —
@@ -1336,13 +1334,10 @@ async fn classify(
     let response = NvCreateClassifyResponse::from_annotated_stream(stream)
         .await
         .map_err(|e| {
-            tracing::error!(
-                "Failed to fold classification stream for {}: {:?}",
-                request_id,
-                e
+            let err_response = ErrorMessage::from_anyhow(
+                anyhow::Error::new(e),
+                "Failed to fold classification stream",
             );
-            let err_response =
-                ErrorMessage::internal_server_error("Failed to fold classification stream");
             inflight.mark_error(extract_error_type_from_response(&err_response));
             err_response
         })?;
@@ -1364,6 +1359,15 @@ fn pooling_or_classify_bad_request(message: String) -> ErrorResponse {
     )
 }
 
+fn validate_pooling_cache_salt(cache_salt: Option<&str>) -> Result<(), ErrorResponse> {
+    if cache_salt == Some("") {
+        return Err(pooling_or_classify_bad_request(
+            "Parameter 'cache_salt' must be a non-empty string if provided.".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 #[tracing::instrument(skip_all)]
 async fn pooling(
     State(state): State<Arc<service_v2::State>>,
@@ -1378,6 +1382,7 @@ async fn pooling(
         warn_nvext_disabled("pooling", request.nvext.is_some(), &headers);
         request.nvext = None;
     }
+    validate_pooling_cache_salt(request.cache_salt.as_deref())?;
 
     // Cheap request validation mirroring vLLM's `/pooling` server: reject
     // unsupported `dimensions` and unknown encodings here with a 400 instead
@@ -1489,8 +1494,8 @@ async fn pooling(
     let response = NvCreatePoolingResponse::from_annotated_stream(stream)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to fold pooling stream for {}: {:?}", request_id, e);
-            let err_response = ErrorMessage::internal_server_error("Failed to fold pooling stream");
+            let err_response =
+                ErrorMessage::from_anyhow(anyhow::Error::new(e), "Failed to fold pooling stream");
             inflight.mark_error(extract_error_type_from_response(&err_response));
             err_response
         })?;
@@ -3341,8 +3346,8 @@ async fn images(
     let response = NvImagesResponse::from_annotated_stream(stream)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to fold images stream for {}: {:?}", request_id, e);
-            let err_response = ErrorMessage::internal_server_error("Failed to fold images stream");
+            let err_response =
+                ErrorMessage::from_anyhow(anyhow::Error::new(e), "Failed to fold images stream");
             inflight.mark_error(extract_error_type_from_response(&err_response));
             err_response
         })?;
@@ -3495,9 +3500,10 @@ async fn videos(
         let response = NvVideosResponse::from_annotated_stream(stream)
             .await
             .map_err(|e| {
-                tracing::error!("Failed to fold videos stream for {}: {:?}", request_id, e);
-                let err_response =
-                    ErrorMessage::internal_server_error("Failed to fold videos stream");
+                let err_response = ErrorMessage::from_anyhow(
+                    anyhow::Error::new(e),
+                    "Failed to fold videos stream",
+                );
                 inflight.mark_error(extract_error_type_from_response(&err_response));
                 err_response
             })?;
@@ -3748,8 +3754,7 @@ async fn audio_speech(
     let response = NvAudioSpeechResponse::from_annotated_stream(stream)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to fold audio stream for {}: {:?}", request_id, e);
-            ErrorMessage::internal_server_error("Failed to fold audio stream")
+            ErrorMessage::from_anyhow(anyhow::Error::new(e), "Failed to fold audio stream")
         })?;
 
     // Check for failure before marking success
@@ -4041,6 +4046,19 @@ mod tests {
         let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
         assert_eq!(response.0, StatusCode::BAD_REQUEST);
         assert_eq!(response.1.message, "custom error message");
+    }
+
+    #[test]
+    fn empty_pooling_cache_salt_is_rejected() {
+        assert!(validate_pooling_cache_salt(None).is_ok());
+        assert!(validate_pooling_cache_salt(Some("salt")).is_ok());
+
+        let response = validate_pooling_cache_salt(Some("")).unwrap_err();
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response.1.message,
+            "Parameter 'cache_salt' must be a non-empty string if provided."
+        );
     }
 
     #[test]

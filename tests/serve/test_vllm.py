@@ -772,7 +772,7 @@ vllm_configs = {
                 expected_response=["Classified 2 inputs"],
             ),
             # Same worker also serves /pooling (ModelType.Classify | Pooling).
-            # Default task lets the engine pick its pooling default.
+            # Omitted task resolves to the model's configured pooling default.
             pooling_payload(
                 input_text="Some men are playing a sport.",
                 expected_response=["Pooled 1 inputs"],

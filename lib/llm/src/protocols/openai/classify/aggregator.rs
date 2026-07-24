@@ -9,7 +9,7 @@ use crate::protocols::{
     openai::stream_aggregator::{StreamAggregable, aggregate_stream},
 };
 
-use dynamo_runtime::engine::DataStream;
+use dynamo_runtime::{engine::DataStream, error::DynamoError};
 use futures::Stream;
 
 impl StreamAggregable for NvCreateClassifyResponse {
@@ -38,7 +38,7 @@ impl NvCreateClassifyResponse {
     /// Converts an SSE stream into a [`NvCreateClassifyResponse`].
     pub async fn from_sse_stream(
         stream: DataStream<Result<Message, SseCodecError>>,
-    ) -> Result<NvCreateClassifyResponse, String> {
+    ) -> Result<NvCreateClassifyResponse, DynamoError> {
         let stream = convert_sse_stream::<NvCreateClassifyResponse>(stream);
         NvCreateClassifyResponse::from_annotated_stream(stream).await
     }
@@ -46,7 +46,7 @@ impl NvCreateClassifyResponse {
     /// Aggregates an annotated stream of classification responses into a final response.
     pub async fn from_annotated_stream(
         stream: impl Stream<Item = Annotated<NvCreateClassifyResponse>>,
-    ) -> Result<NvCreateClassifyResponse, String> {
+    ) -> Result<NvCreateClassifyResponse, DynamoError> {
         aggregate_stream(stream).await
     }
 }
@@ -127,6 +127,31 @@ mod tests {
         let stream = stream::iter(vec![error_annotated]);
         let result = NvCreateClassifyResponse::from_annotated_stream(Box::pin(stream)).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Test error"));
+        assert!(result.unwrap_err().to_string().contains("Test error"));
+    }
+
+    #[tokio::test]
+    async fn preserves_typed_stream_errors() {
+        use dynamo_runtime::{
+            error::{BackendError, ErrorType},
+            protocols::maybe_error::MaybeError,
+        };
+
+        let backend_error = DynamoError::builder()
+            .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+            .message("invalid classify input")
+            .build();
+        let stream = stream::iter(vec![Annotated::<NvCreateClassifyResponse>::from_err(
+            backend_error,
+        )]);
+
+        let error = NvCreateClassifyResponse::from_annotated_stream(stream)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument)
+        );
+        assert_eq!(error.message(), "invalid classify input");
     }
 }

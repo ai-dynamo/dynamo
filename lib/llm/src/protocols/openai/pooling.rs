@@ -12,16 +12,16 @@
 //! data:[{index, object: "pooling", data}], usage}`.
 //!
 //! The completion-style request (`input`) is supported; vLLM's chat-messages
-//! and IOProcessor-plugin request variants are not. Supported request options:
-//! `task`, `use_activation`, `encoding_format`, `add_special_tokens`,
-//! `truncate_prompt_tokens` (forwarded); `dimensions`, `truncation_side`, and
-//! non-default `embed_dtype`/`endianness` (base64) are rejected with a 400
-//! rather than silently ignored.
+//! and IOProcessor-plugin request variants are not. Pooling controls such as
+//! `task`, `priority`, `cache_salt`, `mm_processor_kwargs`, `use_activation`,
+//! `encoding_format`, `add_special_tokens`, and `truncate_prompt_tokens` are
+//! forwarded; `dimensions`, `truncation_side`, and non-default
+//! `embed_dtype`/`endianness` (base64) are rejected with a 400.
 //!
-//! `task` is forwarded verbatim and resolved by the vLLM engine: `None`
-//! defaults to `token_embed` → `token_classify` → `plugin` (first supported),
-//! and unsupported tasks are rejected engine-side — identical to bare
-//! `vllm serve`.
+//! `task` is forwarded verbatim when set. When omitted, the worker resolves
+//! the model's configured/default task using vLLM's `ModelConfig`.
+
+use std::collections::HashMap;
 
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
@@ -29,9 +29,8 @@ use utoipa::ToSchema;
 use validator::Validate;
 
 mod aggregator;
-mod nvext;
 
-pub use nvext::{NvExt, NvExtProvider};
+pub use super::embeddings::{NvExt, NvExtProvider};
 
 /// Pooling input — raw text or pre-tokenized prompts, single or batched.
 /// Mirrors the `input` field of vLLM's pooling request
@@ -62,10 +61,30 @@ pub struct NvCreatePoolingRequest {
     /// The prompt(s) to pool.
     pub input: PoolingInput,
 
+    /// A unique identifier representing the end user.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+
+    /// Optional caller-provided identifier used in the response ID. Internal
+    /// engine request IDs remain server-generated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+
+    /// Scheduling priority. Lower values are scheduled first.
+    #[serde(default)]
+    pub priority: i64,
+
+    /// Additional keyword arguments forwarded to the Hugging Face processor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mm_processor_kwargs: Option<HashMap<String, serde_json::Value>>,
+
+    /// Salt applied to prefix-cache keys.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_salt: Option<String>,
+
     /// vLLM pooling task (`embed`, `classify`, `token_embed`,
-    /// `token_classify`, …). Forwarded verbatim; `None` lets the engine pick
-    /// its default and unknown values are rejected engine-side, so new vLLM
-    /// tasks work without a frontend change.
+    /// `token_classify`, …). Forwarded verbatim when set; `None` lets the
+    /// worker resolve the model's configured/default task.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task: Option<String>,
 
@@ -317,6 +336,29 @@ mod tests {
         assert_eq!(request.add_special_tokens, Some(false));
         assert_eq!(request.truncate_prompt_tokens, Some(64));
         assert_eq!(request.truncation_side.as_deref(), Some("left"));
+    }
+
+    #[test]
+    fn pooling_request_controls_round_trip() {
+        let request: NvCreatePoolingRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "input": "hello",
+            "user": "user-1",
+            "request_id": "request-1",
+            "priority": -2,
+            "mm_processor_kwargs": {"do_resize": false},
+            "cache_salt": "salt"
+        }))
+        .unwrap();
+
+        assert_eq!(request.user.as_deref(), Some("user-1"));
+        assert_eq!(request.request_id.as_deref(), Some("request-1"));
+        assert_eq!(request.priority, -2);
+        assert_eq!(request.cache_salt.as_deref(), Some("salt"));
+
+        let value = serde_json::to_value(request).unwrap();
+        assert_eq!(value["mm_processor_kwargs"]["do_resize"], false);
+        assert_eq!(value["priority"], -2);
     }
 
     #[test]
