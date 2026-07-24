@@ -402,7 +402,7 @@ def make_custom_encoder_payload() -> ChatPayload:
         ],
         repeat_count=1,
         expected_response=["42"],
-        expected_log=["Loaded CustomEncoder"],
+        expected_log=["Loaded CustomEncoder", "_LinearEmbedsAdapter"],
         max_tokens=32,
         temperature=0.0,
     )

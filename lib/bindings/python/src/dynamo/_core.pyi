@@ -2087,6 +2087,7 @@ class MockEngineArgs:
         bandwidth_g2_to_g4_gbps: Optional[float] = None,
         bandwidth_g4_to_g2_gbps: Optional[float] = None,
         max_model_len: Optional[int] = None,
+        g1_backend: str = "kvbm",
     ) -> None:
         ...
 
@@ -2119,6 +2120,9 @@ class MockEngineArgs:
 
     @enable_prefix_caching.setter
     def enable_prefix_caching(self, value: bool) -> None: ...
+
+    @property
+    def g1_backend(self) -> str: ...
 
     @property
     def enable_local_indexer(self) -> bool: ...

@@ -23,6 +23,10 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 )
 
+// legacyGroveConditionReasonInsufficientScheduledPCSGReplicas can remain on
+// persisted PCSG status after upgrading from Grove versions that emitted it.
+const legacyGroveConditionReasonInsufficientScheduledPCSGReplicas = "InsufficientScheduledPodCliqueScalingGroupReplicas"
+
 type GroveMultinodeDeployer struct {
 	MultinodeDeployer
 	// IsInterPodGMS is true when this deployer produces pod specs for an
@@ -365,7 +369,7 @@ func CheckPCSGReady(ctx context.Context, client client.Client, resourceName, nam
 	// *availability* reason (InsufficientAvailablePodCliqueScalingGroupReplicas).
 	if cond := meta.FindStatusCondition(pcsg.Status.Conditions, groveconstants.ConditionTypeMinAvailableBreached); cond != nil &&
 		cond.Status == metav1.ConditionFalse &&
-		cond.Reason == groveconstants.ConditionReasonInsufficientScheduledPCSGReplicas {
+		cond.Reason == legacyGroveConditionReasonInsufficientScheduledPCSGReplicas {
 		logger.V(1).Info("PodCliqueScalingGroup MinAvailableBreached reports insufficient capacity", "resourceName", resourceName, "reason", cond.Reason, "message", cond.Message)
 		return false, fmt.Sprintf("min-available breached (%s): %s", cond.Reason, cond.Message), serviceStatus, v1beta1.DGDReadyReasonInsufficientCapacity, nil
 	}

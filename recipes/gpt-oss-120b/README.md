@@ -15,14 +15,14 @@ Dynamo + vLLM deployment profiles for the Mooncake agentic trace (64k/400/90%-KV
 |--------------------------|------------------------------------|------------------------------------|------------------------------------|------------------------------------|
 | **GPUs** (per node)      | 8x B200                            | 8x H200                            | 8x B200 (2 prefill + 6 decode)     | 8x H200 (4 prefill + 4 decode)     |
 | **Mode**                 | aggregated                         | aggregated                         | disaggregated                      | disaggregated                      |
-| **Framework**            | Dynamo 1.3.0 / vLLM 0.23           | Dynamo 1.3.0 / vLLM 0.23           | Dynamo 1.3.0 / vLLM 0.23¹          | Dynamo 1.3.0 / vLLM 0.23¹          |
-| **Deployment**           | DGD (8 pods, KV router)            | DGD (8 pods, KV router)            | single Pod, in-pod co-located¹     | single Pod, in-pod co-located¹     |
+| **Framework**            | Dynamo 1.3.0 / vLLM 0.23           | Dynamo 1.3.0 / vLLM 0.23           | Dynamo 1.3.0 / vLLM 0.23           | Dynamo 1.3.0 / vLLM 0.23           |
+| **Deployment**           | DGD (8 pods, KV router)            | DGD (8 pods, KV router)            | DGD (colocated 1 node)             | DGD (colocated 1 node)             |
 | **Precision**            | MXFP4 + FP8 KV                     | MXFP4 + FP8 KV                     | MXFP4 + FP8 KV                     | MXFP4 + FP8 KV                     |
 | **Parallelism**          | 8x TP1 replicas                    | 8x TP1 replicas                    | 2x TP1 prefill + 6x TP1 decode³    | 4x TP1 prefill + 4x TP1 decode³    |
 | **MoE backend**          | flashinfer_trtllm (MXFP4xFP8)      | flashinfer_cutlass                 | flashinfer_trtllm                  | flashinfer_cutlass                 |
 | **Attention backend**    | FlashInfer                         | FlashInfer                         | FlashInfer                         | FlashInfer                         |
 | **Routing**              | KV-aware                           | KV-aware                           | KV-aware                           | KV-aware                           |
-| **Speculative decoding** | EAGLE3-v3 (DL=3), ON               | EAGLE3-v3 (DL=3), ON               | EAGLE3-v3 (DL=3), ON (both)¹       | EAGLE3-v3 (DL=3), ON (both)        |
+| **Speculative decoding** | EAGLE3-v3 (DL=3), ON               | EAGLE3-v3 (DL=3), ON               | EAGLE3-v3 (DL=3), ON (both)        | EAGLE3-v3 (DL=3), ON (both)        |
 | **KV cache offloading**  | none (SimpleCPUOffload opt-in)     | **SimpleCPUOffload ON**            | none (NIXL-incompatible)           | none (NIXL-incompatible)           |
 
 
@@ -70,7 +70,7 @@ kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeo
 
 ### 4. Deploy
 
-`agg` applies a DynamoGraphDeployment (8 worker pods); `disagg` applies a single co-located Pod + Service. Same command:
+Both `agg` and `disagg` apply a DynamoGraphDeployment (`disagg` adds `podAffinity` so its prefill+decode workers colocate on one node for the NVLink NIXL path). Same command:
 
 ```bash
 SKU=b200   # or h200
@@ -105,13 +105,12 @@ Measured 2026-07-09 on the agentic 15% trace (see [perf/README.md](perf/README.m
 | SKU  | config (shipped)                 | conc | tok/s/GPU | tok/s/user | TTFT avg | note                                        |
 |------|----------------------------------|------|-----------|------------|----------|---------------------------------------------|
 | B200 | **agg** — 8x TP1                 | c512 | **2896**  | 58         | 4.4s     | offload quality-neutral                     |
-| B200 | disagg — 2P6D in-pod             | c256 | 2069      | 99         | 5.6s     | plateau; TTFT-limited above c256            |
+| B200 | disagg — 2P6D colocated             | c256 | 2069      | 99         | 5.6s     | plateau; TTFT-limited above c256            |
 | H200 | **agg** — 8x TP1 + CPU offload   | c256 | **1256**  | 47.5       | 1.4s     | at the 50-tps floor; offload = +9%, quality-neutral |
-| H200 | disagg — 4P4D in-pod             | c256 | 1046      | 43         | 4.4s     | best usable H200 split                      |
+| H200 | disagg — 4P4D colocated             | c256 | 1046      | 43         | 4.4s     | best usable H200 split                      |
 
 ## Known issues
 
-1. Multi-pod disaggregation is not supported — the disagg recipes run single-node in-pod (see ¹).
-2. Structured output (`response_format: json_object` / `json_schema`) is not working — may return invalid
+1. Structured output (`response_format: json_object` / `json_schema`) is not working — may return invalid
    JSON while speculative decoding is enabled; use tool calling or validate client-side.
 
