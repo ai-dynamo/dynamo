@@ -327,13 +327,13 @@ func (r *DynamoGraphDeploymentReconciler) findLegacyWorkerDCDs(
 	return legacyDCDs, nil
 }
 
-// supportsManagedRollingUpdate checks if DGD pathway supports operator managed rolling updates.
-// Grove and LWS deployments currently do not support operator managed rolling updates.
-// They fall back to the default rolling update mechanism.
-func (r *DynamoGraphDeploymentReconciler) supportsManagedRollingUpdate(
+// supportsManagedRollingUpdate checks whether the component pathway can use
+// operator-managed rolling updates. Multinode component workloads rely on
+// external orchestration and retain the compatibility hash behavior instead.
+func (p *componentProgram) supportsManagedRollingUpdate(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) bool {
-	return !r.isGrovePathway(dgd) && !dgd.HasAnyMultinodeComponent()
+	return !dgd.HasAnyMultinodeComponent()
 }
 
 // getCurrentWorkerHash returns the v1 worker generation stored on the DGD.

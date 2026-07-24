@@ -506,7 +506,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileGMSResourceClaimTemplates_DRAV
 	}
 }
 
-func TestDynamoGraphDeploymentReconciler_reconcileResources_ValidatesGMSResourceClaimTemplatesBeforePathway(t *testing.T) {
+func TestDynamoGraphDeploymentReconciler_reconcileProgramInputs_ValidatesGMSResourceClaimTemplatesBeforePathway(t *testing.T) {
 	ctx := context.Background()
 	g := gomega.NewGomegaWithT(t)
 	s := newDynamoGraphDeploymentControllerTestScheme(t)
@@ -537,7 +537,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileResources_ValidatesGMSResource
 		RuntimeConfig: &controller_common.RuntimeConfig{},
 	}
 
-	_, err := reconciler.reconcileResources(ctx, dgd)
+	err := reconciler.reconcileProgramInputs(ctx, &graphReconcileState{DGD: dgd})
 	g.Expect(err).To(gomega.HaveOccurred())
 	g.Expect(err.Error()).To(gomega.ContainSubstring("requires DRA"))
 	g.Expect(err.Error()).To(gomega.ContainSubstring("explicitly disabled"))
@@ -3945,7 +3945,7 @@ func Test_computeRestartStatus(t *testing.T) {
 	}
 }
 
-func TestComponentProgram_Reconcile(t *testing.T) {
+func TestComponentProgram_ReconcileWorkloads(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
@@ -4578,10 +4578,10 @@ func TestComponentProgram_Reconcile(t *testing.T) {
 			}
 
 			state := &graphReconcileState{DGD: dgd}
-			err = (&componentProgram{reconciler: reconciler}).Reconcile(ctx, state)
+			result, err := (&componentProgram{reconciler: reconciler}).reconcileWorkloads(ctx, state)
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 
-			g.Expect(state.Result).To(gomega.Equal(tt.wantReconcileResult))
+			g.Expect(result).To(gomega.Equal(tt.wantReconcileResult))
 		})
 	}
 }

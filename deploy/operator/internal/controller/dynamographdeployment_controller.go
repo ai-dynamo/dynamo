@@ -73,6 +73,8 @@ type Message string
 
 const (
 	reasonFailedToInitializeWorkerHash Reason = "failed_to_initialize_worker_hash"
+	reasonFailedToMigrateWorkerHash    Reason = "failed_to_migrate_worker_hash"
+	reasonFailedToReconcileResources   Reason = "failed_to_reconcile_the_resources"
 	reasonRollingUpdateFailed          Reason = "rolling_update_failed"
 
 	dgdComponentPodIndex = ".metadata.dgdComponent"
@@ -197,107 +199,23 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, nil
 	}
 
-	if err = r.migrateCurrentWorkerHashIfNeeded(ctx, dynamoDeployment); err != nil {
-		logger.Error(err, "Failed to migrate worker hash")
-		reason = "failed_to_migrate_worker_hash"
+	reconcileState := &graphReconcileState{DGD: dynamoDeployment}
+	program := r.selectWorkloadProgram(reconcileState)
+	if err = program.Reconcile(ctx, reconcileState); err != nil {
+		logger.Error(err, "failed to reconcile the workload program")
+		reason = reasonFailedToReconcileResources
+		if programReason, ok := workloadProgramFailureReason(err); ok {
+			reason = programReason
+		}
 		return ctrl.Result{}, err
 	}
-
-	if r.supportsManagedRollingUpdate(dynamoDeployment) {
-		if err = r.initializeWorkerHashIfNeeded(ctx, dynamoDeployment); err != nil {
-			logger.Error(err, "Failed to initialize worker hash")
-			reason = reasonFailedToInitializeWorkerHash
-			message = Message(err.Error())
-			return ctrl.Result{}, err
-		}
-
-		rollingUpdateInProgress := r.isRollingUpdateInProgress(dynamoDeployment)
-		triggerRollingUpdate := false
-		if !rollingUpdateInProgress {
-			triggerRollingUpdate, err = r.shouldTriggerRollingUpdate(dynamoDeployment)
-			if err != nil {
-				logger.Error(err, "Failed to check rolling update trigger")
-				state = nvidiacomv1beta1.DGDStateFailed
-				reason = reasonRollingUpdateFailed
-				message = Message(err.Error())
-				return ctrl.Result{}, err
-			}
-		}
-		if rollingUpdateInProgress || triggerRollingUpdate {
-			if err = r.reconcileRollingUpdate(ctx, dynamoDeployment); err != nil {
-				logger.Error(err, "Failed to reconcile rolling update")
-				state = nvidiacomv1beta1.DGDStateFailed
-				reason = reasonRollingUpdateFailed
-				message = Message(err.Error())
-				return ctrl.Result{}, err
-			}
-		}
-	} else {
-		if r.currentWorkerHashes(dynamoDeployment).empty() {
-			hashes, err := r.desiredWorkerHashes(dynamoDeployment)
-			if err != nil {
-				logger.Error(err, "Failed to compute worker hash for unsupported pathway")
-				reason = reasonFailedToInitializeWorkerHash
-				message = Message(err.Error())
-				return ctrl.Result{}, err
-			}
-			r.setCurrentWorkerHashes(dynamoDeployment, workerHashesForCompletedGeneration(hashes.v2, hashes))
-			if updateErr := r.Update(ctx, dynamoDeployment); updateErr != nil {
-				logger.Error(updateErr, "Failed to initialize worker hash for unsupported pathway")
-				reason = reasonFailedToInitializeWorkerHash
-				message = Message(updateErr.Error())
-				return ctrl.Result{}, updateErr
-			}
-		}
-
-		// For unsupported pathways, log if a rolling update would have been triggered
-		triggerRollingUpdate, err := r.shouldTriggerRollingUpdate(dynamoDeployment)
-		if err != nil {
-			logger.Error(err, "Failed to check rolling update trigger for unsupported pathway")
-			state = nvidiacomv1beta1.DGDStateFailed
-			reason = reasonRollingUpdateFailed
-			message = Message(err.Error())
-			return ctrl.Result{}, err
-		}
-		if triggerRollingUpdate {
-			logger.Info("Worker spec change detected but rolling update not supported for this pathway",
-				"isGrove", r.isGrovePathway(dynamoDeployment),
-				"hasMultinode", dynamoDeployment.HasAnyMultinodeComponent())
-			r.Recorder.Event(dynamoDeployment, corev1.EventTypeWarning, "RollingUpdateNotSupported",
-				"Worker spec changed but custom rolling updates are not supported for Grove/multinode deployments")
-
-			// Update the hash to prevent repeated warnings. If the unsupported
-			// path is processing a v2-only worker change, preserve the migrated
-			// v2-only state instead of resurrecting the downgrade-compatible v1
-			// annotation for pod contents it no longer represents.
-			hashes, err := r.desiredWorkerHashes(dynamoDeployment)
-			if err != nil {
-				logger.Error(err, "Failed to compute worker hash for unsupported pathway")
-				state = nvidiacomv1beta1.DGDStateFailed
-				reason = reasonRollingUpdateFailed
-				message = Message(err.Error())
-				return ctrl.Result{}, err
-			}
-			r.setCurrentWorkerHashes(dynamoDeployment, r.workerHashesForUnsupportedPathway(dynamoDeployment, hashes))
-			if updateErr := r.Update(ctx, dynamoDeployment); updateErr != nil {
-				logger.Error(updateErr, "Failed to update worker hash for unsupported pathway")
-			}
-		}
-	}
-
-	reconcileResult, err := r.reconcileResources(ctx, dynamoDeployment)
-
-	if err != nil {
-		logger.Error(err, "failed to reconcile the resources")
-		reason = "failed_to_reconcile_the_resources"
-		return ctrl.Result{}, err
-	}
+	reconcileResult := reconcileState.Result
 
 	// Assign status only after confirming the reconcile succeeded. On error,
-	// reconcileResources returns an empty ReconcileResult; assigning it here
-	// would wipe Components/Restart, which the deferred status update would then
-	// persist. Deferring the assignment past the error check preserves the
-	// last-known-good status on a transient failure.
+	// the selected program does not publish a new ReconcileResult; assigning a
+	// zero value here would wipe Components/Restart, which the deferred status
+	// update would then persist. Deferring the assignment past the error check
+	// preserves the last-known-good status on a transient failure.
 	state = reconcileResult.State
 	reason = reconcileResult.Reason
 	message = reconcileResult.Message
@@ -336,16 +254,22 @@ type ReconcileResult struct {
 	RestartStatus   *nvidiacomv1beta1.RestartStatus
 }
 
-func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context, dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment) (ReconcileResult, error) {
+// reconcileProgramInputs runs the shared resource reconcilers that must
+// complete before a selected workload program realizes its workload graph.
+func (r *DynamoGraphDeploymentReconciler) reconcileProgramInputs(
+	ctx context.Context,
+	state *graphReconcileState,
+) error {
 	logger := log.FromContext(ctx)
+	dynamoDeployment := state.DGD
 
 	// Ensure planner RBAC exists in cluster-wide mode
 	if r.Config.Namespace.Restricted == "" {
 		if r.RBACManager == nil {
-			return ReconcileResult{}, fmt.Errorf("RBAC manager not initialized in cluster-wide mode")
+			return fmt.Errorf("RBAC manager not initialized in cluster-wide mode")
 		}
 		if r.Config.RBAC.PlannerClusterRoleName == "" {
-			return ReconcileResult{}, fmt.Errorf("planner ClusterRole name is required in cluster-wide mode")
+			return fmt.Errorf("planner ClusterRole name is required in cluster-wide mode")
 		}
 		if err := r.RBACManager.EnsureServiceAccountWithRBAC(
 			ctx,
@@ -354,13 +278,13 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 			r.Config.RBAC.PlannerClusterRoleName,
 		); err != nil {
 			logger.Error(err, "Failed to ensure planner RBAC")
-			return ReconcileResult{}, fmt.Errorf("failed to ensure planner RBAC: %w", err)
+			return fmt.Errorf("failed to ensure planner RBAC: %w", err)
 		}
 
 		// Ensure EPP RBAC exists in cluster-wide mode if EPP service is present
 		if dynamoDeployment.HasEPPComponent() {
 			if r.Config.RBAC.EPPClusterRoleName == "" {
-				return ReconcileResult{}, fmt.Errorf("EPP ClusterRole name is required in cluster-wide mode when EPP service is present")
+				return fmt.Errorf("EPP ClusterRole name is required in cluster-wide mode when EPP service is present")
 			}
 			if err := r.RBACManager.EnsureServiceAccountWithRBAC(
 				ctx,
@@ -369,7 +293,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 				r.Config.RBAC.EPPClusterRoleName,
 			); err != nil {
 				logger.Error(err, "Failed to ensure EPP RBAC")
-				return ReconcileResult{}, fmt.Errorf("failed to ensure EPP RBAC: %w", err)
+				return fmt.Errorf("failed to ensure EPP RBAC: %w", err)
 			}
 		}
 	}
@@ -378,7 +302,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 	err := r.reconcilePVCs(ctx, dynamoDeployment)
 	if err != nil {
 		logger.Error(err, "Failed to reconcile top-level PVCs")
-		return ReconcileResult{}, fmt.Errorf("failed to reconcile top-level PVCs: %w", err)
+		return fmt.Errorf("failed to reconcile top-level PVCs: %w", err)
 	}
 
 	// Reconcile discovery RBAC before checkpoints so auto-created checkpoint
@@ -387,18 +311,18 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 	err = r.reconcileK8sDiscoveryResources(ctx, dynamoDeployment)
 	if err != nil {
 		logger.Error(err, "Failed to reconcile K8s discovery resources")
-		return ReconcileResult{}, fmt.Errorf("failed to reconcile K8s discovery resources: %w", err)
+		return fmt.Errorf("failed to reconcile K8s discovery resources: %w", err)
 	}
 
 	if err := r.reconcileGMSResourceClaimTemplates(ctx, dynamoDeployment); err != nil {
-		return ReconcileResult{}, err
+		return err
 	}
 
 	// Reconcile checkpoints for components with checkpointing enabled.
 	checkpointStatuses, checkpointInfos, err := r.reconcileCheckpoints(ctx, dynamoDeployment)
 	if err != nil {
 		logger.Error(err, "Failed to reconcile checkpoints")
-		return ReconcileResult{}, fmt.Errorf("failed to reconcile checkpoints: %w", err)
+		return fmt.Errorf("failed to reconcile checkpoints: %w", err)
 	}
 	dynamoDeployment.Status.Checkpoints = checkpointStatuses
 
@@ -406,14 +330,14 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 	err = r.reconcileEPPResources(ctx, dynamoDeployment)
 	if err != nil {
 		logger.Error(err, "Failed to reconcile EPP resources")
-		return ReconcileResult{}, fmt.Errorf("failed to reconcile EPP resources: %w", err)
+		return fmt.Errorf("failed to reconcile EPP resources: %w", err)
 	}
 
 	// Reconcile the wait-for-leader ConfigMap for multinode mp deployments
 	err = r.reconcileWaitLeaderConfigMap(ctx, dynamoDeployment)
 	if err != nil {
 		logger.Error(err, "Failed to reconcile wait-leader ConfigMap")
-		return ReconcileResult{}, fmt.Errorf("failed to reconcile wait-leader ConfigMap: %w", err)
+		return fmt.Errorf("failed to reconcile wait-leader ConfigMap: %w", err)
 	}
 
 	// Determine if any component is multinode.
@@ -422,42 +346,42 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 	if r.SSHKeyManager != nil && hasMultinode {
 		if err := r.SSHKeyManager.EnsureAndReplicate(ctx, dynamoDeployment.Namespace); err != nil {
 			logger.Error(err, "Failed to ensure MPI SSH key secret", "namespace", dynamoDeployment.Namespace)
-			return ReconcileResult{}, fmt.Errorf("failed to ensure MPI SSH key secret: %w", err)
+			return fmt.Errorf("failed to ensure MPI SSH key secret: %w", err)
 		}
 	}
 
-	// return error early if Grove and LWS is not available for multinode
-	if !r.isGrovePathway(dynamoDeployment) && hasMultinode && !r.RuntimeConfig.Gate.Enabled(features.LWS) {
-		err := fmt.Errorf("no multinode orchestrator available")
-		logger.Error(err, err.Error(), "hasMultinode", hasMultinode, "lwsEnabled", r.RuntimeConfig.Gate.Enabled(features.LWS))
-		return ReconcileResult{}, fmt.Errorf("failed to reconcile Dynamo components deployments: %w", err)
-	}
+	state.HasMultinode = hasMultinode
+	state.CheckpointInfos = checkpointInfos
+	return nil
+}
 
-	restartStatus := r.computeRestartStatus(ctx, dynamoDeployment)
-	restartState := dynamo.DetermineRestartState(dynamoDeployment, restartStatus)
+// resolveProgramRestartState enriches the ephemeral state after shared
+// resources and pathway-specific input validation have completed.
+func (r *DynamoGraphDeploymentReconciler) resolveProgramRestartState(
+	ctx context.Context,
+	state *graphReconcileState,
+) {
+	state.RestartStatus = r.computeRestartStatus(ctx, state.DGD)
+	state.RestartState = dynamo.DetermineRestartState(state.DGD, state.RestartStatus)
+}
 
-	state := &graphReconcileState{
-		DGD:             dynamoDeployment,
-		HasMultinode:    hasMultinode,
-		RestartState:    restartState,
-		CheckpointInfos: checkpointInfos,
-	}
-	program := r.selectWorkloadProgram(state)
-	if err := program.Reconcile(ctx, state); err != nil {
-		logger.Error(err, "Failed to reconcile workload program")
-		return ReconcileResult{}, fmt.Errorf("failed to reconcile workload program: %w", err)
-	}
-	result := state.Result
-	result.RestartStatus = restartStatus
-	result = applyCheckpointStartupReadiness(result, checkpointInfos)
+// reconcileProgramResult applies the shared post-workload policies after the
+// selected program has produced a successful workload result.
+func (r *DynamoGraphDeploymentReconciler) reconcileProgramResult(
+	ctx context.Context,
+	state *graphReconcileState,
+	result ReconcileResult,
+) (ReconcileResult, error) {
+	logger := log.FromContext(ctx)
+	result.RestartStatus = state.RestartStatus
+	result = applyCheckpointStartupReadiness(result, state.CheckpointInfos)
 
 	// Reconcile DynamoGraphDeploymentScalingAdapters after applying checkpoint
 	// startup readiness. In WaitForCheckpoint, the DGD deliberately reports
 	// pending before regular workers exist; letting a scaling adapter write
 	// replicas while gated would create an avoidable update loop.
 	if result.State != nvidiacomv1beta1.DGDStatePending || result.Reason != "waiting_for_checkpoint" {
-		err = r.reconcileScalingAdapters(ctx, dynamoDeployment)
-		if err != nil {
+		if err := r.reconcileScalingAdapters(ctx, state.DGD); err != nil {
 			logger.Error(err, "Failed to reconcile scaling adapters")
 			return ReconcileResult{}, fmt.Errorf("failed to reconcile scaling adapters: %w", err)
 		}

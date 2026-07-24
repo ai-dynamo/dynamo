@@ -527,7 +527,7 @@ func TestUnsupportedPathwayMigratesV1OnlyAndKeepsV2OnlyGeneration(t *testing.T) 
 	}
 
 	r := createTestReconcilerWithStatus(dgd)
-	require.False(t, r.supportsManagedRollingUpdate(dgd))
+	require.False(t, (&componentProgram{reconciler: r}).supportsManagedRollingUpdate(dgd))
 
 	require.NoError(t, r.migrateCurrentWorkerHashIfNeeded(context.Background(), dgd))
 	require.Equal(t, legacyHash, dgd.Annotations[consts.AnnotationCurrentWorkerHash])
@@ -561,7 +561,7 @@ func TestUnsupportedPathwayMigratesV1OnlyAndKeepsV2OnlyGeneration(t *testing.T) 
 	require.Equal(t, newV2Hash, rollingCtx.NewWorkerHash)
 }
 
-func TestSupportsManagedRollingUpdate(t *testing.T) {
+func TestComponentProgram_SupportsManagedRollingUpdate(t *testing.T) {
 	tests := []struct {
 		name     string
 		services map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec
@@ -591,9 +591,9 @@ func TestSupportsManagedRollingUpdate(t *testing.T) {
 			dgd := createTestDGD("test-dgd", tt.services)
 			r := createTestReconcilerWithStatus(dgd)
 
-			result := r.supportsManagedRollingUpdate(dgd)
+			result := (&componentProgram{reconciler: r}).supportsManagedRollingUpdate(dgd)
 			if result != tt.expected {
-				t.Errorf("isUnsupportedRollingUpdatePathway() = %v, expected %v", result, tt.expected)
+				t.Errorf("supportsManagedRollingUpdate() = %v, expected %v", result, tt.expected)
 			}
 		})
 	}

@@ -34,6 +34,7 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -87,11 +88,14 @@ func TestDynamoGraphDeploymentReconciler_selectWorkloadProgram(t *testing.T) {
 			if component, ok := got.(*componentProgram); ok {
 				assert.Same(t, reconciler, component.reconciler)
 			}
+			if grove, ok := got.(*groveProgram); ok {
+				assert.Same(t, reconciler, grove.reconciler)
+			}
 		})
 	}
 }
 
-func TestGroveProgram_ReconcileAdapter(t *testing.T) {
+func TestGroveProgram_ReconcileWorkloadsAdapter(t *testing.T) {
 	reconcileErr := errors.New("reconcile failed")
 	tests := []struct {
 		name         string
@@ -159,12 +163,14 @@ func TestGroveProgram_ReconcileAdapter(t *testing.T) {
 			}
 
 			t.Log("Run the selected complete workload program")
-			err := (&groveProgram{reconcile: reconcile}).Reconcile(context.Background(), state)
+			result, err := (&groveProgram{reconcile: reconcile}).reconcileWorkloads(context.Background(), state)
 
-			t.Log("Verify state is committed only after successful reconciliation")
+			t.Log("Verify the adapter forwards inputs and outputs unchanged")
 			require.True(t, called)
 			require.ErrorIs(t, err, tt.wantErr)
-			assert.Equal(t, tt.wantState, state.Result)
+			if tt.reconcileErr == nil {
+				assert.Equal(t, tt.wantState, result)
+			}
 		})
 	}
 }
@@ -199,6 +205,99 @@ func TestComponentProgram_ReconcilePreservesResultOnError(t *testing.T) {
 	t.Log("Verify failed reconciliation cannot publish a partial result")
 	require.ErrorIs(t, err, reconcileErr)
 	assert.Equal(t, previous, state.Result)
+	reason, ok := workloadProgramFailureReason(err)
+	require.True(t, ok)
+	assert.Equal(t, reasonFailedToInitializeWorkerHash, reason)
+}
+
+func TestGroveProgram_ReconcilePreservesResultOnError(t *testing.T) {
+	t.Log("Inject an unsupported-path metadata failure before shared reconciliation")
+	reconcileErr := errors.New("reconcile failed")
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {ComponentType: commonconsts.ComponentTypeWorker},
+	})
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
+		WithObjects(dgd).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Update: func(context.Context, client.WithWatch, client.Object, ...client.UpdateOption) error {
+				return reconcileErr
+			},
+		}).
+		Build()
+	program := &groveProgram{
+		reconciler: &DynamoGraphDeploymentReconciler{
+			Client:   kubeClient,
+			Recorder: record.NewFakeRecorder(10),
+		},
+		reconcile: func(
+			context.Context,
+			*nvidiacomv1beta1.DynamoGraphDeployment,
+			*dynamo.RestartState,
+			map[string]*checkpoint.CheckpointInfo,
+		) (ReconcileResult, error) {
+			t.Fatal("Grove workload reconciliation must not run after rollout preparation fails")
+			return ReconcileResult{}, nil
+		},
+	}
+	previous := ReconcileResult{
+		State:  nvidiacomv1beta1.DGDStatePending,
+		Reason: "existing",
+	}
+	state := &graphReconcileState{DGD: dgd, Result: previous}
+
+	err := program.Reconcile(context.Background(), state)
+
+	t.Log("Verify failed reconciliation cannot publish a partial result")
+	require.ErrorIs(t, err, reconcileErr)
+	assert.Equal(t, previous, state.Result)
+	reason, ok := workloadProgramFailureReason(err)
+	require.True(t, ok)
+	assert.Equal(t, reasonFailedToInitializeWorkerHash, reason)
+}
+
+func TestComponentProgram_ReconcileWorkerRollout(t *testing.T) {
+	t.Run("single-node component workload starts a managed rollout", func(t *testing.T) {
+		dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+			"worker": {
+				ComponentType: commonconsts.ComponentTypeWorker,
+				Envs:          []corev1.EnvVar{{Name: "WORKER_VERSION", Value: "new"}},
+			},
+		})
+		dgd.Annotations = map[string]string{
+			commonconsts.AnnotationCurrentWorkerHash: "old-worker-hash",
+		}
+		reconciler := createTestReconcilerWithStatus(dgd)
+		program := &componentProgram{reconciler: reconciler}
+
+		require.NoError(t, program.reconcileWorkerRollout(context.Background(), dgd))
+
+		require.NotNil(t, dgd.Status.RollingUpdate)
+		assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhasePending, dgd.Status.RollingUpdate.Phase)
+		assert.Equal(t, "old-worker-hash", dgd.Annotations[commonconsts.AnnotationCurrentWorkerHash])
+	})
+
+	t.Run("multinode component workload keeps unsupported-path hash behavior", func(t *testing.T) {
+		dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+			"worker": {
+				ComponentType: commonconsts.ComponentTypeWorker,
+				Envs:          []corev1.EnvVar{{Name: "WORKER_VERSION", Value: "new"}},
+				Multinode:     &nvidiacomv1alpha1.MultinodeSpec{NodeCount: 2},
+			},
+		})
+		dgd.Annotations = map[string]string{
+			commonconsts.AnnotationCurrentWorkerHash: "old-worker-hash",
+		}
+		reconciler := createTestReconcilerWithStatus(dgd)
+		program := &componentProgram{reconciler: reconciler}
+
+		require.NoError(t, program.reconcileWorkerRollout(context.Background(), dgd))
+
+		assert.Nil(t, dgd.Status.RollingUpdate)
+		desired, err := reconciler.desiredWorkerHashes(dgd)
+		require.NoError(t, err)
+		assert.True(t, currentWorkerHashesMatchDesired(reconciler.currentWorkerHashes(dgd), desired))
+	})
 }
 
 func TestComponentProgram_PreserveExistingBackendFramework(t *testing.T) {

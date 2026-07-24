@@ -19,6 +19,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -42,6 +43,7 @@ type graphReconcileState struct {
 	DGD             *nvidiacomv1beta1.DynamoGraphDeployment
 	HasMultinode    bool
 	RestartState    *dynamo.RestartState
+	RestartStatus   *nvidiacomv1beta1.RestartStatus
 	CheckpointInfos map[string]*checkpoint.CheckpointInfo
 	Result          ReconcileResult
 }
@@ -52,6 +54,31 @@ type graphReconcileState struct {
 // lifecycle callbacks.
 type workloadProgram interface {
 	Reconcile(context.Context, *graphReconcileState) error
+}
+
+type workloadProgramFailure struct {
+	reason Reason
+	err    error
+}
+
+func (e *workloadProgramFailure) Error() string {
+	return e.err.Error()
+}
+
+func (e *workloadProgramFailure) Unwrap() error {
+	return e.err
+}
+
+func failWorkloadProgram(reason Reason, err error) error {
+	return &workloadProgramFailure{reason: reason, err: err}
+}
+
+func workloadProgramFailureReason(err error) (Reason, bool) {
+	var failure *workloadProgramFailure
+	if !errors.As(err, &failure) {
+		return "", false
+	}
+	return failure.reason, true
 }
 
 // groveReconcileFunc is the temporary strangler seam around the existing Grove
@@ -71,25 +98,52 @@ type componentProgram struct {
 	lwsEnabled bool
 }
 
+// Reconcile composes the complete component pathway. Each earlier operation
+// enriches the ephemeral state consumed by the later workload and result
+// operations; only the final successful result is published back to state.
 func (p *componentProgram) Reconcile(ctx context.Context, state *graphReconcileState) error {
 	log.FromContext(ctx).Info(
 		"Reconciling Dynamo components deployments",
-		"hasMultinode", state.HasMultinode,
+		"hasMultinode", state.DGD.HasAnyMultinodeComponent(),
 		"lwsEnabled", p.lwsEnabled,
 	)
 
-	result, err := p.reconcile(ctx, state)
+	if err := p.reconcileWorkerRollout(ctx, state.DGD); err != nil {
+		return err
+	}
+	if err := p.reconciler.reconcileProgramInputs(ctx, state); err != nil {
+		return err
+	}
+	if state.HasMultinode && !p.lwsEnabled {
+		err := fmt.Errorf("no multinode orchestrator available")
+		log.FromContext(ctx).Error(
+			err,
+			err.Error(),
+			"hasMultinode", state.HasMultinode,
+			"lwsEnabled", p.lwsEnabled,
+		)
+		return fmt.Errorf("failed to reconcile Dynamo components deployments: %w", err)
+	}
+	p.reconciler.resolveProgramRestartState(ctx, state)
+
+	result, err := p.reconcileWorkloads(ctx, state)
+	if err != nil {
+		return fmt.Errorf("failed to reconcile Dynamo components deployments: %w", err)
+	}
+	result, err = p.reconciler.reconcileProgramResult(ctx, state, result)
 	if err != nil {
 		return err
 	}
+
 	state.Result = result
 	return nil
 }
 
-// reconcile owns the component pathway's complete DCD graph reconciliation.
+// reconcileWorkloads owns the component pathway's complete DCD graph
+// reconciliation.
 // Managed rolling-update helpers remain on the DGD reconciler until their
 // dedicated extraction; this program owns when they participate in the flow.
-func (p *componentProgram) reconcile(
+func (p *componentProgram) reconcileWorkloads(
 	ctx context.Context,
 	state *graphReconcileState,
 ) (ReconcileResult, error) {
@@ -171,6 +225,113 @@ func (p *componentProgram) reconcile(
 	}
 
 	return result, nil
+}
+
+func (p *componentProgram) reconcileWorkerRollout(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+) error {
+	if err := p.reconciler.migrateCurrentWorkerHashIfNeeded(ctx, dgd); err != nil {
+		log.FromContext(ctx).Error(err, "Failed to migrate worker hash")
+		return failWorkloadProgram(reasonFailedToMigrateWorkerHash, err)
+	}
+
+	if p.supportsManagedRollingUpdate(dgd) {
+		return p.reconcileManagedWorkerRollout(ctx, dgd)
+	}
+	return reconcileUnsupportedWorkerRollout(ctx, p.reconciler, dgd, false)
+}
+
+func (p *componentProgram) reconcileManagedWorkerRollout(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+) error {
+	r := p.reconciler
+	logger := log.FromContext(ctx)
+
+	if err := r.initializeWorkerHashIfNeeded(ctx, dgd); err != nil {
+		logger.Error(err, "Failed to initialize worker hash")
+		return failWorkloadProgram(reasonFailedToInitializeWorkerHash, err)
+	}
+
+	rollingUpdateInProgress := r.isRollingUpdateInProgress(dgd)
+	triggerRollingUpdate := false
+	if !rollingUpdateInProgress {
+		var err error
+		triggerRollingUpdate, err = r.shouldTriggerRollingUpdate(dgd)
+		if err != nil {
+			logger.Error(err, "Failed to check rolling update trigger")
+			return failWorkloadProgram(reasonRollingUpdateFailed, err)
+		}
+	}
+	if rollingUpdateInProgress || triggerRollingUpdate {
+		if err := r.reconcileRollingUpdate(ctx, dgd); err != nil {
+			logger.Error(err, "Failed to reconcile rolling update")
+			return failWorkloadProgram(reasonRollingUpdateFailed, err)
+		}
+	}
+	return nil
+}
+
+func reconcileUnsupportedWorkerRollout(
+	ctx context.Context,
+	r *DynamoGraphDeploymentReconciler,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	isGrove bool,
+) error {
+	logger := log.FromContext(ctx)
+
+	if r.currentWorkerHashes(dgd).empty() {
+		hashes, err := r.desiredWorkerHashes(dgd)
+		if err != nil {
+			logger.Error(err, "Failed to compute worker hash for unsupported pathway")
+			return failWorkloadProgram(reasonFailedToInitializeWorkerHash, err)
+		}
+		r.setCurrentWorkerHashes(dgd, workerHashesForCompletedGeneration(hashes.v2, hashes))
+		if err := r.Update(ctx, dgd); err != nil {
+			logger.Error(err, "Failed to initialize worker hash for unsupported pathway")
+			return failWorkloadProgram(reasonFailedToInitializeWorkerHash, err)
+		}
+	}
+
+	// For unsupported pathways, log if a rolling update would have been triggered.
+	triggerRollingUpdate, err := r.shouldTriggerRollingUpdate(dgd)
+	if err != nil {
+		logger.Error(err, "Failed to check rolling update trigger for unsupported pathway")
+		return failWorkloadProgram(reasonRollingUpdateFailed, err)
+	}
+	if !triggerRollingUpdate {
+		return nil
+	}
+
+	logger.Info(
+		"Worker spec change detected but rolling update not supported for this pathway",
+		"isGrove", isGrove,
+		"hasMultinode", dgd.HasAnyMultinodeComponent(),
+	)
+	r.Recorder.Event(
+		dgd,
+		corev1.EventTypeWarning,
+		"RollingUpdateNotSupported",
+		"Worker spec changed but custom rolling updates are not supported for Grove/multinode deployments",
+	)
+
+	// Update the hash to prevent repeated warnings. If the unsupported path is
+	// processing a v2-only worker change, preserve the migrated v2-only state
+	// instead of resurrecting the downgrade-compatible v1 annotation for pod
+	// contents it no longer represents.
+	hashes, err := r.desiredWorkerHashes(dgd)
+	if err != nil {
+		logger.Error(err, "Failed to compute worker hash for unsupported pathway")
+		return failWorkloadProgram(reasonRollingUpdateFailed, err)
+	}
+	r.setCurrentWorkerHashes(dgd, r.workerHashesForUnsupportedPathway(dgd, hashes))
+	if err := r.Update(ctx, dgd); err != nil {
+		// Preserve the existing best-effort behavior: the next reconciliation
+		// retries the metadata update and may emit another warning.
+		logger.Error(err, "Failed to update worker hash for unsupported pathway")
+	}
+	return nil
 }
 
 func (p *componentProgram) applyCheckpointStartupPolicy(
@@ -258,28 +419,59 @@ func (p *componentProgram) preserveExistingBackendFramework(
 }
 
 type groveProgram struct {
+	reconciler *DynamoGraphDeploymentReconciler
 	reconcile  groveReconcileFunc
 	lwsEnabled bool
 }
 
+// Reconcile composes the current Grove pathway around its temporary workload
+// adapter while keeping shared resource ordering and result publication
+// identical to the component program.
 func (p *groveProgram) Reconcile(ctx context.Context, state *graphReconcileState) error {
 	log.FromContext(ctx).Info(
 		"Reconciling Grove resources",
-		"hasMultinode", state.HasMultinode,
+		"hasMultinode", state.DGD.HasAnyMultinodeComponent(),
 		"lwsEnabled", p.lwsEnabled,
 	)
 
-	result, err := p.reconcile(
+	if err := p.reconciler.migrateCurrentWorkerHashIfNeeded(ctx, state.DGD); err != nil {
+		log.FromContext(ctx).Error(err, "Failed to migrate worker hash")
+		return failWorkloadProgram(reasonFailedToMigrateWorkerHash, err)
+	}
+	if err := reconcileUnsupportedWorkerRollout(ctx, p.reconciler, state.DGD, true); err != nil {
+		return err
+	}
+	if err := p.reconciler.reconcileProgramInputs(ctx, state); err != nil {
+		return err
+	}
+	p.reconciler.resolveProgramRestartState(ctx, state)
+
+	result, err := p.reconcileWorkloads(
+		ctx,
+		state,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to reconcile Dynamo components deployments: %w", err)
+	}
+	result, err = p.reconciler.reconcileProgramResult(ctx, state, result)
+	if err != nil {
+		return err
+	}
+
+	state.Result = result
+	return nil
+}
+
+func (p *groveProgram) reconcileWorkloads(
+	ctx context.Context,
+	state *graphReconcileState,
+) (ReconcileResult, error) {
+	return p.reconcile(
 		ctx,
 		state.DGD,
 		state.RestartState,
 		state.CheckpointInfos,
 	)
-	if err != nil {
-		return err
-	}
-	state.Result = result
-	return nil
 }
 
 func (r *DynamoGraphDeploymentReconciler) selectWorkloadProgram(
@@ -287,6 +479,7 @@ func (r *DynamoGraphDeploymentReconciler) selectWorkloadProgram(
 ) workloadProgram {
 	if r.isGrovePathway(state.DGD) {
 		return &groveProgram{
+			reconciler: r,
 			reconcile:  r.reconcileGroveResources,
 			lwsEnabled: r.RuntimeConfig.Gate.Enabled(features.LWS),
 		}
