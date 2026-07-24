@@ -45,6 +45,9 @@ on:
     tags:
       # Match only clean semver tags: vX.Y.Z
       - 'v[0-9]+.[0-9]+.[0-9]+'
+  schedule:
+    # Daily refresh so the install-selector data and Support Matrix ToT row stay current.
+    - cron: '0 9 * * *'
   workflow_dispatch:
     inputs:
       tag:
@@ -65,8 +68,9 @@ jobs:
   # Detect changed files for conditional job execution
   changed-files:
     runs-on: ubuntu-latest
-    # Skip for tag pushes - version release doesn't need changed-files check
-    if: github.ref_type != 'tag'
+    # Skip for tag pushes (version release doesn't need it) and scheduled runs
+    # (no diff base; the scheduled refresh regenerates unconditionally).
+    if: github.ref_type != 'tag' && github.event_name != 'schedule'
     outputs:
       docs: ${{ steps.changes.outputs.docs }}
     steps:
@@ -88,9 +92,14 @@ jobs:
   preview-or-publish-docs:
     name: Preview or publish docs
     needs: changed-files
+    # always() so the job still evaluates on scheduled runs, where changed-files is
+    # skipped. It runs when docs changed, on manual dispatch, or on the daily schedule.
     if: |
+      always() &&
       github.ref_type != 'tag' &&
-      (needs.changed-files.outputs.docs == 'true' || github.event_name == 'workflow_dispatch') &&
+      needs.changed-files.result != 'failure' &&
+      needs.changed-files.result != 'cancelled' &&
+      (needs.changed-files.outputs.docs == 'true' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') &&
       (github.event.inputs.tag == '' || github.event.inputs.tag == null)
     runs-on: ubuntu-latest
     steps:
@@ -116,6 +125,22 @@ jobs:
           path: docs-checkout
           fetch-depth: 1
           token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate install-selector data
+        # Writes the generated TS module into fern/components/ (picked up by the
+        # component sync below). Needs full history and tags to read
+        # container/context.yaml history, release tags, and nightly commit versions.
+        run: |
+          git -C source-checkout fetch --unshallow --tags 2>/dev/null || git -C source-checkout fetch --tags
+          # Fail rather than silently produce a collapsed nightly history from a
+          # still-shallow clone (e.g. a transient --unshallow failure).
+          if [ "$(git -C source-checkout rev-parse --is-shallow-repository)" != "false" ]; then
+            echo "::error::source-checkout is still shallow after fetch; nightly history would be incomplete"
+            exit 1
+          fi
+          python3 -m pip install --quiet pyyaml
+          python3 source-checkout/.github/scripts/build_install_selector.py --refresh-support-matrix
+
       - name: Sync dev content from main
         run: |
           # Sync content directories from docs/ to fern/pages-dev/ on docs-website
@@ -126,6 +151,7 @@ jobs:
           rsync -a \
             --exclude='digest' \
             --exclude='index.yml' \
+            --exclude='data' \
             source-checkout/docs/ docs-checkout/fern/pages-dev/
 
           # Sync Fern's native-localization mirror:
@@ -477,6 +503,17 @@ jobs:
               fi
             done
           fi
+
+      - name: Freeze the install selector in the versioned Quickstart
+        # Dev keeps the interactive selector; a release snapshot is static and pinned,
+        # so this strips the <InstallSelector /> import from the tagged pages. Note the
+        # tag build does NOT regenerate install-selector-data.ts — the still-live dev
+        # pages resolve their import from the module a prior dev sync committed to
+        # docs-website (stale-but-present is fine during a tag publish).
+        run: |
+          python3 source-checkout/.github/scripts/freeze_install_selector.py \
+            "docs-checkout/fern/pages-${{ steps.version.outputs.tag }}/getting-started/quickstart.mdx" \
+            "${{ steps.version.outputs.version }}"
 
       - name: Update GitHub links to version tag
         run: |
