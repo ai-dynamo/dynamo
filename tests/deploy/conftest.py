@@ -14,8 +14,8 @@ from typing import AsyncIterator, Dict, List, Optional
 
 import pytest
 
+from tests.deploy.dgd_utils import DeploymentSpec, _get_workspace_dir
 from tests.deploy.dgdr_utils import DGDRTestConfig, ManagedDGDR
-from tests.utils.managed_deployment import DeploymentSpec, _get_workspace_dir
 
 
 # Shared CLI options (--image, --namespace, --skip-service-restart) are defined in tests/conftest.py.

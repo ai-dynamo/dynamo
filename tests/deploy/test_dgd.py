@@ -21,12 +21,8 @@ import requests
 import yaml
 
 from tests.deploy.conftest import DeploymentTarget
+from tests.deploy.dgd_utils import DeploymentSpec, ManagedDeployment, _get_workspace_dir
 from tests.utils.client import send_request, wait_for_model_availability
-from tests.utils.managed_deployment import (
-    DeploymentSpec,
-    ManagedDeployment,
-    _get_workspace_dir,
-)
 
 logger = logging.getLogger(__name__)
 

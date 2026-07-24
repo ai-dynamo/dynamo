@@ -197,7 +197,6 @@ deploy:
   - 'deploy/utils/**'
   - 'deploy/snapshot/**'
   - 'tests/deploy/**'
-  - 'tests/utils/managed_deployment.py'
   # Standalone CRD apiVersion converter: not used by the deploy-test harness and
   # has no CI test wiring, so it should not trigger the operator deploy pipeline.
   - '!deploy/utils/convert_api_version.py'
@@ -213,7 +212,7 @@ dgdr:
   - 'tests/deploy/test_dgdr.py'
   - 'tests/deploy/test_dgdr_h100.py'
   - 'tests/deploy/test_dgdr_utils.py'
-  - 'tests/utils/managed_deployment.py'
+  - 'tests/deploy/dgd_utils.py'
 
 planner:
   - 'container/templates/planner.Dockerfile'

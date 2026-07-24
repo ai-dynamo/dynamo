@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""Helpers for live-cluster DynamoGraphDeployment tests."""
+
 import asyncio
 import logging
 import os
@@ -33,7 +35,7 @@ def _get_workspace_dir() -> str:
             return current
         current = os.path.dirname(current)
 
-    # Fallback: assume workspace is 3 levels up from tests/utils/
+    # Fallback: assume workspace is 3 levels up from tests/deploy/
     return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
