@@ -2172,7 +2172,7 @@ async fn chat_completions(
         if ctx.is_killed() {
             inflight_guard.mark_error(ErrorType::Cancelled);
         }
-        Ok(Json(response).into_response())
+        Ok(Json(crate::reasoning_field::RoutedReasoning::new(response)).into_response())
     }
 }
 

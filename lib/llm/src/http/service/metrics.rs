@@ -2102,6 +2102,10 @@ pub fn process_chat_response_using_event_converter_and_observe_metrics(
         annotated.data = None;
     }
 
+    // Route reasoning to the field selected by DYN_REASONING_FIELD_NAME at the
+    // SSE boundary. Internal representation stays `reasoning_content`.
+    let annotated =
+        annotated.map_data(|response| Ok(crate::reasoning_field::RoutedReasoning::new(response)));
     annotated_to_sse_event(annotated)
 }
 
