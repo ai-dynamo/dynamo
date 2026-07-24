@@ -5,7 +5,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from dynamo.vllm.capacity import get_metrics_model_name, get_spec_decode_runtime_data
+from dynamo.vllm.capacity import (
+    STRICT_REQUEST_TOKEN_LIMIT_RUNTIME_KEY,
+    get_metrics_model_name,
+    get_spec_decode_runtime_data,
+    get_strict_request_runtime_data,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -42,6 +47,13 @@ def test_metrics_model_name_falls_back_to_model():
     config = SimpleNamespace(model="meta-llama/Llama-3.1-8B", served_model_name=None)
 
     assert get_metrics_model_name(config) == "meta-llama/Llama-3.1-8B"
+
+
+def test_strict_request_runtime_data_uses_vllm_model_limit():
+    assert get_strict_request_runtime_data(4096) == {
+        STRICT_REQUEST_TOKEN_LIMIT_RUNTIME_KEY: 4096
+    }
+    assert get_strict_request_runtime_data(None) == {}
 
 
 def test_spec_decode_runtime_data_falls_back_to_engine_args_json():

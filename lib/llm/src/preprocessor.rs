@@ -366,10 +366,9 @@ impl OpenAIPreprocessor {
             return Ok(());
         };
 
-        // An omitted output cap still has a useful lower bound: the prompt
-        // itself must fit. The backend remains responsible for choosing the
-        // generation cap when the prompt is within the strict limit.
-        let requested_tokens = prompt_len.saturating_add(max_tokens.unwrap_or_default() as usize);
+        // Generation requires at least one output token even when the caller
+        // omits the output cap.
+        let requested_tokens = prompt_len.saturating_add(max_tokens.unwrap_or(1) as usize);
         if requested_tokens > strict_request_token_limit as usize {
             let request_description = match max_tokens {
                 Some(max_tokens) => format!(
@@ -377,8 +376,8 @@ impl OpenAIPreprocessor {
                      tokens ({requested_tokens} tokens total)"
                 ),
                 None => format!(
-                    "your request already has {prompt_len} input tokens before generating any \
-                     output"
+                    "your request has {prompt_len} input tokens and requires room for at least one \
+                     output token ({requested_tokens} tokens minimum)"
                 ),
             };
             return Err(DynamoError::builder()
@@ -4668,8 +4667,9 @@ mod tests {
 
     #[test]
     fn test_requested_token_budget_validation() {
-        // With no output cap, only prompt overflow is certain.
-        assert!(OpenAIPreprocessor::validate_requested_token_budget(100, None, Some(100)).is_ok());
+        // Generation requires at least one output token when the cap is omitted.
+        assert!(OpenAIPreprocessor::validate_requested_token_budget(99, None, Some(100)).is_ok());
+        assert!(OpenAIPreprocessor::validate_requested_token_budget(100, None, Some(100)).is_err());
         assert!(OpenAIPreprocessor::validate_requested_token_budget(101, None, Some(100)).is_err());
         // Explicit-budget arithmetic cannot wrap into an accepted request.
         assert!(
@@ -4704,13 +4704,20 @@ mod tests {
                 .is_err()
         );
 
-        // An omitted output budget is backend-owned, but the prompt must fit by
-        // itself. The exact boundary is valid; one token over is not.
+        // An omitted output budget is backend-owned, but the prompt must leave
+        // room for at least one generated token.
         let omitted_budget_request = preprocessed_budget_request(None);
-        assert_eq!(
+        assert!(
             OpenAIPreprocessor::validate_preprocessed_token_budget(
                 &omitted_budget_request,
                 Some(3)
+            )
+            .is_err()
+        );
+        assert_eq!(
+            OpenAIPreprocessor::validate_preprocessed_token_budget(
+                &omitted_budget_request,
+                Some(4)
             )
             .unwrap(),
             Some(3)

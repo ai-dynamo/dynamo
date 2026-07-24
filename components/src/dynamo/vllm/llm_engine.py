@@ -68,7 +68,11 @@ from dynamo.vllm.cache_info import (
     configure_kv_event_block_size,
     get_configured_kv_event_block_size,
 )
-from dynamo.vllm.capacity import per_rank_kv_blocks
+from dynamo.vllm.capacity import (
+    get_strict_request_runtime_data,
+    per_rank_kv_blocks,
+    set_strict_request_token_limit,
+)
 from dynamo.vllm.kv_connector_protocols import (
     disable_hybrid_kv_cache_manager_for_incompatible_pd_connector,
 )
@@ -397,6 +401,7 @@ class VllmLLMEngine(LLMEngine):
         return EngineConfig(
             model=self.engine_args.model,
             served_model_name=self._served_model_name,
+            runtime_data=get_strict_request_runtime_data(self._model_max_len),
             llm=LlmRegistration(
                 context_length=self._model_max_len,
                 kv_cache_block_size=block_size,
@@ -833,6 +838,8 @@ class VllmLLMEngine(LLMEngine):
         model_type, worker_type, needs = self._lora_registration_topology()
 
         runtime_config = ModelRuntimeConfig()
+        runtime_config.context_length = self._model_max_len
+        set_strict_request_token_limit(runtime_config, self._model_max_len)
         # Prefill workers don't run tool/reasoning parsing (mirrors the base
         # model registration in main.py:register_vllm_model).
         if model_type != ModelType.Prefill:

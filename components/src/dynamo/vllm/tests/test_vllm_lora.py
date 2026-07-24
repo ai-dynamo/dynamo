@@ -360,6 +360,7 @@ async def test_load_lora_publishes_dp_and_capacity_metadata(monkeypatch):
     )
     engine._dp_range = (2, 4)
     engine._total_kv_blocks = 1024
+    engine._model_max_len = 4096
     register, _ = _patch_discovery(monkeypatch)
 
     result = await engine.load_lora(
@@ -368,6 +369,10 @@ async def test_load_lora_publishes_dp_and_capacity_metadata(monkeypatch):
 
     assert result["status"] == "success"
     runtime_config = register.await_args.kwargs["runtime_config"]
+    assert runtime_config.context_length == 4096
+    runtime_config.set_engine_specific.assert_called_once_with(
+        "strict_request_token_limit", "4096"
+    )
     assert runtime_config.total_kv_blocks == 1024
     assert runtime_config.max_num_seqs == 256
     assert runtime_config.max_num_batched_tokens == 8192

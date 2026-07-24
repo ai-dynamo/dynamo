@@ -55,6 +55,7 @@ from .capacity import (
     get_metrics_model_name,
     get_spec_decode_runtime_data,
     per_rank_kv_blocks,
+    set_strict_request_token_limit,
 )
 from .constants import DisaggregationMode
 from .handlers import get_dp_range_for_worker
@@ -671,6 +672,9 @@ async def register_vllm_model(
     """
     runtime_config = ModelRuntimeConfig()
     runtime_config.context_length = vllm_config.model_config.max_model_len
+    set_strict_request_token_limit(
+        runtime_config, vllm_config.model_config.max_model_len
+    )
 
     # Get runtime configuration from vLLM engine
     logging.info(

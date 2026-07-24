@@ -9,6 +9,24 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# Must match `STRICT_REQUEST_TOKEN_LIMIT_RUNTIME_KEY` in
+# `lib/llm/src/local_model/runtime_config.rs`.
+STRICT_REQUEST_TOKEN_LIMIT_RUNTIME_KEY = "strict_request_token_limit"
+
+
+def get_strict_request_runtime_data(max_model_len: int | None) -> dict[str, int]:
+    """Publish vLLM's OpenAI request-admission limit to the Dynamo frontend."""
+    if max_model_len is None:
+        return {}
+    return {STRICT_REQUEST_TOKEN_LIMIT_RUNTIME_KEY: max_model_len}
+
+
+def set_strict_request_token_limit(
+    runtime_config: Any, max_model_len: int | None
+) -> None:
+    for key, value in get_strict_request_runtime_data(max_model_len).items():
+        runtime_config.set_engine_specific(key, json.dumps(value))
+
 
 def per_rank_kv_blocks(
     total_kv_blocks: int | None, data_parallel_size: int

@@ -85,6 +85,7 @@ from dynamo.vllm.kv_connector_protocols import (
 )
 
 from .args import Config
+from .capacity import set_strict_request_token_limit
 from .constants import DisaggregationMode, EmbeddingTransferMode
 from .engine_monitor import VllmEngineMonitor
 from .multimodal_utils.async_vision_encoder import AsyncVisionEncoder
@@ -2150,6 +2151,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
                             runtime_config = ModelRuntimeConfig()
                             runtime_config.context_length = self.model_max_len
+                            set_strict_request_token_limit(
+                                runtime_config, self.model_max_len
+                            )
                             runtime_config.tool_call_parser = (
                                 self.config.dyn_tool_call_parser
                             )
