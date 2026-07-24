@@ -444,6 +444,15 @@ impl ModelRuntimeConfig {
         self.validate().map_err(|error| error.to_string())
     }
 
+    /// Derive the automatic TCP pool hint from existing engine registration fields.
+    pub(crate) fn tcp_worker_pool_capacity_hint(&self) -> Option<usize> {
+        let max_num_seqs = usize::try_from(self.max_num_seqs?).ok()?;
+        let data_parallel_size = usize::try_from(self.data_parallel_size).ok()?;
+        max_num_seqs
+            .checked_mul(data_parallel_size)
+            .filter(|capacity| *capacity > 0)
+    }
+
     pub fn set_engine_specific<T: Serialize>(&mut self, key: &str, value: T) -> anyhow::Result<()> {
         self.runtime_data
             .insert(key.to_string(), serde_json::to_value(value)?);
@@ -527,6 +536,42 @@ impl ModelRuntimeConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tcp_worker_pool_capacity_hint_uses_existing_registration_fields() {
+        let config = ModelRuntimeConfig {
+            max_num_seqs: Some(3),
+            data_parallel_size: 3,
+            ..Default::default()
+        };
+        assert_eq!(config.tcp_worker_pool_capacity_hint(), Some(9));
+    }
+
+    #[test]
+    fn tcp_worker_pool_capacity_hint_rejects_missing_zero_and_overflow() {
+        for config in [
+            ModelRuntimeConfig {
+                max_num_seqs: None,
+                ..Default::default()
+            },
+            ModelRuntimeConfig {
+                max_num_seqs: Some(0),
+                ..Default::default()
+            },
+            ModelRuntimeConfig {
+                max_num_seqs: Some(3),
+                data_parallel_size: 0,
+                ..Default::default()
+            },
+            ModelRuntimeConfig {
+                max_num_seqs: Some(u64::MAX),
+                data_parallel_size: 2,
+                ..Default::default()
+            },
+        ] {
+            assert_eq!(config.tcp_worker_pool_capacity_hint(), None);
+        }
+    }
 
     // Env-touching tests use `temp_env` (snapshot + restore around the closure) and
     // `#[serial_test::serial]` (serialize against every other env-touching test in the
