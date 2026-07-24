@@ -958,9 +958,12 @@ class OrchestratorEngineAdapter:
             # must not drag the other role's echoed ready count along, and a
             # scale-up held at ready (see ``_hold_scale_up_during_rollout``)
             # collapses to "no change" instead of re-emitting ready.
-            if num_p is not None and num_p == current_p:
+            # No observed ready count means the role is currently empty. A
+            # budget hold at that baseline returns 0; mask it as "no change"
+            # rather than emitting an explicit scale-to-zero target.
+            if num_p is not None and num_p == (0 if current_p is None else current_p):
                 num_p = None
-            if num_d is not None and num_d == current_d:
+            if num_d is not None and num_d == (0 if current_d is None else current_d):
                 num_d = None
             if num_p is None and num_d is None:
                 return None

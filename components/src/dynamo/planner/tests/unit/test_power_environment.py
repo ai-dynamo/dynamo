@@ -16,9 +16,7 @@ import pytest
 from kubernetes.client import ApiException
 
 from dynamo.planner.config.planner_config import PlannerConfig
-from dynamo.planner.core.util import deployment_state_changed
 from dynamo.planner.environment.base import PlannerEnvironmentImpl
-from dynamo.planner.environment.state import DeploymentState
 from dynamo.planner.errors import DeploymentValidationError, PowerAnnotationInvalidError
 from dynamo.planner.monitoring.dgd_services import ComponentPowerConfig
 
@@ -129,14 +127,6 @@ def test_restart_adopts_current_cap_not_stale_max():
     fresh_env._load_static_power_caps_at_startup()
     state = fresh_env.deployment_state()
     assert state.prefill.power_watts_per_replica == 500
-
-
-def test_deployment_state_changed_on_watts_change():
-    old = DeploymentState()
-    new = DeploymentState()
-    old.decode.power_watts_per_replica = 1200
-    new.decode.power_watts_per_replica = 1000
-    assert deployment_state_changed(old, new, False, True) is True
 
 
 @pytest.mark.asyncio

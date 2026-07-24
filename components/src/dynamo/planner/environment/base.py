@@ -114,9 +114,9 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
         # metadata.generation without changing desired replicas, so a Planner
         # restart in the controller-status lag could otherwise cache a newer,
         # lower cap while Pods still enforce the previous higher one.
+        deployment = await self._wait_for_startup_dgd_snapshot()
         if self.runtime_namespace_source is not None:
             await self.runtime_namespace_source.refresh_runtime_namespace()
-        deployment = await self._wait_for_startup_dgd_snapshot()
         await self._refresh_deployment_state(deployment=deployment)
         self._load_static_power_caps_at_startup(deployment=deployment)
         # FPM init can change the effective runtime namespace / discovery view;
@@ -211,7 +211,7 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
         wait_settled = getattr(
             self.controller, "wait_for_settled_graph_deployment", None
         )
-        if callable(wait_settled):
+        if inspect.iscoroutinefunction(wait_settled):
             return await wait_settled(include_planner=False)
         await self.controller.wait_for_deployment_ready(include_planner=False)
         return self._shared_dgd_deployment()
@@ -222,7 +222,10 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
 
         Inspects the callable signature so a real ``TypeError`` raised inside
         the connector (wrong arg types, ``None`` arithmetic, etc.) is not
-        swallowed by a retry without ``deployment``.
+        swallowed by a retry without ``deployment``. Connectors that support
+        the shared-snapshot optimization must name the optional keyword exactly
+        ``deployment``; otherwise this deliberately falls back to the ordinary
+        connector call (and its own DGD GET).
         """
         if deployment is not None:
             try:

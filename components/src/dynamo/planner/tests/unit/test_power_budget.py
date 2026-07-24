@@ -300,6 +300,32 @@ def test_final_boundary_clamps_merged_proposal_regardless_of_source():
     assert decision.num_decode == 3
 
 
+def test_project_scale_to_masks_budget_hold_at_unobserved_zero_baseline():
+    """A refused create-from-empty proposal must emit no scale target."""
+    caps = WorkerCapabilities(
+        prefill=EngineCapabilities(num_gpu=1, power_watts_per_replica=700),
+        decode=EngineCapabilities(num_gpu=1, power_watts_per_replica=1200),
+    )
+    adapter = _bare_adapter(_mode_config("disagg", total_gpu_power_limit=5500), caps)
+    outcome = SimpleNamespace(
+        execute_action="apply",
+        final_proposal=SimpleNamespace(
+            targets=[SimpleNamespace(sub_component_type="prefill", replicas=4)]
+        ),
+    )
+    # Decode alone already exceeds the ceiling. Prefill has never been
+    # observed, so the budget layer holds it at the empty baseline (0);
+    # projection must mask that hold to None instead of scaling to zero.
+    wc = WorkerCounts(
+        ready_num_prefill=None,
+        ready_num_decode=5,
+        expected_num_prefill=None,
+        expected_num_decode=5,
+    )
+
+    assert adapter._project_scale_to(outcome, wc) is None
+
+
 # The Kubernetes environment uses a single deployment-wide stability flag, so a
 # rollout of EITHER role marks BOTH roles' ``expected`` (settled) count None.
 # These tests use that reachable state (both None during any rollout).
