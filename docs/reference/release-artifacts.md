@@ -7,7 +7,7 @@ subtitle: Container images, Python wheels, Helm charts, Rust crates, and release
 
 This document provides a comprehensive inventory of all Dynamo release artifacts including container images, Python wheels, Helm charts, and Rust crates.
 
-> **See also:** [Support Matrix](support-matrix.md) for hardware and platform compatibility | [Feature Matrix](feature-matrix.md) for backend feature support
+> **See also:** [Support Matrix](support-matrix.md) for hardware and platform compatibility | [Feature Matrix](feature-matrix.md) for backend feature support | [Nightly Release Info](nightly-release-info.md) for nightly builds
 
 Release history in this document begins at v0.6.0.
 
@@ -198,9 +198,7 @@ For backend version pins, see the version-pins table above and the [GitHub Relea
 
 **Dynamo Nightlies**
 
-- **New as of v1.1.0\*:** **`ai-dynamo`** and **`ai-dynamo-runtime`** — nightly builds from **`main`** publish wheels tagged **`*.devYYYYMMDD`**. Install with **`pip`** or **`uv`** using **`--pre`** and the same NVIDIA extra-index pattern as [Early Access Artifacts](#early-access-artifacts).
-
-\* **`*.devYYYYMMDD`** versioning for nightly **`main`** wheels began **Apr 24, 2026**.
+- Nightly builds from `main` publish the three CUDA 13 runtime images and the `ai-dynamo`, `ai-dynamo-runtime`, and `kvbm` wheels (tagged `*.devYYYYMMDD`). See [Nightly Release Info](nightly-release-info.md) for install patterns and current and historical backend versions.
 
 **Early Access Git Tags**
 

@@ -38,6 +38,9 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "router_track_output_blocks",
     "router_assume_kv_reuse",
     "router_track_prefill_tokens",
+    "router_tracking_hash",
+    "router_tracking_key_file",
+    "router_tracking_key_id",
     "router_prefill_load_model",
     "router_ttl_secs",
     "router_queue_threshold",
@@ -117,6 +120,9 @@ class KvRouterConfigBase(ConfigBase):
     router_track_output_blocks: bool
     router_assume_kv_reuse: bool
     router_track_prefill_tokens: bool
+    router_tracking_hash: str = "public-xxh3-v1"
+    router_tracking_key_file: Optional[str] = None
+    router_tracking_key_id: Optional[str] = None
     router_prefill_load_model: str
     router_ttl_secs: float
     router_queue_threshold: Optional[float]
@@ -321,6 +327,28 @@ class KvRouterArgGroup(ArgGroup):
                 "Use --no-router-track-prefill-tokens to ignore prompt tokens in router "
                 "prefill-token load, queue pressure, and active_prefill_tokens metrics."
             ),
+        )
+        add_argument(
+            g,
+            flag_name="--router-tracking-hash",
+            env_var="DYN_ROUTER_TRACKING_HASH",
+            default="public-xxh3-v1",
+            choices=["public-xxh3-v1", "keyed-xxh3-v1"],
+            help="KV Router: Hash function for router-derived active-sequence identities.",
+        )
+        add_argument(
+            g,
+            flag_name="--router-tracking-key-file",
+            env_var="DYN_ROUTER_TRACKING_KEY_FILE",
+            default=None,
+            help="KV Router: File containing the 32-byte provider tracking key.",
+        )
+        add_argument(
+            g,
+            flag_name="--router-tracking-key-id",
+            env_var="DYN_ROUTER_TRACKING_KEY_ID",
+            default=None,
+            help="KV Router: Provider-managed tracking-key epoch identifier.",
         )
         add_argument(
             g,

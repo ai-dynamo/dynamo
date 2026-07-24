@@ -222,6 +222,41 @@ For Kubernetes deployment examples, see [Kubernetes Topology-Aware KV Transfer](
 - `--no-router-track-prefill-tokens`: Disables prompt-side prefill token accounting in the router's active load model. Use this for decode-only routing paths where prompt processing already happened elsewhere.
 - `--router-replica-sync`: Disabled by default. Enables best-effort Runtime event-plane synchronization of KV active-sequence state. Session-affinity synchronization is independent and starts when `--router-session-affinity-ttl-secs` is set.
 
+### Tracking Hash Identities
+
+**Experimental.** Set `--router-tracking-hash keyed-xxh3-v1` to make
+router-derived active-sequence identities depend on a provider key. The default
+`public-xxh3-v1` mode preserves the existing public XXH3 identities.
+
+Keyed mode requires `--router-tracking-key-file` to name a file containing
+exactly 32 raw bytes and `--router-tracking-key-id` to contain a nonempty key
+epoch. The corresponding environment variables are
+`DYN_ROUTER_TRACKING_HASH`, `DYN_ROUTER_TRACKING_KEY_FILE`, and
+`DYN_ROUTER_TRACKING_KEY_ID`. Invalid or unreadable key configuration stops
+startup instead of falling back to public hashing.
+
+The router derives independent block and chain XXH3 seeds from one keyed BLAKE3
+digest for each request scope. The scope includes the algorithm version, key ID,
+model, routing group, block size, normalized `cache_salt`, LoRA adapter, and
+Eagle mode. Multimodal identity remains part of the canonical bytes for each
+block. Seeded XXH3 is not a pseudorandom function or message authentication
+code, so keep tracking hashes and the APIs that accept them on a trusted
+internal plane.
+
+Public block hashes continue to drive primary-indexer lookups. Keyed sequence
+hashes drive active tracking, reservations, prompt membership, and projected
+load. Engine hashes, universal positional lineage hashes, KV events, and
+standalone indexer APIs do not change. `--no-router-assume-kv-reuse` continues
+to use random tracking identities while retaining public indexer hashes.
+
+Selection requests and standalone slot-tracker calls that supply precomputed
+sequence hashes remain trusted inputs. Dynamo does not attach or negotiate an
+algorithm or key epoch in HTTP requests, selection payloads, tracker lifecycle
+events, or replica messages. Initialize every producer with the same algorithm,
+key, and key ID. To rotate the key, change the key and key ID together, restart
+all producers, and flush or recreate derived tracker state before resuming
+traffic. Mixed epochs are not detected.
+
 ## KV Indexer / Approx KV Indexer
 
 - `--router-ttl-secs`: Time-to-live in seconds for blocks in the router's local cache predictions. Defaults to 120.0 seconds when `--no-router-kv-events` is used.
