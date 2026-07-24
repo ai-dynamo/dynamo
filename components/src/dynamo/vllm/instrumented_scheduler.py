@@ -89,7 +89,7 @@ import time
 import uuid
 from collections import deque
 from collections.abc import Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from itertools import count
 from typing import TYPE_CHECKING, cast
@@ -163,6 +163,9 @@ class _BenchPhase(enum.Enum):
     PREFILL_SWEEP = "prefill_sweep"
     DECODE_SWEEP = "decode_sweep"
     DONE = "done"
+
+
+EAGER_WARMUP_REASON = "eager_warmup"
 
 
 @dataclass
@@ -1625,6 +1628,10 @@ class InstrumentedScheduler(AsyncScheduler):
             self._bench_active = False
             return
 
+        from dynamo.vllm import gc_policy as _fpm_gc_policy
+
+        _fpm_gc_policy.start_gc_policy()
+
         cfg = bench_cfg if isinstance(bench_cfg, dict) else {}
         raw_mode = cfg.get("mode", "agg")
         if not isinstance(raw_mode, str) or raw_mode not in BENCHMARK_MODES:
@@ -1828,6 +1835,38 @@ class InstrumentedScheduler(AsyncScheduler):
 
     # -- Grid generation ------------------------------------------------
 
+    def _bench_eager_warmup_points(self) -> list[BenchmarkPoint]:
+        """One discarded replica per eager shape, executed before the sweep.
+
+        Captured shapes are executed during cudagraph capture at startup, so
+        their one-time per-shape costs (first kernel launch and selection,
+        allocator pool growth) are paid before any measurement. Eager shapes
+        (no capture available) get no such implicit warmup: their first
+        execution pays a ~1s one-off (measured 1126ms vs 147ms warm on
+        decode batch 513) and a single-sample sweep books that cost as the
+        point's latency. Prepending one replica per eager shape - deduped by
+        the shape driver: token count for prefill, batch size for decode -
+        puts eager and captured points on the same footing. Replicas run
+        through the normal injection/lockstep/validation path on every rank
+        (grids stay identical by construction) and are dropped at save time.
+        """
+        seen: set[tuple[str, int]] = set()
+        replicas: list[BenchmarkPoint] = []
+        for point in self._bench_grid:
+            if point.expected_capture_size is not None:
+                continue
+            key = (
+                point.point_type,
+                point.total_prefill_tokens
+                if point.point_type == "prefill"
+                else point.batch_size,
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            replicas.append(replace(point, sample_reasons=[EAGER_WARMUP_REASON]))
+        return replicas
+
     def _bench_build_grid(self) -> None:
         """Generate the sweep grid once scheduler limits are known."""
         if self._bench_grid_built:
@@ -1850,9 +1889,50 @@ class InstrumentedScheduler(AsyncScheduler):
                 if len(self._bench_grid) == points_before:
                     self._bench_missing_phases.append("decode")
                     logger.warning("Benchmark decode phase generated no points")
-        self._bench_expected_points = len(self._bench_grid)
-        for benchmark_id, point in enumerate(self._bench_grid, start=1):
-            point.benchmark_id = benchmark_id
+        warmup_points = self._bench_eager_warmup_points()
+        if warmup_points:
+            # _bench_pop_next() treats a type mismatch at the queue front as
+            # "phase complete", so each warmup block must stay contiguous
+            # with its phase's real block; mixed-type warmups prepended as a
+            # single run would end PREFILL_SWEEP at the first decode warmup
+            # and DECODE_SWEEP at the first real prefill point.
+            warmup = {
+                point_type: [
+                    point for point in warmup_points if point.point_type == point_type
+                ]
+                for point_type in ("prefill", "decode")
+            }
+            real = {
+                point_type: [
+                    point
+                    for point in self._bench_grid
+                    if point.point_type == point_type
+                ]
+                for point_type in ("prefill", "decode")
+            }
+            self._bench_grid = deque(
+                warmup["prefill"] + real["prefill"] + warmup["decode"] + real["decode"]
+            )
+            logger.info(
+                "Benchmark grid: prepending %d eager-shape warmup point(s); "
+                "their results are discarded",
+                len(warmup_points),
+            )
+        self._bench_expected_points = len(self._bench_grid) - len(warmup_points)
+        # Published results must carry contiguous benchmark IDs starting at 1
+        # (the native-artifact contract), so real points are numbered first;
+        # discarded warmup replicas take IDs after the real range. counter_id
+        # stamping uses point.benchmark_id directly, so execution order and
+        # ID order are independent.
+        real_id = 0
+        warmup_id = self._bench_expected_points
+        for point in self._bench_grid:
+            if EAGER_WARMUP_REASON in point.sample_reasons:
+                warmup_id += 1
+                point.benchmark_id = warmup_id
+            else:
+                real_id += 1
+                point.benchmark_id = real_id
         grid_payload = json.dumps(
             [asdict(point) for point in self._bench_grid],
             sort_keys=True,
@@ -2827,6 +2907,11 @@ class InstrumentedScheduler(AsyncScheduler):
         self._last_update_time = 0.0
         if resume_publisher:
             self._publisher.resume()
+        # Benchmark over: re-enable automatic gen2 collections and reclaim
+        # the frozen heap before regular serving resumes.
+        from dynamo.vllm import gc_policy as _fpm_gc_policy
+
+        _fpm_gc_policy.stop_gc_policy()
 
     def _bench_abort(self, error: Exception) -> None:
         if self._bench_synchronizer is not None:
@@ -3240,6 +3325,15 @@ class InstrumentedScheduler(AsyncScheduler):
                     reason,
                 )
                 self._bench_skip_point(point, reason)
+                self._bench_current_point = None
+                self._bench_current_fpms = []
+                self._bench_point_deadline = 0.0
+                if group_result.stop_requested:
+                    self._bench_request_timeout_stop(point)
+                return
+
+            if EAGER_WARMUP_REASON in point.sample_reasons:
+                logger.debug("Discarding eager-shape warmup result: %s", point)
                 self._bench_current_point = None
                 self._bench_current_fpms = []
                 self._bench_point_deadline = 0.0

@@ -359,6 +359,27 @@ def update_engine_config_with_dynamo(
                 f"--scheduler-cls is set to '{existing_cls}'. Either remove "
                 f"--scheduler-cls or use a subclass of InstrumentedScheduler."
             )
+        if os.environ.get("DYN_FPM_GC_POLICY"):
+            # Class path as a literal, not an import: importing
+            # dynamo.vllm.gc_policy auto-starts the policy in the importing
+            # process, and this launcher process must stay untouched.
+            worker_extension_cls = "dynamo.vllm.gc_policy.FpmGcWorkerExtension"
+            existing_ext = getattr(engine_config, "worker_extension_cls", None)
+            if not existing_ext:
+                defaults["worker_extension_cls"] = worker_extension_cls
+                logger.info(
+                    "Benchmark mode: DYN_FPM_GC_POLICY set, injecting "
+                    "worker_extension_cls=%s",
+                    worker_extension_cls,
+                )
+            elif str(existing_ext) != worker_extension_cls:
+                raise ValueError(
+                    f"DYN_FPM_GC_POLICY requires "
+                    f"worker_extension_cls='{worker_extension_cls}' so model "
+                    f"workers apply the GC policy, but --worker-extension-cls "
+                    f"is set to '{existing_ext}'. Remove it or unset "
+                    f"DYN_FPM_GC_POLICY."
+                )
         benchmark_config: Dict[str, Any] = {
             "mode": dynamo_config.benchmark_mode,
             "warmup_iterations": dynamo_config.benchmark_warmup_iterations,

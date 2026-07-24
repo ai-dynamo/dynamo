@@ -34,6 +34,7 @@ from vllm.v1.request import RequestStatus  # noqa: E402
 import dynamo.vllm.instrumented_scheduler as instrumented_scheduler_module  # noqa: E402
 from dynamo.vllm.benchmark_points import BenchmarkPoints  # noqa: E402
 from dynamo.vllm.instrumented_scheduler import (  # noqa: E402
+    EAGER_WARMUP_REASON,
     BenchmarkConfig,
     BenchmarkPoint,
     InstrumentedScheduler,
@@ -1344,8 +1345,13 @@ def test_benchmark_grid_has_no_point_cap():
     InstrumentedScheduler._bench_build_grid(stub)
 
     assert stub._bench_expected_points == 4097
-    assert len(stub._bench_grid) == 4097
-    assert [point.benchmark_id for point in stub._bench_grid] == list(range(1, 4098))
+    real_points = [
+        point
+        for point in stub._bench_grid
+        if EAGER_WARMUP_REASON not in point.sample_reasons
+    ]
+    assert len(real_points) == 4097
+    assert [point.benchmark_id for point in real_points] == list(range(1, 4098))
     assert stub._bench_grid_error is None
 
 
@@ -1370,7 +1376,21 @@ def test_benchmark_grid_assigns_stable_contiguous_ids_and_digest():
 
     InstrumentedScheduler._bench_build_grid(stub)
 
-    assert [point.benchmark_id for point in stub._bench_grid] == [1, 2]
+    real_points = [
+        point
+        for point in stub._bench_grid
+        if EAGER_WARMUP_REASON not in point.sample_reasons
+    ]
+    warmup_points = [
+        point
+        for point in stub._bench_grid
+        if EAGER_WARMUP_REASON in point.sample_reasons
+    ]
+    # Real points own the contiguous 1..N range (native-artifact contract);
+    # discarded eager-warmup replicas take IDs after the real range even
+    # though they execute first.
+    assert [point.benchmark_id for point in real_points] == [1, 2]
+    assert [point.benchmark_id for point in warmup_points] == [3, 4]
     assert len(stub._bench_grid_digest) == 64
 
 
@@ -1903,6 +1923,44 @@ def test_agg_grid_contains_piecewise_prefill_then_full_decode_points():
         for point in points
         if point.point_type == "decode"
     } == {"FULL"}
+
+
+def test_agg_eager_warmups_stay_contiguous_with_their_phase():
+    """``_bench_pop_next()`` treats a type mismatch at the queue front as
+    "phase complete", so eager warmups of both types prepended as a single
+    run would end PREFILL_SWEEP at the first decode warmup and DECODE_SWEEP
+    at the first real prefill point, silently dropping every real point."""
+    stub = _prefill_grid_stub()
+    stub._bench_grid = deque()
+    stub._bench_grid_built = False
+    stub._bench_missing_phases = []
+    stub._bench_grid_error = None
+    stub._bench_feasible_max_decode_batch_size = 0
+    stub._bench_config.mode = "agg"
+    stub._bench_explicit_points = None
+    # Captures end below the feasible max batch so decode also has eager
+    # shapes; prefill already has them (max tokens 40 > largest capture 16).
+    stub._bench_decode_capture_sizes = [1, 2, 4]
+    stub._bench_decode_cudagraph_mode = "FULL"
+
+    InstrumentedScheduler._bench_build_grid(stub)
+
+    points = list(stub._bench_grid)
+    warmup_types = {
+        point.point_type
+        for point in points
+        if instrumented_scheduler_module.EAGER_WARMUP_REASON in point.sample_reasons
+    }
+    assert warmup_types == {"prefill", "decode"}, "need warmups on both phases"
+
+    # Drain the grid exactly as the phase machine does: prefill until the
+    # front stops matching, then decode.
+    drained = 0
+    for phase in ("prefill", "decode"):
+        while InstrumentedScheduler._bench_pop_next(stub, phase) is not None:
+            drained += 1
+    assert not stub._bench_grid, "phase transitions must consume every point"
+    assert drained == len(points)
 
 
 def test_prefill_kv_read_ladder_is_total_block_aligned():
