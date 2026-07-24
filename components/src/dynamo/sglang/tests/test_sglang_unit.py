@@ -23,7 +23,6 @@ from dynamo.sglang._compat import (
     ensure_sglang_top_level_exports,
     filter_supported_async_generate_kwargs,
     require_reasoning_kwargs,
-    start_profile_compat,
 )
 from dynamo.sglang.args import (
     _forward_pass_metrics_source,
@@ -148,6 +147,7 @@ def test_compat_supports_tensor_image_sizes_and_is_idempotent(caplog, monkeypatc
 
         processor = object.__new__(ConcreteMultimodalProcessor)
         processor._processor = Processor()
+        processor.use_cuda_ipc = False
         image_token_id = 99
         processor._process_and_collect_mm_items = lambda **kwargs: (
             [],
@@ -386,46 +386,6 @@ def test_compat_caches_async_generate_signature_inspection(monkeypatch):
     assert calls == 1
 
     sglang_compat._get_async_generate_supported_kwarg_names.cache_clear()
-
-
-@pytest.mark.asyncio
-async def test_compat_starts_profile_with_legacy_kwargs():
-    class LegacyTokenizerManager:
-        received = None
-
-        async def start_profile(self, output_dir=None, start_step=None, num_steps=None):
-            self.received = {
-                "output_dir": output_dir,
-                "start_step": start_step,
-                "num_steps": num_steps,
-            }
-
-    manager = LegacyTokenizerManager()
-    body = {"output_dir": "/tmp/profile", "start_step": 10, "num_steps": 5}
-
-    await start_profile_compat(manager, body)
-
-    assert manager.received == body
-
-
-@pytest.mark.asyncio
-async def test_compat_starts_profile_with_request_object(monkeypatch):
-    class RequestTokenizerManager:
-        received = None
-
-        async def start_profile(self, req=None):
-            self.received = req
-
-    request = SimpleNamespace(output_dir="/tmp/profile", start_step=10, num_steps=5)
-    monkeypatch.setattr(sglang_compat, "_build_profile_request", lambda body: request)
-    manager = RequestTokenizerManager()
-
-    await start_profile_compat(
-        manager,
-        {"output_dir": "/tmp/profile", "start_step": 10, "num_steps": 5},
-    )
-
-    assert manager.received is request
 
 
 @pytest.mark.asyncio
