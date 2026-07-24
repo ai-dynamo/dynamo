@@ -40,7 +40,12 @@ class KvConnectorProtocol(ABC):
 
 
 class NixlConnectorProtocol(KvConnectorProtocol):
-    """Pull-based: decode-side params come straight off the engine response."""
+    """Decode-side params come straight off the engine response.
+
+    Serves both NIXL modes: pull (``NixlConnector``, decode READs from
+    prefill) and push (``NixlPushConnector``, prefill WRITEs to decode) —
+    vLLM hands dynamo the same param shape either way.
+    """
 
     def prefill_request_kv_transfer_params(self) -> Dict[str, Any]:
         return {
@@ -109,6 +114,11 @@ class MooncakeConnectorProtocol(KvConnectorProtocol):
 # Keyed by ``KVTransferConfig.kv_connector``. One entry per connector.
 KV_CONNECTOR_PROTOCOLS: Dict[str, Type[KvConnectorProtocol]] = {
     "NixlConnector": NixlConnectorProtocol,
+    # Push-mode NIXL (vLLM #35264) keeps pull mode's wire shape: the P side
+    # still keys off ``do_remote_decode`` and its ``request_finished`` returns
+    # the same ``remote_block_ids/engine_id/host/port`` params for the D side
+    # (see vLLM's nixl/push_scheduler.py), so the pull protocol is reused.
+    "NixlPushConnector": NixlConnectorProtocol,
     "MooncakeConnector": MooncakeConnectorProtocol,
 }
 
