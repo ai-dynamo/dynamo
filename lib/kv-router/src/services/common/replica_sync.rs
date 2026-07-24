@@ -12,6 +12,7 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use crate::identity::{RoutingPartitionId, RoutingPartitionRef};
 use crate::protocols::{ActiveLoad, ActiveSequenceEvent, WorkerWithDpRank};
 use crate::sequences::{SequencePublishQueueError, SequencePublisher, SequenceSubscriber};
 use crate::services::common::zmq::{create_bound_pub_socket, create_sub_socket, validate_endpoint};
@@ -26,6 +27,20 @@ pub(crate) struct ScopedReplicaEvent {
     pub routing_group: String,
     pub block_size: u32,
     pub event: ActiveSequenceEvent,
+}
+
+impl ScopedReplicaEvent {
+    pub(crate) fn partition_ref(&self) -> RoutingPartitionRef<'_> {
+        RoutingPartitionRef::new(&self.model_name, &self.routing_group)
+    }
+
+    pub(crate) fn into_parts(self) -> (RoutingPartitionId, u32, ActiveSequenceEvent) {
+        (
+            RoutingPartitionId::new(self.model_name, self.routing_group),
+            self.block_size,
+            self.event,
+        )
+    }
 }
 
 pub(crate) type ReplicaEventSender = mpsc::Sender<ScopedReplicaEvent>;
@@ -109,8 +124,7 @@ pub(crate) struct ScopedSequencePublisher {
 
 #[derive(Clone)]
 struct ScopedReplicaPublisher {
-    model_name: Arc<str>,
-    routing_group: Arc<str>,
+    partition: Arc<RoutingPartitionId>,
     block_size: u32,
     tx: ReplicaEventSender,
     cancel_token: CancellationToken,
@@ -122,16 +136,14 @@ impl ScopedSequencePublisher {
     }
 
     pub(crate) fn enabled(
-        model_name: Arc<str>,
-        routing_group: Arc<str>,
+        partition: Arc<RoutingPartitionId>,
         block_size: u32,
         tx: ReplicaEventSender,
         cancel_token: CancellationToken,
     ) -> Self {
         Self {
             replica: Some(ScopedReplicaPublisher {
-                model_name,
-                routing_group,
+                partition,
                 block_size,
                 tx,
                 cancel_token,
@@ -146,8 +158,8 @@ impl SequencePublisher for ScopedSequencePublisher {
             return Ok(());
         };
         let envelope = ScopedReplicaEvent {
-            model_name: replica.model_name.to_string(),
-            routing_group: replica.routing_group.to_string(),
+            model_name: replica.partition.model_name.clone(),
+            routing_group: replica.partition.routing_group.clone(),
             block_size: replica.block_size,
             event,
         };
@@ -250,8 +262,7 @@ pub(crate) fn setup_replica_sync(
 
 pub(crate) fn setup_scoped_replica_sync(
     config: Option<&ReplicaSyncConfig>,
-    model_name: &str,
-    routing_group: &str,
+    partition: &RoutingPartitionId,
     block_size: u32,
 ) -> ScopedReplicaSync {
     let Some(config) = config else {
@@ -266,8 +277,7 @@ pub(crate) fn setup_scoped_replica_sync(
     let (replica_tx, replica_rx) = mpsc::channel(REPLICA_EVENT_CHANNEL_CAPACITY);
     ScopedReplicaSync {
         publisher: ScopedSequencePublisher::enabled(
-            Arc::from(model_name),
-            Arc::from(routing_group),
+            Arc::new(partition.clone()),
             block_size,
             config.outbound_tx.clone(),
             config.cancel_token.clone(),
@@ -300,10 +310,13 @@ pub(crate) fn start_replica_publisher(
             };
 
             let request_id = event.event.request_id.clone();
+            let partition = event.partition_ref();
             let payload = match rmp_serde::to_vec_named(&event) {
                 Ok(payload) => payload,
                 Err(error) => {
                     tracing::error!(
+                        model_name = %partition.model_name,
+                        routing_group = %partition.routing_group,
                         request_id = %request_id,
                         "Failed to encode active-sequence replica event: {error}"
                     );
@@ -315,6 +328,8 @@ pub(crate) fn start_replica_publisher(
                 .await
             {
                 tracing::error!(
+                    model_name = %partition.model_name,
+                    routing_group = %partition.routing_group,
                     request_id = %request_id,
                     "Failed to publish active-sequence replica event: {error}"
                 );
@@ -541,7 +556,7 @@ mod tests {
     use super::*;
     use crate::protocols::{ActiveSequenceEventData, WorkerWithDpRank};
     #[cfg(feature = "standalone-slot-tracker")]
-    use crate::services::slot_tracker::registry::{SlotTrackerRegistry, TrackerKey};
+    use crate::services::slot_tracker::registry::SlotTrackerRegistry;
 
     fn event() -> ScopedReplicaEvent {
         ScopedReplicaEvent {
@@ -584,12 +599,39 @@ mod tests {
     fn replica_event_wire_schema_uses_routing_group() {
         let payload = rmp_serde::to_vec_named(&event()).unwrap();
         let value: serde_json::Value = rmp_serde::from_slice(&payload).unwrap();
+        let fields = value.as_object().unwrap();
 
+        assert_eq!(fields.len(), 4);
+        assert!(fields.contains_key("model_name"));
         assert_eq!(value["routing_group"], "group");
+        assert!(fields.contains_key("block_size"));
+        assert!(fields.contains_key("event"));
+        assert!(value.get("partition").is_none());
         assert!(value.get("tenant_id").is_none());
 
         let decoded: ScopedReplicaEvent = rmp_serde::from_slice(&payload).unwrap();
-        assert_eq!(decoded.routing_group, "group");
+        assert_eq!(
+            decoded.partition_ref(),
+            RoutingPartitionRef::new("model", "group")
+        );
+    }
+
+    #[test]
+    fn previous_flat_replica_event_wire_schema_is_accepted() {
+        let previous = serde_json::json!({
+            "model_name": "model",
+            "routing_group": "group",
+            "block_size": 16,
+            "event": event().event,
+        });
+        let payload = rmp_serde::to_vec_named(&previous).unwrap();
+
+        let decoded: ScopedReplicaEvent = rmp_serde::from_slice(&payload).unwrap();
+        assert_eq!(
+            decoded.partition_ref(),
+            RoutingPartitionRef::new("model", "group")
+        );
+        assert_eq!(decoded.block_size, 16);
     }
 
     #[test]
@@ -610,8 +652,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(1);
         let cancel_token = CancellationToken::new();
         let publisher = ScopedSequencePublisher::enabled(
-            Arc::from("model"),
-            Arc::from("group"),
+            Arc::new(RoutingPartitionId::new("model", "group")),
             16,
             tx,
             cancel_token.clone(),
@@ -720,7 +761,7 @@ mod tests {
                 dispatch_registry_b.dispatch_replica_event(event)
             })
             .unwrap();
-        let key = TrackerKey::new("model".to_string(), Some("group".to_string()));
+        let key = RoutingPartitionId::new("model", "group");
         registry_a.register(key.clone(), 1, 16, 0, 1).unwrap();
         registry_b.register(key.clone(), 1, 16, 0, 1).unwrap();
         let worker = WorkerWithDpRank::new(1, 0);

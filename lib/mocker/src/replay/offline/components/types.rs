@@ -7,6 +7,7 @@ use super::super::core::{EngineEventBatch, EngineProgress, NoEngineEvents};
 use super::super::runtime_utils::WorkerCompletionPayload;
 use super::super::state::OfflineWorkerState;
 use crate::common::protocols::DirectRequest;
+use crate::loadgen::ReplayRequestPayload;
 use crate::replay::offline::core::RequestIdentity;
 use crate::scheduler::{
     AdmissionEvent, EnginePassResult, SchedulerCommandEffects, SchedulerCommandResult,
@@ -31,6 +32,12 @@ impl<Events: EngineEventBatch> ObservedWorkerEvents<Events> {
 impl RequestIdentity for DirectRequest {
     fn request_id(&self) -> Option<Uuid> {
         self.uuid
+    }
+}
+
+impl RequestIdentity for ReplayRequestPayload {
+    fn request_id(&self) -> Option<Uuid> {
+        self.metadata().uuid
     }
 }
 

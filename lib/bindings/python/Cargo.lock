@@ -1850,6 +1850,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a4ae5f15dda3c708c0ade84bfee31ccab44a3da4f88015ed22f63732abe300c8"
 
 [[package]]
+name = "ddsketchy"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "724389b6953e2cef5558663e625e64220f473443132a7c64477742a0caeff621"
+
+[[package]]
 name = "defmac"
 version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2140,6 +2146,7 @@ dependencies = [
  "arc-swap",
  "async-trait",
  "axum",
+ "blake3",
  "chrono",
  "crossbeam-queue",
  "dashmap",
@@ -2169,6 +2176,7 @@ dependencies = [
  "tracing-appender",
  "uuid",
  "xxhash-rust",
+ "zeroize",
  "zmq",
 ]
 
@@ -2293,6 +2301,7 @@ dependencies = [
  "anyhow",
  "bytes",
  "dashmap",
+ "ddsketchy",
  "derive-getters",
  "derive_builder",
  "dynamo-data-gen",

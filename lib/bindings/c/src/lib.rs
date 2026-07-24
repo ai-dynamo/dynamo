@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use dynamo_kv_router::{
-    config::{RouterConfigOverride, kv_router_config_from_dynamo_env},
+    config::{RouterConfigOverride, try_kv_router_config_from_dynamo_env},
     protocols::*,
 };
 use dynamo_llm::kv_router::publisher::KvEventPublisher;
@@ -755,7 +755,13 @@ pub unsafe extern "C" fn create_routers(
             );
         }
 
-        let mut kv_router_config = kv_router_config_from_dynamo_env();
+        let mut kv_router_config = match try_kv_router_config_from_dynamo_env() {
+            Ok(config) => config,
+            Err(error) => {
+                tracing::error!(%error, "Invalid KV router environment configuration");
+                return Err(QueryRouterResult::ErrInitFailed);
+            }
+        };
         kv_router_config.skip_initial_worker_wait = true;
 
         // Build endpoint using the actual namespace discovered from workers,
