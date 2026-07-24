@@ -221,6 +221,17 @@ def test_prefill_load_scale_env_uses_kv_router_config_field(monkeypatch) -> None
     assert not hasattr(args, "router_prefill_load_scale")
 
 
+def test_decode_active_request_weight_flows_to_binding_kwargs(monkeypatch) -> None:
+    monkeypatch.setenv("DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT", "32")
+    parser = argparse.ArgumentParser()
+    KvRouterArgGroup().add_arguments(parser)
+
+    args = parser.parse_args(["--router-decode-active-request-weight", "64"])
+    kwargs = KvRouterConfigBase.from_cli_args(args).kv_router_kwargs()
+
+    assert kwargs["decode_active_request_weight"] == 64.0
+
+
 def test_load_aware_cli_applies_no_cache_load_balancing_preset() -> None:
     parser = argparse.ArgumentParser()
     KvRouterArgGroup().add_arguments(parser)
