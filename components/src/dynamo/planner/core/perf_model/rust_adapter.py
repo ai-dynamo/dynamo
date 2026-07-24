@@ -60,7 +60,6 @@ _RUST_SHIM_FALLBACK_EXCEPTIONS = (RuntimeError, ValueError, TypeError)
 DEFAULT_MAX_NUM_BATCHED_TOKENS = 8192
 DEFAULT_MAX_NUM_SEQS = 512
 DEFAULT_MAX_KV_TOKENS = 2_000_000
-RAW_AIC_NEXTN_ACCEPTED = "0"
 
 
 @dataclass(frozen=True)
@@ -263,9 +262,6 @@ class PlannerEnginePerfModel:
         nextn = self._effective_speculative_nextn()
         if self._worker_type != "prefill" and nextn > 0:
             extra["nextn"] = str(nextn)
-            # Forward-pass metrics are per scheduler iteration, so preserve the
-            # MTP verification cost without applying accepted-token speedup.
-            extra["nextn_accepted"] = RAW_AIC_NEXTN_ACCEPTED
         return AicEngineConfig(
             model_name=spec.hf_id,
             backend=spec.backend,
@@ -300,10 +296,7 @@ class PlannerEnginePerfModel:
             aic_extra: tuple[tuple[str, str], ...] = ()
             nextn = self._effective_speculative_nextn()
             if self._worker_type != "prefill" and nextn > 0:
-                aic_extra = (
-                    ("nextn", str(nextn)),
-                    ("nextn_accepted", RAW_AIC_NEXTN_ACCEPTED),
-                )
+                aic_extra = (("nextn", str(nextn)),)
             aic_key = (
                 spec.hf_id,
                 spec.backend,
