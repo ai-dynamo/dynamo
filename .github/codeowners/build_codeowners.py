@@ -43,6 +43,26 @@ class CoverageGate:
     warnings: list[str]
 
 
+# Program-function areas coordinated by Maintainers directly; exempt from the
+# SIG roster (see GOVERNANCE.md, "Special Interest Groups").
+PROGRAM_AREAS = {"docs", "ops", "process"}
+
+
+def sigs_gaps(labels: list[str], sigs_text: str) -> list[str]:
+    """Area labels whose codeowners team is absent from SIGS.md.
+
+    Every non-program area must appear in the SIG roster so the SIG-to-area
+    mapping cannot drift silently when areas are added or renamed. Deliberately
+    a dumb substring match on the team name (``dynamo-<label>-codeowners``) so
+    the check does not couple to SIGS.md's prose or table layout.
+    """
+    return [
+        label
+        for label in labels
+        if label not in PROGRAM_AREAS and f"dynamo-{label}-codeowners" not in sigs_text
+    ]
+
+
 def split_coverage(unmatched: list[str], changed: list[str] | None) -> CoverageGate:
     """Partition catch-all-only paths into blocking vs. non-blocking.
 
@@ -171,12 +191,25 @@ def main() -> int:
         )
         print("   ", gate.warnings[:15])
 
-    if args.strict and gate.blocking:
-        scope = "changed" if changed is not None else "tree"
-        print(
-            f"!! strict: {len(gate.blocking)} {scope} file(s) fall to the catch-all "
-            "-- cover them in areas.yaml"
-        )
+    # SIG roster drift: every non-program area must appear in SIGS.md. Only
+    # checked when the roster exists, so the gate stays repo-agnostic.
+    sig_missing: list[str] = []
+    sigs_path = Path(args.repo) / "SIGS.md"
+    if sigs_path.exists():
+        sig_missing = sigs_gaps([a.label for a in model.areas], sigs_path.read_text())
+        if sig_missing:
+            print(
+                f"!! SIGS.md is missing {len(sig_missing)} area team(s): "
+                f"{sig_missing} -- add the area to a SIG (or to PROGRAM_AREAS)"
+            )
+
+    if args.strict and (gate.blocking or sig_missing):
+        if gate.blocking:
+            scope = "changed" if changed is not None else "tree"
+            print(
+                f"!! strict: {len(gate.blocking)} {scope} file(s) fall to the catch-all "
+                "-- cover them in areas.yaml"
+            )
         return 1
     return 0
 

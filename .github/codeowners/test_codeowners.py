@@ -28,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from build_codeowners import (  # noqa: E402
     CoverageGate,
     is_policy_change,
+    sigs_gaps,
     split_coverage,
 )
 from codeowners_match import (  # noqa: E402
@@ -1080,3 +1081,23 @@ class TestRenderCodeownersWithExternals:
         model = self._model()
         plain, _ = _render_codeowners(model, group=True, external=[])
         assert not any("@jane" in ln for ln in plain)
+
+
+class TestSigsGaps:
+    """SIG roster drift gate: every non-program area appears in SIGS.md."""
+
+    def test_all_mapped(self) -> None:
+        text = "| sig-x | stuff | `dynamo-runtime-codeowners`, `dynamo-router-codeowners` |"
+        assert sigs_gaps(["runtime", "router"], text) == []
+
+    def test_missing_area_flagged(self) -> None:
+        text = "| sig-x | stuff | `dynamo-runtime-codeowners` |"
+        assert sigs_gaps(["runtime", "router"], text) == ["router"]
+
+    def test_program_areas_exempt(self) -> None:
+        assert sigs_gaps(["docs", "ops", "process"], "") == []
+
+    def test_label_is_not_substring_matched_bare(self) -> None:
+        # The bare label appearing in prose does not satisfy the check; the
+        # full team name must be present.
+        assert sigs_gaps(["router"], "the router is great") == ["router"]

@@ -302,12 +302,15 @@
 /DCO.md                                                                      @ai-dynamo/dynamo-process-codeowners
 /skills                                                                      @ai-dynamo/dynamo-process-codeowners
 /LICENSE                                                                     @ai-dynamo/dynamo-process-codeowners
+/SIGS.md                                                                     @ai-dynamo/dynamo-process-codeowners
 /.agents/                                                                    @ai-dynamo/dynamo-process-codeowners
 /.claude/                                                                    @ai-dynamo/dynamo-process-codeowners
 /AGENTS.md                                                                   @ai-dynamo/dynamo-process-codeowners
 /CLAUDE.md                                                                   @ai-dynamo/dynamo-process-codeowners
 /CODEOWNERS                                                                  @ai-dynamo/dynamo-process-codeowners
 /SECURITY.md                                                                 @ai-dynamo/dynamo-process-codeowners
+/GOVERNANCE.md                                                               @ai-dynamo/dynamo-process-codeowners
+/MAINTAINERS.md                                                              @ai-dynamo/dynamo-process-codeowners
 /ATTRIBUTIONS.md                                                             @ai-dynamo/dynamo-process-codeowners
 /CONTRIBUTING.md                                                             @ai-dynamo/dynamo-process-codeowners
 /CONTRIBUTORS.md                                                             @ai-dynamo/dynamo-process-codeowners
