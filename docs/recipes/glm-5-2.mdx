@@ -231,6 +231,31 @@ All four targets serve GLM-5.2 on SGLang with KV-aware routing and EAGLE-style M
 | **KV offload** | HiCache CPU | HiCache CPU | None | None |
 | **Max context** | 500K | 500K | 250K | 250K |
 
+## Accuracy
+
+The checkpoints these targets serve are already accuracy-validated — [nvidia/GLM-5.2-NVFP4](https://huggingface.co/nvidia/GLM-5.2-NVFP4) publishes GPQA-Diamond results for the quantized model alongside its FP8 baseline. However, it can still be reassuring to perform a final accuracy check to ensure no bugs have crept in along the path to deployment. The `accuracy/accuracy.yaml` Job does this as an A/B test against the model card: it runs AIPerf's GPQA-Diamond benchmark, sending the 198 real GPQA-Diamond questions as chat requests through your deployed DGD (A) and comparing the graded score to the checkpoint's published number (B). Each answer is graded by extracting the chosen A/B/C/D letter and exact-matching against ground truth. Compare the score to the model-card number, not to a fixed threshold.
+
+Edit `ENDPOINT` in `accuracy/accuracy.yaml` to your deployed frontend service, then run the Job. `glm-5-2-gpqa` is a fixed-name Job, so clear any prior run before re-applying (for example when switching `ENDPOINT` to a different target):
+
+```bash
+kubectl delete job glm-5-2-gpqa -n ${NAMESPACE} --ignore-not-found
+kubectl apply -f recipes/glm-5.2/accuracy/accuracy.yaml -n ${NAMESPACE}
+kubectl logs -f -l app=glm-5-2-gpqa -n ${NAMESPACE}
+```
+
+Measured results for all four targets, each against its checkpoint's model-card GPQA-Diamond baseline, with 0 errors and 0 unparsed answers on every run:
+
+| Target | Checkpoint | Model card | This recipe (aiperf) |
+|---|---|---:|---:|
+| B200 aggregated | nvidia/GLM-5.2-NVFP4 | 89.39 | 88.89 (176/198) |
+| B200 disaggregated | nvidia/GLM-5.2-NVFP4 | 89.39 | 90.91 (180/198) |
+| H200 aggregated | zai-org/GLM-5.2-FP8 | 89.52 | 87.88 (174/198) |
+| H200 disaggregated | zai-org/GLM-5.2-FP8 | 89.52 | 89.39 (177/198) |
+
+The baselines above come from NVIDIA's [NVFP4 model card](https://huggingface.co/nvidia/GLM-5.2-NVFP4), measured at the same sampling this recipe uses (temperature 1.0, top_p 0.95, max_new_tokens 100k): NVFP4 89.39 and the FP8 baseline 89.52. Z.ai's own FP8 card reports GPQA-Diamond at 91.2 under a different eval harness — the NVIDIA numbers are used here so the comparison is like-for-like.
+
+Scores are harness-dependent — different evaluation tools produce slightly different numbers on the same model, so compare the general range, not exact decimals. A single run of 198 questions at temperature 1.0 varies by a few points between runs: each score carries a 95% binomial confidence interval of about ±4.0-4.6 points, and every model-card baseline falls within its config's interval. The spread between targets is not a sign that one serving mode or SKU is more accurate than another. Remove any `SGLANG_SIMULATE_ACC_LEN` env (a perf-only synthetic spec-decode setting) from the deployment before running, since it corrupts outputs. See `recipes/glm-5.2/accuracy/README.md` for methodology and caveats.
+
 ## Notes
 
 - Speculative decoding uses EAGLE-style MTP with draft length 3, measured at a SpeedBench acceptance length of 2.69.

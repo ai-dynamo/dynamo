@@ -107,6 +107,36 @@ Modified Mooncake traces are provided to showcase the value of KV-aware routing 
 
 
 
+## Accuracy
+
+The checkpoints these recipes serve are already accuracy-validated (see
+[nvidia/GLM-5.2-NVFP4](https://huggingface.co/nvidia/GLM-5.2-NVFP4)), but it
+can still be reassuring to run a final accuracy check to ensure no bugs have
+crept in along the path to deployment. The [`accuracy/`](accuracy/) folder
+contains a GPQA-Diamond evaluation Job (`aiperf --accuracy-benchmark
+gpqa_diamond`) that A/B tests the deployed endpoint against the checkpoint's
+model card:
+
+| Benchmark | Model card¹ | This recipe (aiperf) | Config |
+|---|---:|---:|---|
+| GPQA-Diamond | 89.39 (NVFP4) | 90.91 (180/198, 0 unparsed) | disagg-b200 |
+| GPQA-Diamond | 89.39 (NVFP4) | 88.89 (176/198, 0 unparsed) | agg-b200 |
+| GPQA-Diamond | 89.52 (FP8) | 89.39 (177/198, 0 unparsed) | disagg-h200 |
+| GPQA-Diamond | 89.52 (FP8) | 87.88 (174/198, 0 unparsed) | agg-h200 |
+
+¹ Baselines from NVIDIA's [NVFP4 model card](https://huggingface.co/nvidia/GLM-5.2-NVFP4),
+measured at matched sampling (temperature 1.0, top_p 0.95, max_new_tokens 100k):
+NVFP4 89.39, FP8 baseline 89.52. B200 recipes serve `nvidia/GLM-5.2-NVFP4`; H200
+recipes serve [`zai-org/GLM-5.2-FP8`](https://huggingface.co/zai-org/GLM-5.2-FP8),
+whose own card reports 91.2 under Z.ai's harness — the 89.52 baseline is used here
+because it matches this recipe's sampling.
+
+All four configs score close to their model-card baseline with no errors or
+unparsed answers. The small spread between configs (~2-3%) is normal run-to-run
+variation at temperature=1.0 — not a sign that one serving mode or SKU is more
+accurate than another. See [accuracy/README.md](accuracy/README.md) for
+methodology and caveats.
+
 ## Limitations
 
 - B200 recipes support up to 500K context lengths. The full 1M context length is not supported out of the box.

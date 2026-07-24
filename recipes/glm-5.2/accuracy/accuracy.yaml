@@ -1,0 +1,192 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# AIPerf GPQA-Diamond accuracy check for glm-5.2 DGDs.
+#
+# One Job covers all variants. Edit ENDPOINT below to select a DGD:
+#   agg-b200-agentic         ENDPOINT=glm52-agg-b200-agentic-frontend:8000  (agg)
+#   agg-h200-agentic         ENDPOINT=glm52-agg-h200-agentic-frontend:8000  (agg)
+#   disagg-b200-agentic      ENDPOINT=glm52-disagg-b200-agentic-frontend:8000  (disagg)
+#   disagg-h200-agentic      ENDPOINT=glm52-disagg-h200-agentic-frontend:8000  (disagg)
+#
+# NOT a perf benchmark: sends the 198 real GPQA-Diamond questions as chat
+# requests through the deployment and grades the answers (simple-evals
+# template, lighteval letter extraction). Compare the score to the
+# checkpoint's model-card GPQA number — see ../accuracy/README.md.
+#
+# Prerequisites:
+# - Target DGD is Ready (see ../README.md); 1-replica deployments suffice
+#   (accuracy is per-request and independent of replica count)
+# - accuracy must be measured WITHOUT synthetic spec-decode acceptance: if
+#   the deployment sets SGLANG_SIMULATE_ACC_LEN (perf-only), remove it first
+# - hf-token-secret token has accepted the gated Idavidrein/gpqa terms
+#
+# Results: /model-cache/accuracy/<epoch>_<job-name>/
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: glm-5-2-gpqa
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: 14400
+  completions: 1
+  parallelism: 1
+  template:
+    metadata:
+      labels:
+        app: glm-5-2-gpqa
+    spec:
+      # Prefer co-locating the eval pod with the target DGD frontend for
+      # network locality, but schedule anywhere if that node is full
+      # (preferred, not required: frontends often land on busy shared CPU
+      # nodes with no headroom for the eval pod's requests).
+      affinity:
+        podAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: nvidia.com/dynamo-component-type
+                  operator: In
+                  values:
+                  - frontend
+                - key: nvidia.com/dynamo-graph-deployment-name
+                  operator: In
+                  values:
+                  - glm52-disagg-b200-agentic  # Update to match your ENDPOINT target DGD
+              topologyKey: kubernetes.io/hostname
+      # tolerations: # Uncomment and populate for tainted frontend nodes.
+      containers:
+      - name: accuracy
+        # python + pip rather than the NGC aiperf image: the lighteval GPQA
+        # grader requires the aiperf [accuracy] extras, which the runtime
+        # image does not ship.
+        image: python:3.12-slim
+        imagePullPolicy: IfNotPresent
+        command:
+        - /bin/bash
+        - -c
+        - |
+          set -euo pipefail
+          export COLUMNS=200
+          pip install --no-cache-dir "aiperf[accuracy]==0.11.0" > /dev/null
+          EPOCH=$(date +%s)
+
+          wait_for_model_ready() {
+            python3 - <<'PY'
+          import json
+          import os
+          import time
+          import urllib.request
+
+          endpoint = os.environ["ENDPOINT"]
+          model = os.environ["TARGET_MODEL"]
+          max_attempts = int(os.environ.get("WAIT_FOR_MODEL_MAX_ATTEMPTS", "720"))
+          url = f"http://{endpoint}/v1/models"
+
+          print(f"Waiting for model '{model}' at {url} (max {max_attempts} attempts) ...")
+          for attempt in range(1, max_attempts + 1):
+              try:
+                  with urllib.request.urlopen(url, timeout=5) as response:
+                      payload = json.load(response)
+                  if any(item.get("id") == model for item in payload.get("data", [])):
+                      print(json.dumps(payload, indent=2))
+                      raise SystemExit(0)
+              except Exception:
+                  pass
+
+              if attempt == max_attempts:
+                  break
+              timestamp = time.strftime("%H:%M:%S")
+              print(f"[{timestamp}] not ready (attempt {attempt}/{max_attempts}), sleeping 5s")
+              time.sleep(5)
+
+          raise SystemExit(
+              f"model '{model}' did not become ready after {max_attempts} attempts"
+          )
+          PY
+          }
+
+          wait_for_model_ready
+          RUN_DIR="${ROOT_ARTIFACT_DIR}/${EPOCH}_${JOB_NAME}"
+          mkdir -p "$RUN_DIR"
+          echo "=============================================="
+          echo "GPQA-Diamond Accuracy Check (aiperf)"
+          echo "=============================================="
+          echo "Endpoint:     http://${ENDPOINT}"
+          echo "Model:        ${TARGET_MODEL}"
+          echo "Sampling:     temperature=${TEMPERATURE} top_p=${TOP_P} max_tokens=${MAX_TOKENS}"
+          echo "Artifact dir: ${RUN_DIR}"
+          echo "=============================================="
+
+          aiperf profile             -m "$TARGET_MODEL"             --tokenizer "$TARGET_MODEL"             --tokenizer-trust-remote-code             --url "http://$ENDPOINT"             --endpoint-type chat             --accuracy-benchmark gpqa_diamond             --num-requests "$NUM_REQUESTS"             --concurrency "$CONCURRENCY"             --extra-inputs temperature:"$TEMPERATURE"             --extra-inputs top_p:"$TOP_P"             --extra-inputs max_tokens:"$MAX_TOKENS"             --extra-inputs max_completion_tokens:"$MAX_TOKENS"             --request-timeout-seconds 3600             --random-seed 42             --ui simple             --artifact-dir "$RUN_DIR"
+          echo ""
+          echo "===== ACCURACY RESULTS ====="
+          cat "$RUN_DIR"/accuracy_results.csv
+          echo "Done. Artifacts: ${RUN_DIR}"
+        env:
+        # --- Edit ENDPOINT to target one of the glm-5.2 DGDs. ---
+        - name: ENDPOINT
+          value: glm52-disagg-b200-agentic-frontend:8000
+        # --- The remainder is shared across all variants. ---
+        - name: TARGET_MODEL
+          value: zai-org/GLM-5.2
+        # Sampling matches the checkpoint model-card eval methodology; scores
+        # are only comparable under matched sampling. A generous MAX_TOKENS is
+        # required: truncated reasoning chains grade as unparsed/wrong.
+        - name: TEMPERATURE
+          value: "1.0"
+        - name: TOP_P
+          value: "0.95"
+        - name: MAX_TOKENS
+          value: "100000"
+        - name: NUM_REQUESTS
+          value: "198"
+        - name: CONCURRENCY
+          value: "10"
+        - name: AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT
+          value: "3600"
+        - name: AIPERF_DATASET_CONFIGURATION_TIMEOUT
+          value: "3600"
+        - name: JOB_NAME
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.labels['job-name']
+        - name: ROOT_ARTIFACT_DIR
+          value: /model-cache/accuracy
+        - name: HF_HOME
+          value: /model-cache
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        envFrom:
+        - secretRef:
+            name: hf-token-secret
+        resources:
+          requests:
+            cpu: "4"
+            memory: 8Gi
+          limits:
+            cpu: "16"
+            memory: 64Gi
+        volumeMounts:
+        - name: model-cache
+          mountPath: /model-cache
+      restartPolicy: Never
+      volumes:
+      - name: model-cache
+        persistentVolumeClaim:
+          claimName: model-cache
