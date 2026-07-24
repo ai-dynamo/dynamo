@@ -909,6 +909,10 @@ static HTTP_SVC_CHAT_PATH_ENV: &str = "DYN_HTTP_SVC_CHAT_PATH";
 static HTTP_SVC_CMP_PATH_ENV: &str = "DYN_HTTP_SVC_CMP_PATH";
 /// Environment variable to set the embeddings endpoint path (default: `/v1/embeddings`)
 static HTTP_SVC_EMB_PATH_ENV: &str = "DYN_HTTP_SVC_EMB_PATH";
+/// Environment variable to set the classify endpoint path (default: `/v1/classify`)
+static HTTP_SVC_CLASSIFY_PATH_ENV: &str = "DYN_HTTP_SVC_CLASSIFY_PATH";
+/// Environment variable to set the pooling endpoint path (default: `/v1/pooling`)
+static HTTP_SVC_POOLING_PATH_ENV: &str = "DYN_HTTP_SVC_POOLING_PATH";
 /// Environment variable to set the responses endpoint path (default: `/v1/responses`)
 static HTTP_SVC_RESPONSES_PATH_ENV: &str = "DYN_HTTP_SVC_RESPONSES_PATH";
 /// Environment variable to set the batch files endpoint path (default: `/v1/files`)
@@ -1248,6 +1252,10 @@ impl HttpServiceConfigBuilder {
             super::openai::completions_router(state.clone(), var(HTTP_SVC_CMP_PATH_ENV).ok());
         let (embed_docs, embed_route) =
             super::openai::embeddings_router(state.clone(), var(HTTP_SVC_EMB_PATH_ENV).ok());
+        let (classify_docs, classify_route) =
+            super::openai::classify_router(state.clone(), var(HTTP_SVC_CLASSIFY_PATH_ENV).ok());
+        let (pooling_docs, pooling_route) =
+            super::openai::pooling_router(state.clone(), var(HTTP_SVC_POOLING_PATH_ENV).ok());
         let (images_docs, images_route) = super::openai::images_router(state.clone(), None);
         let (videos_docs, videos_route) = super::openai::videos_router(state.clone(), None);
         let (audios_docs, audios_route) = super::openai::audios_router(state.clone(), None);
@@ -1266,6 +1274,8 @@ impl HttpServiceConfigBuilder {
         endpoint_routes.insert(EndpointType::Chat, (chat_docs, chat_route));
         endpoint_routes.insert(EndpointType::Completion, (cmpl_docs, cmpl_route));
         endpoint_routes.insert(EndpointType::Embedding, (embed_docs, embed_route));
+        endpoint_routes.insert(EndpointType::Classify, (classify_docs, classify_route));
+        endpoint_routes.insert(EndpointType::Pooling, (pooling_docs, pooling_route));
         endpoint_routes.insert(EndpointType::Images, (images_docs, images_route));
         endpoint_routes.insert(EndpointType::Videos, (videos_docs, videos_route));
         endpoint_routes.insert(EndpointType::Audios, (audios_docs, audios_route));
