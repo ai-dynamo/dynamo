@@ -396,6 +396,7 @@ impl Drop for KvEventSubscriptionHandle {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn start_subscriber(
     endpoint: Endpoint,
     indexer: Indexer,
