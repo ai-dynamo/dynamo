@@ -9,9 +9,8 @@ SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../common/gpu_utils.sh"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
-MODEL="Qwen/Qwen3-Omni-30B-A3B-Instruct"
+MODEL="mistralai/Voxtral-Mini-4B-Realtime-2602"
 
-# Parse command line arguments
 EXTRA_ARGS=()
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -28,33 +27,25 @@ done
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
-print_launch_banner --no-curl "Launching vLLM-Omni Realtime" "$MODEL" "$HTTP_PORT"
+print_launch_banner --no-curl "Launching vLLM Realtime Transcription" "$MODEL" "$HTTP_PORT"
 print_curl_footer <<TEST
-  # /v1/realtime is a WebSocket endpoint; drive it with the realtime client
-  # (omit --input-audio to fetch a sample clip from the vLLM-Omni repo):
+  # Stream an audio file and print its transcription:
   python ${SCRIPT_DIR}/realtime_audio_client.py \\
-    --session-type realtime \\
+    --session-type transcription \\
     --url ws://localhost:${HTTP_PORT}/v1/realtime \\
-    --model "${MODEL}" \\
-    --output-dir dynamo-realtime
+    --model "${MODEL}"
 TEST
-
 
 python -m dynamo.frontend &
 
-echo "Starting Omni Realtime worker..."
-# --realtime serves a ModelType.Realtime bidirectional endpoint backed by
-# vLLM-Omni streaming; --output-modalities audio drives the talker so the
-# response carries synthesized speech (the thinker transcript streams too).
+echo "Starting Realtime Transcription worker..."
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
-    python -m dynamo.vllm.omni \
+    python -m dynamo.vllm \
     --realtime \
     --model "$MODEL" \
-    --output-modalities audio \
-    --trust-remote-code \
     --enforce-eager \
+    --hf-overrides '{"architectures":["VoxtralRealtimeGeneration"]}' \
     $GPU_MEM_ARGS \
     "${EXTRA_ARGS[@]}" &
 
-# Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
 wait_any_exit

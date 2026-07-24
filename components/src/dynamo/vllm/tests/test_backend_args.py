@@ -9,6 +9,7 @@ need to add more tests to cover different code paths of DynamoVllmConfig.
 """
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -245,6 +246,79 @@ class TestEmbeddingWorkerExclusivity:
         config.embedding_worker = False
         config.benchmark_mode = "agg"
         config._validate_embedding_worker_exclusivity()
+
+
+class TestRealtimeWorkerExclusivity:
+    def test_baseline_aggregated_is_accepted(self):
+        config = create_config()
+        config.realtime = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        config._validate_realtime_worker_exclusivity()
+
+    @pytest.mark.parametrize(
+        "mode",
+        [
+            DisaggregationMode.PREFILL,
+            DisaggregationMode.DECODE,
+            DisaggregationMode.ENCODE,
+        ],
+    )
+    def test_non_aggregated_disagg_rejected(self, mode):
+        config = create_config()
+        config.realtime = True
+        config.disaggregation_mode = mode
+        with pytest.raises(ValueError, match="disaggregation-mode=agg"):
+            config._validate_realtime_worker_exclusivity()
+
+    def test_embedding_combination_rejected(self):
+        config = create_config()
+        config.realtime = True
+        config.embedding_worker = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        with pytest.raises(ValueError, match="embedding-worker"):
+            config._validate_realtime_worker_exclusivity()
+
+    def test_multimodal_combination_rejected(self):
+        config = create_config()
+        config.realtime = True
+        config.enable_multimodal = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        with pytest.raises(ValueError, match="multimodal"):
+            config._validate_realtime_worker_exclusivity()
+
+    def test_benchmark_mode_rejected(self):
+        config = create_config()
+        config.realtime = True
+        config.benchmark_mode = "agg"
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        with pytest.raises(ValueError, match="benchmark-mode"):
+            config._validate_realtime_worker_exclusivity()
+
+    def test_lora_rejected(self):
+        config = create_config()
+        config.realtime = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        config.engine_args = SimpleNamespace(enable_lora=True)
+        with pytest.raises(ValueError, match="enable-lora"):
+            config._validate_realtime_worker_exclusivity()
+
+    @pytest.mark.parametrize(
+        "attribute, value, option",
+        [
+            ("custom_encoder_class", "my_pkg.MyEncoder", "custom-encoder-class"),
+            ("gms_shadow_mode", True, "gms-shadow-mode"),
+            ("enable_rl", True, "enable-rl"),
+            ("headless", True, "headless"),
+        ],
+    )
+    def test_unsupported_worker_options_rejected(self, attribute, value, option):
+        config = create_config()
+        config.realtime = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        setattr(config, attribute, value)
+
+        with pytest.raises(ValueError, match=option):
+            config._validate_realtime_worker_exclusivity()
 
 
 class TestValidateCustomEncoder:
