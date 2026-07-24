@@ -62,6 +62,7 @@ bytes = { version = "1" }
 dashmap = { version = "6.1" }
 futures = { version = "0.3" }
 rmp = { version = "0.8" }
+rmpv = { version = "1", features = ["with-serde"] }
 once_cell = { version = "1.20.3" }
 parking_lot = { version = "0.12.4" }
 serde = { version = "1" }
