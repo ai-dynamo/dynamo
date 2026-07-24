@@ -1284,6 +1284,121 @@ class EmbeddingPayload(BasePayload):
 
 
 @dataclass
+class ClassifyPayload(BasePayload):
+    """Payload for the ``/v1/classify`` endpoint."""
+
+    endpoint: str = "/v1/classify"
+    expected_prompt_tokens: Optional[int] = None
+
+    def response_handler(self, response: Any) -> str:
+        response.raise_for_status()
+        result = response.json()
+        assert (
+            result.get("object") == "list"
+        ), f"Expected object='list', got {result.get('object')}"
+        assert result.get("data"), "Empty classification data"
+
+        for index, item in enumerate(result["data"]):
+            assert item.get("index") == index
+            probs = item.get("probs")
+            assert isinstance(probs, list) and probs, "probs must be a non-empty list"
+            assert item.get("num_classes") == len(probs)
+            assert all(isinstance(prob, (int, float)) for prob in probs)
+            assert item.get("label") is None or isinstance(item["label"], str)
+
+        usage = result.get("usage")
+        assert isinstance(usage, dict), "Missing usage in classification response"
+        assert usage.get("prompt_tokens") == usage.get("total_tokens")
+        if self.expected_prompt_tokens is not None:
+            assert usage.get("prompt_tokens") == self.expected_prompt_tokens
+
+        return f"Classified {len(result['data'])} inputs"
+
+
+@dataclass
+class PoolingPayload(BasePayload):
+    """Payload for JSON and binary ``/v1/pooling`` responses."""
+
+    endpoint: str = "/v1/pooling"
+    expected_prompt_tokens: Optional[int] = None
+
+    @staticmethod
+    def _validate_json_data(data: Any) -> None:
+        assert isinstance(data, list) and data, "pooling data must be non-empty"
+        values = data[0] if isinstance(data[0], list) else data
+        assert values and all(isinstance(value, (int, float)) for value in values)
+
+    def _handle_json_response(self, response: Any) -> str:
+        result = response.json()
+        assert (
+            result.get("object") == "list"
+        ), f"Expected object='list', got {result.get('object')}"
+        assert result.get("data"), "Empty pooling data"
+
+        encoding_format = self.body.get("encoding_format", "float")
+        dtype_width = {
+            "float32": 4,
+            "float16": 2,
+            "bfloat16": 2,
+            "fp8_e4m3": 1,
+            "fp8_e5m2": 1,
+        }[self.body.get("embed_dtype", "float32")]
+        for index, item in enumerate(result["data"]):
+            assert item.get("index") == index
+            assert item.get("object") == "pooling"
+            data = item.get("data")
+            if encoding_format == "base64":
+                assert isinstance(data, str)
+                decoded = base64.b64decode(data, validate=True)
+                assert decoded and len(decoded) % dtype_width == 0
+            else:
+                self._validate_json_data(data)
+
+        usage = result.get("usage")
+        assert isinstance(usage, dict), "Missing usage in pooling response"
+        assert usage.get("prompt_tokens") == usage.get("total_tokens")
+        assert usage.get("completion_tokens") == 0
+        if self.expected_prompt_tokens is not None:
+            assert usage.get("prompt_tokens") == self.expected_prompt_tokens
+
+        return f"Pooled {len(result['data'])} inputs as {encoding_format}"
+
+    def _handle_binary_response(self, response: Any) -> str:
+        assert response.headers.get("content-type") == "application/octet-stream"
+        assert response.content, "Empty binary pooling response"
+
+        encoding_format = self.body["encoding_format"]
+        metadata_header = response.headers.get("metadata")
+        if encoding_format == "bytes_only":
+            assert metadata_header is None
+            return f"Pooled bytes_only response with {len(response.content)} bytes"
+
+        assert metadata_header is not None, "bytes response is missing metadata"
+        metadata = json.loads(metadata_header)
+        assert metadata.get("data"), "bytes metadata has no tensor entries"
+        for index, item in enumerate(metadata["data"]):
+            assert item.get("index") == index
+            assert item.get("embed_dtype") == self.body.get("embed_dtype", "float32")
+            assert item.get("endianness") == self.body.get("endianness", "native")
+            assert item["start"] < item["end"] <= len(response.content)
+            assert item.get("shape")
+
+        usage = metadata.get("usage")
+        assert isinstance(usage, dict), "bytes metadata is missing usage"
+        assert usage.get("prompt_tokens") == usage.get("total_tokens")
+        if self.expected_prompt_tokens is not None:
+            assert usage.get("prompt_tokens") == self.expected_prompt_tokens
+
+        return f"Pooled {len(metadata['data'])} binary tensors"
+
+    def response_handler(self, response: Any) -> str:
+        response.raise_for_status()
+        if self.body.get("encoding_format") in ("bytes", "bytes_only"):
+            return self._handle_binary_response(response)
+        return self._handle_json_response(response)
+
+
+@dataclass
 class EmbeddingMultiWorkerDispatchPayload(BasePayload):
     """Send ``repeat_count`` embedding requests to the frontend, capturing a
     per-worker ``/metrics`` snapshot on the FIRST iteration and on the LAST
