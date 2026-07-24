@@ -672,12 +672,17 @@ async fn postprocessor_parsing_stream_nemotron_v3_enable_thinking_false_returns_
     assert_eq!(content, "This is plain content");
 }
 
-/// vLLM parity: `chat_template_kwargs={"force_nonempty_content": true}` turns
-/// a leading `<think>...` response into normal content instead of reasoning.
-/// Dynamo checks this in the postprocessor because request flags are applied
-/// before stream parsing, not inside the raw reasoning parser.
+/// Streaming Nemotron `force_nonempty_content=true`, reasoning-only turn: the
+/// parser stays ON (it is no longer disabled for streaming), so an unterminated
+/// `<think>...` with no answer parses entirely into `reasoning_content` and
+/// `content` stays empty. This is the deliberately-deferred "Case 2": matching
+/// the non-streaming move (surface reasoning as content when content is empty)
+/// would require buffering all reasoning until end-of-stream, so streaming keeps
+/// reasoning in `reasoning_content` and does NOT move it — no `</think>` leak
+/// into content, but `force_nonempty_content` is not honored on this path.
+/// See `is_reasoning_disabled_by_request`; the streaming move is tracked in DIS-2439.
 #[tokio::test]
-async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_strips_start_token() {
+async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_reasoning_only_stays_reasoning() {
     let preprocessor = build_preprocessor(Some("nemotron_v3"), None);
 
     let mut request: NvCreateChatCompletionRequest = serde_json::from_str(REQUEST_JSON).unwrap();
@@ -716,23 +721,78 @@ async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_strips_start_to
         }
     }
 
-    assert_eq!(reasoning, "");
-    assert_eq!(content, "This is plain content");
+    assert_eq!(
+        reasoning, "This is plain content",
+        "reasoning-only stream keeps text in reasoning_content (no move on streaming)"
+    );
+    assert_eq!(
+        content, "",
+        "streaming does not move reasoning into content (Case 2 deferred to DIS-2439)"
+    );
 }
 
-/// Non-streaming parity for the Nemotron `force_nonempty_content` flag.
-///
-/// A `stream=false` request is not a separate code path: the engine always runs
-/// internally in streaming mode, and the HTTP layer folds the resulting deltas
-/// into a single response. The leading-`<think>` strip that
-/// `postprocessor_parsing_stream` applies must therefore survive that fold.
-///
-/// This test exercises the full non-streaming path: `postprocessor_parsing_stream`
-/// (where the `force_nonempty_content` strip lives), then
-/// `NvCreateChatCompletionResponse::from_annotated_stream` (the entrypoint the
-/// non-streaming handler uses). It asserts the aggregated message has non-empty,
-/// `<think>`-stripped `content` and empty `reasoning_content` — the guarantee
-/// clients that require non-empty content depend on.
+/// Streaming Nemotron `force_nonempty_content=true`, reasoning+answer turn: the
+/// headline fix (Case 1). With the parser on, `<think>reason</think>answer`
+/// streams `reason` as `reasoning_content` and `answer` as `content` — no
+/// reasoning text or raw `</think>` leaks into content. On `main` (and before
+/// this change) the parser was disabled for streaming and only the leading
+/// `<think>` was stripped, so `content` was `"reason</think>answer"`.
+#[tokio::test]
+async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_stream_reasoning_and_answer_split()
+{
+    let preprocessor = build_preprocessor(Some("nemotron_v3"), None);
+
+    let mut request: NvCreateChatCompletionRequest = serde_json::from_str(REQUEST_JSON).unwrap();
+    request.chat_template_args = Some(
+        serde_json::from_value(serde_json::json!({ "force_nonempty_content": true })).unwrap(),
+    );
+
+    let input_chunks = vec![
+        mock_content_chunk("<think>Let me greet them.</think>Hello!"),
+        mock_final_chunk(),
+    ];
+    let input_stream = stream::iter(input_chunks.into_iter().map(Annotated::from_data));
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .expect("postprocessor_parsing_stream should build");
+
+    let output_chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> =
+        output_stream.collect().await;
+
+    let mut reasoning = String::new();
+    let mut content = String::new();
+    for output in &output_chunks {
+        let Some(data) = output.data.as_ref() else {
+            continue;
+        };
+        for choice in &data.inner.choices {
+            if let Some(r) = &choice.delta.reasoning_content {
+                reasoning.push_str(r);
+            }
+            if let Some(c) = &choice.delta.content {
+                content.push_str(get_text(c));
+            }
+        }
+    }
+
+    assert_eq!(
+        reasoning, "Let me greet them.",
+        "reasoning must stream as reasoning_content, not leak into content"
+    );
+    assert_eq!(
+        content, "Hello!",
+        "answer must be the content, with no reasoning or </think> leaked in"
+    );
+}
+
+/// Non-streaming parity for the Nemotron `force_nonempty_content` flag,
+/// reasoning-only case. Reasoning parsing stays ON for non-streaming, so a
+/// `<think>` with no answer parses entirely into `reasoning_content`, leaving
+/// `content` empty; the aggregator then surfaces reasoning as `content` when
+/// content is empty, gated by `ParsingOptions::move_reasoning_to_content_when_empty`.
+/// The chat handler sets that flag for `force_nonempty_content` via
+/// `OpenAIPreprocessor::wants_reasoning_as_content_when_empty`; this test mirrors
+/// it and asserts non-empty, `<think>`-stripped `content`.
 #[tokio::test]
 async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_aggregated_strips_start_token() {
     let preprocessor = build_preprocessor(Some("nemotron_v3"), None);
@@ -760,9 +820,10 @@ async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_aggregated_stri
         .expect("postprocessor_parsing_stream should build");
 
     // Step 2: the non-streaming fold, identical to the `stream=false` HTTP path.
+    // Options mirror what the chat handler sets for `force_nonempty_content`.
     let response = NvCreateChatCompletionResponse::from_annotated_stream(
         output_stream,
-        ParsingOptions::default(),
+        ParsingOptions::default().with_move_reasoning_to_content_when_empty(true),
     )
     .await
     .expect("aggregation should succeed");
@@ -771,7 +832,7 @@ async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_aggregated_stri
     assert_eq!(
         choice.message.content.as_ref().map(get_text),
         Some("This is plain content"),
-        "aggregated content must be non-empty with the leading <think> stripped"
+        "reasoning-only turn must surface reasoning as non-empty content"
     );
     assert_eq!(
         choice.message.reasoning_content, None,
@@ -780,9 +841,10 @@ async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_aggregated_stri
 }
 
 /// Non-streaming parity, EOF-flush case: when the stream ends after only a
-/// partial `<think>` prefix, those bytes are valid content that the strip
-/// flushes on the terminal chunk. This confirms the non-streaming fold keeps
-/// that flushed content instead of dropping it.
+/// partial `<think>` prefix (`<thi`), those bytes must not be dropped. Reasoning
+/// parsing stays on, so `parse_reasoning_content_from_stream` flushes the
+/// unterminated buffer at EOF and the aggregator move (mirroring the chat handler
+/// for `force_nonempty_content`) surfaces it as non-empty `content`.
 #[tokio::test]
 async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_aggregated_flushes_partial_prefix()
 {
@@ -803,9 +865,10 @@ async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_aggregated_flus
         .postprocessor_parsing_stream(input_stream, &request, false, false)
         .expect("postprocessor_parsing_stream should build");
 
+    // Options mirror what the chat handler sets for `force_nonempty_content`.
     let response = NvCreateChatCompletionResponse::from_annotated_stream(
         output_stream,
-        ParsingOptions::default(),
+        ParsingOptions::default().with_move_reasoning_to_content_when_empty(true),
     )
     .await
     .expect("aggregation should succeed");
@@ -819,8 +882,82 @@ async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_aggregated_flus
     assert_eq!(choice.message.reasoning_content, None);
 }
 
+/// Regression for the leak this PR fixes: a non-streaming Nemotron turn that
+/// emits real reasoning AND a real answer must split them, not dump reasoning
+/// (and a raw `</think>`) into `content`. On `main` this returned
+/// `content = "Let me greet them.</think>Hello!"`, `reasoning_content = None`.
+#[tokio::test]
+async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_reasoning_and_answer_split() {
+    let preprocessor = build_preprocessor(Some("nemotron_v3"), None);
+    let mut request: NvCreateChatCompletionRequest = serde_json::from_str(REQUEST_JSON).unwrap();
+    request.chat_template_args = Some(
+        serde_json::from_value(serde_json::json!({ "force_nonempty_content": true })).unwrap(),
+    );
+    let input_chunks = vec![
+        mock_content_chunk("<think>Let me greet them.</think>Hello!"),
+        mock_final_chunk(),
+    ];
+    let input_stream = stream::iter(input_chunks.into_iter().map(Annotated::from_data));
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .expect("postprocessor_parsing_stream should build");
+    let response = NvCreateChatCompletionResponse::from_annotated_stream(
+        output_stream,
+        ParsingOptions::default().with_move_reasoning_to_content_when_empty(true),
+    )
+    .await
+    .expect("aggregation should succeed");
+    let choice = &response.inner.choices[0];
+    assert_eq!(
+        choice.message.content.as_ref().map(get_text),
+        Some("Hello!"),
+        "answer must be the content, with no leaked reasoning or </think>"
+    );
+    assert_eq!(
+        choice.message.reasoning_content.as_deref(),
+        Some("Let me greet them."),
+        "reasoning must be preserved in reasoning_content, not moved into content"
+    );
+}
+
+/// Same reasoning+answer input WITHOUT `force_nonempty_content`: non-streaming
+/// reasoning parsing is unchanged, so the split is identical. Confirms the flag
+/// is a no-op when content is already present.
+#[tokio::test]
+async fn postprocessor_parsing_stream_nemotron_v3_reasoning_and_answer_split_no_flag() {
+    let preprocessor = build_preprocessor(Some("nemotron_v3"), None);
+    let request: NvCreateChatCompletionRequest = serde_json::from_str(REQUEST_JSON).unwrap();
+    let input_chunks = vec![
+        mock_content_chunk("<think>Let me greet them.</think>Hello!"),
+        mock_final_chunk(),
+    ];
+    let input_stream = stream::iter(input_chunks.into_iter().map(Annotated::from_data));
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .expect("postprocessor_parsing_stream should build");
+    let response = NvCreateChatCompletionResponse::from_annotated_stream(
+        output_stream,
+        ParsingOptions::default(),
+    )
+    .await
+    .expect("aggregation should succeed");
+    let choice = &response.inner.choices[0];
+    assert_eq!(
+        choice.message.content.as_ref().map(get_text),
+        Some("Hello!")
+    );
+    assert_eq!(
+        choice.message.reasoning_content.as_deref(),
+        Some("Let me greet them.")
+    );
+}
+
 /// Regression: if the stream ends after a partial `<think>` prefix, those bytes
-/// are valid content and must be flushed before the terminal chunk is emitted.
+/// must be flushed (not dropped) before the terminal chunk is emitted. With the
+/// parser on for streaming, the parser reports the unterminated buffer as
+/// reasoning at `finish_reasoning_stream`, so `<thi` surfaces as
+/// `reasoning_content` and `content` stays empty (streaming does no move — the
+/// non-streaming aggregated path moves the same bytes into content).
 #[tokio::test]
 async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_flushes_partial_prefix_on_finish()
 {
@@ -863,13 +1000,18 @@ async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_flushes_partial
         }
     }
 
-    assert_eq!(reasoning, "");
-    assert_eq!(content, "<thi");
+    assert_eq!(
+        reasoning, "<thi",
+        "partial prefix must survive as reasoning_content"
+    );
+    assert_eq!(content, "");
     assert!(finish_reasons.contains(&FinishReason::Stop));
 }
 
 /// Regression: the EOF path has no terminal delta to carry the buffered bytes,
-/// so the postprocessor must emit one final content chunk itself.
+/// so the postprocessor must emit one final chunk itself. With the parser on,
+/// the unterminated `<thi` flushes as `reasoning_content` (streaming does no
+/// move); the point of the test is that the bytes are not silently dropped.
 #[tokio::test]
 async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_flushes_partial_prefix_on_eof() {
     let preprocessor = build_preprocessor(Some("nemotron_v3"), None);
@@ -907,26 +1049,31 @@ async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_flushes_partial
         }
     }
 
-    assert_eq!(reasoning, "");
-    assert_eq!(content, "<thi");
+    assert_eq!(
+        reasoning, "<thi",
+        "partial prefix must survive as reasoning_content"
+    );
+    assert_eq!(content, "");
 }
 
 /// Dynamo already represents streamed responses as `choices: Vec<_>`, so this
-/// test is not adding new `n > 1` behavior. It verifies that the Nemotron v3
-/// `force_nonempty_content=true` path does not use one shared strip buffer for
-/// all choices. Both choices receive a split `<think>` prefix (`"<thi"` then
-/// `"nk>..."`). If the helper keeps only one global buffer/decided flag, choice
-/// 0 can consume the prefix state and choice 1 can leak `<think>` or lose text.
-/// The expected behavior is that each `choice.index` strips its own leading
-/// prefix independently and returns only normal content.
+/// test is not adding new `n > 1` behavior. It verifies that the disabled-reasoning
+/// strip path (`enable_thinking=false`, which is where the leading-`<think>` strip
+/// still runs) does not use one shared strip buffer for all choices. Both choices
+/// receive a split `<think>` prefix (`"<thi"` then `"nk>..."`). If the helper keeps
+/// only one global buffer/decided flag, choice 0 can consume the prefix state and
+/// choice 1 can leak `<think>` or lose text. The expected behavior is that each
+/// `choice.index` strips its own leading prefix independently and returns only
+/// normal content. (`force_nonempty_content` no longer takes this path — it keeps
+/// the reasoning parser on — so this exercises the strip path via `enable_thinking`.)
 #[tokio::test]
-async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_tracks_prefix_per_choice() {
+async fn postprocessor_parsing_stream_nemotron_v3_disabled_reasoning_tracks_prefix_per_choice() {
     let preprocessor = build_preprocessor(Some("nemotron_v3"), None);
 
     let mut request: NvCreateChatCompletionRequest = serde_json::from_str(REQUEST_JSON).unwrap();
     request.chat_template_args = Some(
         serde_json::from_value(serde_json::json!({
-            "force_nonempty_content": true
+            "enable_thinking": false
         }))
         .unwrap(),
     );
@@ -957,7 +1104,7 @@ async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_tracks_prefix_p
             }
             assert!(
                 choice.delta.reasoning_content.is_none(),
-                "reasoning_content must stay empty when force_nonempty_content=true"
+                "reasoning_content must stay empty when reasoning is disabled"
             );
         }
     }

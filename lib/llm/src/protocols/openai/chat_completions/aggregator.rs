@@ -423,6 +423,38 @@ impl DeltaAggregator {
             }
         }
 
+        // for non-streaming Nemotron `force_nonempty_content=true`
+        // requests, a reasoning-only turn leaves `content` empty because all
+        // output was split into `reasoning_content`. The chat template promised
+        // non-empty content, so surface the reasoning as content. Only when no
+        // content and no tool calls were produced; when content exists,
+        // reasoning stays in `reasoning_content`.
+        if parsing_options.move_reasoning_to_content_when_empty {
+            for choice in aggregator.choices.values_mut() {
+                let has_tool_calls = choice
+                    .tool_calls
+                    .as_ref()
+                    .is_some_and(|calls| !calls.is_empty());
+                // `content_parts` (multimodal) counts as content too — `From<DeltaChoice>`
+                // prefers parts over `text`, so moving reasoning into `text` here would be
+                // dropped. Only move when there is no content of either kind.
+                // Whitespace-only text counts as empty — matching vLLM's
+                // NemotronV3ReasoningParser (`not final_content.strip()`): a
+                // trailing newline after `</think>` must not block the move and
+                // leave semantically empty content.
+                if choice.text.trim().is_empty()
+                    && choice.content_parts.is_empty()
+                    && !has_tool_calls
+                    && choice
+                        .reasoning_content
+                        .as_deref()
+                        .is_some_and(|r| !r.trim().is_empty())
+                {
+                    choice.text = choice.reasoning_content.take().unwrap_or_default();
+                }
+            }
+        }
+
         // Extract aggregated choices and sort them by index.
         let mut choices: Vec<_> = aggregator
             .choices
@@ -631,6 +663,184 @@ mod tests {
             comment: None,
             error: None,
         }
+    }
+
+    /// Build a stream delta with `reasoning_content` set and optional (possibly
+    /// empty) text content — mirrors what the reasoning parser emits after
+    /// splitting think tags. Used by the force_nonempty_content test.
+    fn create_reasoning_delta(
+        index: u32,
+        content: &str,
+        reasoning_content: &str,
+    ) -> Annotated<NvCreateChatCompletionStreamResponse> {
+        // ALLOW: function_call is deprecated
+        #[allow(deprecated)]
+        let delta = dynamo_protocols::types::ChatCompletionStreamResponseDelta {
+            content: Some(ChatCompletionMessageContent::Text(content.to_string())),
+            function_call: None,
+            tool_calls: None,
+            role: Some(dynamo_protocols::types::Role::Assistant),
+            refusal: None,
+            reasoning_content: Some(reasoning_content.to_string()),
+        };
+        let choice = dynamo_protocols::types::ChatChoiceStream {
+            index,
+            delta,
+            finish_reason: Some(dynamo_protocols::types::FinishReason::Stop),
+            logprobs: None,
+        };
+        let data = NvCreateChatCompletionStreamResponse {
+            inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
+                id: "test_id".to_string(),
+                model: "nvidia/nvidia-nemotron-3-ultra".to_string(),
+                created: 1234567890,
+                service_tier: None,
+                usage: None,
+                system_fingerprint: None,
+                choices: vec![choice],
+                object: "chat.completion".to_string(),
+            },
+            nvext: None,
+            llm_metrics: None,
+        };
+        Annotated {
+            data: Some(data),
+            id: Some("test_id".to_string()),
+            event: None,
+            comment: None,
+            error: None,
+        }
+    }
+
+    /// with Nemotron `force_nonempty_content=true`, a non-streaming
+    /// reasoning-only turn must surface its reasoning as `content` (the chat
+    /// template promised non-empty content), but only when no content was
+    /// generated. Gated by `ParsingOptions::move_reasoning_to_content_when_empty`.
+    #[tokio::test]
+    async fn test_move_reasoning_to_content_when_empty() {
+        let reasoning_only = || {
+            Box::pin(stream::iter(vec![create_reasoning_delta(
+                0,
+                "",
+                "Let me think.",
+            )]))
+        };
+
+        // Repro: without the flag, a reasoning-only turn leaves content empty
+        // (None) even though force_nonempty_content promised non-empty content.
+        let resp = DeltaAggregator::apply(reasoning_only(), ParsingOptions::default())
+            .await
+            .unwrap();
+        let msg = &resp.inner.choices[0].message;
+        assert!(
+            msg.content.is_none(),
+            "repro: content empty without the flag"
+        );
+        assert_eq!(msg.reasoning_content.as_deref(), Some("Let me think."));
+
+        // Fixed: with the flag, reasoning is moved into content and cleared.
+        let opts = ParsingOptions::default().with_move_reasoning_to_content_when_empty(true);
+        let resp = DeltaAggregator::apply(reasoning_only(), opts.clone())
+            .await
+            .unwrap();
+        let msg = &resp.inner.choices[0].message;
+        assert_eq!(
+            msg.content.as_ref().unwrap(),
+            &ChatCompletionMessageContent::Text("Let me think.".to_string()),
+        );
+        assert_eq!(msg.reasoning_content, None);
+
+        // Whitespace-only content counts as empty (a trailing newline after
+        // `</think>` from the incremental parser) — matches vLLM's
+        // `not final_content.strip()` check; the move must still fire.
+        let whitespace_content = Box::pin(stream::iter(vec![create_reasoning_delta(
+            0,
+            "\n",
+            "Let me think.",
+        )]));
+        let resp = DeltaAggregator::apply(whitespace_content, opts.clone())
+            .await
+            .unwrap();
+        let msg = &resp.inner.choices[0].message;
+        assert_eq!(
+            msg.content.as_ref().unwrap(),
+            &ChatCompletionMessageContent::Text("Let me think.".to_string()),
+        );
+        assert_eq!(msg.reasoning_content, None);
+
+        // When content WAS generated, reasoning stays in reasoning_content.
+        let with_content = Box::pin(stream::iter(vec![create_reasoning_delta(
+            0,
+            "The answer is 42.",
+            "Let me think.",
+        )]));
+        let resp = DeltaAggregator::apply(with_content, opts).await.unwrap();
+        let msg = &resp.inner.choices[0].message;
+        assert_eq!(
+            msg.content.as_ref().unwrap(),
+            &ChatCompletionMessageContent::Text("The answer is 42.".to_string()),
+        );
+        assert_eq!(msg.reasoning_content.as_deref(), Some("Let me think."));
+    }
+
+    /// Multimodal content lives in `content_parts`, and `From<DeltaChoice>` prefers
+    /// parts over `text` — so reasoning must NOT be moved when parts are present
+    /// (it would be silently dropped). Guards the `content_parts` half of the
+    /// no-content check.
+    #[tokio::test]
+    async fn test_move_reasoning_skips_when_content_parts_present() {
+        #[allow(deprecated)]
+        let delta = dynamo_protocols::types::ChatCompletionStreamResponseDelta {
+            content: Some(ChatCompletionMessageContent::Parts(vec![
+                dynamo_protocols::types::ChatCompletionResponseContentPart::Text(
+                    dynamo_protocols::types::ChatCompletionResponseContentPartText {
+                        text: "an image".to_string(),
+                    },
+                ),
+            ])),
+            function_call: None,
+            tool_calls: None,
+            role: Some(dynamo_protocols::types::Role::Assistant),
+            refusal: None,
+            reasoning_content: Some("thinking".to_string()),
+        };
+        let choice = dynamo_protocols::types::ChatChoiceStream {
+            index: 0,
+            delta,
+            finish_reason: Some(dynamo_protocols::types::FinishReason::Stop),
+            logprobs: None,
+        };
+        let data = NvCreateChatCompletionStreamResponse {
+            inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
+                id: "test_id".to_string(),
+                model: "m".to_string(),
+                created: 1,
+                service_tier: None,
+                usage: None,
+                system_fingerprint: None,
+                choices: vec![choice],
+                object: "chat.completion".to_string(),
+            },
+            nvext: None,
+            llm_metrics: None,
+        };
+        let annotated = Annotated {
+            data: Some(data),
+            id: Some("test_id".to_string()),
+            event: None,
+            comment: None,
+            error: None,
+        };
+        let opts = ParsingOptions::default().with_move_reasoning_to_content_when_empty(true);
+        let resp = DeltaAggregator::apply(Box::pin(stream::iter(vec![annotated])), opts)
+            .await
+            .unwrap();
+        let msg = &resp.inner.choices[0].message;
+        assert!(matches!(
+            msg.content.as_ref().unwrap(),
+            ChatCompletionMessageContent::Parts(_)
+        ));
+        assert_eq!(msg.reasoning_content.as_deref(), Some("thinking"));
     }
 
     /// Build a stream delta carrying a raw list of tool-call chunks (no content).

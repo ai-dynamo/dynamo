@@ -337,6 +337,16 @@ pub struct ParsingOptions {
     /// support are checked separately in the aggregator.
     #[serde(default)]
     pub experimental_v2_batch_eligible: bool,
+
+    /// Non-streaming only: when the aggregated message has no non-reasoning
+    /// `content`, move the parsed `reasoning_content` into `content` instead of
+    /// returning empty content. Set by the chat HTTP handler for Nemotron
+    /// force-reasoning parsers requested with `force_nonempty_content=true`
+    /// — the chat template promises non-empty content, so a
+    /// reasoning-only turn must surface the reasoning as content. When content
+    /// was generated, reasoning stays in `reasoning_content`.
+    #[serde(default)]
+    pub move_reasoning_to_content_when_empty: bool,
 }
 
 impl ParsingOptions {
@@ -345,6 +355,7 @@ impl ParsingOptions {
             tool_call_parser,
             reasoning_parser,
             experimental_v2_batch_eligible: false,
+            move_reasoning_to_content_when_empty: false,
         }
     }
 
@@ -353,6 +364,14 @@ impl ParsingOptions {
     /// `chat_completions::tool_parser_v2::batch_tool_choice_eligible`.
     pub fn with_experimental_v2_batch_eligible(mut self, eligible: bool) -> Self {
         self.experimental_v2_batch_eligible = eligible;
+        self
+    }
+
+    /// Set whether a reasoning-only aggregated message should surface its
+    /// `reasoning_content` as `content` (non-streaming force_nonempty_content;
+    /// see the field docs).
+    pub fn with_move_reasoning_to_content_when_empty(mut self, enabled: bool) -> Self {
+        self.move_reasoning_to_content_when_empty = enabled;
         self
     }
 }
