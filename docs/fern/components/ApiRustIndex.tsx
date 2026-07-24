@@ -22,38 +22,6 @@ const GROUPS: { id: RustCrateGroup; label: string }[] = [
 ];
 
 const RUST_CSS = `
-.dynref-ari-header {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: flex-end;
-    justify-content: space-between;
-    gap: 8px 16px;
-    margin-bottom: 10px;
-}
-
-.dynref-ari-title {
-    margin: 0;
-    color: var(--pst-color-text-base);
-    font-size: 20px;
-    font-weight: 600;
-}
-
-.dynref-ari-rail {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    margin: 0 0 12px;
-}
-
-.dynref-ari-pill {
-    padding: 4px 9px;
-    border: 1px solid var(--border, var(--grayscale-a5));
-    border-radius: 6px;
-    color: var(--pst-color-text-base);
-    font-size: 12px;
-    cursor: pointer;
-}
-
 .dynref-ari-group {
     margin: 13px 0 3px;
     color: var(--pst-color-text-muted);
@@ -119,11 +87,11 @@ const RUST_CSS = `
     border-bottom: 1px solid var(--border, var(--grayscale-a5));
 }
 
-#ari-all:checked ~ .dynref-ari-rail label[for="ari-all"],
-#ari-core:checked ~ .dynref-ari-rail label[for="ari-core"],
-#ari-supporting:checked ~ .dynref-ari-rail label[for="ari-supporting"],
-#ari-development:checked ~ .dynref-ari-rail label[for="ari-development"],
-#ari-deprecated:checked ~ .dynref-ari-rail label[for="ari-deprecated"] {
+#ari-all:checked ~ .dynref-filter-rail label[for="ari-all"],
+#ari-core:checked ~ .dynref-filter-rail label[for="ari-core"],
+#ari-supporting:checked ~ .dynref-filter-rail label[for="ari-supporting"],
+#ari-development:checked ~ .dynref-filter-rail label[for="ari-development"],
+#ari-deprecated:checked ~ .dynref-filter-rail label[for="ari-deprecated"] {
     border-color: var(--nv-color-green, #76B900);
     box-shadow: 0 0 0 1px var(--nv-color-green, #76B900);
     background: var(--dynref-green-bg);
@@ -137,11 +105,11 @@ const RUST_CSS = `
     display: none;
 }
 
-#ari-all:focus-visible ~ .dynref-ari-rail label[for="ari-all"],
-#ari-core:focus-visible ~ .dynref-ari-rail label[for="ari-core"],
-#ari-supporting:focus-visible ~ .dynref-ari-rail label[for="ari-supporting"],
-#ari-development:focus-visible ~ .dynref-ari-rail label[for="ari-development"],
-#ari-deprecated:focus-visible ~ .dynref-ari-rail label[for="ari-deprecated"] {
+#ari-all:focus-visible ~ .dynref-filter-rail label[for="ari-all"],
+#ari-core:focus-visible ~ .dynref-filter-rail label[for="ari-core"],
+#ari-supporting:focus-visible ~ .dynref-filter-rail label[for="ari-supporting"],
+#ari-development:focus-visible ~ .dynref-filter-rail label[for="ari-development"],
+#ari-deprecated:focus-visible ~ .dynref-filter-rail label[for="ari-deprecated"] {
     outline: 2px solid var(--nv-color-green, #76B900);
     outline-offset: 2px;
 }
@@ -172,10 +140,10 @@ function FilterInputs() {
 
 function FilterRail() {
     return (
-        <div className="dynref-ari-rail">
-            <label className="dynref-ari-pill" htmlFor="ari-all">All · {RUST_CRATES.length}</label>
+        <div className="dynref-filter-rail">
+            <label className="dynref-filter-pill" htmlFor="ari-all">All · {RUST_CRATES.length}</label>
             {GROUPS.map((group) => (
-                <label className="dynref-ari-pill" htmlFor={`ari-${group.id}`} key={group.id}>
+                <label className="dynref-filter-pill" htmlFor={`ari-${group.id}`} key={group.id}>
                     {group.label} · {RUST_CRATES.filter((crate) => crate.group === group.id).length}
                 </label>
             ))}
@@ -252,10 +220,10 @@ function Bindings() {
 
 function Header() {
     return (
-        <div className="dynref-ari-header">
+        <div className="dynref-index-header">
             <div>
                 <p className="dynref-eyebrow">Rust API</p>
-                <p className="dynref-ari-title">{RUST_CRATES.length} published crates</p>
+                <p className="dynref-index-title">{RUST_CRATES.length} published crates</p>
             </div>
             <span className="dynref-badge dynref-badge--green">release {RUST_WORKSPACE_VERSION}</span>
         </div>

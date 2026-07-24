@@ -906,8 +906,9 @@ navigation:
           # ==================== API Reference ====================
           # docs/fern/scripts/gen_python_api.py generates the Python landing
           # page (Overview) and one deterministic MDX per curated module.
-          # The Python section owns the landing route; its generated children
-          # stay hidden so Fern validates links without cluttering the sidebar.
+          # Each per-module page is a visible sibling of the Python landing so
+          # the sidebar exposes every published module. The section's path is
+          # the landing (/reference/api/python); children get their own slugs.
           - section: API Reference
             slug: api
             contents:
@@ -920,50 +921,63 @@ navigation:
                   - page: dynamo._core
                     path: reference/api/python/_core.mdx
                     slug: _core
-                    hidden: true
                   - page: dynamo.runtime
                     path: reference/api/python/runtime.mdx
                     slug: runtime
-                    hidden: true
                   - page: dynamo.llm
                     path: reference/api/python/llm.mdx
                     slug: llm
-                    hidden: true
                   - page: dynamo.frontend
                     path: reference/api/python/frontend.mdx
                     slug: frontend
-                    hidden: true
                   - page: dynamo.common
                     path: reference/api/python/common.mdx
                     slug: common
-                    hidden: true
                   - page: dynamo.health_check
                     path: reference/api/python/health_check.mdx
                     slug: health_check
-                    hidden: true
                   - page: dynamo.logits_processing
                     path: reference/api/python/logits_processing.mdx
                     slug: logits_processing
-                    hidden: true
                   - page: dynamo.planner
                     path: reference/api/python/planner.mdx
                     slug: planner
-                    hidden: true
                   - page: dynamo.router
                     path: reference/api/python/router.mdx
                     slug: router
-                    hidden: true
                   - page: dynamo.mocker
                     path: reference/api/python/mocker.mdx
                     slug: mocker
-                    hidden: true
                   - page: dynamo.nixl_connect
                     path: reference/api/python/nixl_connect.mdx
                     slug: nixl_connect
-                    hidden: true
               - page: Rust API
                 path: reference/api/rust/README.mdx
                 slug: rust
+              # ==================== Kubernetes API ====================
+              # docs/fern/scripts/gen_kubernetes_api.py regenerates the Full
+              # API Reference page from the operator CRDs. The section owns
+              # the /reference/api/kubernetes landing route; DGD / DGDR / DCD
+              # trimmed references live as sibling pages. Legacy
+              # /reference/kubernetes-api/* URLs are redirected in docs.yml.
+              - section: Kubernetes API
+                path: kubernetes/api-reference-fern.mdx
+                slug: kubernetes
+                contents:
+                  - page: DynamoGraphDeployment
+                    path: kubernetes/dgd-reference.mdx
+                    slug: dynamographdeployment
+                  - page: DynamoGraphDeploymentRequest
+                    path: kubernetes/dgdr-reference.mdx
+                    slug: dynamographdeploymentrequest
+                  - page: DynamoComponentDeployment
+                    path: kubernetes/dcd-reference.mdx
+                    slug: dynamocomponentdeployment
+                  - section: Additional Resources
+                    hidden: true
+                    contents:
+                      - page: API Reference (K8s)
+                        path: kubernetes/api-reference.md
           - page: Compatibility
             path: reference/compatibility.mdx
           - page: Examples
@@ -1000,27 +1014,6 @@ navigation:
             path: reference/releases-data.mdx
             slug: releases-data
             hidden: true
-
-      # ==================== Kubernetes API variant ====================
-      - title: Kubernetes API
-        icon: fa-brands fa-kubernetes
-        slug: kubernetes-api
-        layout:
-          - page: DynamoGraphDeployment
-            path: kubernetes/dgd-reference.mdx
-          - page: DynamoGraphDeploymentRequest
-            path: kubernetes/dgdr-reference.mdx
-          - page: DynamoComponentDeployment
-            path: kubernetes/dcd-reference.mdx
-          - page: Full API Reference
-            path: kubernetes/api-reference-fern.mdx
-
-          # Accessible by direct URL but not shown in the sidebar.
-          - section: Additional Resources
-            hidden: true
-            contents:
-              - page: API Reference (K8s)
-                path: kubernetes/api-reference.md
 
       # ==================== Components variant ====================
       - title: Components

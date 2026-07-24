@@ -48,44 +48,14 @@ const ASB_CSS = `
 .dynref-asb-import {
     margin: 0 0 10px;
     padding: 8px 10px;
-    background: rgba(120, 120, 120, 0.06);
-    border: 1px solid var(--border, var(--grayscale-a5));
+    background: var(--dynref-nested-bg);
+    border: 1px solid var(--dynref-nested-border);
     border-radius: 6px;
     font-family: var(--pst-font-family-monospace, ui-monospace, SFMono-Regular, Menlo, monospace);
     font-size: 12.5px;
     color: var(--pst-color-text-base);
     overflow-x: auto;
     white-space: pre;
-}
-
-.dark .dynref-asb-import {
-    background: #161616;
-    border-color: #333;
-}
-
-.dynref-asb-rail {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    margin: 0 0 12px;
-}
-
-.dynref-asb-pill {
-    display: inline-flex;
-    align-items: center;
-    min-height: 28px;
-    padding: 4px 10px;
-    border: 1px solid var(--border, var(--grayscale-a5));
-    border-radius: var(--rounded, 6px);
-    background: transparent;
-    color: var(--pst-color-text-base);
-    font-size: 12.5px;
-    line-height: 1;
-    cursor: pointer;
-}
-
-.dynref-asb-pill:hover {
-    border-color: var(--nv-color-green, #76B900);
 }
 
 .dynref-asb-group {
@@ -208,19 +178,14 @@ const ASB_CSS = `
 .dynref-asb-sig {
     margin: 0;
     padding: 6px 8px;
-    background: rgba(120, 120, 120, 0.06);
-    border: 1px solid var(--border, var(--grayscale-a5));
+    background: var(--dynref-nested-bg);
+    border: 1px solid var(--dynref-nested-border);
     border-radius: 4px;
     font-family: var(--pst-font-family-monospace, ui-monospace, SFMono-Regular, Menlo, monospace);
     font-size: 12px;
     color: var(--pst-color-text-base);
     overflow-x: auto;
     white-space: pre;
-}
-
-.dark .dynref-asb-sig {
-    background: #161616;
-    border-color: #333;
 }
 
 .dynref-asb-methods-heading {
@@ -283,17 +248,13 @@ const ASB_CSS = `
 .dynref-asb-method-sig {
     margin: 0;
     padding: 4px 6px;
-    background: rgba(120, 120, 120, 0.05);
+    background: var(--dynref-nested-bg);
     border-radius: 3px;
     font-family: var(--pst-font-family-monospace, ui-monospace, SFMono-Regular, Menlo, monospace);
     font-size: 11.5px;
     color: var(--pst-color-text-base);
     overflow-x: auto;
     white-space: pre;
-}
-
-.dark .dynref-asb-method-sig {
-    background: #161616;
 }
 
 .dynref-asb-note {
@@ -310,18 +271,18 @@ const ASB_CSS = `
     display: none;
 }
 
-#asb-all:checked ~ .dynref-asb-rail label[for="asb-all"],
-#asb-class:checked ~ .dynref-asb-rail label[for="asb-class"],
-#asb-function:checked ~ .dynref-asb-rail label[for="asb-function"] {
+#asb-all:checked ~ .dynref-filter-rail label[for="asb-all"],
+#asb-class:checked ~ .dynref-filter-rail label[for="asb-class"],
+#asb-function:checked ~ .dynref-filter-rail label[for="asb-function"] {
     border-color: var(--nv-color-green, #76B900);
     box-shadow: 0 0 0 1px var(--nv-color-green, #76B900);
-    background: rgba(118, 185, 0, 0.08);
+    background: var(--dynref-green-bg);
     font-weight: 700;
 }
 
-#asb-all:focus-visible ~ .dynref-asb-rail label[for="asb-all"],
-#asb-class:focus-visible ~ .dynref-asb-rail label[for="asb-class"],
-#asb-function:focus-visible ~ .dynref-asb-rail label[for="asb-function"] {
+#asb-all:focus-visible ~ .dynref-filter-rail label[for="asb-all"],
+#asb-class:focus-visible ~ .dynref-filter-rail label[for="asb-class"],
+#asb-function:focus-visible ~ .dynref-filter-rail label[for="asb-function"] {
     outline: 2px solid var(--nv-color-green, #76B900);
     outline-offset: 1px;
 }
@@ -500,14 +461,14 @@ function importSnippet(mod: ApiModule): string {
 
 function FilterRail({ counts }: { counts: Counts }) {
     return (
-        <div className="dynref-asb-rail">
-            <label className="dynref-asb-pill" htmlFor="asb-all">
+        <div className="dynref-filter-rail">
+            <label className="dynref-filter-pill" htmlFor="asb-all">
                 All · {counts.total}
             </label>
-            <label className="dynref-asb-pill" htmlFor="asb-class">
+            <label className="dynref-filter-pill" htmlFor="asb-class">
                 Classes · {counts.classes}
             </label>
-            <label className="dynref-asb-pill" htmlFor="asb-function">
+            <label className="dynref-filter-pill" htmlFor="asb-function">
                 Functions · {counts.functions}
             </label>
         </div>

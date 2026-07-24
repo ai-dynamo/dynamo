@@ -440,11 +440,16 @@ def test_python_index_links_to_fern_routes_not_mdx_files() -> None:
 
 
 def test_reference_hero_uses_version_relative_site_routes() -> None:
-    """The API landing's React links must resolve without MDX rewriting."""
+    """The API landing's React links must resolve without MDX rewriting.
+
+    Every landingHref sits inside the ``api/`` segment now that Kubernetes
+    lives alongside Python and Rust under the same API Reference section.
+    """
     source = (COMPONENTS_DIR / "ApiReferenceHero.tsx").read_text(encoding="utf-8")
     assert 'landingHref: "api/python"' in source
     assert 'landingHref: "api/rust"' in source
-    assert 'landingHref: "../kubernetes-api/full-api-reference"' in source
+    assert 'landingHref: "api/kubernetes"' in source
+    assert 'landingHref: "../kubernetes-api/full-api-reference"' not in source
     assert "href={`api/python/${mod.slug}`}" in source
     assert "python/README.mdx" not in source
 
@@ -503,8 +508,9 @@ def test_index_yml_python_registrations_do_not_shadow_each_other() -> None:
 def test_python_landing_owns_the_python_section_slug() -> None:
     """The landing page must be the Python section path.
 
-    A sibling page and hidden section with the same ``python`` slug collide
-    in Fern and route the landing URL to the first generated module instead.
+    The section carries the ``python`` slug and the README landing; every
+    generated module page sits underneath as a visible sibling — the earlier
+    hidden-children pattern hid the whole surface from the sidebar.
     """
     doc = yaml.safe_load((FERN_ROOT / "index.yml").read_text(encoding="utf-8"))
     landing = _find_node_by_path(doc, "reference/api/python/README.mdx")
@@ -512,7 +518,9 @@ def test_python_landing_owns_the_python_section_slug() -> None:
     assert landing.get("slug") == "python"
     module_pages = landing.get("contents")
     assert isinstance(module_pages, list)
-    assert all(page.get("hidden") is True for page in module_pages)
+    assert not any(
+        page.get("hidden") is True for page in module_pages
+    ), "Python module pages must remain visible sidebar entries."
 
 
 def _find_node_by_path(node: object, target: str) -> dict[str, object]:

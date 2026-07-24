@@ -18,38 +18,6 @@
 import { API_MODULES, type ApiModule } from "./api-reference.data";
 
 const API_CSS = `
-.dynref-api-header {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: flex-end;
-    justify-content: space-between;
-    gap: 8px 16px;
-    margin-bottom: 12px;
-}
-
-.dynref-api-title {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 10px;
-    margin: 0;
-    color: var(--pst-color-text-base);
-    font-size: 20px;
-    font-weight: 600;
-    line-height: 1.2;
-}
-
-.dynref-api-meta {
-    margin: 0;
-    color: var(--pst-color-text-muted);
-    font-size: 12.5px;
-}
-
-.dynref-api-meta a {
-    color: inherit;
-    text-decoration: underline;
-}
-
 .dynref-api-list {
     display: grid;
     grid-template-columns: 220px minmax(0, 1fr) max-content;
@@ -134,14 +102,14 @@ function totalSymbols(): number {
 
 function IndexHeader() {
     return (
-        <div className="dynref-api-header">
+        <div className="dynref-index-header">
             <div>
                 <p className="dynref-eyebrow">Python API</p>
-                <div className="dynref-api-title">
+                <div className="dynref-index-title">
                     {API_MODULES.length} curated Python modules
                 </div>
             </div>
-            <p className="dynref-api-meta">
+            <p className="dynref-index-meta">
                 {totalSymbols()} public class + function symbols · statically
                 discovered from{" "}
                 <a href="https://github.com/ai-dynamo/dynamo">

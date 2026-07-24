@@ -20,36 +20,6 @@
 import { API_MODULES, type ApiModule } from "./api-reference.data";
 
 const ARH_CSS = `
-.dynref-arh-header {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: flex-end;
-    justify-content: space-between;
-    gap: 8px 16px;
-    margin-bottom: 16px;
-}
-
-.dynref-arh-title {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 10px;
-    margin: 0;
-    color: var(--pst-color-text-base);
-    font-size: 22px;
-    font-weight: 600;
-    line-height: 1.2;
-}
-
-.dynref-arh-meta {
-    margin: 0;
-}
-
-.dynref-arh-meta a {
-    color: inherit;
-    text-decoration: underline;
-}
-
 .dynref-arh-langs {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -62,14 +32,9 @@ const ARH_CSS = `
     flex-direction: column;
     gap: 6px;
     padding: 14px 16px;
-    border: 1px solid var(--border, var(--grayscale-a5));
+    border: 1px solid var(--dynref-nested-border);
     border-radius: 10px;
-    background: transparent;
-}
-
-.dark .dynref-arh-lang {
-    background: #1d1d1d;
-    border-color: #2e2e2e;
+    background: var(--dynref-nested-bg);
 }
 
 .dynref-arh-lang-name {
@@ -110,23 +75,19 @@ const ARH_CSS = `
     display: inline-flex;
     align-items: center;
     padding: 3px 8px;
-    border: 1px solid var(--border, var(--grayscale-a5));
+    border: 1px solid var(--dynref-nested-border);
     border-radius: 6px;
     color: var(--pst-color-text-base);
     font-family: var(--pst-font-family-monospace, ui-monospace, SFMono-Regular, Menlo, monospace);
     font-size: 12px;
     text-decoration: none;
     line-height: 1;
+    background: var(--dynref-nested-bg);
 }
 
 .dynref-arh-module:hover {
     border-color: var(--nv-color-green, #76B900);
     text-decoration: none;
-}
-
-.dark .dynref-arh-module {
-    background: #161616;
-    border-color: #333;
 }
 
 .dynref-arh-note {
@@ -165,7 +126,7 @@ const LANGUAGE_CARDS: LanguageCard[] = [
         label: "Kubernetes",
         description:
             "DynamoGraphDeployment, DynamoGraphDeploymentRequest, and DynamoComponentDeployment custom-resource fields.",
-        landingHref: "../kubernetes-api/full-api-reference",
+        landingHref: "api/kubernetes",
         modules: [],
     },
 ];
@@ -204,14 +165,14 @@ function LangCard({ card }: { card: LanguageCard }) {
 function HeroHeader({ symbolCount }: { symbolCount: number }) {
     const modLabel = API_MODULES.length === 1 ? "module" : "modules";
     return (
-        <div className="dynref-arh-header">
+        <div className="dynref-index-header">
             <div>
                 <p className="dynref-eyebrow">API Reference</p>
-                <div className="dynref-arh-title">
+                <div className="dynref-index-title">
                     Programmatic surfaces across {LANGUAGE_CARDS.length} languages
                 </div>
             </div>
-            <p className="dynref-muted dynref-arh-meta">
+            <p className="dynref-index-meta">
                 {API_MODULES.length} Python {modLabel} · {symbolCount} public symbols · statically discovered from{" "}
                 <a href="https://github.com/ai-dynamo/dynamo">ai-dynamo/dynamo</a>
             </p>

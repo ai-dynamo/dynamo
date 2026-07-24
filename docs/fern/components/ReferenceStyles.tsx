@@ -174,6 +174,84 @@ const REFERENCE_CSS = `
     font-weight: 600;
 }
 
+/* Shared surface tone for nested content blocks (import blocks, package
+   groups, monospace signatures) — one dark/light pair so every reference
+   component reads as one system. */
+:root {
+    --dynref-nested-bg: rgba(120, 120, 120, 0.06);
+    --dynref-nested-border: var(--border, var(--grayscale-a5));
+}
+
+.dark {
+    --dynref-nested-bg: #161616;
+    --dynref-nested-border: #2b2b2b;
+}
+
+/* Shared "index page title" for the API landing components (Python index,
+   Rust crates, Kubernetes hero, API Reference hero). 20px keeps the
+   compact-index visual density; the individual components used to pick
+   22px vs 20px inconsistently. */
+.dynref-index-header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 8px 16px;
+    margin-bottom: 12px;
+}
+
+.dynref-index-title {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+    margin: 0;
+    color: var(--pst-color-text-base);
+    font-size: 20px;
+    font-weight: 600;
+    line-height: 1.2;
+}
+
+.dynref-index-meta {
+    margin: 0;
+    color: var(--pst-color-text-muted);
+    font-size: 12.5px;
+}
+
+.dynref-index-meta a {
+    color: inherit;
+    text-decoration: underline;
+}
+
+/* Shared CSS-only filter rail + pills. Each component keeps its own
+   :checked sibling active-state rules (component-local IDs), but the pill
+   dimensions and hover treatment are one style so the four filter surfaces
+   feel identical. Composes with the .dynref-vh hidden radio pattern. */
+.dynref-filter-rail {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 0 0 12px;
+}
+
+.dynref-filter-pill {
+    display: inline-flex;
+    align-items: center;
+    min-height: 28px;
+    padding: 4px 10px;
+    border: 1px solid var(--border, var(--grayscale-a5));
+    border-radius: var(--rounded, 6px);
+    background: transparent;
+    color: var(--pst-color-text-base);
+    font-size: 12.5px;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.dynref-filter-pill:hover {
+    border-color: var(--nv-color-green, #76B900);
+}
+
 /* Category chips — palette replicated from main.css .dynamo-chip-*. */
 .dynref-chip {
     display: inline-flex;
