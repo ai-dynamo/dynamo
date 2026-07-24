@@ -77,7 +77,7 @@ class TestTextFormatter:
         f = TextFormatter(model_name="test-model")
         ro = _make_request_output("done", finish_reason="abort")
         chunk = f.format(ro, "req-1")
-        assert chunk["choices"][0]["finish_reason"] == "cancelled"
+        assert chunk["choices"][0]["finish_reason"] == "stop"
 
     def test_finish_reason_none_when_not_finished(self):
         f = TextFormatter(model_name="test-model")
