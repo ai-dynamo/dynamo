@@ -2335,6 +2335,59 @@ mod tests {
     }
 
     #[test]
+    fn exact_mm_routing_capability_mismatch_never_joins_existing_worker_set() {
+        fn card_with_capability(supports_exact_mm_routing: bool) -> ModelDeploymentCard {
+            let mut card = ModelDeploymentCard::with_name_only("llama");
+            card.model_type = ModelType::Chat;
+            card.worker_type = Some(WorkerType::Aggregated);
+            if supports_exact_mm_routing {
+                card.runtime_config.runtime_data.insert(
+                    crate::local_model::runtime_config::VLLM_EXACT_MM_ROUTING_CAPABILITY
+                        .to_string(),
+                    true.into(),
+                );
+            }
+            card
+        }
+
+        fn assert_second_worker_is_incompatible(first_supports: bool, second_supports: bool) {
+            let first = card_with_capability(first_supports);
+            let second = card_with_capability(second_supports);
+            let endpoint_id = test_endpoint_id("generate");
+            let ws_key = worker_set_key(&endpoint_id, first.model_type, first.worker_type);
+            let model = crate::discovery::Model::new(first.name().to_string());
+            model.add_worker_set(
+                ws_key.clone(),
+                Arc::new(WorkerSet::new(
+                    endpoint_id.namespace,
+                    first.mdcsum().to_string(),
+                    first,
+                )),
+            );
+
+            assert!(
+                !model.is_checksum_compatible(&ws_key, second.mdcsum()),
+                "a worker with a different exact-MM capability must be drained instead of joining"
+            );
+        }
+
+        let absent = card_with_capability(false);
+        let mut explicit_false = card_with_capability(false);
+        explicit_false.runtime_config.runtime_data.insert(
+            crate::local_model::runtime_config::VLLM_EXACT_MM_ROUTING_CAPABILITY.to_string(),
+            false.into(),
+        );
+        assert_eq!(
+            absent.mdcsum(),
+            explicit_false.mdcsum(),
+            "absent and explicit-false capability values are equivalent"
+        );
+
+        assert_second_worker_is_incompatible(false, true);
+        assert_second_worker_is_incompatible(true, false);
+    }
+
+    #[test]
     fn stale_cleanup_cannot_reserve_after_a_new_registration() {
         let operation = InstanceOperation::default();
         let snapshot_generation = operation.current_generation();

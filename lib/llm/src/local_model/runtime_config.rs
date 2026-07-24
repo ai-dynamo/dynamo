@@ -56,6 +56,9 @@ pub const ENV_TOKENIZER_BACKEND: &str = "DYN_TOKENIZER";
 /// surfaces without implementing vLLM's Generate contract.
 pub const VLLM_INFERENCE_V1_GENERATE_CAPABILITY: &str = "vllm_inference_v1_generate";
 
+/// Worker capability for exact multimodal KV routing on vLLM's Generate API.
+pub const VLLM_EXACT_MM_ROUTING_CAPABILITY: &str = "vllm_exact_mm_routing";
+
 /// Tokenizer backend used by the Rust preprocessor for BPE tokenizer.json models.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

@@ -76,6 +76,20 @@ pub fn pad_value_for_mm_hash(mm_hash: u64) -> u32 {
     (MM_PAD_SHIFT_VALUE + (mm_hash & MM_PAD_HASH_MASK)) as u32
 }
 
+/// Map a non-empty multimodal identifier to Dynamo's routing hash.
+///
+/// Preserve vLLM's canonical 64-character hex-digest mapping for compatibility,
+/// and hash shorter opaque identifiers emitted by external renderers with XXH3.
+pub fn hash_mm_identifier(identifier: &str) -> Option<u64> {
+    if identifier.is_empty() {
+        return None;
+    }
+    if identifier.len() == 64 && identifier.chars().all(|c| c.is_ascii_hexdigit()) {
+        return u64::from_str_radix(&identifier[..16], 16).ok();
+    }
+    Some(xxh3::xxh3_64(identifier.as_bytes()))
+}
+
 /// Compute the hash for a sequence of tokens, optionally including multimodal metadata,
 /// LoRA adapter identity, and cache namespace.
 ///
@@ -1325,6 +1339,22 @@ mod tests {
             (MM_PAD_SHIFT_VALUE + 0xCAFE) as u32,
             "high bits above the 30-bit mask must be discarded"
         );
+    }
+
+    #[test]
+    fn mm_identifier_hash_preserves_canonical_vllm_digest_mapping() {
+        let identifier = "0123456789abcdef".repeat(4);
+        assert_eq!(hash_mm_identifier(&identifier), Some(0x0123_4567_89ab_cdef));
+    }
+
+    #[test]
+    fn mm_identifier_hash_supports_opaque_identifiers() {
+        let identifier = "opaque-renderer-image-0";
+        assert_eq!(
+            hash_mm_identifier(identifier),
+            Some(xxh3::xxh3_64(identifier.as_bytes()))
+        );
+        assert_eq!(hash_mm_identifier(""), None);
     }
 
     #[test]

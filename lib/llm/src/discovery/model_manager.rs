@@ -19,7 +19,7 @@ use tokio::sync::oneshot;
 
 use super::worker_monitor::LoadThresholdConfig;
 use super::{
-    KvSourceMembershipWatch, Model, RuntimeConfigWatch, WorkerSet,
+    GenerateEngineSelection, KvSourceMembershipWatch, Model, RuntimeConfigWatch, WorkerSet,
     kv_source_watch::KvSourceMembershipCoordinator, runtime_config_watch,
 };
 
@@ -686,7 +686,7 @@ impl ModelManager {
     pub fn get_generate_engine(
         &self,
         model: &str,
-    ) -> Result<GenerateStreamingEngine, ModelManagerError> {
+    ) -> Result<GenerateEngineSelection, ModelManagerError> {
         self.models
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
@@ -725,22 +725,6 @@ impl ModelManager {
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_completions_engine_with_parsing()
-    }
-
-    pub fn get_generate_engine_with_parsing(
-        &self,
-        model: &str,
-    ) -> Result<
-        (
-            GenerateStreamingEngine,
-            crate::protocols::openai::ParsingOptions,
-        ),
-        ModelManagerError,
-    > {
-        self.models
-            .get(model)
-            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
-            .get_generate_engine_with_parsing()
     }
 
     // -- Convenience methods for in-process models (http.rs, grpc.rs) --
