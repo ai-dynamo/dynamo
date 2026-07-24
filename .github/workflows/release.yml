@@ -210,6 +210,8 @@ jobs:
     if: needs.prepare-release.result == 'success'
     runs-on: prod-builder-amd-v1 # TODO: needs to identify the correct runner here, definitely should not be prod-builder-amd-v1
     environment: automated-release
+    outputs:
+      failed_copy_count: ${{ steps.copy_images.outputs.failed_count }}
     env:
       VERSION: ${{ needs.prepare-release.outputs.version }}
       COMMIT_SHA: ${{ needs.prepare-release.outputs.commit_sha }}
@@ -339,10 +341,13 @@ jobs:
           done
 
           # Nightly builds only the runtime images above (vllm/sglang/trtllm
-          # cuda13). EFA/frontend/operator/planner/snapshot are built
-          # by post-merge and other workflows on release branches; for nightly
-          # we skip them entirely so we don't try to copy ECR tags that don't
-          # exist for the resolved SHA.
+          # cuda13). EFA/frontend/snapshot are built by post-merge and other
+          # workflows on release branches; for nightly we skip them so we
+          # don't try to copy ECR tags that don't exist for the resolved SHA.
+          # Operator and planner carry no dev-versioned wheels, so nightly
+          # reuses the post-merge images at the same SHA (the exact images
+          # the RC path promotes below) and stages them into the dedicated
+          # kubernetes-operator-nightly / dynamo-planner-nightly repos.
           if [[ "${NIGHTLY}" != "true" ]]; then
             # ---- EFA runtime images ----
             # All EFA runtime images are multi-arch (amd64+arm64).
@@ -393,13 +398,50 @@ jobs:
             SNAPSHOT_TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/snapshot-agent:${NGC_VERSION_TAG}"
             copy_image "${SNAPSHOT_SOURCE}" "${SNAPSHOT_TARGET}" "snapshot-agent:${NGC_VERSION_TAG}"
           else
+            # Operator + planner (nightly): post-merge multi-arch images at the
+            # same SHA — not rebuilt in this run, so a just-merged SHA whose
+            # post-merge CI hasn't finished is a legitimate skip, not a failure
+            # (a bare copy_image failure under set -e would abort the step and
+            # skip the GitLab trigger for the whole nightly). A copy that fails
+            # with the source PRESENT points at the NGC target instead (write
+            # access / repo config) — annotate loudly either way.
             echo ""
-            echo "=== Skipping EFA / frontend / operator / planner / snapshot (not built by nightly) ==="
+            echo "=== Operator Image (nightly) ==="
+            OPERATOR_STAGED=false
+            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-operator"
+            TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/kubernetes-operator-nightly:${NGC_VERSION_TAG}"
+            if ! crane manifest "${SOURCE}" > /dev/null 2>&1; then
+              echo "::warning::Skipped kubernetes-operator-nightly:${NGC_VERSION_TAG} — ${SOURCE} not found (post-merge CI incomplete for this SHA?)"
+              FAILED_COPIES+=("kubernetes-operator-nightly:${NGC_VERSION_TAG} (source missing)")
+            elif copy_image "${SOURCE}" "${TARGET}" "kubernetes-operator-nightly:${NGC_VERSION_TAG}"; then
+              OPERATOR_STAGED=true
+            else
+              echo "::warning::Copy failed for kubernetes-operator-nightly:${NGC_VERSION_TAG} — source exists; check NGC write access to kubernetes-operator-nightly"
+            fi
+
+            echo ""
+            echo "=== Planner Image (nightly) ==="
+            PLANNER_STAGED=false
+            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-dynamo-planner"
+            TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/dynamo-planner-nightly:${NGC_VERSION_TAG}"
+            if ! crane manifest "${SOURCE}" > /dev/null 2>&1; then
+              echo "::warning::Skipped dynamo-planner-nightly:${NGC_VERSION_TAG} — ${SOURCE} not found (post-merge CI incomplete for this SHA?)"
+              FAILED_COPIES+=("dynamo-planner-nightly:${NGC_VERSION_TAG} (source missing)")
+            elif copy_image "${SOURCE}" "${TARGET}" "dynamo-planner-nightly:${NGC_VERSION_TAG}"; then
+              PLANNER_STAGED=true
+            else
+              echo "::warning::Copy failed for dynamo-planner-nightly:${NGC_VERSION_TAG} — source exists; check NGC write access to dynamo-planner-nightly"
+            fi
+
+            echo ""
+            echo "=== Skipping EFA / frontend / snapshot (not staged by nightly) ==="
           fi
 
           # ---- Summary ----
           echo "successful_count=${#SUCCESSFUL_COPIES[@]}" >> $GITHUB_OUTPUT
           echo "failed_count=${#FAILED_COPIES[@]}" >> $GITHUB_OUTPUT
+          echo "operator_staged=${OPERATOR_STAGED:-}" >> $GITHUB_OUTPUT
+          echo "planner_staged=${PLANNER_STAGED:-}" >> $GITHUB_OUTPUT
 
           printf '%s\n' "${SUCCESSFUL_COPIES[@]}" > /tmp/successful_copies.txt
           printf '%s\n' "${FAILED_COPIES[@]}" > /tmp/failed_copies.txt 2>/dev/null || true
@@ -465,6 +507,8 @@ jobs:
           HELM_CHART_VERSION: ${{ needs.prepare-release.outputs.helm_chart_version }}
           SUCCESSFUL_COUNT: ${{ steps.copy_images.outputs.successful_count }}
           FAILED_COUNT: ${{ steps.copy_images.outputs.failed_count }}
+          OPERATOR_STAGED: ${{ steps.copy_images.outputs.operator_staged }}
+          PLANNER_STAGED: ${{ steps.copy_images.outputs.planner_staged }}
         run: |
           if [[ "${NIGHTLY}" == "true" ]]; then
             echo "## Nightly Build Summary" >> $GITHUB_STEP_SUMMARY
@@ -497,6 +541,12 @@ jobs:
           echo "- \`sglang-runtime${NGC_NAME_SUFFIX}:${NGC_VERSION_TAG}\` / \`sglang-runtime${NGC_NAME_SUFFIX}:${NGC_VERSION_TAG}-cuda13\`" >> $GITHUB_STEP_SUMMARY
           echo "- \`tensorrtllm-runtime${NGC_NAME_SUFFIX}:${NGC_VERSION_TAG}\` / \`tensorrtllm-runtime${NGC_NAME_SUFFIX}:${NGC_VERSION_TAG}-cuda13\`" >> $GITHUB_STEP_SUMMARY
           if [[ "${NIGHTLY}" == "true" ]]; then
+            OP_NOTE=""; [[ "${OPERATOR_STAGED}" == "true" ]] || OP_NOTE=" — **NOT staged this run** (see copy-step warnings)"
+            PL_NOTE=""; [[ "${PLANNER_STAGED}" == "true" ]] || PL_NOTE=" — **NOT staged this run** (see copy-step warnings)"
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Operator / planner images (post-merge images at the same SHA):" >> $GITHUB_STEP_SUMMARY
+            echo "- \`kubernetes-operator-nightly:${NGC_VERSION_TAG}\`${OP_NOTE}" >> $GITHUB_STEP_SUMMARY
+            echo "- \`dynamo-planner-nightly:${NGC_VERSION_TAG}\`${PL_NOTE}" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "Mutable floating tags (repushed every nightly):" >> $GITHUB_STEP_SUMMARY
             echo "- \`vllm-runtime:nightly\` / \`vllm-runtime:nightly-cuda13\`" >> $GITHUB_STEP_SUMMARY
@@ -731,6 +781,7 @@ jobs:
           SLACK_CHANNEL_ID: ${{ secrets.SLACK_RELEASE_CHANNEL_ID }}
           SLACK_THREAD_TS:  ${{ inputs.slack_thread_ts }}
           NGC_RESULT:       ${{ needs.release-publish.result }}
+          NGC_FAILED_COPIES: ${{ needs.release-publish.outputs.failed_copy_count }}
           ART_RESULT:       ${{ needs.stage-wheels-artifactory.result }}
           NGC_VERSION_TAG:  ${{ needs.prepare-release.outputs.ngc_version_tag }}
           WHEEL_VERSION:    ${{ needs.prepare-release.outputs.wheel_version }}
@@ -752,7 +803,13 @@ jobs:
           ART_EMOJI=$(emoji_for "${ART_RESULT}")
 
           if [ "${NGC_RESULT}" = "success" ] && [ "${ART_RESULT}" = "success" ]; then
-            HEADER=":package: Staging complete"
+            # Copy failures can be non-fatal (operator/planner warn-skip) —
+            # a green job with skipped copies must not read as "complete".
+            if [ -n "${NGC_FAILED_COPIES:-}" ] && [ "${NGC_FAILED_COPIES}" != "0" ]; then
+              HEADER=":warning: Staging complete with ${NGC_FAILED_COPIES} skipped image copy(ies)"
+            else
+              HEADER=":package: Staging complete"
+            fi
           else
             HEADER=":warning: Staging finished with issues"
           fi
