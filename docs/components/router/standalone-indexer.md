@@ -163,17 +163,17 @@ curl http://localhost:8090/metrics
 | `dynamo_kvindexer_models` | Gauge | — | Number of active model+routing-group indexers |
 | `dynamo_kvindexer_workers` | Gauge | — | Number of registered worker instances |
 | `dynamo_kvindexer_listeners` | Gauge | `status` | Number of ZMQ listeners by status (`pending`, `active`, `paused`, `failed`) |
-| `dynamo_kvrouter_kv_cache_events_applied` | Counter | `event_type`, `status` | Primary device-tier KV events applied, partitioned by event type and result |
+| `dynamo_kvrouter_kv_cache_events_applied` | Counter | `event_type`, `status` | Device- and lower-tier KV events applied, partitioned by event type and result |
 | `dynamo_kvrouter_kv_cache_event_warnings` | Counter | `warning_kind` | Suspicious-but-valid primary device-tier events, including duplicate STORE content |
+| `dynamo_kvrouter_lower_tier_removal_total` | Counter | `outcome` | Lower-tier removal activity by chunk, event-hash, or index-entry outcome |
 
 The core event counters aggregate process-wide across model and routing-group indexers and
-across all indexer threads. A `duplicate_store` warning is not necessarily an error:
-peer recovery replay can reapply content already restored from a snapshot. Lower-tier
-events and listener transport or replay failures are not represented by these core
-event counters; use the standalone service metrics and logs for those paths. These
-device-tier-only semantics apply to the standalone indexer. The frontend-embedded
-router's component-scoped `dynamo_component_kv_cache_events_applied` counter includes
-both device- and lower-tier events. See [KV Indexer Metrics](../../observability/metrics.md#kv-indexer-metrics).
+across all indexer threads and storage tiers. A `duplicate_store` warning is not necessarily an
+error: peer recovery replay can reapply content already restored from a snapshot. Listener transport
+or replay failures are not represented by these event counters; use the standalone service metrics
+and logs for those paths. The `lower_tier_removal_total` outcomes are not mutually exclusive:
+`removals_*` counts chunks, `removal_hashes_*` counts unique event hashes, and `entries_*` counts
+index entries. See [KV Indexer Metrics](../../observability/metrics.md#kv-indexer-metrics).
 
 ### `POST /reopen_logs` — Reopen the access log
 

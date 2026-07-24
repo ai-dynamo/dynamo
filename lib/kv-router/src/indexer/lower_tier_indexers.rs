@@ -36,14 +36,13 @@ pub struct LowerTierIndexers {
 impl LowerTierIndexers {
     /// Metrics-less constructor for call sites without a `KvIndexerMetrics` handle.
     /// Router production assembly should use [`new_with_metrics`](Self::new_with_metrics)
-    /// so lower-tier traffic is included in `kv_cache_events_applied`.
+    /// so lower-tier traffic is included in KV indexer metrics.
     pub fn new(num_threads: usize, block_size: u32) -> Self {
         Self::new_with_metrics(num_threads, block_size, None)
     }
 
-    /// Same as [`new`](Self::new) but wires `kv_cache_events_applied`
-    /// counters into every lazily created per-tier indexer, matching the
-    /// observability of the device-tier path.
+    /// Same as [`new`](Self::new) but wires metrics into every lazily created
+    /// per-tier indexer, matching the observability of the device-tier path.
     pub fn new_with_metrics(
         num_threads: usize,
         block_size: u32,

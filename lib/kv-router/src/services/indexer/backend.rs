@@ -189,10 +189,8 @@ impl Indexer {
     /// peer's [`Self::apply_event_routed`].
     ///
     /// Returns the primary device-tier dump first, followed by every allocated
-    /// lower-tier indexer's dump with each event's `storage_tier` retagged to
-    /// the tier it lives in. The `LowerTierIndexer::dump_events` synthetic
-    /// events default `storage_tier` to `Device`, so without retagging a peer
-    /// would replay them into the wrong slot.
+    /// lower-tier indexer's dump. Lower-tier events preserve their storage tier;
+    /// the registry tier is reapplied defensively before peer replay.
     pub async fn dump_events(&self) -> Result<Vec<RouterEvent>> {
         let (primary_events, lower_tier_entries) = match self {
             Indexer::Single {
@@ -499,19 +497,19 @@ pub fn create_indexer_with_metrics(
                 ConcurrentRadixTreeCompressed::new(),
                 num_threads,
                 block_size,
-                Some(metrics),
+                Some(metrics.clone()),
             )),
-            lower_tier: LowerTierIndexers::new(num_threads, block_size),
+            lower_tier: LowerTierIndexers::new_with_metrics(num_threads, block_size, Some(metrics)),
         }
     } else {
         Indexer::Single {
             primary: KvIndexer::new_with_pruning(
                 CancellationToken::new(),
                 block_size,
-                metrics,
+                metrics.clone(),
                 None,
             ),
-            lower_tier: LowerTierIndexers::new(1, block_size),
+            lower_tier: LowerTierIndexers::new_with_metrics(1, block_size, Some(metrics)),
         }
     }
 }
