@@ -633,6 +633,7 @@ func TestDynamoComponentDeploymentReconciler_generateService_DottedDeleteStub(t 
 }
 
 func TestDynamoComponentDeploymentReconciler_LWSNameDoesNotCollideWithComponentService(t *testing.T) {
+	t.Log("Build a multinode DCD and the dependencies shared by reconciliation and rendering")
 	s := scheme.Scheme
 	require.NoError(t, v1alpha1.AddToScheme(s))
 	require.NoError(t, corev1.AddToScheme(s))
@@ -694,6 +695,15 @@ func TestDynamoComponentDeploymentReconciler_LWSNameDoesNotCollideWithComponentS
 		},
 	}
 
+	t.Log("Render the reusable component Service and multinode pod templates directly")
+	renderer := newDCDWorkloadRenderer(r.Client, r.Config, r.RuntimeConfig, r.DockerSecretRetriever)
+	renderedService, renderedServiceToDelete, err := renderer.generateService(context.Background(), dcd)
+	require.NoError(t, err)
+	require.False(t, renderedServiceToDelete)
+	renderedLeaderTemplate, renderedWorkerTemplate, err := renderer.renderMultinodePodTemplateSpecs(context.Background(), dcd)
+	require.NoError(t, err)
+
+	t.Log("Compose the same resources through the DCD controller")
 	service, toDelete, err := r.generateService(context.Background(), generateResourceOption{dynamoComponentDeployment: dcd})
 	require.NoError(t, err)
 	require.False(t, toDelete)
@@ -702,6 +712,10 @@ func TestDynamoComponentDeploymentReconciler_LWSNameDoesNotCollideWithComponentS
 	require.NoError(t, err)
 	require.False(t, toDelete)
 
+	t.Log("Verify controller composition preserves the reusable renderer output")
+	require.Equal(t, renderedService, service)
+	require.Equal(t, renderedLeaderTemplate, lws.Spec.LeaderWorkerTemplate.LeaderTemplate)
+	require.Equal(t, *renderedWorkerTemplate, lws.Spec.LeaderWorkerTemplate.WorkerTemplate)
 	require.Equal(t, "vllm-disagg-decode-4e5bb2af", service.Name)
 	require.Equal(t, "vllm-disagg-decode-4e5bb2af-0", lws.Name)
 	require.NotEqual(t, service.Name, lws.Name)
