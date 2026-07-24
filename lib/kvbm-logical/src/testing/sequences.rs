@@ -34,8 +34,9 @@ impl BlockSequenceBuilder {
         use super::config::validate_test_block_size;
         assert!(
             validate_test_block_size(size),
-            "Invalid block size: {}. Must be power of 2 between 1 and 1024",
-            size
+            "Invalid block size: {}. Must be power of 2 between 1 and {}",
+            size,
+            crate::MAX_LOGICAL_BLOCK_SIZE_TOKENS
         );
         self.block_size = size;
         self
