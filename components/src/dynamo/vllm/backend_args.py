@@ -183,8 +183,8 @@ class DynamoVllmArgGroup(ArgGroup):
             flag_name="--classify-worker",
             env_var="DYN_VLLM_CLASSIFY_WORKER",
             default=False,
-            help="Run as a sequence-classification worker, exposing /v1/classify. "
-            "Engine must be started with vLLM's --runner pooling. "
+            help="Run as a sequence-classification worker, exposing /v1/classify and "
+            "/v1/pooling endpoints. Engine must be started with vLLM's --runner pooling. "
             "Skips KV events, KV router registration, and InstrumentedScheduler injection.",
         )
 

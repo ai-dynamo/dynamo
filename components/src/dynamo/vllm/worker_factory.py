@@ -774,9 +774,8 @@ class WorkerFactory:
         """Initialize an aggregated sequence-classification worker.
 
         Like the embeddings worker, this uses a pooling ``AsyncLLM`` and skips
-        the generation-only KV-cache and scheduler machinery. This wiring
-        initially advertises only ``ModelType.Classify``; pooling endpoint
-        registration is enabled separately.
+        the generation-only KV-cache and scheduler machinery. The combined
+        model type advertises both pooling-family endpoints.
         """
         generate_endpoint = runtime.endpoint(
             f"{config.namespace}.{config.component}.{config.endpoint}"
@@ -818,7 +817,7 @@ class WorkerFactory:
                 ),
                 self.register_vllm_model(
                     ModelInput.Text,
-                    ModelType.Classify,
+                    ModelType.Classify | ModelType.Pooling,
                     generate_endpoint,
                     config,
                     engine_client,

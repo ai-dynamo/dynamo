@@ -580,7 +580,7 @@ class TestCreate:
 
 
 @pytest.mark.asyncio
-async def test_classify_worker_registers_only_classify(
+async def test_classify_worker_registers_classify_and_pooling(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     endpoint = Mock()
@@ -633,16 +633,23 @@ async def test_classify_worker_registers_only_classify(
         shutdown_endpoints,
     )
 
-    register_model.assert_awaited_once_with(
-        ModelInput.Text,
-        ModelType.Classify,
+    register_model.assert_awaited_once()
+    register_args = register_model.await_args.args
+    registered_model_type = register_args[1]
+    assert register_args[0] == ModelInput.Text
+    assert registered_model_type.supports_classify()
+    assert registered_model_type.supports_pooling()
+    assert not registered_model_type.supports_embedding()
+    assert register_args[2:] == (
         endpoint,
         config,
         engine_client,
         vllm_config,
-        worker_type=WorkerType.Aggregated,
-        needs=[],
     )
+    assert register_model.await_args.kwargs == {
+        "worker_type": WorkerType.Aggregated,
+        "needs": [],
+    }
     assert shutdown_endpoints == [endpoint]
     handler.cleanup.assert_called_once()
 
