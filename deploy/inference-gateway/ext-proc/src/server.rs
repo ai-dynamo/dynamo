@@ -680,8 +680,12 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
             // Notify the picker that this request is complete so it can free router
             // bookkeeping state (mirrors Go EPP PostResponse).
             if ctx.body_routed && !ctx.request_id.is_empty() {
+                let usage = ctx.parsed_usage.take();
+                if let Some(cached_tokens) = usage.as_ref().and_then(|u| u.cached_tokens) {
+                    crate::metrics::observe_cached_tokens(&ctx.target_model_name, cached_tokens);
+                }
                 picker
-                    .on_request_complete_with_usage(&ctx.request_id, ctx.parsed_usage.take())
+                    .on_request_complete_with_usage(&ctx.request_id, usage)
                     .await;
             }
         });
@@ -695,10 +699,11 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
 // ---------------------------------------------------------------------------
 
 /// Validate the gateway's `ProtocolConfiguration` against the protocol
-/// contract this EPP requires.
+/// contract this EPP requires: `FULL_DUPLEX_STREAMED` on both body
+/// directions plus `send_body_without_waiting_for_header_response`.
 ///
-/// We build the `RequestHeaders` response only after receiving the request
-/// body, because:
+/// **Request direction.** We build the `RequestHeaders` response only after
+/// receiving the request body, because:
 ///   * The body holds the chat-completion prompt.
 ///   * We tokenize it.
 ///   * We feed those tokens to the KV-aware router to choose a worker.
@@ -712,9 +717,24 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
 /// we wait for body chunks before producing the header response, which
 /// silently deadlocks until the ext_proc timeout fires.
 ///
+/// **Response direction.** `response_body_mode` defaults to `NONE` in Envoy,
+/// which delivers no `ResponseBody` messages at all. Three behaviours depend
+/// on receiving them, and all three fail silently under `NONE`:
+///   * `on_prefill_complete` fires on the first non-empty body chunk, so
+///     disaggregated prefill bookkeeping would stay held for the whole stream.
+///   * Token usage (`cached_tokens`) is parsed out of the terminal chunk.
+///   * Model-name rewriting mutates body bytes on their way to the client.
+///
+/// Streaming the response also requires `FULL_DUPLEX_STREAMED` specifically:
+/// the buffering modes hold the whole body before handing it over, which
+/// would break SSE token streaming. This matches the llm-d router, which
+/// documents `FULL_DUPLEX_STREAMED` as the only supported mode for both
+/// directions.
+///
 /// Failing fast with `Status::failed_precondition` here turns a multi-second
-/// hidden timeout into an immediate, self-explaining error visible in Envoy
-/// logs the first time the EPP is wired up behind a misconfigured gateway.
+/// hidden timeout (or silently absent telemetry) into an immediate,
+/// self-explaining error visible in Envoy logs the first time the EPP is
+/// wired up behind a misconfigured gateway.
 ///
 /// Older Envoy versions (pre-1.32) do not send `ProtocolConfiguration`; in
 /// that case the caller skips this validation entirely and trusts the
@@ -729,23 +749,27 @@ fn validate_protocol_config(
     use crate::proto::envoy::extensions::filters::http::ext_proc::v3::processing_mode::BodySendMode;
 
     let request_mode = BodySendMode::try_from(pc.request_body_mode).ok();
-    let mode_ok = matches!(request_mode, Some(BodySendMode::FullDuplexStreamed));
+    let response_mode = BodySendMode::try_from(pc.response_body_mode).ok();
+    let full_duplex = Some(BodySendMode::FullDuplexStreamed);
     let flag_ok = pc.send_body_without_waiting_for_header_response;
 
-    if mode_ok && flag_ok {
+    if request_mode == full_duplex && response_mode == full_duplex && flag_ok {
         return Ok(());
     }
 
     let detail = format!(
-        "ext_proc filter must be configured with request_body_mode=FULL_DUPLEX_STREAMED \
-         and send_body_without_waiting_for_header_response=true; got \
-         request_body_mode={:?}, send_body_without_waiting_for_header_response={}. \
+        "ext_proc filter must be configured with request_body_mode=FULL_DUPLEX_STREAMED, \
+         response_body_mode=FULL_DUPLEX_STREAMED and \
+         send_body_without_waiting_for_header_response=true; got \
+         request_body_mode={request_mode:?}, response_body_mode={response_mode:?}, \
+         send_body_without_waiting_for_header_response={flag_ok}. \
          The Rust EPP defers its RequestHeaders response until after it has tokenized \
-         the body and selected a worker, so any other mode deadlocks Envoy.",
-        request_mode, flag_ok,
+         the body and selected a worker, and it reads response bodies to signal prefill \
+         completion, parse token usage, and rewrite the model name."
     );
     tracing::error!(
         request_body_mode = pc.request_body_mode,
+        response_body_mode = pc.response_body_mode,
         send_body_without_waiting = flag_ok,
         "ProtocolConfiguration mismatch — failing stream"
     );
@@ -879,6 +903,74 @@ mod tests {
         HttpBody, HttpHeaders, ProcessingRequest,
         external_processor_client::ExternalProcessorClient, processing_request::Request as ProcReq,
     };
+
+    fn protocol_config(
+        request_body_mode: i32,
+        response_body_mode: i32,
+        send_body_without_waiting_for_header_response: bool,
+    ) -> crate::proto::envoy::service::ext_proc::v3::ProtocolConfiguration {
+        crate::proto::envoy::service::ext_proc::v3::ProtocolConfiguration {
+            request_body_mode,
+            response_body_mode,
+            send_body_without_waiting_for_header_response,
+        }
+    }
+
+    #[test]
+    fn protocol_config_accepts_full_duplex_on_both_directions() {
+        use crate::proto::envoy::extensions::filters::http::ext_proc::v3::processing_mode::BodySendMode;
+
+        let full_duplex = BodySendMode::FullDuplexStreamed as i32;
+        assert!(validate_protocol_config(&protocol_config(full_duplex, full_duplex, true)).is_ok());
+    }
+
+    #[test]
+    fn protocol_config_rejects_response_body_mode_none() {
+        use crate::proto::envoy::extensions::filters::http::ext_proc::v3::processing_mode::BodySendMode;
+
+        // Envoy's default. Without response bodies the EPP never signals
+        // prefill completion, parses usage, or rewrites the model name.
+        let err = validate_protocol_config(&protocol_config(
+            BodySendMode::FullDuplexStreamed as i32,
+            BodySendMode::None as i32,
+            true,
+        ))
+        .expect_err("response_body_mode=NONE must be rejected");
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+        assert!(err.message().contains("response_body_mode"));
+    }
+
+    #[test]
+    fn protocol_config_rejects_buffered_response_body_mode() {
+        use crate::proto::envoy::extensions::filters::http::ext_proc::v3::processing_mode::BodySendMode;
+
+        // Buffering holds the whole body, which would break SSE streaming.
+        let err = validate_protocol_config(&protocol_config(
+            BodySendMode::FullDuplexStreamed as i32,
+            BodySendMode::Buffered as i32,
+            true,
+        ))
+        .expect_err("response_body_mode=BUFFERED must be rejected");
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    }
+
+    #[test]
+    fn protocol_config_still_rejects_request_side_misconfiguration() {
+        use crate::proto::envoy::extensions::filters::http::ext_proc::v3::processing_mode::BodySendMode;
+
+        let full_duplex = BodySendMode::FullDuplexStreamed as i32;
+        assert!(
+            validate_protocol_config(&protocol_config(
+                BodySendMode::Streamed as i32,
+                full_duplex,
+                true
+            ))
+            .is_err()
+        );
+        assert!(
+            validate_protocol_config(&protocol_config(full_duplex, full_duplex, false)).is_err()
+        );
+    }
 
     #[test]
     fn parse_unary_usage_extracts_cached_tokens() {

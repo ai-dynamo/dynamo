@@ -120,6 +120,30 @@ spec:
       nvidia.com/dynamo-component-type: planner
       nvidia.com/metrics-enabled: "true"
 ---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: dynamo-epp
+spec:
+  {{- if .Values.namespaceRestriction.enabled }}
+  namespaceSelector:
+    matchNames:
+    - {{ .Release.Namespace }}
+  {{- else }}
+  namespaceSelector:
+    any: true
+  {{- end }}
+  podMetricsEndpoints:
+  # The EPP container declares "metrics" (9090) alongside its gRPC ports; see
+  # EPPDefaults.GetBaseContainer in the operator.
+  - interval: 5s
+    path: /metrics
+    port: metrics
+  selector:
+    matchLabels:
+      nvidia.com/dynamo-component-type: epp
+      nvidia.com/metrics-enabled: "true"
+---
 # TODO: Once a first-class 'router' componentType is added to the dynamo operator,
 #       replace this PodMonitor with one that selects on
 #       nvidia.com/dynamo-component-type: router instead of 'default'.

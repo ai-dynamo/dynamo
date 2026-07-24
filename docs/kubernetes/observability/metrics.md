@@ -128,7 +128,9 @@ NIXL telemetry is disabled by default. When enabled, NIXL metrics will be expose
 
 The Prometheus Operator uses PodMonitor resources to automatically discover and scrape metrics from pods. To enable this discovery, the Dynamo operator automatically creates PodMonitor resource and adds these labels to all pods:
 - `nvidia.com/metrics-enabled: "true"` - Enables metrics collection
-- `nvidia.com/dynamo-component-type: "frontend|worker"` - Identifies the component type
+- `nvidia.com/dynamo-component-type: "frontend|worker|planner|epp"` - Identifies the component type
+
+When you deploy the Rust endpoint picker (EPP) for Gateway API Inference Extension routing, the `dynamo-epp` PodMonitor scrapes its `metrics` port (9090). Set `DYN_EPP_METRICS_PORT` to move that endpoint, or to `0` to disable it.
 
 <Note>
 You can opt-out specific deployments from metrics collection by adding this annotation to your DynamoGraphDeployment:
@@ -172,6 +174,7 @@ kubectl port-forward svc/prometheus-kube-prometheus-prometheus 9090:9090 -n moni
 Visit http://localhost:9090 and try these example queries:
 - `dynamo_frontend_requests_total`
 - `dynamo_frontend_time_to_first_token_seconds_bucket`
+- `dynamo_epp_cached_tokens_bucket` - prefix-cache hits the model server reported, as observed by the endpoint picker
 
 ![Prometheus UI showing Dynamo metrics](../../assets/img/prometheus-k8s.png)
 

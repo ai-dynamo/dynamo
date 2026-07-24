@@ -13,7 +13,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use dynamo_ext_proc::{ExtProcServer, Router};
+use dynamo_ext_proc::{ExtProcServer, Router, metrics};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 
@@ -146,6 +146,19 @@ async fn main() -> Result<()> {
             .add_service(health_service)
             .serve(health_addr),
     );
+
+    // Start before router init so scrapes during a slow discovery bootstrap
+    // return an empty exposition rather than a connection refusal.
+    let metrics_port = parse_env(metrics::METRICS_PORT_ENV, metrics::DEFAULT_METRICS_PORT);
+    if metrics_port == 0 {
+        tracing::info!("Metrics server disabled");
+    } else {
+        tokio::spawn(async move {
+            if let Err(e) = metrics::serve(metrics_port).await {
+                tracing::error!(error = %e, port = metrics_port, "Metrics server exited");
+            }
+        });
+    }
 
     tracing::info!("Initializing KV-aware router from discovery...");
     let router = Router::from_discovery(&config.namespace, &config.component).await?;
