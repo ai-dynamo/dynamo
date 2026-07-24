@@ -32,6 +32,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       docs: ${{ steps.changes.outputs.docs }}
+      api_docs: ${{ steps.changes.outputs.api_docs }}
       operator: ${{ steps.changes.outputs.operator }}
       snapshot: ${{ steps.changes.outputs.snapshot }}
       rust: ${{ steps.changes.outputs.rust }}
@@ -47,7 +48,7 @@ jobs:
 
   pre-merge-status-check:
     runs-on: ubuntu-latest
-    needs: [changed-files, pre-commit, fern-check, fern-broken-links, operator, snapshot, rust-tests, rust-clippy]
+    needs: [changed-files, pre-commit, api-docs, fern-check, fern-broken-links, operator, snapshot, rust-tests, rust-clippy]
     if: always()
     steps:
       - name: "Check all dependent jobs"
@@ -63,6 +64,28 @@ jobs:
     - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
     - uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
       timeout-minutes: 3
+
+  api-docs:
+    name: Generated API References
+    needs: changed-files
+    if: needs.changed-files.outputs.api_docs == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+    - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+      with:
+        python-version: '3.13'
+    - name: Install API docs test dependencies
+      run: python3 -m pip install 'griffe==2.1.0' 'pytest>=8.0' 'pyyaml>=6.0'
+    - name: Test generated API references
+      run: python3 -m pytest -c /dev/null -q docs/fern/scripts/tests
+    - name: Check generated API reference freshness
+      run: |
+        python3 docs/fern/scripts/gen_python_api.py --check
+        python3 docs/fern/scripts/gen_rust_api.py --check
+        python3 docs/fern/scripts/gen_kubernetes_api.py --check
 
   # Safe Fern docs checks run in pre-merge with read-only permissions.
   fern-check:

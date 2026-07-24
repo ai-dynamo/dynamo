@@ -38,6 +38,21 @@ docs:
   # Canonical agent skills live in .agents/skills; root skills/ is a symlink there.
   - 'skills/**'
 
+api_docs:
+  - '.github/filters.yaml'
+  - '.github/workflows/fern-docs.yml'
+  - '.github/workflows/pre-merge.yml'
+  - 'pyproject.toml'
+  - 'docs/fern/scripts/**'
+  - 'docs/fern/components/**'
+  - 'docs/fern/reference/api/**'
+  - 'docs/fern/kubernetes/api-reference.md'
+  - 'docs/fern/kubernetes/api-reference-fern.mdx'
+  - 'docs/fern/kubernetes/api-reference.data.ts'
+  - 'lib/bindings/python/src/**'
+  - 'components/src/dynamo/**'
+  - '**/Cargo.toml'
+
 examples:
   - 'recipes/**'
   - 'examples/**'

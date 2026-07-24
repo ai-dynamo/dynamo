@@ -1,0 +1,62 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: API Reference
+subtitle: Language-by-language public surface for Dynamo, discovered from the source tree
+---
+
+import { ReferenceStyles } from "@/components/ReferenceStyles";
+import { ApiReferenceHero } from "@/components/ApiReferenceHero";
+
+<ReferenceStyles />
+
+<ApiReferenceHero />
+
+The API Reference is a machine-generated view of Dynamo's public surface, kept
+honest by static analysis of the source tree. Each module page lists every
+class and function, expands into per-symbol signatures and public methods,
+and deep-links to the exact file and line on `main`.
+
+## Coverage
+
+- **Python** — the [Python API landing page](python/README.mdx) indexes every
+  curated module. Class methods and function signatures are pulled directly
+  from the source; there are no hand-maintained tables.
+- **Rust** — see the published [`ai-dynamo` crates on crates.io][crates] and
+  the [release artifact inventory](../release-artifacts.mdx) for currently
+  shipped crate versions.
+- **Kubernetes** — the [Kubernetes API reference](../../kubernetes/api-reference-fern.mdx)
+  documents the full DynamoGraphDeployment / DynamoComponentDeployment
+  custom-resource surface.
+
+## How It Stays Current
+
+The [`docs/fern/scripts/gen_python_api.py`][gen] script parses the Dynamo
+Python source with [griffe][griffe] — no import, no build, no runtime
+dependency on backend containers. From one parse it writes:
+
+- [`docs/fern/components/api-reference.data.ts`][data] — a typed TypeScript
+  data module the Reference components read from.
+- [`docs/fern/reference/api/python/README.mdx`][landing] — the Python API
+  landing page.
+- [`docs/fern/reference/api/python/<module>.mdx`][pages] — one page per
+  curated module. Each page ends in an `<llms-only>` fallback so agent
+  Markdown exports still see the full symbol table when the React
+  components are stripped.
+
+Run the generator locally after editing the Python source or the module list:
+
+```bash
+python3 docs/fern/scripts/gen_python_api.py            # write / refresh
+python3 docs/fern/scripts/gen_python_api.py --check    # drift check (exit 1 if stale)
+```
+
+`--check` is what CI runs against every commit to catch stale generated
+content before it ships.
+
+[gen]: https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/scripts/gen_python_api.py
+[data]: https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/components/api-reference.data.ts
+[landing]: https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/reference/api/python/README.mdx
+[pages]: https://github.com/ai-dynamo/dynamo/tree/main/docs/fern/reference/api/python
+[griffe]: https://mkdocstrings.github.io/griffe/
+[crates]: https://crates.io/search?q=ai-dynamo
