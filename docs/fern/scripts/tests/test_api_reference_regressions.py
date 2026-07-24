@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import api_discovery
@@ -24,6 +24,39 @@ FERN_ROOT = REPO_ROOT / "docs" / "fern"
 COMPONENTS_DIR = FERN_ROOT / "components"
 K8S_DIR = FERN_ROOT / "kubernetes"
 K8S_SCHEMA_COMPONENT = COMPONENTS_DIR / "KubernetesSchemaDetails.tsx"
+_KubernetesLlmsReference = tuple[kubernetes_api_discovery.KubernetesReference, str]
+_KubernetesPackagePairs = tuple[
+    tuple[kubernetes_api_discovery.KubernetesPackage, ...],
+    tuple[kubernetes_api_discovery.KubernetesPackage, ...],
+]
+_SAMPLE_METHOD = api_discovery.Method(
+    name="run",
+    signature="run(value: str) -> None",
+    summary="Run one value.",
+    source_path="sample.py",
+    source_line=20,
+    source_href="https://example.com/sample.py#L20",
+)
+_SAMPLE_SYMBOL = api_discovery.Symbol(
+    name="Worker",
+    kind="class",
+    qualname="sample.Worker",
+    import_path="sample.Worker",
+    summary="A sample worker.",
+    signature="Worker(name: str)",
+    source_path="sample.py",
+    source_line=10,
+    source_href="https://example.com/sample.py#L10",
+    methods=(_SAMPLE_METHOD,),
+)
+_SAMPLE_MODULE = api_discovery.Module(
+    name="sample",
+    slug="sample",
+    summary="Sample module.",
+    source_path="sample.py",
+    source_href="https://example.com/sample.py",
+    symbols=(_SAMPLE_SYMBOL,),
+)
 
 
 def test_python_component_uses_qualnames_for_identity_and_imports() -> None:
@@ -69,11 +102,19 @@ def test_kubernetes_component_preserves_safe_field_type_links() -> None:
     assert "dangerouslySetInnerHTML" not in source
 
 
-def test_kubernetes_llms_fallback_contains_complete_schema_details() -> None:
+@pytest.fixture(scope="module")
+def kubernetes_llms_reference() -> _KubernetesLlmsReference:
     source = (K8S_DIR / "api-reference.md").read_text(encoding="utf-8")
     reference = kubernetes_api_discovery.parse_reference(source)
     rendered = kubernetes_api_rendering.render_mdx(reference)
     llms_body = rendered.split("<llms-only>", 1)[1].split("</llms-only>", 1)[0]
+    return reference, llms_body
+
+
+def test_kubernetes_llms_fallback_contains_field_details(
+    kubernetes_llms_reference: _KubernetesLlmsReference,
+) -> None:
+    reference, llms_body = kubernetes_llms_reference
     field = next(
         field
         for package in reference.packages
@@ -81,6 +122,18 @@ def test_kubernetes_llms_fallback_contains_complete_schema_details() -> None:
         for field in type_.fields
         if field.default and field.validation
     )
+
+    assert (
+        "| Field | Type | Required | Default | Description | Validation |" in llms_body
+    )
+    for value in (field.name, field.type, field.default, field.validation):
+        assert kubernetes_api_rendering._md_cell(value) in llms_body
+
+
+def test_kubernetes_llms_fallback_contains_enum_details(
+    kubernetes_llms_reference: _KubernetesLlmsReference,
+) -> None:
+    reference, llms_body = kubernetes_llms_reference
     enum_type = next(
         type_
         for package in reference.packages
@@ -88,15 +141,16 @@ def test_kubernetes_llms_fallback_contains_complete_schema_details() -> None:
         if type_.enum_values
     )
 
-    assert (
-        "| Field | Type | Required | Default | Description | Validation |" in llms_body
-    )
-    for value in (field.name, field.type, field.default, field.validation):
-        assert kubernetes_api_rendering._md_cell(value) in llms_body
     assert f"#### {enum_type.display_name}" in llms_body
     for value in enum_type.enum_values:
         assert value.name in llms_body
         assert value.description in llms_body
+
+
+def test_kubernetes_llms_fallback_links_resolve(
+    kubernetes_llms_reference: _KubernetesLlmsReference,
+) -> None:
+    _, llms_body = kubernetes_llms_reference
     rendered_anchors = set(re.findall(r'<a id="([^"]+)"></a>', llms_body))
     local_link_targets = set(re.findall(r"\]\(#([^)]+)\)", llms_body))
     assert local_link_targets <= rendered_anchors
@@ -156,32 +210,59 @@ def test_pre_merge_runs_fern_from_docs_root() -> None:
         assert f"run: {command}" in step
 
 
-def test_kubernetes_type_anchors_are_globally_unique_and_package_local() -> None:
+@pytest.fixture(scope="module")
+def kubernetes_package_pairs() -> _KubernetesPackagePairs:
     source = (K8S_DIR / "api-reference.md").read_text(encoding="utf-8")
     reference = kubernetes_api_discovery.parse_reference(source)
     package_text, _ = kubernetes_api_discovery._split_defaults_section(source)
     raw_packages = tuple(kubernetes_api_discovery._iter_packages(package_text))
-    all_anchors = [
-        type_.anchor for package in reference.packages for type_ in package.types
-    ]
+    return raw_packages, reference.packages
 
+
+def _field_anchor_pairs(
+    raw_package: kubernetes_api_discovery.KubernetesPackage,
+    package: kubernetes_api_discovery.KubernetesPackage,
+) -> Iterator[tuple[str, str]]:
+    remap = {
+        raw_type.anchor: type_.anchor
+        for raw_type, type_ in zip(raw_package.types, package.types, strict=True)
+    }
+    for raw_type, type_ in zip(raw_package.types, package.types, strict=True):
+        for raw_field, field in zip(raw_type.fields, type_.fields, strict=True):
+            raw_match = re.search(r"\]\(#([^)]+)\)", raw_field.type)
+            if raw_match is None or raw_match.group(1) not in remap:
+                continue
+            match = re.search(r"\]\(#([^)]+)\)", field.type)
+            assert match is not None
+            yield match.group(1), remap[raw_match.group(1)]
+
+
+def test_kubernetes_type_anchors_are_globally_unique(
+    kubernetes_package_pairs: _KubernetesPackagePairs,
+) -> None:
+    _, packages = kubernetes_package_pairs
+    all_anchors = [type_.anchor for package in packages for type_ in package.types]
     assert len(all_anchors) == len(set(all_anchors))
-    for raw_package, package in zip(raw_packages, reference.packages, strict=True):
+
+
+def test_kubernetes_type_references_stay_package_local(
+    kubernetes_package_pairs: _KubernetesPackagePairs,
+) -> None:
+    _, packages = kubernetes_package_pairs
+    for package in packages:
         package_anchors = {type_.anchor for type_ in package.types}
-        remap = {
-            raw_type.anchor: type_.anchor
-            for raw_type, type_ in zip(raw_package.types, package.types, strict=True)
-        }
         refs = list(package.resource_types)
         refs.extend(ref for type_ in package.types for ref in type_.appears_in)
         assert all(ref.anchor in package_anchors for ref in refs)
-        for raw_type, type_ in zip(raw_package.types, package.types, strict=True):
-            for raw_field, field in zip(raw_type.fields, type_.fields, strict=True):
-                raw_match = re.search(r"\]\(#([^)]+)\)", raw_field.type)
-                match = re.search(r"\]\(#([^)]+)\)", field.type)
-                if raw_match is not None and raw_match.group(1) in remap:
-                    assert match is not None
-                    assert match.group(1) == remap[raw_match.group(1)]
+
+
+def test_kubernetes_field_links_follow_package_remaps(
+    kubernetes_package_pairs: _KubernetesPackagePairs,
+) -> None:
+    raw_packages, packages = kubernetes_package_pairs
+    for raw_package, package in zip(raw_packages, packages, strict=True):
+        for actual, expected in _field_anchor_pairs(raw_package, package):
+            assert actual == expected
 
 
 def test_python_signature_preserves_all_parameter_kinds(tmp_path: Path) -> None:
@@ -210,40 +291,12 @@ def test_python_signature_preserves_all_parameter_kinds(tmp_path: Path) -> None:
 
 
 def test_python_llms_fallback_includes_signatures_and_methods() -> None:
-    method = api_discovery.Method(
-        name="run",
-        signature="run(value: str) -> None",
-        summary="Run one value.",
-        source_path="sample.py",
-        source_line=20,
-        source_href="https://example.com/sample.py#L20",
-    )
-    symbol = api_discovery.Symbol(
-        name="Worker",
-        kind="class",
-        qualname="sample.Worker",
-        import_path="sample.Worker",
-        summary="A sample worker.",
-        signature="Worker(name: str)",
-        source_path="sample.py",
-        source_line=10,
-        source_href="https://example.com/sample.py#L10",
-        methods=(method,),
-    )
-    module = api_discovery.Module(
-        name="sample",
-        slug="sample",
-        summary="Sample module.",
-        source_path="sample.py",
-        source_href="https://example.com/sample.py",
-        symbols=(symbol,),
-    )
-    rendered = api_rendering.render_module_page(module)
+    rendered = api_rendering.render_module_page(_SAMPLE_MODULE)
     llms_body = rendered.split("<llms-only>", 1)[1].split("</llms-only>", 1)[0]
 
-    assert symbol.signature in llms_body
-    assert method.signature in llms_body
-    assert method.summary in llms_body
+    assert _SAMPLE_SYMBOL.signature in llms_body
+    assert _SAMPLE_METHOD.signature in llms_body
+    assert _SAMPLE_METHOD.summary in llms_body
 
 
 def test_kubernetes_fields_and_enums_have_visible_semantics() -> None:
