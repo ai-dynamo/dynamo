@@ -2,26 +2,24 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap},
     time::Duration,
 };
 
-use dynamo_kv_router::protocols::{WorkerId, WorkerWithDpRank};
+use dynamo_kv_router::protocols::WorkerId;
 use dynamo_runtime::protocols::EndpointId;
 use tokio::{sync::oneshot, time::Instant};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    discovery::{
-        KvSourceAmbiguity, KvSourceMembershipView, KvSourceMembershipWatch, KvSourceStatus,
-    },
+    discovery::{KvSourceMembershipView, KvSourceMembershipWatch, KvSourceStatus},
     kv_router::KvEventSourceRequirement,
     worker_type::WorkerType,
 };
 
 const SOURCE_JOIN_GRACE: Duration = Duration::from_secs(30);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DiagnosticCode {
     PublisherDisabled,
     SourceNotObserved,
@@ -41,327 +39,215 @@ impl DiagnosticCode {
 }
 
 #[derive(Debug, Clone)]
-struct RankDiagnostic {
+struct Diagnostic {
     code: DiagnosticCode,
-    worker: WorkerWithDpRank,
+    worker_id: WorkerId,
     kv_event_publishing_enabled: bool,
     waited: Duration,
+    dp_ranks: Vec<u32>,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct DeadlineToken {
-    worker: WorkerWithDpRank,
-    epoch: u64,
-    deadline: Instant,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum RankIssue {
-    Idle,
-    Pending {
-        code: DiagnosticCode,
-        since: Instant,
-        deadline: Instant,
-    },
+#[derive(Debug, Clone)]
+enum WorkerIssue {
+    MissingSince(Instant),
     Warned {
         code: DiagnosticCode,
         since: Instant,
+        dp_ranks: Vec<u32>,
     },
-}
-
-#[derive(Debug, Clone, Copy)]
-struct RankHealth {
-    epoch: u64,
-    lifecycle_generation: u64,
-    issue: RankIssue,
-}
-
-impl RankHealth {
-    fn new(epoch: u64, lifecycle_generation: u64) -> Self {
-        Self {
-            epoch,
-            lifecycle_generation,
-            issue: RankIssue::Idle,
-        }
-    }
 }
 
 struct SourceHealthState {
     requirement: KvEventSourceRequirement,
-    ranks: HashMap<WorkerWithDpRank, RankHealth>,
-    next_epoch: u64,
+    issues: HashMap<WorkerId, WorkerIssue>,
 }
 
 impl SourceHealthState {
     fn new(requirement: KvEventSourceRequirement) -> Self {
         Self {
             requirement,
-            ranks: HashMap::new(),
-            next_epoch: 1,
+            issues: HashMap::new(),
         }
     }
 
-    fn reconcile(&mut self, view: &KvSourceMembershipView, now: Instant) -> Vec<RankDiagnostic> {
+    fn reconcile(&mut self, view: &KvSourceMembershipView, now: Instant) -> Vec<Diagnostic> {
         if !self.requirement.requires_source() {
-            self.ranks.clear();
+            self.issues.clear();
             return Vec::new();
         }
 
-        let present: HashSet<_> = view.sources.keys().copied().collect();
-        self.ranks.retain(|worker, _| present.contains(worker));
+        let mut workers = BTreeMap::<WorkerId, Vec<(u32, &KvSourceStatus)>>::new();
+        for (worker, status) in &view.sources {
+            workers
+                .entry(worker.worker_id)
+                .or_default()
+                .push((worker.dp_rank, status));
+        }
+        self.issues
+            .retain(|worker_id, _| workers.contains_key(worker_id));
 
         let mut diagnostics = Vec::new();
-        for (&worker, status) in &view.sources {
-            let capability = view.kv_event_publishing_enabled(worker.worker_id);
-            let generation = view.lifecycle_generation(&worker).unwrap_or(0);
-            self.reconcile_rank(
-                worker,
-                status,
-                capability,
-                view.observation_state.is_bound(),
-                generation,
-                now,
-                &mut diagnostics,
-            );
+        for (worker_id, statuses) in workers {
+            let previous = self.issues.remove(&worker_id);
+            let capability = view.kv_event_publishing_enabled(worker_id);
+            let (next, diagnostic) =
+                reconcile_worker(worker_id, statuses, capability, previous, now);
+            if let Some(next) = next {
+                self.issues.insert(worker_id, next);
+            }
+            if let Some(diagnostic) = diagnostic {
+                diagnostics.push(diagnostic);
+            }
         }
         diagnostics
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn reconcile_rank(
-        &mut self,
-        worker: WorkerWithDpRank,
-        status: &KvSourceStatus,
-        capability: Option<bool>,
-        observation_bound: bool,
-        lifecycle_generation: u64,
-        now: Instant,
-        diagnostics: &mut Vec<RankDiagnostic>,
-    ) {
-        let Some(capability) = capability else {
-            self.ranks.remove(&worker);
-            return;
-        };
-
-        let mut state = self
-            .ranks
-            .remove(&worker)
-            .unwrap_or_else(|| RankHealth::new(self.take_epoch(), lifecycle_generation));
-        let generation_changed = state.lifecycle_generation != lifecycle_generation;
-        state.lifecycle_generation = lifecycle_generation;
-
-        if !capability {
-            self.set_immediate_issue(
-                worker,
-                &mut state,
-                DiagnosticCode::PublisherDisabled,
-                false,
-                now,
-                diagnostics,
-            );
-            self.ranks.insert(worker, state);
-            return;
-        }
-
-        match status {
-            KvSourceStatus::ActiveRecoverable(_) | KvSourceStatus::ActiveLiveOnly(_) => {
-                if let RankIssue::Warned { since, .. } = state.issue {
-                    diagnostics.push(RankDiagnostic {
-                        code: DiagnosticCode::SourceRecovered,
-                        worker,
-                        kv_event_publishing_enabled: true,
-                        waited: now.saturating_duration_since(since),
-                    });
-                }
-                self.set_issue(&mut state, RankIssue::Idle);
-            }
-            KvSourceStatus::Missing if observation_bound => {
-                let keep_existing = matches!(
-                    state.issue,
-                    RankIssue::Pending {
-                        code: DiagnosticCode::SourceNotObserved,
-                        ..
-                    } | RankIssue::Warned {
-                        code: DiagnosticCode::SourceNotObserved,
-                        ..
-                    }
-                ) && !generation_changed;
-                if !keep_existing {
-                    self.set_issue(
-                        &mut state,
-                        RankIssue::Pending {
-                            code: DiagnosticCode::SourceNotObserved,
-                            since: now,
-                            deadline: now + SOURCE_JOIN_GRACE,
-                        },
-                    );
-                }
-            }
-            KvSourceStatus::Ambiguous(KvSourceAmbiguity::EndpointMapping { .. }) => {
-                self.set_immediate_issue(
-                    worker,
-                    &mut state,
-                    DiagnosticCode::SourceAmbiguous,
-                    true,
-                    now,
-                    diagnostics,
-                );
-            }
-            KvSourceStatus::Ambiguous(_) if observation_bound => {
-                self.set_immediate_issue(
-                    worker,
-                    &mut state,
-                    DiagnosticCode::SourceAmbiguous,
-                    true,
-                    now,
-                    diagnostics,
-                );
-            }
-            KvSourceStatus::Missing | KvSourceStatus::Ambiguous(_) => {
-                if matches!(state.issue, RankIssue::Pending { .. }) {
-                    self.set_issue(&mut state, RankIssue::Idle);
-                }
-            }
-        }
-
-        self.ranks.insert(worker, state);
-    }
-
-    fn set_immediate_issue(
-        &mut self,
-        worker: WorkerWithDpRank,
-        state: &mut RankHealth,
-        code: DiagnosticCode,
-        capability: bool,
-        now: Instant,
-        diagnostics: &mut Vec<RankDiagnostic>,
-    ) {
-        if matches!(state.issue, RankIssue::Warned { code: current, .. } if current == code) {
-            return;
-        }
-        diagnostics.push(RankDiagnostic {
-            code,
-            worker,
-            kv_event_publishing_enabled: capability,
-            waited: Duration::ZERO,
-        });
-        self.set_issue(state, RankIssue::Warned { code, since: now });
-    }
-
-    fn set_issue(&mut self, state: &mut RankHealth, issue: RankIssue) {
-        state.epoch = self.take_epoch();
-        state.issue = issue;
-    }
-
-    fn take_epoch(&mut self) -> u64 {
-        let epoch = self.next_epoch;
-        self.next_epoch = self.next_epoch.wrapping_add(1);
-        epoch
-    }
-
-    fn next_deadline(&self) -> Option<DeadlineToken> {
-        self.ranks
-            .iter()
-            .filter_map(|(&worker, state)| {
-                let RankIssue::Pending { deadline, .. } = state.issue else {
-                    return None;
-                };
-                Some(DeadlineToken {
-                    worker,
-                    epoch: state.epoch,
-                    deadline,
-                })
+    fn next_deadline(&self) -> Option<Instant> {
+        self.issues
+            .values()
+            .filter_map(|issue| match issue {
+                WorkerIssue::MissingSince(since) => Some(*since + SOURCE_JOIN_GRACE),
+                WorkerIssue::Warned { .. } => None,
             })
-            .min_by_key(|token| token.deadline)
+            .min()
+    }
+}
+
+fn reconcile_worker(
+    worker_id: WorkerId,
+    mut statuses: Vec<(u32, &KvSourceStatus)>,
+    capability: Option<bool>,
+    previous: Option<WorkerIssue>,
+    now: Instant,
+) -> (Option<WorkerIssue>, Option<Diagnostic>) {
+    let Some(capability) = capability else {
+        return (None, None);
+    };
+
+    statuses.sort_unstable_by_key(|(rank, _)| *rank);
+    let all_ranks = || statuses.iter().map(|(rank, _)| *rank).collect::<Vec<_>>();
+
+    if !capability {
+        return immediate_warning(
+            worker_id,
+            DiagnosticCode::PublisherDisabled,
+            false,
+            all_ranks(),
+            previous,
+            now,
+        );
     }
 
-    fn fire_deadline(&mut self, token: DeadlineToken, now: Instant) -> Vec<RankDiagnostic> {
-        let Some(state) = self.ranks.get(&token.worker) else {
-            return Vec::new();
-        };
-        if state.epoch != token.epoch {
-            return Vec::new();
-        }
-        let RankIssue::Pending { deadline, .. } = state.issue else {
-            return Vec::new();
-        };
-        if deadline != token.deadline || deadline > now {
-            return Vec::new();
-        }
+    let ambiguous_ranks = statuses
+        .iter()
+        .filter_map(|(rank, status)| {
+            matches!(status, KvSourceStatus::Ambiguous(_)).then_some(*rank)
+        })
+        .collect::<Vec<_>>();
+    if !ambiguous_ranks.is_empty() {
+        return immediate_warning(
+            worker_id,
+            DiagnosticCode::SourceAmbiguous,
+            true,
+            ambiguous_ranks,
+            previous,
+            now,
+        );
+    }
 
-        let due: Vec<_> = self
-            .ranks
-            .iter()
-            .filter_map(|(&worker, state)| {
-                let RankIssue::Pending {
-                    code,
-                    since,
-                    deadline,
-                } = state.issue
-                else {
-                    return None;
-                };
-                (deadline <= now).then_some((worker, code, since))
-            })
-            .collect();
-        let mut diagnostics = Vec::with_capacity(due.len());
-        for (worker, code, since) in due {
-            let epoch = self.take_epoch();
-            let state = self
-                .ranks
-                .get_mut(&worker)
-                .expect("due rank came from health map");
-            state.epoch = epoch;
-            state.issue = RankIssue::Warned { code, since };
-            diagnostics.push(RankDiagnostic {
-                code,
-                worker,
+    let missing_ranks = statuses
+        .iter()
+        .filter_map(|(rank, status)| matches!(status, KvSourceStatus::Missing).then_some(*rank))
+        .collect::<Vec<_>>();
+    if !missing_ranks.is_empty() {
+        return missing_source(worker_id, missing_ranks, previous, now);
+    }
+
+    match previous {
+        Some(WorkerIssue::Warned {
+            since, dp_ranks, ..
+        }) => (
+            None,
+            Some(Diagnostic {
+                code: DiagnosticCode::SourceRecovered,
+                worker_id,
                 kv_event_publishing_enabled: true,
                 waited: now.saturating_duration_since(since),
-            });
-        }
-        diagnostics
+                dp_ranks,
+            }),
+        ),
+        Some(WorkerIssue::MissingSince(_)) | None => (None, None),
     }
 }
 
-#[derive(Debug)]
-struct AggregatedDiagnostic {
-    code: DiagnosticCode,
+fn immediate_warning(
     worker_id: WorkerId,
-    kv_event_publishing_enabled: bool,
-    waited_ms: u64,
+    code: DiagnosticCode,
+    capability: bool,
     dp_ranks: Vec<u32>,
+    previous: Option<WorkerIssue>,
+    now: Instant,
+) -> (Option<WorkerIssue>, Option<Diagnostic>) {
+    if matches!(
+        previous,
+        Some(WorkerIssue::Warned {
+            code: current,
+            ..
+        }) if current == code
+    ) {
+        return (previous, None);
+    }
+
+    (
+        Some(WorkerIssue::Warned {
+            code,
+            since: now,
+            dp_ranks: dp_ranks.clone(),
+        }),
+        Some(Diagnostic {
+            code,
+            worker_id,
+            kv_event_publishing_enabled: capability,
+            waited: Duration::ZERO,
+            dp_ranks,
+        }),
+    )
 }
 
-fn aggregate_diagnostics(diagnostics: Vec<RankDiagnostic>) -> Vec<AggregatedDiagnostic> {
-    let mut grouped = BTreeMap::<(DiagnosticCode, WorkerId, bool), (u64, Vec<u32>)>::new();
-    for diagnostic in diagnostics {
-        let waited_ms = diagnostic.waited.as_millis().min(u128::from(u64::MAX)) as u64;
-        let entry = grouped
-            .entry((
-                diagnostic.code,
-                diagnostic.worker.worker_id,
-                diagnostic.kv_event_publishing_enabled,
-            ))
-            .or_default();
-        entry.0 = entry.0.max(waited_ms);
-        entry.1.push(diagnostic.worker.dp_rank);
-    }
-    grouped
-        .into_iter()
-        .map(
-            |((code, worker_id, kv_event_publishing_enabled), (waited_ms, mut dp_ranks))| {
-                dp_ranks.sort_unstable();
-                AggregatedDiagnostic {
-                    code,
-                    worker_id,
-                    kv_event_publishing_enabled,
-                    waited_ms,
-                    dp_ranks,
-                }
+fn missing_source(
+    worker_id: WorkerId,
+    dp_ranks: Vec<u32>,
+    previous: Option<WorkerIssue>,
+    now: Instant,
+) -> (Option<WorkerIssue>, Option<Diagnostic>) {
+    match previous {
+        Some(
+            issue @ WorkerIssue::Warned {
+                code: DiagnosticCode::SourceNotObserved,
+                ..
             },
-        )
-        .collect()
+        ) => (Some(issue), None),
+        Some(WorkerIssue::MissingSince(since))
+            if now.saturating_duration_since(since) >= SOURCE_JOIN_GRACE =>
+        {
+            (
+                Some(WorkerIssue::Warned {
+                    code: DiagnosticCode::SourceNotObserved,
+                    since,
+                    dp_ranks: dp_ranks.clone(),
+                }),
+                Some(Diagnostic {
+                    code: DiagnosticCode::SourceNotObserved,
+                    worker_id,
+                    kv_event_publishing_enabled: true,
+                    waited: now.saturating_duration_since(since),
+                    dp_ranks,
+                }),
+            )
+        }
+        Some(WorkerIssue::MissingSince(since)) => (Some(WorkerIssue::MissingSince(since)), None),
+        Some(WorkerIssue::Warned { .. }) | None => (Some(WorkerIssue::MissingSince(now)), None),
+    }
 }
 
 struct DiagnosticContext<'a> {
@@ -371,14 +257,15 @@ struct DiagnosticContext<'a> {
     serving_endpoint: &'a EndpointId,
 }
 
-fn emit_diagnostics(context: &DiagnosticContext<'_>, diagnostics: Vec<RankDiagnostic>) {
+fn emit_diagnostics(context: &DiagnosticContext<'_>, diagnostics: Vec<Diagnostic>) {
     let worker_role = context
         .worker_role
         .map(|role| role.as_str())
         .unwrap_or("unknown");
-    for diagnostic in aggregate_diagnostics(diagnostics) {
+    for diagnostic in diagnostics {
         let diagnostic_code = diagnostic.code.as_str();
         let requirement = context.requirement.as_str();
+        let waited_ms = diagnostic.waited.as_millis().min(u128::from(u64::MAX)) as u64;
         let rank_count = diagnostic.dp_ranks.len();
         let dp_ranks = diagnostic
             .dp_ranks
@@ -395,7 +282,7 @@ fn emit_diagnostics(context: &DiagnosticContext<'_>, diagnostics: Vec<RankDiagno
                 worker_id = diagnostic.worker_id,
                 serving_endpoint = %context.serving_endpoint,
                 kv_event_publishing_enabled = diagnostic.kv_event_publishing_enabled,
-                waited_ms = diagnostic.waited_ms,
+                waited_ms,
                 rank_count,
                 dp_ranks = %dp_ranks,
                 "KV event source recovered"
@@ -409,7 +296,7 @@ fn emit_diagnostics(context: &DiagnosticContext<'_>, diagnostics: Vec<RankDiagno
                 worker_id = diagnostic.worker_id,
                 serving_endpoint = %context.serving_endpoint,
                 kv_event_publishing_enabled = diagnostic.kv_event_publishing_enabled,
-                waited_ms = diagnostic.waited_ms,
+                waited_ms,
                 rank_count,
                 dp_ranks = %dp_ranks,
                 "KV event source health warning"
@@ -439,48 +326,26 @@ pub(super) fn spawn(
         emit_diagnostics(&context, state.reconcile(&initial, Instant::now()));
 
         loop {
-            let Some(deadline) = state.next_deadline() else {
+            let changed = if let Some(deadline) = state.next_deadline() {
                 tokio::select! {
                     biased;
                     _ = cancellation_token.cancelled() => break,
-                    changed = membership_watch.changed() => {
-                        if changed.is_err() {
-                            break;
-                        }
-                        let view = membership_watch.borrow_and_update().clone();
-                        emit_diagnostics(&context, state.reconcile(&view, Instant::now()));
-                    }
+                    changed = membership_watch.changed() => Some(changed),
+                    _ = tokio::time::sleep_until(deadline) => None,
                 }
-                continue;
+            } else {
+                tokio::select! {
+                    biased;
+                    _ = cancellation_token.cancelled() => break,
+                    changed = membership_watch.changed() => Some(changed),
+                }
             };
-
-            tokio::select! {
-                biased;
-                _ = cancellation_token.cancelled() => break,
-                changed = membership_watch.changed() => {
-                    if changed.is_err() {
-                        break;
-                    }
-                    let now = Instant::now();
-                    let view = membership_watch.borrow_and_update().clone();
-                    let mut diagnostics = state.reconcile(&view, now);
-                    if let Some(current) = state.next_deadline()
-                        && current.deadline <= now
-                    {
-                        diagnostics.extend(state.fire_deadline(current, now));
-                    }
-                    emit_diagnostics(&context, diagnostics);
-                }
-                _ = tokio::time::sleep_until(deadline.deadline) => {
-                    // Re-read membership before using the wake-up token. A removal, rejoin, or
-                    // source arrival invalidates the per-rank epoch and suppresses the stale alarm.
-                    let now = Instant::now();
-                    let view = membership_watch.borrow_and_update().clone();
-                    let mut diagnostics = state.reconcile(&view, now);
-                    diagnostics.extend(state.fire_deadline(deadline, now));
-                    emit_diagnostics(&context, diagnostics);
-                }
+            if changed.is_some_and(|result| result.is_err()) {
+                break;
             }
+
+            let view = membership_watch.borrow_and_update().clone();
+            emit_diagnostics(&context, state.reconcile(&view, Instant::now()));
         }
         let _ = completion_tx.send(());
     });
@@ -489,8 +354,10 @@ pub(super) fn spawn(
 
 #[cfg(test)]
 mod tests {
+    use dynamo_kv_router::protocols::WorkerWithDpRank;
+
     use super::*;
-    use crate::discovery::{KvEventSource, KvSourceObservationState, KvStateEndpointResolution};
+    use crate::discovery::{KvEventSource, KvStateEndpointResolution};
 
     fn endpoint() -> EndpointId {
         EndpointId {
@@ -501,7 +368,6 @@ mod tests {
     }
 
     fn view(
-        observation_state: KvSourceObservationState,
         capabilities: impl IntoIterator<Item = (WorkerId, Option<bool>)>,
         statuses: impl IntoIterator<Item = (WorkerWithDpRank, KvSourceStatus)>,
     ) -> KvSourceMembershipView {
@@ -510,7 +376,6 @@ mod tests {
         KvSourceMembershipView {
             serving_endpoint: endpoint.clone(),
             endpoint_resolution: KvStateEndpointResolution::Resolved(endpoint),
-            observation_state,
             lifecycle_generations: sources.keys().map(|worker| (*worker, 0)).collect(),
             recovery_expected: HashMap::new(),
             kv_event_publishing_enabled: capabilities.into_iter().collect(),
@@ -518,13 +383,33 @@ mod tests {
         }
     }
 
-    fn active(worker: WorkerWithDpRank) -> KvSourceStatus {
-        KvSourceStatus::ActiveLiveOnly(KvEventSource {
-            kv_state_endpoint: endpoint(),
+    fn missing(worker_id: WorkerId, dp_rank: u32) -> (WorkerWithDpRank, KvSourceStatus) {
+        (
+            WorkerWithDpRank::new(worker_id, dp_rank),
+            KvSourceStatus::Missing,
+        )
+    }
+
+    fn active(worker_id: WorkerId, dp_rank: u32) -> (WorkerWithDpRank, KvSourceStatus) {
+        let worker = WorkerWithDpRank::new(worker_id, dp_rank);
+        (
             worker,
-            publisher_id: 17,
-            recovery_target: None,
-        })
+            KvSourceStatus::ActiveLiveOnly(KvEventSource {
+                kv_state_endpoint: endpoint(),
+                worker,
+                publisher_id: 11,
+                recovery_target: None,
+            }),
+        )
+    }
+
+    fn ambiguous(worker_id: WorkerId, dp_rank: u32) -> (WorkerWithDpRank, KvSourceStatus) {
+        (
+            WorkerWithDpRank::new(worker_id, dp_rank),
+            KvSourceStatus::Ambiguous(crate::discovery::KvSourceAmbiguity::Incarnations {
+                publisher_ids: vec![1, 2],
+            }),
+        )
     }
 
     fn required_state() -> SourceHealthState {
@@ -532,223 +417,131 @@ mod tests {
     }
 
     #[test]
-    fn disabled_capability_warns_immediately_and_once() {
-        let worker = WorkerWithDpRank::new(7, 0);
-        let view = view(
-            KvSourceObservationState::Rebinding,
-            [(7, Some(false))],
-            [(worker, KvSourceStatus::Missing)],
-        );
-        let now = Instant::now();
-        let mut state = required_state();
+    fn source_health_state_matrix() {
+        struct Case {
+            name: &'static str,
+            requirement: KvEventSourceRequirement,
+            capability: Option<bool>,
+            statuses: Vec<(WorkerWithDpRank, KvSourceStatus)>,
+            expected_code: Option<DiagnosticCode>,
+            expected_ranks: Vec<u32>,
+        }
 
-        let diagnostics = state.reconcile(&view, now);
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].code, DiagnosticCode::PublisherDisabled);
-        assert!(!diagnostics[0].kv_event_publishing_enabled);
-        assert!(state.reconcile(&view, now).is_empty());
+        let cases = [
+            Case {
+                name: "disabled publisher",
+                requirement: KvEventSourceRequirement::CacheAwareRouting,
+                capability: Some(false),
+                statuses: vec![missing(7, 3), missing(7, 1)],
+                expected_code: Some(DiagnosticCode::PublisherDisabled),
+                expected_ranks: vec![1, 3],
+            },
+            Case {
+                name: "ambiguous source",
+                requirement: KvEventSourceRequirement::CacheAwareRouting,
+                capability: Some(true),
+                statuses: vec![ambiguous(7, 0)],
+                expected_code: Some(DiagnosticCode::SourceAmbiguous),
+                expected_ranks: vec![0],
+            },
+            Case {
+                name: "active idle source",
+                requirement: KvEventSourceRequirement::CacheAwareRouting,
+                capability: Some(true),
+                statuses: vec![active(7, 0)],
+                expected_code: None,
+                expected_ranks: vec![],
+            },
+            Case {
+                name: "unknown capability",
+                requirement: KvEventSourceRequirement::CacheAwareRouting,
+                capability: None,
+                statuses: vec![missing(7, 0)],
+                expected_code: None,
+                expected_ranks: vec![],
+            },
+            Case {
+                name: "source not required",
+                requirement: KvEventSourceRequirement::NotRequired,
+                capability: Some(false),
+                statuses: vec![missing(7, 0)],
+                expected_code: None,
+                expected_ranks: vec![],
+            },
+        ];
+        let now = Instant::now();
+
+        for case in cases {
+            let source_view = view([(7, case.capability)], case.statuses);
+            let mut state = SourceHealthState::new(case.requirement);
+            let diagnostics = state.reconcile(&source_view, now);
+            assert_eq!(
+                diagnostics.first().map(|diagnostic| diagnostic.code),
+                case.expected_code,
+                "{}",
+                case.name
+            );
+            assert_eq!(
+                diagnostics
+                    .first()
+                    .map(|diagnostic| diagnostic.dp_ranks.as_slice())
+                    .unwrap_or_default(),
+                case.expected_ranks,
+                "{}",
+                case.name
+            );
+            assert!(
+                state
+                    .reconcile(&source_view, now + SOURCE_JOIN_GRACE * 2)
+                    .is_empty(),
+                "{}",
+                case.name
+            );
+            assert!(state.next_deadline().is_none(), "{}", case.name);
+        }
     }
 
     #[test]
-    fn missing_source_waits_full_grace_and_active_source_recovers_once() {
-        let worker = WorkerWithDpRank::new(7, 0);
-        let missing = view(
-            KvSourceObservationState::Bound,
-            [(7, Some(true))],
-            [(worker, KvSourceStatus::Missing)],
+    fn missing_source_warns_at_grace_boundary_and_recovers_once() {
+        let missing = view([(7, Some(true))], [missing(7, 0), missing(7, 1)]);
+        let active = view([(7, Some(true))], [active(7, 0), active(7, 1)]);
+        let now = Instant::now();
+        let mut state = required_state();
+
+        assert!(state.reconcile(&missing, now).is_empty());
+        assert!(
+            state
+                .reconcile(&missing, now + SOURCE_JOIN_GRACE - Duration::from_millis(1))
+                .is_empty()
+        );
+        let warning = state.reconcile(&missing, now + SOURCE_JOIN_GRACE);
+        assert_eq!(warning.len(), 1);
+        assert_eq!(warning[0].code, DiagnosticCode::SourceNotObserved);
+        assert_eq!(warning[0].dp_ranks, vec![0, 1]);
+
+        let recovered = state.reconcile(&active, now + SOURCE_JOIN_GRACE);
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].code, DiagnosticCode::SourceRecovered);
+        assert!(state.reconcile(&active, now + SOURCE_JOIN_GRACE).is_empty());
+    }
+
+    #[test]
+    fn worker_removal_clears_pending_warning() {
+        let missing = view([(7, Some(true))], [missing(7, 0)]);
+        let removed = view(
+            std::iter::empty::<(WorkerId, Option<bool>)>(),
+            std::iter::empty::<(WorkerWithDpRank, KvSourceStatus)>(),
         );
         let now = Instant::now();
         let mut state = required_state();
 
         assert!(state.reconcile(&missing, now).is_empty());
-        let deadline = state.next_deadline().expect("missing source has deadline");
-        assert!(
-            state
-                .fire_deadline(deadline, deadline.deadline - Duration::from_nanos(1))
-                .is_empty()
-        );
-        let diagnostics = state.fire_deadline(deadline, deadline.deadline);
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].code, DiagnosticCode::SourceNotObserved);
-        assert_eq!(diagnostics[0].waited, SOURCE_JOIN_GRACE);
-
-        let active = view(
-            KvSourceObservationState::Bound,
-            [(7, Some(true))],
-            [(worker, active(worker))],
-        );
-        let recovered = state.reconcile(&active, deadline.deadline + Duration::from_secs(1));
-        assert_eq!(recovered.len(), 1);
-        assert_eq!(recovered[0].code, DiagnosticCode::SourceRecovered);
-        assert!(
-            state
-                .reconcile(&active, deadline.deadline + Duration::from_secs(32))
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn rebinding_resets_pending_grace_and_fences_old_deadline() {
-        let worker = WorkerWithDpRank::new(7, 0);
-        let bound_missing = view(
-            KvSourceObservationState::Bound,
-            [(7, Some(true))],
-            [(worker, KvSourceStatus::Missing)],
-        );
-        let rebinding = view(
-            KvSourceObservationState::Rebinding,
-            [(7, Some(true))],
-            [(worker, KvSourceStatus::Missing)],
-        );
-        let now = Instant::now();
-        let mut state = required_state();
-
-        state.reconcile(&bound_missing, now);
-        let stale = state.next_deadline().unwrap();
-        state.reconcile(&rebinding, now + Duration::from_secs(20));
+        assert!(state.reconcile(&removed, now).is_empty());
         assert!(state.next_deadline().is_none());
-        state.reconcile(&bound_missing, now + Duration::from_secs(25));
-        let fresh = state.next_deadline().unwrap();
-        assert_ne!(fresh.epoch, stale.epoch);
         assert!(
             state
-                .fire_deadline(stale, now + SOURCE_JOIN_GRACE)
+                .reconcile(&missing, now + SOURCE_JOIN_GRACE)
                 .is_empty()
         );
-        assert_eq!(
-            state.fire_deadline(fresh, fresh.deadline)[0].code,
-            DiagnosticCode::SourceNotObserved
-        );
-    }
-
-    #[test]
-    fn remove_and_rejoin_fences_old_deadline() {
-        let worker = WorkerWithDpRank::new(7, 0);
-        let missing = view(
-            KvSourceObservationState::Bound,
-            [(7, Some(true))],
-            [(worker, KvSourceStatus::Missing)],
-        );
-        let removed = view(
-            KvSourceObservationState::Bound,
-            std::iter::empty(),
-            std::iter::empty(),
-        );
-        let now = Instant::now();
-        let mut state = required_state();
-
-        state.reconcile(&missing, now);
-        let stale = state.next_deadline().unwrap();
-        state.reconcile(&removed, now + Duration::from_secs(1));
-        state.reconcile(&missing, now + Duration::from_secs(2));
-        let fresh = state.next_deadline().unwrap();
-        assert_ne!(fresh.epoch, stale.epoch);
-        assert!(state.fire_deadline(stale, stale.deadline).is_empty());
-        assert_eq!(
-            state.fire_deadline(fresh, fresh.deadline)[0].code,
-            DiagnosticCode::SourceNotObserved
-        );
-    }
-
-    #[test]
-    fn ambiguity_warns_once_then_active_emits_one_recovery() {
-        let worker = WorkerWithDpRank::new(7, 0);
-        let ambiguity = crate::discovery::KvSourceAmbiguity::Incarnations {
-            publisher_ids: vec![1, 2],
-        };
-        let ambiguous = view(
-            KvSourceObservationState::Bound,
-            [(7, Some(true))],
-            [(worker, KvSourceStatus::Ambiguous(ambiguity))],
-        );
-        let now = Instant::now();
-        let mut state = required_state();
-
-        let diagnostics = state.reconcile(&ambiguous, now);
-        assert_eq!(diagnostics[0].code, DiagnosticCode::SourceAmbiguous);
-        assert!(state.reconcile(&ambiguous, now).is_empty());
-
-        let active = view(
-            KvSourceObservationState::Bound,
-            [(7, Some(true))],
-            [(worker, active(worker))],
-        );
-        assert_eq!(
-            state.reconcile(&active, now + Duration::from_secs(1))[0].code,
-            DiagnosticCode::SourceRecovered
-        );
-        assert!(
-            state
-                .reconcile(&active, now + Duration::from_secs(2))
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn endpoint_mapping_ambiguity_warns_while_source_watch_is_unbound() {
-        let worker = WorkerWithDpRank::new(7, 0);
-        let ambiguous = view(
-            KvSourceObservationState::Rebinding,
-            [(7, Some(true))],
-            [(
-                worker,
-                KvSourceStatus::Ambiguous(KvSourceAmbiguity::EndpointMapping {
-                    endpoints: vec![endpoint()],
-                }),
-            )],
-        );
-        let now = Instant::now();
-        let mut state = required_state();
-
-        let diagnostics = state.reconcile(&ambiguous, now);
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].code, DiagnosticCode::SourceAmbiguous);
-        assert!(state.reconcile(&ambiguous, now).is_empty());
-    }
-
-    #[test]
-    fn unknown_capability_and_unknown_requirement_are_silent() {
-        let worker = WorkerWithDpRank::new(7, 0);
-        let unknown_capability = view(
-            KvSourceObservationState::Bound,
-            [(7, None)],
-            [(worker, KvSourceStatus::Missing)],
-        );
-        let now = Instant::now();
-        let mut required = required_state();
-        assert!(required.reconcile(&unknown_capability, now).is_empty());
-        assert!(required.next_deadline().is_none());
-
-        let disabled = view(
-            KvSourceObservationState::Bound,
-            [(7, Some(false))],
-            [(worker, KvSourceStatus::Missing)],
-        );
-        let mut unknown = SourceHealthState::new(KvEventSourceRequirement::Unknown);
-        assert!(unknown.reconcile(&disabled, now).is_empty());
-        assert!(unknown.next_deadline().is_none());
-    }
-
-    #[test]
-    fn diagnostics_aggregate_by_worker_and_code() {
-        let diagnostics = aggregate_diagnostics(vec![
-            RankDiagnostic {
-                code: DiagnosticCode::SourceNotObserved,
-                worker: WorkerWithDpRank::new(7, 3),
-                kv_event_publishing_enabled: true,
-                waited: Duration::from_secs(30),
-            },
-            RankDiagnostic {
-                code: DiagnosticCode::SourceNotObserved,
-                worker: WorkerWithDpRank::new(7, 1),
-                kv_event_publishing_enabled: true,
-                waited: Duration::from_secs(31),
-            },
-        ]);
-
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].worker_id, 7);
-        assert_eq!(diagnostics[0].waited_ms, 31_000);
-        assert_eq!(diagnostics[0].dp_ranks, vec![1, 3]);
     }
 }

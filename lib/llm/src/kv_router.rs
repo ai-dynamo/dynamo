@@ -506,12 +506,6 @@ where
         }
     }
 
-    pub(crate) fn stop_source_health_monitor(&self) {
-        if let Some(subscription) = &self.kv_event_subscription {
-            subscription.stop_source_health_monitor();
-        }
-    }
-
     pub fn is_eagle(&self) -> bool {
         self.is_eagle
     }
@@ -1448,49 +1442,57 @@ mod tests {
     }
 
     #[test]
-    fn kv_event_source_requirement_is_role_and_config_aware() {
-        let config = KvRouterConfig::default();
-        assert_eq!(
-            KvEventSourceRequirement::derive(Some(WorkerType::Prefill), &config),
-            KvEventSourceRequirement::CacheAwareRouting
-        );
-        assert_eq!(
-            KvEventSourceRequirement::derive(Some(WorkerType::Aggregated), &config),
-            KvEventSourceRequirement::CacheAwareRouting
-        );
-        assert_eq!(
-            KvEventSourceRequirement::derive(Some(WorkerType::Decode), &config),
-            KvEventSourceRequirement::NotRequired
-        );
-        assert_eq!(
-            KvEventSourceRequirement::derive(Some(WorkerType::Encode), &config),
-            KvEventSourceRequirement::NotRequired
-        );
-        assert_eq!(
-            KvEventSourceRequirement::derive(None, &config),
-            KvEventSourceRequirement::Unknown
-        );
-
+    fn kv_event_source_requirement_matrix() {
+        let default = KvRouterConfig::default();
+        let mut cases = vec![
+            (
+                Some(WorkerType::Prefill),
+                default.clone(),
+                KvEventSourceRequirement::CacheAwareRouting,
+                true,
+            ),
+            (
+                Some(WorkerType::Aggregated),
+                default.clone(),
+                KvEventSourceRequirement::CacheAwareRouting,
+                true,
+            ),
+            (
+                Some(WorkerType::Decode),
+                default.clone(),
+                KvEventSourceRequirement::NotRequired,
+                false,
+            ),
+            (
+                Some(WorkerType::Encode),
+                default.clone(),
+                KvEventSourceRequirement::NotRequired,
+                false,
+            ),
+            (
+                None,
+                default.clone(),
+                KvEventSourceRequirement::Unknown,
+                true,
+            ),
+        ];
         for policy in [
             dynamo_kv_router::ConditionalDisaggPolicyKind::IslBounding,
             dynamo_kv_router::ConditionalDisaggPolicyKind::PrefillLoad,
             dynamo_kv_router::ConditionalDisaggPolicyKind::IslOrLoad,
         ] {
-            let conditional = KvRouterConfig {
-                conditional_disagg_enabled: true,
-                conditional_disagg_policy: policy,
-                ..config.clone()
-            };
-            assert_eq!(
-                KvEventSourceRequirement::derive(Some(WorkerType::Decode), &conditional),
-                KvEventSourceRequirement::ConditionalDisaggDecodeCache
-            );
+            cases.push((
+                Some(WorkerType::Decode),
+                KvRouterConfig {
+                    conditional_disagg_enabled: true,
+                    conditional_disagg_policy: policy,
+                    ..default.clone()
+                },
+                KvEventSourceRequirement::ConditionalDisaggDecodeCache,
+                true,
+            ));
         }
-    }
-
-    #[test]
-    fn non_local_indexers_never_require_kv_event_sources() {
-        let configurations = [
+        for config in [
             KvRouterConfig {
                 use_remote_indexer: true,
                 ..Default::default()
@@ -1503,32 +1505,34 @@ mod tests {
                 overlap_score_credit: 0.0,
                 ..Default::default()
             },
-        ];
-
-        for config in configurations {
-            assert_eq!(
-                KvEventSourceRequirement::derive(None, &config),
-                KvEventSourceRequirement::Unknown
-            );
-            assert_eq!(
-                KvEventSourceRequirement::derive(Some(WorkerType::Aggregated), &config),
-                KvEventSourceRequirement::NotRequired
-            );
-            assert_eq!(
-                KvEventSourceRequirement::derive(Some(WorkerType::Decode), &config),
-                KvEventSourceRequirement::NotRequired
-            );
+        ] {
+            cases.extend([
+                (
+                    None,
+                    config.clone(),
+                    KvEventSourceRequirement::Unknown,
+                    false,
+                ),
+                (
+                    Some(WorkerType::Aggregated),
+                    config.clone(),
+                    KvEventSourceRequirement::NotRequired,
+                    false,
+                ),
+                (
+                    Some(WorkerType::Decode),
+                    config,
+                    KvEventSourceRequirement::NotRequired,
+                    false,
+                ),
+            ]);
         }
-    }
 
-    #[test]
-    fn unknown_role_preserves_configured_subscription_behavior() {
-        let config = KvRouterConfig::default();
-        assert!(KvEventSourceRequirement::Unknown.should_subscribe(&config));
-
-        let decode_requirement =
-            KvEventSourceRequirement::derive(Some(WorkerType::Decode), &config);
-        assert!(!decode_requirement.should_subscribe(&config));
+        for (role, config, expected, should_subscribe) in cases {
+            let requirement = KvEventSourceRequirement::derive(role, &config);
+            assert_eq!(requirement, expected);
+            assert_eq!(requirement.should_subscribe(&config), should_subscribe);
+        }
     }
 
     #[test]

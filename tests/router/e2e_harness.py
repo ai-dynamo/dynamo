@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import asyncio
 import logging
 import os
 import time
@@ -15,11 +14,7 @@ from tests.router.common import (
     _test_router_decisions_disagg,
     _test_router_indexers_sync,
 )
-from tests.router.helper import (
-    generate_random_suffix,
-    managed_runtime,
-    wait_for_model_absent,
-)
+from tests.router.helper import generate_random_suffix, managed_runtime
 from tests.router.router_process import FrontendRouterProcess
 from tests.utils.constants import DynamoPortRange
 from tests.utils.port_utils import allocate_ports, deallocate_ports
@@ -278,26 +273,6 @@ def run_kv_event_publisher_disabled_test(
                 expected_worker_role="aggregated",
                 expected_requirement="cache_aware_routing",
                 expected_rank_count=expected_rank_count,
-                request_plane=request_plane,
-            )
-        asyncio.run(
-            wait_for_model_absent(
-                f"http://localhost:{frontend_port}",
-                model_name,
-            )
-        )
-        with process as engine_workers:
-            _test_kv_event_publisher_disabled_diagnostic(
-                frontend=frontend,
-                engine_workers=engine_workers,
-                diagnostic_workers=engine_workers,
-                frontend_port=frontend_port,
-                test_payload=test_payload or build_test_payload(model_name),
-                model_name=model_name,
-                expected_worker_role="aggregated",
-                expected_requirement="cache_aware_routing",
-                expected_rank_count=expected_rank_count,
-                expected_total_diagnostics=2,
                 request_plane=request_plane,
             )
 

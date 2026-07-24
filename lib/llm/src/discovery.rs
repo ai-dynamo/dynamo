@@ -7,9 +7,8 @@ pub use model::Model;
 pub mod kv_source_membership;
 pub use kv_source_membership::{
     KvEventSource, KvSourceAdvertisement, KvSourceAmbiguity, KvSourceId, KvSourceKey,
-    KvSourceMembership, KvSourceMembershipError, KvSourceMembershipView, KvSourceObservationState,
-    KvSourceStatus, KvSourceTransition, KvStateEndpointResolution, PublisherId,
-    resolve_kv_state_endpoint,
+    KvSourceMembership, KvSourceMembershipError, KvSourceMembershipView, KvSourceStatus,
+    KvSourceTransition, KvStateEndpointResolution, PublisherId, resolve_kv_state_endpoint,
 };
 
 mod kv_source_watch;
