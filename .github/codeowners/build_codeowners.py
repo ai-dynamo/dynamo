@@ -142,7 +142,7 @@ def strict_failure(
     gate: CoverageGate,
     changed: list[str] | None,
     ownership_violations: list[OwnershipContractViolation],
-    dead: list[str] | None = None,
+    dead: list[str],
 ) -> str | None:
     """Return the fail-closed message for the active strict gate."""
     if not strict:
@@ -230,7 +230,23 @@ def validation_scope(
     return changed, [path for path in tree if path in changed_set]
 
 
-def main() -> int:
+def _dead_patterns(model: ResolvedModel, tree: list[str]) -> list[str]:
+    """Return unique blocking ownership patterns that match no tracked files."""
+    patterns = [
+        *model.owned_patterns(),
+        *(anchor(rule["glob"]) for rule in model.required_owners),
+        *(anchor(rule["glob"]) for rule in model.advisory),
+        *(rule["pattern"] for rule in model.filetype_advisory),
+    ]
+    return [
+        pattern
+        for pattern in dict.fromkeys(patterns)
+        if not any(match(pattern, path) for path in tree)
+    ]
+
+
+def _parse_args() -> argparse.Namespace:
+    """Parse command-line arguments."""
     ap = argparse.ArgumentParser()
     ap.add_argument(
         "--areas", required=True, help="path to areas.yaml (source of truth)"
@@ -254,35 +270,32 @@ def main() -> int:
         default="main",
         help="base ref for --changed-only (default: main)",
     )
-    args = ap.parse_args()
+    return ap.parse_args()
 
-    spec = yaml.safe_load(Path(args.areas).read_text())
-    # Resolution is a pure function of the YAML; the tree only feeds the
-    # coverage/drift reports below, never the rule set.
-    model = compute_resolution(spec)
-    tree = load_tree(Path(args.repo))
-    unmatched = model.unmatched_paths(tree)
 
-    # Diff-aware mode judges only the PR's own surface; full-tree mode (the
-    # default) judges every tracked file. A PR that edits ownership policy
-    # (areas/scripts/CODEOWNERS) can re-route any path, so it is always judged
-    # whole-tree -- otherwise a policy edit could orphan untouched paths.
-    changed, contract_tree = validation_scope(
-        Path(args.repo), args.base, args.areas, args.changed_only, tree
+def _print_dead_patterns(dead: list[str]) -> None:
+    """Print a bounded stale-pattern report."""
+    if not dead:
+        return
+    print(
+        f"globs matching no files: {len(dead)} "
+        "(prune from areas.yaml when the paths are gone):"
     )
+    for pattern in dead[:10]:
+        print(f"    {pattern}")
 
-    # Scope ownership contracts exactly like catch-all coverage. Otherwise a
-    # pre-existing owner loss on the base branch can fail an unrelated PR even
-    # though --changed-only promises that only the PR's own surface blocks.
-    ownership_violations = ownership_contract_violations(model, contract_tree)
-    # A glob that no longer matches a tracked file is stale policy. Strict mode
-    # rejects it so deleting the final covered path requires pruning the rule.
-    dead = [g for g in model.owned_patterns() if not any(match(g, p) for p in tree)]
 
+def _print_summary(
+    model: ResolvedModel,
+    tree: list[str],
+    unmatched: list[str],
+    dead: list[str],
+    violations: list[OwnershipContractViolation],
+) -> None:
+    """Print coverage, stale-pattern, contract, and per-area summaries."""
     n_tree = len(tree)
     n_owned = n_tree - len(unmatched)
     pct = (100 * n_owned / n_tree) if n_tree else 100.0
-
     print(f"areas: {len(model.areas)} | tree files: {n_tree}")
     print(
         f"explicitly owned: {n_owned}/{n_tree} ({pct:.2f}%) | catch-all only: {len(unmatched)}"
@@ -290,28 +303,40 @@ def main() -> int:
     if unmatched:
         print("catch-all-only sample (add an explicit glob to cover these):")
         print("   ", unmatched[:15])
-    if dead:
-        print(
-            f"globs matching no files: {len(dead)} "
-            "(prune from areas.yaml when the paths are gone):"
-        )
-        for g in dead[:10]:
-            print(f"    {g}")
-    print_ownership_violations(ownership_violations)
+    _print_dead_patterns(dead)
+    print_ownership_violations(violations)
     print("\nper-area glob counts:")
     counts = Counter({a.label: len(a.path_globs) for a in model.areas})
-    for lbl, c in counts.most_common():
-        print(f"  {lbl:<22} {c}")
+    for label, count in counts.most_common():
+        print(f"  {label:<22} {count}")
 
+
+def _print_warnings(gate: CoverageGate, base: str) -> None:
+    """Print inherited catch-all gaps that do not block diff-aware mode."""
+    if not gate.warnings:
+        return
+    print(
+        f"warning: {len(gate.warnings)} catch-all-only path(s) inherited from "
+        f"{base} (not touched by this change; not blocking):"
+    )
+    print("   ", gate.warnings[:15])
+
+
+def main() -> int:
+    args = _parse_args()
+    spec = yaml.safe_load(Path(args.areas).read_text())
+    model = compute_resolution(spec)
+    tree = load_tree(Path(args.repo))
+    unmatched = model.unmatched_paths(tree)
+    changed, contract_tree = validation_scope(
+        Path(args.repo), args.base, args.areas, args.changed_only, tree
+    )
+    violations = ownership_contract_violations(model, contract_tree)
+    dead = _dead_patterns(model, tree)
+    _print_summary(model, tree, unmatched, dead, violations)
     gate = split_coverage(unmatched, changed)
-    if gate.warnings:
-        print(
-            f"warning: {len(gate.warnings)} catch-all-only path(s) inherited from "
-            f"{args.base} (not touched by this change; not blocking):"
-        )
-        print("   ", gate.warnings[:15])
-
-    failure = strict_failure(args.strict, gate, changed, ownership_violations, dead)
+    _print_warnings(gate, args.base)
+    failure = strict_failure(args.strict, gate, changed, violations, dead)
     if failure:
         print(failure)
         return 1

@@ -46,14 +46,15 @@ in the Actions tab, visible to external contributors.
 
 ## Flow 2: The `codeowners` CI check failed
 
-This is the coverage gate doing its job: the PR adds at least one file that no
-area claims. Nothing ships unowned. On pull requests the gate is diff-aware:
-only files YOUR PR adds or changes block it; unowned paths inherited from the
-base branch are a non-fatal warning. (A PR that edits ownership policy itself
-is judged against the full tree, since a policy edit can orphan any path.)
+This is the strict ownership-policy gate doing its job. It rejects uncovered
+files, stale globs, and final routing that violates an explicit ownership
+contract. Coverage is diff-aware on pull requests: only files YOUR PR adds or
+changes block it; unowned paths inherited from the base branch are a non-fatal
+warning. A PR that edits ownership policy is judged against the full tree,
+since a policy edit can orphan any path.
 
-1. Read the failing job log. The gate prints the exact uncovered files:
-   `catch-all-only sample (add an explicit glob to cover these): [...]`.
+1. Read the failing job log. The gate prints the exact uncovered files, stale
+   globs, or ownership-contract violations.
 2. Decide which area owns the new path. Match it to the subsystem whose code it
    extends (the PR that introduced `examples/custom_encoder/` was a multimodal
    feature, so the claim went under the `multimodal` area).
@@ -72,12 +73,10 @@ is judged against the full tree, since a policy edit can orphan any path.)
 5. Commit `areas.yaml` and `CODEOWNERS` together (same commit), signed
    (`git commit -s`).
 
-Removals fail differently: deleting a directory never fails coverage (it
-counts files, and a claim matching nothing is not an error), but regeneration
-drops the directory's rule, so the **drift check** fails until the
-regenerated `CODEOWNERS` is committed with the deletion. Run step 4 and
-commit both files. While there, prune the now-dead glob from `areas.yaml`;
-the `build_codeowners.py` report lists globs that no longer match any file.
+Removals fail the stale-policy gate when a deletion removes the final tracked
+file matched by a declared ownership glob. Prune the dead declaration from
+`areas.yaml`, run step 4, and commit the policy and regenerated artifacts with
+the deletion.
 
 ## Flow 3: Change review routing
 
@@ -130,5 +129,5 @@ the area's team owns and rebuilds `CONTRIBUTORS.md`. Commit all three files
 
 - Schema, the last-match-wins model, and the change process:
   `.github/codeowners/README.md`
-- The gate and drift check run in `.github/workflows/codeowners.yml` on every
-  PR; both must pass before merge.
+- The strict policy gate and drift check run in
+  `.github/workflows/codeowners.yml` on every PR; both must pass before merge.

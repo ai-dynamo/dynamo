@@ -28,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from build_codeowners import (  # noqa: E402
     CoverageGate,
+    _dead_patterns,
     is_policy_change,
     ownership_contract_violations,
     split_coverage,
@@ -903,7 +904,7 @@ class TestOwnershipContracts:
         model = compute_resolution(self._spec())
         violations = ownership_contract_violations(model, ["lib/private/a.rs"])
         message = strict_failure(
-            True, CoverageGate(blocking=[], warnings=[]), None, violations
+            True, CoverageGate(blocking=[], warnings=[]), None, violations, []
         )
         assert message is None
 
@@ -912,9 +913,29 @@ class TestOwnershipContracts:
         model.shared.append({"glob": "lib/private/", "owners": ["runtime"]})
         violations = ownership_contract_violations(model, ["lib/private/a.rs"])
         message = strict_failure(
-            True, CoverageGate(blocking=[], warnings=[]), None, violations
+            True, CoverageGate(blocking=[], warnings=[]), None, violations, []
         )
         assert message and "lost declared owners" in message
+
+
+def test_dead_patterns_include_advisory_rules() -> None:
+    spec = {
+        "meta": {"catch_all": "@root"},
+        "areas": [
+            {"label": "owned", "github_team": "@owned", "path_globs": ["owned/"]},
+            {"label": "docs", "github_team": "@docs", "path_globs": []},
+        ],
+        "advisory": [{"glob": "missing/", "owners": ["docs"]}],
+        "classify": {
+            "filetype_rules": [
+                {"pattern": "*.missing", "coowner": "docs", "advisory": True}
+            ]
+        },
+    }
+
+    model = compute_resolution(spec)
+
+    assert _dead_patterns(model, ["owned/file.txt"]) == ["/missing/", "*.missing"]
 
 
 # ------------------------------------------------------------------
@@ -1058,6 +1079,26 @@ class TestDiffAwareStrictGateE2E:
         assert result.returncode == 1
         assert "glob(s) match no tracked files" in result.stdout
         assert "/owned/" in result.stdout
+
+    def test_deleting_required_owner_target_requires_pruning_contract(
+        self, tmp_path
+    ) -> None:
+        areas = self._areas(tmp_path)
+        areas.write_text(
+            areas.read_text()
+            + 'required_owners:\n  - glob: "base_unowned/x.txt"\n'
+            + "    owners: [owned]\n"
+        )
+        repo, base = self._repo_with_base(tmp_path)
+        (repo / "base_unowned" / "x.txt").unlink()
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "delete required target")
+
+        result = _run_build(repo, areas, "--changed-only", "--base", base)
+
+        assert result.returncode == 1
+        assert "glob(s) match no tracked files" in result.stdout
+        assert "/base_unowned/x.txt" in result.stdout
 
     def test_inherited_contract_only_blocks_full_tree(self, tmp_path) -> None:
         areas = tmp_path / "areas.yaml"

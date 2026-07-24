@@ -79,7 +79,9 @@ required_owners:
 
 This is appropriate for parent-team guarantees. A narrower specialist rule
 under `deploy/operator/` may add GMS or Observability, but it cannot silently
-remove Operator.
+remove Operator. Each `required_owners` glob must match at least one tracked
+path; strict validation rejects stale contracts after their final path is
+deleted.
 
 ## External contributors
 
@@ -116,9 +118,11 @@ generated outputs together.
 
 - any tracked file falls through to no owner (**coverage gate**) - a new
   directory no area claims blocks the PR until `areas.yaml` is updated; or
+- any declared ownership glob matches no tracked file (**stale policy gate**) -
+  deleting the final matching path also requires pruning its declaration; or
 - final last-match resolution removes an owner promised by `required_owners`,
-  `shared`, or a blocking file-type declaration (**ownership contract gate**)
-  - coverage by the wrong team no longer counts as success; or
+  or a blocking file-type declaration (**ownership contract gate**) - coverage
+  by the wrong team no longer counts as success; or
 - the committed `CODEOWNERS` or `CONTRIBUTORS.md` differs from what the sources
   produce (**drift check**) - so the outputs always match their sources.
 
