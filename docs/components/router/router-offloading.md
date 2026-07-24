@@ -25,7 +25,7 @@ Legend: ✅ tier-aware routing · 🟡 router-visible, tier-agnostic · 🚧 Dyn
 - **Router-visible (tier-agnostic).** The router keeps blocks indexed across engine-managed tiers but cannot distinguish which tier currently holds them, so per-tier weights do not apply.
 
 > [!NOTE]
-> Offloading support changes quickly on both the framework and the Dynamo side. Version gates are summarized in the matrix and expanded in the per-framework sections below. Capabilities merged upstream but not yet released are listed as main-branch support. vLLM tier-aware routing and the `--router-host-cache-hit-weight` / `--router-disk-cache-hit-weight` tuning flags require Dynamo 1.3.0 or later; SGLang HiCache tier-aware routing also works on Dynamo 1.2.x, with the lower-tier weights fixed at their defaults.
+> Offloading support changes quickly. Version gates are summarized in the matrix and expanded in the per-framework sections below.
 
 ## Common Frontend Setup
 
