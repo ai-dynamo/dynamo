@@ -271,10 +271,10 @@ function StableCard({ entry }: { entry: StableTagEntry }) {
       </div>
       {stats && (
         <div className="dynref-tg-chips">
-          <a className="dynref-up-read" href={`/dynamo/dev/reference/deprecations#${anchor}`}>
+          <a className="dynref-up-read" href={`/dynamo/dev/reference/releases/deprecations#${anchor}`}>
             {stats.breaking} breaking changes
           </a>
-          <a className="dynref-up-read" href={`/dynamo/dev/reference/known-issues#${anchor}`}>
+          <a className="dynref-up-read" href={`/dynamo/dev/reference/releases/known-issues#${anchor}`}>
             {stats.knownIssues} known issues
           </a>
         </div>

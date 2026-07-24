@@ -150,7 +150,7 @@ export function ReleaseHeader(props: { version: string }) {
       label: "Breaking changes",
       value: stats.breaking,
       amber: true,
-      href: `/dynamo/dev/reference/deprecations#${versionAnchor}`,
+      href: `/dynamo/dev/reference/releases/deprecations#${versionAnchor}`,
     });
     tiles.push({
       label: "Known issues",
@@ -158,7 +158,7 @@ export function ReleaseHeader(props: { version: string }) {
       amber: true,
       href:
         stats.knownIssues > 0
-          ? `/dynamo/dev/reference/known-issues#${versionAnchor}`
+          ? `/dynamo/dev/reference/releases/known-issues#${versionAnchor}`
           : undefined,
     });
   }

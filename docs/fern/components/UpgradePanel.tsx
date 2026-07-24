@@ -236,13 +236,13 @@ function buildReadingChips(readingList: ReadingItem[]): { label: string; href: s
       ? [
           {
             label: `${item.version} breaking changes (${stats.breaking})`,
-            href: `/dynamo/dev/reference/deprecations#${anchor}`,
+            href: `/dynamo/dev/reference/releases/deprecations#${anchor}`,
           },
         ]
       : [
           {
             label: `${item.version} known issues (${stats.knownIssues})`,
-            href: `/dynamo/dev/reference/known-issues#${anchor}`,
+            href: `/dynamo/dev/reference/releases/known-issues#${anchor}`,
           },
         ];
   });

@@ -833,7 +833,7 @@ def build_atom(data: dict) -> str:
     dated.sort(key=lambda item: (item[0], -item[1]), reverse=True)
 
     feed_updated = dated[0][0] + "T00:00:00Z"
-    notes_index = f"{PROD_BASE}/dev/reference/release-notes"
+    notes_index = f"{PROD_BASE}/dev/reference/releases/release-history"
 
     lines = [
         '<?xml version="1.0" encoding="utf-8"?>',

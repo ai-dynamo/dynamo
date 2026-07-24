@@ -20,7 +20,7 @@
   "releases": [
     {
       "version": "v1.3.0",
-      "notesHref": "/dynamo/dev/reference/release-notes/v1-3-0",
+      "notesHref": "/dynamo/dev/reference/releases/v1-3-0",
       "date": "Jul 20, 2026",
       "kind": "stable",
       "github": "https://github.com/ai-dynamo/dynamo/releases/tag/v1.3.0",
@@ -36,7 +36,7 @@
       "delta": "CUDA 12 container images discontinued; EFA variants go multi-arch as -efa; GA wheels published as 1.3.0.post1 (containers stay :1.3.0); UCX 1.20.x.",
       "notesSummary": "Tool-calling and reasoning overhaul, RL rollout serving, the largest Router buildout to date, SLA-driven Planner autoscaling, and production GPU Memory Service on Kubernetes.",
       "dateIso": "2026-07-20",
-      "notesUrl": "https://docs.nvidia.com/dynamo/dev/reference/release-notes/v1-3-0"
+      "notesUrl": "https://docs.nvidia.com/dynamo/dev/reference/releases/v1-3-0"
     },
     {
       "version": "v1.3.0-dev.1",
@@ -57,7 +57,7 @@
     },
     {
       "version": "v1.2.1",
-      "notesHref": "/dynamo/dev/reference/release-notes/v1-2-0",
+      "notesHref": "/dynamo/dev/reference/releases/v1-2-0",
       "date": "Jun 13, 2026",
       "kind": "patch",
       "github": "https://github.com/ai-dynamo/dynamo/releases/tag/v1.2.1",
@@ -72,11 +72,11 @@
       },
       "delta": "Patch release. Same backend pins as v1.2.0.",
       "dateIso": "2026-06-13",
-      "notesUrl": "https://docs.nvidia.com/dynamo/dev/reference/release-notes/v1-2-0"
+      "notesUrl": "https://docs.nvidia.com/dynamo/dev/reference/releases/v1-2-0"
     },
     {
       "version": "v1.2.0",
-      "notesHref": "/dynamo/dev/reference/release-notes/v1-2-0",
+      "notesHref": "/dynamo/dev/reference/releases/v1-2-0",
       "date": "Jun 2, 2026",
       "kind": "stable",
       "github": "https://github.com/ai-dynamo/dynamo/releases/tag/v1.2.0",
@@ -92,7 +92,7 @@
       "delta": "603 PRs from 82 authors. DGD/DGDR promoted to v1beta1; CRTC default approximate KV router; inter-pod GMS sidecar; Dynamo Snapshot on CRI-O / OpenShift; UCX 1.20.0.",
       "notesSummary": "DGD/DGDR v1beta1, CRTC as the default KV router, inter-pod GPU Memory Service, Dynamo Snapshot on CRI-O/OpenShift, and DeepSeek-V4 recipes on vLLM.",
       "dateIso": "2026-06-02",
-      "notesUrl": "https://docs.nvidia.com/dynamo/dev/reference/release-notes/v1-2-0"
+      "notesUrl": "https://docs.nvidia.com/dynamo/dev/reference/releases/v1-2-0"
     },
     {
       "version": "v1.2.0-deepseek-v4-dev.3",
@@ -126,7 +126,7 @@
     },
     {
       "version": "v1.1.1",
-      "notesHref": "/dynamo/dev/reference/release-notes/v1-1-0",
+      "notesHref": "/dynamo/dev/reference/releases/v1-1-0",
       "date": "May 5, 2026",
       "kind": "patch",
       "github": "https://github.com/ai-dynamo/dynamo/releases/tag/v1.1.1",
@@ -141,11 +141,11 @@
       },
       "delta": "Patch release. Same backend pins as v1.1.0.",
       "dateIso": "2026-05-05",
-      "notesUrl": "https://docs.nvidia.com/dynamo/dev/reference/release-notes/v1-1-0"
+      "notesUrl": "https://docs.nvidia.com/dynamo/dev/reference/releases/v1-1-0"
     },
     {
       "version": "v1.1.0",
-      "notesHref": "/dynamo/dev/reference/release-notes/v1-1-0",
+      "notesHref": "/dynamo/dev/reference/releases/v1-1-0",
       "date": "May 1, 2026",
       "kind": "stable",
       "github": "https://github.com/ai-dynamo/dynamo/releases/tag/v1.1.0",
@@ -161,7 +161,7 @@
       "delta": "Planner split into its own dynamo-planner image (artifact boundary change). First 1.y.z publication of dynamo-protocols on crates.io; dynamo-async-openai deprecated at final 1.0.2.",
       "notesSummary": "Resilient KV routing at scale, Anthropic Messages API support, performance modeling and offline replay, and the multimodal embedding cache.",
       "dateIso": "2026-05-01",
-      "notesUrl": "https://docs.nvidia.com/dynamo/dev/reference/release-notes/v1-1-0"
+      "notesUrl": "https://docs.nvidia.com/dynamo/dev/reference/releases/v1-1-0"
     },
     {
       "version": "v1.1.0-dev.3",
@@ -218,7 +218,7 @@
     },
     {
       "version": "v1.0.2",
-      "notesHref": "/dynamo/dev/reference/release-notes/v1-0-0",
+      "notesHref": "/dynamo/dev/reference/releases/v1-0-0",
       "date": "Apr 22, 2026",
       "kind": "patch",
       "github": "https://github.com/ai-dynamo/dynamo/releases/tag/v1.0.2",
@@ -233,11 +233,11 @@
       },
       "delta": "No artifact additions or removals versus v1.0.0.",
       "dateIso": "2026-04-22",
-      "notesUrl": "https://docs.nvidia.com/dynamo/dev/reference/release-notes/v1-0-0"
+      "notesUrl": "https://docs.nvidia.com/dynamo/dev/reference/releases/v1-0-0"
     },
     {
       "version": "v1.0.1",
-      "notesHref": "/dynamo/dev/reference/release-notes/v1-0-0",
+      "notesHref": "/dynamo/dev/reference/releases/v1-0-0",
       "date": "Mar 16, 2026",
       "kind": "patch",
       "github": "https://github.com/ai-dynamo/dynamo/releases/tag/v1.0.1",
@@ -252,11 +252,11 @@
       },
       "delta": "No artifact additions or removals versus v1.0.0.",
       "dateIso": "2026-03-16",
-      "notesUrl": "https://docs.nvidia.com/dynamo/dev/reference/release-notes/v1-0-0"
+      "notesUrl": "https://docs.nvidia.com/dynamo/dev/reference/releases/v1-0-0"
     },
     {
       "version": "v1.0.0",
-      "notesHref": "/dynamo/dev/reference/release-notes/v1-0-0",
+      "notesHref": "/dynamo/dev/reference/releases/v1-0-0",
       "date": "Mar 12, 2026",
       "kind": "stable",
       "github": "https://github.com/ai-dynamo/dynamo/releases/tag/v1.0.0",
@@ -272,7 +272,7 @@
       "delta": "snapshot-agent image and EFA variants for vLLM and TRT-LLM (AMD64 only). First publish of dynamo-mocker and dynamo-kv-router crates. snapshot Helm chart added (preview); deprecated dynamo-crds dropped from the publish stream.",
       "notesSummary": "First GA release: unified configuration, Kubernetes production readiness, multimodal serving, and the agents surface.",
       "dateIso": "2026-03-12",
-      "notesUrl": "https://docs.nvidia.com/dynamo/dev/reference/release-notes/v1-0-0"
+      "notesUrl": "https://docs.nvidia.com/dynamo/dev/reference/releases/v1-0-0"
     },
     {
       "version": "v0.9.1",

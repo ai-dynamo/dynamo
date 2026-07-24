@@ -77,7 +77,7 @@ const GH = "https://github.com/ai-dynamo/dynamo/releases/tag/";
 export const RELEASES: Release[] = [
   {
     version: "v1.3.0",
-    notesHref: "/dynamo/dev/reference/release-notes/v1-3-0",
+    notesHref: "/dynamo/dev/reference/releases/v1-3-0",
     date: "Jul 20, 2026",
     kind: "stable",
     github: `${GH}v1.3.0`,
@@ -99,7 +99,7 @@ export const RELEASES: Release[] = [
   },
   {
     version: "v1.2.1",
-    notesHref: "/dynamo/dev/reference/release-notes/v1-2-0",
+    notesHref: "/dynamo/dev/reference/releases/v1-2-0",
     date: "Jun 13, 2026",
     kind: "patch",
     github: `${GH}v1.2.1`,
@@ -109,7 +109,7 @@ export const RELEASES: Release[] = [
   },
   {
     version: "v1.2.0",
-    notesHref: "/dynamo/dev/reference/release-notes/v1-2-0",
+    notesHref: "/dynamo/dev/reference/releases/v1-2-0",
     date: "Jun 2, 2026",
     kind: "stable",
     github: `${GH}v1.2.0`,
@@ -140,7 +140,7 @@ export const RELEASES: Release[] = [
   },
   {
     version: "v1.1.1",
-    notesHref: "/dynamo/dev/reference/release-notes/v1-1-0",
+    notesHref: "/dynamo/dev/reference/releases/v1-1-0",
     date: "May 5, 2026",
     kind: "patch",
     github: `${GH}v1.1.1`,
@@ -150,7 +150,7 @@ export const RELEASES: Release[] = [
   },
   {
     version: "v1.1.0",
-    notesHref: "/dynamo/dev/reference/release-notes/v1-1-0",
+    notesHref: "/dynamo/dev/reference/releases/v1-1-0",
     date: "May 1, 2026",
     kind: "stable",
     github: `${GH}v1.1.0`,
@@ -189,7 +189,7 @@ export const RELEASES: Release[] = [
   },
   {
     version: "v1.0.2",
-    notesHref: "/dynamo/dev/reference/release-notes/v1-0-0",
+    notesHref: "/dynamo/dev/reference/releases/v1-0-0",
     date: "Apr 22, 2026",
     kind: "patch",
     github: `${GH}v1.0.2`,
@@ -199,7 +199,7 @@ export const RELEASES: Release[] = [
   },
   {
     version: "v1.0.1",
-    notesHref: "/dynamo/dev/reference/release-notes/v1-0-0",
+    notesHref: "/dynamo/dev/reference/releases/v1-0-0",
     date: "Mar 16, 2026",
     kind: "patch",
     github: `${GH}v1.0.1`,
@@ -209,7 +209,7 @@ export const RELEASES: Release[] = [
   },
   {
     version: "v1.0.0",
-    notesHref: "/dynamo/dev/reference/release-notes/v1-0-0",
+    notesHref: "/dynamo/dev/reference/releases/v1-0-0",
     date: "Mar 12, 2026",
     kind: "stable",
     github: `${GH}v1.0.0`,
