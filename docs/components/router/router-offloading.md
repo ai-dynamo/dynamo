@@ -52,9 +52,16 @@ offloading configuration with the tiers it observes.
 
 ## vLLM
 
-Enable KV event publishing and native CPU offloading with self-describing events on every worker:
+Start each vLLM worker with native CPU offloading and router-usable KV events:
 
-- Worker: `--kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'` and `--kv-transfer-config` with `"kv_connector": "OffloadingConnector"` and `"self_describing_kv_events": true` in `kv_connector_extra_config`.
+```bash
+PYTHONHASHSEED=0 python3 -m dynamo.vllm \
+  --model Qwen/Qwen3-0.6B \
+  --block-size 16 \
+  --kv-transfer-config '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use":17179869184,"block_size":256,"self_describing_kv_events":true}}' \
+  --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
+```
+
 - Versions: vLLM v0.24.0 or later. Earlier versions publish placeholder CPU events that the router silently drops — offloading still works engine-side, but the router only sees the GPU tier.
 - Disk and multi-tier offloading (`TieringOffloadingSpec`): vLLM main emits FS and OBJ events. Dynamo tier mapping is in progress.
 - Shared pools: vLLM main publishes optional `LOCAL` / `REMOTE` locality metadata on FS and OBJ events. Dynamo shared-pool indexing is in progress.
