@@ -23,10 +23,11 @@ from dynamo.common.protocols.video_protocol import (
     VideoNvExt,
 )
 from dynamo.common.storage import get_fs, upload_to_fs
-from dynamo.common.utils.video_utils import encode_to_video_bytes
+from dynamo.common.utils.video_utils import encode_video
 from dynamo.trtllm.configs.diffusion_config import DiffusionConfig
 from dynamo.trtllm.engines.diffusion_engine import DiffusionEngine
 from dynamo.trtllm.request_handlers.base_generative_handler import BaseGenerativeHandler
+from dynamo.trtllm.request_handlers.diffusion.video_convert import to_canonical
 
 logger = logging.getLogger(__name__)
 
@@ -250,22 +251,21 @@ class VideoGenerationHandler(BaseGenerativeHandler):
 
             # Encode media based on what the VisualGen returned
             if output.video is not None:
-                # VisualGenOutput.video is (B, T, H, W, C) uint8 since TRT-LLM rc9;
-                # squeeze the batch dim to get (T, H, W, C) for MP4 encoding.
-                video = output.video
-                assert (
-                    video.ndim == 5 and video.shape[0] == 1
-                ), f"Expected video shape (1, T, H, W, C), got {video.shape}"
-                frames_np = video[0].cpu().numpy()
+                # VisualGenOutput.video is (1, T, H, W, C) uint8 since TRT-LLM
+                # rc9; the backend converter squeezes the batch dim and moves
+                # the frames to host memory as canonical (T, H, W, 3) uint8.
+                frames_np = to_canonical(output.video)
                 logger.info(
-                    f"Request {request_id}: encoding video output "
-                    f"(shape={frames_np.shape}) to MP4 at {fps} fps"
+                    "Request %s: encoding video output (shape=%s) to MP4 at %d fps",
+                    request_id,
+                    frames_np.shape,
+                    fps,
                 )
                 video_bytes = await asyncio.to_thread(
-                    encode_to_video_bytes,
+                    encode_video,
                     frames_np,
-                    fps=fps,
-                    output_format=output_format,
+                    fps,
+                    container=output_format,
                 )
 
             elif output.image is not None:
