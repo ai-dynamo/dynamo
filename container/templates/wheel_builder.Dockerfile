@@ -288,15 +288,38 @@ RUN mkdir -p /tmp/native-sources
 ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
     SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}}
 
-# Always build FFmpeg so libs are available for Rust checks in CI.
-# We also build the ffmpeg CLI with h264_nvenc + libvpx_vp9 encoders so Python
-# code can encode video without the GPL-licensed binary shipped by imageio-ffmpeg.
-# Stays LGPL-only: --disable-gpl --disable-nonfree are preserved; H.264 comes from
-# NVIDIA's NVENC (proprietary HW encoder, already a runtime dependency of these
-# GPU images) and VP9 from libvpx (BSD).
+# Build FFmpeg for every framework's video-encode path, SGLang included. The
+# build is VP9-only (libvpx) — it contains no H.264, H.265, or AAC encoder in
+# any form — so SGLang's video-generation handler gets a VP9 encoder to write
+# with, matching vLLM/TRT-LLM.
+# Build FFmpeg so libs are available for Rust checks in CI.
+# We build the ffmpeg CLI with the libvpx_vp9 encoder so Python code can encode
+# video without the GPL-licensed binary shipped by imageio-ffmpeg.
+# Stays LGPL-only AND royalty-free: --disable-gpl --disable-nonfree are preserved,
+# and no H.264/H.265/AAC codec is built in any form. Video encode is VP9 only
+# (libvpx, BSD). NVENC is intentionally NOT enabled: the hardware H.264 encoder is
+# still a distributable H.264 codec surface, so it is omitted entirely — see the
+# post-build guard below that fails the build if any H.264 surface reappears.
+#
+# MEDIA CODEC ALLOWLIST: the in-tree libavcodec should carry only
+# the media formats we actually build and use, not ffmpeg's full default decoder
+# set. A blanket --disable-decoders/--disable-demuxers/--disable-parsers plus a
+# narrow allowlist keeps the shipped libav*.so limited to that set. The allowlist
+# covers exactly two paths: (1) the encode CLI ingesting rawvideo frames from
+# imageio over a pipe and encoding with libvpx_vp9, and (2) the Rust media-ffmpeg
+# VideoDecoder decoding VP8/VP9 in mp4/webm/mkv (test fixtures are VP9-in-mp4).
+# No H.264 parser/decoder/encoder is enabled — H.264 is not built at all. Image
+# decode does not use ffmpeg (it goes through the Rust `image` crate), so no
+# still-image decoders are enabled here.
+# The `fd` protocol is enabled alongside `pipe`: `ffmpeg -i -` reads stdin via
+# the `fd:` protocol on ffmpeg 8.x (not `pipe:`), so omitting it breaks the
+# imageio encode path with "Protocol not found. Did you mean file:fd:?". Both
+# are pure fd/stream I/O and carry no codec implementation.
+#
+# Combined with the 8.1 -> 8.1.2 bump below (an upstream maintenance release),
+# this also trims the decoder surface to what we ship.
 # Do not delete the source tarball for legal reasons.
 ARG FFMPEG_VERSION
-ARG NV_CODEC_HEADERS_REF
 ARG LIBVPX_REF
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
     --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
@@ -311,12 +334,10 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     elif [ "$DEVICE" = "cuda" ]; then \
     dnf install -y --setopt=tsflags=nocontexts pkg-config xz git yasm; \
     fi && \
-    # nv-codec-headers: provides the NVENC/NVDEC API headers ffmpeg compiles against.
-    # Header-only, no runtime dep here; libcuda/libnvidia-encode are loaded at runtime
-    # in the consuming container.
+    # No nv-codec-headers: NVENC/NVDEC are not built, so the NVIDIA codec API
+    # headers are not needed. This keeps H.264 (incl. the h264_nvenc HW encoder)
+    # out of the in-tree ffmpeg entirely.
     cd /tmp && \
-    git clone --depth 1 --branch ${NV_CODEC_HEADERS_REF} https://github.com/FFmpeg/nv-codec-headers.git && \
-    make -C nv-codec-headers PREFIX=/usr/local install && \
     # libvpx: BSD-licensed VP9 encoder needed for the WebM output path. Built from
     # source so we don't need to track distro package names (libvpx-dev on Debian
     # vs libvpx-devel via EPEL on RHEL/manylinux).
@@ -342,15 +363,37 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         --disable-devices \
         --disable-libdrm \
         --enable-shared \
-        --enable-nvenc \
         --enable-libvpx \
         --disable-encoders \
-        --enable-encoder=h264_nvenc,libvpx_vp9 \
+        --enable-encoder=libvpx_vp9 \
+        --disable-decoders \
+        --enable-decoder=vp8,vp9,rawvideo \
         --disable-muxers \
         --enable-muxer=mov,mp4,matroska,webm \
-        --enable-protocol=file,pipe && \
+        --disable-demuxers \
+        --enable-demuxer=mov,matroska,rawvideo \
+        --disable-parsers \
+        --enable-parser=vp8,vp9 \
+        --disable-protocols \
+        --enable-protocol=file,pipe,fd && \
     make -j$(nproc) && \
     make install && \
+    # Compliance guard: fail the build if any royalty-bearing / HW codec surface
+    # leaked into the in-tree ffmpeg. By construction this build is VP9-only, so a
+    # match here means a config regression. Check the implementation-carrying
+    # surfaces (encoders/decoders/parsers), not -codecs (lists names even when no
+    # implementation is built) and not -bsfs: bitstream filters (e.g.
+    # aac_adtstoasc, h264_mp4toannexb) only reframe an already-encoded stream, are
+    # pulled in as mov/mp4 muxer dependencies, and carry no codec implementation.
+    for surface in encoders decoders parsers; do \
+        if /usr/local/bin/ffmpeg -hide_banner "-${surface}" 2>/dev/null \
+             | grep -qiE 'h\.?264|h\.?265|hevc|(^| )aac|nvenc|cuvid|nvdec'; then \
+            echo "ERROR: in-tree ffmpeg exposes a disallowed codec via -${surface}" >&2; \
+            /usr/local/bin/ffmpeg -hide_banner "-${surface}" 2>/dev/null \
+             | grep -iE 'h\.?264|h\.?265|hevc|(^| )aac|nvenc|cuvid|nvdec' >&2; \
+            exit 1; \
+        fi; \
+    done && \
     /tmp/use-sccache.sh show-stats "FFMPEG" && \
     ldconfig && \
     mkdir -p /usr/local/src/ffmpeg && \
@@ -503,7 +546,9 @@ COPY components/ /opt/dynamo/components/
 
 # Build ai-dynamo (pure Python) and ai-dynamo-runtime (maturin) wheels
 ARG USE_SCCACHE
+{% if framework != "sglang" %}
 ARG ENABLE_MEDIA_FFMPEG
+{% endif %}
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
     --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
     --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
@@ -520,12 +565,13 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     cd /opt/dynamo && \
     uv build --wheel --out-dir /opt/dynamo/dist && \
     cd /opt/dynamo/lib/bindings/python && \
-    if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
+{% if framework == "sglang" %}    maturin build --release --features "kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass" --out /opt/dynamo/dist && \
+{% else %}    if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
         maturin build --release --features "media-ffmpeg,kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass" --out /opt/dynamo/dist; \
     else \
         maturin build --release --features "kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass" --out /opt/dynamo/dist; \
     fi && \
-    /tmp/use-sccache.sh show-stats "Dynamo Runtime"
+{% endif %}    /tmp/use-sccache.sh show-stats "Dynamo Runtime"
 
 # Compliance: harvest each crate's real LICENSE files from the cargo registry
 # source cache so the rust NOTICES generator can inline upstream license text

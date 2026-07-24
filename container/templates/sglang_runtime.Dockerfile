@@ -77,25 +77,6 @@ $NIXL_PLUGIN_DIR:\
 ${LD_LIBRARY_PATH:-}
 {% endif %}
 
-# Copy ffmpeg from wheel_builder: versioned shared libs (libav*.so*,
-# libsw*.so*) for the Rust media-ffmpeg decoder, plus the LGPL CLI binary
-# (built with h264_nvenc + libvpx_vp9 encoders) that imageio targets via
-# IMAGEIO_FFMPEG_EXE for video encoding. Ungated by enable_media_ffmpeg
-# because the upstream lmsysorg/sglang base image always ships
-# imageio-ffmpeg with a GPL-encumbered prebuilt binary that we replace
-# unconditionally below; the LGPL CLI must be present so imageio has
-# something to target.
-RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/local/ \
-    mkdir -p /usr/local/lib/pkgconfig && \
-    cp -rnL /tmp/usr/local/include/libav* /tmp/usr/local/include/libsw* /usr/local/include/ && \
-    cp -nL /tmp/usr/local/lib/libav*.so* /tmp/usr/local/lib/libsw*.so* /usr/local/lib/ && \
-    cp -nL /tmp/usr/local/lib/lib*vpx*.so* /usr/local/lib/ 2>/dev/null || true && \
-    cp -nL /tmp/usr/local/lib/pkgconfig/libav*.pc /tmp/usr/local/lib/pkgconfig/libsw*.pc /usr/local/lib/pkgconfig/ && \
-    cp -nL /tmp/usr/local/bin/ffmpeg /usr/local/bin/ffmpeg && \
-    cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/ && \
-    ldconfig
-ENV IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg
-
 {% if target not in ("dev", "local-dev") %}
 # Runtime target installs only the prebuilt Dynamo wheels. SGLang and its NIXL
 # packages come from the upstream lmsysorg/sglang runtime image; --no-deps keeps
@@ -161,16 +142,96 @@ RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tm
     export PIP_CACHE_DIR=/root/.cache/pip && \
     pip install --break-system-packages --no-deps $(grep -E '^nvtx==' /tmp/requirements.common.txt)
 
-# Replace the upstream lmsysorg/sglang image's imageio-ffmpeg (which ships a
-# GPL-encumbered prebuilt ffmpeg binary in <site-packages>/imageio_ffmpeg/binaries/)
-# with a source install that leaves no binary on disk. IMAGEIO_FFMPEG_EXE points
-# imageio at the LGPL CLI we copied from wheel_builder above. The --no-binary
-# directive lives in the requirements file itself.
+# Install SGLang-specific runtime dependencies without changing the upstream
+# dependency solution. imageio-ffmpeg is installed from source (no bundled
+# binary) for the VP9 video-encode path; see requirements.sglang.txt.
 RUN --mount=type=bind,source=./container/deps/requirements.sglang.txt,target=/tmp/requirements.sglang.txt \
     --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export PIP_CACHE_DIR=/root/.cache/pip && \
     pip install --break-system-packages --force-reinstall --no-deps \
         --requirement /tmp/requirements.sglang.txt
+
+# Remove the codec-bearing video-DECODE components from the upstream SGLang image
+# (PyAV, decord, OpenCV, torchcodec + any base ffmpeg/libav*), then copy the
+# VP9-only in-tree ffmpeg from wheel_builder below for the video-generation
+# encode path. H.264/H.265/AAC encoders must never appear (guarded at the end).
+#
+# Inkling image preprocessing uses Pillow. Its audio feature extractor imports
+# soundfile and uses torchaudio only for resampling, so those paths remain
+# available for formats supported by libsndfile (for example WAV and FLAC).
+# AAC-backed M4A stays removed; video encode is VP9 only.
+RUN set -eux; \
+    python3 -m pip uninstall --yes \
+        av \
+        decord \
+        decord2 \
+        opencv-python \
+        opencv-python-headless \
+        torchcodec; \
+    SITE_PACKAGES="$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; \
+    rm -rf \
+        "${SITE_PACKAGES}"/av \
+        "${SITE_PACKAGES}"/av-*.dist-info \
+        "${SITE_PACKAGES}"/av.libs \
+        "${SITE_PACKAGES}"/cv2 \
+        "${SITE_PACKAGES}"/decord \
+        "${SITE_PACKAGES}"/decord-*.dist-info \
+        "${SITE_PACKAGES}"/decord.libs \
+        "${SITE_PACKAGES}"/decord2 \
+        "${SITE_PACKAGES}"/decord2-*.dist-info \
+        "${SITE_PACKAGES}"/decord2.libs \
+        "${SITE_PACKAGES}"/opencv_python*.dist-info \
+        "${SITE_PACKAGES}"/opencv_python*.libs \
+        "${SITE_PACKAGES}"/torchcodec \
+        "${SITE_PACKAGES}"/torchcodec-*.dist-info \
+        /usr/local/bin/ffmpeg \
+        /usr/local/bin/ffprobe \
+        /usr/local/include/libav* \
+        /usr/local/include/libsw* \
+        /usr/local/lib/libav* \
+        /usr/local/lib/libpostproc* \
+        /usr/local/lib/libsw* \
+        /usr/local/lib/pkgconfig/libav*.pc \
+        /usr/local/lib/pkgconfig/libpostproc*.pc \
+        /usr/local/lib/pkgconfig/libsw*.pc \
+        /usr/local/src/ffmpeg \
+        /root/.cache/pip; \
+    ldconfig
+
+{% if device == "cuda" %}
+# Copy the in-tree VP9 ffmpeg from wheel_builder: versioned shared libs
+# (libav*.so*, libsw*.so*) + libvpx + the in-tree CLI binary that imageio targets
+# via IMAGEIO_FFMPEG_EXE. The upstream ffmpeg was purged above, so this
+# VP9-only build is the only ffmpeg present; the video-generation
+# handler (CUDA DiffGenerator) encodes libvpx-vp9 with it. Same pattern as
+# vllm_runtime.Dockerfile.
+RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/local/ \
+    mkdir -p /usr/local/lib/pkgconfig && \
+    cp -rnL /tmp/usr/local/include/libav* /tmp/usr/local/include/libsw* /usr/local/include/ && \
+    cp -nL /tmp/usr/local/lib/libav*.so* /tmp/usr/local/lib/libsw*.so* /usr/local/lib/ && \
+    cp -nL /tmp/usr/local/lib/lib*vpx*.so* /usr/local/lib/ 2>/dev/null || true && \
+    cp -nL /tmp/usr/local/lib/pkgconfig/libav*.pc /tmp/usr/local/lib/pkgconfig/libsw*.pc /usr/local/lib/pkgconfig/ && \
+    cp -nL /tmp/usr/local/bin/ffmpeg /usr/local/bin/ffmpeg && \
+    cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/ && \
+    ldconfig
+ENV IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg
+
+# Positive codec guard: the shipped ffmpeg MUST expose the VP9 encoder and MUST
+# NOT expose any H.264/H.265/AAC/NVENC encoder. A missing/broken copy (no VP9)
+# or a codec regression fails the build here rather than at runtime — closing the
+# gap where SGLang shipping no encoder passed every PR gate.
+RUN set -eu; \
+    ff="${IMAGEIO_FFMPEG_EXE:-ffmpeg}"; \
+    "$ff" -hide_banner -encoders 2>/dev/null | grep -qiE 'libvpx[-_]vp9' \
+      || { echo "ERROR: shipped ffmpeg ($ff) has no VP9 encoder" >&2; exit 1; }; \
+    if "$ff" -hide_banner -encoders 2>/dev/null \
+         | grep -iE 'h\.?264|h\.?265|hevc|(^| )aac|nvenc|cuvid|nvdec'; then \
+        echo "ERROR: shipped ffmpeg ($ff) exposes an H.264/H.265/AAC/NVENC encoder" >&2; \
+        exit 1; \
+    fi
+{% else %}
+ENV IMAGEIO_FFMPEG_EXE=
+{% endif %}
 
 # Copy tests, deploy and components for CI with correct ownership
 COPY --chmod=775 --chown=dynamo:0 tests /workspace/tests
@@ -216,6 +277,28 @@ RUN SITE_PACKAGES="$(python3 -c 'import site; print(site.getsitepackages()[0])')
     python3 -m compileall -q -j0 "$SITE_PACKAGES" && \
     (python3 -m compileall -q -j0 /sgl-workspace/sglang/python || true)
 {%- endif %}
+
+# Belt-and-suspenders guard at the end of the populated runtime stage: fail the
+# build if an H.264/H.265/AAC codec *implementation* library appears. The VP9
+# ffmpeg (ffmpeg + libav*/libsw* + libvpx) copied above is intentionally
+# shipped for the video-encode path, so it is NOT flagged here — the in-tree
+# build is VP9-only by construction (wheel_builder's post-build codec-surface
+# guard) and the media-codec scan below re-permits it only under /usr/local while
+# still catching any stray third-party libav*/ffmpeg. This adds the extra
+# non-FFmpeg AAC/H.264 implementation names the scan's deny_globs don't list.
+RUN set -eux; \
+    remaining="$(find /usr /opt /workspace /sgl-workspace -xdev \
+        \( -type f -o -type l \) \
+        \( -name 'libx264*.so*' -o -name 'libx265*.so*' \
+        -o -name 'libopenh264*.so*' -o -name 'libfdk-aac*.so*' \
+        -o -name 'libfaac*.so*' -o -name 'libvo-aacenc*.so*' \
+        -o -name 'libaacplus*.so*' \) -print)"; \
+    if [ -n "${remaining}" ]; then \
+        echo "ERROR: H.264/H.265/AAC codec libraries remain in the SGLang image:" >&2; \
+        echo "${remaining}" >&2; \
+        exit 1; \
+    fi; \
+    python3 -c 'import soundfile, torchaudio; from PIL import Image'
 
 USER dynamo
 ARG DYNAMO_COMMIT_SHA

@@ -257,6 +257,20 @@ RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/loca
     cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/ && \
     ldconfig
 ENV IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg
+
+# Positive codec guard: the shipped ffmpeg MUST expose the VP9 encoder and MUST
+# NOT expose any H.264/H.265/AAC/NVENC encoder. A missing/broken copy (no VP9)
+# or a codec regression fails the build here rather than at runtime — closing the
+# gap where an image with no working encoder passed every PR gate.
+RUN set -eu; \
+    ff="${IMAGEIO_FFMPEG_EXE:-ffmpeg}"; \
+    "$ff" -hide_banner -encoders 2>/dev/null | grep -qiE 'libvpx[-_]vp9' \
+      || { echo "ERROR: shipped ffmpeg ($ff) has no VP9 encoder" >&2; exit 1; }; \
+    if "$ff" -hide_banner -encoders 2>/dev/null \
+         | grep -iE 'h\.?264|h\.?265|hevc|(^| )aac|nvenc|cuvid|nvdec'; then \
+        echo "ERROR: shipped ffmpeg ($ff) exposes an H.264/H.265/AAC/NVENC encoder" >&2; \
+        exit 1; \
+    fi
 {% endif %}
 
 # Replace the upstream vllm/vllm-openai image's imageio-ffmpeg (which ships a
@@ -274,6 +288,36 @@ RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/
 # collection conflicts (duplicate conftest plugin registration) and stale
 # tool scripts referencing files not present in Dynamo's build context.
 RUN rm -rf /workspace/vllm
+
+# Remove the codec-bearing video-DECODE wheels inherited from the vllm-openai
+# base. Each bundles its own full ffmpeg carrying software H.264/H.265/AAC;
+# PyAV and decord additionally ship GPL libx264/libx265. Dynamo's vLLM component
+# imports none of them, so they are unused decode-side dead weight. The in-tree
+# LGPL ffmpeg + imageio-ffmpeg installed above are intentionally KEPT for the
+# omni video-encode path, which uses the royalty-free VP9 (libvpx_vp9) encoder —
+# no H.264 is built. Direct rm makes the removal robust regardless of how the
+# base image's pip is configured; the guards fail the build if any of them survive.
+RUN set -eux; \
+    python3 -m pip uninstall --yes \
+        av decord decord2 opencv-python opencv-python-headless torchcodec PyNvVideoCodec \
+        || true; \
+    SITE_PACKAGES="$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; \
+    rm -rf \
+        "${SITE_PACKAGES}"/av "${SITE_PACKAGES}"/av-*.dist-info "${SITE_PACKAGES}"/av.libs \
+        "${SITE_PACKAGES}"/cv2 "${SITE_PACKAGES}"/opencv_python*.dist-info "${SITE_PACKAGES}"/opencv_python*.libs \
+        "${SITE_PACKAGES}"/decord "${SITE_PACKAGES}"/decord-*.dist-info "${SITE_PACKAGES}"/decord.libs \
+        "${SITE_PACKAGES}"/decord2 "${SITE_PACKAGES}"/decord2-*.dist-info "${SITE_PACKAGES}"/decord2.libs \
+        "${SITE_PACKAGES}"/torchcodec "${SITE_PACKAGES}"/torchcodec-*.dist-info \
+        "${SITE_PACKAGES}"/PyNvVideoCodec "${SITE_PACKAGES}"/PyNvVideoCodec-*.dist-info "${SITE_PACKAGES}"/PyNvVideoCodec.libs \
+        /root/.cache/pip; \
+    # Guard EVERY purged wheel: the uninstall above is `|| true`, so a package
+    # that survived (rename, new bundling) would otherwise pass silently. decord2
+    # imports as `decord`, so both are covered by the one check.
+    ! python3 -c "import cv2" 2>/dev/null; \
+    ! python3 -c "import av" 2>/dev/null; \
+    ! python3 -c "import decord" 2>/dev/null; \
+    ! python3 -c "import torchcodec" 2>/dev/null; \
+    ! python3 -c "import PyNvVideoCodec" 2>/dev/null
 
 USER dynamo
 

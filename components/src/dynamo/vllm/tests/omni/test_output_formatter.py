@@ -533,7 +533,14 @@ class TestDiffusionFormatterVideoOutputFormat:
                 "dynamo.vllm.omni.output_formatter.normalize_video_frames",
                 return_value=[MagicMock()],
             ),
-            _patch("dynamo.vllm.omni.output_formatter.export_to_video"),
+            _patch(
+                "dynamo.vllm.omni.output_formatter.frames_to_numpy",
+                return_value=MagicMock(),
+            ),
+            _patch(
+                "dynamo.vllm.omni.output_formatter.encode_to_video_bytes",
+                return_value=b"video-bytes",
+            ),
             _patch(
                 "dynamo.vllm.omni.output_formatter.upload_to_fs",
                 return_value="http://x/v.mp4",
@@ -553,8 +560,8 @@ class TestDiffusionFormatterVideoOutputFormat:
         stage = MagicMock()
         stage.images = [MagicMock()]
 
-        p1, p2, p3, p4 = self._patches()
-        with p1, p2, p3 as mock_upload, p4:
+        p1, p2, p3, p4, p5 = self._patches()
+        with p1, p2, p3, p4 as mock_upload, p5:
             result = await f.format(
                 stage,
                 "r5",
@@ -580,8 +587,8 @@ class TestDiffusionFormatterVideoOutputFormat:
         stage = MagicMock()
         stage.images = [MagicMock()]
 
-        p1, p2, p3, p4 = self._patches()
-        with p1, p2, p3 as mock_upload, p4:
+        p1, p2, p3, p4, p5 = self._patches()
+        with p1, p2, p3, p4 as mock_upload, p5:
             result = await f.format(
                 stage,
                 "r6",
@@ -607,8 +614,8 @@ class TestDiffusionFormatterVideoOutputFormat:
         stage = MagicMock()
         stage.images = [MagicMock()]
 
-        p1, p2, p3, p4 = self._patches()
-        with p1, p2, p3 as mock_upload, p4:
+        p1, p2, p3, p4, p5 = self._patches()
+        with p1, p2, p3, p4 as mock_upload, p5:
             result = await f.format(
                 stage, "r7", request_type=RequestType.VIDEO_GENERATION, fps=16
             )
