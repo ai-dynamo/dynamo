@@ -299,12 +299,16 @@ def minimum_power_footprint_fits(
 def _hold_at_current(
     proposed: Optional[int], current: Optional[int]
 ) -> tuple[Optional[int], bool]:
-    """Cap a proposal at the current count (block scale-up, allow scale-down)."""
+    """Cap a proposal at the current count (block scale-up, allow scale-down).
+
+    ``current is None`` means no replicas are seated yet — treated as 0 so a
+    create-from-nothing proposal is a scale-up and can be refused when the
+    fixed peer already exhausts the budget.
+    """
     if proposed is None:
         return None, False
-    if current is None:
-        return proposed, False
-    held = min(proposed, current)
+    baseline = 0 if current is None else current
+    held = min(proposed, baseline)
     return held, held < proposed
 
 
@@ -460,8 +464,9 @@ def _shrink_single(
     if avail < min_endpoint * watts:
         held, capped = _hold_at_current(proposed, current)
         # ``proposed`` is non-optional, so ``_hold_at_current`` never returns
-        # ``None`` here. When ``current`` is None it leaves the proposal
-        # unchanged and ``capped`` is False — do not claim a suppression.
+        # ``None`` here. ``current is None`` is treated as baseline 0, so a
+        # create-from-nothing proposal is suppressed when the fixed peer
+        # alone leaves no room for ``min_endpoint``.
         assert held is not None
         return held, capped
     max_fit = math.floor(avail / watts)

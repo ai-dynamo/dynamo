@@ -1228,9 +1228,17 @@ class OrchestratorEngineAdapter:
                     if min_gpus < 0 or (min_gpus - fixed_gpus) <= 0
                     else (min_gpus - fixed_gpus)
                 )
+                desired_p = max(base_p, min_endpoint)
+                # When the fixed peer alone meets/exceeds the ceiling,
+                # proportional_clamp_single would return 0 (infeasible). Hold
+                # at ready instead — never emit a spurious scale-to-zero.
+                if residual_max >= 0 and residual_max < min_endpoint * p_gpu:
+                    if ready_p is None:
+                        return None, None
+                    return min(desired_p, ready_p), None
                 return (
                     proportional_clamp_single(
-                        max(base_p, min_endpoint),
+                        desired_p,
                         p_gpu,
                         residual_min,
                         residual_max,
@@ -1246,10 +1254,15 @@ class OrchestratorEngineAdapter:
                 if min_gpus < 0 or (min_gpus - fixed_gpus) <= 0
                 else (min_gpus - fixed_gpus)
             )
+            desired_d = max(base_d, min_endpoint)
+            if residual_max >= 0 and residual_max < min_endpoint * d_gpu:
+                if ready_d is None:
+                    return None, None
+                return None, min(desired_d, ready_d)
             return (
                 None,
                 proportional_clamp_single(
-                    max(base_d, min_endpoint),
+                    desired_d,
                     d_gpu,
                     residual_min,
                     residual_max,

@@ -378,6 +378,8 @@ def test_project_scale_to_budget_preserves_single_component_target_mask():
         served_model_name="test",
         max_gpu_budget=4,
         min_gpu_budget=-1,
+        enable_power_awareness=True,
+        total_gpu_power_limit=100000,
     )
     adapter = OrchestratorEngineAdapter(cfg, _disagg_caps())
     wc = WorkerCounts(ready_num_prefill=1, ready_num_decode=1)
@@ -389,10 +391,8 @@ def test_project_scale_to_budget_preserves_single_component_target_mask():
 
     assert dec is not None
     assert dec.num_prefill is None
-    assert dec.num_decode is not None
-    # Prefill is omitted from the decision (mask keeps None) but still charged
-    # at its ready count (=1) inside the residual GPU clamp.
-    assert 1 + dec.num_decode <= 4
+    # Prefill ready=1 charged against residual ceiling 3 → decode capped at 3.
+    assert dec.num_decode == 3
 
 
 def test_partial_decode_proposal_respects_residual_gpu_ceiling():
@@ -437,6 +437,41 @@ def test_partial_decode_proposal_respects_residual_gpu_ceiling():
     applied_d = 1 if (dec is None or dec.num_decode is None) else dec.num_decode
     assert applied_d <= 1
     assert 7 + applied_d <= 8
+
+
+def test_residual_gpu_clamp_holds_when_fixed_peer_already_over_ceiling():
+    """Fixed peer alone over the GPU ceiling must not zero the proposed role.
+
+    ready prefill=9, ceiling=8, decode-only propose 4: residual_max is 0, so
+    proportional_clamp_single would return 0. Hold decode at its ready count
+    instead of emitting a spurious scale-to-zero.
+    """
+    cfg = PlannerConfig(
+        mode="disagg",
+        enable_load_scaling=True,
+        enable_throughput_scaling=True,
+        optimization_target="sla",
+        served_model_name="test",
+        max_gpu_budget=8,
+        min_gpu_budget=-1,
+        enable_power_awareness=True,
+        total_gpu_power_limit=100000,
+    )
+    adapter = OrchestratorEngineAdapter(cfg, _disagg_caps())
+    wc = WorkerCounts(
+        ready_num_prefill=9,
+        ready_num_decode=1,
+        expected_num_prefill=9,
+        expected_num_decode=1,
+    )
+
+    assert adapter._apply_gpu_final_budget(None, 4, wc) == (None, 1)
+
+    outcome = _apply_outcome([ComponentTarget(sub_component_type="decode", replicas=4)])
+    dec = adapter._project_scale_to(outcome, wc)
+    # Held at ready decode=1 → ready-echo mask collapses to no-op.
+    assert dec is None or dec.num_decode is None
+    assert dec is None or dec.num_prefill is None
 
 
 def test_power_off_partial_proposal_keeps_joint_gpu_clamp():

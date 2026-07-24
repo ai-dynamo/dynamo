@@ -100,6 +100,16 @@ def test_partial_proposal_suppressed_when_unproposed_alone_over_budget():
     assert reason == "power_budget_scale_up_suppressed"
 
 
+def test_partial_proposal_suppressed_when_current_missing_and_peer_over_budget():
+    # Prefill has no ready count yet (current_p=None) while decode alone is
+    # already over budget. Creating prefill would worsen the draw — refuse
+    # rather than letting the full proposal pass through.
+    new_p, new_d, reason = apply_power_budget(4, None, None, 5, 700, 1200, 5500, 1)
+    assert new_d is None
+    assert new_p == 0
+    assert reason == "power_budget_scale_up_suppressed"
+
+
 def test_peak_parallel_watts_rebalance_example():
     assert peak_parallel_watts(1, 4, 4, 1, 1000, 1000) == 8000
     assert project_watts(4, 1, 1000, 1000) == 5000
