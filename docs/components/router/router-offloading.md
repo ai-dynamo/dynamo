@@ -36,6 +36,21 @@ Every combination starts the frontend the same way:
 python -m dynamo.frontend --http-port 8000 --router-mode kv
 ```
 
+### Verify Router Visibility
+
+After sending requests, confirm that the router is applying KV events:
+
+```bash
+curl -s localhost:8000/metrics | grep kv_cache_events_applied
+```
+
+A rising `event_type="stored",status="ok"` counter confirms event ingestion,
+but not which tiers are visible. For tier-aware backends, run the frontend with
+`DYN_LOG=debug` and look for `Queried lower-tier indexer` messages such as
+`storage_tier=HostPinned`. TensorRT-LLM uses a merged GPU + RAM view, so it has
+no separate CPU-tier signal. The router does not currently compare a worker's
+offloading configuration with the tiers it observes.
+
 ## vLLM
 
 Enable KV event publishing and native CPU offloading with self-describing events on every worker:
