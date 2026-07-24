@@ -7,6 +7,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from dynamo.common.lora.manager import LoRAInfo
+
 try:
     from PIL import Image
     from vllm.sampling_params import SamplingParams
@@ -16,7 +18,9 @@ try:
     from dynamo.common.protocols.image_protocol import NvCreateImageRequest
     from dynamo.common.protocols.video_protocol import NvCreateVideoRequest, VideoNvExt
     from dynamo.common.utils.output_modalities import RequestType
+    from dynamo.vllm.lora_state import LoRAState
     from dynamo.vllm.omni.audio_handler import AudioGenerationHandler
+    from dynamo.vllm.omni.main import _register_lora_engine_routes
     from dynamo.vllm.omni.omni_handler import EngineInputs, OmniHandler
     from dynamo.vllm.omni.utils import build_original_prompt, parse_omni_request
 except ImportError:
@@ -40,6 +44,8 @@ def _make_handler(stage_types=("diffusion",)):
     config.model = "test-model"
     config.served_model_name = None
     config.output_modalities = ["text"]
+    config.enable_lora = False  # Disable LoRA for tests unless explicitly set
+    config.engine_args = SimpleNamespace(enable_lora=False)
     handler.config = config
 
     defaults = []
@@ -57,6 +63,23 @@ def _make_handler(stage_types=("diffusion",)):
         stage_type=stage_types[i]
     )
     handler.engine_client = engine_client
+
+    # BaseOmniHandler.__init__ is mocked out in tests; recreate LoRA state attrs
+    # expected by BaseWorkerHandler helpers called by OmniHandler.
+    handler._lora_state = LoRAState()
+    handler.loaded_loras = handler._lora_state.loaded_loras
+    handler._lora_load_locks = handler._lora_state.lora_load_locks
+    handler._lora_load_locks_guard = handler._lora_state.lora_load_locks_guard
+    handler._lora_capacity = None
+    handler._engine_loaded_loras = set()
+
+    # Add attributes required by _resolve_lora_request() (called by _resolve_and_apply_lora)
+    handler._served_model_name = config.served_model_name or config.model
+    handler._served_model_aliases = tuple(
+        getattr(config, "served_model_aliases", ()) or ()
+    )
+    handler.engine_args = SimpleNamespace(model=config.model)
+
     return handler
 
 
@@ -129,7 +152,7 @@ class TestBuildEngineInputs:
         """Video request parses prompt, size, seconds, and sets fps."""
         handler = _make_handler()
         req = NvCreateVideoRequest(
-            prompt="a drone", model="test", size="832x480", seconds=2
+            prompt="a drone", model="test-model", size="832x480", seconds=2
         )
         inputs = await handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION)
         assert inputs.request_type == RequestType.VIDEO_GENERATION
@@ -166,7 +189,7 @@ class TestI2VEngineInputs:
         """T2V has no multi_modal_data; I2V attaches image to prompt."""
         handler = _make_handler()
         req = NvCreateVideoRequest(
-            prompt="a drone", model="test", size="832x480", seconds=2
+            prompt="a drone", model="test-model", size="832x480", seconds=2
         )
 
         # T2V: no image
@@ -186,7 +209,7 @@ class TestI2VEngineInputs:
         handler = _make_handler()
         req = NvCreateVideoRequest(
             prompt="bear",
-            model="test",
+            model="test-model",
             size="832x480",
             nvext=VideoNvExt(
                 boundary_ratio=0.875, guidance_scale_2=1.0, num_inference_steps=40
@@ -246,6 +269,184 @@ class TestBuildSamplingParamsList:
         sp = OmniDiffusionSamplingParams()
         handler._build_sampling_params_list(sp)
         handler.engine_client.default_sampling_params_list[0].clone.assert_called_once()
+
+
+class TestLoraEngineRouteRegistration:
+    @pytest.mark.asyncio
+    async def test_register_lora_engine_routes_dispatches_each_handler(self):
+        runtime = MagicMock()
+        handler = SimpleNamespace(
+            load_lora=MagicMock(),
+            unload_lora=MagicMock(),
+            list_loras=MagicMock(),
+        )
+
+        async def _yield_once(payload):
+            yield {"status": "ok", "payload": payload}
+
+        handler.load_lora.side_effect = _yield_once
+        handler.unload_lora.side_effect = _yield_once
+        handler.list_loras.side_effect = _yield_once
+
+        _register_lora_engine_routes(runtime, handler)
+
+        registered = {
+            call.args[0]: call.args[1]
+            for call in runtime.register_engine_route.call_args_list
+        }
+
+        # Routes should be registered with update/ prefix per unified worker convention
+        assert set(registered) == {
+            "update/load_lora",
+            "update/unload_lora",
+            "update/list_loras",
+        }
+
+        body = {"lora_name": "adapterA"}
+        assert await registered["update/load_lora"](body) == {
+            "status": "ok",
+            "payload": body,
+        }
+        assert await registered["update/unload_lora"](body) == {
+            "status": "ok",
+            "payload": body,
+        }
+        assert await registered["update/list_loras"](body) == {
+            "status": "ok",
+            "payload": body,
+        }
+
+
+class TestLoraRequestParsing:
+    def test_extract_lora_name_accepts_delete_route_alias_shape(self):
+        handler = _make_handler()
+
+        assert (
+            handler._extract_lora_name_from_request({"name": "adapterA"}) == "adapterA"
+        )
+        assert (
+            handler._extract_lora_name_from_request({"adapter_name": "adapterA"})
+            == "adapterA"
+        )
+        assert (
+            handler._extract_lora_name_from_request({"model": "adapterA"}) == "adapterA"
+        )
+
+
+class TestLoraEnablement:
+    def test_resolve_lora_request_unknown_adapter_raises_when_enabled(self):
+        handler = _make_handler()
+        handler.config.engine_args.enable_lora = True
+
+        with patch(
+            "dynamo.vllm.omni.omni_handler.get_lora_manager",
+            return_value=MagicMock(),
+        ):
+            with pytest.raises(ValueError, match="unknown model or LoRA adapter"):
+                handler._resolve_lora_request("ghost-adapter")
+
+    def test_resolve_lora_request_unknown_adapter_is_none_when_manager_missing(self):
+        handler = _make_handler()
+        handler.config.engine_args.enable_lora = True
+
+        with patch("dynamo.vllm.omni.omni_handler.get_lora_manager", return_value=None):
+            assert handler._resolve_lora_request("ghost-adapter") is None
+
+    def test_resolve_lora_request_served_alias_is_treated_as_base_model(self):
+        handler = _make_handler()
+        handler.config.engine_args.enable_lora = True
+        handler.config.served_model_aliases = ["test-model-alias"]
+        handler._served_model_aliases = tuple(handler.config.served_model_aliases)
+
+        with patch(
+            "dynamo.vllm.omni.omni_handler.get_lora_manager",
+            return_value=MagicMock(),
+        ):
+            assert handler._resolve_lora_request("test-model-alias") is None
+
+
+class TestLoraCapacity:
+    def test_resolve_lora_capacity_uses_configured_max_loras(self):
+        """Omni Base handler should defer LoRA capacity to configured max_loras."""
+        from dynamo.vllm.omni.base_handler import BaseOmniHandler
+
+        handler = BaseOmniHandler.__new__(BaseOmniHandler)
+        config = SimpleNamespace(
+            engine_args=SimpleNamespace(enable_lora=True, max_loras=4)
+        )
+
+        assert handler._resolve_lora_capacity(config) == 4
+
+    @pytest.mark.asyncio
+    async def test_second_distinct_adapter_load_is_rejected_at_capacity_one(self):
+        handler = _make_handler()
+        handler._lora_capacity = 1
+        handler._lora_state.loaded_loras = {
+            "adapterA": LoRAInfo(id=123, path="/cache/adapterA")
+        }
+        handler.loaded_loras = handler._lora_state.loaded_loras
+
+        results = [
+            result
+            async for result in handler.load_lora(
+                {"lora_name": "adapterB", "source": {"uri": "file:///adapter-b"}}
+            )
+        ]
+
+        assert results[-1]["status"] == "error"
+        assert "LoRA capacity exceeded" in results[-1]["message"]
+        handler.engine_client.add_lora.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_new_adapter_still_rejected_at_capacity_when_hot_swap_enabled(self):
+        handler = _make_handler()
+        handler._lora_capacity = 1
+        handler._lora_state.loaded_loras = {
+            "adapterA": LoRAInfo(id=123, path="/cache/adapterA")
+        }
+        handler.loaded_loras = handler._lora_state.loaded_loras
+
+        with patch.dict("os.environ", {"DYN_LORA_HOTSWAP_ENABLED": "true"}):
+            results = [
+                result
+                async for result in handler.load_lora(
+                    {"lora_name": "adapterB", "source": {"uri": "file:///adapter-b"}}
+                )
+            ]
+
+        assert results[-1]["status"] == "error"
+        assert "LoRA capacity exceeded" in results[-1]["message"]
+        handler.engine_client.add_lora.assert_not_called()
+
+
+class TestDiffusionLoraAttachment:
+    def test_apply_lora_to_diffusion_sampling_params_sets_lora_request(self):
+        diffusion_sp = OmniDiffusionSamplingParams()
+        llm_sp = SamplingParams()
+        lora_request = MagicMock()
+
+        OmniHandler._apply_lora_to_sampling_params(
+            [llm_sp, diffusion_sp],
+            lora_request,
+        )
+
+        assert diffusion_sp.lora_request is lora_request
+
+    def test_apply_lora_to_diffusion_sampling_params_raises_when_attr_missing(self):
+        class _NoLoraRequestSamplingParams(OmniDiffusionSamplingParams):
+            def __setattr__(self, name, value):
+                if name == "lora_request" and value is not None:
+                    raise AttributeError("lora_request is not supported")
+                super().__setattr__(name, value)
+
+        diffusion_sp = _NoLoraRequestSamplingParams()
+        lora_request = MagicMock()
+
+        with pytest.raises(
+            RuntimeError,
+            match="OmniDiffusionSamplingParams no longer exposes 'lora_request'",
+        ):
+            OmniHandler._apply_lora_to_sampling_params([diffusion_sp], lora_request)
 
 
 class TestBuildOriginalPrompt:

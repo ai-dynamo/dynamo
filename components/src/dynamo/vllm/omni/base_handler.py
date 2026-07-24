@@ -21,6 +21,7 @@ from dynamo._core import Context
 from dynamo.common.protocols.audio_protocol import NvAudioSpeechResponse
 from dynamo.common.utils.output_modalities import RequestType
 from dynamo.vllm.handlers import BaseWorkerHandler, build_sampling_params
+from dynamo.vllm.lora_state import LoRAState
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +54,14 @@ class BaseOmniHandler(BaseWorkerHandler[Dict[str, Any], Dict[str, Any]]):
 
         # Initialize attributes needed from BaseWorkerHandler
         # We don't call super().__init__() because VllmEngineMonitor expects AsyncLLM,
-        # but AsyncOmni manages its own engines internally
+        # but AsyncOmni manages its own engines internally.
+        #
+        # CRITICAL: AsyncOmni must implement the vLLM LoRA interface:
+        # - add_lora(LoRARequest) - dynamically load adapter into engine
+        # - remove_lora(int) - unload adapter by ID
+        # - list_loras() - query currently loaded adapters
+        # BaseWorkerHandler.load_lora() depends on these methods when
+        # _preload_lora_into_engine() is True (default for AGGREGATED mode).
 
         # TODO: Kv publishers not supported yet
         # TODO: Adopt to baseworker initialization pattern
@@ -63,7 +71,41 @@ class BaseOmniHandler(BaseWorkerHandler[Dict[str, Any], Dict[str, Any]]):
         self.model_max_len = config.engine_args.max_model_len
         self.shutdown_event = shutdown_event
 
+        self._lora_state = LoRAState()
+        # Keep historical attribute names for compatibility with existing code.
+        self.loaded_loras = self._lora_state.loaded_loras
+        self._lora_load_locks = self._lora_state.lora_load_locks
+        self._lora_load_locks_guard = self._lora_state.lora_load_locks_guard
+        self._lora_capacity = self._resolve_lora_capacity(config)
+        self._advertised_gpu_lora_capacity = self._resolve_advertised_gpu_lora_capacity(
+            config
+        )
+        # Track adapters already handed to vLLM so load/unload stays idempotent.
+        # This set ensures the same adapter isn't handed to add_lora() twice,
+        # and tracks which adapters are in the engine (vs. just in loaded_loras metadata).
+        self._engine_loaded_loras: set[str] = set()
+
         logger.info(f"{self.__class__.__name__} initialized successfully")
+
+    def _resolve_lora_capacity(self, config) -> int | None:
+        """Return the effective LoRA capacity for this Omni backend."""
+        if not getattr(config.engine_args, "enable_lora", False):
+            return None
+
+        # Resident adapter budget should follow vLLM max_cpu_loras when set.
+        # max_loras controls per-batch active adapter concurrency, not total
+        # registration capacity.
+        resident_capacity = getattr(config.engine_args, "max_cpu_loras", None)
+        if resident_capacity is not None:
+            return resident_capacity
+
+        return getattr(config.engine_args, "max_loras", None)
+
+    def _resolve_advertised_gpu_lora_capacity(self, config) -> int | None:
+        """Return advertised GPU LoRA concurrency for discovery metadata."""
+        if not getattr(config.engine_args, "enable_lora", False):
+            return None
+        return getattr(config.engine_args, "max_loras", None)
 
     def _build_omni_kwargs(self, config) -> Dict[str, Any]:
         """Build keyword arguments for AsyncOmni constructor."""
