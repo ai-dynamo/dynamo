@@ -393,7 +393,9 @@ class SyntheticWorkload:
     input_tokens: int
     output_tokens: int
     request_count: int
-    arrival_interval_ms: float = 1.0
+    request_rate: float | None = None
+    arrival_interval_ms: float | None = None
+    arrival_seed: int = 42
     turns_per_session: int = 1
     shared_prefix_ratio: float = 0.0
     num_prefix_groups: int = 0
@@ -464,7 +466,9 @@ def _run_planner_replay(
                 model_name=model_name,
                 replay_concurrency=replay_concurrency,
                 arrival_speedup_ratio=arrival_speedup_ratio,
+                request_rate=synthetic.request_rate,
                 arrival_interval_ms=synthetic.arrival_interval_ms,
+                arrival_seed=synthetic.arrival_seed,
                 turns_per_session=synthetic.turns_per_session,
                 shared_prefix_ratio=synthetic.shared_prefix_ratio,
                 num_prefix_groups=synthetic.num_prefix_groups,
@@ -511,7 +515,9 @@ def _run_planner_replay(
                 model_name=model_name,
                 replay_concurrency=replay_concurrency,
                 arrival_speedup_ratio=arrival_speedup_ratio,
+                request_rate=synthetic.request_rate,
                 arrival_interval_ms=synthetic.arrival_interval_ms,
+                arrival_seed=synthetic.arrival_seed,
                 turns_per_session=synthetic.turns_per_session,
                 shared_prefix_ratio=synthetic.shared_prefix_ratio,
                 num_prefix_groups=synthetic.num_prefix_groups,
@@ -769,7 +775,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         type=int,
         help="number of synthetic requests; when --turns-per-session > 1, this is the number of sessions",
     )
-    parser.add_argument("--arrival-interval-ms", type=float, default=1.0)
+    parser.add_argument(
+        "--request-rate",
+        type=float,
+        help="Poisson open-loop request rate in requests per second",
+    )
+    parser.add_argument(
+        "--arrival-interval-ms",
+        type=float,
+        help="fixed open-loop interval between synthetic requests in milliseconds",
+    )
+    parser.add_argument(
+        "--arrival-seed",
+        type=int,
+        default=42,
+        help="seed for synthetic open-loop arrival timestamps",
+    )
     parser.add_argument("--turns-per-session", type=int, default=1)
     parser.add_argument("--shared-prefix-ratio", type=float, default=0.0)
     parser.add_argument("--num-prefix-groups", type=int, default=0)
@@ -905,6 +926,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error(
             "synthetic replay requires --input-tokens, --output-tokens, and --request-count"
         )
+    if using_synthetic:
+        load_controllers = (
+            args.replay_concurrency,
+            args.request_rate,
+            args.arrival_interval_ms,
+        )
+        if sum(value is not None for value in load_controllers) != 1:
+            parser.error(
+                "synthetic replay requires exactly one of --replay-concurrency, "
+                "--request-rate, or --arrival-interval-ms"
+            )
+    elif args.request_rate is not None or args.arrival_interval_ms is not None:
+        parser.error(
+            "--request-rate and --arrival-interval-ms only apply to synthetic replay"
+        )
     if (
         using_trace_file
         and args.trace_format == "applied_compute_agentic"
@@ -963,7 +999,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 input_tokens=args.input_tokens,
                 output_tokens=args.output_tokens,
                 request_count=args.request_count,
+                request_rate=args.request_rate,
                 arrival_interval_ms=args.arrival_interval_ms,
+                arrival_seed=args.arrival_seed,
                 turns_per_session=args.turns_per_session,
                 shared_prefix_ratio=args.shared_prefix_ratio,
                 num_prefix_groups=args.num_prefix_groups,
@@ -1058,7 +1096,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             replay_mode=args.replay_mode,
             router_mode=args.router_mode,
             arrival_speedup_ratio=args.arrival_speedup_ratio,
+            request_rate=args.request_rate,
             arrival_interval_ms=args.arrival_interval_ms,
+            arrival_seed=args.arrival_seed,
             turns_per_session=args.turns_per_session,
             shared_prefix_ratio=args.shared_prefix_ratio,
             num_prefix_groups=args.num_prefix_groups,

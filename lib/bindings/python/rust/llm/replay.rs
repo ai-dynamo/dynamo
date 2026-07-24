@@ -1247,7 +1247,7 @@ fn write_per_request_jsonl(
 }
 
 #[pyfunction]
-#[pyo3(signature = (input_tokens, output_tokens, request_count, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, arrival_interval_ms=1.0, turns_per_session=1, shared_prefix_ratio=0.0, num_prefix_groups=0, inter_turn_delay_ms=0.0, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None))]
+#[pyo3(signature = (input_tokens, output_tokens, request_count, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, request_rate=None, arrival_interval_ms=None, arrival_seed=42, turns_per_session=1, shared_prefix_ratio=0.0, num_prefix_groups=0, inter_turn_delay_ms=0.0, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn run_mocker_synthetic_trace_replay(
     py: Python<'_>,
@@ -1266,7 +1266,9 @@ pub fn run_mocker_synthetic_trace_replay(
     replay_mode: &str,
     router_mode: &str,
     arrival_speedup_ratio: f64,
-    arrival_interval_ms: f64,
+    request_rate: Option<f64>,
+    arrival_interval_ms: Option<f64>,
+    arrival_seed: u64,
     turns_per_session: usize,
     shared_prefix_ratio: f64,
     num_prefix_groups: usize,
@@ -1317,7 +1319,12 @@ pub fn run_mocker_synthetic_trace_replay(
         ReplayArgsSelection::Disagg(config) => config.prefill_args.block_size.max(1),
     };
     let report = py.allow_threads(move || {
-        let replay_concurrency = parse_replay_concurrency(replay_concurrency)?;
+        let load_controller = parse_synthetic_load_controller(
+            replay_concurrency,
+            request_rate,
+            arrival_interval_ms,
+        )?;
+        let replay_concurrency = load_controller.replay_concurrency();
         let use_workload = turns_per_session > 1
             || shared_prefix_ratio > 0.0
             || num_prefix_groups > 0
@@ -1329,7 +1336,11 @@ pub fn run_mocker_synthetic_trace_replay(
                 input_tokens,
                 output_tokens,
                 request_count,
-                arrival_interval_ms,
+                load_controller
+                    .arrival_spec()
+                    .cloned()
+                    .unwrap_or(ArrivalSpec::Burst),
+                arrival_seed,
                 turns_per_session,
                 shared_prefix_ratio,
                 num_prefix_groups,
@@ -1420,12 +1431,15 @@ pub fn run_mocker_synthetic_trace_replay(
             };
         }
 
+        let arrival_timestamps_ms = load_controller
+            .arrival_spec()
+            .map(|spec| spec.timestamps(request_count, arrival_seed))
+            .transpose()?;
         let requests = build_synthetic_requests(
             input_tokens,
             output_tokens,
             request_count,
-            arrival_interval_ms,
-            replay_concurrency.is_none(),
+            arrival_timestamps_ms.as_deref(),
         )?;
 
         match args_selection {
@@ -1576,8 +1590,12 @@ fn validate_disagg_replay_mode(replay_mode: &str) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{fpm_snapshots_to_json, reconcile_replay_dp_topology, validate_disagg_replay_mode};
+    use super::{
+        build_synthetic_requests, fpm_snapshots_to_json, reconcile_replay_dp_topology,
+        validate_disagg_replay_mode,
+    };
     use dynamo_mocker::common::protocols::{ForwardPassSnapshot, MockEngineArgs};
+    use dynamo_mocker::loadgen::ArrivalSpec;
 
     #[test]
     fn online_disaggregation_is_rejected_with_stable_message() {
@@ -1628,6 +1646,53 @@ mod tests {
 
         assert_eq!(snapshots[0]["worker_id"], 2);
         assert_eq!(snapshots[0]["dp_rank"], 3);
+    }
+
+    #[test]
+    fn simple_synthetic_arrival_mode_changes_timestamps_only() {
+        let fixed_timestamps = ArrivalSpec::ConstantQps { qps: 20.0 }
+            .timestamps(8, 42)
+            .unwrap();
+        let poisson_timestamps = ArrivalSpec::PoissonQps { qps: 20.0 }
+            .timestamps(8, 42)
+            .unwrap();
+        let fixed = build_synthetic_requests(16, 4, 8, Some(&fixed_timestamps)).unwrap();
+        let poisson = build_synthetic_requests(16, 4, 8, Some(&poisson_timestamps)).unwrap();
+
+        assert_ne!(fixed_timestamps, poisson_timestamps);
+        assert_eq!(
+            fixed
+                .iter()
+                .map(|request| request.arrival_timestamp_ms.unwrap())
+                .collect::<Vec<_>>(),
+            fixed_timestamps
+        );
+        assert_eq!(
+            poisson
+                .iter()
+                .map(|request| request.arrival_timestamp_ms.unwrap())
+                .collect::<Vec<_>>(),
+            poisson_timestamps
+        );
+        for (fixed_request, poisson_request) in fixed.iter().zip(&poisson) {
+            assert_eq!(fixed_request.tokens, poisson_request.tokens);
+            assert_eq!(
+                fixed_request.max_output_tokens,
+                poisson_request.max_output_tokens
+            );
+            assert_eq!(
+                fixed_request.output_token_ids,
+                poisson_request.output_token_ids
+            );
+            assert_eq!(fixed_request.uuid, poisson_request.uuid);
+            assert_eq!(fixed_request.dp_rank, poisson_request.dp_rank);
+            assert_eq!(fixed_request.priority, poisson_request.priority);
+            assert_eq!(
+                fixed_request.strict_priority,
+                poisson_request.strict_priority
+            );
+            assert_eq!(fixed_request.policy_class, poisson_request.policy_class);
+        }
     }
 }
 
@@ -1964,13 +2029,78 @@ fn parse_replay_concurrency(replay_concurrency: Option<isize>) -> anyhow::Result
     }
 }
 
+#[derive(Debug, Clone)]
+enum SyntheticLoadController {
+    Concurrency(usize),
+    Arrivals(ArrivalSpec),
+}
+
+impl SyntheticLoadController {
+    fn replay_concurrency(&self) -> Option<usize> {
+        match self {
+            Self::Concurrency(value) => Some(*value),
+            Self::Arrivals(_) => None,
+        }
+    }
+
+    fn arrival_spec(&self) -> Option<&ArrivalSpec> {
+        match self {
+            Self::Concurrency(_) => None,
+            Self::Arrivals(spec) => Some(spec),
+        }
+    }
+}
+
+fn parse_synthetic_load_controller(
+    replay_concurrency: Option<isize>,
+    request_rate: Option<f64>,
+    arrival_interval_ms: Option<f64>,
+) -> anyhow::Result<SyntheticLoadController> {
+    let controller_count = usize::from(replay_concurrency.is_some())
+        + usize::from(request_rate.is_some())
+        + usize::from(arrival_interval_ms.is_some());
+    if controller_count != 1 {
+        anyhow::bail!(
+            "synthetic replay requires exactly one of replay_concurrency, request_rate, or arrival_interval_ms"
+        );
+    }
+
+    if let Some(replay_concurrency) = parse_replay_concurrency(replay_concurrency)? {
+        return Ok(SyntheticLoadController::Concurrency(replay_concurrency));
+    }
+    if let Some(qps) = request_rate {
+        if !qps.is_finite() || qps <= 0.0 {
+            anyhow::bail!("request_rate must be a finite positive number, got {qps}");
+        }
+        return Ok(SyntheticLoadController::Arrivals(ArrivalSpec::PoissonQps {
+            qps,
+        }));
+    }
+
+    let interval_ms = arrival_interval_ms.expect("controller count validated");
+    if !interval_ms.is_finite() || interval_ms < 0.0 {
+        anyhow::bail!(
+            "arrival_interval_ms must be a finite non-negative number, got {interval_ms}"
+        );
+    }
+    if interval_ms == 0.0 {
+        return Ok(SyntheticLoadController::Arrivals(ArrivalSpec::Burst));
+    }
+    Ok(SyntheticLoadController::Arrivals(
+        ArrivalSpec::ConstantQps {
+            qps: 1000.0 / interval_ms,
+        },
+    ))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_synthetic_workload(
     block_size: usize,
     input_tokens: usize,
     output_tokens: usize,
     request_count: usize,
-    arrival_interval_ms: f64,
+    first_turn_arrivals: ArrivalSpec,
+    arrival_seed: u64,
     turns_per_session: usize,
     shared_prefix_ratio: f64,
     num_prefix_groups: usize,
@@ -1988,20 +2118,9 @@ fn build_synthetic_workload(
     if turns_per_session == 0 {
         anyhow::bail!("turns_per_session must be at least 1");
     }
-    if !arrival_interval_ms.is_finite() || arrival_interval_ms < 0.0 {
-        anyhow::bail!("arrival_interval_ms must be a finite non-negative number");
-    }
     if !inter_turn_delay_ms.is_finite() || inter_turn_delay_ms < 0.0 {
         anyhow::bail!("inter_turn_delay_ms must be a finite non-negative number");
     }
-
-    let first_turn_arrivals = if arrival_interval_ms == 0.0 {
-        ArrivalSpec::Burst
-    } else {
-        ArrivalSpec::ConstantQps {
-            qps: 1000.0 / arrival_interval_ms,
-        }
-    };
 
     RsTrace::synthetic(SyntheticTraceSpec {
         block_size,
@@ -2024,6 +2143,7 @@ fn build_synthetic_workload(
             DelaySpec::ConstantMs(inter_turn_delay_ms)
         },
         seed: 42,
+        arrival_seed,
     })
 }
 
@@ -2031,8 +2151,7 @@ fn build_synthetic_requests(
     input_tokens: usize,
     output_tokens: usize,
     request_count: usize,
-    arrival_interval_ms: f64,
-    include_arrival_timestamps: bool,
+    arrival_timestamps_ms: Option<&[f64]>,
 ) -> anyhow::Result<Vec<DirectRequest>> {
     if input_tokens == 0 {
         anyhow::bail!("input_tokens must be at least 1");
@@ -2043,10 +2162,12 @@ fn build_synthetic_requests(
     if request_count == 0 {
         anyhow::bail!("request_count must be at least 1");
     }
-    if !arrival_interval_ms.is_finite() || arrival_interval_ms < 0.0 {
+    if let Some(arrival_timestamps_ms) = arrival_timestamps_ms
+        && arrival_timestamps_ms.len() != request_count
+    {
         anyhow::bail!(
-            "arrival_interval_ms must be a finite non-negative number, got {}",
-            arrival_interval_ms
+            "arrival timestamp count {} does not match request_count {request_count}",
+            arrival_timestamps_ms.len()
         );
     }
 
@@ -2060,8 +2181,7 @@ fn build_synthetic_requests(
             max_output_tokens: output_tokens,
             uuid: Some(Uuid::from_u128((request_idx as u128) + 1)),
             dp_rank: 0,
-            arrival_timestamp_ms: include_arrival_timestamps
-                .then_some(request_idx as f64 * arrival_interval_ms),
+            arrival_timestamp_ms: arrival_timestamps_ms.map(|values| values[request_idx]),
             ..Default::default()
         });
     }
@@ -2246,12 +2366,13 @@ impl PlannerReplayBridge {
 
     /// Create a bridge for an aggregated **synthetic** workload: `request_count`
     /// sessions of fixed `input_tokens`/`output_tokens`. `replay_concurrency =
-    /// Some(n)` runs closed-loop (cap n in flight); `None` replays open-loop at a
-    /// fixed rate (`arrival_interval_ms` -> QPS). `shared_prefix_ratio` /
+    /// Some(n)` runs closed-loop (cap n in flight); otherwise `request_rate`
+    /// selects Poisson open-loop or `arrival_interval_ms` selects fixed-rate
+    /// open-loop replay. `shared_prefix_ratio` /
     /// `num_prefix_groups` control prefix-cache sharing; `turns_per_session` > 1
     /// makes each session multi-turn (total requests = request_count * turns).
     #[staticmethod]
-    #[pyo3(signature = (input_tokens, output_tokens, request_count, extra_engine_args, num_workers, router_mode="round_robin", router_config=None, model_name=None, replay_concurrency=None, arrival_speedup_ratio=1.0, arrival_interval_ms=1.0, turns_per_session=1, shared_prefix_ratio=0.0, num_prefix_groups=0, inter_turn_delay_ms=0.0, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None))]
+    #[pyo3(signature = (input_tokens, output_tokens, request_count, extra_engine_args, num_workers, router_mode="round_robin", router_config=None, model_name=None, replay_concurrency=None, arrival_speedup_ratio=1.0, request_rate=None, arrival_interval_ms=None, arrival_seed=42, turns_per_session=1, shared_prefix_ratio=0.0, num_prefix_groups=0, inter_turn_delay_ms=0.0, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None))]
     #[allow(clippy::too_many_arguments)]
     fn from_synthetic(
         input_tokens: usize,
@@ -2264,7 +2385,9 @@ impl PlannerReplayBridge {
         model_name: Option<String>,
         replay_concurrency: Option<isize>,
         arrival_speedup_ratio: f64,
-        arrival_interval_ms: f64,
+        request_rate: Option<f64>,
+        arrival_interval_ms: Option<f64>,
+        arrival_seed: u64,
         turns_per_session: usize,
         shared_prefix_ratio: f64,
         num_prefix_groups: usize,
@@ -2285,7 +2408,10 @@ impl PlannerReplayBridge {
             itl_ms: sla_itl_ms,
             e2e_ms: sla_e2e_ms,
         };
-        let max_in_flight = parse_replay_concurrency(replay_concurrency).map_err(to_pyerr)?;
+        let load_controller =
+            parse_synthetic_load_controller(replay_concurrency, request_rate, arrival_interval_ms)
+                .map_err(to_pyerr)?;
+        let max_in_flight = load_controller.replay_concurrency();
 
         let block_size = args.block_size.max(1);
         let mut trace = build_synthetic_workload(
@@ -2293,7 +2419,11 @@ impl PlannerReplayBridge {
             input_tokens,
             output_tokens,
             request_count,
-            arrival_interval_ms,
+            load_controller
+                .arrival_spec()
+                .cloned()
+                .unwrap_or(ArrivalSpec::Burst),
+            arrival_seed,
             turns_per_session,
             shared_prefix_ratio,
             num_prefix_groups,
@@ -2327,7 +2457,7 @@ impl PlannerReplayBridge {
     /// Create a bridge for a disaggregated **synthetic** workload. See
     /// [`PlannerReplayBridge::from_synthetic`] for the load-shape parameters.
     #[staticmethod]
-    #[pyo3(signature = (input_tokens, output_tokens, request_count, prefill_engine_args, decode_engine_args, num_prefill_workers, num_decode_workers, router_mode="round_robin", router_config=None, model_name=None, replay_concurrency=None, arrival_speedup_ratio=1.0, arrival_interval_ms=1.0, turns_per_session=1, shared_prefix_ratio=0.0, num_prefix_groups=0, inter_turn_delay_ms=0.0, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None))]
+    #[pyo3(signature = (input_tokens, output_tokens, request_count, prefill_engine_args, decode_engine_args, num_prefill_workers, num_decode_workers, router_mode="round_robin", router_config=None, model_name=None, replay_concurrency=None, arrival_speedup_ratio=1.0, request_rate=None, arrival_interval_ms=None, arrival_seed=42, turns_per_session=1, shared_prefix_ratio=0.0, num_prefix_groups=0, inter_turn_delay_ms=0.0, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None))]
     #[allow(clippy::too_many_arguments)]
     fn from_synthetic_disagg(
         input_tokens: usize,
@@ -2342,7 +2472,9 @@ impl PlannerReplayBridge {
         model_name: Option<String>,
         replay_concurrency: Option<isize>,
         arrival_speedup_ratio: f64,
-        arrival_interval_ms: f64,
+        request_rate: Option<f64>,
+        arrival_interval_ms: Option<f64>,
+        arrival_seed: u64,
         turns_per_session: usize,
         shared_prefix_ratio: f64,
         num_prefix_groups: usize,
@@ -2371,7 +2503,10 @@ impl PlannerReplayBridge {
             itl_ms: sla_itl_ms,
             e2e_ms: sla_e2e_ms,
         };
-        let max_in_flight = parse_replay_concurrency(replay_concurrency).map_err(to_pyerr)?;
+        let load_controller =
+            parse_synthetic_load_controller(replay_concurrency, request_rate, arrival_interval_ms)
+                .map_err(to_pyerr)?;
+        let max_in_flight = load_controller.replay_concurrency();
 
         let block_size = config.prefill_args.block_size.max(1);
         let mut trace = build_synthetic_workload(
@@ -2379,7 +2514,11 @@ impl PlannerReplayBridge {
             input_tokens,
             output_tokens,
             request_count,
-            arrival_interval_ms,
+            load_controller
+                .arrival_spec()
+                .cloned()
+                .unwrap_or(ArrivalSpec::Burst),
+            arrival_seed,
             turns_per_session,
             shared_prefix_ratio,
             num_prefix_groups,

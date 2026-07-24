@@ -85,7 +85,7 @@ class DynamoVllmArgGroup(ArgGroup):
             env_var="DYN_VLLM_IS_DECODE_WORKER",
             default=False,
             help="DEPRECATED: use --disaggregation-mode=decode. "
-            "Mark this as a decode worker which does not publish KV events.",
+            "Mark this as a decode worker.",
         )
 
         add_negatable_bool_argument(
