@@ -721,6 +721,7 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 		multinodeDeployer   MultinodeDeployer
 		initialPodSpec      *corev1.PodSpec
 		expectInitContainer bool
+		expectRunAsNonRoot  bool
 		expectedInitImage   string
 		expectedLeaderHost  string
 	}{
@@ -768,6 +769,9 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 			role:              RoleWorker,
 			multinodeDeployer: &GroveMultinodeDeployer{},
 			initialPodSpec: &corev1.PodSpec{
+				SecurityContext: &corev1.PodSecurityContext{
+					RunAsNonRoot: new(true),
+				},
 				Containers: []corev1.Container{
 					{
 						Name:  "main",
@@ -781,6 +785,7 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 				},
 			},
 			expectInitContainer: true,
+			expectRunAsNonRoot:  true,
 			expectedInitImage:   "vllm:shell-command",
 			expectedLeaderHost:  "${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-ldr-0.${GROVE_HEADLESS_SERVICE}",
 		},
@@ -876,6 +881,24 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 					tt.expectedLeaderHost, commonconsts.VLLMMpMasterPort)
 				g.Expect(injected.Command).To(gomega.Equal([]string{"sh", "-c", expectedCmd}))
 				g.Expect(injected.Env).To(gomega.BeEmpty())
+
+				cpuRequest := injected.Resources.Requests[corev1.ResourceCPU]
+				g.Expect(cpuRequest.String()).To(gomega.Equal("500m"))
+				memoryRequest := injected.Resources.Requests[corev1.ResourceMemory]
+				g.Expect(memoryRequest.String()).To(gomega.Equal("128Mi"))
+				cpuLimit := injected.Resources.Limits[corev1.ResourceCPU]
+				g.Expect(cpuLimit.String()).To(gomega.Equal("1"))
+				memoryLimit := injected.Resources.Limits[corev1.ResourceMemory]
+				g.Expect(memoryLimit.String()).To(gomega.Equal("256Mi"))
+
+				if tt.expectRunAsNonRoot {
+					g.Expect(*injected.SecurityContext.RunAsNonRoot).To(gomega.BeTrue())
+				} else {
+					g.Expect(injected.SecurityContext.RunAsNonRoot).To(gomega.BeNil())
+				}
+				g.Expect(*injected.SecurityContext.AllowPrivilegeEscalation).To(gomega.BeFalse())
+				g.Expect(injected.SecurityContext.Capabilities.Drop).To(gomega.Equal([]corev1.Capability{"ALL"}))
+				g.Expect(injected.SecurityContext.SeccompProfile.Type).To(gomega.Equal(corev1.SeccompProfileTypeRuntimeDefault))
 
 				g.Expect(injected.VolumeMounts).To(gomega.HaveLen(1))
 				g.Expect(injected.VolumeMounts[0].Name).To(gomega.Equal("wait-leader-script"))
