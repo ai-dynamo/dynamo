@@ -11,7 +11,7 @@ Dynamo's production path is Kubernetes-native: you install the platform with
 Helm, submit Dynamo custom resources, and let the operator reconcile inference
 graphs into pods, services, routing, model-loading, and scaling resources. The
 local and container guides remain useful for development, but Kubernetes is the
-canonical path for shared GPU clusters and multi-node serving.
+canonical path for shared clusters and multi-node serving.
 
 > [!NOTE]
 > **Request entry.** This quickstart uses Dynamo-native Frontend routing: the Dynamo Frontend
@@ -22,13 +22,12 @@ canonical path for shared GPU clusters and multi-node serving.
 
 ## Prerequisites
 
-- [Helm](https://helm.sh/docs/intro/install/) (v3.0+) installed
-
 <Tabs>
 <Tab title="CUDA">
 
 - Kubernetes cluster (v1.30+) with GPU nodes
 - [kubectl](https://kubernetes.io/docs/tasks/tools/#kubectl) (v1.30+)
+- [Helm](https://helm.sh/docs/intro/install/) (v3.0+) installed
 - [NVIDIA GPU Operator](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/getting-started.html) installed on the cluster
 
 </Tab>
@@ -36,8 +35,17 @@ canonical path for shared GPU clusters and multi-node serving.
 
 - Kubernetes cluster (v1.34+) with XPU nodes and Dynamic Resource Allocation (DRA) API v1 enabled
 - [kubectl](https://kubernetes.io/docs/tasks/tools/#kubectl) matching your Kubernetes minor version (v1.34+ for these DRA API v1 templates)
+- [Helm](https://helm.sh/docs/intro/install/) (v3.0+) installed
 - [Intel resource drivers for Kubernetes](https://github.com/intel/intel-resource-drivers-for-kubernetes) installed with a `gpu.intel.com` `DeviceClass`
 - vLLM XPU runtime image built from this repository
+
+</Tab>
+<Tab title="CPU">
+
+- Kubernetes cluster (v1.30+)
+- [kubectl](https://kubernetes.io/docs/tasks/tools/#kubectl) (v1.30+)
+- [Helm](https://helm.sh/docs/intro/install/) (v3.0+) installed
+- Docker-compatible image builder and access to load images into or push images to the cluster
 
 </Tab>
 </Tabs>
@@ -89,11 +97,16 @@ kubectl get resourceslices
 The vLLM XPU templates expect a `gpu.intel.com` `DeviceClass`.
 
 </Tab>
+<Tab title="CPU">
+
+No accelerator operator or device plugin is required.
+
+</Tab>
 </Tabs>
 
 ### Detailed installation
 
-CUDA deployments require the GPU Operator. XPU deployments require the Intel resource drivers for Kubernetes and DRA. For additional features like RDMA, Prometheus, or multinode scheduling with Grove/KAI Scheduler, see the [Installation Guide](installation-guide.md).
+NVIDIA GPU deployments require the GPU Operator. Intel GPU deployments require the Intel resource drivers for Kubernetes and DRA. CPU deployments do not require accelerator setup. For additional features like RDMA, Prometheus, or multinode scheduling with Grove/KAI Scheduler, see the [Installation Guide](installation-guide.md).
 
 > [!TIP]
 > If your GPU SKU and cloud provider are supported, you can use [AICR](https://github.com/NVIDIA/aicr) for rapid installation of prerequisites and the Dynamo Helm chart.
@@ -102,9 +115,32 @@ CUDA deployments require the GPU Operator. XPU deployments require the Intel res
 
 Optionally, verify your cluster is ready:
 
+<Tabs>
+<Tab title="CUDA">
+
 ```bash
-./deploy/pre-deployment/pre-deployment-check.sh
+./deploy/pre-deployment/pre-deployment-check.sh --device gpu
 ```
+
+</Tab>
+<Tab title="XPU">
+
+```bash
+kubectl get deviceclasses
+kubectl get resourceslices
+```
+
+Confirm that the cluster exposes a `gpu.intel.com` `DeviceClass` and XPU devices.
+
+</Tab>
+<Tab title="CPU">
+
+```bash
+./deploy/pre-deployment/pre-deployment-check.sh --device cpu
+```
+
+</Tab>
+</Tabs>
 
 ## Install Dynamo
 
@@ -227,7 +263,7 @@ spec:
               workingDir: /workspace/examples/backends/vllm
 ```
 
-Apply exactly one of the manifests.
+Apply exactly one of the manifests:
 
 Option A: generate and apply a DGD with DGDR.
 
@@ -284,9 +320,90 @@ kubectl get resourceslices
 ```
 
 </Tab>
+<Tab title="CPU">
+
+Build the vLLM CPU runtime image from the repository:
+
+```bash
+python3 container/render.py \
+  --framework=vllm \
+  --device=cpu \
+  --target=runtime \
+  --output-short-filename
+
+docker build -t dynamo:latest-vllm-cpu-runtime -f container/rendered.Dockerfile .
+```
+
+Load the image into a local cluster or push it to a registry accessible to your
+cluster. For example, with kind:
+
+```bash
+kind load docker-image dynamo:latest-vllm-cpu-runtime
+```
+
+Save the following CPU deployment as `qwen3-cpu-dgd.yaml`:
+
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen3-cpu
+spec:
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: dynamo:latest-vllm-cpu-runtime
+              envFrom:
+                - secretRef:
+                    name: hf-token-secret
+    - name: VllmDecodeWorker
+      type: worker
+      replicas: 1
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: dynamo:latest-vllm-cpu-runtime
+              command:
+                - python3
+                - -m
+                - dynamo.vllm
+              args:
+                - --model
+                - Qwen/Qwen3-0.6B
+                - --gpu-memory-utilization
+                - "0.5"
+                - --max-model-len
+                - "4096"
+              envFrom:
+                - secretRef:
+                    name: hf-token-secret
+              resources:
+                limits:
+                  cpu: "4"
+                  memory: 16Gi
+                requests:
+                  cpu: "4"
+                  memory: 16Gi
+                  ephemeral-storage: 2Gi
+              workingDir: /workspace/examples/backends/vllm
+```
+
+Apply the CPU deployment:
+
+```bash
+kubectl apply -f qwen3-cpu-dgd.yaml -n $NAMESPACE
+```
+
+</Tab>
 </Tabs>
 
-In both paths, the DGD is the live serving resource:
+In all paths, the DGD is the live serving resource:
 
 ```bash
 kubectl get dynamographdeployment -n $NAMESPACE
@@ -320,7 +437,7 @@ curl -s http://localhost:8000/v1/chat/completions \
 
 ```bash
 kubectl delete dgdr qwen3-quickstart -n $NAMESPACE --ignore-not-found
-kubectl delete dynamographdeployment qwen3-quickstart qwen3-direct \
+kubectl delete dynamographdeployment qwen3-quickstart qwen3-direct qwen3-cpu \
   -n $NAMESPACE --ignore-not-found
 ```
 

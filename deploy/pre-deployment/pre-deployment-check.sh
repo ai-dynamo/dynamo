@@ -6,13 +6,41 @@
 # This script verifies that the Kubernetes cluster has the necessary prerequisites
 # before deploying Dynamo platform.
 #
+# Usage: ./pre-deployment-check.sh [--device gpu|cpu]
+#   --device gpu  (default) Check for NVIDIA GPU nodes and GPU Operator
+#   --device cpu            Skip GPU-specific checks
+#
 # Checks performed:
 # 1. kubectl connectivity - Verifies kubectl is installed and can connect to cluster
 # 2. Default StorageClass - Ensures a default StorageClass is configured
-# 3. Cluster GPU Resources - Validates GPU nodes are available
-# 4. GPU Operator - Confirms GPU operator is installed and running
+# 3. Cluster GPU Resources - Validates GPU nodes are available; skipped for CPU
+# 4. GPU Operator - Confirms the GPU Operator is running; skipped for CPU
 
 set -e
+
+# Parse arguments
+DEVICE_TYPE="gpu"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --device)
+            if [[ $# -lt 2 ]]; then
+                echo "Error: --device requires a value: gpu or cpu" >&2
+                exit 1
+            fi
+            DEVICE_TYPE="$2"
+            if [[ "$DEVICE_TYPE" != "gpu" && "$DEVICE_TYPE" != "cpu" ]]; then
+                echo "Error: --device must be 'gpu' or 'cpu'" >&2
+                exit 1
+            fi
+            shift 2
+            ;;
+        *)
+            echo "Unknown argument: $1" >&2
+            echo "Usage: $0 [--device gpu|cpu]" >&2
+            exit 1
+            ;;
+    esac
+done
 
 # Colors for output
 RED='\033[0;31m'
@@ -119,7 +147,7 @@ check_default_storage_class() {
     fi
 }
 
-check_cluster_resources() {
+check_gpu_resources() {
     print_section "Checking cluster GPU resources"
 
     local node_count
@@ -256,18 +284,20 @@ main() {
         overall_exit_code=1
     fi
 
-    if check_cluster_resources; then
-        record_check_result "Cluster GPU Resources" "PASS"
-    else
-        record_check_result "Cluster GPU Resources" "FAIL"
-        overall_exit_code=1
-    fi
+    if [[ "$DEVICE_TYPE" == "gpu" ]]; then
+        if check_gpu_resources; then
+            record_check_result "Cluster Resources" "PASS"
+        else
+            record_check_result "Cluster Resources" "FAIL"
+            overall_exit_code=1
+        fi
 
-    if check_gpu_operator; then
-        record_check_result "GPU Operator" "PASS"
-    else
-        record_check_result "GPU Operator" "FAIL"
-        overall_exit_code=1
+        if check_gpu_operator; then
+            record_check_result "GPU Operator" "PASS"
+        else
+            record_check_result "GPU Operator" "FAIL"
+            overall_exit_code=1
+        fi
     fi
 
     # Display summary
