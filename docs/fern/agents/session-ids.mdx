@@ -1,0 +1,84 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Session IDs
+subtitle: Identify agent sessions from supported coding agents and custom clients
+---
+
+Send a session ID on every LLM request in one reasoning chain:
+
+```bash title="Custom client with session ID" {4}
+curl http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer sk-dummy' \
+  -H 'x-dynamo-session-id: research-run-42:researcher' \
+  -d '{"model":"my-model","messages":[{"role":"user","content":"..."}]}'
+```
+
+## Use One ID Per Reasoning Chain
+
+Use one `session_id` for one agent reasoning and tool-use chain. A root agent, planner, researcher subagent, or OpenCode subtask can each have its own ID. Child sessions can also send a parent ID so traces and replay tools can rebuild the tree. Some academic papers call this a `program_id`.
+
+<a id="session-id-inputs"></a>
+
+## Session ID Inputs
+
+Custom clients should send the canonical Dynamo headers. When `X-Dynamo-Session-ID` is present, Dynamo uses it and `X-Dynamo-Parent-Session-ID` instead of any agent-native identity values.
+
+<ParamField path="X-Dynamo-Session-ID" type="string" required={true}>
+  One reasoning or tool chain inside the run. Maps to `agent_context.session_id`.
+</ParamField>
+
+<ParamField path="X-Dynamo-Parent-Session-ID" type="string">
+  Parent session when using subagents. Maps to `agent_context.parent_session_id`.
+</ParamField>
+
+<ParamField path="X-Dynamo-Session-Final" type="boolean">
+  Set to `true` on a dedicated minimal request when the session ends. Lifecycle-aware consumers can release per-session state immediately instead of waiting for an idle timeout. This works with canonical or agent-native session identity and maps to `agent_context.session_final`.
+</ParamField>
+
+## Native Agent Headers
+
+Dynamo also recognizes the current stable identity headers emitted by the following coding agents. The [frontend API surface compliance test](https://github.com/ai-dynamo/dynamo/blob/main/tests/frontend/test_frontend_api_surface_compliance.py) catches header changes as coding agents evolve. See [Agent Harnesses](agent-harnesses.md) for packaged setup.
+
+<Tabs>
+  <Tab title="Claude Code">
+    Dynamo reads Claude Code headers and normalizes them to `session_id` and `parent_session_id`:
+
+    - `x-claude-code-session-id` for root turns
+    - `x-claude-code-agent-id` for child-agent turns
+    - `x-claude-code-parent-agent-id` for nested children; top-level children fall back to `x-claude-code-session-id`
+  </Tab>
+  <Tab title="Codex">
+    Dynamo maps `session-id` to `session_id`.
+  </Tab>
+  <Tab title="OpenCode">
+    Dynamo maps:
+
+    - `x-session-id` to `session_id`
+    - `x-parent-session-id` to `parent_session_id` when present
+  </Tab>
+  <Tab title="Custom client">
+    Send the canonical headers directly:
+
+    ```bash title="Session and parent session" {4-5}
+    curl http://localhost:8000/v1/chat/completions \
+      -H 'Content-Type: application/json' \
+      -H 'Authorization: Bearer sk-dummy' \
+      -H 'x-dynamo-session-id: research-run-42:researcher' \
+      -H 'x-dynamo-parent-session-id: research-run-42:planner' \
+      -d '{"model":"my-model","messages":[{"role":"user","content":"..."}]}'
+    ```
+  </Tab>
+</Tabs>
+
+<Warning>
+Session identity is passive metadata. Sending a session ID does not enable sticky sessions or change request placement. Tracing records the identity when `DYN_REQUEST_TRACE=1` is enabled, and a session-aware routing policy can consume it only when that policy is configured separately.
+</Warning>
+
+## Related
+
+- [Agent Harnesses](agent-harnesses.md) — connect supported coding-agent CLIs to Dynamo
+- [Agent Tracing](agent-tracing.md) — join LLM and tool spans on `session_id`
+- [Agent Simulation](agent-replay.md) — replay captured agent traces
+- [ThunderAgent Program Scheduler](thunderagent-router.md) — program-level scheduling keyed by `session_id`

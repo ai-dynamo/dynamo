@@ -1,0 +1,247 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: vLLM Configuration (DynamoVllmConfig)
+subtitle: Field reference for the Dynamo-specific CLI flags and environment variables of the vLLM backend wrapper.
+---
+
+`DynamoVllmConfig` holds the Dynamo-specific configuration for the vLLM backend (`python -m dynamo.vllm`). Every field, type, default, and choice on this page comes from the [`DynamoVllmArgGroup` and `DynamoVllmConfig`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/vllm/backend_args.py) definitions. For features and operational details, see the [vLLM Reference Guide](vllm-reference-guide.md).
+
+<Note>
+  These are **only** the Dynamo wrapper flags. The vLLM backend also accepts every native vLLM `EngineArgs` argument (`--model`, `--tensor-parallel-size`, `--max-model-len`, and so on) in the same command, plus the cross-cutting [Dynamo Runtime](../../reference/runtime-config-reference.mdx) flags (`--namespace`, `--endpoint`, and others). This page covers neither — only the vLLM-specific `DYN_VLLM_*` surface.
+</Note>
+
+## How the config is loaded
+
+Each field is both a CLI flag and an environment variable. The CLI flag takes precedence; the environment variable is the fallback. Boolean fields are negatable — `--headless` sets it on, `--no-headless` sets it off.
+
+<Card>
+<Tabs>
+  <Tab title="Kubernetes">
+    Set flags in the worker container's `args` and environment variables in its `env`, under the vLLM worker service of a [DynamoGraphDeployment](../../kubernetes/dgd-reference.mdx) (DGD). The operator passes both through to the process without validation.
+
+    ```yaml
+    spec:
+      services:
+        VllmDecodeWorker:
+          extraPodSpec:
+            mainContainer:
+              command:
+                - python3
+                - -m
+                - dynamo.vllm
+              args:
+                - --model
+                - meta-llama/Llama-3.1-8B-Instruct
+                - --disaggregation-mode
+                - decode
+              env:
+                - name: DYN_VLLM_EMBEDDING_TRANSFER_MODE
+                  value: nixl-read
+    ```
+  </Tab>
+  <Tab title="Local">
+    Pass the flags directly on the command line:
+
+    ```bash
+    python -m dynamo.vllm \
+        --model meta-llama/Llama-3.1-8B-Instruct \
+        --disaggregation-mode decode \
+        --embedding-transfer-mode nixl-read
+    ```
+  </Tab>
+</Tabs>
+</Card>
+
+## Worker role and disaggregation
+
+These flags control which role this worker plays in a disaggregated deployment. The default when no `--disaggregation-mode` is set is aggregated (`agg`).
+
+<ParamField path="--disaggregation-mode" type="string" default="null">
+  Worker disaggregation mode. `agg` (default when unset) runs a combined aggregated prefill+decode worker. `pd` is a legacy alias for `agg`. `prefill` and `decode` split the pipeline for prefill/decode disaggregation. `encode` starts a multimodal encode-only worker.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>pd</Badge> <Badge intent="note" minimal>agg</Badge> <Badge intent="note" minimal>prefill</Badge> <Badge intent="note" minimal>decode</Badge> <Badge intent="note" minimal>encode</Badge></span>
+
+  Environment variable: `DYN_VLLM_DISAGGREGATION_MODE`
+</ParamField>
+
+<ParamField path="--headless" type="boolean" default="false">
+  Run in headless mode for multi-node tensor-parallel or pipeline-parallel deployments. Secondary nodes run vLLM workers only with no Dynamo endpoints. See the vLLM multi-node data parallel documentation for details.
+
+  Environment variable: `DYN_VLLM_HEADLESS`
+</ParamField>
+
+## Tokenizer and multimodal
+
+<ParamField path="--use-vllm-tokenizer" type="boolean" default="false">
+  Use vLLM's tokenizer for pre- and post-processing. This bypasses Dynamo's preprocessor; only the `/v1/chat/completions` endpoint will be available through the Dynamo frontend.
+
+  Environment variable: `DYN_VLLM_USE_TOKENIZER`
+</ParamField>
+
+<ParamField path="--enable-multimodal" type="boolean" default="false">
+  Enable multimodal processing. Must be set when using any multimodal worker role flag; without it, none of the multimodal components can be activated.
+
+  Environment variable: `DYN_VLLM_ENABLE_MULTIMODAL`
+</ParamField>
+
+<ParamField path="--route-to-encoder" type="boolean" default="false">
+  Enable routing to separate encoder workers for multimodal processing.
+
+  Environment variable: `DYN_VLLM_ROUTE_TO_ENCODER`
+</ParamField>
+
+<ParamField path="--mm-prompt-template" type="string" default="USER: <image>\n<prompt> ASSISTANT:">
+  Prompt template used to construct the final multimodal prompt sent to the model. The literal `<prompt>` token is replaced with the user's text at inference time; `<image>` marks where the image placeholder appears. Update this template to match your model's expected format.
+
+  Environment variable: `DYN_VLLM_MM_PROMPT_TEMPLATE`
+</ParamField>
+
+<ParamField path="--frontend-decoding" type="boolean" default="false">
+  Enable frontend decoding of multimodal images. Images are decoded in the Rust frontend and transferred to the backend via NIXL RDMA, bypassing in-engine HTTP fetch and decode.
+
+  Environment variable: `DYN_VLLM_FRONTEND_DECODING`
+</ParamField>
+
+## Embedding
+
+<ParamField path="--embedding-transfer-mode" type="string" default="nixl-write">
+  Embedding transfer mode used between encode and decode workers. `local` keeps embeddings on the local file system. `nixl-write` and `nixl-read` transfer them over NIXL RDMA (writer-initiated or reader-initiated, respectively).
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>local</Badge> <Badge intent="note" minimal>nixl-write</Badge> <Badge intent="note" minimal>nixl-read</Badge></span>
+
+  Environment variable: `DYN_VLLM_EMBEDDING_TRANSFER_MODE`
+</ParamField>
+
+<ParamField path="--embedding-worker" type="boolean" default="false">
+  Run as a text-embedding worker. The vLLM engine must be started with `--runner pooling`. KV-event publishing, KV router registration, and `InstrumentedScheduler` injection are all skipped, as they do not apply to pooling models.
+
+  Environment variable: `DYN_VLLM_EMBEDDING_WORKER`
+</ParamField>
+
+## Other
+
+<ParamField path="--enable-rl" type="boolean" default="false">
+  Enable reinforcement-learning training support. Selects RL-friendly vLLM defaults for token-in/token-out (TITO) workloads and per-token logprob parity. Mirrors `--enable-rl` on the SGLang backend.
+
+  Environment variable: `DYN_ENABLE_RL`
+</ParamField>
+
+<ParamField path="--gms-shadow-mode" type="boolean" default="false">
+  Enable GMS (GPU Memory Service) shadow/standby mode. Shadow engines skip KV cache allocation at startup, automatically pause after initialization, and resume on demand when the active engine dies. Requires `--load-format=gms`.
+
+  Environment variable: `DYN_VLLM_GMS_SHADOW_MODE`
+</ParamField>
+
+## Benchmarking
+
+These flags control the self-benchmark sweep that runs on startup before the worker begins accepting production requests.
+
+<ParamField path="--benchmark-mode" type="string" default="null">
+  Run a self-benchmark on startup before accepting requests. Sweeps prefill input sequence lengths (ISLs) and/or decode `(context_length × batch_size)` operating points, collecting `ForwardPassMetrics` at each point.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>prefill</Badge> <Badge intent="note" minimal>decode</Badge> <Badge intent="note" minimal>agg</Badge></span>
+
+  Environment variable: `DYN_BENCHMARK_MODE`
+</ParamField>
+
+<ParamField path="--benchmark-prefill-granularity" type="integer" default="16">
+  Number of ISL sample points for the prefill sweep.
+
+  Environment variable: `DYN_BENCHMARK_PREFILL_GRANULARITY`
+</ParamField>
+
+<ParamField path="--benchmark-decode-length-granularity" type="integer" default="6">
+  Number of context length sample points for the decode sweep.
+
+  Environment variable: `DYN_BENCHMARK_DECODE_LENGTH_GRANULARITY`
+</ParamField>
+
+<ParamField path="--benchmark-decode-batch-granularity" type="integer" default="6">
+  Number of batch size sample points per context length for the decode sweep.
+
+  Environment variable: `DYN_BENCHMARK_DECODE_BATCH_GRANULARITY`
+</ParamField>
+
+<ParamField path="--benchmark-warmup-iterations" type="integer" default="5">
+  Number of warmup iterations to run before benchmark measurement begins.
+
+  Environment variable: `DYN_BENCHMARK_WARMUP_ITERATIONS`
+</ParamField>
+
+<ParamField path="--benchmark-output-path" type="string" default="/tmp/benchmark_results.json">
+  File path where benchmark results are written in JSON format.
+
+  Environment variable: `DYN_BENCHMARK_OUTPUT_PATH`
+</ParamField>
+
+<ParamField path="--benchmark-timeout" type="integer" default="300">
+  Maximum seconds to wait for the benchmark to complete. Worker startup fails if this limit is exceeded.
+
+  Environment variable: `DYN_BENCHMARK_TIMEOUT`
+</ParamField>
+
+## Deprecated
+
+These flags are retained for backward compatibility and will be removed in a future release. Each is mapped to its replacement at startup with a deprecation warning.
+
+<ParamField path="--is-prefill-worker" type="boolean" default="false" deprecated={true}>
+  **Deprecated** — use `--disaggregation-mode=prefill`. Enable prefill functionality for this worker.
+
+  Environment variable: `DYN_VLLM_IS_PREFILL_WORKER`
+</ParamField>
+
+<ParamField path="--is-decode-worker" type="boolean" default="false" deprecated={true}>
+  **Deprecated** — use `--disaggregation-mode=decode`. Mark this as a decode worker that does not publish KV events.
+
+  Environment variable: `DYN_VLLM_IS_DECODE_WORKER`
+</ParamField>
+
+<ParamField path="--multimodal-encode-worker" type="boolean" default="false" deprecated={true}>
+  **Deprecated** — use `--enable-multimodal --disaggregation-mode=encode`. The legacy flag is mapped to those arguments at startup.
+
+  Environment variable: `DYN_VLLM_MULTIMODAL_ENCODE_WORKER`
+</ParamField>
+
+<ParamField path="--multimodal-worker" type="boolean" default="false" deprecated={true}>
+  **Deprecated** — use `--enable-multimodal` with `--disaggregation-mode=pd` or `--disaggregation-mode=prefill`. The legacy flag is mapped to those arguments at startup.
+
+  Environment variable: `DYN_VLLM_MULTIMODAL_WORKER`
+</ParamField>
+
+<ParamField path="--multimodal-decode-worker" type="boolean" default="false" deprecated={true}>
+  **Deprecated** — use `--enable-multimodal --disaggregation-mode=decode`. The legacy flag is mapped to those arguments at startup.
+
+  Environment variable: `DYN_VLLM_MULTIMODAL_DECODE_WORKER`
+</ParamField>
+
+<ParamField path="--model-express-url" type="string" default="null" deprecated={true}>
+  **Deprecated** — accepted for compatibility with older ModelExpress manifests only. The vLLM ModelExpress plugin reads its own configuration.
+
+  Environment variable: `MODEL_EXPRESS_URL`
+</ParamField>
+
+## Validation rules
+
+- `--disaggregation-mode` cannot be combined with `--is-prefill-worker` or `--is-decode-worker`.
+- `--is-prefill-worker` and `--is-decode-worker` cannot both be set at the same time.
+- Only one of `--multimodal-encode-worker`, `--multimodal-worker`, `--multimodal-decode-worker` may be set.
+- `--enable-multimodal` is required when any multimodal role flag is set.
+- `--embedding-worker` is only valid with `--disaggregation-mode=agg` (or the default aggregated mode) and cannot be combined with multimodal flags or `--benchmark-mode`.
+
+## Related pages
+
+<CardGroup cols={2}>
+  <Card title="vLLM Reference Guide" href="vllm-reference-guide.md" icon="book">
+    Features, worker roles, and operational details for the vLLM backend.
+  </Card>
+  <Card title="Runtime Configuration" href="../../reference/runtime-config-reference.mdx" icon="gear">
+    Cross-cutting `DYN_*` flags shared by every backend and the frontend.
+  </Card>
+  <Card title="SGLang Configuration" href="../sglang/sglang-config-reference.mdx" icon="book">
+    The equivalent Dynamo flag reference for the SGLang backend.
+  </Card>
+  <Card title="TensorRT-LLM Configuration" href="../trtllm/trtllm-config-reference.mdx" icon="book">
+    The equivalent Dynamo flag reference for the TensorRT-LLM backend.
+  </Card>
+</CardGroup>

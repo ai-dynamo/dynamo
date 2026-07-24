@@ -1,0 +1,66 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Benchmark a Local Deployment with AIPerf
+subtitle: Measure latency and throughput through the local Dynamo frontend
+---
+
+AIPerf sends load to an OpenAI-compatible endpoint and measures latency and throughput. Use this
+tutorial after starting a local Dynamo frontend and at least one model worker.
+
+AIPerf measures the live deployment. It does not predict a configuration like AIConfigurator or run
+a GPU-free simulation like Mocker and DynoSim.
+
+## Prerequisites
+
+Start a local deployment by following [Model Deployment](overview.mdx). Confirm that the frontend is
+available at `http://localhost:8000`:
+
+```bash
+curl --fail http://localhost:8000/health
+```
+
+Install AIPerf on the machine that will generate load:
+
+```bash
+pip install aiperf
+```
+
+## Run a baseline benchmark
+
+Set the model name to the value served by the local worker:
+
+```bash
+aiperf profile \
+  --model Qwen/Qwen3-32B-FP8 \
+  --url http://localhost:8000 \
+  --endpoint-type chat \
+  --streaming \
+  --concurrency 10 \
+  --request-count 100 \
+  --synthetic-input-tokens-mean 2000 \
+  --output-tokens-mean 256
+```
+
+AIPerf writes artifacts to `artifacts/` and prints a metrics summary. Record TTFT, Inter-Token
+Latency (ITL), end-to-end latency, and output throughput.
+
+## Compare local configurations
+
+Change one deployment setting at a time, restart the affected workers, and rerun the same AIPerf
+command. Common comparisons include:
+
+- one worker versus multiple replicas
+- aggregated versus disaggregated serving
+- KV-aware routing versus round-robin routing
+- different TP or PP sizes recommended by AIConfigurator
+- backend or engine-argument changes
+
+Keep the request shape, concurrency, and request count fixed so that the results remain comparable.
+Then sweep concurrency to find the saturation point of the selected configuration.
+
+## Next steps
+
+- Use [Sizing with AIConfigurator](aiconfigurator.mdx) to select additional configurations.
+- Use the full [Dynamo Benchmarking guide](../benchmarks/benchmarking.md) for concurrency sweeps,
+  arrival patterns, trace replay, visualization, and GPU telemetry.

@@ -1,0 +1,119 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Health Check Reference
+subtitle: Health endpoints, status codes, paths, and active-check configuration
+---
+
+Dynamo exposes two related health interfaces: HTTP status endpoints for external observers and
+optional canary requests that actively exercise idle worker endpoints. For a local procedure, see
+[Check Local Deployment Health](../../observability/health-checks.mdx).
+
+## Endpoint Summary
+
+| Process | Default port | Path | Behavior |
+| --- | --- | --- | --- |
+| Frontend | `DYN_HTTP_PORT`, default `8000` | `/live` | Reports whether the HTTP service is running or shutting down |
+| Frontend | `DYN_HTTP_PORT`, default `8000` | `/health` | Reports frontend health plus discovered endpoints and instances |
+| Worker or standalone router | `DYN_SYSTEM_PORT`, disabled by default | `/live` | Reports system status |
+| Worker or standalone router | `DYN_SYSTEM_PORT`, disabled by default | `/health` | Reports system status |
+
+Set `DYN_SYSTEM_HEALTH_PATH` or `DYN_SYSTEM_LIVE_PATH` before process startup to replace the worker
+or router paths. For the frontend, use `DYN_HTTP_SVC_HEALTH_PATH` or `DYN_HTTP_SVC_LIVE_PATH`.
+
+## Frontend Responses
+
+A live frontend returns `200 OK`:
+
+```json
+{
+  "message": "Service is live",
+  "status": "live"
+}
+```
+
+During shutdown, `/live` returns `503 Service Unavailable` with status `shutting_down`.
+
+The frontend `/health` endpoint returns `200 OK` and lists the endpoints and instances currently
+visible through discovery:
+
+```json
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.backend.generate"
+  ],
+  "instances": [
+    {
+      "namespace": "dynamo",
+      "component": "backend",
+      "endpoint": "generate",
+      "instance_id": 7587888160958628000
+    }
+  ]
+}
+```
+
+An empty `endpoints` or `instances` array means the frontend does not currently discover workers; it
+does not change the frontend response status by itself.
+
+## System-Status Responses
+
+Workers and standalone routers expose health endpoints only when `DYN_SYSTEM_PORT` is zero or a
+positive port. A negative value disables the system-status server.
+
+Before the component is ready, `/health` and `/live` return `503 Service Unavailable`:
+
+```json
+{
+  "endpoints": {
+    "generate": "notready"
+  },
+  "status": "notready",
+  "uptime": {
+    "nanos": 313803539,
+    "secs": 12
+  }
+}
+```
+
+After startup, both paths return `200 OK` with status `ready`:
+
+```json
+{
+  "endpoints": {
+    "clear_kv_blocks": "ready",
+    "generate": "ready",
+    "load_metrics": "ready"
+  },
+  "status": "ready",
+  "uptime": {
+    "nanos": 356504530,
+    "secs": 18
+  }
+}
+```
+
+`DYN_SYSTEM_STARTING_HEALTH_STATUS` controls the initial status. The legacy
+`DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS` variable is deprecated and no longer controls endpoint
+selection in the current runtime.
+
+## Active Canary Configuration
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `DYN_HEALTH_CHECK_ENABLED` | `false` | Enables active checks for registered worker endpoints |
+| `DYN_CANARY_WAIT_TIME` | `10` | Seconds without successful endpoint activity before sending a canary |
+| `DYN_HEALTH_CHECK_REQUEST_TIMEOUT` | `3` | Seconds to wait for the canary response |
+| `DYN_HEALTH_CHECK_PAYLOAD` | Backend default | Optional JSON object or `@/path/to/file.json` payload override for unified backends |
+
+Each backend supplies a minimal inference payload. Dynamo marks the request as a health check and
+uses the backend's normal endpoint path, so the check covers request handling and engine execution
+rather than only process reachability. For the lifecycle and rationale, see
+[Observability Architecture](../../design-docs/observability.md#active-worker-health-checks).
+
+## Related Reference
+
+- [Environment Variables](environment-variables.mdx#health-checks)
+- [Local Observability Stack](local-stack.mdx)
+- [DynamoGraphDeployment Probes](../../kubernetes/dgd-probes.md)

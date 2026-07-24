@@ -1,0 +1,447 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# yaml-language-server: $schema=https://schema.buildwithfern.dev/docs-yml.json
+
+instances:
+  - url: dynamo.docs.buildwithfern.com/dynamo
+    custom-domain: [docs.nvidia.com/dynamo, docs.dynamo.nvidia.com/dynamo]
+    multi-source: true
+
+title: NVIDIA Dynamo Documentation
+
+agents:
+  page-directive: "For clean Markdown content of this page, append .md to this URL. For the complete documentation index, see https://docs.nvidia.com/dynamo/llms.txt. For full content including API reference and SDK examples, see https://docs.nvidia.com/dynamo/llms-full.txt."
+
+
+# Keep Home and the documentation tabs in the same versioned navigation.
+# Standalone versioning avoids rendering a product selector for one product.
+versions:
+  - display-name: dev
+    path: ./index.yml
+
+redirects:
+  - source: "/dynamo/index.html"
+    destination: "/dynamo/"
+  - source: "/dynamo/dev/index.html"
+    destination: "/dynamo/dev/"
+  - source: "/dynamo/latest/index.html"
+    destination: "/dynamo/"
+  - source: "/dynamo/dev/backends/custom-backend/writing-unified-backends/python"
+    destination: "/dynamo/dev/backends/custom-backend/writing-unified-backends"
+  - source: "/dynamo/dev/backends/custom-backend/writing-unified-backends/rust"
+    destination: "/dynamo/dev/backends/custom-backend/writing-unified-backends"
+  - source: "/dynamo/latest/backends/custom-backend/writing-unified-backends/python"
+    destination: "/dynamo/latest/backends/custom-backend/writing-unified-backends"
+  - source: "/dynamo/latest/backends/custom-backend/writing-unified-backends/rust"
+    destination: "/dynamo/latest/backends/custom-backend/writing-unified-backends"
+  # Unversioned root redirects → dev (fixes broken links from docs.nvidia.com/dynamo)
+  # See: https://github.com/ai-dynamo/dynamo/issues/7297
+  # support-matrix + feature-matrix were consolidated into reference/compatibility.
+  - source: "/dynamo/dev/reference/support-matrix"
+    destination: "/dynamo/dev/reference/compatibility"
+  - source: "/dynamo/dev/reference/feature-matrix"
+    destination: "/dynamo/dev/reference/compatibility"
+  - source: "/dynamo/resources/support-matrix"
+    destination: "/dynamo/dev/reference/compatibility"
+  - source: "/dynamo/resources/feature-matrix"
+    destination: "/dynamo/dev/reference/compatibility"
+  - source: "/dynamo/resources/release-artifacts"
+    destination: "/dynamo/dev/reference/release-artifacts"
+  - source: "/dynamo/resources/model-early-access-builds"
+    destination: "/dynamo/dev/reference/model-early-access-builds"
+  # Live-site "Resources" section URLs (main's nav) → consolidated reference pages.
+  - source: "/dynamo/dev/resources/support-matrix"
+    destination: "/dynamo/dev/reference/compatibility"
+  - source: "/dynamo/dev/resources/feature-matrix"
+    destination: "/dynamo/dev/reference/compatibility"
+  - source: "/dynamo/dev/resources/release-artifacts"
+    destination: "/dynamo/dev/reference/release-artifacts"
+  - source: "/dynamo/dev/resources/model-early-access-builds"
+    destination: "/dynamo/dev/reference/model-early-access-builds"
+  - source: "/dynamo/resources/examples"
+    destination: "/dynamo/dev/resources/examples"
+  # Version-scoped getting-started → resources redirects
+  # Only for versions where these pages moved (dev, v1.0.0, v1.0.1, latest).
+  # Older versions (v0.9.x and below) still have pages under getting-started.
+  - source: "/dynamo/dev/getting-started/support-matrix"
+    destination: "/dynamo/dev/reference/compatibility"
+  - source: "/dynamo/dev/getting-started/feature-matrix"
+    destination: "/dynamo/dev/reference/compatibility"
+  - source: "/dynamo/dev/getting-started/release-artifacts"
+    destination: "/dynamo/dev/reference/release-artifacts"
+  - source: "/dynamo/dev/getting-started/examples"
+    destination: "/dynamo/dev/resources/examples"
+  - source: "/dynamo/v1.0.1/getting-started/support-matrix"
+    destination: "/dynamo/v1.0.1/resources/support-matrix"
+  - source: "/dynamo/v1.0.1/getting-started/feature-matrix"
+    destination: "/dynamo/v1.0.1/resources/feature-matrix"
+  - source: "/dynamo/v1.0.1/getting-started/release-artifacts"
+    destination: "/dynamo/v1.0.1/resources/release-artifacts"
+  - source: "/dynamo/v1.0.1/getting-started/examples"
+    destination: "/dynamo/v1.0.1/resources/examples"
+  - source: "/dynamo/v1.0.0/getting-started/support-matrix"
+    destination: "/dynamo/v1.0.0/resources/support-matrix"
+  - source: "/dynamo/v1.0.0/getting-started/feature-matrix"
+    destination: "/dynamo/v1.0.0/resources/feature-matrix"
+  - source: "/dynamo/v1.0.0/getting-started/release-artifacts"
+    destination: "/dynamo/v1.0.0/resources/release-artifacts"
+  - source: "/dynamo/v1.0.0/getting-started/examples"
+    destination: "/dynamo/v1.0.0/resources/examples"
+  - source: "/dynamo/latest/getting-started/support-matrix"
+    destination: "/dynamo/latest/resources/support-matrix"
+  - source: "/dynamo/latest/getting-started/feature-matrix"
+    destination: "/dynamo/latest/resources/feature-matrix"
+  - source: "/dynamo/latest/getting-started/release-artifacts"
+    destination: "/dynamo/latest/resources/release-artifacts"
+  - source: "/dynamo/latest/getting-started/examples"
+    destination: "/dynamo/latest/resources/examples"
+  # Community is now a standalone landing page. Contributor and documentation
+  # guides live together under Contributing in the Developer Guide.
+  - source: "/dynamo/connect/contributing-to-dynamo"
+    destination: "/dynamo/dev/contributing/contribution-guide"
+  - source: "/dynamo/connect/contributing/contributing-to-dynamo"
+    destination: "/dynamo/dev/contributing/contribution-guide"
+  - source: "/dynamo/connect/documentation-style-guide"
+    destination: "/dynamo/dev/contributing/documentation/style-guide"
+  - source: "/dynamo/connect/contributing/documentation-style-guide"
+    destination: "/dynamo/dev/contributing/documentation/style-guide"
+  - source: "/dynamo/connect/docs-website"
+    destination: "/dynamo/dev/contributing/documentation/building-and-publishing"
+  - source: "/dynamo/connect/contributing/docs-website"
+    destination: "/dynamo/dev/contributing/documentation/building-and-publishing"
+  - source: "/dynamo/getting-started/contribution-guide"
+    destination: "/dynamo/contributing/contribution-guide"
+  - source: "/dynamo/dev/getting-started/contribution-guide"
+    destination: "/dynamo/dev/contributing/contribution-guide"
+  # Documentation section: style guide moved out of getting-started, and the
+  # docs-system guide ("Dynamo Docs Guide") was renamed. Dev-only (main).
+  - source: "/dynamo/dev/getting-started/documentation-style-guide"
+    destination: "/dynamo/dev/contributing/documentation/style-guide"
+  - source: "/dynamo/dev/documentation/dynamo-docs-guide"
+    destination: "/dynamo/dev/contributing/documentation/building-and-publishing"
+  - source: "/dynamo/dev/documentation/style-guide"
+    destination: "/dynamo/dev/contributing/documentation/style-guide"
+  - source: "/dynamo/dev/documentation/building-and-publishing"
+    destination: "/dynamo/dev/contributing/documentation/building-and-publishing"
+  - source: "/dynamo/dev/components/frontend/configuration"
+    destination: "/dynamo/dev/components/frontend/frontend-config-reference"
+  - source: "/dynamo/dev/user-guides/multimodal-model-serving/diffusion-experimental"
+    destination: "/dynamo/dev/diffusion"
+  - source: "/dynamo/dev/user-guides/multimodal-model-serving/diffusion-experimental/:slug*"
+    destination: "/dynamo/dev/diffusion/:slug*"
+  - source: "/dynamo/dev/user-guides/multimodal-model-serving/vision-language-models-vlms"
+    destination: "/dynamo/dev/multimodal"
+  - source: "/dynamo/dev/user-guides/multimodal-model-serving/vision-language-models-vlms/:slug*"
+    destination: "/dynamo/dev/multimodal/:slug*"
+  - source: "/dynamo/dev/user-guides/diffusion/diffusion-guide"
+    destination: "/dynamo/dev/diffusion/text-to-video"
+  - source: "/dynamo/dev/user-guides/agentic-workloads"
+    destination: "/dynamo/dev/agents"
+  - source: "/dynamo/dev/user-guides/agentic-workloads/:slug*"
+    destination: "/dynamo/dev/agents/:slug*"
+  - source: "/dynamo/dev/user-guides/custom-backend/python-unified-backends"
+    destination: "/dynamo/dev/backends/custom-backend/writing-unified-backends"
+  - source: "/dynamo/dev/user-guides/custom-backend/rust-unified-backends"
+    destination: "/dynamo/dev/backends/custom-backend/writing-unified-backends"
+  - source: "/dynamo/dev/backends/custom-backend/python-unified-backends"
+    destination: "/dynamo/dev/backends/custom-backend/writing-unified-backends"
+  - source: "/dynamo/dev/backends/custom-backend/rust-unified-backends"
+    destination: "/dynamo/dev/backends/custom-backend/writing-unified-backends"
+  - source: "/dynamo/dev/user-guides/custom-backend/:slug*"
+    destination: "/dynamo/dev/backends/custom-backend/:slug*"
+  - source: "/dynamo/dev/user-guides/custom-backend"
+    destination: "/dynamo/dev/backends/custom-backend/custom-backend-overview"
+  - source: "/dynamo/latest/planner/planner_intro.html"
+    destination: "/dynamo/components/planner"
+  # Kubernetes sidebar reorganization: keep old section-generated URLs working.
+  - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/quickstart"
+    destination: "/dynamo/dev/kubernetes-deployment/start-here/kubernetes-quickstart"
+  - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/installation-guide"
+    destination: "/dynamo/dev/kubernetes-deployment/start-here/installation-guide"
+  - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/minikube-setup"
+    destination: "/dynamo/dev/kubernetes-deployment/start-here/minikube-setup"
+  - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/model-deployment-guide"
+    destination: "/dynamo/dev/kubernetes-deployment/deploy-models/model-deployment-guide"
+  - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/managing-models-with-dynamo-model"
+    destination: "/dynamo/dev/kubernetes-deployment/deploy-models/managing-models-with-dynamo-model"
+  - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/dgdr-reference"
+    destination: "/dynamo/dev/kubernetes-deployment/deploy-models/dgdr-reference"
+  - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/model-caching"
+    destination: "/dynamo/dev/kubernetes-deployment/model-loading/model-caching"
+  - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/autoscaling"
+    destination: "/dynamo/dev/kubernetes-deployment/operate/autoscaling"
+  - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/rolling-update"
+    destination: "/dynamo/dev/kubernetes-deployment/operate/rolling-update"
+  - source: "/dynamo/dev/kubernetes-deployment/observability-k8s/metrics"
+    destination: "/dynamo/dev/kubernetes-deployment/operate/observability/metrics"
+  - source: "/dynamo/dev/kubernetes-deployment/observability-k8s/logging"
+    destination: "/dynamo/dev/kubernetes-deployment/operate/observability/logging"
+  - source: "/dynamo/dev/kubernetes-deployment/observability-k8s/operator-metrics"
+    destination: "/dynamo/dev/kubernetes-deployment/operate/observability/operator-metrics"
+  - source: "/dynamo/dev/kubernetes-deployment/multinode/multinode-deployments"
+    destination: "/dynamo/dev/kubernetes-deployment/scale/multinode-deployments"
+  - source: "/dynamo/dev/kubernetes-deployment/multinode/grove"
+    destination: "/dynamo/dev/kubernetes-deployment/scale/grove"
+  - source: "/dynamo/dev/kubernetes-deployment/multinode/topology-aware-scheduling"
+    destination: "/dynamo/dev/kubernetes-deployment/scale/topology-aware-scheduling"
+  - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/disagg-communication"
+    destination: "/dynamo/dev/kubernetes-deployment/operate/disagg-communication"
+  - source: "/dynamo/dev/kubernetes-deployment/scale/disagg-communication"
+    destination: "/dynamo/dev/kubernetes-deployment/operate/disagg-communication"
+  - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/dynamo-operator"
+    destination: "/dynamo/dev/kubernetes-deployment/start-here/dynamo-operator"
+  - source: "/dynamo/dev/kubernetes-deployment/advanced-platform/dynamo-operator"
+    destination: "/dynamo/dev/kubernetes-deployment/start-here/dynamo-operator"
+  - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/service-discovery"
+    destination: "/dynamo/dev/kubernetes-deployment/advanced-platform/service-discovery"
+  - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/webhooks"
+    destination: "/dynamo/dev/kubernetes-deployment/advanced-platform/webhooks"
+  - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/snapshot"
+    destination: "/dynamo/dev/kubernetes-deployment/advanced-platform/snapshot"
+  - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/shadow-engine-failover"
+    destination: "/dynamo/dev/kubernetes-deployment/advanced-platform/shadow-engine-failover"
+  - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/developing-with-tilt"
+    destination: "/dynamo/dev/kubernetes-deployment/advanced-platform/developing-with-tilt"
+  - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/inference-gateway-gaie"
+    destination: "/dynamo/dev/integrations/kubernetes-integrations/gateway-api-inference-extension-gaie"
+  # User Guide operations restructure: the CLI tools section was flattened.
+  - source: "/dynamo/dev/kubernetes/operations/cli-tools/sizing-with-ai-configurator"
+    destination: "/dynamo/dev/kubernetes/model-deployment/size-with-ai-configurator"
+  - source: "/dynamo/dev/kubernetes/operations/cli-tools/benchmarking-with-ai-perf"
+    destination: "/dynamo/dev/kubernetes/operations/benchmarking-with-ai-perf"
+  # Local observability restructure: installation, usage, and reference now have separate pages.
+  - source: "/dynamo/dev/cli/installation/observability-setup/overview"
+    destination: "/dynamo/dev/cli/installation/observability"
+  - source: "/dynamo/dev/cli/installation/observability-setup/prometheus-grafana"
+    destination: "/dynamo/dev/cli/operations/observability"
+  - source: "/dynamo/dev/cli/operations/metrics-and-dashboards"
+    destination: "/dynamo/dev/cli/operations/observability"
+  - source: "/dynamo/dev/cli/operations/tracing"
+    destination: "/dynamo/dev/cli/operations/observability"
+  - source: "/dynamo/dev/cli/operations/logging"
+    destination: "/dynamo/dev/cli/operations/observability"
+  # Backend launch scripts moved from the CLI guide to Reference.
+  - source: "/dynamo/dev/cli/model-deployment/backends/v-llm-deployments"
+    destination: "/dynamo/dev/local-deployment-examples/v-llm"
+  - source: "/dynamo/dev/cli/model-deployment/backends/sg-lang-deployments"
+    destination: "/dynamo/dev/local-deployment-examples/sg-lang"
+  - source: "/dynamo/dev/cli/model-deployment/backends/trt-llm-deployments"
+    destination: "/dynamo/dev/local-deployment-examples/tensor-rt-llm"
+  # Local KV cache guides consolidated into one tutorial; custom-engine events moved to Developer Guide.
+  - source: "/dynamo/dev/cli/model-deployment/kv-cache-offloading/lm-cache-integration"
+    destination: "/dynamo/dev/cli/model-deployment/kv-cache-offloading"
+  - source: "/dynamo/dev/cli/model-deployment/kv-cache-offloading/hicache-integration"
+    destination: "/dynamo/dev/cli/model-deployment/kv-cache-offloading"
+  - source: "/dynamo/dev/cli/model-deployment/kv-cache-offloading/flex-kv-integration"
+    destination: "/dynamo/dev/cli/model-deployment/kv-cache-offloading"
+  - source: "/dynamo/dev/cli/model-deployment/kv-cache-offloading/custom-kv-events"
+    destination: "/dynamo/dev/advanced-customizations/writing-custom-backends/publish-kv-events"
+  # SGLang HiCache doc: canonical URL under Integrations > KV Cache Integrations.
+  - source: "/dynamo/dev/backends/sg-lang/hi-cache"
+    destination: "/dynamo/dev/integrations/kv-cache-integrations/hi-cache"
+  - source: "/dynamo/dev/integrations/sg-lang-hi-cache"
+    destination: "/dynamo/dev/integrations/kv-cache-integrations/hi-cache"
+  - source: "/dynamo/integrations/sg-lang-hi-cache"
+    destination: "/dynamo/dev/integrations/kv-cache-integrations/hi-cache"
+  - source: "/dynamo/dev/integrations/sglang-hicache"
+    destination: "/dynamo/dev/integrations/kv-cache-integrations/hi-cache"
+  - source: "/dynamo/integrations/sglang-hicache"
+    destination: "/dynamo/dev/integrations/kv-cache-integrations/hi-cache"
+  # Fault Tolerance: internals/testing pages moved from Use Cases into the
+  # Knowledge Base > Design Documents section. Cancellation and testing are no
+  # longer user-facing Use Cases pages.
+  - source: "/dynamo/dev/fault-tolerance/request-cancellation"
+    destination: "/dynamo/dev/design-docs/request-cancellation"
+  - source: "/dynamo/fault-tolerance/request-cancellation"
+    destination: "/dynamo/dev/design-docs/request-cancellation"
+  - source: "/dynamo/dev/fault-tolerance/testing"
+    destination: "/dynamo/dev/design-docs/fault-tolerance-testing"
+  - source: "/dynamo/fault-tolerance/testing"
+    destination: "/dynamo/dev/design-docs/fault-tolerance-testing"
+  # Blog and Community are versioned tabs in the main Fern navigation.
+  - source: "/dynamo/dev/blog/:slug*"
+    destination: "/dynamo/dev/digest/:slug*"
+  - source: "/dynamo/dev/blog"
+    destination: "/dynamo/dev/digest"
+  - source: "/dynamo/latest/blog/:slug*"
+    destination: "/dynamo/dev/digest/:slug*"
+  - source: "/dynamo/latest/blog"
+    destination: "/dynamo/dev/digest"
+  - source: "/dynamo/blog/:slug*"
+    destination: "/dynamo/dev/digest/:slug*"
+  - source: "/dynamo/blog"
+    destination: "/dynamo/dev/digest"
+  - source: "/dynamo/connect/:slug*"
+    destination: "/dynamo/dev/community/:slug*"
+  - source: "/dynamo/connect"
+    destination: "/dynamo/dev/community"
+  - source: "/dynamo/home"
+    destination: "/dynamo/"
+  # Historical redirects from the earlier single-product tab layout.
+  # Introduction moved from Home into User Guide > Getting Started.
+  - source: "/dynamo/dev/introduction"
+    destination: "/dynamo/dev/getting-started/introduction"
+  - source: "/dynamo/dev/getting-started/compatibility"
+    destination: "/dynamo/dev/reference/compatibility"
+  - source: "/dynamo/dev/getting-started/blog"
+    destination: "/dynamo/dev/digest"
+  - source: "/dynamo/dev/additional-resources/kv-router-a-b-testing"
+    destination: "/dynamo/dev/benchmarks/kv-router-ab-testing"
+  # Diffusion backend pages consolidated into one page per modality.
+  - source: "/dynamo/dev/use-cases/diffusion/text-to-image/v-llm-omni"
+    destination: "/dynamo/dev/diffusion/text-to-image"
+  - source: "/dynamo/dev/use-cases/diffusion/text-to-image/sg-lang"
+    destination: "/dynamo/dev/diffusion/text-to-image"
+  - source: "/dynamo/dev/use-cases/diffusion/text-to-image/tensor-rt-llm"
+    destination: "/dynamo/dev/diffusion/text-to-image"
+  - source: "/dynamo/dev/use-cases/diffusion/text-to-video/v-llm-omni"
+    destination: "/dynamo/dev/diffusion/text-to-video"
+  - source: "/dynamo/dev/use-cases/diffusion/text-to-video/sg-lang"
+    destination: "/dynamo/dev/diffusion/text-to-video"
+  - source: "/dynamo/dev/use-cases/diffusion/text-to-video/tensor-rt-llm"
+    destination: "/dynamo/dev/diffusion/text-to-video"
+  - source: "/dynamo/dev/use-cases/diffusion/text-to-video/fastvideo"
+    destination: "/dynamo/dev/diffusion/text-to-video"
+  - source: "/dynamo/dev/use-cases/diffusion/image-to-video/v-llm-omni"
+    destination: "/dynamo/dev/diffusion/image-to-video"
+  - source: "/dynamo/dev/use-cases/diffusion/image-to-video/sg-lang"
+    destination: "/dynamo/dev/diffusion/image-to-video"
+  - source: "/dynamo/dev/use-cases/diffusion/text-to-audio/v-llm-omni"
+    destination: "/dynamo/dev/diffusion/text-to-audio"
+  - source: "/dynamo/dev/use-cases/diffusion/text-to-text-llm-diffusion/sg-lang"
+    destination: "/dynamo/dev/diffusion/text-to-text"
+  # Preserve URLs from the previous User Guide navigation.
+  - source: "/dynamo/dev/user-guides/diffusion/text-to-image/v-llm-omni"
+    destination: "/dynamo/dev/diffusion/text-to-image"
+  - source: "/dynamo/dev/user-guides/diffusion/text-to-image/sg-lang"
+    destination: "/dynamo/dev/diffusion/text-to-image"
+  - source: "/dynamo/dev/user-guides/diffusion/text-to-image/tensor-rt-llm"
+    destination: "/dynamo/dev/diffusion/text-to-image"
+  - source: "/dynamo/dev/user-guides/diffusion/text-to-video/v-llm-omni"
+    destination: "/dynamo/dev/diffusion/text-to-video"
+  - source: "/dynamo/dev/user-guides/diffusion/text-to-video/sg-lang"
+    destination: "/dynamo/dev/diffusion/text-to-video"
+  - source: "/dynamo/dev/user-guides/diffusion/text-to-video/tensor-rt-llm"
+    destination: "/dynamo/dev/diffusion/text-to-video"
+  - source: "/dynamo/dev/user-guides/diffusion/text-to-video/fastvideo"
+    destination: "/dynamo/dev/diffusion/text-to-video"
+  - source: "/dynamo/dev/user-guides/diffusion/image-to-video/v-llm-omni"
+    destination: "/dynamo/dev/diffusion/image-to-video"
+  - source: "/dynamo/dev/user-guides/diffusion/image-to-video/sg-lang"
+    destination: "/dynamo/dev/diffusion/image-to-video"
+  - source: "/dynamo/dev/user-guides/diffusion/text-to-audio/v-llm-omni"
+    destination: "/dynamo/dev/diffusion/text-to-audio"
+  - source: "/dynamo/dev/user-guides/diffusion/text-to-text-llm-diffusion/sg-lang"
+    destination: "/dynamo/dev/diffusion/text-to-text"
+  - source: "/dynamo/dev/user-guides/diffusion/fastvideo"
+    destination: "/dynamo/dev/diffusion/text-to-video"
+  # Features tab: remove Use Cases / Other Features wrappers.
+  - source: "/dynamo/dev/use-cases/agents"
+    destination: "/dynamo/dev/agents"
+  - source: "/dynamo/dev/use-cases/agents/:slug*"
+    destination: "/dynamo/dev/agents/:slug*"
+  - source: "/dynamo/dev/use-cases/multimodal"
+    destination: "/dynamo/dev/multimodal"
+  - source: "/dynamo/dev/use-cases/multimodal/:slug*"
+    destination: "/dynamo/dev/multimodal/:slug*"
+  - source: "/dynamo/dev/use-cases/diffusion"
+    destination: "/dynamo/dev/diffusion"
+  - source: "/dynamo/dev/use-cases/diffusion/:slug*"
+    destination: "/dynamo/dev/diffusion/:slug*"
+  - source: "/dynamo/dev/other-features/parsing"
+    destination: "/dynamo/dev/parsing"
+  - source: "/dynamo/dev/other-features/parsing/:slug*"
+    destination: "/dynamo/dev/parsing/:slug*"
+  - source: "/dynamo/dev/other-features/fastokens-tokenizer"
+    destination: "/dynamo/dev/fastokens-tokenizer"
+  - source: "/dynamo/dev/other-features/lo-ra-adapters"
+    destination: "/dynamo/dev/lo-ra-adapters"
+  - source: "/dynamo/dev/user-guides/agents"
+    destination: "/dynamo/dev/agents"
+  - source: "/dynamo/dev/user-guides/agents/:slug*"
+    destination: "/dynamo/dev/agents/:slug*"
+  - source: "/dynamo/dev/user-guides/multimodal"
+    destination: "/dynamo/dev/multimodal"
+  - source: "/dynamo/dev/user-guides/multimodal/:slug*"
+    destination: "/dynamo/dev/multimodal/:slug*"
+  - source: "/dynamo/dev/user-guides/diffusion"
+    destination: "/dynamo/dev/diffusion"
+  - source: "/dynamo/dev/user-guides/diffusion/:slug*"
+    destination: "/dynamo/dev/diffusion/:slug*"
+
+# GitHub repository link in navbar
+navbar-links:
+  - type: github
+    value: https://github.com/ai-dynamo/dynamo
+
+footer: ./components/CustomFooter.tsx
+
+layout:
+  searchbar-placement: header
+  page-width: 1376px # Formerly 1376 px
+  sidebar-width: 272px
+  content-width: 912px # Formerly 812 px
+  tabs-placement: header
+  hide-feedback: true
+
+metadata:
+  canonical-host: "docs.nvidia.com/dynamo"
+
+experimental:
+  mdx-components:
+    - ./components
+
+colors:
+  accentPrimary:
+    dark: '#76B900'
+    # Darkened NVIDIA green for light mode: #76B900 on white is 2.41:1,
+    # below the 3:1 minimum Fern warns about; #538300 passes (~4.3:1).
+    light: '#538300'
+  background:
+    light: '#FFFFFF'
+    dark: '#000000'
+typography:
+  bodyFont:
+    name: NVIDIA
+    paths:
+      - path: ./assets/fonts/NVIDIASans.woff2
+        style: normal
+      - path: ./assets/fonts/NVIDIASans_Italic.woff2
+        style: italic
+  codeFont:
+    name: RobotoMono
+    paths:
+      - path: ./assets/fonts/RobotoMono.woff2
+theme:
+  page-actions: toolbar
+  footer-nav: minimal
+
+logo:
+  dark: ./assets/NVIDIA_dark.svg
+  light: ./assets/NVIDIA_light.svg
+  height: 20
+  href: /dynamo/
+  right-text: Dynamo
+
+favicon: ./assets/NVIDIA_symbol.svg
+
+js:
+  - url: https://assets.adobedtm.com/5d4962a43b79/c1061d2c5e7b/launch-191c2462b890.min.js
+    strategy: beforeInteractive
+  - path: ./custom.js
+    strategy: beforeInteractive
+css:
+  - ./main.css

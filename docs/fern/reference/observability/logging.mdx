@@ -1,0 +1,97 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Logging Reference
+subtitle: Log formats, levels, correlation fields, and backend controls
+---
+
+Dynamo writes readable text or newline-delimited JSON (JSONL) to standard error. With OTLP export
+enabled, it also sends structured log records to the configured OpenTelemetry Collector. For a local
+Loki workflow, see [Observe a Local Deployment](../../observability/local-observability.mdx#inspect-traces-and-exported-logs).
+
+## Output Formats
+
+Set `DYN_LOGGING_JSONL=false` for readable text:
+
+```text
+2025-09-02T15:50:01.770028Z INFO main.init: VllmWorker for Qwen/Qwen3-0.6B has been initialized
+```
+
+Set `DYN_LOGGING_JSONL=true` for structured output:
+
+```json
+{"time":"2025-10-31T21:06:45.397194Z","level":"DEBUG","target":"dynamo_runtime::pipeline::network::tcp::server","message":"Registering new TcpStream","span_name":"http-request","trace_id":"80196f3e3a6fdf06d23bb9ada3788518","span_id":"f7e487a9d2a6bf38","x_request_id":"test-trace-001"}
+```
+
+Fields vary by event and active span. Common fields include:
+
+| Field | Meaning |
+| --- | --- |
+| `time` | Event timestamp |
+| `level` | Event severity |
+| `target` | Rust or Python logging target |
+| `message` | Event message |
+| `trace_id` | Distributed trace identifier |
+| `span_id` | Current span identifier |
+| `span_name` | Current span name |
+| `x_request_id` | Caller-provided request identifier, when present |
+| `component` and `endpoint` | Dynamo component and endpoint context, when present |
+
+`DYN_LOGGING_SPAN_EVENTS=true` adds span creation and exit events. This is useful for detailed
+debugging but increases log volume.
+
+## Log Levels
+
+`DYN_LOG` accepts standard tracing filter syntax, including per-target overrides.
+
+| Level | Intended use |
+| --- | --- |
+| `ERROR` | Unrecoverable failures or resource exhaustion |
+| `WARN` | Degraded or unexpected conditions |
+| `INFO` | Startup, shutdown, and major operational events |
+| `DEBUG` | Request flow and diagnostic state |
+| `TRACE` | Low-level implementation details |
+
+For example, keep the default at `info` and enable trace output for the system-status server:
+
+```bash
+export DYN_LOG='info,dynamo_runtime::system_status_server=trace'
+```
+
+## OTLP Export
+
+`OTEL_EXPORT_ENABLED=true` is the master switch for both trace and log export. By default, logs use
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`; set `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` to route them separately.
+Dynamo's exporter connects to an OTLP gRPC listener.
+
+```bash
+export DYN_LOGGING_JSONL=true
+export OTEL_EXPORT_ENABLED=true
+export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:4317
+# Optional separate log collector:
+# export OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://localhost:4317
+```
+
+Set these variables on every process whose logs you want to export.
+
+## Request Correlation
+
+When a request includes an `x-request-id` header, Dynamo propagates it through the distributed trace
+context and records it as `x_request_id` on participating spans and log events. JSONL logs also carry
+`trace_id` and `span_id`, allowing Loki results to link to the corresponding Tempo trace.
+
+For the span hierarchy and propagation model, see
+[Observability Architecture](../../design-docs/observability.md#trace-and-log-correlation).
+
+## Backend Engine Controls
+
+`DYN_LOG` controls Dynamo. Inference engines retain separate controls:
+
+| Backend | Control | Notes |
+| --- | --- | --- |
+| vLLM | `VLLM_LOGGING_LEVEL` | Standard vLLM level such as `INFO` or `DEBUG` |
+| TensorRT-LLM | `TLLM_LOG_LEVEL` | Set before process startup; read during import |
+| SGLang | `DYN_SKIP_SGLANG_LOG_FORMATTING=true` | Returns formatting and level control to SGLang, including its `--log-level` flag |
+
+See [Environment Variables](environment-variables.mdx#logging) for defaults and the complete logging
+and OTLP variable catalog.

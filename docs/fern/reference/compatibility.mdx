@@ -1,0 +1,271 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Compatibility
+subtitle: Hardware, platform, and feature support for Dynamo backends
+---
+
+import { ReferenceStyles } from "@/components/ReferenceStyles";
+import { CompatibilityHero } from "@/components/CompatibilityHero";
+import { FeatureHeatmap } from "@/components/FeatureHeatmap";
+import { BackendVersionMatrix } from "@/components/BackendVersionMatrix";
+import { CudaDriverMatrix } from "@/components/CudaDriverMatrix";
+import { RunsWhereWizard } from "@/components/RunsWhereWizard";
+
+<ReferenceStyles />
+
+<CompatibilityHero />
+
+<Note>
+See [Release Artifacts](release-artifacts.mdx) for the full artifact inventory — container images, wheels, Helm charts, and crates — and [Model Early Access Builds](model-early-access-builds.mdx) for per-model early access container builds.
+</Note>
+
+## Backend Dependencies
+
+The backend framework versions included with the current Dynamo release. Backend versions listed are the only versions tested and supported for each release. TensorRT-LLM does not support Python 3.11; installation of the `ai-dynamo[trtllm]` wheel will fail on Python 3.11.
+
+<BackendVersionMatrix />
+
+<Accordion title="Backend dependencies by release (back to v0.6.0)">
+  <BackendVersionMatrix mode="all" />
+</Accordion>
+
+## CUDA & Driver Requirements
+
+Dynamo container images include CUDA toolkit libraries; the host must have a compatible NVIDIA GPU driver.
+
+<CudaDriverMatrix />
+
+For extended driver compatibility beyond these minimums (forward compatibility, `cuda-compat` packages, troubleshooting), see the [CUDA Compatibility documentation](https://docs.nvidia.com/deploy/cuda-compatibility/).
+
+<Accordion title="CUDA & driver requirements by release">
+  <CudaDriverMatrix mode="all" />
+</Accordion>
+
+### What Runs Where
+
+Pick your backend and the CUDA generation your host driver supports to see which Dynamo releases you can run — and what to pull for the current one.
+
+<RunsWhereWizard />
+
+## Platform Notes
+
+Dynamo ships multi-arch (x86_64 + ARM64) container images. Wheels are built in a manylinux_2_28-compatible environment and validated on CentOS Stream 9 and Ubuntu 22.04/24.04; other Linux distributions are expected to work but are not officially verified.
+
+### Cloud Service Providers
+
+**Amazon Linux 2023** (AWS) · x86_64 · Supported
+
+<Warning>
+**AL2023 TensorRT-LLM limitation:** there is a known issue with the TensorRT-LLM framework when running the AL2023 container locally with `docker run --network host ...` due to a [bug](https://github.com/mpi4py/mpi4py/discussions/491#discussioncomment-12660609) in mpi4py. Replace the `--network host` flag with precise networking configuration by mapping only the necessary ports (4222 for NATS, 2379/2380 for etcd, 8000 for the frontend).
+</Warning>
+
+## Feature Support
+
+<FeatureHeatmap />
+
+### Per-Backend Detail
+
+<Tabs>
+  <Tab title="vLLM">
+
+vLLM offers the broadest feature coverage in Dynamo, with full support for disaggregated serving, KV-aware routing, KV block management, LoRA adapters, and multimodal inference including video and audio.
+
+*Source: [docs/backends/vllm/README.md][vllm-readme]*
+
+| Feature                   | Supported? | Notes                                                                                                                                        |
+| :------------------------ | :--------: | :------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Disaggregated Serving** | <span className="dynref-badge dynref-badge--green">✓</span> | Prefill/decode separation with NIXL KV transfer                                                                                              |
+| **KV-Aware Routing**      | <span className="dynref-badge dynref-badge--green">✓</span> |                                                                                                                                              |
+| **SLA-Based Planner**     | <span className="dynref-badge dynref-badge--green">✓</span> |                                                                                                                                              |
+| **KV Block Manager**      | <span className="dynref-badge dynref-badge--green">✓</span> |                                                                                                                                              |
+| **Multimodal**            | <span className="dynref-badge dynref-badge--green">✓</span> | Image + video; audio experimental (Qwen2-Audio). With KV-aware routing, image-aware routing on documented paths ([Source][mm-kv-routing]) |
+| **Request Migration**     | <span className="dynref-badge dynref-badge--green">✓</span> |                                                                                                                                              |
+| **Request Cancellation**  | <span className="dynref-badge dynref-badge--green">✓</span> |                                                                                                                                              |
+| **LoRA**                  | <span className="dynref-badge dynref-badge--green">✓</span> | Dynamic load/unload; KV-aware routing supports adapter affinity                                                                              |
+| **Tool Calling**          | <span className="dynref-badge dynref-badge--green">✓</span> |                                                                                                                                              |
+| **Speculative Decoding**  | <span className="dynref-badge dynref-badge--green">✓</span> | Eagle3 ([Source][vllm-spec])                                                                                                                 |
+
+  </Tab>
+  <Tab title="SGLang">
+
+SGLang is optimized for high-throughput serving with fast primitives, providing robust support for disaggregated serving, KV-aware routing, and request migration.
+
+*Source: [docs/backends/sglang/README.md][sglang-readme]*
+
+| Feature                   | Supported? | Notes                                                                                                                                 |
+| :------------------------ | :--------: | :------------------------------------------------------------------------------------------------------------------------------------ |
+| **Disaggregated Serving** | <span className="dynref-badge dynref-badge--green">✓</span> |                                                                                                                                       |
+| **KV-Aware Routing**      | <span className="dynref-badge dynref-badge--green">✓</span> |                                                                                                                                       |
+| **SLA-Based Planner**     | <span className="dynref-badge dynref-badge--green">✓</span> |                                                                                                                                       |
+| **KV Block Manager**      | <span className="dynref-badge dynref-badge--wip">WIP</span> | Work in progress across all combinations                                                                                              |
+| **Multimodal**            | <span className="dynref-badge dynref-badge--green">✓</span> | Image + video. Not compatible with KV-aware routing. Disagg patterns: EPD, E/PD, E/P/D (not traditional EP/D) ([Source][mm-sglang]) |
+| **Request Migration**     | <span className="dynref-badge dynref-badge--green">✓</span> |                                                                                                                                       |
+| **Request Cancellation**  | <span className="dynref-badge dynref-badge--wip">WIP</span> | Remote-prefill-phase cancellation not supported in disaggregated mode ([Source][sglang-readme])                                       |
+| **LoRA**                  | <span className="dynref-badge dynref-badge--gray">—</span> | Not supported                                                                                                                         |
+| **Tool Calling**          | <span className="dynref-badge dynref-badge--green">✓</span> |                                                                                                                                       |
+| **Speculative Decoding**  | <span className="dynref-badge dynref-badge--wip">WIP</span> | Code hooks exist; no examples or docs yet                                                                                             |
+
+  </Tab>
+  <Tab title="TensorRT-LLM">
+
+TensorRT-LLM delivers maximum inference performance and optimization, with full KVBM integration and robust disaggregated serving support.
+
+*Source: [docs/backends/trtllm/README.md][trtllm-readme]*
+
+| Feature                   | Supported? | Notes                                                                                                                                                                         |
+| :------------------------ | :--------: | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Disaggregated Serving** | <span className="dynref-badge dynref-badge--green">✓</span> |                                                                                                                                                                               |
+| **KV-Aware Routing**      | <span className="dynref-badge dynref-badge--green">✓</span> |                                                                                                                                                                               |
+| **SLA-Based Planner**     | <span className="dynref-badge dynref-badge--green">✓</span> |                                                                                                                                                                               |
+| **KV Block Manager**      | <span className="dynref-badge dynref-badge--green">✓</span> |                                                                                                                                                                               |
+| **Multimodal**            | <span className="dynref-badge dynref-badge--green">✓</span> | Image only (URLs + pre-computed embeddings). Disagg: EP/D + E/P/D. With KV-aware routing, via dedicated MM Router Worker (requires KV event publishing) ([Source][mm-trtllm]) |
+| **Request Migration**     | <span className="dynref-badge dynref-badge--green">✓</span> | Work in progress with multimodal                                                                                                                                                             |
+| **Request Cancellation**  | <span className="dynref-badge dynref-badge--amber">!</span> | Engine temporarily not notified of cancellations — resources for cancelled requests are not freed (known issue)                                                               |
+| **LoRA**                  | <span className="dynref-badge dynref-badge--gray">—</span> | Not supported                                                                                                                                                                 |
+| **Tool Calling**          | <span className="dynref-badge dynref-badge--green">✓</span> |                                                                                                                                                                               |
+| **Speculative Decoding**  | <span className="dynref-badge dynref-badge--green">✓</span> |                                                                                                                                                                               |
+
+  </Tab>
+</Tabs>
+
+[vllm-readme]: ../backends/vllm/README.md
+[sglang-readme]: ../backends/sglang/README.md
+[trtllm-readme]: ../backends/trtllm/README.md
+[mm-kv-routing]: ../features/multimodal/multimodal-kv-routing.md
+[mm-sglang]: ../features/multimodal/multimodal-sglang.md
+[mm-trtllm]: ../features/multimodal/multimodal-trtllm.md
+[vllm-spec]: ../features/speculative-decoding/speculative-decoding-vllm.md
+
+{/* llms-tables:begin — generated by scripts/gen_llms_tables.py, do not edit */}
+<llms-only>
+
+Current stable release: v1.3.0 (container tag `1.3.0`, wheel version `1.3.0.post1`).
+
+**Backend engine pins per Dynamo release**
+
+| Dynamo | Type | SGLang | TensorRT-LLM | vLLM | NIXL (SGL / TRT / vLLM) | UCX |
+| --- | --- | --- | --- | --- | --- | --- |
+| main (ToT) | development head | 0.5.15 | 1.3.0rc21 | 0.25.1 | 1.3.0 / 1.0.1 / 1.1.0 | - |
+| v1.3.0 | stable | 0.5.14 | 1.3.0rc19 | 0.23.0 | 1.3.0 / 1.0.1 / 1.1.0 | 1.20.x |
+| v1.3.0-dev.1 | platform-preview | 0.5.12.post1 | 1.3.0rc17 | 0.22.0 | 1.0.1 / 0.10.1 / 1.1.0 | - |
+| v1.2.1 | patch | 0.5.11 | 1.3.0rc14 | 0.20.1 | 1.0.1 / 0.10.1 / 0.10.1 | - |
+| v1.2.0 | stable | 0.5.11 | 1.3.0rc14 | 0.20.1 | 1.0.1 / 0.10.1 / 0.10.1 | 1.20.0 |
+| v1.2.0-deepseek-v4-dev.3 | model-build | upstream DSv4 preview | - | 0.20.1 | - / - / 0.10.1 | - |
+| v1.2.0-deepseek-v4-dev.2 | model-build | upstream DSv4 preview | - | 0.20.0 | - / - / 0.10.1 | - |
+| v1.1.1 | patch | 0.5.10.post1 | 1.3.0rc11 | 0.19.0 | 1.0.1 / 0.10.1 / 0.10.1 | - |
+| v1.1.0 | stable | 0.5.10.post1 | 1.3.0rc11 | 0.19.0 | 1.0.1 / 0.10.1 / 0.10.1 | 1.20 |
+| v1.1.0-dev.3 | platform-preview | 0.5.10.post1 | 1.3.0rc11 | 0.19.0 | 1.0.1 / 0.10.1 / 0.10.1 | - |
+| v1.1.0-dev.2 | platform-preview | 0.5.9 | 1.3.0rc9 | 0.19.0 | 1.0.1 / 0.10.1 / 0.10.1 | - |
+| v1.1.0-dev.1 | platform-preview | 0.5.9 | 1.3.0rc5.post1 | 0.17.1 | 1.0.1 / 0.10.1 / 0.10.1 | - |
+| v1.0.2 | patch | 0.5.9 | 1.3.0rc5.post1 | 0.16.0 | 0.10.1 / 0.10.1 / 0.10.1 | - |
+| v1.0.1 | patch | 0.5.9 | 1.3.0rc5.post1 | 0.16.0 | 0.10.1 / 0.10.1 / 0.10.1 | - |
+| v1.0.0 | stable | 0.5.9 | 1.3.0rc5.post1 | 0.16.0 | 0.10.1 / 0.10.1 / 0.10.1 | - |
+| v0.9.1 | patch | 0.5.8 | 1.3.0rc3 | 0.14.1 | 0.9.0 / 0.9.0 / 0.9.0 | - |
+| v0.9.0 | stable | 0.5.8 | 1.3.0rc1 | 0.14.1 | 0.9.0 / 0.9.0 / 0.9.0 | - |
+| v0.8.1 | patch | 0.5.6.post2 | 1.2.0rc6.post1 | 0.12.0 | 0.8.0 / 0.8.0 / 0.8.0 | - |
+| v0.8.0 | stable | 0.5.6.post2 | 1.2.0rc6.post1 | 0.12.0 | 0.8.0 / 0.8.0 / 0.8.0 | - |
+| v0.7.1 | patch | 0.5.4.post3 | 1.2.0rc3 | 0.11.0 | 0.8.0 / 0.8.0 / 0.8.0 | - |
+| v0.7.0 | stable | 0.5.4.post3 | 1.2.0rc2 | 0.11.0 | 0.8.0 / 0.8.0 / 0.8.0 | - |
+| v0.6.1 | patch | 0.5.3.post2 | 1.1.0rc5 | 0.11.0 | 0.6.0 / 0.6.0 / 0.6.0 | - |
+| v0.6.0 | stable | 0.5.3.post2 | 1.1.0rc5 | 0.11.0 | 0.6.0 / 0.6.0 / 0.6.0 | - |
+
+**CUDA toolkit and minimum driver per Dynamo release**
+
+| Dynamo | Backend | CUDA Toolkit | Min Driver | Note |
+| --- | --- | --- | --- | --- |
+| 1.3.0 | SGLang | 13.0 | 580.xx+ | - |
+| 1.3.0 | TensorRT-LLM | 13.1 | 580.xx+ | - |
+| 1.3.0 | vLLM | 13.0 | 580.xx+ | - |
+| 1.2.1 | SGLang | 12.9 | 575.xx+ | - |
+| 1.2.1 | SGLang | 13.0 | 580.xx+ | - |
+| 1.2.1 | TensorRT-LLM | 13.1 | 580.xx+ | - |
+| 1.2.1 | vLLM | 12.9 | 575.xx+ | - |
+| 1.2.1 | vLLM | 13.0 | 580.xx+ | - |
+| 1.2.0 | SGLang | 12.9 | 575.xx+ | - |
+| 1.2.0 | SGLang | 13.0 | 580.xx+ | - |
+| 1.2.0 | TensorRT-LLM | 13.1 | 580.xx+ | - |
+| 1.2.0 | vLLM | 12.9 | 575.xx+ | - |
+| 1.2.0 | vLLM | 13.0 | 580.xx+ | - |
+| 1.1.1 | SGLang | 12.9 | 575.xx+ | - |
+| 1.1.1 | SGLang | 13.0 | 580.xx+ | - |
+| 1.1.1 | TensorRT-LLM | 13.1 | 580.xx+ | - |
+| 1.1.1 | vLLM | 12.9 | 575.xx+ | - |
+| 1.1.1 | vLLM | 13.0 | 580.xx+ | - |
+| 1.1.0 | SGLang | 12.9 | 575.xx+ | - |
+| 1.1.0 | SGLang | 13.0 | 580.xx+ | - |
+| 1.1.0 | TensorRT-LLM | 13.1 | 580.xx+ | - |
+| 1.1.0 | vLLM | 12.9 | 575.xx+ | - |
+| 1.1.0 | vLLM | 13.0 | 580.xx+ | - |
+| 1.0.2 | SGLang | 12.9 | 575.xx+ | - |
+| 1.0.2 | SGLang | 13.0 | 580.xx+ | - |
+| 1.0.2 | TensorRT-LLM | 13.1 | 580.xx+ | - |
+| 1.0.2 | vLLM | 12.9 | 575.xx+ | - |
+| 1.0.2 | vLLM | 13.0 | 580.xx+ | - |
+| 1.0.1 | SGLang | 12.9 | 575.xx+ | - |
+| 1.0.1 | SGLang | 13.0 | 580.xx+ | - |
+| 1.0.1 | TensorRT-LLM | 13.1 | 580.xx+ | - |
+| 1.0.1 | vLLM | 12.9 | 575.xx+ | - |
+| 1.0.1 | vLLM | 13.0 | 580.xx+ | - |
+| 1.0.0 | SGLang | 12.9 | 575.xx+ | - |
+| 1.0.0 | SGLang | 13.0 | 580.xx+ | - |
+| 1.0.0 | TensorRT-LLM | 13.1 | 580.xx+ | - |
+| 1.0.0 | vLLM | 12.9 | 575.xx+ | - |
+| 1.0.0 | vLLM | 13.0 | 580.xx+ | - |
+| 0.9.1 | SGLang | 12.9 | 575.xx+ | - |
+| 0.9.1 | TensorRT-LLM | 13.0 | 580.xx+ | - |
+| 0.9.1 | vLLM | 12.9 | 575.xx+ | - |
+| 0.9.0 | SGLang | 12.9 | 575.xx+ | - |
+| 0.9.0 | TensorRT-LLM | 13.0 | 580.xx+ | - |
+| 0.9.0 | vLLM | 12.9 | 575.xx+ | - |
+| 0.8.1 | SGLang | 12.9 | 575.xx+ | - |
+| 0.8.1 | SGLang | 13.0 | 580.xx+ | Experimental |
+| 0.8.1 | TensorRT-LLM | 13.0 | 580.xx+ | - |
+| 0.8.1 | vLLM | 12.9 | 575.xx+ | - |
+| 0.8.1 | vLLM | 13.0 | 580.xx+ | Experimental |
+| 0.8.0 | SGLang | 12.9 | 575.xx+ | - |
+| 0.8.0 | SGLang | 13.0 | 580.xx+ | Experimental |
+| 0.8.0 | TensorRT-LLM | 13.0 | 580.xx+ | - |
+| 0.8.0 | vLLM | 12.9 | 575.xx+ | - |
+| 0.8.0 | vLLM | 13.0 | 580.xx+ | Experimental |
+| 0.7.1 | SGLang | 12.8 | 570.xx+ | - |
+| 0.7.1 | TensorRT-LLM | 13.0 | 580.xx+ | - |
+| 0.7.1 | vLLM | 12.9 | 575.xx+ | - |
+| 0.7.0 | SGLang | 12.9 | 575.xx+ | - |
+| 0.7.0 | TensorRT-LLM | 13.0 | 580.xx+ | - |
+| 0.7.0 | vLLM | 12.8 | 570.xx+ | - |
+
+- Patch versions (e.g. v0.8.1.post1, v0.7.0.post1) have the same CUDA support as their base version.
+- Early access v1.1.0-dev.* images follow the same CUDA matrix as v1.0.2. The v1.2.0-deepseek-v4-dev.3 vLLM container is CUDA 13.0 multi-arch; the SGLang containers split by arch (CUDA 12.9 on amd64, CUDA 13.0 on arm64).
+- Experimental CUDA 13 images are not published for all versions.
+
+**Feature support by backend (v1.3.0)**
+
+| Feature | SGLang | TensorRT-LLM | vLLM |
+| --- | --- | --- | --- |
+| Disaggregated Serving | Supported | Supported | Supported (Prefill/decode separation with NIXL KV transfer) |
+| KV-Aware Routing | Supported | Supported | Supported |
+| SLA-Based Planner | Supported | Supported | Supported |
+| KV Block Manager | Experimental (Work in progress across all combinations) | Supported | Supported |
+| Multimodal (Image) | Supported (Not compatible with KV-aware routing. Disagg patterns: EPD, E/PD, E/P/D (not traditional EP/D)) | Supported (Image URLs + pre-computed embeddings. Disagg: EP/D + E/P/D. KV-aware routing via dedicated MM Router Worker (requires KV event publishing)) | Supported (With KV-aware routing, image-aware routing on documented paths) |
+| Multimodal (Video) | Supported | Not supported | Supported (Video input with frame sampling) |
+| Multimodal (Audio) | Not supported | Not supported | Experimental (Qwen2-Audio, experimental) |
+| Request Migration | Supported | Supported (Work in progress with multimodal) | Supported |
+| Request Cancellation | Experimental (Remote-prefill-phase cancellation not supported in disaggregated mode) | Supported with caveat (Engine temporarily not notified of cancellations — resources for cancelled requests are not freed (known issue)) | Supported |
+| LoRA | Not supported | Not supported | Supported (Dynamic load/unload; KV-aware routing supports adapter affinity) |
+| Tool Calling | Supported | Supported | Supported |
+| Speculative Decoding | Experimental (Code hooks exist; no examples or docs yet) | Supported | Supported (Eagle3) |
+| Dynamo Snapshot | Supported | Not supported | Supported |
+
+**Platform support**
+
+- GPU architectures: Blackwell, Hopper, Ada Lovelace, Ampere
+- OS: Ubuntu 24.04 (x86_64, ARM64) — Supported
+- OS: Ubuntu 22.04 (x86_64) — Supported
+- OS: CentOS Stream 9 (x86_64) — Experimental
+- CSP: AWS — Amazon Linux 2023 (x86_64) — Supported
+- CPU architectures: x86_64, ARM64 (Ubuntu 24.04 only)
+- Wheels: Wheels are built in a manylinux_2_28-compatible environment and validated on CentOS Stream 9 and Ubuntu 22.04/24.04. Other Linux distributions are expected to work but are not officially verified.
+
+</llms-only>
+{/* llms-tables:end */}
