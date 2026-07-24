@@ -291,7 +291,10 @@ impl PendingUpload {
     }
 
     async fn finish(mut self) -> Result<PutResult, BatchFileStorageError> {
-        self.flush().await?;
+        if let Err(error) = self.flush().await {
+            self.abort().await;
+            return Err(error);
+        }
         let result = self
             .upload_mut()?
             .complete()
@@ -348,6 +351,12 @@ mod tests {
         aborted: Option<oneshot::Sender<()>>,
     }
 
+    #[derive(Debug)]
+    struct FailingFinalPartUpload {
+        abort_started: Option<oneshot::Sender<()>>,
+        abort_release: Option<oneshot::Receiver<()>>,
+    }
+
     #[async_trait::async_trait]
     impl MultipartUpload for RecordingUpload {
         fn put_part(&mut self, _data: PutPayload) -> UploadPart {
@@ -369,6 +378,27 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
+    impl MultipartUpload for FailingFinalPartUpload {
+        fn put_part(&mut self, _data: PutPayload) -> UploadPart {
+            Box::pin(async { Err(object_store::Error::NotImplemented) })
+        }
+
+        async fn complete(&mut self) -> object_store::Result<PutResult> {
+            Err(object_store::Error::NotImplemented)
+        }
+
+        async fn abort(&mut self) -> object_store::Result<()> {
+            if let Some(abort_started) = self.abort_started.take() {
+                let _ = abort_started.send(());
+            }
+            if let Some(abort_release) = self.abort_release.take() {
+                let _ = abort_release.await;
+            }
+            Ok(())
+        }
+    }
+
     #[tokio::test]
     async fn dropping_pending_upload_aborts_multipart_upload() {
         let (aborted_tx, aborted_rx) = oneshot::channel();
@@ -382,6 +412,36 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn final_part_failure_awaits_abort() {
+        let (abort_started_tx, abort_started_rx) = oneshot::channel();
+        let (abort_release_tx, abort_release_rx) = oneshot::channel();
+        let upload = Box::new(FailingFinalPartUpload {
+            abort_started: Some(abort_started_tx),
+            abort_release: Some(abort_release_rx),
+        });
+        let mut pending = PendingUpload::new(upload);
+        pending
+            .write(Bytes::from_static(b"final part"))
+            .await
+            .unwrap();
+
+        let mut finish = tokio::spawn(pending.finish());
+        abort_started_rx.await.unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut finish)
+                .await
+                .is_err(),
+            "finish returned before abort completed"
+        );
+
+        abort_release_tx.send(()).unwrap();
+        assert!(matches!(
+            finish.await.unwrap(),
+            Err(BatchFileStorageError::ObjectStore(_))
+        ));
     }
 
     #[tokio::test]
