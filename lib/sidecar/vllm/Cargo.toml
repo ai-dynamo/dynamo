@@ -33,12 +33,12 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 
-prost = { version = "0.13.5" }
-prost-types = { version = "0.13.5" }
-tonic = { version = "0.13.1" }
+prost = { workspace = true }
+prost-types = { workspace = true }
+tonic = { workspace = true }
 
 [build-dependencies]
-tonic-build = { version = "0.13.1" }
+tonic-build = { workspace = true }
 
 [dev-dependencies]
 dynamo-backend-common = { workspace = true, features = ["testing"] }

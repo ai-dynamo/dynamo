@@ -54,3 +54,23 @@ corresponding `DYN_SIDECAR_GRPC_*` environment variables.
 
 Distribution and container packaging for the executable are intentionally
 deferred to a follow-up change.
+
+## Test without vLLM or a GPU
+
+Use the CPU-only `dynamo-vllm-mocker-server` to exercise this sidecar against
+the same `Generate` gRPC contract:
+
+```bash
+cargo run -p dynamo-vllm-mocker --bin dynamo-vllm-mocker-server -- \
+  --listen 127.0.0.1:50051 \
+  --model mocker-model \
+  --extra-engine-args '{"speedup_ratio":1000}'
+
+cargo run -p dynamo-vllm-sidecar --bin dynamo-vllm-sidecar -- \
+  --vllm-endpoint 127.0.0.1:50051 \
+  --model-path mocker-model
+```
+
+See [`../../mocker/servers/vllm/README.md`](../../mocker/servers/vllm/README.md)
+for aggregated and prefill/decode examples, supported Mocker configuration,
+and fidelity limits.
