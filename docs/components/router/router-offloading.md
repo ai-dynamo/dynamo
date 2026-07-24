@@ -107,13 +107,15 @@ See the [TensorRT-LLM backend docs](../../backends/trtllm/README.md) for worker 
 
 ## Router Flags for Lower Tiers
 
-The router-side knobs are backend-independent; set them on the frontend when workers publish tier-annotated events:
+These flags change routing credit only; they do not enable offloading or event publishing. All weights accept values from `0` to `1`. For each matched block, the weight reduces the router's estimated prefill work. `0` ignores that tier for routing, while `1` gives it the same credit as a device-local hit when device overlap credit uses its default value.
 
-| Flag | Default | Applies to |
+| Flag | Default | Effect |
 | --- | --- | --- |
-| `--router-host-cache-hit-weight` | `0.75` | CPU-tier prefix overlap (SGLang HiCache, vLLM `OffloadingConnector`) |
-| `--router-disk-cache-hit-weight` | `0.25` | Disk-tier prefix overlap when the backend publishes a Dynamo-recognized disk tier |
-| `--shared-cache-type` / `--shared-cache-multiplier` | `none` / `0.5` | **Experimental.** Shared-pool lookups (SGLang HiCache + Mooncake only) |
+| `--router-host-cache-hit-weight` | `0.75` | Credit for each matched host-pinned block |
+| `--router-disk-cache-hit-weight` | `0.25` | Credit for each matched disk or external-tier block |
+| `--shared-cache-type` / `--shared-cache-multiplier` | `none` / `0.5` | **Experimental.** Enable shared-cache lookup and credit matches beyond the device-local prefix |
+
+Start with the defaults. Raise a weight only when representative TTFT and throughput tests show that loading from that tier reliably beats recomputation; lower it when the tier is slow or bandwidth-constrained. Tune one tier at a time, and normally keep the host weight at least as high as the disk weight. The shared-cache multiplier has no effect until a shared-cache type is enabled.
 
 See [Configuration and Tuning](router-configuration.md) for the cache-hit weight semantics, [Using HiCache](../../backends/sglang/sglang-hicache.md#configuration) for the shared-cache flags, and [Router Operations](router-operations.md) for enabling event publishing per backend.
 
