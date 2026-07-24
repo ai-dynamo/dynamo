@@ -89,6 +89,9 @@ pub mod runtime {
     pub const DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS: &str =
         "DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS";
 
+    /// Maximum duration for local worker inhibition after a request failure. Zero disables it.
+    pub const DYN_RUNTIME_INHIBITED_DURATION_SECS: &str = "DYN_RUNTIME_INHIBITED_DURATION_SECS";
+
     /// Enable Tokio task poll-time histogram (calls enable_metrics_poll_time_histogram on builder).
     /// Set to "1", "true", or "yes" to enable. Adds ~2× overhead of Instant::now() per task poll.
     pub const DYN_ENABLE_POLL_HISTOGRAM: &str = "DYN_ENABLE_POLL_HISTOGRAM";
@@ -339,6 +342,11 @@ pub mod llm {
     /// from the system prompt before forwarding to the target model. The preamble
     /// varies per session and per release, wasting tokens and breaking prompt caching.
     pub const DYN_STRIP_ANTHROPIC_PREAMBLE: &str = "DYN_STRIP_ANTHROPIC_PREAMBLE";
+
+    /// When truthy, force usage in streaming chat and text-completion responses
+    /// regardless of the request's `stream_options.include_usage` value.
+    /// Unset or false preserves request-controlled defaults.
+    pub const DYN_ENABLE_FORCE_INCLUDE_USAGE: &str = "DYN_ENABLE_FORCE_INCLUDE_USAGE";
 
     /// Enable streaming tool call dispatch (`event: tool_call_dispatch` SSE events)
     pub const DYN_ENABLE_STREAMING_TOOL_DISPATCH: &str = "DYN_ENABLE_STREAMING_TOOL_DISPATCH";
@@ -756,6 +764,7 @@ mod tests {
             runtime::DYN_RUNTIME_NUM_WORKER_THREADS,
             runtime::DYN_RUNTIME_MAX_BLOCKING_THREADS,
             runtime::DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
+            runtime::DYN_RUNTIME_INHIBITED_DURATION_SECS,
             runtime::system::DYN_SYSTEM_ENABLED,
             runtime::system::DYN_SYSTEM_HOST,
             runtime::system::DYN_SYSTEM_PORT,
@@ -808,6 +817,7 @@ mod tests {
             llm::DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
             llm::DYN_DISABLE_FRONTEND_ADMIN_API,
             llm::DYN_STRIP_ANTHROPIC_PREAMBLE,
+            llm::DYN_ENABLE_FORCE_INCLUDE_USAGE,
             llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH,
             llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH,
             llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2,

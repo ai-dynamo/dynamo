@@ -10,11 +10,11 @@
 //! this crate while the runtime glue stays in `lib/llm`.
 
 use dynamo_tokens::SequenceHash;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use rustc_hash::FxHashMap;
 use std::collections::HashMap;
 use std::env;
-use std::future::{self, Future};
+use std::future::Future;
 use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -40,6 +40,9 @@ use crate::protocols::{
 // in ActiveSequencesMultiWorker::force_expire_requests_across_all_workers for
 // more details.
 const FORCE_EXPIRE_REQUESTS_ACROSS_ALL_WORKERS_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Minimum interval between repeated logs for a saturated or unexpectedly closed publish queue.
+const SEQUENCE_PUBLISH_FAILURE_LOG_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Environment override for the stale active-request cleanup guard.
 const DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS: &str = "DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS";
@@ -87,21 +90,14 @@ fn active_request_expiry_duration_from_lookup(
 ///
 /// Implementations provide the runtime-specific transport (e.g., NATS EventPublisher,
 /// Prometheus gauges) while the business logic in [`ActiveSequencesMultiWorker`] stays
-/// runtime-agnostic.
+/// runtime-agnostic. Implementations enqueue accepted replica-sync events synchronously so
+/// lifecycle callers never await transport I/O, and publish successful enqueues in FIFO order.
 pub trait SequencePublisher: Send + Sync {
-    /// Publish a replica-sync event to peer routers.
-    fn publish_event(
-        &self,
-        event: &ActiveSequenceEvent,
-    ) -> impl Future<Output = anyhow::Result<()>> + Send;
-
-    /// Publish an owned replica-sync event, avoiding a clone when supported by the transport.
-    fn publish_event_owned(
-        &self,
-        event: ActiveSequenceEvent,
-    ) -> impl Future<Output = anyhow::Result<()>> + Send {
-        async move { self.publish_event(&event).await }
-    }
+    /// Enqueue a replica-sync event for publication to peer routers.
+    ///
+    /// Queue-backed implementations must preserve [`SequencePublishQueueError`] as the error
+    /// source for admission failures so callers can classify queue saturation and closure.
+    fn enqueue_event(&self, event: ActiveSequenceEvent) -> anyhow::Result<()>;
 
     /// Fire-and-forget publish of an [`ActiveLoad`] metric payload.
     fn publish_load(&self, load: ActiveLoad);
@@ -129,15 +125,110 @@ pub trait SequencePublisher: Send + Sync {
     fn observe_worker_removed(&self, _worker: &WorkerWithDpRank, _worker_type: &str) {}
 }
 
+/// Admission failures reported by bounded active-sequence publisher queues.
+#[derive(Debug, thiserror::Error)]
+pub enum SequencePublishQueueError {
+    #[error(
+        "active-sequence publish queue full; dropping newest event \
+         (request_id={request_id}, worker={worker:?}, capacity={capacity})"
+    )]
+    Full {
+        request_id: String,
+        worker: WorkerWithDpRank,
+        capacity: usize,
+    },
+    #[error(
+        "active-sequence publish queue closed; dropping event \
+         (request_id={request_id}, worker={worker:?}, capacity={capacity})"
+    )]
+    Closed {
+        request_id: String,
+        worker: WorkerWithDpRank,
+        capacity: usize,
+        during_shutdown: bool,
+    },
+}
+
+impl SequencePublishQueueError {
+    pub fn full(event: ActiveSequenceEvent, capacity: usize) -> Self {
+        Self::Full {
+            request_id: event.request_id,
+            worker: event.worker,
+            capacity,
+        }
+    }
+
+    pub fn closed(event: ActiveSequenceEvent, capacity: usize, during_shutdown: bool) -> Self {
+        Self::Closed {
+            request_id: event.request_id,
+            worker: event.worker,
+            capacity,
+            during_shutdown,
+        }
+    }
+}
+
+#[derive(Default)]
+struct RateLimitedPublishFailure {
+    last_logged_at: Option<Instant>,
+    suppressed_since_last_log: u64,
+}
+
+impl RateLimitedPublishFailure {
+    fn record(&mut self, now: Instant) -> Option<u64> {
+        let should_log = self.last_logged_at.is_none_or(|last_logged_at| {
+            now.saturating_duration_since(last_logged_at) >= SEQUENCE_PUBLISH_FAILURE_LOG_INTERVAL
+        });
+        if should_log {
+            let failures_since_last_log = self.suppressed_since_last_log.saturating_add(1);
+            self.last_logged_at = Some(now);
+            self.suppressed_since_last_log = 0;
+            Some(failures_since_last_log)
+        } else {
+            self.suppressed_since_last_log = self.suppressed_since_last_log.saturating_add(1);
+            None
+        }
+    }
+}
+
+#[derive(Default)]
+struct SequencePublishFailureLogState {
+    full: RateLimitedPublishFailure,
+    unexpected_closed: RateLimitedPublishFailure,
+    shutdown_closed_logged: bool,
+}
+
+#[derive(Default)]
+struct SequencePublishFailureLogLimiter {
+    state: Mutex<SequencePublishFailureLogState>,
+}
+
+impl SequencePublishFailureLogLimiter {
+    fn record_full(&self, now: Instant) -> Option<u64> {
+        self.state.lock().full.record(now)
+    }
+
+    fn record_unexpected_closed(&self, now: Instant) -> Option<u64> {
+        self.state.lock().unexpected_closed.record(now)
+    }
+
+    fn record_shutdown_closed(&self) -> bool {
+        let mut state = self.state.lock();
+        if state.shutdown_closed_logged {
+            false
+        } else {
+            state.shutdown_closed_logged = true;
+            true
+        }
+    }
+}
+
 /// No-op publisher for callers that do not need active-sequence event transport.
 pub struct NoopSequencePublisher;
 
 impl SequencePublisher for NoopSequencePublisher {
-    fn publish_event(
-        &self,
-        _event: &ActiveSequenceEvent,
-    ) -> impl Future<Output = anyhow::Result<()>> + Send {
-        future::ready(Ok(()))
+    fn enqueue_event(&self, _event: ActiveSequenceEvent) -> anyhow::Result<()> {
+        Ok(())
     }
 
     fn publish_load(&self, _load: ActiveLoad) {}
@@ -226,6 +317,7 @@ pub struct ActiveSequencesMultiWorker<P: SequencePublisher> {
     block_size: usize,
     pub(super) router_id: u64,
     pub(super) publisher: Arc<P>,
+    publish_failure_logs: SequencePublishFailureLogLimiter,
     remote_state_updates: watch::Sender<()>,
     #[cfg(test)]
     remote_state_update_count: AtomicUsize,
@@ -368,6 +460,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             block_size,
             router_id,
             publisher,
+            publish_failure_logs: SequencePublishFailureLogLimiter::default(),
             remote_state_updates,
             #[cfg(test)]
             remote_state_update_count: AtomicUsize::new(0),
@@ -444,25 +537,78 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         }
     }
 
-    fn spawn_publish_event(&self, event: ActiveSequenceEvent) {
+    fn enqueue_publish_event(&self, event: ActiveSequenceEvent) {
         if !self.replica_sync {
             return;
         }
 
         // TODO: Publish explicit prompt-load decay timestamps with these events so peer routers
         // can mirror the same oldest-prefill anchor instead of approximating from receive time.
-        let publisher = Arc::clone(&self.publisher);
-        tokio::spawn(async move {
-            let request_id = event.request_id.clone();
-            let worker = event.worker;
-            if let Err(e) = publisher.publish_event_owned(event).await {
-                tracing::error!(
-                    request_id = %request_id,
-                    worker = ?worker,
-                    "failed to publish active sequence event: {e}"
-                );
+        // FIFO begins at this enqueue boundary. Local mutation completes first, so overlapping
+        // lifecycle calls can enqueue in a different order from their local mutations; replica
+        // sync is best-effort and peer expiry reconciles stale state.
+        let request_id = event.request_id.clone();
+        let worker = event.worker;
+        if let Err(error) = self.publisher.enqueue_event(event) {
+            match error.downcast_ref::<SequencePublishQueueError>() {
+                Some(SequencePublishQueueError::Full { capacity, .. }) => {
+                    if let Some(dropped_events) =
+                        self.publish_failure_logs.record_full(Instant::now())
+                    {
+                        tracing::error!(
+                            request_id = %request_id,
+                            worker = ?worker,
+                            capacity,
+                            dropped_events_since_last_log = dropped_events,
+                            error = %format!("{error:#}"),
+                            "active-sequence publish queue full; dropping newest event"
+                        );
+                    }
+                }
+                Some(SequencePublishQueueError::Closed {
+                    capacity,
+                    during_shutdown: true,
+                    ..
+                }) => {
+                    if self.publish_failure_logs.record_shutdown_closed() {
+                        tracing::debug!(
+                            request_id = %request_id,
+                            worker = ?worker,
+                            capacity,
+                            error = %format!("{error:#}"),
+                            "active-sequence publish queue closed during shutdown"
+                        );
+                    }
+                }
+                Some(SequencePublishQueueError::Closed {
+                    capacity,
+                    during_shutdown: false,
+                    ..
+                }) => {
+                    if let Some(dropped_events) = self
+                        .publish_failure_logs
+                        .record_unexpected_closed(Instant::now())
+                    {
+                        tracing::error!(
+                            request_id = %request_id,
+                            worker = ?worker,
+                            capacity,
+                            dropped_events_since_last_log = dropped_events,
+                            error = %format!("{error:#}"),
+                            "active-sequence publish queue closed unexpectedly; dropping event"
+                        );
+                    }
+                }
+                None => {
+                    tracing::error!(
+                        request_id = %request_id,
+                        worker = ?worker,
+                        error = %error,
+                        "failed to enqueue active-sequence event"
+                    );
+                }
             }
-        });
+        }
     }
 
     /// Subscribe to remote lifecycle updates that were applied through replica sync.
@@ -634,7 +780,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         });
         self.add_request_local(req, decay_now, lazily_register_worker)?;
         if let Some(event) = event {
-            self.spawn_publish_event(event);
+            self.enqueue_publish_event(event);
         }
         Ok(())
     }
@@ -1132,7 +1278,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             mutate_fn,
             remove_mapping,
         )?;
-        self.spawn_publish_event(ActiveSequenceEvent {
+        self.enqueue_publish_event(ActiveSequenceEvent {
             request_id: request_id.clone(),
             worker,
             data: event_data,
@@ -1157,7 +1303,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
 
         let lora_name = self.request_index.lora_for(request_id);
         self.mutate_request_worker_load_state_local(worker, request_id, decay_now, mutate_fn)?;
-        self.spawn_publish_event(ActiveSequenceEvent {
+        self.enqueue_publish_event(ActiveSequenceEvent {
             request_id: request_id.clone(),
             worker,
             data: event_data,
@@ -1172,7 +1318,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
 mod tests {
     use std::collections::{HashMap, VecDeque};
     use std::future::{self, Future};
-    use std::sync::Mutex;
+    use std::sync::{Condvar, Mutex, mpsc as std_mpsc};
     use std::time::Duration;
 
     use rustc_hash::FxHashMap;
@@ -1411,6 +1557,7 @@ mod tests {
 
     #[derive(Default)]
     struct RecordingPublisherState {
+        events: Mutex<Vec<ActiveSequenceEventData>>,
         single_loads: Mutex<Vec<ActiveLoad>>,
         load_batches: Mutex<Vec<Vec<ActiveLoad>>>,
         observations: Mutex<Vec<(WorkerWithDpRank, usize, usize)>>,
@@ -1424,6 +1571,7 @@ mod tests {
         }
 
         fn clear(&self) {
+            self.events.lock().unwrap().clear();
             self.single_loads.lock().unwrap().clear();
             self.load_batches.lock().unwrap().clear();
             self.observations.lock().unwrap().clear();
@@ -1437,11 +1585,9 @@ mod tests {
     }
 
     impl SequencePublisher for RecordingPublisher {
-        fn publish_event(
-            &self,
-            _event: &ActiveSequenceEvent,
-        ) -> impl Future<Output = anyhow::Result<()>> + Send {
-            future::ready(Ok(()))
+        fn enqueue_event(&self, event: ActiveSequenceEvent) -> anyhow::Result<()> {
+            self.state.events.lock().unwrap().push(event.data);
+            Ok(())
         }
 
         fn publish_load(&self, load: ActiveLoad) {
@@ -1472,6 +1618,45 @@ mod tests {
 
         fn observe_worker_removed(&self, worker: &WorkerWithDpRank, _worker_type: &str) {
             self.state.removed.lock().unwrap().push(*worker);
+        }
+    }
+
+    struct BlockingPublisher {
+        blocked_worker_id: u64,
+        entered: std_mpsc::Sender<()>,
+        release: Arc<(Mutex<bool>, Condvar)>,
+    }
+
+    impl SequencePublisher for BlockingPublisher {
+        fn enqueue_event(&self, _event: ActiveSequenceEvent) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn publish_load(&self, _load: ActiveLoad) {}
+
+        fn publish_load_batch(&self, loads: Vec<ActiveLoad>) {
+            if !loads
+                .iter()
+                .any(|load| load.worker_id == self.blocked_worker_id)
+            {
+                return;
+            }
+
+            self.entered.send(()).unwrap();
+            let (released, ready) = &*self.release;
+            let mut released = released.lock().unwrap();
+            while !*released {
+                released = ready.wait(released).unwrap();
+            }
+        }
+
+        fn observe_load(
+            &self,
+            _worker: &WorkerWithDpRank,
+            _worker_type: &str,
+            _blocks: usize,
+            _tokens: usize,
+        ) {
         }
     }
 
@@ -1563,6 +1748,97 @@ mod tests {
             router_id: 99,
             lora_name: None,
         }
+    }
+
+    fn local_sequence_request(request_id: &str, worker: WorkerWithDpRank) -> SequenceRequest {
+        SequenceRequest {
+            request_id: request_id.to_string(),
+            token_sequence: Some(vec![1, 2, 3]),
+            track_prefill_tokens: true,
+            expected_output_tokens: None,
+            prefill_load_hint: tracking_hint(12),
+            worker,
+            lora_name: None,
+        }
+    }
+
+    #[test]
+    fn active_sequence_publish_enqueues_lifecycle_in_order() {
+        let (sequences, state) = make_recording_sequences(HashMap::from([(1_u64, (0_u32, 1_u32))]));
+        let worker = WorkerWithDpRank::new(1, 0);
+        let request_id = "ordered".to_string();
+
+        sequences
+            .add_request(local_sequence_request(&request_id, worker), Instant::now())
+            .unwrap();
+        sequences
+            .mark_prefill_completed(&request_id, Instant::now())
+            .unwrap();
+        sequences.free(&request_id, Instant::now()).unwrap();
+
+        assert!(matches!(
+            state.events.lock().unwrap().as_slice(),
+            [
+                ActiveSequenceEventData::AddRequest { .. },
+                ActiveSequenceEventData::MarkPrefillCompleted,
+                ActiveSequenceEventData::Free,
+            ]
+        ));
+    }
+
+    #[test]
+    fn active_sequence_publish_skips_enqueue_when_replica_sync_disabled() {
+        let state = Arc::new(RecordingPublisherState::default());
+        let sequences = ActiveSequencesMultiWorker::new(
+            RecordingPublisher {
+                state: Arc::clone(&state),
+            },
+            4,
+            HashMap::from([(1_u64, (0_u32, 1_u32))]),
+            false,
+            0,
+            "test",
+        );
+        let worker = WorkerWithDpRank::new(1, 0);
+        let request_id = "disabled".to_string();
+
+        sequences
+            .add_request(local_sequence_request(&request_id, worker), Instant::now())
+            .unwrap();
+        sequences
+            .mark_prefill_completed(&request_id, Instant::now())
+            .unwrap();
+        sequences.free(&request_id, Instant::now()).unwrap();
+
+        assert!(state.events.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn active_sequence_publish_failure_logs_are_aggregated() {
+        let limiter = SequencePublishFailureLogLimiter::default();
+        let now = Instant::now();
+
+        assert_eq!(limiter.record_full(now), Some(1));
+        assert_eq!(limiter.record_full(now + Duration::from_secs(1)), None);
+        assert_eq!(
+            limiter.record_full(now + SEQUENCE_PUBLISH_FAILURE_LOG_INTERVAL),
+            Some(2)
+        );
+
+        assert_eq!(limiter.record_unexpected_closed(now), Some(1));
+        assert_eq!(
+            limiter.record_unexpected_closed(now + Duration::from_secs(1)),
+            None
+        );
+        assert_eq!(
+            limiter.record_unexpected_closed(
+                now + SEQUENCE_PUBLISH_FAILURE_LOG_INTERVAL + Duration::from_secs(1)
+            ),
+            Some(2)
+        );
+
+        assert!(limiter.record_shutdown_closed());
+        assert!(!limiter.record_shutdown_closed());
     }
 
     #[tokio::test]
@@ -2152,6 +2428,105 @@ mod tests {
         assert_eq!(
             sequences.active_request_counts().get(&worker).copied(),
             Some(1)
+        );
+    }
+
+    #[test]
+    fn replica_batch_apply_uses_one_deferred_effect_flush() {
+        let worker = WorkerWithDpRank::new(1, 0);
+        let (sequences, publisher) =
+            make_recording_sequences(HashMap::from([(1_u64, (0_u32, 1_u32))]));
+
+        sequences.apply_replica_batch(vec![
+            replica_add("req-1", worker, vec![1, 2, 3]),
+            replica_add("req-2", worker, vec![4, 5, 6]),
+            replica_mark("req-2", worker),
+            replica_free("req-1", worker),
+        ]);
+
+        let batches = publisher.load_batches();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].len(), 1);
+        assert_eq!(batches[0][0].active_decode_blocks, Some(3));
+        assert_eq!(batches[0][0].active_prefill_tokens, Some(0));
+        assert_eq!(sequences.remote_state_update_count(), 1);
+        assert_eq!(sequences.prompt_registry.cleanup_attempts(), 1);
+        assert_eq!(
+            sequences.request_index.worker_for(&"req-2".to_string()),
+            Some(worker)
+        );
+        assert_eq!(
+            sequences.request_index.worker_for(&"req-1".to_string()),
+            None
+        );
+    }
+
+    #[test]
+    fn replica_batches_apply_concurrently_to_independent_workers() {
+        let worker_a = WorkerWithDpRank::new(1, 0);
+        let worker_b = WorkerWithDpRank::new(2, 0);
+        let (entered_tx, entered_rx) = std_mpsc::channel();
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let sequences = Arc::new(ActiveSequencesMultiWorker::new(
+            BlockingPublisher {
+                blocked_worker_id: worker_a.worker_id,
+                entered: entered_tx,
+                release: Arc::clone(&release),
+            },
+            4,
+            HashMap::from([(1, (0, 1)), (2, (0, 1))]),
+            true,
+            0,
+            "test",
+        ));
+
+        let source_a = {
+            let sequences = Arc::clone(&sequences);
+            std::thread::spawn(move || {
+                sequences.apply_replica_batch(vec![replica_add(
+                    "source-a",
+                    worker_a,
+                    vec![1, 2, 3],
+                )]);
+            })
+        };
+        entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("source A should block inside tracker batch flush");
+
+        let (source_b_done_tx, source_b_done_rx) = std_mpsc::channel();
+        let source_b = {
+            let sequences = Arc::clone(&sequences);
+            std::thread::spawn(move || {
+                sequences.apply_replica_batch(vec![replica_add(
+                    "source-b",
+                    worker_b,
+                    vec![4, 5, 6],
+                )]);
+                source_b_done_tx.send(()).unwrap();
+            })
+        };
+        let source_b_completed = source_b_done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .is_ok();
+
+        let (released, ready) = &*release;
+        *released.lock().unwrap() = true;
+        ready.notify_all();
+        source_a.join().unwrap();
+        source_b.join().unwrap();
+
+        assert!(
+            source_b_completed,
+            "source B should apply while source A remains blocked"
+        );
+        assert_eq!(
+            sequences.request_index.worker_for(&"source-a".to_string()),
+            Some(worker_a)
+        );
+        assert_eq!(
+            sequences.request_index.worker_for(&"source-b".to_string()),
+            Some(worker_b)
         );
     }
 

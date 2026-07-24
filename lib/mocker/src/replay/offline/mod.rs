@@ -9,6 +9,7 @@ pub(crate) mod core;
 pub(crate) mod disagg;
 mod entrypoints;
 pub(crate) mod events;
+pub(crate) mod extensions;
 pub(crate) mod planner_hook;
 mod progress;
 pub(crate) mod runtime_utils;
@@ -22,5 +23,9 @@ pub(crate) use entrypoints::{
     simulate_concurrency_workload, simulate_concurrency_workload_accumulating_deltas,
     simulate_concurrency_workload_disagg, simulate_trace, simulate_trace_disagg,
     simulate_trace_workload, simulate_trace_workload_accumulating_deltas,
-    simulate_trace_workload_disagg,
+    simulate_trace_workload_disagg, simulate_trace_workload_disagg_without_session_metadata,
+    simulate_trace_workload_without_session_metadata,
 };
+
+#[cfg(test)]
+mod firewall_tests;

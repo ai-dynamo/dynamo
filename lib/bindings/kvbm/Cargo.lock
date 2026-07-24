@@ -1285,6 +1285,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a4ae5f15dda3c708c0ade84bfee31ccab44a3da4f88015ed22f63732abe300c8"
 
 [[package]]
+name = "ddsketchy"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "724389b6953e2cef5558663e625e64220f473443132a7c64477742a0caeff621"
+
+[[package]]
 name = "defmac"
 version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1514,7 +1520,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "dynamo-data-gen"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "dynamo-kv-hashing",
@@ -1526,7 +1532,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-kv-hashing"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "derive_builder",
  "dynamo-tokens",
@@ -1537,11 +1543,12 @@ dependencies = [
 
 [[package]]
 name = "dynamo-kv-router"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "arc-swap",
  "async-trait",
+ "blake3",
  "crossbeam-queue",
  "dashmap",
  "derive_builder",
@@ -1567,11 +1574,12 @@ dependencies = [
  "tracing",
  "uuid",
  "xxhash-rust",
+ "zeroize",
 ]
 
 [[package]]
 name = "dynamo-llm"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "aligned-vec",
  "anyhow",
@@ -1662,7 +1670,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-memory"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "cudarc",
@@ -1679,11 +1687,12 @@ dependencies = [
 
 [[package]]
 name = "dynamo-mocker"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "bytes",
  "dashmap",
+ "ddsketchy",
  "derive-getters",
  "derive_builder",
  "dynamo-data-gen",
@@ -1714,9 +1723,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers"
-version = "5.0.0"
+version = "5.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c18f8f6a2d325675a65beb0718940124a011e5ea25ee827df19028b965296a6c"
+checksum = "bf45340e7f5beb8f3055c1fb933394f05256b6548a1b1434ae3df27bfc8d2f6e"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -1752,9 +1761,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-protocols"
-version = "2.0.2"
+version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d1da866e573424e374c83d64dbf7807547054ebadcd85ddb2f9f67db06bf386"
+checksum = "92d05c9671ed19fd2ad5c7062e79c3ee83533d9d5a602a41b1fc5a0279c0dbef"
 dependencies = [
  "async-openai",
  "derive_builder",
@@ -1769,9 +1778,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-renderer"
-version = "1.3.8"
+version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3472f4ee978f581bac985c4f5ebad55a9b1b4ccb025ed3e9df708efa56e83bfa"
+checksum = "1afd1dc880ea81af098f1d0586af1ab37865c82f87d14265b7e72bf00696ffef"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1787,7 +1796,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-rl"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1801,7 +1810,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-runtime"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -1868,9 +1877,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokenizers"
-version = "1.5.0"
+version = "1.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61fb9c031ea19d99d1faf8ff304fe666eb2dbd4666fcb416af3f08ae88f5be80"
+checksum = "2843cd9cd50002ae23f3df525e1c551775b7bc7c9041742539faf63bc35ea225"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -1890,7 +1899,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokens"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "bs58",
  "bytemuck",
@@ -1904,7 +1913,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-truthy"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "anyhow",
 ]
@@ -3359,7 +3368,7 @@ dependencies = [
 
 [[package]]
 name = "kvbm-logical"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3384,7 +3393,7 @@ dependencies = [
 
 [[package]]
 name = "kvbm-py3"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "cudarc",

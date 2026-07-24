@@ -226,6 +226,9 @@ pub struct MockEngine {
     active_requests: Arc<DashMap<Uuid, mpsc::UnboundedSender<OutputSignal>>>,
     request_senders: OnceCell<Vec<mpsc::UnboundedSender<DirectRequest>>>,
     command_senders: OnceCell<Vec<mpsc::Sender<SchedulerCommandEnvelope>>>,
+    // TODO(DIS-2478): Store the scheduler cancellation senders and connect the AsyncEngine
+    // context stop/response-stream drop path to targeted cancellation. Until then, lib/mocker
+    // cancellation is not wired end to end through MockEngine.
     handoff_session_permits: OnceCell<Vec<Arc<Semaphore>>>,
     senders_ready: Notify,
     engine_args: MockEngineArgs,

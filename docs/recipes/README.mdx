@@ -40,7 +40,7 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
       <p>Filter by provider, runtime, and hardware. Each card notes its serving technique and workload shape.</p>
     </div>
     <div className="dynamo-catalog-facts">
-      <strong>34</strong>
+      <strong>38</strong>
       <span>Deployable configurations</span>
       <button className="dynamo-filter-reset" type="reset">Reset filters</button>
     </div>
@@ -148,13 +148,13 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
     <div className="dynamo-model-tags"><span>TRT-LLM</span><span>32x GB200</span><span>Long-context reuse</span><span>Related benchmark</span></div>
   <a className="dynamo-card-link" href="./deepseek-v3-2-nvfp4.mdx" aria-label="Open the DeepSeek V3.2 NVFP4 recipe">Open recipe</a>
   </div>
-  <div className="dynamo-model-card" data-recipe-card data-provider="openai" data-runtime="trtllm" data-hardware="b200 gb200" data-technique="aggregated disaggregated" data-workload="static-generation long-output">
+  <div className="dynamo-model-card" data-recipe-card data-provider="openai" data-runtime="trtllm vllm" data-hardware="b200 gb200 h200" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="static-generation long-output agentic-coding long-context-reuse">
     <div className="dynamo-model-card-top">
       <img className="dynamo-model-logo" src="../assets/img/recipes/providers/openai.webp" alt="" />
       <div><h3>GPT-OSS-120B</h3><p>OpenAI</p></div>
     </div>
-    <p className="dynamo-model-summary">TensorRT-LLM GB200 recipe pair organized by traffic target: aggregated serving and a disaggregated P/D split.</p>
-    <div className="dynamo-model-tags"><span>TRT-LLM</span><span>4x GB200</span><span>Static ISL-OSL</span></div>
+    <p className="dynamo-model-summary">TensorRT-LLM GB200 targets for static traffic plus vLLM B200/H200 agentic targets (agg + disagg) with KV-aware routing and EAGLE3 speculative decoding.</p>
+    <div className="dynamo-model-tags"><span>TRT-LLM + vLLM</span><span>GB200 · B200 · H200</span><span>Static + agentic</span></div>
   <a className="dynamo-card-link" href="./gpt-oss-120b.mdx" aria-label="Open the GPT-OSS-120B recipe">Open recipe</a>
   </div>
   <div className="dynamo-model-card" data-recipe-card data-provider="qwen" data-runtime="vllm" data-hardware="h200" data-technique="disaggregated kv-routing" data-workload="long-context-reuse">

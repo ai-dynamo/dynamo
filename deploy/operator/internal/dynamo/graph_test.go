@@ -1714,6 +1714,48 @@ func Test_mergeEnvs(t *testing.T) {
 	}
 }
 
+func TestAddStandardEnvVars_NATS(t *testing.T) {
+	tests := []struct {
+		name        string
+		natsAddress string
+		wantNATS    bool
+	}{
+		{
+			name: "default configuration omits NATS_SERVER",
+		},
+		{
+			name:        "bundled NATS injects NATS_SERVER",
+			natsAddress: "nats://dynamo-nats.dynamo-system.svc.cluster.local:4222",
+			wantNATS:    true,
+		},
+		{
+			name:        "external NATS injects NATS_SERVER",
+			natsAddress: "nats://external-nats:4222",
+			wantNATS:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			container := &corev1.Container{}
+			operatorConfig := &configv1alpha1.OperatorConfiguration{
+				Infrastructure: configv1alpha1.InfrastructureConfiguration{
+					NATSAddress: tt.natsAddress,
+				},
+			}
+
+			AddStandardEnvVars(container, operatorConfig)
+			envByName := envVarsToMap(container.Env)
+
+			if tt.wantNATS {
+				assert.Equal(t, tt.natsAddress, envByName["NATS_SERVER"])
+			} else {
+				assert.NotContains(t, envByName, "NATS_SERVER")
+			}
+		})
+	}
+}
+
 func TestGenerateGrovePodCliqueSet(t *testing.T) {
 	type args struct {
 		ctx              context.Context

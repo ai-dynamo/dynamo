@@ -16,6 +16,13 @@ from dynamo.planner.connectors.clients.kubernetes_api import KubernetesAPI
 from dynamo.planner.connectors.protocol import ScaleRequest, ScaleResponse, ScaleStatus
 from dynamo.planner.core import budget
 from dynamo.planner.errors import DynamoGraphDeploymentNotReadyError
+from dynamo.planner.monitoring.dgd_services import (
+    V1BETA1_GENERIC_WORKER_COMPONENT_TYPE,
+    Service,
+    get_component_type,
+    get_components_by_name,
+    get_planner_component_role,
+)
 from dynamo.runtime import DistributedRuntime, dynamo_endpoint
 
 logger = logging.getLogger(__name__)
@@ -26,6 +33,7 @@ class PoolSpec:
     """Snapshot of one pool's state read from the DGD spec."""
 
     sub_type: str
+    component_name: str
     current_replicas: int
     gpu_per_replica: int
 
@@ -114,6 +122,10 @@ class ScaleRequestHandler:
         self.min_total_gpus = min_total_gpus
         self.intent_cache_ttl_seconds = intent_cache_ttl_seconds
         self.connectors: dict[str, KubernetesConnector] = {}  # Cache per DGD
+        # Generic v1beta1 ``type: worker`` components need the role supplied by
+        # their Planner's TargetReplica. Specialized prefill/decode components
+        # do not need a hint.
+        self._component_roles: dict[str, dict[str, str]] = {}
         # Per-pool cached desired replicas from recent ScaleRequests, keyed by
         # f"{k8s_ns}/{dgd_name}/{sub_type}". Used to pair opposite-direction
         # intents across requests when one request alone would breach bounds.
@@ -239,37 +251,107 @@ class ScaleRequestHandler:
                 f"Initial total GPUs ({total}) meets floor ({self.min_total_gpus})"
             )
 
-    def _read_dgd_pools(self, connector: KubernetesConnector) -> dict[str, PoolSpec]:
+    @staticmethod
+    def _component_role(
+        component_name: str,
+        component: dict,
+        role_hints: dict[str, str],
+    ) -> str:
+        explicit_role = get_planner_component_role(component)
+        if explicit_role:
+            return explicit_role
+        if get_component_type(component) in (
+            "",
+            V1BETA1_GENERIC_WORKER_COMPONENT_TYPE,
+        ):
+            return role_hints.get(component_name, "")
+        return ""
+
+    @staticmethod
+    def _gpu_per_replica(component: dict, service: Service) -> int:
+        multinode = component.get("multinode")
+        node_count = 1 if multinode is None else multinode.get("nodeCount", 2)
+        return service.get_gpu_count() * int(node_count)
+
+    @staticmethod
+    def _record_pool_component(
+        components_by_pool: dict[str, str],
+        pool_key: str,
+        component_name: str,
+        dgd_name: str,
+    ) -> None:
+        previous_component = components_by_pool.get(pool_key)
+        if previous_component is not None:
+            raise ValueError(
+                f"DGD {dgd_name!r} components {previous_component!r} and "
+                f"{component_name!r} both resolve to planner pool {pool_key!r}"
+            )
+        components_by_pool[pool_key] = component_name
+
+    def _read_dgd_pools(
+        self,
+        connector: KubernetesConnector,
+        role_hints: Optional[dict[str, str]] = None,
+    ) -> dict[str, PoolSpec]:
         """Read the current pool state for one DGD.
 
-        Returns a map from sub_component_type to PoolSpec. Pools with 0
-        gpu_per_replica are included for completeness but contribute 0 to
-        budget math.
+        Returns a map from sub_component_type to PoolSpec. An unmapped generic
+        worker is keyed by component name so it still contributes to the total.
         """
         deployment = connector.kube_api.get_graph_deployment(connector.parent_dgd_name)
         pools: dict[str, PoolSpec] = {}
-        services = deployment.get("spec", {}).get("services", {})
-        for svc_spec in services.values():
-            sub_type = svc_spec.get("subComponentType", "")
-            if not sub_type:
+        components_by_pool: dict[str, str] = {}
+        role_hints = role_hints or {}
+        for component_name, component in get_components_by_name(deployment).items():
+            pool_key = self._component_role(component_name, component, role_hints)
+            component_type = get_component_type(component)
+            service = Service(name=component_name, service=component)
+            gpu_per_replica = None
+            if not pool_key and component_type in (
+                "",
+                V1BETA1_GENERIC_WORKER_COMPONENT_TYPE,
+            ):
+                try:
+                    gpu_per_replica = self._gpu_per_replica(component, service)
+                except ValueError:
+                    if component_type == "":
+                        # An untyped non-worker component is not a pool.
+                        continue
+                    raise
+                # Count an as-yet-unmapped worker in the cluster total. Once
+                # its Planner sends a request, the component-name hint replaces
+                # this key with its prefill/decode role.
+                pool_key = component_name
+            if not pool_key:
                 continue
-            gpu_per_replica = int(
-                svc_spec.get("resources", {}).get("limits", {}).get("gpu", 0)
+            self._record_pool_component(
+                components_by_pool,
+                pool_key,
+                component_name,
+                connector.parent_dgd_name,
             )
-            replicas = svc_spec.get("replicas", 0)
-            pools[sub_type] = PoolSpec(
-                sub_type=sub_type,
-                current_replicas=replicas,
-                gpu_per_replica=gpu_per_replica,
+            pools[pool_key] = PoolSpec(
+                sub_type=pool_key,
+                component_name=component_name,
+                current_replicas=service.number_replicas(),
+                gpu_per_replica=(
+                    gpu_per_replica
+                    if gpu_per_replica is not None
+                    else self._gpu_per_replica(component, service)
+                ),
             )
         return pools
 
-    def _read_all_pools(self) -> dict[str, dict[str, PoolSpec]]:
+    def _read_all_pools(
+        self, require_complete: bool = False
+    ) -> dict[str, dict[str, PoolSpec]]:
         """Read current pool state for every known DGD.
 
         Returns a map of dgd_key -> (sub_type -> PoolSpec). Each arbitration
         call reads fresh state once; cross-DGD partner search and budget math
         both consume this snapshot to avoid re-hitting the K8s API per lookup.
+        When ``require_complete`` is true, any unreadable DGD fails the whole
+        snapshot so budget enforcement cannot under-count cluster usage.
 
         Snapshots ``self.connectors`` up-front via ``list(...)``: this method
         runs on a worker thread (see ``asyncio.to_thread`` in scale_request),
@@ -282,8 +364,12 @@ class ScaleRequestHandler:
         all_pools: dict[str, dict[str, PoolSpec]] = {}
         for key, connector in list(self.connectors.items()):
             try:
-                all_pools[key] = self._read_dgd_pools(connector)
+                all_pools[key] = self._read_dgd_pools(
+                    connector, self._component_roles.get(key)
+                )
             except Exception as e:
+                if require_complete:
+                    raise RuntimeError(f"Failed to read DGD for {key}: {e}") from e
                 logger.warning(f"Failed to read DGD for {key}: {e}")
                 all_pools[key] = {}
         return all_pools
@@ -317,11 +403,13 @@ class ScaleRequestHandler:
         In the hot arbitration path, prefer ``_total_gpus_from_snapshot`` with
         a pre-read ``_read_all_pools`` result.
 
-        NOTE: GPU count is read from spec.services[].resources.limits.gpu only.
-        GPUs specified via resources.requests.gpu or extraPodSpec resource
-        overrides are not counted.
+        NOTE: GPU count is read from the v1beta1 component's main container,
+        preferring resources.limits.nvidia.com/gpu and falling back to requests.
         """
-        return self._total_gpus_from_snapshot(self._read_all_pools(), overrides)
+        return self._total_gpus_from_snapshot(
+            self._read_all_pools(require_complete=self._budget_enforcement_enabled()),
+            overrides,
+        )
 
     # ------------------------------------------------------------------ #
     # Intent cache helpers                                               #
@@ -355,6 +443,12 @@ class ScaleRequestHandler:
                 last_desired=target.desired_replicas,
                 last_seen_at=now,
             )
+
+    def _remember_component_roles(self, dgd_key: str, request: ScaleRequest) -> None:
+        role_hints = self._component_roles.setdefault(dgd_key, {})
+        for target in request.target_replicas:
+            if target.component_name:
+                role_hints[target.component_name] = target.sub_component_type.value
 
     def _pair_tolerance(
         self,
@@ -792,13 +886,16 @@ class ScaleRequestHandler:
             # so concurrent requests from different pools cannot both pass
             # against the same pre-scale replica counts.
             async with self._scale_lock:
+                self._remember_component_roles(connector_key, request)
                 # Read ALL known DGDs' current state once. Cross-DGD partner
                 # search needs to see every pool's current replicas and
                 # gpu_per_replica; cross-DGD budget math also consumes this.
                 # Run the synchronous K8s GETs off-thread so the event loop
                 # (health checks, other endpoints) isn't blocked for the
                 # N round-trips it takes across managed DGDs.
-                all_pools = await asyncio.to_thread(self._read_all_pools)
+                all_pools = await asyncio.to_thread(
+                    self._read_all_pools, self._budget_enforcement_enabled()
+                )
                 dgd_pools = all_pools.get(connector_key, {})
 
                 # Always update the intent cache with this request's targets,
@@ -926,10 +1023,11 @@ class ScaleRequestHandler:
                 # patch. Cross-DGD partners get separate per-DGD patches.
                 dgd_targets: dict[str, list[TargetReplica]] = defaultdict(list)
                 dgd_targets[request_key].extend(request.target_replicas)
-                for p_dgd, p_sub, p_desired, _ in selected_partners:
+                for p_dgd, p_sub, p_desired, p_spec in selected_partners:
                     dgd_targets[p_dgd].append(
                         TargetReplica(
                             sub_component_type=SubComponentType(p_sub),
+                            component_name=p_spec.component_name,
                             desired_replicas=p_desired,
                         )
                     )
@@ -1016,10 +1114,20 @@ class ScaleRequestHandler:
             deployment = connector.kube_api.get_graph_deployment(
                 connector.parent_dgd_name
             )
-            for service_name, service_spec in deployment["spec"]["services"].items():
-                sub_type = service_spec.get("subComponentType", "")
+            role_hints = self._component_roles.get(connector_key, {})
+            components_by_pool: dict[str, str] = {}
+            for component_name, component in get_components_by_name(deployment).items():
+                sub_type = self._component_role(component_name, component, role_hints)
                 if sub_type:
-                    current_replicas[sub_type] = service_spec.get("replicas", 0)
+                    self._record_pool_component(
+                        components_by_pool,
+                        sub_type,
+                        component_name,
+                        connector.parent_dgd_name,
+                    )
+                    current_replicas[sub_type] = Service(
+                        name=component_name, service=component
+                    ).number_replicas()
 
             logger.info(
                 f"Successfully scaled {request.graph_deployment_name}: {current_replicas}"

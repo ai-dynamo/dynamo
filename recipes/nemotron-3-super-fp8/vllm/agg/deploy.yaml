@@ -35,7 +35,7 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 1800
             failureThreshold: 60
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
           # Approximate KV-aware routing: uses prefix hashing to route
           # requests to workers likely to have relevant KV cache, without
           # requiring KV events from the backend.
@@ -67,13 +67,13 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 10
             failureThreshold: 120
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
           env:
             - name: HF_HOME
               value: "/opt/models"
             # Workaround for vllm/vllm#35772: FlashInfer allreduce can hang during
             # CUDA graph capture with TP>1. Fixed in vllm/vllm#35793 (default changed
-            # to trtllm). The 1.0 container ships vLLM 0.16.0, so set explicitly.
+            # to trtllm). The 1.3.0 container ships vLLM 0.23.0, so set explicitly.
             - name: VLLM_FLASHINFER_ALLREDUCE_BACKEND
               value: "trtllm"
           command:
