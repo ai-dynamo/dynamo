@@ -100,4 +100,11 @@ pub enum PickError {
     RoutingFailed(String),
     #[error("tokenization failed: {0}")]
     TokenizationFailed(String),
+    /// Every eligible worker is overloaded, so the request is shed rather than
+    /// routed. This is an explicit load-shedding verdict (distinct from a
+    /// failure): the ext_proc server maps it to HTTP 429 with an optional
+    /// `Retry-After` header so the gateway / client failover can back off and
+    /// retry instead of treating it as an error.
+    #[error("service saturated: all workers overloaded")]
+    Saturated { retry_after_secs: Option<u64> },
 }
