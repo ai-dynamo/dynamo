@@ -5,15 +5,22 @@ title: KV Cache Offloading
 subtitle: CPU and disk offloading integrations for vLLM in Dynamo
 ---
 
-Dynamo supports multiple KV cache offloading backends for vLLM, allowing you to extend effective KV cache capacity beyond GPU memory using CPU RAM and disk storage. Each backend integrates through vLLM's connector interface and works with both aggregated and disaggregated serving.
+Dynamo supports multiple KV cache offloading backends for vLLM, allowing you to extend effective KV cache capacity beyond GPU memory using CPU RAM and disk storage. Each backend integrates through vLLM's connector interface; the deployment modes each backend supports are listed in its section.
 
 
-| Backend                 | Source                                           |
-| ----------------------- | ------------------------------------------------ |
-| **[KVBM](#kvbm)**       | [Dynamo](../../components/kvbm/README.md)        |
-| **[LMCache](#lmcache)** | [GitHub](https://github.com/LMCache/LMCache)     |
-| **[FlexKV](#flexkv)**   | [GitHub](https://github.com/taco-project/FlexKV) |
+| Backend                                                       | Source                                                                          |
+| ------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| **[Native OffloadingConnector](#native-offloadingconnector)** | [vLLM](https://docs.vllm.ai/en/latest/features/kv_offloading_usage/)            |
+| **[KVBM](#kvbm)**                                             | [Dynamo](../../components/kvbm/README.md)                                       |
+| **[LMCache](#lmcache)**                                       | [GitHub](https://github.com/LMCache/LMCache)                                    |
+| **[FlexKV](#flexkv)**                                         | [GitHub](https://github.com/taco-project/FlexKV)                                |
 
+
+## Native OffloadingConnector
+
+vLLM's built-in [`OffloadingConnector`](https://docs.vllm.ai/en/latest/features/kv_offloading_usage/) offloads KV blocks to pinned CPU memory with no additional dependency, and integrates with Dynamo's KV-aware routing through self-describing KV events. Aggregated serving with event-driven KV routing is validated; disaggregated serving is not yet validated with the Dynamo KV router.
+
+For the full support matrix, required versions, and configuration, see [Native KV Offloading](vllm-native-kv-offloading.md).
 
 ## KVBM
 

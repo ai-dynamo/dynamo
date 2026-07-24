@@ -402,6 +402,8 @@ navigation:
                 path: backends/vllm/vllm-examples.md
               - page: KV Cache Offloading
                 path: backends/vllm/vllm-kv-offloading.md
+              - page: Native KV Offloading
+                path: backends/vllm/vllm-native-kv-offloading.md
               - page: Observability
                 path: backends/vllm/vllm-observability.md
               - page: vLLM-Omni
@@ -448,6 +450,8 @@ navigation:
                 path: components/router/router-disaggregated-serving.md
               - page: Topology-Aware KV Transfer
                 path: components/router/topology-aware-kv-transfer.md
+              - page: Offloading Support Matrix
+                path: components/router/router-offloading.md
               - page: Router Operations
                 path: components/router/router-operations.md
               - page: Router Examples
