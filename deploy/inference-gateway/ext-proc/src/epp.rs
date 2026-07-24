@@ -20,7 +20,11 @@ use dynamo_llm::kv_router::prefill_router::PrefillQueryOutcome;
 use dynamo_llm::kv_router::{KvRouter, PrefillRouter};
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
-use dynamo_llm::protocols::common::extensions::{HEADER_TENANT_ID, request_cache_salt};
+use dynamo_llm::protocols::common::extensions::{
+    HEADER_TENANT_ID, NvExt, request_cache_salt, routing_constraints_to_kv,
+};
+use dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest;
+use dynamo_llm::types::openai::completions::NvCreateCompletionRequest;
 use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryQuery, hash_pod_name};
 use dynamo_runtime::pipeline::RouterMode;
 use dynamo_runtime::{DistributedRuntime, Runtime};
@@ -210,18 +214,47 @@ impl Router {
 
     /// Tokenize a JSON request body and extract router queue priorities.
     ///
-    /// Returns `(token_ids, cache_namespace, priority_jump, strict_priority)`.
     /// Priorities default to zero when absent. Mirrors the standalone Dynamo
     /// preprocessor lift in `lib/llm/src/preprocessor.rs`.
-    pub fn tokenize(&self, request_json: &str) -> Result<(Vec<u32>, Option<String>, f64, u32)> {
+    async fn tokenize(&self, request_json: &str) -> Result<TokenizeResult> {
         // TODO(epp-request-routing): Reuse shared preprocessing so expected output
         // length, LoRA, pins, sessions, topology constraints, additional protocols,
         // and multimodal routing hashes are preserved.
-        let request: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
-            serde_json::from_str(request_json)?;
+        let mut request_json: serde_json::Value = serde_json::from_str(request_json)?;
 
-        let priority_jump = extract_priority_jump(&request);
-        let strict_priority = extract_strict_priority(&request);
+        if request_json.get("prompt").is_some() || request_json.get("prompt_embeds").is_some() {
+            if let Some(result) = tokenize_completion_prompt_embeds(&request_json)? {
+                return Ok(result);
+            }
+
+            let token_data_policy = prepare_completion_prompt_for_routing(&mut request_json);
+            let request: NvCreateCompletionRequest = serde_json::from_value(request_json)?;
+            let nvext = request.nvext.as_ref();
+            let priority_jump = extract_priority_jump(nvext);
+            let strict_priority = extract_strict_priority(nvext);
+            let routing_constraints = extract_routing_constraints(nvext);
+            let cache_namespace = request_cache_salt(&request).map(str::to_owned);
+
+            let (token_ids, _) = self
+                .preprocessor
+                .gather_tokens(&request, None, None)
+                .await?;
+
+            return Ok(TokenizeResult {
+                token_ids,
+                cache_namespace,
+                priority_jump,
+                strict_priority,
+                routing_constraints,
+                token_data_policy,
+            });
+        }
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(request_json)?;
+        let nvext = request.nvext.as_ref();
+        let priority_jump = extract_priority_jump(nvext);
+        let strict_priority = extract_strict_priority(nvext);
+        let routing_constraints = extract_routing_constraints(nvext);
         let cache_namespace = request_cache_salt(&request).map(str::to_owned);
 
         let formatted_prompt = self
@@ -230,12 +263,14 @@ impl Router {
             .unwrap_or_default();
 
         let encoding = self.preprocessor.tokenize(&formatted_prompt)?;
-        Ok((
-            encoding.token_ids().to_vec(),
+        Ok(TokenizeResult {
+            token_ids: encoding.token_ids().to_vec(),
             cache_namespace,
             priority_jump,
             strict_priority,
-        ))
+            routing_constraints,
+            token_data_policy: TokenDataPolicy::Inject,
+        })
     }
 
     /// Resolve a worker_id to a pod endpoint address (ip:port).
@@ -316,6 +351,7 @@ impl Router {
         priority_jump: f64,
         strict_priority: u32,
         allowed_worker_ids: Option<HashSet<u64>>,
+        routing_constraints: RoutingConstraints,
     ) -> Result<(u64, Option<u32>)> {
         if let Some(ref ids) = allowed_worker_ids {
             self.prefill_router.register_workers(ids);
@@ -333,7 +369,7 @@ impl Router {
                 priority_jump,
                 strict_priority,
                 allowed_worker_ids,
-                RoutingConstraints::default(),
+                routing_constraints,
             )
             .await
             .map_err(|e| anyhow::anyhow!("Prefill query failed: {:?}", e))?;
@@ -355,15 +391,20 @@ impl Router {
     ///
     /// Queue priorities are forwarded to the decode scheduler. `priority_jump`
     /// adjusts the policy score, while `strict_priority` selects the primary tier.
-    pub async fn route_decode(
+    async fn route_decode(
         &self,
-        tokens: &[u32],
-        is_disaggregated: bool,
-        cache_namespace: Option<String>,
-        priority_jump: f64,
-        strict_priority: u32,
-        allowed_worker_ids: Option<HashSet<u64>>,
+        request: DecodeRouteRequest<'_>,
     ) -> Result<(WorkerWithDpRank, u32)> {
+        let DecodeRouteRequest {
+            tokens,
+            is_disaggregated,
+            cache_namespace,
+            priority_jump,
+            strict_priority,
+            allowed_worker_ids,
+            routing_constraints,
+        } = request;
+
         if let Some(ref ids) = allowed_worker_ids {
             self.decode_router.register_workers(ids);
         }
@@ -383,7 +424,7 @@ impl Router {
                 strict_priority,
                 None,
                 allowed_worker_ids,
-                RoutingConstraints::default(),
+                routing_constraints,
             )
             .await
             .map_err(|e| anyhow::anyhow!("Decode query failed: {:?}", e))
@@ -481,7 +522,133 @@ impl Router {
     }
 }
 
-/// Extract the router queue `priority_jump` from a chat completion request's
+struct TokenizeResult {
+    token_ids: Vec<u32>,
+    cache_namespace: Option<String>,
+    priority_jump: f64,
+    strict_priority: u32,
+    routing_constraints: RoutingConstraints,
+    token_data_policy: TokenDataPolicy,
+}
+
+struct DecodeRouteRequest<'a> {
+    tokens: &'a [u32],
+    is_disaggregated: bool,
+    cache_namespace: Option<String>,
+    priority_jump: f64,
+    strict_priority: u32,
+    allowed_worker_ids: Option<HashSet<u64>>,
+    routing_constraints: RoutingConstraints,
+}
+
+#[derive(serde::Deserialize)]
+struct CompletionPromptEmbedsRoutingFields {
+    #[serde(rename = "model")]
+    _model: String,
+    #[serde(rename = "prompt_embeds")]
+    _prompt_embeds: String,
+    #[serde(default)]
+    cache_salt: Option<String>,
+    #[serde(default)]
+    nvext: Option<NvExt>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TokenDataPolicy {
+    Inject,
+    Strip,
+}
+
+impl TokenDataPolicy {
+    fn injects(self) -> bool {
+        matches!(self, Self::Inject)
+    }
+
+    fn strips(self) -> bool {
+        matches!(self, Self::Strip)
+    }
+}
+
+fn tokenize_completion_prompt_embeds(
+    request_json: &serde_json::Value,
+) -> Result<Option<TokenizeResult>> {
+    let Some(prompt_embeds) = request_json.get("prompt_embeds") else {
+        return Ok(None);
+    };
+    if prompt_embeds.is_null() {
+        return Ok(None);
+    }
+
+    let fields: CompletionPromptEmbedsRoutingFields = serde_json::from_value(request_json.clone())?;
+    let nvext = fields.nvext.as_ref();
+    let priority_jump = extract_priority_jump(nvext);
+    let strict_priority = extract_strict_priority(nvext);
+    let routing_constraints = extract_routing_constraints(nvext);
+    let cache_namespace = nvext
+        .and_then(|nvext| nvext.cache_salt.as_deref())
+        .filter(|salt| !salt.is_empty())
+        .or_else(|| fields.cache_salt.as_deref().filter(|salt| !salt.is_empty()))
+        .map(str::to_owned);
+
+    Ok(Some(TokenizeResult {
+        token_ids: Vec::new(),
+        cache_namespace,
+        priority_jump,
+        strict_priority,
+        routing_constraints,
+        token_data_policy: TokenDataPolicy::Strip,
+    }))
+}
+
+/// Pick a single completion prompt shape the router can score today.
+///
+/// Returns how the forwarded request's `nvext.token_data` should be handled.
+/// Only scalar text completion prompts consume injected token data correctly.
+/// Other completion shapes either already carry tokens, are batch-shaped, or
+/// use embeddings, so stale flat token data must be stripped.
+fn prepare_completion_prompt_for_routing(request_json: &mut serde_json::Value) -> TokenDataPolicy {
+    if request_json.get("prompt_embeds").is_some() {
+        return TokenDataPolicy::Strip;
+    }
+
+    let Some(prompt) = request_json.get_mut("prompt") else {
+        return TokenDataPolicy::Strip;
+    };
+    if prompt.is_string() {
+        return TokenDataPolicy::Inject;
+    }
+    let Some(items) = prompt.as_array() else {
+        return TokenDataPolicy::Strip;
+    };
+    if items.is_empty() {
+        return TokenDataPolicy::Strip;
+    }
+
+    if items.iter().all(|item| item.is_string()) {
+        if items.len() > 1 {
+            let first = items
+                .first()
+                .and_then(|item| item.as_str())
+                .map(str::to_string);
+            if let Some(first) = first {
+                *prompt = serde_json::Value::String(first);
+            }
+        }
+        return TokenDataPolicy::Strip;
+    } else if items.iter().all(|item| item.is_array()) {
+        if items.len() > 1 {
+            let first = items.first().cloned();
+            if let Some(first) = first {
+                *prompt = first;
+            }
+        }
+        return TokenDataPolicy::Strip;
+    }
+
+    TokenDataPolicy::Strip
+}
+
+/// Extract the router queue `priority_jump` from an OpenAI request's
 /// `nvext.agent_hints.priority`.
 ///
 /// Negative priorities are clamped to `0.0` so a low-priority hint never
@@ -489,30 +656,26 @@ impl Router {
 /// in `lib/llm/src/preprocessor.rs`). Falls back to the deprecated
 /// `latency_sensitivity` alias for callers still on the old field name.
 /// Returns `0.0` when `nvext` is absent.
-fn extract_priority_jump(
-    request: &dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest,
-) -> f64 {
-    request
-        .nvext
-        .as_ref()
+fn extract_priority_jump(nvext: Option<&NvExt>) -> f64 {
+    nvext
         .and_then(|n| n.agent_hints.as_ref())
-        .and_then(|h| {
-            h.priority
-                .map(|p| p.max(0) as f64)
-                .or(h.latency_sensitivity)
-        })
+        .and_then(|h| h.priority.map(|p| p as f64).or(h.latency_sensitivity))
+        .map(|p| p.max(0.0))
         .unwrap_or(0.0)
 }
 
-fn extract_strict_priority(
-    request: &dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest,
-) -> u32 {
-    request
-        .nvext
-        .as_ref()
+fn extract_strict_priority(nvext: Option<&NvExt>) -> u32 {
+    nvext
         .and_then(|n| n.agent_hints.as_ref())
         .and_then(|h| h.strict_priority)
         .unwrap_or(0)
+}
+
+fn extract_routing_constraints(nvext: Option<&NvExt>) -> RoutingConstraints {
+    nvext
+        .and_then(|n| n.routing_constraints.clone())
+        .map(routing_constraints_to_kv)
+        .unwrap_or_default()
 }
 
 struct DiscoveredModelBootstrap {
@@ -932,8 +1095,16 @@ impl EndpointPicker for Router {
         let body_str = std::str::from_utf8(&req.body)
             .map_err(|e| PickError::TokenizationFailed(format!("Invalid UTF-8: {e}")))?;
 
-        let (tokens, body_cache_namespace, priority_jump, strict_priority) = self
+        let TokenizeResult {
+            token_ids: tokens,
+            cache_namespace: body_cache_namespace,
+            priority_jump,
+            strict_priority,
+            routing_constraints,
+            token_data_policy,
+        } = self
             .tokenize(body_str)
+            .await
             .map_err(|e| PickError::TokenizationFailed(e.to_string()))?;
         let cache_namespace =
             cache_namespace_with_header_override(&req.headers, body_cache_namespace);
@@ -949,6 +1120,7 @@ impl EndpointPicker for Router {
                 priority_jump,
                 strict_priority,
                 allowed_worker_ids.clone(),
+                routing_constraints.clone(),
             )
             .await;
 
@@ -968,14 +1140,15 @@ impl EndpointPicker for Router {
         // booking ID independent of x-request-id, handle cancellation races, roll
         // back endpoint-resolution failures, and never forward to an unbooked fallback.
         let (decode_worker, _overlap) = self
-            .route_decode(
-                &tokens,
+            .route_decode(DecodeRouteRequest {
+                tokens: &tokens,
                 is_disaggregated,
-                cache_namespace.clone(),
+                cache_namespace: cache_namespace.clone(),
                 priority_jump,
                 strict_priority,
                 allowed_worker_ids,
-            )
+                routing_constraints,
+            })
             .await
             .map_err(|e| PickError::RoutingFailed(e.to_string()))?;
 
@@ -1065,6 +1238,7 @@ impl EndpointPicker for Router {
             is_disaggregated,
             endpoint = %endpoint,
             token_count = tokens.len(),
+            ?token_data_policy,
             priority_jump,
             model = %req.model,
             header_count = headers.len(),
@@ -1078,7 +1252,8 @@ impl EndpointPicker for Router {
             endpoint,
             fallbacks: vec![],
             headers,
-            token_ids: Some(tokens),
+            strip_token_data: token_data_policy.strips(),
+            token_ids: token_data_policy.injects().then_some(tokens),
         })
     }
 
@@ -1145,49 +1320,217 @@ mod tests {
     /// regresses, the GAIE ext-proc path is back to ignoring priority.
     #[test]
     fn priority_jump_lifted_from_agent_hints_priority() {
-        let with_priority: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
-            serde_json::from_str(
-                r#"{
+        let with_priority: NvCreateChatCompletionRequest = serde_json::from_str(
+            r#"{
                     "model": "test",
                     "messages": [{"role": "user", "content": "hi"}],
                     "nvext": {"agent_hints": {"priority": 5}}
                 }"#,
-            )
-            .unwrap();
-        assert_eq!(extract_priority_jump(&with_priority), 5.0);
+        )
+        .unwrap();
+        assert_eq!(extract_priority_jump(with_priority.nvext.as_ref()), 5.0);
 
-        let without_nvext: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
-            serde_json::from_str(
-                r#"{
+        let with_negative_alias: NvCreateChatCompletionRequest = serde_json::from_str(
+            r#"{
+                    "model": "test",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "nvext": {"agent_hints": {"latency_sensitivity": -3.5}}
+                }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            extract_priority_jump(with_negative_alias.nvext.as_ref()),
+            0.0
+        );
+
+        let without_nvext: NvCreateChatCompletionRequest = serde_json::from_str(
+            r#"{
                     "model": "test",
                     "messages": [{"role": "user", "content": "hi"}]
                 }"#,
-            )
-            .unwrap();
-        assert_eq!(extract_priority_jump(&without_nvext), 0.0);
+        )
+        .unwrap();
+        assert_eq!(extract_priority_jump(without_nvext.nvext.as_ref()), 0.0);
     }
 
     #[test]
     fn strict_priority_lifted_from_agent_hints() {
-        let with_priority: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
-            serde_json::from_str(
-                r#"{
+        let with_priority: NvCreateChatCompletionRequest = serde_json::from_str(
+            r#"{
                     "model": "test",
                     "messages": [{"role": "user", "content": "hi"}],
                     "nvext": {"agent_hints": {"strict_priority": 9}}
                 }"#,
-            )
-            .unwrap();
-        assert_eq!(extract_strict_priority(&with_priority), 9);
+        )
+        .unwrap();
+        assert_eq!(extract_strict_priority(with_priority.nvext.as_ref()), 9);
 
-        let without_nvext: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
-            serde_json::from_str(
-                r#"{
+        let without_nvext: NvCreateChatCompletionRequest = serde_json::from_str(
+            r#"{
                     "model": "test",
                     "messages": [{"role": "user", "content": "hi"}]
                 }"#,
-            )
-            .unwrap();
-        assert_eq!(extract_strict_priority(&without_nvext), 0);
+        )
+        .unwrap();
+        assert_eq!(extract_strict_priority(without_nvext.nvext.as_ref()), 0);
+    }
+
+    #[test]
+    fn completion_agent_hints_are_lifted() {
+        let request: NvCreateCompletionRequest = serde_json::from_str(
+            r#"{
+                "model": "test",
+                "prompt": [101, 102, 103],
+                "nvext": {"agent_hints": {"priority": 5, "strict_priority": 9}}
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(extract_priority_jump(request.nvext.as_ref()), 5.0);
+        assert_eq!(extract_strict_priority(request.nvext.as_ref()), 9);
+    }
+
+    #[test]
+    fn completion_string_array_prompt_routes_first_prompt_without_token_injection() {
+        let mut request = serde_json::json!({
+            "model": "test",
+            "prompt": ["hello", "world"]
+        });
+
+        let token_data_policy = prepare_completion_prompt_for_routing(&mut request);
+
+        assert_eq!(token_data_policy, TokenDataPolicy::Strip);
+        assert_eq!(request["prompt"], "hello");
+    }
+
+    #[test]
+    fn completion_text_prompt_keeps_token_injection() {
+        let mut request = serde_json::json!({
+            "model": "test",
+            "prompt": "hello"
+        });
+
+        let token_data_policy = prepare_completion_prompt_for_routing(&mut request);
+
+        assert_eq!(token_data_policy, TokenDataPolicy::Inject);
+        assert_eq!(request["prompt"], "hello");
+    }
+
+    #[test]
+    fn completion_single_string_array_prompt_strips_token_data() {
+        let mut request = serde_json::json!({
+            "model": "test",
+            "prompt": ["hello"]
+        });
+
+        let token_data_policy = prepare_completion_prompt_for_routing(&mut request);
+
+        assert_eq!(token_data_policy, TokenDataPolicy::Strip);
+        assert_eq!(request["prompt"], serde_json::json!(["hello"]));
+    }
+
+    #[test]
+    fn completion_token_array_prompt_strips_token_data() {
+        let mut request = serde_json::json!({
+            "model": "test",
+            "prompt": [101, 102, 103]
+        });
+
+        let token_data_policy = prepare_completion_prompt_for_routing(&mut request);
+
+        assert_eq!(token_data_policy, TokenDataPolicy::Strip);
+        assert_eq!(request["prompt"], serde_json::json!([101, 102, 103]));
+    }
+
+    #[test]
+    fn completion_token_batch_prompt_routes_first_prompt_without_token_injection() {
+        let mut request = serde_json::json!({
+            "model": "test",
+            "prompt": [[101, 102], [201, 202]]
+        });
+
+        let token_data_policy = prepare_completion_prompt_for_routing(&mut request);
+
+        assert_eq!(token_data_policy, TokenDataPolicy::Strip);
+        assert_eq!(request["prompt"], serde_json::json!([101, 102]));
+    }
+
+    #[test]
+    fn completion_prompt_embeds_disables_token_injection() {
+        let mut request = serde_json::json!({
+            "model": "test",
+            "prompt": "placeholder",
+            "prompt_embeds": "encoded"
+        });
+
+        let token_data_policy = prepare_completion_prompt_for_routing(&mut request);
+
+        assert_eq!(token_data_policy, TokenDataPolicy::Strip);
+        assert_eq!(request["prompt"], "placeholder");
+    }
+
+    #[test]
+    fn completion_prompt_embeds_without_prompt_routes_without_tokens() {
+        let request = serde_json::json!({
+            "model": "test",
+            "prompt_embeds": "encoded",
+            "nvext": {
+                "cache_salt": "tenant-nvext",
+                "agent_hints": {"priority": 5, "strict_priority": 9},
+                "routing_constraints": {"required_taints": ["gpu=A100"]}
+            },
+            "cache_salt": "tenant-legacy"
+        });
+
+        let result = tokenize_completion_prompt_embeds(&request)
+            .expect("prompt embeds should parse")
+            .expect("prompt embeds should short-circuit");
+
+        assert!(result.token_ids.is_empty());
+        assert_eq!(result.priority_jump, 5.0);
+        assert_eq!(result.strict_priority, 9);
+        assert_eq!(result.cache_namespace.as_deref(), Some("tenant-nvext"));
+        assert!(
+            result
+                .routing_constraints
+                .required_taints
+                .contains("gpu=A100")
+        );
+        assert_eq!(result.token_data_policy, TokenDataPolicy::Strip);
+    }
+
+    #[test]
+    fn completion_prompt_embeds_helper_ignores_absent_embeds() {
+        let request = serde_json::json!({
+            "model": "test",
+            "prompt": "hello"
+        });
+
+        assert!(
+            tokenize_completion_prompt_embeds(&request)
+                .expect("request should parse")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn completion_routing_constraints_are_lifted() {
+        let request: NvCreateCompletionRequest = serde_json::from_str(
+            r#"{
+                "model": "test",
+                "prompt": [101, 102, 103],
+                "nvext": {
+                    "routing_constraints": {
+                        "required_taints": ["gpu=A100"],
+                        "preferred_taints": {"zone=west": 0.75}
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let constraints = extract_routing_constraints(request.nvext.as_ref());
+        assert!(constraints.required_taints.contains("gpu=A100"));
+        assert_eq!(constraints.preferred_taints.get("zone=west"), Some(&0.75));
     }
 }
