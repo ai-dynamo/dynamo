@@ -266,6 +266,7 @@ dev:
   #               - key: nvidia.com/gpu.present
   #                 operator: In
   #                 values: ["true"]
+  # Empty ({}) means "not set" — Helm treats empty maps as false.
   affinity: {}
   # Name of an externally-created ConfigMap holding power_agent.py,
   # actuator.py AND managed_state.py at the matching key names (all three
