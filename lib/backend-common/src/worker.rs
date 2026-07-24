@@ -299,6 +299,13 @@ impl EngineKind {
         }
     }
 
+    fn drain_before_discovery_unregister(&self) -> bool {
+        match self {
+            EngineKind::Llm(e) => e.drain_before_discovery_unregister(),
+            EngineKind::Raw(_) => false,
+        }
+    }
+
     async fn setup_metrics(&self, ctx: MetricsCtx<'_>) -> Result<MetricsBindings, DynamoError> {
         match self {
             EngineKind::Llm(e) => e.setup_metrics(ctx).await,
@@ -444,17 +451,14 @@ impl Worker {
     /// Lifecycle driver. Takes owned `self` — `Worker` is single-shot and
     /// cannot be reused after `run()` returns.
     ///
-    /// Shutdown sequence (mirrors `graceful_shutdown_with_discovery` in
-    /// `components/src/dynamo/common/utils/graceful_shutdown.py`):
-    ///   1. `endpoint.unregister_endpoint_instance()` — router stops routing.
-    ///   2. Sleep `DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS` (default 5s) to
-    ///      let in-flight router decisions complete.
-    ///   3. Poll `engine.is_quiescent()` until it returns true or the drain
-    ///      budget (`DYN_PREFILL_DRAIN_TIMEOUT_S`, default 30s) expires.
-    ///   4. `engine.cleanup()` — release engine resources while NATS / etcd
-    ///      are still reachable.
-    ///   5. Return — caller (`run.rs`) drives `runtime.shutdown()` for
-    ///      request-plane drain and transport teardown.
+    /// Shutdown sequence normally mirrors `graceful_shutdown_with_discovery`
+    /// in `components/src/dynamo/common/utils/graceful_shutdown.py`:
+    /// unregister, grace period, engine drain/quiescence, cleanup. Remote
+    /// engines may opt into drain-before-unregister when their Drain RPC
+    /// atomically closes admission. This preserves admitted response streams
+    /// until terminal drain completion instead of discovery removal cancelling
+    /// their request-plane transports. The caller (`run.rs`) drives
+    /// `runtime.shutdown()` after this sequence returns.
     ///
     /// A SIGTERM/SIGINT listener is installed at the top of `run` and
     /// shared via a [`CancellationToken`]:
@@ -786,9 +790,10 @@ impl Worker {
         Ok(())
     }
 
-    /// Full graceful-shutdown orchestrator: discovery unregister →
-    /// grace period → engine drain → cleanup. Shared by every shutdown path —
-    /// pre-serve (mid-start signal) and the serve loop's signal arm.
+    /// Full graceful-shutdown orchestrator. In-process engines unregister
+    /// before drain. Out-of-process engines that atomically close admission
+    /// opt into drain-before-unregister so discovery removal cannot cancel
+    /// their admitted response streams.
     async fn orchestrator_steps(&mut self, endpoint: &dynamo_runtime::component::Endpoint) {
         let _ = self.finalize_serve(Some(endpoint), None).await;
     }
@@ -801,6 +806,15 @@ impl Worker {
         endpoint: Option<&dynamo_runtime::component::Endpoint>,
         terminal_error: Option<DynamoError>,
     ) -> Result<(), DynamoError> {
+        // A fatal watch result means the remote is already unhealthy; remove
+        // it immediately instead of holding a stale discovery record while a
+        // Drain RPC to the failed engine times out.
+        let drain_before_unregister =
+            terminal_error.is_none() && self.engine.drain_before_discovery_unregister();
+        if drain_before_unregister {
+            self.run_engine_drain_steps().await;
+        }
+
         if let Some(endpoint) = endpoint {
             if let Err(e) = endpoint.unregister_endpoint_instance().await {
                 tracing::warn!(error = %e, "discovery unregister failed");
@@ -808,7 +822,12 @@ impl Worker {
                 tracing::info!("Endpoint unregistered from discovery");
             }
         }
-        self.run_engine_shutdown_steps().await;
+
+        if drain_before_unregister {
+            self.cleanup_once().await;
+        } else {
+            self.run_engine_shutdown_steps().await;
+        }
         terminal_error.map_or(Ok(()), Err)
     }
 
@@ -1093,6 +1112,15 @@ impl Worker {
             tokio::time::sleep(Duration::from_secs_f64(grace)).await;
         }
 
+        self.run_engine_drain_steps().await;
+        self.cleanup_once().await;
+    }
+
+    /// Close engine admission and wait for terminal drain/quiescence within
+    /// the configured shutdown budget. Cleanup is deliberately separate so
+    /// an out-of-process engine can drain before discovery unregister while
+    /// preserving the legacy unregister-first sequence for other engines.
+    async fn run_engine_drain_steps(&self) {
         let drain_start = std::time::Instant::now();
         let configured = drain_timeout_secs();
         let cap = (graceful_shutdown_timeout().as_secs_f64() - CLEANUP_RESERVE_S).max(0.0);
@@ -1114,8 +1142,6 @@ impl Worker {
         if let Some(lifecycle) = self.lifecycle.as_ref() {
             lifecycle.observe_drain_time(drain_elapsed);
         }
-
-        self.cleanup_once().await;
     }
 
     /// Hold a prefill worker open until its KV transfers finish, so cleanup

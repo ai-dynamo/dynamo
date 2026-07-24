@@ -783,6 +783,10 @@ impl LLMEngine for OpenEngineSidecar {
         ))
     }
 
+    fn drain_before_discovery_unregister(&self) -> bool {
+        true
+    }
+
     async fn supported_updates(&self) -> Result<Vec<String>, DynamoError> {
         if self.bootstrap.model.supports_lora == Some(true) {
             Ok(vec!["load_lora", "unload_lora", "list_loras"]

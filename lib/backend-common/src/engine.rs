@@ -277,6 +277,18 @@ pub trait LLMEngine: Send + Sync + 'static {
         Ok(())
     }
 
+    /// Whether [`drain`](LLMEngine::drain) must complete before this worker's
+    /// discovery record is removed.
+    ///
+    /// The default preserves the in-process lifecycle: unregister first, then
+    /// drain. Out-of-process engines whose Drain RPC atomically closes remote
+    /// admission should return `true`. That keeps admitted response streams
+    /// routable until the remote reaches terminal drain completion; removing
+    /// discovery first would make the request plane cancel those streams.
+    fn drain_before_discovery_unregister(&self) -> bool {
+        false
+    }
+
     /// Release all engine resources. Called exactly once.
     ///
     /// `Worker` guarantees:

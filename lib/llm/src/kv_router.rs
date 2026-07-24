@@ -130,18 +130,23 @@ pub const RADIX_STATE_FILE: &str = "radix-state";
 pub const WORKER_KV_INDEXER_BUFFER_SIZE: usize = 1024; // store 1024 most recent events in worker buffer
 
 fn map_scheduler_error(error: scheduling::KvSchedulerError) -> anyhow::Error {
-    if !error.is_overload() {
-        return error.into();
-    }
-
     let message = error.to_string();
-    let cause = PipelineError::ServiceOverloaded(message.clone());
-    DynamoError::builder()
-        .error_type(ErrorType::ResourceExhausted)
-        .message(message)
-        .cause(cause)
-        .build()
-        .into()
+    let error_type = match error {
+        KvSchedulerError::NoEndpoints | KvSchedulerError::SubscriberShutdown => {
+            ErrorType::Unavailable
+        }
+        KvSchedulerError::PinnedWorkerNotAllowed { .. } => ErrorType::InvalidArgument,
+        error if error.is_overload() => ErrorType::ResourceExhausted,
+        error => return error.into(),
+    };
+
+    let mut builder = DynamoError::builder()
+        .error_type(error_type)
+        .message(message.clone());
+    if error_type == ErrorType::ResourceExhausted {
+        builder = builder.cause(PipelineError::ServiceOverloaded(message));
+    }
+    builder.build().into()
 }
 
 fn cancelled_error(context_id: &str) -> anyhow::Error {
@@ -1550,6 +1555,28 @@ mod tests {
             err.to_string()
                 .contains("all eligible workers are overloaded")
         );
+    }
+
+    #[test]
+    fn test_scheduler_unavailability_and_pin_errors_remain_typed() {
+        for scheduler_error in [
+            KvSchedulerError::NoEndpoints,
+            KvSchedulerError::SubscriberShutdown,
+        ] {
+            let error = map_scheduler_error(scheduler_error);
+            assert!(dynamo_runtime::error::match_error_chain(
+                error.as_ref(),
+                &[dynamo_runtime::error::ErrorType::Unavailable],
+                &[]
+            ));
+        }
+
+        let error = map_scheduler_error(KvSchedulerError::PinnedWorkerNotAllowed { worker_id: 42 });
+        assert!(dynamo_runtime::error::match_error_chain(
+            error.as_ref(),
+            &[dynamo_runtime::error::ErrorType::InvalidArgument],
+            &[]
+        ));
     }
 
     #[tokio::test]

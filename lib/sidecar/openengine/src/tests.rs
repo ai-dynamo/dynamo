@@ -1570,6 +1570,10 @@ async fn fake_tonic_drain_accepts_terminal_cleanup_after_remote_deadline() {
     let server = FakeServer::start(state).await;
     let (engine, _) = build_sidecar(server.address, "tensorrt_llm").await.unwrap();
     engine.start(1).await.unwrap();
+    assert!(
+        engine.drain_before_discovery_unregister(),
+        "OpenEngine must preserve admitted streams until remote drain completes"
+    );
 
     tokio::time::timeout(std::time::Duration::from_secs(2), engine.drain())
         .await
