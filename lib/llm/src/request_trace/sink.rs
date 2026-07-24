@@ -230,7 +230,7 @@ async fn spawn_workers(shutdown: CancellationToken) -> anyhow::Result<()> {
     let sink_count = sinks.len();
     for sink in sinks {
         let name = sink.name();
-        let mut receiver: broadcast::Receiver<RequestTraceRecord> = super::subscribe();
+        let mut receiver = super::subscribe_sink();
         let worker_shutdown = shutdown.clone();
         tokio::spawn(async move {
             loop {
