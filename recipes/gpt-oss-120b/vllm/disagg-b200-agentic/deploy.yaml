@@ -46,9 +46,8 @@ spec:
         - {name: HF_MODULES_CACHE, value: /model-cache/.cache/hfmods}
         - {name: KV_JSON, value: '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'}
         - {name: SPEC_JSON, value: '{"method":"eagle3","model":"nvidia/gpt-oss-120b-Eagle3-v3","num_speculative_tokens":3}'}
-        - {name: ETCD_ENDPOINTS, value: "dynamo-platform-etcd.dynamo-system.svc.cluster.local:2379"}
         - {name: NATS_SERVER, value: "nats://dynamo-platform-nats.dynamo-system.svc.cluster.local:4222"}
-        - {name: DYN_DISCOVERY_BACKEND, value: etcd}
+        - {name: DYN_DISCOVERY_BACKEND, value: file}   # in-pod file KV discovery (shared /tmp): self-contained, no external etcd
         - {name: DYN_NAMESPACE, value: gptoss-disagg-b200}
         - {name: NCCL_IB_DISABLE, value: "1"}
         - {name: NCCL_NET_PLUGIN, value: "none"}
@@ -59,7 +58,6 @@ spec:
           set -x
           M="--model openai/gpt-oss-120b --served-model-name openai/gpt-oss-120b --trust-remote-code --quantization mxfp4 --kv-cache-dtype fp8 --max-model-len 131072 --gpu-memory-utilization 0.9 --block-size 64 --tensor-parallel-size 1 --enable-chunked-prefill --enable-prefix-caching --async-scheduling --no-disable-hybrid-kv-cache-manager --enable-flashinfer-autotune --max-num-batched-tokens 32768 --dyn-reasoning-parser gpt_oss --dyn-tool-call-parser harmony"
           cvd(){ local o=$1 r=""; for g in 0 1 2 3 4 5 6 7; do [ "$g" != "$o" ] && r="$r,$g"; done; echo "${o}${r}"; }
-          DYN_HTTP_PORT=8000 DYN_SYSTEM_PORT=9090 python3 -m dynamo.frontend --router-mode kv --router-kv-events --kv-cache-block-size 64 --http-host 0.0.0.0 --http-port 8000 >/tmp/fe.log 2>&1 &
           s=9091; c=5601
           for g in 0 1; do           # 2 prefill (EAGLE3 spec on BOTH so draft-layer KV layout matches for NIXL)
             CUDA_VISIBLE_DEVICES=$(cvd $g) DYN_COMPONENT=prefill DYN_SYSTEM_PORT=$s VLLM_NIXL_SIDE_CHANNEL_PORT=$c \
@@ -71,6 +69,14 @@ spec:
               python3 -m dynamo.vllm $M --kv-transfer-config "$KV_JSON" --disaggregation-mode decode --speculative-config "$SPEC_JSON" >/tmp/dc$g.log 2>&1 &
             s=$((s+2)); c=$((c+2))
           done
+          # File discovery snapshots existing entries once at frontend start and does NOT resync,
+          # so the frontend must come up AFTER all 8 workers have registered. Wait for the 8
+          # model-deployment-card entries (max ~18 min), then start it. Verified on 8xH200.
+          for i in $(seq 1 216); do
+            [ "$(ls /tmp/dynamo_store_kv/v1/mdc/ 2>/dev/null | wc -l)" -ge 8 ] && break
+            sleep 5
+          done
+          DYN_HTTP_PORT=8000 DYN_SYSTEM_PORT=9090 python3 -m dynamo.frontend --router-mode kv --router-kv-events --kv-cache-block-size 64 --http-host 0.0.0.0 --http-port 8000 >/tmp/fe.log 2>&1 &
           wait
       readinessProbe: {httpGet: {path: /v1/models, port: 8000}, initialDelaySeconds: 120, periodSeconds: 30, failureThreshold: 40}
       volumeMounts: [{mountPath: /model-cache, name: model-cache}, {mountPath: /dev/shm, name: dshm}]
