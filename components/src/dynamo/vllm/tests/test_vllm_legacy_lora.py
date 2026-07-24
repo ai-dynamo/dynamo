@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Legacy worker-factory LoRA lifecycle tests.
-
-The unified vLLM engine has separate lifecycle coverage. These tests protect
-the still-supported ``BaseWorkerHandler`` path used by release images.
-"""
+"""vLLM worker-factory LoRA lifecycle tests."""
 
 import asyncio
 from types import SimpleNamespace
@@ -94,6 +90,9 @@ async def test_prefill_load_records_and_publishes_without_eager_engine_add(
     assert str(kwargs["model_type"]) == str(ModelType.Prefill)
     assert kwargs["worker_type"] == WorkerType.Prefill
     assert kwargs["needs"] == [[WorkerType.Decode]]
+    runtime_config = kwargs["runtime_config"]
+    assert runtime_config.context_length == 8192
+    assert runtime_config.runtime_data["strict_request_token_limit"] == "8192"
     # The adapter card must carry the engine-actual main-attention block size,
     # not engine_args.block_size (16) — see #11866.
     assert kwargs["kv_cache_block_size"] == 1056

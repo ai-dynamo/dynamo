@@ -20,6 +20,13 @@ pub use dynamo_parsers::tool_calling::StructuralTagSchemaMode;
 // Reserve a topology namespace so generated taints can be rebuilt without touching caller taints.
 pub const TOPOLOGY_TAINT_PREFIX: &str = "dynamo.topology/";
 
+/// Runtime-data key for an engine-published strict input-plus-output token limit.
+///
+/// A backend must publish this only when requests above the limit are rejected,
+/// rather than truncated or otherwise accepted. The value already accounts for
+/// backend-reserved tokens.
+pub const STRICT_REQUEST_TOKEN_LIMIT_RUNTIME_KEY: &str = "strict_request_token_limit";
+
 /// Canonical worker-taint form for topology metadata.
 ///
 /// A topology domain/value pair such as `zone=us-east-1a` becomes

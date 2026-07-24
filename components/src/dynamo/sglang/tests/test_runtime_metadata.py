@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -75,6 +76,76 @@ def test_eagle_enabled_for_speculative_algorithm(speculative_algorithm, expected
     assert _eagle_enabled_for(speculative_algorithm) is expected
 
 
+@pytest.mark.parametrize(
+    "allow_auto_truncate, validate_total_tokens, reserved_tokens, expected",
+    [
+        (False, True, 0, 256),
+        (False, True, 4, 252),
+        (False, True, 300, 0),
+        (True, True, 0, None),
+        (False, False, 0, None),
+    ],
+)
+def test_strict_request_token_limit_matches_sglang_policy(
+    allow_auto_truncate, validate_total_tokens, reserved_tokens, expected
+):
+    from dynamo.sglang.register import _get_strict_request_token_limit
+
+    engine = SimpleNamespace(
+        tokenizer_manager=SimpleNamespace(
+            context_len=256,
+            validate_total_tokens=validate_total_tokens,
+            num_reserved_tokens=reserved_tokens,
+        )
+    )
+    server_args = SimpleNamespace(
+        context_length=None,
+        allow_auto_truncate=allow_auto_truncate,
+    )
+
+    assert _get_strict_request_token_limit(engine, server_args) == expected
+
+
+def test_runtime_config_without_engine_omits_strict_request_limit(monkeypatch, caplog):
+    from dynamo.sglang import register
+
+    server_args = SimpleNamespace(
+        allow_auto_truncate=False,
+        context_length=4096,
+        disaggregation_mode=None,
+        max_prefill_tokens=None,
+        page_size=16,
+        speculative_algorithm="NONE",
+        speculative_num_steps=None,
+    )
+    dynamo_args = register.DynamoConfig()
+    dynamo_args.enable_local_indexer = False
+    capacity = SimpleNamespace(
+        max_num_seqs=None,
+        max_num_batched_tokens=None,
+        total_kv_blocks=None,
+    )
+
+    monkeypatch.setattr(register, "model_card_dp_rank_bounds", lambda _: (0, 1))
+    monkeypatch.setattr(register, "get_sglang_worker_group_id", lambda _: None)
+    monkeypatch.setattr(register, "apply_topology_config", lambda _: None)
+    monkeypatch.setattr(
+        register, "_get_bootstrap_info_for_config", lambda _: (None, None)
+    )
+    monkeypatch.setattr(register, "get_spec_decode_runtime_data", lambda _: None)
+    monkeypatch.setattr(register, "_get_mooncake_runtime_data", lambda _: None)
+    monkeypatch.setattr(register, "runtime_capacity", lambda *_: capacity)
+
+    runtime_config = asyncio.run(
+        register._get_runtime_config(None, server_args, dynamo_args)
+    )
+
+    assert register.STRICT_REQUEST_TOKEN_LIMIT_RUNTIME_KEY not in (
+        runtime_config.runtime_data
+    )
+    assert "Failed to get runtime config" not in caplog.text
+
+
 def test_hicache_publishes_native_offloading_capacity():
     server_args = SimpleNamespace(hicache_write_policy="write_back")
     assert get_hicache_native_offloading_capacity(
@@ -139,6 +210,7 @@ async def test_hicache_publish_failure_preserves_core_capacity(monkeypatch, capl
     from dynamo.sglang import register
 
     server_args = SimpleNamespace(
+        allow_auto_truncate=False,
         context_length=4096,
         disaggregation_mode=None,
         hicache_write_policy="write_back",
@@ -154,7 +226,12 @@ async def test_hicache_publish_failure_preserves_core_capacity(monkeypatch, capl
         "max_total_num_tokens": 1024,
     }
     engine = SimpleNamespace(
-        _scheduler_init_result=SimpleNamespace(scheduler_infos=[scheduler_info])
+        _scheduler_init_result=SimpleNamespace(scheduler_infos=[scheduler_info]),
+        tokenizer_manager=SimpleNamespace(
+            context_len=4096,
+            validate_total_tokens=True,
+            num_reserved_tokens=4,
+        ),
     )
     capacity = SimpleNamespace(
         max_num_seqs=None,
@@ -187,6 +264,10 @@ async def test_hicache_publish_failure_preserves_core_capacity(monkeypatch, capl
 
     assert runtime_config.total_kv_blocks == 64
     assert runtime_config.max_num_batched_tokens == 1024
+    assert (
+        runtime_config.runtime_data[register.STRICT_REQUEST_TOKEN_LIMIT_RUNTIME_KEY]
+        == "4092"
+    )
     assert (
         "Failed to attach native offloading capacity from SGLang HiCache" in caplog.text
     )

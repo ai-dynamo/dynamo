@@ -55,6 +55,7 @@ from .capacity import (
     get_metrics_model_name,
     get_spec_decode_runtime_data,
     per_rank_kv_blocks,
+    set_strict_request_token_limit,
 )
 from .handlers import get_dp_range_for_worker
 from .headless import run_dynamo_headless
@@ -634,6 +635,15 @@ def setup_vllm_engine(
     )
 
 
+def _set_vllm_request_token_limit(
+    runtime_config: ModelRuntimeConfig,
+    model_type: ModelType,
+    max_model_len: int,
+) -> None:
+    if model_type != ModelType.Embedding:
+        set_strict_request_token_limit(runtime_config, max_model_len)
+
+
 async def register_vllm_model(
     model_input: ModelInput,
     model_type: ModelType,
@@ -666,6 +676,9 @@ async def register_vllm_model(
     """
     runtime_config = ModelRuntimeConfig()
     runtime_config.context_length = vllm_config.model_config.max_model_len
+    _set_vllm_request_token_limit(
+        runtime_config, model_type, vllm_config.model_config.max_model_len
+    )
 
     # Get runtime configuration from vLLM engine
     logging.info(

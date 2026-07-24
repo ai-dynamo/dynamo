@@ -24,6 +24,7 @@ use dynamo_llm::{
 use dynamo_runtime::metrics::prometheus_names::{frontend_service, name_prefix};
 use dynamo_runtime::{
     CancellationToken,
+    error::{DynamoError, ErrorType as DynamoErrorType},
     pipeline::{
         AsyncEngine, AsyncEngineContextProvider, ManyOut, ResponseStream, SingleIn, async_trait,
     },
@@ -144,6 +145,28 @@ impl
 }
 
 struct AlwaysFailEngine {}
+
+struct InvalidArgumentEngine {}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateChatCompletionRequest>,
+        ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+        Error,
+    > for InvalidArgumentEngine
+{
+    async fn generate(
+        &self,
+        _request: SingleIn<NvCreateChatCompletionRequest>,
+    ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
+        Err(DynamoError::builder()
+            .error_type(DynamoErrorType::InvalidArgument)
+            .message("request exceeds strict token budget")
+            .build()
+            .into())
+    }
+}
 
 #[async_trait]
 impl
@@ -299,6 +322,14 @@ async fn test_http_service() {
     assert!(result.is_ok());
 
     let result = manager.add_completions_model("bar", card.mdcsum(), failure);
+    assert!(result.is_ok());
+
+    let card = ModelDeploymentCard::with_name_only("invalid-argument");
+    let result = manager.add_chat_completions_model(
+        "invalid-argument",
+        card.mdcsum(),
+        Arc::new(InvalidArgumentEngine {}),
+    );
     assert!(result.is_ok());
 
     let metrics = state.metrics_clone();
@@ -485,6 +516,44 @@ async fn test_http_service() {
     compare_counters(&metrics, "foo", &foo_counters);
     compare_counters(&metrics, "bar", &bar_counters);
     // ==== ChatCompletions / Unary / Error ====
+
+    // ==== ChatCompletions / Stream / InvalidArgument ====
+    // Admission failures must be returned as an HTTP error before a streaming
+    // 200 response is committed.
+    request.model = "invalid-argument".to_string();
+    request.stream = Some(true);
+
+    let response = client
+        .post(format!("http://localhost:{}/v1/chat/completions", port))
+        .json(&request)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("application/json"))
+    );
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["code"], StatusCode::BAD_REQUEST.as_u16());
+    assert_eq!(
+        body["message"],
+        "Validation: request exceeds strict token budget"
+    );
+    compare_counter(
+        &metrics,
+        "invalid-argument",
+        &Endpoint::ChatCompletions,
+        &RequestType::Stream,
+        &Status::Error,
+        &ErrorType::Validation,
+        1,
+    );
+    // ==== ChatCompletions / Stream / InvalidArgument ====
 
     // ==== Completions / Unary / Error ====
     let mut request = dynamo_protocols::types::CreateCompletionRequestArgs::default()
