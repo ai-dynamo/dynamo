@@ -307,6 +307,7 @@ def metric_payload_default(
     backend: Optional[str] = None,
     port: int = DefaultPort.SYSTEM1.value,
     check_lifecycle_gauges: bool = False,
+    optional_kvstats: bool = False,
 ) -> MetricsPayload:
     """Create a metrics payload for the specified backend.
 
@@ -320,6 +321,9 @@ def metric_payload_default(
             (``cleanup_time_seconds``, ``drain_time_seconds``,
             ``kv_cache_hit_rate``) are registered. Default False because
             legacy entry points don't emit them.
+        optional_kvstats: Relax the decode-side KV gauges (``total_blocks``,
+            ``gpu_cache_usage_percent``); set True only for a disaggregated
+            prefill worker, which doesn't emit them.
 
     Returns:
         Backend-specific MetricsPayload subclass based on backend parameter
@@ -332,6 +336,7 @@ def metric_payload_default(
         "min_num_requests": min_num_requests,
         "port": port,
         "check_lifecycle_gauges": check_lifecycle_gauges,
+        "optional_kvstats": optional_kvstats,
     }
 
     # Return backend-specific payload class
