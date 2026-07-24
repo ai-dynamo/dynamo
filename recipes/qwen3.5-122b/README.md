@@ -18,10 +18,12 @@ Dynamo + vLLM aggregated profile for the agentic workload on **H200**.
 | **Framework**            | vLLM (runtime `1.3.0`)                           |
 | **Precision**            | FP8 weights + BF16 KV                            |
 | **Parallelism**          | TP1                                              |
+| **MoE backend**          | `triton` (auto-selected on H200 FP8)             |
 | **KV cache manager**     | Hybrid (DeltaNet SSM + attention)                |
 | **Routing**              | KV-aware (`DYN_ROUTER_MODE=kv`) + worker KV events |
 | **Speculative decoding** | MTP, `num_speculative_tokens=3`                  |
 | **Context length**       | 262,144 (model default)                          |
+| **KV transfer**          | N/A (aggregated)                                 |
 
 ### Why TP1 + replicas + KV routing
 
@@ -35,7 +37,7 @@ H200 node runs `replicas: 8`.
 
 ## Supported features
 
-- Modalities: Text
+- Modalities: Text, Image, Video
 - Reasoning (`--dyn-reasoning-parser qwen3`)
 - Tool calling (`--dyn-tool-call-parser qwen3_coder`)
 
@@ -159,7 +161,7 @@ To reproduce the throughput numbers, set the worker env `SPECULATIVE_CONFIG`
 (perf/README.md). **Never ship the synthetic key** — production serves real traffic with
 real acceptance.
 
-## Known issues
+## Limitations
 
 - **`--max-num-seqs` must stay ≤ 228.** The Mamba/DeltaNet SSM cache is block-allocated
   at TP1; the vLLM default (`1024`) crashes at startup. The recipe ships `128`.
