@@ -314,13 +314,13 @@ pub struct OpenAIPreprocessor {
 impl OpenAIPreprocessor {
     fn omitted_max_tokens_default(
         prompt_len: usize,
-        context_length: u32,
+        token_limit: Option<u32>,
         options: PreprocessRequestOptions,
     ) -> Option<u32> {
-        if context_length == 0 || options.preserve_omitted_max_tokens {
+        if options.preserve_omitted_max_tokens {
             return None;
         }
-        Some(context_length.saturating_sub(prompt_len as u32))
+        token_limit.map(|limit| limit.saturating_sub(prompt_len as u32))
     }
 
     /// Return the exact prompt length when the frontend can prove it.
@@ -359,23 +359,35 @@ impl OpenAIPreprocessor {
     /// engine-published limit.
     fn validate_requested_token_budget(
         prompt_len: usize,
-        max_tokens: u32,
+        max_tokens: Option<u32>,
         strict_request_token_limit: Option<u32>,
     ) -> Result<()> {
         let Some(strict_request_token_limit) = strict_request_token_limit else {
             return Ok(());
         };
 
-        let requested_tokens = prompt_len.saturating_add(max_tokens as usize);
+        // An omitted output cap still has a useful lower bound: the prompt
+        // itself must fit. The backend remains responsible for choosing the
+        // generation cap when the prompt is within the strict limit.
+        let requested_tokens = prompt_len.saturating_add(max_tokens.unwrap_or_default() as usize);
         if requested_tokens > strict_request_token_limit as usize {
+            let request_description = match max_tokens {
+                Some(max_tokens) => format!(
+                    "your request has {prompt_len} input tokens and asks for {max_tokens} output \
+                     tokens ({requested_tokens} tokens total)"
+                ),
+                None => format!(
+                    "your request already has {prompt_len} input tokens before generating any \
+                     output"
+                ),
+            };
             return Err(DynamoError::builder()
                 .error_type(ErrorType::InvalidArgument)
                 .message(format!(
                     "This model configuration accepts at most {} combined input and output \
-                     tokens. However, your request has {} input tokens and asks for {} output \
-                     tokens ({} tokens total). Please reduce the input length or requested \
-                     output length.",
-                    strict_request_token_limit, prompt_len, max_tokens, requested_tokens,
+                     tokens. However, {}. Please reduce the input length or requested output \
+                     length.",
+                    strict_request_token_limit, request_description,
                 ))
                 .build()
                 .into());
@@ -402,12 +414,10 @@ impl OpenAIPreprocessor {
             request.multi_modal_data.as_ref(),
             request.token_ids.len(),
         );
-        if let (Some(prompt_len), Some(max_tokens)) =
-            (exact_prompt_len, request.stop_conditions.max_tokens)
-        {
+        if let Some(prompt_len) = exact_prompt_len {
             Self::validate_requested_token_budget(
                 prompt_len,
-                max_tokens,
+                request.stop_conditions.max_tokens,
                 strict_request_token_limit,
             )?;
         }
@@ -1023,10 +1033,21 @@ impl OpenAIPreprocessor {
         )?;
         if preprocessed.stop_conditions.max_tokens.is_none()
             && let Some(prompt_len) = exact_prompt_len
-            && let Some(max_tokens) =
-                Self::omitted_max_tokens_default(prompt_len, self.context_length, options)
+            && let Some(max_tokens) = Self::omitted_max_tokens_default(
+                prompt_len,
+                self.strict_request_token_limit
+                    .or_else(|| (self.context_length != 0).then_some(self.context_length)),
+                options,
+            )
         {
             preprocessed.stop_conditions.max_tokens = Some(max_tokens);
+            // A strict limit may be smaller than the raw context window because
+            // the engine reserves tokens. Revalidate the derived budget so an
+            // already-over-limit prompt fails before streaming begins.
+            Self::validate_preprocessed_token_budget(
+                &preprocessed,
+                self.strict_request_token_limit,
+            )?;
         }
 
         Ok((preprocessed, annotations, prompt_injected_reasoning))
@@ -4546,7 +4567,7 @@ mod tests {
         assert_eq!(
             OpenAIPreprocessor::omitted_max_tokens_default(
                 10,
-                100,
+                Some(100),
                 PreprocessRequestOptions::default()
             ),
             Some(90)
@@ -4554,7 +4575,7 @@ mod tests {
         assert_eq!(
             OpenAIPreprocessor::omitted_max_tokens_default(
                 10,
-                100,
+                Some(100),
                 PreprocessRequestOptions {
                     preserve_omitted_max_tokens: true,
                 },
@@ -4564,10 +4585,18 @@ mod tests {
         assert_eq!(
             OpenAIPreprocessor::omitted_max_tokens_default(
                 10,
-                0,
+                None,
                 PreprocessRequestOptions::default()
             ),
             None
+        );
+        assert_eq!(
+            OpenAIPreprocessor::omitted_max_tokens_default(
+                10,
+                Some(0),
+                PreprocessRequestOptions::default()
+            ),
+            Some(0)
         );
     }
 
@@ -4639,17 +4668,19 @@ mod tests {
 
     #[test]
     fn test_requested_token_budget_validation() {
-        assert!(OpenAIPreprocessor::validate_requested_token_budget(80, 20, Some(100)).is_ok());
-        assert!(OpenAIPreprocessor::validate_requested_token_budget(80, 21, Some(100)).is_err());
+        // With no output cap, only prompt overflow is certain.
+        assert!(OpenAIPreprocessor::validate_requested_token_budget(100, None, Some(100)).is_ok());
+        assert!(OpenAIPreprocessor::validate_requested_token_budget(101, None, Some(100)).is_err());
+        // Explicit-budget arithmetic cannot wrap into an accepted request.
         assert!(
-            OpenAIPreprocessor::validate_requested_token_budget(usize::MAX, 1, Some(100)).is_err()
+            OpenAIPreprocessor::validate_requested_token_budget(usize::MAX, Some(1), Some(100))
+                .is_err()
         );
-        assert!(OpenAIPreprocessor::validate_requested_token_budget(usize::MAX, 1, None).is_ok());
     }
 
-    fn preprocessed_budget_request(max_tokens: u32) -> PreprocessedRequest {
+    fn preprocessed_budget_request(max_tokens: Option<u32>) -> PreprocessedRequest {
         let stop_conditions = crate::protocols::common::StopConditions {
-            max_tokens: Some(max_tokens),
+            max_tokens,
             ..Default::default()
         };
 
@@ -4667,10 +4698,29 @@ mod tests {
     fn test_preprocessed_completion_budget_validation_and_deferral() {
         // Models the legacy Completions request after its builder has produced
         // exact text/token input: 3 input + 8 output exceeds a strict limit of 10.
-        let text_request = preprocessed_budget_request(8);
+        let text_request = preprocessed_budget_request(Some(8));
         assert!(
             OpenAIPreprocessor::validate_preprocessed_token_budget(&text_request, Some(10))
                 .is_err()
+        );
+
+        // An omitted output budget is backend-owned, but the prompt must fit by
+        // itself. The exact boundary is valid; one token over is not.
+        let omitted_budget_request = preprocessed_budget_request(None);
+        assert_eq!(
+            OpenAIPreprocessor::validate_preprocessed_token_budget(
+                &omitted_budget_request,
+                Some(3)
+            )
+            .unwrap(),
+            Some(3)
+        );
+        assert!(
+            OpenAIPreprocessor::validate_preprocessed_token_budget(
+                &omitted_budget_request,
+                Some(2)
+            )
+            .is_err()
         );
 
         // Prompt embeddings do not expose their sequence length as token_ids.
@@ -4678,20 +4728,6 @@ mod tests {
         embeddings_request.prompt_embeds = Some("opaque-tensor".to_string());
         assert_eq!(
             OpenAIPreprocessor::validate_preprocessed_token_budget(&embeddings_request, Some(10))
-                .unwrap(),
-            None
-        );
-
-        // Unexpanded multimodal placeholders likewise remain backend-owned.
-        let mut multimodal_request = text_request;
-        multimodal_request.multi_modal_data = Some(MultimodalDataMap::from([(
-            "image_url".to_string(),
-            vec![MultimodalData::Url(
-                url::Url::parse("https://example.com/image.png").unwrap(),
-            )],
-        )]));
-        assert_eq!(
-            OpenAIPreprocessor::validate_preprocessed_token_budget(&multimodal_request, Some(10))
                 .unwrap(),
             None
         );

@@ -841,6 +841,25 @@ mod context_length_validation {
     }
 
     #[tokio::test]
+    async fn test_omitted_output_budget_uses_strict_engine_limit() {
+        let message = r#"[{"role": "user", "content": "What is deep learning?"}]"#;
+        let (mut mdc, prompt_len) = model_card_and_prompt_len(message).await;
+
+        set_strict_request_token_limit(&mut mdc, prompt_len + 10);
+        // The raw model context is larger because the engine reserves tokens.
+        mdc.runtime_config.context_length = Some(prompt_len + 100);
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        let request = make_chat_request(message, "test-model");
+
+        let (preprocessed, _, _) = preprocessor
+            .preprocess_request(&request, None)
+            .await
+            .unwrap();
+
+        assert_eq!(preprocessed.stop_conditions.max_tokens, Some(10));
+    }
+
+    #[tokio::test]
     async fn test_requested_tokens_defer_without_strict_engine_limit() {
         let message = r#"[{"role": "user", "content": "What is deep learning?"}]"#;
         let (mut mdc, prompt_len) = model_card_and_prompt_len(message).await;

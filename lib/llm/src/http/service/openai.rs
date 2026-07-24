@@ -394,7 +394,7 @@ impl ErrorMessage {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorMessage {
-                    message: dynamo_err.message().to_string(),
+                    message: format!("{VALIDATION_PREFIX}{}", dynamo_err.message()),
                     error_type: map_error_code_to_error_type(StatusCode::BAD_REQUEST),
                     code: StatusCode::BAD_REQUEST.as_u16(),
                     details: None,
