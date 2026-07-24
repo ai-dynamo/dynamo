@@ -69,4 +69,5 @@ def test_failed_cleanup_leaves_deployment_for_final_cleanup():
             )
         )
 
+    client.delete_deployment.assert_awaited_once_with()
     assert deployment_clients == [client]
