@@ -65,15 +65,15 @@ aiperf profile Qwen/Qwen3.5-122B-A10B-FP8 --tokenizer Qwen/Qwen3.5-122B-A10B-FP8
 ## Results
 
 Agentic 15% Mooncake trace (3,541 reqs / 3,411 completed / 130 errors each), concurrency 8,
-tp1 + MTP(nst=3) forced to the measured AL=2.925 (`speculative-config-synthetic`).
+tp1 + MTP(nst=3) forced to the SpeedBench-measured AL=2.937 (`speculative-config-synthetic`).
 
 | Router       | Output tok/s | Req/s | TTFT mean (ms) | ITL (ms) | KV hit rate |
 | ------------ | ------------ | ----- | -------------- | -------- | ----------- |
-| round_robin  | 640.3        | 0.28  | 10,499         | 11.2     | ~0 (routing off) |
-| **kv**       | **764.2**    | 0.33  | **4,248**      | 9.3      | **~59%**    |
-| **Δ (kv)**   | **+19.4%**   | +18%  | **−59% (2.5×)** | −17%    | —           |
+| round_robin  | 620.7        | 0.27  | 11,194         | 10.4     | ~0 (routing off) |
+| **kv**       | **759.5**    | 0.33  | **4,391**      | 9.2      | **59.0%**   |
+| **Δ (kv)**   | **+22.4%**   | +22%  | **−61% (2.6×)** | −11%    | —           |
 
-KV-aware routing is the recommended configuration: +19.4% output throughput and 2.5× lower
+KV-aware routing is the recommended configuration: +22.4% output throughput and 2.6× lower
 TTFT by landing shared-prefix requests on the replica holding the cache.
 
 ## Speculative decoding — measuring the acceptance length (SpeedBench)
@@ -109,10 +109,11 @@ this as the `speculative-config-synthetic` ConfigMap key; set the worker's
 | nst | measured AL | SpeedBench-qualitative tok/s |
 | --- | ----------- | ---------------------------- |
 | 1   | 1.825       | 681 |
-| **3 (recipe)** | **2.925** | 895 |
+| **3 (recipe)** | **2.937** | 895 |
 | 5   | 3.518       | 910 |
 
-**AL(nst=3)=2.925** — per-position acceptance 0.80 / 0.63 / 0.50, overall acceptance rate
-~64%. Forced as `synthetic_acceptance_length:2.925` in the router benchmark above. nst=5
-edges nst=3 by <2% on the short-ISL SpeedBench split but loses on the 64k-context
+**Measured AL(nst=3)=2.937** (accepted 118,967 / drafts 61,422 → ~65% token acceptance).
+This exact value is forced in the router benchmark (`synthetic_acceptance_length:2.937`) —
+measured = forced; the live runtime confirmed mean acceptance length 2.94–2.95 during the
+run. nst=5 edges nst=3 by <2% on the short-ISL SpeedBench split but loses on the 64k-context
 (pool-bound) workload; nst=3 is the shipped depth.

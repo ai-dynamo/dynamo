@@ -7,7 +7,7 @@
 #
 # The worker's --speculative-config is sourced from the ConfigMap below via env:
 #   - key `speculative-config`           = REAL MTP (production; ships active).
-#   - key `speculative-config-synthetic` = forced AL=2.925 (measured on SpeedBench), for
+#   - key `speculative-config-synthetic` = forced AL=2.937 (measured on SpeedBench), for
 #     representative throughput benchmarking on synthetic traces (mooncake). Do NOT ship it.
 # To benchmark, set the worker's SPECULATIVE_CONFIG configMapKeyRef.key to
 # `speculative-config-synthetic`. See perf/README.md.
@@ -31,7 +31,7 @@ data:
       "num_speculative_tokens": 3,
       "moe_backend": "triton",
       "rejection_sample_method": "synthetic",
-      "synthetic_acceptance_length": 2.925
+      "synthetic_acceptance_length": 2.937
     }
 ---
 apiVersion: nvidia.com/v1beta1
@@ -152,7 +152,7 @@ spec:
                   valueFrom:
                     fieldRef:
                       fieldPath: metadata.uid
-                # Swap key to `speculative-config-synthetic` (AL=2.925) for representative
+                # Swap key to `speculative-config-synthetic` (AL=2.937) for representative
                 # benchmarking on synthetic traces; ship `speculative-config`.
                 - name: SPECULATIVE_CONFIG
                   valueFrom:

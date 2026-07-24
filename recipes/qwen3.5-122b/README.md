@@ -110,18 +110,18 @@ round_robin-vs-kv router comparison.
 
 **KV routing vs round_robin** — tp1 + MTP(nst=3), 2 workers, agentic 15% mooncake trace
 (3,541 reqs, block 512, concurrency 8), Dynamo `1.3.0` on H200. MTP forced to the
-**measured acceptance length AL=2.925** (see "Speculative decoding" below). Both runs
-identical except `DYN_ROUTER_MODE`. Each: 3,411 completed / 130 errors (long-context tail).
+**SpeedBench-measured AL=2.937** (see "Speculative decoding" below). Both runs identical
+except `DYN_ROUTER_MODE`. Each: 3,411 completed / 130 errors (long-context tail).
 
 | Router       | Output tok/s | Req/s | TTFT mean (ms) | ITL (ms) | KV hit rate |
 | ------------ | ------------ | ----- | -------------- | -------- | ----------- |
-| round_robin  | 640.3        | 0.28  | 10,499         | 11.2     | ~0 (routing off; workers still cache locally) |
-| **kv**       | **764.2**    | 0.33  | **4,248**      | 9.3      | **~59%**    |
-| **Δ (kv)**   | **+19.4%**   | +18%  | **−59% (2.5× faster)** | −17% | — |
+| round_robin  | 620.7        | 0.27  | 11,194         | 10.4     | ~0 (routing off; workers still cache locally) |
+| **kv**       | **759.5**    | 0.33  | **4,391**      | 9.2      | **59.0%**   |
+| **Δ (kv)**   | **+22.4%**   | +22%  | **−61% (2.6× faster)** | −11% | — |
 
-**KV-aware routing is the recommended configuration** — +19.4% throughput and 2.5× lower
+**KV-aware routing is the recommended configuration** — +22.4% throughput and 2.6× lower
 TTFT by landing shared-prefix requests on the replica holding the cache. (Per-user decode
-is ~8% lower under kv — it concentrates load on the cached replica — a small trade for the
+is ~7% lower under kv — it concentrates load on the cached replica — a small trade for the
 large system-throughput and first-token-latency wins.)
 
 ## Speculative decoding (MTP) — measured, not assumed
@@ -134,12 +134,13 @@ synthetic trace data.
 | nst (draft length) | measured AL | SpeedBench tok/s |
 | ------------------ | ----------- | ---------------- |
 | 1                  | 1.825       | 681              |
-| **3 (recipe)**     | **2.925**   | 895              |
+| **3 (recipe)**     | **2.937**   | 895              |
 | 5                  | 3.518       | 910              |
 
-- **AL(nst=3) = 2.925** — per-position acceptance ~0.80 / 0.62 / 0.50, overall acceptance
-  rate ~64%. This is the AL forced (`synthetic_acceptance_length:2.925`) in the router
-  benchmark above.
+- **Measured AL(nst=3) = 2.937** on SpeedBench (accepted 118,967 / drafts 61,422 → overall
+  ~65% token acceptance). This exact value is what the router benchmark forces
+  (`synthetic_acceptance_length: 2.937`) — measured = forced. (The live runtime confirmed it:
+  worker SpecDecoding metrics reported mean acceptance length 2.94–2.95 during the run.)
 - **nst=3 is the chosen depth.** nst=5 has higher AL and edges nst=3 by <2% on the
   short-ISL SpeedBench split, but its larger draft head costs more KV pool — on the
   64k-context agentic workload (pool-bound) that reverses the thin gain. nst=1 is clearly
@@ -154,7 +155,7 @@ sources `--speculative-config` from a **ConfigMap** with two keys:
 | ConfigMap key | value | use |
 | --- | --- | --- |
 | `speculative-config` (shipped active) | `{"method":"mtp","num_speculative_tokens":3,"moe_backend":"triton"}` | **production** — real MTP |
-| `speculative-config-synthetic` | above + `"rejection_sample_method":"synthetic","synthetic_acceptance_length":2.925` | **benchmark only** — forced measured AL for synthetic traces (mooncake) |
+| `speculative-config-synthetic` | above + `"rejection_sample_method":"synthetic","synthetic_acceptance_length":2.937` | **benchmark only** — forced measured AL for synthetic traces (mooncake) |
 
 To reproduce the throughput numbers, set the worker env `SPECULATIVE_CONFIG`
 `configMapKeyRef.key` to `speculative-config-synthetic`, then run the mooncake benchmark
@@ -172,7 +173,7 @@ real acceptance.
   utilization back to `0.92`.
 - **Benchmarking MTP on synthetic data:** spec-decode performance on synthetic AIPerf
   traces is not representative — use the `speculative-config-synthetic` ConfigMap key
-  (measured `synthetic_acceptance_length:2.925`) for representative numbers, per "Real vs
+  (measured `synthetic_acceptance_length:2.937`) for representative numbers, per "Real vs
   synthetic spec-config" above. Do **not** ship the synthetic key.
 - **ConfigMap/`moe_backend` note.** The tp1+MTP serving config was verified end-to-end;
   the ConfigMap-env indirection and `"moe_backend":"triton"` field follow the Nemotron-3-Super
