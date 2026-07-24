@@ -108,6 +108,7 @@ def _bare_adapter(capabilities):
         mode="disagg",
     )
     adapter._capabilities = capabilities
+    adapter._power_rollout_hold_warned = False
     return adapter
 
 

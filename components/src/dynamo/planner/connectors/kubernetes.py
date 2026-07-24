@@ -476,7 +476,12 @@ class KubernetesConnector(PlannerConnector):
         return None
 
     async def wait_for_deployment_ready(self, include_planner: bool = True):
-        """Wait for the deployment to be ready.
+        """Wait for the deployment to be ready (legacy replica-stability path).
+
+        Does **not** query DCD/Grove backing resources or require
+        ``observedGeneration`` catch-up. Power-aware callers that permanently
+        cache DGD fields must use :meth:`wait_for_settled_graph_deployment`
+        instead.
 
         Args:
             include_planner: If False, skip the planner component when checking
@@ -486,18 +491,30 @@ class KubernetesConnector(PlannerConnector):
         await self.kube_api.wait_for_graph_deployment_ready(
             self.graph_deployment_name,
             include_planner=include_planner,
+            require_backing_settled=False,
         )
 
     async def wait_for_settled_graph_deployment(
-        self, include_planner: bool = True
+        self,
+        include_planner: bool = True,
+        *,
+        require_prefill: bool = True,
+        require_decode: bool = True,
+        prefill_component_name: Optional[str] = None,
+        decode_component_name: Optional[str] = None,
     ) -> dict:
         """Wait for a settled DGD snapshot and return that same object.
 
         When ``include_planner`` is False, the snapshot has:
-        - ``status.observedGeneration >= metadata.generation``
         - non-planner worker replica counts stable (desired == updated == ready)
+        - ``status.observedGeneration >= metadata.generation``
         - each power-relevant worker's backing CR (DCD / Grove PodClique)
           generation-ready, so Pods have adopted the current template
+
+        Power-relevant workers are selected with the same role/name resolution
+        as :meth:`get_component_power_configs` (typed roles, explicit-name
+        fallback for untyped workers, unique generic ``type: worker`` for agg)
+        so a named untyped worker cannot be skipped while its DCD still lags.
 
         Callers that permanently cache fields from the DGD (power caps) must
         use this snapshot rather than issuing a later GET, so an
@@ -510,6 +527,11 @@ class KubernetesConnector(PlannerConnector):
         return await self.kube_api.wait_for_graph_deployment_ready(
             self.graph_deployment_name,
             include_planner=include_planner,
+            require_backing_settled=True,
+            require_prefill=require_prefill,
+            require_decode=require_decode,
+            prefill_component_name=prefill_component_name,
+            decode_component_name=decode_component_name,
         )
 
     def _list_worker_metadata_crs(self) -> list[dict]:

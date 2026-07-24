@@ -1539,3 +1539,46 @@ def test_service_get_component_name_from_endpoint_arg_missing_value():
         service=_component("VllmPrefillWorker", args=["--endpoint"]),
     )
     assert service.get_component_name_from_endpoint_arg() is None
+
+
+@pytest.mark.asyncio
+async def test_wait_for_deployment_ready_does_not_require_backing(kubernetes_connector):
+    """Production power-off path must keep the legacy readiness contract."""
+    with patch.object(
+        kubernetes_connector.kube_api,
+        "wait_for_graph_deployment_ready",
+        new_callable=AsyncMock,
+    ) as wait:
+        await kubernetes_connector.wait_for_deployment_ready(include_planner=False)
+    wait.assert_awaited_once_with(
+        kubernetes_connector.graph_deployment_name,
+        include_planner=False,
+        require_backing_settled=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_wait_for_settled_graph_deployment_requires_backing(kubernetes_connector):
+    """Power settlement path must opt into generation + backing gates."""
+    with patch.object(
+        kubernetes_connector.kube_api,
+        "wait_for_graph_deployment_ready",
+        new_callable=AsyncMock,
+        return_value={"metadata": {"name": "dgd"}},
+    ) as wait:
+        got = await kubernetes_connector.wait_for_settled_graph_deployment(
+            include_planner=False,
+            require_prefill=False,
+            require_decode=True,
+            decode_component_name="CustomDecode",
+        )
+    assert got == {"metadata": {"name": "dgd"}}
+    wait.assert_awaited_once_with(
+        kubernetes_connector.graph_deployment_name,
+        include_planner=False,
+        require_backing_settled=True,
+        require_prefill=False,
+        require_decode=True,
+        prefill_component_name=None,
+        decode_component_name="CustomDecode",
+    )

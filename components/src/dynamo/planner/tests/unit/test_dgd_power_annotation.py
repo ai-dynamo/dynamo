@@ -218,6 +218,19 @@ def test_explicit_name_resolution_when_type_absent():
     assert decode.watts_per_replica == 600
 
 
+def test_resolve_power_component_names_includes_untyped_named_worker():
+    from dynamo.planner.monitoring.dgd_services import resolve_power_component_names
+
+    dgd = _dgd(_worker("CustomDecode", comp_type=None, watts="300", gpus="2"))
+    names = resolve_power_component_names(
+        dgd,
+        require_prefill=False,
+        require_decode=True,
+        decode_name="CustomDecode",
+    )
+    assert names == ["CustomDecode"]
+
+
 # --------------------------------------------------------------------------- #
 # errors surface from the shared resolver
 # --------------------------------------------------------------------------- #

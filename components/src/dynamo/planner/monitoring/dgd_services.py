@@ -332,19 +332,20 @@ class ComponentPowerConfig:
         return self.gpu_power_limit_watts * self.gpus_per_replica
 
 
-def _resolve_one_power_config(
+def _resolve_one_power_service(
     deployment: dict,
     sub_component_type: SubComponentType,
     component_name: Optional[str],
-) -> ComponentPowerConfig:
-    """Resolve a single role's power config, or raise a typed error.
+) -> Service:
+    """Resolve a single role's worker Service without reading the power annotation.
 
     Role/name resolution reuses ``get_component_from_type_or_name`` for disagg
-    typed roles. For agg (single generic ``type: worker``), the fallback is
-    scoped to this power parser only — not the shared component resolver.
+    typed roles (including untyped components matched by explicit name). For agg
+    (single generic ``type: worker``), the fallback is scoped to this power
+    parser only — not the shared component resolver.
     """
     try:
-        service = get_component_from_type_or_name(
+        return get_component_from_type_or_name(
             deployment, sub_component_type, component_name=component_name
         )
     except SubComponentNotFoundError:
@@ -359,12 +360,20 @@ def _resolve_one_power_config(
         ]
         if len(generic_workers) == 1:
             name, component = generic_workers[0]
-            service = Service(name=name, service=component)
-        elif len(generic_workers) > 1:
+            return Service(name=name, service=component)
+        if len(generic_workers) > 1:
             component_names = [name for name, _ in generic_workers]
             raise DuplicateSubComponentError(sub_component_type.value, component_names)
-        else:
-            raise
+        raise
+
+
+def _resolve_one_power_config(
+    deployment: dict,
+    sub_component_type: SubComponentType,
+    component_name: Optional[str],
+) -> ComponentPowerConfig:
+    """Resolve a single role's power config, or raise a typed error."""
+    service = _resolve_one_power_service(deployment, sub_component_type, component_name)
     watts = service.get_gpu_power_limit_watts()
     gpus_per_replica = service.get_total_gpu_count()
     role = get_component_type(service.service) or sub_component_type.value
@@ -374,6 +383,44 @@ def _resolve_one_power_config(
         gpu_power_limit_watts=watts,
         gpus_per_replica=gpus_per_replica,
     )
+
+
+def resolve_power_component_names(
+    deployment: dict,
+    *,
+    require_prefill: bool,
+    require_decode: bool,
+    prefill_name: Optional[str] = None,
+    decode_name: Optional[str] = None,
+) -> list[str]:
+    """Return DGD component names whose backing CRs must settle for power caps.
+
+    Uses the same role/name resolution as :func:`resolve_component_power_configs`
+    (typed roles, explicit-name fallback for untyped workers, unique generic
+    ``type: worker`` for agg) but does not read the power annotation — so the
+    settlement gate can run before cap validation.
+    """
+    names: list[str] = []
+    if require_prefill:
+        names.append(
+            _resolve_one_power_service(
+                deployment, SubComponentType.PREFILL, prefill_name
+            ).name
+        )
+    if require_decode:
+        names.append(
+            _resolve_one_power_service(
+                deployment, SubComponentType.DECODE, decode_name
+            ).name
+        )
+    # Preserve order but drop duplicates (agg decode-only should be unique).
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for name in names:
+        if name not in seen:
+            seen.add(name)
+            ordered.append(name)
+    return ordered
 
 
 def resolve_component_power_configs(

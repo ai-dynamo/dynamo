@@ -364,7 +364,11 @@ async def test_initialize_caches_caps_from_settled_snapshot_not_lagging_get():
     await env.initialize()
 
     controller.wait_for_settled_graph_deployment.assert_awaited_once_with(
-        include_planner=False
+        include_planner=False,
+        require_prefill=True,
+        require_decode=True,
+        prefill_component_name="VllmPrefillWorker",
+        decode_component_name="VllmDecodeWorker",
     )
     assert seen["power_deployments"][0] is settled
     assert seen["gpu_deployments"][0] is settled

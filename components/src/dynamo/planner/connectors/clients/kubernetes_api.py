@@ -15,17 +15,22 @@
 
 import asyncio
 import logging
-from typing import Optional
+from typing import Optional, Sequence
 
 from kubernetes import client, config
 from kubernetes.client import ApiException
 from kubernetes.config.config_exception import ConfigException
 
-from dynamo.planner.errors import DynamoGraphDeploymentNotFoundError
+from dynamo.planner.errors import (
+    DuplicateSubComponentError,
+    DynamoGraphDeploymentNotFoundError,
+    SubComponentNotFoundError,
+)
 from dynamo.planner.monitoring.dgd_services import (
     Service,
     get_component_type,
     get_components_by_name,
+    resolve_power_component_names,
 )
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -559,19 +564,24 @@ class KubernetesAPI:
         )
 
     def worker_backing_resources_settled(
-        self, deployment: dict
+        self,
+        deployment: dict,
+        component_names: Sequence[str],
     ) -> tuple[bool, list[str]]:
-        """Return ``(all_settled, pending_worker_components)`` for power workers."""
+        """Return ``(all_settled, pending)`` for the named power-relevant workers.
+
+        ``component_names`` must be the roles selected by the power resolver
+        (:func:`~dynamo.planner.monitoring.dgd_services.resolve_power_component_names`),
+        including untyped workers matched by explicit name. A type-only filter
+        would skip those workers and allow caching a newer cap while their
+        DCD/Pods still enforce the previous one.
+        """
         blocking, reason = self.is_rolling_update_blocking_settlement(deployment)
         if blocking:
             return False, [reason]
 
         pending: list[str] = []
-        for component_name, component_spec in get_components_by_name(
-            deployment
-        ).items():
-            if get_component_type(component_spec) not in WORKER_COMPONENT_TYPES:
-                continue
+        for component_name in component_names:
             settled, reason = self.is_worker_backing_settled(deployment, component_name)
             if not settled:
                 pending.append(f"{component_name}: {reason}")
@@ -583,25 +593,37 @@ class KubernetesAPI:
         include_planner: bool = True,
         max_attempts: int = 180,  # default: 30 minutes total
         delay_seconds: int = 10,  # default: check every 10 seconds
+        *,
+        require_backing_settled: bool = False,
+        require_prefill: bool = True,
+        require_decode: bool = True,
+        prefill_component_name: Optional[str] = None,
+        decode_component_name: Optional[str] = None,
     ) -> dict:
-        """Wait for a graph deployment to be ready; return the settled snapshot.
+        """Wait for a graph deployment to be ready; return the ready snapshot.
 
         Args:
             graph_deployment_name: Name of the DGD to wait for.
             include_planner: If False, skip components with type "planner"
                 and check per-component readiness instead of the global DGD Ready
                 condition. This avoids a circular wait when the planner itself
-                is one of the services in the DGD. Also requires
-                ``status.observedGeneration >= metadata.generation`` on the
-                same snapshot so annotation-only updates are not treated as
-                settled before the controller observes them, and requires each
-                power-relevant worker's backing CR (DCD / Grove PodClique) to
-                have caught up its own generation before Pods are treated as
-                having adopted the template. Active rolling updates
-                (Pending/InProgress/Failed) block settlement so a still-
-                annotated old DCD cannot satisfy the gate.
+                is one of the services in the DGD.
             max_attempts: Maximum polling iterations.
             delay_seconds: Seconds between polls.
+            require_backing_settled: Power-only gate. When True (and
+                ``include_planner`` is False), also requires
+                ``status.observedGeneration >= metadata.generation`` and each
+                power-relevant worker's backing CR (DCD / Grove PodClique) to be
+                generation-ready, and blocks while
+                ``status.rollingUpdate.phase`` is Pending/InProgress/Failed.
+                Must stay False for the legacy ``wait_for_deployment_ready``
+                path so power-disabled planners keep working with older
+                operators / custom SAs that lack DCD/Grove get permissions.
+            require_prefill / require_decode / ``*_component_name``:
+                Forwarded to :func:`resolve_power_component_names` when
+                ``require_backing_settled`` is True so settlement covers the
+                same workers the power resolver will read (including untyped
+                named workers).
 
         Returns:
             The DGD dict that satisfied the readiness criteria (same object
@@ -625,41 +647,58 @@ class KubernetesAPI:
                     f"(status: {ready_condition.get('status') if ready_condition else 'N/A'}, "
                     f"message: {ready_condition.get('message') if ready_condition else 'no condition found'})"
                 )
-            else:
-                if not self.is_spec_generation_observed(graph_deployment):
-                    generation = graph_deployment.get("metadata", {}).get("generation")
-                    observed = graph_deployment.get("status", {}).get(
-                        "observedGeneration"
-                    )
-                    logger.info(
-                        f"[Attempt {attempt + 1}/{max_attempts}] "
-                        f"Waiting for DGD generation to be observed: "
-                        f"generation={generation}, observedGeneration={observed}"
-                    )
-                    continue
+                continue
 
-                all_stable, not_ready = self.non_planner_components_stable(
-                    graph_deployment
+            # Legacy exclude-planner path: replica-count stability only.
+            all_stable, not_ready = self.non_planner_components_stable(graph_deployment)
+            if not all_stable:
+                logger.info(
+                    f"[Attempt {attempt + 1}/{max_attempts}] "
+                    f"Waiting for components (excluding planner): "
+                    f"not ready: {not_ready}"
                 )
-                if not all_stable:
-                    logger.info(
-                        f"[Attempt {attempt + 1}/{max_attempts}] "
-                        f"Waiting for components (excluding planner): "
-                        f"not ready: {not_ready}"
-                    )
-                    continue
+                continue
 
-                backing_ok, backing_pending = self.worker_backing_resources_settled(
-                    graph_deployment
-                )
-                if not backing_ok:
-                    logger.info(
-                        f"[Attempt {attempt + 1}/{max_attempts}] "
-                        f"Waiting for worker backing resources: {backing_pending}"
-                    )
-                    continue
-
+            if not require_backing_settled:
                 return graph_deployment
+
+            # Power settlement: generation catch-up + resolved workers' backing.
+            if not self.is_spec_generation_observed(graph_deployment):
+                generation = graph_deployment.get("metadata", {}).get("generation")
+                observed = graph_deployment.get("status", {}).get("observedGeneration")
+                logger.info(
+                    f"[Attempt {attempt + 1}/{max_attempts}] "
+                    f"Waiting for DGD generation to be observed: "
+                    f"generation={generation}, observedGeneration={observed}"
+                )
+                continue
+
+            try:
+                power_names = resolve_power_component_names(
+                    graph_deployment,
+                    require_prefill=require_prefill,
+                    require_decode=require_decode,
+                    prefill_name=prefill_component_name,
+                    decode_name=decode_component_name,
+                )
+            except (SubComponentNotFoundError, DuplicateSubComponentError) as exc:
+                logger.info(
+                    f"[Attempt {attempt + 1}/{max_attempts}] "
+                    f"Waiting for power-relevant workers to be resolvable: {exc}"
+                )
+                continue
+
+            backing_ok, backing_pending = self.worker_backing_resources_settled(
+                graph_deployment, power_names
+            )
+            if not backing_ok:
+                logger.info(
+                    f"[Attempt {attempt + 1}/{max_attempts}] "
+                    f"Waiting for worker backing resources: {backing_pending}"
+                )
+                continue
+
+            return graph_deployment
 
         raise TimeoutError(
             f"Graph deployment '{graph_deployment_name}' "

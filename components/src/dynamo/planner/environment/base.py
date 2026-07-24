@@ -218,7 +218,14 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
                 self.controller, "wait_for_settled_graph_deployment", None
             )
             if inspect.iscoroutinefunction(wait_settled):
-                return await wait_settled(include_planner=False)
+                prefill_name, decode_name = self._power_component_names()
+                return await wait_settled(
+                    include_planner=False,
+                    require_prefill=self.require_prefill,
+                    require_decode=self.require_decode,
+                    prefill_component_name=prefill_name,
+                    decode_component_name=decode_name,
+                )
         await self.controller.wait_for_deployment_ready(include_planner=False)
         return self._shared_dgd_deployment()
 

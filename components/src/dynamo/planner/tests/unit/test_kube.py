@@ -522,6 +522,9 @@ async def test_wait_exclude_planner_rejects_unobserved_generation(
             await k8s_api.wait_for_graph_deployment_ready(
                 "test-deployment",
                 include_planner=False,
+                require_backing_settled=True,
+                require_prefill=False,
+                require_decode=True,
                 max_attempts=2,
                 delay_seconds=0.01,
             )
@@ -543,6 +546,9 @@ async def test_wait_exclude_planner_returns_observed_stable_snapshot(
         got = await k8s_api.wait_for_graph_deployment_ready(
             "test-deployment",
             include_planner=False,
+            require_backing_settled=True,
+            require_prefill=False,
+            require_decode=True,
             max_attempts=3,
             delay_seconds=0.01,
         )
@@ -572,6 +578,9 @@ async def test_wait_exclude_planner_rejects_dgd_observed_while_dcd_lags(
             await k8s_api.wait_for_graph_deployment_ready(
                 "test-deployment",
                 include_planner=False,
+                require_backing_settled=True,
+                require_prefill=False,
+                require_decode=True,
                 max_attempts=2,
                 delay_seconds=0.01,
             )
@@ -591,7 +600,9 @@ def test_worker_backing_resources_settled_rejects_lagging_dcd(k8s_api, mock_cust
         mock_custom_api,
         _ready_dcd(generation=2, observed_generation=1),
     )
-    settled, pending = k8s_api.worker_backing_resources_settled(dgd)
+    settled, pending = k8s_api.worker_backing_resources_settled(
+        dgd, ["VllmDecodeWorker"]
+    )
     assert settled is False
     assert pending == [
         "VllmDecodeWorker: DCD test-deployment-vllmdecodeworker not ready "
@@ -630,7 +641,9 @@ def test_worker_backing_resources_settled_rejects_lagging_pod_clique(
         raise client.ApiException(status=404)
 
     mock_custom_api.get_namespaced_custom_object.side_effect = _lookup
-    settled, pending = k8s_api.worker_backing_resources_settled(dgd)
+    settled, pending = k8s_api.worker_backing_resources_settled(
+        dgd, ["VllmDecodeWorker"]
+    )
     assert settled is False
     assert pending == [
         "VllmDecodeWorker: PodClique test-deployment-vllmdecodeworker "
@@ -670,7 +683,9 @@ def test_worker_backing_rejects_inprogress_rollout_with_ready_old_dcd(
         raise client.ApiException(status=404)
 
     mock_custom_api.get_namespaced_custom_object.side_effect = _lookup
-    settled, pending = k8s_api.worker_backing_resources_settled(dgd)
+    settled, pending = k8s_api.worker_backing_resources_settled(
+        dgd, ["VllmDecodeWorker"]
+    )
     assert settled is False
     assert pending == ["rollingUpdate.phase=InProgress"]
 
@@ -704,7 +719,9 @@ def test_worker_backing_rejects_when_component_names_include_lagging_new_dcd(
         raise client.ApiException(status=404)
 
     mock_custom_api.get_namespaced_custom_object.side_effect = _lookup
-    settled, pending = k8s_api.worker_backing_resources_settled(dgd)
+    settled, pending = k8s_api.worker_backing_resources_settled(
+        dgd, ["VllmDecodeWorker"]
+    )
     assert settled is False
     assert pending == [
         f"VllmDecodeWorker: DCD {new_name} not ready "
@@ -746,9 +763,88 @@ async def test_wait_exclude_planner_rejects_inprogress_rollout_ready_old_dcd(
             await k8s_api.wait_for_graph_deployment_ready(
                 "test-deployment",
                 include_planner=False,
+                require_backing_settled=True,
+                require_prefill=False,
+                require_decode=True,
                 max_attempts=2,
                 delay_seconds=0.01,
             )
+
+
+def test_worker_backing_settles_untyped_named_worker(k8s_api, mock_custom_api):
+    """Explicit-name power workers without ``type`` must still be settlement-gated.
+
+    The power resolver matches untyped components by name
+    (``_can_use_explicit_component_name``). A type-only backing filter would
+    skip them and allow caching a lower gen-N cap while the DCD still
+    enforces gen-N-1.
+    """
+    dgd = _stable_worker_dgd(generation=2, observed_generation=2, decode_watts="300")
+    # Drop type so only the explicit name resolves the role.
+    dgd["spec"]["components"][0].pop("type", None)
+    _mock_dcd_lookup(
+        mock_custom_api,
+        _ready_dcd(generation=2, observed_generation=1),
+    )
+    settled, pending = k8s_api.worker_backing_resources_settled(
+        dgd, ["VllmDecodeWorker"]
+    )
+    assert settled is False
+    assert pending == [
+        "VllmDecodeWorker: DCD test-deployment-vllmdecodeworker not ready "
+        "(generation=2, observedGeneration=1)"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_wait_settled_rejects_untyped_named_worker_with_lagging_dcd(
+    k8s_api, mock_custom_api
+):
+    """End-to-end settled wait: untyped named decode + lagging DCD must not pass."""
+    dgd = _stable_worker_dgd(generation=2, observed_generation=2, decode_watts="300")
+    dgd["spec"]["components"][0].pop("type", None)
+    lagging_dcd = _ready_dcd(generation=2, observed_generation=1)
+    lagging_dcd["status"]["conditions"] = []
+    _mock_dcd_lookup(mock_custom_api, lagging_dcd)
+    with patch.object(k8s_api, "get_graph_deployment", return_value=dgd):
+        with pytest.raises(TimeoutError):
+            await k8s_api.wait_for_graph_deployment_ready(
+                "test-deployment",
+                include_planner=False,
+                require_backing_settled=True,
+                require_prefill=False,
+                require_decode=True,
+                decode_component_name="VllmDecodeWorker",
+                max_attempts=2,
+                delay_seconds=0.01,
+            )
+
+
+@pytest.mark.asyncio
+async def test_wait_legacy_exclude_planner_does_not_query_backing(
+    k8s_api, mock_custom_api
+):
+    """Power-off / legacy wait must not touch DCD or Grove CRs.
+
+    ``include_planner=False`` without ``require_backing_settled`` restores the
+    pre-power readiness contract: replica-count stability only. Generation lag
+    and backing CR readiness are power-settlement concerns.
+    """
+    # Replica-stable, but observedGeneration lags and no DCD is registered —
+    # legacy wait must still succeed without issuing a backing GET.
+    lagging = _stable_worker_dgd(
+        generation=2, observed_generation=1, decode_watts="300"
+    )
+    with patch.object(k8s_api, "get_graph_deployment", return_value=lagging):
+        got = await k8s_api.wait_for_graph_deployment_ready(
+            "test-deployment",
+            include_planner=False,
+            require_backing_settled=False,
+            max_attempts=2,
+            delay_seconds=0.01,
+        )
+    assert got is lagging
+    mock_custom_api.get_namespaced_custom_object.assert_not_called()
 
 
 def test_get_graph_deployment(k8s_api, mock_custom_api):
