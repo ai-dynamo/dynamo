@@ -125,10 +125,10 @@ const KIND_BADGE: Record<ReleaseKind, { variant: "green" | "gray" | "amber"; lab
   "model-build": { variant: "amber", label: "Model build" },
 };
 
-/** Chronologically previous non-model-build release's pins (RELEASES is newest-first). */
-function previousComparablePins(index: number): BackendPins | undefined {
+/** Chronologically previous non-model-build release (RELEASES is newest-first). */
+function previousComparable(index: number): Release | undefined {
   for (let j = index + 1; j < RELEASES.length; j++) {
-    if (RELEASES[j].kind !== "model-build") return RELEASES[j].pins;
+    if (RELEASES[j].kind !== "model-build") return RELEASES[j];
   }
   return undefined;
 }
@@ -172,7 +172,7 @@ function PinCells({ pins, prev }: { pins?: BackendPins; prev?: BackendPins }) {
   );
 }
 
-function ReleaseRow({ release, prev }: { release: Release; prev?: BackendPins }) {
+function ReleaseRow({ release, prev }: { release: Release; prev?: Release }) {
   const badge = KIND_BADGE[release.kind];
   return (
     <tr>
@@ -184,7 +184,10 @@ function ReleaseRow({ release, prev }: { release: Release; prev?: BackendPins })
       <td className="dynref-vm-kind">
         <span className={`dynref-badge dynref-badge--${badge.variant}`}>{badge.label}</span>
       </td>
-      <PinCells pins={release.pins} prev={prev} />
+      <PinCells pins={release.pins} prev={prev?.pins} />
+      <td>
+        <Pin value={release.ucx} changed={prev?.ucx ? prev.ucx !== release.ucx : false} />
+      </td>
     </tr>
   );
 }
@@ -205,6 +208,7 @@ export function BackendVersionMatrix({ mode = "current" }: { mode?: "current" | 
                 <th key={key}>{label}</th>
               ))}
               <th>NIXL</th>
+              <th>UCX</th>
             </tr>
           </thead>
           <tbody>
@@ -216,6 +220,9 @@ export function BackendVersionMatrix({ mode = "current" }: { mode?: "current" | 
                     <span className="dynref-badge dynref-badge--gray">development</span>
                   </td>
                   <PinCells pins={MAIN_TOT} />
+                  <td>
+                    <Pin />
+                  </td>
                 </tr>
                 {current && (
                   <tr>
@@ -227,6 +234,9 @@ export function BackendVersionMatrix({ mode = "current" }: { mode?: "current" | 
                       <span className="dynref-badge dynref-badge--green">GA release</span>
                     </td>
                     <PinCells pins={current.pins} />
+                    <td>
+                      <Pin value={current.ucx} />
+                    </td>
                   </tr>
                 )}
               </>
@@ -235,7 +245,7 @@ export function BackendVersionMatrix({ mode = "current" }: { mode?: "current" | 
                 <ReleaseRow
                   key={release.version}
                   release={release}
-                  prev={previousComparablePins(index)}
+                  prev={previousComparable(index)}
                 />
               ))
             )}

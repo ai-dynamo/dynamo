@@ -10,8 +10,8 @@
  * release-artifacts.md, model-early-access-builds.md).
  *
  * PER-RELEASE BUMP CHECKLIST (a release touches more than this file):
- *   1. This file: add the RELEASES entry (pins, date, delta, notesSummary,
- *      notesHref), CUDA_HISTORY rows, ARTIFACTS tags/versions, MAIN_TOT,
+ *   1. This file: add the RELEASES entry (pins, ucx, date, delta,
+ *      notesSummary, notesHref), CUDA_HISTORY rows, ARTIFACTS tags/versions, MAIN_TOT,
  *      CURRENT_* consts, MODEL_EA_BUILDS, and the RELEASE_STATS entry
  *      (counts from the GitHub body) as applicable.
  *   2. New page reference/release-notes/vX-Y-Z.mdx (ingest the GitHub body;
@@ -50,6 +50,10 @@ export interface Release {
   /** Docs-native release notes page (absolute site path); GitHub link used when absent. */
   notesHref?: string;
   pins?: BackendPins;
+  /** UCX version shipped with the release's NIXL builds — from the release's
+   *  Key Dependencies table; omitted where the source never stated one
+   *  (v1.0.0 and patch releases). */
+  ucx?: string;
   delta?: string;
   note?: string;
   /** Feature-voice one-liner for the Release Notes timeline (stable releases);
@@ -83,6 +87,7 @@ export const RELEASES: Release[] = [
     github: `${GH}v1.3.0`,
     docs: "https://docs.nvidia.com/dynamo",
     pins: { sglang: "0.5.14", trtllm: "1.3.0rc19", vllm: "0.23.0", nixlSglang: "1.3.0", nixlTrtllm: "1.0.1", nixlVllm: "1.1.0" },
+    ucx: "1.20.x",
     delta:
       "CUDA 12 container images discontinued; EFA variants go multi-arch as -efa; GA wheels published as 1.3.0.post1 (containers stay :1.3.0); UCX 1.20.x.",
     notesSummary:
@@ -115,6 +120,7 @@ export const RELEASES: Release[] = [
     github: `${GH}v1.2.0`,
     docs: "https://docs.nvidia.com/dynamo",
     pins: { sglang: "0.5.11", trtllm: "1.3.0rc14", vllm: "0.20.1", nixlSglang: "1.0.1", nixlTrtllm: "0.10.1", nixlVllm: "0.10.1" },
+    ucx: "1.20.0",
     delta:
       "603 PRs from 82 authors. DGD/DGDR promoted to v1beta1; CRTC default approximate KV router; inter-pod GMS sidecar; Dynamo Snapshot on CRI-O / OpenShift; UCX 1.20.0.",
     notesSummary:
@@ -156,6 +162,7 @@ export const RELEASES: Release[] = [
     github: `${GH}v1.1.0`,
     docs: "https://docs.nvidia.com/dynamo",
     pins: { sglang: "0.5.10.post1", trtllm: "1.3.0rc11", vllm: "0.19.0", nixlSglang: "1.0.1", nixlTrtllm: "0.10.1", nixlVllm: "0.10.1" },
+    ucx: "1.20",
     delta:
       "Planner split into its own dynamo-planner image (artifact boundary change). First 1.y.z publication of dynamo-protocols on crates.io; dynamo-async-openai deprecated at final 1.0.2.",
     notesSummary:

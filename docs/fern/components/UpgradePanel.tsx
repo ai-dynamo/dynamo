@@ -191,6 +191,12 @@ export function buildRows(
     if (fromPin && toPin) rows.push({ label, from: fromPin, to: toPin });
   }
 
+  // UCX ships with the NIXL builds, so it sits directly under the NIXL rows.
+  // Skipped when either side never stated a UCX version (v1.0.0, patches).
+  const fromUcx = RELEASES.find((r) => r.version === fromTag)?.ucx;
+  const toUcx = RELEASES.find((r) => r.version === toTag)?.ucx;
+  if (fromUcx && toUcx) rows.push({ label: "UCX", from: fromUcx, to: toUcx });
+
   const fromCuda = cudaRowsFor(fromTag);
   const toCuda = cudaRowsFor(toTag);
   const fromToolkits = uniq(fromCuda.map((row) => row.toolkit));

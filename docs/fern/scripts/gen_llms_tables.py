@@ -513,6 +513,7 @@ def render_compatibility(data: dict) -> str:
             tot.get("trtllm"),
             tot.get("vllm"),
             nixl_cell(tot),
+            None,
         ]
     )
     for rel in data["RELEASES"]:
@@ -525,6 +526,7 @@ def render_compatibility(data: dict) -> str:
                 pins.get("trtllm"),
                 pins.get("vllm"),
                 nixl_cell(pins),
+                rel.get("ucx"),
             ]
         )
     parts.append("**Backend engine pins per Dynamo release**")
@@ -537,6 +539,7 @@ def render_compatibility(data: dict) -> str:
                 "TensorRT-LLM",
                 "vLLM",
                 "NIXL (SGL / TRT / vLLM)",
+                "UCX",
             ],
             pin_rows,
         )
@@ -637,6 +640,7 @@ def render_releases_data(data: dict) -> str:
             tot.get("trtllm"),
             tot.get("vllm"),
             nixl_cell(tot),
+            None,
             "-",
             "-",
         ]
@@ -653,6 +657,7 @@ def render_releases_data(data: dict) -> str:
                 pins.get("trtllm"),
                 pins.get("vllm"),
                 nixl_cell(pins),
+                rel.get("ucx"),
                 f"[release notes]({link})" if link else None,
                 rel.get("delta") or rel.get("note"),
             ]
@@ -667,6 +672,7 @@ def render_releases_data(data: dict) -> str:
                 "TensorRT-LLM",
                 "vLLM",
                 "NIXL (SGL / TRT / vLLM)",
+                "UCX",
                 "Notes",
                 "Delta",
             ],
