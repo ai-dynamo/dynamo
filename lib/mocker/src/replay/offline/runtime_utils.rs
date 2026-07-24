@@ -5,8 +5,7 @@ use std::collections::BinaryHeap;
 #[cfg(test)]
 use std::collections::VecDeque;
 
-use dynamo_kv_router::protocols::RouterEvent;
-
+use super::core::{EngineEventBatch, EngineProgress};
 use super::events::{SimulationEvent, SimulationEventKind, SimulationWorkerStage};
 use crate::common::handoff::HandoffId;
 #[cfg(test)]
@@ -15,13 +14,14 @@ use crate::common::protocols::{ForwardPassSnapshot, OutputSignal};
 use crate::scheduler::SchedulerLifecycleEvent;
 
 #[derive(Debug)]
-pub(super) struct WorkerCompletionPayload {
+pub(super) struct WorkerCompletionPayload<Events: EngineEventBatch = ()> {
     pub stage: SimulationWorkerStage,
     pub worker_idx: usize,
     pub completed_requests: usize,
     pub output_signals: Vec<OutputSignal>,
     pub lifecycle_events: Vec<SchedulerLifecycleEvent>,
-    pub kv_events: Vec<RouterEvent>,
+    pub engine_events: Events,
+    pub progress: EngineProgress,
     pub fpm: Option<ForwardPassSnapshot>,
     pub accept_length_output_tokens: usize,
     pub accept_length_decode_forwards: usize,
@@ -68,11 +68,11 @@ pub(super) fn pop_next_concurrency_ready(
     Some((request, now_ms))
 }
 
-pub(super) fn push_worker_completion(
-    events: &mut BinaryHeap<SimulationEvent>,
+pub(super) fn push_worker_completion<Events: EngineEventBatch>(
+    events: &mut BinaryHeap<SimulationEvent<Events>>,
     next_event_seq: &mut u64,
     at_ms: f64,
-    payload: WorkerCompletionPayload,
+    payload: WorkerCompletionPayload<Events>,
 ) {
     events.push(SimulationEvent {
         at_ms,
@@ -83,7 +83,9 @@ pub(super) fn push_worker_completion(
             completed_requests: payload.completed_requests,
             output_signals: payload.output_signals,
             lifecycle_events: payload.lifecycle_events,
-            kv_events: payload.kv_events,
+            engine_events: payload.engine_events,
+            made_progress: payload.progress.made_progress,
+            had_raw_observations: payload.progress.had_raw_observations,
             fpm: payload.fpm.map(Box::new),
             accept_length_output_tokens: payload.accept_length_output_tokens,
             accept_length_decode_forwards: payload.accept_length_decode_forwards,
@@ -92,10 +94,10 @@ pub(super) fn push_worker_completion(
     *next_event_seq += 1;
 }
 
-pub(super) fn pop_ready_worker_completion(
-    events: &mut BinaryHeap<SimulationEvent>,
+pub(super) fn pop_ready_worker_completion<Events: EngineEventBatch>(
+    events: &mut BinaryHeap<SimulationEvent<Events>>,
     now_ms: f64,
-) -> Option<WorkerCompletionPayload> {
+) -> Option<WorkerCompletionPayload<Events>> {
     let event = events.peek()?;
     if event.at_ms != now_ms {
         return None;
@@ -110,7 +112,9 @@ pub(super) fn pop_ready_worker_completion(
         completed_requests,
         output_signals,
         lifecycle_events,
-        kv_events,
+        engine_events,
+        made_progress,
+        had_raw_observations,
         fpm,
         accept_length_output_tokens,
         accept_length_decode_forwards,
@@ -121,7 +125,9 @@ pub(super) fn pop_ready_worker_completion(
             completed_requests,
             output_signals,
             lifecycle_events,
-            kv_events,
+            engine_events,
+            made_progress,
+            had_raw_observations,
             fpm,
             accept_length_output_tokens,
             accept_length_decode_forwards,
@@ -131,7 +137,9 @@ pub(super) fn pop_ready_worker_completion(
             completed_requests,
             output_signals,
             lifecycle_events,
-            kv_events,
+            engine_events,
+            made_progress,
+            had_raw_observations,
             fpm.map(|fpm| *fpm),
             accept_length_output_tokens,
             accept_length_decode_forwards,
@@ -148,15 +156,19 @@ pub(super) fn pop_ready_worker_completion(
         completed_requests,
         output_signals,
         lifecycle_events,
-        kv_events,
+        engine_events,
+        progress: EngineProgress {
+            made_progress,
+            had_raw_observations,
+        },
         fpm,
         accept_length_output_tokens,
         accept_length_decode_forwards,
     })
 }
 
-pub(super) fn push_transfer_complete(
-    events: &mut BinaryHeap<SimulationEvent>,
+pub(super) fn push_transfer_complete<Events: EngineEventBatch>(
+    events: &mut BinaryHeap<SimulationEvent<Events>>,
     next_event_seq: &mut u64,
     at_ms: f64,
     handoff_id: HandoffId,
@@ -169,8 +181,8 @@ pub(super) fn push_transfer_complete(
     *next_event_seq += 1;
 }
 
-pub(super) fn pop_ready_transfer_complete(
-    events: &mut BinaryHeap<SimulationEvent>,
+pub(super) fn pop_ready_transfer_complete<Events: EngineEventBatch>(
+    events: &mut BinaryHeap<SimulationEvent<Events>>,
     now_ms: f64,
 ) -> Option<HandoffId> {
     let event = events.peek()?;
@@ -187,8 +199,8 @@ pub(super) fn pop_ready_transfer_complete(
     Some(handoff_id)
 }
 
-pub(super) fn push_worker_ready(
-    events: &mut BinaryHeap<SimulationEvent>,
+pub(super) fn push_worker_ready<Events: EngineEventBatch>(
+    events: &mut BinaryHeap<SimulationEvent<Events>>,
     next_event_seq: &mut u64,
     at_ms: f64,
     stage: SimulationWorkerStage,
@@ -202,8 +214,8 @@ pub(super) fn push_worker_ready(
     *next_event_seq += 1;
 }
 
-pub(super) fn pop_ready_worker_ready(
-    events: &mut BinaryHeap<SimulationEvent>,
+pub(super) fn pop_ready_worker_ready<Events: EngineEventBatch>(
+    events: &mut BinaryHeap<SimulationEvent<Events>>,
     now_ms: f64,
 ) -> Option<(SimulationWorkerStage, usize)> {
     let event = events.peek()?;
@@ -220,8 +232,8 @@ pub(super) fn pop_ready_worker_ready(
     Some((stage, worker_id))
 }
 
-pub(super) fn push_planner_tick(
-    events: &mut BinaryHeap<SimulationEvent>,
+pub(super) fn push_planner_tick<Events: EngineEventBatch>(
+    events: &mut BinaryHeap<SimulationEvent<Events>>,
     next_event_seq: &mut u64,
     at_ms: f64,
 ) {
@@ -235,8 +247,8 @@ pub(super) fn push_planner_tick(
 
 /// Pop a `PlannerTick` scheduled for exactly `now_ms` (peek-and-pop-at-now, like the
 /// other `pop_ready_*` helpers). Payload-free, so it returns whether one fired.
-pub(super) fn pop_ready_planner_tick(
-    events: &mut BinaryHeap<SimulationEvent>,
+pub(super) fn pop_ready_planner_tick<Events: EngineEventBatch>(
+    events: &mut BinaryHeap<SimulationEvent<Events>>,
     now_ms: f64,
 ) -> bool {
     let Some(event) = events.peek() else {
@@ -332,7 +344,8 @@ mod tests {
                     handoff_delay_ms: None,
                 }],
                 lifecycle_events: Vec::new(),
-                kv_events: Vec::new(),
+                engine_events: (),
+                progress: EngineProgress::default(),
                 fpm: None,
                 accept_length_output_tokens: 1,
                 accept_length_decode_forwards: 1,
@@ -354,7 +367,8 @@ mod tests {
                     handoff_delay_ms: None,
                 }],
                 lifecycle_events: Vec::new(),
-                kv_events: Vec::new(),
+                engine_events: (),
+                progress: EngineProgress::default(),
                 fpm: None,
                 accept_length_output_tokens: 1,
                 accept_length_decode_forwards: 1,
@@ -376,7 +390,7 @@ mod tests {
 
     #[test]
     fn test_worker_ready_push_pop_round_trip() {
-        let mut events = BinaryHeap::new();
+        let mut events: BinaryHeap<SimulationEvent<()>> = BinaryHeap::new();
         let mut next_event_seq = 0;
 
         push_worker_ready(
@@ -398,7 +412,7 @@ mod tests {
 
     #[test]
     fn test_worker_ready_does_not_interfere_with_completion_pop() {
-        let mut events = BinaryHeap::new();
+        let mut events: BinaryHeap<SimulationEvent<()>> = BinaryHeap::new();
         let mut next_event_seq = 0;
 
         push_worker_ready(
@@ -432,7 +446,8 @@ mod tests {
                 completed_requests: 1,
                 output_signals: Vec::new(),
                 lifecycle_events: Vec::new(),
-                kv_events: Vec::new(),
+                engine_events: (),
+                progress: EngineProgress::default(),
                 fpm: None,
                 accept_length_output_tokens: 0,
                 accept_length_decode_forwards: 0,

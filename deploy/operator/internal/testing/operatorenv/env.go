@@ -20,6 +20,7 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/podcache"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -364,14 +365,18 @@ func (e *TestEnv) ScaleClient() (scale.ScalesGetter, error) {
 // StartManager starts a namespace-scoped controller manager configured by setup.
 func (e *TestEnv) StartManager(setup func(ctrl.Manager) error) {
 	e.tb.Helper()
+	cacheOptions := cache.Options{
+		DefaultNamespaces: map[string]cache.Config{
+			e.namespace: {},
+		},
+	}
+	if err := podcache.Configure(&cacheOptions); err != nil {
+		e.tb.Fatalf("configure Pod cache: %v", err)
+	}
 	mgr, err := ctrl.NewManager(e.rt.config, ctrl.Options{
 		Scheme:  e.rt.scheme,
 		Metrics: metricsserver.Options{BindAddress: "0"},
-		Cache: cache.Options{
-			DefaultNamespaces: map[string]cache.Config{
-				e.namespace: {},
-			},
-		},
+		Cache:   cacheOptions,
 	})
 	if err != nil {
 		e.tb.Fatalf("create manager: %v", err)

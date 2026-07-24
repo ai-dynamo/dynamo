@@ -656,7 +656,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 mod tests {
     use std::{
         collections::HashMap,
-        future,
         sync::{
             Arc, Mutex,
             atomic::{AtomicBool, Ordering},
@@ -703,11 +702,8 @@ mod tests {
     struct NoopSequencePublisher;
 
     impl SequencePublisher for NoopSequencePublisher {
-        fn publish_event(
-            &self,
-            _event: &ActiveSequenceEvent,
-        ) -> impl future::Future<Output = anyhow::Result<()>> + Send {
-            future::ready(Ok(()))
+        fn enqueue_event(&self, _event: ActiveSequenceEvent) -> anyhow::Result<()> {
+            Ok(())
         }
 
         fn publish_load(&self, _load: ActiveLoad) {}
