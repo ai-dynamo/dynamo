@@ -42,6 +42,7 @@ use dynamo_runtime::metrics::frontend_perf::{
 use std::{any::Any, collections::HashMap, pin::Pin, sync::Arc};
 use tracing;
 
+use crate::local_model::runtime_config::STRICT_REQUEST_TOKEN_LIMIT_RUNTIME_KEY;
 #[cfg(feature = "mm-routing")]
 use crate::model_card::ModelInfoType;
 use crate::model_card::{ModelDeploymentCard, ModelInfo};
@@ -281,6 +282,10 @@ pub struct OpenAIPreprocessor {
     media_loader: Option<MediaLoader>,
     /// Max context length (in tokens) this model can handle, from ModelDeploymentCard
     context_length: u32,
+    /// Engine-published strict input-plus-output limit. `None` means the
+    /// backend may apply another overflow policy or cannot expose an exact
+    /// admission budget, so total-token validation is deferred to it.
+    strict_request_token_limit: Option<u32>,
     /// Per-image token-count engine. `None` when the feature is disabled, the
     /// model isn't covered by the registry, or `preprocessor_config.json` is
     /// unreadable.
@@ -318,20 +323,65 @@ impl OpenAIPreprocessor {
         Some(context_length.saturating_sub(prompt_len as u32))
     }
 
-    /// Prompt length for sizing the omitted-`max_tokens` cap. Prefers the
-    /// MM-expanded length; a 0 (serde-default / absent) counts as missing. With
-    /// images but no expanded length, defers to the backend (`None`); text-only
-    /// uses `token_ids_len`.
-    fn effective_prompt_len_for_cap(
-        expanded_prompt_len: Option<usize>,
-        has_images: bool,
+    /// Return the exact prompt length when the frontend can prove it.
+    ///
+    /// MM routing currently expands image placeholders only. Therefore any
+    /// other non-empty media modality makes even an image-expanded length
+    /// incomplete and forces backend validation.
+    fn exact_prompt_len(
+        expanded_image_prompt_len: Option<usize>,
+        multi_modal_data: Option<&MultimodalDataMap>,
         token_ids_len: usize,
     ) -> Option<usize> {
-        match expanded_prompt_len {
-            Some(n) if n > 0 => Some(n),
-            _ if has_images => None,
-            _ => Some(token_ids_len),
+        let has_images = multi_modal_data
+            .and_then(|media| media.get("image_url"))
+            .is_some_and(|items| !items.is_empty());
+        let has_other_media = multi_modal_data.is_some_and(|media| {
+            media
+                .iter()
+                .any(|(kind, items)| kind != "image_url" && !items.is_empty())
+        });
+
+        if has_other_media {
+            None
+        } else if let Some(expanded_prompt_len) =
+            expanded_image_prompt_len.filter(|length| *length > 0)
+        {
+            Some(expanded_prompt_len)
+        } else if has_images {
+            None
+        } else {
+            Some(token_ids_len)
         }
+    }
+
+    /// Validate an explicit input-plus-output token budget against a strict
+    /// engine-published limit.
+    fn validate_requested_token_budget(
+        prompt_len: usize,
+        max_tokens: u32,
+        strict_request_token_limit: Option<u32>,
+    ) -> Result<()> {
+        let Some(strict_request_token_limit) = strict_request_token_limit else {
+            return Ok(());
+        };
+
+        let requested_tokens = prompt_len.saturating_add(max_tokens as usize);
+        if requested_tokens > strict_request_token_limit as usize {
+            return Err(DynamoError::builder()
+                .error_type(ErrorType::InvalidArgument)
+                .message(format!(
+                    "This model configuration accepts at most {} combined input and output \
+                     tokens. However, your request has {} input tokens and asks for {} output \
+                     tokens ({} tokens total). Please reduce the input length or requested \
+                     output length.",
+                    strict_request_token_limit, prompt_len, max_tokens, requested_tokens,
+                ))
+                .build()
+                .into());
+        }
+
+        Ok(())
     }
 
     fn nvext_passthrough_args<R: NvExtProvider>(
@@ -617,6 +667,11 @@ impl OpenAIPreprocessor {
 
         // // Initialize runtime config from the ModelDeploymentCard
         let runtime_config = mdc.runtime_config.clone();
+        let strict_request_token_limit = runtime_config
+            .get_engine_specific::<u32>(STRICT_REQUEST_TOKEN_LIMIT_RUNTIME_KEY)
+            .with_context(|| {
+                format!("Invalid {STRICT_REQUEST_TOKEN_LIMIT_RUNTIME_KEY} runtime metadata")
+            })?;
         let kv_cache_block_size = mdc.kv_cache_block_size as usize;
 
         // Capture MM-routing inputs before mdc is partially moved into MediaLoader.
@@ -796,6 +851,7 @@ impl OpenAIPreprocessor {
             tool_call_parser,
             media_loader,
             context_length,
+            strict_request_token_limit,
             #[cfg(feature = "mm-routing")]
             image_token_counter,
             #[cfg(feature = "mm-routing")]
@@ -930,21 +986,25 @@ impl OpenAIPreprocessor {
         //
         // Multimodal `token_ids` carry unexpanded image placeholders, so prefer
         // the MM-expanded length when available, else defer to the backend.
-        let has_images = preprocessed
-            .multi_modal_data
-            .as_ref()
-            .and_then(|m| m.get("image_url"))
-            .is_some_and(|v| !v.is_empty());
-        let effective_prompt_len = Self::effective_prompt_len_for_cap(
+        let exact_prompt_len = Self::exact_prompt_len(
             preprocessed
                 .mm_routing_info
                 .as_ref()
                 .map(|mm| mm.expanded_prompt_len),
-            has_images,
+            preprocessed.multi_modal_data.as_ref(),
             preprocessed.token_ids.len(),
         );
+        if let (Some(prompt_len), Some(max_tokens)) =
+            (exact_prompt_len, preprocessed.stop_conditions.max_tokens)
+        {
+            Self::validate_requested_token_budget(
+                prompt_len,
+                max_tokens,
+                self.strict_request_token_limit,
+            )?;
+        }
         if preprocessed.stop_conditions.max_tokens.is_none()
-            && let Some(prompt_len) = effective_prompt_len
+            && let Some(prompt_len) = exact_prompt_len
             && let Some(max_tokens) =
                 Self::omitted_max_tokens_default(prompt_len, self.context_length, options)
         {
@@ -4493,32 +4553,79 @@ mod tests {
     }
 
     #[test]
-    fn test_effective_prompt_len_for_cap() {
-        // MM-expanded length present: use it, ignoring the unexpanded token count.
+    fn test_exact_prompt_len() {
+        let images = MultimodalDataMap::from([(
+            "image_url".to_string(),
+            vec![MultimodalData::Url(
+                url::Url::parse("https://example.com/image.png").unwrap(),
+            )],
+        )]);
+        let videos = MultimodalDataMap::from([(
+            "video_url".to_string(),
+            vec![MultimodalData::Url(
+                url::Url::parse("https://example.com/video.mp4").unwrap(),
+            )],
+        )]);
+        let mixed = MultimodalDataMap::from([
+            (
+                "image_url".to_string(),
+                vec![MultimodalData::Url(
+                    url::Url::parse("https://example.com/image.png").unwrap(),
+                )],
+            ),
+            (
+                "audio_url".to_string(),
+                vec![MultimodalData::Url(
+                    url::Url::parse("https://example.com/audio.wav").unwrap(),
+                )],
+            ),
+        ]);
+
+        // Image-expanded length present: use it instead of placeholder tokens.
         assert_eq!(
-            OpenAIPreprocessor::effective_prompt_len_for_cap(Some(500), true, 12),
+            OpenAIPreprocessor::exact_prompt_len(Some(500), Some(&images), 12),
             Some(500)
         );
         // Expanded length 0 (serde-default / absent) with images: defer to backend.
         assert_eq!(
-            OpenAIPreprocessor::effective_prompt_len_for_cap(Some(0), true, 12),
+            OpenAIPreprocessor::exact_prompt_len(Some(0), Some(&images), 12),
             None
         );
         // No routing info but images present: defer to backend.
         assert_eq!(
-            OpenAIPreprocessor::effective_prompt_len_for_cap(None, true, 12),
+            OpenAIPreprocessor::exact_prompt_len(None, Some(&images), 12),
+            None
+        );
+        // Video/audio expansion is backend-owned, including mixed requests
+        // whose routing metadata expands only the image portion.
+        assert_eq!(
+            OpenAIPreprocessor::exact_prompt_len(None, Some(&videos), 12),
+            None
+        );
+        assert_eq!(
+            OpenAIPreprocessor::exact_prompt_len(Some(500), Some(&mixed), 12),
             None
         );
         // Text-only: use the token count.
         assert_eq!(
-            OpenAIPreprocessor::effective_prompt_len_for_cap(None, false, 12),
+            OpenAIPreprocessor::exact_prompt_len(None, None, 12),
             Some(12)
         );
-        // Expanded length 0 without images: fall back to the token count.
+        // Expanded length 0 without media: fall back to the token count.
         assert_eq!(
-            OpenAIPreprocessor::effective_prompt_len_for_cap(Some(0), false, 12),
+            OpenAIPreprocessor::exact_prompt_len(Some(0), None, 12),
             Some(12)
         );
+    }
+
+    #[test]
+    fn test_requested_token_budget_validation() {
+        assert!(OpenAIPreprocessor::validate_requested_token_budget(80, 20, Some(100)).is_ok());
+        assert!(OpenAIPreprocessor::validate_requested_token_budget(80, 21, Some(100)).is_err());
+        assert!(
+            OpenAIPreprocessor::validate_requested_token_budget(usize::MAX, 1, Some(100)).is_err()
+        );
+        assert!(OpenAIPreprocessor::validate_requested_token_budget(usize::MAX, 1, None).is_ok());
     }
 
     #[test]

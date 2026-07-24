@@ -75,6 +75,36 @@ def test_eagle_enabled_for_speculative_algorithm(speculative_algorithm, expected
     assert _eagle_enabled_for(speculative_algorithm) is expected
 
 
+@pytest.mark.parametrize(
+    "allow_auto_truncate, validate_total_tokens, reserved_tokens, expected",
+    [
+        (False, True, 0, 256),
+        (False, True, 4, 252),
+        (False, True, 300, 0),
+        (True, True, 0, None),
+        (False, False, 0, None),
+    ],
+)
+def test_strict_request_token_limit_matches_sglang_policy(
+    allow_auto_truncate, validate_total_tokens, reserved_tokens, expected
+):
+    from dynamo.sglang.register import _get_strict_request_token_limit
+
+    engine = SimpleNamespace(
+        tokenizer_manager=SimpleNamespace(
+            context_len=256,
+            validate_total_tokens=validate_total_tokens,
+            num_reserved_tokens=reserved_tokens,
+        )
+    )
+    server_args = SimpleNamespace(
+        context_length=None,
+        allow_auto_truncate=allow_auto_truncate,
+    )
+
+    assert _get_strict_request_token_limit(engine, server_args) == expected
+
+
 def test_hicache_publishes_native_offloading_capacity():
     server_args = SimpleNamespace(hicache_write_policy="write_back")
     assert get_hicache_native_offloading_capacity(
@@ -139,6 +169,7 @@ async def test_hicache_publish_failure_preserves_core_capacity(monkeypatch, capl
     from dynamo.sglang import register
 
     server_args = SimpleNamespace(
+        allow_auto_truncate=False,
         context_length=4096,
         disaggregation_mode=None,
         hicache_write_policy="write_back",
@@ -154,7 +185,12 @@ async def test_hicache_publish_failure_preserves_core_capacity(monkeypatch, capl
         "max_total_num_tokens": 1024,
     }
     engine = SimpleNamespace(
-        _scheduler_init_result=SimpleNamespace(scheduler_infos=[scheduler_info])
+        _scheduler_init_result=SimpleNamespace(scheduler_infos=[scheduler_info]),
+        tokenizer_manager=SimpleNamespace(
+            context_len=4096,
+            validate_total_tokens=True,
+            num_reserved_tokens=4,
+        ),
     )
     capacity = SimpleNamespace(
         max_num_seqs=None,
@@ -187,6 +223,10 @@ async def test_hicache_publish_failure_preserves_core_capacity(monkeypatch, capl
 
     assert runtime_config.total_kv_blocks == 64
     assert runtime_config.max_num_batched_tokens == 1024
+    assert (
+        runtime_config.runtime_data[register.STRICT_REQUEST_TOKEN_LIMIT_RUNTIME_KEY]
+        == "4092"
+    )
     assert (
         "Failed to attach native offloading capacity from SGLang HiCache" in caplog.text
     )

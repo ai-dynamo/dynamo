@@ -36,6 +36,9 @@ from dynamo.sglang.capacity import (
 
 SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"
 SPEC_DECODE_RUNTIME_KEY = "spec_decode"
+# Must match `STRICT_REQUEST_TOKEN_LIMIT_RUNTIME_KEY` in
+# `lib/llm/src/local_model/runtime_config.rs`.
+STRICT_REQUEST_TOKEN_LIMIT_RUNTIME_KEY = "strict_request_token_limit"
 
 
 def _register_model_source_path(engine: sgl.Engine, server_args: ServerArgs) -> str:
@@ -344,6 +347,24 @@ def _eagle_enabled_for(speculative_algorithm: Optional[str]) -> bool:
         return False
 
 
+def _get_strict_request_token_limit(
+    engine: sgl.Engine, server_args: ServerArgs
+) -> Optional[int]:
+    """Return SGLang's strict input-plus-output limit, if it has one.
+
+    SGLang can instead auto-truncate over-budget requests, and some modes
+    disable total-token validation. In either case the frontend must defer to
+    the engine. ``num_reserved_tokens`` covers speculative draft-token space.
+    """
+    tokenizer_manager = engine.tokenizer_manager
+    if server_args.allow_auto_truncate:
+        return None
+    if not tokenizer_manager.validate_total_tokens:
+        return None
+
+    return max(0, tokenizer_manager.context_len - tokenizer_manager.num_reserved_tokens)
+
+
 async def _get_runtime_config(
     engine: sgl.Engine, server_args: ServerArgs, dynamo_args: DynamoConfig
 ) -> Optional[ModelRuntimeConfig]:
@@ -359,6 +380,12 @@ async def _get_runtime_config(
     """
     runtime_config = ModelRuntimeConfig()
     runtime_config.context_length = server_args.context_length
+    strict_request_token_limit = _get_strict_request_token_limit(engine, server_args)
+    if strict_request_token_limit is not None:
+        runtime_config.set_engine_specific(
+            STRICT_REQUEST_TOKEN_LIMIT_RUNTIME_KEY,
+            json.dumps(strict_request_token_limit),
+        )
     # set reasoning parser and tool call parser
     runtime_config.reasoning_parser = dynamo_args.dyn_reasoning_parser
     runtime_config.tool_call_parser = dynamo_args.dyn_tool_call_parser
