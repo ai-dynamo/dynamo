@@ -139,6 +139,11 @@ pub struct KvSourceMembershipView<S = KvEventSource> {
     /// Membership remains indexed by logical worker and global DP rank. Publisher incarnation is
     /// deliberately absent from this routing/index identity.
     pub sources: HashMap<WorkerWithDpRank, KvSourceStatus<S>>,
+    /// Runtime-declared KV event publication capability, stored once per logical worker.
+    ///
+    /// `Some(true)` and `Some(false)` are explicit declarations. `None` is a legacy or otherwise
+    /// unknown declaration.
+    pub kv_event_publishing_enabled: HashMap<WorkerId, Option<bool>>,
     /// Monotonic cold-reset fence for each logical source in `sources`.
     ///
     /// A consumer must cold-reset a logical rank before accepting a source when this value
@@ -162,6 +167,13 @@ impl<S> KvSourceMembershipView<S> {
 
     pub fn recovery_expected(&self, worker: &WorkerWithDpRank) -> Option<bool> {
         self.recovery_expected.get(worker).copied()
+    }
+
+    pub fn kv_event_publishing_enabled(&self, worker_id: WorkerId) -> Option<bool> {
+        self.kv_event_publishing_enabled
+            .get(&worker_id)
+            .copied()
+            .flatten()
     }
 
     pub fn resolved_kv_state_endpoint(&self) -> Option<&EndpointId> {
@@ -384,12 +396,17 @@ where
         let recovery_expected = workers
             .into_iter()
             .collect::<HashMap<WorkerWithDpRank, bool>>();
+        let kv_event_publishing_enabled = runtime_configs
+            .iter()
+            .map(|(&worker_id, config)| (worker_id, config.kv_event_publishing_enabled))
+            .collect();
 
         KvSourceMembershipView {
             serving_endpoint: serving_endpoint.clone(),
             endpoint_resolution,
             lifecycle_generations: sources.keys().map(|worker| (*worker, 0)).collect(),
             recovery_expected,
+            kv_event_publishing_enabled,
             sources,
         }
     }
@@ -574,6 +591,7 @@ mod tests {
                 data_parallel_start_rank: 2,
                 data_parallel_size: 2,
                 kv_state_endpoint: Some(kv_endpoint.clone()),
+                kv_event_publishing_enabled: Some(true),
                 ..Default::default()
             },
         )]);
@@ -594,5 +612,18 @@ mod tests {
             Some(&KvSourceStatus::Missing)
         );
         assert!(view.status(&WorkerWithDpRank::new(99, 0)).is_none());
+        assert_eq!(view.kv_event_publishing_enabled.len(), 1);
+        assert_eq!(view.kv_event_publishing_enabled(7), Some(true));
+        assert_eq!(view.kv_event_publishing_enabled(99), None);
+    }
+
+    #[test]
+    fn view_preserves_legacy_unknown_capability_for_expected_worker() {
+        let serving = endpoint("generate");
+        let configs = HashMap::from([(7, ModelRuntimeConfig::default())]);
+        let view = KvSourceMembership::<KvEventSource>::new().view(&serving, &configs);
+
+        assert_eq!(view.kv_event_publishing_enabled, HashMap::from([(7, None)]));
+        assert_eq!(view.kv_event_publishing_enabled(7), None);
     }
 }

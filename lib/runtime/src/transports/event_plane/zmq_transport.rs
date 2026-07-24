@@ -20,6 +20,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
 use std::sync::{Arc, OnceLock};
+use thiserror::Error;
 use tmq::{
     AsZmqSocket, Context, Message, Multipart, SocketBuilder,
     publish::{Publish, publish},
@@ -45,7 +46,7 @@ const ZMQ_RCVHWM: i32 = 100_000; // Receive buffer: 100K messages
 const ZMQ_SNDTIMEOUT_MS: i32 = 0; // Send timeout: fail fast under pressure
 const ZMQ_RCVTIMEOUT_MS: i32 = 100; // Receive timeout: 100ms (avoids blocking forever)
 
-use super::codec::MsgpackCodec;
+use super::codec::{Codec, MsgpackCodec};
 use super::frame::Frame;
 use super::transport::{EventTransportRx, EventTransportTx, WireStream};
 use crate::discovery::EventTransportKind;
@@ -63,9 +64,17 @@ fn configure_subscribe_builder<T>(builder: SocketBuilder<T>) -> SocketBuilder<T>
 where
     T: tmq::FromZmqSocket<T>,
 {
-    builder
-        .set_rcvhwm(ZMQ_RCVHWM)
-        .set_rcvtimeo(ZMQ_RCVTIMEOUT_MS)
+    configure_subscribe_builder_with_hwm(builder, ZMQ_RCVHWM)
+}
+
+fn configure_subscribe_builder_with_hwm<T>(
+    builder: SocketBuilder<T>,
+    rcvhwm: i32,
+) -> SocketBuilder<T>
+where
+    T: tmq::FromZmqSocket<T>,
+{
+    builder.set_rcvhwm(rcvhwm).set_rcvtimeo(ZMQ_RCVTIMEOUT_MS)
 }
 
 /// Keeps a received ZMQ message alive for as long as any derived `Bytes` exists.
@@ -221,12 +230,120 @@ pub struct ZmqWireMessage {
 pub type ZmqWireStream =
     std::pin::Pin<Box<dyn futures::Stream<Item = Result<ZmqWireMessage>> + Send>>;
 
+/// One event envelope whose ZMQ frames and envelope attribution agree.
+#[derive(Debug)]
+pub struct ValidatedEnvelope {
+    pub publisher_id: u64,
+    pub sequence: u64,
+    pub published_at: u64,
+    pub payload: Bytes,
+}
+
+/// Failure returned while reading a [`ValidatedZmqSource`].
+#[derive(Debug, Error)]
+pub enum ValidatedZmqSourceError {
+    #[error("direct ZMQ receive failed: {0}")]
+    Receive(#[source] anyhow::Error),
+    #[error("direct ZMQ envelope decode failed: {0}")]
+    EnvelopeDecode(#[source] anyhow::Error),
+    #[error(
+        "direct ZMQ identity mismatch: expected publisher {expected_publisher_id} topic {expected_topic}, frame publisher {frame_publisher_id} sequence {frame_sequence}, envelope publisher {envelope_publisher_id} sequence {envelope_sequence} topic {envelope_topic}"
+    )]
+    IdentityMismatch {
+        expected_publisher_id: u64,
+        expected_topic: String,
+        frame_publisher_id: u64,
+        frame_sequence: u64,
+        envelope_publisher_id: u64,
+        envelope_sequence: u64,
+        envelope_topic: String,
+    },
+}
+
+/// A direct ZMQ source that validates frame and envelope attribution once.
+pub struct ValidatedZmqSource {
+    stream: ZmqWireStream,
+    expected_topic: String,
+    expected_publisher_id: u64,
+    codec: Codec,
+}
+
+impl ValidatedZmqSource {
+    pub async fn connect_default(
+        endpoint: &str,
+        topic: &str,
+        expected_publisher_id: u64,
+    ) -> Result<Self> {
+        Self::connect(endpoint, topic, expected_publisher_id, ZMQ_RCVHWM).await
+    }
+
+    pub async fn connect(
+        endpoint: &str,
+        topic: &str,
+        expected_publisher_id: u64,
+        rcvhwm: i32,
+    ) -> Result<Self> {
+        Ok(Self {
+            stream: ZmqSubTransport::connect_single_consumer_with_rcvhwm(endpoint, topic, rcvhwm)
+                .await?,
+            expected_topic: topic.to_string(),
+            expected_publisher_id,
+            codec: Codec::default(),
+        })
+    }
+
+    pub async fn next(
+        &mut self,
+    ) -> Option<std::result::Result<ValidatedEnvelope, ValidatedZmqSourceError>> {
+        let message = match self.stream.next().await? {
+            Ok(message) => message,
+            Err(error) => return Some(Err(ValidatedZmqSourceError::Receive(error))),
+        };
+        let envelope = match self.codec.decode_envelope(&message.payload) {
+            Ok(envelope) => envelope,
+            Err(error) => {
+                return Some(Err(ValidatedZmqSourceError::EnvelopeDecode(error)));
+            }
+        };
+
+        if envelope.publisher_id != self.expected_publisher_id
+            || envelope.publisher_id != message.publisher_id
+            || envelope.sequence != message.sequence
+            || envelope.topic != self.expected_topic
+        {
+            return Some(Err(ValidatedZmqSourceError::IdentityMismatch {
+                expected_publisher_id: self.expected_publisher_id,
+                expected_topic: self.expected_topic.clone(),
+                frame_publisher_id: message.publisher_id,
+                frame_sequence: message.sequence,
+                envelope_publisher_id: envelope.publisher_id,
+                envelope_sequence: envelope.sequence,
+                envelope_topic: envelope.topic,
+            }));
+        }
+
+        Some(Ok(ValidatedEnvelope {
+            publisher_id: envelope.publisher_id,
+            sequence: envelope.sequence,
+            published_at: envelope.published_at,
+            payload: envelope.payload,
+        }))
+    }
+}
+
 impl ZmqSubTransport {
     fn connect_socket(endpoint: &str, topic: &str) -> Result<Subscribe> {
+        Self::connect_socket_with_rcvhwm(endpoint, topic, ZMQ_RCVHWM)
+    }
+
+    fn connect_socket_with_rcvhwm(endpoint: &str, topic: &str, rcvhwm: i32) -> Result<Subscribe> {
+        anyhow::ensure!(rcvhwm > 0, "ZMQ receive HWM must be greater than zero");
         let ctx = shared_zmq_context();
-        Ok(configure_subscribe_builder(subscribe(&ctx))
-            .connect(endpoint)?
-            .subscribe(topic.as_bytes())?)
+        Ok(
+            configure_subscribe_builder_with_hwm(subscribe(&ctx), rcvhwm)
+                .connect(endpoint)?
+                .subscribe(topic.as_bytes())?,
+        )
     }
 
     /// Create a new ZMQ subscriber by connecting to a single endpoint.
@@ -255,13 +372,22 @@ impl ZmqSubTransport {
     /// therefore has no background pump or lossy broadcast hop and naturally
     /// applies backpressure at the configured ZMQ receive HWM.
     pub async fn connect_single_consumer(endpoint: &str, topic: &str) -> Result<ZmqWireStream> {
-        let mut socket = Self::connect_socket(endpoint, topic)?;
+        Self::connect_single_consumer_with_rcvhwm(endpoint, topic, ZMQ_RCVHWM).await
+    }
+
+    /// Connect one consumer directly to one ZMQ publisher with an explicit receive HWM.
+    pub async fn connect_single_consumer_with_rcvhwm(
+        endpoint: &str,
+        topic: &str,
+        rcvhwm: i32,
+    ) -> Result<ZmqWireStream> {
+        let mut socket = Self::connect_socket_with_rcvhwm(endpoint, topic, rcvhwm)?;
         let expected_topic = topic.as_bytes().to_vec();
 
         tracing::info!(
             endpoint,
             topic,
-            rcvhwm = ZMQ_RCVHWM,
+            rcvhwm,
             "Direct ZMQ single-consumer stream connected"
         );
 
@@ -547,6 +673,84 @@ mod tests {
         assert_eq!(decoded.publisher_id, 12345);
         assert_eq!(decoded.sequence, 1);
         assert_eq!(decoded.topic, topic);
+    }
+
+    #[tokio::test]
+    async fn single_consumer_applies_explicit_receive_hwm() {
+        let endpoint = format!("inproc://dynamo-zmq-explicit-hwm-{}", std::process::id());
+        let topic = "explicit-hwm";
+        let (_publisher, _) = ZmqPubTransport::bind(&endpoint, topic).await.unwrap();
+
+        let socket = ZmqSubTransport::connect_socket_with_rcvhwm(&endpoint, topic, 37).unwrap();
+        assert_eq!(socket.get_socket().get_rcvhwm().unwrap(), 37);
+
+        let default_socket = ZmqSubTransport::connect_socket(&endpoint, topic).unwrap();
+        assert_eq!(
+            default_socket.get_socket().get_rcvhwm().unwrap(),
+            ZMQ_RCVHWM
+        );
+        assert!(
+            ZmqSubTransport::connect_single_consumer_with_rcvhwm(&endpoint, topic, 0)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn validated_source_rejects_bad_envelopes_and_continues_zero_copy() {
+        let codec = Codec::default();
+        let topic = "validated-source";
+        let publisher_id = 7;
+        let invalid = ZmqWireMessage {
+            publisher_id,
+            sequence: 0,
+            payload: Bytes::from_static(&[0xc1]),
+        };
+        let mismatched_payload = codec
+            .encode_envelope_parts(8, 1, 11, topic, b"mismatch")
+            .unwrap();
+        let mismatch = ZmqWireMessage {
+            publisher_id,
+            sequence: 1,
+            payload: mismatched_payload,
+        };
+        let encoded = codec
+            .encode_envelope_parts(publisher_id, 2, 12, topic, b"payload")
+            .unwrap();
+        let encoded_start = encoded.as_ptr() as usize;
+        let encoded_end = encoded_start + encoded.len();
+        let valid = ZmqWireMessage {
+            publisher_id,
+            sequence: 2,
+            payload: encoded,
+        };
+        let mut source = ValidatedZmqSource {
+            stream: Box::pin(futures::stream::iter(vec![
+                Ok(invalid),
+                Ok(mismatch),
+                Ok(valid),
+            ])),
+            expected_topic: topic.to_string(),
+            expected_publisher_id: publisher_id,
+            codec,
+        };
+
+        assert!(matches!(
+            source.next().await.unwrap(),
+            Err(ValidatedZmqSourceError::EnvelopeDecode(_))
+        ));
+        assert!(matches!(
+            source.next().await.unwrap(),
+            Err(ValidatedZmqSourceError::IdentityMismatch { .. })
+        ));
+        let envelope = source.next().await.unwrap().unwrap();
+        assert_eq!(envelope.publisher_id, publisher_id);
+        assert_eq!(envelope.sequence, 2);
+        assert_eq!(envelope.published_at, 12);
+        assert_eq!(envelope.payload, Bytes::from_static(b"payload"));
+        let payload_ptr = envelope.payload.as_ptr() as usize;
+        assert!((encoded_start..encoded_end).contains(&payload_ptr));
+        assert!(source.next().await.is_none());
     }
 
     #[tokio::test]

@@ -133,7 +133,7 @@ The Prometheus Operator uses PodMonitor resources to automatically discover and 
 | PodMonitor | Selects | Scrapes |
 |---|---|---|
 | `dynamo-frontend` | `component-type: frontend` | port `http` (`/metrics`) |
-| `dynamo-worker` | `worker` / `decode` / `prefill` | port `system` (worker metrics) and port `http` when present (frontend sidecar) |
+| `dynamo-worker` | `worker` / `decode` / `prefill` | port `system` (worker metrics), ports `system-0` / `system-1` when present (GMS shadow-failover), and port `http` when present (frontend sidecar) |
 | `dynamo-planner` | `component-type: planner` | port `metrics` |
 
 In Gateway API / EPP deployments, each worker pod runs a frontend sidecar in `--router-mode direct` that exposes `dynamo_frontend_*` (including `dynamo_frontend_cached_tokens`) on port `http` (8000). The worker PodMonitor scrapes that named port when the sidecar is present; pods without an `http` container port are skipped for that endpoint.
