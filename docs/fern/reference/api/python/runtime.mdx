@@ -225,7 +225,7 @@ construct_formatter_prefix(service_name: str | None, worker_id: int | None) -> s
 </Accordion>
 
 <Accordion id="api-dynamo-runtime-dynamo-endpoint" title="dynamo_endpoint (function)">
-No summary available.
+Decorator that parses incoming requests into Pydantic models on an async generator endpoint.
 
 ```python
 from dynamo.runtime import dynamo_endpoint
@@ -233,6 +233,38 @@ from dynamo.runtime import dynamo_endpoint
 
 ```python
 dynamo_endpoint(request_model: Union[Type[BaseModel], Type[Any]], response_model: Type[BaseModel]) -> Callable
+```
+
+When ``request_model`` is a Pydantic ``BaseModel`` subclass, the wrapper
+converts the final positional argument from a JSON string or dictionary
+before invoking the endpoint. Invalid payloads raise ``ValueError``.
+``response_model`` is reserved for future validation; yielded items pass
+through unchanged today.
+
+**Parameters**
+
+<ParamField path="request_model" type="Union[Type[BaseModel], Type[Any]]">
+Request class used to parse JSON strings or dictionaries.
+</ParamField>
+<ParamField path="response_model" type="Type[BaseModel]">
+Expected response class. Currently accepted but not enforced.
+</ParamField>
+
+**Examples**
+
+```python
+>>> from pydantic import BaseModel
+>>> from dynamo.runtime import dynamo_endpoint
+>>>
+>>> class Request(BaseModel):
+...     data: str
+>>> class Response(BaseModel):
+...     char: str
+>>>
+>>> @dynamo_endpoint(Request, Response)
+... async def generate(request):
+...     for char in request.data:
+...         yield char
 ```
 
 [`lib/bindings/python/src/dynamo/runtime/__init__.py#L54`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/runtime/__init__.py#L54)

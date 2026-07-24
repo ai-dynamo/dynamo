@@ -64,6 +64,12 @@ CURATED_MODULE_NAMES = {
     "dynamo.mocker",
     "dynamo.nixl_connect",
 }
+SELECTED_DOCSTRING_SUMMARIES = {
+    "dynamo.runtime.dynamo_endpoint": (
+        "Decorator that parses incoming requests into Pydantic models "
+        "on an async generator endpoint."
+    ),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -82,6 +88,33 @@ def all_modules(loader: GriffeLoader) -> list[api_discovery.Module]:
     return [
         api_discovery.discover_module(loader, spec) for spec in api_discovery.MODULES
     ]
+
+
+@pytest.mark.parametrize(
+    ("qualname", "expected"),
+    SELECTED_DOCSTRING_SUMMARIES.items(),
+)
+def test_selected_complex_apis_have_high_value_summaries(
+    all_modules: list[api_discovery.Module],
+    qualname: str,
+    expected: str,
+) -> None:
+    symbols = {
+        symbol.qualname: symbol for module in all_modules for symbol in module.symbols
+    }
+
+    assert symbols[qualname].summary == expected
+
+
+def test_media_url_includes_safe_rewrite_example() -> None:
+    storage = (
+        REPO_ROOT / "components" / "src" / "dynamo" / "common" / "storage.py"
+    ).read_text(encoding="utf-8")
+
+    assert (
+        '>>> get_media_url(get_fs("memory://media"), "videos/request.mp4", '
+        '"https://cdn.example.com/media")'
+    ) in storage
 
 
 @pytest.fixture(scope="session")
@@ -398,9 +431,9 @@ def test_curated_modules_match_the_agreed_eleven() -> None:
     packages the branch's plan pins as public surface. Adding or dropping a
     module is a scope decision and must be reviewed as such."""
     names = {spec[0] for spec in api_discovery.MODULES}
-    assert (
-        names == CURATED_MODULE_NAMES
-    ), f"missing: {CURATED_MODULE_NAMES - names} extra: {names - CURATED_MODULE_NAMES}"
+    assert names == CURATED_MODULE_NAMES, (
+        f"missing: {CURATED_MODULE_NAMES - names} extra: {names - CURATED_MODULE_NAMES}"
+    )
 
 
 def test_every_curated_module_discovers_at_least_one_symbol(
@@ -441,9 +474,9 @@ def test_dynamo_runtime_re_exports_from_core_are_present(
         "PyAsyncRequestStream",
     ):
         assert expected in by_name, f"{expected} missing from dynamo.runtime page"
-        assert by_name[expected].qualname.startswith(
-            "dynamo._core."
-        ), f"{expected}.qualname should preserve the canonical dynamo._core.* path"
+        assert by_name[expected].qualname.startswith("dynamo._core."), (
+            f"{expected}.qualname should preserve the canonical dynamo._core.* path"
+        )
 
 
 def test_class_symbols_carry_their_public_methods(
@@ -461,11 +494,13 @@ def test_class_symbols_carry_their_public_methods(
     assert {
         "endpoint",
         "shutdown",
-    } <= method_names, f"DistributedRuntime methods should include endpoint + shutdown; got {method_names}"
+    } <= method_names, (
+        f"DistributedRuntime methods should include endpoint + shutdown; got {method_names}"
+    )
     ep = next((m for m in dr.methods if m.name == "endpoint"), None)
-    assert ep is not None and ep.signature.startswith(
-        "endpoint("
-    ), "endpoint method should carry a signature string"
+    assert ep is not None and ep.signature.startswith("endpoint("), (
+        "endpoint method should carry a signature string"
+    )
 
 
 def test_discover_all_modules_returns_the_full_curated_list(
@@ -502,9 +537,9 @@ def test_render_module_page_is_native_mdx(
     assert "ApiSurfaceBrowser" not in text
     assert "<llms-only>" not in text
     body_lines = text.split("---\n", 2)[-1].splitlines()
-    assert not any(
-        ln.strip().startswith("# ") for ln in body_lines
-    ), "body must not contain an H1 (Fern renders the title from the nav)"
+    assert not any(ln.strip().startswith("# ") for ln in body_lines), (
+        "body must not contain an H1 (Fern renders the title from the nav)"
+    )
 
 
 @pytest.mark.parametrize("module_name", _MODULE_NAMES)
@@ -672,9 +707,9 @@ def test_no_hardcoded_dev_paths_in_any_generated_output() -> None:
     for path in generated_paths:
         assert path.is_file(), f"expected generated file missing on disk: {path}"
         text = path.read_text(encoding="utf-8")
-        assert (
-            "/dynamo/dev" not in text
-        ), f"{path.relative_to(REPO_ROOT)}: hardcoded '/dynamo/dev' path found"
+        assert "/dynamo/dev" not in text, (
+            f"{path.relative_to(REPO_ROOT)}: hardcoded '/dynamo/dev' path found"
+        )
 
 
 def test_python_landing_links_to_fern_routes_not_mdx_files() -> None:
@@ -723,9 +758,9 @@ def test_index_yml_registers_every_generated_module_page() -> None:
     index_text = (FERN_ROOT / "index.yml").read_text(encoding="utf-8")
     for spec in api_discovery.MODULES:
         expected = f"reference/api/python/{spec[1]}.mdx"
-        assert (
-            expected in index_text
-        ), f"index.yml does not reference generated page {expected}"
+        assert expected in index_text, (
+            f"index.yml does not reference generated page {expected}"
+        )
     # The overview + landing must also be present.
     assert "reference/api/README.mdx" in index_text
     assert "reference/api/python/README.mdx" in index_text
@@ -755,9 +790,9 @@ def test_python_landing_owns_the_python_section_slug() -> None:
     assert landing.get("slug") == "python"
     module_pages = landing.get("contents")
     assert isinstance(module_pages, list)
-    assert not any(
-        page.get("hidden") is True for page in module_pages
-    ), "Python module pages must remain visible sidebar entries."
+    assert not any(page.get("hidden") is True for page in module_pages), (
+        "Python module pages must remain visible sidebar entries."
+    )
 
 
 def _find_node_by_path(node: object, target: str) -> dict[str, object]:

@@ -1234,7 +1234,7 @@ The URL of the filesystem to initialize. e.g. s3://bucket, gs://bucket, file:///
 - `DirFileSystem` — fs.path to get the bucket or root path
 - `DirFileSystem` — path to the object in the filesystem - f"&#123;fs.fs.protocol&#125;://&#123;fs.path&#125;/&#123;path&#125;"
 
-[`components/src/dynamo/common/storage.py#L42`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/storage.py#L42)
+[`components/src/dynamo/common/storage.py#L43`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/storage.py#L43)
 </Accordion>
 
 <Accordion id="api-dynamo-common-config-dump-system-info-get-gpu-info" title="get_gpu_info (function)">
@@ -1306,7 +1306,14 @@ from the filesystem's protocol and root path.
 
 - `str` — Public URL string for the uploaded file.
 
-[`components/src/dynamo/common/storage.py#L72`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/storage.py#L72)
+**Examples**
+
+```python
+>>> get_media_url(get_fs("memory://media"), "videos/request.mp4", "https://cdn.example.com/media")
+'https://cdn.example.com/media/videos/request.mp4'
+```
+
+[`components/src/dynamo/common/storage.py#L73`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/storage.py#L73)
 </Accordion>
 
 <Accordion id="api-dynamo-common-native-offloading-get-native-offloading-capacity-tokens" title="get_native_offloading_capacity_tokens (function)">
@@ -1504,5 +1511,5 @@ Optional CDN / proxy base URL for URL rewriting.
 
 - `str` — Public URL string for the uploaded file.
 
-[`components/src/dynamo/common/storage.py#L96`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/storage.py#L96)
+[`components/src/dynamo/common/storage.py#L101`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/storage.py#L101)
 </Accordion>

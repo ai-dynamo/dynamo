@@ -54,6 +54,33 @@ def dynamo_worker(enable_nats: Optional[bool] = None):
 def dynamo_endpoint(
     request_model: Union[Type[BaseModel], Type[Any]], response_model: Type[BaseModel]
 ) -> Callable:
+    """Decorator that parses incoming requests into Pydantic models on an async generator endpoint.
+
+    When ``request_model`` is a Pydantic ``BaseModel`` subclass, the wrapper
+    converts the final positional argument from a JSON string or dictionary
+    before invoking the endpoint. Invalid payloads raise ``ValueError``.
+    ``response_model`` is reserved for future validation; yielded items pass
+    through unchanged today.
+
+    Args:
+        request_model: Request class used to parse JSON strings or dictionaries.
+        response_model: Expected response class. Currently accepted but not enforced.
+
+    Examples:
+        >>> from pydantic import BaseModel
+        >>> from dynamo.runtime import dynamo_endpoint
+        >>>
+        >>> class Request(BaseModel):
+        ...     data: str
+        >>> class Response(BaseModel):
+        ...     char: str
+        >>>
+        >>> @dynamo_endpoint(Request, Response)
+        ... async def generate(request):
+        ...     for char in request.data:
+        ...         yield char
+    """
+
     def decorator(
         func: Callable[..., AsyncGenerator[Any, None]],
     ) -> Callable[..., AsyncGenerator[Any, None]]:
