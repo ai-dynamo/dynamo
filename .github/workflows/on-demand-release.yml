@@ -1,0 +1,519 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# On-demand release: branch from main / a release branch / a main commit SHA,
+# set the release version, commit it to a new release/<version> branch (which
+# triggers post-merge CI to build the images), then stage all artifacts and
+# trigger the GitLab release-automation pipeline via release.yml.
+
+name: On-Demand Release
+
+# workflow_dispatch is capped at 10 inputs by GitHub — this block is at 10;
+# fold any new knob into an existing input.
+on:
+  # TEMPORARY(test): push events have no inputs, so the fallbacks below run the
+  # test flow as release_version 1.3.0.post1 on release/1.3.0.post1, forked from
+  # release/1.3.0, wheels-only (containers/crates/helm=none). REVERT before merge.
+  push:
+    branches:
+      - pvijayakrish/on-demand-release
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: "Branch to fork from: 'main', a 'release/x.y.z' branch, or a 40-char main commit SHA."
+        required: false
+        type: string
+        default: main
+      release_version:
+        description: 'Version to STAMP into the tree, X.Y.Z[.devN|.postN] (PEP 440; .devN = pre-release, .postN = post-release; e.g. 0.0.0, 0.0.0.dev3). Not the branch name.'
+        required: true
+        type: string
+      release_branch:
+        description: 'Branch to create (default release/<version>). For a throwaway run use e.g. release/0.0.0test — it still matches release/*.*.* so post-merge + release-branch checks run, but the publish jobs skip.'
+        required: false
+        type: string
+        default: ''
+      rc_round:
+        description: 'Internal staging RC: <round> or <round>.<sub> (e.g. 2 or 2.1 -> staging versions X.Y.Z-rc.2 / X.Y.Z-rc.2.1, a numerically-ordered SemVer pre-release; also the wheel rc<N> subpath). Re-stages of the same version need a distinct value (immutable registries). NO GitHub tag is created. Default 13.'
+        required: false
+        type: string
+        default: '13'
+      containers:
+        description: 'Containers to release: all | none | csv of vllm[:runtime|:efa],sglang[...],trtllm[...],frontend,operator,planner,snapshot.'
+        required: false
+        type: string
+        default: all
+      wheels:
+        description: 'Wheels to release: all | none | csv of ai-dynamo,ai-dynamo-runtime,kvbm.'
+        required: false
+        type: string
+        default: all
+      crates:
+        description: 'Crates to release: all | none | csv of crate names (must be dependency-closed).'
+        required: false
+        type: string
+        default: all
+      helm:
+        description: 'Helm charts to release: all | none | csv of platform,snapshot.'
+        required: false
+        type: string
+        default: all
+      dry_run:
+        description: 'Create the branch + version bump only; skip staging and the GitLab trigger.'
+        required: false
+        type: boolean
+        default: false
+      skip_gitlab_pipeline:
+        description: 'Skip the GitLab release automation pipeline trigger. Emergency use only.'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  # ============================================================================
+  # CREATE RELEASE BRANCH + VERSION BUMP
+  # Pushes with a dedicated token (not GITHUB_TOKEN) so the push triggers
+  # post-merge CI, which builds the release images for the bump commit.
+  # ============================================================================
+  prepare-branch:
+    name: Create release branch + version bump
+    runs-on: prod-default-small-v2
+    environment: automated-release
+    permissions:
+      contents: read
+    outputs:
+      branch: ${{ steps.bump.outputs.branch }}
+      bump_sha: ${{ steps.bump.outputs.bump_sha }}
+      is_test: ${{ steps.bump.outputs.is_test }}
+      rc_number: ${{ steps.rc.outputs.rc_number }}
+      containers: ${{ steps.resolve.outputs.containers }}
+      wheels: ${{ steps.resolve.outputs.wheels }}
+      crates: ${{ steps.resolve.outputs.crates }}
+      helm: ${{ steps.resolve.outputs.helm }}
+    steps:
+      - name: Validate inputs
+        env:
+          # TEMPORARY(test): the || fallbacks cover inputless push events. REVERT
+          # to bare inputs.* before merge.
+          RELEASE_VERSION: ${{ inputs.release_version || '1.3.0.post1' }}
+          SOURCE_REF: ${{ inputs.source_ref || 'release/1.3.0' }}
+          RELEASE_BRANCH: ${{ inputs.release_branch || (github.event_name == 'push' && 'release/1.3.0.post1' || '') }}
+          RC_ROUND: ${{ inputs.rc_round || '13' }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${RELEASE_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\.(dev|post)[0-9]+)?$ ]]; then
+            echo "::error::release_version must be X.Y.Z[.devN|.postN] (got '${RELEASE_VERSION}')"
+            exit 1
+          fi
+          # Validated before the branch cut — a typo caught after the push wastes hours of CI.
+          if ! [[ "${RC_ROUND}" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+            echo "::error::rc_round must be '<round>' or '<round>.<sub>' (non-negative integers; got '${RC_ROUND}')"
+            exit 1
+          fi
+          if [[ -n "${RELEASE_BRANCH}" && ! "${RELEASE_BRANCH}" =~ ^release/[A-Za-z0-9._-]+$ ]]; then
+            echo "::error::release_branch must look like release/<name> (got '${RELEASE_BRANCH}')"
+            exit 1
+          fi
+          if [[ ! "${SOURCE_REF}" =~ ^(main|release/[0-9]+\.[0-9]+\.[0-9]+(\.(dev|post)[0-9]+)?|[0-9a-f]{40})$ ]]; then
+            echo "::error::source_ref must be 'main', a release/x.y.z branch, or a 40-char SHA (got '${SOURCE_REF}')"
+            exit 1
+          fi
+
+      # Normalize the per-type fields into canonical subset strings (all|none|csv
+      # of normalized tokens) consumed by the bump, release.yml, and the GitLab
+      # trigger. The container grammar expands <fw>[:runtime|:efa] (bare fw = both)
+      # and validates every token; unknown tokens fail fast.
+      - name: Resolve artifact selection
+        id: resolve
+        env:
+          RELEASE_VERSION: ${{ inputs.release_version }}
+          CONTAINERS: ${{ inputs.containers || 'none' }}
+          WHEELS: ${{ inputs.wheels || 'all' }}
+          # Stage ALL publishable workspace crates ('all' = the max). A hardcoded
+          # "public-only" list is infeasible: dynamo-llm depends on dynamo-bench
+          # (lib/llm/Cargo.toml), so excluding bench breaks the dependency closure, and
+          # the publishable graph differs across release branches (e.g. release/1.3.0 has
+          # no dynamo-parsers/protocols/renderer/tokenizers). stage_crates.py publishes
+          # the full publishable set for whichever branch it runs on, topo-ordered, with
+          # dynamo-mocker's aiconfigurator-core git dep stripped at publish (strip_git_deps);
+          # the expect-version gate guards against any crate not at the release version.
+          CRATES: ${{ inputs.crates || 'none' }}
+          HELM: ${{ inputs.helm || 'none' }}
+        run: |
+          set -euo pipefail
+          python3 <<'PY' > "${RUNNER_TEMP}/selection.env"
+          import os, re, sys
+
+          FRAMEWORKS = {"vllm", "sglang", "trtllm"}
+          VARIANTS = {"runtime", "efa"}
+          COMPONENTS = {"frontend", "operator", "planner", "snapshot"}
+          WHEEL_TOKENS = {"ai-dynamo", "ai-dynamo-runtime", "kvbm"}
+          HELM_TOKENS = {"platform", "snapshot"}
+
+          def fail(msg):
+              print(f"::error::{msg}", file=sys.stderr)
+              sys.exit(1)
+
+          def dedupe(xs):
+              seen = []
+              for x in xs:
+                  if x not in seen:
+                      seen.append(x)
+              return seen
+
+          def norm_containers(spec):
+              spec = (spec or "all").strip()
+              if spec == "all":
+                  return "all"
+              if spec in ("", "none"):
+                  return "none"
+              out = []
+              for tok in (t.strip() for t in spec.split(",") if t.strip()):
+                  if tok in COMPONENTS:
+                      out.append(tok)
+                      continue
+                  fw, _, var = tok.partition(":")
+                  if fw not in FRAMEWORKS:
+                      fail(f"unknown container token '{tok}'")
+                  if var == "":
+                      out += [f"{fw}-runtime", f"{fw}-efa"]
+                  elif var in VARIANTS:
+                      out.append(f"{fw}-{var}")
+                  else:
+                      fail(f"unknown variant in '{tok}' (use runtime|efa)")
+              return ",".join(dedupe(out))
+
+          def norm_simple(spec, universe, label):
+              spec = (spec or "all").strip()
+              if spec == "all":
+                  return "all"
+              if spec in ("", "none"):
+                  return "none"
+              sel = [t.strip() for t in spec.split(",") if t.strip()]
+              bad = [t for t in sel if t not in universe]
+              if bad:
+                  fail(f"unknown {label} token(s) {bad}; valid: {sorted(universe)}")
+              return ",".join(dedupe(sel))
+
+          def norm_crates(spec):
+              spec = (spec or "all").strip()
+              if spec == "all":
+                  return "all"
+              if spec in ("", "none"):
+                  return "none"
+              # Closure is checked by stage_crates.py; the charset gate keeps
+              # arbitrary text out of $GITHUB_OUTPUT and the GitLab variables.
+              sel = dedupe(t.strip() for t in spec.split(",") if t.strip())
+              bad = [t for t in sel if not re.fullmatch(r"[A-Za-z0-9_-]+", t)]
+              if bad:
+                  fail(f"invalid crate token(s) {bad}; crate names are [A-Za-z0-9_-]+")
+              return ",".join(sel)
+
+          c = norm_containers(os.environ.get("CONTAINERS", "all"))
+          w = norm_simple(os.environ.get("WHEELS", "all"), WHEEL_TOKENS, "wheel")
+          cr = norm_crates(os.environ.get("CRATES", "all"))
+          h = norm_simple(os.environ.get("HELM", "all"), HELM_TOKENS, "helm")
+
+          # SemVer has no post-release form: .postN would sort before X.Y.Z or
+          # collide on crates.io — post releases ship containers/wheels only.
+          if re.search(r"\.post[0-9]+$", os.environ.get("RELEASE_VERSION", "")):
+              if cr != "none" or h != "none":
+                  fail("post releases (X.Y.Z.postN) cannot ship crates or helm charts "
+                       "(no SemVer post-release form); re-run with crates=none and helm=none")
+
+          print(f"containers={c}")
+          print(f"wheels={w}")
+          print(f"crates={cr}")
+          print(f"helm={h}")
+          PY
+          echo "Resolved selection:"
+          cat "${RUNNER_TEMP}/selection.env"
+          cat "${RUNNER_TEMP}/selection.env" >> "$GITHUB_OUTPUT"
+
+      - name: Mint app token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
+      - name: Checkout source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          # TEMPORARY(test): || 'main' covers inputless push events. REVERT.
+          ref: ${{ inputs.source_ref || 'release/1.3.0' }}
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Set version and create branch
+        id: bump
+        env:
+          # TEMPORARY(test): push fallbacks. REVERT to bare inputs.* before merge.
+          RELEASE_VERSION: ${{ inputs.release_version || '1.3.0.post1' }}
+          RELEASE_BRANCH: ${{ inputs.release_branch || (github.event_name == 'push' && 'release/1.3.0.post1' || '') }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          CONTAINERS: ${{ steps.resolve.outputs.containers }}
+          HELM: ${{ steps.resolve.outputs.helm }}
+        run: |
+          set -euo pipefail
+
+          BRANCH="${RELEASE_BRANCH:-release/${RELEASE_VERSION}}"
+          # A pure release/X.Y.Z[.devN|.postN] branch is a real release; anything
+          # else (e.g. release/0.0.0test) is a throwaway test branch.
+          if [[ "${BRANCH}" =~ ^release/[0-9]+\.[0-9]+\.[0-9]+(\.(dev|post)[0-9]+)?$ ]]; then
+            IS_TEST=false
+          else
+            IS_TEST=true
+          fi
+
+          # Fetch the version-bump script from THIS workflow's commit (GITHUB_SHA);
+          # source_ref may predate --set-version.
+          git show "${GITHUB_SHA}:.github/scripts/apply_dev_version.py" > "${RUNNER_TEMP}/apply_dev_version.py"
+
+          # Base the release branch on the existing remote branch when it exists, so a
+          # re-run only adds the diff (e.g. a newly-added script step lands on the branch
+          # that was cut before it existed); otherwise base it on the checked-out
+          # source_ref. We never delete/clobber — the diff (if any) is committed on top.
+          if git ls-remote --exit-code --heads origin "${BRANCH}" >/dev/null 2>&1; then
+            git fetch origin "${BRANCH}"
+            git checkout -B "${BRANCH}" FETCH_HEAD
+            EXISTED=1
+          else
+            git checkout -b "${BRANCH}"
+            EXISTED=0
+          fi
+
+          # Run the release scripts on the working tree: set the absolute version (then
+          # sync the lockfile and substitute image placeholders, below).
+          python3 "${RUNNER_TEMP}/apply_dev_version.py" "" . --set-version "${RELEASE_VERSION}" \
+            --containers "${CONTAINERS}" --helm "${HELM}"
+
+          if ! command -v cargo >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 --retry 5 --retry-delay 2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --profile minimal --default-toolchain stable
+            source "${HOME}/.cargo/env"
+          fi
+          # Keep Cargo.lock in sync so post-merge `cargo test --locked` passes.
+          cargo update --workspace
+
+          # Substitute the example/deploy/doc image placeholders to the GA registry +
+          # release tag (the manual `my-registry`/`my-tag` release step). Anchored to
+          # image refs only — 'my-registry/' and ':my-tag' — so prose, the
+          # `my-registry-secret` k8s name, `my-registry.com` operator test fixtures,
+          # recipe_tool.py's placeholder-detection regex, and the "Replace my-tag"
+          # instructional comments are all left untouched.
+          REGISTRY="nvcr.io/nvidia/ai-dynamo"
+          git ls-files -z \
+            | xargs -0 grep -IlZ -e 'my-registry/' -e ':my-tag' 2>/dev/null \
+            | xargs -0 -r sed -i -e "s#my-registry/#${REGISTRY}/#g" -e "s#:my-tag#:${RELEASE_VERSION}#g" || true
+          echo "Substituted image placeholders -> ${REGISTRY}/<image>:${RELEASE_VERSION}"
+
+          APP_USER_ID=$(curl -fsSL --retry 3 \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/users/${APP_SLUG}%5Bbot%5D" \
+            | python3 -c "import sys,json;print(json.load(sys.stdin)['id'])")
+          git config user.name "${APP_SLUG}[bot]"
+          git config user.email "${APP_USER_ID}+${APP_SLUG}[bot]@users.noreply.github.com"
+          # Commit + push only when the scripts produced a diff vs the branch's current
+          # state. No diff on an existing branch => reuse (no push); no diff on a brand-
+          # new branch => still record a release commit so the push fires post-merge CI.
+          git add -A
+          if git diff --cached --quiet; then
+            if [ "${EXISTED}" = "1" ]; then
+              echo "${BRANCH} already matches the release scripts; nothing to commit (reuse, no push)."
+            else
+              git commit -s --allow-empty -m "release: set version ${RELEASE_VERSION}"
+              git push origin "${BRANCH}"
+            fi
+          else
+            git commit -s -m "release: set version ${RELEASE_VERSION}"
+            git push origin "${BRANCH}"
+          fi
+
+          echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "bump_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "is_test=${IS_TEST}" >> "$GITHUB_OUTPUT"
+          echo "Prepared ${BRANCH} @ $(git rev-parse HEAD) (is_test=${IS_TEST}, existed=${EXISTED})"
+
+      - name: Resolve internal staging rc
+        id: rc
+        # A dry run sets up the branch/bump only — don't consume an rc.
+        if: ${{ !inputs.dry_run }}
+        env:
+          RC_ROUND: ${{ inputs.rc_round || '13' }}
+        run: |
+          set -euo pipefail
+          # Internal staging registries (crates/helm/wheels) are immutable, so each
+          # (re-)stage of the same version needs a distinct rc. We take the rc as an
+          # INPUT (no GitHub tag is created): '<round>' or '<round>.<sub>'.
+          # Downstream builds X.Y.Z-rc.<round>[.<sub>] — a SemVer pre-release whose
+          # dot-separated numeric identifiers order correctly (rc.2.9 < rc.2.10 <
+          # rc.10.0). GA promotion (GitLab) still uses the clean version.
+          if ! [[ "${RC_ROUND}" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+            echo "::error::rc_round must be '<round>' or '<round>.<sub>' (non-negative integers; got '${RC_ROUND}')"
+            exit 1
+          fi
+          echo "rc_number=${RC_ROUND}" >> "$GITHUB_OUTPUT"
+          echo "Internal staging rc=${RC_ROUND} (no GitHub tag created)"
+
+  # ============================================================================
+  # WAIT FOR POST-MERGE BUILDS (not tests)
+  # The branch push above triggers post-merge-ci.yml, which builds + pushes the
+  # release images to ECR for the bump commit. We wait only for the ECR images the
+  # SELECTED artifacts consume, so we proceed as soon as those builds finish —
+  # WITHOUT waiting for post-merge tests/compliance/deploy. Tests don't push images,
+  # and the bump SHA is unique, so a present tag is unambiguously this run's build
+  # output. Runs on an ECR-capable runner (same IRSA path as stage-wheels).
+  # ============================================================================
+  await-post-merge:
+    name: Wait for post-merge builds
+    needs: [prepare-branch]
+    # TEMPORARY(test): run the full chain on push too. REVERT to the commented line.
+    if: ${{ !inputs.dry_run }}
+    # if: ${{ github.event_name == 'workflow_dispatch' && !inputs.dry_run && needs.prepare-branch.outputs.is_test != 'true' }}
+    runs-on: prod-tester-amd-v1
+    environment: automated-release
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Wait for the selected artifacts' build images in ECR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ needs.prepare-branch.outputs.bump_sha }}
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+          CONTAINERS: ${{ needs.prepare-branch.outputs.containers }}
+          WHEELS: ${{ needs.prepare-branch.outputs.wheels }}
+          CRATES: ${{ needs.prepare-branch.outputs.crates }}
+        run: |
+          set -euo pipefail
+          aws sts get-caller-identity >/dev/null || { echo "::error::no AWS credentials on this runner"; exit 1; }
+
+          # ECR tags this release will consume, derived from the selection. The
+          # container token -> source tag map mirrors release.yml's copy step; wheels
+          # come from the dynamo-runtime image, crates from dynamo-runtime-test.
+          CSET="${CONTAINERS:-all}"
+          ctr_selected() {
+            [ "${CSET}" = "all" ] && return 0
+            [ "${CSET}" = "none" ] && return 1
+            case ",${CSET}," in *,"$1",*) return 0 ;; esac
+            return 1
+          }
+          declare -A CTR=(
+            [vllm-runtime]=vllm-runtime     [vllm-efa]=vllm-runtime-efa
+            [sglang-runtime]=sglang-runtime [sglang-efa]=sglang-runtime-efa
+            [trtllm-runtime]=trtllm-runtime [trtllm-efa]=trtllm-runtime-efa
+            [frontend]=dynamo-frontend [operator]=operator [planner]=dynamo-planner [snapshot]=snapshot-agent
+          )
+          declare -a TAGS=()
+          for tok in "${!CTR[@]}"; do
+            if ctr_selected "${tok}"; then TAGS+=("${SHA}-${CTR[$tok]}"); fi
+          done
+          if [ "${WHEELS:-all}" != "none" ]; then TAGS+=("${SHA}-dynamo-runtime"); fi
+          if [ "${CRATES:-all}" != "none" ]; then TAGS+=("${SHA}-dynamo-runtime-test"); fi
+
+          if [ ${#TAGS[@]} -eq 0 ]; then
+            echo "No ECR build artifacts selected (helm-only); nothing to wait for."
+            exit 0
+          fi
+
+          echo "Waiting for post-merge builds to publish ${#TAGS[@]} ECR tag(s): ${TAGS[*]}"
+          # 3h budget (runtime builds alone get 120 min); 15-min fast-fail if
+          # post-merge never started for the bump SHA.
+          start=$(date +%s)
+          deadline=$(( start + 10800 ))
+          start_deadline=$(( start + 900 ))
+          while :; do
+            missing=()
+            for TAG in "${TAGS[@]}"; do
+              if ! aws ecr describe-images --repository-name "ai-dynamo/dynamo" \
+                     --image-ids imageTag="${TAG}" --region "${AWS_DEFAULT_REGION}" >/dev/null 2>&1; then
+                missing+=("${TAG}")
+              fi
+            done
+            if [ ${#missing[@]} -eq 0 ]; then
+              echo "All ${#TAGS[@]} required build images are in ECR; proceeding (not waiting for post-merge tests)."
+              break
+            fi
+            echo "still missing ${#missing[@]}/${#TAGS[@]}: ${missing[*]}"
+
+            # Fast-fail if post-merge finished (or never started) — but only on a
+            # successful API response, so a transient curl/JSON failure can't
+            # masquerade as "post-merge never ran".
+            API_OK=true
+            RUNS=$(curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${REPO}/actions/workflows/post-merge-ci.yml/runs?head_sha=${SHA}&per_page=1") || { API_OK=false; RUNS='{}'; }
+            COUNT=$(echo "${RUNS}" | jq -r '.workflow_runs | length' 2>/dev/null || { API_OK=false; echo 0; })
+            STATUS=$(echo "${RUNS}" | jq -r '.workflow_runs[0].status // "pending"' 2>/dev/null || { API_OK=false; echo pending; })
+            if [ "${API_OK}" = "true" ]; then
+              if [ "${COUNT}" = "0" ] && [ "$(date +%s)" -ge "${start_deadline}" ]; then
+                echo "::error::post-merge CI never started for ${SHA} (branch push may not have triggered it); required image(s) missing: ${missing[*]}"
+                exit 1
+              fi
+              if [ "${COUNT}" != "0" ] && [ "${STATUS}" = "completed" ]; then
+                echo "::error::post-merge CI completed but required image(s) still missing: ${missing[*]}"
+                exit 1
+              fi
+            else
+              echo "workflow-runs API probe failed (transient); skipping fast-fail checks this round"
+            fi
+
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "::error::timed out waiting for post-merge build images: ${missing[*]}"
+              exit 1
+            fi
+            sleep 30
+          done
+
+  # ============================================================================
+  # MANUAL APPROVAL GATE before publishing.
+  # ============================================================================
+  release-approval:
+    name: Release approval gate
+    needs: [prepare-branch, await-post-merge]
+    # TEMPORARY(test): run the full chain on push too. REVERT to the commented line.
+    if: ${{ !inputs.dry_run }}
+    # if: ${{ github.event_name == 'workflow_dispatch' && !inputs.dry_run && needs.prepare-branch.outputs.is_test != 'true' }}
+    runs-on: prod-default-small-v2
+    environment: manual-release-approval
+    permissions:
+      contents: read
+    steps:
+      - name: Record approval
+        env:
+          BRANCH: ${{ needs.prepare-branch.outputs.branch }}
+          ACTOR: ${{ github.actor }}
+        run: echo "On-demand release ${BRANCH} approved by ${ACTOR}"
+
+  # ============================================================================
+  # STAGE ARTIFACTS + TRIGGER GITLAB (release.yml in on-demand mode)
+  # ============================================================================
+  invoke-release:
+    name: Stage release
+    needs: [prepare-branch, await-post-merge, release-approval]
+    # TEMPORARY(test): run the full chain on push too. REVERT to the commented line.
+    if: ${{ !inputs.dry_run }}
+    # if: ${{ github.event_name == 'workflow_dispatch' && !inputs.dry_run && needs.prepare-branch.outputs.is_test != 'true' }}
+    uses: ./.github/workflows/release.yml
+    with:
+      commit_sha: ${{ needs.prepare-branch.outputs.bump_sha }}
+      on_demand: true
+      # TEMPORARY(test): || fallback for inputless push events. REVERT.
+      release_version: ${{ inputs.release_version || '1.3.0.post1' }}
+      # Operator-chosen internal-staging rc (immutable registries can't be overwritten).
+      rc_number: ${{ needs.prepare-branch.outputs.rc_number }}
+      # Normalized subsets from resolve-selection.
+      containers: ${{ needs.prepare-branch.outputs.containers }}
+      wheels: ${{ needs.prepare-branch.outputs.wheels }}
+      crates: ${{ needs.prepare-branch.outputs.crates }}
+      helm: ${{ needs.prepare-branch.outputs.helm }}
+      skip_gitlab_pipeline: ${{ inputs.skip_gitlab_pipeline || false }}
+    secrets: inherit
