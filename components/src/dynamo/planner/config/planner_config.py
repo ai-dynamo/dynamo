@@ -614,6 +614,38 @@ class PlannerConfig(BaseModel):
     # Advisory mode: compute and log decisions without executing scaling
     advisory: bool = SLAPlannerDefaults.advisory
 
+    # --- Power-aware budget (read-only caps; DGD-owned) ---
+    #
+    # Per-GPU caps are NOT configured here. They are authored on each worker
+    # component's ``podTemplate.metadata.annotations``
+    # (``dynamo.nvidia.com/gpu-power-limit``), applied to Pods by the operator,
+    # and enforced by the Power Agent. The planner reads those caps from the DGD
+    # and combines them with ``total_gpu_power_limit`` to project and clamp a
+    # power budget. It never writes per-GPU caps.
+    enable_power_awareness: bool = Field(
+        default=False,
+        description=(
+            "Enable power-aware budget projection and budget-gated replica "
+            "scaling. Per-GPU caps are read from DGD worker podTemplate "
+            "annotations; this planner combines them with total_gpu_power_limit "
+            "to publish power-budget gauges and clamp scale-up. Requires "
+            "total_gpu_power_limit and environment='kubernetes'."
+        ),
+    )
+    total_gpu_power_limit: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Total GPU power budget in watts for this DGD. Required when "
+            "enable_power_awareness=True. Recommended formula: "
+            "(rack_capacity_W × headroom_factor) − non_gpu_overhead with "
+            "headroom_factor ≈ 0.85–0.9. Used for the power-budget gauges and "
+            "as the projected ceiling the final budget clamp holds scaling to — "
+            "a bound on projected draw from the requested caps, not a proven "
+            "hardware limit (see the Power Agent for effective enforcement)."
+        ),
+    )
+
     # Diagnostics report settings
     report_interval_hours: Optional[float] = Field(
         default=24.0,
@@ -645,15 +677,16 @@ class PlannerConfig(BaseModel):
         default=8080,
         description=(
             "Port for the live diagnostics dashboard HTTP server. "
-            "Set to 0 to disable. When enabled, visit http://host:port/ "
-            "to view a real-time Plotly report of accumulated snapshots."
+            "Set to 0 to disable. When enabled, visit "
+            "http://<host>:<port>/ to view a real-time Plotly report of "
+            "accumulated snapshots."
         ),
     )
 
     scheduling: SchedulingConfig = Field(
         default_factory=SchedulingConfig,
         description=(
-            "Plugin-pipeline scheduling config — see ``SchedulingConfig`` " "docstring."
+            "Plugin-pipeline scheduling config — see ``SchedulingConfig`` docstring."
         ),
     )
 
@@ -751,6 +784,25 @@ class PlannerConfig(BaseModel):
                 f"fpm_sample_bucket_size must be a perfect square, "
                 f"got {self.fpm_sample_bucket_size}"
             )
+
+        # Power-awareness validation. Per-GPU caps come from DGD worker
+        # podTemplate annotations, not this config, so the only required knob
+        # is the total budget — and a Kubernetes connector to read the DGD.
+        if self.enable_power_awareness:
+            if self.total_gpu_power_limit is None:
+                raise ValueError(
+                    "total_gpu_power_limit is required when enable_power_awareness=True. "
+                    "Recommended: (rack_capacity_W × headroom_factor) − non_gpu_overhead "
+                    "with headroom_factor ≈ 0.85–0.9. Setting this incorrectly "
+                    "could silently cap your cluster — there is no safe default."
+                )
+            if self.environment != "kubernetes":
+                raise ValueError(
+                    "enable_power_awareness=True requires environment='kubernetes'. "
+                    "Per-GPU caps are read from DGD worker podTemplate annotations, "
+                    "which only the Kubernetes connector resolves; virtual/replay and "
+                    "global-planner modes have no DGD with authoritative caps."
+                )
 
         if self.environment == "global-planner" and not self.global_planner_namespace:
             raise ValueError(

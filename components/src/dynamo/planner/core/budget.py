@@ -6,31 +6,26 @@
 Two layers:
 
 * **Pure math** (``compute_tolerance``, ``bounds_for_total``,
-  ``proportional_clamp_pair``, ``proportional_clamp_single``): no I/O, no
-  state, no logging. Shared by the builtin local planner state (where the
-  budget is enforced intra-DGD by clamping the joint
-  ``(num_prefill, num_decode)`` desired counts) and the centralized
-  GlobalPlanner (where it is enforced across DGDs by accepting/rejecting
-  incoming ScaleRequests). Both layers compute the same ``tolerance`` and
-  the same in-band check; only the action taken on a breach differs (the
-  local planner transforms counts, the GlobalPlanner decides).
-
-* **Config-aware wrappers** (``_apply_global_gpu_budget``,
-  ``_apply_component_gpu_budget``): pull ``min_gpu_budget``,
-  ``max_gpu_budget``, ``min_endpoint``, and per-engine GPU counts off a
-  ``PlannerConfig`` and delegate to the pure primitives. These are what
-  ``state_machine.py`` and friends call.
+  ``proportional_clamp_pair``, ``proportional_clamp_single``, plus the
+  power-budget helpers below): no I/O, no state, no logging. Shared by
+  the builtin local planner state (where the budget is enforced
+  intra-DGD by clamping the joint ``(num_prefill, num_decode)`` desired
+  counts), the orchestrator engine adapter's final budget clamp, and the
+  centralized GlobalPlanner (where it is enforced across DGDs by
+  accepting/rejecting incoming ScaleRequests). Callers share the same
+  ``tolerance`` / in-band check; only the action taken on a breach
+  differs (local transforms counts, GlobalPlanner decides).
 
 * ``_initialize_gpu_counts`` remains a deployment-bootstrap helper: it
   populates per-engine GPU counts from the DGD spec or CLI flags, with
-  a virtual-mode fallback. Untouched by this refactor.
+  a virtual-mode fallback.
 """
 
 from __future__ import annotations
 
 import logging
 import math
-from typing import Iterable
+from typing import Iterable, Optional
 
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.errors import DeploymentValidationError
@@ -215,78 +210,267 @@ def proportional_clamp_single(
 
 
 # ---------------------------------------------------------------------------- #
-# Config-aware wrappers — what state_machine.py and friends call.              #
+# Power budget — pure ceiling clamp on PROJECTED watts (no floor).             #
+#                                                                              #
+# The per-GPU caps are DGD-owned; the planner reads ``watts_per_replica`` per  #
+# role (from the *requested* annotation) and a ``total_gpu_power_limit`` and   #
+# clamps proposed replica counts so projected watts fit the budget. This is a  #
+# ceiling on the projected draw of the requested caps — not a proven hardware  #
+# limit (the Power Agent may clamp a cap up to the GPU minimum or fail to      #
+# apply it, and does not feed the effective cap back here). Within that model  #
+# it is treated as a hard constraint: it only ever *lowers* counts and,        #
+# applied after the GPU-budget clamp, wins over the GPU floor when the two     #
+# conflict (the floor violation is reported, not enforced).                    #
 # ---------------------------------------------------------------------------- #
 
 
-def _apply_global_gpu_budget(
-    next_num_p: int, next_num_d: int, config: PlannerConfig
-) -> tuple[int, int]:
-    """Apply GPU budget band to disagg ``(num_p, num_d)``.
+def project_watts(
+    num_p: Optional[int],
+    num_d: Optional[int],
+    p_watts: Optional[int],
+    d_watts: Optional[int],
+) -> int:
+    """Projected watts = Σ count × per-replica watts. Missing count/watts = 0."""
+    total = 0
+    if num_p is not None and p_watts is not None:
+        total += num_p * p_watts
+    if num_d is not None and d_watts is not None:
+        total += num_d * d_watts
+    return total
 
-    Honors ``config.max_gpu_budget`` (hard ceiling) and ``config.min_gpu_budget``
-    (floor; ``-1`` disables). When both are active, allows the result to
-    land in ``[min - tolerance, max]`` where ``tolerance =
-    max(prefill_engine_num_gpu, decode_engine_num_gpu)`` — see
-    ``proportional_clamp_pair``. ``max_gpu_budget`` is never relaxed.
 
-    Returns ``(0, 0)`` if the ceiling is below the per-pool minima
-    (configuration error).
+def peak_parallel_watts(
+    current_p: Optional[int],
+    current_d: Optional[int],
+    proposed_p: Optional[int],
+    proposed_d: Optional[int],
+    p_watts: Optional[int],
+    d_watts: Optional[int],
+) -> int:
+    """Worst-case draw if both roles move toward their targets in parallel."""
+    p_ready = current_p or 0
+    d_ready = current_d or 0
+    p_peak = max(p_ready, proposed_p if proposed_p is not None else p_ready)
+    d_peak = max(d_ready, proposed_d if proposed_d is not None else d_ready)
+    return project_watts(p_peak, d_peak, p_watts, d_watts)
+
+
+def _is_opposing_rebalance(
+    proposed_p: Optional[int],
+    proposed_d: Optional[int],
+    current_p: Optional[int],
+    current_d: Optional[int],
+) -> bool:
+    """True when one role scales up and the other scales down."""
+    if (
+        proposed_p is None
+        or proposed_d is None
+        or current_p is None
+        or current_d is None
+    ):
+        return False
+    p_up = proposed_p > current_p
+    p_down = proposed_p < current_p
+    d_up = proposed_d > current_d
+    d_down = proposed_d < current_d
+    return (p_up and d_down) or (p_down and d_up)
+
+
+def minimum_power_footprint_fits(
+    total_budget: int,
+    min_endpoint: int,
+    p_watts: Optional[int],
+    d_watts: Optional[int],
+) -> bool:
+    """True when ``min_endpoint`` replicas of every present role fit the budget.
+
+    Startup feasibility gate: if even the minimum footprint overshoots the
+    total power budget the deployment can never satisfy the ceiling, so the
+    planner must fail closed rather than clamp to an impossible target.
     """
-    if config.max_gpu_budget < 0 and config.min_gpu_budget < 0:
-        return next_num_p, next_num_d
-    assert config.prefill_engine_num_gpu is not None
-    assert config.decode_engine_num_gpu is not None
+    required = 0
+    if p_watts is not None:
+        required += min_endpoint * p_watts
+    if d_watts is not None:
+        required += min_endpoint * d_watts
+    return required <= total_budget
 
-    p_gpu = config.prefill_engine_num_gpu
-    d_gpu = config.decode_engine_num_gpu
 
-    new_p, new_d = proportional_clamp_pair(
-        next_num_p,
-        next_num_d,
-        p_gpu,
-        d_gpu,
-        config.min_gpu_budget,
-        config.max_gpu_budget,
-        config.min_endpoint,
-    )
+def _hold_at_current(
+    proposed: Optional[int], current: Optional[int]
+) -> tuple[Optional[int], bool]:
+    """Cap a proposal at the current count (block scale-up, allow scale-down)."""
+    if proposed is None:
+        return None, False
+    if current is None:
+        return proposed, False
+    held = min(proposed, current)
+    return held, held < proposed
 
-    if (new_p, new_d) != (next_num_p, next_num_d):
-        old_total = next_num_p * p_gpu + next_num_d * d_gpu
-        new_total = new_p * p_gpu + new_d * d_gpu
-        logger.warning(
-            f"GPU budget band [min={config.min_gpu_budget}, max={config.max_gpu_budget}] "
-            f"clamped ({next_num_p}P + {next_num_d}D = {old_total} GPUs) -> "
-            f"({new_p}P + {new_d}D = {new_total} GPUs)"
+
+def apply_power_budget(
+    proposed_p: Optional[int],
+    proposed_d: Optional[int],
+    current_p: Optional[int],
+    current_d: Optional[int],
+    p_watts: Optional[int],
+    d_watts: Optional[int],
+    total_budget: int,
+    min_endpoint: int,
+) -> tuple[Optional[int], Optional[int], Optional[str]]:
+    """Clamp proposed replica counts so projected power fits ``total_budget``.
+
+    ``None`` proposals preserve the proposal mask — an unproposed component is
+    never mutated; its *current* count is charged against the budget when
+    sizing the proposed component(s). Returns ``(new_p, new_d, reason)`` where
+    ``reason`` is a short diagnostic when the clamp changed a proposal (or
+    suppressed a scale-up), else ``None``.
+
+    Power is ceiling-only and never raises a count above what was proposed.
+    """
+    p_adjustable = proposed_p is not None and p_watts is not None and p_watts > 0
+    d_adjustable = proposed_d is not None and d_watts is not None and d_watts > 0
+
+    if (
+        p_adjustable
+        and d_adjustable
+        and _is_opposing_rebalance(proposed_p, proposed_d, current_p, current_d)
+        and peak_parallel_watts(
+            current_p, current_d, proposed_p, proposed_d, p_watts, d_watts
         )
+        > total_budget
+    ):
+        # Settled target may fit, but parallel rollouts can transiently exceed
+        # the ceiling (e.g. (1,4)->(4,1) peaks at (4,4)). Stage scale-downs
+        # first by deferring scale-up legs to a later stable tick.
+        new_p, capped_p = _hold_at_current(proposed_p, current_p)
+        new_d, capped_d = _hold_at_current(proposed_d, current_d)
+        if capped_p or capped_d:
+            return new_p, new_d, "power_rebalance_staged"
 
+    eff_p = proposed_p if proposed_p is not None else current_p
+    eff_d = proposed_d if proposed_d is not None else current_d
+    if project_watts(eff_p, eff_d, p_watts, d_watts) <= total_budget:
+        return proposed_p, proposed_d, None
+
+    if p_adjustable and d_adjustable:
+        assert proposed_p is not None and proposed_d is not None
+        assert p_watts is not None and d_watts is not None
+        new_p, new_d = _shrink_pair(
+            proposed_p, proposed_d, p_watts, d_watts, total_budget, min_endpoint
+        )
+        # Ceiling never raises a proposed count (decode-no-upscale invariant).
+        new_p = min(new_p, proposed_p)
+        new_d = min(new_d, proposed_d)
+        # The clamp itself can synthesize an opposing rebalance vs current even
+        # when the proposal was not one (e.g. current (4,1), proposal (5,5) ->
+        # clamped (2,3)): the settled target fits, but parallel actuation peaks
+        # at (4,3). Stage that peak the same way as a proposed rebalance by
+        # holding the scale-up leg(s) at current so the transient stays under
+        # the ceiling; the scale-up is admitted on a later stable tick.
+        if (
+            _is_opposing_rebalance(new_p, new_d, current_p, current_d)
+            and peak_parallel_watts(
+                current_p, current_d, new_p, new_d, p_watts, d_watts
+            )
+            > total_budget
+        ):
+            staged_p, capped_p = _hold_at_current(new_p, current_p)
+            staged_d, capped_d = _hold_at_current(new_d, current_d)
+            if capped_p or capped_d:
+                return staged_p, staged_d, "power_rebalance_staged"
+        return new_p, new_d, "power_budget_clamped"
+
+    if p_adjustable != d_adjustable:
+        # Exactly one proposed adjustable component; charge the other at its
+        # current count and never mutate it.
+        if p_adjustable:
+            assert proposed_p is not None and p_watts is not None
+            fixed = eff_d * d_watts if (eff_d is not None and d_watts) else 0
+            new_p, suppressed = _shrink_single(
+                proposed_p, current_p, p_watts, total_budget - fixed, min_endpoint
+            )
+            if new_p == proposed_p:
+                return new_p, proposed_d, None
+            reason = (
+                "power_budget_scale_up_suppressed"
+                if suppressed
+                else "power_budget_clamped"
+            )
+            return new_p, proposed_d, reason
+        assert proposed_d is not None and d_watts is not None
+        fixed = eff_p * p_watts if (eff_p is not None and p_watts) else 0
+        new_d, suppressed = _shrink_single(
+            proposed_d, current_d, d_watts, total_budget - fixed, min_endpoint
+        )
+        if new_d == proposed_d:
+            return proposed_p, new_d, None
+        reason = (
+            "power_budget_scale_up_suppressed" if suppressed else "power_budget_clamped"
+        )
+        return proposed_p, new_d, reason
+
+    # Over budget but nothing adjustable is proposed (baseline over budget with
+    # no lever this tick). Do not mutate unproposed components.
+    return proposed_p, proposed_d, None
+
+
+def _shrink_pair(
+    num_p: int,
+    num_d: int,
+    p_watts: int,
+    d_watts: int,
+    budget: int,
+    min_endpoint: int,
+) -> tuple[int, int]:
+    """Proportionally shrink a disagg pair so watts fit the budget ceiling."""
+    projected = num_p * p_watts + num_d * d_watts
+    if projected <= budget:
+        return num_p, num_d
+    if budget < min_endpoint * (p_watts + d_watts):
+        # Infeasible under the ceiling (startup validation should have caught
+        # it). Best effort: hold each pool at the floor.
+        # May return a count above a role's proposal when that floor exceeds
+        # the proposal; ``apply_power_budget`` immediately ``min()``s against
+        # ``proposed_p``/``proposed_d``, so the emitted decision never raises
+        # a role above what was proposed.
+        return min_endpoint, min_endpoint
+    scale = budget / projected
+    max_p = math.floor((budget - min_endpoint * d_watts) / p_watts)
+    new_p = max(min_endpoint, min(max_p, math.floor(num_p * scale)))
+    remaining = budget - new_p * p_watts
+    new_d = max(min_endpoint, math.floor(remaining / d_watts))
     return new_p, new_d
 
 
-def _apply_component_gpu_budget(
-    desired_replicas: int, engine_num_gpu: int, config: PlannerConfig
-) -> int:
-    """Apply GPU budget band to a single component (agg, or
-    prefill-only / decode-only mode)."""
-    if config.max_gpu_budget < 0 and config.min_gpu_budget < 0:
-        return desired_replicas
+def _shrink_single(
+    proposed: int,
+    current: Optional[int],
+    watts: int,
+    avail: int,
+    min_endpoint: int,
+) -> tuple[int, bool]:
+    """Fit a single adjustable pool into ``avail`` watts.
 
-    new_replicas = proportional_clamp_single(
-        desired_replicas,
-        engine_num_gpu,
-        config.min_gpu_budget,
-        config.max_gpu_budget,
-        config.min_endpoint,
-    )
+    Returns ``(new_count, suppressed)``. ``suppressed`` is True when the fixed
+    (unproposed) component alone leaves no room to even seat ``min_endpoint``,
+    so the proposed scale-up is refused (held at ``min(proposed, current)``)
+    rather than the unproposed component being silently mutated.
+    """
+    if avail < min_endpoint * watts:
+        held, capped = _hold_at_current(proposed, current)
+        # ``proposed`` is non-optional, so ``_hold_at_current`` never returns
+        # ``None`` here. When ``current`` is None it leaves the proposal
+        # unchanged and ``capped`` is False — do not claim a suppression.
+        assert held is not None
+        return held, capped
+    max_fit = math.floor(avail / watts)
+    return max(min_endpoint, min(proposed, max_fit)), False
 
-    if new_replicas != desired_replicas:
-        logger.warning(
-            f"GPU budget band [min={config.min_gpu_budget}, max={config.max_gpu_budget}] "
-            f"clamped {desired_replicas} replicas (= {desired_replicas * engine_num_gpu} GPUs) "
-            f"-> {new_replicas} replicas (= {new_replicas * engine_num_gpu} GPUs)"
-        )
 
-    return new_replicas
+# ---------------------------------------------------------------------------- #
+# Deployment bootstrap — GPU counts from DGD / CLI.                            #
+# ---------------------------------------------------------------------------- #
 
 
 def _initialize_gpu_counts(

@@ -46,6 +46,60 @@ def test_invalid_environment():
         )
 
 
+# ---------------------------------------------------------------------------
+# Power-awareness validator (DGD-owned caps; read-only)
+# ---------------------------------------------------------------------------
+
+
+def test_power_awareness_disabled_by_default_needs_no_budget():
+    """The feature is off by default, so an otherwise-minimal config is valid
+    with the power fields left unset."""
+    config = PlannerConfig(namespace="test-ns")
+    assert config.enable_power_awareness is False
+    assert config.total_gpu_power_limit is None
+
+
+def test_power_awareness_requires_total_gpu_power_limit():
+    """enable_power_awareness=True without total_gpu_power_limit must fail —
+    there is no safe default for the deployment-wide budget."""
+    with pytest.raises(ValidationError, match="total_gpu_power_limit is required"):
+        PlannerConfig(
+            namespace="test-ns",
+            enable_power_awareness=True,
+        )
+
+
+def test_power_awareness_requires_kubernetes_environment():
+    """Per-GPU caps are read from the DGD, so power awareness is only valid on
+    the Kubernetes connector."""
+    with pytest.raises(ValidationError, match="requires environment='kubernetes'"):
+        PlannerConfig(
+            namespace="test-ns",
+            environment="virtual",
+            enable_power_awareness=True,
+            total_gpu_power_limit=5000,
+        )
+
+
+def test_power_awareness_enabled_with_required_fields_ok():
+    """Budget present and environment=kubernetes (default): config validates."""
+    config = PlannerConfig(
+        namespace="test-ns",
+        enable_power_awareness=True,
+        total_gpu_power_limit=5000,
+    )
+    assert config.enable_power_awareness is True
+    assert config.total_gpu_power_limit == 5000
+    assert config.environment == "kubernetes"
+
+
+def test_total_gpu_power_limit_rejects_non_positive():
+    """total_gpu_power_limit carries a ge=1 constraint (fires regardless of the
+    awareness flag)."""
+    with pytest.raises(ValidationError):
+        PlannerConfig(namespace="test-ns", total_gpu_power_limit=0)
+
+
 def test_all_fields_work():
     """Test that PlannerConfig accepts all fields."""
     config = PlannerConfig(

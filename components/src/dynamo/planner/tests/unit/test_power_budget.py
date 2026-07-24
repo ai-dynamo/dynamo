@@ -1,0 +1,624 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Power-budget clamp (Phase 4): pure ceiling math + engine_adapter wiring.
+
+Covers the ceiling-only clamp on projected watts (fit → no-op, proportional
+shrink, decode-no-upscale, partial proposals, scale-up-blocked hold) and the
+final-boundary ordering guarantee in ``OrchestratorEngineAdapter``: GPU budget
+first, then power budget (non-commutative; power wins over the GPU floor).
+"""
+
+from types import SimpleNamespace
+
+import pytest
+
+from dynamo.planner.core.budget import (
+    apply_power_budget,
+    minimum_power_footprint_fits,
+    peak_parallel_watts,
+    project_watts,
+)
+from dynamo.planner.core.types import (
+    EngineCapabilities,
+    WorkerCapabilities,
+    WorkerCounts,
+)
+from dynamo.planner.plugins.orchestrator.engine_adapter import OrchestratorEngineAdapter
+
+pytestmark = [
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+    pytest.mark.planner,
+]
+
+
+# ---------------------------------------------------------------------------
+# project_watts / minimum_power_footprint_fits
+# ---------------------------------------------------------------------------
+
+
+def test_project_watts_sums_present_roles():
+    assert project_watts(2, 3, 700, 1200) == 2 * 700 + 3 * 1200
+    assert project_watts(2, None, 700, 1200) == 1400
+    assert project_watts(None, 3, 700, 1200) == 3600
+    assert project_watts(2, 3, None, None) == 0
+
+
+@pytest.mark.parametrize(
+    "budget,min_endpoint,p,d,fits",
+    [
+        (5000, 1, 700, 1200, True),  # 1900 <= 5000
+        (1900, 1, 700, 1200, True),  # exactly fits
+        (1899, 1, 700, 1200, False),  # 1900 > 1899
+        (1000, 2, 700, 1200, False),  # 2*(700+1200) = 3800 > 1000
+        (2000, 1, None, 1200, True),  # only decode present
+    ],
+)
+def test_minimum_power_footprint_fits(budget, min_endpoint, p, d, fits):
+    assert minimum_power_footprint_fits(budget, min_endpoint, p, d) is fits
+
+
+# ---------------------------------------------------------------------------
+# apply_power_budget — ceiling clamp
+# ---------------------------------------------------------------------------
+
+
+def test_fit_is_a_no_op():
+    assert apply_power_budget(2, 2, 2, 2, 700, 1200, 100000, 1) == (2, 2, None)
+
+
+def test_disagg_over_budget_shrinks_proportionally_to_fit():
+    # 3*700 + 3*1200 = 5700 > 5000
+    new_p, new_d, reason = apply_power_budget(3, 3, 2, 2, 700, 1200, 5000, 1)
+    assert reason == "power_budget_clamped"
+    assert new_p <= 3 and new_d <= 3  # decode-no-upscale: never raised
+    assert new_p * 700 + new_d * 1200 <= 5000
+
+
+def test_ceiling_never_raises_a_proposed_count():
+    # Even with a huge budget, a proposal that already fits is untouched.
+    assert apply_power_budget(1, 1, 5, 5, 700, 1200, 100000, 1) == (1, 1, None)
+
+
+def test_partial_proposal_does_not_mutate_unproposed_component():
+    # Only prefill proposed; decode fixed at current=2 (2*1200=2400).
+    # 4*700 + 2400 = 5200 > 5000, so prefill must shrink; decode stays None.
+    new_p, new_d, reason = apply_power_budget(4, None, 2, 2, 700, 1200, 5000, 1)
+    assert new_d is None  # unproposed decode untouched
+    assert new_p * 700 + 2 * 1200 <= 5000
+    assert reason is not None
+
+
+def test_partial_proposal_suppressed_when_unproposed_alone_over_budget():
+    # decode current=5 → 5*1200 = 6000 already over the 5500 budget; prefill
+    # cannot fit even min_endpoint without changing decode → scale-up refused.
+    new_p, new_d, reason = apply_power_budget(4, None, 1, 5, 700, 1200, 5500, 1)
+    assert new_d is None
+    assert new_p == 1  # held at current (no scale-up)
+    assert reason == "power_budget_scale_up_suppressed"
+
+
+def test_peak_parallel_watts_rebalance_example():
+    assert peak_parallel_watts(1, 4, 4, 1, 1000, 1000) == 8000
+    assert project_watts(4, 1, 1000, 1000) == 5000
+
+
+def test_apply_power_budget_rebalance_stages_scale_down_first():
+    # Ted P1: settled (4,1)=5000W fits, but parallel peak (4,4)=8000W does not.
+    assert apply_power_budget(4, 1, 1, 4, 1000, 1000, 5000, 1) == (
+        1,
+        1,
+        "power_rebalance_staged",
+    )
+
+
+def test_apply_power_budget_clamp_synthesized_rebalance_is_staged():
+    """Clamp can create an opposing rebalance even when the proposal was not one.
+
+    Current (4,1), proposal (5,5), 1000 W/replica, 5000 W budget: the
+    proportional clamp yields settled (2,3)=5000 W, but parallel actuation
+    peaks at (4,3)=7000 W. Stage by holding the decode scale-up at current
+    so this tick emits (2,1) under the ceiling instead of (2,3).
+    """
+    assert apply_power_budget(5, 5, 4, 1, 1000, 1000, 5000, 1) == (
+        2,
+        1,
+        "power_rebalance_staged",
+    )
+    assert peak_parallel_watts(4, 1, 2, 1, 1000, 1000) <= 5000
+
+
+def test_already_over_budget_baseline_with_no_proposal_is_left_alone():
+    # Nothing proposed (both None); baseline over budget but no lever this tick.
+    assert apply_power_budget(None, None, 10, 10, 700, 1200, 100, 1) == (
+        None,
+        None,
+        None,
+    )
+
+
+# ---------------------------------------------------------------------------
+# engine_adapter final-boundary ordering (GPU budget then power budget)
+# ---------------------------------------------------------------------------
+
+
+def _bare_adapter(config, capabilities) -> OrchestratorEngineAdapter:
+    """An adapter with only the fields the budget path reads (skips heavy init)."""
+    adapter = object.__new__(OrchestratorEngineAdapter)
+    adapter._config = config
+    adapter._capabilities = capabilities
+    adapter._power_rollout_hold_warned = False
+    return adapter
+
+
+def _agg_config(**overrides):
+    base = dict(
+        enable_power_awareness=True,
+        total_gpu_power_limit=1200,
+        min_endpoint=1,
+        min_gpu_budget=8,  # GPU floor: 8 GPUs
+        max_gpu_budget=-1,  # no GPU ceiling
+        mode="agg",
+    )
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+def test_gpu_budget_then_power_budget_order_is_not_commutative(caplog):
+    """The GPU floor raises decode to 8, then the power ceiling lowers it to fit
+    1200 W — power wins. Applying power first would fit the proposal, then the
+    GPU floor would raise it back above budget: the two orders disagree."""
+    import logging
+
+    caps = WorkerCapabilities(
+        prefill=None,
+        decode=EngineCapabilities(num_gpu=1, power_watts_per_replica=400),
+    )
+    adapter = _bare_adapter(_agg_config(), caps)
+    wc = WorkerCounts(ready_num_decode=2, expected_num_decode=2)  # stable
+
+    # Pipeline order (GPU floor first, then power ceiling): power wins → 3
+    # (3 × 400 W = 1200 W fits). The GPU floor of 8 is violated by design —
+    # power wins over the GPU floor; the clamp warning records both stages.
+    with caplog.at_level(logging.WARNING):
+        assert adapter._apply_final_budget(None, 2, wc) == (None, 3)
+    assert any(
+        "GPU clamp first adjusted proposed" in r.message
+        and "power wins over GPU floor" in r.message
+        for r in caplog.records
+    )
+
+    # Reverse order: power fit leaves 2, then the GPU floor raises to 8 — which
+    # is 3200 W, over the 1200 W budget. Different result → non-commutative.
+    power_first = adapter._apply_power_final_budget(None, 2, wc)
+    reversed_result = adapter._apply_gpu_final_budget(
+        power_first[0], power_first[1], wc
+    )
+    assert reversed_result == (None, 8)
+    assert reversed_result != adapter._apply_final_budget(None, 2, wc)
+
+
+def test_power_clamp_noop_when_awareness_disabled():
+    caps = WorkerCapabilities(
+        prefill=None,
+        decode=EngineCapabilities(num_gpu=1, power_watts_per_replica=400),
+    )
+    adapter = _bare_adapter(
+        _agg_config(enable_power_awareness=False, min_gpu_budget=-1), caps
+    )
+    wc = WorkerCounts(ready_num_decode=2)
+    # No GPU floor, awareness off → proposal passes through untouched.
+    assert adapter._apply_final_budget(None, 5, wc) == (None, 5)
+
+
+def _mode_config(mode, **overrides):
+    base = dict(
+        enable_power_awareness=True,
+        total_gpu_power_limit=1200,
+        min_endpoint=1,
+        min_gpu_budget=-1,
+        max_gpu_budget=-1,
+        mode=mode,
+    )
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+def test_final_boundary_clamps_prefill_mode():
+    caps = WorkerCapabilities(
+        prefill=EngineCapabilities(num_gpu=1, power_watts_per_replica=400),
+        decode=None,
+    )
+    adapter = _bare_adapter(_mode_config("prefill", total_gpu_power_limit=1200), caps)
+    wc = WorkerCounts(ready_num_prefill=2, expected_num_prefill=2)  # stable
+    # 6 × 400 W = 2400 W > 1200 W → clamp prefill to floor(1200/400)=3; decode
+    # is None (not managed in prefill mode) and stays None.
+    assert adapter._apply_final_budget(6, None, wc) == (3, None)
+
+
+def test_final_boundary_clamps_decode_mode():
+    caps = WorkerCapabilities(
+        prefill=None,
+        decode=EngineCapabilities(num_gpu=1, power_watts_per_replica=300),
+    )
+    adapter = _bare_adapter(_mode_config("decode", total_gpu_power_limit=900), caps)
+    wc = WorkerCounts(ready_num_decode=2, expected_num_decode=2)  # stable
+    # 6 × 300 W = 1800 W > 900 W → clamp decode to floor(900/300)=3.
+    assert adapter._apply_final_budget(None, 6, wc) == (None, 3)
+
+
+def test_final_boundary_clamps_disagg_mode():
+    caps = WorkerCapabilities(
+        prefill=EngineCapabilities(num_gpu=2, power_watts_per_replica=700),
+        decode=EngineCapabilities(num_gpu=4, power_watts_per_replica=1200),
+    )
+    adapter = _bare_adapter(_mode_config("disagg", total_gpu_power_limit=5000), caps)
+    wc = WorkerCounts(
+        ready_num_prefill=2,
+        ready_num_decode=2,
+        expected_num_prefill=2,
+        expected_num_decode=2,
+    )  # stable
+    # 4*700 + 4*1200 = 7600 W > 5000 W → proportionally shrunk to fit.
+    new_p, new_d = adapter._apply_final_budget(4, 4, wc)
+    assert new_p <= 4 and new_d <= 4
+    assert new_p * 700 + new_d * 1200 <= 5000
+
+
+def test_final_boundary_clamps_merged_proposal_regardless_of_source():
+    """``_project_scale_to`` applies the power clamp to the merged
+    ``final_proposal`` — the single point where builtin and external plugin
+    proposals converge — so the budget is enforced no matter which plugin
+    produced the counts."""
+    caps = WorkerCapabilities(
+        prefill=None,
+        decode=EngineCapabilities(num_gpu=1, power_watts_per_replica=400),
+    )
+    adapter = _bare_adapter(_mode_config("agg", total_gpu_power_limit=1200), caps)
+    outcome = SimpleNamespace(
+        execute_action="apply",
+        final_proposal=SimpleNamespace(
+            targets=[SimpleNamespace(sub_component_type="decode", replicas=6)]
+        ),
+    )
+    wc = WorkerCounts(ready_num_decode=2, expected_num_decode=2)  # stable
+    decision = adapter._project_scale_to(outcome, wc)
+    # 6 × 400 W = 2400 W over the 1200 W budget → clamped to 3 in the decision.
+    assert decision is not None
+    assert decision.num_decode == 3
+
+
+# The Kubernetes environment uses a single deployment-wide stability flag, so a
+# rollout of EITHER role marks BOTH roles' ``expected`` (settled) count None.
+# These tests use that reachable state (both None during any rollout).
+
+
+def test_scale_up_held_while_deployment_is_rolling(caplog):
+    """Fail closed: while any power-relevant role is mid-rollout (deployment
+    unstable → both expected None), a proposed scale-up is held at ready, since
+    a rolling role can only be charged at its transient ready count.
+
+    The hold warning fires once per continuous mid-rollout stretch, not every
+    tick, so long rollouts do not flood logs.
+    """
+    import logging
+
+    caps = WorkerCapabilities(
+        prefill=EngineCapabilities(num_gpu=2, power_watts_per_replica=700),
+        decode=EngineCapabilities(num_gpu=4, power_watts_per_replica=1200),
+    )
+    adapter = _bare_adapter(_mode_config("disagg", total_gpu_power_limit=5000), caps)
+    wc = WorkerCounts(
+        ready_num_prefill=2,
+        ready_num_decode=2,
+        expected_num_prefill=None,  # deployment mid-rollout ->
+        expected_num_decode=None,  # both settled targets unknown
+    )
+    with caplog.at_level(logging.WARNING):
+        # Prefill proposed 2 -> 4 is held at ready 2 while the deployment rolls.
+        assert adapter._apply_final_budget(4, None, wc) == (2, None)
+        assert adapter._apply_final_budget(4, None, wc) == (2, None)
+    hold_warnings = [
+        r
+        for r in caplog.records
+        if "holding" in r.message and "mid-rollout" in r.message
+    ]
+    assert len(hold_warnings) == 1
+
+    # After the deployment stabilizes, a later rollout may warn again.
+    stable = WorkerCounts(
+        ready_num_prefill=2,
+        ready_num_decode=2,
+        expected_num_prefill=2,
+        expected_num_decode=2,
+    )
+    assert adapter._apply_final_budget(2, None, stable) == (2, None)
+    assert adapter._power_rollout_hold_warned is False
+    rolling_again = WorkerCounts(
+        ready_num_prefill=2,
+        ready_num_decode=2,
+        expected_num_prefill=None,
+        expected_num_decode=None,
+    )
+    with caplog.at_level(logging.WARNING):
+        caplog.clear()
+        assert adapter._apply_final_budget(4, None, rolling_again) == (2, None)
+    assert (
+        sum(
+            1
+            for r in caplog.records
+            if "holding" in r.message and "mid-rollout" in r.message
+        )
+        == 1
+    )
+
+
+def test_scale_up_allowed_when_deployment_stable():
+    """When the deployment is stable (both expected known == ready), a proposal
+    is budgeted normally against the known footprint."""
+    caps = WorkerCapabilities(
+        prefill=EngineCapabilities(num_gpu=2, power_watts_per_replica=700),
+        decode=EngineCapabilities(num_gpu=4, power_watts_per_replica=1200),
+    )
+    adapter = _bare_adapter(_mode_config("disagg", total_gpu_power_limit=6000), caps)
+    wc = WorkerCounts(
+        ready_num_prefill=2,
+        ready_num_decode=2,
+        expected_num_prefill=2,
+        expected_num_decode=2,  # deployment stable
+    )
+    # decode at 2 (2400 W); prefill 2->4 (2800 W); total 5200 <= 6000 → allowed.
+    assert adapter._apply_final_budget(4, None, wc) == (4, None)
+
+
+def test_scale_down_allowed_while_deployment_is_rolling():
+    """A scale-down is always safe (reduces power), even mid-rollout."""
+    caps = WorkerCapabilities(
+        prefill=EngineCapabilities(num_gpu=2, power_watts_per_replica=700),
+        decode=EngineCapabilities(num_gpu=4, power_watts_per_replica=1200),
+    )
+    adapter = _bare_adapter(_mode_config("disagg", total_gpu_power_limit=5000), caps)
+    wc = WorkerCounts(
+        ready_num_prefill=4,
+        ready_num_decode=2,
+        expected_num_prefill=None,  # deployment mid-rollout
+        expected_num_decode=None,
+    )
+    # Prefill scale-down 4 -> 2 is honored despite the rollout.
+    assert adapter._apply_final_budget(2, None, wc) == (2, None)
+
+
+def test_project_scale_to_holds_scale_up_during_rollout_full_merge():
+    """Production-shaped reproduction of the Kubernetes runtime path.
+
+    ``type_aware_merge`` fills a role a plugin omitted from the baseline, so the
+    final proposal carries a target for BOTH roles (neither is None). The K8s
+    environment marks BOTH ``expected`` counts None during any rollout, so the
+    guard must key off that deployment-wide rollout state — not per-role or
+    None-target detection — and hold the decode scale-up. Without the fix this
+    returned ``ScalingDecision(num_prefill=2, num_decode=2)``."""
+    caps = WorkerCapabilities(
+        prefill=EngineCapabilities(num_gpu=2, power_watts_per_replica=700),
+        decode=EngineCapabilities(num_gpu=4, power_watts_per_replica=1200),
+    )
+    # Huge budget so only the rollout guard (not the budget clamp) can act.
+    adapter = _bare_adapter(_mode_config("disagg", total_gpu_power_limit=100000), caps)
+    # Deployment mid-rollout: BOTH expected counts unknown (the reachable state).
+    # Merged proposal carries prefill=2 (baseline) and decode=2 (a scale-up).
+    wc = WorkerCounts(
+        ready_num_prefill=2,
+        ready_num_decode=1,
+        expected_num_prefill=None,
+        expected_num_decode=None,
+    )
+    outcome = SimpleNamespace(
+        execute_action="apply",
+        final_proposal=SimpleNamespace(
+            targets=[
+                SimpleNamespace(sub_component_type="prefill", replicas=2),
+                SimpleNamespace(sub_component_type="decode", replicas=2),
+            ]
+        ),
+    )
+    decision = adapter._project_scale_to(outcome, wc)
+    # decode must NOT be scaled up to 2 while the deployment rolls (held at 1);
+    # the held result equals the current counts, so no new decision is issued.
+    assert decision is None or (decision.num_decode or 0) <= 1
+
+
+def test_project_scale_to_masks_ready_echo_during_rollout_scale_down():
+    """A scale-down of one role must not drag the other role's ready echo.
+
+    Production-shaped: prefill is rolling from ready=2 toward a larger desired
+    (deployment unstable → both ``expected`` None), while decode legitimately
+    scales down 3 -> 2. ``type_aware_merge`` echoes prefill's baseline == ready 2
+    into the merged proposal, so before masking ``_project_scale_to`` returned
+    ``ScalingDecision(num_prefill=2, num_decode=2)``; DisaggPlanner applies every
+    non-None target, writing prefill's DGD desired back to 2 and cancelling its
+    in-flight rollout. The ready-echo mask drops prefill to None while preserving
+    the decode scale-down."""
+    caps = WorkerCapabilities(
+        prefill=EngineCapabilities(num_gpu=2, power_watts_per_replica=700),
+        decode=EngineCapabilities(num_gpu=4, power_watts_per_replica=1200),
+    )
+    # Budget large enough that the decode scale-down is never the constraint.
+    adapter = _bare_adapter(_mode_config("disagg", total_gpu_power_limit=100000), caps)
+    wc = WorkerCounts(
+        ready_num_prefill=2,
+        ready_num_decode=3,
+        expected_num_prefill=None,  # deployment mid-rollout (prefill 2 -> desired)
+        expected_num_decode=None,
+    )
+    outcome = SimpleNamespace(
+        execute_action="apply",
+        final_proposal=SimpleNamespace(
+            targets=[
+                # prefill baseline echo == ready 2 (not an intended change)
+                SimpleNamespace(sub_component_type="prefill", replicas=2),
+                # decode scale-down 3 -> 2
+                SimpleNamespace(sub_component_type="decode", replicas=2),
+            ]
+        ),
+    )
+    decision = adapter._project_scale_to(outcome, wc)
+    # prefill's ready echo is masked to None (its rollout desired is left
+    # untouched); the decode scale-down survives.
+    assert decision is not None
+    assert decision.num_prefill is None
+    assert decision.num_decode == 2
+
+
+def test_project_scale_to_partial_prefill_proposal_does_not_scale_decode():
+    """Stable merged ``(prefill=5, decode=2)`` at ready ``(2, 2)`` under the
+    5000 W example budget must clamp only prefill and leave decode unemitted.
+
+    ``type_aware_merge`` fills the omitted decode role with its ready baseline,
+    so without restoring the proposal mask before the power clamp both roles
+    look adjustable and ``_shrink_pair`` can return decode=1 — a cross-role
+    scale-down ``DisaggPlanner`` would apply.
+    """
+    caps = WorkerCapabilities(
+        prefill=EngineCapabilities(num_gpu=2, power_watts_per_replica=700),
+        decode=EngineCapabilities(num_gpu=4, power_watts_per_replica=1200),
+    )
+    adapter = _bare_adapter(_mode_config("disagg", total_gpu_power_limit=5000), caps)
+    wc = WorkerCounts(
+        ready_num_prefill=2,
+        ready_num_decode=2,
+        expected_num_prefill=2,
+        expected_num_decode=2,
+    )
+    outcome = SimpleNamespace(
+        execute_action="apply",
+        final_proposal=SimpleNamespace(
+            targets=[
+                SimpleNamespace(sub_component_type="prefill", replicas=5),
+                # baseline echo of ready decode — not a genuine proposal
+                SimpleNamespace(sub_component_type="decode", replicas=2),
+            ]
+        ),
+    )
+    decision = adapter._project_scale_to(outcome, wc)
+    assert decision is not None
+    # 3*700 + 2*1200 = 4500 <= 5000; decode stays None (charged, not adjusted).
+    assert decision.num_prefill == 3
+    assert decision.num_decode is None
+
+
+def test_project_scale_to_partial_decode_proposal_does_not_scale_prefill():
+    """Mirror of the prefill-only case: merged ``(prefill=2, decode=5)`` must
+    not emit a prefill target."""
+    caps = WorkerCapabilities(
+        prefill=EngineCapabilities(num_gpu=2, power_watts_per_replica=700),
+        decode=EngineCapabilities(num_gpu=4, power_watts_per_replica=1200),
+    )
+    adapter = _bare_adapter(_mode_config("disagg", total_gpu_power_limit=5000), caps)
+    wc = WorkerCounts(
+        ready_num_prefill=2,
+        ready_num_decode=2,
+        expected_num_prefill=2,
+        expected_num_decode=2,
+    )
+    outcome = SimpleNamespace(
+        execute_action="apply",
+        final_proposal=SimpleNamespace(
+            targets=[
+                SimpleNamespace(sub_component_type="prefill", replicas=2),
+                SimpleNamespace(sub_component_type="decode", replicas=5),
+            ]
+        ),
+    )
+    decision = adapter._project_scale_to(outcome, wc)
+    assert decision is not None
+    # 2*700 + 3*1200 = 5000; prefill stays None.
+    assert decision.num_prefill is None
+    assert decision.num_decode == 3
+
+
+def test_project_scale_to_rebalance_emits_decode_only_tick1():
+    """Stable (1P,4D) -> (4P,1D) must stage decode scale-down before prefill up."""
+    caps = WorkerCapabilities(
+        prefill=EngineCapabilities(num_gpu=1, power_watts_per_replica=1000),
+        decode=EngineCapabilities(num_gpu=1, power_watts_per_replica=1000),
+    )
+    adapter = _bare_adapter(_mode_config("disagg", total_gpu_power_limit=5000), caps)
+    wc = WorkerCounts(
+        ready_num_prefill=1,
+        ready_num_decode=4,
+        expected_num_prefill=1,
+        expected_num_decode=4,
+    )
+    outcome = SimpleNamespace(
+        execute_action="apply",
+        final_proposal=SimpleNamespace(
+            targets=[
+                SimpleNamespace(sub_component_type="prefill", replicas=4),
+                SimpleNamespace(sub_component_type="decode", replicas=1),
+            ]
+        ),
+    )
+    decision = adapter._project_scale_to(outcome, wc)
+    assert decision is not None
+    assert decision.num_prefill is None
+    assert decision.num_decode == 1
+
+
+def test_project_scale_to_rebalance_prefill_up_after_decode_stable():
+    """Tick 2: once decode is at 1, prefill scale-up to 4 is safe."""
+    caps = WorkerCapabilities(
+        prefill=EngineCapabilities(num_gpu=1, power_watts_per_replica=1000),
+        decode=EngineCapabilities(num_gpu=1, power_watts_per_replica=1000),
+    )
+    adapter = _bare_adapter(_mode_config("disagg", total_gpu_power_limit=5000), caps)
+    wc = WorkerCounts(
+        ready_num_prefill=1,
+        ready_num_decode=1,
+        expected_num_prefill=1,
+        expected_num_decode=1,
+    )
+    outcome = SimpleNamespace(
+        execute_action="apply",
+        final_proposal=SimpleNamespace(
+            targets=[
+                SimpleNamespace(sub_component_type="prefill", replicas=4),
+                SimpleNamespace(sub_component_type="decode", replicas=1),
+            ]
+        ),
+    )
+    decision = adapter._project_scale_to(outcome, wc)
+    assert decision is not None
+    assert decision.num_prefill == 4
+    assert decision.num_decode is None
+
+
+def test_project_scale_to_partial_scale_down_does_not_mutate_unproposed_role():
+    """An over-budget one-role scale-down must not drag the baseline-echoed
+    role through ``_shrink_pair``."""
+    caps = WorkerCapabilities(
+        prefill=EngineCapabilities(num_gpu=2, power_watts_per_replica=700),
+        decode=EngineCapabilities(num_gpu=4, power_watts_per_replica=1200),
+    )
+    adapter = _bare_adapter(_mode_config("disagg", total_gpu_power_limit=5000), caps)
+    # Current 4P+4D = 7600 W already over the 5000 W budget.
+    wc = WorkerCounts(
+        ready_num_prefill=4,
+        ready_num_decode=4,
+        expected_num_prefill=4,
+        expected_num_decode=4,
+    )
+    outcome = SimpleNamespace(
+        execute_action="apply",
+        final_proposal=SimpleNamespace(
+            targets=[
+                SimpleNamespace(sub_component_type="prefill", replicas=2),
+                SimpleNamespace(sub_component_type="decode", replicas=4),
+            ]
+        ),
+    )
+    decision = adapter._project_scale_to(outcome, wc)
+    assert decision is not None
+    assert decision.num_prefill == 2
+    # Decode was only a ready echo — must not be emitted / scaled down.
+    assert decision.num_decode is None

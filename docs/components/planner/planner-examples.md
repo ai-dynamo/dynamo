@@ -52,6 +52,30 @@ args:
   - --load-predictor-log1p
 ```
 
+## Power-Aware Budget Scaling
+
+Keep the Planner's projected GPU power draw within a configured rack/DGD budget.
+Per-GPU caps are DGD-owned: authored on each worker component's `podTemplate`
+annotation (`dynamo.nvidia.com/gpu-power-limit`), applied to Pods by the
+operator, and enforced by the Power Agent. The Planner only reads them and
+combines them with `total_gpu_power_limit` (in its config) to project a budget
+and clamp scale-up — it never patches Pods.
+
+The mounted PlannerConfig enables it:
+
+```json
+{
+  "enable_power_awareness": true,
+  "total_gpu_power_limit": 5200
+}
+```
+
+`enable_power_awareness` requires `environment: "kubernetes"`. See the
+`power-aware-budget/` directory in
+[Dynamo examples](https://github.com/ai-dynamo/dynamo/tree/main/examples) for
+the full annotation + config contract and its limitations (the budget is a
+projected ceiling over requested caps, not a proven hardware limit).
+
 ## Virtual Connector
 
 For non-Kubernetes environments, use the VirtualConnector to communicate scaling
