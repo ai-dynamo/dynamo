@@ -30,7 +30,7 @@ You can provide multimodal inputs in the following ways:
 
 ## Deployment Patterns
 
-TRT-LLM supports aggregated and traditional disaggregated patterns. See [Architecture Patterns](README.md#architecture-patterns) for detailed explanations.
+TRT-LLM supports aggregated and traditional disaggregated patterns. See [Multimodal Model Serving](README.md) for detailed explanations.
 
 | Pattern | Supported | Launch Script | Notes |
 |---------|-----------|---------------|-------|
@@ -48,6 +48,46 @@ TRT-LLM supports aggregated and traditional disaggregated patterns. See [Archite
 | Prefill Worker | `--disaggregation-mode prefill` | Image processing + Prefill (multimodal tokenization happens here) |
 | Decode Worker | `--disaggregation-mode decode` | Decode only |
 | Encode Worker | `--disaggregation-mode encode` | Image encoding (E/P/D flow) |
+
+## Multimodal KV Routing
+
+TensorRT-LLM multimodal KV routing uses the Rust frontend to give the router and worker the same image identity:
+
+1. The frontend computes an `mm_hash` for each image.
+2. It represents the image identity as hash-derived pad-value tokens in the routing view.
+3. The KV router selects the worker with the highest block overlap.
+4. The frontend forwards each hash as `multi_modal_uuids`.
+5. The worker associates the UUID with the matching image-token run in its KV events.
+
+For HTTP inputs, routing identity is based on the full image URL by default. Set `--frontend-decoding` to hash decoded image content when different URLs can refer to identical images.
+
+Workers must enable KV event publishing and block reuse. The provided launcher configures `--publish-events-and-metrics`, `enable_block_reuse: true`, and a KV-routing frontend:
+
+```bash
+cd $DYNAMO_HOME
+bash examples/backends/trtllm/launch/agg_multimodal_router.sh
+```
+
+Key settings include:
+
+| Variable | Purpose |
+|----------|---------|
+| `MODEL_PATH` | Model checkpoint to serve |
+| `SERVED_MODEL_NAME` | Model name exposed by the endpoint |
+| `AGG_ENGINE_ARGS` | TensorRT-LLM engine configuration, including block reuse |
+| `BLOCK_SIZE` | Shared worker and frontend KV block size |
+| `DYN_HTTP_PORT` | Frontend HTTP port |
+| `DYN_SYSTEM_PORT` | Dynamo runtime port |
+
+The routing path supports Qwen2-VL, Qwen2.5-VL, Qwen3-VL, Kimi K2.5, and Kimi K2.6 model families. Other models fall back to text-prefix routing.
+
+Current limitations:
+
+- Use direct KV event publishing; consolidated multimodal KV events are not supported.
+- Requests that mix image URLs and precomputed `.safetensors` embeddings skip multimodal-aware routing.
+- The worker and frontend must use matching block sizes.
+
+For the user-facing workflow, see [Multimodal KV Routing](../../../../use-cases/multimodal/multimodal-kv-routing).
 
 ## Aggregated Serving
 
