@@ -235,8 +235,8 @@ pub fn validate_top_p(top_p: Option<f32>) -> Result<(), anyhow::Error> {
 pub fn validate_top_k(top_k: Option<i32>) -> Result<(), anyhow::Error> {
     match top_k {
         None => Ok(()),
-        Some(k) if k == -1 || k >= 1 => Ok(()),
-        _ => anyhow::bail!("Top_k must be null, -1, or greater than or equal to 1"),
+        Some(k) if k >= -1 => Ok(()),
+        _ => anyhow::bail!("Top_k must be null or greater than or equal to -1"),
     }
 }
 

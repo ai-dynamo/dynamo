@@ -167,3 +167,33 @@ packages:
     source: http://gondor.apana.org.au/~herbert/dash/
     images:
       - dynamo-planner
+
+  # CRIU, cuda-checkpoint, cuda-checkpoint-helper — from-source binaries the
+  # snapshot-agent builds/clones and copies into the distroful cuda-dl-base
+  # image. dpkg doesn't see them (not apt-installed); their license text is
+  # staged at /legal/<name>/... in agent_pre so the native generator inlines it.
+  - name: CRIU
+    version: criu-dev
+    license: GPL-2.0-only
+    source: https://github.com/checkpoint-restore/criu
+    license_text_path: /legal/CRIU/COPYING
+    images:
+      - snapshot-agent
+
+  - name: cuda-checkpoint
+    version: main
+    license: LicenseRef-NVIDIA-Proprietary
+    source: https://github.com/NVIDIA/cuda-checkpoint
+    license_text_path: /legal/cuda-checkpoint/LICENSE
+    images:
+      - snapshot-agent
+
+  - name: cuda-checkpoint-helper
+    # First-party: small C wrapper that calls cuLink/cuMemcpyAsync etc.
+    # to assist with cuda-checkpoint coordination. Source lives in
+    # deploy/snapshot/cmd/cuda-checkpoint-helper/main.c.
+    version: 1.0
+    license: Apache-2.0
+    source: https://github.com/ai-dynamo/dynamo
+    images:
+      - snapshot-agent

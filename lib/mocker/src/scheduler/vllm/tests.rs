@@ -48,7 +48,12 @@ fn assert_scheduler_idle(metrics: &MockerMetrics) {
 }
 
 fn make_args() -> MockEngineArgs {
+    make_args_for_engine(EngineType::Vllm)
+}
+
+fn make_args_for_engine(engine_type: EngineType) -> MockEngineArgs {
     MockEngineArgs::builder()
+        .engine_type(engine_type)
         .block_size(4)
         .num_gpu_blocks(6)
         .max_num_batched_tokens(Some(8))
@@ -71,6 +76,131 @@ fn router_args() -> MockEngineArgs {
         .speedup_ratio(0.0)
         .build()
         .unwrap()
+}
+
+#[rstest]
+#[case(EngineType::Vllm)]
+#[case(EngineType::Trtllm)]
+fn zero_output_request_completes_after_prefill(#[case] engine_type: EngineType) {
+    let mut core = VllmCore::new(make_args_for_engine(engine_type));
+    let uuid = core.receive(DirectRequest {
+        tokens: vec![1, 2, 3, 4],
+        max_output_tokens: 0,
+        uuid: Some(Uuid::from_u128(90_001)),
+        ..Default::default()
+    });
+    let mut collector = crate::replay::TraceCollector::default();
+
+    let pass = core.execute_pass(&mut collector, 0.0);
+
+    assert!(core.state.requests.is_empty());
+    assert_eq!(core.kv_manager.num_active_blocks(), 0);
+    assert_eq!(pass.completed_requests, 1);
+    let fpm = pass.fpm.as_ref().unwrap();
+    assert_eq!(fpm.num_decode_requests, 0);
+    assert_eq!(fpm.sum_decode_kv_tokens, 0);
+    assert!(matches!(
+        pass.output_signals.as_slice(),
+        [OutputSignal {
+            uuid: signal_uuid,
+            token_id: None,
+            completed: true,
+            rejected: false,
+            ..
+        }] if *signal_uuid == uuid
+    ));
+}
+
+#[test]
+fn fully_cached_zero_output_request_is_not_decode_fpm_work() {
+    let mut core = VllmCore::new(router_args());
+    let tokens = vec![1, 2, 3, 4];
+    let mut collector = crate::replay::TraceCollector::default();
+
+    core.receive(DirectRequest {
+        tokens: tokens.clone(),
+        max_output_tokens: 0,
+        uuid: Some(Uuid::from_u128(90_002)),
+        ..Default::default()
+    });
+    let seed_pass = core.execute_pass(&mut collector, 0.0);
+    assert_eq!(seed_pass.completed_requests, 1);
+
+    let uuid = core.receive(DirectRequest {
+        tokens,
+        max_output_tokens: 0,
+        uuid: Some(Uuid::from_u128(90_003)),
+        ..Default::default()
+    });
+    let pass = core.execute_pass(&mut collector, seed_pass.end_ms);
+
+    assert_eq!(pass.completed_requests, 1);
+    let fpm = pass.fpm.as_ref().unwrap();
+    assert_eq!(fpm.num_prefill_requests, 0);
+    assert_eq!(fpm.num_decode_requests, 0);
+    assert_eq!(fpm.sum_decode_kv_tokens, 0);
+    assert!(matches!(
+        pass.output_signals.as_slice(),
+        [OutputSignal {
+            uuid: signal_uuid,
+            token_id: None,
+            completed: true,
+            rejected: false,
+            ..
+        }] if *signal_uuid == uuid
+    ));
+}
+
+#[test]
+fn speculative_batch_drains_zero_output_before_emitting_tokens() {
+    let args = MockEngineArgs::builder()
+        .block_size(4)
+        .num_gpu_blocks(8)
+        .max_num_batched_tokens(Some(8))
+        .max_num_seqs(Some(2))
+        .enable_chunked_prefill(true)
+        .enable_prefix_caching(false)
+        .speedup_ratio(0.0)
+        .aic_nextn(Some(2))
+        .aic_nextn_accept_rates(Some("1,1".to_string()))
+        .build()
+        .unwrap();
+    let mut core = VllmCore::new(args);
+    let zero_uuid = core.receive(DirectRequest {
+        tokens: vec![1, 2, 3, 4],
+        max_output_tokens: 0,
+        uuid: Some(Uuid::from_u128(90_002)),
+        ..Default::default()
+    });
+    let normal_uuid = core.receive(DirectRequest {
+        tokens: vec![5, 6, 7, 8],
+        max_output_tokens: 3,
+        uuid: Some(Uuid::from_u128(90_003)),
+        ..Default::default()
+    });
+    let mut collector = crate::replay::TraceCollector::default();
+
+    let pass = core.execute_pass(&mut collector, 0.0);
+
+    assert!(core.state.requests.is_empty());
+    assert_eq!(core.kv_manager.num_active_blocks(), 0);
+    assert_eq!(pass.completed_requests, 2);
+    assert_eq!(
+        pass.output_signals
+            .iter()
+            .filter(|signal| signal.uuid == zero_uuid && signal.token_id.is_none())
+            .count(),
+        1
+    );
+    assert_eq!(
+        pass.output_signals
+            .iter()
+            .filter(|signal| signal.uuid == normal_uuid && signal.token_id.is_some())
+            .count(),
+        3
+    );
+    assert_eq!(pass.accept_length_output_tokens, 3);
+    assert_eq!(pass.accept_length_decode_forwards, 1);
 }
 
 mod source_holds {

@@ -44,8 +44,13 @@ rewritten to their GitHub source URL (with a warning) -- a relative path
 would naive-join into a dead link on the rendered page.
 
 Usage:
+    # dev sync (default --pages-dir pages-dev)
     resolve_translation_links.py --nav docs/index.yml \
         --translations-root fern/translations --site-root /dynamo --version-slug dev
+    # release snapshot
+    resolve_translation_links.py --nav docs/index.yml \
+        --translations-root fern/translations --site-root /dynamo \
+        --version-slug vX.Y.Z --pages-dir pages-vX.Y.Z --github-ref vX.Y.Z
 
 Delete this script (and re-shallow the deep-relative links) once Fern
 resolves relative links in translated content natively.
@@ -61,12 +66,7 @@ import yaml
 
 LINK = re.compile(r"(!?)(\[[^\]]*\])\(([^)#\s]+)(#[^)]*)?\)")
 PAGE_EXT = (".md", ".mdx")
-# Fallback for links whose target isn't published in the nav (no site URL).
-# Pin to the build's commit: correct on PR-preview builds (the target may not
-# exist on main yet) and immune to later renames/moves on main.
-GITHUB_BLOB = "https://github.com/ai-dynamo/dynamo/blob/" + os.environ.get(
-    "GITHUB_SHA", "main"
-)
+GITHUB_REPO_BLOB = "https://github.com/ai-dynamo/dynamo/blob"
 
 
 def slugify(name: str) -> str:
@@ -147,14 +147,30 @@ def main() -> int:
         required=True,
         help="version slug the translated pages belong to, e.g. dev",
     )
+    ap.add_argument(
+        "--pages-dir",
+        default="pages-dev",
+        help="translation subtree to process, mirroring the base pages dir "
+        "(pages-dev, or pages-vX.Y.Z for a release snapshot)",
+    )
+    ap.add_argument(
+        "--github-ref",
+        default=os.environ.get("GITHUB_SHA", "main"),
+        help="ref for GitHub-fallback links (targets not published in the "
+        "nav). Defaults to the build's commit, which is correct for dev "
+        "syncs and PR previews; release snapshots pass the tag so fallback "
+        "links stay faithful to the release on workflow_dispatch rebuilds "
+        "too.",
+    )
     args = ap.parse_args()
+    github_blob = f"{GITHUB_REPO_BLOB}/{args.github_ref}"
 
     slugs = build_slug_map(args.nav)
     rewritten = warned = 0
 
     for lang_dir in sorted(p for p in args.translations_root.iterdir() if p.is_dir()):
         lang = lang_dir.name
-        pages_root = lang_dir / "pages-dev"
+        pages_root = lang_dir / args.pages_dir
         if not pages_root.is_dir():
             continue
         for page in sorted(pages_root.rglob("*")):
@@ -162,9 +178,10 @@ def main() -> int:
                 continue
             rel = page.relative_to(pages_root)  # mirrors docs/<rel>
             # links were authored from fern/translations/<lang>/pages-dev/<rel>
-            # in the source repo (same layout the sync publishes)
+            # in the source repo; version snapshots keep the same depth, so
+            # the deep-relative arithmetic is unchanged
             virtual_dir = (
-                PurePosixPath("fern/translations") / lang / "pages-dev" / rel.parent
+                PurePosixPath("fern/translations") / lang / args.pages_dir / rel.parent
             )
 
             def repl(m: re.Match) -> str:
@@ -180,7 +197,9 @@ def main() -> int:
                 if not target.endswith(PAGE_EXT):
                     return m.group(0)
                 q = PurePosixPath(os.path.normpath(str(virtual_dir / target)))
-                mirror_prefix = PurePosixPath("fern/translations") / lang / "pages-dev"
+                mirror_prefix = (
+                    PurePosixPath("fern/translations") / lang / args.pages_dir
+                )
                 if q.is_relative_to(mirror_prefix):
                     doc_rel = str(q.relative_to(mirror_prefix))
                 elif q.is_relative_to("docs"):
@@ -212,7 +231,7 @@ def main() -> int:
                         f"linking to GitHub source"
                     )
                     warned += 1
-                    return f"{bang}{label}({GITHUB_BLOB}/docs/{doc_rel}{anchor})"
+                    return f"{bang}{label}({github_blob}/docs/{doc_rel}{anchor})"
                 # Locale sits between product and version in Fern URLs
                 # (/dynamo/zh-CN/dev/...); links starting with the product
                 # slug pass through Fern's renderer unmodified.

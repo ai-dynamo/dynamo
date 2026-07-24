@@ -56,7 +56,6 @@ from .capacity import (
     get_spec_decode_runtime_data,
     per_rank_kv_blocks,
 )
-from .constants import DisaggregationMode
 from .handlers import get_dp_range_for_worker
 from .headless import run_dynamo_headless
 from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKER_ID
@@ -367,11 +366,6 @@ def setup_kv_event_publisher(
     if not config.engine_args.enable_prefix_caching:
         return None
 
-    # Skip KV event publishing for decode workers
-    if config.disaggregation_mode == DisaggregationMode.DECODE:
-        logger.info("Skipping KV event publisher setup for decode worker")
-        return None
-
     if config.engine_args.kv_events_config is None:
         return None
 
@@ -419,6 +413,7 @@ def setup_kv_event_publisher(
             enable_local_indexer=config.enable_local_indexer,
             dp_rank=dp_rank,
             image_token_id=image_token_id,
+            kv_state_endpoint=config.kv_state_endpoint,
         )
         kv_publishers.append(kv_publisher)
 
@@ -695,11 +690,8 @@ async def register_vllm_model(
     runtime_config.total_kv_blocks = per_rank_kv_blocks(num_gpu_blocks, dp_range[1])
     runtime_config.max_num_seqs = runtime_values["max_num_seqs"]
     runtime_config.max_num_batched_tokens = runtime_values["max_num_batched_tokens"]
-    # Decode workers don't create the WorkerKvQuery endpoint, so don't advertise local indexer
-    runtime_config.enable_local_indexer = (
-        config.enable_local_indexer
-        and config.disaggregation_mode != DisaggregationMode.DECODE
-    )
+    runtime_config.enable_local_indexer = config.enable_local_indexer
+    runtime_config.kv_state_endpoint = config.kv_state_endpoint
 
     # Add tool/reasoning parsers for decode/aggregated workers. Prefill
     # workers have no OpenAI surface and don't run a parser — key off
@@ -756,6 +748,7 @@ async def register_vllm_model(
         worker_type=worker_type,
         needs=needs,
         ignore_weights=should_register_model_ignore_weights(config),
+        model_aliases=config.served_model_aliases or None,
         # Advertise LoRA capacity on the BASE card so the frontend can place the first
         # adapter onto an idle worker. Decode, aggregated, and prefill workers all serve
         # lifecycle registration; embeddings still do not.

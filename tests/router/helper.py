@@ -23,6 +23,25 @@ NUM_REQUESTS = 100
 BLOCK_SIZE = 16
 
 
+def parse_sse_json_chunks(body: str) -> list[dict[str, Any]]:
+    """Decode JSON objects from single-line SSE data fields."""
+    chunks = []
+    for line in body.splitlines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if not data or data == "[DONE]":
+            continue
+        try:
+            chunk = json.loads(data)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(chunk, dict):
+            chunks.append(chunk)
+    return chunks
+
+
 def generate_random_suffix() -> str:
     """Generate a 10-character random alphabetic suffix for namespace isolation."""
     return "".join(random.choices(string.ascii_lowercase, k=10))  # noqa: S311

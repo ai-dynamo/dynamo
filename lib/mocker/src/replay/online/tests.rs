@@ -534,6 +534,29 @@ fn test_online_trace_replay_sglang_single_worker_completes() {
 }
 
 #[test]
+fn test_online_trace_replay_sglang_zero_output_drains_without_phantom_token() {
+    let mut zero_output = request(103, 7, Some(0.0));
+    zero_output.max_output_tokens = 0;
+    let report = simulate_trace_requests(
+        sglang_replay_args(),
+        None,
+        None,
+        vec![zero_output, request(104, 8, Some(1.0))],
+        1,
+        1.0,
+        ReplayRouterMode::RoundRobin,
+    )
+    .unwrap();
+
+    // Zero-output trace rows count as completed prefill work but do not
+    // manufacture a token or latency sample. The normal follower also completes.
+    assert_eq!(report.request_counts.num_requests, 2);
+    assert_eq!(report.request_counts.completed_requests, 2);
+    assert_eq!(report.request_counts.total_input_tokens, 128);
+    assert_eq!(report.request_counts.total_output_tokens, 2);
+}
+
+#[test]
 fn test_online_trace_replay_sglang_kv_router_smoke() {
     let args = sglang_replay_args();
     let requests = vec![request(111, 9, Some(0.0)), request(112, 9, Some(500.0))];

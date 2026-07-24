@@ -3,8 +3,9 @@
 Reads an ``areas.yaml`` (each area declares its path globs directly), asks the
 pure resolver in ``codeowners_match`` what the emitted CODEOWNERS would cover,
 and reports how much of the live tree is EXPLICITLY owned vs. falls to the
-catch-all. It also verifies that final last-match resolution retains every
-owner promised by required, shared, and blocking file-type declarations.
+catch-all. It also rejects stale globs and verifies that final last-match
+resolution retains every owner promised by required and blocking file-type
+declarations.
 
 This is the ONLY place in the pipeline that reads ``git ls-files``. Emission
 is a pure function of the policy YAML; the tree only enters here, in the
@@ -141,6 +142,7 @@ def strict_failure(
     gate: CoverageGate,
     changed: list[str] | None,
     ownership_violations: list[OwnershipContractViolation],
+    dead: list[str] | None = None,
 ) -> str | None:
     """Return the fail-closed message for the active strict gate."""
     if not strict:
@@ -150,6 +152,11 @@ def strict_failure(
         return (
             f"!! strict: {len(gate.blocking)} {scope} file(s) fall to the "
             "catch-all -- cover them in areas.yaml"
+        )
+    if dead:
+        return (
+            f"!! strict: {len(dead)} glob(s) match no tracked files -- "
+            "remove them from areas.yaml"
         )
     if ownership_violations:
         return (
@@ -232,7 +239,7 @@ def main() -> int:
     ap.add_argument(
         "--strict",
         action="store_true",
-        help="exit non-zero on catch-all coverage or ownership contract failures",
+        help="exit non-zero on coverage, stale glob, or ownership contract failures",
     )
     ap.add_argument(
         "--changed-only",
@@ -268,9 +275,8 @@ def main() -> int:
     # pre-existing owner loss on the base branch can fail an unrelated PR even
     # though --changed-only promises that only the PR's own surface blocks.
     ownership_violations = ownership_contract_violations(model, contract_tree)
-    # Deletions never fail a gate (coverage counts files, and the drift check
-    # forces the CODEOWNERS regeneration), so stale claims would otherwise
-    # accumulate silently in areas.yaml. Surface them; never block on them.
+    # A glob that no longer matches a tracked file is stale policy. Strict mode
+    # rejects it so deleting the final covered path requires pruning the rule.
     dead = [g for g in model.owned_patterns() if not any(match(g, p) for p in tree)]
 
     n_tree = len(tree)
@@ -287,7 +293,7 @@ def main() -> int:
     if dead:
         print(
             f"globs matching no files: {len(dead)} "
-            "(prune from areas.yaml when the paths are gone; never blocking):"
+            "(prune from areas.yaml when the paths are gone):"
         )
         for g in dead[:10]:
             print(f"    {g}")
@@ -305,7 +311,7 @@ def main() -> int:
         )
         print("   ", gate.warnings[:15])
 
-    failure = strict_failure(args.strict, gate, changed, ownership_violations)
+    failure = strict_failure(args.strict, gate, changed, ownership_violations, dead)
     if failure:
         print(failure)
         return 1

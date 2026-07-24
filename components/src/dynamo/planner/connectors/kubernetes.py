@@ -462,21 +462,41 @@ class KubernetesConnector(PlannerConnector):
                 return []
             raise
 
+    def _get_dgd_component_names(self) -> list[str]:
+        """Return the Kubernetes component names reported in DGD status.
+
+        Grove may truncate and hash long DGD names when it creates component
+        resources. These status names reflect the names actually used by the
+        worker pods and their DynamoWorkerMetadata CRs.
+        """
+        deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
+        component_statuses = deployment.get("status", {}).get("components", {}) or {}
+        return [
+            component_name
+            for component_status in component_statuses.values()
+            for component_name in component_status.get("componentNames", []) or []
+        ]
+
     def _extract_mdc_entries(self) -> list[MdcEntry]:
         """Extract MDC entries belonging to this DGD.
 
-        CRs are named after the worker pod (e.g. ``<dgd>-0-<service>-<hash>``),
-        so we filter by the DGD name prefix to avoid picking up entries from
-        other deployments sharing the namespace.  LoRA-adapter wrappers are
-        dropped via :func:`is_model_card`.
+        CRs are named after the worker pod. Match the DGD name prefix and the
+        actual component names from DGD status because Grove may truncate and
+        hash a long DGD name. LoRA-adapter wrappers are dropped via
+        :func:`is_model_card`.
         """
         crs = self._list_worker_metadata_crs()
+        component_names = self._get_dgd_component_names()
         dgd_prefix = f"{self.graph_deployment_name}-"
 
         entries: list[MdcEntry] = []
         for cr in crs:
             cr_name = cr.get("metadata", {}).get("name", "")
-            if not cr_name.startswith(dgd_prefix):
+            belongs_to_dgd = cr_name.startswith(dgd_prefix) or any(
+                cr_name == component_name or cr_name.startswith(f"{component_name}-")
+                for component_name in component_names
+            )
+            if not belongs_to_dgd:
                 continue
 
             data = cr.get("spec", {}).get("data", {})

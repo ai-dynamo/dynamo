@@ -16,11 +16,30 @@ and throughput measurements without going through the Python wrapper. It uses
 the mocker's internal polynomial perf model so the results stay focused on
 replay overhead instead of external timing backends.
 
+Build each entrypoint with `--no-default-features` and its matching feature:
+
+| Entrypoint | Feature |
+|---|---|
+| `claude_trace_export` | `claude-trace-export` |
+| `request_trace_to_satf` | `satf` |
+| `multiturn_bench` | `multiturn` |
+| `offline_replay_bench` | `offline-replay` |
+| `mooncake_bench` | `mooncake` |
+| `active_sequences_bench` | `active-sequences` |
+| `dc_ckf_consumer_bench` | `dc-ckf-consumer` |
+| `dc_ckf_relay_bench` | `dc-ckf-relay` |
+
+The CKF consumer feature contains only the endpoint-scoped consumer and its
+dependency-light protocol metadata. The Relay feature additionally owns its
+Mooncake replay generation dependencies, without enabling mocker's optional
+TMQ/ZeroMQ services.
+
 ## Quick start
 
 ```bash
 # Smoke test (1 user, 1 turn, ~50 tokens)
-cargo bench --package dynamo-bench --bench multiturn_bench -- --ping
+cargo bench --package dynamo-bench --bench multiturn_bench \
+  --no-default-features --features multiturn -- --ping
 ```
 
 ## Speculative prefill demo
@@ -47,7 +66,8 @@ python -m dynamo.frontend \
 ### 2. Run baseline (no speculative prefill)
 
 ```bash
-cargo bench --package dynamo-bench --bench multiturn_bench -- \
+cargo bench --package dynamo-bench --bench multiturn_bench \
+  --no-default-features --features multiturn -- \
   --url http://localhost:8000 \
   --num-users 10 \
   --num-turns 5 \
@@ -61,7 +81,8 @@ cargo bench --package dynamo-bench --bench multiturn_bench -- \
 ### 3. Run with speculative prefill
 
 ```bash
-cargo bench --package dynamo-bench --bench multiturn_bench -- \
+cargo bench --package dynamo-bench --bench multiturn_bench \
+  --no-default-features --features multiturn -- \
   --url http://localhost:8000 \
   --num-users 10 \
   --num-turns 5 \
@@ -108,7 +129,8 @@ See also: [Agent Hints documentation](../../docs/components/frontend/nvext.md#ag
 ## Offline replay
 
 ```bash
-cargo bench --package dynamo-bench --bench offline_replay_bench -- \
+cargo bench --package dynamo-bench --bench offline_replay_bench \
+  --no-default-features --features offline-replay -- \
   /path/to/mooncake_trace.jsonl \
   --engine-type sglang \
   --num-workers 4 \
@@ -125,7 +147,8 @@ knob while keeping the same internal polynomial model.
 Use `--serving-mode disagg` to replay separate prefill and decode pools:
 
 ```bash
-cargo bench --package dynamo-bench --bench offline_replay_bench -- \
+cargo bench --package dynamo-bench --bench offline_replay_bench \
+  --no-default-features --features offline-replay -- \
   /path/to/mooncake_trace.jsonl \
   --serving-mode disagg \
   --num-prefill-workers 2 \
@@ -140,7 +163,7 @@ environment:
 
 ```bash
 cargo bench --package dynamo-bench --bench offline_replay_bench \
-  --features mocker-kvbm-offload -- \
+  --no-default-features --features mocker-kvbm-offload -- \
   /path/to/mooncake_trace.jsonl \
   --engine-type vllm \
   --num-gpu-blocks 1024 \

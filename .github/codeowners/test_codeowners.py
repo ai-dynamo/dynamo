@@ -1046,6 +1046,19 @@ class TestDiffAwareStrictGateE2E:
         # (c) full-tree strict still FAILS on that same inherited gap.
         assert _run_build(repo, areas).returncode == 1
 
+    def test_deleting_last_matched_file_requires_pruning_glob(self, tmp_path) -> None:
+        areas = self._areas(tmp_path)
+        repo, base = self._repo_with_base(tmp_path)
+        (repo / "owned" / "a.txt").unlink()
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "delete last owned file")
+
+        result = _run_build(repo, areas, "--changed-only", "--base", base)
+
+        assert result.returncode == 1
+        assert "glob(s) match no tracked files" in result.stdout
+        assert "/owned/" in result.stdout
+
     def test_inherited_contract_only_blocks_full_tree(self, tmp_path) -> None:
         areas = tmp_path / "areas.yaml"
         areas.write_text(
@@ -1199,6 +1212,16 @@ class TestRealPolicyRoutingContracts:
         assert resolve_owners(rules, "components/src/dynamo/vllm/handlers.py") == [
             teams["backend-vllm"]
         ]
+
+    def test_squeeze_evolve_is_router_owned_only(
+        self,
+        real_policy_rules: tuple[list[tuple[str, list[str]]], dict[str, str]],
+    ) -> None:
+        rules, teams = real_policy_rules
+        owners = resolve_owners(
+            rules, "components/src/dynamo/squeeze_evolve/orchestrator.py"
+        )
+        assert owners == [teams["router"]]
 
 
 # ------------------------------------------------------------------
