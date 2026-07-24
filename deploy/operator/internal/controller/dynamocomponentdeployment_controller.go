@@ -473,10 +473,6 @@ func IsLeaderWorkerSetReady(leaderWorkerSet *leaderworkersetv1.LeaderWorkerSet) 
 	return false
 }
 
-func (r *DynamoComponentDeploymentReconciler) generateLeaderPodTemplateSpec(ctx context.Context, opt generateResourceOption, labels map[string]string) (*corev1.PodTemplateSpec, error) {
-	return r.workloadRenderer().generateLeaderPodTemplateSpec(ctx, opt.dynamoComponentDeployment, labels)
-}
-
 func checkMainContainer(spec *corev1.PodSpec) error {
 
 	if len(spec.Containers) == 0 {
@@ -506,10 +502,6 @@ func checkMainContainer(spec *corev1.PodSpec) error {
 	}
 
 	return nil
-}
-
-func (r *DynamoComponentDeploymentReconciler) generateWorkerPodTemplateSpec(ctx context.Context, opt generateResourceOption, labels map[string]string) (*corev1.PodTemplateSpec, error) {
-	return r.workloadRenderer().generateWorkerPodTemplateSpec(ctx, opt.dynamoComponentDeployment, labels)
 }
 
 // generateLeaderWorkerSet creates a single LeaderWorkerSet resource from the DynamoComponentDeployment
@@ -556,15 +548,6 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx contex
 	}
 
 	return leaderWorkerSet, false, nil
-}
-
-// getDCDWorkloadPodLabels keeps LWS pod labels aligned with the workload
-// component type used by Deployment and Service rendering.
-func (r *DynamoComponentDeploymentReconciler) getDCDWorkloadPodLabels(
-	ctx context.Context,
-	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
-) (map[string]string, error) {
-	return r.workloadRenderer().getDCDWorkloadPodLabels(ctx, dcd)
 }
 
 // leaderWorkerSetName keeps the native LWS at <dcd-name>-0 so it can adopt
@@ -799,7 +782,7 @@ func (r *DynamoComponentDeploymentReconciler) generateDeployment(ctx context.Con
 	}
 
 	// nolint: gosimple
-	podTemplateSpec, err := r.generatePodTemplateSpec(ctx, opt, dynamo.RoleMain)
+	podTemplateSpec, err := r.workloadRenderer().generatePodTemplateSpec(ctx, opt.dynamoComponentDeployment, dynamo.RoleMain)
 	if err != nil {
 		return
 	}
@@ -852,10 +835,6 @@ type generateResourceOption struct {
 	dynamoComponentDeployment *nvidiacomv1beta1.DynamoComponentDeployment
 }
 
-func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx context.Context, opt generateResourceOption, role dynamo.Role) (*corev1.PodTemplateSpec, error) {
-	return r.workloadRenderer().generatePodTemplateSpec(ctx, opt.dynamoComponentDeployment, role)
-}
-
 func (r *DynamoComponentDeploymentReconciler) generateService(ctx context.Context, opt generateResourceOption) (*corev1.Service, bool, error) {
 	return r.workloadRenderer().generateService(ctx, opt.dynamoComponentDeployment)
 }
@@ -869,14 +848,6 @@ func (r *DynamoComponentDeploymentReconciler) getDCDWorkloadComponentType(
 	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
 ) (string, error) {
 	return r.workloadRenderer().getDCDWorkloadComponentType(ctx, dcd)
-}
-
-func (r *DynamoComponentDeploymentReconciler) hasExistingLegacyWorkerSelector(
-	ctx context.Context,
-	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
-	componentType string,
-) (bool, error) {
-	return r.workloadRenderer().hasExistingLegacyWorkerSelector(ctx, dcd, componentType)
 }
 
 func hasLegacyWorkerSelector(labels map[string]string, componentType string) bool {

@@ -788,9 +788,9 @@ func TestDynamoComponentDeploymentReconciler_LegacyAlphaWorkloadComponentType(t 
 		},
 	}
 
-	podTemplate, err := r.generatePodTemplateSpec(
+	podTemplate, err := r.workloadRenderer().generatePodTemplateSpec(
 		context.Background(),
-		generateResourceOption{dynamoComponentDeployment: dcd},
+		dcd,
 		dynamo.RoleMain,
 	)
 	require.NoError(t, err)
@@ -963,9 +963,9 @@ func TestDynamoComponentDeploymentReconciler_BetaPrefillWorkloadComponentType(t 
 		},
 	}
 
-	podTemplate, err := r.generatePodTemplateSpec(
+	podTemplate, err := r.workloadRenderer().generatePodTemplateSpec(
 		context.Background(),
-		generateResourceOption{dynamoComponentDeployment: dcd},
+		dcd,
 		dynamo.RoleMain,
 	)
 	require.NoError(t, err)
@@ -1778,9 +1778,9 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		}
 
 		r := makeReconciler(dcd, ckpt)
-		podTemplateSpec, err := r.generatePodTemplateSpec(
+		podTemplateSpec, err := r.workloadRenderer().generatePodTemplateSpec(
 			context.Background(),
-			generateResourceOption{dynamoComponentDeployment: dcd},
+			dcd,
 			dynamo.RoleMain,
 		)
 		if err != nil {
@@ -1838,9 +1838,9 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 
 		r := makeReconciler(dcd, ckpt)
 		r.RuntimeConfig = &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true, GMSSnapshot: true}}
-		podTemplateSpec, err := r.generatePodTemplateSpec(
+		podTemplateSpec, err := r.workloadRenderer().generatePodTemplateSpec(
 			context.Background(),
-			generateResourceOption{dynamoComponentDeployment: dcd},
+			dcd,
 			dynamo.RoleMain,
 		)
 		if err != nil {
@@ -1917,9 +1917,9 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		}
 
 		r := makeReconciler(dcd, ckpt)
-		_, err = r.generatePodTemplateSpec(
+		_, err = r.workloadRenderer().generatePodTemplateSpec(
 			context.Background(),
-			generateResourceOption{dynamoComponentDeployment: dcd},
+			dcd,
 			dynamo.RoleMain,
 		)
 		require.Error(t, err)
@@ -1959,9 +1959,9 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 
 		r := makeReconciler(dcd, ckpt)
 		r.RuntimeConfig = &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true, GMSSnapshot: true}}
-		podTemplateSpec, err := r.generatePodTemplateSpec(
+		podTemplateSpec, err := r.workloadRenderer().generatePodTemplateSpec(
 			context.Background(),
-			generateResourceOption{dynamoComponentDeployment: dcd},
+			dcd,
 			dynamo.RoleMain,
 		)
 		if err != nil {
@@ -2004,9 +2004,9 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		}
 
 		r := makeReconciler(dcd, ckpt)
-		podTemplateSpec, err := r.generatePodTemplateSpec(
+		podTemplateSpec, err := r.workloadRenderer().generatePodTemplateSpec(
 			context.Background(),
-			generateResourceOption{dynamoComponentDeployment: dcd},
+			dcd,
 			dynamo.RoleMain,
 		)
 		if err != nil {
@@ -2065,9 +2065,9 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		}
 
 		r := makeReconciler(dcd, ckpt)
-		podTemplateSpec, err := r.generatePodTemplateSpec(
+		podTemplateSpec, err := r.workloadRenderer().generatePodTemplateSpec(
 			context.Background(),
-			generateResourceOption{dynamoComponentDeployment: dcd},
+			dcd,
 			dynamo.RoleMain,
 		)
 		if err != nil {
@@ -2108,9 +2108,9 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		}
 
 		r := makeReconciler(dcd, ckpt)
-		podTemplateSpec, err := r.generatePodTemplateSpec(
+		podTemplateSpec, err := r.workloadRenderer().generatePodTemplateSpec(
 			context.Background(),
-			generateResourceOption{dynamoComponentDeployment: dcd},
+			dcd,
 			dynamo.RoleMain,
 		)
 		if err != nil {
@@ -3482,9 +3482,9 @@ func TestGenerateWorkerPodTemplateSpecDoesNotRequireGPUResource(t *testing.T) {
 		},
 	}
 
-	got, err := reconciler.generateWorkerPodTemplateSpec(
+	got, err := reconciler.workloadRenderer().generateWorkerPodTemplateSpec(
 		context.Background(),
-		generateResourceOption{dynamoComponentDeployment: dcd},
+		dcd,
 		map[string]string{"app": "demo"},
 	)
 	require.NoError(t, err)
