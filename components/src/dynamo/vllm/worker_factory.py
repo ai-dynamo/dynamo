@@ -1172,22 +1172,43 @@ class WorkerFactory:
                 vllm_config,
                 default_sampling_params,
                 prometheus_temp_dir,
-                _component_gauges,
+                component_gauges,
             ) = snapshot_engine
             # TODO: The scheduler in the child process still has worker_id=""
             # because the engine was forked before the runtime existed.
             # Propagating the new ID to the child requires shared memory or
             # a restart of the EngineCore process.
             os.environ[ENV_FPM_WORKER_ID] = fpm_worker_id
+            factory = StatLoggerFactory(
+                endpoint=generate_endpoint,
+                component_gauges=component_gauges,
+            )
         else:
+            # Factory is created without component_gauges; setup_vllm_engine() will
+            # create the gauges after setup_multiprocess_prometheus() and set them
+            # on the factory before vLLM calls create_stat_logger().
+            factory = StatLoggerFactory(
+                endpoint=generate_endpoint,
+            )
             (
                 engine_client,
                 vllm_config,
                 default_sampling_params,
                 prometheus_temp_dir,
                 _component_gauges,
-            ) = self.setup_vllm_engine(config, fpm_worker_id=fpm_worker_id)
+            ) = self.setup_vllm_engine(config, factory, fpm_worker_id=fpm_worker_id)
         await configure_kv_event_block_size(engine_client, vllm_config)
+
+        # Match decode-worker KV gauge behavior: seed samples immediately so
+        # Prometheus exports per-rank labels before the first scheduler record,
+        # then let vLLM stat logger updates publish live usage.
+        _, dp_size = get_dp_range_for_worker(vllm_config)
+        per_rank_num_gpu_blocks = per_rank_kv_blocks(
+            vllm_config.cache_config.num_gpu_blocks,
+            dp_size,
+        )
+        factory.set_num_gpu_blocks_all(per_rank_num_gpu_blocks or 0)
+        factory.init_publish()
 
         encode_worker_client = await self._maybe_get_encode_worker_client(
             runtime, config
