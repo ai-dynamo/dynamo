@@ -2932,9 +2932,9 @@ func TestScaleOldWorkerDCDs_MultipleOldGenerationsPreservesAvailableReplicas(t *
 
 	rollingUpdateCtx, err := r.buildRollingUpdateContext(ctx, dgd)
 	require.NoError(t, err)
-	assert.Equal(t, int32(15), rollingUpdateCtx.OldWorkerReplicaTargetsByComponent["worker"])
+	assert.Equal(t, int32(20), rollingUpdateCtx.OldWorkerReplicaTargetsByComponent["worker"])
 	assert.Equal(t, int32(15), rollingUpdateCtx.OldWorkerReplicaTargetsByDCD["test-dgd-worker-hashaaaa"])
-	assert.Equal(t, int32(0), rollingUpdateCtx.OldWorkerReplicaTargetsByDCD["test-dgd-worker-hashbbbb"])
+	assert.Equal(t, int32(5), rollingUpdateCtx.OldWorkerReplicaTargetsByDCD["test-dgd-worker-hashbbbb"])
 	assert.Equal(t, int32(0), rollingUpdateCtx.NewWorkerReplicaTargetsByComponent["worker"])
 
 	err = r.scaleOldWorkerDCDs(ctx, dgd, rollingUpdateCtx)
@@ -2943,12 +2943,12 @@ func TestScaleOldWorkerDCDs_MultipleOldGenerationsPreservesAvailableReplicas(t *
 	updatedA := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{})
 	err = r.Get(ctx, types.NamespacedName{Name: "test-dgd-worker-hashaaaa", Namespace: "default"}, updatedA)
 	require.NoError(t, err)
-	assert.Equal(t, int32(15), *updatedA.Spec.Replicas, "Healthy old DCD should continue serving minAvailable")
+	assert.Equal(t, int32(15), *updatedA.Spec.Replicas, "Healthy old DCD should continue serving")
 
 	updatedB := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{})
 	err = r.Get(ctx, types.NamespacedName{Name: "test-dgd-worker-hashbbbb", Namespace: "default"}, updatedB)
 	require.NoError(t, err)
-	assert.Equal(t, int32(0), *updatedB.Spec.Replicas, "Unavailable newer old DCD should be drained first")
+	assert.Equal(t, int32(5), *updatedB.Spec.Replicas, "Unavailable newer old DCD should absorb the remaining old target")
 }
 
 func TestAggregateOldWorkerServiceStatuses_MultipleOldGenerations(t *testing.T) {
@@ -3644,9 +3644,11 @@ func TestBuildRollingUpdateContext(t *testing.T) {
 			expectedNew: map[string]int32{"worker": 2}, // budget from Spec: 10+0-8-0=2
 		},
 		{
-			name: "old fleet degraded - should protect healthy old pods",
+			name: "old fleet degraded - scale up before draining old",
 			// desired=10, maxSurge=3, maxUnavailable=2
 			// old: spec=8, available=4, actual=8 | new: spec=3, available=3, actual=3
+			// Vector planning advances by one scale-up step first; unhealthy old pods are not
+			// independently drained ahead of the shared rollout progression.
 			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				"worker": {
 					ComponentType: consts.ComponentTypeWorker,
@@ -3664,7 +3666,7 @@ func TestBuildRollingUpdateContext(t *testing.T) {
 					makeNewDCD("test-dgd", "worker", consts.ComponentTypeWorker, newHash, 3, 3, 3),
 				}
 			},
-			expectedOld: map[string]int32{"worker": 5},
+			expectedOld: map[string]int32{"worker": 8},
 			expectedNew: map[string]int32{"worker": 5},
 		},
 		{
@@ -3683,7 +3685,7 @@ func TestBuildRollingUpdateContext(t *testing.T) {
 				}
 			},
 			newDCDs:     func(_ string) []runtime.Object { return nil },
-			expectedOld: map[string]int32{"worker": 8},
+			expectedOld: map[string]int32{"worker": 10},
 			expectedNew: map[string]int32{"worker": 3},
 		},
 		{
@@ -3709,15 +3711,17 @@ func TestBuildRollingUpdateContext(t *testing.T) {
 					makeNewDCD("test-dgd", "worker", consts.ComponentTypeWorker, newHash, 5, 5, 5),
 				}
 			},
-			expectedOld: map[string]int32{"worker": 3},
+			expectedOld: map[string]int32{"worker": 5},
 			expectedNew: map[string]int32{"worker": 8},
 		},
 		{
-			name: "multi-service independence - prefill done, decode mid-rollout",
+			name: "multi-service vector gate - prefill done, decode new pods unavailable",
 			// prefill: desired=4, maxSurge=1, maxUnavailable=1
 			//   old: spec=0, available=0, actual=0 | new: spec=4, available=4, actual=4
 			// decode: desired=8, maxSurge=2, maxUnavailable=2
 			//   old: spec=6, available=6, actual=6 | new: spec=2, available=0, actual=2
+			// Because decode's new generation is not available yet, the vector planner holds all
+			// worker targets instead of advancing decode independently.
 			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				"prefill": {
 					ComponentType: consts.ComponentTypePrefill,
@@ -3741,7 +3745,76 @@ func TestBuildRollingUpdateContext(t *testing.T) {
 				}
 			},
 			expectedOld: map[string]int32{"prefill": 0, "decode": 6},
-			expectedNew: map[string]int32{"prefill": 4, "decode": 4},
+			expectedNew: map[string]int32{"prefill": 4, "decode": 2},
+		},
+		{
+			name: "awkward ratio initial scale-up uses shared interpolation",
+			// decode:prefill desired=7:3, maxSurge=1, maxUnavailable=0 for both.
+			// The shared interpolation uses totalSteps=7 and starts with +1D/+1P.
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"decode": {
+					ComponentType: consts.ComponentTypeDecode,
+					Replicas:      ptr.To(int32(7)),
+					Annotations: map[string]string{
+						KubeAnnotationDeploymentRollingUpdateMaxSurge:       "1",
+						KubeAnnotationDeploymentRollingUpdateMaxUnavailable: "0",
+					},
+				},
+				"prefill": {
+					ComponentType: consts.ComponentTypePrefill,
+					Replicas:      ptr.To(int32(3)),
+					Annotations: map[string]string{
+						KubeAnnotationDeploymentRollingUpdateMaxSurge:       "1",
+						KubeAnnotationDeploymentRollingUpdateMaxUnavailable: "0",
+					},
+				},
+			},
+			oldDCDs: func(_ string) []runtime.Object {
+				return []runtime.Object{
+					makeOldDCD("test-dgd", "decode", consts.ComponentTypeDecode, "", 7, 7, 7),
+					makeOldDCD("test-dgd", "prefill", consts.ComponentTypePrefill, "", 3, 3, 3),
+				}
+			},
+			newDCDs:     func(_ string) []runtime.Object { return nil },
+			expectedOld: map[string]int32{"decode": 7, "prefill": 3},
+			expectedNew: map[string]int32{"decode": 1, "prefill": 1},
+		},
+		{
+			name: "awkward ratio next step drains only decode",
+			// After +1D/+1P is available, surge budget blocks the next +1D, so the
+			// shared interpolation drains one old decode and keeps prefill unchanged.
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"decode": {
+					ComponentType: consts.ComponentTypeDecode,
+					Replicas:      ptr.To(int32(7)),
+					Annotations: map[string]string{
+						KubeAnnotationDeploymentRollingUpdateMaxSurge:       "1",
+						KubeAnnotationDeploymentRollingUpdateMaxUnavailable: "0",
+					},
+				},
+				"prefill": {
+					ComponentType: consts.ComponentTypePrefill,
+					Replicas:      ptr.To(int32(3)),
+					Annotations: map[string]string{
+						KubeAnnotationDeploymentRollingUpdateMaxSurge:       "1",
+						KubeAnnotationDeploymentRollingUpdateMaxUnavailable: "0",
+					},
+				},
+			},
+			oldDCDs: func(_ string) []runtime.Object {
+				return []runtime.Object{
+					makeOldDCD("test-dgd", "decode", consts.ComponentTypeDecode, "", 7, 7, 7),
+					makeOldDCD("test-dgd", "prefill", consts.ComponentTypePrefill, "", 3, 3, 3),
+				}
+			},
+			newDCDs: func(newHash string) []runtime.Object {
+				return []runtime.Object{
+					makeNewDCD("test-dgd", "decode", consts.ComponentTypeDecode, newHash, 1, 1, 1),
+					makeNewDCD("test-dgd", "prefill", consts.ComponentTypePrefill, newHash, 1, 1, 1),
+				}
+			},
+			expectedOld: map[string]int32{"decode": 6, "prefill": 3},
+			expectedNew: map[string]int32{"decode": 1, "prefill": 1},
 		},
 		{
 			name: "new pods unavailable - hold old until new becomes Ready",
@@ -3763,8 +3836,8 @@ func TestBuildRollingUpdateContext(t *testing.T) {
 					makeNewDCD("test-dgd", "worker", consts.ComponentTypeWorker, newHash, 4, 4, 0),
 				}
 			},
-			expectedOld: map[string]int32{"worker": 8}, // newUnavailable shrinks scale-down budget; hold unhealthy old
-			expectedNew: map[string]int32{"worker": 4}, // no surge: actual already at desired+maxSurge-1
+			expectedOld: map[string]int32{"worker": 10}, // new generation is not available; hold old targets
+			expectedNew: map[string]int32{"worker": 4},
 		},
 		{
 			name: "multiple old generations - aggregate state across hashes",
@@ -3787,8 +3860,8 @@ func TestBuildRollingUpdateContext(t *testing.T) {
 					makeNewDCD("test-dgd", "worker", consts.ComponentTypeWorker, newHash, 2, 2, 2),
 				}
 			},
-			expectedOld: map[string]int32{"worker": 6}, // aggregated across both old gens
-			expectedNew: map[string]int32{"worker": 5},
+			expectedOld: map[string]int32{"worker": 8}, // aggregated across both old gens
+			expectedNew: map[string]int32{"worker": 3},
 		},
 	}
 
@@ -3876,8 +3949,8 @@ func TestBuildRollingUpdateContext_NoNewDCDExists(t *testing.T) {
 
 	assert.NoError(t, err, "IsNotFound on the new-hash DCD must not produce an error")
 	assert.Equal(t, newHash, result.NewWorkerHash)
-	// Math runs with newState={0,0,0}: drain old to minAvailable, surge new from zero.
-	assert.Equal(t, int32(8), result.OldWorkerReplicaTargetsByComponent["worker"])
+	// Math runs with newState={0,0,0}: the vector planner scales new up before draining old.
+	assert.Equal(t, int32(10), result.OldWorkerReplicaTargetsByComponent["worker"])
 	assert.Equal(t, int32(3), result.NewWorkerReplicaTargetsByComponent["worker"])
 }
 

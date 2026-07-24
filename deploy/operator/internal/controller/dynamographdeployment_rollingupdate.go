@@ -18,6 +18,7 @@
 package controller
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"slices"
@@ -1174,6 +1175,290 @@ func resolveRollingUpdateParams(annotations map[string]string, desiredReplicas i
 	return int32(surge), int32(unavail)
 }
 
+type workerRollingUpdateConfig struct {
+	maxSurge       int32
+	maxUnavailable int32
+}
+
+type workerRolloutComponent struct {
+	name    string
+	desired int32
+	old     dcdComponentState
+	new     dcdComponentState
+	config  workerRollingUpdateConfig
+}
+
+func workerRolloutBatchSize(config workerRollingUpdateConfig) int32 {
+	if config.maxSurge > 0 {
+		return config.maxSurge
+	}
+	return max(int32(1), config.maxUnavailable)
+}
+
+func ceilDivInt32(numerator, denominator int32) int32 {
+	if denominator <= 0 {
+		return 0
+	}
+	return (numerator + denominator - 1) / denominator
+}
+
+func computeWorkerRolloutTotalSteps(
+	initialOld []int32,
+	targetNew []int32,
+	configs []workerRollingUpdateConfig,
+) int32 {
+	var totalSteps int32
+	for i := range initialOld {
+		maxReplicas := max(initialOld[i], targetNew[i], int32(0))
+		totalSteps = max(totalSteps, ceilDivInt32(maxReplicas, workerRolloutBatchSize(configs[i])))
+	}
+	return totalSteps
+}
+
+func computeNextWorkerNewReplicas(targetNew, currentNew []int32, totalSteps int32) []int32 {
+	result := make([]int32, len(targetNew))
+	if totalSteps == 0 {
+		copy(result, targetNew)
+		return result
+	}
+
+	stepIndex := func(current, target int32) int32 {
+		if target == 0 {
+			return totalSteps
+		}
+		return current * totalSteps / target
+	}
+
+	minStepIndex := totalSteps
+	for i := range targetNew {
+		minStepIndex = min(minStepIndex, stepIndex(currentNew[i], targetNew[i]))
+	}
+	nextStepIndex := minStepIndex + 1
+
+	for i := range targetNew {
+		next := ceilDivInt32(nextStepIndex*targetNew[i], totalSteps)
+		result[i] = max(min(next, targetNew[i]), currentNew[i])
+	}
+	return result
+}
+
+func computeNextWorkerOldReplicas(initialOld, currentOld []int32, totalSteps int32) []int32 {
+	result := make([]int32, len(initialOld))
+	if totalSteps == 0 {
+		return result
+	}
+
+	stepIndex := func(removed, source int32) int32 {
+		if source == 0 {
+			return 0
+		}
+		return removed * totalSteps / source
+	}
+
+	var maxStepIndex int32
+	for i := range initialOld {
+		if initialOld[i] == 0 {
+			continue
+		}
+		removed := initialOld[i] - currentOld[i]
+		maxStepIndex = max(maxStepIndex, stepIndex(removed, initialOld[i]))
+	}
+	nextStepIndex := maxStepIndex + 1
+
+	for i := range initialOld {
+		next := initialOld[i] - (nextStepIndex * initialOld[i] / totalSteps)
+		result[i] = min(max(int32(0), next), currentOld[i])
+	}
+	return result
+}
+
+func workerRolloutComplete(currentOld, currentNew, targetNew []int32) bool {
+	for i := range currentOld {
+		if currentOld[i] != 0 || currentNew[i] < targetNew[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func workerNewAtTarget(currentNew, targetNew []int32) bool {
+	for i := range currentNew {
+		if currentNew[i] < targetNew[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func workerCanScaleUp(
+	currentOld []int32,
+	nextNew []int32,
+	targetNew []int32,
+	configs []workerRollingUpdateConfig,
+) bool {
+	for i := range currentOld {
+		if targetNew[i] == 0 {
+			continue
+		}
+		if currentOld[i]+nextNew[i] > targetNew[i]+configs[i].maxSurge {
+			return false
+		}
+	}
+	return true
+}
+
+func computeWorkerMinOld(
+	initialOld []int32,
+	currentNew []int32,
+	targetNew []int32,
+	configs []workerRollingUpdateConfig,
+) []int32 {
+	minOld := make([]int32, len(initialOld))
+	for i := range initialOld {
+		if initialOld[i] >= targetNew[i] {
+			minOld[i] = max(int32(0), targetNew[i]-configs[i].maxUnavailable-currentNew[i])
+		}
+	}
+	return minOld
+}
+
+func workerCanDrainAllToZero(
+	currentNew []int32,
+	initialOld []int32,
+	targetNew []int32,
+	configs []workerRollingUpdateConfig,
+) bool {
+	for i := range targetNew {
+		if initialOld[i] >= targetNew[i] {
+			minRequired := targetNew[i] - configs[i].maxUnavailable
+			if currentNew[i] < minRequired {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func applyWorkerOrphanPrevention(
+	nextOld []int32,
+	currentNew []int32,
+	initialOld []int32,
+	targetNew []int32,
+	configs []workerRollingUpdateConfig,
+) {
+	anyDrainsToZero := false
+	allDrainToZero := true
+	for i := range nextOld {
+		if initialOld[i] == 0 {
+			continue
+		}
+		if nextOld[i] == 0 {
+			anyDrainsToZero = true
+		} else {
+			allDrainToZero = false
+		}
+	}
+
+	if !anyDrainsToZero || allDrainToZero {
+		return
+	}
+
+	if workerCanDrainAllToZero(currentNew, initialOld, targetNew, configs) {
+		for i := range nextOld {
+			nextOld[i] = 0
+		}
+		return
+	}
+
+	for i := range nextOld {
+		if nextOld[i] == 0 && initialOld[i] > 0 {
+			nextOld[i] = 1
+		}
+	}
+}
+
+func computeNextWorkerRolloutStep(
+	initialOld []int32,
+	currentOld []int32,
+	currentNew []int32,
+	targetNew []int32,
+	configs []workerRollingUpdateConfig,
+) ([]int32, []int32) {
+	oldTargets := slices.Clone(currentOld)
+	newTargets := slices.Clone(currentNew)
+	if workerRolloutComplete(currentOld, currentNew, targetNew) {
+		return oldTargets, newTargets
+	}
+
+	totalSteps := computeWorkerRolloutTotalSteps(initialOld, targetNew, configs)
+	if totalSteps == 0 {
+		return oldTargets, newTargets
+	}
+
+	if workerNewAtTarget(currentNew, targetNew) {
+		return make([]int32, len(initialOld)), newTargets
+	}
+
+	nextNew := computeNextWorkerNewReplicas(targetNew, currentNew, totalSteps)
+	needsScaleUp := false
+	for i := range currentNew {
+		if nextNew[i] > currentNew[i] {
+			needsScaleUp = true
+			break
+		}
+	}
+	if needsScaleUp && workerCanScaleUp(currentOld, nextNew, targetNew, configs) {
+		return oldTargets, nextNew
+	}
+
+	minOld := computeWorkerMinOld(initialOld, currentNew, targetNew, configs)
+	nextOld := computeNextWorkerOldReplicas(initialOld, currentOld, totalSteps)
+	for i := range nextOld {
+		nextOld[i] = max(nextOld[i], minOld[i])
+	}
+	applyWorkerOrphanPrevention(nextOld, currentNew, initialOld, targetNew, configs)
+
+	needsScaleDown := false
+	for i := range nextOld {
+		if nextOld[i] < currentOld[i] {
+			needsScaleDown = true
+			break
+		}
+	}
+	if needsScaleDown {
+		return nextOld, newTargets
+	}
+
+	drainedOld := make([]int32, len(currentOld))
+	needsForceDrain := false
+	for i := range currentOld {
+		maxOld := targetNew[i] + configs[i].maxSurge - nextNew[i]
+		drainedOld[i] = max(int32(0), min(currentOld[i], maxOld))
+		if initialOld[i] >= targetNew[i] {
+			minOldForRole := max(int32(0), targetNew[i]-configs[i].maxUnavailable-nextNew[i])
+			drainedOld[i] = max(drainedOld[i], minOldForRole)
+		}
+		if drainedOld[i] < currentOld[i] {
+			needsForceDrain = true
+		}
+	}
+	if needsForceDrain {
+		applyWorkerOrphanPrevention(drainedOld, nextNew, initialOld, targetNew, configs)
+		return drainedOld, nextNew
+	}
+
+	return oldTargets, newTargets
+}
+
+func newWorkerGenerationAvailable(components []workerRolloutComponent) bool {
+	for i := range components {
+		if components[i].new.Available < components[i].new.Spec {
+			return false
+		}
+	}
+	return true
+}
+
 // buildRollingUpdateContext creates a RollingUpdateContext.
 func (r *DynamoGraphDeploymentReconciler) buildRollingUpdateContext(
 	ctx context.Context,
@@ -1202,10 +1487,7 @@ func (r *DynamoGraphDeploymentReconciler) buildRollingUpdateContext(
 		return dynamo.RollingUpdateContext{}, fmt.Errorf("failed to get old worker component states: %w", err)
 	}
 
-	oldWorkerComponentReplicas := make(map[string]int32)
-	oldWorkerDCDReplicas := make(map[string]int32)
-	newWorkerReplicas := make(map[string]int32)
-
+	components := make([]workerRolloutComponent, 0)
 	for i := range dgd.Spec.Components {
 		spec := &dgd.Spec.Components[i]
 		componentName := spec.ComponentName
@@ -1219,7 +1501,6 @@ func (r *DynamoGraphDeploymentReconciler) buildRollingUpdateContext(
 		}
 
 		maxSurge, maxUnavailable := resolveRollingUpdateParams(dynamo.GetPodTemplateAnnotations(spec), desired)
-		minAvailable := desired - maxUnavailable
 
 		var newState dcdComponentState
 		newDCDName := dynamo.GetDCDResourceName(dgd, componentName, newWorkerHash)
@@ -1230,35 +1511,64 @@ func (r *DynamoGraphDeploymentReconciler) buildRollingUpdateContext(
 			return dynamo.RollingUpdateContext{}, fmt.Errorf("failed to get new worker DCD %s: %w", newDCDName, err)
 		}
 
-		oldState := oldStates[componentName]
+		components = append(components, workerRolloutComponent{
+			name:    componentName,
+			desired: desired,
+			old:     oldStates[componentName],
+			new:     newState,
+			config: workerRollingUpdateConfig{
+				maxSurge:       maxSurge,
+				maxUnavailable: maxUnavailable,
+			},
+		})
+	}
 
-		newUnavailable := max(int32(0), newState.Spec-newState.Available)
-		// maxScaledDown is the maximum number of old replicas that can be scaled down
-		maxScaledDown := max(int32(0), (oldState.Spec+newState.Spec)-minAvailable-newUnavailable)
-		oldUnhealthy := max(int32(0), oldState.Spec-oldState.Available)
-		// availableSurplus is how many extra available replicas we have above minAvailable (min 0)
-		availableSurplus := max(int32(0), (oldState.Available+newState.Available)-minAvailable)
-		oldTarget := max(int32(0), oldState.Spec-min(maxScaledDown, oldUnhealthy+availableSurplus))
+	slices.SortFunc(components, func(a, b workerRolloutComponent) int {
+		return cmp.Compare(a.name, b.name)
+	})
 
-		// Surge budget uses Spec (declared intent) like K8s Deployment controller; scheduler enforces actual resource constraints.
-		scaleUpBudget := max(int32(0), desired+maxSurge-oldState.Spec-newState.Spec)
-		newTarget := min(desired, newState.Spec+scaleUpBudget)
+	initialOld := make([]int32, len(components))
+	currentOld := make([]int32, len(components))
+	currentNew := make([]int32, len(components))
+	targetNew := make([]int32, len(components))
+	configs := make([]workerRollingUpdateConfig, len(components))
+	for i := range components {
+		component := components[i]
+		initialOld[i] = max(component.desired, component.old.Spec)
+		currentOld[i] = component.old.Spec
+		currentNew[i] = component.new.Spec
+		targetNew[i] = component.desired
+		configs[i] = component.config
+	}
 
-		oldWorkerComponentReplicas[componentName] = oldTarget
-		newWorkerReplicas[componentName] = newTarget
+	oldTargets := slices.Clone(currentOld)
+	newTargets := slices.Clone(currentNew)
+	if newWorkerGenerationAvailable(components) {
+		oldTargets, newTargets = computeNextWorkerRolloutStep(initialOld, currentOld, currentNew, targetNew, configs)
+	}
 
-		for dcdName, target := range allocateOldWorkerDCDReplicas(oldDCDsByComponent[componentName], oldTarget) {
+	oldWorkerComponentReplicas := make(map[string]int32)
+	oldWorkerDCDReplicas := make(map[string]int32)
+	newWorkerReplicas := make(map[string]int32)
+	for i := range components {
+		component := components[i]
+		oldTarget := oldTargets[i]
+		newTarget := newTargets[i]
+
+		oldWorkerComponentReplicas[component.name] = oldTarget
+		newWorkerReplicas[component.name] = newTarget
+
+		for dcdName, target := range allocateOldWorkerDCDReplicas(oldDCDsByComponent[component.name], oldTarget) {
 			oldWorkerDCDReplicas[dcdName] = target
 		}
 
 		logger.V(1).Info("Rolling update replica calculation",
-			"component", componentName,
-			"desired", desired,
-			"maxSurge", maxSurge,
-			"maxUnavailable", maxUnavailable,
-			"minAvailable", minAvailable,
-			"old", oldState,
-			"new", newState,
+			"component", component.name,
+			"desired", component.desired,
+			"maxSurge", component.config.maxSurge,
+			"maxUnavailable", component.config.maxUnavailable,
+			"old", component.old,
+			"new", component.new,
 			"oldTarget", oldTarget,
 			"newTarget", newTarget)
 	}
