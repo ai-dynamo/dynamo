@@ -19,7 +19,7 @@ use super::{
     MatchDetails, PreBoundEventCounters, SyncIndexer, WorkerLookupStats, WorkerTask,
 };
 use crate::cleanup::{CleanupGuard, CleanupState};
-use crate::lookup_update::update_arc_lookup_for_keys;
+use crate::lookup_update::{update_arc_lookup_for_keys, update_existing_arc_lookup_for_keys};
 use crate::protocols::*;
 
 mod children;
