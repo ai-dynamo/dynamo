@@ -22,6 +22,7 @@ use super::frontend_extension::{
 };
 use super::metrics;
 use super::metrics::{register_lora_allocation_metrics, register_worker_timing_metrics};
+use crate::batch::storage::BatchFileStore;
 use crate::discovery::ModelManager;
 use crate::endpoint_type::EndpointType;
 use crate::kv_router::metrics::{
@@ -104,6 +105,7 @@ pub struct State {
     cancel_token: CancellationToken,
     // Frontend API behavior read by request handlers after the service is built.
     frontend_api_config: FrontendApiConfig,
+    batch_file_store: Option<BatchFileStore>,
     nvext_enabled: bool,
 }
 
@@ -114,6 +116,7 @@ pub struct State {
 struct StateConfig {
     metrics_config: MetricsConfig,
     frontend_api_config: FrontendApiConfig,
+    batch_file_store: Option<BatchFileStore>,
     nvext_enabled: bool,
 }
 
@@ -381,6 +384,7 @@ impl State {
             },
             cancel_token,
             frontend_api_config: config.frontend_api_config,
+            batch_file_store: config.batch_file_store,
         }
     }
 
@@ -391,6 +395,10 @@ impl State {
 
     pub fn manager(&self) -> &ModelManager {
         Arc::as_ref(&self.manager)
+    }
+
+    pub(crate) fn batch_file_store(&self) -> Option<&BatchFileStore> {
+        self.batch_file_store.as_ref()
     }
 
     pub fn manager_clone(&self) -> Arc<ModelManager> {
@@ -548,11 +556,21 @@ pub struct HttpServiceConfig {
     #[builder(default = "true")]
     enable_responses_endpoints: bool,
 
-    /// OpenAI-compatible Batch API placeholders. Disabled by default until
-    /// batch storage and job lifecycle support are implemented; when enabled,
-    /// the placeholder handlers return 501.
+    /// OpenAI-compatible Batch API. Disabled by default while batch support is
+    /// experimental. Enabling it requires `batch_storage_url` or
+    /// `DYN_BATCH_STORAGE_URL`.
     #[builder(default = "false")]
     enable_batch_endpoints: bool,
+
+    /// Object-store URL for Batch API files.
+    ///
+    /// Supported schemes come from `object_store`. Use `memory` or `file` for
+    /// tests and local development; replicated deployments require a shared
+    /// backend such as S3, GCS, or Azure. Cloud stores should have lifecycle
+    /// cleanup configured for abandoned multipart uploads and completed-file
+    /// retention.
+    #[builder(setter(into, strip_option), default = "None")]
+    batch_storage_url: Option<String>,
 
     /// Experimental engine-native APIs (currently the token-in/token-out
     /// `Generate` endpoint `POST /inference/v1/generate`). **Disabled by
@@ -950,6 +968,20 @@ impl HttpServiceConfigBuilder {
         let anthropic_endpoints_enabled = frontend_api_config.anthropic().enabled();
         let generate_endpoint_enabled =
             config.enable_engine_apis || env_is_truthy(VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV);
+        let batch_file_store = if config.enable_batch_endpoints {
+            let storage_url = config
+                .batch_storage_url
+                .or_else(|| var(env_llm::DYN_BATCH_STORAGE_URL).ok())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "batch endpoints require batch_storage_url or {}",
+                        env_llm::DYN_BATCH_STORAGE_URL
+                    )
+                })?;
+            Some(BatchFileStore::from_url(&storage_url)?)
+        } else {
+            None
+        };
 
         let model_manager = Arc::new(ModelManager::new());
         let cancel_token = config.cancel_token.unwrap_or_default();
@@ -976,6 +1008,7 @@ impl HttpServiceConfigBuilder {
             StateConfig {
                 metrics_config,
                 frontend_api_config,
+                batch_file_store,
                 nvext_enabled,
             },
         ));
@@ -1578,6 +1611,17 @@ mod tests {
             Ok(_) => panic!("service build unexpectedly succeeded"),
             Err(err) => err.to_string(),
         }
+    }
+
+    #[test]
+    fn batch_endpoints_require_storage_url() {
+        temp_env::with_var_unset(env_llm::DYN_BATCH_STORAGE_URL, || {
+            let error = build_error_message(HttpService::builder().enable_batch_endpoints(true));
+            assert_eq!(
+                error,
+                "batch endpoints require batch_storage_url or DYN_BATCH_STORAGE_URL"
+            );
+        });
     }
 
     #[tokio::test]
