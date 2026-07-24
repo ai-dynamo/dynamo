@@ -992,9 +992,7 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                         }
 
                         // Recompute the full overloaded set only when thresholds change;
-                        // otherwise incrementally update just this worker. When the set
-                        // changes, publish to both the decode Client and (in disaggregated
-                        // serving) the prefill Client — see `publish_overloaded_instances`.
+                        // otherwise incrementally update just this worker.
                         let overloaded_changed = if thresholds_changed {
                             last_thresholds = cfg.clone();
                             let overloaded_workers =
@@ -1004,13 +1002,25 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                             overloaded_tracker.update_worker(worker_id, worker_overloaded)
                         };
 
+                        // Publish on every fresh load sample, even when the threshold-derived
+                        // set did not change. A worker can also be marked overloaded from the
+                        // request path via `Client::mark_overloaded_immediate` (on a
+                        // `ResourceExhausted` / "worker at capacity" response); that fast-path
+                        // state lives outside `overloaded_tracker` and is cleared only when the
+                        // monitor republishes the (now healthy) set. Gating the publish on
+                        // `overloaded_changed` means an unchanged healthy sample never
+                        // republishes, so a worker that briefly reported overload stays excluded
+                        // from routing indefinitely — the router then returns "All workers are
+                        // busy" forever even though the worker is idle. Publishing every sample
+                        // lets the healthy set overwrite the stale immediate mark.
+                        let overloaded_instances = overloaded_tracker.ids();
+                        publish_overloaded_instances(
+                            &client,
+                            &prefill_client_holder,
+                            &overloaded_instances,
+                        );
                         if overloaded_changed {
-                            let overloaded_instances = overloaded_tracker.ids();
-                            publish_overloaded_instances(
-                                &client,
-                                &prefill_client_holder,
-                                &overloaded_instances,
-                            );
+                            tracing::debug!(?overloaded_instances, "worker overload set changed");
                         }
                     }
 
