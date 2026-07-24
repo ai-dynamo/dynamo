@@ -384,6 +384,37 @@ impl OpenAIPreprocessor {
         Ok(())
     }
 
+    /// Validate a preprocessed request when its frontend-visible prompt length
+    /// is exact, returning that length for other context-budget decisions.
+    fn validate_preprocessed_token_budget(
+        request: &PreprocessedRequest,
+        strict_request_token_limit: Option<u32>,
+    ) -> Result<Option<usize>> {
+        if request.prompt_embeds.is_some() {
+            return Ok(None);
+        }
+
+        let exact_prompt_len = Self::exact_prompt_len(
+            request
+                .mm_routing_info
+                .as_ref()
+                .map(|mm| mm.expanded_prompt_len),
+            request.multi_modal_data.as_ref(),
+            request.token_ids.len(),
+        );
+        if let (Some(prompt_len), Some(max_tokens)) =
+            (exact_prompt_len, request.stop_conditions.max_tokens)
+        {
+            Self::validate_requested_token_budget(
+                prompt_len,
+                max_tokens,
+                strict_request_token_limit,
+            )?;
+        }
+
+        Ok(exact_prompt_len)
+    }
+
     fn nvext_passthrough_args<R: NvExtProvider>(
         request: &R,
     ) -> Option<serde_json::Map<String, serde_json::Value>> {
@@ -986,23 +1017,10 @@ impl OpenAIPreprocessor {
         //
         // Multimodal `token_ids` carry unexpanded image placeholders, so prefer
         // the MM-expanded length when available, else defer to the backend.
-        let exact_prompt_len = Self::exact_prompt_len(
-            preprocessed
-                .mm_routing_info
-                .as_ref()
-                .map(|mm| mm.expanded_prompt_len),
-            preprocessed.multi_modal_data.as_ref(),
-            preprocessed.token_ids.len(),
-        );
-        if let (Some(prompt_len), Some(max_tokens)) =
-            (exact_prompt_len, preprocessed.stop_conditions.max_tokens)
-        {
-            Self::validate_requested_token_budget(
-                prompt_len,
-                max_tokens,
-                self.strict_request_token_limit,
-            )?;
-        }
+        let exact_prompt_len = Self::validate_preprocessed_token_budget(
+            &preprocessed,
+            self.strict_request_token_limit,
+        )?;
         if preprocessed.stop_conditions.max_tokens.is_none()
             && let Some(prompt_len) = exact_prompt_len
             && let Some(max_tokens) =
@@ -3600,6 +3618,7 @@ impl
             .await?;
 
         let mut common_request = builder.build()?;
+        Self::validate_preprocessed_token_budget(&common_request, self.strict_request_token_limit)?;
         attach_agent_context_from_context(&mut common_request, &context);
 
         let trace_state = crate::request_trace::build_request_end_trace_state(
@@ -4626,6 +4645,111 @@ mod tests {
             OpenAIPreprocessor::validate_requested_token_budget(usize::MAX, 1, Some(100)).is_err()
         );
         assert!(OpenAIPreprocessor::validate_requested_token_budget(usize::MAX, 1, None).is_ok());
+    }
+
+    fn preprocessed_budget_request(max_tokens: u32) -> PreprocessedRequest {
+        let stop_conditions = crate::protocols::common::StopConditions {
+            max_tokens: Some(max_tokens),
+            ..Default::default()
+        };
+
+        PreprocessedRequest::builder()
+            .model("test-model".to_string())
+            .token_ids(vec![1, 2, 3])
+            .stop_conditions(stop_conditions)
+            .sampling_options(crate::protocols::common::SamplingOptions::default())
+            .output_options(crate::protocols::common::OutputOptions::default())
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn test_preprocessed_completion_budget_validation_and_deferral() {
+        // Models the legacy Completions request after its builder has produced
+        // exact text/token input: 3 input + 8 output exceeds a strict limit of 10.
+        let text_request = preprocessed_budget_request(8);
+        assert!(
+            OpenAIPreprocessor::validate_preprocessed_token_budget(&text_request, Some(10))
+                .is_err()
+        );
+
+        // Prompt embeddings do not expose their sequence length as token_ids.
+        let mut embeddings_request = text_request.clone();
+        embeddings_request.prompt_embeds = Some("opaque-tensor".to_string());
+        assert_eq!(
+            OpenAIPreprocessor::validate_preprocessed_token_budget(&embeddings_request, Some(10))
+                .unwrap(),
+            None
+        );
+
+        // Unexpanded multimodal placeholders likewise remain backend-owned.
+        let mut multimodal_request = text_request;
+        multimodal_request.multi_modal_data = Some(MultimodalDataMap::from([(
+            "image_url".to_string(),
+            vec![MultimodalData::Url(
+                url::Url::parse("https://example.com/image.png").unwrap(),
+            )],
+        )]));
+        assert_eq!(
+            OpenAIPreprocessor::validate_preprocessed_token_budget(&multimodal_request, Some(10))
+                .unwrap(),
+            None
+        );
+    }
+
+    struct UnreachableCompletionBackend;
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>
+        for UnreachableCompletionBackend
+    {
+        async fn generate(
+            &self,
+            _request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<BackendOutput>>, Error> {
+            panic!("over-budget completion must be rejected before backend dispatch")
+        }
+    }
+
+    #[tokio::test]
+    async fn test_completion_operator_rejects_strict_token_budget_overflow() {
+        let mut mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        mdc.runtime_config.context_length = Some(100);
+        mdc.runtime_config
+            .set_engine_specific(STRICT_REQUEST_TOKEN_LIMIT_RUNTIME_KEY, 10_u32)
+            .unwrap();
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+
+        let request = NvCreateCompletionRequest {
+            inner: dynamo_protocols::types::CreateCompletionRequest {
+                model: "test-model".to_string(),
+                prompt: dynamo_protocols::types::Prompt::IntegerArray(vec![1, 2, 3]),
+                max_tokens: Some(8),
+                ..Default::default()
+            },
+            common: Default::default(),
+            nvext: None,
+            metadata: None,
+            return_tokens_as_token_ids: None,
+            unsupported_fields: Default::default(),
+        };
+        let next: Arc<
+            dyn AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>,
+        > = Arc::new(UnreachableCompletionBackend);
+
+        let result =
+            Operator::generate(preprocessor.as_ref(), PipelineContext::new(request), next).await;
+        let Err(err) = result else {
+            panic!("over-budget completion should fail admission");
+        };
+        let dynamo_err = err
+            .downcast_ref::<DynamoError>()
+            .expect("error should preserve the DynamoError type");
+        assert_eq!(dynamo_err.error_type(), ErrorType::InvalidArgument);
     }
 
     #[test]
