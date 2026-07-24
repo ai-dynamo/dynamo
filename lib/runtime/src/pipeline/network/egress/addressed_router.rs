@@ -418,6 +418,12 @@ impl AddressedPushRouter {
             .await
     }
 
+    /// Reject new associations for an instance while preserving streams that
+    /// were admitted before discovery removal.
+    pub async fn tombstone_instance(&self, instance_id: &EndpointInstanceId) {
+        self.resp_transport.tombstone_instance(instance_id).await
+    }
+
     /// Clear the tombstone after an instance reappears in discovery.
     pub async fn clear_instance_tombstone(&self, instance_id: &EndpointInstanceId) {
         self.resp_transport

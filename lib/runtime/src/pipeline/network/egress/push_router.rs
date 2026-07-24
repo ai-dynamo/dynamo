@@ -315,11 +315,33 @@ static ENDPOINT_CACHE_INDEXER_WATCHER_ACTIVE: std::sync::OnceLock<
     dashmap::DashMap<EndpointId, ()>,
 > = std::sync::OnceLock::new();
 
-/// Watch discovery for instance removals and cancel pending response-stream
-/// registrations on the removed instance, unblocking queued requests with
-/// a migratable `Disconnected` error. Uses raw `list_and_watch` events
-/// (not a coalesced snapshot diff) so a rapid remove→re-add of the same
-/// identity is not silently swallowed. Keyed by full `EndpointInstanceId`.
+/// Duration for which discovery removal preserves streams admitted before the
+/// removal event. This intentionally follows the worker's configured graceful
+/// shutdown deadline: discovery has no separate graceful-removal event, so the
+/// frontend cannot otherwise distinguish retirement from lease loss.
+fn discovery_removal_stream_grace_period() -> std::time::Duration {
+    use crate::config::environment_names::worker as env_worker;
+    use crate::worker::{
+        DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_DEBUG, DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_RELEASE,
+    };
+
+    let default = if cfg!(debug_assertions) {
+        DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_DEBUG
+    } else {
+        DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_RELEASE
+    };
+    let seconds = std::env::var(env_worker::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(default);
+    std::time::Duration::from_secs(seconds)
+}
+
+/// Watch discovery for instance removals. Removal immediately tombstones the
+/// instance so no new request can race admission, but streams associated before
+/// removal remain alive until the configured graceful-shutdown deadline. A
+/// rapid remove→re-add cancels the deferred cleanup and clears the tombstone.
+/// Raw `list_and_watch` events are required so the re-add is not coalesced away.
 fn spawn_instance_removal_watcher(
     endpoint: Endpoint,
     addressed: Arc<AddressedPushRouter>,
@@ -358,6 +380,12 @@ fn spawn_instance_removal_watcher(
 
         let namespace = endpoint.component().namespace().name();
         let component = endpoint.component().name().to_string();
+        let stream_grace = discovery_removal_stream_grace_period();
+        let pending_cancellations = Arc::new(tokio::sync::Mutex::new(HashMap::<
+            EndpointInstanceId,
+            (u64, tokio_util::sync::CancellationToken),
+        >::new()));
+        let cancellation_generation = Arc::new(AtomicU64::new(0));
 
         // Reconnect on transient discovery failure; cancel-aware backoff.
         const RECONNECT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(5);
@@ -388,22 +416,72 @@ fn spawn_instance_removal_watcher(
                         match event {
                             Some(Ok(DiscoveryEvent::Removed(id))) => {
                                 if let DiscoveryInstanceId::Endpoint(eid) = &id {
-                                    let n = addressed.cancel_instance_streams(eid).await;
-                                    if n > 0 {
-                                        tracing::warn!(
-                                            namespace = %eid.namespace,
-                                            component = %eid.component,
-                                            endpoint = %eid.endpoint,
-                                            instance_id = eid.instance_id,
-                                            cancelled = n,
-                                            "Cancelled pending response streams for removed \
-                                             instance (discovery-driven cleanup)"
-                                        );
+                                    addressed.tombstone_instance(eid).await;
+
+                                    let generation = cancellation_generation
+                                        .fetch_add(1, Ordering::Relaxed);
+                                    let deferred_cancel =
+                                        tokio_util::sync::CancellationToken::new();
+                                    if let Some((_, previous)) = pending_cancellations
+                                        .lock()
+                                        .await
+                                        .insert(
+                                            eid.clone(),
+                                            (generation, deferred_cancel.clone()),
+                                        )
+                                    {
+                                        previous.cancel();
                                     }
+
+                                    let addressed = addressed.clone();
+                                    let eid = eid.clone();
+                                    let pending = pending_cancellations.clone();
+                                    let watcher_cancel = cancel_token.clone();
+                                    tokio::spawn(async move {
+                                        let deadline_elapsed = tokio::select! {
+                                            _ = tokio::time::sleep(stream_grace) => true,
+                                            _ = deferred_cancel.cancelled() => false,
+                                            _ = watcher_cancel.cancelled() => false,
+                                        };
+                                        if !deadline_elapsed {
+                                            return;
+                                        }
+
+                                        // Serialize the deadline action with re-add
+                                        // handling. If Added won the race, its
+                                        // generation is absent or different and no
+                                        // admitted stream is cancelled.
+                                        let mut pending = pending.lock().await;
+                                        let is_current = pending
+                                            .get(&eid)
+                                            .is_some_and(|(current, _)| *current == generation);
+                                        if !is_current {
+                                            return;
+                                        }
+                                        let n = addressed.cancel_instance_streams(&eid).await;
+                                        pending.remove(&eid);
+                                        if n > 0 {
+                                            tracing::warn!(
+                                                namespace = %eid.namespace,
+                                                component = %eid.component,
+                                                endpoint = %eid.endpoint,
+                                                instance_id = eid.instance_id,
+                                                cancelled = n,
+                                                grace_period_s = stream_grace.as_secs_f64(),
+                                                "Cancelled admitted response streams for removed \
+                                                 instance at graceful-shutdown deadline"
+                                            );
+                                        }
+                                    });
                                 }
                             }
                             Some(Ok(DiscoveryEvent::Added(DiscoveryInstance::Endpoint(inst)))) => {
                                 let eid: EndpointInstanceId = inst.endpoint_instance_id();
+                                if let Some((_, deferred_cancel)) =
+                                    pending_cancellations.lock().await.remove(&eid)
+                                {
+                                    deferred_cancel.cancel();
+                                }
                                 addressed.clear_instance_tombstone(&eid).await;
                             }
                             Some(Ok(_)) => {}
