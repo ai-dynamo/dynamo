@@ -1905,6 +1905,7 @@ class KvRouterConfig:
         overlap_score_credit: float = 1.0,
         overlap_score_credit_decay: float = 0.0,
         prefill_load_scale: float = 1.0,
+        decode_active_request_weight: float = 0.0,
         router_policy_config: Optional[str] = None,
         router_tracking_hash: Literal["public-xxh3-v1", "keyed-xxh3-v1"] = "public-xxh3-v1",
         router_tracking_key_file: Optional[str | os.PathLike[str]] = None,
@@ -1917,6 +1918,7 @@ class KvRouterConfig:
             overlap_score_weight: Deprecated positional/keyword alias for prefill_load_scale. When present, it takes precedence over prefill_load_scale; a value of 0 also sets overlap_score_credit to 0.
             overlap_score_credit: Finite, non-negative credit multiplier for device-local prefix overlap (default: 1.0). Values above 1.0 give device overlap extra credit and can make adjusted prefill cost negative.
             prefill_load_scale: Scale for adjusted prompt-side prefill load after cache-hit credits (default: 1.0)
+            decode_active_request_weight: Experimental block-equivalent decode cost added for each active request on a candidate worker (default: 0.0)
             host_cache_hit_weight: Credit multiplier for host-pinned cache hits (default: 0.75)
             disk_cache_hit_weight: Credit multiplier for disk/external cache hits (default: 0.25)
             router_temperature: Temperature for normalized worker sampling via softmax (default: 0.0)
@@ -1990,6 +1992,10 @@ class KvRouterConfig:
     def prefill_load_scale(self) -> float: ...
     @prefill_load_scale.setter
     def prefill_load_scale(self, value: float) -> None: ...
+    @property
+    def decode_active_request_weight(self) -> float: ...
+    @decode_active_request_weight.setter
+    def decode_active_request_weight(self, value: float) -> None: ...
 
     def with_overrides(
         self,
@@ -1998,6 +2004,7 @@ class KvRouterConfig:
         overlap_score_credit: Optional[float] = None,
         overlap_score_credit_decay: Optional[float] = None,
         prefill_load_scale: Optional[float] = None,
+        decode_active_request_weight: Optional[float] = None,
     ) -> "KvRouterConfig": ...
 
 class ReasoningConfig:
