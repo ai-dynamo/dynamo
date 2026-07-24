@@ -259,6 +259,13 @@ pub fn cannot_connect(message: impl Into<String>) -> DynamoError {
 }
 
 pub fn status_to_dynamo(rpc: &str, status: tonic::Status) -> DynamoError {
+    let message = format!("{rpc}: {} ({:?})", status.message(), status.code());
+    if status.code() == tonic::Code::Unavailable {
+        return DynamoError::builder()
+            .error_type(ErrorType::Unavailable)
+            .message(message)
+            .build();
+    }
     let kind = match status.code() {
         tonic::Code::InvalidArgument
         | tonic::Code::NotFound
@@ -266,15 +273,11 @@ pub fn status_to_dynamo(rpc: &str, status: tonic::Status) -> DynamoError {
         | tonic::Code::FailedPrecondition
         | tonic::Code::AlreadyExists
         | tonic::Code::Unimplemented => BackendError::InvalidArgument,
-        tonic::Code::Unavailable => BackendError::CannotConnect,
         tonic::Code::Cancelled => BackendError::Cancelled,
         tonic::Code::DeadlineExceeded => BackendError::ConnectionTimeout,
         _ => BackendError::Unknown,
     };
-    backend(
-        kind,
-        format!("{rpc}: {} ({:?})", status.message(), status.code()),
-    )
+    backend(kind, message)
 }
 
 pub fn engine_error_to_dynamo(error: &pb::EngineError) -> DynamoError {

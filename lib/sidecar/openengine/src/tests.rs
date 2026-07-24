@@ -1546,6 +1546,19 @@ async fn bootstrap_discovery_rpc_timeout_is_typed_and_bounded() {
     server.stop().await;
 }
 
+#[test]
+fn grpc_unavailable_maps_to_typed_service_unavailable() {
+    let error = crate::client::status_to_dynamo(
+        "Generate",
+        tonic::Status::unavailable("engine is draining"),
+    );
+    assert_eq!(
+        error.error_type(),
+        dynamo_backend_common::ErrorType::Unavailable
+    );
+    assert!(error.to_string().contains("engine is draining"));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fake_tonic_blackholed_drain_stream_times_out() {
     let state = Arc::new(FakeState::default());
