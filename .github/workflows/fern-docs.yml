@@ -478,6 +478,12 @@ jobs:
           # references from the snapshot rather than freezing stale copies.
           # Everything else under reference/ (observability pages, config
           # references) belongs to versioned tabs and stays in the snapshot.
+          # If the selectors stop matching (tab or variant renamed), this and
+          # the version-config revert silently no-op and the reference quietly
+          # freezes per version again — warn loudly so the rename gets fixed.
+          if [ "$(yq '[.navigation[] | select(.tab == "reference") | .variants[] | select(.title == "General")] | length' fern/versions/dev.yml)" = "0" ]; then
+            echo "::warning::No Reference General variant found in dev.yml — the shared-reference exclusion is a no-op and $TAG will freeze its own reference copy. If the tab or variant was renamed, update the yq selectors in this workflow."
+          fi
           yq '.navigation[] | select(.tab == "reference") | .variants[] | select(.title == "General") | .. | select(has("path")) | .path' \
             fern/versions/dev.yml | sed 's|^\.\./pages-dev/||' | while read -r relpath; do
               [ -n "$relpath" ] && rm -f "fern/pages-$TAG/$relpath"
