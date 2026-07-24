@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Shared AIC session helpers used by internal Dynamo integrations."""
+"""Shared AIC-core session helpers used by internal Dynamo integrations."""
 
 from __future__ import annotations
 
@@ -13,10 +13,10 @@ import os
 logger = logging.getLogger(__name__)
 
 _NEXTN_ACCEPT_RATES_LEN = 5
-# AIC CLI default when accept-rates are omitted (``cli/main.py:795``).
+# Dynamo's historical default when conditional acceptance rates are omitted.
 _DEFAULT_NEXTN_ACCEPT_RATES = [0.85, 0.3, 0.0, 0.0, 0.0]
 
-# Default backend versions match the AIC v0.9.0 perf DB.
+# Default backend versions match the AIC-core v0.11.0 perf DB.
 DEFAULT_BACKEND_VERSIONS = {
     "vllm": "0.19.0",
     "sglang": "0.5.10",
@@ -75,7 +75,7 @@ def _resolve_quant_mode(field: str, value: str | None):
     normalized = _normalize_aic_quant_mode(value)
     if normalized is None:
         return None
-    from aiconfigurator.sdk import common
+    from aiconfigurator_core.sdk import common
 
     enum_cls = {
         "gemm": common.GEMMQuantMode,
@@ -105,13 +105,11 @@ def _resolve_quant_mode_name(field: str, value: str | None) -> str | None:
 def _pad_nextn_accept_rates(
     nextn_accept_rates: list[float] | str | None,
 ) -> list[float]:
-    """Normalize accept-rates to AIC's fixed length-5 slot.
+    """Normalize Dynamo's legacy conditional accept-rate input.
 
-    AIC caps MTP draft tokens at 5 (``ModelConfig.nextn`` "at most mtp5",
-    ``sdk/config.py:28``) and ``calc_expectation`` indexes into the list up
-    to ``nextn``. When rates are omitted entirely we fall back to AIC's CLI
-    default (``cli/main.py:795``); an explicit shorter list is zero-padded and
-    a longer one is truncated, so callers never trip over IndexError downstream.
+    Mocker burst sampling still uses at most five conditional probabilities.
+    When rates are omitted entirely, preserve Dynamo's historical AIC default;
+    shorter lists are zero-padded and longer lists are truncated.
     """
     if isinstance(nextn_accept_rates, str):
         try:
@@ -141,11 +139,10 @@ def _pad_nextn_accept_rates(
 
 def _load_aiconfigurator():
     try:
-        from aiconfigurator.sdk import config
-        from aiconfigurator.sdk.backends.factory import get_backend
-        from aiconfigurator.sdk.inference_session import InferenceSession
-        from aiconfigurator.sdk.models import get_model
-        from aiconfigurator.sdk.perf_database import (
+        from aiconfigurator_core.sdk import config
+        from aiconfigurator_core.sdk.backends.factory import get_backend
+        from aiconfigurator_core.sdk.models import get_model
+        from aiconfigurator_core.sdk.perf_database import (
             get_database,
             get_supported_databases,
         )
@@ -153,13 +150,12 @@ def _load_aiconfigurator():
         ImportError
     ) as exc:  # pragma: no cover - exercised in integration environments
         raise RuntimeError(
-            "aiconfigurator is required for AIC perf modeling but is not installed"
+            "aiconfigurator-core is required for AIC perf modeling but is not installed"
         ) from exc
 
     return {
         "config": config,
         "get_backend": get_backend,
-        "InferenceSession": InferenceSession,
         "get_model": get_model,
         "get_database": get_database,
         "get_supported_databases": get_supported_databases,
@@ -167,7 +163,7 @@ def _load_aiconfigurator():
 
 
 class AicSession:
-    """Wrap an AIC InferenceSession with direct prefill/decode predictors."""
+    """Wrap AIC-core model objects with direct prefill/decode predictors."""
 
     def __init__(
         self,
@@ -225,16 +221,10 @@ class AicSession:
             if quant_mode is not None:
                 model_config_kwargs[cfg_key] = quant_mode
         if nextn:
-            # Mirror the Rust 1..=5 contract; AIC indexes accept_rates up to
-            # nextn, so >5 would IndexError in calc_expectation.
-            if not 1 <= nextn <= _NEXTN_ACCEPT_RATES_LEN:
-                raise ValueError(
-                    f"nextn must be 1..={_NEXTN_ACCEPT_RATES_LEN} when set, got {nextn}"
-                )
             model_config_kwargs["nextn"] = nextn
-            model_config_kwargs["nextn_accept_rates"] = _pad_nextn_accept_rates(
-                nextn_accept_rates
-            )
+            # aic-core models one verification iteration. Dynamo's scheduler
+            # owns accepted-token progress and burst sampling above core.
+            _pad_nextn_accept_rates(nextn_accept_rates)
         model_config = aic["config"].ModelConfig(**model_config_kwargs)
         model = aic["get_model"](
             model_path=model_path,
@@ -242,9 +232,6 @@ class AicSession:
             backend_name=backend_name,
         )
         backend = aic["get_backend"](backend_name)
-        self._session = aic["InferenceSession"](
-            model=model, database=database, backend=backend
-        )
         self._backend = backend
         self._backend_name = backend_name
         self._database = database
@@ -261,7 +248,7 @@ class AicSession:
         # Phase 1.5: compile the model's op list to a Rust Engine ONCE, so each
         # predict call is a single Rust dispatch instead of a per-call Python
         # walk over model.context_ops / generation_ops. Falls back to the
-        # Python op-walk if aiconfigurator predates Phase 1.5 or the build fails.
+        # Python op-walk if the compiled AIC-core engine is unavailable or fails.
         self._engine = self._build_compiled_engine()
 
     def _build_compiled_engine(self):
@@ -273,8 +260,8 @@ class AicSession:
             )
             return None
         try:
-            from aiconfigurator.sdk.rust_engine_step import _cached_engine_handle
-        except Exception as exc:  # aiconfigurator without the Phase 1.5 engine
+            from aiconfigurator_core.sdk.rust_engine_step import _cached_engine_handle
+        except Exception as exc:  # aiconfigurator-core without the compiled engine
             logger.info(
                 "AIC compiled-engine path unavailable (%s); using Python op-walk.",
                 exc,
@@ -423,9 +410,9 @@ def estimate_num_gpu_blocks(
 ) -> int:
     """Estimate rank-local KV cache blocks for mocker/replay AIC configs.
 
-    Delegates the budget math to aiconfigurator's unified
-    ``sdk.memory.estimate_num_gpu_blocks`` (the single source of truth as of
-    aiconfigurator 0.8.0, PR #1159) instead of recomputing it here. The result is
+    Delegates the budget math to aiconfigurator-core's unified
+    ``sdk.memory.estimate_num_gpu_blocks`` (the single source of truth for the
+    AIC memory estimator) instead of recomputing it here. The result is
     per rank (per single GPU): AIC's memory model is already sharded for the
     configured TP/DP shape, so the caller must not multiply it by TP or DP.
 
@@ -457,7 +444,7 @@ def estimate_num_gpu_blocks(
         memory_fraction_kind = "of_total"
         memory_fraction_value = gpu_memory_utilization
 
-    # Imported lazily: aiconfigurator is an optional dependency (the `mocker`
+    # Imported lazily: aiconfigurator-core is an optional dependency (the `mocker`
     # extra), so importing it at module scope would break callers that never run
     # AIC estimation. Report a typed error so callers can choose their policy:
     # mocker warns and uses its existing default block count, while direct callers
@@ -466,16 +453,16 @@ def estimate_num_gpu_blocks(
     #   omitted due to a downstream AIC bug where `_get_memory_usage` predicts
     #   negative KV capacity with Eagle.
     try:
-        memory = importlib.import_module("aiconfigurator.sdk.memory")
+        memory = importlib.import_module("aiconfigurator_core.sdk.memory")
     except ModuleNotFoundError as exc:
-        if exc.name == "aiconfigurator.sdk.memory":
+        if exc.name == "aiconfigurator_core.sdk.memory":
             raise AicMemoryEstimatorUnavailableError(
-                "aiconfigurator.sdk.memory is required for AIC KV-cache estimation; "
-                "install a compatible aiconfigurator version"
+                "aiconfigurator_core.sdk.memory is required for AIC KV-cache "
+                "estimation; install a compatible aiconfigurator-core version"
             ) from exc
-        if exc.name in {"aiconfigurator", "aiconfigurator.sdk"}:
+        if exc.name in {"aiconfigurator_core", "aiconfigurator_core.sdk"}:
             raise RuntimeError(
-                "aiconfigurator is required for AIC KV-cache estimation but is not "
+                "aiconfigurator-core is required for AIC KV-cache estimation but is not "
                 "installed; install the 'mocker' extra or set num_gpu_blocks "
                 "explicitly (e.g. --num-gpu-blocks-override)"
             ) from exc

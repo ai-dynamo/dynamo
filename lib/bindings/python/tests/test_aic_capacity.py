@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import builtins
 import types
 
 import pytest
@@ -27,14 +28,14 @@ pytestmark = [
 
 
 def _patch_memory(monkeypatch, return_value=123):
-    """Patch aiconfigurator's unified estimator and record forwarded kwargs.
+    """Patch aiconfigurator-core's unified estimator and record forwarded kwargs.
 
     ``estimate_num_gpu_blocks`` now delegates the budget math to
-    ``aiconfigurator.sdk.memory.estimate_num_gpu_blocks`` (the single source of
+    ``aiconfigurator_core.sdk.memory.estimate_num_gpu_blocks`` (the single source of
     truth), so these tests assert the dynamo->AIC mapping rather than recompute
     the math themselves.
     """
-    memory = pytest.importorskip("aiconfigurator.sdk.memory")
+    memory = pytest.importorskip("aiconfigurator_core.sdk.memory")
     calls = []
 
     def fake(model_path, system, backend, **kwargs):
@@ -45,6 +46,31 @@ def _patch_memory(monkeypatch, return_value=123):
 
     monkeypatch.setattr(memory, "estimate_num_gpu_blocks", fake)
     return calls
+
+
+def test_runtime_loader_does_not_import_upper_aiconfigurator(monkeypatch):
+    """The mocker/runtime path must remain usable with only the core wheel."""
+    pytest.importorskip("aiconfigurator_core")
+    import dynamo._internal.aic as aic_mod
+
+    real_import = builtins.__import__
+
+    def reject_upper_package(name, *args, **kwargs):
+        """Reject accidental imports of the upper AIC distribution."""
+        if name == "aiconfigurator" or name.startswith("aiconfigurator."):
+            raise AssertionError(f"runtime imported upper package: {name}")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", reject_upper_package)
+    loaded = aic_mod._load_aiconfigurator()
+
+    assert set(loaded) == {
+        "config",
+        "get_backend",
+        "get_model",
+        "get_database",
+        "get_supported_databases",
+    }
 
 
 def test_estimate_num_gpu_blocks_maps_vllm_to_total_fraction(monkeypatch):
@@ -180,7 +206,7 @@ def test_estimate_num_gpu_blocks_reports_unavailable_estimator(monkeypatch):
 
     with pytest.raises(
         AicMemoryEstimatorUnavailableError,
-        match=r"aiconfigurator\.sdk\.memory is required",
+        match=r"aiconfigurator_core\.sdk\.memory is required",
     ):
         estimate_num_gpu_blocks(
             backend_name="vllm",
@@ -193,7 +219,7 @@ def test_estimate_num_gpu_blocks_reports_unavailable_estimator(monkeypatch):
 
 
 def test_estimate_num_gpu_blocks_propagates_transitive_import_error(monkeypatch):
-    missing_dependency = ModuleNotFoundError(name="aiconfigurator_core")
+    missing_dependency = ModuleNotFoundError(name="transitive_dependency")
 
     def broken_memory_module(_module_name):
         raise missing_dependency
@@ -220,7 +246,7 @@ def test_trtllm_version_resolution():
 
 
 def test_pad_nextn_accept_rates_defaults_when_omitted():
-    # Omitted/empty input falls back to AIC's CLI default, not all zeros.
+    # Omitted/empty input preserves Dynamo's historical default, not all zeros.
     assert _pad_nextn_accept_rates(None) == _DEFAULT_NEXTN_ACCEPT_RATES
     assert _pad_nextn_accept_rates("") == _DEFAULT_NEXTN_ACCEPT_RATES
     assert _pad_nextn_accept_rates([]) == _DEFAULT_NEXTN_ACCEPT_RATES
@@ -295,7 +321,7 @@ def test_estimate_num_gpu_blocks_forwards_normalized_quant_modes(monkeypatch):
 
 
 def test_resolve_quant_mode_per_field():
-    common = pytest.importorskip("aiconfigurator.sdk.common")
+    common = pytest.importorskip("aiconfigurator_core.sdk.common")
 
     assert _resolve_quant_mode("gemm", "int4") == common.GEMMQuantMode.int4_wo
     assert _resolve_quant_mode("gemm", "fp8") == common.GEMMQuantMode.fp8
@@ -309,7 +335,7 @@ def test_resolve_quant_mode_per_field():
 
 
 def test_resolve_quant_mode_rejects_unsupported_per_field():
-    pytest.importorskip("aiconfigurator.sdk.common")
+    pytest.importorskip("aiconfigurator_core.sdk.common")
 
     # `int4` -> `int4_wo` is valid for GEMM/MoE but not for KV cache or FMHA,
     # which have narrower vocabularies. The error must name the field and the
@@ -325,7 +351,7 @@ def test_resolve_quant_mode_rejects_unsupported_per_field():
 
 
 def test_aic_session_forwards_quant_modes_to_model_config(monkeypatch):
-    common = pytest.importorskip("aiconfigurator.sdk.common")
+    common = pytest.importorskip("aiconfigurator_core.sdk.common")
     import dynamo._internal.aic as aic_mod
 
     captured: dict = {}
@@ -343,11 +369,10 @@ def test_aic_session_forwards_quant_modes_to_model_config(monkeypatch):
         "get_supported_databases": lambda: {},
         "get_model": lambda model_path, model_config, backend_name: fake_model,
         "get_backend": lambda backend_name: object(),
-        "InferenceSession": lambda model, database, backend: object(),
     }
     monkeypatch.setattr(aic_mod, "_load_aiconfigurator", lambda: fake)
     # Skip the optional compiled-engine build (it would import aiconfigurator's
-    # rust engine step); we only care about the ModelConfig wiring here.
+    # AIC-core Rust engine step); we only care about the ModelConfig wiring here.
     monkeypatch.setenv("DYNAMO_AIC_DISABLE_COMPILED_ENGINE", "1")
 
     aic_mod.AicSession(
@@ -360,6 +385,8 @@ def test_aic_session_forwards_quant_modes_to_model_config(monkeypatch):
         fmha_dtype="fp8",
         kv_cache_dtype="auto",  # -> omitted, ModelConfig keeps its default
         comm_dtype="fp8",
+        nextn=2,
+        nextn_accept_rates="0.85,0.3",
     )
 
     assert captured["gemm_quant_mode"] == common.GEMMQuantMode.int4_wo
@@ -367,3 +394,6 @@ def test_aic_session_forwards_quant_modes_to_model_config(monkeypatch):
     assert captured["fmha_quant_mode"] == common.FMHAQuantMode.fp8
     assert "kvcache_quant_mode" not in captured
     assert captured["comm_quant_mode"] == common.CommQuantMode.fp8
+    assert captured["nextn"] == 2
+    assert "nextn_accepted" not in captured
+    assert "nextn_accept_rates" not in captured
