@@ -114,11 +114,18 @@ pub(crate) async fn discover_sources(
                 let cancel = cancel.clone();
                 let tasks = tasks.clone();
                 let fatal = fatal.clone();
+                let routing_image_token_id = routing_image_token_id;
                 result.push(KvEventSource::Push {
                     dp_rank: rank,
                     on_ready: Box::new(move |publisher| {
-                        let task =
-                            tokio::spawn(subscribe_loop(channel, rank, publisher, cancel, fatal));
+                        let task = tokio::spawn(subscribe_loop(
+                            channel,
+                            rank,
+                            publisher,
+                            cancel,
+                            fatal,
+                            routing_image_token_id,
+                        ));
                         tasks.lock().push(task);
                         Ok(())
                     }),
@@ -160,6 +167,7 @@ async fn subscribe_loop(
     publisher: Arc<KvEventPublisher>,
     cancel: CancellationToken,
     fatal: watch::Sender<Option<String>>,
+    routing_image_token_id: Option<u32>,
 ) {
     let mut client = pb::control_client::ControlClient::new(channel);
     let response = client.subscribe_kv_events(subscription_request(rank)).await;
@@ -207,7 +215,12 @@ async fn subscribe_loop(
                     if batch.events.is_empty() {
                         continue;
                     }
-                    let events = match convert_batch_events(batch.events, rank, &warnings) {
+                    let events = match convert_batch_events(
+                        batch.events,
+                        rank,
+                        &warnings,
+                        routing_image_token_id,
+                    ) {
                         Ok(events) => events,
                         Err(message) => {
                             let message = format!(
@@ -265,10 +278,13 @@ fn convert_batch_events(
     events: Vec<pb::KvEvent>,
     rank: u32,
     warnings: &Arc<AtomicU32>,
+    routing_image_token_id: Option<u32>,
 ) -> Result<Vec<KvCacheEvent>, String> {
     events
         .into_iter()
-        .filter_map(|event| convert_event(event, rank, 0, warnings).transpose())
+        .filter_map(|event| {
+            convert_event(event, rank, 0, warnings, routing_image_token_id).transpose()
+        })
         .collect()
 }
 
@@ -287,6 +303,7 @@ fn convert_event(
     rank: u32,
     sequence_number: u64,
     warnings: &Arc<AtomicU32>,
+    routing_image_token_id: Option<u32>,
 ) -> Result<Option<KvCacheEvent>, String> {
     let Some(wire_event) = value.event else {
         return Err("KvEvent omitted its event payload".to_string());
@@ -337,7 +354,7 @@ fn convert_event(
                 warnings,
                 block_mm_infos.as_deref(),
                 None,
-                None,
+                routing_image_token_id,
             );
             if blocks.len() != hashes.len() {
                 return Err(
@@ -509,14 +526,14 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            convert_event(cleared(), 2, 7, &warnings)
+            convert_event(cleared(), 2, 7, &warnings, None)
                 .unwrap()
                 .unwrap()
                 .event_id,
             7
         );
         assert_eq!(
-            convert_event(cleared(), 2, 11, &warnings)
+            convert_event(cleared(), 2, 11, &warnings, None)
                 .unwrap()
                 .unwrap()
                 .event_id,
@@ -546,7 +563,7 @@ mod tests {
             )),
             ..Default::default()
         };
-        let events = convert_batch_events(vec![cleared(), cleared()], 3, &warnings).unwrap();
+        let events = convert_batch_events(vec![cleared(), cleared()], 3, &warnings, None).unwrap();
         assert_eq!(events.len(), 2);
         assert!(events.iter().all(|event| event.dp_rank == 3));
     }
@@ -585,7 +602,9 @@ mod tests {
             })),
             ..Default::default()
         };
-        let converted = convert_event(event, 3, 7, &warnings).unwrap().unwrap();
+        let converted = convert_event(event, 3, 7, &warnings, None)
+            .unwrap()
+            .unwrap();
         let KvCacheEventData::Stored(stored) = converted.data else {
             panic!("expected stored event");
         };
@@ -599,5 +618,48 @@ mod tests {
             Vec::<(usize, usize)>::new()
         );
         assert_eq!(converted.dp_rank, 3);
+    }
+
+    #[test]
+    fn trt_grpc_event_normalizes_to_frontend_pad_value_hash() {
+        use dynamo_kv_router::protocols::{
+            BlockHashOptions, compute_block_hash_for_seq, pad_value_for_mm_hash,
+        };
+
+        let warnings = Arc::new(AtomicU32::new(0));
+        let image_token_id = 151655;
+        let mm_hash = 42;
+        let event = pb::KvEvent {
+            event: Some(pb::kv_event::Event::BlockStored(pb::BlockStored {
+                block_hashes: vec![pb::KvBlockHash {
+                    value: b"9".to_vec(),
+                    encoding: "decimal_int64".into(),
+                }],
+                token_ids: vec![10, image_token_id, image_token_id, 20],
+                block_size: 4,
+                medium: pb::StorageMedium::Gpu as i32,
+                extra_keys: vec![pb::OpaqueKeyTuple {
+                    values: vec![
+                        "trt_mm_v1".into(),
+                        "0".into(),
+                        mm_hash.to_string(),
+                        "1".into(),
+                    ],
+                }],
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+
+        let converted = convert_event(event, 0, 1, &warnings, Some(image_token_id))
+            .unwrap()
+            .unwrap();
+        let KvCacheEventData::Stored(stored) = converted.data else {
+            panic!("expected stored event");
+        };
+        let pad = pad_value_for_mm_hash(mm_hash);
+        let expected =
+            compute_block_hash_for_seq(&[10, pad, pad, 20], 4, BlockHashOptions::default());
+        assert_eq!(stored.blocks[0].tokens_hash, expected[0]);
     }
 }
