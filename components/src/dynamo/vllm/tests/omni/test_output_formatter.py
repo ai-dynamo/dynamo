@@ -234,6 +234,43 @@ class TestDiffusionFormatterVideo:
         assert chunk["status"] == "failed"
         assert "boom" in chunk["error"]
 
+    @pytest.mark.asyncio
+    async def test_float_frames_encoded_as_webm_uint8(self):
+        import numpy as np
+
+        f = _make_diffusion_formatter()
+        float_frames = np.zeros((4, 8, 8, 3), dtype=np.float32)
+        captured = {}
+
+        def fake_encode(frames, fps, output_format):
+            captured["dtype"] = frames.dtype
+            captured["output_format"] = output_format
+            return b"webm-bytes"
+
+        with patch(
+            "dynamo.vllm.omni.output_formatter.normalize_video_frames",
+            return_value=float_frames,
+        ), patch(
+            "dynamo.vllm.omni.output_formatter.encode_to_video_bytes",
+            side_effect=fake_encode,
+        ):
+            chunk = await f._encode_video(
+                [MagicMock()], "req-1", fps=16, response_format="b64_json"
+            )
+        # imageio needs uint8; float pipeline frames must be coerced.
+        assert captured["dtype"] == np.uint8
+        assert captured["output_format"] == "webm"
+        assert chunk["status"] == "completed"
+        assert chunk["data"][0]["output_format"] == "webm"
+
+    @pytest.mark.asyncio
+    async def test_non_webm_output_format_rejected(self):
+        f = _make_diffusion_formatter()
+        with pytest.raises(ValueError, match="webm"):
+            await f._encode_video(
+                [MagicMock()], "req-1", fps=16, output_format="mp4"
+            )
+
 
 class TestBuildCompletionUsage:
     def test_basic(self):
@@ -523,20 +560,24 @@ class TestAudioFormatterOutputFormat:
 
 
 class TestDiffusionFormatterVideoOutputFormat:
-    """_encode_video always sets VideoData.output_format='mp4'."""
+    """_encode_video always sets VideoData.output_format='webm'."""
 
     def _patches(self):
+        import numpy as np
         from unittest.mock import patch as _patch
 
         return (
             _patch(
                 "dynamo.vllm.omni.output_formatter.normalize_video_frames",
-                return_value=[MagicMock()],
+                return_value=np.zeros((2, 4, 4, 3), dtype=np.uint8),
             ),
-            _patch("dynamo.vllm.omni.output_formatter.export_to_video"),
+            _patch(
+                "dynamo.vllm.omni.output_formatter.encode_to_video_bytes",
+                return_value=b"video",
+            ),
             _patch(
                 "dynamo.vllm.omni.output_formatter.upload_to_fs",
-                return_value="http://x/v.mp4",
+                return_value="http://x/v.webm",
             ),
             _patch(
                 "dynamo.vllm.omni.output_formatter.asyncio.to_thread",
@@ -564,8 +605,8 @@ class TestDiffusionFormatterVideoOutputFormat:
             )
 
         assert result is not None
-        assert result["data"][0]["output_format"] == "mp4"
-        assert result["data"][0]["url"] == "http://x/v.mp4"
+        assert result["data"][0]["output_format"] == "webm"
+        assert result["data"][0]["url"] == "http://x/v.webm"
         assert result["data"][0].get("b64_json") is None
         mock_upload.assert_called_once()
 
@@ -591,7 +632,7 @@ class TestDiffusionFormatterVideoOutputFormat:
             )
 
         assert result is not None
-        assert result["data"][0]["output_format"] == "mp4"
+        assert result["data"][0]["output_format"] == "webm"
         assert result["data"][0].get("url") is None
         assert result["data"][0]["b64_json"] is not None
         base64.b64decode(result["data"][0]["b64_json"])  # must be valid base64
@@ -614,5 +655,5 @@ class TestDiffusionFormatterVideoOutputFormat:
             )
 
         assert result is not None
-        assert result["data"][0]["url"] == "http://x/v.mp4"
+        assert result["data"][0]["url"] == "http://x/v.webm"
         mock_upload.assert_called_once()

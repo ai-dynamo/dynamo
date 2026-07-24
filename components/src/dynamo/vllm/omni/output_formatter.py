@@ -11,7 +11,6 @@ output without creating an engine or loading model weights.
 import asyncio
 import base64
 import logging
-import tempfile
 import time
 import uuid
 from io import BytesIO
@@ -20,7 +19,6 @@ from typing import Any, Dict, Optional
 import numpy as np
 import soundfile as sf
 import torch
-from diffusers.utils.export_utils import export_to_video
 
 from dynamo.common.protocols.audio_protocol import AudioData, NvAudioSpeechResponse
 from dynamo.common.protocols.image_protocol import ImageData, NvImagesResponse
@@ -28,7 +26,10 @@ from dynamo.common.protocols.video_protocol import NvVideosResponse, VideoData
 from dynamo.common.storage import upload_to_fs
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.output_modalities import RequestType
-from dynamo.common.utils.video_utils import normalize_video_frames
+from dynamo.common.utils.video_utils import (
+    encode_to_video_bytes,
+    normalize_video_frames,
+)
 from dynamo.vllm.handlers import build_prompt_tokens_details
 from dynamo.vllm.omni.utils import is_empty_payload
 
@@ -129,24 +130,28 @@ class DiffusionFormatter:
         response_format: Optional[str] = None,
         output_format: Optional[str] = None,
     ) -> Dict[str, Any] | None:
-        output_format = output_format or "mp4"
+        # VP9/webm is already provided by the in-tree ffmpeg, so it needs no extra
+        # codec packages in the base image, and as a software encoder it also works
+        # on GPUs without NVENC (A100/H100).
+        output_format = output_format or "webm"
         response_format = response_format or "url"
         if response_format not in ("url", "b64_json"):
             raise ValueError(
                 f"Unsupported response_format: {response_format!r}; expected 'url' or 'b64_json'"
             )
-        if output_format != "mp4":
+        if output_format != "webm":
             raise ValueError(
-                f"Unsupported output_format: {output_format!r}; only 'mp4' is supported"
+                f"Unsupported output_format: {output_format!r}; only 'webm' is supported"
             )
         try:
             start_time = time.time()
-            frame_list = normalize_video_frames(images)
-            with tempfile.NamedTemporaryFile(
-                suffix=f".{output_format}", delete=True
-            ) as tmp:
-                await asyncio.to_thread(export_to_video, frame_list, tmp.name, fps)
-                video_bytes = tmp.read()
+            frames = normalize_video_frames(images)
+            # imageio requires uint8; the diffusion pipeline emits float frames.
+            if np.issubdtype(frames.dtype, np.floating):
+                frames = (frames * 255.0).round().clip(0, 255).astype(np.uint8)
+            video_bytes = await asyncio.to_thread(
+                encode_to_video_bytes, frames, fps, output_format
+            )
 
             if response_format == "b64_json":
                 video_data = VideoData(
