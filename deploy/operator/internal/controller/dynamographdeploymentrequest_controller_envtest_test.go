@@ -1,3 +1,5 @@
+//go:build !clustertest
+
 /*
  * SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
@@ -45,18 +47,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
-
-// MockRBACManager implements RBACManager for testing
-type MockRBACManager struct {
-	EnsureServiceAccountWithRBACFunc func(ctx context.Context, targetNamespace, serviceAccountName, clusterRoleName string) error
-}
-
-func (m *MockRBACManager) EnsureServiceAccountWithRBAC(ctx context.Context, targetNamespace, serviceAccountName, clusterRoleName string) error {
-	if m.EnsureServiceAccountWithRBACFunc != nil {
-		return m.EnsureServiceAccountWithRBACFunc(ctx, targetNamespace, serviceAccountName, clusterRoleName)
-	}
-	return nil
-}
 
 // writeFaultClient injects a one-shot DGDR apply conflict.
 type writeFaultClient struct {

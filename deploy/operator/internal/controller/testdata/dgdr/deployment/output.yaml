@@ -1,0 +1,600 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  $strict: false
+  name: aic-deployment-dgd
+spec:
+  components:
+    - name: Frontend
+      podTemplate:
+        spec:
+          containers:
+            - image: $ignore
+              name: main
+      replicas: 1
+      type: frontend
+    - name: decode
+      podTemplate:
+        spec:
+          containers:
+            - args:
+                - --model-path
+                - Qwen/Qwen3-0.6B
+                - --model-name
+                - Qwen/Qwen3-0.6B
+                - --speedup-ratio
+                - "1.0"
+                - --planner-profile-data
+                - /workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D
+                - --disaggregation-mode
+                - decode
+              command:
+                - python3
+                - -m
+                - dynamo.mocker
+              envFrom:
+                - secretRef:
+                    name: hf-token-secret
+              image: $ignore
+              name: main
+              workingDir: /workspace
+      replicas: 1
+      type: decode
+    - name: prefill
+      podTemplate:
+        spec:
+          containers:
+            - args:
+                - --model-path
+                - Qwen/Qwen3-0.6B
+                - --model-name
+                - Qwen/Qwen3-0.6B
+                - --speedup-ratio
+                - "1.0"
+                - --planner-profile-data
+                - /workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D
+                - --disaggregation-mode
+                - prefill
+              command:
+                - python3
+                - -m
+                - dynamo.mocker
+              envFrom:
+                - secretRef:
+                    name: hf-token-secret
+              image: $ignore
+              name: main
+              workingDir: /workspace
+      replicas: 1
+      type: prefill
+status:
+  $ignore: true
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoComponentDeployment
+metadata:
+  $strict: false
+  name: $glob:aic-deployment-dgd-decode-*
+spec:
+  name: decode
+  podTemplate:
+    metadata:
+      annotations:
+        nvidia.com/dynamo-operator-origin-version: $pattern:1\.4\..*
+      labels:
+        nvidia.com/dynamo-worker-hash: "$pattern:[0-9a-f]{8}"
+    spec:
+      containers:
+        - args:
+            - --model-path
+            - Qwen/Qwen3-0.6B
+            - --model-name
+            - Qwen/Qwen3-0.6B
+            - --speedup-ratio
+            - "1.0"
+            - --planner-profile-data
+            - /workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D
+            - --disaggregation-mode
+            - decode
+          command:
+            - python3
+            - -m
+            - dynamo.mocker
+          envFrom:
+            - secretRef:
+                name: hf-token-secret
+          image: $ignore
+          name: main
+          workingDir: /workspace
+  replicas: 1
+  type: decode
+status:
+  $ignore: true
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  $strict: false
+  name: $glob:aic-deployment-dgd-decode-*
+spec:
+  progressDeadlineSeconds: 600
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      nvidia.com/selector: $glob:aic-deployment-dgd-decode-*
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        nvidia.com/dynamo-component: decode
+        nvidia.com/dynamo-component-type: decode
+        nvidia.com/dynamo-discovery-backend: kubernetes
+        nvidia.com/dynamo-discovery-enabled: "true"
+        nvidia.com/dynamo-graph-deployment-name: aic-deployment-dgd
+        nvidia.com/dynamo-namespace: $glob:clusterenv-*-aic-deployment-dgd
+        nvidia.com/dynamo-sub-component-type: decode
+        nvidia.com/dynamo-worker-hash: "$pattern:[0-9a-f]{8}"
+        nvidia.com/metrics-enabled: "true"
+        nvidia.com/selector: $glob:aic-deployment-dgd-decode-*
+    spec:
+      containers:
+        - args:
+            - --model-path
+            - Qwen/Qwen3-0.6B
+            - --model-name
+            - Qwen/Qwen3-0.6B
+            - --speedup-ratio
+            - "1.0"
+            - --planner-profile-data
+            - /workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D
+            - --disaggregation-mode
+            - decode
+          command:
+            - python3
+            - -m
+            - dynamo.mocker
+          env:
+            - name: DYN_COMPONENT
+              value: decode
+            - name: DYN_DISCOVERY_BACKEND
+              value: kubernetes
+            - name: DYN_FORWARDPASS_METRIC_PORT
+              value: "20380"
+            - name: DYN_HEALTH_CHECK_ENABLED
+              value: "false"
+            - name: DYN_NAMESPACE
+              value: $glob:clusterenv-*-aic-deployment-dgd
+            - name: DYN_NAMESPACE_WORKER_SUFFIX
+              value: "$pattern:[0-9a-f]{8}"
+            - name: DYN_PARENT_DGD_K8S_NAME
+              value: aic-deployment-dgd
+            - name: DYN_PARENT_DGD_K8S_NAMESPACE
+              value: $glob:clusterenv-*
+            - name: DYN_SYSTEM_ENABLED
+              value: "true"
+            - name: DYN_SYSTEM_PORT
+              value: "9090"
+            - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
+              value: '["generate"]'
+            - name: NIXL_TELEMETRY_ENABLE
+              value: "n"
+            - name: NIXL_TELEMETRY_EXPORTER
+              value: prometheus
+            - name: NIXL_TELEMETRY_PROMETHEUS_PORT
+              value: "19090"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.namespace
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.uid
+          envFrom:
+            - secretRef:
+                name: hf-token-secret
+          image: $ignore
+          imagePullPolicy: IfNotPresent
+          livenessProbe:
+            failureThreshold: 1
+            httpGet:
+              path: /live
+              port: system
+              scheme: HTTP
+            periodSeconds: 5
+            successThreshold: 1
+            timeoutSeconds: 4
+          name: main
+          ports:
+            - containerPort: 9090
+              name: system
+              protocol: TCP
+            - containerPort: 19090
+              name: nixl
+              protocol: TCP
+          readinessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /health
+              port: system
+              scheme: HTTP
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 4
+          resources: {}
+          startupProbe:
+            failureThreshold: 720
+            httpGet:
+              path: /live
+              port: system
+              scheme: HTTP
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 5
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          volumeMounts:
+            - mountPath: /dev/shm
+              name: shared-memory
+          workingDir: /workspace
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext:
+        fsGroup: 1000
+      serviceAccount: aic-deployment-dgd-k8s-service-discovery
+      serviceAccountName: aic-deployment-dgd-k8s-service-discovery
+      terminationGracePeriodSeconds: 60
+      volumes:
+        - emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi
+          name: shared-memory
+status:
+  $ignore: true
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  $strict: false
+  name: aic-deployment-dgd-frontend
+spec:
+  progressDeadlineSeconds: 600
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      nvidia.com/selector: aic-deployment-dgd-frontend
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        nvidia.com/dynamo-component: Frontend
+        nvidia.com/dynamo-component-type: frontend
+        nvidia.com/dynamo-discovery-backend: kubernetes
+        nvidia.com/dynamo-discovery-enabled: "true"
+        nvidia.com/dynamo-graph-deployment-name: aic-deployment-dgd
+        nvidia.com/dynamo-namespace: $glob:clusterenv-*-aic-deployment-dgd
+        nvidia.com/metrics-enabled: "true"
+        nvidia.com/selector: aic-deployment-dgd-frontend
+    spec:
+      containers:
+        - args:
+            - -m
+            - dynamo.frontend
+          command:
+            - python3
+          env:
+            - name: DYNAMO_PORT
+              value: "8000"
+            - name: DYN_COMPONENT
+              value: frontend
+            - name: DYN_DISCOVERY_BACKEND
+              value: kubernetes
+            - name: DYN_HTTP_PORT
+              value: "8000"
+            - name: DYN_NAMESPACE
+              value: $glob:clusterenv-*-aic-deployment-dgd
+            - name: DYN_NAMESPACE_PREFIX
+              value: $glob:clusterenv-*-aic-deployment-dgd
+            - name: DYN_PARENT_DGD_K8S_NAME
+              value: aic-deployment-dgd
+            - name: DYN_PARENT_DGD_K8S_NAMESPACE
+              value: $glob:clusterenv-*
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.namespace
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.uid
+          image: $ignore
+          imagePullPolicy: IfNotPresent
+          livenessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /live
+              port: http
+              scheme: HTTP
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 1
+          name: main
+          ports:
+            - containerPort: 8000
+              name: http
+              protocol: TCP
+          readinessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /health
+              port: http
+              scheme: HTTP
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 3
+          resources: {}
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          volumeMounts:
+            - mountPath: /dev/shm
+              name: shared-memory
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext:
+        fsGroup: 1000
+      serviceAccount: aic-deployment-dgd-k8s-service-discovery
+      serviceAccountName: aic-deployment-dgd-k8s-service-discovery
+      terminationGracePeriodSeconds: 60
+      volumes:
+        - emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi
+          name: shared-memory
+status:
+  $ignore: true
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  $strict: false
+  name: $glob:aic-deployment-dgd-prefill-*
+spec:
+  progressDeadlineSeconds: 600
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      nvidia.com/selector: $glob:aic-deployment-dgd-prefill-*
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        nvidia.com/dynamo-component: prefill
+        nvidia.com/dynamo-component-type: prefill
+        nvidia.com/dynamo-discovery-backend: kubernetes
+        nvidia.com/dynamo-discovery-enabled: "true"
+        nvidia.com/dynamo-graph-deployment-name: aic-deployment-dgd
+        nvidia.com/dynamo-namespace: $glob:clusterenv-*-aic-deployment-dgd
+        nvidia.com/dynamo-sub-component-type: prefill
+        nvidia.com/dynamo-worker-hash: "$pattern:[0-9a-f]{8}"
+        nvidia.com/metrics-enabled: "true"
+        nvidia.com/selector: $glob:aic-deployment-dgd-prefill-*
+    spec:
+      containers:
+        - args:
+            - --model-path
+            - Qwen/Qwen3-0.6B
+            - --model-name
+            - Qwen/Qwen3-0.6B
+            - --speedup-ratio
+            - "1.0"
+            - --planner-profile-data
+            - /workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D
+            - --disaggregation-mode
+            - prefill
+          command:
+            - python3
+            - -m
+            - dynamo.mocker
+          env:
+            - name: DYN_COMPONENT
+              value: prefill
+            - name: DYN_DISCOVERY_BACKEND
+              value: kubernetes
+            - name: DYN_FORWARDPASS_METRIC_PORT
+              value: "20380"
+            - name: DYN_HEALTH_CHECK_ENABLED
+              value: "false"
+            - name: DYN_NAMESPACE
+              value: $glob:clusterenv-*-aic-deployment-dgd
+            - name: DYN_NAMESPACE_WORKER_SUFFIX
+              value: "$pattern:[0-9a-f]{8}"
+            - name: DYN_PARENT_DGD_K8S_NAME
+              value: aic-deployment-dgd
+            - name: DYN_PARENT_DGD_K8S_NAMESPACE
+              value: $glob:clusterenv-*
+            - name: DYN_SYSTEM_ENABLED
+              value: "true"
+            - name: DYN_SYSTEM_PORT
+              value: "9090"
+            - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
+              value: '["generate"]'
+            - name: NIXL_TELEMETRY_ENABLE
+              value: "n"
+            - name: NIXL_TELEMETRY_EXPORTER
+              value: prometheus
+            - name: NIXL_TELEMETRY_PROMETHEUS_PORT
+              value: "19090"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.namespace
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.uid
+          envFrom:
+            - secretRef:
+                name: hf-token-secret
+          image: $ignore
+          imagePullPolicy: IfNotPresent
+          livenessProbe:
+            failureThreshold: 1
+            httpGet:
+              path: /live
+              port: system
+              scheme: HTTP
+            periodSeconds: 5
+            successThreshold: 1
+            timeoutSeconds: 4
+          name: main
+          ports:
+            - containerPort: 9090
+              name: system
+              protocol: TCP
+            - containerPort: 19090
+              name: nixl
+              protocol: TCP
+          readinessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /health
+              port: system
+              scheme: HTTP
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 4
+          resources: {}
+          startupProbe:
+            failureThreshold: 720
+            httpGet:
+              path: /live
+              port: system
+              scheme: HTTP
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 5
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          volumeMounts:
+            - mountPath: /dev/shm
+              name: shared-memory
+          workingDir: /workspace
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext:
+        fsGroup: 1000
+      serviceAccount: aic-deployment-dgd-k8s-service-discovery
+      serviceAccountName: aic-deployment-dgd-k8s-service-discovery
+      terminationGracePeriodSeconds: 60
+      volumes:
+        - emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi
+          name: shared-memory
+status:
+  $ignore: true
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoComponentDeployment
+metadata:
+  $strict: false
+  name: aic-deployment-dgd-frontend
+spec:
+  name: Frontend
+  podTemplate:
+    metadata:
+      annotations:
+        nvidia.com/dynamo-operator-origin-version: $pattern:1\.4\..*
+    spec:
+      containers:
+        - image: $ignore
+          name: main
+  replicas: 1
+  type: frontend
+status:
+  $ignore: true
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoComponentDeployment
+metadata:
+  $strict: false
+  name: $glob:aic-deployment-dgd-prefill-*
+spec:
+  name: prefill
+  podTemplate:
+    metadata:
+      annotations:
+        nvidia.com/dynamo-operator-origin-version: $pattern:1\.4\..*
+      labels:
+        nvidia.com/dynamo-worker-hash: "$pattern:[0-9a-f]{8}"
+    spec:
+      containers:
+        - args:
+            - --model-path
+            - Qwen/Qwen3-0.6B
+            - --model-name
+            - Qwen/Qwen3-0.6B
+            - --speedup-ratio
+            - "1.0"
+            - --planner-profile-data
+            - /workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D
+            - --disaggregation-mode
+            - prefill
+          command:
+            - python3
+            - -m
+            - dynamo.mocker
+          envFrom:
+            - secretRef:
+                name: hf-token-secret
+          image: $ignore
+          name: main
+          workingDir: /workspace
+  replicas: 1
+  type: prefill
+status:
+  $ignore: true
