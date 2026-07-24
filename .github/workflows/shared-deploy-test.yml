@@ -71,28 +71,6 @@ jobs:
         with:
           vcluster_name: ${{ inputs.vcluster_name }}
           vcluster_namespace: ${{ inputs.namespace }}
-      - name: Detect shared model cache PVC
-        id: model-cache
-        env:
-          PVC_NAME: model-cache
-        run: |
-          # Mount the shared cache only when the PVC is actually present. It is
-          # provisioned at vCluster creation time (setup-dynamo-operator, which needs
-          # the endpoint at `vcluster create` to sync the PV to the host), so gating
-          # here on the same repo vars would silently assume every caller wired that
-          # up -- and a caller that did not would wedge every deployment on a
-          # nonexistent PVC. Checking observed state degrades to a HuggingFace
-          # download instead.
-          # Bound, not merely present: an unbound PVC leaves every pod Pending.
-          PHASE="$(kubectl --kubeconfig="${{ github.workspace }}/.kubeconfig-vcluster" \
-            -n default get pvc "${PVC_NAME}" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
-          if [ "${PHASE}" = "Bound" ]; then
-            echo "pvc=${PVC_NAME}" >> $GITHUB_OUTPUT
-            echo "PVC ${PVC_NAME} is Bound; workers will read models from the shared cache."
-          else
-            echo "pvc=" >> $GITHUB_OUTPUT
-            echo "PVC ${PVC_NAME} not usable (phase: '${PHASE:-absent}'); workers will download from HuggingFace."
-          fi
       - name: Run Dynamo Deploy Test
         id: deploy-test
         uses: ./.github/actions/dynamo-deploy-test
@@ -107,4 +85,6 @@ jobs:
           image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-${{ inputs.image_suffix }}
           platform_arch: amd64
           extra_pytest_args: -m framework_only
-          model_cache_pvc: ${{ steps.model-cache.outputs.pvc }}
+          # Mount the shared model cache only when both endpoint vars are set
+          # (matches the PV/PVC creation gate); otherwise workers download from HF.
+          model_cache_pvc: ${{ vars.AZURE_MODEL_CACHE_SERVER != '' && vars.AZURE_MODEL_CACHE_PATH != '' && 'model-cache' || '' }}
