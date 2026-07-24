@@ -90,11 +90,20 @@ See [Using HiCache](../../backends/sglang/sglang-hicache.md) for full setup, sco
 
 ## TensorRT-LLM
 
-Enable KV event publishing on every worker:
+Start each TensorRT-LLM worker with native host offloading and KV event publishing:
 
-- Worker: `--publish-kv-events` (Dynamo 1.3.0+; earlier releases and current examples use the `--publish-events-and-metrics` spelling, which remains accepted as a deprecated alias and logs a deprecation warning). Requires the PyTorch backend.
+```bash
+python3 -m dynamo.trtllm \
+  --model Qwen/Qwen3-0.6B \
+  --publish-kv-events \
+  --trtllm.kv_cache_config.enable_block_reuse true \
+  --trtllm.kv_cache_config.host_cache_size 17179869184 \
+  --trtllm.kv_cache_config.secondary_offload_min_priority 35
+```
+
+- Versions: `--publish-kv-events` requires Dynamo 1.3.0 or later and the PyTorch backend. Earlier releases use the deprecated `--publish-events-and-metrics` alias.
 - TensorRT-LLM events do not identify GPU versus host RAM. The router keeps a block indexed while it remains in either tier and removes it after it leaves the lowest tier.
-- Native host offloading (`kv_cache_config.host_cache_size` and `secondary_offload_min_priority`, passed through `--extra-engine-args`) therefore extends router-visible reuse, but host-tier weights do not apply.
+- Native host offloading therefore extends router-visible reuse, but host-tier weights do not apply.
 - For CPU and disk tiers managed by Dynamo, use KVBM (`--connector kvbm`; see [Other Offloading Backends](#other-offloading-backends)).
 
 See the [TensorRT-LLM backend docs](../../backends/trtllm/README.md) for worker setup.
