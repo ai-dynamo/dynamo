@@ -131,6 +131,30 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export PIP_CACHE_DIR=/root/.cache/pip && \
     pip install --break-system-packages --no-deps "distro==1.9.0"
 
+{% if device == "cuda" and target == "runtime" %}
+# Ensure SGLang CUDA runtime has a NIXL wheel new enough for LIBFABRIC KV
+# transfer. If the upstream SGLang image already carries this version or newer,
+# pip keeps it and we only expose its native wheel libs through a stable prefix.
+ARG CUDA_MAJOR
+ARG NIXL_MIN_VERSION=1.3.2
+COPY --chmod=755 container/deps/vllm/install_nixl_from_wheel.sh /usr/local/bin/install_nixl_from_wheel
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    set -eux; \
+    export PIP_CACHE_DIR=/root/.cache/pip; \
+    pip install --break-system-packages --no-deps --only-binary=:all: \
+        "nixl>=${NIXL_MIN_VERSION}" \
+        "nixl-cu${CUDA_MAJOR}>=${NIXL_MIN_VERSION}"; \
+    site_packages=$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])'); \
+    install_nixl_from_wheel \
+        --wheel-lib-dir "${site_packages}/.nixl_cu${CUDA_MAJOR}.mesonpy.libs" \
+        --prefix /opt/dynamo/nixl \
+        --skip-headers
+ENV NIXL_PREFIX=/opt/dynamo/nixl
+ENV NIXL_LIB_DIR=/opt/dynamo/nixl
+ENV NIXL_PLUGIN_DIR=/opt/dynamo/nixl/plugins
+ENV LD_LIBRARY_PATH=/opt/dynamo/nixl:/opt/dynamo/nixl/plugins:${LD_LIBRARY_PATH:-}
+{% endif %}
+
 # Install gpu_memory_service wheel if enabled (all targets)
 ARG ENABLE_GPU_MEMORY_SERVICE
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
