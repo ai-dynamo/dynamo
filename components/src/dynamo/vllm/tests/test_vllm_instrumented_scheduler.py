@@ -32,7 +32,10 @@ from vllm.v1.request import RequestStatus  # noqa: E402
 # not be resolvable and ``instrumented_scheduler`` will fail to load with
 # ``ModuleNotFoundError: No module named 'vllm.sampling_params'``.
 import dynamo.vllm.instrumented_scheduler as instrumented_scheduler_module  # noqa: E402
-from dynamo.vllm.benchmark_points import BenchmarkPoints  # noqa: E402
+from dynamo.vllm.benchmark_points import (  # noqa: E402
+    BenchmarkPoints,
+    PrefillPointCandidate,
+)
 from dynamo.vllm.instrumented_scheduler import (  # noqa: E402
     BenchmarkConfig,
     BenchmarkPoint,
@@ -51,6 +54,38 @@ pytestmark = [
 STRUCTURED_OUTPUT_WAITING_STATUS = getattr(
     RequestStatus, "WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR", None
 ) or getattr(RequestStatus, "WAITING_FOR_FSM")
+
+
+def _benchmark_capacity(
+    *,
+    max_model_len: int = 256,
+    max_num_scheduled_tokens: int = 10_000,
+    max_num_running_reqs: int = 10_000,
+    usable_blocks_without_watermark: int = 1_000,
+    usable_blocks_with_watermark: int | None = None,
+    grid_invariants_digest: str = "a" * 64,
+):
+    if usable_blocks_with_watermark is None:
+        usable_blocks_with_watermark = usable_blocks_without_watermark
+    return instrumented_scheduler_module._BenchmarkCapacityEnvelope(
+        max_model_len=max_model_len,
+        max_num_scheduled_tokens=max_num_scheduled_tokens,
+        max_num_running_reqs=max_num_running_reqs,
+        usable_blocks_without_watermark=usable_blocks_without_watermark,
+        usable_blocks_with_watermark=usable_blocks_with_watermark,
+        grid_invariants_digest=grid_invariants_digest,
+    )
+
+
+def _install_test_capacity_preflight(stub, capacity=None):
+    capacity = capacity or _benchmark_capacity()
+    stub._bench_make_local_capacity = lambda: capacity
+    stub._bench_synchronizer = None
+    # ``_bench_build_grid`` re-filters the decode capture list against the
+    # negotiated request limit before generating the grid; stubs that don't
+    # model captures still need the attribute to exist.
+    if not hasattr(stub, "_bench_decode_capture_sizes"):
+        stub._bench_decode_capture_sizes = []
 
 
 def _make_request(status, num_tokens: int, num_computed_tokens: int = 0):
@@ -517,6 +552,203 @@ def test_benchmark_synchronizer_aligns_point_and_shares_run_id():
         assert follower_result["group"].rank_results == expected_rank_results
         assert coordinator_group.stop_requested is False
         assert follower_result["group"].stop_requested is False
+    finally:
+        rank1.close()
+        rank0.close()
+
+
+def test_benchmark_synchronizer_negotiates_minimum_capacity_and_grid():
+    endpoint = f"inproc://benchmark-sync-{uuid.uuid4().hex}"
+    rank0 = instrumented_scheduler_module._BenchmarkSynchronizer(
+        dp_rank=0,
+        dp_size=2,
+        master_ip="unused",
+        port=0,
+        timeout=1,
+        endpoint=endpoint,
+    )
+    rank1 = instrumented_scheduler_module._BenchmarkSynchronizer(
+        dp_rank=1,
+        dp_size=2,
+        master_ip="unused",
+        port=0,
+        timeout=1,
+        endpoint=endpoint,
+    )
+    rank0_capacity = _benchmark_capacity(
+        max_model_len=383_168,
+        usable_blocks_without_watermark=23_944,
+        usable_blocks_with_watermark=23_940,
+    )
+    rank1_capacity = _benchmark_capacity(
+        max_model_len=351_104,
+        max_num_scheduled_tokens=8_192,
+        usable_blocks_without_watermark=21_940,
+        usable_blocks_with_watermark=21_936,
+    )
+    follower_result = {}
+
+    def run_follower():
+        follower_result["capacity"] = rank1.negotiate_capacity(rank1_capacity)
+        rank1.synchronize_grid(
+            grid_digest="b" * 64,
+            expected_points=1_368,
+            missing_phases=[],
+        )
+        follower_result["grid_synchronized"] = True
+
+    follower = threading.Thread(target=run_follower)
+    follower.start()
+    try:
+        common = rank0.negotiate_capacity(rank0_capacity)
+        rank0.synchronize_grid(
+            grid_digest="b" * 64,
+            expected_points=1_368,
+            missing_phases=[],
+        )
+        follower.join(timeout=2)
+        assert not follower.is_alive()
+        assert common == follower_result["capacity"]
+        assert common.max_model_len == 351_104
+        assert common.max_num_scheduled_tokens == 8_192
+        assert common.usable_blocks_without_watermark == 21_940
+        assert common.usable_blocks_with_watermark == 21_936
+        assert follower_result["grid_synchronized"] is True
+    finally:
+        rank1.close()
+        rank0.close()
+
+
+def test_benchmark_synchronizer_rejects_capacity_invariant_mismatch():
+    endpoint = f"inproc://benchmark-sync-{uuid.uuid4().hex}"
+    rank0 = instrumented_scheduler_module._BenchmarkSynchronizer(
+        dp_rank=0,
+        dp_size=2,
+        master_ip="unused",
+        port=0,
+        timeout=1,
+        endpoint=endpoint,
+    )
+    rank1 = instrumented_scheduler_module._BenchmarkSynchronizer(
+        dp_rank=1,
+        dp_size=2,
+        master_ip="unused",
+        port=0,
+        timeout=1,
+        endpoint=endpoint,
+    )
+    follower_error = {}
+
+    def run_follower():
+        try:
+            rank1.negotiate_capacity(
+                _benchmark_capacity(grid_invariants_digest="b" * 64)
+            )
+        except RuntimeError as error:
+            follower_error["error"] = error
+
+    follower = threading.Thread(target=run_follower)
+    follower.start()
+    try:
+        with pytest.raises(RuntimeError, match="grid invariants differ"):
+            rank0.negotiate_capacity(_benchmark_capacity())
+        follower.join(timeout=2)
+        assert not follower.is_alive()
+        assert "grid invariants differ" in str(follower_error["error"])
+    finally:
+        rank1.close()
+        rank0.close()
+
+
+def _digest_stub(max_num_running_reqs: int):
+    """Populate only the attributes ``_bench_grid_invariants_digest`` reads,
+    mirroring the activation-time filtering of the decode capture sizes."""
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_config = BenchmarkConfig()
+    stub.block_size = 16
+    stub._bench_hash_block_size = 16
+    stub.cache_config = SimpleNamespace(block_size=16, enable_prefix_caching=True)
+    stub.max_num_running_reqs = max_num_running_reqs
+    stub._bench_prefill_cudagraph_mode = "PIECEWISE"
+    stub._bench_decode_cudagraph_mode = "FULL"
+    stub._bench_cudagraph_capture_sizes = [1, 2, 4, 8, 16, 32, 64, 128, 256]
+    stub._bench_prefill_capture_sizes = list(stub._bench_cudagraph_capture_sizes)
+    stub._bench_decode_capture_sizes = [
+        size
+        for size in stub._bench_cudagraph_capture_sizes
+        if size <= max_num_running_reqs
+    ]
+    return stub
+
+
+def test_capacity_digest_ignores_request_limit_filtered_capture_sizes():
+    """Ranks that differ only in ``max_num_running_reqs`` filter different
+    decode capture lists at activation. The invariants digest must hash the
+    unfiltered configuration so ``common()`` negotiates the minimum instead
+    of rejecting the ranks as structurally different."""
+    small = _digest_stub(max_num_running_reqs=128)
+    large = _digest_stub(max_num_running_reqs=256)
+    assert small._bench_decode_capture_sizes != large._bench_decode_capture_sizes
+
+    small_digest = InstrumentedScheduler._bench_grid_invariants_digest(small)
+    large_digest = InstrumentedScheduler._bench_grid_invariants_digest(large)
+    assert small_digest == large_digest
+
+    common = instrumented_scheduler_module._BenchmarkCapacityEnvelope.common(
+        [
+            _benchmark_capacity(
+                max_num_running_reqs=128, grid_invariants_digest=small_digest
+            ),
+            _benchmark_capacity(
+                max_num_running_reqs=256, grid_invariants_digest=large_digest
+            ),
+        ]
+    )
+    assert common.max_num_running_reqs == 128
+
+
+def test_benchmark_synchronizer_rejects_grid_mismatch_before_warmup():
+    endpoint = f"inproc://benchmark-sync-{uuid.uuid4().hex}"
+    rank0 = instrumented_scheduler_module._BenchmarkSynchronizer(
+        dp_rank=0,
+        dp_size=2,
+        master_ip="unused",
+        port=0,
+        timeout=1,
+        endpoint=endpoint,
+    )
+    rank1 = instrumented_scheduler_module._BenchmarkSynchronizer(
+        dp_rank=1,
+        dp_size=2,
+        master_ip="unused",
+        port=0,
+        timeout=1,
+        endpoint=endpoint,
+    )
+    follower_error = {}
+
+    def run_follower():
+        try:
+            rank1.synchronize_grid(
+                grid_digest="b" * 64,
+                expected_points=1_368,
+                missing_phases=[],
+            )
+        except RuntimeError as error:
+            follower_error["error"] = error
+
+    follower = threading.Thread(target=run_follower)
+    follower.start()
+    try:
+        with pytest.raises(RuntimeError, match="grid mismatch"):
+            rank0.synchronize_grid(
+                grid_digest="a" * 64,
+                expected_points=1_368,
+                missing_phases=[],
+            )
+        follower.join(timeout=2)
+        assert not follower.is_alive()
+        assert "grid mismatch" in str(follower_error["error"])
     finally:
         rank1.close()
         rank0.close()
@@ -1284,6 +1516,57 @@ def test_decode_grid_uses_live_free_block_count_after_manager_reservations():
     )
 
 
+def test_decode_grid_uses_common_attention_dp_capacity():
+    # Regression for a DEP4 GLM-5.2 run where vLLM auto-fit two ranks to
+    # 5,987 blocks / 383,168 tokens and two ranks to 5,486 blocks / 351,104
+    # tokens. Independent grids had the same count but diverged at point 20:
+    # 383,103 versus 351,039 total KV-read tokens.
+    larger_rank = _grid_stub_with_kv_capacity(num_gpu_blocks=5_987, block_size=64)
+    smaller_rank = _grid_stub_with_kv_capacity(num_gpu_blocks=5_486, block_size=64)
+    larger_rank.max_model_len = 383_168
+    smaller_rank.max_model_len = 351_104
+    capture_sizes = [
+        1,
+        2,
+        4,
+        *range(8, 257, 8),
+        *range(272, 513, 16),
+    ]
+    for stub in (larger_rank, smaller_rank):
+        stub.max_num_scheduled_tokens = 8_192
+        stub.max_num_running_reqs = 1_024
+        stub._bench_decode_capture_sizes = capture_sizes
+    common = _benchmark_capacity(
+        max_model_len=351_104,
+        max_num_scheduled_tokens=8_192,
+        max_num_running_reqs=1_024,
+        usable_blocks_without_watermark=5_485,
+        usable_blocks_with_watermark=5_485,
+    )
+    larger_rank._bench_negotiated_capacity = common
+    smaller_rank._bench_negotiated_capacity = common
+
+    InstrumentedScheduler._bench_generate_decode_grid(larger_rank)
+    InstrumentedScheduler._bench_generate_decode_grid(smaller_rank)
+
+    larger_grid = [point.__dict__ for point in larger_rank._bench_grid]
+    smaller_grid = [point.__dict__ for point in smaller_rank._bench_grid]
+    assert larger_grid == smaller_grid
+    assert len(larger_grid) == 1_368
+    assert larger_rank._bench_grid[19].total_kv_read_tokens == 351_039
+
+    # The common grid must remain feasible under each rank's original local
+    # capacity when the conservative shared envelope is removed.
+    for stub in (larger_rank, smaller_rank):
+        stub._bench_negotiated_capacity = None
+        assert all(
+            InstrumentedScheduler._bench_decode_point_feasible(
+                stub, point.batch_size, point.total_kv_read_tokens
+            )
+            for point in stub._bench_grid
+        )
+
+
 @pytest.mark.parametrize(
     ("mode", "prefill_points", "decode_points", "expected_missing_phases"),
     [
@@ -1304,6 +1587,7 @@ def test_benchmark_grid_tracks_each_requested_empty_phase(
     stub._bench_grid = deque()
     stub._bench_grid_built = False
     stub._bench_missing_phases = []
+    _install_test_capacity_preflight(stub)
 
     def generate_prefill_grid():
         stub._bench_grid.extend(
@@ -1332,6 +1616,7 @@ def test_benchmark_grid_has_no_point_cap():
     stub._bench_grid_built = False
     stub._bench_missing_phases = []
     stub._bench_grid_error = None
+    _install_test_capacity_preflight(stub)
 
     def generate_prefill_grid():
         stub._bench_grid.extend(
@@ -1357,6 +1642,7 @@ def test_benchmark_grid_assigns_stable_contiguous_ids_and_digest():
     stub._bench_grid_built = False
     stub._bench_missing_phases = []
     stub._bench_grid_error = None
+    _install_test_capacity_preflight(stub)
 
     def generate_prefill_grid():
         stub._bench_grid.extend(
@@ -1399,6 +1685,7 @@ def _explicit_grid_stub(mode="agg", points=None):
             "decode": [{"total_kv_read_tokens": 16, "batch_size": 1}],
         }
     )
+    _install_test_capacity_preflight(stub)
     return stub
 
 
@@ -1472,7 +1759,11 @@ def test_explicit_decode_respects_scheduled_token_limit():
             "decode": [{"total_kv_read_tokens": 2, "batch_size": 2}],
         },
     )
-    stub.max_num_scheduled_tokens = 1
+    # The limit is read through the negotiated capacity envelope, so the
+    # constraint must be installed there rather than on the stub attribute.
+    _install_test_capacity_preflight(
+        stub, _benchmark_capacity(max_num_scheduled_tokens=1)
+    )
 
     with pytest.raises(ValueError, match=r"decode\[0\].*infeasible"):
         InstrumentedScheduler._bench_build_grid(stub)
@@ -1690,6 +1981,15 @@ def _prefill_grid_stub(
     stub._bench_prefill_capture_sizes = [8, 16]
     stub._bench_prefill_cudagraph_mode = "PIECEWISE"
     stub.num_lookahead_tokens = 0
+    _install_test_capacity_preflight(
+        stub,
+        _benchmark_capacity(
+            max_model_len=stub.max_model_len,
+            max_num_scheduled_tokens=stub.max_num_scheduled_tokens,
+            max_num_running_reqs=stub.max_num_running_reqs,
+            usable_blocks_without_watermark=num_gpu_blocks - 1,
+        ),
+    )
     return stub
 
 
@@ -1867,6 +2167,71 @@ def test_prefill_grid_runs_larger_workload_coordinates_first():
         for point in stub._bench_grid
     ]
     assert coordinates == sorted(coordinates, reverse=True)
+
+
+def test_prefill_grid_uses_common_attention_dp_capacity():
+    larger_rank = _prefill_grid_stub(num_gpu_blocks=64)
+    smaller_rank = _prefill_grid_stub(num_gpu_blocks=48)
+    common = _benchmark_capacity(
+        max_model_len=96,
+        max_num_scheduled_tokens=40,
+        max_num_running_reqs=8,
+        usable_blocks_without_watermark=47,
+        usable_blocks_with_watermark=47,
+    )
+    larger_rank._bench_negotiated_capacity = common
+    smaller_rank._bench_negotiated_capacity = common
+
+    InstrumentedScheduler._bench_generate_prefill_grid(larger_rank)
+    InstrumentedScheduler._bench_generate_prefill_grid(smaller_rank)
+
+    larger_grid = [point.__dict__ for point in larger_rank._bench_grid]
+    smaller_grid = [point.__dict__ for point in smaller_rank._bench_grid]
+    assert larger_grid == smaller_grid
+
+    for stub in (larger_rank, smaller_rank):
+        stub._bench_negotiated_capacity = None
+        assert all(
+            InstrumentedScheduler._bench_prefill_point_feasible(
+                stub,
+                point.total_prefill_tokens,
+                point.batch_size,
+                point.total_kv_read_tokens,
+            )
+            for point in stub._bench_grid
+        )
+
+
+def test_explicit_prefill_point_uses_negotiated_scheduled_token_limit():
+    """An explicit point at the negotiated ``max_num_scheduled_tokens`` must
+    get identical cudagraph metadata on every rank regardless of the rank's
+    local limit — otherwise ``sample_reasons`` (engine_limit vs
+    geometric_tail) and therefore the per-point digests diverge."""
+    at_limit_rank = _prefill_grid_stub()
+    above_limit_rank = _prefill_grid_stub()
+    above_limit_rank.max_num_scheduled_tokens = 48
+    common = _benchmark_capacity(
+        max_model_len=128,
+        max_num_scheduled_tokens=40,
+        max_num_running_reqs=8,
+        usable_blocks_without_watermark=63,
+    )
+    candidate = PrefillPointCandidate(
+        total_prefill_tokens=40, batch_size=1, total_kv_read_tokens=0
+    )
+
+    points = []
+    for stub in (at_limit_rank, above_limit_rank):
+        stub._bench_negotiated_capacity = common
+        points.append(
+            InstrumentedScheduler._bench_materialize_prefill_candidate(
+                stub, candidate, "points[0]"
+            )
+        )
+
+    assert points[0] == points[1]
+    assert "engine_limit" in points[0].sample_reasons
+    assert "geometric_tail" not in points[1].sample_reasons
 
 
 def test_agg_grid_contains_piecewise_prefill_then_full_decode_points():
