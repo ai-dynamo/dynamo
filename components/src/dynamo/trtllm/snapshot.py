@@ -11,6 +11,39 @@ from typing import Any
 from dynamo.trtllm.constants import DisaggregationMode, Modality
 
 _EXTERNAL_MODEL_LOAD_FORMATS = {"gms"}
+_WARMUP_INPUT_IDS = (1, 2, 3)
+
+
+def _create_warmup_sampling_params() -> Any:
+    from tensorrt_llm.llmapi import SamplingParams
+
+    return SamplingParams(
+        end_id=-1,
+        pad_id=-1,
+        max_tokens=2,
+        temperature=0.0,
+        ignore_eos=True,
+        detokenize=False,
+    )
+
+
+async def warmup_engine(engine: Any) -> None:
+    """Warm TensorRT-LLM before capture."""
+
+    sampling_params = _create_warmup_sampling_params()
+    logging.info("TensorRT-LLM snapshot warmup starting")
+    generation_result = engine.llm.generate_async(
+        inputs=list(_WARMUP_INPUT_IDS),
+        sampling_params=sampling_params,
+        streaming=True,
+    )
+    async for _ in generation_result:
+        pass
+    if generation_result.error is not None:
+        raise RuntimeError(
+            f"TensorRT-LLM snapshot warmup failed: {generation_result.error}"
+        )
+    logging.info("TensorRT-LLM snapshot warmup complete")
 
 
 def _should_prefetch_model_for_snapshot(config: Any) -> bool:
@@ -109,6 +142,7 @@ class _SnapshotRuntimeProxy:
             "Checkpoint mode enabled: TRT-LLM engine is initialized before "
             "Dynamo runtime creation"
         )
+        await warmup_engine(engine)
         pause_controller = _NoOpSnapshotPauseController()
         snapshot_controller = _create_engine_snapshot_controller(
             engine=engine,
