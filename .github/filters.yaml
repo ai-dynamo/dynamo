@@ -6,6 +6,7 @@
 #   snapshot -> snapshot-agent build and test
 #   power_agent -> power-agent image build
 #   deploy   -> deploy tests
+#   dgdr     -> DGDR deploy tests
 #   planner  -> dynamo build-test
 #   vllm     -> vllm build and test
 #   sglang   -> sglang build and test
@@ -172,6 +173,16 @@ deploy:
   - '!deploy/utils/tests/**'
   - '!**/*.md'
   - '!**/*.rst'
+
+dgdr:
+  - '.github/workflows/shared-dgdr-deploy-test.yml'
+  - 'tests/conftest.py'
+  - 'tests/deploy/conftest.py'
+  - 'tests/deploy/dgdr_utils.py'
+  - 'tests/deploy/test_dgdr.py'
+  - 'tests/deploy/test_dgdr_h100.py'
+  - 'tests/deploy/test_dgdr_utils.py'
+  - 'tests/utils/managed_deployment.py'
 
 planner:
   - 'container/templates/planner.Dockerfile'

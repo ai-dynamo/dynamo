@@ -1,0 +1,135 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Shared DGDR Deploy Test
+
+on:
+  workflow_call:
+    inputs:
+      namespace:
+        description: 'Host namespace where the vCluster lives'
+        type: string
+        required: true
+      vcluster_name:
+        description: 'Name of the vCluster'
+        type: string
+        required: true
+      operator_tag:
+        description: 'Operator image tag used to self-bootstrap a missing vCluster'
+        type: string
+        required: true
+    secrets:
+      AZURE_ACR_HOSTNAME:
+        required: true
+      HF_TOKEN:
+        required: true
+      DOCKERHUB_LOGIN_USER:
+        required: false
+      DOCKERHUB_ACCESS_TOKEN:
+        required: false
+
+jobs:
+  dgdr-deploy-test:
+    name: CPU / ${{ matrix.suite }}
+    runs-on: prod-deploy-tester-v1
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        suite:
+          - validation
+          - profiling
+          - lifecycle
+    env:
+      DGDR_NAMESPACE: dgdr-${{ matrix.suite }}-${{ github.run_id }}-${{ github.run_attempt }}
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Check if vCluster exists
+        id: vcluster-check
+        uses: ./.github/actions/check-vcluster-exists
+        with:
+          vcluster_name: ${{ inputs.vcluster_name }}
+          vcluster_namespace: ${{ inputs.namespace }}
+
+      - name: Self-bootstrap vCluster (rerun)
+        if: steps.vcluster-check.outputs.exists != 'true'
+        uses: ./.github/actions/setup-dynamo-operator
+        with:
+          vcluster_name: ${{ inputs.vcluster_name }}
+          vcluster_namespace: ${{ inputs.namespace }}
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ inputs.operator_tag }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+          dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+
+      - name: Connect to vCluster
+        id: connect-vcluster
+        uses: ./.github/actions/connect-vcluster
+        with:
+          vcluster_name: ${{ inputs.vcluster_name }}
+          vcluster_namespace: ${{ inputs.namespace }}
+
+      - name: Set up vCluster kubeconfig
+        id: kubeconfig
+        shell: bash
+        env:
+          KUBECONFIG_BASE64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
+        run: |
+          set -euo pipefail
+          echo "${KUBECONFIG_BASE64}" | base64 -d > "${RUNNER_TEMP}/dgdr-test-kubeconfig"
+          chmod 600 "${RUNNER_TEMP}/dgdr-test-kubeconfig"
+          echo "KUBECONFIG=${RUNNER_TEMP}/dgdr-test-kubeconfig" >> "${GITHUB_ENV}"
+
+      - name: Prepare DGDR test namespace
+        shell: bash
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          set -euo pipefail
+          kubectl delete namespace "${DGDR_NAMESPACE}" \
+            --ignore-not-found --wait=true --timeout=5m
+          kubectl create namespace "${DGDR_NAMESPACE}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+          kubectl create secret generic hf-token-secret \
+            --namespace="${DGDR_NAMESPACE}" \
+            --from-literal=HF_TOKEN="${HF_TOKEN}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Verify DGDR test prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          kubectl wait --for=condition=established \
+            crd/dynamographdeploymentrequests.nvidia.com \
+            --timeout=120s
+          kubectl get secret hf-token-secret -n "${DGDR_NAMESPACE}" >/dev/null
+
+      - name: Run CPU DGDR tests
+        uses: ./.github/actions/dynamo-deploy-test
+        with:
+          kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
+          namespace: ${{ env.DGDR_NAMESPACE }}
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ inputs.operator_tag }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo-planner:${{ github.sha }}-dynamo-planner
+          platform_arch: amd64
+          test_name: dgdr-${{ matrix.suite }}
+          test_file: tests/deploy/test_dgdr.py
+          extra_pytest_args: -m gpu_0 -k=dgdr_${{ matrix.suite }} --dgdr-name-prefix=ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.suite }} --dgdr-hf-token-secret=hf-token-secret
+          cleanup_deployment: 'false'
+
+      - name: Clean up DGDR test namespace
+        if: always() && steps.kubeconfig.outcome == 'success'
+        shell: bash
+        run: |
+          kubectl delete namespace "${DGDR_NAMESPACE}" \
+            --ignore-not-found --wait=true --timeout=5m
