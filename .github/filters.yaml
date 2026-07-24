@@ -48,7 +48,6 @@ api_docs:
   - 'docs/fern/reference/api/**'
   - 'docs/fern/kubernetes/api-reference.md'
   - 'docs/fern/kubernetes/api-reference-fern.mdx'
-  - 'docs/fern/kubernetes/api-reference.data.ts'
   - 'lib/bindings/python/src/**'
   - 'components/src/dynamo/**'
   - '**/Cargo.toml'

@@ -4,18 +4,12 @@
 """Generate the Dynamo Kubernetes API reference source-of-truth outputs.
 
 Thin CLI/orchestrator that composes :mod:`kubernetes_api_discovery` (the
-deterministic Markdown parser) with :mod:`kubernetes_api_rendering` (the
-TypeScript + MDX serializer). Every run parses
-``docs/fern/kubernetes/api-reference.md`` once and emits two outputs:
-
-* ``docs/fern/kubernetes/api-reference.data.ts`` -- typed TypeScript data
-  kept beside the page so Fern release snapshots preserve the matching
-  Kubernetes API surface.
-* ``docs/fern/kubernetes/api-reference-fern.mdx`` -- the thin MDX shell
-  that mounts ``<ReferenceStyles />`` and ``<ApiKubernetesReference />``,
-  embeds the twelve operator-default subsections as demoted Markdown
-  headings, and carries a full ``<llms-only>`` Markdown twin so agent
-  exports still see the 165-type surface.
+deterministic Markdown parser) with :mod:`kubernetes_api_rendering` (the MDX
+serializer). Every run parses ``docs/fern/kubernetes/api-reference.md`` once
+and emits ``docs/fern/kubernetes/api-reference-fern.mdx``: one MDX page built
+from Fern's own ``<CardGroup>``, ``<Accordion>``, ``<ParamField>``, and
+``<Badge>`` components, followed by the twelve operator-default subsections as
+demoted Markdown headings.
 
 Usage (from any cwd; paths resolve relative to this file)::
 
@@ -36,7 +30,7 @@ import sys
 from pathlib import Path
 
 from kubernetes_api_discovery import KubernetesReference, parse_reference
-from kubernetes_api_rendering import render_mdx, render_ts_data
+from kubernetes_api_rendering import render_mdx
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_FERN_ROOT = SCRIPT_DIR.parent
@@ -44,10 +38,6 @@ DEFAULT_FERN_ROOT = SCRIPT_DIR.parent
 
 def _source_path(fern_root: Path) -> Path:
     return fern_root / "kubernetes" / "api-reference.md"
-
-
-def _data_ts_path(fern_root: Path) -> Path:
-    return fern_root / "kubernetes" / "api-reference.data.ts"
 
 
 def _mdx_shell_path(fern_root: Path) -> Path:
@@ -63,10 +53,7 @@ def _rendered_outputs(
     fern_root: Path, reference: KubernetesReference
 ) -> dict[Path, str]:
     """Compute every output path -> new text mapping in one pass."""
-    return {
-        _data_ts_path(fern_root): render_ts_data(reference),
-        _mdx_shell_path(fern_root): render_mdx(reference),
-    }
+    return {_mdx_shell_path(fern_root): render_mdx(reference)}
 
 
 def _apply_outputs(outputs: dict[Path, str], *, check: bool) -> int:

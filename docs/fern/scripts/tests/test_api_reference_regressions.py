@@ -7,6 +7,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import Any
 
 import api_discovery
 import api_rendering
@@ -15,6 +16,7 @@ import kubernetes_api_discovery
 import kubernetes_api_rendering
 import pytest
 import rust_api_rendering
+import yaml
 from griffe import Function, GriffeLoader
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.gpu_0, pytest.mark.unit]
@@ -23,8 +25,43 @@ REPO_ROOT = Path(__file__).resolve().parents[4]
 FERN_ROOT = REPO_ROOT / "docs" / "fern"
 COMPONENTS_DIR = FERN_ROOT / "components"
 K8S_DIR = FERN_ROOT / "kubernetes"
-K8S_SCHEMA_COMPONENT = COMPONENTS_DIR / "KubernetesSchemaDetails.tsx"
-_KubernetesLlmsReference = tuple[kubernetes_api_discovery.KubernetesReference, str]
+INDEX_YML = FERN_ROOT / "index.yml"
+DOCS_YML = FERN_ROOT / "docs.yml"
+REF_STYLES_COMPONENT = COMPONENTS_DIR / "ReferenceStyles.tsx"
+HERO_COMPONENT = COMPONENTS_DIR / "ApiReferenceHero.tsx"
+
+
+def _reference_general_layout() -> list[dict[str, Any]]:
+    """Return the ``layout`` list of the Reference tab's General variant."""
+    nav = yaml.safe_load(INDEX_YML.read_text(encoding="utf-8"))
+    reference_tab = next(
+        entry for entry in nav["navigation"] if entry.get("tab") == "reference"
+    )
+    general = next(
+        variant
+        for variant in reference_tab.get("variants", [])
+        if variant.get("title") == "General"
+    )
+    return general["layout"]
+
+
+def _api_reference_section() -> dict[str, Any]:
+    """Return the API Reference section from the General variant."""
+    for entry in _reference_general_layout():
+        if entry.get("section") == "API Reference":
+            return entry
+    raise AssertionError("API Reference section not found in General variant")
+
+
+def _python_api_section() -> dict[str, Any]:
+    """Return the Python API section (nested under API Reference)."""
+    for entry in _api_reference_section()["contents"]:
+        if entry.get("section") == "Python API":
+            return entry
+    raise AssertionError("Python API section not found under API Reference")
+
+
+_KubernetesPage = tuple[kubernetes_api_discovery.KubernetesReference, str]
 _KubernetesPackagePairs = tuple[
     tuple[kubernetes_api_discovery.KubernetesPackage, ...],
     tuple[kubernetes_api_discovery.KubernetesPackage, ...],
@@ -59,6 +96,145 @@ _SAMPLE_MODULE = api_discovery.Module(
 )
 
 
+EXPECTED_PYTHON_MODULE_SLUGS = (
+    "_core",
+    "runtime",
+    "llm",
+    "frontend",
+    "common",
+    "health_check",
+    "logits_processing",
+    "planner",
+    "router",
+    "mocker",
+    "nixl_connect",
+)
+
+
+def test_python_module_pages_are_visible_in_sidebar() -> None:
+    """Every generated Python module page must be a visible sidebar entry."""
+    python_section = _python_api_section()
+    child_pages = [item for item in python_section["contents"] if "page" in item]
+    slugs = {page["slug"] for page in child_pages}
+
+    assert slugs == set(EXPECTED_PYTHON_MODULE_SLUGS)
+    hidden = [page["slug"] for page in child_pages if page.get("hidden") is True]
+    assert hidden == [], f"Python module pages must not be hidden: {hidden}"
+
+
+def test_api_reference_colocates_python_rust_kubernetes() -> None:
+    """Python, Rust, and Kubernetes must appear as siblings under API Reference."""
+    api_reference = _api_reference_section()
+    languages: list[str] = []
+    for entry in api_reference["contents"]:
+        title = entry.get("section") or entry.get("page")
+        if title in ("Python API", "Rust API", "Kubernetes API"):
+            languages.append(title)
+
+    assert set(languages) == {
+        "Python API",
+        "Rust API",
+        "Kubernetes API",
+    }, f"missing languages under API Reference: {sorted(set(languages))}"
+
+
+def test_reference_tab_no_longer_has_kubernetes_api_variant() -> None:
+    """The stand-alone Kubernetes API variant is removed once colocated."""
+    nav = yaml.safe_load(INDEX_YML.read_text(encoding="utf-8"))
+    reference_tab = next(
+        entry for entry in nav["navigation"] if entry.get("tab") == "reference"
+    )
+    variant_titles = [
+        variant.get("title") for variant in reference_tab.get("variants", [])
+    ]
+
+    assert (
+        "Kubernetes API" not in variant_titles
+    ), f"Kubernetes API variant should be removed from reference tab, got {variant_titles}"
+
+
+# The section landing consumes the old "full-api-reference" slug because
+# it now owns kubernetes/api-reference-fern.mdx; the trimmed per-CRD
+# references keep their slugs as sibling pages inside the section.
+_EXPECTED_K8S_REDIRECTS: dict[str, str] = {
+    "/dynamo/dev/reference/kubernetes-api/full-api-reference": (
+        "/dynamo/dev/reference/api/kubernetes"
+    ),
+    "/dynamo/dev/reference/kubernetes-api/dynamographdeployment": (
+        "/dynamo/dev/reference/api/kubernetes/dynamographdeployment"
+    ),
+    "/dynamo/dev/reference/kubernetes-api/dynamographdeploymentrequest": (
+        "/dynamo/dev/reference/api/kubernetes/dynamographdeploymentrequest"
+    ),
+    "/dynamo/dev/reference/kubernetes-api/dynamocomponentdeployment": (
+        "/dynamo/dev/reference/api/kubernetes/dynamocomponentdeployment"
+    ),
+}
+
+
+def test_kubernetes_api_url_redirects_present() -> None:
+    """Legacy /reference/kubernetes-api/* URLs must redirect to /reference/api/kubernetes/*."""
+    docs = yaml.safe_load(DOCS_YML.read_text(encoding="utf-8"))
+    redirects = {r["source"]: r["destination"] for r in docs.get("redirects", [])}
+    for source, destination in _EXPECTED_K8S_REDIRECTS.items():
+        assert source in redirects, f"missing redirect for {source}"
+        assert redirects[source] == destination, (
+            f"unexpected redirect target for {source}: "
+            f"got {redirects[source]}, want {destination}"
+        )
+
+
+def test_api_reference_hero_points_kubernetes_at_colocated_route() -> None:
+    """LANGUAGE_CARDS must point Kubernetes at the colocated API Reference route."""
+    source = HERO_COMPONENT.read_text(encoding="utf-8")
+    hero_match = re.search(
+        r'label:\s*"Kubernetes".*?landingHref:\s*"([^"]+)"',
+        source,
+        flags=re.DOTALL,
+    )
+
+    assert hero_match is not None, "Kubernetes card not found in LANGUAGE_CARDS"
+    assert hero_match.group(1) == "api/kubernetes", (
+        f"Kubernetes landingHref must point at colocated api/kubernetes, got "
+        f"{hero_match.group(1)!r}"
+    )
+    assert (
+        "../kubernetes-api/full-api-reference" not in source
+    ), "hero must not reference the removed kubernetes-api variant"
+
+
+def test_shared_filter_primitives_live_in_reference_styles() -> None:
+    """Filter rail and pill styles must be shared, not duplicated per component."""
+    styles = REF_STYLES_COMPONENT.read_text(encoding="utf-8")
+
+    assert (
+        ".dynref-filter-rail" in styles
+    ), "shared filter rail class missing from ReferenceStyles"
+    assert (
+        ".dynref-filter-pill" in styles
+    ), "shared filter pill class missing from ReferenceStyles"
+
+    for tsx_name, per_component_class in (
+        ("ApiRustIndex.tsx", ".dynref-ari-pill"),
+        ("ApiSurfaceBrowser.tsx", ".dynref-asb-pill"),
+    ):
+        source = (COMPONENTS_DIR / tsx_name).read_text(encoding="utf-8")
+        # The per-component pill selector must be gone; only :checked sibling
+        # active-state rules that hang off the shared rail may remain.
+        assert (
+            f'className="{per_component_class[1:]}"' not in source
+        ), f"{tsx_name} still hardcodes its own pill class"
+
+
+def test_shared_index_page_title_lives_in_reference_styles() -> None:
+    """Landing / index components share a single 20px title style."""
+    styles = REF_STYLES_COMPONENT.read_text(encoding="utf-8")
+
+    assert (
+        ".dynref-index-title" in styles
+    ), "shared index title class missing from ReferenceStyles"
+
+
 def test_python_component_uses_qualnames_for_identity_and_imports() -> None:
     source = (COMPONENTS_DIR / "ApiSurfaceBrowser.tsx").read_text(encoding="utf-8")
     anchor_helper = re.search(r"function symbolAnchorId.*?\n}", source, flags=re.DOTALL)
@@ -78,43 +254,42 @@ def test_python_component_uses_qualnames_for_identity_and_imports() -> None:
     assert 'importPath: "dynamo._core.PyRuntimeMetrics"' in data
 
 
-def test_kubernetes_page_snapshots_its_generated_data() -> None:
-    data_path = K8S_DIR / "api-reference.data.ts"
-    mdx = (K8S_DIR / "api-reference-fern.mdx").read_text(encoding="utf-8")
-    component = (COMPONENTS_DIR / "ApiKubernetesReference.tsx").read_text(
-        encoding="utf-8"
-    )
-
-    assert data_path.is_file()
-    assert 'from "./api-reference.data"' in mdx
-    assert "reference={KUBERNETES_REFERENCE}" in mdx
-    assert 'from "./kubernetes-api-reference.data"' not in component
-    assert "reference: KubernetesReference" in component
-
-
-def test_kubernetes_component_preserves_safe_field_type_links() -> None:
-    source = K8S_SCHEMA_COMPONENT.read_text(encoding="utf-8")
-
-    assert "function FieldType" in source
-    assert "<FieldType value={field.type}" in source
-    assert 'href.startsWith("#") || href.startsWith("https://")' in source
-    assert "validAnchors.has(href.slice(1))" in source
-    assert "dangerouslySetInnerHTML" not in source
-
-
 @pytest.fixture(scope="module")
-def kubernetes_llms_reference() -> _KubernetesLlmsReference:
+def kubernetes_page() -> _KubernetesPage:
     source = (K8S_DIR / "api-reference.md").read_text(encoding="utf-8")
     reference = kubernetes_api_discovery.parse_reference(source)
-    rendered = kubernetes_api_rendering.render_mdx(reference)
-    llms_body = rendered.split("<llms-only>", 1)[1].split("</llms-only>", 1)[0]
-    return reference, llms_body
+    return reference, kubernetes_api_rendering.render_mdx(reference)
 
 
-def test_kubernetes_llms_fallback_contains_field_details(
-    kubernetes_llms_reference: _KubernetesLlmsReference,
+def test_kubernetes_page_is_self_contained(kubernetes_page: _KubernetesPage) -> None:
+    """Release snapshots copy the page. Inlining the schema as MDX means a
+    snapshot cannot drift from a shared component or data module the way an
+    imported ``.data.ts`` could."""
+    _, mdx = kubernetes_page
+
+    assert "import {" not in mdx
+    assert "api-reference.data" not in mdx
+    assert not (K8S_DIR / "api-reference.data.ts").exists()
+
+
+def test_kubernetes_field_type_links_resolve(
+    kubernetes_page: _KubernetesPage,
 ) -> None:
-    reference, llms_body = kubernetes_llms_reference
+    """Every local fragment link must land on an anchor the page renders,
+    otherwise a field type deep-links into nothing."""
+    _, mdx = kubernetes_page
+    rendered_anchors = set(re.findall(r'<a id="([^"]+)"></a>', mdx))
+    local_link_targets = set(re.findall(r"\]\(#([^)]+)\)", mdx))
+
+    assert local_link_targets <= rendered_anchors
+
+
+def test_kubernetes_page_carries_full_field_semantics(
+    kubernetes_page: _KubernetesPage,
+) -> None:
+    """Fern derives the Markdown and llms.txt twins from MDX, so the field
+    schema must be in the page rather than a hand-built fallback block."""
+    reference, mdx = kubernetes_page
     field = next(
         field
         for package in reference.packages
@@ -123,17 +298,16 @@ def test_kubernetes_llms_fallback_contains_field_details(
         if field.default and field.validation
     )
 
-    assert (
-        "| Field | Type | Required | Default | Description | Validation |" in llms_body
-    )
-    for value in (field.name, field.type, field.default, field.validation):
-        assert kubernetes_api_rendering._md_cell(value) in llms_body
+    assert f'<ParamField path="{field.name}"' in mdx
+    assert f'default="{field.default}"' in mdx
 
 
-def test_kubernetes_llms_fallback_contains_enum_details(
-    kubernetes_llms_reference: _KubernetesLlmsReference,
+def test_kubernetes_page_carries_enum_semantics(
+    kubernetes_page: _KubernetesPage,
 ) -> None:
-    reference, llms_body = kubernetes_llms_reference
+    """Enum values render as badges beside their descriptions, not as a
+    hover-only title attribute."""
+    reference, mdx = kubernetes_page
     enum_type = next(
         type_
         for package in reference.packages
@@ -141,19 +315,9 @@ def test_kubernetes_llms_fallback_contains_enum_details(
         if type_.enum_values
     )
 
-    assert f"#### {enum_type.display_name}" in llms_body
+    assert f'<Accordion title="{enum_type.display_name}">' in mdx
     for value in enum_type.enum_values:
-        assert value.name in llms_body
-        assert value.description in llms_body
-
-
-def test_kubernetes_llms_fallback_links_resolve(
-    kubernetes_llms_reference: _KubernetesLlmsReference,
-) -> None:
-    _, llms_body = kubernetes_llms_reference
-    rendered_anchors = set(re.findall(r'<a id="([^"]+)"></a>', llms_body))
-    local_link_targets = set(re.findall(r"\]\(#([^)]+)\)", llms_body))
-    assert local_link_targets <= rendered_anchors
+        assert f'<Badge intent="note" minimal>{value.name}</Badge>' in mdx
 
 
 def test_pre_merge_gates_every_api_generator_input() -> None:
@@ -299,16 +463,6 @@ def test_python_llms_fallback_includes_signatures_and_methods() -> None:
     assert _SAMPLE_METHOD.summary in llms_body
 
 
-def test_kubernetes_fields_and_enums_have_visible_semantics() -> None:
-    source = K8S_SCHEMA_COMPONENT.read_text(encoding="utf-8")
-
-    assert '<table className="dynref-k8s-fields">' in source
-    assert '<th scope="row"' in source
-    assert '<dl className="dynref-k8s-enum-values">' in source
-    assert '{value.description || "No description."}' in source
-    assert "title={value.description" not in source
-
-
 def test_kubernetes_sources_use_supported_admonitions() -> None:
     footer = REPO_ROOT / "deploy" / "operator" / "docs" / "footer.md"
     source_paths = (footer, K8S_DIR / "api-reference.md")
@@ -358,7 +512,7 @@ def test_python_generator_detects_and_removes_orphaned_pages(
 
 @pytest.mark.parametrize(
     "cell_renderer",
-    (api_rendering._cell, rust_api_rendering._cell, kubernetes_api_rendering._md_cell),
+    (api_rendering._cell, rust_api_rendering._cell),
 )
 def test_mdx_table_cells_escape_source_metacharacters(
     cell_renderer: Callable[[str], str],
@@ -370,3 +524,23 @@ def test_mdx_table_cells_escape_source_metacharacters(
     assert "&#123;item&#125;" in rendered
     assert "&lt;Widget&gt;" in rendered
     assert "\\|" in rendered
+
+
+def test_kubernetes_attributes_escape_source_metacharacters() -> None:
+    """The Kubernetes surface renders MDX attributes, not Markdown table cells."""
+    rendered = kubernetes_api_rendering._attr('Scale "up" & down\nnow')
+
+    assert '"' not in rendered.replace("&quot;", "")
+    assert "&quot;up&quot;" in rendered
+    assert "&amp;" in rendered
+    assert "\n" not in rendered
+
+
+def test_kubernetes_prose_escapes_jsx_outside_code_spans() -> None:
+    rendered = kubernetes_api_rendering._prose(
+        "Accepts <T> and {opt} but `map[string]<T>` stays literal"
+    )
+
+    assert "&lt;T&gt;" in rendered
+    assert "&#123;opt&#125;" in rendered
+    assert "`map[string]<T>`" in rendered

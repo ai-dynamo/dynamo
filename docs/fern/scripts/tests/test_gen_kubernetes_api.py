@@ -15,7 +15,6 @@ runtime. Invocation::
 
 from __future__ import annotations
 
-import re
 import shutil
 from pathlib import Path
 
@@ -29,12 +28,9 @@ pytestmark = [pytest.mark.pre_merge, pytest.mark.gpu_0, pytest.mark.unit]
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 FERN_ROOT = REPO_ROOT / "docs" / "fern"
-COMPONENTS_DIR = FERN_ROOT / "components"
 K8S_DIR = FERN_ROOT / "kubernetes"
 SOURCE_MD = K8S_DIR / "api-reference.md"
 TARGET_MDX = K8S_DIR / "api-reference-fern.mdx"
-DATA_TS = K8S_DIR / "api-reference.data.ts"
-COMPONENT_TSX = COMPONENTS_DIR / "ApiKubernetesReference.tsx"
 
 # Content baseline pinned by the plan.
 EXPECTED_PACKAGES = (
@@ -281,104 +277,36 @@ def test_operator_defaults_subsections_carry_their_body_markdown(
 
 
 # ---------------------------------------------------------------------------
-# TypeScript data rendering
-# ---------------------------------------------------------------------------
-
-
-def test_render_ts_data_carries_headers_and_generator_marker(
-    reference: kubernetes_api_discovery.KubernetesReference,
-) -> None:
-    """TS module leads with SPDX header, Apache-2.0 identifier, and GENERATED marker."""
-    text = kubernetes_api_rendering.render_ts_data(reference)
-    assert text.startswith("/*\n * SPDX-FileCopyrightText:")
-    assert "SPDX-License-Identifier: Apache-2.0" in text
-    assert kubernetes_api_rendering.TS_GENERATED_MARKER in text
-    assert "docs/fern/scripts/kubernetes_api_discovery.py" in text
-
-
-def test_render_ts_data_imports_the_shared_typed_interfaces(
-    reference: kubernetes_api_discovery.KubernetesReference,
-) -> None:
-    """Versioned data imports stable types and exports its reference literal."""
-    text = kubernetes_api_rendering.render_ts_data(reference)
-    types = (COMPONENTS_DIR / "KubernetesApiTypes.ts").read_text(encoding="utf-8")
-    assert (
-        'import type { KubernetesReference } from "@/components/KubernetesApiTypes"'
-        in text
-    )
-    assert "export const KUBERNETES_REFERENCE: KubernetesReference" in text
-    for needle in (
-        "export interface KubernetesField",
-        "export interface KubernetesTypeRef",
-        "export interface KubernetesType",
-        "export interface KubernetesPackage",
-        "export interface KubernetesOperatorDefaultsSubsection",
-        "export interface KubernetesReference",
-    ):
-        assert needle in types, f"missing {needle!r} in shared TypeScript types"
-
-
-def test_render_ts_data_lists_every_package_and_type(
-    reference: kubernetes_api_discovery.KubernetesReference,
-) -> None:
-    """Every package + every type anchor appears in the TS data literal."""
-    text = kubernetes_api_rendering.render_ts_data(reference)
-    for pkg in reference.packages:
-        assert f'"{pkg.name}"' in text
-    for pkg in reference.packages:
-        for type_ in pkg.types:
-            needle = f'"{type_.anchor}"'
-            assert (
-                needle in text
-            ), f"{pkg.name}: type anchor '{type_.anchor}' missing from TS data"
-
-
-def test_render_ts_data_preserves_v1beta1_dedup_anchors(
-    reference: kubernetes_api_discovery.KubernetesReference,
-) -> None:
-    """v1beta1-dedup anchors surface literally in the TS data (deep-link contract)."""
-    text = kubernetes_api_rendering.render_ts_data(reference)
-    for type_name in V1BETA1_DEDUP_TYPES:
-        anchor = f"v1beta1-{type_name.lower()}"
-        assert (
-            f'"{anchor}"' in text
-        ), f"TS data missing deduped anchor '{anchor}' for v1beta1 {type_name}"
-
-
-def test_render_ts_data_is_deterministic(
-    reference: kubernetes_api_discovery.KubernetesReference,
-) -> None:
-    """Identical inputs must produce byte-identical outputs so ``--check``
-    stays reliable and code review sees only real diffs."""
-    a = kubernetes_api_rendering.render_ts_data(reference)
-    b = kubernetes_api_rendering.render_ts_data(reference)
-    assert a == b
-
-
-# ---------------------------------------------------------------------------
 # MDX rendering
 # ---------------------------------------------------------------------------
 
 
-def test_render_mdx_mounts_reference_styles_and_component(
+def test_render_mdx_carries_frontmatter_and_no_body_h1(
     reference: kubernetes_api_discovery.KubernetesReference,
 ) -> None:
-    """The generated MDX shell must import the shared reference styles and
-    the compact-index component, and body-render at least one heading to
-    surface Fern's page title correctly."""
+    """Fern renders the page title from the navigation, so a body H1 would
+    duplicate it."""
     text = kubernetes_api_rendering.render_mdx(reference)
     assert text.startswith("---\n# SPDX-FileCopyrightText:")
     assert "title: API Reference" in text
-    assert "import { ReferenceStyles }" in text
-    assert "import { ApiKubernetesReference }" in text
-    assert 'import { KUBERNETES_REFERENCE } from "./api-reference.data"' in text
-    assert "<ReferenceStyles />" in text
-    assert "<ApiKubernetesReference reference={KUBERNETES_REFERENCE} />" in text
     body = text.split("---\n", 2)[-1]
     assert not _has_body_h1(body), (
         "body must not contain a Markdown H1 outside code fences "
         "(Fern renders the title from the nav)"
     )
+
+
+def test_render_mdx_preserves_dedup_anchors_for_deep_links(
+    reference: kubernetes_api_discovery.KubernetesReference,
+) -> None:
+    """v1beta1-dedup anchors are the deep-link contract for shared type
+    names that collide across packages."""
+    text = kubernetes_api_rendering.render_mdx(reference)
+    for type_name in V1BETA1_DEDUP_TYPES:
+        anchor = f"v1beta1-{type_name.lower()}"
+        assert (
+            f'<a id="{anchor}"></a>' in text
+        ), f"MDX missing deduped anchor '{anchor}' for v1beta1 {type_name}"
 
 
 def _has_body_h1(body: str) -> bool:
@@ -412,24 +340,6 @@ def test_render_mdx_embeds_the_twelve_operator_default_subsections(
     assert "#### Frontend Components" in text
 
 
-def test_render_mdx_contains_the_llms_only_fallback(
-    reference: kubernetes_api_discovery.KubernetesReference,
-) -> None:
-    """Fern renders `<llms-only>` blocks only in agent-mode exports. The
-    shell must include the Markdown twin so agents can still see the
-    full 165-type surface even when the compact React component is
-    stripped out."""
-    text = kubernetes_api_rendering.render_mdx(reference)
-    assert "<llms-only>" in text and "</llms-only>" in text
-    llms_body = text.split("<llms-only>", 1)[1].split("</llms-only>", 1)[0]
-    for pkg in reference.packages:
-        assert pkg.name in llms_body, f"llms-only fallback missing package '{pkg.name}'"
-    for type_name in V1BETA1_DEDUP_TYPES:
-        assert (
-            f"v1beta1-{type_name.lower()}" in llms_body
-        ), f"llms-only fallback missing anchor for v1beta1 {type_name}"
-
-
 def test_render_mdx_is_deterministic(
     reference: kubernetes_api_discovery.KubernetesReference,
 ) -> None:
@@ -443,11 +353,10 @@ def test_render_mdx_is_deterministic(
 # ---------------------------------------------------------------------------
 
 
-def test_generator_writes_data_ts_and_mdx_shell(workspace: Path) -> None:
+def test_generator_writes_the_mdx_page(workspace: Path) -> None:
     fern = workspace / "docs" / "fern"
     rc = gen_kubernetes_api.main(["--fern-root", str(fern)])
     assert rc == 0
-    assert (fern / "kubernetes" / "api-reference.data.ts").is_file()
     assert (fern / "kubernetes" / "api-reference-fern.mdx").is_file()
 
 
@@ -455,19 +364,6 @@ def test_check_mode_returns_zero_on_fresh_outputs(workspace: Path) -> None:
     fern = workspace / "docs" / "fern"
     assert gen_kubernetes_api.main(["--fern-root", str(fern)]) == 0
     assert gen_kubernetes_api.main(["--fern-root", str(fern), "--check"]) == 0
-
-
-def test_check_mode_flags_ts_data_drift(workspace: Path) -> None:
-    fern = workspace / "docs" / "fern"
-    assert gen_kubernetes_api.main(["--fern-root", str(fern)]) == 0
-    data = fern / "kubernetes" / "api-reference.data.ts"
-    data.write_text(
-        data.read_text(encoding="utf-8").replace(
-            '"nvidia.com/v1alpha1"', '"MUTATED_BY_TEST"', 1
-        ),
-        encoding="utf-8",
-    )
-    assert gen_kubernetes_api.main(["--fern-root", str(fern), "--check"]) == 1
 
 
 def test_check_mode_flags_mdx_shell_drift(workspace: Path) -> None:
@@ -496,79 +392,11 @@ def test_shipped_mdx_matches_regeneration_output() -> None:
     assert rendered == shipped
 
 
-def test_shipped_data_ts_matches_regeneration_output() -> None:
-    """The shipped ``kubernetes-api-reference.data.ts`` is generator
-    output; the same regeneration guarantee applies to the typed data
-    module the component reads from."""
-    text = SOURCE_MD.read_text(encoding="utf-8")
-    reference = kubernetes_api_discovery.parse_reference(text)
-    rendered = kubernetes_api_rendering.render_ts_data(reference)
-    shipped = DATA_TS.read_text(encoding="utf-8")
-    assert rendered == shipped
-
-
-def test_shipped_mdx_uses_only_generator_managed_component() -> None:
-    """The compact-index page must not smuggle a hand-written
-    ``<ParamField>`` back into the shell; if any surface stays there,
-    the generator is not the single source of truth."""
-    text = TARGET_MDX.read_text(encoding="utf-8")
-    assert "<ParamField" not in text, (
-        "api-reference-fern.mdx must be a thin generator-managed shell; "
-        "hand-written ParamField blocks belong to the old body layout"
-    )
-
-
-def test_component_uses_only_shared_and_scoped_layout_classes() -> None:
-    """The component reuses the existing ``dynref-*`` shared vocabulary
-    (panels, chips, badges, focus rings, copy affordance) and narrowly
-    scopes its own layout to a ``dynref-k8s-*`` prefix, avoiding another
-    stylesheet system."""
-    source = COMPONENT_TSX.read_text(encoding="utf-8")
-    classes = re.findall(r'className="([^"]+)"', source)
-    tokens = {token for value in classes for token in value.split()}
-    unmanaged = {
-        t for t in tokens if not (t.startswith("dynref-") or t.startswith("dark"))
-    }
-    assert (
-        not unmanaged
-    ), f"ApiKubernetesReference.tsx: unmanaged CSS tokens {sorted(unmanaged)}"
-    scoped = {t for t in tokens if t.startswith("dynref-k8s-")}
-    assert (
-        scoped
-    ), "component must define at least one narrowly-scoped dynref-k8s-* layout class"
-
-
-def test_component_defines_a_css_only_package_filter() -> None:
-    """The compact index carries a CSS-only, keyboard-operable filter rail
-    (same pattern as ArtifactBrowser / ApiSurfaceBrowser). Radios must use
-    the shared visually-hidden helper so the pill labels stay tab-navigable."""
-    source = COMPONENT_TSX.read_text(encoding="utf-8")
-    assert 'name="dynref-k8s-filter"' in source
-    assert "dynref-vh" in source
-    assert (
-        ":checked ~" in source
-    ), "package filter needs the CSS-only :checked sibling pattern"
-
-
-def test_component_wraps_every_type_in_a_native_details_accordion() -> None:
-    """Native ``<details>`` accordions keep expand/collapse working without
-    JS and preserve keyboard access + agent Markdown exports."""
-    source = COMPONENT_TSX.read_text(encoding="utf-8")
-    assert "<details" in source and "<summary" in source
-
-
-def test_component_has_no_versioned_docs_paths() -> None:
+def test_shipped_mdx_has_no_hardcoded_dev_paths() -> None:
     """Fern serves each doc version under its own path prefix; hardcoding
-    ``/dynamo/dev/...`` in the component links a versioned snapshot back to
-    ``/dev`` and breaks cross-version navigation."""
-    assert "/dynamo/dev" not in COMPONENT_TSX.read_text(encoding="utf-8")
-
-
-def test_data_ts_has_no_hardcoded_dev_paths() -> None:
-    """The generated data must not bake in a ``/dynamo/dev`` URL; source
-    references must stay repo-relative and github.com/... absolute so
-    they resolve under every docs version."""
-    assert "/dynamo/dev" not in DATA_TS.read_text(encoding="utf-8")
+    ``/dynamo/dev/...`` links a versioned snapshot back to ``/dev`` and
+    breaks cross-version navigation."""
+    assert "/dynamo/dev" not in TARGET_MDX.read_text(encoding="utf-8")
 
 
 def test_index_yml_still_registers_the_compact_mdx() -> None:
@@ -578,6 +406,106 @@ def test_index_yml_still_registers_the_compact_mdx() -> None:
     paths = _collect_all_paths(doc)
     assert "kubernetes/api-reference-fern.mdx" in paths
     assert "kubernetes/api-reference.md" in paths
+
+
+# ---------------------------------------------------------------------------
+# Native Fern component rendering
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="session")
+def native_mdx(reference: kubernetes_api_discovery.KubernetesReference) -> str:
+    return kubernetes_api_rendering.render_mdx(reference)
+
+
+def test_render_mdx_carries_no_react_component_or_data_import(native_mdx: str) -> None:
+    """Content lives in MDX so Fern's own components, search indexing, and
+    Markdown extraction apply. A React mount would hide all of it."""
+    assert "ApiKubernetesReference" not in native_mdx
+    assert "api-reference.data" not in native_mdx
+
+
+def test_render_mdx_drops_the_hand_built_llms_only_twin(native_mdx: str) -> None:
+    """Fern serves any page as Markdown and builds llms.txt from MDX, so the
+    hand-maintained twin is duplicated content once the page is native."""
+    assert "<llms-only>" not in native_mdx
+
+
+def test_render_mdx_renders_every_type_in_an_accordion(
+    reference: kubernetes_api_discovery.KubernetesReference, native_mdx: str
+) -> None:
+    """Accordion content stays searchable and SEO-indexed while collapsed,
+    unlike raw ``<details>``."""
+    total_types = sum(len(pkg.types) for pkg in reference.packages)
+    assert native_mdx.count("<Accordion ") == total_types
+
+
+def test_render_mdx_anchors_precede_each_accordion(
+    reference: kubernetes_api_discovery.KubernetesReference, native_mdx: str
+) -> None:
+    """Cross-package field links target ``#anchor``; the anchor must sit
+    outside the collapsed region so deep links still scroll to it."""
+    for type_ in _iter_types(reference):
+        assert f'<a id="{type_.anchor}"></a>\n<Accordion ' in native_mdx
+
+
+def test_render_mdx_renders_schema_fields_as_param_fields(
+    reference: kubernetes_api_discovery.KubernetesReference, native_mdx: str
+) -> None:
+    """``<ParamField>`` is the house pattern for reference fields and is
+    already used in 29 pages across this site."""
+    field_total = sum(len(t.fields) for t in _iter_types(reference))
+    assert native_mdx.count("<ParamField path=") == field_total
+
+
+def test_render_mdx_marks_required_fields_natively(
+    reference: kubernetes_api_discovery.KubernetesReference, native_mdx: str
+) -> None:
+    """Required is a first-class ParamField attribute, not a text badge."""
+    required_total = sum(
+        1 for t in _iter_types(reference) for f in t.fields if f.required
+    )
+    assert native_mdx.count("required={true}") == required_total
+
+
+def test_render_mdx_renders_enum_values_as_badges(
+    reference: kubernetes_api_discovery.KubernetesReference, native_mdx: str
+) -> None:
+    """Enum values were previously a description list; Badge matches how the
+    backend config references render allowed values."""
+    enum_total = sum(len(t.enum_values) for t in _iter_types(reference))
+    assert native_mdx.count('<Badge intent="note" minimal>') == enum_total
+
+
+def test_render_mdx_lists_resource_types_in_a_card_group(
+    reference: kubernetes_api_discovery.KubernetesReference, native_mdx: str
+) -> None:
+    """Resource-type entry points render as native cards rather than a
+    hand-styled CSS grid."""
+    assert "<CardGroup" in native_mdx
+    for ref in reference.packages[0].resource_types:
+        assert f'<Card title="{ref.name}" href="#{ref.anchor}"' in native_mdx
+
+
+def test_render_mdx_keeps_the_operator_defaults_trailer(native_mdx: str) -> None:
+    """The twelve operator-default subsections are prose, not schema, and
+    must survive the migration unchanged."""
+    assert "## Operator Default Values Injection" in native_mdx
+    for title in EXPECTED_OPERATOR_DEFAULT_SECTIONS:
+        assert f"### {title}" in native_mdx
+
+
+def test_native_mdx_is_deterministic(
+    reference: kubernetes_api_discovery.KubernetesReference, native_mdx: str
+) -> None:
+    """``--check`` and diff review depend on byte-identical regeneration."""
+    assert kubernetes_api_rendering.render_mdx(reference) == native_mdx
+
+
+def _iter_types(
+    reference: kubernetes_api_discovery.KubernetesReference,
+) -> list[kubernetes_api_discovery.KubernetesType]:
+    return [type_ for pkg in reference.packages for type_ in pkg.types]
 
 
 def _collect_all_paths(node: object) -> set[str]:
