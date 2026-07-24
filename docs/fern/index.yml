@@ -132,7 +132,7 @@ navigation:
                       path: kubernetes/cloud-providers/gke/gke.md
 
           # ==================== Usage ====================
-          - section: Model Deployment # TODO: could be renamed to Deployment or Model Deployment bc this part is more about installation and how to get running with a model as opposed to observability, tuning, or other features.
+          - section: Model Deployment
             icon: microchip
             collapsed: open-by-default
             contents:
@@ -144,7 +144,8 @@ navigation:
                 path: kubernetes/dgd-kv-routing.md
               - page: Disaggregated Serving
                 path: features/disaggregated-serving/README.md
-              - page: Size with AIConfigurator
+              - page: Sizing with AIConfigurator
+                slug: size-with-ai-configurator
                 path: kubernetes/dgd-aiconfigurator.md
               - page: Multinode Deployments
                 path: kubernetes/deployment/multinode-deployment.md
@@ -178,9 +179,18 @@ navigation:
                 contents:
                   - page: Overview
                     path: dynosim/README.md
-                  - page: Live Simulation
+                  - page: Mocker Live Simulation
                     slug: live-simulation-with-mocker
                     path: dynosim/mocker.md
+                  - page: DynoSim Replay
+                    slug: simulation-runs
+                    path: dynosim/runs.md
+                  - page: DynoSim Sweeps
+                    slug: simulation-sweeps
+                    path: dynosim/sweeps.md
+                  - page: DynoSim Planner Replay
+                    slug: planner-simulation-benchmarking
+                    path: dynosim/planner-benchmarking.md
 
       # ==================== Local Deployment variant ====================
       # slug: cli preserves the existing CLI page URLs (previously the
@@ -224,6 +234,8 @@ navigation:
                 path: cli/kv-routing.mdx
               - page: Disaggregated Serving
                 path: cli/disaggregated-serving.mdx
+              - page: Sizing with AIConfigurator
+                path: cli/aiconfigurator.mdx
               - page: Multi-Node Deployment
                 path: cli/multinode-deployment.mdx
               - page: KV Cache Offloading
@@ -237,22 +249,21 @@ navigation:
                 path: observability/local-observability.mdx
               - page: Health Checks
                 path: observability/health-checks.mdx
+              - page: Benchmarking with AIPerf
+                path: cli/aiperf.mdx
               - section: DynoSim
                 slug: dynosim
                 contents:
                   - page: Overview
                     path: dynosim/README.md
-                  - page: Live Simulation
+                  - page: Mocker Live Simulation
                     path: dynosim/mocker-local.md
-                  - page: Offline Replay
+                  - page: DynoSim Replay
                     slug: simulation-runs
                     path: dynosim/runs.md
-                  - page: Configuration Sweeps
+                  - page: DynoSim Sweeps
                     slug: simulation-sweeps
                     path: dynosim/sweeps.md
-                  - page: Planner Replay
-                    slug: planner-simulation-benchmarking
-                    path: dynosim/planner-benchmarking.md
 
   - tab: use-cases
     layout:

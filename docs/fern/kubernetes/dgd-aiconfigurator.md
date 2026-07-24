@@ -1,7 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Size with AIConfigurator
+title: Size a Kubernetes Deployment with AIConfigurator
 subtitle: Generate a tensor- and pipeline-parallel layout for your DGD worker from a latency target
 ---
 
@@ -11,7 +11,13 @@ This page is a detour from the **Determine topology and parallelism** step of [D
 > AIConfigurator itself is not Kubernetes-specific. You can run the same optimizer for a local or
 > bare-metal Dynamo deployment and translate the recommended TP, PP, and replica counts into worker
 > commands. This tutorial is Kubernetes-specific only because its final step applies the result to a
-> DGD.
+> DGD. For that workflow, see [Sizing a Local Deployment with AIConfigurator](../cli/aiconfigurator.mdx).
+
+AIConfigurator uses analytical and profiled performance models to estimate candidate configurations.
+It is sometimes described as performance simulation, but it does not run the request-by-request
+Dynamo scheduler, router, or KV-cache lifecycle. Mocker provides the simulated engine behavior, and
+DynoSim supplies the replay and sweep harness; DynoSim can use AIConfigurator estimates as its
+forward-pass timing model.
 
 ## Prerequisites
 

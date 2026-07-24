@@ -71,7 +71,7 @@ first if you are new here. Then pick your path:
 | Author a deployment by hand (start here) | [Deploy with DGD](../kubernetes/dgd-guide.md) |
 | Let Dynamo size and generate the deployment | [Auto Deploy with DGDR](../kubernetes/dgdr-guide.md) |
 | Split prefill and decode for performance | [Disaggregated Serving](../features/disaggregated-serving/README.md) |
-| Auto-pick TP/PP/DP for a latency target | [Size with AIConfigurator](../kubernetes/dgd-aiconfigurator.md) |
+| Auto-pick TP/PP/DP for a latency target | [Sizing with AIConfigurator](../kubernetes/dgd-aiconfigurator.md) |
 | Scale a model across multiple nodes | [Multinode Deployments](../kubernetes/deployment/multinode-deployment.md) |
 | Understand the full resource model (DGD, DCD, DGDR, recipes) | [Deployment Overview](../kubernetes/model-deployment-guide.md) |
 | Load models faster across pods | [Model Caching](../kubernetes/model-caching.md) |

@@ -11,9 +11,9 @@ live cluster.
 
 > [!NOTE]
 > The production Planner scales Kubernetes or Global Planner deployments; it does not autoscale a
-> local CLI deployment. This page lives under Local (CLI) because `python -m dynamo.replay` runs the
-> Planner logic through its virtual simulation environment on the local machine. The decisions being
-> evaluated still represent Kubernetes deployment behavior.
+> local CLI deployment. Although `python -m dynamo.replay` executes on your local machine, this
+> tutorial evaluates Planner decisions for a Kubernetes deployment through the virtual simulation
+> environment.
 
 For the general replay workflow, see [Run a DynoSim Simulation](runs.md). For Planner field types and
 defaults, see the

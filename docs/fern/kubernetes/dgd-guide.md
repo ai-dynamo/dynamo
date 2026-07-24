@@ -737,7 +737,7 @@ These are independent capabilities you opt into per workload. None are required 
   <Card title="Set up Disaggregated Serving" icon="regular arrows-split-up-and-left" href="/dynamo/dev/features/disaggregated-serving">
     Split prefill and decode into independently scaled workers with KV transfer over RDMA.
   </Card>
-  <Card title="Size with AIConfigurator" icon="regular ruler-combined" href="/dynamo/dev/kubernetes/dgd-aiconfigurator">
+  <Card title="Sizing with AIConfigurator" icon="regular ruler-combined" href="/dynamo/dev/kubernetes/dgd-aiconfigurator">
     Auto-pick TP/PP/DP and replica counts to meet a TTFT/ITL latency target.
   </Card>
   <Card title="Expose the Frontend" icon="regular globe" href="/dynamo/dev/kubernetes/dgd-expose-frontend">

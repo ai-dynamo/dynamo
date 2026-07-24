@@ -1,0 +1,101 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Size a Local Deployment with AIConfigurator
+subtitle: Choose parallelism and worker counts before launching local Dynamo processes
+---
+
+AIConfigurator estimates inference performance across candidate parallelism and deployment layouts.
+Use it before launching a local Dynamo deployment to choose tensor parallelism (TP), pipeline
+parallelism (PP), and the number of worker replicas to validate.
+
+AIConfigurator is an analytical performance model and configuration optimizer. It does not start a
+Dynamo frontend, simulate request-by-request scheduler or KV-cache behavior, or benchmark a live
+endpoint. Use [Mocker Live Simulation](../dynosim/mocker-local.md) for a live GPU-free deployment,
+[DynoSim Replay](../dynosim/runs.md) for request-level offline simulation, and
+[Benchmarking with AIPerf](aiperf.mdx) for measurements against the running local endpoint.
+
+## Prerequisites
+
+Install AIConfigurator in the environment where you run the sizing command:
+
+```bash
+pip install aiconfigurator
+```
+
+Collect:
+
+- the model ID or local checkpoint path
+- the backend and backend version
+- the GPU system
+- the total GPU budget
+- typical input and output sequence lengths
+- Time to First Token (TTFT) and Time Per Output Token (TPOT) targets
+
+Confirm that AIConfigurator supports the combination:
+
+```bash
+aiconfigurator cli support \
+  --model-path Qwen/Qwen3-32B-FP8 \
+  --system h200_sxm \
+  --backend vllm
+```
+
+## Generate candidate configurations
+
+Run the optimizer with the local GPU budget and workload targets:
+
+```bash
+aiconfigurator cli default \
+  --model-path Qwen/Qwen3-32B-FP8 \
+  --total-gpus 8 \
+  --system h200_sxm \
+  --backend vllm \
+  --backend-version 0.12.0 \
+  --isl 4000 \
+  --osl 500 \
+  --ttft 600 \
+  --tpot 16.67
+```
+
+`--total-gpus` is the budget available to the local deployment. The selected system definition
+provides the assumed GPUs per node and communication characteristics. AIConfigurator does not inspect
+which GPUs or nodes are currently free.
+
+## Apply a recommendation
+
+Choose a highly ranked row that meets the SLA. Translate its output into the local worker launch:
+
+| AIConfigurator output | Local deployment setting |
+|---|---|
+| `parallel` | Backend TP and PP arguments |
+| `gpus/worker` | GPUs exposed to each worker process |
+| `replicas` | Number of worker processes to launch |
+| Prefill and decode rows | Separate worker pools for disaggregated serving |
+
+For example, apply a `tp4pp1` recommendation to a vLLM worker:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 python -m dynamo.vllm \
+  --model Qwen/Qwen3-32B-FP8 \
+  --tensor-parallel-size 4
+```
+
+Start additional replicas on separate GPU sets when the recommendation calls for them. All replicas
+register with the same frontend. For backend-specific arguments, see the local deployment examples
+for [vLLM](../backends/vllm/vllm-examples.mdx),
+[SGLang](../backends/sglang/sglang-examples.mdx), and
+[TensorRT-LLM](../backends/trtllm/trtllm-examples.mdx).
+
+If one worker requires more GPUs than a node provides, follow
+[Multi-Node Deployment](multinode-deployment.mdx) rather than treating the GPU budget as one flat
+local device list.
+
+## Validate the recommendation
+
+AIConfigurator narrows the configurations to test; it does not replace measurement. Launch the
+recommended local deployment and use [Benchmarking with AIPerf](aiperf.mdx) to validate latency and
+throughput on the target hardware.
+
+For aggregated versus disaggregated analysis, generated artifacts, output fields, and advanced
+options, see the [AIConfigurator Reference](../features/disaggregated-serving/aiconfigurator.md).

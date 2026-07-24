@@ -9,7 +9,7 @@ This page is the full AIConfigurator reference: sizing
 [AIConfigurator](https://github.com/ai-dynamo/aiconfigurator/tree/main) for
 aggregated and disaggregated Dynamo deployments, generating deployment
 artifacts, and validating them. If you only need a parallelism layout for a DGD
-you are already authoring, use the shorter [Size with AIConfigurator](../../kubernetes/dgd-aiconfigurator.md)
+you are already authoring, use the shorter [Sizing with AIConfigurator](../../kubernetes/dgd-aiconfigurator.md)
 tutorial. For the serving architecture and deployment-path overview, start with
 [Disaggregated Serving](README.md).
 
