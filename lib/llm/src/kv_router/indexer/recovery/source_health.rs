@@ -36,6 +36,34 @@ impl DiagnosticCode {
             Self::SourceRecovered => "kv_event_source_recovered",
         }
     }
+
+    fn message(self) -> &'static str {
+        match self {
+            Self::PublisherDisabled => {
+                "KV-event publishing is disabled for a role that requires KV events"
+            }
+            Self::SourceNotObserved => {
+                "KV-event source was not observed after the discovery grace period"
+            }
+            Self::SourceAmbiguous => "KV-event source registration is ambiguous",
+            Self::SourceRecovered => "KV-event source recovered",
+        }
+    }
+
+    fn suggested_action(self) -> &'static str {
+        match self {
+            Self::PublisherDisabled => {
+                "Enable backend KV-event publishing, or select a routing mode that does not require KV events"
+            }
+            Self::SourceNotObserved => {
+                "Check publisher startup, endpoint registration, discovery, and NATS/ZMQ connectivity"
+            }
+            Self::SourceAmbiguous => {
+                "Check for stale or duplicate publisher incarnations and conflicting KV-state endpoint mappings"
+            }
+            Self::SourceRecovered => "No action required",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -264,6 +292,8 @@ fn emit_diagnostics(context: &DiagnosticContext<'_>, diagnostics: Vec<Diagnostic
         .unwrap_or("unknown");
     for diagnostic in diagnostics {
         let diagnostic_code = diagnostic.code.as_str();
+        let diagnostic_message = diagnostic.code.message();
+        let suggested_action = diagnostic.code.suggested_action();
         let requirement = context.requirement.as_str();
         let waited_ms = diagnostic.waited.as_millis().min(u128::from(u64::MAX)) as u64;
         let rank_count = diagnostic.dp_ranks.len();
@@ -285,7 +315,8 @@ fn emit_diagnostics(context: &DiagnosticContext<'_>, diagnostics: Vec<Diagnostic
                 waited_ms,
                 rank_count,
                 dp_ranks = %dp_ranks,
-                "KV event source recovered"
+                suggested_action,
+                "{diagnostic_message}"
             );
         } else {
             tracing::warn!(
@@ -299,7 +330,8 @@ fn emit_diagnostics(context: &DiagnosticContext<'_>, diagnostics: Vec<Diagnostic
                 waited_ms,
                 rank_count,
                 dp_ranks = %dp_ranks,
-                "KV event source health warning"
+                suggested_action,
+                "{diagnostic_message}"
             );
         }
     }
