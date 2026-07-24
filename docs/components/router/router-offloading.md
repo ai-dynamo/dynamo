@@ -70,9 +70,19 @@ See [Native KV Offloading](../../backends/vllm/vllm-native-kv-offloading.md) for
 
 ## SGLang
 
-Enable KV event publishing on every worker, plus HiCache for the host tier:
+Start each SGLang worker with HiCache and KV event publishing:
 
-- Worker: `--kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'` and the SGLang-native HiCache flags (`--enable-hierarchical-cache --hicache-ratio 2 --hicache-write-policy write_through`).
+```bash
+python3 -m dynamo.sglang \
+  --model-path Qwen/Qwen3-0.6B \
+  --page-size 64 \
+  --enable-hierarchical-cache \
+  --hicache-ratio 2 \
+  --hicache-write-policy write_through \
+  --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}' \
+  --skip-tokenizer-init
+```
+
 - For the Mooncake shared pool: add `--hicache-storage-backend mooncake` (plus its extra config) on the workers and `--shared-cache-type hicache --shared-cache-multiplier 0.5` on the frontend.
 - Versions: SGLang 0.5.11 or later emits host-tier (`CPU_PINNED`) events; earlier versions offload engine-side but the router only sees the GPU tier. With Mooncake, use SGLang 0.5.13 or later to avoid a bundled-Mooncake crash.
 
