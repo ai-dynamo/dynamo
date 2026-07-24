@@ -23,8 +23,9 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::{Arc, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::{net::TcpListener, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
@@ -128,6 +129,8 @@ pub struct LoraResponse {
     pub count: Option<usize>,
 }
 
+const SYSTEM_STATUS_REBIND_BACKOFF: Duration = Duration::from_secs(1);
+
 /// Start system status server with metrics support
 pub async fn spawn_system_status_server(
     host: &str,
@@ -138,6 +141,42 @@ pub async fn spawn_system_status_server(
 ) -> anyhow::Result<(std::net::SocketAddr, tokio::task::JoinHandle<()>)> {
     // Create system status server state with the provided distributed runtime
     let server_state = Arc::new(SystemStatusState::new(drt, discovery_metadata)?);
+    let app = build_system_status_router(server_state);
+
+    let initial_bind_address = format!("{}:{}", host, port);
+    let (listener, actual_address) = bind_system_status_listener(initial_bind_address).await?;
+
+    // Rebind the concrete socket address that was advertised to callers. This
+    // keeps port 0 test callers from holding a stale random port if the server
+    // has to recover after its first successful bind.
+    let rebind_address = actual_address.to_string();
+    let observer = cancel_token.child_token();
+
+    // Spawn the server supervisor in the background and return the handle. If
+    // CRIU closes the listener during restore, axum returns from serve while
+    // the runtime is still active; the supervisor rebinds the same address in
+    // the restored network namespace.
+    let handle = tokio::spawn(async move {
+        supervise_rebinding_server(
+            rebind_address,
+            Some(listener),
+            observer,
+            SYSTEM_STATUS_REBIND_BACKOFF,
+            bind_system_status_listener,
+            {
+                let app = app;
+                move |listener, shutdown_token| {
+                    serve_system_status_once(listener, app.clone(), shutdown_token)
+                }
+            },
+        )
+        .await;
+    });
+
+    Ok((actual_address, handle))
+}
+
+fn build_system_status_router(server_state: Arc<SystemStatusState>) -> Router {
     let health_path = server_state
         .drt()
         .system_health()
@@ -219,53 +258,122 @@ pub async fn spawn_system_status_server(
     // The endpoint triple disambiguates multi-LocalModel-per-DRT; the
     // suffix segment (LoRA slug or `_base`) scopes per-registration so
     // detaching one doesn't wipe another's entries.
-    app = app.route(
+    app.route(
         "/v1/metadata/{namespace}/{component}/{endpoint}/{model_slug}/{model_suffix}/{*filename}",
         get({
             let state = Arc::clone(&server_state);
             move |path| metadata_file_handler(State(state), path)
         }),
-    );
+    )
+    .fallback(|| async {
+        tracing::info!("[fallback handler] called");
+        (StatusCode::NOT_FOUND, "Route not found").into_response()
+    })
+    .layer(TraceLayer::new_for_http().make_span_with(make_system_request_span))
+}
 
-    let app = app
-        .fallback(|| async {
-            tracing::info!("[fallback handler] called");
-            (StatusCode::NOT_FOUND, "Route not found").into_response()
-        })
-        .layer(TraceLayer::new_for_http().make_span_with(make_system_request_span));
-
-    let address = format!("{}:{}", host, port);
+async fn bind_system_status_listener(
+    address: String,
+) -> anyhow::Result<(TcpListener, std::net::SocketAddr)> {
     tracing::info!("[spawn_system_status_server] binding to: {address}");
 
-    let listener = match TcpListener::bind(&address).await {
-        Ok(listener) => {
-            // get the actual address and port, print in debug level
-            let actual_address = listener.local_addr()?;
-            tracing::info!(
-                "[spawn_system_status_server] system status server bound to: {}",
-                actual_address
-            );
-            (listener, actual_address)
-        }
-        Err(e) => {
-            tracing::error!("Failed to bind to address {}: {}", address, e);
-            return Err(anyhow::anyhow!("Failed to bind to address: {}", e));
-        }
-    };
-    let (listener, actual_address) = listener;
+    let listener = TcpListener::bind(&address).await.map_err(|e| {
+        tracing::error!("Failed to bind to address {}: {}", address, e);
+        anyhow::anyhow!("Failed to bind to address: {}", e)
+    })?;
 
-    let observer = cancel_token.child_token();
-    // Spawn the server in the background and return the handle
-    let handle = tokio::spawn(async move {
-        if let Err(e) = axum::serve(listener, app)
-            .with_graceful_shutdown(observer.cancelled_owned())
-            .await
-        {
-            tracing::error!("System status server error: {e}");
-        }
-    });
+    let actual_address = listener.local_addr()?;
+    tracing::info!(
+        "[spawn_system_status_server] system status server bound to: {}",
+        actual_address
+    );
 
-    Ok((actual_address, handle))
+    Ok((listener, actual_address))
+}
+
+async fn serve_system_status_once(
+    listener: TcpListener,
+    app: Router,
+    cancel_token: CancellationToken,
+) -> anyhow::Result<()> {
+    axum::serve(listener, app)
+        .with_graceful_shutdown(cancel_token.cancelled_owned())
+        .await
+        .map_err(Into::into)
+}
+
+async fn supervise_rebinding_server<L, Bind, BindFuture, Serve, ServeFuture>(
+    bind_address: String,
+    initial_listener: Option<L>,
+    cancel_token: CancellationToken,
+    rebind_backoff: Duration,
+    mut bind: Bind,
+    mut serve: Serve,
+) where
+    L: Send + 'static,
+    Bind: FnMut(String) -> BindFuture + Send + 'static,
+    BindFuture: Future<Output = anyhow::Result<(L, std::net::SocketAddr)>> + Send,
+    Serve: FnMut(L, CancellationToken) -> ServeFuture + Send + 'static,
+    ServeFuture: Future<Output = anyhow::Result<()>> + Send,
+{
+    let mut listener = initial_listener;
+
+    loop {
+        let current_listener = match listener.take() {
+            Some(listener) => listener,
+            None => match bind(bind_address.clone()).await {
+                Ok((listener, _actual_address)) => listener,
+                Err(error) => {
+                    if cancel_token.is_cancelled() {
+                        break;
+                    }
+
+                    tracing::error!(
+                        "System status server failed to bind {}; retrying after {:?}: {error}",
+                        bind_address,
+                        rebind_backoff
+                    );
+
+                    if wait_for_rebind_or_cancel(&cancel_token, rebind_backoff).await {
+                        break;
+                    }
+                    continue;
+                }
+            },
+        };
+
+        let result = serve(current_listener, cancel_token.clone()).await;
+        if cancel_token.is_cancelled() {
+            break;
+        }
+
+        match result {
+            Ok(()) => tracing::warn!(
+                "System status server exited unexpectedly; rebinding {} after {:?}",
+                bind_address,
+                rebind_backoff
+            ),
+            Err(error) => tracing::error!(
+                "System status server error; rebinding {} after {:?}: {error}",
+                bind_address,
+                rebind_backoff
+            ),
+        }
+
+        if wait_for_rebind_or_cancel(&cancel_token, rebind_backoff).await {
+            break;
+        }
+    }
+}
+
+async fn wait_for_rebind_or_cancel(
+    cancel_token: &CancellationToken,
+    rebind_backoff: Duration,
+) -> bool {
+    tokio::select! {
+        _ = cancel_token.cancelled() => true,
+        _ = tokio::time::sleep(rebind_backoff) => false,
+    }
 }
 
 /// Health handler with optional active health checking
@@ -710,6 +818,11 @@ async fn engine_route_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use tokio::sync::oneshot;
     use tokio::time::Duration;
 
     // This is a basic test to verify the HTTP server is working before testing other more complicated tests
@@ -740,6 +853,127 @@ mod tests {
             result.is_ok(),
             "HTTP server should shut down when cancel token is cancelled"
         );
+    }
+
+    #[tokio::test]
+    async fn test_rebinding_supervisor_rebinds_after_unexpected_serve_exit() {
+        let cancel_token = CancellationToken::new();
+        let bind_attempts = Arc::new(AtomicUsize::new(0));
+        let serve_attempts = Arc::new(AtomicUsize::new(0));
+        let (second_serve_tx, second_serve_rx) = oneshot::channel();
+        let second_serve_tx = Arc::new(Mutex::new(Some(second_serve_tx)));
+
+        let supervisor = tokio::spawn(supervise_rebinding_server(
+            "127.0.0.1:9090".to_string(),
+            Some(0usize),
+            cancel_token.clone(),
+            Duration::from_millis(1),
+            {
+                let bind_attempts = Arc::clone(&bind_attempts);
+                move |_address| {
+                    let bind_attempts = Arc::clone(&bind_attempts);
+                    async move {
+                        let listener_id = bind_attempts.fetch_add(1, Ordering::SeqCst) + 1;
+                        Ok((listener_id, "127.0.0.1:9090".parse().unwrap()))
+                    }
+                }
+            },
+            {
+                let serve_attempts = Arc::clone(&serve_attempts);
+                let second_serve_tx = Arc::clone(&second_serve_tx);
+                move |_listener, _shutdown_token| {
+                    let serve_attempts = Arc::clone(&serve_attempts);
+                    let second_serve_tx = Arc::clone(&second_serve_tx);
+                    async move {
+                        let attempt = serve_attempts.fetch_add(1, Ordering::SeqCst) + 1;
+                        if attempt == 2 {
+                            if let Some(sender) = second_serve_tx.lock().unwrap().take() {
+                                let _ = sender.send(());
+                            }
+                        }
+                        Ok(())
+                    }
+                }
+            },
+        ));
+
+        tokio::time::timeout(Duration::from_secs(1), second_serve_rx)
+            .await
+            .expect("supervisor should rebind and serve again after the first serve exits")
+            .expect("second serve notification should be sent");
+        cancel_token.cancel();
+
+        tokio::time::timeout(Duration::from_secs(1), supervisor)
+            .await
+            .expect("supervisor should stop after cancellation")
+            .expect("supervisor task should not panic");
+
+        assert_eq!(
+            bind_attempts.load(Ordering::SeqCst),
+            1,
+            "initial listener should be reused once, then rebound once"
+        );
+        assert_eq!(serve_attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn test_rebinding_supervisor_stops_without_rebind_after_cancellation() {
+        let cancel_token = CancellationToken::new();
+        let bind_attempts = Arc::new(AtomicUsize::new(0));
+        let serve_attempts = Arc::new(AtomicUsize::new(0));
+        let (serve_started_tx, serve_started_rx) = oneshot::channel();
+        let serve_started_tx = Arc::new(Mutex::new(Some(serve_started_tx)));
+
+        let supervisor = tokio::spawn(supervise_rebinding_server(
+            "127.0.0.1:9090".to_string(),
+            Some(0usize),
+            cancel_token.clone(),
+            Duration::from_millis(1),
+            {
+                let bind_attempts = Arc::clone(&bind_attempts);
+                move |_address| {
+                    let bind_attempts = Arc::clone(&bind_attempts);
+                    async move {
+                        bind_attempts.fetch_add(1, Ordering::SeqCst);
+                        Ok((1usize, "127.0.0.1:9090".parse().unwrap()))
+                    }
+                }
+            },
+            {
+                let serve_attempts = Arc::clone(&serve_attempts);
+                let serve_started_tx = Arc::clone(&serve_started_tx);
+                move |_listener, shutdown_token| {
+                    let serve_attempts = Arc::clone(&serve_attempts);
+                    let serve_started_tx = Arc::clone(&serve_started_tx);
+                    async move {
+                        serve_attempts.fetch_add(1, Ordering::SeqCst);
+                        if let Some(sender) = serve_started_tx.lock().unwrap().take() {
+                            let _ = sender.send(());
+                        }
+                        shutdown_token.cancelled().await;
+                        Ok(())
+                    }
+                }
+            },
+        ));
+
+        tokio::time::timeout(Duration::from_secs(1), serve_started_rx)
+            .await
+            .expect("initial serve should start")
+            .expect("serve start notification should be sent");
+        cancel_token.cancel();
+
+        tokio::time::timeout(Duration::from_secs(1), supervisor)
+            .await
+            .expect("supervisor should stop after cancellation")
+            .expect("supervisor task should not panic");
+
+        assert_eq!(
+            bind_attempts.load(Ordering::SeqCst),
+            0,
+            "cancellation should not trigger a rebind"
+        );
+        assert_eq!(serve_attempts.load(Ordering::SeqCst), 1);
     }
 }
 
