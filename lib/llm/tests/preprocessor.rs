@@ -750,17 +750,61 @@ mod embedding_without_chat_template {
     use dynamo_llm::model_card::ModelDeploymentCard;
     use dynamo_llm::model_type::ModelType;
     use dynamo_llm::preprocessor::OpenAIPreprocessor;
+    use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
     use dynamo_llm::protocols::openai::embeddings::NvCreateEmbeddingRequest;
     use serde_json::json;
+    use serial_test::serial;
+    use std::sync::Arc;
+    use tempfile::TempDir;
 
     const MODEL_PATH: &str = "tests/data/sample-models/mock-llama-3.1-8b-instruct";
+    const ADD_SPECIAL_TOKENS_ENV: &str = "DYN_EMBEDDING_TOKENIZATION_ADD_SPECIAL_TOKENS";
+
+    fn model_copy_with_chat_template(chat_template: Option<&str>) -> TempDir {
+        let temp_dir = tempfile::tempdir().unwrap();
+        for filename in [
+            "config.json",
+            "generation_config.json",
+            "tokenizer_config.json",
+            "tokenizer.json",
+        ] {
+            std::fs::copy(
+                std::path::Path::new(MODEL_PATH).join(filename),
+                temp_dir.path().join(filename),
+            )
+            .unwrap();
+        }
+
+        let config_path = temp_dir.path().join("tokenizer_config.json");
+        let mut config: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+        match chat_template {
+            Some(template) => config["chat_template"] = json!(template),
+            None => {
+                config.as_object_mut().unwrap().remove("chat_template");
+            }
+        }
+        std::fs::write(config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+        temp_dir
+    }
+
+    fn embedding_mdc(path: impl AsRef<std::path::Path>) -> ModelDeploymentCard {
+        let mut mdc = ModelDeploymentCard::load_from_disk(path, None).unwrap();
+        mdc.model_type = ModelType::Embedding;
+        mdc
+    }
+
+    fn embedding_preprocessor_without_template() -> Arc<OpenAIPreprocessor> {
+        let mut mdc = embedding_mdc(MODEL_PATH);
+        mdc.prompt_formatter = None;
+        mdc.chat_template_file = None;
+        OpenAIPreprocessor::new_for_embeddings(mdc).unwrap()
+    }
 
     #[test]
     fn embedding_preprocessor_does_not_require_chat_template() {
-        let mut mdc = ModelDeploymentCard::load_from_disk(MODEL_PATH, None).unwrap();
-        mdc.model_type = ModelType::Embedding;
-        mdc.prompt_formatter = None;
-        mdc.chat_template_file = None;
+        let model_dir = model_copy_with_chat_template(None);
+        let mdc = embedding_mdc(model_dir.path());
 
         assert!(
             OpenAIPreprocessor::new(mdc.clone()).is_err(),
@@ -768,6 +812,38 @@ mod embedding_without_chat_template {
         );
         OpenAIPreprocessor::new_for_embeddings(mdc)
             .expect("embedding-only preprocessing must not require a chat template");
+    }
+
+    #[test]
+    fn embedding_preprocessor_uses_chat_template_when_present() {
+        let preprocessor =
+            OpenAIPreprocessor::new_for_embeddings(embedding_mdc(MODEL_PATH)).unwrap();
+        let messages: Vec<dynamo_protocols::types::ChatCompletionRequestMessage> =
+            serde_json::from_str(r#"[{"role":"user","content":"hello"}]"#).unwrap();
+        let inner = dynamo_protocols::types::CreateChatCompletionRequestArgs::default()
+            .model("test-model")
+            .messages(messages)
+            .build()
+            .unwrap();
+        let request = NvCreateChatCompletionRequest {
+            inner,
+            common: Default::default(),
+            nvext: None,
+            chat_template_args: None,
+            thinking: None,
+            media_io_kwargs: None,
+            return_tokens_as_token_ids: None,
+            unsupported_fields: Default::default(),
+        };
+
+        let rendered = preprocessor.apply_template(&request).unwrap().unwrap();
+        assert!(rendered.contains("<|start_header_id|>user<|end_header_id|>"));
+    }
+
+    #[test]
+    fn embedding_preprocessor_rejects_malformed_chat_template() {
+        let model_dir = model_copy_with_chat_template(Some("{% invalid template %}"));
+        assert!(OpenAIPreprocessor::new_for_embeddings(embedding_mdc(model_dir.path())).is_err());
     }
 
     #[test]
@@ -796,40 +872,68 @@ mod embedding_without_chat_template {
         serde_json::from_value(value).unwrap()
     }
 
+    async fn token_ids(
+        preprocessor: &OpenAIPreprocessor,
+        add_special_tokens: Option<bool>,
+    ) -> Vec<Vec<u32>> {
+        preprocessor
+            .preprocess_embedding_request(&embedding_request(add_special_tokens))
+            .await
+            .unwrap()
+            .0
+            .token_ids
+    }
+
     #[tokio::test]
-    async fn omitted_add_special_tokens_preserves_legacy_tokenization() {
-        let mut mdc = ModelDeploymentCard::load_from_disk(MODEL_PATH, None).unwrap();
-        mdc.model_type = ModelType::Embedding;
-        mdc.prompt_formatter = None;
-        mdc.chat_template_file = None;
-        let preprocessor = OpenAIPreprocessor::new_for_embeddings(mdc).unwrap();
+    #[serial]
+    async fn request_add_special_tokens_is_tri_state() {
+        temp_env::async_with_vars([(ADD_SPECIAL_TOKENS_ENV, None::<&str>)], async {
+            let preprocessor = embedding_preprocessor_without_template();
+            let omitted = token_ids(&preprocessor, None).await;
+            let explicit_false = token_ids(&preprocessor, Some(false)).await;
+            let explicit_true = token_ids(&preprocessor, Some(true)).await;
 
-        let omitted = preprocessor
-            .preprocess_embedding_request(&embedding_request(None))
-            .await
-            .unwrap()
-            .0
-            .token_ids;
-        let explicit_false = preprocessor
-            .preprocess_embedding_request(&embedding_request(Some(false)))
-            .await
-            .unwrap()
-            .0
-            .token_ids;
-        let explicit_true = preprocessor
-            .preprocess_embedding_request(&embedding_request(Some(true)))
-            .await
-            .unwrap()
-            .0
-            .token_ids;
+            assert_eq!(omitted, explicit_false);
+            assert_ne!(omitted, explicit_true);
+            assert_eq!(explicit_true[0][0], 128000, "explicit true adds BOS");
+            assert_ne!(omitted[0].first(), Some(&128000));
+        })
+        .await;
+    }
 
-        assert_eq!(omitted, explicit_false);
-        assert_ne!(omitted, explicit_true);
-        assert_eq!(explicit_true[0][0], 128000, "explicit true adds BOS");
-        assert_ne!(
-            omitted[0].first(),
-            Some(&128000),
-            "omission does not add BOS"
-        );
+    #[tokio::test]
+    #[serial]
+    async fn env_add_special_tokens_is_default_and_request_wins() {
+        temp_env::async_with_vars([(ADD_SPECIAL_TOKENS_ENV, Some("true"))], async {
+            let preprocessor = embedding_preprocessor_without_template();
+            assert_eq!(token_ids(&preprocessor, None).await[0][0], 128000);
+            assert_ne!(
+                token_ids(&preprocessor, Some(false)).await[0].first(),
+                Some(&128000)
+            );
+        })
+        .await;
+
+        temp_env::async_with_vars([(ADD_SPECIAL_TOKENS_ENV, Some("false"))], async {
+            let preprocessor = embedding_preprocessor_without_template();
+            let env_false = token_ids(&preprocessor, None).await;
+            let request_false = token_ids(&preprocessor, Some(false)).await;
+            assert_eq!(env_false, request_false);
+            assert_eq!(token_ids(&preprocessor, Some(true)).await[0][0], 128000);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn invalid_env_add_special_tokens_preserves_legacy_behavior() {
+        temp_env::async_with_vars([(ADD_SPECIAL_TOKENS_ENV, Some("yes-please"))], async {
+            let preprocessor = embedding_preprocessor_without_template();
+            assert_ne!(
+                token_ids(&preprocessor, None).await[0].first(),
+                Some(&128000)
+            );
+        })
+        .await;
     }
 }

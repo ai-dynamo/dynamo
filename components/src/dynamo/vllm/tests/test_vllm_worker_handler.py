@@ -1394,7 +1394,7 @@ class TestEmbeddingWorkerHandlerCancellation:
         request = {"input": ["a", "b"], "model": "test-model"}
         with patch.dict(
             mod.os.environ,
-            {mod._EMBEDDING_RESPONSE_TRANSPORT_ENV: "json"},
+            {mod._EMBEDDING_RESPONSE_TRANSPORT_ENV: ""},
         ):
             responses = [r async for r in handler.generate(request, context)]
 
@@ -1405,9 +1405,9 @@ class TestEmbeddingWorkerHandlerCancellation:
         assert len(response["data"]) == 2
         assert response["data"][0]["index"] == 0
         assert response["data"][1]["index"] == 1
-        # The default baseline preserves the original JSON float payload.
-        assert response["data"][0]["embedding"] == pytest.approx([0.1, 0.2, 0.3])
-        assert response["data"][1]["embedding"] == pytest.approx([0.1, 0.2, 0.3])
+        expected_b64 = mod._encode_floats_to_base64([0.1, 0.2, 0.3])
+        assert response["data"][0]["embedding"] == expected_b64
+        assert response["data"][1]["embedding"] == expected_b64
         # No tasks were in flight at gather completion, so the finally
         # cancel-and-await pass must not have touched the engine.
         assert aborted == []
@@ -1439,9 +1439,26 @@ class TestEmbeddingWorkerHandlerCancellation:
         expected_b64 = mod._encode_floats_to_base64([0.1, 0.2, 0.3])
         assert responses[0]["data"][0]["embedding"] == expected_b64
 
+    def test_invalid_response_transport_warns_and_uses_default(self, caplog):
+        with patch.dict(
+            mod.os.environ,
+            {mod._EMBEDDING_RESPONSE_TRANSPORT_ENV: "json"},
+        ):
+            transport = mod._embedding_response_transport()
+
+        assert transport == mod._EMBEDDING_RESPONSE_TRANSPORT_DEFAULT
+        assert mod._EMBEDDING_RESPONSE_TRANSPORT_ENV in caplog.text
+
     @pytest.mark.asyncio
     @pytest.mark.timeout(5)
-    async def test_tokens_response_uses_engine_output_shape(self):
+    @pytest.mark.parametrize(
+        "encoding_fields",
+        [{}, {"encoding_format": None}, {"encoding_format": "float"}],
+        ids=["omitted", "null", "float"],
+    )
+    async def test_tokens_default_response_uses_base64_engine_output_shape(
+        self, encoding_fields
+    ):
         handler = self._make_embedding_handler()
         context = self._make_context()
 
@@ -1454,7 +1471,7 @@ class TestEmbeddingWorkerHandlerCancellation:
         handler.engine_client.encode = fake_encode
         with patch.dict(
             mod.os.environ,
-            {mod._EMBEDDING_RESPONSE_TRANSPORT_ENV: "json"},
+            {mod._EMBEDDING_RESPONSE_TRANSPORT_ENV: ""},
         ):
             responses = [
                 response
@@ -1462,19 +1479,40 @@ class TestEmbeddingWorkerHandlerCancellation:
                     {
                         "token_ids": [[11, 12, 13]],
                         "model": "test-model",
-                        "encoding_format": "float",
+                        **encoding_fields,
                     },
                     context,
                 )
             ]
 
-        assert responses[0]["embeddings"][0] == pytest.approx([0.1, 0.2, 0.3])
-        assert responses[0]["prompt_tokens"] == 3
-        assert responses[0]["total_tokens"] == 3
+        assert responses == [
+            {
+                "embeddings": [mod._encode_floats_to_base64([0.1, 0.2, 0.3])],
+                "prompt_tokens": 3,
+                "total_tokens": 3,
+            }
+        ]
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(5)
-    async def test_tokens_numpy_response_uses_base64_engine_output_field(self):
+    async def test_tokens_invalid_encoding_format_is_rejected(self):
+        handler = self._make_embedding_handler()
+        context = self._make_context()
+
+        with pytest.raises(ValueError, match="Invalid 'encoding_format' value"):
+            async for _ in handler.generate(
+                {
+                    "token_ids": [[11, 12, 13]],
+                    "model": "test-model",
+                    "encoding_format": "invalid",
+                },
+                context,
+            ):
+                pass
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_tokens_numpy_response_matches_default_wire_shape(self):
         handler = self._make_embedding_handler()
         context = self._make_context()
 
@@ -1503,10 +1541,7 @@ class TestEmbeddingWorkerHandlerCancellation:
 
         assert responses == [
             {
-                "embeddings": [],
-                "embeddings_base64": [
-                    mod._encode_floats_to_base64([0.1, 0.2, 0.3])
-                ],
+                "embeddings": [mod._encode_floats_to_base64([0.1, 0.2, 0.3])],
                 "prompt_tokens": 3,
                 "total_tokens": 3,
             }
@@ -1527,8 +1562,7 @@ class TestEmbeddingWorkerHandlerCancellation:
         context = self._make_context()
         captured: dict = {}
         # vLLM's pooler has already reduced to the requested ``dimensions``, so
-        # the stub returns a 128-dim vector (not 3) -- otherwise the handler's
-        # oversized-dimensions guard would (correctly) reject it.
+        # the stub returns the final 128-dim vector.
         vec = [i * 0.01 for i in range(128)]
 
         async def fake_encode(prompt, pooling_params, request_id):
@@ -1546,10 +1580,12 @@ class TestEmbeddingWorkerHandlerCancellation:
         pp = captured["pooling_params"]
         assert pp.task == "embed"
         assert pp.dimensions == 128
-        # No post-hoc truncation: the handler returns exactly the vector vLLM
-        # produced (the 128-float stub here), trusting the pooler to have
-        # already applied the dimensionality reduction.
-        assert responses[0]["data"][0]["embedding"] == pytest.approx(vec)
+        # No post-hoc truncation: the handler transports the vector produced
+        # by vLLM unchanged. A separate defensive guard rejects outputs shorter
+        # than the requested dimensions.
+        assert responses[0]["data"][0]["embedding"] == (
+            mod._encode_floats_to_base64(vec)
+        )
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(5)

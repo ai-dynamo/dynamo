@@ -390,18 +390,11 @@ impl MaybeError for LLMEngineOutput {
     }
 }
 
-/// Raw output from embedding engines containing embedding vectors
+/// Raw output from embedding engines containing base64-encoded float32 vectors.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct EmbeddingsEngineOutput {
-    /// Generated embedding vectors (one per input text)
-    #[serde(default)]
-    pub embeddings: Vec<Vec<f64>>,
-
-    /// Optional portable float32 byte transport, one standard-base64 string
-    /// per input. This avoids JSON float serialization while remaining usable
-    /// across processes and nodes. It is mutually exclusive with embeddings.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub embeddings_base64: Vec<String>,
+    /// One standard-base64 string per input embedding.
+    pub embeddings: Vec<String>,
 
     /// Token usage information
     pub prompt_tokens: u32,

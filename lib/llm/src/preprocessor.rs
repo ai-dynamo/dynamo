@@ -43,7 +43,7 @@ use tracing;
 
 #[cfg(feature = "mm-routing")]
 use crate::model_card::ModelInfoType;
-use crate::model_card::{ModelDeploymentCard, ModelInfo};
+use crate::model_card::{ModelDeploymentCard, ModelInfo, PromptFormatterArtifact};
 use crate::preprocessor::media::MediaLoader;
 use crate::protocols::common::preprocessor::{
     MultimodalData, MultimodalDataMap, PreprocessedRequestBuilder, RoutingHints,
@@ -97,19 +97,6 @@ fn routing_priorities(hints: Option<&AgentHints>) -> (Option<f64>, Option<u32>, 
     (priority_jump, strict_priority, priority)
 }
 
-/// Encode a slice of `f32` values as a base64 string per the OpenAI
-/// `encoding_format=base64` spec: the raw little-endian byte
-/// representation of each `f32` is concatenated and the resulting byte
-/// buffer is base64-encoded with the standard alphabet.
-fn encode_floats_to_base64(floats: &[f32]) -> String {
-    use base64::{Engine as _, engine::general_purpose::STANDARD};
-    let mut bytes = Vec::with_capacity(std::mem::size_of_val(floats));
-    for f in floats {
-        bytes.extend_from_slice(&f.to_le_bytes());
-    }
-    STANDARD.encode(&bytes)
-}
-
 fn decode_base64_to_floats(encoded: &str) -> Result<Vec<f32>, String> {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     let bytes = STANDARD
@@ -129,18 +116,22 @@ fn decode_base64_to_floats(encoded: &str) -> Result<Vec<f32>, String> {
 
 #[cfg(test)]
 mod embedding_base64_transport_tests {
-    use super::{decode_base64_to_floats, encode_floats_to_base64};
+    use super::decode_base64_to_floats;
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
 
     #[test]
-    fn portable_embedding_bytes_round_trip() {
+    fn portable_embedding_bytes_decode() {
         let expected = vec![0.0, 1.0, -1.0, 3.25];
-        let encoded = encode_floats_to_base64(&expected);
+        let bytes = expected
+            .iter()
+            .flat_map(|value: &f32| value.to_le_bytes())
+            .collect::<Vec<_>>();
+        let encoded = STANDARD.encode(bytes);
         assert_eq!(decode_base64_to_floats(&encoded).unwrap(), expected);
     }
 
     #[test]
     fn portable_embedding_bytes_reject_partial_float() {
-        use base64::{Engine as _, engine::general_purpose::STANDARD};
         let encoded = STANDARD.encode([0_u8; 5]);
         let error = decode_base64_to_floats(&encoded).unwrap_err();
         assert!(error.to_string().contains("not a multiple of 4"));
@@ -285,6 +276,74 @@ static DIM_FETCH_HTTP_CLIENT: std::sync::LazyLock<reqwest::Client> =
 pub(crate) const PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY: &str =
     "dynamo.llm.preserve_omitted_max_tokens";
 
+const EMBEDDING_ADD_SPECIAL_TOKENS_ENV: &str = "DYN_EMBEDDING_TOKENIZATION_ADD_SPECIAL_TOKENS";
+
+fn parse_embedding_add_special_tokens(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" => Some(true),
+        "0" | "false" | "no" => Some(false),
+        _ => None,
+    }
+}
+
+fn embedding_add_special_tokens_env() -> Option<bool> {
+    match std::env::var(EMBEDDING_ADD_SPECIAL_TOKENS_ENV) {
+        Ok(value) => match parse_embedding_add_special_tokens(&value) {
+            Some(value) => Some(value),
+            None => {
+                tracing::warn!(
+                    env_var = EMBEDDING_ADD_SPECIAL_TOKENS_ENV,
+                    value,
+                    "invalid value for DYN_EMBEDDING_TOKENIZATION_ADD_SPECIAL_TOKENS; \
+                     expected true/false/yes/no/1/0; using per-request behavior"
+                );
+                None
+            }
+        },
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            tracing::warn!(
+                env_var = EMBEDDING_ADD_SPECIAL_TOKENS_ENV,
+                "non-Unicode value for DYN_EMBEDDING_TOKENIZATION_ADD_SPECIAL_TOKENS; \
+                 expected true/false/yes/no/1/0; using per-request behavior"
+            );
+            None
+        }
+    }
+}
+
+fn embedding_chat_template_present(mdc: &ModelDeploymentCard) -> Result<bool> {
+    if mdc.chat_template_file.is_some() {
+        return Ok(true);
+    }
+
+    let Some(artifact) = mdc.prompt_formatter.as_ref() else {
+        return Ok(false);
+    };
+    let PromptFormatterArtifact::HfTokenizerConfigJson(checked_file) = artifact else {
+        return Ok(true);
+    };
+    let Some(path) = checked_file.path() else {
+        return Ok(true);
+    };
+
+    let contents = std::fs::read_to_string(path)
+        .with_context(|| format!("fs:read_to_string '{}'", path.display()))?;
+    let config: serde_json::Value = serde_json::from_str(&contents)
+        .with_context(|| format!("Failed to parse '{}'", path.display()))?;
+    Ok(config
+        .get("chat_template")
+        .is_some_and(|template| !template.is_null()))
+}
+
+fn embedding_prompt_formatter(mdc: &ModelDeploymentCard) -> Result<PromptFormatter> {
+    match prompt_formatter_from_mdc(mdc) {
+        Ok(formatter) => Ok(formatter),
+        Err(_) if !embedding_chat_template_present(mdc)? => Ok(PromptFormatter::no_op()),
+        Err(err) => Err(err),
+    }
+}
+
 fn attach_agent_context_from_context(
     request: &mut PreprocessedRequest,
     context: &PipelineContext<()>,
@@ -309,6 +368,8 @@ pub struct OpenAIPreprocessor {
     /// post-processor (for example BOS/EOS). Kept separate so chat and
     /// completion tokenization retains its existing behavior.
     embedding_tokenizer_with_special_tokens: Option<Arc<dyn Tokenizer>>,
+    embedding_tokenizer_without_special_tokens: Option<Arc<dyn Tokenizer>>,
+    embedding_add_special_tokens_default: Option<bool>,
     model_info: Arc<dyn ModelInfo>,
     lora_name: Option<String>,
     /// Per-model runtime configuration propagated to response generator (e.g., reasoning/tool parser)
@@ -568,18 +629,13 @@ impl OpenAIPreprocessor {
     }
 
     /// Build the preprocessor used by token-input embedding pipelines.
-    ///
-    /// Embedding requests never render chat prompts, and pooling-only model
-    /// repositories commonly omit a chat template. Use Dynamo's no-op
-    /// formatter here so model registration does not impose an unrelated chat
-    /// requirement while keeping the shared tokenization/response machinery.
     pub fn new_for_embeddings(mdc: ModelDeploymentCard) -> Result<Arc<Self>> {
         if !mdc.model_type.supports_embedding() {
             anyhow::bail!("embedding preprocessor requires an embedding-capable model");
         }
 
         let tokenizer = mdc.tokenizer()?;
-        let PromptFormatter::OAI(formatter) = PromptFormatter::no_op();
+        let PromptFormatter::OAI(formatter) = embedding_prompt_formatter(&mdc)?;
         Self::new_with_parts(mdc, formatter, tokenizer)
     }
 
@@ -588,19 +644,32 @@ impl OpenAIPreprocessor {
         formatter: Arc<dyn OAIPromptFormatter>,
         tokenizer: crate::tokenizers::Tokenizer,
     ) -> Result<Arc<Self>> {
-        let embedding_tokenizer = if mdc.model_type.supports_embedding() {
-            Some(
-                mdc.tokenizer_with_options(crate::tokenizers::TokenizerOptions {
-                    add_special_tokens: true,
-                })?,
-            )
+        let supports_embedding = mdc.model_type.supports_embedding();
+        let (embedding_tokenizer_with_special_tokens, embedding_tokenizer_without_special_tokens) =
+            if supports_embedding {
+                let with_special_tokens =
+                    mdc.embedding_tokenizer_with_options(crate::tokenizers::TokenizerOptions {
+                        add_special_tokens: true,
+                    })?;
+                let without_special_tokens =
+                    mdc.embedding_tokenizer_with_options(crate::tokenizers::TokenizerOptions {
+                        add_special_tokens: false,
+                    })?;
+                (Some(with_special_tokens), Some(without_special_tokens))
+            } else {
+                (None, None)
+            };
+        let embedding_add_special_tokens_default = if supports_embedding {
+            embedding_add_special_tokens_env()
         } else {
             None
         };
         let mdcsum = mdc.mdcsum().to_string();
         let tokenizer: Arc<dyn Tokenizer> = (*tokenizer).clone();
         let embedding_tokenizer_with_special_tokens: Option<Arc<dyn Tokenizer>> =
-            embedding_tokenizer.map(|tokenizer| (*tokenizer).clone());
+            embedding_tokenizer_with_special_tokens.map(|tokenizer| (*tokenizer).clone());
+        let embedding_tokenizer_without_special_tokens: Option<Arc<dyn Tokenizer>> =
+            embedding_tokenizer_without_special_tokens.map(|tokenizer| (*tokenizer).clone());
         let lora_name = mdc.lora.as_ref().map(|l| l.name.clone());
         let Some(ref model_info) = mdc.model_info else {
             anyhow::bail!(
@@ -788,6 +857,8 @@ impl OpenAIPreprocessor {
             formatter,
             tokenizer,
             embedding_tokenizer_with_special_tokens,
+            embedding_tokenizer_without_special_tokens,
+            embedding_add_special_tokens_default,
             model_info,
             mdcsum,
             lora_name,
@@ -2019,22 +2090,25 @@ impl OpenAIPreprocessor {
         let mut annotations = HashMap::new();
         let mut builder = PreprocessedEmbeddingRequest::builder();
 
-        // Preserve the existing tokenizer path when the request omits
-        // `add_special_tokens`. Only an explicit true opts into the tokenizer
-        // configured to apply the HuggingFace post-processor; explicit false
-        // and omission both retain the legacy tokenizer behavior. Caller-
-        // provided token IDs are already final and never pass through either
-        // tokenizer.
-        let tokenizer = if request.add_special_tokens == Some(true) {
-            self.embedding_tokenizer_with_special_tokens
+        let effective_add_special_tokens = request
+            .add_special_tokens
+            .or(self.embedding_add_special_tokens_default);
+        let tokenizer = match effective_add_special_tokens {
+            Some(true) => self
+                .embedding_tokenizer_with_special_tokens
                 .clone()
                 .ok_or_else(|| {
                     anyhow::anyhow!(
                         "embedding special-token tokenizer is unavailable for a non-embedding model"
                     )
-                })?
-        } else {
-            self.tokenizer.clone()
+                })?,
+            Some(false) => self
+                .embedding_tokenizer_without_special_tokens
+                .clone()
+                .ok_or_else(|| {
+                    anyhow::anyhow!("embedding tokenizer is unavailable for a non-embedding model")
+                })?,
+            None => self.tokenizer.clone(),
         };
         let all_token_ids = match &request.inner.input {
             dynamo_protocols::types::EmbeddingInput::String(s) => {
@@ -2605,65 +2679,37 @@ impl OpenAIPreprocessor {
     where
         S: Stream<Item = Annotated<EmbeddingsEngineOutput>> + Send + 'static,
     {
-        // Honor the OpenAI `encoding_format` field. The default is `Float`;
-        // `Base64` encodes the raw little-endian f32 bytes of each
-        // per-input vector. The engine always returns floats, so the
-        // base64 path runs at the postprocessor seam where we still have
-        // the original request shape in scope.
+        // The worker always returns base64-encoded little-endian f32 bytes.
+        // Honor the client's OpenAI `encoding_format` at this boundary:
+        // pass base64 through, or decode to floats (the public default).
         let encode_base64 = matches!(
             original_request.inner.encoding_format,
             Some(dynamo_protocols::types::EncodingFormat::Base64)
         );
         stream.map(move |output| {
             output.map_data(|engine_output| {
-                let embeddings: Vec<dynamo_protocols::types::Embedding> =
-                    if !engine_output.embeddings_base64.is_empty() {
-                        if !engine_output.embeddings.is_empty() {
-                            return Err("embedding worker returned both float and base64 payloads"
-                                .to_string());
-                        }
-                        engine_output
-                            .embeddings_base64
-                            .into_iter()
-                            .enumerate()
-                            .map(|(index, encoded)| {
-                                let value = if encode_base64 {
-                                    dynamo_protocols::types::EmbeddingVector::Base64(encoded)
-                                } else {
-                                    dynamo_protocols::types::EmbeddingVector::Float(
-                                        decode_base64_to_floats(&encoded)?,
-                                    )
-                                };
-                                Ok::<_, String>(dynamo_protocols::types::Embedding {
-                                    index: index as u32,
-                                    object: "embedding".to_string(),
-                                    embedding: value,
-                                })
-                            })
-                            .collect::<Result<Vec<_>, String>>()?
-                    } else {
-                        engine_output
-                            .embeddings
-                            .into_iter()
-                            .enumerate()
-                            .map(|(index, embedding)| {
-                                let floats: Vec<f32> =
-                                    embedding.into_iter().map(|f| f as f32).collect();
-                                let value = if encode_base64 {
-                                    dynamo_protocols::types::EmbeddingVector::Base64(
-                                        encode_floats_to_base64(&floats),
-                                    )
-                                } else {
-                                    dynamo_protocols::types::EmbeddingVector::Float(floats)
-                                };
-                                dynamo_protocols::types::Embedding {
-                                    index: index as u32,
-                                    object: "embedding".to_string(),
-                                    embedding: value,
-                                }
-                            })
-                            .collect()
-                    };
+                if engine_output.embeddings.is_empty() {
+                    return Err("embedding worker returned an empty `embeddings` field".to_string());
+                }
+                let embeddings: Vec<dynamo_protocols::types::Embedding> = engine_output
+                    .embeddings
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, encoded)| {
+                        let value = if encode_base64 {
+                            dynamo_protocols::types::EmbeddingVector::Base64(encoded)
+                        } else {
+                            dynamo_protocols::types::EmbeddingVector::Float(
+                                decode_base64_to_floats(&encoded)?,
+                            )
+                        };
+                        Ok::<_, String>(dynamo_protocols::types::Embedding {
+                            index: index as u32,
+                            object: "embedding".to_string(),
+                            embedding: value,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
 
                 let response = NvCreateEmbeddingResponse {
                     inner: dynamo_protocols::types::CreateEmbeddingResponse {

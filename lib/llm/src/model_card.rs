@@ -1144,23 +1144,26 @@ impl ModelDeploymentCard {
     ///   per-turn tokenization cost flat instead of growing with history. Set to `0` to
     ///   fall back to the original hit-without-insert behavior.
     pub fn tokenizer(&self) -> anyhow::Result<crate::tokenizers::Tokenizer> {
-        self.tokenizer_with_options(Default::default())
+        self.tokenizer_with_options(Default::default(), false)
     }
 
-    /// Load a tokenizer with backend-specific construction options.
-    ///
-    /// This is kept separate from Self::tokenizer so chat/completion
-    /// preprocessing retains its historical defaults while embedding
-    /// preprocessing can honor an explicit request to add model-declared
-    /// special tokens to raw text.
-    pub(crate) fn tokenizer_with_options(
+    pub(crate) fn embedding_tokenizer_with_options(
         &self,
         options: crate::tokenizers::TokenizerOptions,
     ) -> anyhow::Result<crate::tokenizers::Tokenizer> {
-        let use_fast = self
-            .runtime_config
-            .effective_tokenizer_backend()
-            .is_fastokens();
+        self.tokenizer_with_options(options, true)
+    }
+
+    fn tokenizer_with_options(
+        &self,
+        options: crate::tokenizers::TokenizerOptions,
+        force_hugging_face: bool,
+    ) -> anyhow::Result<crate::tokenizers::Tokenizer> {
+        let use_fast = !force_hugging_face
+            && self
+                .runtime_config
+                .effective_tokenizer_backend()
+                .is_fastokens();
 
         let cache_enabled =
             tokenizer_cache_enabled(std::env::var("DYN_TOKENIZER_CACHE").ok().as_deref());

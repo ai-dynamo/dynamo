@@ -1098,11 +1098,12 @@ async fn embeddings(
     let request = context_from_headers(request, request_id, &headers)?;
     let request_id = request.id().to_string();
 
-    // The optional portable worker transport emits base64-encoded vectors
-    // over NATS to avoid a JSON float array on the internal hop. If that
-    // transport was selected and the client asked for float (the default),
-    // decode back at the HTTP boundary. The legacy JSON-float baseline
-    // already has the requested public shape and passes through unchanged.
+    // The worker always emits base64-encoded vectors over NATS so we
+    // avoid serializing/parsing a JSON float array on the internal hop.
+    // If the client asked for float (the default), decode back at the
+    // HTTP boundary so the public response shape matches their
+    // ``encoding_format`` choice. See the PR description / DIS-2154 for
+    // measured impact.
     // Borrow rather than move ``encoding_format`` out of ``request`` so the
     // request value remains intact for the later ``engine.generate(request)``
     // call below.
@@ -1224,7 +1225,7 @@ async fn embeddings(
 
 /// Decode a base64-encoded little-endian f32 byte string back into a float
 /// vector. The byte length must be a multiple of 4; trailing bytes are
-/// rejected. Mirrors the encoder in `lib/llm/src/preprocessor.rs` and the
+/// rejected. Mirrors the decoder in `lib/llm/src/preprocessor.rs` and the
 /// Python `_encode_floats_to_base64` helper in
 /// `components/src/dynamo/vllm/handlers.py`.
 fn decode_base64_embedding_to_floats(s: &str) -> Result<Vec<f32>, anyhow::Error> {

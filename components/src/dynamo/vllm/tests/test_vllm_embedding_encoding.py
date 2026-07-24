@@ -87,26 +87,14 @@ def test_pooling_tensor_base64_matches_struct_pack():
     assert encoded == expected
 
 
-def test_pooling_tensor_base64_honors_dimensions():
+def test_pooling_tensor_base64_serializes_full_tensor():
     tensor = torch.arange(8, dtype=torch.float32)
-    encoded = _pooling_output_to_base64(tensor, dimensions=3)
-    assert _decode_base64_floats(encoded, 3) == pytest.approx([0.0, 1.0, 2.0])
+    encoded = _pooling_output_to_base64(tensor)
+    assert _decode_base64_floats(encoded, 8) == pytest.approx(
+        [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]
+    )
 
 
-def test_pooling_list_base64_fallback_honors_dimensions():
-    encoded = _pooling_output_to_base64([[0.5, 1.5], [2.5, 3.5]], dimensions=3)
-    assert _decode_base64_floats(encoded, 3) == pytest.approx([0.5, 1.5, 2.5])
-
-
-@pytest.mark.parametrize(
-    "data",
-    [
-        torch.tensor([0.0, 1.0], dtype=torch.float32),
-        [0.0, 1.0],
-    ],
-)
-def test_pooling_base64_rejects_oversized_dimensions(data):
-    with pytest.raises(
-        ValueError, match="dimensions=3 exceeds model embedding dimension 2"
-    ):
-        _pooling_output_to_base64(data, dimensions=3)
+def test_pooling_list_base64_fallback_serializes_full_list():
+    encoded = _pooling_output_to_base64([[0.5, 1.5], [2.5, 3.5]])
+    assert _decode_base64_floats(encoded, 4) == pytest.approx([0.5, 1.5, 2.5, 3.5])
