@@ -117,7 +117,7 @@ Approximate (hash-based) routing is used for the vLLM and SGLang variants becaus
 
 ### vLLM
 - No connector flags needed in 1.0 (default is no connector)
-- Requires `--is-decode-worker` to skip KV event publisher setup
+- Omits `--kv-events-config` to keep KV event publishing disabled for approximate routing
 - Requires `--mamba-cache-mode align` to work around [vllm#34865](https://github.com/vllm-project/vllm/issues/34865): prefix caching with the default `mamba_cache_mode="all"` produces NaN logprobs and garbage tokens for Nemotron-H. Fixed in vLLM 0.17.0 ([vllm#34874](https://github.com/vllm-project/vllm/pull/34874)); the 1.0 container ships vLLM 0.16.0, so the workaround is needed.
 - **Attention backend**: On Hopper the default (`FLASH_ATTN`) is safe. On Blackwell, vLLM defaults to FlashInfer, which has a [stale NaN bug](https://github.com/vllm-project/vllm/issues/35138) with hybrid Mamba models ([vllm#35219](https://github.com/vllm-project/vllm/pull/35219)). For Blackwell, specify `--attention-backend FLASH_ATTN` or `--attention-backend TRITON_ATTN` to avoid the issue.
 - Sets `VLLM_FLASHINFER_ALLREDUCE_BACKEND=trtllm` to avoid a [hang during CUDA graph capture](https://github.com/vllm-project/vllm/issues/35772) with TP>1. This is the [new default](https://github.com/vllm-project/vllm/pull/35793) in later vLLM versions but must be set explicitly in 0.16.0.
