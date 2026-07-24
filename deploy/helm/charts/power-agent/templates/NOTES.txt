@@ -29,7 +29,7 @@ RBAC scope: {{ if eq (include "power-agent.effectiveNamespaceRestricted" .) "tru
 
 {{- if .Values.dev.enabled }}
 
-DEV MODE: a single Pod (not a DaemonSet) was created, pinned to node "{{ .Values.dev.nodeName }}".
+DEV MODE: a single Pod (not a DaemonSet) was created, {{ if .Values.dev.nodeName }}pinned to node "{{ .Values.dev.nodeName }}"{{ else }}scheduled via the affinity rules in dev.affinity{{ end }}.
 
 ╭─ PREREQUISITE — the script ConfigMap MUST exist before this Pod can start ─╮
 │                                                                            │
