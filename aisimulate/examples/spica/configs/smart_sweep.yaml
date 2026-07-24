@@ -1,0 +1,56 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Experimental Spica example that maps directly to SmartSearchConfig.
+search_space:
+  deployment_mode: [disagg, agg]
+  model_name: deepseek-ai/DeepSeek-V3
+  hardware_sku: h200_sxm
+  gpu_budget: 32
+  backend: [vllm]
+  router_mode: [kv_router, round_robin]
+  planner_scaling_policy: [disabled, throughput_180_5, hybrid_180_5]
+  # other *_candidates omitted -> defaults apply
+workload:
+  trace_path: /data/replay/traffic.jsonl   # or omit and set a synthetic load (see below)
+  trace_format: mooncake
+  # Synthetic instead of a trace: set isl/osl + ONE of request_rate (open-loop),
+  # concurrency (fixed closed-loop), or kv_load_ratio (candidate-relative closed-loop),
+  # plus num_request_ratio. Request count scales with the concrete load.
+  #   isl: 1024
+  #   osl: 1024
+  #   concurrency: 64          # always one fixed value
+  #   num_request_ratio: 10    # -> 640 requests at concurrency 64
+goal:
+  # throughput | throughput_per_gpu | throughput_per_user | e2e_latency | goodput | goodput_per_gpu | pareto
+  target: goodput_per_gpu
+  sla: {ttft_ms: 2000, itl_ms: 30}  # required only for goodput / goodput_per_gpu (or a pareto with a goodput objective)
+sweep:
+  max_rounds: 40
+  parallel_evals: 16
+
+# --- Pareto front (e.g. reproduce an InferenceX throughput/gpu vs throughput/user curve) ---
+# Multi-objective: sweep normalized KV load and return the non-dominated frontier.
+# kv_load_ratio is a continuous [min, max] only under Pareto; when all load fields are
+# omitted for a synthetic Pareto workload it defaults to [0.0, 1.0].
+#
+# workload:
+#   isl: 1024
+#   osl: 1024
+#   kv_load_ratio: [0.0, 1.0]  # 0 -> concurrency 1; 1 -> estimated full decode/agg KV load
+#   num_request_ratio: 10
+# goal:
+#   target: pareto
+#   # pareto_objectives: [throughput_per_gpu, throughput_per_user]   # the default

@@ -1,0 +1,104 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "aisimulate"
+version = "0.1.0"
+description = "Experimental replay-backed deployment configuration search for NVIDIA Dynamo"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+license-files = ["LICENSE"]
+requires-python = ">=3.10,<3.13"
+authors = [
+    { name = "NVIDIA Inc.", email = "sw-dl-dynamo@nvidia.com" },
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "ai-dynamo>=1.3.0,<2.0.0",
+    "aiconfigurator>=0.9.0,<0.10.0",
+    "chex==0.1.87",
+    "filterpy==1.4.5",
+    "flax==0.10.0",
+    "google-vizier[jax]==0.1.21",
+    "jax==0.4.38",
+    "jaxlib==0.4.38",
+    "optax==0.2.4",
+    "pmdarima==2.1.1",
+    "prometheus-api-client==0.6.0",
+    "prophet==1.2.1",
+    "pydantic>=2.5",
+    "pyyaml>=6.0",
+    "scikit-learn==1.7.2",
+    "scipy>=1.14.0,<2.0",
+    "tfp-nightly[jax]==0.26.0.dev20260626",
+    "tqdm>=4.0.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.3.5",
+    "pytest-asyncio>=0.26.0",
+    "pytest-mock>=3.14.0",
+    "pytest-timeout>=2.3.1",
+    "pytest-xdist>=3.8.0",
+]
+
+[project.urls]
+Repository = "https://github.com/ai-dynamo/dynamo.git"
+Documentation = "https://github.com/ai-dynamo/dynamo/tree/main/docs/components/aisimulate"
+
+[tool.hatch.build.targets.wheel]
+packages = ["spica"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/LICENSE",
+    "/README.md",
+    "/pyproject.toml",
+    "/spica",
+    "/tests",
+    "/examples",
+]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+]
+asyncio_mode = "auto"
+filterwarnings = [
+    "error",
+    "ignore:jax.core.Primitive is deprecated.*:DeprecationWarning:(equinox|jax)(\\..*)?",
+    "ignore:datetime.datetime.utcnow\\(\\) is deprecated.*:DeprecationWarning:google.protobuf.internal.well_known_types",
+]
+markers = [
+    "gpu_0: marks tests that do not require a GPU",
+    "integration: marks integration tests",
+    "model: model id used by a test or parameter",
+    "planner: marks tests for the planner component",
+    "post_merge: marks tests to run after merge",
+    "pre_merge: marks tests to run before merging",
+    "timeout: test timeout in seconds",
+    "unit: marks unit tests",
+]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
