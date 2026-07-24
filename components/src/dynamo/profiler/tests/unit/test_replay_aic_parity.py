@@ -136,7 +136,6 @@ def test_run_synthetic_concurrency_replay_matches_aic_static_point_no_prefix(
         num_workers=1,
         replay_mode="offline",
         replay_concurrency=8,
-        arrival_interval_ms=0.0,
     )
     aic = _run_aic_static_point(
         backend_name=backend_name,
@@ -249,7 +248,6 @@ def test_run_synthetic_disagg_replay_preserves_aic_local_optimum(
             replay_concurrency=replay_concurrency,
             replay_mode="offline",
             router_mode="round_robin",
-            arrival_interval_ms=0.0,
         )
         reports[variant_name] = report["output_throughput_tok_s"] / total_gpu_budget
 
