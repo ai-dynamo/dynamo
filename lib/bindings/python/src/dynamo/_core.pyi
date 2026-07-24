@@ -1633,7 +1633,11 @@ class ModelInput:
 
 
 class ModelType:
-    """What type of request this model supports: Chat, Completions, Embedding, Tensor, Images, Videos, Realtime, or Empty (no OpenAI surface)"""
+    """OpenAI-style surfaces supported by a model.
+
+    Values are Chat, Completions, Embedding, Classify, Pooling, TensorBased,
+    Images, Audios, Videos, Realtime, and Empty (no OpenAI surface).
+    """
     # No OpenAI surface — used by prefill / encode workers whose role is
     # carried by WorkerType. Symmetric with the other ModelType.Foo members.
     Empty: ModelType
@@ -1649,12 +1653,29 @@ class ModelType:
     Audios: ModelType
     Videos: ModelType
     Realtime: ModelType
+    # Sequence-classification / cross-encoder pooling models served on /v1/classify.
+    Classify: ModelType
+    # Raw pooler output served on /v1/pooling (token embeddings, logits, rewards).
+    # Usually combined with Classify or Embedding: ModelType.Classify | ModelType.Pooling.
+    Pooling: ModelType
 
     def __or__(self, other: ModelType) -> ModelType:
         ...
 
     def supports_chat(self) -> bool:
         """Return True if this model type supports chat."""
+        ...
+
+    def supports_embedding(self) -> bool:
+        """Return True if this model type supports /v1/embeddings."""
+        ...
+
+    def supports_classify(self) -> bool:
+        """Return True if this model type supports /v1/classify."""
+        ...
+
+    def supports_pooling(self) -> bool:
+        """Return True if this model type supports /v1/pooling."""
         ...
 
 class RouterMode:
