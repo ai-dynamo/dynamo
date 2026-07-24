@@ -8,6 +8,7 @@ These tests verify that deployments can be created, become ready, and respond
 to chat completion requests correctly.
 """
 
+import json
 import logging
 import os
 import subprocess
@@ -48,6 +49,24 @@ DEFAULT_REQUEST_TIMEOUT = 120
 # This matches the validation threshold from the original shell-based deployment tests.
 MIN_RESPONSE_CONTENT_LENGTH = 100
 GAIE_MODEL_NAME = "Qwen/Qwen3-0.6B"
+JSON_LOG_REQUIRED_FIELDS = frozenset({"time", "level", "target", "message"})
+
+
+def find_structured_json_log(log_lines: Any) -> Dict[str, Any] | None:
+    """Return the first Dynamo JSONL record with the documented core fields."""
+    if isinstance(log_lines, str):
+        log_lines = log_lines.splitlines()
+
+    for line in log_lines:
+        try:
+            record = json.loads(line)
+        except (json.JSONDecodeError, TypeError):
+            continue
+
+        if isinstance(record, dict) and JSON_LOG_REQUIRED_FIELDS.issubset(record):
+            return record
+
+    return None
 
 
 def validate_chat_response(
@@ -168,6 +187,12 @@ async def test_deployment(
             f"{framework}/{profile}"
         )
 
+    if profile == "agg_logging":
+        logging_config = deployment_spec.get_logging_config()
+        assert logging_config[
+            "jsonl_enabled"
+        ], "The agg_logging deployment profile must enable DYN_LOGGING_JSONL"
+
     logger.info(
         f"Starting deployment test for {deployment_target.test_id} "
         f"(source: {deployment_target.source}, model: {model}, namespace: {namespace})"
@@ -235,6 +260,19 @@ async def test_deployment(
             expected_model=model,
             min_content_length=MIN_RESPONSE_CONTENT_LENGTH,
         )
+
+        if profile == "agg_logging":
+            frontend_logs = frontend_pod.logs(container="main")
+            json_log_record = find_structured_json_log(frontend_logs)
+            assert json_log_record is not None, (
+                "The agg_logging deployment served inference but the frontend "
+                "did not emit a structured Dynamo JSONL record"
+            )
+            logger.info(
+                "Validated structured JSON logging: target=%s message=%s",
+                json_log_record["target"],
+                json_log_record["message"],
+            )
 
         logger.info(
             f"Deployment test PASSED for {deployment_target.test_id} "
