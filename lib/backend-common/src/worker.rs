@@ -36,7 +36,10 @@ use crate::engine::{
 use crate::error::{BackendError, DynamoError, ErrorType};
 use crate::publisher::{PublisherHandles, setup_publishers};
 
-/// Default grace-period in seconds between discovery unregister and engine drain.
+/// Default grace-period in seconds reserved for request-plane propagation
+/// during shutdown. In-process engines use it between discovery unregister
+/// and engine drain. Remote engines use it after terminal engine drain and
+/// before discovery unregister so terminal responses can reach callers.
 /// Mirrors the Python `_DEFAULT_GRACE_PERIOD_SECS` constant.
 const DEFAULT_GRACE_PERIOD_SECS: f64 = 5.0;
 
@@ -285,6 +288,27 @@ impl EngineKind {
         }
     }
 
+    async fn watch(&self) -> Result<(), DynamoError> {
+        match self {
+            EngineKind::Llm(e) => e.watch().await,
+            EngineKind::Raw(_) => std::future::pending().await,
+        }
+    }
+
+    async fn drain(&self) -> Result<(), DynamoError> {
+        match self {
+            EngineKind::Llm(e) => e.drain().await,
+            EngineKind::Raw(_) => Ok(()),
+        }
+    }
+
+    fn drain_before_discovery_unregister(&self) -> bool {
+        match self {
+            EngineKind::Llm(e) => e.drain_before_discovery_unregister(),
+            EngineKind::Raw(_) => false,
+        }
+    }
+
     async fn setup_metrics(&self, ctx: MetricsCtx<'_>) -> Result<MetricsBindings, DynamoError> {
         match self {
             EngineKind::Llm(e) => e.setup_metrics(ctx).await,
@@ -362,6 +386,23 @@ impl EngineKind {
         }
     }
 
+    async fn on_model_ready(
+        &self,
+        endpoint: dynamo_runtime::component::Endpoint,
+        base_model: LocalModel,
+        model_type: ModelType,
+        worker_type: WorkerType,
+        needs: Vec<Vec<WorkerType>>,
+    ) -> Result<(), DynamoError> {
+        match self {
+            EngineKind::Llm(e) => {
+                e.on_model_ready(endpoint, base_model, model_type, worker_type, needs)
+                    .await
+            }
+            EngineKind::Raw(_) => Ok(()),
+        }
+    }
+
     /// Raw media engines (image/video/audio) register name-only — the engine
     /// loads the model itself and the model has no LLM artifacts (tokenizer /
     /// chat template / config.json) for Dynamo to fetch.
@@ -413,17 +454,14 @@ impl Worker {
     /// Lifecycle driver. Takes owned `self` — `Worker` is single-shot and
     /// cannot be reused after `run()` returns.
     ///
-    /// Shutdown sequence (mirrors `graceful_shutdown_with_discovery` in
-    /// `components/src/dynamo/common/utils/graceful_shutdown.py`):
-    ///   1. `endpoint.unregister_endpoint_instance()` — router stops routing.
-    ///   2. Sleep `DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS` (default 5s) to
-    ///      let in-flight router decisions complete.
-    ///   3. Poll `engine.is_quiescent()` until it returns true or the drain
-    ///      budget (`DYN_PREFILL_DRAIN_TIMEOUT_S`, default 30s) expires.
-    ///   4. `engine.cleanup()` — release engine resources while NATS / etcd
-    ///      are still reachable.
-    ///   5. Return — caller (`run.rs`) drives `runtime.shutdown()` for
-    ///      request-plane drain and transport teardown.
+    /// Shutdown sequence normally mirrors `graceful_shutdown_with_discovery`
+    /// in `components/src/dynamo/common/utils/graceful_shutdown.py`:
+    /// unregister, grace period, engine drain/quiescence, cleanup. Remote
+    /// engines may opt into drain-before-unregister when their Drain RPC
+    /// atomically closes admission. They drain, retain discovery for the grace
+    /// period so terminal responses can finish crossing the request plane, and
+    /// only then unregister. The caller (`run.rs`) drives `runtime.shutdown()`
+    /// after this sequence returns.
     ///
     /// A SIGTERM/SIGINT listener is installed at the top of `run` and
     /// shared via a [`CancellationToken`]:
@@ -755,16 +793,62 @@ impl Worker {
         Ok(())
     }
 
-    /// Full graceful-shutdown orchestrator: discovery unregister →
-    /// grace period → engine drain → cleanup. Shared by every shutdown path —
-    /// pre-serve (mid-start signal) and the serve loop's signal arm.
+    /// Full graceful-shutdown orchestrator. In-process engines unregister
+    /// before drain. Out-of-process engines that atomically close admission
+    /// opt into drain-before-unregister so discovery removal cannot cancel
+    /// their admitted response streams.
     async fn orchestrator_steps(&mut self, endpoint: &dynamo_runtime::component::Endpoint) {
-        if let Err(e) = endpoint.unregister_endpoint_instance().await {
-            tracing::warn!(error = %e, "discovery unregister failed");
-        } else {
-            tracing::info!("Endpoint unregistered from discovery");
+        let _ = self.finalize_serve(Some(endpoint), None).await;
+    }
+
+    /// Common terminal path for normal shutdown and engine-watch failure.
+    /// Keeping the watch error until after unregister/drain/cleanup prevents a
+    /// dead remote from leaving a stale discovery record or skipping cleanup.
+    async fn finalize_serve(
+        &mut self,
+        endpoint: Option<&dynamo_runtime::component::Endpoint>,
+        terminal_error: Option<DynamoError>,
+    ) -> Result<(), DynamoError> {
+        // A fatal watch result means the remote is already unhealthy; remove
+        // it immediately instead of holding a stale discovery record while a
+        // Drain RPC to the failed engine times out.
+        let drain_before_unregister =
+            terminal_error.is_none() && self.engine.drain_before_discovery_unregister();
+        if drain_before_unregister {
+            self.run_engine_drain_steps().await;
+            self.wait_for_request_plane_flush().await;
         }
-        self.run_engine_shutdown_steps().await;
+
+        if let Some(endpoint) = endpoint {
+            if let Err(e) = endpoint.unregister_endpoint_instance().await {
+                tracing::warn!(error = %e, "discovery unregister failed");
+            } else {
+                tracing::info!("Endpoint unregistered from discovery");
+            }
+        }
+
+        if drain_before_unregister {
+            self.cleanup_once().await;
+        } else {
+            self.run_engine_shutdown_steps().await;
+        }
+        terminal_error.map_or(Ok(()), Err)
+    }
+
+    /// Keep the registered request-plane endpoint alive briefly after a
+    /// remote engine reports terminal drain. The engine's gRPC stream can
+    /// finish before Dynamo has forwarded its final response through the
+    /// endpoint transport; unregistering immediately can otherwise cancel an
+    /// admitted caller between those two events.
+    async fn wait_for_request_plane_flush(&self) {
+        let grace = grace_period_secs();
+        if grace > 0.0 {
+            tracing::info!(
+                "Grace period {:.2}s after drain for request-plane flush",
+                grace
+            );
+            tokio::time::sleep(Duration::from_secs_f64(grace)).await;
+        }
     }
 
     /// Start the engine exactly once. `Worker::run` consumes `self`, so all
@@ -853,6 +937,16 @@ impl Worker {
         // still runs before `register_engine_controls`, so `/engine/*` cannot
         // fire before the engine has the endpoint.
         self.engine.on_endpoint_ready(endpoint.clone()).await?;
+
+        self.engine
+            .on_model_ready(
+                endpoint.clone(),
+                local_model.clone(),
+                model_type,
+                worker_type,
+                needs.clone(),
+            )
+            .await?;
 
         local_model
             .attach(
@@ -978,8 +1072,11 @@ impl Worker {
         }
         let serve_fut = builder.start();
         tokio::pin!(serve_fut);
+        let watched_engine = self.engine.clone();
+        let watch_fut = watched_engine.watch();
+        tokio::pin!(watch_fut);
 
-        tokio::select! {
+        let watch_error = tokio::select! {
             biased;
             result = &mut serve_fut => {
                 match result {
@@ -990,6 +1087,7 @@ impl Worker {
                         tracing::info!(
                             "Endpoint completed gracefully; running shutdown orchestration"
                         );
+                        None
                     }
                     // Serve errored; cleanup_once in run() is the safety net.
                     Err(e) => {
@@ -1002,11 +1100,17 @@ impl Worker {
             }
             _ = shutdown.cancelled() => {
                 tracing::info!("Received shutdown signal; running graceful orchestration");
+                None
             }
-        }
+            result = &mut watch_fut => {
+                Some(result.err().unwrap_or_else(|| err(
+                    ErrorType::Backend(BackendError::EngineShutdown),
+                    "engine watch ended unexpectedly",
+                )))
+            }
+        };
 
-        self.orchestrator_steps(&endpoint).await;
-        Ok(())
+        self.finalize_serve(Some(&endpoint), watch_error).await
     }
 
     /// Engine-facing shutdown sequence: grace period sleep → drain loop on
@@ -1028,14 +1132,36 @@ impl Worker {
             tokio::time::sleep(Duration::from_secs_f64(grace)).await;
         }
 
+        self.run_engine_drain_steps().await;
+        self.cleanup_once().await;
+    }
+
+    /// Close engine admission and wait for terminal drain/quiescence within
+    /// the configured shutdown budget. Cleanup is deliberately separate so
+    /// an out-of-process engine can drain before discovery unregister while
+    /// preserving the legacy unregister-first sequence for other engines.
+    async fn run_engine_drain_steps(&self) {
         let drain_start = std::time::Instant::now();
-        self.drain_until_idle_or_deadline().await;
+        let configured = drain_timeout_secs();
+        let cap = (graceful_shutdown_timeout().as_secs_f64() - CLEANUP_RESERVE_S).max(0.0);
+        let budget = Duration::from_secs_f64(configured.min(cap));
+        let drain_deadline = tokio::time::Instant::now() + budget;
+        match tokio::time::timeout(budget, self.engine.drain()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                tracing::warn!(error = %e, "engine drain request failed; continuing shutdown")
+            }
+            Err(_) => tracing::warn!(
+                timeout_s = budget.as_secs_f64(),
+                "engine drain request timed out; continuing shutdown"
+            ),
+        }
+        let remaining = drain_deadline.saturating_duration_since(tokio::time::Instant::now());
+        self.drain_until_idle_or_deadline(remaining).await;
         let drain_elapsed = drain_start.elapsed().as_secs_f64();
         if let Some(lifecycle) = self.lifecycle.as_ref() {
             lifecycle.observe_drain_time(drain_elapsed);
         }
-
-        self.cleanup_once().await;
     }
 
     /// Hold a prefill worker open until its KV transfers finish, so cleanup
@@ -1046,21 +1172,19 @@ impl Worker {
     /// `DRAIN_POLL_INTERVAL_S`, exiting on `Some(true)` or when the budget
     /// expires. Budget = `DYN_PREFILL_DRAIN_TIMEOUT_S` capped at
     /// `graceful_shutdown_timeout - CLEANUP_RESERVE_S`.
-    async fn drain_until_idle_or_deadline(&self) {
+    async fn drain_until_idle_or_deadline(&self, budget: Duration) {
         if !self.config.disaggregation_mode.is_prefill() {
             return;
         }
-        let configured = drain_timeout_secs();
-        let cap = (graceful_shutdown_timeout().as_secs_f64() - CLEANUP_RESERVE_S).max(0.0);
-        let budget = configured.min(cap);
-        let deadline = std::time::Instant::now() + Duration::from_secs_f64(budget);
+        let deadline = std::time::Instant::now() + budget;
         let start = std::time::Instant::now();
         let mut last_heartbeat = start;
         let mut announced = false;
         loop {
-            match self.engine.is_quiescent().await {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            match tokio::time::timeout(remaining, self.engine.is_quiescent()).await {
                 // Quiescent: in-flight transfers done, safe to exit drain.
-                Ok(Some(true)) => {
+                Ok(Ok(Some(true))) => {
                     if announced {
                         tracing::info!(
                             "drain: exited (quiescent, elapsed={:.1}s)",
@@ -1070,16 +1194,22 @@ impl Worker {
                     return;
                 }
                 // Busy (Some(false)) or no introspection (None): keep polling.
-                Ok(Some(false)) | Ok(None) => {}
-                Err(e) => {
+                Ok(Ok(Some(false))) | Ok(Ok(None)) => {}
+                Ok(Err(e)) => {
                     tracing::debug!(error = %e, "is_quiescent raised; treating as not quiescent")
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        "is_quiescent timed out at drain deadline; proceeding with cleanup"
+                    );
+                    return;
                 }
             }
             if !announced {
                 // First non-quiescent poll: announce once that we're waiting.
                 tracing::info!(
                     "drain: waiting for prefill to quiesce; polling is_quiescent (timeout={:.1}s)",
-                    budget
+                    budget.as_secs_f64()
                 );
                 announced = true;
             }
@@ -1672,6 +1802,7 @@ async fn build_local_model(
     let mut builder = LocalModelBuilder::default();
     builder
         .model_name(served_name)
+        .model_aliases(engine_config.model_aliases.clone())
         .kv_cache_block_size(llm.kv_cache_block_size)
         .custom_template_path(config.custom_jinja_template.clone())
         .media_decoder(config.media_decoder.clone())
@@ -2011,6 +2142,7 @@ mod tests {
         };
         let engine_config = EngineConfig {
             model: "media-config-test".to_string(),
+            model_aliases: vec!["media-alias".to_string()],
             ..EngineConfig::default()
         };
 
@@ -2020,6 +2152,7 @@ mod tests {
 
         assert!(local_model.card().media_decoder.is_some());
         assert!(local_model.card().media_fetcher.is_some());
+        assert_eq!(local_model.card().aliases, ["media-alias"]);
     }
 
     #[test]
@@ -2499,6 +2632,23 @@ mod tests {
         assert_eq!(worker.state, LifecycleState::Stopped);
     }
 
+    #[tokio::test]
+    async fn watch_failure_still_runs_cleanup_before_returning_error() {
+        let (engine, cleanup_calls) = StateMockEngine::new(false);
+        let mut worker = worker_with(engine);
+        worker.start_engine(0).await.unwrap();
+        let watch_error = err(
+            ErrorType::Backend(BackendError::EngineShutdown),
+            "synthetic watch failure",
+        );
+
+        let result = worker.finalize_serve(None, Some(watch_error)).await;
+
+        assert!(result.is_err(), "watch failure must remain fatal");
+        assert_eq!(cleanup_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(worker.state, LifecycleState::Stopped);
+    }
+
     // The pre-start shutdown path is handled in `run_inner` via a
     // `CancellationToken` cancellation check before `start_engine` is
     // called — not by flipping state to `Stopped` first. There is no
@@ -2567,6 +2717,11 @@ mod tests {
             }
         }
 
+        async fn drain(&self) -> Result<(), DynamoError> {
+            self.log.lock().unwrap().push("drain");
+            Ok(())
+        }
+
         async fn cleanup(&self) -> Result<(), DynamoError> {
             self.log.lock().unwrap().push("cleanup");
             Ok(())
@@ -2586,8 +2741,8 @@ mod tests {
         let recorded = log.lock().unwrap().clone();
         assert_eq!(
             recorded,
-            vec!["start", "is_quiescent", "cleanup"],
-            "is_quiescent (drain) must run before cleanup"
+            vec!["start", "drain", "is_quiescent", "cleanup"],
+            "remote drain and is_quiescent must run before cleanup"
         );
     }
 
@@ -2603,7 +2758,7 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap();
         let saved = std::env::var(DRAIN_TIMEOUT_ENV).ok();
         // SAFETY: tests in this mod serialize env access via ENV_LOCK.
-        unsafe { std::env::set_var(DRAIN_TIMEOUT_ENV, "0") };
+        unsafe { std::env::set_var(DRAIN_TIMEOUT_ENV, "0.01") };
 
         let (engine, log) = OrderingMockEngine::new(true); // is_quiescent fails
         let mut worker = worker_with_prefill(engine);
@@ -2613,7 +2768,7 @@ mod tests {
 
         // is_quiescent ran at least once (and errored), then cleanup ran.
         let recorded = log.lock().unwrap().clone();
-        assert!(recorded.starts_with(&["start", "is_quiescent"]));
+        assert!(recorded.starts_with(&["start", "drain", "is_quiescent"]));
         assert_eq!(recorded.last().copied(), Some("cleanup"));
         assert_eq!(worker.state, LifecycleState::Stopped);
 
@@ -2627,11 +2782,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shutdown_steps_skip_drain_for_non_prefill() {
-        // Drain is prefill-only: an aggregated (or decode) worker must go
-        // straight to cleanup without ever polling is_quiescent, regardless of
-        // what the engine would report. Guards the mode-gate invariant that
-        // makes the `Ok(None)` default safe (only prefill workers drain).
+    async fn shutdown_steps_skip_quiescence_poll_for_non_prefill() {
+        // Process-wide engine drain applies to every role. Only prefill needs
+        // the additional KV-transfer quiescence polling phase.
         let (engine, log) = OrderingMockEngine::new(false);
         let mut worker = worker_with(engine); // WorkerConfig::default() => Aggregated
         worker.start_engine(0).await.unwrap();
@@ -2641,9 +2794,85 @@ mod tests {
         let recorded = log.lock().unwrap().clone();
         assert_eq!(
             recorded,
-            vec!["start", "cleanup"],
-            "non-prefill workers must not poll is_quiescent (no drain)"
+            vec!["start", "drain", "cleanup"],
+            "non-prefill workers must drain remotely without polling is_quiescent"
         );
+    }
+
+    struct HangingDrainEngine {
+        cleanup_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl LLMEngine for HangingDrainEngine {
+        async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
+            Ok(EngineConfig {
+                model: "mock".to_string(),
+                ..Default::default()
+            })
+        }
+
+        async fn generate(
+            &self,
+            _request: PreprocessedRequest,
+            _ctx: crate::engine::GenerateContext,
+        ) -> Result<
+            BoxStream<'static, Result<crate::engine::LLMEngineOutput, DynamoError>>,
+            DynamoError,
+        > {
+            unreachable!("not used in shutdown test")
+        }
+
+        async fn drain(&self) -> Result<(), DynamoError> {
+            std::future::pending().await
+        }
+
+        async fn cleanup(&self) -> Result<(), DynamoError> {
+            self.cleanup_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn hanging_remote_drain_is_bounded_and_cleanup_still_runs() {
+        use dynamo_runtime::config::environment_names::worker as env_worker;
+
+        let _guard = ENV_LOCK.lock().unwrap();
+        let graceful_key = env_worker::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT;
+        let saved_drain = std::env::var(DRAIN_TIMEOUT_ENV).ok();
+        let saved_graceful = std::env::var(graceful_key).ok();
+        // SAFETY: env-mutating shutdown tests are serialized by ENV_LOCK.
+        unsafe {
+            std::env::set_var(DRAIN_TIMEOUT_ENV, "0.01");
+            std::env::set_var(graceful_key, "6");
+        }
+
+        let cleanup_calls = Arc::new(AtomicUsize::new(0));
+        let engine = Arc::new(HangingDrainEngine {
+            cleanup_calls: cleanup_calls.clone(),
+        });
+        let mut worker = worker_with(engine);
+        worker.start_engine(0).await.unwrap();
+        tokio::time::timeout(
+            Duration::from_millis(500),
+            worker.run_engine_shutdown_steps_with_grace(0.0),
+        )
+        .await
+        .expect("hanging remote drain must be bounded");
+        assert_eq!(cleanup_calls.load(Ordering::SeqCst), 1);
+
+        // SAFETY: see serialized env access above.
+        unsafe {
+            match saved_drain {
+                Some(value) => std::env::set_var(DRAIN_TIMEOUT_ENV, value),
+                None => std::env::remove_var(DRAIN_TIMEOUT_ENV),
+            }
+            match saved_graceful {
+                Some(value) => std::env::set_var(graceful_key, value),
+                None => std::env::remove_var(graceful_key),
+            }
+        }
     }
 
     // The "drain skipped when engine never started" scenario isn't
@@ -2857,7 +3086,7 @@ mod tests {
         );
 
         let recorded = log.lock().unwrap().clone();
-        assert_eq!(recorded, vec!["start", "is_quiescent", "cleanup"]);
+        assert_eq!(recorded, vec!["start", "drain", "is_quiescent", "cleanup"]);
     }
 
     // -------------------------------------------------------------------

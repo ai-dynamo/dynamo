@@ -236,12 +236,13 @@ pub struct EngineConfig {
 #[pymethods]
 impl EngineConfig {
     #[new]
-    #[pyo3(signature = (model, served_model_name = None, runtime_data = None, llm = None))]
+    #[pyo3(signature = (model, served_model_name = None, runtime_data = None, llm = None, model_aliases = None))]
     fn new(
         model: String,
         served_model_name: Option<String>,
         runtime_data: Option<&Bound<'_, PyDict>>,
         llm: Option<LlmRegistration>,
+        model_aliases: Option<Vec<String>>,
     ) -> PyResult<Self> {
         let runtime_data = runtime_data
             .map(|dict| depythonize::<HashMap<String, serde_json::Value>>(dict))
@@ -253,6 +254,7 @@ impl EngineConfig {
             inner: RsEngineConfig {
                 model,
                 served_model_name,
+                model_aliases: model_aliases.unwrap_or_default(),
                 runtime_data,
                 llm: llm.map(|l| l.inner),
             },
@@ -266,6 +268,11 @@ impl EngineConfig {
     #[getter]
     fn served_model_name(&self) -> Option<&str> {
         self.inner.served_model_name.as_deref()
+    }
+
+    #[getter]
+    fn model_aliases(&self) -> &[String] {
+        &self.inner.model_aliases
     }
     #[getter]
     fn llm(&self) -> Option<LlmRegistration> {
@@ -859,6 +866,7 @@ impl PyEngineCore {
             Ok(RsEngineConfig {
                 model: bound.getattr("model")?.extract()?,
                 served_model_name: opt_attr::<String>(bound, "served_model_name")?,
+                model_aliases: opt_attr::<Vec<String>>(bound, "model_aliases")?.unwrap_or_default(),
                 runtime_data: match bound.getattr("runtime_data") {
                     Ok(value) if !value.is_none() => depythonize(&value).map_err(to_pyerr)?,
                     Ok(_) => HashMap::new(),
@@ -1565,6 +1573,7 @@ fn depythonize_kv_source(item: &Bound<'_, PyAny>) -> PyResult<RsKvEventSource> {
             endpoint: item.getattr("endpoint")?.extract()?,
             topic: item.getattr("topic")?.extract()?,
             dp_rank,
+            image_token_id: item.getattr("image_token_id")?.extract()?,
         }),
         "PushSource" => {
             // Capture the Python callable as a `PyObject` and wrap in a

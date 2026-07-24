@@ -7,9 +7,15 @@ use dynamo_kv_router::{
     RouterConfigOverride,
     indexer::RoutingDecisionHashes,
     protocols::{BlockExtraInfo, RoutingConstraints, WorkerId, WorkerWithDpRank},
-    scheduling::{RequestLifecycleLease, RequestProgressUpdater, RoutingEligibility},
+    scheduling::{
+        RequestLifecycleLease, RequestProgressUpdater, RoutingEligibility, WorkerEligibilityError,
+    },
 };
-use dynamo_runtime::{dynamo_nvtx_range, pipeline::Error};
+use dynamo_runtime::{
+    dynamo_nvtx_range,
+    error::{DynamoError, ErrorType},
+    pipeline::Error,
+};
 
 use crate::{
     kv_router::{FindBestMatchOutcome, push_router::KvPushRouter},
@@ -68,6 +74,30 @@ struct BestMatchArgs<'a> {
     pinned_worker: Option<WorkerWithDpRank>,
     allowed_worker_ids: Option<HashSet<WorkerId>>,
     routing_constraints: RoutingConstraints,
+}
+
+fn pinned_worker_eligibility_error(
+    pinned_worker: WorkerWithDpRank,
+    error: WorkerEligibilityError,
+) -> DynamoError {
+    let error_type = match error {
+        WorkerEligibilityError::WorkerUnavailable { .. } => ErrorType::Unavailable,
+        WorkerEligibilityError::WorkerOverloaded { .. } => ErrorType::ResourceExhausted,
+        WorkerEligibilityError::WorkerNotAllowed { .. }
+        | WorkerEligibilityError::DpRankUnavailable { .. }
+        | WorkerEligibilityError::RoutingConstraintsUnsatisfied { .. } => {
+            ErrorType::InvalidArgument
+        }
+    };
+    let message = format!(
+        "Pinned worker {} dp_rank {} is not eligible: {error}",
+        pinned_worker.worker_id, pinned_worker.dp_rank
+    );
+    DynamoError::builder()
+        .error_type(error_type)
+        .message(message)
+        .cause(error)
+        .build()
 }
 
 impl KvPushRouter {
@@ -210,11 +240,7 @@ impl KvPushRouter {
                 &routing_constraints,
             );
             if let Err(error) = eligibility.validate_worker_rank(&configs, pinned_worker) {
-                return Err(anyhow::anyhow!(
-                    "Pinned worker {} dp_rank {} is not eligible: {error}",
-                    pinned_worker.worker_id,
-                    pinned_worker.dp_rank
-                ));
+                return Err(pinned_worker_eligibility_error(pinned_worker, error).into());
             }
         }
 
@@ -267,9 +293,13 @@ fn resolve_pinned_worker_rank(
     unique_dp_rank: Option<u32>,
 ) -> Result<WorkerWithDpRank, Error> {
     let Some(dp_rank) = requested_dp_rank.or(unique_dp_rank) else {
-        return Err(anyhow::anyhow!(
-            "Pinned worker {worker_id} requires an explicit dp_rank because it has multiple or unknown DP ranks"
-        ));
+        return Err(DynamoError::builder()
+            .error_type(ErrorType::InvalidArgument)
+            .message(format!(
+                "Pinned worker {worker_id} requires an explicit dp_rank because it has multiple or unknown DP ranks"
+            ))
+            .build()
+            .into());
     };
 
     Ok(WorkerWithDpRank::new(worker_id, dp_rank))
@@ -306,7 +336,10 @@ mod tests {
         scheduling::{RoutingEligibility, WorkerEligibilityError},
     };
 
-    use super::{merge_affinity_pin, pinned_worker_hint, resolve_pinned_worker_rank};
+    use super::{
+        merge_affinity_pin, pinned_worker_eligibility_error, pinned_worker_hint,
+        resolve_pinned_worker_rank,
+    };
     use crate::{
         local_model::runtime_config::ModelRuntimeConfig,
         protocols::common::{preprocessor::RoutingHints, timing::RequestPhase},
@@ -328,10 +361,64 @@ mod tests {
 
     #[test]
     fn resolve_pinned_worker_rank_rejects_unresolved_rank() {
-        let error = resolve_pinned_worker_rank(7, None, None)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("requires an explicit dp_rank"));
+        let error = resolve_pinned_worker_rank(7, None, None).unwrap_err();
+        let typed = error
+            .downcast_ref::<dynamo_runtime::error::DynamoError>()
+            .expect("unresolved pinned rank must stay typed for HTTP mapping");
+        assert_eq!(
+            typed.error_type(),
+            dynamo_runtime::error::ErrorType::InvalidArgument
+        );
+        assert!(typed.message().contains("requires an explicit dp_rank"));
+    }
+
+    #[test]
+    fn pinned_worker_eligibility_errors_remain_typed_for_http_mapping() {
+        use dynamo_runtime::error::{DynamoError, ErrorType};
+
+        let worker = WorkerWithDpRank::new(7, 0);
+        let cases = [
+            (
+                WorkerEligibilityError::WorkerUnavailable { worker_id: 7 },
+                ErrorType::Unavailable,
+            ),
+            (
+                WorkerEligibilityError::WorkerOverloaded { worker_id: 7 },
+                ErrorType::ResourceExhausted,
+            ),
+            (
+                WorkerEligibilityError::WorkerNotAllowed { worker_id: 7 },
+                ErrorType::InvalidArgument,
+            ),
+            (
+                WorkerEligibilityError::DpRankUnavailable {
+                    worker_id: 7,
+                    dp_rank: 0,
+                    start: 1,
+                    end: 2,
+                },
+                ErrorType::InvalidArgument,
+            ),
+            (
+                WorkerEligibilityError::RoutingConstraintsUnsatisfied { worker_id: 7 },
+                ErrorType::InvalidArgument,
+            ),
+        ];
+
+        for (error, expected) in cases {
+            let mapped = pinned_worker_eligibility_error(worker, error);
+            assert_eq!(mapped.error_type(), expected);
+        }
+
+        let error: anyhow::Error = DynamoError::builder()
+            .error_type(ErrorType::Unavailable)
+            .message("pinned worker is unavailable")
+            .build()
+            .into();
+
+        assert!(crate::http::service::metrics::request_was_unavailable(
+            error.as_ref()
+        ));
     }
 
     #[test]

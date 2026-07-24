@@ -21,11 +21,16 @@ mod tool_choice;
 pub mod tools;
 use anyhow::Context;
 use anyhow::{Result, bail};
+use async_openai::types::chat::ChatCompletionRequestDeveloperMessageContentPart;
 
 use dynamo_protocols::types::{
-    ChatCompletionMessageContent, ChatCompletionRequestMessage,
-    ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
-    ChatCompletionToolChoiceOption, EncodingFormat,
+    ChatCompletionMessageContent, ChatCompletionRequestAssistantMessageContent,
+    ChatCompletionRequestAssistantMessageContentPart, ChatCompletionRequestDeveloperMessageContent,
+    ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageContent,
+    ChatCompletionRequestSystemMessageContentPart, ChatCompletionRequestToolMessageContent,
+    ChatCompletionRequestToolMessageContentPart, ChatCompletionRequestUserMessageContent,
+    ChatCompletionRequestUserMessageContentPart, ChatCompletionToolChoiceOption, EncodingFormat,
+    ReasoningContent,
 };
 use dynamo_renderer::OAIPromptFormatter;
 use dynamo_runtime::config::is_truthy;
@@ -699,7 +704,12 @@ impl OpenAIPreprocessor {
                     // explicit field and falls back to the spec value, so it's
                     // the single id used both for the engagement gate and the
                     // routing-fill below.
-                    let img_tok = routing_tokens.chat_placeholder_token_id;
+                    let img_tok = runtime_config
+                        .runtime_data
+                        .get("openengine_routing_image_token_id")
+                        .and_then(serde_json::Value::as_u64)
+                        .and_then(|value| crate::protocols::TokenIdType::try_from(value).ok())
+                        .or(routing_tokens.chat_placeholder_token_id);
                     let bos_tok_string = routing_tokens.bos_token_string;
 
                     match (counter.is_some(), img_tok.is_some()) {
@@ -1228,10 +1238,217 @@ impl OpenAIPreprocessor {
             } else {
                 self.formatter.render(request)?
             };
-            Ok(Some(formatted_prompt))
+            Ok(Some(Self::repair_numbered_media_placeholders(
+                formatted_prompt,
+                request.typed_messages(),
+            )))
         } else {
             Ok(None)
         }
+    }
+
+    /// Repair string-content templates that expose a single numbered image
+    /// placeholder for every media item. The renderer flattens audio/video
+    /// parts through that image template because it does not retain
+    /// per-modality placeholder maps on this path. Rewrite only when the full
+    /// expected numbered sequence is present; otherwise preserve the rendered
+    /// prompt byte-for-byte.
+    fn repair_numbered_media_placeholders(
+        prompt: String,
+        messages: Option<&[ChatCompletionRequestMessage]>,
+    ) -> String {
+        let Some(messages) = messages else {
+            return prompt;
+        };
+        let mut replacements = Vec::new();
+        let mut expected_sources = HashMap::<String, usize>::new();
+        let mut needs_repair = false;
+        let (mut image, mut video, mut audio) = (0_u32, 0_u32, 0_u32);
+        for message in messages {
+            let ChatCompletionRequestMessage::User(user) = message else {
+                continue;
+            };
+            let ChatCompletionRequestUserMessageContent::Array(parts) = &user.content else {
+                continue;
+            };
+            // String-content renderers restart their synthetic image slot for
+            // each message, while TRT-LLM indexes each target modality over
+            // the complete conversation.
+            let mut slot = 0_u32;
+            for part in parts {
+                let target = match part {
+                    ChatCompletionRequestUserMessageContentPart::ImageUrl(_) => {
+                        slot += 1;
+                        image += 1;
+                        format!("<|image_{image}|>")
+                    }
+                    ChatCompletionRequestUserMessageContentPart::VideoUrl(_) => {
+                        slot += 1;
+                        video += 1;
+                        needs_repair = true;
+                        format!("<|video_{video}|>")
+                    }
+                    ChatCompletionRequestUserMessageContentPart::AudioUrl(_) => {
+                        slot += 1;
+                        audio += 1;
+                        needs_repair = true;
+                        format!("<|audio_{audio}|>")
+                    }
+                    _ => continue,
+                };
+                let source = format!("<|image_{slot}|>");
+                *expected_sources.entry(source.clone()).or_default() += 1;
+                replacements.push((source, target));
+            }
+        }
+        if !needs_repair || replacements.is_empty() {
+            return prompt;
+        }
+
+        fn message_text_contains(message: &ChatCompletionRequestMessage, needle: &str) -> bool {
+            let contains = |value: &str| value.contains(needle);
+            let optional_contains = |value: Option<&String>| value.is_some_and(|v| contains(v));
+
+            match message {
+                ChatCompletionRequestMessage::Developer(message) => {
+                    optional_contains(message.name.as_ref())
+                        || match &message.content {
+                            ChatCompletionRequestDeveloperMessageContent::Text(text) => {
+                                contains(text)
+                            }
+                            ChatCompletionRequestDeveloperMessageContent::Array(parts) => {
+                                parts.iter().any(|part| match part {
+                                    ChatCompletionRequestDeveloperMessageContentPart::Text(
+                                        text,
+                                    ) => contains(&text.text),
+                                })
+                            }
+                        }
+                }
+                ChatCompletionRequestMessage::System(message) => {
+                    optional_contains(message.name.as_ref())
+                        || match &message.content {
+                            ChatCompletionRequestSystemMessageContent::Text(text) => contains(text),
+                            ChatCompletionRequestSystemMessageContent::Array(parts) => {
+                                parts.iter().any(|part| match part {
+                                    ChatCompletionRequestSystemMessageContentPart::Text(text) => {
+                                        contains(&text.text)
+                                    }
+                                })
+                            }
+                        }
+                }
+                ChatCompletionRequestMessage::User(message) => {
+                    optional_contains(message.name.as_ref()) || match &message.content {
+                        ChatCompletionRequestUserMessageContent::Text(text) => contains(text),
+                        ChatCompletionRequestUserMessageContent::Array(parts) => {
+                            parts.iter().any(|part| match part {
+                                ChatCompletionRequestUserMessageContentPart::Text(text) => {
+                                    contains(&text.text)
+                                }
+                                ChatCompletionRequestUserMessageContentPart::ImageUrl(_)
+                                | ChatCompletionRequestUserMessageContentPart::VideoUrl(_)
+                                | ChatCompletionRequestUserMessageContentPart::AudioUrl(_)
+                                | ChatCompletionRequestUserMessageContentPart::InputAudio(_) => {
+                                    false
+                                }
+                            })
+                        }
+                    }
+                }
+                ChatCompletionRequestMessage::Assistant(message) => {
+                    #[allow(deprecated)]
+                    let legacy_function_call_contains = message
+                        .function_call
+                        .as_ref()
+                        .is_some_and(|call| contains(&call.name) || contains(&call.arguments));
+                    optional_contains(message.name.as_ref())
+                        || optional_contains(message.refusal.as_ref())
+                        || message
+                            .audio
+                            .as_ref()
+                            .is_some_and(|audio| contains(&audio.id))
+                        || legacy_function_call_contains
+                        || message.reasoning_content.as_ref().is_some_and(|reasoning| {
+                            match reasoning {
+                                ReasoningContent::Text(text) => contains(text),
+                                ReasoningContent::Segments(segments) => {
+                                    segments.iter().any(|text| contains(text))
+                                }
+                            }
+                        })
+                        || message
+                            .content
+                            .as_ref()
+                            .is_some_and(|content| match content {
+                                ChatCompletionRequestAssistantMessageContent::Text(text) => {
+                                    contains(text)
+                                }
+                                ChatCompletionRequestAssistantMessageContent::Array(parts) => {
+                                    parts.iter().any(|part| {
+                                        match part {
+                                    ChatCompletionRequestAssistantMessageContentPart::Text(
+                                        text,
+                                    ) => contains(&text.text),
+                                    ChatCompletionRequestAssistantMessageContentPart::Refusal(
+                                        refusal,
+                                    ) => contains(&refusal.refusal),
+                                }
+                                    })
+                                }
+                            })
+                        || message.tool_calls.as_ref().is_some_and(|calls| {
+                            calls.iter().any(|call| {
+                                contains(&call.id)
+                                    || contains(&call.function.name)
+                                    || contains(&call.function.arguments)
+                            })
+                        })
+                }
+                ChatCompletionRequestMessage::Tool(message) => {
+                    contains(&message.tool_call_id)
+                        || match &message.content {
+                            ChatCompletionRequestToolMessageContent::Text(text) => contains(text),
+                            ChatCompletionRequestToolMessageContent::Array(parts) => {
+                                parts.iter().any(|part| match part {
+                                    ChatCompletionRequestToolMessageContentPart::Text(text) => {
+                                        contains(&text.text)
+                                    }
+                                })
+                            }
+                        }
+                }
+                ChatCompletionRequestMessage::Function(message) => {
+                    contains(&message.name) || optional_contains(message.content.as_ref())
+                }
+            }
+        }
+
+        // A user may include placeholder-looking text of their own. Without
+        // renderer provenance, an extra occurrence is ambiguous; preserve the
+        // prompt instead of rewriting user content or a mismatched slot.
+        if expected_sources.iter().any(|(source, expected)| {
+            prompt.match_indices(source).count() != *expected
+                || messages
+                    .iter()
+                    .any(|message| message_text_contains(message, source))
+        }) {
+            return prompt;
+        }
+
+        let mut repaired = String::with_capacity(prompt.len());
+        let mut cursor = 0;
+        for (source, target) in replacements {
+            let Some(relative) = prompt[cursor..].find(&source) else {
+                return prompt;
+            };
+            let start = cursor + relative;
+            repaired.push_str(&prompt[cursor..start]);
+            repaired.push_str(&target);
+            cursor = start + source.len();
+        }
+        repaired.push_str(&prompt[cursor..]);
+        repaired
     }
 
     /// Replace inline `data:` URLs with empty strings in message content parts.
@@ -3756,6 +3973,7 @@ impl
 #[cfg(test)]
 mod strip_tests {
     use super::OpenAIPreprocessor;
+    use dynamo_protocols::types::ChatCompletionRequestMessage;
 
     #[test]
     fn test_strip_inline_data_urls_replaces_data_urls() {
@@ -3808,6 +4026,175 @@ mod strip_tests {
         let mut messages = serde_json::json!([]);
         OpenAIPreprocessor::strip_inline_data_urls(&mut messages);
         assert_eq!(messages, serde_json::json!([]));
+    }
+
+    #[test]
+    fn test_repair_numbered_media_placeholders_preserves_modality_indexes() {
+        let messages: Vec<ChatCompletionRequestMessage> =
+            serde_json::from_value(serde_json::json!([{
+                "role": "user",
+                "content": [
+                    {"type": "audio_url", "audio_url": {"url": "data:audio/wav;base64,AAAA"}},
+                    {"type": "text", "text": "compare"},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+                    {"type": "audio_url", "audio_url": {"url": "data:audio/wav;base64,BBBB"}}
+                ]
+            }]))
+            .unwrap();
+        let rendered = "<|user|><|image_1|>compare<|image_2|><|image_3|><|end|>";
+        assert_eq!(
+            OpenAIPreprocessor::repair_numbered_media_placeholders(
+                rendered.to_string(),
+                Some(&messages),
+            ),
+            "<|user|><|audio_1|>compare<|image_1|><|audio_2|><|end|>"
+        );
+    }
+
+    #[test]
+    fn test_repair_numbered_media_placeholders_fails_closed() {
+        let messages: Vec<ChatCompletionRequestMessage> =
+            serde_json::from_value(serde_json::json!([{
+                "role": "user",
+                "content": [
+                    {"type": "audio_url", "audio_url": {"url": "data:audio/wav;base64,AAAA"}}
+                ]
+            }]))
+            .unwrap();
+        let rendered = "<|user|><audio><|end|>";
+        assert_eq!(
+            OpenAIPreprocessor::repair_numbered_media_placeholders(
+                rendered.to_string(),
+                Some(&messages),
+            ),
+            rendered
+        );
+    }
+
+    #[test]
+    fn test_repair_numbered_media_placeholders_numbers_modalities_across_messages() {
+        let messages: Vec<ChatCompletionRequestMessage> =
+            serde_json::from_value(serde_json::json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "audio_url", "audio_url": {"url": "data:audio/wav;base64,AAAA"}}
+                    ]
+                },
+                {"role": "assistant", "content": "first"},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "audio_url", "audio_url": {"url": "data:audio/wav;base64,BBBB"}},
+                        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+                    ]
+                }
+            ]))
+            .unwrap();
+        let rendered = "<|user|><|image_1|><|end|><|assistant|>first<|end|><|user|><|image_1|><|image_2|><|end|>";
+        assert_eq!(
+            OpenAIPreprocessor::repair_numbered_media_placeholders(
+                rendered.to_string(),
+                Some(&messages),
+            ),
+            "<|user|><|audio_1|><|end|><|assistant|>first<|end|><|user|><|audio_2|><|image_1|><|end|>"
+        );
+    }
+
+    #[test]
+    fn test_repair_numbered_media_placeholders_preserves_literal_collision() {
+        let messages: Vec<ChatCompletionRequestMessage> =
+            serde_json::from_value(serde_json::json!([{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "literal <|image_1|>"},
+                    {"type": "audio_url", "audio_url": {"url": "data:audio/wav;base64,AAAA"}}
+                ]
+            }]))
+            .unwrap();
+        let rendered = "<|user|>literal <|image_1|><|image_1|><|end|>";
+        assert_eq!(
+            OpenAIPreprocessor::repair_numbered_media_placeholders(
+                rendered.to_string(),
+                Some(&messages),
+            ),
+            rendered
+        );
+    }
+
+    #[test]
+    fn test_repair_numbered_media_placeholders_preserves_literal_when_media_slot_is_missing() {
+        let messages: Vec<ChatCompletionRequestMessage> =
+            serde_json::from_value(serde_json::json!([{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "literal <|image_1|>"},
+                    {"type": "audio_url", "audio_url": {"url": "data:audio/wav;base64,AAAA"}}
+                ]
+            }]))
+            .unwrap();
+        let rendered = "<|user|>literal <|image_1|><audio><|end|>";
+        assert_eq!(
+            OpenAIPreprocessor::repair_numbered_media_placeholders(
+                rendered.to_string(),
+                Some(&messages),
+            ),
+            rendered
+        );
+    }
+
+    #[test]
+    fn test_repair_numbered_media_placeholders_preserves_literal_from_another_message() {
+        let messages: Vec<ChatCompletionRequestMessage> =
+            serde_json::from_value(serde_json::json!([
+                {"role": "user", "content": "literal <|image_1|>"},
+                {"role": "assistant", "content": "continue"},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "audio_url", "audio_url": {"url": "data:audio/wav;base64,AAAA"}}
+                    ]
+                }
+            ]))
+            .unwrap();
+        let rendered =
+            "<|user|>literal <|image_1|><|end|><|assistant|>continue<|end|><|user|><audio><|end|>";
+        assert_eq!(
+            OpenAIPreprocessor::repair_numbered_media_placeholders(
+                rendered.to_string(),
+                Some(&messages),
+            ),
+            rendered
+        );
+    }
+
+    #[test]
+    fn test_repair_numbered_media_placeholders_preserves_legacy_function_call_literal() {
+        let messages: Vec<ChatCompletionRequestMessage> =
+            serde_json::from_value(serde_json::json!([
+                {
+                    "role": "assistant",
+                    "function_call": {
+                        "name": "legacy",
+                        "arguments": "{\"literal\":\"<|image_1|>\"}"
+                    }
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "audio_url", "audio_url": {"url": "data:audio/wav;base64,AAAA"}}
+                    ]
+                }
+            ]))
+            .unwrap();
+        let rendered = "<|assistant|>{\"literal\":\"<|image_1|>\"}<|end|><|user|><audio><|end|>";
+        assert_eq!(
+            OpenAIPreprocessor::repair_numbered_media_placeholders(
+                rendered.to_string(),
+                Some(&messages),
+            ),
+            rendered
+        );
     }
 }
 

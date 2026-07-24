@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Phi-4 multimodal implements audio through the model's bundled speech-lora.
+# These mappings match Phi4MMForCausalLM.lora_config() in the local TRT-LLM
+# fork. Keep the model's speech-lora directory beside the base checkpoint.
+tensor_parallel_size: 1
+enable_attention_dp: false
+max_num_tokens: 1024
+max_batch_size: 4
+max_seq_len: 4096
+trust_remote_code: true
+backend: pytorch
+enable_chunked_prefill: true
+
+kv_cache_config:
+  free_gpu_memory_fraction: 0.60
+
+lora_config:
+  lora_ckpt_source: hf
+  swap_gate_up_proj_lora_b_weight: false
+  max_loras: 2
+  max_cpu_loras: 2
+  max_lora_rank: 320
+  lora_target_modules:
+  - attn_qkv
+  - attn_dense
+  - mlp_gate_up
+  - mlp_4h_to_h
+  trtllm_modules_to_hf_modules:
+    attn_qkv: qkv_proj
+    attn_dense: o_proj
+    mlp_gate_up: gate_up_proj
+    mlp_4h_to_h: down_proj

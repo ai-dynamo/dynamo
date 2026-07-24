@@ -13,6 +13,7 @@ impl ConfiguredModel {
         EngineConfig {
             model: self.source.clone(),
             served_model_name: None,
+            model_aliases: Vec::new(),
             runtime_data: Default::default(),
             llm: Some(LlmRegistration::default()),
         }

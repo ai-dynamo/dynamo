@@ -98,24 +98,27 @@ pub struct ZmqPubTransport {
 impl ZmqPubTransport {
     /// Create a new ZMQ publisher by binding to an endpoint.
     ///
-    /// If port is 0, finds an available port using TcpListener first,
-    /// then binds ZMQ to that port.
+    /// If port is 0, delegates the free-port selection to libzmq so the port
+    /// remains reserved throughout the bind.
     ///
     /// Returns the transport and the actual bound endpoint.
     pub async fn bind(endpoint: &str, topic: &str) -> Result<(Self, String)> {
-        let actual_endpoint = if endpoint.ends_with(":0") {
-            let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await?;
-            let actual_addr = listener.local_addr()?;
-            let port = actual_addr.port();
-            drop(listener);
-
-            format!("tcp://0.0.0.0:{port}")
+        let wildcard_endpoint = if let Some(prefix) = endpoint.strip_suffix(":0") {
+            format!("{prefix}:*")
         } else {
             endpoint.to_string()
         };
 
         let ctx = shared_zmq_context();
-        let socket = configure_publish_builder(publish(&ctx)).bind(&actual_endpoint)?;
+        let socket = configure_publish_builder(publish(&ctx)).bind(&wildcard_endpoint)?;
+        let actual_endpoint = if endpoint.ends_with(":0") {
+            socket
+                .get_socket()
+                .get_last_endpoint()?
+                .map_err(|bytes| anyhow!("ZMQ bind endpoint is not UTF-8: {bytes:?}"))?
+        } else {
+            endpoint.to_string()
+        };
 
         tracing::info!(
             endpoint = %actual_endpoint,
@@ -673,6 +676,31 @@ mod tests {
         assert_eq!(decoded.publisher_id, 12345);
         assert_eq!(decoded.sequence, 1);
         assert_eq!(decoded.topic, topic);
+    }
+
+    #[tokio::test]
+    async fn zero_port_binding_returns_libzmq_selected_endpoint() {
+        let (publisher, actual_endpoint) =
+            ZmqPubTransport::bind("tcp://127.0.0.1:0", "wildcard-port")
+                .await
+                .unwrap();
+
+        let port = actual_endpoint
+            .rsplit(':')
+            .next()
+            .and_then(|value| value.parse::<u16>().ok())
+            .unwrap();
+        assert_ne!(port, 0);
+        assert!(!actual_endpoint.ends_with(":*"));
+        assert_eq!(
+            publisher
+                .socket
+                .lock()
+                .await
+                .get_socket()
+                .get_last_endpoint(),
+            Ok(Ok(actual_endpoint))
+        );
     }
 
     #[tokio::test]

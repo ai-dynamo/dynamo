@@ -20,10 +20,13 @@ use futures::stream::BoxStream;
 use tokio::sync::watch;
 
 use crate::error::DynamoError;
+use dynamo_llm::local_model::LocalModel;
+use dynamo_llm::model_type::ModelType;
+use dynamo_llm::worker_type::WorkerType;
 
 pub use dynamo_llm::kv_router::publisher::KvEventPublisher;
 pub use dynamo_llm::protocols::common::llm_backend::{
-    LLMEngineOutput, LogProbs, TopLogprob, TopLogprobs,
+    LLMEngineOutput, LogProbs, PromptLogprobEntry, PromptLogprobs, TopLogprob, TopLogprobs,
 };
 pub use dynamo_llm::protocols::common::preprocessor::{
     BootstrapInfo, MultimodalData, MultimodalDataMap, PrefillResult, PreprocessedRequest,
@@ -145,15 +148,17 @@ pub struct LlmRegistration {
 ///
 /// `Worker` consumes this to build a `ModelDeploymentCard` and register the
 /// model with discovery. The neutral fields (`model`, `served_model_name`,
-/// `runtime_data`) apply to every modality; the token-pipeline metadata lives
-/// in the optional [`llm`](Self::llm) sub-record, which raw media engines
-/// leave `None`.
+/// `model_aliases`, `runtime_data`) apply to every modality; the token-pipeline
+/// metadata lives in the optional [`llm`](Self::llm) sub-record, which raw
+/// media engines leave `None`.
 #[derive(Clone, Debug, Default)]
 pub struct EngineConfig {
     /// Canonical model identifier (e.g. HF repo name).
     pub model: String,
     /// Public-facing model name advertised to clients. Defaults to `model`.
     pub served_model_name: Option<String>,
+    /// Additional public-facing model names accepted by the engine.
+    pub model_aliases: Vec<String>,
     /// Engine-specific metadata copied into `ModelRuntimeConfig.runtime_data`.
     pub runtime_data: HashMap<String, serde_json::Value>,
     /// Token-pipeline registration metadata (KV cache, DP, bootstrap).
@@ -200,9 +205,10 @@ pub trait LLMEngine: Send + Sync + 'static {
     /// emit a terminal `Ok(chunk)` with `FinishReason::Cancelled`.
     ///
     /// Stream item: `Result<LLMEngineOutput, DynamoError>`.
-    ///   * `Ok(chunk)` carries normal output. Exactly one terminal `Ok`
-    ///     chunk (one with `finish_reason` set) must be the last item
-    ///     yielded, and no items may follow it.
+    ///   * `Ok(chunk)` carries normal output. Single-output streams have one
+    ///     terminal `Ok` chunk (one with `finish_reason` set). Multi-output
+    ///     streams have one terminal per distinct `index`; no later chunk may
+    ///     target an already-finished index.
     ///   * `Err(dynamo_err)` carries a typed mid-stream failure (e.g.
     ///     `BackendError::InvalidArgument`). It is itself terminal — the
     ///     framework forwards it as `Annotated::error` and stops polling
@@ -256,6 +262,31 @@ pub trait LLMEngine: Send + Sync + 'static {
     /// can observe transfer completion (e.g. a connector or scheduler).
     async fn is_quiescent(&self) -> Result<Option<bool>, DynamoError> {
         Ok(None)
+    }
+
+    /// Long-lived remote-engine liveness watch. Returning is fatal to the
+    /// serving worker and causes its discovery registration to be removed.
+    /// In-process engines normally keep the default pending future.
+    async fn watch(&self) -> Result<(), DynamoError> {
+        std::future::pending().await
+    }
+
+    /// Ask an out-of-process engine to stop admission and wait for terminal
+    /// drain completion. Called before quiescence polling and cleanup.
+    async fn drain(&self) -> Result<(), DynamoError> {
+        Ok(())
+    }
+
+    /// Whether [`drain`](LLMEngine::drain) must complete before this worker's
+    /// discovery record is removed.
+    ///
+    /// The default preserves the in-process lifecycle: unregister first, then
+    /// drain. Out-of-process engines whose Drain RPC atomically closes remote
+    /// admission should return `true`. That keeps admitted response streams
+    /// routable until the remote reaches terminal drain completion; removing
+    /// discovery first would make the request plane cancel those streams.
+    fn drain_before_discovery_unregister(&self) -> bool {
+        false
     }
 
     /// Release all engine resources. Called exactly once.
@@ -384,6 +415,20 @@ pub trait LLMEngine: Send + Sync + 'static {
     ) -> Result<(), DynamoError> {
         Ok(())
     }
+
+    /// Hand the engine a clone of the fully populated base-model card before
+    /// it is attached. Dynamic-LoRA engines use this to publish adapter model
+    /// cards with identical tokenizer/runtime/routing metadata.
+    async fn on_model_ready(
+        &self,
+        _endpoint: dynamo_runtime::component::Endpoint,
+        _base_model: LocalModel,
+        _model_type: ModelType,
+        _worker_type: WorkerType,
+        _needs: Vec<Vec<WorkerType>>,
+    ) -> Result<(), DynamoError> {
+        Ok(())
+    }
 }
 
 /// Raw media-generation engine trait — the non-token sibling of [`LLMEngine`].
@@ -467,6 +512,9 @@ pub enum KvEventSource {
         endpoint: String,
         topic: String,
         dp_rank: u32,
+        /// Model image-placeholder token ID used to normalize multimodal
+        /// engine events into Dynamo's canonical media-aware routing keys.
+        image_token_id: Option<u32>,
     },
     Push {
         on_ready: OnPublisherReady,

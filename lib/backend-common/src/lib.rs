@@ -36,8 +36,8 @@ pub use engine::{
     FinishReason, GenerateContext, GuidedDecodingOptions, HEALTH_CHECK_KEY, KvEventPublisher,
     KvEventSource, LLMEngine, LLMEngineOutput, LLMEngineOutputExt, LlmRegistration, LogProbs,
     Metrics, MetricsBindings, MetricsCtx, OnPublisherReady, OnSnapshotPublisherReady,
-    OutputOptions, PrefillResult, PreprocessedRequest, RawEngine, SamplingOptions, StopConditions,
-    StopReason, TopLogprob, TopLogprobs, chunk, usage,
+    OutputOptions, PrefillResult, PreprocessedRequest, PromptLogprobEntry, PromptLogprobs,
+    RawEngine, SamplingOptions, StopConditions, StopReason, TopLogprob, TopLogprobs, chunk, usage,
 };
 pub use error::{BackendError, DynamoError, ErrorType};
 pub use metrics::{ComponentGauges, EngineMetrics, LifecycleGauges};

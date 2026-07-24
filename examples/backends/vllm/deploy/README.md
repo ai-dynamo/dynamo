@@ -46,6 +46,10 @@ Hardware-specific templates for Intel XPU GPUs using Kubernetes DRA.
 
 See [`xpu/README.md`](./xpu/README.md) for available templates, prerequisites, and usage.
 
+### 7. **Shared OpenEngine Sidecar** (`v1beta1/openengine-*.yaml`)
+
+Runs the GPU vLLM server and the engine-neutral CPU `dynamo-openengine-sidecar` in the same pod. The aggregate and context-first P/D examples use OpenEngine revision 3, direct ZMQ KV-event discovery, dynamic LoRA, and explicit pod-IP NIXL handoff addresses. P/D requires the documented ReadWriteMany LoRA PVC.
+
 ## CRD Structure
 
 All templates use the **DynamoGraphDeployment** CRD:

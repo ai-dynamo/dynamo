@@ -221,6 +221,8 @@ def _prepare_deployment(
         # Unique ZMQ port for vLLM KV event publishing (avoids xdist collisions).
         if ports.kv_event_port:
             merged_env["DYN_VLLM_KV_EVENT_PORT"] = str(ports.kv_event_port)
+            merged_env["DYN_KV_EVENT_PORT"] = str(ports.kv_event_port)
+            merged_env["DYN_KV_EVENT_PORT1"] = str(ports.kv_event_port)
             # For multi-worker scripts (xpu_2 router tests), allocate separate
             # KV event ports for each worker to avoid ZMQ bind collisions.
             if len(dynamic_system_ports) >= 2:
@@ -229,10 +231,20 @@ def _prepare_deployment(
                 extra_allocated_ports.append(kv_port2)
                 merged_env["DYN_VLLM_KV_EVENT_PORT1"] = str(kv_port1)
                 merged_env["DYN_VLLM_KV_EVENT_PORT2"] = str(kv_port2)
+                merged_env["DYN_KV_EVENT_PORT2"] = str(kv_port2)
 
         # Per-worker NIXL side-channel ports (avoids xdist collisions on 20097).
         for idx, port in enumerate(ports.nixl_side_channel_ports, start=1):
             merged_env[f"DYN_VLLM_NIXL_SIDE_CHANNEL_PORT{idx}"] = str(port)
+
+        for name, values in (
+            ("DYN_ENGINE_HTTP_PORT", ports.engine_http_ports),
+            ("DYN_OPENENGINE_PORT", ports.openengine_ports),
+        ):
+            if values:
+                merged_env[name] = str(values[0])
+            for idx, port in enumerate(values, start=1):
+                merged_env[f"{name}{idx}"] = str(port)
 
         # Ensure EngineProcess health checks hit the correct frontend port.
         config = dataclasses.replace(config, frontend_port=dynamic_frontend_port)

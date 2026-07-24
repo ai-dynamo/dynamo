@@ -161,6 +161,11 @@ struct State {
     /// `cancel_instance_streams` vs `associate_instance` race; entries expire
     /// after [`TOMBSTONE_TTL`].
     removed_instances: HashMap<EndpointInstanceId, Instant>,
+    /// Instances undergoing graceful retirement. Unlike crash-removal
+    /// tombstones, these remain closed to new admission until discovery
+    /// explicitly re-adds the identity or terminal cancellation moves the
+    /// identity into `removed_instances`.
+    retiring_instances: HashSet<EndpointInstanceId>,
     handle: Option<tokio::task::JoinHandle<Result<()>>>,
 }
 
@@ -262,7 +267,7 @@ impl TcpStreamServer {
         let mut state = self.state.lock();
         let now = Instant::now();
         prune_tombstones(&mut state.removed_instances, now);
-        if state.removed_instances.contains_key(id) {
+        if state.removed_instances.contains_key(id) || state.retiring_instances.contains(id) {
             // Instance was already removed -- cancel immediately.
             tracing::warn!(
                 recv_subject,
@@ -326,6 +331,21 @@ impl TcpStreamServer {
         }
     }
 
+    /// Stop accepting new stream associations for an instance without
+    /// cancelling streams that were already admitted.
+    ///
+    /// Discovery removal uses this as the first phase of graceful retirement:
+    /// routing stops selecting the instance immediately, and this tombstone
+    /// closes the remove-vs-dispatch race. Existing streams remain associated
+    /// until [`Self::cancel_instance_streams`] is called at the shutdown
+    /// deadline.
+    pub async fn tombstone_instance(&self, id: &EndpointInstanceId) {
+        let mut state = self.state.lock();
+        let now = Instant::now();
+        prune_tombstones(&mut state.removed_instances, now);
+        state.retiring_instances.insert(id.clone());
+    }
+
     /// Cancel all pending streams for an instance — both response-side and
     /// request-side halves of any bidirectional sessions tracked by
     /// `associate_instance` — and tombstone the id so any racing associate
@@ -334,6 +354,7 @@ impl TcpStreamServer {
         let mut state = self.state.lock();
         let now = Instant::now();
         prune_tombstones(&mut state.removed_instances, now);
+        state.retiring_instances.remove(id);
         state.removed_instances.insert(id.clone(), now);
         let subjects = match state.instance_subjects.remove(id) {
             Some(subjects) => subjects,
@@ -359,6 +380,7 @@ impl TcpStreamServer {
     pub async fn clear_instance_tombstone(&self, id: &EndpointInstanceId) {
         let mut state = self.state.lock();
         state.removed_instances.remove(id);
+        state.retiring_instances.remove(id);
     }
 
     async fn start(local_ip: String, local_port: u16, state: Arc<Mutex<State>>) -> Result<u16> {
@@ -1343,6 +1365,46 @@ mod tests {
         assert!(
             send_provider.await.is_err(),
             "send provider should resolve with RecvError after instance cancellation"
+        );
+    }
+
+    /// A graceful discovery removal must reject a racing new dispatch without
+    /// dropping a response stream that was admitted before removal.
+    #[tokio::test(start_paused = true)]
+    async fn test_tombstone_blocks_new_associations_but_preserves_admitted_streams() {
+        let server = test_server().await;
+        let id = make_eid("ns", "comp", "generate", 17);
+
+        let (admitted_subject, mut admitted_provider) = register_and_get_subject(&server).await;
+        assert!(
+            server
+                .associate_instance(&admitted_subject, None, &id)
+                .await
+        );
+
+        server.tombstone_instance(&id).await;
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), &mut admitted_provider)
+                .await
+                .is_err(),
+            "tombstoning must not cancel an already-admitted stream"
+        );
+
+        tokio::time::advance(TOMBSTONE_TTL + Duration::from_secs(1)).await;
+        let (racing_subject, racing_provider) = register_and_get_subject(&server).await;
+        assert!(
+            !server.associate_instance(&racing_subject, None, &id).await,
+            "tombstoning must reject dispatches racing discovery removal"
+        );
+        assert!(
+            racing_provider.await.is_err(),
+            "the rejected racing dispatch must be unblocked"
+        );
+
+        assert_eq!(server.cancel_instance_streams(&id).await, 1);
+        assert!(
+            admitted_provider.await.is_err(),
+            "the admitted stream must be cancelled at the terminal deadline"
         );
     }
 

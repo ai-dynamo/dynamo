@@ -1,0 +1,77 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: sglang-openengine-agg
+spec:
+  backendFramework: sglang
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - args: [python3 -m dynamo.frontend --router-mode kv --http-port 8000]
+          command: [/bin/sh, -c]
+          env:
+          - {name: DYN_NAMESPACE, value: dynamo}
+          image: my-registry/dynamo-openengine-sidecar:my-tag
+          name: main
+    replicas: 1
+    type: frontend
+  - name: OpenEngineWorker
+    podTemplate:
+      spec:
+        containers:
+        - args: [--openengine-endpoint, http://127.0.0.1:50051, --expected-engine, sglang, --expected-schema-release, a66ff6f73a65e262a7c3edd5ea6fd0d8701d402f]
+          command: [dynamo-openengine-sidecar]
+          env:
+          - {name: DYN_NAMESPACE, value: dynamo}
+          - {name: DYN_SYSTEM_PORT, value: "8081"}
+          - {name: DYN_LORA_ENABLED, value: "true"}
+          - {name: DYN_LORA_PATH, value: /lora-cache}
+          - {name: HF_HOME, value: /model-cache}
+          image: my-registry/dynamo-openengine-sidecar:my-tag
+          name: main
+          resources:
+            limits: {cpu: "2", memory: 4Gi}
+            requests: {cpu: "1", memory: 2Gi}
+          volumeMounts:
+          - {mountPath: /lora-cache, name: lora-cache}
+          - {mountPath: /model-cache, name: model-cache}
+        - args:
+          - --model-path
+          - Qwen/Qwen3-0.6B
+          - --served-model-name
+          - Qwen/Qwen3-0.6B
+          - --host
+          - 127.0.0.1
+          - --port
+          - "8001"
+          - --openengine-host
+          - 127.0.0.1
+          - --openengine-port
+          - "50051"
+          - --page-size
+          - "16"
+          - --enable-lora
+          - --kv-events-config
+          - '{"publisher":"zmq","endpoint":"tcp://*:5557","topic":""}'
+          command: [python3, -m, sglang.launch_server]
+          env:
+          - {name: HF_HOME, value: /model-cache}
+          - {name: OPENENGINE_SCHEMA_RELEASE, value: a66ff6f73a65e262a7c3edd5ea6fd0d8701d402f}
+          image: my-registry/sglang-openengine:my-tag
+          name: engine
+          resources:
+            limits: {nvidia.com/gpu: "1"}
+            requests: {nvidia.com/gpu: "1"}
+          volumeMounts:
+          - {mountPath: /lora-cache, name: lora-cache}
+          - {mountPath: /model-cache, name: model-cache}
+        volumes:
+        - {emptyDir: {}, name: lora-cache}
+        - {emptyDir: {}, name: model-cache}
+    replicas: 1
+    type: worker

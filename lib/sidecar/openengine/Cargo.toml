@@ -1,0 +1,45 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-openengine-sidecar"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Engine-neutral Dynamo backend for out-of-process OpenEngine servers."
+build = "build.rs"
+
+[package.metadata.openengine]
+commit = "a66ff6f73a65e262a7c3edd5ea6fd0d8701d402f"
+
+[[bin]]
+name = "dynamo-openengine-sidecar"
+path = "src/main.rs"
+
+[dependencies]
+dynamo-backend-common = { workspace = true }
+dynamo-kv-router = { workspace = true }
+dynamo-llm = { workspace = true, features = ["mm-routing"] }
+dynamo-protocols = { workspace = true }
+dynamo-runtime = { workspace = true }
+openengine-proto = { version = "0.3.0", git = "https://github.com/ai-dynamo/openengine.git", rev = "a66ff6f73a65e262a7c3edd5ea6fd0d8701d402f" }
+
+anyhow = { workspace = true }
+async-stream = { workspace = true }
+async-trait = { workspace = true }
+clap = { version = "4", features = ["derive", "env"] }
+futures = { workspace = true }
+parking_lot = { workspace = true }
+prost-types = "0.14.4"
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tonic = "0.14.6"
+tracing = { workspace = true }
+
+[dev-dependencies]
+dynamo-backend-common = { workspace = true, features = ["testing"] }
+tokio-stream = { workspace = true, features = ["net"] }
