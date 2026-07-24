@@ -252,6 +252,18 @@ class GlobalPlannerConnector(PlannerConnector):
         )
         await local.wait_for_deployment_ready(include_planner=include_planner)
 
+    async def wait_for_settled_graph_deployment(
+        self, include_planner: bool = True
+    ) -> Optional[dict]:
+        """Return a settled pool-local DGD snapshot when a k8s connector exists."""
+        local = self._get_local_k8s_connector()
+        if local is None:
+            await self.wait_for_deployment_ready(include_planner=include_planner)
+            return None
+        return await local.wait_for_settled_graph_deployment(
+            include_planner=include_planner
+        )
+
     def _get_local_k8s_connector(self) -> Optional[KubernetesConnector]:
         """Lazily build a KubernetesConnector scoped to the pool's own DGD.
 

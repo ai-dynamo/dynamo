@@ -108,15 +108,15 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
             require_prefill=self.require_prefill,
             require_decode=self.require_decode,
         )
-        # wait_for_deployment_ready(include_planner=False) blocks until the
-        # worker rollout is stable, so a planner that (re)starts after a DGD
-        # template cap change reads the settled desired cap once at startup.
-        await self.controller.wait_for_deployment_ready(include_planner=False)
+        # Block until one DGD snapshot is generation-caught-up and worker-stable,
+        # then permanently cache power caps from that same snapshot. Replica-count
+        # stability alone is not enough: an annotation-only edit bumps
+        # metadata.generation without changing desired replicas, so a Planner
+        # restart in the controller-status lag could otherwise cache a newer,
+        # lower cap while Pods still enforce the previous higher one.
         if self.runtime_namespace_source is not None:
             await self.runtime_namespace_source.refresh_runtime_namespace()
-        # Share one DGD GET across GPU-count refresh and power-cap load when
-        # the connector exposes get_graph_deployment (Kubernetes only).
-        deployment = self._shared_dgd_deployment()
+        deployment = await self._wait_for_startup_dgd_snapshot()
         await self._refresh_deployment_state(deployment=deployment)
         self._load_static_power_caps_at_startup(deployment=deployment)
         # FPM init can change the effective runtime namespace / discovery view;
@@ -190,7 +190,8 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
 
         Uses the Kubernetes-only ``get_graph_deployment`` duck-type; other
         connectors keep separate (or no-op) paths. Not added to
-        ``PlannerConnector``.
+        ``PlannerConnector``. Prefer ``_wait_for_startup_dgd_snapshot`` at
+        init so caps come from a generation-observed, worker-stable snapshot.
         """
         if not self.config.enable_power_awareness:
             return None
@@ -198,6 +199,22 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
         if not callable(fetch):
             return None
         return fetch()
+
+    async def _wait_for_startup_dgd_snapshot(self) -> Optional[dict]:
+        """Wait for a settled DGD and return that same snapshot for static reads.
+
+        Kubernetes connectors expose ``wait_for_settled_graph_deployment``,
+        which requires observedGeneration catch-up plus worker stability and
+        returns the snapshot that passed. Other connectors fall back to the
+        generic ready wait plus an optional shared GET.
+        """
+        wait_settled = getattr(
+            self.controller, "wait_for_settled_graph_deployment", None
+        )
+        if callable(wait_settled):
+            return await wait_settled(include_planner=False)
+        await self.controller.wait_for_deployment_ready(include_planner=False)
+        return self._shared_dgd_deployment()
 
     @staticmethod
     def _call_with_optional_deployment(method, *, deployment=None, **kwargs):

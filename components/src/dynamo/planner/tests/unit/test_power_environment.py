@@ -212,3 +212,74 @@ def test_call_with_optional_deployment_propagates_inner_typeerror():
         PlannerEnvironmentImpl._call_with_optional_deployment(
             broken, deployment={"dgd": True}, require_prefill=True
         )
+
+
+@pytest.mark.asyncio
+async def test_initialize_caches_caps_from_settled_snapshot_not_lagging_get():
+    """Gen-2 lower cap must come from the settled wait snapshot.
+
+    Production race: annotation-only update bumps metadata.generation while
+    observedGeneration and worker status still describe gen 1. Counts look
+    stable, so a post-wait DGD GET could return the lower annotation before
+    Pods roll. initialize() must cache watts from the same snapshot the
+    settled wait returned — never a later GET of a lagging generation.
+    """
+    from unittest.mock import AsyncMock
+
+    lagging = {
+        "metadata": {"generation": 2},
+        "status": {"observedGeneration": 1},
+        "spec": {"components": []},
+    }
+    settled = {
+        "metadata": {"generation": 2},
+        "status": {"observedGeneration": 2},
+        "spec": {"components": []},
+    }
+    seen = {"power_deployments": [], "gpu_deployments": []}
+
+    def get_power_configs(
+        *,
+        require_prefill=True,
+        require_decode=True,
+        deployment=None,
+        prefill_component_name=None,
+        decode_component_name=None,
+    ):
+        del (
+            require_prefill,
+            require_decode,
+            prefill_component_name,
+            decode_component_name,
+        )
+        seen["power_deployments"].append(deployment)
+        return (_cfg("prefill", 300), _cfg("decode", 300))
+
+    def get_gpu_counts(*, require_prefill=True, require_decode=True, deployment=None):
+        del require_prefill, require_decode
+        seen["gpu_deployments"].append(deployment)
+        return (1, 1)
+
+    controller = Mock()
+    controller.async_init = AsyncMock()
+    controller.validate_deployment = AsyncMock()
+    controller.wait_for_settled_graph_deployment = AsyncMock(return_value=settled)
+    controller.get_graph_deployment = Mock(return_value=lagging)
+    controller.get_gpu_counts = get_gpu_counts
+    controller.get_actual_worker_counts = AsyncMock(return_value=(1, 1, True))
+    controller.get_model_name = Mock(return_value="test-model")
+    controller.get_component_power_configs = get_power_configs
+
+    env = _env(controller, budget=10000)
+    fpm = Mock()
+    fpm.async_init = AsyncMock()
+    env.fpm_provider = fpm
+
+    await env.initialize()
+
+    controller.wait_for_settled_graph_deployment.assert_awaited_once_with(
+        include_planner=False
+    )
+    assert seen["power_deployments"][0] is settled
+    assert seen["gpu_deployments"][0] is settled
+    assert env.deployment_state().decode.power_watts_per_replica == 300

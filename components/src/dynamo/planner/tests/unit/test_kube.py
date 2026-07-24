@@ -402,9 +402,353 @@ async def test_wait_for_graph_deployment_ready_on_second_attempt(
         side_effect=[mock_deployment_not_ready, mock_deployment_ready],
     ):
         # Test with minimal attempts and delay for faster testing
-        await k8s_api.wait_for_graph_deployment_ready(
+        settled = await k8s_api.wait_for_graph_deployment_ready(
             "test-deployment", max_attempts=2, delay_seconds=0.1
         )
+        assert settled is mock_deployment_ready
+
+
+def _stable_worker_dgd(
+    *,
+    generation: int,
+    observed_generation: int,
+    decode_watts: str = "400",
+    dgd_name: str = "test-deployment",
+) -> Dict[str, Any]:
+    """Production-shaped DGD: stable replica counts, explicit generation lag."""
+    return {
+        "metadata": {"name": dgd_name, "generation": generation},
+        "spec": {
+            "components": [
+                {
+                    "name": "VllmDecodeWorker",
+                    "type": "decode",
+                    "replicas": 2,
+                    "podTemplate": {
+                        "metadata": {
+                            "annotations": {
+                                "dynamo.nvidia.com/gpu-power-limit": decode_watts
+                            }
+                        },
+                        "spec": {
+                            "containers": [
+                                {
+                                    "name": "main",
+                                    "resources": {"limits": {"nvidia.com/gpu": "1"}},
+                                }
+                            ]
+                        },
+                    },
+                },
+                {"name": "Planner", "type": "planner", "replicas": 1},
+            ]
+        },
+        "status": {
+            "observedGeneration": observed_generation,
+            "components": {
+                "VllmDecodeWorker": {
+                    "readyReplicas": 2,
+                    "updatedReplicas": 2,
+                    "availableReplicas": 2,
+                },
+                "Planner": {
+                    "readyReplicas": 0,
+                    "updatedReplicas": 0,
+                    "availableReplicas": 0,
+                },
+            },
+        },
+    }
+
+
+def _ready_dcd(*, generation: int = 1, observed_generation: int = 1) -> Dict[str, Any]:
+    return {
+        "metadata": {"generation": generation},
+        "status": {
+            "observedGeneration": observed_generation,
+            "conditions": [{"type": "Available", "status": "True"}],
+        },
+    }
+
+
+def _mock_dcd_lookup(
+    mock_custom_api, dcd: Dict[str, Any], dgd_name: str = "test-deployment"
+):
+    """Wire CustomObjectsApi to return ``dcd`` for the decode worker DCD name."""
+
+    def _lookup(*args, **kwargs):
+        plural = kwargs.get("plural")
+        name = kwargs.get("name")
+        if (
+            plural == "dynamocomponentdeployments"
+            and name == f"{dgd_name}-vllmdecodeworker"
+        ):
+            return dcd
+        raise client.ApiException(status=404)
+
+    mock_custom_api.get_namespaced_custom_object.side_effect = _lookup
+
+
+def test_is_spec_generation_observed_requires_catch_up(k8s_api):
+    assert (
+        k8s_api.is_spec_generation_observed(
+            _stable_worker_dgd(generation=2, observed_generation=1)
+        )
+        is False
+    )
+    assert (
+        k8s_api.is_spec_generation_observed(
+            _stable_worker_dgd(generation=2, observed_generation=2)
+        )
+        is True
+    )
+    assert k8s_api.is_spec_generation_observed({"status": {}}) is False
+
+
+@pytest.mark.asyncio
+async def test_wait_exclude_planner_rejects_unobserved_generation(
+    k8s_api, mock_custom_api
+):
+    """Annotation-only gen bump: counts look stable, but observedGeneration lags.
+
+    Planner must not treat this snapshot as settled — otherwise a restart can
+    cache the gen-2 lower cap while Pods still enforce gen-1.
+    """
+    lagging = _stable_worker_dgd(
+        generation=2, observed_generation=1, decode_watts="300"
+    )
+    with patch.object(k8s_api, "get_graph_deployment", return_value=lagging):
+        with pytest.raises(TimeoutError):
+            await k8s_api.wait_for_graph_deployment_ready(
+                "test-deployment",
+                include_planner=False,
+                max_attempts=2,
+                delay_seconds=0.01,
+            )
+
+
+@pytest.mark.asyncio
+async def test_wait_exclude_planner_returns_observed_stable_snapshot(
+    k8s_api, mock_custom_api
+):
+    """Gen-2 lower cap is adopted only after observedGeneration catches up."""
+    lagging = _stable_worker_dgd(
+        generation=2, observed_generation=1, decode_watts="300"
+    )
+    settled = _stable_worker_dgd(
+        generation=2, observed_generation=2, decode_watts="300"
+    )
+    _mock_dcd_lookup(mock_custom_api, _ready_dcd(generation=2, observed_generation=2))
+    with patch.object(k8s_api, "get_graph_deployment", side_effect=[lagging, settled]):
+        got = await k8s_api.wait_for_graph_deployment_ready(
+            "test-deployment",
+            include_planner=False,
+            max_attempts=3,
+            delay_seconds=0.01,
+        )
+    assert got is settled
+    assert got["status"]["observedGeneration"] == 2
+    assert (
+        got["spec"]["components"][0]["podTemplate"]["metadata"]["annotations"][
+            "dynamo.nvidia.com/gpu-power-limit"
+        ]
+        == "300"
+    )
+
+
+@pytest.mark.asyncio
+async def test_wait_exclude_planner_rejects_dgd_observed_while_dcd_lags(
+    k8s_api, mock_custom_api
+):
+    """DGD observedGeneration can advance before the worker DCD rolls Pods."""
+    dgd_observed = _stable_worker_dgd(
+        generation=2, observed_generation=2, decode_watts="300"
+    )
+    lagging_dcd = _ready_dcd(generation=2, observed_generation=1)
+    lagging_dcd["status"]["conditions"] = []
+    _mock_dcd_lookup(mock_custom_api, lagging_dcd)
+    with patch.object(k8s_api, "get_graph_deployment", return_value=dgd_observed):
+        with pytest.raises(TimeoutError):
+            await k8s_api.wait_for_graph_deployment_ready(
+                "test-deployment",
+                include_planner=False,
+                max_attempts=2,
+                delay_seconds=0.01,
+            )
+
+
+def test_is_dcd_ready_requires_generation_and_available(k8s_api):
+    assert k8s_api.is_dcd_ready(_ready_dcd(generation=2, observed_generation=2))
+    assert not k8s_api.is_dcd_ready(_ready_dcd(generation=2, observed_generation=1))
+    missing_available = _ready_dcd(generation=2, observed_generation=2)
+    missing_available["status"]["conditions"] = []
+    assert not k8s_api.is_dcd_ready(missing_available)
+
+
+def test_worker_backing_resources_settled_rejects_lagging_dcd(k8s_api, mock_custom_api):
+    dgd = _stable_worker_dgd(generation=2, observed_generation=2)
+    _mock_dcd_lookup(
+        mock_custom_api,
+        _ready_dcd(generation=2, observed_generation=1),
+    )
+    settled, pending = k8s_api.worker_backing_resources_settled(dgd)
+    assert settled is False
+    assert pending == [
+        "VllmDecodeWorker: DCD test-deployment-vllmdecodeworker not ready "
+        "(generation=2, observedGeneration=1)"
+    ]
+
+
+def test_worker_backing_resources_settled_rejects_lagging_pod_clique(
+    k8s_api, mock_custom_api
+):
+    """Grove path: DGD counters can look stable while PodClique gen still lags."""
+    dgd = _stable_worker_dgd(generation=2, observed_generation=2)
+    dgd["status"]["components"]["VllmDecodeWorker"] = {
+        "componentKind": "PodClique",
+        "componentNames": ["test-deployment-vllmdecodeworker"],
+        "readyReplicas": 2,
+        "updatedReplicas": 2,
+        "availableReplicas": 2,
+    }
+
+    def _lookup(*args, **kwargs):
+        if (
+            kwargs.get("plural") == "podcliques"
+            and kwargs.get("name") == "test-deployment-vllmdecodeworker"
+        ):
+            return {
+                "metadata": {"generation": 2},
+                "spec": {"replicas": 2},
+                "status": {
+                    "observedGeneration": 1,
+                    "replicas": 2,
+                    "updatedReplicas": 2,
+                    "readyReplicas": 2,
+                },
+            }
+        raise client.ApiException(status=404)
+
+    mock_custom_api.get_namespaced_custom_object.side_effect = _lookup
+    settled, pending = k8s_api.worker_backing_resources_settled(dgd)
+    assert settled is False
+    assert pending == [
+        "VllmDecodeWorker: PodClique test-deployment-vllmdecodeworker "
+        "not generation-ready"
+    ]
+
+
+def test_worker_backing_rejects_inprogress_rollout_with_ready_old_dcd(
+    k8s_api, mock_custom_api
+):
+    """InProgress rollout: current-hash still names the ready old DCD.
+
+    DGD observedGeneration and replica counters can look settled while the
+    annotation points at the old revision and the new DCD is missing. The
+    wait must not treat the old DCD as proof the desired revision rolled.
+    """
+    old_name = "test-deployment-vllmdecodeworker-oldhash1"
+    new_name = "test-deployment-vllmdecodeworker-newhash2"
+    dgd = _stable_worker_dgd(generation=2, observed_generation=2, decode_watts="300")
+    dgd["metadata"]["annotations"] = {
+        "nvidia.com/current-worker-hash-v2": "oldhash1",
+    }
+    dgd["status"]["rollingUpdate"] = {"phase": "InProgress"}
+    dgd["status"]["components"]["VllmDecodeWorker"] = {
+        "componentKind": "Deployment",
+        "componentNames": [new_name, old_name],
+        "readyReplicas": 2,
+        "updatedReplicas": 2,
+        "availableReplicas": 2,
+    }
+
+    def _lookup(*args, **kwargs):
+        if kwargs.get("plural") != "dynamocomponentdeployments":
+            raise client.ApiException(status=404)
+        if kwargs.get("name") == old_name:
+            return _ready_dcd(generation=1, observed_generation=1)
+        raise client.ApiException(status=404)
+
+    mock_custom_api.get_namespaced_custom_object.side_effect = _lookup
+    settled, pending = k8s_api.worker_backing_resources_settled(dgd)
+    assert settled is False
+    assert pending == ["rollingUpdate.phase=InProgress"]
+
+
+def test_worker_backing_rejects_when_component_names_include_lagging_new_dcd(
+    k8s_api, mock_custom_api
+):
+    """Even without an InProgress phase, every named DCD must be ready."""
+    old_name = "test-deployment-vllmdecodeworker-oldhash1"
+    new_name = "test-deployment-vllmdecodeworker-newhash2"
+    dgd = _stable_worker_dgd(generation=2, observed_generation=2, decode_watts="300")
+    dgd["metadata"]["annotations"] = {
+        "nvidia.com/current-worker-hash-v2": "oldhash1",
+    }
+    dgd["status"]["components"]["VllmDecodeWorker"] = {
+        "componentKind": "Deployment",
+        "componentNames": [new_name, old_name],
+        "readyReplicas": 2,
+        "updatedReplicas": 2,
+        "availableReplicas": 2,
+    }
+
+    def _lookup(*args, **kwargs):
+        if kwargs.get("plural") != "dynamocomponentdeployments":
+            raise client.ApiException(status=404)
+        name = kwargs.get("name")
+        if name == old_name:
+            return _ready_dcd(generation=1, observed_generation=1)
+        if name == new_name:
+            return _ready_dcd(generation=2, observed_generation=1)
+        raise client.ApiException(status=404)
+
+    mock_custom_api.get_namespaced_custom_object.side_effect = _lookup
+    settled, pending = k8s_api.worker_backing_resources_settled(dgd)
+    assert settled is False
+    assert pending == [
+        f"VllmDecodeWorker: DCD {new_name} not ready "
+        "(generation=2, observedGeneration=1)"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_wait_exclude_planner_rejects_inprogress_rollout_ready_old_dcd(
+    k8s_api, mock_custom_api
+):
+    """End-to-end wait: InProgress + ready old DCD must not settle."""
+    old_name = "test-deployment-vllmdecodeworker-oldhash1"
+    new_name = "test-deployment-vllmdecodeworker-newhash2"
+    dgd = _stable_worker_dgd(generation=2, observed_generation=2, decode_watts="300")
+    dgd["metadata"]["annotations"] = {
+        "nvidia.com/current-worker-hash-v2": "oldhash1",
+    }
+    dgd["status"]["rollingUpdate"] = {"phase": "InProgress"}
+    dgd["status"]["components"]["VllmDecodeWorker"] = {
+        "componentKind": "Deployment",
+        "componentNames": [new_name, old_name],
+        "readyReplicas": 2,
+        "updatedReplicas": 2,
+        "availableReplicas": 2,
+    }
+
+    def _lookup(*args, **kwargs):
+        if (
+            kwargs.get("plural") == "dynamocomponentdeployments"
+            and kwargs.get("name") == old_name
+        ):
+            return _ready_dcd(generation=1, observed_generation=1)
+        raise client.ApiException(status=404)
+
+    mock_custom_api.get_namespaced_custom_object.side_effect = _lookup
+    with patch.object(k8s_api, "get_graph_deployment", return_value=dgd):
+        with pytest.raises(TimeoutError):
+            await k8s_api.wait_for_graph_deployment_ready(
+                "test-deployment",
+                include_planner=False,
+                max_attempts=2,
+                delay_seconds=0.01,
+            )
 
 
 def test_get_graph_deployment(k8s_api, mock_custom_api):

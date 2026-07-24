@@ -488,6 +488,30 @@ class KubernetesConnector(PlannerConnector):
             include_planner=include_planner,
         )
 
+    async def wait_for_settled_graph_deployment(
+        self, include_planner: bool = True
+    ) -> dict:
+        """Wait for a settled DGD snapshot and return that same object.
+
+        When ``include_planner`` is False, the snapshot has:
+        - ``status.observedGeneration >= metadata.generation``
+        - non-planner worker replica counts stable (desired == updated == ready)
+        - each power-relevant worker's backing CR (DCD / Grove PodClique)
+          generation-ready, so Pods have adopted the current template
+
+        Callers that permanently cache fields from the DGD (power caps) must
+        use this snapshot rather than issuing a later GET, so an
+        annotation-only generation bump cannot be adopted before workers
+        have rolled onto that generation. Active rolling updates
+        (``status.rollingUpdate.phase`` Pending/InProgress/Failed) also
+        block settlement so a still-annotated old DCD cannot satisfy the
+        gate while the new revision is missing.
+        """
+        return await self.kube_api.wait_for_graph_deployment_ready(
+            self.graph_deployment_name,
+            include_planner=include_planner,
+        )
+
     def _list_worker_metadata_crs(self) -> list[dict]:
         """List all DynamoWorkerMetadata CRs in the current namespace.
 
