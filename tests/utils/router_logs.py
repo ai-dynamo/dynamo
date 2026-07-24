@@ -10,7 +10,7 @@ import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal, Protocol, Sequence, cast
+from typing import Literal, Protocol, Sequence, cast, get_args
 
 _ROUTING_MESSAGE_PATTERN = re.compile(
     r"\[ROUTING\].*with\s*(?P<overlap>\d+(?:\.\d+)?)/(?P<total>\d+)\s*blocks overlap"
@@ -27,15 +27,7 @@ KvEventDiagnosticCode = Literal[
     "kv_event_source_recovered",
 ]
 
-KV_EVENT_DIAGNOSTIC_CODES = frozenset(
-    {
-        "kv_event_publisher_disabled",
-        "kv_event_source_not_observed",
-        "kv_event_source_ambiguous",
-        "kv_event_source_recovered",
-    }
-)
-_SNAKE_CASE_PATTERN = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
+KV_EVENT_DIAGNOSTIC_CODES = frozenset(get_args(KvEventDiagnosticCode))
 
 
 class LogReadable(Protocol):
@@ -183,27 +175,6 @@ def _require_bool(record: dict[str, object], field: str, line_number: int) -> bo
     return value
 
 
-def _validate_dp_ranks(dp_ranks: str, rank_count: int, line_number: int) -> None:
-    try:
-        ranks = [] if not dp_ranks else [int(rank) for rank in dp_ranks.split(",")]
-    except ValueError as error:
-        raise ValueError(
-            f"router diagnostic line {line_number} has invalid dp_ranks={dp_ranks!r}"
-        ) from error
-
-    canonical = ",".join(str(rank) for rank in sorted(set(ranks)))
-    if dp_ranks != canonical:
-        raise ValueError(
-            f"router diagnostic line {line_number} dp_ranks must be unique, "
-            "comma-separated, and ascending"
-        )
-    if rank_count != len(ranks):
-        raise ValueError(
-            f"router diagnostic line {line_number} rank_count={rank_count} "
-            f"does not match dp_ranks={dp_ranks!r}"
-        )
-
-
 def _parse_diagnostic(record: dict[str, object], line_number: int) -> KvEventDiagnostic:
     diagnostic_code = _require_string(record, "diagnostic_code", line_number)
     if diagnostic_code not in KV_EVENT_DIAGNOSTIC_CODES:
@@ -212,46 +183,19 @@ def _parse_diagnostic(record: dict[str, object], line_number: int) -> KvEventDia
             f"diagnostic_code={diagnostic_code!r}"
         )
 
-    worker_role = _require_string(record, "worker_role", line_number)
-    if _SNAKE_CASE_PATTERN.fullmatch(worker_role) is None:
-        raise ValueError(
-            f"router diagnostic line {line_number} has non-snake-case "
-            f"worker_role={worker_role!r}"
-        )
-
-    requirement = _require_string(record, "requirement", line_number)
-    if _SNAKE_CASE_PATTERN.fullmatch(requirement) is None:
-        raise ValueError(
-            f"router diagnostic line {line_number} has non-snake-case "
-            f"requirement={requirement!r}"
-        )
-
-    waited_ms = _require_int(record, "waited_ms", line_number)
-    rank_count = _require_int(record, "rank_count", line_number)
-    dp_ranks = _require_string(record, "dp_ranks", line_number)
-    if waited_ms < 0:
-        raise ValueError(
-            f"router diagnostic line {line_number} waited_ms must be non-negative"
-        )
-    if rank_count < 0:
-        raise ValueError(
-            f"router diagnostic line {line_number} rank_count must be non-negative"
-        )
-    _validate_dp_ranks(dp_ranks, rank_count, line_number)
-
     return KvEventDiagnostic(
         diagnostic_code=cast(KvEventDiagnosticCode, diagnostic_code),
         model=_require_string(record, "model", line_number),
-        worker_role=worker_role,
-        requirement=requirement,
+        worker_role=_require_string(record, "worker_role", line_number),
+        requirement=_require_string(record, "requirement", line_number),
         worker_id=_require_int(record, "worker_id", line_number),
         serving_endpoint=_require_string(record, "serving_endpoint", line_number),
         kv_event_publishing_enabled=_require_bool(
             record, "kv_event_publishing_enabled", line_number
         ),
-        waited_ms=waited_ms,
-        rank_count=rank_count,
-        dp_ranks=dp_ranks,
+        waited_ms=_require_int(record, "waited_ms", line_number),
+        rank_count=_require_int(record, "rank_count", line_number),
+        dp_ranks=_require_string(record, "dp_ranks", line_number),
     )
 
 

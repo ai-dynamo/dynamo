@@ -1094,11 +1094,7 @@ impl ModelWatcher {
         if !component_has_instances {
             // No more workers of this component in this namespace — remove its WorkerSet
             let removed = self.manager.remove_worker_set(&model_name, &ws_key);
-            if let Some(worker_set) = &removed {
-                // Active requests can retain a retired router after discovery removes its
-                // WorkerSet. Stop only its diagnostic monitor so a replacement router becomes
-                // the sole reporter without disrupting in-flight request cleanup.
-                worker_set.stop_kv_source_health_monitor();
+            if removed.is_some() {
                 tracing::info!(
                     model_name,
                     namespace = %worker_namespace,

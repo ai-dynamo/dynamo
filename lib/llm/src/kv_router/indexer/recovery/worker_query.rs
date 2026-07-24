@@ -1135,7 +1135,7 @@ mod tests {
     use crate::{
         discovery::{
             KvSourceAmbiguity, KvSourceMembershipCoordinator, KvSourceMembershipView,
-            KvSourceObservationState, KvStateEndpointResolution, runtime_config_watch,
+            KvStateEndpointResolution, runtime_config_watch,
         },
         kv_router::{
             indexer::{Indexer, LowerTierIndexers},
@@ -2619,7 +2619,6 @@ mod tests {
         KvSourceMembershipView {
             serving_endpoint: serving_endpoint.clone(),
             endpoint_resolution: KvStateEndpointResolution::Resolved(kv_state_endpoint.clone()),
-            observation_state: KvSourceObservationState::Bound,
             sources: statuses,
             kv_event_publishing_enabled: HashMap::new(),
             lifecycle_generations: generations,

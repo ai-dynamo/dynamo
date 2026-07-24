@@ -131,29 +131,11 @@ pub enum KvStateEndpointResolution {
     Ambiguous { endpoints: Vec<EndpointId> },
 }
 
-/// Whether the coordinator currently has an exact KV event-source discovery watch.
-///
-/// Consumers must not interpret `Missing` as an observed publisher absence while the
-/// coordinator is rebinding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum KvSourceObservationState {
-    Rebinding,
-    Bound,
-}
-
-impl KvSourceObservationState {
-    pub fn is_bound(self) -> bool {
-        matches!(self, Self::Bound)
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KvSourceMembershipView<S = KvEventSource> {
     /// The exact serving endpoint whose workers this view describes.
     pub serving_endpoint: EndpointId,
     pub endpoint_resolution: KvStateEndpointResolution,
-    /// Whether `sources` is backed by a currently bound exact discovery watch.
-    pub observation_state: KvSourceObservationState,
     /// Membership remains indexed by logical worker and global DP rank. Publisher incarnation is
     /// deliberately absent from this routing/index identity.
     pub sources: HashMap<WorkerWithDpRank, KvSourceStatus<S>>,
@@ -372,19 +354,6 @@ where
         serving_endpoint: &EndpointId,
         runtime_configs: &HashMap<WorkerId, ModelRuntimeConfig>,
     ) -> KvSourceMembershipView<S> {
-        self.view_with_observation_state(
-            serving_endpoint,
-            runtime_configs,
-            KvSourceObservationState::Rebinding,
-        )
-    }
-
-    pub(crate) fn view_with_observation_state(
-        &self,
-        serving_endpoint: &EndpointId,
-        runtime_configs: &HashMap<WorkerId, ModelRuntimeConfig>,
-        observation_state: KvSourceObservationState,
-    ) -> KvSourceMembershipView<S> {
         let endpoint_resolution =
             resolve_kv_state_endpoint(serving_endpoint, runtime_configs.values());
         let workers: Vec<_> = runtime_configs
@@ -435,7 +404,6 @@ where
         KvSourceMembershipView {
             serving_endpoint: serving_endpoint.clone(),
             endpoint_resolution,
-            observation_state,
             lifecycle_generations: sources.keys().map(|worker| (*worker, 0)).collect(),
             recovery_expected,
             kv_event_publishing_enabled,
@@ -647,7 +615,6 @@ mod tests {
         assert_eq!(view.kv_event_publishing_enabled.len(), 1);
         assert_eq!(view.kv_event_publishing_enabled(7), Some(true));
         assert_eq!(view.kv_event_publishing_enabled(99), None);
-        assert_eq!(view.observation_state, KvSourceObservationState::Rebinding);
     }
 
     #[test]
