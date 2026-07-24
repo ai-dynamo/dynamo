@@ -124,6 +124,14 @@ dynamo:
       # -- Enable the NIXL telemetry metrics collection on workers.
       # Requires workers with NIXL_TELEMETRY_ENABLE=y in their environment
       nixlTelemetry: false
+      # -- Metric relabelings for frontends
+      frontendRelabelings: []
+      # -- Metric relabelings for workers
+      workerRelabelings: []
+      # -- Metric relabelings for planners
+      plannerRelabelings: []
+      # -- Metric relabelings for routers
+      routerRelabelings: []
 
   mpiRun:
     secretName: "mpi-run-ssh-secret"
