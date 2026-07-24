@@ -452,7 +452,7 @@ jobs:
   sglang-efa-build:
     name: sglang-runtime-efa
     needs: [changed-files]
-    if: needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.efa == 'true'
+    if: needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.efa == 'true' || needs.changed-files.outputs.ci == 'true'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: sglang
@@ -882,7 +882,8 @@ jobs:
     if: |
       always() && !cancelled() &&
       (needs.changed-files.outputs.sglang == 'true' ||
-       needs.changed-files.outputs.efa == 'true') &&
+       needs.changed-files.outputs.efa == 'true' ||
+       needs.changed-files.outputs.ci == 'true') &&
       needs.sglang-efa-build.result == 'success'
     uses: ./.github/workflows/shared-copy.yml
     with:
