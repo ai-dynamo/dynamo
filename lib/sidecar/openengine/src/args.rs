@@ -51,7 +51,7 @@ pub struct Args {
     #[arg(long, default_value_t = 300)]
     pub health_deadline_secs: u64,
 
-    /// Maximum time to wait for OpenEngine's process-wide drain stream.
+    /// Maximum time to wait for terminal Drain and a quiescent load snapshot.
     #[arg(long, env = "OPENENGINE_DRAIN_TIMEOUT_SECS", default_value_t = 25)]
     pub drain_timeout_secs: u64,
 

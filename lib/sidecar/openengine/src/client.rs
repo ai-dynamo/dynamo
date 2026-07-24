@@ -102,7 +102,7 @@ pub async fn discover(
     deadline: Duration,
 ) -> Result<Discovery, DynamoError> {
     let deadline_at = Instant::now() + deadline;
-    let mut engine = timeout_discovery_rpc(
+    let engine = timeout_discovery_rpc(
         "GetServerInfo",
         deadline_at,
         client.get_server_info(pb::GetServerInfoRequest {}),
@@ -141,15 +141,6 @@ pub async fn discover(
             model.model_id
         )));
     }
-    let connector = timeout_discovery_rpc(
-        "GetKvConnectorInfo",
-        deadline_at,
-        client.get_kv_connector_info(pb::GetKvConnectorInfoRequest {}),
-    )
-    .await?
-    .map_err(|status| status_to_dynamo("GetKvConnectorInfo", status))?
-    .into_inner();
-    engine.kv_connector = Some(connector);
     Ok(Discovery {
         engine,
         model,

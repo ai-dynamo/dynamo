@@ -12,6 +12,7 @@ use dynamo_llm::protocols::common::preprocessor::{BootstrapInfo, MultimodalData,
 use parking_lot::Mutex;
 
 use crate::convert;
+use crate::engine::load_is_quiescent;
 use crate::proto as pb;
 
 type GrpcStream<T> = Pin<Box<dyn futures::Stream<Item = Result<T, tonic::Status>> + Send>>;
@@ -25,6 +26,29 @@ fn request() -> PreprocessedRequest {
         .output_options(Default::default())
         .build()
         .unwrap()
+}
+
+#[test]
+fn drain_quiescence_includes_queue_and_kv_sessions() {
+    let mut load = pb::LoadInfo {
+        running_requests: Some(0),
+        queued_requests: Some(0),
+        active_kv_sessions: Some(0),
+        ..Default::default()
+    };
+    assert!(load_is_quiescent(&load));
+
+    load.queued_requests = Some(1);
+    assert!(!load_is_quiescent(&load));
+    load.queued_requests = Some(0);
+    load.active_kv_sessions = Some(1);
+    assert!(!load_is_quiescent(&load));
+    load.active_kv_sessions = Some(0);
+    load.running_requests = None;
+    assert!(
+        !load_is_quiescent(&load),
+        "missing the primary running-request count must fail closed"
+    );
 }
 
 fn trt_handoff(
@@ -721,15 +745,22 @@ impl pb::control_server::Control for FakeOpenEngine {
             })));
         }
         if self.0.behavior.load(Ordering::SeqCst) == DELAYED_DRAIN_COMPLETE {
-            let deadline_ms = request.into_inner().deadline_ms.unwrap_or_default();
+            let request = request.into_inner();
+            let deadline_ms = request.deadline_ms.unwrap_or_default();
+            assert!(
+                deadline_ms > 0,
+                "sidecar Drain must carry its bounded deadline"
+            );
+            assert!(
+                !request.abort_after_deadline,
+                "sidecar cleanup must abort only its tracked request IDs"
+            );
             return Ok(tonic::Response::new(Box::pin(async_stream::try_stream! {
                 yield pb::DrainResponse {
                     event: Some(pb::drain_response::Event::State(pb::DrainState::Started as i32)),
                     ..Default::default()
                 };
-                tokio::time::sleep(std::time::Duration::from_millis(
-                    u64::from(deadline_ms) + 100,
-                )).await;
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 yield pb::DrainResponse {
                     event: Some(pb::drain_response::Event::State(pb::DrainState::Complete as i32)),
                     ..Default::default()
@@ -1575,7 +1606,7 @@ async fn fake_tonic_blackholed_drain_stream_times_out() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn fake_tonic_drain_accepts_terminal_cleanup_after_remote_deadline() {
+async fn fake_tonic_drain_verifies_quiescence_after_terminal_completion() {
     let state = Arc::new(FakeState::default());
     state
         .behavior
@@ -1584,8 +1615,8 @@ async fn fake_tonic_drain_accepts_terminal_cleanup_after_remote_deadline() {
     let (engine, _) = build_sidecar(server.address, "tensorrt_llm").await.unwrap();
     engine.start(1).await.unwrap();
     assert!(
-        engine.drain_before_discovery_unregister(),
-        "OpenEngine must preserve admitted streams until remote drain completes"
+        !engine.drain_before_discovery_unregister(),
+        "Dynamo must unregister sidecar admission before remote drain"
     );
 
     tokio::time::timeout(std::time::Duration::from_secs(2), engine.drain())
@@ -1594,6 +1625,35 @@ async fn fake_tonic_drain_accepts_terminal_cleanup_after_remote_deadline() {
         .expect("Drain reached terminal COMPLETE");
 
     engine.cleanup().await.unwrap();
+    server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fake_tonic_cleanup_aborts_tracked_straggler_before_returning() {
+    use futures::StreamExt;
+
+    let state = Arc::new(FakeState::default());
+    state.behavior.store(PENDING, Ordering::SeqCst);
+    let server = FakeServer::start(state.clone()).await;
+    let (engine, _) = build_sidecar(server.address, "tensorrt_llm").await.unwrap();
+    engine.start(1).await.unwrap();
+    let mut stream = engine
+        .generate(
+            request(),
+            GenerateContext::new(dynamo_backend_common::testing::mock_context(), None),
+        )
+        .await
+        .unwrap();
+    assert!(stream.next().await.is_some());
+
+    engine.cleanup().await.unwrap();
+    assert_eq!(
+        state.aborts.lock().len(),
+        1,
+        "cleanup must synchronously abort every sidecar-owned straggler"
+    );
+
+    drop(stream);
     server.stop().await;
 }
 

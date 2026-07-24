@@ -3,7 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use dynamo_backend_common::{
@@ -32,8 +32,6 @@ use crate::convert;
 use crate::kv;
 use crate::proto as pb;
 
-const DRAIN_ABORT_CLEANUP_GRACE: Duration = Duration::from_secs(5);
-
 fn request_error_stream(
     error: DynamoError,
 ) -> BoxStream<'static, Result<LLMEngineOutput, DynamoError>> {
@@ -56,6 +54,8 @@ pub struct OpenEngineSidecar {
     lora_downloader: Option<LoRADownloader>,
     lora_discovery: OnceCell<LoraDiscovery>,
     loaded_loras: tokio::sync::Mutex<HashMap<String, pb::LoraAdapter>>,
+    active_requests: Arc<Mutex<HashSet<String>>>,
+    shutting_down: Arc<AtomicBool>,
 }
 
 struct LoraDiscovery {
@@ -173,6 +173,8 @@ impl OpenEngineSidecar {
                 lora_downloader: build_lora_downloader(),
                 lora_discovery: OnceCell::new(),
                 loaded_loras: tokio::sync::Mutex::new(HashMap::new()),
+                active_requests: Arc::new(Mutex::new(HashSet::new())),
+                shutting_down: Arc::new(AtomicBool::new(false)),
             },
             worker,
         ))
@@ -385,13 +387,23 @@ impl LLMEngine for OpenEngineSidecar {
         *grpc_request.metadata_mut() = metadata;
         let mut grpc_client = pool.stream_client();
         let abort_client = pool.control_client();
+        let active_requests = self.active_requests.clone();
+        let shutting_down = self.shutting_down.clone();
         let cancel = self.cancel.clone();
         let fatal = self.fatal.clone();
         let current_failure = self.fatal.borrow().clone();
         let response_discovery = discovery.clone();
 
         Ok(Box::pin(async_stream::stream! {
-            let mut abort_guard = AbortOnDrop::new(request_id.clone(), abort_client);
+            let Some(mut abort_guard) = AbortOnDrop::new(
+                request_id.clone(),
+                abort_client,
+                active_requests,
+                shutting_down,
+            ) else {
+                yield Ok(LLMEngineOutput::cancelled().with_usage(usage(prompt_tokens, 0)));
+                return;
+            };
             if let Some(reason) = current_failure {
                 yield Err(client::engine_shutdown(reason));
                 return;
@@ -604,7 +616,27 @@ impl LLMEngine for OpenEngineSidecar {
     }
 
     async fn cleanup(&self) -> Result<(), DynamoError> {
+        self.shutting_down.store(true, Ordering::SeqCst);
+        let request_ids = self.active_requests.lock().drain().collect::<Vec<_>>();
         self.cancel.cancel();
+        if let Some(pool) = self.pool.get() {
+            let request_count = request_ids.len();
+            let aborts = request_ids
+                .into_iter()
+                .map(|request_id| abort_request(pool.control_client(), request_id));
+            if tokio::time::timeout(
+                self.transport.connect_timeout,
+                futures::future::join_all(aborts),
+            )
+            .await
+            .is_err()
+            {
+                tracing::warn!(
+                    request_count,
+                    "OpenEngine Abort cleanup exceeded the shared timeout"
+                );
+            }
+        }
         if let Some(discovery) = self.lora_discovery.get() {
             let names = self
                 .loaded_loras
@@ -675,7 +707,7 @@ impl LLMEngine for OpenEngineSidecar {
         .map_err(|_| client::engine_shutdown("OpenEngine GetLoad timed out"))?
         .map_err(|status| client::status_to_dynamo("GetLoad", status))?
         .into_inner();
-        Ok(load.running_requests.map(|running| running == 0))
+        Ok(Some(load_is_quiescent(&load)))
     }
 
     async fn kv_event_sources(&self) -> Result<Vec<KvEventSource>, DynamoError> {
@@ -739,21 +771,24 @@ impl LLMEngine for OpenEngineSidecar {
         };
         let client_timeout = self.transport.drain_timeout;
         let deadline = Instant::now() + client_timeout;
-        let cleanup_grace = DRAIN_ABORT_CLEANUP_GRACE.min(client_timeout / 2);
-        let remote_timeout = self.transport.drain_timeout.saturating_sub(cleanup_grace);
-        let deadline_ms = remote_timeout.as_millis().min(u32::MAX as u128) as u32;
+        let deadline_ms = client_timeout.as_millis().min(u32::MAX as u128) as u32;
         let mut stream = tokio::time::timeout(
             self.transport.drain_timeout,
             pool.control_client().drain(pb::DrainRequest {
                 stop_accepting_new_requests: true,
                 deadline_ms: Some(deadline_ms),
-                abort_after_deadline: true,
+                // The sidecar owns only its tracked request IDs. Let cleanup
+                // abort those stragglers at the local deadline rather than
+                // asking the shared engine server to abort unrelated HTTP
+                // requests process-wide.
+                abort_after_deadline: false,
             }),
         )
         .await
         .map_err(|_| client::engine_shutdown("OpenEngine Drain startup timed out"))?
         .map_err(|status| client::status_to_dynamo("Drain", status))?
         .into_inner();
+        let mut drain_complete = false;
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
@@ -770,7 +805,8 @@ impl LLMEngine for OpenEngineSidecar {
                 Some(pb::drain_response::Event::State(value))
                     if pb::DrainState::try_from(value).ok() == Some(pb::DrainState::Complete) =>
                 {
-                    return Ok(());
+                    drain_complete = true;
+                    break;
                 }
                 Some(pb::drain_response::Event::Error(error)) => {
                     return Err(client::engine_error_to_dynamo(&error));
@@ -778,13 +814,61 @@ impl LLMEngine for OpenEngineSidecar {
                 _ => {}
             }
         }
-        Err(client::engine_shutdown(
-            "OpenEngine Drain stream ended without COMPLETE",
-        ))
+        if !drain_complete {
+            return Err(client::engine_shutdown(
+                "OpenEngine Drain stream ended without COMPLETE",
+            ));
+        }
+
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(client::engine_shutdown(
+                    "OpenEngine remained non-quiescent after terminal Drain",
+                ));
+            }
+            let load_timeout = self.transport.connect_timeout.min(remaining);
+            match tokio::time::timeout(
+                load_timeout,
+                pool.control_client().get_load(pb::GetLoadRequest {
+                    include_per_rank: false,
+                }),
+            )
+            .await
+            {
+                Ok(Ok(response)) if load_is_quiescent(response.get_ref()) => return Ok(()),
+                Ok(Ok(response)) => {
+                    let load = response.into_inner();
+                    tracing::debug!(
+                        running_requests = ?load.running_requests,
+                        queued_requests = ?load.queued_requests,
+                        active_kv_sessions = ?load.active_kv_sessions,
+                        "waiting for OpenEngine to quiesce after terminal Drain"
+                    );
+                }
+                Ok(Err(status)) => {
+                    tracing::debug!(
+                        %status,
+                        "OpenEngine GetLoad failed while verifying drain quiescence"
+                    );
+                }
+                Err(_) => {
+                    tracing::debug!(
+                        "OpenEngine GetLoad timed out while verifying drain quiescence"
+                    );
+                }
+            }
+            tokio::time::sleep(
+                self.transport
+                    .load_poll_interval
+                    .min(deadline.saturating_duration_since(Instant::now())),
+            )
+            .await;
+        }
     }
 
     fn drain_before_discovery_unregister(&self) -> bool {
-        true
+        false
     }
 
     async fn supported_updates(&self) -> Result<Vec<String>, DynamoError> {
@@ -1016,17 +1100,33 @@ fn publish_load(publisher: &SnapshotPublisher, rank: u32, used: Option<u64>, tot
 struct AbortOnDrop {
     request_id: Option<String>,
     client: Option<client::Control>,
+    active_requests: Arc<Mutex<HashSet<String>>>,
 }
 
 impl AbortOnDrop {
-    fn new(request_id: String, client: client::Control) -> Self {
-        Self {
+    fn new(
+        request_id: String,
+        client: client::Control,
+        active_requests: Arc<Mutex<HashSet<String>>>,
+        shutting_down: Arc<AtomicBool>,
+    ) -> Option<Self> {
+        let mut active = active_requests.lock();
+        if shutting_down.load(Ordering::SeqCst) {
+            return None;
+        }
+        active.insert(request_id.clone());
+        drop(active);
+        Some(Self {
             request_id: Some(request_id),
             client: Some(client),
-        }
+            active_requests,
+        })
     }
 
     fn complete(&mut self) {
+        if let Some(request_id) = self.request_id.as_ref() {
+            self.active_requests.lock().remove(request_id);
+        }
         self.request_id = None;
         self.client = None;
     }
@@ -1037,6 +1137,9 @@ impl Drop for AbortOnDrop {
         let (Some(request_id), Some(client)) = (self.request_id.take(), self.client.take()) else {
             return;
         };
+        if !self.active_requests.lock().remove(&request_id) {
+            return;
+        }
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(abort_request(client, request_id));
         }
@@ -1052,6 +1155,12 @@ async fn abort_request(mut client: client::Control, request_id: String) {
     {
         tracing::debug!(%error, %request_id, "OpenEngine Abort failed");
     }
+}
+
+pub(crate) fn load_is_quiescent(load: &pb::LoadInfo) -> bool {
+    load.running_requests == Some(0)
+        && load.queued_requests.unwrap_or(0) == 0
+        && load.active_kv_sessions.unwrap_or(0) == 0
 }
 
 fn bootstrap_discover(
