@@ -26,7 +26,9 @@ A 10-second cooldown between launches avoids the vLLM profiling race
 from __future__ import annotations
 
 import argparse
+import atexit
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -118,6 +120,8 @@ class _RunningTest:
     start_time: float
     captured: list[str] = field(default_factory=list)
     reader_thread: threading.Thread | None = None
+    # Child's process-group id (== pid, since it's a session leader).
+    pgid: int | None = None
 
 
 def _print(msg: str = "") -> None:
@@ -445,6 +449,40 @@ def _select_launches(
     return to_launch
 
 
+def _reap_running(running: dict[int, _RunningTest], reason: str) -> None:
+    """Kill every still-running child pytest and its GPU-holding engine tree.
+
+    Guards against orphaning engine trees (and pinning VRAM) when the
+    orchestrator exits early. Idempotent: clears ``running`` on completion.
+    """
+    if not running:
+        return
+    import psutil
+
+    from tests.utils.managed_process import terminate_process_tree
+
+    _print(f"[cleanup] terminating {len(running)} running test(s) — {reason}")
+    for w_id, run_info in list(running.items()):
+        # Snapshots descendants before killing, so it catches ManagedProcess
+        # workers that setsid into their own session (killpg alone misses them).
+        try:
+            terminate_process_tree(run_info.proc.pid, immediate_kill=True, timeout=5)
+        except (psutil.Error, OSError) as exc:  # keep reaping remaining tests
+            _print(f"[cleanup] w{w_id} tree kill error: {exc}")
+        if run_info.pgid is not None:
+            try:
+                os.killpg(run_info.pgid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+        try:
+            run_info.proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _print(f"[cleanup] w{w_id} still alive after SIGKILL")
+        if run_info.reader_thread is not None:
+            run_info.reader_thread.join(timeout=2)
+    running.clear()
+
+
 def run_parallel(
     test_ids: list[str],
     meta: dict[str, dict],
@@ -745,8 +783,12 @@ def run_parallel(
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            # Own session/process group so the orchestrator can killpg the
+            # whole tree on exit, and a terminal Ctrl-C hits only us.
+            start_new_session=True,
         )
         run_info = _RunningTest(proc=proc, test=test, start_time=time.monotonic())
+        run_info.pgid = proc.pid  # session leader: pgid == pid
         w_id = test.w_id
         stream_prefix = f"[w{w_id}]" if stream else None
         t = threading.Thread(
@@ -759,6 +801,24 @@ def run_parallel(
         return run_info
 
     env_base = os.environ.copy()
+
+    # Reap children on early exit. Signals cover timeout (SIGTERM) and Ctrl-C
+    # (SIGINT); atexit backstops normal/exception exit. (SIGKILL to us is
+    # uncatchable and would still orphan children.)
+    def _signal_reap(signum, _frame):
+        _reap_running(running, f"signal {signum}")
+        # Re-raise with default disposition so exit status reflects the signal.
+        signal.signal(signum, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+
+    _prev_handlers: dict[int, object] = {}
+    if threading.current_thread() is threading.main_thread():
+        for _sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                _prev_handlers[_sig] = signal.signal(_sig, _signal_reap)
+            except (ValueError, OSError):
+                pass
+    atexit.register(_reap_running, running, "interpreter exit")
 
     while pending or running:
         now = time.monotonic()
@@ -946,6 +1006,14 @@ def run_parallel(
 
         if running or pending:
             time.sleep(1.0)
+
+    # Drained cleanly: restore handlers and drop the atexit backstop.
+    for _sig, _handler in _prev_handlers.items():
+        try:
+            signal.signal(_sig, _handler)
+        except (ValueError, OSError):
+            pass
+    atexit.unregister(_reap_running)
 
     # Summary
     wall_time = time.monotonic() - t0
