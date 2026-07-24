@@ -21,6 +21,7 @@ from tests.utils.managed_deployment import (
     DeploymentSpec,
     ManagedDeployment,
     _get_workspace_dir,
+    dynamo_runtime_compatibility_version,
 )
 
 logger = logging.getLogger(__name__)
@@ -239,9 +240,13 @@ def _new_checkpoint_spec(
     deployment_spec.name = name
     deployment_spec.namespace = namespace
     deployment_spec.set_image(frontend_image, backend.frontend_component)
-    deployment_spec.set_runtime_version_override("1.3.0", backend.frontend_component)
+    deployment_spec.set_runtime_version_override(
+        dynamo_runtime_compatibility_version(), backend.frontend_component
+    )
     deployment_spec.set_image(image, backend.decode_component)
-    deployment_spec.set_runtime_version_override("1.3.0", backend.decode_component)
+    deployment_spec.set_runtime_version_override(
+        dynamo_runtime_compatibility_version(), backend.decode_component
+    )
     deployment_spec.set_model(backend.model, backend.decode_component)
 
     raw_spec = deployment_spec.spec()

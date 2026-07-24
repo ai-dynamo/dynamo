@@ -25,6 +25,7 @@ from tests.utils.managed_deployment import (
     DeploymentSpec,
     ManagedDeployment,
     _get_workspace_dir,
+    dynamo_runtime_compatibility_version,
 )
 
 logger = logging.getLogger(__name__)
@@ -285,10 +286,14 @@ async def test_gaie_deployment(
     logger.info(f"Worker image: {worker_image}")
 
     deployment_spec.set_image(frontend_image, service_name="Epp")
-    deployment_spec.set_runtime_version_override("1.3.0", service_name="Epp")
+    deployment_spec.set_runtime_version_override(
+        dynamo_runtime_compatibility_version(), service_name="Epp"
+    )
     for worker in ("VllmPrefillWorker", "VllmDecodeWorker"):
         deployment_spec.set_image(worker_image, service_name=worker)
-        deployment_spec.set_runtime_version_override("1.3.0", service_name=worker)
+        deployment_spec.set_runtime_version_override(
+            dynamo_runtime_compatibility_version(), service_name=worker
+        )
         deployment_spec.set_frontend_sidecar_image(frontend_image, service_name=worker)
 
     route_hostname = f"{namespace}.example.com"
