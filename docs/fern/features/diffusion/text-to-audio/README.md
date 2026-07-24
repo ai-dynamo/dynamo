@@ -1,9 +1,8 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Text-to-Audio with vLLM-Omni (TTS)
-subtitle: Synthesize speech with vLLM-Omni via the /v1/audio/speech endpoint.
-sidebar-title: vLLM-Omni
+title: Text-to-Audio
+subtitle: Synthesize speech with vLLM-Omni through the /v1/audio/speech endpoint
 ---
 
 Text-to-audio (TTS) generation runs a vLLM-Omni worker with `--output-modalities audio`. See the [Diffusion Overview](../README.md) for installation and shared configuration.

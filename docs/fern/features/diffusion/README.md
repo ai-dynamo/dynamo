@@ -24,27 +24,27 @@ Built-in diffusion backends currently use Dynamo CLI launch scripts and `python 
       <Card title="Text-to-Image">
         Generate images from text prompts.
 
-        **Backends:** [vLLM-Omni](text-to-image/vllm-omni.md), [SGLang](text-to-image/sglang.md), [TensorRT-LLM](text-to-image/trtllm.md)
+        **Backends:** [vLLM-Omni, SGLang, and TensorRT-LLM](text-to-image/README.md)
       </Card>
       <Card title="Text-to-Video">
         Generate video clips from text prompts.
 
-        **Backends:** [vLLM-Omni](text-to-video/vllm-omni.md), [SGLang](text-to-video/sglang.md), [TensorRT-LLM](text-to-video/trtllm.md), [FastVideo](text-to-video/fastvideo.md)
+        **Backends:** [vLLM-Omni, SGLang, TensorRT-LLM, and FastVideo](text-to-video/README.md)
       </Card>
       <Card title="Image-to-Video">
         Animate a source image from a text prompt.
 
-        **Backends:** [vLLM-Omni](image-to-video/vllm-omni.md), [SGLang](image-to-video/sglang.md)
+        **Backends:** [vLLM-Omni and SGLang](image-to-video/README.md)
       </Card>
       <Card title="Text-to-Audio">
         Generate speech from text.
 
-        **Backend:** [vLLM-Omni](text-to-audio/vllm-omni.md)
+        **Backend:** [vLLM-Omni](text-to-audio/README.md)
       </Card>
       <Card title="Text-to-Text">
         Generate text through iterative diffusion rather than autoregressive decoding.
 
-        **Backend:** [SGLang](text-to-text/sglang.md)
+        **Backend:** [SGLang](text-to-text/README.md)
       </Card>
     </CardGroup>
   </Step>
@@ -193,7 +193,7 @@ Built-in diffusion backends currently use Dynamo CLI launch scripts and `python 
           <Accordion title="Build and deploy FastVideo">
             Build the purpose-built runtime from [`examples/diffusers/Dockerfile`](https://github.com/ai-dynamo/dynamo/tree/main/examples/diffusers/Dockerfile). The first build can take 20–40 minutes or longer because it installs FastVideo and compiles its dependencies.
 
-            Kubernetes is the recommended deployment path. Follow the [FastVideo guide](text-to-video/fastvideo.md) for image build, deployment, and configuration instructions.
+            Kubernetes is the recommended deployment path. Follow the [FastVideo tab](text-to-video/README.md#fastvideo) for image build, deployment, and configuration instructions.
           </Accordion>
         </AccordionGroup>
       </Tab>

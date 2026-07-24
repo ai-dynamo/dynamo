@@ -317,39 +317,24 @@ navigation:
             contents:
               - page: Overview
                 path: features/diffusion/README.md
-              - section: Text-to-Image
+              - section: Workflows
+                collapsed: true
                 contents:
-                  - page: vLLM-Omni
-                    path: features/diffusion/text-to-image/vllm-omni.md
-                  - page: SGLang
-                    path: features/diffusion/text-to-image/sglang.md
-                  - page: TensorRT-LLM
-                    path: features/diffusion/text-to-image/trtllm.md
-              - section: Text-to-Video
-                contents:
-                  - page: vLLM-Omni
-                    path: features/diffusion/text-to-video/vllm-omni.md
-                  - page: SGLang
-                    path: features/diffusion/text-to-video/sglang.md
-                  - page: TensorRT-LLM
-                    path: features/diffusion/text-to-video/trtllm.md
-                  - page: FastVideo
-                    slug: fastvideo
-                    path: features/diffusion/text-to-video/fastvideo.md
-              - section: Image-to-Video
-                contents:
-                  - page: vLLM-Omni
-                    path: features/diffusion/image-to-video/vllm-omni.md
-                  - page: SGLang
-                    path: features/diffusion/image-to-video/sglang.md
-              - section: Text-to-Audio
-                contents:
-                  - page: vLLM-Omni
-                    path: features/diffusion/text-to-audio/vllm-omni.md
-              - section: Text-to-Text (LLM Diffusion)
-                contents:
-                  - page: SGLang
-                    path: features/diffusion/text-to-text/sglang.md
+                  - page: Text-to-Image
+                    slug: text-to-image
+                    path: features/diffusion/text-to-image/README.md
+                  - page: Text-to-Video
+                    slug: text-to-video
+                    path: features/diffusion/text-to-video/README.md
+                  - page: Image-to-Video
+                    slug: image-to-video
+                    path: features/diffusion/image-to-video/README.md
+                  - page: Text-to-Audio
+                    slug: text-to-audio
+                    path: features/diffusion/text-to-audio/README.md
+                  - page: Text-to-Text (LLM Diffusion)
+                    slug: text-to-text
+                    path: features/diffusion/text-to-text/README.md
           # TODO: add Reinforcement Learning (RL) use-case docs here when available.
 
       # ==================== Other Features ====================

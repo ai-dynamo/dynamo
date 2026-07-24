@@ -87,5 +87,5 @@ Disaggregated mode: `async_chunk=true` (streaming between stages) is not yet sup
 ## See Also
 
 - [Diffusion Overview](../features/diffusion/README.md)
-- [Text-to-Image with vLLM-Omni](../features/diffusion/text-to-image/vllm-omni.md)
+- [Text-to-Image with vLLM-Omni](../features/diffusion/text-to-image/README.md#vllm-omni)
 - [vLLM-Omni Configuration reference](../backends/vllm/vllm-omni-config-reference.mdx)

@@ -41,8 +41,8 @@ These arguments are added by Dynamo on top of SGLang's native arguments. For the
 | `--embedding-worker` | `DYN_SGL_EMBEDDING_WORKER` | `false` | Run as embedding worker (also sets SGLang's `--is-embedding`) |
 | `--multimodal-encode-worker` | `DYN_SGL_MULTIMODAL_ENCODE_WORKER` | `false` | Run as [multimodal](../../features/multimodal/multimodal-sglang.md) encode worker (frontend-facing) |
 | `--multimodal-worker` | `DYN_SGL_MULTIMODAL_WORKER` | `false` | Run as multimodal LLM worker |
-| `--image-diffusion-worker` | `DYN_SGL_IMAGE_DIFFUSION_WORKER` | `false` | Run as [image diffusion](../../features/diffusion/text-to-image/sglang.md) worker |
-| `--video-generation-worker` | `DYN_SGL_VIDEO_GENERATION_WORKER` | `false` | Run as [video generation](../../features/diffusion/text-to-video/sglang.md) worker |
+| `--image-diffusion-worker` | `DYN_SGL_IMAGE_DIFFUSION_WORKER` | `false` | Run as [image diffusion](../../features/diffusion/text-to-image/README.md#sglang) worker |
+| `--video-generation-worker` | `DYN_SGL_VIDEO_GENERATION_WORKER` | `false` | Run as [video generation](../../features/diffusion/text-to-video/README.md#sglang) worker |
 | `--disagg-config` | `DYN_SGL_DISAGG_CONFIG` | `None` | Path to YAML disaggregation config file |
 | `--disagg-config-key` | `DYN_SGL_DISAGG_CONFIG_KEY` | `None` | Key to select from disaggregation config (e.g., `prefill`, `decode`) |
 

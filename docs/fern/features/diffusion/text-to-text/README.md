@@ -1,9 +1,8 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Text-to-Text (LLM Diffusion) with SGLang
-subtitle: Generate text through iterative refinement with SGLang diffusion language models.
-sidebar-title: SGLang
+title: Text-to-Text (LLM Diffusion)
+subtitle: Generate text through iterative refinement with SGLang diffusion language models
 ---
 
 Diffusion Language Models generate text through iterative refinement rather than autoregressive token-by-token generation. The model starts with masked tokens and progressively replaces them with predictions, refining low-confidence tokens each step. See the [Diffusion Overview](../README.md) for backend setup.

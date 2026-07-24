@@ -1,15 +1,203 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: FastVideo
-subtitle: Deploys FastVideo text-to-video generation on Dynamo through a custom worker that serves the /v1/videos endpoint.
-sidebar-title: FastVideo
+title: Text-to-Video
+subtitle: Generate videos from text prompts with vLLM-Omni, SGLang, TensorRT-LLM, or FastVideo
 ---
+
+Choose a backend for text-to-video generation. See the [Diffusion Overview](../README.md) for installation and shared configuration.
+
+<Tabs>
+<Tab title="vLLM-Omni">
+
+<Anchor id="vllm-omni" />
+
+Text-to-video generation runs a vLLM-Omni worker with `--output-modalities video`.
+
+## Tested Models
+
+| Model | Notes |
+|---|---|
+| `Wan-AI/Wan2.1-T2V-1.3B-Diffusers` | Default model (1 GPU) |
+| `Wan-AI/Wan2.2-T2V-A14B-Diffusers` | |
+
+To run a non-default model, pass `--model` to the launch script:
+
+```bash
+bash examples/backends/vllm/launch/agg_omni_video.sh --model Wan-AI/Wan2.2-T2V-A14B-Diffusers
+```
+
+## Launch
+
+Launch using the provided script with `Wan-AI/Wan2.1-T2V-1.3B-Diffusers`:
+
+```bash
+bash examples/backends/vllm/launch/agg_omni_video.sh
+```
+
+## Generate a Video
+
+Generate a video via `/v1/videos`:
+
+```bash
+curl -s http://localhost:8000/v1/videos \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+    "prompt": "A drone flyover of a mountain landscape",
+    "seconds": 2,
+    "size": "832x480",
+    "response_format": "url"
+  }'
+```
+
+The response returns a video URL or base64 data depending on `response_format` (e.g. `{"object": "video", "status": "completed", "data": [{"url": "file:///tmp/dynamo_media/videos/req-abc123.mp4"}]}`).
+
+## Request Parameters (`nvext`)
+
+The `/v1/videos` endpoint also accepts NVIDIA extensions via the `nvext` field for fine-grained control:
+
+<ParamField path="nvext.fps" type="int" default="24">
+  Frames per second.
+</ParamField>
+<ParamField path="nvext.num_frames" type="int">
+  Number of frames (overrides `fps * seconds`).
+</ParamField>
+<ParamField path="nvext.negative_prompt" type="string">
+  Negative prompt for guidance.
+</ParamField>
+<ParamField path="nvext.num_inference_steps" type="int" default="50">
+  Number of denoising steps.
+</ParamField>
+<ParamField path="nvext.guidance_scale" type="float" default="5.0">
+  CFG guidance scale.
+</ParamField>
+<ParamField path="nvext.seed" type="int">
+  Random seed for reproducibility.
+</ParamField>
+
+<Note>
+The `nvext.boundary_ratio` and `nvext.guidance_scale_2` fields apply to the dual-expert MoE schedule used in image-to-video. See [Image-to-Video with vLLM-Omni](../image-to-video/README.md#vllm-omni).
+</Note>
+
+## See Also
+
+- [Image-to-Video with vLLM-Omni](../image-to-video/README.md#vllm-omni) — animate a source image with the same `/v1/videos` endpoint
+- [Text-to-Video with SGLang](README.md#sglang)
+- [Text-to-Video with TensorRT-LLM](README.md#tensorrt-llm)
+- [Text-to-Video with FastVideo](README.md#fastvideo)
+- [vLLM-Omni Configuration reference](../../../backends/vllm/vllm-omni-config-reference.mdx)
+
+</Tab>
+<Tab title="SGLang">
+
+<Anchor id="sglang" />
+
+Video generation workers produce videos from text prompts using SGLang's `DiffGenerator` with frame-to-video encoding, via the `--video-generation-worker` flag. The same worker also supports [image-to-video](../image-to-video/README.md#sglang).
+
+## Launch
+
+```bash
+cd $DYNAMO_HOME/examples/backends/sglang
+./launch/text-to-video-diffusion.sh
+```
+
+Use `--wan-size 1b` (default, 1 GPU) or `--wan-size 14b` (2 GPUs). See the launch script for all configuration options.
+
+## Generate a Video
+
+```bash
+curl http://localhost:8000/v1/videos \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "Roger Federer winning his 19th grand slam",
+    "model": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+    "seconds": 2,
+    "size": "832x480",
+    "response_format": "url",
+    "nvext": {
+      "fps": 8,
+      "num_frames": 17,
+      "num_inference_steps": 50
+    }
+  }'
+```
+
+## See Also
+
+- [Image-to-Video with SGLang](../image-to-video/README.md#sglang)
+- [Text-to-Video with vLLM-Omni](README.md#vllm-omni)
+- [Text-to-Video with TensorRT-LLM](README.md#tensorrt-llm)
+- [SGLang Examples](../../../backends/sglang/sglang-examples.mdx)
+
+</Tab>
+<Tab title="TensorRT-LLM">
+
+<Anchor id="tensorrt-llm" />
+
+TensorRT-LLM supports **experimental** text-to-video generation through the `--modality video_diffusion` flag. See the [Diffusion Overview](../README.md) for requirements and installation (including the ffmpeg/imageio setup needed for MP4 encoding).
+
+## Supported Models
+
+| Diffusers Pipeline | Description | Example Model |
+|--------------------|-------------|---------------|
+| `WanPipeline` | Wan 2.1/2.2 Text-to-Video | `Wan-AI/Wan2.1-T2V-1.3B-Diffusers` |
+
+The pipeline type is **auto-detected** from the model's `model_index.json` — no `--model-type` flag is needed.
+
+## Launch
+
+```bash
+python -m dynamo.trtllm \
+  --modality video_diffusion \
+  --model-path Wan-AI/Wan2.1-T2V-1.3B-Diffusers \
+  --media-output-fs-url file:///tmp/dynamo_media
+```
+
+## Generate a Video
+
+Video generation uses the `/v1/videos` endpoint:
+
+```bash
+curl -X POST http://localhost:8000/v1/videos \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "A cat playing piano",
+    "model": "wan_t2v",
+    "seconds": 4,
+    "size": "832x480",
+    "nvext": {
+      "fps": 24
+    }
+  }'
+```
+
+## Configuration
+
+For the full flag surface (quantization, TeaCache, torch.compile, attention backend, and request defaults), see the [TensorRT-LLM Configuration reference](../../../backends/trtllm/trtllm-config-reference.mdx#diffusion-experimental).
+
+## Limitations
+
+- Diffusion is experimental and not recommended for production use.
+- Only text-to-video and text-to-image are supported in this release (image-to-video planned).
+- Requires a GPU with sufficient VRAM for the diffusion model.
+
+## See Also
+
+- [Text-to-Video with vLLM-Omni](README.md#vllm-omni)
+- [Text-to-Video with SGLang](README.md#sglang)
+- [Text-to-Video with FastVideo](README.md#fastvideo)
+- [Text-to-Image with TensorRT-LLM](../text-to-image/README.md#tensorrt-llm)
+
+</Tab>
+<Tab title="FastVideo">
+
+<Anchor id="fastvideo" />
 
 This guide covers deploying [FastVideo](https://github.com/hao-ai-lab/FastVideo) text-to-video generation on Dynamo using a custom worker (`worker.py`) exposed through the `/v1/videos` endpoint.
 
 <Note>
-Dynamo also supports text-to-video through built-in backends: [vLLM-Omni](vllm-omni.md), [SGLang](sglang.md), and [TensorRT-LLM](trtllm.md). See the [Diffusion Overview](../README.md) for the full support matrix across all modalities.
+Dynamo also supports text-to-video through built-in backends: [vLLM-Omni](README.md#vllm-omni), [SGLang](README.md#sglang), and [TensorRT-LLM](README.md#tensorrt-llm). See the [Diffusion Overview](../README.md) for the full support matrix across all modalities.
 </Note>
 
 ## Overview
@@ -247,7 +435,6 @@ Fields nested under `nvext` in the `/v1/videos` request body:
 </Tab>
 </Tabs>
 
-
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
@@ -333,7 +520,10 @@ The example source lives at [`examples/diffusers/`](https://github.com/ai-dynamo
 
 ## See Also
 
-- [Text-to-Video with vLLM-Omni](vllm-omni.md) — vLLM-Omni video generation via `/v1/videos`
-- [Text-to-Video with SGLang](sglang.md) — SGLang video generation worker
-- [Text-to-Video with TensorRT-LLM](trtllm.md) — TensorRT-LLM diffusion quick start
+- [Text-to-Video with vLLM-Omni](README.md#vllm-omni) — vLLM-Omni video generation via `/v1/videos`
+- [Text-to-Video with SGLang](README.md#sglang) — SGLang video generation worker
+- [Text-to-Video with TensorRT-LLM](README.md#tensorrt-llm) — TensorRT-LLM diffusion quick start
 - [Diffusion Overview](../README.md) — Full backend support matrix
+
+</Tab>
+</Tabs>
