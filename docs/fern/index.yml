@@ -154,6 +154,18 @@ navigation:
               - page: KV Cache Offloading
                 path: kubernetes/dgd-kv-offloading.md
 
+          - section: Fault Tolerance
+            icon: shield-halved
+            contents:
+              - page: Introduction
+                path: fault-tolerance/README.md
+              - page: Request Migration
+                path: fault-tolerance/request-migration.md
+              - page: Request Rejection
+                path: fault-tolerance/request-rejection.md
+              - page: Graceful Shutdown
+                path: fault-tolerance/graceful-shutdown.md
+
           - section: Auto Deployment
             icon: wand-magic-sparkles
             collapsed: open-by-default
@@ -277,15 +289,15 @@ navigation:
               - page: Overview
                 path: agents/README.md
               - page: Session IDs
-                path: agents/session-ids.md
-              - page: Agent Tracing
-                path: agents/agent-tracing.md
-              - page: Agent Simulation
-                path: agents/agent-replay.md
+                path: agents/session-ids.mdx
               - page: Agent Hints
                 path: agents/agent-hints.md
               - page: Agent Harnesses
                 path: agents/agent-harnesses.md
+              - page: Agent Tracing
+                path: agents/agent-tracing.md
+              - page: Agent Simulation
+                path: agents/agent-replay.md
               - page: ThunderAgent Program Scheduler
                 path: agents/thunderagent-router.md
           - section: Multimodal
@@ -340,8 +352,8 @@ navigation:
                     path: features/diffusion/text-to-text/sglang.md
           # TODO: add Reinforcement Learning (RL) use-case docs here when available.
 
-      # ==================== Key Features ====================
-      - section: Key Features
+      # ==================== Other Features ====================
+      - section: Other Features
         icon: star
         contents:
           - section: Tool Calling & Reasoning
@@ -361,16 +373,6 @@ navigation:
             path: features/tokenizer/README.md
           - page: LoRA Adapters
             path: features/lora/README.md
-          - section: Fault Tolerance
-            contents:
-              - page: Introduction
-                path: fault-tolerance/README.md
-              - page: Request Migration
-                path: fault-tolerance/request-migration.md
-              - page: Request Rejection
-                path: fault-tolerance/request-rejection.md
-              - page: Graceful Shutdown
-                path: fault-tolerance/graceful-shutdown.md
 
   - tab: well-lit-paths
     layout:

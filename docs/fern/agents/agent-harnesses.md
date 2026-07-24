@@ -17,180 +17,187 @@ To start it, run:
 bash examples/backends/sglang/launch/agg_agent.sh
 ```
 
-## Codex
+## Configure a Harness
 
-Codex uses the Responses API. Add a local provider in `~/.codex/config.toml`:
+<Tabs>
+  <Tab title="Codex">
 
-```toml
-[model_providers.dynamo]
-name = "dynamo"
-base_url = "http://localhost:8000/v1"
-wire_api = "responses"
-```
+    Codex uses the Responses API. Add a local provider in `~/.codex/config.toml`:
 
-```bash
-# replace -m <model> with your model
-codex -m zai-org/GLM-4.7-Flash -c model_provider=dynamo
-```
+    ```toml
+    [model_providers.dynamo]
+    name = "dynamo"
+    base_url = "http://localhost:8000/v1"
+    wire_api = "responses"
+    ```
 
-Codex sends a `session-id` header that Dynamo maps to `session_id`.
+    ```bash
+    # replace -m <model> with your model
+    codex -m zai-org/GLM-4.7-Flash -c model_provider=dynamo
+    ```
 
-## Pi
+    Codex sends a `session-id` header that Dynamo maps to `session_id`.
 
-Pi uses the Dynamo provider plugin. Build and install it from the [agent-plugins](https://github.com/ai-dynamo/agent-plugins/tree/main/pi-plugin) checkout:
+  </Tab>
+  <Tab title="Pi">
 
-```bash
-git clone https://github.com/ai-dynamo/agent-plugins.git ~/agent-plugins
-cd ~/agent-plugins/pi-plugin
-npm install && npm run build
-pi install "$PWD"
-```
+    Pi uses the Dynamo provider plugin. Build and install it from the [agent-plugins](https://github.com/ai-dynamo/agent-plugins/tree/main/pi-plugin) checkout:
 
-Point it at the Dynamo OpenAI-compatible endpoint and run Pi with the `dynamo` provider:
+    ```bash
+    git clone https://github.com/ai-dynamo/agent-plugins.git ~/agent-plugins
+    cd ~/agent-plugins/pi-plugin
+    npm install && npm run build
+    pi install "$PWD"
+    ```
 
-```bash
-export DYNAMO_BASE_URL=http://localhost:8000/v1
-export DYNAMO_API_KEY=dynamo-local
+    Point it at the Dynamo OpenAI-compatible endpoint and run Pi with the `dynamo` provider:
 
-pi --model dynamo/zai-org/GLM-4.7-Flash
-```
+    ```bash
+    export DYNAMO_BASE_URL=http://localhost:8000/v1
+    export DYNAMO_API_KEY=dynamo-local
 
-## Claude Code
+    pi --model dynamo/zai-org/GLM-4.7-Flash
+    ```
 
-Claude Code uses Anthropic-compatible Messages API. The local launcher above starts `dynamo.frontend` with `--enable-anthropic-api`; for other deployments, pass that flag when starting the frontend. Then set:
+  </Tab>
+  <Tab title="Claude Code">
 
-```bash
-export ANTHROPIC_BASE_URL=http://localhost:8000
-export ANTHROPIC_MODEL=zai-org/GLM-4.7-Flash
-export ANTHROPIC_SMALL_FAST_MODEL=zai-org/GLM-4.7-Flash
-export ANTHROPIC_BASE_URL=http://localhost:8000
-export CLAUDE_CODE_ATTRIBUTION_HEADER=0 # preserve kv cache hits!
-export ANTHROPIC_API_KEY=
+    Claude Code uses the Anthropic-compatible Messages API. The local launcher above starts `dynamo.frontend` with `--enable-anthropic-api`; for other deployments, pass that flag when starting the frontend. Then set:
 
-claude
-```
+    ```bash
+    export ANTHROPIC_BASE_URL=http://localhost:8000
+    export ANTHROPIC_MODEL=zai-org/GLM-4.7-Flash
+    export ANTHROPIC_SMALL_FAST_MODEL=zai-org/GLM-4.7-Flash
+    export CLAUDE_CODE_ATTRIBUTION_HEADER=0 # preserve KV cache hits
+    export ANTHROPIC_API_KEY=
 
-Dynamo uses `x-claude-code-session-id` as the Claude Code session ID. For subagents, Dynamo uses `x-claude-code-agent-id` as the child session ID. Nested subagents use `x-claude-code-parent-agent-id` as the parent; top-level subagents fall back to the root session ID.
+    claude
+    ```
 
-## OpenCode
+    Dynamo uses `x-claude-code-session-id` as the Claude Code session ID. For subagents, Dynamo uses `x-claude-code-agent-id` as the child session ID. Nested subagents use `x-claude-code-parent-agent-id` as the parent; top-level subagents fall back to the root session ID.
 
-OpenCode uses a project-local JSONC provider config; setting an endpoint env var alone is not enough. Create `.opencode/opencode.jsonc` in the project you run OpenCode from:
+  </Tab>
+  <Tab title="OpenCode">
 
-```jsonc
-{
-  "provider": {
-    "dynamo": {
-      "npm": "@ai-sdk/openai-compatible",
-      "name": "Dynamo",
-      "models": {
-        "zai-org/GLM-4.7-Flash": {
-          "id": "zai-org/GLM-4.7-Flash",
-          "name": "GLM 4.7 Flash"
+    OpenCode uses a project-local JSONC provider config; setting an endpoint environment variable alone is not enough. Create `.opencode/opencode.jsonc` in the project where you run OpenCode:
+
+    ```jsonc
+    {
+      "provider": {
+        "dynamo": {
+          "npm": "@ai-sdk/openai-compatible",
+          "name": "Dynamo",
+          "models": {
+            "zai-org/GLM-4.7-Flash": {
+              "id": "zai-org/GLM-4.7-Flash",
+              "name": "GLM 4.7 Flash"
+            }
+          },
+          "options": {
+            "baseURL": "http://localhost:8000/v1"
+          }
         }
       },
-      "options": {
-        "baseURL": "http://localhost:8000/v1"
+      "permission": {
+        "task": "allow"
       }
     }
-  },
-  "permission": {
-    "task": "allow"
-  }
-}
-```
+    ```
 
-Run OpenCode with the provider/model pair:
+    Run OpenCode with the provider/model pair:
 
-```bash
-opencode -m dynamo/zai-org/GLM-4.7-Flash
-```
+    ```bash
+    opencode -m dynamo/zai-org/GLM-4.7-Flash
+    ```
 
-Dynamo maps OpenCode's `x-session-id` header to `session_id` and `x-parent-session-id` to `parent_session_id`.
+    Dynamo maps OpenCode's `x-session-id` header to `session_id` and `x-parent-session-id` to `parent_session_id`.
 
-## OpenClaw
+  </Tab>
+  <Tab title="OpenClaw">
 
-OpenClaw can use Dynamo through its OpenAI-compatible Responses endpoint. Install the
-Dynamo provider plugin:
+    OpenClaw can use Dynamo through its OpenAI-compatible Responses endpoint. Install the Dynamo provider plugin:
 
-```bash
-git clone https://github.com/ai-dynamo/agent-plugins.git ~/agent-plugins
-openclaw plugins install --link ~/agent-plugins/openclaw-plugin
-openclaw plugins enable dynamo
-```
+    ```bash
+    git clone https://github.com/ai-dynamo/agent-plugins.git ~/agent-plugins
+    openclaw plugins install --link ~/agent-plugins/openclaw-plugin
+    openclaw plugins enable dynamo
+    ```
 
-Add a Dynamo-backed model to `~/.openclaw/openclaw.json`:
+    Add a Dynamo-backed model to `~/.openclaw/openclaw.json`:
 
-```jsonc
-{
-  "models": {
-    "providers": {
-      "dynamo": {
-        "baseUrl": "http://localhost:8000/v1",
-        "apiKey": "dynamo-local",
-        "api": "openai-responses",
-        "models": [
-          {
-            "id": "zai-org/GLM-4.7-Flash",
-            "name": "Dynamo GLM 4.7 Flash",
-            "reasoning": true,
-            "contextWindow": 128000,
-            "maxTokens": 8192
+    ```jsonc
+    {
+      "models": {
+        "providers": {
+          "dynamo": {
+            "baseUrl": "http://localhost:8000/v1",
+            "apiKey": "dynamo-local",
+            "api": "openai-responses",
+            "models": [
+              {
+                "id": "zai-org/GLM-4.7-Flash",
+                "name": "Dynamo GLM 4.7 Flash",
+                "reasoning": true,
+                "contextWindow": 128000,
+                "maxTokens": 8192
+              }
+            ]
           }
-        ]
+        }
+      },
+      "agents": {
+        "defaults": {
+          "model": {
+            "primary": "dynamo/zai-org/GLM-4.7-Flash"
+          }
+        }
       }
     }
-  },
-  "agents": {
-    "defaults": {
-      "model": {
-        "primary": "dynamo/zai-org/GLM-4.7-Flash"
-      }
-    }
-  }
-}
-```
+    ```
 
-Run OpenClaw:
+    Run OpenClaw:
 
-```bash
-openclaw chat
-```
+    ```bash
+    openclaw chat
+    ```
 
-The plugin copies OpenClaw's current `sessionId` into `x-dynamo-session-id` on each
-request. Native subagents receive their own `session_id` and the immediate parent is
-recorded as `parent_session_id`.
+    The plugin copies OpenClaw's current `sessionId` into `x-dynamo-session-id` on each request. Native subagents receive their own `session_id`, and the immediate parent is recorded as `parent_session_id`.
 
-## Hermes Agent
+  </Tab>
+  <Tab title="Hermes Agent">
 
-Hermes uses an OpenAI-compatible custom endpoint. Configure Hermes with the served model name and Dynamo `/v1` base URL:
+    Hermes uses an OpenAI-compatible custom endpoint. Configure Hermes with the served model name and Dynamo `/v1` base URL:
 
-```yaml
-model:
-  default: zai-org/GLM-4.7-Flash
-  provider: custom
-  base_url: http://localhost:8000/v1
-  api_mode: chat_completions
-```
+    ```yaml
+    model:
+      default: zai-org/GLM-4.7-Flash
+      provider: custom
+      base_url: http://localhost:8000/v1
+      api_mode: chat_completions
+    ```
 
-If your Dynamo endpoint requires auth, add `api_key: <token>` to the Hermes model config or set `OPENAI_API_KEY`.
+    If your Dynamo endpoint requires authentication, add `api_key: <token>` to the Hermes model config or set `OPENAI_API_KEY`.
 
-This configuration lets you run Hermes with the `hermes` command. To send session IDs to Dynamo, install the plugin:
+    This configuration lets you run Hermes with the `hermes` command. To send session IDs to Dynamo, install the plugin:
 
-```bash
-# clone the plugin
-git clone https://github.com/ai-dynamo/agent-plugins.git ~/agent-plugins
-# link it to where hermes typically looks for plugins
-ln -sfnT ~/agent-plugins/hermes-plugin ~/.hermes/plugins/dynamo_session
-hermes plugins enable dynamo_session
+    ```bash
+    # clone the plugin
+    git clone https://github.com/ai-dynamo/agent-plugins.git ~/agent-plugins
+    # link it to where Hermes typically looks for plugins
+    ln -sfnT ~/agent-plugins/hermes-plugin ~/.hermes/plugins/dynamo_session
+    hermes plugins enable dynamo_session
 
-# run hermes
-hermes
-```
+    # run Hermes
+    hermes
+    ```
 
-The plugin copies the Hermes `session_id` into `x-dynamo-session-id` on each LLM request.
+    The plugin copies the Hermes `session_id` into `x-dynamo-session-id` on each LLM request.
+
+  </Tab>
+</Tabs>
 
 ## See Also
 
-- [Session IDs](session-ids.md)
+- [Session IDs](session-ids.mdx)
 - [Agent Tracing](agent-tracing.md)
 - [SGLang for Agentic Workloads](../backends/sglang/agents.md)

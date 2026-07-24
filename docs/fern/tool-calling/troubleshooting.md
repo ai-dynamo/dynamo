@@ -18,19 +18,7 @@ configuration, or the parser itself. This page shows the field to add and
 what the response will look like, so you can capture and share useful
 diagnostic info.
 
-> [!NOTE]
-> Recipe applies to non-streaming requests against Dynamo's OpenAI
-> `/v1/chat/completions` endpoint. For multi-channel reasoning models
-> (`harmony`, `kimi_k2`, `kimi_k25`, `gemma4`), the recipe recovers only
-> the assistant-content channel; the reasoning channel is not surfaced in
-> `logprobs.content`.
->
-> If the worker is the SGLang backend, `logprobs: true` is rejected by
-> default because SGLang's tokenizer manager detokenizes top-k tokens
-> serially, causing latency degradation. Set
-> `DYN_SGL_ALLOW_TOP_LOGPROBS=1` in the SGLang worker's `env:` to opt in,
-> then remove it and re-apply once the repro is captured. Tracked at
-> [sgl-project/sglang#24447](https://github.com/sgl-project/sglang/pull/24447).
+<Info> Recipe applies to non-streaming requests against Dynamo's OpenAI `/v1/chat/completions` endpoint. For multi-channel reasoning models (`harmony`, `kimi_k2`, `kimi_k25`, `gemma4`), the recipe recovers only the assistant-content channel; the reasoning channel is not surfaced in `logprobs.content`. If the worker is the SGLang backend, `logprobs: true` is rejected by default because SGLang's tokenizer manager detokenizes top-k tokens serially, causing latency degradation. Set `DYN_SGL_ALLOW_TOP_LOGPROBS=1` in the SGLang worker's `env:` to opt in, then remove it and re-apply once the repro is captured. Tracked at [sgl-project/sglang#24447](https://github.com/sgl-project/sglang/pull/24447).</Info>
 
 ## The request
 

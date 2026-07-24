@@ -7,11 +7,9 @@ subtitle: Per-request serving hints for agentic workloads
 
 Agent hints are optional per-request metadata that a harness sends under `nvext.agent_hints`. Dynamo parses these hints in the frontend and passes them to the router and, where supported, backend runtimes.
 
-Use hints only for serving-relevant intent. Use [session IDs](session-ids.md#session-id-inputs) for passive trace identity.
+Use hints only for serving-relevant intent. Use [session IDs](session-ids.mdx#session-id-inputs) for passive trace identity.
 
-## Request Schema
-
-```json
+```json title="Send a Dynamo request with agent hints"
 {
     "model": "my-model",
     "messages": [

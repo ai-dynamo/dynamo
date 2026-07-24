@@ -9,405 +9,351 @@ subtitle: Connect Dynamo to external tools and services using Dynamo's built-in 
   <a href="./README.zh-CN.md" hreflang="zh-CN"><img src="../assets/img/readme-zh-cn-link.svg" alt="简体中文" height="28" /></a>
 </p>
 
-You can connect Dynamo to external tools and services using tool calling. By
-providing a list of available functions, Dynamo can choose to output function
-arguments for the relevant function(s) which you can execute to augment the
-prompt with relevant external information.
+Tool calling lets Dynamo connect models to external tools and services by returning function arguments for your application to execute. Requests use the `tool_choice` and `tools` parameters. This page covers Dynamo-native parsing; if your model is not listed, use [engine fallback](chat-processors.mdx), which also explains valid combinations of `--dyn-tool-call-parser`, `--dyn-chat-processor`, and `--dyn-reasoning-parser`.
 
-Tool calling is controlled using the `tool_choice` and `tools` request
-parameters.
+## Configure Tool Calling
 
-This page covers parser names for the default Dynamo-native path, where the
-`dynamo` [chat processor](chat-processors.mdx) parses tool calls on the worker.
-If Dynamo does not list a parser for your model, use
-[engine fallback](chat-processors.mdx) instead.
+<Steps>
+  <Step title="Launch Dynamo Backend">
+    Select a `--dyn-tool-call-parser` that matches your model based on the list below. The backend can be SGLang, TensorRT-LLM, vLLM, or another installed backend.
 
-## Enable tool calling
+    To inspect the available worker flags, run:
 
-To enable tool calling, add `--dyn-tool-call-parser` to your backend **worker**'s `args:` in the DynamoGraphDeployment (DGD), set to the parser that matches your model. Here is where it goes:
+    ```bash
+    python -m dynamo.<backend> --help
+    ```
 
-```yaml
-apiVersion: nvidia.com/v1beta1
-kind: DynamoGraphDeployment
-metadata:
-  name: ...
-spec:
-  components:
-  - name: SGLangWorker
-    type: worker
-    ...
-    podTemplate:
-      spec:
-        containers:
-        - name: main
-          ...
-          command:
-          - python3
-          - -m
-          - dynamo.sglang
-          args:
-          - --model-path
-          - Qwen/Qwen3.5-4B
-          - --served-model-name
-          - Qwen/Qwen3.5-4B
-          - --dyn-tool-call-parser   # add this to enable tool calling
-          - qwen3_coder              # value comes from the table below
-```
+    The following example starts an SGLang worker for Qwen3.5:
 
-The Frontend needs no extra flags — the default `dynamo` chat processor parses tool calls for every backend.
+    ```bash
+    python -m dynamo.sglang \
+      --model Qwen/Qwen3.5-4B \
+      --dyn-tool-call-parser qwen3_coder \
+      --reasoning-parser qwen3 \
+      --dyn-reasoning-parser qwen3
+    ```
 
-> [!IMPORTANT]
-> `--dyn-tool-call-parser` pairs with the default `dynamo` chat processor and goes on the **worker**. The bare `--tool-call-parser` (no `--dyn-` prefix) is a different flag — it drives [engine fallback](chat-processors.mdx) and goes on the Frontend. Don't use the bare flag with the default processor, and don't put `--dyn-tool-call-parser` on a `vllm`/`sglang` chat processor.
+    <Info>
+    If the model supports tool calling but its default chat template does not, add `--custom-jinja-template /path/to/template.jinja` to the worker command. The template must be readable inside the container.
+    </Info>
 
-The flag works on any worker — `dynamo.vllm`, `dynamo.sglang`, or `dynamo.trtllm`. For the full list of worker flags, see the backend guides ([vLLM](../backends/vllm/README.md), [SGLang](../backends/sglang/README.md), [TensorRT-LLM](../backends/trtllm/README.md)) or run the worker with `--help`. New to authoring a DGD? Start with [Deploy with DGD](../kubernetes/dgd-guide.md).
+    <Tip>
+    If the model emits reasoning content that should be separated from normal output, see [Reasoning Parsing (Dynamo)](../reasoning/README.md) for supported `--dyn-reasoning-parser` values.
+    </Tip>
+  </Step>
 
-> [!TIP]
-> If your model's default chat template doesn't support tool calling, but the model itself does, add `--custom-jinja-template /path/to/template.jinja` to the worker `args:` (the template must be readable inside the container).
+  <Step title="Start the Frontend">
+    Start the Dynamo frontend in another terminal:
 
-> [!TIP]
-> If your model also emits reasoning content that should be separated from normal output, see [Reasoning Parsing (Dynamo)](../reasoning/README.md) for the supported `--dyn-reasoning-parser` values.
+    ```bash
+    python -m dynamo.frontend
+    ```
+  </Step>
+
+  <Step title="Wait for Readiness">
+    Wait for the frontend health endpoint to return a successful response:
+
+    ```bash
+    curl --fail http://localhost:8000/health
+    ```
+  </Step>
+
+  <Step title="Send a Tool-Calling Request">
+    Send an OpenAI-compatible chat completion request with the available tools:
+
+    ```bash
+    curl -s http://localhost:8000/v1/chat/completions \
+      -H 'Content-Type: application/json' \
+      -d '{
+        "model": "Qwen/Qwen3.5-4B",
+        "messages": [
+          {"role": "user", "content": "What is the weather in San Francisco and New York?"}
+        ],
+        "tools": [{
+          "type": "function",
+          "function": {
+            "name": "get_weather",
+            "description": "Get the current weather for a location.",
+            "parameters": {
+              "type": "object",
+              "properties": {"location": {"type": "string"}},
+              "required": ["location"]
+            }
+          }
+        }],
+        "tool_choice": "auto"
+      }'
+    ```
+
+    Dynamo parses the model output and returns OpenAI-compatible `tool_calls`.
+
+    <Accordion title="View an example response">
+      ```json
+      {
+        "id": "chatcmpl-b415caad-9be0-4d9e-ac6d-9d23bfe57703",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": null,
+              "reasoning_content": "The user is asking about the weather in two cities: San Francisco and New York. I need to call the get_weather function for each city. I'll make two separate function calls to get the weather information for both locations.\n",
+              "tool_calls": [
+                {
+                  "id": "call-56223a95-3d14-4433-a94e-011f106c0e40",
+                  "type": "function",
+                  "function": {
+                    "name": "get_weather",
+                    "arguments": "{\"location\":\"San Francisco\"}"
+                  }
+                },
+                {
+                  "id": "call-d5b5772b-6b0c-4120-ad01-623278a937fe",
+                  "type": "function",
+                  "function": {
+                    "name": "get_weather",
+                    "arguments": "{\"location\":\"New York\"}"
+                  }
+                }
+              ]
+            },
+            "finish_reason": "tool_calls",
+            "logprobs": null
+          }
+        ],
+        "created": 1778653281,
+        "model": "Qwen/Qwen3.5-4B",
+        "object": "chat.completion"
+      }
+      ```
+    </Accordion>
+
+    <Info>
+    If a tool call is parsed incorrectly, add `"logprobs": true` to one reproduction request and share the response. See [Troubleshooting Tool Calls](troubleshooting.md) for what to capture when reporting an issue.
+    </Info>
+  </Step>
+</Steps>
 
 ## Supported Tool Call Parsers
 
-Set `--dyn-tool-call-parser` to the **Parser Name** (first column) that matches your model. These are all the values it accepts.
+Choose a model family, then expand the matching model option to see its parser name and configuration details.
 
-The **Upstream name** column shows where the vLLM or SGLang parser name differs
-from Dynamo's -- relevant when using `--dyn-chat-processor vllm` or `sglang`
-(see [engine fallback](chat-processors.mdx)). A blank upstream
-column means the same name works everywhere. `Dynamo-only` means no upstream
-parser exists for this format.
+The **Upstream name** column shows where the vLLM or SGLang parser name differs from Dynamo’s — relevant when using `--dyn-chat-processor vllm` or `sglang` (see [Parser Engine Fallback](chat-processors.mdx)). A blank upstream column means the same name works everywhere. `Dynamo-only` means no upstream parser exists for this format.
 
-| Parser Name | Models | Upstream name | Notes |
-|---|---|---|---|
-| `kimi_k2` | Kimi K2 Instruct/Thinking, Kimi K2.5 | | Pair with `--dyn-reasoning-parser kimi` or `kimi_k25` |
-| `minimax_m2` | MiniMax M2 / M2.1 | vLLM: `minimax` | XML `<minimax:tool_call>` |
-| `deepseek_v4` | DeepSeek V4 Pro / Flash | vLLM: `deepseek_v4`; SGLang: `deepseekv4` | DSML tags (`<｜DSML｜tool_calls>...`). Aliases: `deepseek-v4`, `deepseekv4` |
-| `deepseek_v3` | DeepSeek V3, DeepSeek R1-0528+ | SGLang: `deepseekv3` | Special Unicode markers |
-| `deepseek_v3_1` | DeepSeek V3.1 | Dynamo-only | JSON separators |
-| `deepseek_v3_2` | DeepSeek V3.2+ | Dynamo-only | DSML tags (`<｜DSML｜function_calls>...`) |
-| `qwen3_coder` | Qwen3.5, Qwen3-Coder | | XML `<tool_call><function=...>` |
-| `glm47` | GLM-4.5, GLM-4.7 | Dynamo-only | XML `<arg_key>/<arg_value>` |
-| `nemotron_deci` | Nemotron-Super / -Ultra / -Deci, Llama-Nemotron-Ultra / -Super | Dynamo-only | `<TOOLCALL>` JSON |
-| `nemotron_nano` | Nemotron-Nano | Dynamo-only | Alias for `qwen3_coder` |
-| `gemma4` | Google Gemma 4 (thinking models) | vLLM: `gemma4` | Custom non-JSON grammar with `<\|"\|>` string delimiters and `<\|tool_call>...<tool_call\|>` markers. Aliases: `gemma-4`. Pair with `--dyn-reasoning-parser gemma4` and `--custom-jinja-template examples/chat_templates/gemma4_tool.jinja` |
-| `harmony` | gpt-oss-20b / -120b | Dynamo-only | Harmony channel format |
-| `hermes` | Qwen2.5-\*, QwQ-32B, Qwen3-Instruct, Qwen3-Think, NousHermes-2/3 | vLLM: `qwen2_5`; SGLang: `qwen25` (for Qwen models) | `<tool_call>` JSON |
-| `phi4` | Phi-4, Phi-4-mini, Phi-4-mini-reasoning | vLLM: `phi4_mini_json` | `functools[...]` JSON |
-| `pythonic` | Llama 4 (Scout / Maverick) | | Python-list tool syntax |
-| `llama3_json` | Llama 3 / 3.1 / 3.2 / 3.3 Instruct | | `<\|python_tag\|>` tool syntax |
-| `mistral` | Mistral / Mixtral / Mistral-Nemo, Magistral | | `[TOOL_CALLS]...[/TOOL_CALLS]` |
-| `jamba` | Jamba 1.5 / 1.6 / 1.7 | Dynamo-only | `<tool_calls>` JSON |
-| `default` | *(fallback)* | Dynamo-only | Empty JSON config (no start/end tokens). Prefer a model-specific parser for production use. |
+<AccordionGroup>
+  <Accordion title="Kimi">
+    <AccordionGroup>
+      <Accordion title="Kimi K2 Instruct/Thinking and Kimi K2.5">
+        **Parser:** `kimi_k2`
 
-> [!TIP]
-> For Kimi K2.5 thinking models, pair `--dyn-tool-call-parser kimi_k2` with
-> `--dyn-reasoning-parser kimi_k25` from [Reasoning Parsing (Dynamo)](../reasoning/README.md) so that both `<think>` blocks and tool calls
-> are parsed correctly from the same response.
+        **Upstream name:** Same name across Dynamo, vLLM, and SGLang
 
-## Examples
+        **Notes:** Pair with `--dyn-reasoning-parser kimi` or `kimi_k25`. For Kimi K2.5 thinking models, use `kimi_k25` so `<think>` blocks and tool calls are parsed from the same response. See [Reasoning Parsing (Dynamo)](../reasoning/README.md).
+      </Accordion>
+    </AccordionGroup>
+  </Accordion>
 
-### Deploy Frontend and worker
+  <Accordion title="MiniMax">
+    <AccordionGroup>
+      <Accordion title="MiniMax M2 and M2.1">
+        **Parser:** `minimax_m2`
 
-Here is the complete, runnable DGD for the worker snippet above. It serves Qwen3.5-4B on SGLang with tool-call parsing enabled (plus `--dyn-reasoning-parser`, since this model also emits reasoning) — swap the worker for `dynamo.vllm` or `dynamo.trtllm` with the same `--dyn-*` flags:
+        **Upstream name:** vLLM: `minimax_m2`
 
-```yaml
-apiVersion: nvidia.com/v1beta1
-kind: DynamoGraphDeployment
-metadata:
-  name: qwen35-tools
-spec:
-  components:
-  - name: Frontend
-    type: frontend
-    replicas: 1
-    podTemplate:
-      spec:
-        containers:
-        - name: main
-          image: ${RUNTIME_IMAGE}
-  - name: SGLangWorker
-    type: worker
-    replicas: 1
-    podTemplate:
-      spec:
-        containers:
-        - name: main
-          image: ${RUNTIME_IMAGE}
-          envFrom:
-          - secretRef:
-              name: hf-token-secret
-          command:
-          - python3
-          - -m
-          - dynamo.sglang
-          args:
-          - --model-path
-          - Qwen/Qwen3.5-4B
-          - --served-model-name
-          - Qwen/Qwen3.5-4B
-          - --dyn-tool-call-parser
-          - qwen3_coder
-          - --dyn-reasoning-parser
-          - qwen3
-```
+        **Notes:** XML `<minimax:tool_call>`
+      </Accordion>
 
-Apply it and wait for the deployment to become ready:
+      <Accordion title="MiniMax M3">
+        **Parser:** `minimax_m3`
 
-```bash
-kubectl apply -f qwen35-tools.yaml -n ${NAMESPACE}
-kubectl wait --for=condition=Ready dynamographdeployment/qwen35-tools \
-  -n ${NAMESPACE} --timeout=600s
-```
+        **Upstream name:** vLLM: `minimax_m3`
 
-### Tool Calling Request Example
+        **Notes:** MiniMax namespace-token XML
+      </Accordion>
+    </AccordionGroup>
+  </Accordion>
 
-Port-forward the Frontend Service, then send the request:
+  <Accordion title="DeepSeek">
+    <AccordionGroup>
+      <Accordion title="DeepSeek V4 Pro / Flash">
+        **Parser:** `deepseek_v4`
 
-```bash
-kubectl port-forward svc/qwen35-tools-frontend 8000:8000 -n ${NAMESPACE}
-```
+        **Upstream name:** vLLM: `deepseek_v4`; SGLang: `deepseekv4`
 
-```bash
-curl -s http://localhost:8000/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "model": "Qwen/Qwen3.5-4B",
-    "messages": [
-      {"role": "user", "content": "What is the weather in San Francisco and New York?"}
-    ],
-    "tools": [{
-      "type": "function",
-      "function": {
-        "name": "get_weather",
-        "description": "Get the current weather for a location.",
-        "parameters": {
-          "type": "object",
-          "properties": {"location": {"type": "string"}},
-          "required": ["location"]
-        }
-      }
-    }],
-    "tool_choice": "auto"
-  }'
-```
+        **Notes:** DSML tags (`<｜DSML｜tool_calls>...`). Aliases: `deepseek-v4`, `deepseekv4`
+      </Accordion>
 
-Dynamo parses the tool calls out of the model output and surfaces them as
-OpenAI-compatible `tool_calls` entries on the response:
+      <Accordion title="DeepSeek V3 and DeepSeek R1-0528+">
+        **Parser:** `deepseek_v3`
 
-```json
-{
-  "id": "chatcmpl-b415caad-9be0-4d9e-ac6d-9d23bfe57703",
-  "choices": [
-    {
-      "index": 0,
-      "message": {
-        "role": "assistant",
-        "content": null,
-        "reasoning_content": "The user is asking about the weather in two cities: San Francisco and New York. I need to call the get_weather function for each city. I'll make two separate function calls to get the weather information for both locations.\n",
-        "tool_calls": [
-          {
-            "id": "call-56223a95-3d14-4433-a94e-011f106c0e40",
-            "type": "function",
-            "function": {
-              "name": "get_weather",
-              "arguments": "{\"location\":\"San Francisco\"}"
-            }
-          },
-          {
-            "id": "call-d5b5772b-6b0c-4120-ad01-623278a937fe",
-            "type": "function",
-            "function": {
-              "name": "get_weather",
-              "arguments": "{\"location\":\"New York\"}"
-            }
-          }
-        ]
-      },
-      "finish_reason": "tool_calls",
-      "logprobs": null
-    }
-  ],
-  "created": 1778653281,
-  "model": "Qwen/Qwen3.5-4B",
-  ...
-}
-```
+        **Upstream name:** SGLang: `deepseekv3`
 
-> [!TIP]
-> If a tool call comes back wrong, add `"logprobs": true` to a single repro
-> request and share the response. See
-> [Troubleshooting Tool Calls](troubleshooting.md) for what to capture and
-> include when reporting an issue.
+        **Notes:** Special Unicode markers
+      </Accordion>
 
-## Optional: structural tags
+      <Accordion title="DeepSeek V3.1">
+        **Parser:** `deepseek_v3_1`
 
-You can optionally turn on **xgrammar structural tags** so guided decoding matches the parser's tool-call format at token granularity. See [Structural tag (guided decoding for tool calls)](structural-tag.md).
+        **Upstream name:** <Badge intent="note" minimal>Dynamo-only</Badge>
 
-## How well does tool calling work per model?
+        **Notes:** JSON separators
+      </Accordion>
 
-Tool-call parsing is model-specific, so real-world reliability varies by model.
-To give a concrete picture, Dynamo runs a **probe harness** that exercises a
-battery of tool-calling scenarios (single tool, parallel tools, multi-step
-workflows, literal-string edge cases, streaming and non-streaming) against each
-supported model, and counts how many requests come back wrong.
+      <Accordion title="DeepSeek V3.2+">
+        **Parser:** `deepseek_v3_2`
 
-The tabs below are a **release snapshot** of that harness: for each model, how
-many scenarios failed on the Dynamo **1.2.0 release** versus **current main**,
-and what still breaks. Use it to gauge how much you can rely on tool calling
-with a given model today, and where the rough edges are. Lower failure counts
-are better; most Dynamo-side parser bugs are being fixed release over release.
+        **Upstream name:** <Badge intent="note" minimal>Dynamo-only</Badge>
 
-<Card title="Tool-calling probe snapshot">
-  <Tabs>
-  <Tab title="Kimi K2.6">
-    **Tool-call format:** Kimi tool-call and reasoning format
+        **Notes:** DSML tags (`<｜DSML｜function_calls>...`)
+      </Accordion>
+    </AccordionGroup>
+  </Accordion>
 
-    | Metric | Dynamo 1.2.0 | Current main |
-    |---|---|---|
-    | Total failures | 22 / 36 | 2 / 36 |
-    | Dynamo errors | 21 | 0 |
-    | Other errors | 1 | 2 |
+  <Accordion title="Qwen, QwQ, and NousHermes">
+    <AccordionGroup>
+      <Accordion title="Qwen3.5 and Qwen3-Coder">
+        **Parser:** `qwen3_coder`
 
-    **Current failures:** Current main only fails a multi-step search-and-crawl
-    workflow in streaming and non-streaming modes. The model returns no
-    structured tool calls and asks for endpoint clarification instead of
-    executing the workflow. No raw marker leakage was observed in current main.
+        **Upstream name:** Same name across Dynamo, vLLM, and SGLang
 
-    **Improvement from 1.2 to main:** Dynamo 1.2.0 had 18 parser/API-boundary
-    failures and three endpoint timeouts. Model-native tool-call syntax appeared
-    in reasoning instead of structured `tool_calls`, and some final assistant
-    text was routed away from assistant content. Current main removes those
-    Dynamo failures and leaves two model-workflow failures.
-  </Tab>
-  <Tab title="DeepSeek V4 Pro">
-    **Tool-call format:** DeepSeek tool-call and reasoning format
+        **Notes:** XML `<tool_call><function=...>`
+      </Accordion>
 
-    | Metric | Dynamo 1.2.0 | Current main |
-    |---|---|---|
-    | Total failures | 0 / 46 | 0 / 46 |
-    | Dynamo errors | 0 | 0 |
-    | Other errors | 0 | 0 |
+      <Accordion title="Qwen2.5-*, QwQ-32B, Qwen3-Instruct, Qwen3-Think, and NousHermes-2/3">
+        **Parser:** `hermes`
 
-    **Current failures:** No failures in the captured current-main run.
+        **Upstream name:** vLLM: `qwen2_5`; SGLang: `qwen25` (for Qwen models)
 
-    **Improvement from 1.2 to main:** No change needed. Dynamo 1.2.0 and current
-    main are both clean.
-  </Tab>
-  <Tab title="GLM 5.1">
-    **Tool-call format:** GLM tool-call format
+        **Notes:** `<tool_call>` JSON
+      </Accordion>
+    </AccordionGroup>
+  </Accordion>
 
-    | Metric | Dynamo 1.2.0 | Current main |
-    |---|---|---|
-    | Total failures | 4 / 48 | 3 / 48 |
-    | Dynamo errors | 4 | 3 |
-    | Other errors | 0 | 0 |
+  <Accordion title="GLM">
+    <AccordionGroup>
+      <Accordion title="GLM-4.5 and GLM-4.7">
+        **Parser:** `glm47`
 
-    **Current failures:** Current main still fails delimiter-literal preservation
-    in streaming and non-streaming modes because delimiter-looking text is not
-    preserved in the structured argument. One non-streaming no-tools request also
-    timed out.
+        **Upstream name:** <Badge intent="note" minimal>Dynamo-only</Badge>
 
-    **Improvement from 1.2 to main:** Current main improves from 4 to 3
-    Dynamo/runtime failures by removing a Dynamo 1.2.0 timeout in the multi-step
-    search-and-crawl workflow. The delimiter-string preservation issue remains.
-  </Tab>
-  <Tab title="MiniMax 2.7">
-    **Tool-call format:** MiniMax tool-call format
+        **Notes:** XML `<arg_key>/<arg_value>`
+      </Accordion>
+    </AccordionGroup>
+  </Accordion>
 
-    | Metric | Dynamo 1.2.0 | Current main |
-    |---|---|---|
-    | Total failures | 8 / 46 | 4 / 46 |
-    | Dynamo errors | 2 | 2 |
-    | Other errors | 6 | 2 |
+  <Accordion title="Nemotron">
+    <AccordionGroup>
+      <Accordion title="Nemotron-Super / -Ultra / -Deci and Llama-Nemotron-Ultra / -Super">
+        **Parser:** `nemotron_deci`
 
-    **Current failures:** Current main has four failures. A simple arithmetic
-    auto-tool prompt answers in text instead of producing the requested
-    structured tool call in streaming and non-streaming modes. A delimiter-like
-    literal string prompt returns a structured tool call in both modes, but the
-    marker-looking text inside the argument is not preserved exactly; this is
-    counted as a parser/API-boundary failure.
+        **Upstream name:** <Badge intent="note" minimal>Dynamo-only</Badge>
 
-    **Improvement from 1.2 to main:** Current main now uses the full 46-probe
-    coverage and improves from 8 failures to 4. The multi-step tool-loop workflow
-    and context echo auto-tool prompt that failed in Dynamo 1.2.0 now pass.
-    Dynamo/parser-boundary failures remain at 2, while other failures drop from
-    6 to 2.
-  </Tab>
-  <Tab title="Gemma 4 31B IT">
-    **Tool-call format:** Gemma tool-call and reasoning format
+        **Notes:** `<TOOLCALL>` JSON
+      </Accordion>
 
-    | Metric | Dynamo 1.2.0 | Current main |
-    |---|---|---|
-    | Total failures | 2 / 48 | 2 / 46 |
-    | Dynamo errors | 2 | 2 |
-    | Other errors | 0 | 0 |
+      <Accordion title="Nemotron-Nano">
+        **Parser:** `nemotron_nano`
 
-    **Current failures:** Current main still fails delimiter-literal preservation
-    in streaming and non-streaming modes. The response produces a structured tool
-    call, but the SQL string is truncated before the expected literal marker text.
+        **Upstream name:** <Badge intent="note" minimal>Dynamo-only</Badge>
 
-    **Improvement from 1.2 to main:** No observed failure-count improvement.
-    Dynamo 1.2.0 and current main have the same failure class, with fewer probes
-    in the current-main run.
-  </Tab>
-  <Tab title="Qwen3.6-35B-A3B">
-    **Tool-call format:** Qwen tool-call format
+        **Notes:** Alias for `qwen3_coder`
+      </Accordion>
+    </AccordionGroup>
+  </Accordion>
 
-    | Metric | Dynamo 1.2.0 | Current main |
-    |---|---|---|
-    | Total failures | 1 / 48 | 0 / 46 |
-    | Dynamo errors | 1 | 0 |
-    | Other errors | 0 | 0 |
+  <Accordion title="Gemma">
+    <AccordionGroup>
+      <Accordion title="Google Gemma 4 thinking models">
+        **Parser:** `gemma4`
 
-    **Current failures:** No failures in the captured current-main run.
+        **Upstream name:** vLLM: `gemma4`
 
-    **Improvement from 1.2 to main:** Current main is clean. The Dynamo 1.2.0
-    non-streaming timeout in the multi-step search-and-crawl workflow is gone.
-  </Tab>
-  <Tab title="GPT-OSS 120B">
-    **Tool-call format:** GPT-OSS tool-call format
+        **Notes:** Custom non-JSON grammar with `<\|"\|>` string delimiters and `<\|tool_call>...<tool_call\|>` markers. Aliases: `gemma-4`. Pair with `--dyn-reasoning-parser gemma4` and `--custom-jinja-template examples/chat_templates/gemma4_tool.jinja`.
+      </Accordion>
+    </AccordionGroup>
+  </Accordion>
 
-    | Metric | Dynamo 1.2.0 | Current main |
-    |---|---|---|
-    | Total failures | 14 / 48 | 14 / 48 |
-    | Dynamo errors | 2 | 2 |
-    | Other errors | 12 | 12 |
+  <Accordion title="gpt-oss">
+    <AccordionGroup>
+      <Accordion title="gpt-oss-20b and gpt-oss-120b">
+        **Parser:** `harmony`
 
-    **Current failures:** Current main still has 14 failures. Multi-tool and
-    parallel-tool prompts produce only one structured tool call, a simple
-    calculation prompt answers in text instead of calling the tool, a
-    marker-literal string argument omits the requested marker-like text, and the
-    search/crawl final answer still misses the expected evidence. No raw
-    model-native marker leakage was observed.
+        **Upstream name:** <Badge intent="note" minimal>Dynamo-only</Badge>
 
-    **Improvement from 1.2 to main:** The refreshed GPT-OSS current-main run is
-    no longer worse than Dynamo 1.2.0 by count; both are 14 / 48. The prior
-    main-only required-tool regression is gone, and the streaming multi-step
-    workflow now returns final content instead of an empty assistant message, but
-    the core multi-tool, parallel-tool, literal-marker, and final-answer gaps
-    remain.
-  </Tab>
-  </Tabs>
-</Card>
+        **Notes:** Harmony channel format
+      </Accordion>
+    </AccordionGroup>
+  </Accordion>
 
-### How to read the numbers
+  <Accordion title="Phi">
+    <AccordionGroup>
+      <Accordion title="Phi-4, Phi-4-mini, and Phi-4-mini-reasoning">
+        **Parser:** `phi4`
 
-This is a one-time snapshot generated on 2026-06-05 at 07:24 UTC — **not** a
-live dashboard. Each cell is a `failures / total` count over probe requests,
-where the same scenario can fail separately in streaming and non-streaming
-modes. Failures split into two buckets:
+        **Upstream name:** vLLM: `phi4_mini_json`
 
-- **Dynamo errors** — Dynamo/parser/API-contract failures: raw model-native
-  tool-call syntax leaked into the response instead of structured `tool_calls`,
-  final assistant text was routed into reasoning output, delimiter-like literal
-  text was not preserved in an argument, or the request timed out before a
-  usable OpenAI response returned. These are the ones Dynamo fixes.
-- **Other errors** — engine/model behavior or mixed/needs-inspection failures:
-  the endpoint responded, but the model itself did not satisfy the requested
-  tool workflow.
+        **Notes:** `functools[...]` JSON
+      </Accordion>
+    </AccordionGroup>
+  </Accordion>
 
-Some current-main rows were run with a different number of probes than the
-1.2.0 snapshot, so compare each `failures / total` directly rather than as an
-exact A/B pass rate. Reasoning shows up only incidentally — where a model emits
-tool calls and reasoning in one native format, or where the parser misroutes
-final assistant text into the reasoning channel.
+  <Accordion title="Llama">
+    <AccordionGroup>
+      <Accordion title="Llama 4 Scout / Maverick">
+        **Parser:** `pythonic`
+
+        **Upstream name:** Same name across Dynamo, vLLM, and SGLang
+
+        **Notes:** Python-list tool syntax
+      </Accordion>
+
+      <Accordion title="Llama 3 / 3.1 / 3.2 / 3.3 Instruct">
+        **Parser:** `llama3_json`
+
+        **Upstream name:** Same name across Dynamo, vLLM, and SGLang
+
+        **Notes:** `<\|python_tag\|>` tool syntax
+      </Accordion>
+    </AccordionGroup>
+  </Accordion>
+
+  <Accordion title="Mistral">
+    <AccordionGroup>
+      <Accordion title="Mistral, Mixtral, Mistral-Nemo, and Magistral">
+        **Parser:** `mistral`
+
+        **Upstream name:** Same name across Dynamo, vLLM, and SGLang
+
+        **Notes:** `[TOOL_CALLS]...[/TOOL_CALLS]`
+      </Accordion>
+    </AccordionGroup>
+  </Accordion>
+
+  <Accordion title="Jamba">
+    <AccordionGroup>
+      <Accordion title="Jamba 1.5 / 1.6 / 1.7">
+        **Parser:** `jamba`
+
+        **Upstream name:** <Badge intent="note" minimal>Dynamo-only</Badge>
+
+        **Notes:** `<tool_calls>` JSON
+      </Accordion>
+    </AccordionGroup>
+  </Accordion>
+
+  <Accordion title="Fallback">
+    <AccordionGroup>
+      <Accordion title="Default parser">
+        **Parser:** `default`
+
+        **Upstream name:** <Badge intent="note" minimal>Dynamo-only</Badge>
+
+        **Notes:** Empty JSON config (no start/end tokens). Prefer a model-specific parser for production use.
+      </Accordion>
+    </AccordionGroup>
+  </Accordion>
+</AccordionGroup>
+
+<Info title="Optional: structural tags">
+You can enable **xgrammar structural tags** so guided decoding matches the parser's tool-call format at token granularity. See [Structural Tag (Guided Decoding for Tool Calls)](structural-tag.md).
+</Info>
