@@ -45,21 +45,16 @@ async def read_decoded_media_via_nixl(*args: Any, **kwargs: Any) -> Any:
     return await _read_decoded_media_via_nixl(*args, **kwargs)
 
 
-try:
-    from vllm.multimodal.media import MediaConnector
-    from vllm.multimodal.media.audio import AudioMediaIO
-except ImportError:
-    MediaConnector = None  # type: ignore[assignment]
-    AudioMediaIO = None  # type: ignore[assignment]
-
-
 def _require_vllm_audio_media() -> tuple[Any, Any]:
     """Return vLLM's audio media components, raising if not installed."""
-    if MediaConnector is None or AudioMediaIO is None:
+    try:
+        from vllm.multimodal.media import MediaConnector
+        from vllm.multimodal.media.audio import AudioMediaIO
+    except ImportError as exc:
         raise RuntimeError(
             "vLLM multimodal media components are required to decode `audio_url` "
             "inputs in the vLLM backend."
-        )
+        ) from exc
     return MediaConnector, AudioMediaIO
 
 
