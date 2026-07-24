@@ -9,20 +9,21 @@ Use this matrix to see which KV offloading tiers the Dynamo KV router can use fo
 
 ## Support Matrix
 
-Legend: ✅ tier-aware routing · 🟡 engine-side offloading only (router routes on GPU-tier state) · 🚧 Dynamo integration in progress · ❌ not yet supported · — does not exist for this framework.
+Legend: ✅ tier-aware routing · 🟡 router-visible, tier-agnostic · 🚧 Dynamo integration in progress · ❌ not yet supported · — does not exist for this framework.
 
 | Framework | GPU | CPU RAM | Disk | Shared pool |
 | --- | --- | --- | --- | --- |
 | [**vLLM**](#vllm) | ✅ KV events | ✅ `OffloadingConnector` + self-describing KV events — vLLM v0.24.0+, aggregated serving | 🚧 vLLM main emits FS/OBJ events; Dynamo tier mapping is in progress | 🚧 vLLM locality events are merged; Dynamo shared-pool indexing is in progress |
 | [**SGLang**](#sglang) | ✅ KV events | ✅ HiCache + KV events — SGLang 0.5.11+ | — no separate disk tier; HiCache's third tier is the shared pool (next column) | ✅ HiCache + Mooncake + `--shared-cache-type hicache` |
-| [**TensorRT-LLM**](#tensorrt-llm) | ✅ `--publish-kv-events` | 🟡 native host cache (`host_cache_size`) is not router-visible | — no native disk tier | — |
+| [**TensorRT-LLM**](#tensorrt-llm) | 🟡 `--publish-kv-events`; merged GPU + RAM view | 🟡 native host cache shares one router view with GPU; per-tier weights do not apply | — no native disk tier | — |
 
 [KVBM](../kvbm/README.md), [LMCache](../../integrations/lmcache-integration.md), and [FlexKV](../../integrations/flexkv-integration.md) add CPU and disk tiers outside the frameworks' native paths; their router interaction is covered in [Other Offloading Backends](#other-offloading-backends).
 
 ### Status Definitions
 
 - **Router-visible (tier-aware).** The worker publishes KV cache events annotated with the storage tier (`medium`). The router tracks per-tier residency and credits lower-tier prefix hits when selecting workers, weighted by `--router-host-cache-hit-weight` and `--router-disk-cache-hit-weight`.
-- **Engine-side only.** Offloading works inside each worker, but events carry no usable tier information. The router routes on GPU-tier cache state and treats offloaded prefixes as cache misses.
+- **Router-visible (tier-agnostic).** The router keeps blocks indexed across engine-managed tiers but cannot distinguish which tier currently holds them, so per-tier weights do not apply.
+- **Engine-side only.** Offloading works inside each worker, but the router receives no event lifecycle that preserves offloaded-block residency. It treats offloaded prefixes as cache misses.
 
 > [!NOTE]
 > Offloading support changes quickly on both the framework and the Dynamo side. Version gates are stated in the matrix cells where they limit support, with full version requirements in the per-framework sections below. Capabilities merged upstream but not yet released are listed as main-branch support. vLLM tier-aware routing and the `--router-host-cache-hit-weight` / `--router-disk-cache-hit-weight` tuning flags require Dynamo 1.3.0 or later; SGLang HiCache tier-aware routing also works on Dynamo 1.2.x, with the lower-tier weights fixed at their defaults.
@@ -61,8 +62,8 @@ See [Using HiCache](../../backends/sglang/sglang-hicache.md) for full setup, sco
 Enable KV event publishing on every worker:
 
 - Worker: `--publish-kv-events` (Dynamo 1.3.0+; earlier releases and current examples use the `--publish-events-and-metrics` spelling, which remains accepted as a deprecated alias and logs a deprecation warning). Requires the PyTorch backend.
-- TensorRT-LLM events carry no tier annotation, so only the GPU tier is router-visible.
-- Native host offloading (`kv_cache_config.host_cache_size` and `secondary_offload_min_priority`, passed through `--extra-engine-args`) runs under the KV router and extends each worker's reuse capacity, but the router cannot see the host tier.
+- TensorRT-LLM events do not identify GPU versus host RAM. The router keeps a block indexed while it remains in either tier and removes it after it leaves the lowest tier.
+- Native host offloading (`kv_cache_config.host_cache_size` and `secondary_offload_min_priority`, passed through `--extra-engine-args`) therefore extends router-visible reuse, but host-tier weights do not apply.
 - For CPU and disk tiers managed by Dynamo, use KVBM (`--connector kvbm`; see [Other Offloading Backends](#other-offloading-backends)).
 
 See the [TensorRT-LLM backend docs](../../backends/trtllm/README.md) for worker setup.
