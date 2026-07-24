@@ -40,6 +40,8 @@ import (
 	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 )
 
+const dcdWorkloadRoleLabel = "role"
+
 // dcdWorkloadRenderer contains the dependencies required to render the
 // workload-facing resources of a DynamoComponentDeployment. It deliberately
 // does not own reconciliation, watches, finalizers, or status.
@@ -113,7 +115,7 @@ func (r *dcdWorkloadRenderer) generateLeaderPodTemplateSpec(
 	}
 
 	maps.Copy(leaderPodTemplateSpec.ObjectMeta.Labels, labels)
-	leaderPodTemplateSpec.ObjectMeta.Labels["role"] = "leader"
+	leaderPodTemplateSpec.ObjectMeta.Labels[dcdWorkloadRoleLabel] = string(dynamo.RoleLeader)
 	delete(leaderPodTemplateSpec.ObjectMeta.Labels, commonconsts.KubeLabelDynamoSelector)
 
 	if err := checkMainContainer(&leaderPodTemplateSpec.Spec); err != nil {
@@ -134,7 +136,7 @@ func (r *dcdWorkloadRenderer) generateWorkerPodTemplateSpec(
 	}
 
 	maps.Copy(workerPodTemplateSpec.ObjectMeta.Labels, labels)
-	workerPodTemplateSpec.ObjectMeta.Labels["role"] = "worker"
+	workerPodTemplateSpec.ObjectMeta.Labels[dcdWorkloadRoleLabel] = string(dynamo.RoleWorker)
 	delete(workerPodTemplateSpec.ObjectMeta.Labels, commonconsts.KubeLabelDynamoSelector)
 
 	if err := checkMainContainer(&workerPodTemplateSpec.Spec); err != nil {
@@ -334,7 +336,7 @@ func (r *dcdWorkloadRenderer) generateService(
 		return nil, false, err
 	}
 	if dcd.IsMultinode() {
-		svc.Spec.Selector["role"] = "leader"
+		svc.Spec.Selector[dcdWorkloadRoleLabel] = string(dynamo.RoleLeader)
 	}
 	return svc, false, nil
 }
@@ -369,11 +371,12 @@ func (r *dcdWorkloadRenderer) getDCDWorkloadComponentType(
 	ctx context.Context,
 	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
 ) (string, error) {
+	if dcd == nil {
+		return "", nil
+	}
+
 	componentType := dynamo.GetDCDWorkloadComponentType(dcd)
 	if componentType == commonconsts.ComponentTypeWorker || !dynamo.IsWorkerComponent(componentType) {
-		return componentType, nil
-	}
-	if dcd == nil {
 		return componentType, nil
 	}
 
