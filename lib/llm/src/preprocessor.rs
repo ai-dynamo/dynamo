@@ -45,9 +45,9 @@ use tracing;
 #[cfg(feature = "mm-routing")]
 use crate::model_card::ModelInfoType;
 use crate::model_card::{ModelDeploymentCard, ModelInfo};
-use crate::preprocessor::media::{MediaLoader, require_image_url};
+use crate::preprocessor::media::MediaLoader;
 use crate::protocols::common::preprocessor::{
-    MultimodalData, MultimodalDataMap, PreprocessedRequestBuilder, RoutingHints,
+    MultimodalData, MultimodalDataMap, MultimodalUuidMap, PreprocessedRequestBuilder, RoutingHints,
 };
 use crate::protocols::common::timing::RequestTracker;
 use crate::tokenizers::Encoding;
@@ -96,6 +96,14 @@ fn routing_priorities(hints: Option<&AgentHints>) -> (Option<f64>, Option<u32>, 
     let strict_priority = hints.and_then(|h| h.strict_priority);
     let priority = hints.and_then(|h| h.priority);
     (priority_jump, strict_priority, priority)
+}
+
+fn invalid_argument_error(message: impl Into<String>) -> anyhow::Error {
+    DynamoError::builder()
+        .error_type(ErrorType::InvalidArgument)
+        .message(message.into())
+        .build()
+        .into()
 }
 
 /// Encode a slice of `f32` values as a base64 string per the OpenAI
@@ -185,6 +193,14 @@ pub struct MmImageEntry {
     pub mm_hash: u64,
     pub width: u32,
     pub height: u32,
+}
+
+struct MediaFetchTask<'a> {
+    modality: &'static str,
+    slot_idx: usize,
+    #[cfg(feature = "mm-routing")]
+    source_url: &'a str,
+    content_part: &'a ChatCompletionRequestUserMessageContentPart,
 }
 
 /// Per-request media content-part counts, carried to the metrics annotation.
@@ -1244,6 +1260,24 @@ impl OpenAIPreprocessor {
         }
     }
 
+    fn replace_reserved_media_slot(
+        media_map: &mut MultimodalDataMap,
+        modality: &str,
+        slot_idx: usize,
+        value: MultimodalData,
+    ) -> Result<()> {
+        let slot = media_map
+            .get_mut(modality)
+            .and_then(|slots| slots.get_mut(slot_idx))
+            .with_context(|| {
+                format!(
+                    "missing reserved multimodal slot {modality}[{slot_idx}] during media decode"
+                )
+            })?;
+        *slot = value;
+        Ok(())
+    }
+
     pub async fn gather_multi_modal_data<
         R: OAIChatLikeRequest + MediaRequestExt + NvExtProvider,
     >(
@@ -1261,8 +1295,11 @@ impl OpenAIPreprocessor {
         let _ = token_ids;
 
         let mut media_map: MultimodalDataMap = HashMap::new();
-        let mut fetch_tasks: Vec<(String, &ChatCompletionRequestUserMessageContentPart)> =
-            Vec::new();
+        let mut uuid_map: MultimodalUuidMap = HashMap::new();
+        let mut has_user_uuid = false;
+        // Decoded results are written back into these reserved modality slots so
+        // URL-backed and UUID-only inputs retain request order.
+        let mut fetch_tasks: Vec<MediaFetchTask<'_>> = Vec::new();
         // Per-image (mm_hash, width, height) for the MM-routing path.
         // Accumulated in message order so we don't walk messages twice.
         // Cleared and returned to the caller; empty for non-image / text-only requests.
@@ -1286,7 +1323,7 @@ impl OpenAIPreprocessor {
         // URLs here and resolve dims via header-only HTTP after the loop so we
         // can issue all fetches in parallel.
         #[cfg(feature = "mm-routing")]
-        let mut url_passthrough_images: Vec<(u64, String)> = Vec::new();
+        let mut url_passthrough_images: Vec<(u64, &str)> = Vec::new();
 
         let Some(messages) = request.typed_messages() else {
             return Ok(Vec::new());
@@ -1302,54 +1339,88 @@ impl OpenAIPreprocessor {
                 _ => continue,
             };
             for content_part in content_parts.iter() {
-                if has_media_loader {
-                    let type_str = match content_part {
-                        ChatCompletionRequestUserMessageContentPart::ImageUrl(_) => "image_url",
-                        ChatCompletionRequestUserMessageContentPart::VideoUrl(_) => "video_url",
-                        ChatCompletionRequestUserMessageContentPart::AudioUrl(_) => "audio_url",
-                        _ => continue,
-                    };
-                    #[cfg(feature = "mm-routing")]
-                    if type_str == "image_url" {
-                        total_image_count += 1;
-                    }
-                    fetch_tasks.push((type_str.to_string(), content_part));
-                } else {
-                    let (type_str, url) = match content_part {
-                        ChatCompletionRequestUserMessageContentPart::ImageUrl(p) => {
-                            let url = require_image_url(p)?.clone();
-                            ("image_url", url)
+                let (type_str, url, uuid): (&'static str, Option<&url::Url>, Option<String>) =
+                    match content_part {
+                        ChatCompletionRequestUserMessageContentPart::ImageUrl(part) => (
+                            "image_url",
+                            part.image_url.as_ref().map(|media| &media.url),
+                            part.uuid.clone(),
+                        ),
+                        ChatCompletionRequestUserMessageContentPart::VideoUrl(part) => {
+                            if part.uuid.is_some() {
+                                return Err(invalid_argument_error(
+                                    "multimodal cache UUIDs are supported only for image_url parts with vLLM",
+                                ));
+                            }
+                            (
+                                "video_url",
+                                part.video_url.as_ref().map(|media| &media.url),
+                                None,
+                            )
                         }
-                        ChatCompletionRequestUserMessageContentPart::VideoUrl(p) => {
-                            let url = p
-                                .video_url
-                                .as_ref()
-                                .context("video_url content part is missing a URL")?
-                                .url
-                                .clone();
-                            ("video_url", url)
-                        }
-                        ChatCompletionRequestUserMessageContentPart::AudioUrl(p) => {
-                            let url = p
-                                .audio_url
-                                .as_ref()
-                                .context("audio_url content part is missing a URL")?
-                                .url
-                                .clone();
-                            ("audio_url", url)
+                        ChatCompletionRequestUserMessageContentPart::AudioUrl(part) => {
+                            if part.uuid.is_some() {
+                                return Err(invalid_argument_error(
+                                    "multimodal cache UUIDs are supported only for image_url parts with vLLM",
+                                ));
+                            }
+                            (
+                                "audio_url",
+                                part.audio_url.as_ref().map(|media| &media.url),
+                                None,
+                            )
                         }
                         _ => continue,
                     };
-                    #[cfg(feature = "mm-routing")]
-                    if type_str == "image_url" {
-                        total_image_count += 1;
-                        let mm_hash = Self::hash_image_url(url.as_str());
-                        url_passthrough_images.push((mm_hash, url.to_string()));
-                    }
-                    media_map
+
+                #[cfg(feature = "mm-routing")]
+                if type_str == "image_url" {
+                    total_image_count += 1;
+                }
+
+                if uuid.as_deref().is_some_and(str::is_empty) {
+                    return Err(invalid_argument_error(format!(
+                        "{type_str} uuid must be a non-empty string"
+                    )));
+                }
+
+                let slots = media_map.entry(type_str.to_string()).or_default();
+                let slot_idx = slots.len();
+                has_user_uuid |= uuid.is_some();
+                if type_str == "image_url" {
+                    uuid_map
                         .entry(type_str.to_string())
                         .or_default()
-                        .push(MultimodalData::Url(url));
+                        .push(uuid.clone());
+                }
+
+                match (url, uuid) {
+                    (Some(url), _) => {
+                        if has_media_loader {
+                            fetch_tasks.push(MediaFetchTask {
+                                modality: type_str,
+                                slot_idx,
+                                #[cfg(feature = "mm-routing")]
+                                source_url: url.as_str(),
+                                content_part,
+                            });
+                        } else {
+                            #[cfg(feature = "mm-routing")]
+                            if type_str == "image_url" {
+                                let mm_hash = Self::hash_image_url(url.as_str());
+                                url_passthrough_images.push((mm_hash, url.as_str()));
+                            }
+                        }
+                        slots.push(MultimodalData::Url(url.clone()));
+                    }
+                    (None, Some(uuid)) => {
+                        slots.push(MultimodalData::UuidOnly(uuid));
+                    }
+                    (None, None) => {
+                        return Err(invalid_argument_error(format!(
+                            "{type_str} part has neither `url` nor `uuid`; at least one is required"
+                        )));
+                    }
                 }
             }
         }
@@ -1358,19 +1429,19 @@ impl OpenAIPreprocessor {
         if !fetch_tasks.is_empty() {
             let loader = self.media_loader.as_ref().unwrap();
             let media_io_kwargs = request.media_io_kwargs();
-            let results = futures::future::join_all(fetch_tasks.iter().map(|(_, content_part)| {
-                loader.fetch_and_decode_media_part(content_part, media_io_kwargs)
+            let results = futures::future::join_all(fetch_tasks.iter().map(|task| {
+                loader.fetch_and_decode_media_part(task.content_part, media_io_kwargs)
             }))
             .await;
 
-            for ((type_str, _content_part), result) in fetch_tasks.into_iter().zip(results) {
+            for (task, result) in fetch_tasks.into_iter().zip(results) {
                 // if one item fails, errors the whole request, other items will be cleaned up by Drop
                 let rdma_descriptor = result?;
 
                 // Decoded RDMA descriptor carries shape `[H, W, C]`.
                 // Image-only; MM-routing doesn't cover audio/video.
                 #[cfg(feature = "mm-routing")]
-                if type_str == "image_url" {
+                if task.modality == "image_url" {
                     let shape = &rdma_descriptor.tensor_info.shape;
                     if shape.len() >= 2 {
                         let h = shape[0] as u32;
@@ -1384,17 +1455,7 @@ impl OpenAIPreprocessor {
                         // shouldn't happen on the frontend.
                         let (mm_hash, hash_source) = match rdma_descriptor.content_hash() {
                             Some(h) => (h, "decoded_bytes"),
-                            None => {
-                                let url = match _content_part {
-                                    ChatCompletionRequestUserMessageContentPart::ImageUrl(p) => {
-                                        require_image_url(p)?
-                                    }
-                                    _ => unreachable!(
-                                        "rdma image_url descriptor only originates from ImageUrl content parts"
-                                    ),
-                                };
-                                (Self::hash_image_url(url.as_str()), "url_fallback")
-                            }
+                            None => (Self::hash_image_url(task.source_url), "url_fallback"),
                         };
                         if let Some(counter) = self.image_token_counter.as_ref() {
                             let n = counter.count_tokens(w, h);
@@ -1417,10 +1478,12 @@ impl OpenAIPreprocessor {
                     }
                 }
 
-                media_map
-                    .entry(type_str)
-                    .or_default()
-                    .push(MultimodalData::Decoded(rdma_descriptor));
+                Self::replace_reserved_media_slot(
+                    &mut media_map,
+                    task.modality,
+                    task.slot_idx,
+                    MultimodalData::Decoded(rdma_descriptor),
+                )?;
             }
         }
 
@@ -1429,11 +1492,11 @@ impl OpenAIPreprocessor {
         // Enables MM-aware routing for backends that register
         // `media_decoder: null` and decode images on the worker.
         #[cfg(feature = "mm-routing")]
-        if !url_passthrough_images.is_empty() {
+        if !has_user_uuid && !url_passthrough_images.is_empty() {
             let dim_results = futures::future::join_all(
                 url_passthrough_images
                     .iter()
-                    .map(|(mm_hash, url)| Self::fetch_image_dims(*mm_hash, url.as_str())),
+                    .map(|(mm_hash, url)| Self::fetch_image_dims(*mm_hash, url)),
             )
             .await;
             for ((mm_hash, url), dim_res) in url_passthrough_images.into_iter().zip(dim_results) {
@@ -1483,6 +1546,17 @@ impl OpenAIPreprocessor {
 
         if !media_map.is_empty() {
             builder.multi_modal_data(Some(media_map));
+            if has_user_uuid {
+                builder.multi_modal_uuids(Some(uuid_map));
+            }
+
+            // User cache identities are opaque and cannot be converted into the
+            // router's canonical image hashes. Fall back to text-prefix routing
+            // instead of routing and publishing under different cache keys.
+            #[cfg(feature = "mm-routing")]
+            if has_user_uuid {
+                mm_image_entries.clear();
+            }
 
             // Preserve original messages and formatted prompt in extra_args for multimodal
             // workers (e.g., TRT-LLM needs messages and the template-rendered prompt with
@@ -1542,6 +1616,7 @@ impl OpenAIPreprocessor {
             // text-prefix routing.
             #[cfg(feature = "mm-routing")]
             if let Some(find_token_id) = self.routing_image_token_id
+                && !has_user_uuid
                 && !mm_image_entries.is_empty()
                 && mm_image_entries.len() == total_image_count
                 && token_ids.iter().filter(|&&t| t == find_token_id).count()
@@ -3784,6 +3859,46 @@ mod tests {
         assert_eq!(counts.image, 0);
         assert_eq!(counts.video, 0);
         assert_eq!(counts.audio, 0);
+    }
+
+    #[test]
+    fn replace_reserved_media_slot_preserves_alignment_and_returns_errors() {
+        let mut map = HashMap::from([(
+            "image_url".to_string(),
+            vec![
+                url_entry("http://x/a.png"),
+                MultimodalData::UuidOnly("cached-b".to_string()),
+                url_entry("http://x/c.png"),
+            ],
+        )]);
+
+        OpenAIPreprocessor::replace_reserved_media_slot(
+            &mut map,
+            "image_url",
+            2,
+            MultimodalData::RawUrl("decoded-c".to_string()),
+        )
+        .unwrap();
+
+        let images = &map["image_url"];
+        assert!(matches!(images[0], MultimodalData::Url(_)));
+        assert!(matches!(
+            &images[1],
+            MultimodalData::UuidOnly(uuid) if uuid == "cached-b"
+        ));
+        assert!(matches!(
+            &images[2],
+            MultimodalData::RawUrl(value) if value == "decoded-c"
+        ));
+
+        let error = OpenAIPreprocessor::replace_reserved_media_slot(
+            &mut map,
+            "image_url",
+            3,
+            MultimodalData::RawUrl("out-of-range".to_string()),
+        )
+        .expect_err("an out-of-range reserved slot must return an error");
+        assert!(error.to_string().contains("image_url[3]"));
     }
 
     #[test]

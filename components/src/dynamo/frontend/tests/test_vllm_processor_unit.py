@@ -448,6 +448,59 @@ async def test_prepare_mm_routing_skips_single_modality_transfer_for_mixed_featu
     }
 
 
+@pytest.mark.asyncio
+@pytest.mark.multimodal
+async def test_prepare_mm_routing_opaque_uuid_skips_routing_and_transfer(
+    vllm_processor_module,
+    monkeypatch,
+):
+    def fail_routing(*args, **kwargs):
+        raise AssertionError("opaque user UUIDs must not be parsed as routing hashes")
+
+    monkeypatch.setattr(
+        vllm_processor_module,
+        "build_mm_routing_info_from_features",
+        fail_routing,
+    )
+
+    def fail_sender():
+        raise AssertionError("opaque user UUIDs must be processed by the worker")
+
+    monkeypatch.setattr(vllm_processor_module, "MmKwargsShmSender", fail_sender)
+
+    processor = vllm_processor_module.VllmProcessor.__new__(
+        vllm_processor_module.VllmProcessor
+    )
+    processor.block_size = 16
+    processor.nixl_mm_enabled = True
+    processor.use_shm_transfer = True
+    processor._sender = None
+
+    feature_hash = "derived-from-uuid-and-processor-kwargs"
+    vllm_preproc = SimpleNamespace(
+        prompt_token_ids=list(range(16)),
+        mm_features=[
+            SimpleNamespace(
+                modality="image",
+                mm_hash=feature_hash,
+                data=object(),
+                mm_position=SimpleNamespace(offset=0, length=16),
+            )
+        ],
+    )
+    dynamo_preproc = {"multi_modal_uuids": {"image_url": ["opaque-user-key"]}}
+
+    mm_routing_info, cleanup_items, transferred = await processor._prepare_mm_routing(
+        vllm_preproc,
+        dynamo_preproc,
+    )
+
+    assert mm_routing_info is None
+    assert cleanup_items == []
+    assert transferred is False
+    assert "extra_args" not in dynamo_preproc
+
+
 class TestReasoningParserMetadata:
     def test_no_reasoning_parser_returns_none(self):
         from dynamo.frontend.vllm_processor import _build_reasoning_parser_metadata
@@ -522,6 +575,102 @@ class TestReasoningParserMetadata:
                 "chat_template_kwargs": {"reasoning_effort": "high"}
             },
         }
+
+
+@pytest.mark.asyncio
+@pytest.mark.multimodal
+async def test_build_engine_inputs_preserves_multimodal_uuids(
+    vllm_processor_module,
+):
+    class Renderer:
+        async def process_for_engine_async(self, prompt, arrival_time):
+            assert prompt == {
+                "prompt": "rendered prompt",
+                "prompt_token_ids": [1, 2, 3],
+                "multi_modal_data": {"image": [image]},
+                "multi_modal_uuids": {"image": ["opaque-user-key"]},
+                "cache_salt": "salt",
+                "mm_processor_kwargs": {"do_sample_frames": False},
+            }
+            assert isinstance(arrival_time, float)
+            return {"type": "multimodal", "mm_hashes": ["opaque-user-key"]}
+
+    image = object()
+    engine_inputs = await vllm_processor_module._build_engine_inputs(
+        Renderer(),
+        {
+            "prompt": "rendered prompt",
+            "multi_modal_data": {"image": [image]},
+            "multi_modal_uuids": {"image": ["opaque-user-key"]},
+        },
+        [1, 2, 3],
+        cache_salt="salt",
+        mm_processor_kwargs={"do_sample_frames": False},
+    )
+
+    assert engine_inputs == {
+        "type": "multimodal",
+        "mm_hashes": ["opaque-user-key"],
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.multimodal
+async def test_build_engine_inputs_defers_uuid_only_processing_to_worker(
+    vllm_processor_module,
+):
+    class Renderer:
+        async def process_for_engine_async(self, prompt, arrival_time):
+            assert prompt == {
+                "prompt": "rendered prompt",
+                "prompt_token_ids": [1, 2, 3],
+                "cache_salt": "salt",
+                "mm_processor_kwargs": {"do_sample_frames": False},
+            }
+            assert isinstance(arrival_time, float)
+            return {"type": "token", "prompt_token_ids": [1, 2, 3]}
+
+    engine_inputs = await vllm_processor_module._build_engine_inputs(
+        Renderer(),
+        {
+            "prompt": "rendered prompt",
+            "multi_modal_data": {"image": [None]},
+            "multi_modal_uuids": {"image": ["worker-cached-image"]},
+        },
+        [1, 2, 3],
+        cache_salt="salt",
+        mm_processor_kwargs={"do_sample_frames": False},
+        defer_multimodal_processing=True,
+    )
+
+    assert engine_inputs == {"type": "token", "prompt_token_ids": [1, 2, 3]}
+
+
+@pytest.mark.multimodal
+def test_normalize_vllm_image_parts_defaults_detail_without_lifting_nested_uuid(
+    vllm_processor_module,
+) -> None:
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "https://example.com/image.png",
+                        "detail": None,
+                        "uuid": "92b888ad-e64a-478f-b688-5091e16544e3",
+                    },
+                }
+            ],
+        }
+    ]
+
+    vllm_processor_module._normalize_vllm_image_parts(messages)
+
+    part = messages[0]["content"][0]
+    assert "uuid" not in part
+    assert part["image_url"]["detail"] == "auto"
 
 
 class _FakeOutputProcessor:

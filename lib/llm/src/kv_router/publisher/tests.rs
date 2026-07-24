@@ -21,6 +21,81 @@ mod test_event_processing {
     use dynamo_kv_router::zmq_wire::StoredBlockOptions;
 
     #[test]
+    fn test_publish_batch_ignores_empty_and_preserves_order() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+        let publisher = KvEventPublisher {
+            kv_block_size: 1,
+            source: None,
+            cancellation_token: CancellationToken::new(),
+            worker_id: 7,
+            tx,
+            next_event_id: Arc::new(AtomicU64::new(0)),
+        };
+
+        publisher.publish_batch(Vec::new()).unwrap();
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+
+        publisher
+            .publish_batch(vec![
+                KvCacheEvent {
+                    event_id: 8,
+                    data: KvCacheEventData::Cleared,
+                    dp_rank: 1,
+                },
+                KvCacheEvent {
+                    event_id: 9,
+                    data: KvCacheEventData::Cleared,
+                    dp_rank: 2,
+                },
+            ])
+            .unwrap();
+        let batch = rx.try_recv().unwrap();
+        assert_eq!(batch.len(), 2);
+        assert_eq!(batch[0].event.event_id, 8);
+        assert_eq!(batch[0].event.dp_rank, 1);
+        assert_eq!(batch[1].event.event_id, 9);
+        assert_eq!(batch[1].event.dp_rank, 2);
+    }
+
+    #[test]
+    fn test_publish_batch_closed_channel_returns_original_events_in_order() {
+        let (tx, rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+        let publisher = KvEventPublisher {
+            kv_block_size: 1,
+            source: None,
+            cancellation_token: CancellationToken::new(),
+            worker_id: 7,
+            tx,
+            next_event_id: Arc::new(AtomicU64::new(0)),
+        };
+        drop(rx);
+
+        let error = publisher
+            .publish_batch(vec![
+                KvCacheEvent {
+                    event_id: 8,
+                    data: KvCacheEventData::Cleared,
+                    dp_rank: 1,
+                },
+                KvCacheEvent {
+                    event_id: 9,
+                    data: KvCacheEventData::Cleared,
+                    dp_rank: 2,
+                },
+            ])
+            .unwrap_err();
+
+        assert_eq!(error.0.len(), 2);
+        assert_eq!(error.0[0].event_id, 8);
+        assert_eq!(error.0[0].dp_rank, 1);
+        assert_eq!(error.0[1].event_id, 9);
+        assert_eq!(error.0[1].dp_rank, 2);
+    }
+
+    #[test]
     fn test_publish_wraps_events_in_batches() {
         let (tx, mut rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
         let publisher = KvEventPublisher {
