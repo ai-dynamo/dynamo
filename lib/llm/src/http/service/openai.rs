@@ -1958,14 +1958,28 @@ async fn chat_completions(
     // apply any annotations to the front of the stream
     let stream = stream::iter(annotations).chain(stream);
 
+    // Backends can report request validation failures as the first stream
+    // event. Inspect it before committing an HTTP status.
+    let stream = check_for_backend_error(stream)
+        .await
+        .map_err(|error_response| {
+            // A backend 400 is an engine-owned request validation failure.
+            // It may not use the frontend's "Validation:" message prefix.
+            let error_type = if error_response.0 == StatusCode::BAD_REQUEST {
+                ErrorType::Validation
+            } else {
+                extract_error_type_from_response(&error_response)
+            };
+            inflight_guard.mark_error(error_type);
+            error_response
+        })?;
+
     // todo - tap the stream and propagate request level metrics
     // note - we might do this as part of the post processing set to make it more generic
 
     if streaming {
-        // For streaming responses, we return HTTP 200 immediately without checking for errors.
-        // Once HTTP 200 OK is sent, we cannot change the status code, so any backend errors
-        // must be delivered as SSE events with `event: error` in the stream (handled by
-        // EventConverter and monitor_for_disconnects). This is standard SSE behavior.
+        // Errors after the first backend event are delivered in-band because
+        // the SSE response has already started and its HTTP status is fixed.
         stream_handle.arm(); // allows the system to detect client disconnects and cancel the LLM generation
 
         let mut http_queue_guard = Some(http_queue_guard);
@@ -2034,18 +2048,8 @@ async fn chat_completions(
 
         Ok(sse_stream.into_response())
     } else {
-        // Check first event for backend errors before aggregating (non-streaming only)
-        let stream_with_check =
-            check_for_backend_error(stream)
-                .await
-                .map_err(|error_response| {
-                    tracing::error!(request_id, "Backend error detected: {:?}", error_response);
-                    inflight_guard.mark_error(extract_error_type_from_response(&error_response));
-                    error_response
-                })?;
-
         let mut http_queue_guard = Some(http_queue_guard);
-        let stream = stream_with_check.inspect(move |response| {
+        let stream = stream.inspect(move |response| {
             // Calls observe_response() on each token - drops http_queue_guard on first token
             process_chat_response_and_observe_metrics(
                 response,

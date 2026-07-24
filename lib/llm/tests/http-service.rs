@@ -24,6 +24,7 @@ use dynamo_llm::{
 use dynamo_runtime::metrics::prometheus_names::{frontend_service, name_prefix};
 use dynamo_runtime::{
     CancellationToken,
+    error::{BackendError, DynamoError, ErrorType as DynamoErrorType},
     pipeline::{
         AsyncEngine, AsyncEngineContextProvider, ManyOut, ResponseStream, SingleIn, async_trait,
     },
@@ -41,6 +42,8 @@ use ports::bind_random_port;
 
 struct CounterEngine {}
 
+struct InvalidArgumentStreamEngine;
+
 // Add a new long-running test engine
 struct LongRunningEngine {
     delay_ms: u64,
@@ -57,6 +60,40 @@ impl LongRunningEngine {
 
     fn was_cancelled(&self) -> bool {
         self.cancelled.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateChatCompletionRequest>,
+        ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+        Error,
+    > for InvalidArgumentStreamEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateChatCompletionRequest>,
+    ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
+        let (_request, context) = request.transfer(());
+        let ctx = context.context();
+
+        let stream = stream! {
+            yield Annotated {
+                data: None,
+                id: None,
+                event: Some("error".to_string()),
+                comment: None,
+                error: Some(
+                    DynamoError::builder()
+                        .error_type(DynamoErrorType::Backend(BackendError::InvalidArgument))
+                        .message("input length 313 exceeds context length 256")
+                        .build(),
+                ),
+            };
+        };
+
+        Ok(ResponseStream::new(Box::pin(stream), ctx))
     }
 }
 
@@ -349,7 +386,9 @@ async fn test_http_service() {
     assert!(response.status().is_success(), "{:?}", response);
 
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
-    assert_eq!(metrics.get_inflight_count("foo"), 1);
+    // The first-event preflight waits for this mock's only delay, after which
+    // its small response fits in the socket buffer and completes immediately.
+    assert_eq!(metrics.get_inflight_count("foo"), 0);
 
     // process byte stream
     let _ = response.bytes().await.unwrap();
@@ -554,6 +593,66 @@ async fn test_http_service() {
 
     assert!(response.status().is_success(), "{:?}", response);
     println!("{}", response.text().await.unwrap());
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn test_streaming_backend_invalid_argument_returns_http_400() {
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder()
+        .port(port)
+        .enable_chat_endpoints(true)
+        .build()
+        .unwrap();
+    let state = service.state_clone();
+    let manager = state.manager();
+    let metrics = state.metrics_clone();
+
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+    let task = tokio::spawn(async move { service.run_with_listener(token, listener).await });
+
+    wait_for_service_ready(port).await;
+
+    let card = ModelDeploymentCard::with_name_only("context-limit");
+    manager
+        .add_chat_completions_model(
+            "context-limit",
+            card.mdcsum(),
+            Arc::new(InvalidArgumentStreamEngine),
+        )
+        .unwrap();
+
+    let response = reqwest::Client::new()
+        .post(format!("http://localhost:{port}/v1/chat/completions"))
+        .json(&serde_json::json!({
+            "model": "context-limit",
+            "messages": [{"role": "user", "content": "too long"}],
+            "stream": true
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["code"], StatusCode::BAD_REQUEST.as_u16());
+    assert_eq!(body["type"], "Bad Request");
+    assert_eq!(
+        body["message"],
+        "input length 313 exceeds context length 256"
+    );
+    compare_counter(
+        &metrics,
+        "context-limit",
+        &Endpoint::ChatCompletions,
+        &RequestType::Stream,
+        &Status::Error,
+        &ErrorType::Validation,
+        1,
+    );
 
     cancel_token.cancel();
     task.await.unwrap().unwrap();
