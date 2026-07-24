@@ -19,7 +19,7 @@ Status legend: ✅ validated end to end · ⚠️ available but not yet validate
 | Aggregated serving + event-driven KV routing (`--router-mode kv`) | ✅ | Requires the versions and flags below. |
 | Chunked offloading (offload `block_size` larger than the GPU block size) | ✅ | Validated with 256-token offload blocks over a 16-token GPU block size. |
 | Approximate KV routing (`--no-router-kv-events`) | ✅ | Validated with two workers. The router predicts GPU-tier reuse only, so lower-tier weights have no effect. |
-| Disaggregated serving (`MultiConnector`: `NixlConnector` + `OffloadingConnector`) | ⚠️ | Supported by vLLM; not yet validated with the Dynamo KV router. |
+| Disaggregated serving (`MultiConnector`: `NixlConnector` + `OffloadingConnector`) | ⚠️ | Validated end to end with the pending Dynamo fix in [#11219](https://github.com/ai-dynamo/dynamo/pull/11219). |
 | Tensor parallelism (TP > 1) | ✅ | Validated with TP=2, including GPU eviction, CPU reload, and one event stream per engine. |
 | Models with sliding-window or Mamba/SSM layers | ⚠️ | The router sees only full-attention KV cache groups. |
 | Disk and multi-tier offloading (`TieringOffloadingSpec`) | 🚧 | vLLM main emits FS and OBJ events; Dynamo tier mapping is in progress. |
