@@ -157,7 +157,8 @@ navigation:
             icon: wand-magic-sparkles
             collapsed: open-by-default
             contents:
-              - page: DGDR Walkthrough
+              - page: Auto Deploy with DGDR
+                slug: dgdr-walkthrough
                 path: kubernetes/dgdr-guide.md
               - page: Dynamo Profiler
                 path: kubernetes/dgdr-profiler.md
@@ -170,25 +171,16 @@ navigation:
             contents:
               - page: Observability
                 path: kubernetes/observability/metrics.md
-              - section: CLI Tools
-                contents:
-                  - page: Sizing with AIConfigurator
-                    path: tools/aic.md
-                  - page: Benchmarking with AIPerf
-                    path: tools/aiperf.md
-              - section: Inference Simulation (DynoSim)
+              - page: Benchmarking with AIPerf
+                path: tools/aiperf.md
+              - section: DynoSim
                 slug: dynosim
                 contents:
                   - page: Overview
                     path: dynosim/README.md
-                  - page: Live Simulation with Mocker
+                  - page: Live Simulation
+                    slug: live-simulation-with-mocker
                     path: dynosim/mocker.md
-                  - page: Simulation Runs
-                    path: dynosim/runs.md
-                  - page: Simulation Sweeps
-                    path: dynosim/sweeps.md
-                  - page: Planner Simulation Benchmarking
-                    path: dynosim/planner-benchmarking.md
 
       # ==================== Local Deployment variant ====================
       # slug: cli preserves the existing CLI page URLs (previously the
@@ -245,6 +237,22 @@ navigation:
                 path: observability/local-observability.mdx
               - page: Health Checks
                 path: observability/health-checks.mdx
+              - section: DynoSim
+                slug: dynosim
+                contents:
+                  - page: Overview
+                    path: dynosim/README.md
+                  - page: Live Simulation
+                    path: dynosim/mocker-local.md
+                  - page: Offline Replay
+                    slug: simulation-runs
+                    path: dynosim/runs.md
+                  - page: Configuration Sweeps
+                    slug: simulation-sweeps
+                    path: dynosim/sweeps.md
+                  - page: Planner Replay
+                    slug: planner-simulation-benchmarking
+                    path: dynosim/planner-benchmarking.md
 
   - tab: use-cases
     layout:
@@ -648,6 +656,8 @@ navigation:
                 path: design-docs/distributed-runtime.md
               - page: Observability Architecture
                 path: design-docs/observability.md
+              - page: DynoSim Architecture
+                path: design-docs/dynosim-architecture.md
               - page: Mocker Engine Architecture
                 path: design-docs/mocker-architecture.md
               - section: Communication Planes
@@ -808,6 +818,8 @@ navigation:
             path: components/mocker/mocker-cli-reference.mdx
           - page: DynoSim Replay CLI Reference
             path: components/mocker/replay-cli-reference.mdx
+          - page: DynoSim Sweep Reference
+            path: components/mocker/sweep-reference.mdx
           - page: Global Router Configuration
             path: components/router/global-router-config-reference.mdx
 

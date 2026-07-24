@@ -63,6 +63,13 @@ function ptParts(d, isAllDay) {
     day: fmt({ day: 'numeric' }),
     year: fmt({ year: 'numeric' }),
     dateLabel: fmt({ weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' }),
+    timeLabel: isAllDay
+      ? null
+      : d.toLocaleTimeString('en-US', {
+          timeZone: tz,
+          hour: 'numeric',
+          minute: '2-digit',
+        }),
   };
 }
 
@@ -118,6 +125,7 @@ async function main() {
     '  day: string;\n' +
     '  year: string;\n' +
     '  dateLabel: string;\n' +
+    '  timeLabel: string | null;\n' +
     '  isPast: boolean;\n' +
     '  location: string | null;\n' +
     '  locationUrl: string | null;\n' +

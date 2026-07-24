@@ -13,6 +13,7 @@ export interface DynamoEvent {
   day: string;
   year: string;
   dateLabel: string;
+  timeLabel: string | null;
   isPast: boolean;
   location: string | null;
   locationUrl: string | null;
@@ -27,6 +28,7 @@ export const UPCOMING_EVENTS: DynamoEvent[] = [
     "day": "23",
     "year": "2026",
     "dateLabel": "Thu, Jul 23, 2026",
+    "timeLabel": "5:30 PM",
     "isPast": false,
     "location": "Luma",
     "locationUrl": "https://luma.com/rxsn0u0h",
@@ -39,6 +41,7 @@ export const UPCOMING_EVENTS: DynamoEvent[] = [
     "day": "30",
     "year": "2026",
     "dateLabel": "Thu, Jul 30, 2026",
+    "timeLabel": "6:00 PM",
     "isPast": false,
     "location": "Luma",
     "locationUrl": "https://luma.com/JulyDynamoAfterHours",
@@ -54,6 +57,7 @@ export const PAST_EVENTS: DynamoEvent[] = [
     "day": "16",
     "year": "2026",
     "dateLabel": "Thu, Jul 16, 2026",
+    "timeLabel": "3:00 PM",
     "isPast": true,
     "location": "Luma",
     "locationUrl": "https://luma.com/rxmldtp2?tk=XiKvay",

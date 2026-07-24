@@ -1,5 +1,5 @@
 ---
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: DynoSim
 subtitle: Simulate Dynamo deployment choices before spending GPU time
@@ -47,10 +47,11 @@ AIC provides performance models and candidate-shape information. DynoSim uses th
 
 | Goal | Start Here |
 |---|---|
-| Run one trace or synthetic workload through one config | [DynoSim Runs](runs.md) |
-| Sweep topology and router choices under SLA/GPU constraints | [DynoSim Sweeps](sweeps.md) |
-| Exercise a live frontend/router setup without GPUs | [Live Simulation with Mocker](mocker.md) |
-| Study Planner scaling decisions against a trace | [Planner DynoSim Benchmarking](planner-benchmarking.md) |
+| Run one trace or synthetic workload through one config | [Run a DynoSim Simulation](runs.md) |
+| Sweep topology and router choices under SLA/GPU constraints | [Sweep DynoSim Configurations](sweeps.md) |
+| Exercise a Kubernetes frontend/router setup without GPUs | [Simulate a Kubernetes Deployment](mocker.md) |
+| Exercise a local frontend/router setup without GPUs | [Simulate a Local Deployment](mocker-local.md) |
+| Study Planner scaling decisions against a trace | [Benchmark Planner Decisions](planner-benchmarking.md) |
 | Generate a deployable Kubernetes config from model/SLA intent | [Model Deployment Guide](../kubernetes/model-deployment-guide.md) |
 
 DynoSim narrows the search space; it does not replace real-hardware validation. Use it to move quickly, find promising candidates, and understand failure modes before spending cluster time.

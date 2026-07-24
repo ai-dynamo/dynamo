@@ -74,6 +74,58 @@ Apply only to synthetic (non-trace) runs.
   eligible.
 </ParamField>
 
+## Trace file schema
+
+Mooncake-style JSONL traces contain one request per line. A basic row accepts:
+
+| Field | Description |
+|---|---|
+| `timestamp` or `created_time` | Request arrival time |
+| `input_length` or `input_tokens` | Input token count |
+| `output_length` or `output_tokens` | Output token count |
+| `hash_ids` | Prefix-block identifiers from the source trace |
+| `priority` | Optional signed soft-priority hint |
+| `strict_priority` | Optional unsigned queue tier; larger values run first |
+
+Example:
+
+```json
+{"timestamp": 0, "input_length": 6755, "output_length": 500, "hash_ids": [0, 1, 2, 3]}
+```
+
+Rows without `session_id` are independent requests. Priority fields affect only pending requests
+when `--router-mode kv_router` is active; they do not change round-robin routing or execution order
+inside a selected engine.
+
+### Multi-turn sessions
+
+Use the same `session_id` for every turn in one session. Turn `n+1` waits for turn `n` to complete,
+then applies `delay`, `delay_ms`, or the timestamp delta between consecutive rows.
+
+```json
+{"session_id":"session-a","timestamp":1000,"input_length":2048,"output_length":128,"hash_ids":[1,2,3,4]}
+{"session_id":"session-a","delay_ms":50,"input_length":2560,"output_length":128,"hash_ids":[1,2,3,4,5]}
+```
+
+### Agentic Mooncake traces
+
+Set `--trace-format agentic_mooncake` to model request-level dependencies. Each row requires a stable
+`request_id` and can include:
+
+| Field | Description |
+|---|---|
+| `wait_for` | Request IDs that must complete before this request starts |
+| `branches` | Child request IDs spawned by this request |
+| `prefix_reset` | Marks the first row in a trajectory |
+| `delay` | Additional delay after dependencies complete |
+| `tool_wait_ms` | Simulated tool-execution delay |
+
+Rows without `wait_for` use their timestamp as the start time. Rows with dependencies wait for all
+listed requests and then apply `delay + tool_wait_ms`.
+
+`--trace-block-size` defines how many tokens each trace `hash_id` represents. It is independent from
+the simulated engine `block_size`.
+
 ## Execution
 
 <ParamField path="--replay-mode" type="string" default="offline">

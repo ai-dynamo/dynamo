@@ -20,7 +20,7 @@ Reach for AIPerf when you want to measure real performance against a running end
 
 - Benchmark a DynamoGraphDeployment across concurrency levels to find its saturation point.
 - Compare configurations — aggregated versus disaggregated, KV-aware routing on or off, or one backend against another.
-- Validate that a deployment meets your latency and throughput SLA after sizing it with [AIConfigurator](aic.md).
+- Validate that a deployment meets your latency and throughput SLA after sizing it with [AIConfigurator](../kubernetes/dgd-aiconfigurator.md).
 
 ## Run a single benchmark
 
@@ -42,7 +42,6 @@ This writes results to `artifacts/` and prints a metrics summary to the console.
 
 ## Where to go next
 
-TODO(broken-link): ../benchmarks/benchmarking.md resolves to /dynamo/dev/benchmarks/benchmarking, which is not registered in docs/index.yml, so this link is broken. Register that page in the nav (or fix the target) to resolve. Pre-existing: features/disaggregated-serving/aiconfigurator.md and backends/vllm/vllm-examples.md link to it the same way.
 - For concurrency sweeps, client-side versus in-cluster benchmarking, visualization, and advanced features (trace replay, arrival patterns, GPU telemetry), see the [Dynamo Benchmarking](../benchmarks/benchmarking.md) guide.
 - To benchmark a supported model or feature from a known-good baseline, start from a [Dynamo Recipe](https://github.com/ai-dynamo/dynamo/tree/main/recipes).
 - For the upstream command reference, run `aiperf profile --help` or see the [AIPerf docs](https://github.com/ai-dynamo/aiperf/tree/main/docs).

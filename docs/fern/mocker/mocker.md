@@ -4,7 +4,7 @@
 title: Mocker Engine Simulation
 ---
 
-This page has moved to [Live Simulation with Mocker](../dynosim/mocker.md).
+This page has moved to [Simulate a Kubernetes Deployment](../dynosim/mocker.md).
 
 The old path remains so existing links continue to resolve while the canonical
 documentation moves under DynoSim.

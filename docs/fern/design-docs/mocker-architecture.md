@@ -4,9 +4,9 @@
 title: Mocker Engine Architecture
 ---
 
-The mocker is organized into several cooperating components that mirror the internal architecture of production LLM inference engines. The scheduler (vLLM-style and SGLang-style variants) and KV block manager live inside the engine core. Multi-engine behavior — KV transfer/offloading simulation, KV router simulation, planner simulation — is added by the DynoSim run harness on top of multiple engine cores; see [DynoSim Runs](../dynosim/runs.md) for the component-level diagram and for offline internals under [`lib/mocker/src/replay/offline/`](../../lib/mocker/src/replay/offline/README.md).
+The mocker is organized into several cooperating components that mirror the internal architecture of production LLM inference engines. The scheduler (vLLM-style and SGLang-style variants) and KV block manager live inside the engine core. Multi-engine behavior — KV transfer/offloading simulation, KV router simulation, planner simulation — is added by the DynoSim run harness on top of multiple engine cores; see [DynoSim Architecture](dynosim-architecture.md) for the component-level design and [offline replay internals](https://github.com/ai-dynamo/dynamo/blob/main/lib/mocker/src/replay/offline/README.md) for implementation details.
 
-For how to launch and deploy the mocker worker, see [Live Simulation with Mocker](../dynosim/mocker.md); for the command-line flags referenced throughout this page, see the [Mocker CLI Reference](../components/mocker/mocker-cli-reference.mdx).
+For task-oriented instructions, see [Simulate a Kubernetes Deployment](../dynosim/mocker.md) or [Simulate a Local Deployment](../dynosim/mocker-local.md); for the command-line flags referenced throughout this page, see the [Mocker CLI Reference](../components/mocker/mocker-cli-reference.mdx).
 
 ## Scheduler
 
@@ -57,7 +57,7 @@ Three `Use` outcomes are tracked for KV-event emission: `ActiveHit` (bump refcou
 
 ## Eviction Backends
 
-The kvbm-logical inactive pool selects eviction victims via one of three backends, exposed as `MockerEvictionBackend` in [`lib/mocker/src/common/protocols.rs`](../../lib/mocker/src/common/protocols.rs):
+The kvbm-logical inactive pool selects eviction victims via one of three backends, exposed as `MockerEvictionBackend` in [`lib/mocker/src/common/protocols.rs`](https://github.com/ai-dynamo/dynamo/blob/main/lib/mocker/src/common/protocols.rs):
 
 - **`Lineage`** (default) — parent-chain aware: evicts leaf blocks first, preserving shared prefix chains. Subsumes the preemption-priority behavior the hand-rolled `LRUEvictor::push_front` used to provide.
 - **`Lru`** — plain recency-based LRU.
@@ -131,6 +131,7 @@ The following features are not yet supported by the mocker:
 
 | Document | Description |
 |----------|-------------|
-| [Live Simulation with Mocker](../dynosim/mocker.md) | Deploy and run the mocker worker locally or on Kubernetes |
+| [Simulate a Kubernetes Deployment](../dynosim/mocker.md) | Deploy and run Mocker on Kubernetes |
+| [Simulate a Local Deployment](../dynosim/mocker-local.md) | Run Mocker from the command line |
 | [Mocker CLI Reference](../components/mocker/mocker-cli-reference.mdx) | Command-line flags for `python -m dynamo.mocker` |
-| [DynoSim Runs](../dynosim/runs.md) | Run one workload through a simulated configuration with `python -m dynamo.replay` |
+| [Run a DynoSim Simulation](../dynosim/runs.md) | Run one workload through a simulated configuration with `python -m dynamo.replay` |

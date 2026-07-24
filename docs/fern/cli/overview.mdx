@@ -1,7 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Introduction
+title: Model Deployment
 sidebar-title: Introduction
 description: Deploy and serve models locally with Dynamo backends
 ---
@@ -195,6 +195,9 @@ When a model's tensor-parallel size exceeds the GPUs on a single node, you can s
 
 ## Next steps
 
+- **Size the deployment** — AIConfigurator can evaluate the same model, backend, GPU system, and SLA
+  for local or Kubernetes deployments. Copy its recommended TP, PP, and replica counts into your
+  worker commands. See the [AIConfigurator reference](../features/disaggregated-serving/aiconfigurator.md).
 - **Deployment patterns** — add a router or split prefill and decode across workers. See the local deployment examples for [vLLM](../backends/vllm/vllm-examples.mdx), [SGLang](../backends/sglang/sglang-examples.mdx), and [TensorRT-LLM](../backends/trtllm/trtllm-examples.mdx). Each page provides copyable commands for the `launch/*.sh` scripts in the repository.
 - **KV cache offloading** — extend effective KV cache capacity beyond GPU memory with
   [KVBM, LMCache, HiCache, or FlexKV](kv-cache-offloading.mdx).

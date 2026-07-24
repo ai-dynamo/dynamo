@@ -74,6 +74,15 @@ function ArrowIcon() {
   );
 }
 
+function ExternalLinkIcon() {
+  return (
+    <svg viewBox="0 0 20 20" aria-hidden="true">
+      <path d="M11 4h5v5M16 4l-7 7" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M15 11v4a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h4" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 function ArticleArt({ variant }: { variant: string }) {
   return (
     <div className={`dynamo-blog-art dynamo-blog-art--${variant}`} aria-hidden="true">
@@ -92,12 +101,12 @@ export function BlogLanding() {
     <div className="dynamo-blog-home">
       <section className="dynamo-blog-latest" id="latest" aria-labelledby="latest-heading">
         <div className="dynamo-blog-section-heading">
-          <div>
+          <div className="dynamo-blog-section-heading__copy">
             <span className="dynamo-blog-kicker">From the team</span>
             <h2 id="latest-heading">Latest articles</h2>
-          </div>
-          <div className="dynamo-blog-section-heading__aside">
             <p>Technical perspectives on distributed inference, performance, and the Dynamo ecosystem.</p>
+          </div>
+          <div className="dynamo-blog-section-heading__actions">
             <a
               className="dynamo-blog-button dynamo-blog-button--secondary"
               href="https://github.com/ai-dynamo/dynamo/subscription"
@@ -105,6 +114,7 @@ export function BlogLanding() {
               rel="noopener noreferrer"
             >
               Subscribe on GitHub
+              <ExternalLinkIcon />
             </a>
           </div>
         </div>

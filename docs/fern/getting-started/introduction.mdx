@@ -140,7 +140,7 @@ subtitle: Install, deploy, and operate Dynamo on Kubernetes
     **Auto deploy with DGDR**
 
     <CardGroup cols={3}>
-      <Card title="DGDR Walkthrough" icon="regular wand-magic-sparkles" href="../kubernetes/dgdr-guide.md">
+      <Card title="Auto Deploy with DGDR" icon="regular wand-magic-sparkles" href="../kubernetes/dgdr-guide.md">
         Generate a deployment from model and workload requirements.
       </Card>
       <Card title="Dynamo Profiler" icon="regular gauge-high" href="../kubernetes/dgdr-profiler.md">
@@ -153,14 +153,11 @@ subtitle: Install, deploy, and operate Dynamo on Kubernetes
   </Accordion>
 
   <Accordion title="Operations">
-    Observe, size, benchmark, and simulate Kubernetes deployments.
+    Observe, benchmark, and simulate Kubernetes deployments.
 
-    <CardGroup cols={3}>
+    <CardGroup cols={2}>
       <Card title="Observability" icon="regular chart-line" href="../kubernetes/observability/metrics.md">
         Collect metrics from the operator and serving components.
-      </Card>
-      <Card title="Sizing with AIConfigurator" icon="regular ruler-combined" href="../tools/aic.md">
-        Estimate deployment resources from workload targets.
       </Card>
       <Card title="Benchmarking with AIPerf" icon="regular stopwatch" href="../tools/aiperf.md">
         Measure throughput and latency under load.
@@ -173,17 +170,8 @@ subtitle: Install, deploy, and operate Dynamo on Kubernetes
       <Card title="DynoSim Overview" icon="regular circle-info" href="../dynosim/README.md">
         Learn the simulation workflow and components.
       </Card>
-      <Card title="Live Simulation with Mocker" icon="regular server" href="../dynosim/mocker.md">
-        Exercise a live frontend with simulated workers.
-      </Card>
-      <Card title="Simulation Runs" icon="regular play" href="../dynosim/runs.md">
-        Run repeatable inference simulations.
-      </Card>
-      <Card title="Simulation Sweeps" icon="regular magnifying-glass-chart" href="../dynosim/sweeps.md">
-        Compare configurations across a parameter sweep.
-      </Card>
-      <Card title="Planner Simulation Benchmarking" icon="regular gauge" href="../dynosim/planner-benchmarking.md">
-        Evaluate planner decisions with simulated workloads.
+      <Card title="Simulate a Kubernetes Deployment" icon="regular server" href="../dynosim/mocker.md">
+        Exercise the Kubernetes frontend and router with simulated workers.
       </Card>
     </CardGroup>
   </Accordion>

@@ -8,7 +8,8 @@ subtitle: Command-line flags for the python -m dynamo.mocker simulated worker.
 `python -m dynamo.mocker` launches a simulated Dynamo worker that registers with the frontend,
 publishes KV events, and exercises the router and planner paths without a GPU. This page is the flag
 reference. For the deployment workflow and local/Kubernetes launch recipes, see
-[Live Simulation with Mocker](../../dynosim/mocker.md); for the engine internals these flags
+[Simulate a Kubernetes Deployment](../../dynosim/mocker.md) or
+[Simulate a Local Deployment](../../dynosim/mocker-local.md); for the engine internals these flags
 configure, see [Mocker Engine Architecture](../../design-docs/mocker-architecture.md).
 
 The same engine settings apply to [DynoSim Runs](../../dynosim/runs.md): `python -m dynamo.replay`
@@ -126,7 +127,7 @@ reuses the mocker engine and accepts these values as JSON through `--extra-engin
 ## AIC performance model
 
 Opt-in flags for the NVIDIA AI Configurator (AIC) latency model. Default mocker runs do not use AIC.
-See [Live Simulation with Mocker](../../dynosim/mocker.md#performance-modeling-setup) for setup.
+For the timing-model design, see [Mocker Engine Architecture](../../design-docs/mocker-architecture.md#performance-model).
 
 <ParamField path="--aic-perf-model" type="boolean" default="false">
   Use the AIC SDK for latency prediction instead of the interpolated or polynomial models. Opt-in
@@ -251,10 +252,13 @@ Apply only when `--engine-type sglang`.
 ## Related pages
 
 <CardGroup cols={2}>
-  <Card title="Live Simulation with Mocker" icon="server" href="../../dynosim/mocker.md">
-    Deploy and run the mocker worker locally or on Kubernetes.
+  <Card title="Simulate a Kubernetes Deployment" icon="server" href="../../dynosim/mocker.md">
+    Deploy and run the Mocker worker on Kubernetes.
   </Card>
-  <Card title="DynoSim Runs" icon="play" href="../../dynosim/runs.md">
+  <Card title="Simulate a Local Deployment" icon="terminal" href="../../dynosim/mocker-local.md">
+    Run a frontend and Mocker worker from the command line.
+  </Card>
+  <Card title="Run a DynoSim Simulation" icon="play" href="../../dynosim/runs.md">
     Run one workload through a simulated configuration with `python -m dynamo.replay`.
   </Card>
   <Card title="Mocker Engine Architecture" icon="diagram-project" href="../../design-docs/mocker-architecture.md">

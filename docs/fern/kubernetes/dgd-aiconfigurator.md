@@ -7,6 +7,12 @@ subtitle: Generate a tensor- and pipeline-parallel layout for your DGD worker fr
 
 This page is a detour from the **Determine topology and parallelism** step of [Deploy with DGD](dgd-guide.md). Rather than hand-pick tensor- and pipeline-parallel sizes, run AIConfigurator to search layouts against a latency target, then copy the recommended parallelism into your worker. It covers parallelism sizing only. For the full workflow — aggregated versus disaggregated comparison, generating complete manifests, and validating with AIPerf — see the [AIConfigurator](../features/disaggregated-serving/aiconfigurator.md) reference.
 
+> [!NOTE]
+> AIConfigurator itself is not Kubernetes-specific. You can run the same optimizer for a local or
+> bare-metal Dynamo deployment and translate the recommended TP, PP, and replica counts into worker
+> commands. This tutorial is Kubernetes-specific only because its final step applies the result to a
+> DGD.
+
 ## Prerequisites
 
 - A DGD in progress from [Deploy with DGD](dgd-guide.md), with the Frontend and worker defined and only parallelism left to set.
@@ -37,6 +43,22 @@ aiconfigurator cli default \
 - `--isl` / `--osl` — input and output sequence lengths, in tokens.
 - `--ttft` / `--tpot` — latency targets, in milliseconds; candidates that miss them are filtered out.
 
+## Understand the GPU and node model
+
+`--total-gpus` is a budget, not a flat list with no topology. The selected `--system` definition
+includes GPUs per node, intra-node bandwidth, inter-node bandwidth, PCIe bandwidth, and communication
+latency. AIConfigurator uses that system model when evaluating parallel configurations and can
+produce workers that span multiple nodes.
+
+AIConfigurator does not inspect your live cluster. It assumes a homogeneous pool described by the
+system definition and GPU budget; it does not account for current node availability, GPU
+fragmentation, scheduler placement, or cluster-specific network differences.
+
+The manual DGD example below assumes `gpus/worker` does not exceed the system's GPUs per node. If a
+recommended worker spans nodes, use the generated multi-node artifacts from the full
+[AIConfigurator workflow](../features/disaggregated-serving/aiconfigurator.md) and make sure the
+cluster supports the required LeaderWorkerSet deployment.
+
 ## Read the recommended parallelism
 
 AIConfigurator ranks the layouts that meet your SLA. The `parallel` column is the layout to copy, and `gpus/worker` is the GPUs it needs (abridged):
@@ -64,7 +86,7 @@ Copy those three numbers into the worker you built in the DGD guide:
 | AIConfigurator | DGD field |
 |---|---|
 | `parallel: tp4pp1` | `--tensor-parallel-size 4` (add `--pipeline-parallel-size N` when PP > 1) |
-| `gpus/worker: 4` | `nvidia.com/gpu: "4"` — must equal TP × PP per node |
+| `gpus/worker: 4` | `nvidia.com/gpu: "4"` for this single-node worker |
 | `replicas: 2` | the worker's `replicas` |
 
 ```yaml

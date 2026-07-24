@@ -201,6 +201,17 @@ redirects:
     destination: "/dynamo/dev/kubernetes-deployment/advanced-platform/developing-with-tilt"
   - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/inference-gateway-gaie"
     destination: "/dynamo/dev/integrations/kubernetes-integrations/gateway-api-inference-extension-gaie"
+  # User Guide operations restructure: CLI tools were flattened and DynoSim CLI workflows moved local.
+  - source: "/dynamo/dev/kubernetes/operations/cli-tools/sizing-with-ai-configurator"
+    destination: "/dynamo/dev/kubernetes/model-deployment/size-with-ai-configurator"
+  - source: "/dynamo/dev/kubernetes/operations/cli-tools/benchmarking-with-ai-perf"
+    destination: "/dynamo/dev/kubernetes/operations/benchmarking-with-ai-perf"
+  - source: "/dynamo/dev/kubernetes/operations/dynosim/simulation-runs"
+    destination: "/dynamo/dev/cli/operations/dynosim/simulation-runs"
+  - source: "/dynamo/dev/kubernetes/operations/dynosim/simulation-sweeps"
+    destination: "/dynamo/dev/cli/operations/dynosim/simulation-sweeps"
+  - source: "/dynamo/dev/kubernetes/operations/dynosim/planner-simulation-benchmarking"
+    destination: "/dynamo/dev/cli/operations/dynosim/planner-simulation-benchmarking"
   # Local observability restructure: installation, usage, and reference now have separate pages.
   - source: "/dynamo/dev/cli/installation/observability-setup/overview"
     destination: "/dynamo/dev/cli/installation/observability"

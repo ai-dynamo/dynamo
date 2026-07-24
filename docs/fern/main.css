@@ -2620,7 +2620,7 @@ article:has(.dynamo-blog-home) > header {
 }
 
 .dynamo-blog-latest {
-  padding-top: clamp(2.25rem, 4vw, 3.5rem);
+  padding-top: clamp(1.25rem, 2vw, 2rem);
   scroll-margin-top: 7rem;
 }
 
@@ -2640,18 +2640,15 @@ article:has(.dynamo-blog-home) > header {
   letter-spacing: -0.045em;
 }
 
-.dynamo-blog-section-heading__aside {
-  display: flex;
-  max-width: 390px;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 0.9rem;
-}
-
-.dynamo-blog-section-heading__aside p {
-  margin: 0;
+.dynamo-blog-section-heading__copy p {
+  max-width: 560px;
+  margin: 0.9rem 0 0;
   color: var(--dynamo-blog-muted);
   line-height: 1.6;
+}
+
+.dynamo-blog-section-heading__actions {
+  flex: none;
 }
 
 .dynamo-blog-grid {
@@ -2918,8 +2915,8 @@ article:has(.dynamo-blog-article) pre {
     padding-inline: 0.5rem;
   }
 
-  .dynamo-blog-section-heading__aside,
-  .dynamo-blog-section-heading__aside .dynamo-blog-button {
+  .dynamo-blog-section-heading__actions,
+  .dynamo-blog-section-heading__actions .dynamo-blog-button {
     width: 100%;
   }
 
@@ -3306,13 +3303,42 @@ article:has(.dynamo-community-page) { max-width: 1040px !important; }
   text-align: right;
 }
 
-.dynamo-community-calendar__day.has-event .dynamo-community-calendar__number { color: var(--dynamo-community-ink); }
+.dynamo-community-calendar__day.has-event .dynamo-community-calendar__number {
+  color: var(--dynamo-community-ink);
+}
 
-.dynamo-community-calendar__day > a {
-  display: -webkit-box;
-  overflow: hidden;
+.dynamo-community-calendar__day.is-today {
+  box-shadow: inset 0 0 0 2px rgba(118, 185, 0, 0.42);
+}
+
+.dynamo-community-calendar__day.is-today .dynamo-community-calendar__number {
+  display: grid;
+  width: 1.65rem;
+  height: 1.65rem;
+  margin: -0.15rem -0.15rem 0.3rem auto;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--dynamo-community-green);
+  color: #0b1400;
+}
+
+.dynamo-community-calendar__event-slot {
+  position: relative;
+  min-height: 2.45rem;
   margin: 0.32rem 0;
+}
+
+.dynamo-community-calendar__event-slot > a {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 0.35rem;
+  overflow: hidden;
   padding: 0.42rem 0.48rem;
+  border: 1px solid transparent;
   border-radius: 7px;
   background: rgba(118, 185, 0, 0.13);
   color: var(--dynamo-community-ink) !important;
@@ -3320,21 +3346,56 @@ article:has(.dynamo-community-page) { max-width: 1040px !important; }
   font-weight: 700;
   line-height: 1.25;
   text-decoration: none !important;
+}
+
+.dynamo-community-calendar__event-slot time {
+  color: color-mix(in srgb, var(--dynamo-community-green) 78%, var(--dynamo-community-ink));
+  font-size: 0.58rem;
+  font-variant-numeric: tabular-nums;
+  font-weight: 800;
+  line-height: 1.45;
+  white-space: nowrap;
+}
+
+.dynamo-community-calendar__event-title {
+  display: -webkit-box;
+  overflow: hidden;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
 }
 
-.dynamo-community-calendar__day > a > span {
-  display: inline-block;
-  width: 0.36rem;
-  height: 0.36rem;
-  margin-right: 0.34rem;
-  border-radius: 50%;
-  background: var(--dynamo-community-green);
-  vertical-align: 0.05rem;
+.dynamo-community-calendar__event-slot > a:hover,
+.dynamo-community-calendar__event-slot > a:focus-visible {
+  z-index: 12;
+  right: auto;
+  width: max(100%, 230px);
+  height: auto;
+  min-height: 100%;
+  overflow: visible;
+  border-color: rgba(118, 185, 0, 0.38);
+  background: color-mix(in srgb, var(--grayscale-a1) 88%, #76b900 12%);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.2);
 }
 
-.dynamo-community-calendar__day > a:hover { background: rgba(118, 185, 0, 0.23); }
+.dynamo-community-calendar__event-slot > a:focus-visible {
+  outline: 2px solid var(--dynamo-community-green);
+  outline-offset: 2px;
+}
+
+.dynamo-community-calendar__event-slot > a:hover .dynamo-community-calendar__event-title,
+.dynamo-community-calendar__event-slot > a:focus-visible .dynamo-community-calendar__event-title {
+  display: block;
+  overflow: visible;
+  -webkit-line-clamp: unset;
+}
+
+.dynamo-community-calendar__day:nth-child(7n) .dynamo-community-calendar__event-slot > a:hover,
+.dynamo-community-calendar__day:nth-child(7n) .dynamo-community-calendar__event-slot > a:focus-visible,
+.dynamo-community-calendar__day:nth-child(7n - 1) .dynamo-community-calendar__event-slot > a:hover,
+.dynamo-community-calendar__day:nth-child(7n - 1) .dynamo-community-calendar__event-slot > a:focus-visible {
+  right: 0;
+  left: auto;
+}
 
 .dynamo-community-calendar__upcoming {
   display: grid;

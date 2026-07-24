@@ -3,6 +3,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+"use client";
+
+import { useEffect, useState } from "react";
+
 import {
   UPCOMING_EVENTS,
   PAST_EVENTS,
@@ -142,7 +146,27 @@ function buildMonthCells(year: number, month: number) {
   return cells;
 }
 
+interface CalendarDate {
+  year: number;
+  month: number;
+  day: number;
+}
+
+function getPacificDate(date: Date): CalendarDate {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Los_Angeles",
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+  }).formatToParts(date);
+  const value = (type: "year" | "month" | "day") =>
+    Number(parts.find((part) => part.type === type)?.value);
+
+  return { year: value("year"), month: value("month") - 1, day: value("day") };
+}
+
 function FullCalendar() {
+  const [today, setToday] = useState<CalendarDate | null>(null);
   const focusEvent = UPCOMING_EVENTS[0] ?? PAST_EVENTS[0];
   const year = Number(focusEvent?.year ?? new Date().getUTCFullYear());
   const month = MONTH_INDEX[focusEvent?.month ?? "Jan"] ?? 0;
@@ -150,6 +174,8 @@ function FullCalendar() {
     (event) => Number(event.year) === year && MONTH_INDEX[event.month] === month,
   );
   const eventsByDay = new Map<number, DynamoEvent[]>();
+
+  useEffect(() => setToday(getPacificDate(new Date())), []);
 
   events.forEach((event) => {
     const day = Number(event.day);
@@ -181,22 +207,36 @@ function FullCalendar() {
         <div className="dynamo-community-calendar__grid">
           {buildMonthCells(year, month).map((day, index) => {
             const dayEvents = day === null ? [] : eventsByDay.get(day) ?? [];
+            const isToday = day !== null
+              && today?.year === year
+              && today.month === month
+              && today.day === day;
             return (
               <div
-                className={`dynamo-community-calendar__day${day === null ? ' is-empty' : ''}${dayEvents.length ? ' has-event' : ''}`}
+                className={`dynamo-community-calendar__day${day === null ? ' is-empty' : ''}${dayEvents.length ? ' has-event' : ''}${isToday ? ' is-today' : ''}`}
                 key={`${day ?? 'empty'}-${index}`}
               >
-                {day !== null && <span className="dynamo-community-calendar__number">{day}</span>}
-                {dayEvents.slice(0, 2).map((event) => (
-                  <a
-                    href={event.addUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                    key={`${event.start}-${event.title}`}
-                    title={`${event.title} — ${event.dateLabel}`}
+                {day !== null && (
+                  <span
+                    className="dynamo-community-calendar__number"
+                    aria-current={isToday ? "date" : undefined}
+                    aria-label={isToday ? `${MONTHS[month]} ${day}, ${year}, today` : undefined}
                   >
-                    <span />{event.title}
-                  </a>
+                    {day}
+                  </span>
+                )}
+                {dayEvents.slice(0, 2).map((event) => (
+                  <div className="dynamo-community-calendar__event-slot" key={`${event.start}-${event.title}`}>
+                    <a
+                      href={event.addUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      title={`${event.title} — ${event.dateLabel}${event.timeLabel ? ` at ${event.timeLabel} PT` : ''}`}
+                    >
+                      <time dateTime={event.start}>{event.timeLabel ?? "All day"}</time>
+                      <span className="dynamo-community-calendar__event-title">{event.title}</span>
+                    </a>
+                  </div>
                 ))}
               </div>
             );
