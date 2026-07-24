@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-tokenizer-comparison"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Keep this experiment independent from Dynamo's workspace and its production
+# dependency graph. Gigatoken currently requires nightly Rust.
+[workspace]
+
+[dependencies]
+fastokens = "0.2.0"
+gigatoken_rs = { package = "gigatoken", git = "https://github.com/marcelroed/gigatoken.git", rev = "0d9765fa7312af7534535e6315a5c49d74807b2a" }
+tokenizers = { version = "0.21.4", default-features = false, features = ["onig", "esaxx_fast", "rustls-tls"] }
