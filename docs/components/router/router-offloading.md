@@ -13,9 +13,9 @@ Legend: ✅ tier-aware routing · 🟡 engine-side offloading only (router route
 
 | Framework | GPU | CPU RAM | Disk | Shared pool |
 | --- | --- | --- | --- | --- |
+| [**vLLM**](#vllm) | ✅ KV events | ✅ `OffloadingConnector` + self-describing KV events — vLLM v0.24.0+, aggregated serving | 🚧 vLLM main emits FS/OBJ events; Dynamo tier mapping is in progress | 🚧 vLLM locality events are merged; Dynamo shared-pool indexing is in progress |
 | [**SGLang**](#sglang) | ✅ KV events | ✅ HiCache + KV events — SGLang 0.5.11+ | — no separate disk tier; HiCache's third tier is the shared pool (next column) | ✅ HiCache + Mooncake + `--shared-cache-type hicache` |
 | [**TensorRT-LLM**](#tensorrt-llm) | ✅ `--publish-kv-events` | 🟡 native host cache (`host_cache_size`) is not router-visible | — no native disk tier | — |
-| [**vLLM**](#vllm) | ✅ KV events | ✅ `OffloadingConnector` + self-describing KV events — vLLM v0.24.0+, aggregated serving | ✅ vLLM main; use v0.26.0+ once released | 🚧 vLLM locality events are merged; Dynamo shared-pool indexing is in progress |
 
 [KVBM](../kvbm/README.md), [LMCache](../../integrations/lmcache-integration.md), and [FlexKV](../../integrations/flexkv-integration.md) add CPU and disk tiers outside the frameworks' native paths; their router interaction is covered in [Other Offloading Backends](#other-offloading-backends).
 
@@ -25,7 +25,7 @@ Legend: ✅ tier-aware routing · 🟡 engine-side offloading only (router route
 - **Engine-side only.** Offloading works inside each worker, but events carry no usable tier information. The router routes on GPU-tier cache state and treats offloaded prefixes as cache misses.
 
 > [!NOTE]
-> Offloading support changes quickly on both the framework and the Dynamo side. Version gates are stated in the matrix cells where they limit support, with full version requirements in the per-framework sections below. Capabilities merged upstream but not yet released are listed as main-branch support with their first expected release. vLLM tier-aware routing and the `--router-host-cache-hit-weight` / `--router-disk-cache-hit-weight` tuning flags require Dynamo 1.3.0 or later; SGLang HiCache tier-aware routing also works on Dynamo 1.2.x, with the lower-tier weights fixed at their defaults.
+> Offloading support changes quickly on both the framework and the Dynamo side. Version gates are stated in the matrix cells where they limit support, with full version requirements in the per-framework sections below. Capabilities merged upstream but not yet released are listed as main-branch support. vLLM tier-aware routing and the `--router-host-cache-hit-weight` / `--router-disk-cache-hit-weight` tuning flags require Dynamo 1.3.0 or later; SGLang HiCache tier-aware routing also works on Dynamo 1.2.x, with the lower-tier weights fixed at their defaults.
 
 ## Common Frontend Setup
 
@@ -34,6 +34,17 @@ Every combination starts the frontend the same way:
 ```bash
 python -m dynamo.frontend --http-port 8000 --router-mode kv
 ```
+
+## vLLM
+
+Enable KV event publishing and native CPU offloading with self-describing events on every worker:
+
+- Worker: `--kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'` and `--kv-transfer-config` with `"kv_connector": "OffloadingConnector"` and `"self_describing_kv_events": true` in `kv_connector_extra_config`.
+- Versions: vLLM v0.24.0 or later. Earlier versions publish placeholder CPU events that the router silently drops — offloading still works engine-side, but the router only sees the GPU tier.
+- Disk and multi-tier offloading (`TieringOffloadingSpec`): vLLM main emits FS and OBJ events. Dynamo tier mapping is in progress.
+- Shared pools: vLLM main publishes optional `LOCAL` / `REMOTE` locality metadata on FS and OBJ events. Dynamo shared-pool indexing is in progress.
+
+See [Native KV Offloading](../../backends/vllm/vllm-native-kv-offloading.md) for the full support matrix (including disaggregated and tensor-parallel status), setup commands, verification, and troubleshooting.
 
 ## SGLang
 
@@ -56,17 +67,6 @@ Enable KV event publishing on every worker:
 
 See the [TensorRT-LLM backend docs](../../backends/trtllm/README.md) for worker setup.
 
-## vLLM
-
-Enable KV event publishing and native CPU offloading with self-describing events on every worker:
-
-- Worker: `--kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'` and `--kv-transfer-config` with `"kv_connector": "OffloadingConnector"` and `"self_describing_kv_events": true` in `kv_connector_extra_config`.
-- Versions: vLLM v0.24.0 or later. Earlier versions publish placeholder CPU events that the router silently drops — offloading still works engine-side, but the router only sees the GPU tier.
-- Disk and multi-tier offloading (`TieringOffloadingSpec`): router-usable events are available on the vLLM main branch. Use vLLM v0.26.0 or later once released.
-- Shared pools: the vLLM main branch publishes optional `LOCAL` / `REMOTE` locality metadata on FS and OBJ events. Dynamo shared-pool indexing is in progress.
-
-See [Native KV Offloading](../../backends/vllm/vllm-native-kv-offloading.md) for the full support matrix (including disaggregated and tensor-parallel status), setup commands, verification, and troubleshooting.
-
 ## Other Offloading Backends
 
 These backends offload KV cache outside the frameworks' native paths. KVBM and FlexKV ship launch scripts that run under `--router-mode kv`; LMCache's shipped examples pair it with the router only in the disaggregated script. In every case, the column to check is what the router sees.
@@ -87,7 +87,7 @@ The router-side knobs are backend-independent; set them on the frontend when wor
 | Flag | Default | Applies to |
 | --- | --- | --- |
 | `--router-host-cache-hit-weight` | `0.75` | CPU-tier prefix overlap (SGLang HiCache, vLLM `OffloadingConnector`) |
-| `--router-disk-cache-hit-weight` | `0.25` | Disk-tier prefix overlap (vLLM main; use v0.26.0+ once released) |
+| `--router-disk-cache-hit-weight` | `0.25` | Disk-tier prefix overlap when the backend publishes a Dynamo-recognized disk tier |
 | `--shared-cache-type` / `--shared-cache-multiplier` | `none` / `0.5` | **Experimental.** Shared-pool lookups (SGLang HiCache + Mooncake only) |
 
 See [Configuration and Tuning](router-configuration.md) for the cache-hit weight semantics, [Using HiCache](../../backends/sglang/sglang-hicache.md#configuration) for the shared-cache flags, and [Router Operations](router-operations.md) for enabling event publishing per backend.
