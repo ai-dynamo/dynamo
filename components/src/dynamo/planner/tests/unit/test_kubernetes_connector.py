@@ -378,6 +378,55 @@ def test_get_service_name_from_v1beta_worker_type_by_name(kubernetes_connector):
     assert service.number_replicas() == 2
 
 
+def test_get_service_name_from_unique_v1beta_worker_type_for_decode(
+    kubernetes_connector,
+):
+    deployment = _deployment(_component("arbitrary-name", "worker", replicas=2))
+
+    service = get_component_from_type_or_name(deployment, SubComponentType.DECODE)
+
+    assert service.name == "arbitrary-name"
+    assert service.number_replicas() == 2
+
+
+def test_get_service_name_from_multiple_v1beta_workers_by_name(
+    kubernetes_connector,
+):
+    deployment = _deployment(
+        _component("prefill-name", "worker"),
+        _component("decode-name", "worker"),
+    )
+
+    with pytest.raises(SubComponentNotFoundError):
+        get_component_from_type_or_name(deployment, SubComponentType.DECODE)
+
+    service = get_component_from_type_or_name(
+        deployment, SubComponentType.DECODE, "decode-name"
+    )
+    assert service.name == "decode-name"
+
+
+@pytest.mark.asyncio
+async def test_validate_deployment_agg_worker_by_type(
+    kubernetes_connector, mock_kube_api
+):
+    mock_kube_api.get_graph_deployment.return_value = _deployment(
+        _component("Frontend", "frontend", replicas=1),
+        _component(
+            "arbitrary-name",
+            "worker",
+            replicas=2,
+            args=["--model", "Qwen/Qwen3-8B"],
+        ),
+    )
+
+    await kubernetes_connector.validate_deployment(
+        decode_component_name="stale-default-name",
+        require_prefill=False,
+        require_decode=True,
+    )
+
+
 def test_get_service_name_from_sub_component_type_not_found(kubernetes_connector):
     deployment = _deployment(_component("test-component-decode", "decode", replicas=3))
     with pytest.raises(SubComponentNotFoundError) as exc_info:

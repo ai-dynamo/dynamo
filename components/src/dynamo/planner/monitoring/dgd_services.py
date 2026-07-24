@@ -210,6 +210,15 @@ def get_component_from_type_or_name(
         component_names = [name for name, _ in matching_components]
         raise DuplicateSubComponentError(component_type.value, component_names)
 
+    if not matching_components and component_type == SubComponentType.DECODE:
+        generic_workers = [
+            (name, component)
+            for name, component in components.items()
+            if get_component_type(component) == V1BETA1_GENERIC_WORKER_COMPONENT_TYPE
+        ]
+        if len(generic_workers) == 1:
+            matching_components = generic_workers
+
     if not matching_components and component_name in components:
         component = components[component_name]
         if not _can_use_explicit_component_name(component, component_type):
