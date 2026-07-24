@@ -837,6 +837,14 @@ async fn completions_single(
 
         Ok(sse_stream.into_response())
     } else {
+        let stream = check_for_backend_error(stream)
+            .await
+            .map_err(|error_response| {
+                tracing::error!(request_id, "Backend error detected: {:?}", error_response);
+                inflight_guard.mark_error(extract_error_type_from_response(&error_response));
+                error_response
+            })?;
+
         // Tap the stream to collect metrics for non-streaming requests without altering items
         let mut http_queue_guard = Some(http_queue_guard);
         let stream = stream.inspect(move |response| {
@@ -1036,6 +1044,15 @@ async fn completions_batch(
 
         Ok(sse_stream.into_response())
     } else {
+        let merged_stream =
+            check_for_backend_error(merged_stream)
+                .await
+                .map_err(|error_response| {
+                    tracing::error!(request_id, "Backend error detected: {:?}", error_response);
+                    inflight_guard.mark_error(extract_error_type_from_response(&error_response));
+                    error_response
+                })?;
+
         // Tap the stream to collect metrics for non-streaming requests without altering items
         let mut http_queue_guard = Some(http_queue_guard);
         let stream = merged_stream.inspect(move |response| {
@@ -1602,18 +1619,15 @@ const MAX_LEADING_ANNOTATIONS: usize = 16;
 /// Returns Err(ErrorResponse) if error detected, Ok(stream) otherwise — the
 /// returned stream replays any buffered annotation frames in their original
 /// order before yielding the remaining items.
-pub(super) async fn check_for_backend_error(
-    mut stream: impl futures::Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>>
-    + Send
-    + Unpin
-    + 'static,
-) -> Result<
-    impl futures::Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send,
-    ErrorResponse,
-> {
+pub(super) async fn check_for_backend_error<T>(
+    mut stream: impl futures::Stream<Item = Annotated<T>> + Send + Unpin + 'static,
+) -> Result<impl futures::Stream<Item = Annotated<T>> + Send, ErrorResponse>
+where
+    T: Serialize + Send + 'static,
+{
     use futures::stream::StreamExt;
 
-    let mut buffered: Vec<Annotated<NvCreateChatCompletionStreamResponse>> = Vec::new();
+    let mut buffered: Vec<Annotated<T>> = Vec::new();
     while let Some(event) = stream.next().await {
         if is_annotation_frame(&event) && buffered.len() < MAX_LEADING_ANNOTATIONS {
             buffered.push(event);
@@ -4725,6 +4739,33 @@ mod tests {
             assert_eq!(error_response.1.error_type, "Bad Request");
             assert_eq!(error_response.1.message, "unsupported JSON schema keyword");
         }
+    }
+
+    #[tokio::test]
+    async fn completion_stream_preserves_backend_invalid_argument_as_400() {
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
+        use futures::stream;
+
+        let error_event = Annotated::<NvCreateCompletionResponse> {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: None,
+            error: Some(
+                DynamoError::builder()
+                    .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+                    .message("unsupported completion option")
+                    .build(),
+            ),
+        };
+
+        let error_response = match check_for_backend_error(stream::iter(vec![error_event])).await {
+            Err(error_response) => error_response,
+            Ok(_) => panic!("typed completion error must fail"),
+        };
+
+        assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(error_response.1.message, "unsupported completion option");
     }
 
     #[tokio::test]

@@ -27,7 +27,7 @@ spec:
     podTemplate:
       spec:
         containers:
-        - args: [--openengine-endpoint, http://127.0.0.1:50051, --expected-engine, vllm, --expected-schema-release, b0cf2a4826d246192dc65b055dab6d2b38d2d67e]
+        - args: [--openengine-endpoint, http://127.0.0.1:50051, --expected-engine, vllm, --expected-schema-release, a66ff6f73a65e262a7c3edd5ea6fd0d8701d402f]
           command: [dynamo-openengine-sidecar]
           env:
           - name: DYN_NAMESPACE
@@ -73,7 +73,7 @@ spec:
             valueFrom:
               fieldRef: {fieldPath: status.podIP}
           - {name: VLLM_NIXL_SIDE_CHANNEL_PORT, value: "5600"}
-          - {name: OPENENGINE_SCHEMA_RELEASE, value: b0cf2a4826d246192dc65b055dab6d2b38d2d67e}
+          - {name: OPENENGINE_SCHEMA_RELEASE, value: a66ff6f73a65e262a7c3edd5ea6fd0d8701d402f}
           image: my-registry/vllm-openengine:my-tag
           name: engine
           resources:
@@ -92,7 +92,7 @@ spec:
     podTemplate:
       spec:
         containers:
-        - args: [--openengine-endpoint, http://127.0.0.1:50051, --expected-engine, vllm, --expected-schema-release, b0cf2a4826d246192dc65b055dab6d2b38d2d67e]
+        - args: [--openengine-endpoint, http://127.0.0.1:50051, --expected-engine, vllm, --expected-schema-release, a66ff6f73a65e262a7c3edd5ea6fd0d8701d402f]
           command: [dynamo-openengine-sidecar]
           env:
           - name: DYN_NAMESPACE
@@ -138,7 +138,7 @@ spec:
             valueFrom:
               fieldRef: {fieldPath: status.podIP}
           - {name: VLLM_NIXL_SIDE_CHANNEL_PORT, value: "5600"}
-          - {name: OPENENGINE_SCHEMA_RELEASE, value: b0cf2a4826d246192dc65b055dab6d2b38d2d67e}
+          - {name: OPENENGINE_SCHEMA_RELEASE, value: a66ff6f73a65e262a7c3edd5ea6fd0d8701d402f}
           image: my-registry/vllm-openengine:my-tag
           name: engine
           resources:

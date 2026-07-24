@@ -821,20 +821,6 @@ impl pb::control_server::Control for FakeOpenEngine {
         }))
     }
 
-    async fn get_kv_connector_info(
-        &self,
-        _: tonic::Request<pb::GetKvConnectorInfoRequest>,
-    ) -> Result<tonic::Response<pb::KvConnectorInfo>, tonic::Status> {
-        Ok(tonic::Response::new(
-            self.0
-                .engine
-                .lock()
-                .kv_connector
-                .clone()
-                .unwrap_or_default(),
-        ))
-    }
-
     async fn get_kv_event_sources(
         &self,
         _: tonic::Request<pb::GetKvEventSourcesRequest>,

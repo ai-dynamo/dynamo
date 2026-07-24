@@ -114,7 +114,6 @@ pub(crate) async fn discover_sources(
                 let cancel = cancel.clone();
                 let tasks = tasks.clone();
                 let fatal = fatal.clone();
-                let routing_image_token_id = routing_image_token_id;
                 result.push(KvEventSource::Push {
                     dp_rank: rank,
                     on_ready: Box::new(move |publisher| {

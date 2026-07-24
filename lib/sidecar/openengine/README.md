@@ -1,7 +1,7 @@
 # Dynamo OpenEngine sidecar
 
 This crate consumes generated `openengine-proto` 0.3.0 bindings from immutable
-OpenEngine commit `b0cf2a4826d246192dc65b055dab6d2b38d2d67e`.
+OpenEngine commit `a66ff6f73a65e262a7c3edd5ea6fd0d8701d402f`.
 
 The `dynamo-openengine-sidecar` binary is intentionally engine-neutral. The
 same artifact discovers and serves TRT-LLM, vLLM, and SGLang endpoints without
