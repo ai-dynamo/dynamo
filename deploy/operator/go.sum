@@ -16,8 +16,8 @@ github.com/Masterminds/sprig/v3 v3.3.0 h1:mQh0Yrg1XPo6vjYXgtf5OtijNAKJRNcTdOOGZe
 github.com/Masterminds/sprig/v3 v3.3.0/go.mod h1:Zy1iXRYNqNLUolqCpL4uhk6SHUMAOSCzdgBfDb35Lz0=
 github.com/NYTimes/gziphandler v1.1.1 h1:ZUDjpQae29j0ryrS0u/B8HZfJBtBQHjqw2rQ2cqUQ3I=
 github.com/NYTimes/gziphandler v1.1.1/go.mod h1:n/CVRwUEOgIxrgPvAQhUUr9oeUtvrhMomdKFjzJNB0c=
-github.com/ai-dynamo/grove/operator/api v0.1.0-alpha.11 h1:o5R9G4XeJze3LY3GhVjxeylFmWI4oefeOcAhh0pOJfM=
-github.com/ai-dynamo/grove/operator/api v0.1.0-alpha.11/go.mod h1:KZllCPYxPdxzbu1p48P8BDfPfJzfylJaIh90TeCdMb8=
+github.com/ai-dynamo/grove/operator/api v0.1.0-alpha.12-rc1 h1:rhi1HzLU68RO573k0bQHkTc+o293Ij2sVYmNPoc1d2s=
+github.com/ai-dynamo/grove/operator/api v0.1.0-alpha.12-rc1/go.mod h1:aebLeDCrknulT10/uDj2G1i9K2MEIfVAa25bzrvWxsQ=
 github.com/antlr4-go/antlr/v4 v4.13.0 h1:lxCg3LAv+EUK6t1i0y1V6/SLeUi0eKEKdhQAlS8TVTI=
 github.com/antlr4-go/antlr/v4 v4.13.0/go.mod h1:pfChB/xh/Unjila75QW7+VU4TSnWnnk9UTnmpPaOR2g=
 github.com/beorn7/perks v1.0.1 h1:VlbKKnNfV8bJzeqoa4cOKqO6bYr3WgKZxO8Z16+hsOM=
