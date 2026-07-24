@@ -34,6 +34,11 @@
 # Note: The publish step is included inline because pushes made with GITHUB_TOKEN
 # do not trigger other workflows (GitHub's anti-recursion guard), so we cannot
 # rely on a separate publish-fern-docs.yml workflow for bot-initiated pushes.
+#
+# Validation: the sync/release composition (rsync scopes, nav path transforms,
+# the shared-Reference machinery) only executes on main pushes and tag cuts.
+# Before changing it, replay both jobs locally against the docs-website branch:
+#   docs/fern/scripts/simulate_docs_website.sh
 
 name: Fern Docs
 
