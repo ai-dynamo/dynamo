@@ -39,6 +39,9 @@ Launch the service from the repository root:
 The service binds to `0.0.0.0` and does not provide authentication. Run it on a
 trusted internal network or place it behind an appropriate network policy.
 
+`routing_group` is caller-controlled state partitioning, not caller authentication. Set it only from trusted identity
+metadata, and isolate mutually untrusted tenants into separate service instances. `tenant_id` is not supported.
+
 ## Embedded Rust API
 
 Use `SelectionServiceBuilder` to embed selection without the HTTP server. The

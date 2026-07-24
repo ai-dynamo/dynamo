@@ -25,6 +25,46 @@ The Rust HTTP server also reads these environment variables (not exposed as CLI 
 | `DYN_HTTP_BODY_LIMIT_MB` | `192` | Maximum request body size in MB |
 | `DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` | `5` | Graceful shutdown timeout in seconds |
 
+### TLS and Client Authentication
+
+The frontend supports server-side TLS but does not authenticate or authorize clients. For a public endpoint, put
+the frontend behind an authenticating gateway or service mesh. See
+[Security and Authentication](../../kubernetes/security.md) for the deployment trust model.
+
+To terminate TLS in the frontend, provide a Privacy-Enhanced Mail (PEM) certificate and private key:
+
+```bash
+python3 -m dynamo.frontend \
+  --tls-cert-path /etc/dynamo/tls/tls.crt \
+  --tls-key-path /etc/dynamo/tls/tls.key
+```
+
+On Kubernetes, mount a TLS Secret into the frontend component and set the corresponding environment variables in
+its `podTemplate`:
+
+```yaml
+podTemplate:
+  spec:
+    containers:
+      - name: main
+        env:
+          - name: DYN_TLS_CERT_PATH
+            value: /etc/dynamo/tls/tls.crt
+          - name: DYN_TLS_KEY_PATH
+            value: /etc/dynamo/tls/tls.key
+        volumeMounts:
+          - name: frontend-tls
+            mountPath: /etc/dynamo/tls
+            readOnly: true
+    volumes:
+      - name: frontend-tls
+        secret:
+          secretName: frontend-tls
+```
+
+Both files must be present when the frontend starts. The TLS listener does not provide mutual TLS or end-user
+authentication.
+
 ## Router
 
 This is the canonical CLI and environment-variable reference for the frontend's
@@ -179,9 +219,14 @@ The frontend exposes the following HTTP endpoints:
 | `POST` | `/v1/embeddings` | Text embeddings |
 | `POST` | `/v1/responses` | Responses API |
 | `POST` | `/v1/images/generations` | Image generation |
-| `POST` | `/v1/videos/generations` | Video generation |
-| `POST` | `/v1/videos/generations/stream` | Video generation (streaming) |
+| `POST` | `/v1/images/edits` | Image editing |
+| `POST` | `/v1/videos` | Video generation |
+| `POST` | `/v1/videos/stream` | Video generation (streaming) |
+| `POST` | `/v1/audio/speech` | Speech generation |
+| `GET` | `/v1/realtime` | Bidirectional streaming over WebSocket |
 | `GET` | `/v1/models` | List available models |
+| `GET` | `/v1/models/{model}` | Retrieve metadata for one ready model |
+| `GET` | `/v1/models/{model}/ready` | Inspect per-Dynamo-namespace worker readiness for one registered model |
 
 ### Anthropic (Experimental)
 
@@ -189,6 +234,12 @@ The frontend exposes the following HTTP endpoints:
 |--------|------|-------------|
 | `POST` | `/v1/messages` | Anthropic Messages API (requires `--enable-anthropic-api`) |
 | `POST` | `/v1/messages/count_tokens` | Token counting for Anthropic API |
+
+### Engine-Native (Experimental)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/inference/v1/generate` | vLLM-compatible token-in/token-out generation; disabled by default. Set `DYN_VLLM_ENABLE_INFERENCE_V1_GENERATE=1` to register the route |
 
 ### Infrastructure
 

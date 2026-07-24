@@ -52,6 +52,9 @@ restored accounting.
 The service binds to `0.0.0.0` and does not provide authentication. Run it on a trusted
 internal network or place it behind an appropriate network policy.
 
+`routing_group` is caller-controlled state partitioning, not caller authentication. Set it only from trusted identity
+metadata, and isolate mutually untrusted tenants into separate service instances. `tenant_id` is not supported.
+
 ## Replica Synchronization
 
 `--replica-sync-port` enables a ZMQ PUB endpoint and replica-event consumption. The
