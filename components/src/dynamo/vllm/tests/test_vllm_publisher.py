@@ -62,6 +62,11 @@ def test_factory_returns_noop_logger_for_embedding_worker(monkeypatch):
     logger = factory.create_stat_logger(dp_rank=0)
 
     assert isinstance(logger, NoopStatLogger)
+    # Embedding factory never tracks a created chat logger, so the
+    # downstream ``init_publish`` / ``set_num_gpu_blocks_all`` calls in
+    # the chat path are safe no-ops if anyone ever wires them on the
+    # embedding branch by mistake.
+    assert factory.created_loggers == {}
 
 
 def test_noop_stat_logger_record_is_safe_with_none_stats():
@@ -125,30 +130,41 @@ def test_factory_default_is_chat_path(monkeypatch):
     assert constructed[0]["component_gauges"] is component_gauges
 
 
-def test_factory_initializes_every_dp_rank_logger(monkeypatch):
-    loggers = []
+def test_seed_broadcasts_to_all_dp_ranks(monkeypatch):
+    """Regression for #12052: the pre-first-record seed must reach every
+    per-rank publisher, not just the last one created.
 
-    def _fake_publisher(*args, **kwargs):
-        logger = Mock(spec=DynamoStatLoggerPublisher)
-        loggers.append(logger)
-        return logger
+    vLLM calls the factory once per data-parallel rank, and each returned
+    ``DynamoStatLoggerPublisher`` is a distinct object vLLM retains. If the
+    factory only remembers the last one, ``set_num_gpu_blocks_all`` /
+    ``init_publish`` seed the ``total_blocks`` and ``gpu_cache_usage_percent``
+    gauges for a single rank, so non-last ranks lack their zero-valued labels
+    until the first scheduler record arrives.
+    """
+    created = []
+
+    def _fake_publisher(*_args, **kwargs):
+        m = Mock(spec=DynamoStatLoggerPublisher)
+        m.dp_rank = kwargs.get("dp_rank")
+        created.append(m)
+        return m
 
     monkeypatch.setattr(publisher_mod, "DynamoStatLoggerPublisher", _fake_publisher)
 
     factory = StatLoggerFactory(
         endpoint=SimpleNamespace(), component_gauges=SimpleNamespace()
     )
-    dp_ranks = (2, 4, 7)
+    dp_ranks = (0, 1)
     for dp_rank in dp_ranks:
         factory.create_stat_logger(dp_rank=dp_rank)
 
-    factory.set_num_gpu_blocks_all(4096)
+    factory.set_num_gpu_blocks_all(123)
     factory.init_publish()
 
-    assert factory.created_loggers == dict(zip(dp_ranks, loggers, strict=True))
-    for logger in loggers:
-        logger.set_num_gpu_block.assert_called_once_with(4096)
-        logger.init_publish.assert_called_once_with()
+    assert factory.created_loggers == dict(zip(dp_ranks, created, strict=True))
+    for publisher in created:
+        publisher.set_num_gpu_block.assert_called_once_with(123)
+        publisher.init_publish.assert_called_once_with()
 
 
 def test_factory_initialization_without_loggers_is_a_noop():
