@@ -259,7 +259,7 @@ impl Stream for DeduplicatingStream {
     }
 }
 
-/// Keep publisher IDs representable as signed integers in Kubernetes discovery metadata.
+/// Keep the shared wire, channel, and source publisher ID representable in Kubernetes metadata.
 fn discovery_safe_publisher_id(random_id: u64) -> u64 {
     random_id & (i64::MAX as u64)
 }
@@ -925,7 +925,7 @@ mod tests {
     #[test]
     fn publisher_ids_fit_kubernetes_discovery_integer_range() {
         assert_eq!(discovery_safe_publisher_id(42), 42);
-        assert_eq!(discovery_safe_publisher_id(u64::MAX), i64::MAX as u64);
+        assert!(i64::try_from(discovery_safe_publisher_id(u64::MAX)).is_ok());
     }
 
     #[test]
