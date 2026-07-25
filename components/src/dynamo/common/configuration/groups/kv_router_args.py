@@ -226,10 +226,9 @@ class KvRouterArgGroup(ArgGroup):
             default=0.0,
             help=(
                 "[EXPERIMENTAL] KV Router: Block-equivalent decode cost added for "
-                "each potential active request on a candidate worker, including "
-                "the incoming request. Use this to balance decode batch size when "
-                "step latency depends more on request count than resident KV "
-                "footprint. Must be finite and non-negative."
+                "each active request on a candidate worker. Use this to balance "
+                "decode batch size when step latency depends more on request count "
+                "than resident KV footprint. Must be finite and non-negative."
             ),
             arg_type=float,
             dest="decode_active_request_weight",
