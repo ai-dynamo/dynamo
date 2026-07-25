@@ -305,7 +305,7 @@ def test_render_mdx_preserves_dedup_anchors_for_deep_links(
     for type_name in V1BETA1_DEDUP_TYPES:
         anchor = f"v1beta1-{type_name.lower()}"
         assert (
-            f'<a id="{anchor}"></a>' in text
+            f'<Accordion id="{anchor}"' in text
         ), f"MDX missing deduped anchor '{anchor}' for v1beta1 {type_name}"
 
 
@@ -440,13 +440,14 @@ def test_render_mdx_renders_every_type_in_an_accordion(
     assert native_mdx.count("<Accordion ") == total_types
 
 
-def test_render_mdx_anchors_precede_each_accordion(
+def test_render_mdx_gives_each_accordion_an_explicit_id(
     reference: kubernetes_api_discovery.KubernetesReference, native_mdx: str
 ) -> None:
-    """Cross-package field links target ``#anchor``; the anchor must sit
-    outside the collapsed region so deep links still scroll to it."""
+    """Cross-package field links target ``#anchor``, and Accordion takes that
+    id natively -- no empty ``<a id>``, which renders as a link with no text."""
+    assert "<a id=" not in native_mdx
     for type_ in _iter_types(reference):
-        assert f'<a id="{type_.anchor}"></a>\n<Accordion ' in native_mdx
+        assert f'<Accordion id="{type_.anchor}"' in native_mdx
 
 
 def test_render_mdx_renders_schema_fields_as_param_fields(

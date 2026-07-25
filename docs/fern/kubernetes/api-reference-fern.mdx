@@ -18,7 +18,7 @@ Dynamo publishes 3 Kubernetes API packages with 165 typed CRD and config section
 <Card title="operator.config.dynamo.nvidia.com/v1alpha1" href="#operator-config-dynamo-nvidia-com-v1alpha1">31 types</Card>
 </CardGroup>
 
-<a id="nvidia-com-v1alpha1"></a>
+<div id="nvidia-com-v1alpha1" />
 
 ## nvidia.com/v1alpha1
 
@@ -40,8 +40,7 @@ Package v1alpha1 contains API Schema definitions for the nvidia.com v1alpha1 API
 <Card title="DynamoModel" href="#dynamomodel" />
 </CardGroup>
 
-<a id="autoscaling"></a>
-<Accordion title="Autoscaling">
+<Accordion id="autoscaling" title="Autoscaling">
 Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter
 with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md
 for migration guidance. This field will be removed in a future API version.
@@ -62,17 +61,18 @@ Deprecated: This field is ignored.
 Deprecated: This field is ignored.
 </ParamField>
 
-<ParamField path="behavior" type="[HorizontalPodAutoscalerBehavior](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#horizontalpodautoscalerbehavior-v2-autoscaling)">
+<ParamField path="behavior" type="HorizontalPodAutoscalerBehavior">
 Deprecated: This field is ignored.
+See [HorizontalPodAutoscalerBehavior](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#horizontalpodautoscalerbehavior-v2-autoscaling).
 </ParamField>
 
-<ParamField path="metrics" type="[MetricSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#metricspec-v2-autoscaling) array">
+<ParamField path="metrics" type="MetricSpec array">
 Deprecated: This field is ignored.
+See [MetricSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#metricspec-v2-autoscaling).
 </ParamField>
 </Accordion>
 
-<a id="checkpointdeletionpolicy"></a>
-<Accordion title="CheckpointDeletionPolicy">
+<Accordion id="checkpointdeletionpolicy" title="CheckpointDeletionPolicy">
 CheckpointDeletionPolicy defines what happens to DGD-managed automatic
 checkpoint resources when the owning DGD is deleted.
 
@@ -88,8 +88,7 @@ checkpoint resources when the owning DGD is deleted.
 - <Badge intent="note" minimal>Retain</Badge> CheckpointDeletionPolicyRetain keeps DGD-managed automatic checkpoint CRs&lt;br /&gt;and artifacts after the owning DGD is deleted. Users can reference the&lt;br /&gt;retained checkpoint with checkpointRef if they accept compatibility risk.&lt;br /&gt;
 </Accordion>
 
-<a id="checkpointmode"></a>
-<Accordion title="CheckpointMode">
+<Accordion id="checkpointmode" title="CheckpointMode">
 Deprecated: use checkpoint.enabled instead.
 enabled=true without checkpointRef creates a DGD-managed automatic
 checkpoint; checkpointRef restores the named checkpoint.
@@ -106,8 +105,7 @@ checkpoint; checkpointRef restores the named checkpoint.
 - <Badge intent="note" minimal>Manual</Badge> Deprecated: use checkpointRef to restore an existing checkpoint.&lt;br /&gt;
 </Accordion>
 
-<a id="checkpointstartuppolicy"></a>
-<Accordion title="CheckpointStartupPolicy">
+<Accordion id="checkpointstartuppolicy" title="CheckpointStartupPolicy">
 CheckpointStartupPolicy defines when worker pods should wait for a checkpoint.
 
 
@@ -122,8 +120,7 @@ CheckpointStartupPolicy defines when worker pods should wait for a checkpoint.
 - <Badge intent="note" minimal>WaitForCheckpoint</Badge> CheckpointStartupPolicyWaitForCheckpoint gates worker replicas until the&lt;br /&gt;component's checkpoint is Ready, then starts them from the checkpoint.&lt;br /&gt;
 </Accordion>
 
-<a id="componentkind"></a>
-<Accordion title="ComponentKind">
+<Accordion id="componentkind" title="ComponentKind">
 ComponentKind represents the type of underlying Kubernetes resource.
 
 
@@ -140,8 +137,7 @@ ComponentKind represents the type of underlying Kubernetes resource.
 - <Badge intent="note" minimal>LeaderWorkerSet</Badge> ComponentKindLeaderWorkerSet represents a LeaderWorkerSet resource.&lt;br /&gt;
 </Accordion>
 
-<a id="configmapkeyselector"></a>
-<Accordion title="ConfigMapKeySelector">
+<Accordion id="configmapkeyselector" title="ConfigMapKeySelector">
 ConfigMapKeySelector selects a specific key from a ConfigMap.
 Used to reference external configuration data stored in ConfigMaps.
 
@@ -159,8 +155,7 @@ Key in the ConfigMap to select. If not specified, defaults to "disagg.yaml".
 </ParamField>
 </Accordion>
 
-<a id="dgdrstate"></a>
-<Accordion title="DGDRState">
+<Accordion id="dgdrstate" title="DGDRState">
 
 **Kind:** `enum`
 **Underlying type:** `string`
@@ -178,8 +173,7 @@ Key in the ConfigMap to select. If not specified, defaults to "disagg.yaml".
 - <Badge intent="note" minimal>Failed</Badge>
 </Accordion>
 
-<a id="dgdstate"></a>
-<Accordion title="DGDState">
+<Accordion id="dgdstate" title="DGDState">
 
 **Kind:** `enum`
 **Underlying type:** `string`
@@ -194,8 +188,7 @@ Key in the ConfigMap to select. If not specified, defaults to "disagg.yaml".
 - <Badge intent="note" minimal>failed</Badge>
 </Accordion>
 
-<a id="deploymentoverridesspec"></a>
-<Accordion title="DeploymentOverridesSpec">
+<Accordion id="deploymentoverridesspec" title="DeploymentOverridesSpec">
 DeploymentOverridesSpec allows users to customize metadata for auto-created DynamoGraphDeployments.
 When autoApply is enabled, these overrides are applied to the generated DGD resource.
 
@@ -229,8 +222,7 @@ WorkersImage specifies the container image to use for DynamoGraphDeployment work
 </ParamField>
 </Accordion>
 
-<a id="deploymentstatus"></a>
-<Accordion title="DeploymentStatus">
+<Accordion id="deploymentstatus" title="DeploymentStatus">
 DeploymentStatus tracks the state of an auto-created DynamoGraphDeployment.
 This status is populated when autoApply is enabled and a DGD is created.
 
@@ -257,8 +249,7 @@ Created indicates whether the DGD has been successfully created.&lt;br /&gt;Used
 </ParamField>
 </Accordion>
 
-<a id="dynamocheckpoint"></a>
-<Accordion title="DynamoCheckpoint">
+<Accordion id="dynamocheckpoint" title="DynamoCheckpoint">
 DynamoCheckpoint is the Schema for the dynamocheckpoints API
 It represents a container checkpoint that can be used to restore pods to a warm state
 
@@ -273,8 +264,9 @@ It represents a container checkpoint that can be used to restore pods to a warm 
 `DynamoCheckpoint`
 </ParamField>
 
-<ParamField path="metadata" type="[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)">
+<ParamField path="metadata" type="ObjectMeta">
 Refer to Kubernetes API documentation for fields of `metadata`.
+See [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta).
 </ParamField>
 
 <ParamField path="spec" type="DynamoCheckpointSpec">
@@ -286,8 +278,7 @@ See [DynamoCheckpointStatus](#dynamocheckpointstatus).
 </ParamField>
 </Accordion>
 
-<a id="dynamocheckpointidentity"></a>
-<Accordion title="DynamoCheckpointIdentity">
+<Accordion id="dynamocheckpointidentity" title="DynamoCheckpointIdentity">
 Deprecated: legacy identity metadata. Keep it only where v1alpha1 still
 requires spec.identity; omit DGD-managed identity and use checkpointRef for
 explicit restores.
@@ -337,16 +328,16 @@ ExtraParameters are additional parameters that affect the checkpoint hash.&lt;br
 </ParamField>
 </Accordion>
 
-<a id="dynamocheckpointjobconfig"></a>
-<Accordion title="DynamoCheckpointJobConfig">
+<Accordion id="dynamocheckpointjobconfig" title="DynamoCheckpointJobConfig">
 DynamoCheckpointJobConfig defines the configuration for the checkpoint creation Job
 
 
 **Kind:** `type`
 **Appears in:** [DynamoCheckpointSpec](#dynamocheckpointspec)
 
-<ParamField path="podTemplateSpec" type="[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)" required={true}>
+<ParamField path="podTemplateSpec" type="PodTemplateSpec" required={true}>
 PodTemplateSpec allows customizing the checkpoint Job pod&lt;br /&gt;This should include the container that runs the workload to be checkpointed&lt;br /&gt;and any workload/runtime env, service account, GMS, or DRA wiring needed&lt;br /&gt;by that container. Auto-created checkpoints from DynamoGraphDeployment&lt;br /&gt;render Dynamo defaults before creating the DynamoCheckpoint.
+See [PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core).
 **Validation:** Required: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 
@@ -377,8 +368,7 @@ Deprecated: TTLSecondsAfterFinished is ignored. Checkpoint Jobs use a fixed&lt;b
 </ParamField>
 </Accordion>
 
-<a id="dynamocheckpointphase"></a>
-<Accordion title="DynamoCheckpointPhase">
+<Accordion id="dynamocheckpointphase" title="DynamoCheckpointPhase">
 DynamoCheckpointPhase represents the current phase of the checkpoint lifecycle
 
 
@@ -395,8 +385,7 @@ DynamoCheckpointPhase represents the current phase of the checkpoint lifecycle
 - <Badge intent="note" minimal>Failed</Badge> DynamoCheckpointPhaseFailed indicates the checkpoint creation failed&lt;br /&gt;
 </Accordion>
 
-<a id="dynamocheckpointspec"></a>
-<Accordion title="DynamoCheckpointSpec">
+<Accordion id="dynamocheckpointspec" title="DynamoCheckpointSpec">
 DynamoCheckpointSpec defines the desired state of DynamoCheckpoint
 
 
@@ -422,8 +411,7 @@ See [DynamoCheckpointJobConfig](#dynamocheckpointjobconfig).
 </ParamField>
 </Accordion>
 
-<a id="dynamocheckpointstatus"></a>
-<Accordion title="DynamoCheckpointStatus">
+<Accordion id="dynamocheckpointstatus" title="DynamoCheckpointStatus">
 DynamoCheckpointStatus defines the observed state of DynamoCheckpoint
 
 
@@ -462,8 +450,9 @@ JobName is the name of the checkpoint creation Job
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 
-<ParamField path="createdAt" type="[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)">
+<ParamField path="createdAt" type="Time">
 CreatedAt is the timestamp when the checkpoint became ready
+See [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta).
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 
@@ -472,14 +461,14 @@ Message provides additional information about the current state
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 
-<ParamField path="conditions" type="[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array">
+<ParamField path="conditions" type="Condition array">
 DEPRECATED: Conditions are deprecated. Use status.phase instead.
+See [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta).
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 </Accordion>
 
-<a id="dynamocheckpointstoragetype"></a>
-<Accordion title="DynamoCheckpointStorageType">
+<Accordion id="dynamocheckpointstoragetype" title="DynamoCheckpointStorageType">
 Deprecated: StorageType is retained for compatibility with older
 DynamoCheckpoint status consumers. The current checkpoint flow publishes
 PVC-backed artifacts discovered from the snapshot-agent DaemonSet.
@@ -491,8 +480,7 @@ PVC-backed artifacts discovered from the snapshot-agent DaemonSet.
 **Appears in:** [DynamoCheckpointStatus](#dynamocheckpointstatus)
 </Accordion>
 
-<a id="dynamocomponentdeployment"></a>
-<Accordion title="DynamoComponentDeployment">
+<Accordion id="dynamocomponentdeployment" title="DynamoComponentDeployment">
 DynamoComponentDeployment is the Schema for the dynamocomponentdeployments API
 
 
@@ -506,8 +494,9 @@ DynamoComponentDeployment is the Schema for the dynamocomponentdeployments API
 `DynamoComponentDeployment`
 </ParamField>
 
-<ParamField path="metadata" type="[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)">
+<ParamField path="metadata" type="ObjectMeta">
 Refer to Kubernetes API documentation for fields of `metadata`.
+See [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta).
 </ParamField>
 
 <ParamField path="spec" type="DynamoComponentDeploymentSpec">
@@ -516,8 +505,7 @@ See [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec).
 </ParamField>
 </Accordion>
 
-<a id="dynamocomponentdeploymentsharedspec"></a>
-<Accordion title="DynamoComponentDeploymentSharedSpec">
+<Accordion id="dynamocomponentdeploymentsharedspec" title="DynamoComponentDeploymentSharedSpec">
 
 **Kind:** `type`
 **Appears in:** [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec), [DynamoGraphDeploymentSpec](#dynamographdeploymentspec)
@@ -556,8 +544,9 @@ Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScali
 See [Autoscaling](#autoscaling).
 </ParamField>
 
-<ParamField path="envs" type="[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array">
+<ParamField path="envs" type="EnvVar array">
 Envs defines additional environment variables to inject into the component containers.
+See [EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core).
 </ParamField>
 
 <ParamField path="envFromSecret" type="string">
@@ -597,12 +586,14 @@ See [ExtraPodSpec](#extrapodspec).
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 
-<ParamField path="livenessProbe" type="[Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core)">
+<ParamField path="livenessProbe" type="Probe">
 LivenessProbe to detect and restart unhealthy containers.
+See [Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core).
 </ParamField>
 
-<ParamField path="readinessProbe" type="[Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core)">
+<ParamField path="readinessProbe" type="Probe">
 ReadinessProbe to signal when the container is ready to receive traffic.
+See [Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core).
 </ParamField>
 
 <ParamField path="replicas" type="integer">
@@ -658,8 +649,7 @@ See [FailoverSpec](#failoverspec).
 </ParamField>
 </Accordion>
 
-<a id="dynamocomponentdeploymentspec"></a>
-<Accordion title="DynamoComponentDeploymentSpec">
+<Accordion id="dynamocomponentdeploymentspec" title="DynamoComponentDeploymentSpec">
 DynamoComponentDeploymentSpec defines the desired state of DynamoComponentDeployment
 
 
@@ -705,8 +695,9 @@ Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScali
 See [Autoscaling](#autoscaling).
 </ParamField>
 
-<ParamField path="envs" type="[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array">
+<ParamField path="envs" type="EnvVar array">
 Envs defines additional environment variables to inject into the component containers.
+See [EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core).
 </ParamField>
 
 <ParamField path="envFromSecret" type="string">
@@ -746,12 +737,14 @@ See [ExtraPodSpec](#extrapodspec).
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 
-<ParamField path="livenessProbe" type="[Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core)">
+<ParamField path="livenessProbe" type="Probe">
 LivenessProbe to detect and restart unhealthy containers.
+See [Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core).
 </ParamField>
 
-<ParamField path="readinessProbe" type="[Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core)">
+<ParamField path="readinessProbe" type="Probe">
 ReadinessProbe to signal when the container is ready to receive traffic.
+See [Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core).
 </ParamField>
 
 <ParamField path="replicas" type="integer">
@@ -807,8 +800,7 @@ See [FailoverSpec](#failoverspec).
 </ParamField>
 </Accordion>
 
-<a id="dynamographdeployment"></a>
-<Accordion title="DynamoGraphDeployment">
+<Accordion id="dynamographdeployment" title="DynamoGraphDeployment">
 DynamoGraphDeployment is the Schema for the dynamographdeployments API.
 
 
@@ -822,8 +814,9 @@ DynamoGraphDeployment is the Schema for the dynamographdeployments API.
 `DynamoGraphDeployment`
 </ParamField>
 
-<ParamField path="metadata" type="[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)">
+<ParamField path="metadata" type="ObjectMeta">
 Refer to Kubernetes API documentation for fields of `metadata`.
+See [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta).
 </ParamField>
 
 <ParamField path="spec" type="DynamoGraphDeploymentSpec">
@@ -837,8 +830,7 @@ See [DynamoGraphDeploymentStatus](#dynamographdeploymentstatus).
 </ParamField>
 </Accordion>
 
-<a id="dynamographdeploymentexperimentalspec"></a>
-<Accordion title="DynamoGraphDeploymentExperimentalSpec">
+<Accordion id="dynamographdeploymentexperimentalspec" title="DynamoGraphDeploymentExperimentalSpec">
 DynamoGraphDeploymentExperimentalSpec groups graph-level opt-in preview
 features. Component-level experimental features are represented separately
 on component specs.
@@ -854,8 +846,7 @@ See [KvTransferPolicy](#kvtransferpolicy).
 </ParamField>
 </Accordion>
 
-<a id="dynamographdeploymentrequest"></a>
-<Accordion title="DynamoGraphDeploymentRequest">
+<Accordion id="dynamographdeploymentrequest" title="DynamoGraphDeploymentRequest">
 DynamoGraphDeploymentRequest is the Schema for the dynamographdeploymentrequests API.
 It serves as the primary interface for users to request model deployments with
 specific performance and resource constraints, enabling SLA-driven deployments.
@@ -886,8 +877,9 @@ v1alpha1 will be removed in a future release.
 `DynamoGraphDeploymentRequest`
 </ParamField>
 
-<ParamField path="metadata" type="[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)">
+<ParamField path="metadata" type="ObjectMeta">
 Refer to Kubernetes API documentation for fields of `metadata`.
+See [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta).
 </ParamField>
 
 <ParamField path="spec" type="DynamoGraphDeploymentRequestSpec">
@@ -901,8 +893,7 @@ See [DynamoGraphDeploymentRequestStatus](#dynamographdeploymentrequeststatus).
 </ParamField>
 </Accordion>
 
-<a id="dynamographdeploymentrequestspec"></a>
-<Accordion title="DynamoGraphDeploymentRequestSpec">
+<Accordion id="dynamographdeploymentrequestspec" title="DynamoGraphDeploymentRequestSpec">
 DynamoGraphDeploymentRequestSpec defines the desired state of a DynamoGraphDeploymentRequest.
 This CRD serves as the primary interface for users to request model deployments with
 specific performance constraints and resource requirements, enabling SLA-driven deployments.
@@ -947,8 +938,7 @@ See [DeploymentOverridesSpec](#deploymentoverridesspec).
 </ParamField>
 </Accordion>
 
-<a id="dynamographdeploymentrequeststatus"></a>
-<Accordion title="DynamoGraphDeploymentRequestStatus">
+<Accordion id="dynamographdeploymentrequeststatus" title="DynamoGraphDeploymentRequestStatus">
 DynamoGraphDeploymentRequestStatus represents the observed state of a DynamoGraphDeploymentRequest.
 The controller updates this status as the DGDR progresses through its lifecycle.
 
@@ -971,8 +961,9 @@ Backend is extracted from profilingConfig.config.engine.backend for display purp
 ObservedGeneration reflects the generation of the most recently observed spec.&lt;br /&gt;Used to detect spec changes and enforce immutability after profiling starts.
 </ParamField>
 
-<ParamField path="conditions" type="[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array">
+<ParamField path="conditions" type="Condition array">
 Conditions contains the latest observed conditions of the deployment request.&lt;br /&gt;Standard condition types include: Validation, Profiling, SpecGenerated, DeploymentReady.&lt;br /&gt;Conditions are merged by type on patch updates.
+See [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta).
 </ParamField>
 
 <ParamField path="profilingResults" type="string">
@@ -980,8 +971,9 @@ ProfilingResults contains a reference to the ConfigMap holding profiling data.&l
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 
-<ParamField path="generatedDeployment" type="[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)">
+<ParamField path="generatedDeployment" type="RawExtension">
 GeneratedDeployment contains the full generated DynamoGraphDeployment specification&lt;br /&gt;including metadata, based on profiling results. Users can extract this to create&lt;br /&gt;a DGD manually, or it's used automatically when autoApply is true.&lt;br /&gt;Stored as RawExtension to preserve all fields including metadata.&lt;br /&gt;For mocker backends, this contains the mocker DGD spec.
+See [RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg).
 **Validation:** EmbeddedResource: \&#123;\&#125; &lt;br /&gt;Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 
@@ -992,8 +984,7 @@ See [DeploymentStatus](#deploymentstatus).
 </ParamField>
 </Accordion>
 
-<a id="dynamographdeploymentscalingadapter"></a>
-<Accordion title="DynamoGraphDeploymentScalingAdapter">
+<Accordion id="dynamographdeploymentscalingadapter" title="DynamoGraphDeploymentScalingAdapter">
 DynamoGraphDeploymentScalingAdapter provides a scaling interface for individual services
 within a DynamoGraphDeployment. It implements the Kubernetes scale
 subresource, enabling integration with HPA, KEDA, and custom autoscalers.
@@ -1013,8 +1004,9 @@ This prevents conflicts when multiple autoscaling mechanisms are in play.
 `DynamoGraphDeploymentScalingAdapter`
 </ParamField>
 
-<ParamField path="metadata" type="[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)">
+<ParamField path="metadata" type="ObjectMeta">
 Refer to Kubernetes API documentation for fields of `metadata`.
+See [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta).
 </ParamField>
 
 <ParamField path="spec" type="DynamoGraphDeploymentScalingAdapterSpec">
@@ -1026,8 +1018,7 @@ See [DynamoGraphDeploymentScalingAdapterStatus](#dynamographdeploymentscalingada
 </ParamField>
 </Accordion>
 
-<a id="dynamographdeploymentscalingadapterspec"></a>
-<Accordion title="DynamoGraphDeploymentScalingAdapterSpec">
+<Accordion id="dynamographdeploymentscalingadapterspec" title="DynamoGraphDeploymentScalingAdapterSpec">
 DynamoGraphDeploymentScalingAdapterSpec defines the desired state of DynamoGraphDeploymentScalingAdapter
 
 
@@ -1046,8 +1037,7 @@ See [DynamoGraphDeploymentServiceRef](#dynamographdeploymentserviceref).
 </ParamField>
 </Accordion>
 
-<a id="dynamographdeploymentscalingadapterstatus"></a>
-<Accordion title="DynamoGraphDeploymentScalingAdapterStatus">
+<Accordion id="dynamographdeploymentscalingadapterstatus" title="DynamoGraphDeploymentScalingAdapterStatus">
 DynamoGraphDeploymentScalingAdapterStatus defines the observed state of DynamoGraphDeploymentScalingAdapter
 
 
@@ -1064,14 +1054,14 @@ Selector is a label selector string for the pods managed by this adapter.&lt;br 
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 
-<ParamField path="lastScaleTime" type="[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)">
+<ParamField path="lastScaleTime" type="Time">
 LastScaleTime is the last time the adapter scaled the target service.
+See [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta).
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 </Accordion>
 
-<a id="dynamographdeploymentserviceref"></a>
-<Accordion title="DynamoGraphDeploymentServiceRef">
+<Accordion id="dynamographdeploymentserviceref" title="DynamoGraphDeploymentServiceRef">
 DynamoGraphDeploymentServiceRef identifies a specific service within a DynamoGraphDeployment
 
 
@@ -1089,8 +1079,7 @@ ServiceName is the key name of the service within the DGD's spec.services map to
 </ParamField>
 </Accordion>
 
-<a id="dynamographdeploymentspec"></a>
-<Accordion title="DynamoGraphDeploymentSpec">
+<Accordion id="dynamographdeploymentspec" title="DynamoGraphDeploymentSpec">
 DynamoGraphDeploymentSpec defines the desired state of DynamoGraphDeployment.
 
 
@@ -1124,8 +1113,9 @@ See [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec).
 **Validation:** MaxProperties: 25 &lt;br /&gt;Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 
-<ParamField path="envs" type="[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array">
+<ParamField path="envs" type="EnvVar array">
 Envs are environment variables applied to all services in the deployment unless&lt;br /&gt;overridden by service-specific configuration.
+See [EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core).
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 
@@ -1153,8 +1143,7 @@ See [DynamoGraphDeploymentExperimentalSpec](#dynamographdeploymentexperimentalsp
 </ParamField>
 </Accordion>
 
-<a id="dynamographdeploymentstatus"></a>
-<Accordion title="DynamoGraphDeploymentStatus">
+<Accordion id="dynamographdeploymentstatus" title="DynamoGraphDeploymentStatus">
 DynamoGraphDeploymentStatus defines the observed state of DynamoGraphDeployment.
 
 
@@ -1172,8 +1161,9 @@ See [DGDState](#dgdstate).
 **Validation:** Enum: [initializing pending successful failed] &lt;br /&gt;
 </ParamField>
 
-<ParamField path="conditions" type="[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array">
+<ParamField path="conditions" type="Condition array">
 Conditions contains the latest observed conditions of the graph deployment.&lt;br /&gt;The slice is merged by type on patch updates.
+See [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta).
 </ParamField>
 
 <ParamField path="services" type="object (keys:string, values:ServiceReplicaStatus)">
@@ -1201,8 +1191,7 @@ See [RollingUpdateStatus](#rollingupdatestatus).
 </ParamField>
 </Accordion>
 
-<a id="dynamomodel"></a>
-<Accordion title="DynamoModel">
+<Accordion id="dynamomodel" title="DynamoModel">
 DynamoModel is the Schema for the dynamo models API
 
 
@@ -1216,8 +1205,9 @@ DynamoModel is the Schema for the dynamo models API
 `DynamoModel`
 </ParamField>
 
-<ParamField path="metadata" type="[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)">
+<ParamField path="metadata" type="ObjectMeta">
 Refer to Kubernetes API documentation for fields of `metadata`.
+See [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta).
 </ParamField>
 
 <ParamField path="spec" type="DynamoModelSpec">
@@ -1229,8 +1219,7 @@ See [DynamoModelStatus](#dynamomodelstatus).
 </ParamField>
 </Accordion>
 
-<a id="dynamomodelspec"></a>
-<Accordion title="DynamoModelSpec">
+<Accordion id="dynamomodelspec" title="DynamoModelSpec">
 DynamoModelSpec defines the desired state of DynamoModel
 
 
@@ -1259,8 +1248,7 @@ See [ModelSource](#modelsource).
 </ParamField>
 </Accordion>
 
-<a id="dynamomodelstatus"></a>
-<Accordion title="DynamoModelStatus">
+<Accordion id="dynamomodelstatus" title="DynamoModelStatus">
 DynamoModelStatus defines the observed state of DynamoModel
 
 
@@ -1281,14 +1269,14 @@ ReadyEndpoints is the count of endpoints that are ready
 TotalEndpoints is the total count of endpoints
 </ParamField>
 
-<ParamField path="conditions" type="[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array">
+<ParamField path="conditions" type="Condition array">
 Conditions represents the latest available observations of the model's state
+See [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta).
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 </Accordion>
 
-<a id="eppconfig"></a>
-<Accordion title="EPPConfig">
+<Accordion id="eppconfig" title="EPPConfig">
 EPPConfig contains configuration for EPP (Endpoint Picker Plugin) components.
 EPP is responsible for intelligent endpoint selection and KV-aware routing.
 
@@ -1296,8 +1284,9 @@ EPP is responsible for intelligent endpoint selection and KV-aware routing.
 **Kind:** `type`
 **Appears in:** [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec), [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
-<ParamField path="configMapRef" type="[ConfigMapKeySelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#configmapkeyselector-v1-core)">
+<ParamField path="configMapRef" type="ConfigMapKeySelector">
 ConfigMapRef references a user-provided ConfigMap containing EPP configuration.&lt;br /&gt;The ConfigMap should contain EndpointPickerConfig YAML.&lt;br /&gt;Mutually exclusive with Config.
+See [ConfigMapKeySelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#configmapkeyselector-v1-core).
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 
@@ -1307,8 +1296,7 @@ Config allows specifying EPP EndpointPickerConfig directly as a structured objec
 </ParamField>
 </Accordion>
 
-<a id="endpointinfo"></a>
-<Accordion title="EndpointInfo">
+<Accordion id="endpointinfo" title="EndpointInfo">
 EndpointInfo represents a single endpoint (pod) serving the model
 
 
@@ -1329,8 +1317,7 @@ Ready indicates whether the endpoint is ready to serve traffic&lt;br /&gt;For Lo
 </ParamField>
 </Accordion>
 
-<a id="extrapodmetadata"></a>
-<Accordion title="ExtraPodMetadata">
+<Accordion id="extrapodmetadata" title="ExtraPodMetadata">
 
 **Kind:** `type`
 **Appears in:** [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec), [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
@@ -1342,18 +1329,17 @@ Ready indicates whether the endpoint is ready to serve traffic&lt;br /&gt;For Lo
 </ParamField>
 </Accordion>
 
-<a id="extrapodspec"></a>
-<Accordion title="ExtraPodSpec">
+<Accordion id="extrapodspec" title="ExtraPodSpec">
 
 **Kind:** `type`
 **Appears in:** [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec), [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
-<ParamField path="mainContainer" type="[Container](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#container-v1-core)">
+<ParamField path="mainContainer" type="Container">
+See [Container](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#container-v1-core).
 </ParamField>
 </Accordion>
 
-<a id="failoverspec"></a>
-<Accordion title="FailoverSpec">
+<Accordion id="failoverspec" title="FailoverSpec">
 FailoverSpec configures active-passive failover for a worker component.
 For intraPod mode: requires gpuMemoryService.enabled; the main container is cloned
 into engine containers (active + standby) within the same pod.
@@ -1380,8 +1366,7 @@ NumShadows is the number of shadow (standby) engine pods per rank.&lt;br /&gt;To
 </ParamField>
 </Accordion>
 
-<a id="frontendsidecarspec"></a>
-<Accordion title="FrontendSidecarSpec">
+<Accordion id="frontendsidecarspec" title="FrontendSidecarSpec">
 FrontendSidecarSpec configures the auto-generated frontend sidecar container.
 The operator uses these fields together with built-in frontend defaults (command, probes, ports,
 and Dynamo env vars) to produce a fully configured sidecar container.
@@ -1405,14 +1390,14 @@ EnvFromSecret references a Secret whose key/value pairs will be exposed as&lt;br
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 
-<ParamField path="envs" type="[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array">
+<ParamField path="envs" type="EnvVar array">
 Envs defines additional environment variables for the frontend sidecar.&lt;br /&gt;These are merged with (and can override) the auto-generated Dynamo env vars.
+See [EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core).
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 </Accordion>
 
-<a id="gmsclientpodspec"></a>
-<Accordion title="GMSClientPodSpec">
+<Accordion id="gmsclientpodspec" title="GMSClientPodSpec">
 GMSClientPodSpec declares an additional GMS client pod for inter-pod GMS.
 
 
@@ -1424,14 +1409,14 @@ Name identifies this client pod.
 **Validation:** MaxLength: 63 &lt;br /&gt;MinLength: 1 &lt;br /&gt;Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` &lt;br /&gt;
 </ParamField>
 
-<ParamField path="podTemplate" type="[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)">
+<ParamField path="podTemplate" type="PodTemplateSpec">
 PodTemplate configures the pod to run as a GMS client.
+See [PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core).
 **Validation:** Schemaless: \&#123;\&#125; &lt;br /&gt;Type: object &lt;br /&gt;
 </ParamField>
 </Accordion>
 
-<a id="gpumemoryservicemode"></a>
-<Accordion title="GPUMemoryServiceMode">
+<Accordion id="gpumemoryservicemode" title="GPUMemoryServiceMode">
 GPUMemoryServiceMode selects the GMS deployment topology.
 
 
@@ -1445,8 +1430,7 @@ GPUMemoryServiceMode selects the GMS deployment topology.
 - <Badge intent="note" minimal>interPod</Badge> GMSModeInterPod runs GMS as a separate weight server pod and one or more&lt;br /&gt;engine pods per rank, sharing GPUs via DRA ResourceClaims and a shared&lt;br /&gt;hostPath volume for UDS sockets. Extra client pod rendering is reserved&lt;br /&gt;for a follow-up change.&lt;br /&gt;
 </Accordion>
 
-<a id="gpumemoryservicespec"></a>
-<Accordion title="GPUMemoryServiceSpec">
+<Accordion id="gpumemoryservicespec" title="GPUMemoryServiceSpec">
 GPUMemoryServiceSpec configures the GPU Memory Service (GMS) for a worker component.
 
 
@@ -1480,8 +1464,7 @@ See [GMSClientPodSpec](#gmsclientpodspec).
 </ParamField>
 </Accordion>
 
-<a id="ingressspec"></a>
-<Accordion title="IngressSpec">
+<Accordion id="ingressspec" title="IngressSpec">
 
 **Kind:** `type`
 **Appears in:** [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec), [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
@@ -1528,8 +1511,7 @@ IngressControllerClassName selects the ingress controller class (e.g., "nginx").
 </ParamField>
 </Accordion>
 
-<a id="ingresstlsspec"></a>
-<Accordion title="IngressTLSSpec">
+<Accordion id="ingresstlsspec" title="IngressTLSSpec">
 
 **Kind:** `type`
 **Appears in:** [IngressSpec](#ingressspec)
@@ -1539,8 +1521,7 @@ SecretName is the name of a Kubernetes Secret containing the TLS certificate and
 </ParamField>
 </Accordion>
 
-<a id="kvtransferenforcement"></a>
-<Accordion title="KvTransferEnforcement">
+<Accordion id="kvtransferenforcement" title="KvTransferEnforcement">
 KvTransferEnforcement controls how the selected prefill worker's topology is
 applied to decode routing.
 
@@ -1556,8 +1537,7 @@ applied to decode routing.
 - <Badge intent="note" minimal>preferred</Badge> KvTransferEnforcementPreferred biases decode worker selection toward the&lt;br /&gt;same domain.&lt;br /&gt;
 </Accordion>
 
-<a id="kvtransferpolicy"></a>
-<Accordion title="KvTransferPolicy">
+<Accordion id="kvtransferpolicy" title="KvTransferPolicy">
 KvTransferPolicy configures topology-aware routing for KV-cache transfers
 between prefill and decode workers. This graph-wide policy lives under
 `spec.experimental` while the API is incubating.
@@ -1594,8 +1574,7 @@ PreferredWeight is required and used only when enforcement is&lt;br /&gt;"prefer
 </ParamField>
 </Accordion>
 
-<a id="modelreference"></a>
-<Accordion title="ModelReference">
+<Accordion id="modelreference" title="ModelReference">
 ModelReference identifies a model served by this component
 
 
@@ -1613,8 +1592,7 @@ Revision is the model revision/version (optional)
 </ParamField>
 </Accordion>
 
-<a id="modelsource"></a>
-<Accordion title="ModelSource">
+<Accordion id="modelsource" title="ModelSource">
 ModelSource defines the source location of a model
 
 
@@ -1627,8 +1605,7 @@ URI is the model source URI&lt;br /&gt;Supported formats:&lt;br /&gt;- S3: s3://
 </ParamField>
 </Accordion>
 
-<a id="multinodespec"></a>
-<Accordion title="MultinodeSpec">
+<Accordion id="multinodespec" title="MultinodeSpec">
 
 **Kind:** `type`
 **Appears in:** [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec), [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
@@ -1639,8 +1616,7 @@ Indicates the number of nodes to deploy for multinode components.&lt;br /&gt;Tot
 </ParamField>
 </Accordion>
 
-<a id="pvc"></a>
-<Accordion title="PVC">
+<Accordion id="pvc" title="PVC">
 
 **Kind:** `type`
 **Appears in:** [DynamoGraphDeploymentSpec](#dynamographdeploymentspec)
@@ -1658,17 +1634,18 @@ Name is the name of the PVC
 StorageClass to be used for PVC creation. Required when create is true.
 </ParamField>
 
-<ParamField path="size" type="[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#quantity-resource-api)">
+<ParamField path="size" type="Quantity">
 Size of the volume in Gi, used during PVC creation. Required when create is true.
+See [Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#quantity-resource-api).
 </ParamField>
 
-<ParamField path="volumeAccessMode" type="[PersistentVolumeAccessMode](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#persistentvolumeaccessmode-v1-core)">
+<ParamField path="volumeAccessMode" type="PersistentVolumeAccessMode">
 VolumeAccessMode is the volume access mode of the PVC. Required when create is true.
+See [PersistentVolumeAccessMode](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#persistentvolumeaccessmode-v1-core).
 </ParamField>
 </Accordion>
 
-<a id="profilingconfigspec"></a>
-<Accordion title="ProfilingConfigSpec">
+<Accordion id="profilingconfigspec" title="ProfilingConfigSpec">
 ProfilingConfigSpec defines configuration for the profiling process.
 This structure maps directly to the profile_sla.py config format.
 See dynamo/profiler/utils/profiler_argparse.py for the complete schema.
@@ -1677,8 +1654,9 @@ See dynamo/profiler/utils/profiler_argparse.py for the complete schema.
 **Kind:** `type`
 **Appears in:** [DynamoGraphDeploymentRequestSpec](#dynamographdeploymentrequestspec)
 
-<ParamField path="config" type="[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#json-v1-apiextensions-k8s-io)">
+<ParamField path="config" type="JSON">
 Config is the profiling configuration as arbitrary JSON/YAML. This will be passed directly to the profiler.&lt;br /&gt;The profiler will validate the configuration and report any errors.
+See [JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#json-v1-apiextensions-k8s-io).
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;Type: object &lt;br /&gt;
 </ParamField>
 
@@ -1698,13 +1676,15 @@ OutputPVC is an optional PersistentVolumeClaim name for storing profiling output
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 
-<ParamField path="resources" type="[ResourceRequirements](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#resourcerequirements-v1-core)">
+<ParamField path="resources" type="ResourceRequirements">
 Resources specifies the compute resource requirements for the profiling job container.&lt;br /&gt;If not specified, no resource requests or limits are set.
+See [ResourceRequirements](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#resourcerequirements-v1-core).
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 
-<ParamField path="tolerations" type="[Toleration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#toleration-v1-core) array">
+<ParamField path="tolerations" type="Toleration array">
 Tolerations allows the profiling job to be scheduled on nodes with matching taints.&lt;br /&gt;For example, to schedule on GPU nodes, add a toleration for the nvidia.com/gpu taint.
+See [Toleration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#toleration-v1-core).
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 
@@ -1714,8 +1694,7 @@ NodeSelector is a selector which must match a node's labels for the profiling po
 </ParamField>
 </Accordion>
 
-<a id="resourceitem"></a>
-<Accordion title="ResourceItem">
+<Accordion id="resourceitem" title="ResourceItem">
 
 **Kind:** `type`
 **Appears in:** [Resources](#resources)
@@ -1741,8 +1720,7 @@ Custom specifies additional custom resource requests/limits
 </ParamField>
 </Accordion>
 
-<a id="resources"></a>
-<Accordion title="Resources">
+<Accordion id="resources" title="Resources">
 Resources defines requested and limits for a component, including CPU, memory,
 GPUs/devices, and any runtime-specific resources.
 
@@ -1760,13 +1738,13 @@ Limits specifies the maximum resources allowed for the component
 See [ResourceItem](#resourceitem).
 </ParamField>
 
-<ParamField path="claims" type="[ResourceClaim](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#resourceclaim-v1-core) array">
+<ParamField path="claims" type="ResourceClaim array">
 Claims specifies resource claims for dynamic resource allocation
+See [ResourceClaim](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#resourceclaim-v1-core).
 </ParamField>
 </Accordion>
 
-<a id="restart"></a>
-<Accordion title="Restart">
+<Accordion id="restart" title="Restart">
 
 **Kind:** `type`
 **Appears in:** [DynamoGraphDeploymentSpec](#dynamographdeploymentspec)
@@ -1783,8 +1761,7 @@ See [RestartStrategy](#restartstrategy).
 </ParamField>
 </Accordion>
 
-<a id="restartphase"></a>
-<Accordion title="RestartPhase">
+<Accordion id="restartphase" title="RestartPhase">
 
 **Kind:** `enum`
 **Underlying type:** `string`
@@ -1799,8 +1776,7 @@ See [RestartStrategy](#restartstrategy).
 - <Badge intent="note" minimal>Superseded</Badge>
 </Accordion>
 
-<a id="restartstatus"></a>
-<Accordion title="RestartStatus">
+<Accordion id="restartstatus" title="RestartStatus">
 RestartStatus contains the status of the restart of the graph deployment.
 
 
@@ -1822,8 +1798,7 @@ InProgress contains the names of the services that are currently being restarted
 </ParamField>
 </Accordion>
 
-<a id="restartstrategy"></a>
-<Accordion title="RestartStrategy">
+<Accordion id="restartstrategy" title="RestartStrategy">
 
 **Kind:** `type`
 **Appears in:** [Restart](#restart)
@@ -1840,8 +1815,7 @@ Order specifies the order in which the services should be restarted.
 </ParamField>
 </Accordion>
 
-<a id="restartstrategytype"></a>
-<Accordion title="RestartStrategyType">
+<Accordion id="restartstrategytype" title="RestartStrategyType">
 
 **Kind:** `enum`
 **Underlying type:** `string`
@@ -1853,8 +1827,7 @@ Order specifies the order in which the services should be restarted.
 - <Badge intent="note" minimal>Parallel</Badge>
 </Accordion>
 
-<a id="rollingupdatephase"></a>
-<Accordion title="RollingUpdatePhase">
+<Accordion id="rollingupdatephase" title="RollingUpdatePhase">
 RollingUpdatePhase represents the current phase of a rolling update.
 
 
@@ -1871,8 +1844,7 @@ RollingUpdatePhase represents the current phase of a rolling update.
 - <Badge intent="note" minimal>``</Badge>
 </Accordion>
 
-<a id="rollingupdatestatus"></a>
-<Accordion title="RollingUpdateStatus">
+<Accordion id="rollingupdatestatus" title="RollingUpdateStatus">
 RollingUpdateStatus tracks the progress of a rolling update.
 
 
@@ -1885,13 +1857,15 @@ See [RollingUpdatePhase](#rollingupdatephase).
 **Validation:** Enum: [Pending InProgress Completed Failed ] &lt;br /&gt;Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 
-<ParamField path="startTime" type="[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)">
+<ParamField path="startTime" type="Time">
 StartTime is when the rolling update began.
+See [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta).
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 
-<ParamField path="endTime" type="[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)">
+<ParamField path="endTime" type="Time">
 EndTime is when the rolling update completed (successfully or failed).
+See [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta).
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 
@@ -1901,8 +1875,7 @@ UpdatedServices is the list of services that have completed the rolling update.&
 </ParamField>
 </Accordion>
 
-<a id="scalingadapter"></a>
-<Accordion title="ScalingAdapter">
+<Accordion id="scalingadapter" title="ScalingAdapter">
 ScalingAdapter configures whether a service uses the DynamoGraphDeploymentScalingAdapter
 for replica management. When enabled, the DGDSA owns the replicas field and
 external autoscalers (HPA, KEDA, Planner) can control scaling via the Scale subresource.
@@ -1917,8 +1890,7 @@ Enabled indicates whether the ScalingAdapter should be enabled for this service.
 </ParamField>
 </Accordion>
 
-<a id="servicecheckpointconfig"></a>
-<Accordion title="ServiceCheckpointConfig">
+<Accordion id="servicecheckpointconfig" title="ServiceCheckpointConfig">
 ServiceCheckpointConfig configures checkpointing for a DGD service
 
 
@@ -1971,8 +1943,7 @@ See [ServiceCheckpointJobConfig](#servicecheckpointjobconfig).
 </ParamField>
 </Accordion>
 
-<a id="servicecheckpointjobconfig"></a>
-<Accordion title="ServiceCheckpointJobConfig">
+<Accordion id="servicecheckpointjobconfig" title="ServiceCheckpointJobConfig">
 ServiceCheckpointJobConfig customizes the checkpoint Job created for a DGD service.
 
 
@@ -1984,14 +1955,14 @@ GMSClientContainers lists checkpoint Job containers that should receive&lt;br /&
 **Validation:** items:MaxLength: 63 &lt;br /&gt;items:MinLength: 1 &lt;br /&gt;items:Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` &lt;br /&gt;Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 
-<ParamField path="podTemplate" type="[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)">
+<ParamField path="podTemplate" type="PodTemplateSpec">
 PodTemplate customizes the checkpoint Job pod. The operator starts from the&lt;br /&gt;selected workload container and merges this template so users can add helper&lt;br /&gt;containers such as gms-saver.
+See [PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core).
 **Validation:** Schemaless: \&#123;\&#125; &lt;br /&gt;Type: object &lt;br /&gt;Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 </Accordion>
 
-<a id="servicecheckpointstatus"></a>
-<Accordion title="ServiceCheckpointStatus">
+<Accordion id="servicecheckpointstatus" title="ServiceCheckpointStatus">
 ServiceCheckpointStatus contains checkpoint information for a single service.
 
 
@@ -2019,8 +1990,7 @@ Ready indicates the checkpoint artifact is ready for future pods to restore.
 </ParamField>
 </Accordion>
 
-<a id="servicereplicastatus"></a>
-<Accordion title="ServiceReplicaStatus">
+<Accordion id="servicereplicastatus" title="ServiceReplicaStatus">
 ServiceReplicaStatus contains replica information for a single service.
 
 
@@ -2063,8 +2033,7 @@ AvailableReplicas is the number of available replicas.&lt;br /&gt;For Deployment
 </ParamField>
 </Accordion>
 
-<a id="sharedmemoryspec"></a>
-<Accordion title="SharedMemorySpec">
+<Accordion id="sharedmemoryspec" title="SharedMemorySpec">
 
 **Kind:** `type`
 **Appears in:** [DynamoCheckpointJobConfig](#dynamocheckpointjobconfig), [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec), [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
@@ -2073,12 +2042,12 @@ AvailableReplicas is the number of available replicas.&lt;br /&gt;For Deployment
 Disabled, when true, opts out of mounting a shared-memory medium for the&lt;br /&gt;component. When false (or unset), shared memory is enabled and Size is&lt;br /&gt;required (enforced by the validating webhook). Size is ignored when&lt;br /&gt;Disabled is true.
 </ParamField>
 
-<ParamField path="size" type="[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#quantity-resource-api)">
+<ParamField path="size" type="Quantity">
+See [Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#quantity-resource-api).
 </ParamField>
 </Accordion>
 
-<a id="spectopologyconstraint"></a>
-<Accordion title="SpecTopologyConstraint">
+<Accordion id="spectopologyconstraint" title="SpecTopologyConstraint">
 SpecTopologyConstraint defines deployment-level topology placement requirements.
 It carries both the topology profile (which ClusterTopology CR to use) and an
 optional default pack domain that services without their own constraint inherit.
@@ -2099,8 +2068,7 @@ See [TopologyDomain](#topologydomain).
 </ParamField>
 </Accordion>
 
-<a id="topologyconstraint"></a>
-<Accordion title="TopologyConstraint">
+<Accordion id="topologyconstraint" title="TopologyConstraint">
 TopologyConstraint defines service-level topology placement requirements.
 The topology profile is inherited from the deployment-level SpecTopologyConstraint;
 only the pack domain is specified here.
@@ -2116,8 +2084,7 @@ See [TopologyDomain](#topologydomain).
 </ParamField>
 </Accordion>
 
-<a id="topologydomain"></a>
-<Accordion title="TopologyDomain">
+<Accordion id="topologydomain" title="TopologyDomain">
 TopologyDomain is a free-form topology level identifier.
 Common examples: "region", "zone", "datacenter", "block", "rack", "host", "numa".
 When used with a ClusterTopology CR, domain names are defined in the CR's
@@ -2133,8 +2100,7 @@ may contain hyphens but must not start or end with one).
 **Appears in:** [KvTransferPolicy](#kvtransferpolicy), [SpecTopologyConstraint](#spectopologyconstraint), [TopologyConstraint](#topologyconstraint)
 </Accordion>
 
-<a id="volumemount"></a>
-<Accordion title="VolumeMount">
+<Accordion id="volumemount" title="VolumeMount">
 VolumeMount references a PVC defined at the top level for volumes to be mounted by the component
 
 
@@ -2155,7 +2121,7 @@ UseAsCompilationCache indicates this volume should be used as a compilation cach
 </ParamField>
 </Accordion>
 
-<a id="nvidia-com-v1beta1"></a>
+<div id="nvidia-com-v1beta1" />
 
 ## nvidia.com/v1beta1
 
@@ -2170,8 +2136,7 @@ Package v1beta1 contains API Schema definitions for the nvidia.com v1beta1 API g
 <Card title="DynamoGraphDeploymentScalingAdapter" href="#v1beta1-dynamographdeploymentscalingadapter" />
 </CardGroup>
 
-<a id="backendtype"></a>
-<Accordion title="BackendType">
+<Accordion id="backendtype" title="BackendType">
 BackendType specifies the inference backend.
 
 
@@ -2188,8 +2153,7 @@ BackendType specifies the inference backend.
 - <Badge intent="note" minimal>vllm</Badge>
 </Accordion>
 
-<a id="v1beta1-checkpointdeletionpolicy"></a>
-<Accordion title="CheckpointDeletionPolicy">
+<Accordion id="v1beta1-checkpointdeletionpolicy" title="CheckpointDeletionPolicy">
 CheckpointDeletionPolicy defines what happens to DGD-managed automatic
 checkpoint resources when the owning DGD is deleted.
 
@@ -2205,8 +2169,7 @@ checkpoint resources when the owning DGD is deleted.
 - <Badge intent="note" minimal>Retain</Badge> CheckpointDeletionPolicyRetain keeps DGD-managed automatic checkpoint CRs&lt;br /&gt;and artifacts after the owning DGD is deleted. Users can reference the&lt;br /&gt;retained checkpoint with checkpointRef if they accept compatibility risk.&lt;br /&gt;
 </Accordion>
 
-<a id="v1beta1-checkpointmode"></a>
-<Accordion title="CheckpointMode">
+<Accordion id="v1beta1-checkpointmode" title="CheckpointMode">
 Deprecated: use checkpoint.enabled instead.
 enabled=true without checkpointRef creates a DGD-managed automatic
 checkpoint; checkpointRef restores the named checkpoint.
@@ -2223,8 +2186,7 @@ checkpoint; checkpointRef restores the named checkpoint.
 - <Badge intent="note" minimal>Manual</Badge> Deprecated: use checkpointRef to restore an existing checkpoint.&lt;br /&gt;
 </Accordion>
 
-<a id="v1beta1-checkpointstartuppolicy"></a>
-<Accordion title="CheckpointStartupPolicy">
+<Accordion id="v1beta1-checkpointstartuppolicy" title="CheckpointStartupPolicy">
 CheckpointStartupPolicy defines when worker pods should wait for a checkpoint.
 
 
@@ -2239,8 +2201,7 @@ CheckpointStartupPolicy defines when worker pods should wait for a checkpoint.
 - <Badge intent="note" minimal>WaitForCheckpoint</Badge> CheckpointStartupPolicyWaitForCheckpoint gates worker replicas until the&lt;br /&gt;component's checkpoint is Ready, then starts them from the checkpoint.&lt;br /&gt;
 </Accordion>
 
-<a id="compilationcacheconfig"></a>
-<Accordion title="CompilationCacheConfig">
+<Accordion id="compilationcacheconfig" title="CompilationCacheConfig">
 CompilationCacheConfig configures a PVC-backed compilation cache for a component.
 The operator handles backend-specific mount paths and environment variables so
 users do not need to hand-wire them into the pod template.
@@ -2260,8 +2221,7 @@ mountPath overrides the backend-specific default mount path. When&lt;br /&gt;emp
 </ParamField>
 </Accordion>
 
-<a id="componentcheckpointconfig"></a>
-<Accordion title="ComponentCheckpointConfig">
+<Accordion id="componentcheckpointconfig" title="ComponentCheckpointConfig">
 ComponentCheckpointConfig configures checkpointing for a DGD component.
 
 
@@ -2314,8 +2274,7 @@ See [ComponentCheckpointJobConfig](#componentcheckpointjobconfig).
 </ParamField>
 </Accordion>
 
-<a id="componentcheckpointjobconfig"></a>
-<Accordion title="ComponentCheckpointJobConfig">
+<Accordion id="componentcheckpointjobconfig" title="ComponentCheckpointJobConfig">
 ComponentCheckpointJobConfig customizes the checkpoint Job created for a DGD component.
 
 
@@ -2327,14 +2286,14 @@ gmsClientContainers lists checkpoint Job containers that should receive&lt;br /&
 **Validation:** items:MaxLength: 63 &lt;br /&gt;items:MinLength: 1 &lt;br /&gt;items:Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` &lt;br /&gt;Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 
-<ParamField path="podTemplate" type="[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)">
+<ParamField path="podTemplate" type="PodTemplateSpec">
 podTemplate customizes the checkpoint Job pod. The operator starts from the&lt;br /&gt;selected workload container and merges this template so users can add helper&lt;br /&gt;containers such as gms-saver.
+See [PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core).
 **Validation:** Schemaless: \&#123;\&#125; &lt;br /&gt;Type: object &lt;br /&gt;Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 </Accordion>
 
-<a id="componentcheckpointstatus"></a>
-<Accordion title="ComponentCheckpointStatus">
+<Accordion id="componentcheckpointstatus" title="ComponentCheckpointStatus">
 ComponentCheckpointStatus contains checkpoint information for a single component.
 
 
@@ -2362,8 +2321,7 @@ ready indicates the checkpoint artifact is ready for future pods to restore.
 </ParamField>
 </Accordion>
 
-<a id="v1beta1-componentkind"></a>
-<Accordion title="ComponentKind">
+<Accordion id="v1beta1-componentkind" title="ComponentKind">
 ComponentKind represents the type of underlying Kubernetes resource backing a DGD component.
 
 
@@ -2380,8 +2338,7 @@ ComponentKind represents the type of underlying Kubernetes resource backing a DG
 - <Badge intent="note" minimal>LeaderWorkerSet</Badge>
 </Accordion>
 
-<a id="componentreplicastatus"></a>
-<Accordion title="ComponentReplicaStatus">
+<Accordion id="componentreplicastatus" title="ComponentReplicaStatus">
 ComponentReplicaStatus contains replica information for a single component.
 
 
@@ -2420,8 +2377,7 @@ availableReplicas is the number of available replicas. Populated for&lt;br /&gt;
 </ParamField>
 </Accordion>
 
-<a id="componenttype"></a>
-<Accordion title="ComponentType">
+<Accordion id="componenttype" title="ComponentType">
 ComponentType identifies the role of a Dynamo component within a graph.
 In v1beta1 this is a strict enum. Unlike v1alpha1 (where `subComponentType`
 was used as a workaround for disaggregated serving), `prefill` and `decode`
@@ -2444,8 +2400,7 @@ are first-class values: users can set them directly and downstream consumers
 - <Badge intent="note" minimal>epp</Badge>
 </Accordion>
 
-<a id="dgdrphase"></a>
-<Accordion title="DGDRPhase">
+<Accordion id="dgdrphase" title="DGDRPhase">
 DGDRPhase represents the lifecycle phase of a DynamoGraphDeploymentRequest.
 
 
@@ -2464,8 +2419,7 @@ DGDRPhase represents the lifecycle phase of a DynamoGraphDeploymentRequest.
 - <Badge intent="note" minimal>Failed</Badge>
 </Accordion>
 
-<a id="v1beta1-dgdstate"></a>
-<Accordion title="DGDState">
+<Accordion id="v1beta1-dgdstate" title="DGDState">
 DGDState is the high-level lifecycle state of a DynamoGraphDeployment.
 
 
@@ -2482,8 +2436,7 @@ DGDState is the high-level lifecycle state of a DynamoGraphDeployment.
 - <Badge intent="note" minimal>failed</Badge>
 </Accordion>
 
-<a id="deploymentinfostatus"></a>
-<Accordion title="DeploymentInfoStatus">
+<Accordion id="deploymentinfostatus" title="DeploymentInfoStatus">
 DeploymentInfoStatus tracks the state of the deployed DynamoGraphDeployment.
 
 
@@ -2501,8 +2454,7 @@ AvailableReplicas is the number of replicas that are available and ready.
 </ParamField>
 </Accordion>
 
-<a id="v1beta1-dynamocheckpointidentity"></a>
-<Accordion title="DynamoCheckpointIdentity">
+<Accordion id="v1beta1-dynamocheckpointidentity" title="DynamoCheckpointIdentity">
 Deprecated: omit in DGD component checkpoint configs. Auto needs no
 replacement; use checkpointRef for explicit restores.
 Duplicated from v1alpha1; DynamoCheckpoint itself remains v1alpha1.
@@ -2552,8 +2504,7 @@ extraParameters are additional parameters that affect the checkpoint hash.&lt;br
 </ParamField>
 </Accordion>
 
-<a id="v1beta1-dynamocomponentdeployment"></a>
-<Accordion title="DynamoComponentDeployment">
+<Accordion id="v1beta1-dynamocomponentdeployment" title="DynamoComponentDeployment">
 DynamoComponentDeployment is the Schema for the dynamocomponentdeployments API.
 
 v1beta1 is a served version: the API server accepts reads and writes
@@ -2572,8 +2523,9 @@ operator's conversion webhook; see api/v1alpha1/*_conversion.go.
 `DynamoComponentDeployment`
 </ParamField>
 
-<ParamField path="metadata" type="[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)">
+<ParamField path="metadata" type="ObjectMeta">
 Refer to Kubernetes API documentation for fields of `metadata`.
+See [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta).
 </ParamField>
 
 <ParamField path="spec" type="DynamoComponentDeploymentSpec">
@@ -2582,8 +2534,7 @@ See [DynamoComponentDeploymentSpec](#v1beta1-dynamocomponentdeploymentspec).
 </ParamField>
 </Accordion>
 
-<a id="v1beta1-dynamocomponentdeploymentsharedspec"></a>
-<Accordion title="DynamoComponentDeploymentSharedSpec">
+<Accordion id="v1beta1-dynamocomponentdeploymentsharedspec" title="DynamoComponentDeploymentSharedSpec">
 DynamoComponentDeploymentSharedSpec is the shared configuration used by both
 standalone DCDs and by the components embedded in a DynamoGraphDeployment.
 
@@ -2616,8 +2567,9 @@ globalDynamoNamespace places the component in the global Dynamo&lt;br /&gt;names
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 
-<ParamField path="podTemplate" type="[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)">
+<ParamField path="podTemplate" type="PodTemplateSpec">
 podTemplate is the pod template used to create the component's pods.&lt;br /&gt;The operator injects its defaults (image, command, env, ports, probes,&lt;br /&gt;resources, volume mounts) into the container named `"main"` inside&lt;br /&gt;`podTemplate.spec.containers`, merging user overrides by name. If no&lt;br /&gt;container named `"main"` is present, the operator auto-generates it&lt;br /&gt;with standard defaults. All other containers in `podTemplate.spec.containers`&lt;br /&gt;are treated as user-managed sidecars: the operator does not inject&lt;br /&gt;defaults into them, so sidecars must specify required fields (e.g. `image`)&lt;br /&gt;themselves. The validation webhook rejects pod templates where a&lt;br /&gt;non-`"main"` container is missing a required field such as `image`.
+See [PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core).
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 
@@ -2632,8 +2584,9 @@ See [MultinodeSpec](#v1beta1-multinodespec).
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 
-<ParamField path="sharedMemorySize" type="[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#quantity-resource-api)">
+<ParamField path="sharedMemorySize" type="Quantity">
 sharedMemorySize controls the size of the tmpfs mounted at `/dev/shm`.&lt;br /&gt;`nil` selects the operator default (8Gi), a positive quantity sets a&lt;br /&gt;custom size, and `"0"` disables the shared-memory volume entirely.&lt;br /&gt;Simpler replacement for v1alpha1's `SharedMemorySpec` struct with its&lt;br /&gt;`disabled bool` + `size Quantity` pattern.
+See [Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#quantity-resource-api).
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 
@@ -2679,8 +2632,7 @@ See [ExperimentalSpec](#experimentalspec).
 </ParamField>
 </Accordion>
 
-<a id="v1beta1-dynamocomponentdeploymentspec"></a>
-<Accordion title="DynamoComponentDeploymentSpec">
+<Accordion id="v1beta1-dynamocomponentdeploymentspec" title="DynamoComponentDeploymentSpec">
 DynamoComponentDeploymentSpec defines the desired state of a DynamoComponentDeployment.
 
 
@@ -2708,8 +2660,9 @@ globalDynamoNamespace places the component in the global Dynamo&lt;br /&gt;names
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 
-<ParamField path="podTemplate" type="[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)">
+<ParamField path="podTemplate" type="PodTemplateSpec">
 podTemplate is the pod template used to create the component's pods.&lt;br /&gt;The operator injects its defaults (image, command, env, ports, probes,&lt;br /&gt;resources, volume mounts) into the container named `"main"` inside&lt;br /&gt;`podTemplate.spec.containers`, merging user overrides by name. If no&lt;br /&gt;container named `"main"` is present, the operator auto-generates it&lt;br /&gt;with standard defaults. All other containers in `podTemplate.spec.containers`&lt;br /&gt;are treated as user-managed sidecars: the operator does not inject&lt;br /&gt;defaults into them, so sidecars must specify required fields (e.g. `image`)&lt;br /&gt;themselves. The validation webhook rejects pod templates where a&lt;br /&gt;non-`"main"` container is missing a required field such as `image`.
+See [PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core).
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 
@@ -2724,8 +2677,9 @@ See [MultinodeSpec](#v1beta1-multinodespec).
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 
-<ParamField path="sharedMemorySize" type="[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#quantity-resource-api)">
+<ParamField path="sharedMemorySize" type="Quantity">
 sharedMemorySize controls the size of the tmpfs mounted at `/dev/shm`.&lt;br /&gt;`nil` selects the operator default (8Gi), a positive quantity sets a&lt;br /&gt;custom size, and `"0"` disables the shared-memory volume entirely.&lt;br /&gt;Simpler replacement for v1alpha1's `SharedMemorySpec` struct with its&lt;br /&gt;`disabled bool` + `size Quantity` pattern.
+See [Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#quantity-resource-api).
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 
@@ -2771,8 +2725,7 @@ See [ExperimentalSpec](#experimentalspec).
 </ParamField>
 </Accordion>
 
-<a id="v1beta1-dynamographdeployment"></a>
-<Accordion title="DynamoGraphDeployment">
+<Accordion id="v1beta1-dynamographdeployment" title="DynamoGraphDeployment">
 DynamoGraphDeployment is the Schema for the dynamographdeployments API.
 
 v1beta1 is a served version: the API server accepts reads and writes
@@ -2791,8 +2744,9 @@ operator's conversion webhook; see api/v1alpha1/*_conversion.go.
 `DynamoGraphDeployment`
 </ParamField>
 
-<ParamField path="metadata" type="[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)">
+<ParamField path="metadata" type="ObjectMeta">
 Refer to Kubernetes API documentation for fields of `metadata`.
+See [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta).
 </ParamField>
 
 <ParamField path="spec" type="DynamoGraphDeploymentSpec">
@@ -2806,8 +2760,7 @@ See [DynamoGraphDeploymentStatus](#v1beta1-dynamographdeploymentstatus).
 </ParamField>
 </Accordion>
 
-<a id="dynamographdeploymentcomponentref"></a>
-<Accordion title="DynamoGraphDeploymentComponentRef">
+<Accordion id="dynamographdeploymentcomponentref" title="DynamoGraphDeploymentComponentRef">
 DynamoGraphDeploymentComponentRef identifies a specific component within a
 DynamoGraphDeployment. Renamed from v1alpha1's `DynamoGraphDeploymentServiceRef`
 to align with the v1beta1 `services -> components` and
@@ -2828,8 +2781,7 @@ componentName is the `componentName` of the entry within the target&lt;br /&gt;D
 </ParamField>
 </Accordion>
 
-<a id="v1beta1-dynamographdeploymentexperimentalspec"></a>
-<Accordion title="DynamoGraphDeploymentExperimentalSpec">
+<Accordion id="v1beta1-dynamographdeploymentexperimentalspec" title="DynamoGraphDeploymentExperimentalSpec">
 DynamoGraphDeploymentExperimentalSpec groups graph-level opt-in preview
 features whose API shape and behavior may change in breaking ways between
 v1beta1 releases. Component-level experimental features live under
@@ -2846,8 +2798,7 @@ See [KvTransferPolicy](#v1beta1-kvtransferpolicy).
 </ParamField>
 </Accordion>
 
-<a id="v1beta1-dynamographdeploymentrequest"></a>
-<Accordion title="v1beta1 DynamoGraphDeploymentRequest">
+<Accordion id="v1beta1-dynamographdeploymentrequest" title="v1beta1 DynamoGraphDeploymentRequest">
 DynamoGraphDeploymentRequest is the Schema for the dynamographdeploymentrequests API.
 It provides a simplified, SLA-driven interface for deploying inference models on Dynamo.
 Users specify a model and optional performance targets; the controller handles profiling,
@@ -2872,8 +2823,9 @@ Lifecycle:
 `DynamoGraphDeploymentRequest`
 </ParamField>
 
-<ParamField path="metadata" type="[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)">
+<ParamField path="metadata" type="ObjectMeta">
 Refer to Kubernetes API documentation for fields of `metadata`.
+See [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta).
 </ParamField>
 
 <ParamField path="spec" type="DynamoGraphDeploymentRequestSpec">
@@ -2887,8 +2839,7 @@ See [DynamoGraphDeploymentRequestStatus](#v1beta1-dynamographdeploymentrequestst
 </ParamField>
 </Accordion>
 
-<a id="v1beta1-dynamographdeploymentrequestspec"></a>
-<Accordion title="v1beta1 DynamoGraphDeploymentRequestSpec">
+<Accordion id="v1beta1-dynamographdeploymentrequestspec" title="v1beta1 DynamoGraphDeploymentRequestSpec">
 DynamoGraphDeploymentRequestSpec defines the desired state of a DynamoGraphDeploymentRequest.
 Only the Model field is required; all other fields are optional and have sensible defaults.
 
@@ -2960,8 +2911,7 @@ AutoApply indicates whether to automatically create a DynamoGraphDeployment&lt;b
 </ParamField>
 </Accordion>
 
-<a id="v1beta1-dynamographdeploymentrequeststatus"></a>
-<Accordion title="v1beta1 DynamoGraphDeploymentRequestStatus">
+<Accordion id="v1beta1-dynamographdeploymentrequeststatus" title="v1beta1 DynamoGraphDeploymentRequestStatus">
 DynamoGraphDeploymentRequestStatus represents the observed state of a DynamoGraphDeploymentRequest.
 
 
@@ -2990,8 +2940,9 @@ ProfilingJobName is the name of the Kubernetes Job running the profiler.
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 
-<ParamField path="conditions" type="[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array">
+<ParamField path="conditions" type="Condition array">
 Conditions contains the latest observed conditions of the deployment request.&lt;br /&gt;Standard condition types include: Succeeded, Validation, Profiling, SpecGenerated, DeploymentReady.
+See [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta).
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 
@@ -3013,8 +2964,7 @@ ObservedGeneration is the most recent generation observed by the controller.
 </ParamField>
 </Accordion>
 
-<a id="v1beta1-dynamographdeploymentscalingadapter"></a>
-<Accordion title="DynamoGraphDeploymentScalingAdapter">
+<Accordion id="v1beta1-dynamographdeploymentscalingadapter" title="DynamoGraphDeploymentScalingAdapter">
 DynamoGraphDeploymentScalingAdapter provides a scaling interface for individual
 components within a DynamoGraphDeployment. It implements the Kubernetes scale
 subresource, enabling integration with HPA, KEDA, and custom autoscalers.
@@ -3038,8 +2988,9 @@ handled by the operator's conversion webhook
 `DynamoGraphDeploymentScalingAdapter`
 </ParamField>
 
-<ParamField path="metadata" type="[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)">
+<ParamField path="metadata" type="ObjectMeta">
 Refer to Kubernetes API documentation for fields of `metadata`.
+See [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta).
 </ParamField>
 
 <ParamField path="spec" type="DynamoGraphDeploymentScalingAdapterSpec">
@@ -3051,8 +3002,7 @@ See [DynamoGraphDeploymentScalingAdapterStatus](#v1beta1-dynamographdeploymentsc
 </ParamField>
 </Accordion>
 
-<a id="v1beta1-dynamographdeploymentscalingadapterspec"></a>
-<Accordion title="DynamoGraphDeploymentScalingAdapterSpec">
+<Accordion id="v1beta1-dynamographdeploymentscalingadapterspec" title="DynamoGraphDeploymentScalingAdapterSpec">
 DynamoGraphDeploymentScalingAdapterSpec defines the desired state of a
 DynamoGraphDeploymentScalingAdapter.
 
@@ -3072,8 +3022,7 @@ See [DynamoGraphDeploymentComponentRef](#dynamographdeploymentcomponentref).
 </ParamField>
 </Accordion>
 
-<a id="v1beta1-dynamographdeploymentscalingadapterstatus"></a>
-<Accordion title="DynamoGraphDeploymentScalingAdapterStatus">
+<Accordion id="v1beta1-dynamographdeploymentscalingadapterstatus" title="DynamoGraphDeploymentScalingAdapterStatus">
 DynamoGraphDeploymentScalingAdapterStatus defines the observed state of a
 DynamoGraphDeploymentScalingAdapter.
 
@@ -3090,14 +3039,14 @@ selector is a label selector string for the pods managed by this&lt;br /&gt;adap
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 
-<ParamField path="lastScaleTime" type="[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)">
+<ParamField path="lastScaleTime" type="Time">
 lastScaleTime is the last time the adapter scaled the target component.
+See [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta).
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 </Accordion>
 
-<a id="v1beta1-dynamographdeploymentspec"></a>
-<Accordion title="DynamoGraphDeploymentSpec">
+<Accordion id="v1beta1-dynamographdeploymentspec" title="DynamoGraphDeploymentSpec">
 DynamoGraphDeploymentSpec defines the desired state of a DynamoGraphDeployment.
 
 
@@ -3125,8 +3074,9 @@ See [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentshar
 **Validation:** MaxItems: 25 &lt;br /&gt;Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 
-<ParamField path="env" type="[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array">
+<ParamField path="env" type="EnvVar array">
 env is prepended to every component's environment. Component-specific&lt;br /&gt;env entries with the same name take precedence and may reference values&lt;br /&gt;from this list.
+See [EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core).
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 
@@ -3154,8 +3104,7 @@ See [DynamoGraphDeploymentExperimentalSpec](#v1beta1-dynamographdeploymentexperi
 </ParamField>
 </Accordion>
 
-<a id="v1beta1-dynamographdeploymentstatus"></a>
-<Accordion title="DynamoGraphDeploymentStatus">
+<Accordion id="v1beta1-dynamographdeploymentstatus" title="DynamoGraphDeploymentStatus">
 DynamoGraphDeploymentStatus defines the observed state of a DynamoGraphDeployment.
 Unchanged between v1alpha1 and v1beta1.
 
@@ -3174,8 +3123,9 @@ See [DGDState](#v1beta1-dgdstate).
 **Validation:** Enum: [initializing pending successful failed] &lt;br /&gt;
 </ParamField>
 
-<ParamField path="conditions" type="[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array">
+<ParamField path="conditions" type="Condition array">
 conditions contains the latest observed conditions of the graph deployment.&lt;br /&gt;Merged by type on patch updates.
+See [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta).
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 
@@ -3204,16 +3154,16 @@ See [RollingUpdateStatus](#v1beta1-rollingupdatestatus).
 </ParamField>
 </Accordion>
 
-<a id="v1beta1-eppconfig"></a>
-<Accordion title="EPPConfig">
+<Accordion id="v1beta1-eppconfig" title="EPPConfig">
 EPPConfig contains configuration for EPP (Endpoint Picker Plugin) components.
 
 
 **Kind:** `type`
 **Appears in:** [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec), [DynamoComponentDeploymentSpec](#v1beta1-dynamocomponentdeploymentspec)
 
-<ParamField path="configMapRef" type="[ConfigMapKeySelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#configmapkeyselector-v1-core)">
+<ParamField path="configMapRef" type="ConfigMapKeySelector">
 configMapRef references a user-provided ConfigMap containing EPP&lt;br /&gt;configuration. Mutually exclusive with `config`.
+See [ConfigMapKeySelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#configmapkeyselector-v1-core).
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 
@@ -3223,8 +3173,7 @@ config allows specifying EPP `EndpointPickerConfig` directly as a&lt;br /&gt;str
 </ParamField>
 </Accordion>
 
-<a id="experimentalspec"></a>
-<Accordion title="ExperimentalSpec">
+<Accordion id="experimentalspec" title="ExperimentalSpec">
 ExperimentalSpec groups opt-in preview features whose API shape and behavior
 may change in breaking ways between v1beta1 releases (including disappearing
 without a name-preserving graduation path). Fields placed under
@@ -3256,8 +3205,7 @@ See [ComponentCheckpointConfig](#componentcheckpointconfig).
 </ParamField>
 </Accordion>
 
-<a id="v1beta1-failoverspec"></a>
-<Accordion title="FailoverSpec">
+<Accordion id="v1beta1-failoverspec" title="FailoverSpec">
 FailoverSpec configures active-passive failover for a worker component.
 The main container is cloned into two engine containers (active + standby)
 sharing GPUs via DRA, and the standby acquires the flock when the active
@@ -3282,16 +3230,16 @@ numShadows is the number of shadow (standby) engine containers per&lt;br /&gt;ra
 </ParamField>
 </Accordion>
 
-<a id="featuresspec"></a>
-<Accordion title="FeaturesSpec">
+<Accordion id="featuresspec" title="FeaturesSpec">
 FeaturesSpec controls optional Dynamo platform features in the generated deployment.
 
 
 **Kind:** `type`
 **Appears in:** [DynamoGraphDeploymentRequestSpec](#v1beta1-dynamographdeploymentrequestspec)
 
-<ParamField path="planner" type="[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)">
+<ParamField path="planner" type="RawExtension">
 Planner contains the raw Planner configuration passed to the Planner service.&lt;br /&gt;Its schema is defined by dynamo.planner.config.planner_config.PlannerConfig.&lt;br /&gt;See https://docs.dynamo.nvidia.com/dynamo/components/planner/planner-guide#plannerconfig-reference.&lt;br /&gt;DGDR passes this object through without field-level validation; the Planner&lt;br /&gt;service validates it at startup.&lt;br /&gt;The presence of this field (non-null) enables the planner in the generated DGD.
+See [RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg).
 **Validation:** Type: object &lt;br /&gt;Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 
@@ -3302,8 +3250,7 @@ See [MockerSpec](#mockerspec).
 </ParamField>
 </Accordion>
 
-<a id="v1beta1-gmsclientpodspec"></a>
-<Accordion title="GMSClientPodSpec">
+<Accordion id="v1beta1-gmsclientpodspec" title="GMSClientPodSpec">
 GMSClientPodSpec declares an additional GMS client pod for inter-pod GMS.
 
 
@@ -3315,14 +3262,14 @@ name identifies this client pod.
 **Validation:** MaxLength: 63 &lt;br /&gt;MinLength: 1 &lt;br /&gt;Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` &lt;br /&gt;
 </ParamField>
 
-<ParamField path="podTemplate" type="[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)">
+<ParamField path="podTemplate" type="PodTemplateSpec">
 podTemplate configures the pod to run as a GMS client.
+See [PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core).
 **Validation:** Schemaless: \&#123;\&#125; &lt;br /&gt;Type: object &lt;br /&gt;
 </ParamField>
 </Accordion>
 
-<a id="v1beta1-gpumemoryservicemode"></a>
-<Accordion title="GPUMemoryServiceMode">
+<Accordion id="v1beta1-gpumemoryservicemode" title="GPUMemoryServiceMode">
 GPUMemoryServiceMode selects the GMS deployment topology.
 
 
@@ -3336,8 +3283,7 @@ GPUMemoryServiceMode selects the GMS deployment topology.
 - <Badge intent="note" minimal>InterPod</Badge> GMSModeInterPod runs GMS as rank-local pods that share GPUs through DRA.&lt;br /&gt;Extra client pod rendering is reserved for a follow-up change.&lt;br /&gt;
 </Accordion>
 
-<a id="v1beta1-gpumemoryservicespec"></a>
-<Accordion title="GPUMemoryServiceSpec">
+<Accordion id="v1beta1-gpumemoryservicespec" title="GPUMemoryServiceSpec">
 GPUMemoryServiceSpec configures the GPU Memory Service (GMS) for a
 worker component. The operator injects GMS wiring and replaces the main
 container's GPU resources with a DRA `ResourceClaim` for shared GPU access.
@@ -3370,8 +3316,7 @@ See [GMSClientPodSpec](#v1beta1-gmsclientpodspec).
 </ParamField>
 </Accordion>
 
-<a id="gpuskutype"></a>
-<Accordion title="GPUSKUType">
+<Accordion id="gpuskutype" title="GPUSKUType">
 GPUSKUType is the AIC hardware system identifier for a supported GPU.
 
 
@@ -3401,8 +3346,7 @@ GPUSKUType is the AIC hardware system identifier for a supported GPU.
 - <Badge intent="note" minimal>mi300</Badge>
 </Accordion>
 
-<a id="hardwarespec"></a>
-<Accordion title="HardwareSpec">
+<Accordion id="hardwarespec" title="HardwareSpec">
 HardwareSpec describes the GPU hardware for profiling and deployment.
 All fields are auto-detected from cluster GPU nodes when omitted
 (requires cluster-wide mode with GPU discovery enabled).
@@ -3446,8 +3390,7 @@ RDMA indicates whether the cluster has RDMA-capable networking available for Dyn
 </ParamField>
 </Accordion>
 
-<a id="v1beta1-kvtransferenforcement"></a>
-<Accordion title="KvTransferEnforcement">
+<Accordion id="v1beta1-kvtransferenforcement" title="KvTransferEnforcement">
 KvTransferEnforcement controls how the selected prefill worker's topology is
 applied to decode routing.
 
@@ -3463,8 +3406,7 @@ applied to decode routing.
 - <Badge intent="note" minimal>preferred</Badge> KvTransferEnforcementPreferred biases decode worker selection toward the&lt;br /&gt;same domain.&lt;br /&gt;
 </Accordion>
 
-<a id="v1beta1-kvtransferpolicy"></a>
-<Accordion title="KvTransferPolicy">
+<Accordion id="v1beta1-kvtransferpolicy" title="KvTransferPolicy">
 KvTransferPolicy configures topology-aware routing for KV-cache transfers
 between prefill and decode workers. This is a graph-wide concern placed
 under `spec.experimental` while the API is incubating.
@@ -3501,8 +3443,7 @@ preferredWeight is required and used only when enforcement is&lt;br /&gt;"prefer
 </ParamField>
 </Accordion>
 
-<a id="mockerspec"></a>
-<Accordion title="MockerSpec">
+<Accordion id="mockerspec" title="MockerSpec">
 MockerSpec configures the simulated (mocker) backend.
 
 
@@ -3515,8 +3456,7 @@ Enabled indicates whether to deploy mocker workers instead of real inference wor
 </ParamField>
 </Accordion>
 
-<a id="modelcachespec"></a>
-<Accordion title="ModelCacheSpec">
+<Accordion id="modelcachespec" title="ModelCacheSpec">
 ModelCacheSpec references a PVC containing pre-downloaded model weights.
 
 
@@ -3539,8 +3479,7 @@ PVCMountPath is the mount path for the PVC inside the container.
 </ParamField>
 </Accordion>
 
-<a id="v1beta1-modelreference"></a>
-<Accordion title="ModelReference">
+<Accordion id="v1beta1-modelreference" title="ModelReference">
 ModelReference identifies a model served by a component.
 When specified, a headless service is created for endpoint discovery.
 
@@ -3559,8 +3498,7 @@ revision is the model revision/version.
 </ParamField>
 </Accordion>
 
-<a id="v1beta1-multinodespec"></a>
-<Accordion title="MultinodeSpec">
+<Accordion id="v1beta1-multinodespec" title="MultinodeSpec">
 MultinodeSpec configures a multinode component.
 
 
@@ -3573,8 +3511,7 @@ nodeCount is the number of nodes to deploy for the multinode component.&lt;br /&
 </ParamField>
 </Accordion>
 
-<a id="optimizationtype"></a>
-<Accordion title="OptimizationType">
+<Accordion id="optimizationtype" title="OptimizationType">
 OptimizationType defines the optimization target for SLA-based profiling.
 
 
@@ -3589,27 +3526,27 @@ OptimizationType defines the optimization target for SLA-based profiling.
 - <Badge intent="note" minimal>throughput</Badge>
 </Accordion>
 
-<a id="overridesspec"></a>
-<Accordion title="OverridesSpec">
+<Accordion id="overridesspec" title="OverridesSpec">
 OverridesSpec allows customizing the profiling job and the generated DynamoGraphDeployment.
 
 
 **Kind:** `type`
 **Appears in:** [DynamoGraphDeploymentRequestSpec](#v1beta1-dynamographdeploymentrequestspec)
 
-<ParamField path="profilingJob" type="[JobSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#jobspec-v1-batch)">
+<ParamField path="profilingJob" type="JobSpec">
 ProfilingJob allows overriding the profiling Job specification.&lt;br /&gt;Fields set here are merged into the controller-generated Job spec.
+See [JobSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#jobspec-v1-batch).
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 
-<ParamField path="dgd" type="[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)">
+<ParamField path="dgd" type="RawExtension">
 DGD allows providing a full or partial nvidia.com/v1alpha1 DynamoGraphDeployment&lt;br /&gt;to use as the base for the generated deployment. Fields from profiling results&lt;br /&gt;are merged on top. Use this to override backend worker images.&lt;br /&gt;The field is stored as a raw embedded resource rather than a typed&lt;br /&gt;*v1alpha1.DynamoGraphDeployment to avoid a circular import: v1alpha1 already&lt;br /&gt;imports v1beta1 as the conversion hub and Go does not allow import cycles.&lt;br /&gt;The EmbeddedResource marker tells the API server to validate that the value is a&lt;br /&gt;well-formed Kubernetes object (has apiVersion/kind), but does not enforce that it&lt;br /&gt;is specifically a DynamoGraphDeployment. Full type validation (correct apiVersion,&lt;br /&gt;kind, and field schema) is performed by the controller during reconciliation.
+See [RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg).
 **Validation:** EmbeddedResource: \&#123;\&#125; &lt;br /&gt;Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 </Accordion>
 
-<a id="paretoconfig"></a>
-<Accordion title="ParetoConfig">
+<Accordion id="paretoconfig" title="ParetoConfig">
 ParetoConfig represents a single Pareto-optimal deployment configuration
 discovered during profiling.
 
@@ -3617,14 +3554,14 @@ discovered during profiling.
 **Kind:** `type`
 **Appears in:** [ProfilingResultsStatus](#profilingresultsstatus)
 
-<ParamField path="config" type="[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)">
+<ParamField path="config" type="RawExtension">
 Config is the full deployment configuration for this Pareto point.
+See [RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg).
 **Validation:** Type: object &lt;br /&gt;
 </ParamField>
 </Accordion>
 
-<a id="profilingphase"></a>
-<Accordion title="ProfilingPhase">
+<Accordion id="profilingphase" title="ProfilingPhase">
 ProfilingPhase represents a sub-phase within the profiling pipeline.
 When the DGDR Phase is "Profiling", this value indicates which step
 of the profiling pipeline is currently executing.
@@ -3646,8 +3583,7 @@ of the profiling pipeline is currently executing.
 - <Badge intent="note" minimal>Done</Badge> Profiling pipeline finished successfully.&lt;br /&gt;
 </Accordion>
 
-<a id="profilingresultsstatus"></a>
-<Accordion title="ProfilingResultsStatus">
+<Accordion id="profilingresultsstatus" title="ProfilingResultsStatus">
 ProfilingResultsStatus contains the output of the profiling process.
 
 
@@ -3660,14 +3596,14 @@ See [ParetoConfig](#paretoconfig).
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 
-<ParamField path="selectedConfig" type="[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)">
+<ParamField path="selectedConfig" type="RawExtension">
 SelectedConfig is the recommended configuration chosen by the profiler&lt;br /&gt;based on the SLA targets. This is the configuration used for deployment&lt;br /&gt;when autoApply is true.
+See [RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg).
 **Validation:** Type: object &lt;br /&gt;Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 </Accordion>
 
-<a id="v1beta1-restart"></a>
-<Accordion title="Restart">
+<Accordion id="v1beta1-restart" title="Restart">
 Restart specifies the restart policy for a graph deployment.
 
 
@@ -3686,8 +3622,7 @@ See [RestartStrategy](#v1beta1-restartstrategy).
 </ParamField>
 </Accordion>
 
-<a id="v1beta1-restartphase"></a>
-<Accordion title="RestartPhase">
+<Accordion id="v1beta1-restartphase" title="RestartPhase">
 RestartPhase enumerates phases of a graph-level restart.
 
 
@@ -3704,8 +3639,7 @@ RestartPhase enumerates phases of a graph-level restart.
 - <Badge intent="note" minimal>Superseded</Badge>
 </Accordion>
 
-<a id="v1beta1-restartstatus"></a>
-<Accordion title="RestartStatus">
+<Accordion id="v1beta1-restartstatus" title="RestartStatus">
 RestartStatus contains the status of a graph-level restart.
 
 
@@ -3727,8 +3661,7 @@ inProgress contains the names of the components currently being restarted.
 </ParamField>
 </Accordion>
 
-<a id="v1beta1-restartstrategy"></a>
-<Accordion title="RestartStrategy">
+<Accordion id="v1beta1-restartstrategy" title="RestartStrategy">
 RestartStrategy defines how components are restarted.
 
 
@@ -3747,8 +3680,7 @@ order is the complete ordered set of component names for sequential&lt;br /&gt;r
 </ParamField>
 </Accordion>
 
-<a id="v1beta1-restartstrategytype"></a>
-<Accordion title="RestartStrategyType">
+<Accordion id="v1beta1-restartstrategytype" title="RestartStrategyType">
 RestartStrategyType enumerates restart strategies.
 
 
@@ -3762,8 +3694,7 @@ RestartStrategyType enumerates restart strategies.
 - <Badge intent="note" minimal>Parallel</Badge>
 </Accordion>
 
-<a id="v1beta1-rollingupdatephase"></a>
-<Accordion title="RollingUpdatePhase">
+<Accordion id="v1beta1-rollingupdatephase" title="RollingUpdatePhase">
 RollingUpdatePhase represents the current phase of a rolling update.
 
 
@@ -3781,8 +3712,7 @@ RollingUpdatePhase represents the current phase of a rolling update.
 - <Badge intent="note" minimal>``</Badge>
 </Accordion>
 
-<a id="v1beta1-rollingupdatestatus"></a>
-<Accordion title="RollingUpdateStatus">
+<Accordion id="v1beta1-rollingupdatestatus" title="RollingUpdateStatus">
 RollingUpdateStatus tracks the progress of an operator-managed rolling update.
 
 
@@ -3795,13 +3725,15 @@ See [RollingUpdatePhase](#v1beta1-rollingupdatephase).
 **Validation:** Enum: [Pending InProgress Completed Failed ] &lt;br /&gt;Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 
-<ParamField path="startTime" type="[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)">
+<ParamField path="startTime" type="Time">
 startTime is when the rolling update began.
+See [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta).
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 
-<ParamField path="endTime" type="[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)">
+<ParamField path="endTime" type="Time">
 endTime is when the rolling update completed (successfully or failed).
+See [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta).
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 
@@ -3811,8 +3743,7 @@ updatedComponents is the list of components that have completed the&lt;br /&gt;r
 </ParamField>
 </Accordion>
 
-<a id="slaspec"></a>
-<Accordion title="SLASpec">
+<Accordion id="slaspec" title="SLASpec">
 SLASpec defines the service-level agreement targets for profiling optimization.
 
 
@@ -3841,8 +3772,7 @@ See [OptimizationType](#optimizationtype).
 </ParamField>
 </Accordion>
 
-<a id="v1beta1-scalingadapter"></a>
-<Accordion title="ScalingAdapter">
+<Accordion id="v1beta1-scalingadapter" title="ScalingAdapter">
 ScalingAdapter opts a component into using the DynamoGraphDeploymentScalingAdapter
 (DGDSA). When `scalingAdapter` is set on a component (even as an empty
 object, `scalingAdapter: {}`), the DGDSA is created and owns the `replicas`
@@ -3854,8 +3784,7 @@ the Scale subresource. Omitting the field opts the component out.
 **Appears in:** [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec), [DynamoComponentDeploymentSpec](#v1beta1-dynamocomponentdeploymentspec)
 </Accordion>
 
-<a id="searchstrategy"></a>
-<Accordion title="SearchStrategy">
+<Accordion id="searchstrategy" title="SearchStrategy">
 SearchStrategy controls the profiling search depth.
 
 
@@ -3870,8 +3799,7 @@ SearchStrategy controls the profiling search depth.
 - <Badge intent="note" minimal>thorough</Badge>
 </Accordion>
 
-<a id="v1beta1-spectopologyconstraint"></a>
-<Accordion title="SpecTopologyConstraint">
+<Accordion id="v1beta1-spectopologyconstraint" title="SpecTopologyConstraint">
 SpecTopologyConstraint defines deployment-level topology placement requirements.
 
 
@@ -3890,8 +3818,7 @@ See [TopologyDomain](#v1beta1-topologydomain).
 </ParamField>
 </Accordion>
 
-<a id="v1beta1-topologyconstraint"></a>
-<Accordion title="TopologyConstraint">
+<Accordion id="v1beta1-topologyconstraint" title="TopologyConstraint">
 TopologyConstraint defines component-level topology placement requirements.
 The topology profile is inherited from the deployment-level
 `SpecTopologyConstraint`.
@@ -3907,8 +3834,7 @@ See [TopologyDomain](#v1beta1-topologydomain).
 </ParamField>
 </Accordion>
 
-<a id="v1beta1-topologydomain"></a>
-<Accordion title="TopologyDomain">
+<Accordion id="v1beta1-topologydomain" title="TopologyDomain">
 TopologyDomain is a free-form topology level identifier.
 Common examples: "region", "zone", "datacenter", "block", "rack", "host", "numa".
 When used with a ClusterTopology CR, domain names are defined in the CR's
@@ -3922,8 +3848,7 @@ alone, the value is a user-chosen logical name for the topology level.
 **Appears in:** [KvTransferPolicy](#v1beta1-kvtransferpolicy), [SpecTopologyConstraint](#v1beta1-spectopologyconstraint), [TopologyConstraint](#v1beta1-topologyconstraint)
 </Accordion>
 
-<a id="workloadspec"></a>
-<Accordion title="WorkloadSpec">
+<Accordion id="workloadspec" title="WorkloadSpec">
 WorkloadSpec defines the workload characteristics for SLA-based profiling.
 
 
@@ -3951,7 +3876,7 @@ RequestRate is the target request rate (req/s).&lt;br /&gt;Required (or Concurre
 </ParamField>
 </Accordion>
 
-<a id="operator-config-dynamo-nvidia-com-v1alpha1"></a>
+<div id="operator-config-dynamo-nvidia-com-v1alpha1" />
 
 ## operator.config.dynamo.nvidia.com/v1alpha1
 
@@ -3961,8 +3886,7 @@ RequestRate is the target request rate (req/s).&lt;br /&gt;Required (or Concurre
 <Card title="OperatorConfiguration" href="#operatorconfiguration" />
 </CardGroup>
 
-<a id="certprovisionmode"></a>
-<Accordion title="CertProvisionMode">
+<Accordion id="certprovisionmode" title="CertProvisionMode">
 CertProvisionMode controls how webhook TLS certificates are managed.
 
 
@@ -3976,8 +3900,7 @@ CertProvisionMode controls how webhook TLS certificates are managed.
 - <Badge intent="note" minimal>manual</Badge> CertProvisionModeManual expects certificates to be provided externally (e.g., cert-manager, admin).&lt;br /&gt;
 </Accordion>
 
-<a id="checkpointconfiguration"></a>
-<Accordion title="CheckpointConfiguration">
+<Accordion id="checkpointconfiguration" title="CheckpointConfiguration">
 CheckpointConfiguration holds checkpoint/restore settings.
 
 
@@ -4003,8 +3926,7 @@ CleanupImage is the image used by best-effort artifact cleanup Jobs for&lt;br /&
 </ParamField>
 </Accordion>
 
-<a id="checkpointociconfig"></a>
-<Accordion title="CheckpointOCIConfig">
+<Accordion id="checkpointociconfig" title="CheckpointOCIConfig">
 Deprecated: CheckpointOCIConfig is retained for compatibility and ignored by
 the current snapshot flow.
 
@@ -4021,8 +3943,7 @@ CredentialsSecretRef is the legacy docker config secret name.
 </ParamField>
 </Accordion>
 
-<a id="checkpointpvcconfig"></a>
-<Accordion title="CheckpointPVCConfig">
+<Accordion id="checkpointpvcconfig" title="CheckpointPVCConfig">
 CheckpointPVCConfig configures the namespace-local PVC mounted into
 checkpoint and restore workload pods.
 
@@ -4055,8 +3976,7 @@ AccessMode is the PVC access mode used when Create is true.
 </ParamField>
 </Accordion>
 
-<a id="checkpoints3config"></a>
-<Accordion title="CheckpointS3Config">
+<Accordion id="checkpoints3config" title="CheckpointS3Config">
 Deprecated: CheckpointS3Config is retained for compatibility and ignored by
 the current snapshot flow.
 
@@ -4073,8 +3993,7 @@ CredentialsSecretRef is the legacy credentials secret name.
 </ParamField>
 </Accordion>
 
-<a id="checkpointseccompconfiguration"></a>
-<Accordion title="CheckpointSeccompConfiguration">
+<Accordion id="checkpointseccompconfiguration" title="CheckpointSeccompConfiguration">
 CheckpointSeccompConfiguration controls the localhost seccomp profile applied
 to checkpoint and restore pods. The profile blocks io_uring syscalls (which
 CRIU cannot dump). Default behavior (zero-value substruct, or absent
@@ -4095,8 +4014,7 @@ Profile is the localhost seccomp profile path. Empty falls back to&lt;br /&gt;De
 </ParamField>
 </Accordion>
 
-<a id="checkpointstorageconfiguration"></a>
-<Accordion title="CheckpointStorageConfiguration">
+<Accordion id="checkpointstorageconfiguration" title="CheckpointStorageConfiguration">
 CheckpointStorageConfiguration configures checkpoint storage for operator
 pod mutations. Only PVC storage is implemented today.
 
@@ -4124,8 +4042,7 @@ See [CheckpointOCIConfig](#checkpointociconfig).
 </ParamField>
 </Accordion>
 
-<a id="draconfiguration"></a>
-<Accordion title="DRAConfiguration">
+<Accordion id="draconfiguration" title="DRAConfiguration">
 DRAConfiguration holds Dynamic Resource Allocation (resource.k8s.io/v1) settings.
 
 NOTE: auto-detection here only verifies that the resource.k8s.io/v1 API is
@@ -4147,8 +4064,7 @@ Enabled overrides auto-detection of the resource.k8s.io/v1 API.&lt;br /&gt;nil =
 </ParamField>
 </Accordion>
 
-<a id="discoverybackend"></a>
-<Accordion title="DiscoveryBackend">
+<Accordion id="discoverybackend" title="DiscoveryBackend">
 DiscoveryBackend is the type for the discovery backend.
 
 
@@ -4162,8 +4078,7 @@ DiscoveryBackend is the type for the discovery backend.
 - <Badge intent="note" minimal>etcd</Badge> DiscoveryBackendEtcd is the etcd discovery backend&lt;br /&gt;
 </Accordion>
 
-<a id="discoveryconfiguration"></a>
-<Accordion title="DiscoveryConfiguration">
+<Accordion id="discoveryconfiguration" title="DiscoveryConfiguration">
 DiscoveryConfiguration holds discovery backend settings.
 
 
@@ -4176,8 +4091,7 @@ See [DiscoveryBackend](#discoverybackend).
 </ParamField>
 </Accordion>
 
-<a id="gpuconfiguration"></a>
-<Accordion title="GPUConfiguration">
+<Accordion id="gpuconfiguration" title="GPUConfiguration">
 GPUConfiguration holds GPU discovery settings.
 
 
@@ -4189,8 +4103,7 @@ DiscoveryEnabled indicates whether GPU discovery is enabled
 </ParamField>
 </Accordion>
 
-<a id="groveconfiguration"></a>
-<Accordion title="GroveConfiguration">
+<Accordion id="groveconfiguration" title="GroveConfiguration">
 GroveConfiguration holds Grove orchestrator settings.
 
 
@@ -4201,13 +4114,13 @@ GroveConfiguration holds Grove orchestrator settings.
 Enabled overrides auto-detection. nil = auto-detect.
 </ParamField>
 
-<ParamField path="terminationDelay" type="[Duration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#duration-v1-meta)" default="15m">
+<ParamField path="terminationDelay" type="Duration" default="15m">
 TerminationDelay configures the termination delay for Grove PodCliqueSets
+See [Duration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#duration-v1-meta).
 </ParamField>
 </Accordion>
 
-<a id="infrastructureconfiguration"></a>
-<Accordion title="InfrastructureConfiguration">
+<Accordion id="infrastructureconfiguration" title="InfrastructureConfiguration">
 InfrastructureConfiguration holds service mesh and backend addresses.
 
 
@@ -4231,8 +4144,7 @@ PrometheusEndpoint is the URL of the Prometheus endpoint to use for metrics
 </ParamField>
 </Accordion>
 
-<a id="ingressconfiguration"></a>
-<Accordion title="IngressConfiguration">
+<Accordion id="ingressconfiguration" title="IngressConfiguration">
 IngressConfiguration holds ingress settings.
 
 
@@ -4256,8 +4168,7 @@ HostSuffix is the suffix for ingress hostnames
 </ParamField>
 </Accordion>
 
-<a id="istiomeshconfiguration"></a>
-<Accordion title="IstioMeshConfiguration">
+<Accordion id="istiomeshconfiguration" title="IstioMeshConfiguration">
 IstioMeshConfiguration holds Istio-specific mesh settings.
 
 
@@ -4285,8 +4196,7 @@ CaCertificates is the optional path (in the istio-proxy sidecar's&lt;br /&gt;fil
 </ParamField>
 </Accordion>
 
-<a id="kaischedulerconfiguration"></a>
-<Accordion title="KaiSchedulerConfiguration">
+<Accordion id="kaischedulerconfiguration" title="KaiSchedulerConfiguration">
 KaiSchedulerConfiguration holds Kai-scheduler settings.
 
 
@@ -4298,8 +4208,7 @@ Enabled overrides auto-detection. nil = auto-detect.
 </ParamField>
 </Accordion>
 
-<a id="lwsconfiguration"></a>
-<Accordion title="LWSConfiguration">
+<Accordion id="lwsconfiguration" title="LWSConfiguration">
 LWSConfiguration holds LWS orchestrator settings.
 
 
@@ -4311,8 +4220,7 @@ Enabled overrides auto-detection. nil = auto-detect.
 </ParamField>
 </Accordion>
 
-<a id="leaderelectionconfiguration"></a>
-<Accordion title="LeaderElectionConfiguration">
+<Accordion id="leaderelectionconfiguration" title="LeaderElectionConfiguration">
 LeaderElectionConfiguration holds leader election settings.
 
 
@@ -4332,8 +4240,7 @@ Namespace is the namespace for the leader election resource
 </ParamField>
 </Accordion>
 
-<a id="loggingconfiguration"></a>
-<Accordion title="LoggingConfiguration">
+<Accordion id="loggingconfiguration" title="LoggingConfiguration">
 LoggingConfiguration holds logging settings.
 
 
@@ -4349,8 +4256,7 @@ Format is the log format (e.g., "json", "text")
 </ParamField>
 </Accordion>
 
-<a id="mpiconfiguration"></a>
-<Accordion title="MPIConfiguration">
+<Accordion id="mpiconfiguration" title="MPIConfiguration">
 MPIConfiguration holds MPI SSH secret settings.
 
 
@@ -4366,8 +4272,7 @@ SSHSecretNamespace is the namespace where the MPI SSH secret is located
 </ParamField>
 </Accordion>
 
-<a id="metricsserver"></a>
-<Accordion title="MetricsServer">
+<Accordion id="metricsserver" title="MetricsServer">
 MetricsServer extends Server with secure serving option.
 
 
@@ -4387,8 +4292,7 @@ Secure enables secure serving for the metrics endpoint.&lt;br /&gt;nil = default
 </ParamField>
 </Accordion>
 
-<a id="namespaceconfiguration"></a>
-<Accordion title="NamespaceConfiguration">
+<Accordion id="namespaceconfiguration" title="NamespaceConfiguration">
 NamespaceConfiguration determines operator namespace mode.
 
 
@@ -4405,8 +4309,7 @@ See [NamespaceScopeConfiguration](#namespacescopeconfiguration).
 </ParamField>
 </Accordion>
 
-<a id="namespacescopeconfiguration"></a>
-<Accordion title="NamespaceScopeConfiguration">
+<Accordion id="namespacescopeconfiguration" title="NamespaceScopeConfiguration">
 Deprecated: NamespaceScopeConfiguration is used only by the deprecated namespace-restricted
 mode and will be removed in a future release.
 
@@ -4414,17 +4317,18 @@ mode and will be removed in a future release.
 **Kind:** `type`
 **Appears in:** [NamespaceConfiguration](#namespaceconfiguration)
 
-<ParamField path="leaseDuration" type="[Duration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#duration-v1-meta)" default="30s">
+<ParamField path="leaseDuration" type="Duration" default="30s">
 LeaseDuration is the duration of namespace scope marker lease before expiration
+See [Duration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#duration-v1-meta).
 </ParamField>
 
-<ParamField path="leaseRenewInterval" type="[Duration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#duration-v1-meta)" default="10s">
+<ParamField path="leaseRenewInterval" type="Duration" default="10s">
 LeaseRenewInterval is the interval for renewing namespace scope marker lease
+See [Duration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#duration-v1-meta).
 </ParamField>
 </Accordion>
 
-<a id="operatorconfiguration"></a>
-<Accordion title="OperatorConfiguration">
+<Accordion id="operatorconfiguration" title="OperatorConfiguration">
 OperatorConfiguration is the Schema for the operator configuration.
 
 
@@ -4514,8 +4418,7 @@ See [SecurityConfiguration](#securityconfiguration).
 </ParamField>
 </Accordion>
 
-<a id="orchestratorconfiguration"></a>
-<Accordion title="OrchestratorConfiguration">
+<Accordion id="orchestratorconfiguration" title="OrchestratorConfiguration">
 OrchestratorConfiguration holds orchestrator override settings.
 
 
@@ -4538,8 +4441,7 @@ See [KaiSchedulerConfiguration](#kaischedulerconfiguration).
 </ParamField>
 </Accordion>
 
-<a id="rbacconfiguration"></a>
-<Accordion title="RBACConfiguration">
+<Accordion id="rbacconfiguration" title="RBACConfiguration">
 RBACConfiguration holds RBAC settings for cluster-wide mode.
 
 
@@ -4559,8 +4461,7 @@ EPPClusterRoleName is the ClusterRole for EPP
 </ParamField>
 </Accordion>
 
-<a id="securityconfiguration"></a>
-<Accordion title="SecurityConfiguration">
+<Accordion id="securityconfiguration" title="SecurityConfiguration">
 SecurityConfiguration holds HTTP/2 and TLS settings.
 
 
@@ -4572,8 +4473,7 @@ EnableHTTP2 enables HTTP/2 for metrics and webhook servers
 </ParamField>
 </Accordion>
 
-<a id="server"></a>
-<Accordion title="Server">
+<Accordion id="server" title="Server">
 Server holds a bind address and port.
 
 
@@ -4589,8 +4489,7 @@ Port is the port the server listens on
 </ParamField>
 </Accordion>
 
-<a id="serverconfiguration"></a>
-<Accordion title="ServerConfiguration">
+<Accordion id="serverconfiguration" title="ServerConfiguration">
 ServerConfiguration holds server bind addresses and ports.
 
 
@@ -4613,8 +4512,7 @@ See [WebhookServer](#webhookserver).
 </ParamField>
 </Accordion>
 
-<a id="servicemeshconfiguration"></a>
-<Accordion title="ServiceMeshConfiguration">
+<Accordion id="servicemeshconfiguration" title="ServiceMeshConfiguration">
 ServiceMeshConfiguration holds service mesh integration settings.
 The operator uses this to generate mesh-specific resources (e.g., Istio
 DestinationRules) for EPP components so that sidecar proxies connect
@@ -4634,8 +4532,7 @@ See [IstioMeshConfiguration](#istiomeshconfiguration).
 </ParamField>
 </Accordion>
 
-<a id="webhookserver"></a>
-<Accordion title="WebhookServer">
+<Accordion id="webhookserver" title="WebhookServer">
 WebhookServer extends Server with host and certificate directory.
 
 

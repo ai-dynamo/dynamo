@@ -9,8 +9,7 @@ subtitle: Scaling connectors, decision types, and Planner configuration.
 
 `dynamo.planner` publishes 30 classes and 0 functions. Source: [`components/src/dynamo/planner/__init__.py`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/__init__.py)
 
-<a id="api-dynamo-planner-errors-backendframeworkinvaliderror"></a>
-<Accordion title="BackendFrameworkInvalidError (class)">
+<Accordion id="api-dynamo-planner-errors-backendframeworkinvaliderror" title="BackendFrameworkInvalidError (class)">
 Raised when the backend framework does not exist.
 
 ```python
@@ -28,8 +27,7 @@ BackendFrameworkInvalidError(backend_framework: str)
 - `__init__(backend_framework: str)` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/errors.py#L133))
 </Accordion>
 
-<a id="api-dynamo-planner-errors-backendframeworknotfounderror"></a>
-<Accordion title="BackendFrameworkNotFoundError (class)">
+<Accordion id="api-dynamo-planner-errors-backendframeworknotfounderror" title="BackendFrameworkNotFoundError (class)">
 Raised when the backend framework is not supported.
 
 ```python
@@ -47,8 +45,7 @@ BackendFrameworkNotFoundError()
 - `__init__()` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/errors.py#L122))
 </Accordion>
 
-<a id="api-dynamo-planner-errors-componenterror"></a>
-<Accordion title="ComponentError (class)">
+<Accordion id="api-dynamo-planner-errors-componenterror" title="ComponentError (class)">
 Base class for component type configuration issues.
 
 ```python
@@ -58,8 +55,7 @@ from dynamo.planner.errors import ComponentError
 [`components/src/dynamo/planner/errors.py#L71`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/errors.py#L71)
 </Accordion>
 
-<a id="api-dynamo-planner-errors-deploymentmodelnamemismatcherror"></a>
-<Accordion title="DeploymentModelNameMismatchError (class)">
+<Accordion id="api-dynamo-planner-errors-deploymentmodelnamemismatcherror" title="DeploymentModelNameMismatchError (class)">
 Raised when the model name is not the same in the deployment
 
 ```python
@@ -77,8 +73,7 @@ DeploymentModelNameMismatchError(prefill_model_name: str, decode_model_name: str
 - `__init__(prefill_model_name: str, decode_model_name: str)` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/errors.py#L92))
 </Accordion>
 
-<a id="api-dynamo-planner-errors-deploymentvalidationerror"></a>
-<Accordion title="DeploymentValidationError (class)">
+<Accordion id="api-dynamo-planner-errors-deploymentvalidationerror" title="DeploymentValidationError (class)">
 Raised when deployment validation fails for multiple components.
 
 ```python
@@ -96,8 +91,7 @@ DeploymentValidationError(errors: List[str])
 - `__init__(errors: List[str])` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/errors.py#L193))
 </Accordion>
 
-<a id="api-dynamo-planner-errors-duplicatesubcomponenterror"></a>
-<Accordion title="DuplicateSubComponentError (class)">
+<Accordion id="api-dynamo-planner-errors-duplicatesubcomponenterror" title="DuplicateSubComponentError (class)">
 Raised when multiple components have the same planner role.
 
 ```python
@@ -115,8 +109,7 @@ DuplicateSubComponentError(sub_component_type: str, service_names: List[str])
 - `__init__(sub_component_type: str, service_names: List[str])` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/errors.py#L170))
 </Accordion>
 
-<a id="api-dynamo-planner-errors-dynamographdeploymentnotfounderror"></a>
-<Accordion title="DynamoGraphDeploymentNotFoundError (class)">
+<Accordion id="api-dynamo-planner-errors-dynamographdeploymentnotfounderror" title="DynamoGraphDeploymentNotFoundError (class)">
 Raised when Parent DynamoGraphDeployment cannot be found.
 
 ```python
@@ -134,8 +127,7 @@ DynamoGraphDeploymentNotFoundError(deployment_name: str, namespace: str)
 - `__init__(deployment_name: str, namespace: str)` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/errors.py#L59))
 </Accordion>
 
-<a id="api-dynamo-planner-errors-emptytargetreplicaserror"></a>
-<Accordion title="EmptyTargetReplicasError (class)">
+<Accordion id="api-dynamo-planner-errors-emptytargetreplicaserror" title="EmptyTargetReplicasError (class)">
 Raised when target_replicas is empty or invalid.
 
 ```python
@@ -153,8 +145,7 @@ EmptyTargetReplicasError()
 - `__init__()` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/errors.py#L206))
 </Accordion>
 
-<a id="api-dynamo-planner-core-types-enginecapabilities"></a>
-<Accordion title="EngineCapabilities (class)">
+<Accordion id="api-dynamo-planner-core-types-enginecapabilities" title="EngineCapabilities (class)">
 Static capabilities for a single engine stage (prefill or decode).
 
 ```python
@@ -172,8 +163,7 @@ EngineCapabilities(num_gpu: Optional[int] = None, max_num_batched_tokens: Option
 - `__init__(num_gpu: Optional[int] = None, max_num_batched_tokens: Optional[int] = None, max_num_seqs: Optional[int] = None, context_length: Optional[int] = None, max_kv_tokens: Optional[int] = None, kv_cache_block_size: Optional[int] = None, speculative_nextn: Optional[int] = None) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/types.py))
 </Accordion>
 
-<a id="api-dynamo-planner-core-types-fpmobservations"></a>
-<Accordion title="FpmObservations (class)">
+<Accordion id="api-dynamo-planner-core-types-fpmobservations" title="FpmObservations (class)">
 Per-engine ForwardPassMetrics keyed by (worker_id, dp_rank).
 
 ```python
@@ -191,8 +181,7 @@ FpmObservations(prefill: Optional[dict[tuple[str, int], ForwardPassMetrics]] = N
 - `__init__(prefill: Optional[dict[tuple[str, int], ForwardPassMetrics]] = None, decode: Optional[dict[tuple[str, int], ForwardPassMetrics]] = None) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/types.py))
 </Accordion>
 
-<a id="api-dynamo-planner-connectors-global-planner-globalplannerconnector"></a>
-<Accordion title="GlobalPlannerConnector (class)">
+<Accordion id="api-dynamo-planner-connectors-global-planner-globalplannerconnector" title="GlobalPlannerConnector (class)">
 Connector that delegates scaling decisions to a centralized GlobalPlanner.
 
 ```python
@@ -220,8 +209,7 @@ GlobalPlannerConnector(runtime: DistributedRuntime, dynamo_namespace: str, globa
 - `get_model_name(**kwargs) -> str` — Get model name. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/global_planner.py#L334))
 </Accordion>
 
-<a id="api-dynamo-planner-connectors-kubernetes-kubernetesconnector"></a>
-<Accordion title="KubernetesConnector (class)">
+<Accordion id="api-dynamo-planner-connectors-kubernetes-kubernetesconnector" title="KubernetesConnector (class)">
 No summary available.
 
 ```python
@@ -250,8 +238,7 @@ KubernetesConnector(dynamo_namespace: str, model_name: Optional[str] = None, k8s
 - `set_component_replicas(target_replicas: list[TargetReplica], blocking: bool = True)` — Set the replicas for multiple components at once ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L560))
 </Accordion>
 
-<a id="api-dynamo-planner-errors-modelnamenotfounderror"></a>
-<Accordion title="ModelNameNotFoundError (class)">
+<Accordion id="api-dynamo-planner-errors-modelnamenotfounderror" title="ModelNameNotFoundError (class)">
 Raised when the model name is not found in the deployment
 
 ```python
@@ -269,8 +256,7 @@ ModelNameNotFoundError()
 - `__init__()` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/errors.py#L84))
 </Accordion>
 
-<a id="api-dynamo-planner-connectors-base-plannerconnector"></a>
-<Accordion title="PlannerConnector (class)">
+<Accordion id="api-dynamo-planner-connectors-base-plannerconnector" title="PlannerConnector (class)">
 No summary available.
 
 ```python
@@ -285,8 +271,7 @@ from dynamo.planner import PlannerConnector
 - `remove_component(sub_component_type: SubComponentType, blocking: bool = True) -> None` — Remove a component from the planner ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/base.py#L30))
 </Accordion>
 
-<a id="api-dynamo-planner-core-types-plannereffects"></a>
-<Accordion title="PlannerEffects (class)">
+<Accordion id="api-dynamo-planner-core-types-plannereffects" title="PlannerEffects (class)">
 What the core returns after processing a tick.
 
 ```python
@@ -304,8 +289,7 @@ PlannerEffects(scale_to: Optional[ScalingDecision] = None, next_tick: Optional[S
 - `__init__(scale_to: Optional[ScalingDecision] = None, next_tick: Optional[ScheduledTick] = None, diagnostics: TickDiagnostics = TickDiagnostics()) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/types.py))
 </Accordion>
 
-<a id="api-dynamo-planner-errors-plannererror"></a>
-<Accordion title="PlannerError (class)">
+<Accordion id="api-dynamo-planner-errors-plannererror" title="PlannerError (class)">
 Base exception for all planner-related errors.
 
 ```python
@@ -315,8 +299,7 @@ from dynamo.planner.errors import PlannerError
 [`components/src/dynamo/planner/errors.py#L41`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/errors.py#L41)
 </Accordion>
 
-<a id="api-dynamo-planner-core-state-machine-plannerscalingstate"></a>
-<Accordion title="PlannerScalingState (class)">
+<Accordion id="api-dynamo-planner-core-state-machine-plannerscalingstate" title="PlannerScalingState (class)">
 Shared in-memory scaling state for all planner modes.
 
 ```python
@@ -344,8 +327,7 @@ PlannerScalingState(config: PlannerConfig, capabilities: Optional[WorkerCapabili
 - `diagnostics() -> TickDiagnostics` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L281))
 </Accordion>
 
-<a id="api-dynamo-planner-config-defaults-slaplannerdefaults"></a>
-<Accordion title="SLAPlannerDefaults (class)">
+<Accordion id="api-dynamo-planner-config-defaults-slaplannerdefaults" title="SLAPlannerDefaults (class)">
 No summary available.
 
 ```python
@@ -355,8 +337,7 @@ from dynamo.planner import SLAPlannerDefaults
 [`components/src/dynamo/planner/config/defaults.py#L44`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/config/defaults.py#L44)
 </Accordion>
 
-<a id="api-dynamo-planner-core-types-scalingdecision"></a>
-<Accordion title="ScalingDecision (class)">
+<Accordion id="api-dynamo-planner-core-types-scalingdecision" title="ScalingDecision (class)">
 Desired replica counts.  ``None`` means the core has no opinion
 
 ```python
@@ -374,8 +355,7 @@ ScalingDecision(num_prefill: Optional[int] = None, num_decode: Optional[int] = N
 - `__init__(num_prefill: Optional[int] = None, num_decode: Optional[int] = None) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/types.py))
 </Accordion>
 
-<a id="api-dynamo-planner-core-types-scheduledtick"></a>
-<Accordion title="ScheduledTick (class)">
+<Accordion id="api-dynamo-planner-core-types-scheduledtick" title="ScheduledTick (class)">
 Declares when the core next needs to be called, what data it needs,
 
 ```python
@@ -393,8 +373,7 @@ ScheduledTick(at_s: float, run_load_scaling: bool = False, run_throughput_scalin
 - `__init__(at_s: float, run_load_scaling: bool = False, run_throughput_scaling: bool = False, need_traffic_metrics: bool = False, use_full_traffic_metrics: bool = False, traffic_metrics_duration_s: float = 0.0, need_worker_states: bool = False, need_worker_fpm: bool = False) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/types.py))
 </Accordion>
 
-<a id="api-dynamo-planner-errors-subcomponentnotfounderror"></a>
-<Accordion title="SubComponentNotFoundError (class)">
+<Accordion id="api-dynamo-planner-errors-subcomponentnotfounderror" title="SubComponentNotFoundError (class)">
 Raised when a required component role is not found in the deployment.
 
 ```python
@@ -412,8 +391,7 @@ SubComponentNotFoundError(sub_component_type: str)
 - `__init__(sub_component_type: str)` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/errors.py#L147))
 </Accordion>
 
-<a id="api-dynamo-planner-config-defaults-subcomponenttype"></a>
-<Accordion title="SubComponentType (class)">
+<Accordion id="api-dynamo-planner-config-defaults-subcomponenttype" title="SubComponentType (class)">
 No summary available.
 
 ```python
@@ -423,8 +401,7 @@ from dynamo.planner import SubComponentType
 [`components/src/dynamo/planner/config/defaults.py#L106`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/config/defaults.py#L106)
 </Accordion>
 
-<a id="api-dynamo-planner-config-defaults-targetreplica"></a>
-<Accordion title="TargetReplica (class)">
+<Accordion id="api-dynamo-planner-config-defaults-targetreplica" title="TargetReplica (class)">
 No summary available.
 
 ```python
@@ -434,8 +411,7 @@ from dynamo.planner import TargetReplica
 [`components/src/dynamo/planner/config/defaults.py#L111`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/config/defaults.py#L111)
 </Accordion>
 
-<a id="api-dynamo-planner-core-types-tickinput"></a>
-<Accordion title="TickInput (class)">
+<Accordion id="api-dynamo-planner-core-types-tickinput" title="TickInput (class)">
 What the adapter provides to the core on each tick.
 
 ```python
@@ -453,8 +429,7 @@ TickInput(now_s: float, traffic: Optional[TrafficObservation] = None, worker_cou
 - `__init__(now_s: float, traffic: Optional[TrafficObservation] = None, worker_counts: Optional[WorkerCounts] = None, fpm_observations: Optional[FpmObservations] = None) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/types.py))
 </Accordion>
 
-<a id="api-dynamo-planner-core-types-trafficobservation"></a>
-<Accordion title="TrafficObservation (class)">
+<Accordion id="api-dynamo-planner-core-types-trafficobservation" title="TrafficObservation (class)">
 Aggregated traffic metrics over an observation window.
 
 ```python
@@ -472,8 +447,7 @@ TrafficObservation(duration_s: float, num_req: float, isl: float, osl: float, kv
 - `__init__(duration_s: float, num_req: float, isl: float, osl: float, kv_hit_rate: Optional[float] = None, accept_length: Optional[float] = None) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/types.py))
 </Accordion>
 
-<a id="api-dynamo-planner-errors-userprovidedmodelnamemismatcherror"></a>
-<Accordion title="UserProvidedModelNameMismatchError (class)">
+<Accordion id="api-dynamo-planner-errors-userprovidedmodelnamemismatcherror" title="UserProvidedModelNameMismatchError (class)">
 Raised when the model name is not the same as the user provided model name
 
 ```python
@@ -491,8 +465,7 @@ UserProvidedModelNameMismatchError(model_name: str, user_provided_model_name: st
 - `__init__(model_name: str, user_provided_model_name: str)` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/errors.py#L107))
 </Accordion>
 
-<a id="api-dynamo-planner-connectors-virtual-virtualconnector"></a>
-<Accordion title="VirtualConnector (class)">
+<Accordion id="api-dynamo-planner-connectors-virtual-virtualconnector" title="VirtualConnector (class)">
 This is a virtual connector for planner to output scaling decisions to non-native environments
 
 ```python
@@ -518,8 +491,7 @@ VirtualConnector(runtime: DistributedRuntime, dynamo_namespace: str, model_name:
 - `get_model_name(require_prefill: bool = True, require_decode: bool = True) -> str` — Get the model name from the deployment ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/virtual.py#L230))
 </Accordion>
 
-<a id="api-dynamo-planner-core-types-workercapabilities"></a>
-<Accordion title="WorkerCapabilities (class)">
+<Accordion id="api-dynamo-planner-core-types-workercapabilities" title="WorkerCapabilities (class)">
 Static per-engine capabilities discovered at startup from MDC.
 
 ```python
@@ -537,8 +509,7 @@ WorkerCapabilities(prefill: Optional[EngineCapabilities] = None, decode: Optiona
 - `__init__(prefill: Optional[EngineCapabilities] = None, decode: Optional[EngineCapabilities] = None) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/types.py))
 </Accordion>
 
-<a id="api-dynamo-planner-core-types-workercounts"></a>
-<Accordion title="WorkerCounts (class)">
+<Accordion id="api-dynamo-planner-core-types-workercounts" title="WorkerCounts (class)">
 Current worker inventory as reported by the adapter.
 
 ```python
@@ -556,8 +527,7 @@ WorkerCounts(ready_num_prefill: Optional[int] = None, ready_num_decode: Optional
 - `__init__(ready_num_prefill: Optional[int] = None, ready_num_decode: Optional[int] = None, expected_num_prefill: Optional[int] = None, expected_num_decode: Optional[int] = None, prefill_scaling_in_progress: bool = False, decode_scaling_in_progress: bool = False) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/types.py))
 </Accordion>
 
-<a id="api-dynamo-planner-monitoring-worker-info-workerinfo"></a>
-<Accordion title="WorkerInfo (class)">
+<Accordion id="api-dynamo-planner-monitoring-worker-info-workerinfo" title="WorkerInfo (class)">
 Consolidated worker metadata for the planner.
 
 ```python

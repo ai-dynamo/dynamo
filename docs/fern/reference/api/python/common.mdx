@@ -9,8 +9,7 @@ subtitle: Shared configuration groups, storage adapters, and utility helpers.
 
 `dynamo.common` publishes 49 classes and 24 functions. Source: [`components/src/dynamo/common/__init__.py`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/__init__.py)
 
-<a id="api-dynamo-common-multimodal-embedding-transfer-abstractembeddingreceiver"></a>
-<Accordion title="AbstractEmbeddingReceiver (class)">
+<Accordion id="api-dynamo-common-multimodal-embedding-transfer-abstractembeddingreceiver" title="AbstractEmbeddingReceiver (class)">
 Abstract base class for a receiver of precomputed embeddings from the encode worker.
 
 ```python
@@ -25,8 +24,7 @@ from dynamo.common.multimodal import AbstractEmbeddingReceiver
 - `release_tensor(tensor_id: int) -> None` — Abstract method to indicate that the tensor associated with the ID is no longer in use. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L104))
 </Accordion>
 
-<a id="api-dynamo-common-multimodal-embedding-transfer-abstractembeddingsender"></a>
-<Accordion title="AbstractEmbeddingSender (class)">
+<Accordion id="api-dynamo-common-multimodal-embedding-transfer-abstractembeddingsender" title="AbstractEmbeddingSender (class)">
 Abstract base class for a sender of precomputed embeddings to the downstream worker.
 
 ```python
@@ -40,8 +38,7 @@ from dynamo.common.multimodal import AbstractEmbeddingSender
 - `send_embeddings(embeddings: torch.Tensor, stage_embeddings: bool = False) -> tuple[TransferRequest, Awaitable[None]]` — Abstract method to send precomputed embeddings for a given request ID. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L119))
 </Accordion>
 
-<a id="api-dynamo-common-http-aiohttp-client-aiohttpclient"></a>
-<Accordion title="AiohttpClient (class)">
+<Accordion id="api-dynamo-common-http-aiohttp-client-aiohttpclient" title="AiohttpClient (class)">
 aiohttp-backed concrete client.
 
 ```python
@@ -60,8 +57,7 @@ AiohttpClient(config = None) -> None
 - `close() -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/aiohttp_client.py#L130))
 </Accordion>
 
-<a id="api-dynamo-common-multimodal-async-encoder-cache-asyncencodercache"></a>
-<Accordion title="AsyncEncoderCache (class)">
+<Accordion id="api-dynamo-common-multimodal-async-encoder-cache-asyncencodercache" title="AsyncEncoderCache (class)">
 Async wrapper with request coalescing over MultimodalEmbeddingCacheManager.
 
 ```python
@@ -81,8 +77,7 @@ AsyncEncoderCache(cache: MultimodalEmbeddingCacheManager)
 - `get_or_compute(key: str, compute_fn: Callable[[], Awaitable[CachedEmbedding]]) -> CachedEmbedding` — Get from cache or compute with request coalescing. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/async_encoder_cache.py#L79))
 </Accordion>
 
-<a id="api-dynamo-common-multimodal-audio-loader-audioloader"></a>
-<Accordion title="AudioLoader (class)">
+<Accordion id="api-dynamo-common-multimodal-audio-loader-audioloader" title="AudioLoader (class)">
 Async audio loader for multimodal pipelines.
 
 ```python
@@ -102,8 +97,7 @@ AudioLoader(http_timeout: float = 30.0, enable_frontend_decoding: bool = False, 
 - `load_audio_batch(audio_mm_items: List[Dict[str, Any]]) -> List[tuple[np.ndarray, float]]` — Load a batch of audio files from multimodal data items. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/audio_loader.py#L170))
 </Accordion>
 
-<a id="api-dynamo-common-backend-engine-baseengine"></a>
-<Accordion title="BaseEngine (class)">
+<Accordion id="api-dynamo-common-backend-engine-baseengine" title="BaseEngine (class)">
 Abstract base for all engines — the modality-agnostic lifecycle.
 
 ```python
@@ -130,8 +124,7 @@ from dynamo.common.backend import BaseEngine
 - `on_endpoint_ready(endpoint) -> None` — Receive the runtime serving ``Endpoint`` once, before serving begins. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L313))
 </Accordion>
 
-<a id="api-dynamo-common-backend-engine-diffusionengine"></a>
-<Accordion title="DiffusionEngine (class)">
+<Accordion id="api-dynamo-common-backend-engine-diffusionengine" title="DiffusionEngine (class)">
 A :class:`RawEngine` for diffusion-family generation (image/video via
 
 ```python
@@ -141,8 +134,7 @@ from dynamo.common.backend import DiffusionEngine
 [`components/src/dynamo/common/backend/engine.py#L410`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L410)
 </Accordion>
 
-<a id="api-dynamo-common-constants-disaggregationmode"></a>
-<Accordion title="DisaggregationMode (class)">
+<Accordion id="api-dynamo-common-constants-disaggregationmode" title="DisaggregationMode (class)">
 Disaggregation mode for LLM workers.
 
 ```python
@@ -152,8 +144,7 @@ from dynamo.common.constants import DisaggregationMode
 [`components/src/dynamo/common/constants.py#L9`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/constants.py#L9)
 </Accordion>
 
-<a id="api-dynamo-common-constants-embeddingtransfermode"></a>
-<Accordion title="EmbeddingTransferMode (class)">
+<Accordion id="api-dynamo-common-constants-embeddingtransfermode" title="EmbeddingTransferMode (class)">
 Embedding transfer mode for LLM workers.
 
 ```python
@@ -163,8 +154,7 @@ from dynamo.common.constants import EmbeddingTransferMode
 [`components/src/dynamo/common/constants.py#L18`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/constants.py#L18)
 </Accordion>
 
-<a id="api-dynamo-common-backend-engine-engineconfig"></a>
-<Accordion title="EngineConfig (class)">
+<Accordion id="api-dynamo-common-backend-engine-engineconfig" title="EngineConfig (class)">
 Registration metadata returned by an engine's :meth:`start`.
 
 ```python
@@ -182,8 +172,7 @@ EngineConfig(model: str, served_model_name: Optional[str] = None, runtime_data: 
 - `__init__(model: str, served_model_name: Optional[str] = None, runtime_data: Optional[dict[str, Any]] = None, llm: Optional[LlmRegistration] = None) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py))
 </Accordion>
 
-<a id="api-dynamo-common-engine-monitor-enginehealthmonitorconfig"></a>
-<Accordion title="EngineHealthMonitorConfig (class)">
+<Accordion id="api-dynamo-common-engine-monitor-enginehealthmonitorconfig" title="EngineHealthMonitorConfig (class)">
 No summary available.
 
 ```python
@@ -202,8 +191,7 @@ EngineHealthMonitorConfig(interval: float, check_timeout: float, shutdown_timeou
 - `__init__(interval: float, check_timeout: float, shutdown_timeout: float) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/engine_monitor.py))
 </Accordion>
 
-<a id="api-dynamo-common-forward-pass-metrics-forwardpassmetrics"></a>
-<Accordion title="ForwardPassMetrics (class)">
+<Accordion id="api-dynamo-common-forward-pass-metrics-forwardpassmetrics" title="ForwardPassMetrics (class)">
 Per-iteration metrics emitted by InstrumentedScheduler.
 
 ```python
@@ -213,8 +201,7 @@ from dynamo.common.forward_pass_metrics import ForwardPassMetrics
 [`components/src/dynamo/common/forward_pass_metrics.py#L153`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/forward_pass_metrics.py#L153)
 </Accordion>
 
-<a id="api-dynamo-common-backend-engine-generatechunk"></a>
-<Accordion title="GenerateChunk (class)">
+<Accordion id="api-dynamo-common-backend-engine-generatechunk" title="GenerateChunk (class)">
 Single chunk yielded by ``LLMEngine.generate()``.
 
 ```python
@@ -224,8 +211,7 @@ from dynamo.common.backend import GenerateChunk
 [`components/src/dynamo/common/backend/engine.py#L61`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L61)
 </Accordion>
 
-<a id="api-dynamo-common-backend-engine-generaterequest"></a>
-<Accordion title="GenerateRequest (class)">
+<Accordion id="api-dynamo-common-backend-engine-generaterequest" title="GenerateRequest (class)">
 Inbound request dict passed to ``LLMEngine.generate()``.
 
 ```python
@@ -235,8 +221,7 @@ from dynamo.common.backend import GenerateRequest
 [`components/src/dynamo/common/backend/engine.py#L35`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L35)
 </Accordion>
 
-<a id="api-dynamo-common-http-base-httpclient"></a>
-<Accordion title="HttpClient (class)">
+<Accordion id="api-dynamo-common-http-base-httpclient" title="HttpClient (class)">
 Backend-neutral HTTP client.
 
 ```python
@@ -256,8 +241,7 @@ HttpClient(config: Optional[HttpConfigBase] = None) -> None
 - `close() -> None` — Close the backend session/client. Idempotent. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/base.py#L135))
 </Accordion>
 
-<a id="api-dynamo-common-http-base-httpconnectionerror"></a>
-<Accordion title="HttpConnectionError (class)">
+<Accordion id="api-dynamo-common-http-base-httpconnectionerror" title="HttpConnectionError (class)">
 Network-layer failure: DNS, refused, reset, half-close.
 
 ```python
@@ -267,8 +251,7 @@ from dynamo.common.http import HttpConnectionError
 [`components/src/dynamo/common/http/base.py#L36`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/base.py#L36)
 </Accordion>
 
-<a id="api-dynamo-common-http-base-httperror"></a>
-<Accordion title="HttpError (class)">
+<Accordion id="api-dynamo-common-http-base-httperror" title="HttpError (class)">
 Base class for all HTTP fetch failures.
 
 ```python
@@ -278,8 +261,7 @@ from dynamo.common.http import HttpError
 [`components/src/dynamo/common/http/base.py#L28`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/base.py#L28)
 </Accordion>
 
-<a id="api-dynamo-common-http-base-httpstatuserror"></a>
-<Accordion title="HttpStatusError (class)">
+<Accordion id="api-dynamo-common-http-base-httpstatuserror" title="HttpStatusError (class)">
 Server responded with a non-2xx status.
 
 ```python
@@ -297,8 +279,7 @@ HttpStatusError(status: int, message: str, url: str) -> None
 - `__init__(status: int, message: str, url: str) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/base.py#L43))
 </Accordion>
 
-<a id="api-dynamo-common-http-base-httptimeouterror"></a>
-<Accordion title="HttpTimeoutError (class)">
+<Accordion id="api-dynamo-common-http-base-httptimeouterror" title="HttpTimeoutError (class)">
 Timeout during connect / read / pool-wait.
 
 ```python
@@ -308,8 +289,7 @@ from dynamo.common.http import HttpTimeoutError
 [`components/src/dynamo/common/http/base.py#L32`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/base.py#L32)
 </Accordion>
 
-<a id="api-dynamo-common-http-httpx-client-httpxclient"></a>
-<Accordion title="HttpxClient (class)">
+<Accordion id="api-dynamo-common-http-httpx-client-httpxclient" title="HttpxClient (class)">
 httpx-backed concrete client.
 
 ```python
@@ -328,8 +308,7 @@ HttpxClient(config = None) -> None
 - `close() -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/httpx_client.py#L153))
 </Accordion>
 
-<a id="api-dynamo-common-multimodal-image-loader-imageloader"></a>
-<Accordion title="ImageLoader (class)">
+<Accordion id="api-dynamo-common-multimodal-image-loader-imageloader" title="ImageLoader (class)">
 No summary available.
 
 ```python
@@ -349,8 +328,7 @@ ImageLoader(cache_size: int = CACHE_SIZE_MAXIMUM, http_timeout: float = 30.0, en
 - `load_image_batch(image_mm_items: List[Dict[str, Any]]) -> List[Any]` — Load a batch of images from multimodal data items. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/image_loader.py#L235))
 </Accordion>
 
-<a id="api-dynamo-common-backend-engine-llmengine"></a>
-<Accordion title="LLMEngine (class)">
+<Accordion id="api-dynamo-common-backend-engine-llmengine" title="LLMEngine (class)">
 Abstract base for token-based inference engines (vLLM, SGLang, TRT-LLM).
 
 ```python
@@ -366,8 +344,7 @@ from dynamo.common.backend import LLMEngine
 - `logits_processor_spec() -> 'LogitsProcessorSpec | None'` — Engine-declared logits-processor activation. Default returns ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L351))
 </Accordion>
 
-<a id="api-dynamo-common-backend-engine-llmregistration"></a>
-<Accordion title="LlmRegistration (class)">
+<Accordion id="api-dynamo-common-backend-engine-llmregistration" title="LlmRegistration (class)">
 Token-pipeline registration metadata (KV cache, data-parallel layout,
 
 ```python
@@ -385,8 +362,7 @@ LlmRegistration(context_length: Optional[int] = None, kv_cache_block_size: Optio
 - `__init__(context_length: Optional[int] = None, kv_cache_block_size: Optional[int] = None, total_kv_blocks: Optional[int] = None, max_num_seqs: Optional[int] = None, max_num_batched_tokens: Optional[int] = None, data_parallel_size: Optional[int] = None, data_parallel_start_rank: Optional[int] = None, bootstrap_host: Optional[str] = None, bootstrap_port: Optional[int] = None) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py))
 </Accordion>
 
-<a id="api-dynamo-common-lora-manager-lorainfo"></a>
-<Accordion title="LoRAInfo (class)">
+<Accordion id="api-dynamo-common-lora-manager-lorainfo" title="LoRAInfo (class)">
 Metadata for a loaded LoRA adapter.
 
 ```python
@@ -404,8 +380,7 @@ LoRAInfo(id: int, path: str) -> None
 - `__init__(id: int, path: str) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/lora/manager.py))
 </Accordion>
 
-<a id="api-dynamo-common-lora-manager-loramanager"></a>
-<Accordion title="LoRAManager (class)">
+<Accordion id="api-dynamo-common-lora-manager-loramanager" title="LoRAManager (class)">
 Minimal Python wrapper around Rust core with extension points.
 
 ```python
@@ -426,8 +401,7 @@ LoRAManager(cache_path: Optional[Path] = None)
 - `is_cached(lora_uri: str) -> bool` — Check if LoRA is already cached locally. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/lora/manager.py#L113))
 </Accordion>
 
-<a id="api-dynamo-common-lora-manager-lorasourceprotocol"></a>
-<Accordion title="LoRASourceProtocol (class)">
+<Accordion id="api-dynamo-common-lora-manager-lorasourceprotocol" title="LoRASourceProtocol (class)">
 Protocol for custom Python LoRA sources.
 
 ```python
@@ -442,8 +416,7 @@ from dynamo.common.lora import LoRASourceProtocol
 - `exists(lora_uri: str) -> bool` — Check if LoRA exists in this source ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/lora/manager.py#L31))
 </Accordion>
 
-<a id="api-dynamo-common-multimodal-embedding-transfer-localembeddingreceiver"></a>
-<Accordion title="LocalEmbeddingReceiver (class)">
+<Accordion id="api-dynamo-common-multimodal-embedding-transfer-localembeddingreceiver" title="LocalEmbeddingReceiver (class)">
 Receiver that reads embeddings from a local file path provided in the serialized request.
 
 ```python
@@ -463,8 +436,7 @@ LocalEmbeddingReceiver()
 - `release_tensor(tensor_id: int) -> None` — Indicate that the tensor associated with the ID is no longer in use. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L235))
 </Accordion>
 
-<a id="api-dynamo-common-multimodal-embedding-transfer-localembeddingsender"></a>
-<Accordion title="LocalEmbeddingSender (class)">
+<Accordion id="api-dynamo-common-multimodal-embedding-transfer-localembeddingsender" title="LocalEmbeddingSender (class)">
 Sender that saves embeddings to a local file and sends the file path as the serialized request.
 
 ```python
@@ -484,8 +456,7 @@ LocalEmbeddingSender()
 - `send_embeddings(embeddings: torch.Tensor, stage_embeddings: bool = False) -> tuple[TransferRequest, Awaitable[None]]` — Send precomputed embeddings for a given request ID. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L168))
 </Accordion>
 
-<a id="api-dynamo-common-metadata-upload-metadatauploader"></a>
-<Accordion title="MetadataUploader (class)">
+<Accordion id="api-dynamo-common-metadata-upload-metadatauploader" title="MetadataUploader (class)">
 No summary available.
 
 ```python
@@ -506,8 +477,7 @@ MetadataUploader(url: str) -> None
 - `__init__(url: str) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/metadata_upload.py))
 </Accordion>
 
-<a id="api-dynamo-common-memory-multimodal-embedding-cache-manager-multimodalembeddingcachemanager"></a>
-<Accordion title="MultimodalEmbeddingCacheManager (class)">
+<Accordion id="api-dynamo-common-memory-multimodal-embedding-cache-manager-multimodalembeddingcachemanager" title="MultimodalEmbeddingCacheManager (class)">
 LRU cache for encoder embeddings.
 
 ```python
@@ -527,8 +497,7 @@ MultimodalEmbeddingCacheManager(capacity_bytes: int)
 - `set(key: str, entry: CachedEmbedding) -> bool` — Store a cached embedding in the cache. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/memory/multimodal_embedding_cache_manager.py#L107))
 </Accordion>
 
-<a id="api-dynamo-common-multimodal-embedding-transfer-nixlreadembeddingreceiver"></a>
-<Accordion title="NixlReadEmbeddingReceiver (class)">
+<Accordion id="api-dynamo-common-multimodal-embedding-transfer-nixlreadembeddingreceiver" title="NixlReadEmbeddingReceiver (class)">
 NIXL READ based embedding transfer receiver.
 
 ```python
@@ -548,8 +517,7 @@ NixlReadEmbeddingReceiver(embedding_hidden_size: int = 8 * 1024, max_item_mm_tok
 - `release_tensor(tensor_id: int) -> None` — Indicate that the tensor associated with the ID is no longer in use. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L942))
 </Accordion>
 
-<a id="api-dynamo-common-multimodal-embedding-transfer-nixlreadembeddingsender"></a>
-<Accordion title="NixlReadEmbeddingSender (class)">
+<Accordion id="api-dynamo-common-multimodal-embedding-transfer-nixlreadembeddingsender" title="NixlReadEmbeddingSender (class)">
 NIXL READ based embedding transfer sender.
 
 ```python
@@ -568,8 +536,7 @@ NixlReadEmbeddingSender()
 - `send_embeddings(embeddings: torch.Tensor, stage_embeddings: bool = False) -> tuple[TransferRequest, Awaitable[None]]` — Send precomputed embeddings. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L806))
 </Accordion>
 
-<a id="api-dynamo-common-multimodal-embedding-transfer-nixlwriteembeddingreceiver"></a>
-<Accordion title="NixlWriteEmbeddingReceiver (class)">
+<Accordion id="api-dynamo-common-multimodal-embedding-transfer-nixlwriteembeddingreceiver" title="NixlWriteEmbeddingReceiver (class)">
 Counter part of 'NixlWriteEmbeddingSender', see 'NixlWriteEmbeddingSender' for details.
 
 ```python
@@ -589,8 +556,7 @@ NixlWriteEmbeddingReceiver(buffer_size = 2 * 8 * 1024 * 1024 * 256 * 2)
 - `release_tensor(tensor_id: int) -> None` — Indicate that the tensor associated with the ID is no longer in use. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L784))
 </Accordion>
 
-<a id="api-dynamo-common-multimodal-embedding-transfer-nixlwriteembeddingsender"></a>
-<Accordion title="NixlWriteEmbeddingSender (class)">
+<Accordion id="api-dynamo-common-multimodal-embedding-transfer-nixlwriteembeddingsender" title="NixlWriteEmbeddingSender (class)">
 NIXL WRITE-based implementation of the embedding sender interface.
 
 ```python
@@ -609,8 +575,7 @@ NixlWriteEmbeddingSender()
 - `send_embeddings(embeddings: torch.Tensor, stage_embeddings: bool = False) -> tuple[TransferRequest, asyncio.Future]` — Send precomputed embeddings. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L587))
 </Accordion>
 
-<a id="api-dynamo-common-protocols-video-protocol-nvcreatevideorequest"></a>
-<Accordion title="NvCreateVideoRequest (class)">
+<Accordion id="api-dynamo-common-protocols-video-protocol-nvcreatevideorequest" title="NvCreateVideoRequest (class)">
 Request for video generation (/v1/videos endpoint).
 
 ```python
@@ -620,8 +585,7 @@ from dynamo.common.protocols import NvCreateVideoRequest
 [`components/src/dynamo/common/protocols/video_protocol.py#L50`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/protocols/video_protocol.py#L50)
 </Accordion>
 
-<a id="api-dynamo-common-protocols-video-protocol-nvvideosresponse"></a>
-<Accordion title="NvVideosResponse (class)">
+<Accordion id="api-dynamo-common-protocols-video-protocol-nvvideosresponse" title="NvVideosResponse (class)">
 Response structure for video generation.
 
 ```python
@@ -631,8 +595,7 @@ from dynamo.common.protocols import NvVideosResponse
 [`components/src/dynamo/common/protocols/video_protocol.py#L107`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/protocols/video_protocol.py#L107)
 </Accordion>
 
-<a id="api-dynamo-common-lora-once-oncelock"></a>
-<Accordion title="OnceLock (class)">
+<Accordion id="api-dynamo-common-lora-once-oncelock" title="OnceLock (class)">
 No summary available.
 
 ```python
@@ -652,8 +615,7 @@ OnceLock() -> None
 - `get() -> T | None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/lora/once.py#L31))
 </Accordion>
 
-<a id="api-dynamo-common-forward-pass-metrics-queuedrequestmetrics"></a>
-<Accordion title="QueuedRequestMetrics (class)">
+<Accordion id="api-dynamo-common-forward-pass-metrics-queuedrequestmetrics" title="QueuedRequestMetrics (class)">
 Metrics for requests waiting in the queue (not scheduled this iteration).
 
 ```python
@@ -663,8 +625,7 @@ from dynamo.common.forward_pass_metrics import QueuedRequestMetrics
 [`components/src/dynamo/common/forward_pass_metrics.py#L122`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/forward_pass_metrics.py#L122)
 </Accordion>
 
-<a id="api-dynamo-common-rl-admin-rladminvalidationerror"></a>
-<Accordion title="RLAdminValidationError (class)">
+<Accordion id="api-dynamo-common-rl-admin-rladminvalidationerror" title="RLAdminValidationError (class)">
 Validation error whose message can be returned directly to RL clients.
 
 ```python
@@ -674,8 +635,7 @@ from dynamo.common.rl import RLAdminValidationError
 [`components/src/dynamo/common/rl/admin.py#L21`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/rl/admin.py#L21)
 </Accordion>
 
-<a id="api-dynamo-common-rl-admin-rlrouteregistry"></a>
-<Accordion title="RLRouteRegistry (class)">
+<Accordion id="api-dynamo-common-rl-admin-rlrouteregistry" title="RLRouteRegistry (class)">
 Registry for worker RL admin route descriptors.
 
 ```python
@@ -698,8 +658,7 @@ RLRouteRegistry(runtime: Any, *, logger_: logging.Logger | None = None) -> None
 - `dispatch_stream(request: Mapping[str, Any] | None = None) -> AsyncIterator[dict[str, Any]]` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/rl/admin.py#L149))
 </Accordion>
 
-<a id="api-dynamo-common-backend-engine-rawengine"></a>
-<Accordion title="RawEngine (class)">
+<Accordion id="api-dynamo-common-backend-engine-rawengine" title="RawEngine (class)">
 Engines for raw, non-token generation (image, video, audio).
 
 ```python
@@ -713,8 +672,7 @@ from dynamo.common.backend import RawEngine
 - `generate(request: RawRequest, context: Context) -> AsyncGenerator[RawResponseChunk, None]` — Yield response object(s) for a single raw-media request. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L394))
 </Accordion>
 
-<a id="api-dynamo-common-forward-pass-metrics-scheduledrequestmetrics"></a>
-<Accordion title="ScheduledRequestMetrics (class)">
+<Accordion id="api-dynamo-common-forward-pass-metrics-scheduledrequestmetrics" title="ScheduledRequestMetrics (class)">
 Metrics for requests scheduled in this iteration
 
 ```python
@@ -724,8 +682,7 @@ from dynamo.common.forward_pass_metrics import ScheduledRequestMetrics
 [`components/src/dynamo/common/forward_pass_metrics.py#L84`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/forward_pass_metrics.py#L84)
 </Accordion>
 
-<a id="api-dynamo-common-multimodal-embedding-transfer-transferrequest"></a>
-<Accordion title="TransferRequest (class)">
+<Accordion id="api-dynamo-common-multimodal-embedding-transfer-transferrequest" title="TransferRequest (class)">
 Data class for transfer requests containing necessary information for embedding transfer.
 
 ```python
@@ -735,8 +692,7 @@ from dynamo.common.multimodal import TransferRequest
 [`components/src/dynamo/common/multimodal/embedding_transfer.py#L73`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L73)
 </Accordion>
 
-<a id="api-dynamo-common-forward-pass-metrics-unsupportedfpmversionerror"></a>
-<Accordion title="UnsupportedFpmVersionError (class)">
+<Accordion id="api-dynamo-common-forward-pass-metrics-unsupportedfpmversionerror" title="UnsupportedFpmVersionError (class)">
 Raised when a ForwardPassMetrics message has an unrecognised version.
 
 ```python
@@ -746,8 +702,7 @@ from dynamo.common.forward_pass_metrics import UnsupportedFpmVersionError
 [`components/src/dynamo/common/forward_pass_metrics.py#L200`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/forward_pass_metrics.py#L200)
 </Accordion>
 
-<a id="api-dynamo-common-protocols-video-protocol-videodata"></a>
-<Accordion title="VideoData (class)">
+<Accordion id="api-dynamo-common-protocols-video-protocol-videodata" title="VideoData (class)">
 Video data in response.
 
 ```python
@@ -757,8 +712,7 @@ from dynamo.common.protocols import VideoData
 [`components/src/dynamo/common/protocols/video_protocol.py#L91`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/protocols/video_protocol.py#L91)
 </Accordion>
 
-<a id="api-dynamo-common-multimodal-video-loader-videoloader"></a>
-<Accordion title="VideoLoader (class)">
+<Accordion id="api-dynamo-common-multimodal-video-loader-videoloader" title="VideoLoader (class)">
 No summary available.
 
 ```python
@@ -778,8 +732,7 @@ VideoLoader(http_timeout: float = 60.0, num_frames: int = NUM_FRAMES_DEFAULT, en
 - `load_video_batch(video_mm_items: List[Dict[str, Any]]) -> List[tuple[np.ndarray, Dict[str, Any]]]` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/video_loader.py#L161))
 </Accordion>
 
-<a id="api-dynamo-common-forward-pass-metrics-welfordaccumulator"></a>
-<Accordion title="WelfordAccumulator (class)">
+<Accordion id="api-dynamo-common-forward-pass-metrics-welfordaccumulator" title="WelfordAccumulator (class)">
 Welford's online algorithm for count / sum / population-variance.
 
 ```python
@@ -799,8 +752,7 @@ WelfordAccumulator() -> None
 - `variance() -> float` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/forward_pass_metrics.py#L78))
 </Accordion>
 
-<a id="api-dynamo-common-backend-worker-worker"></a>
-<Accordion title="Worker (class)">
+<Accordion id="api-dynamo-common-backend-worker-worker" title="Worker (class)">
 Drive the Rust ``Worker`` for a single engine instance.
 
 ```python
@@ -819,8 +771,7 @@ Worker(engine: BaseEngine, config: WorkerConfig)
 - `run() -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/worker.py#L193))
 </Accordion>
 
-<a id="api-dynamo-common-backend-worker-workerconfig"></a>
-<Accordion title="WorkerConfig (class)">
+<Accordion id="api-dynamo-common-backend-worker-workerconfig" title="WorkerConfig (class)">
 No summary available.
 
 ```python
@@ -839,8 +790,7 @@ WorkerConfig(namespace: str, component: str = 'backend', endpoint: str = 'genera
 - `__init__(namespace: str, component: str = 'backend', endpoint: str = 'generate', model_name: str = '', served_model_name: Optional[str] = None, model_input: ModelInput = (lambda: ModelInput.Tokens)(), endpoint_types: str = 'chat,completions', discovery_backend: str = 'etcd', request_plane: str = 'tcp', event_plane: Optional[str] = None, use_kv_events: bool = False, custom_jinja_template: Optional[str] = None, tool_call_parser: Optional[str] = None, reasoning_parser: Optional[str] = None, exclude_tools_when_tool_choice_none: bool = True, enable_local_indexer: bool = True, enable_kv_routing: bool = True, metrics_labels: list[tuple[str, str]] = list(), disaggregation_mode: DisaggregationMode = DisaggregationMode.AGGREGATED, health_check_payload: Optional[dict] = None, structural_tag_mode: str = 'off', structural_tag_scope: str = 'auto', structural_tag_schema: str = 'auto') -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/worker.py))
 </Accordion>
 
-<a id="api-dynamo-common-config-dump-config-dumper-add-config-dump-args"></a>
-<Accordion title="add_config_dump_args (function)">
+<Accordion id="api-dynamo-common-config-dump-config-dumper-add-config-dump-args" title="add_config_dump_args (function)">
 Add arguments to the parser to dump the config to a file.
 
 ```python
@@ -854,8 +804,7 @@ add_config_dump_args(parser: argparse.ArgumentParser) -> None
 [`components/src/dynamo/common/config_dump/config_dumper.py#L159`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/config_dump/config_dumper.py#L159)
 </Accordion>
 
-<a id="api-dynamo-common-http-close-http-client"></a>
-<Accordion title="close_http_client (function)">
+<Accordion id="api-dynamo-common-http-close-http-client" title="close_http_client (function)">
 Close the active singleton. Idempotent. Safe across resets.
 
 ```python
@@ -869,8 +818,7 @@ close_http_client() -> None
 [`components/src/dynamo/common/http/__init__.py#L87`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/__init__.py#L87)
 </Accordion>
 
-<a id="api-dynamo-common-forward-pass-metrics-decode"></a>
-<Accordion title="decode (function)">
+<Accordion id="api-dynamo-common-forward-pass-metrics-decode" title="decode (function)">
 Decode a ForwardPassMetrics message, returning None for unknown versions.
 
 ```python
@@ -884,8 +832,7 @@ decode(data: bytes) -> ForwardPassMetrics | None
 [`components/src/dynamo/common/forward_pass_metrics.py#L204`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/forward_pass_metrics.py#L204)
 </Accordion>
 
-<a id="api-dynamo-common-config-dump-config-dumper-dump-config"></a>
-<Accordion title="dump_config (function)">
+<Accordion id="api-dynamo-common-config-dump-config-dumper-dump-config" title="dump_config (function)">
 Dump the configuration to a file or stdout.
 
 ```python
@@ -899,8 +846,7 @@ dump_config(dump_config_to: Optional[str], config: Any) -> None
 [`components/src/dynamo/common/config_dump/config_dumper.py#L72`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/config_dump/config_dumper.py#L72)
 </Accordion>
 
-<a id="api-dynamo-common-forward-pass-metrics-encode"></a>
-<Accordion title="encode (function)">
+<Accordion id="api-dynamo-common-forward-pass-metrics-encode" title="encode (function)">
 No summary available.
 
 ```python
@@ -914,8 +860,7 @@ encode(metrics: ForwardPassMetrics) -> bytes
 [`components/src/dynamo/common/forward_pass_metrics.py#L196`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/forward_pass_metrics.py#L196)
 </Accordion>
 
-<a id="api-dynamo-common-rl-admin-env-bool"></a>
-<Accordion title="env_bool (function)">
+<Accordion id="api-dynamo-common-rl-admin-env-bool" title="env_bool (function)">
 Parse a boolean environment variable using Dynamo's common true values.
 
 ```python
@@ -929,8 +874,7 @@ env_bool(name: str, default: bool = False) -> bool
 [`components/src/dynamo/common/rl/admin.py#L25`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/rl/admin.py#L25)
 </Accordion>
 
-<a id="api-dynamo-common-http-fetch-bytes"></a>
-<Accordion title="fetch_bytes (function)">
+<Accordion id="api-dynamo-common-http-fetch-bytes" title="fetch_bytes (function)">
 Singleton-backed convenience wrapper over :meth:`HttpClient.fetch_bytes`.
 
 ```python
@@ -944,8 +888,7 @@ fetch_bytes(url, timeout, *, policy = None) -> bytes
 [`components/src/dynamo/common/http/__init__.py#L82`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/__init__.py#L82)
 </Accordion>
 
-<a id="api-dynamo-common-rl-admin-first-endpoint-response"></a>
-<Accordion title="first_endpoint_response (function)">
+<Accordion id="api-dynamo-common-rl-admin-first-endpoint-response" title="first_endpoint_response (function)">
 Return the first response from an async-generator endpoint handler.
 
 ```python
@@ -959,8 +902,7 @@ first_endpoint_response(endpoint_handler: EndpointGenerator, body: dict[str, Any
 [`components/src/dynamo/common/rl/admin.py#L33`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/rl/admin.py#L33)
 </Accordion>
 
-<a id="api-dynamo-common-config-dump-config-dumper-get-config-dump"></a>
-<Accordion title="get_config_dump (function)">
+<Accordion id="api-dynamo-common-config-dump-config-dumper-get-config-dump" title="get_config_dump (function)">
 Collect comprehensive config information about a backend instance.
 
 ```python
@@ -974,8 +916,7 @@ get_config_dump(config: Any, extra_info: Optional[Dict[str, Any]] = None) -> str
 [`components/src/dynamo/common/config_dump/config_dumper.py#L108`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/config_dump/config_dumper.py#L108)
 </Accordion>
 
-<a id="api-dynamo-common-http-get-default-client"></a>
-<Accordion title="get_default_client (function)">
+<Accordion id="api-dynamo-common-http-get-default-client" title="get_default_client (function)">
 Return the process-wide singleton client, instantiating on first call.
 
 ```python
@@ -989,8 +930,7 @@ get_default_client() -> HttpClient
 [`components/src/dynamo/common/http/__init__.py#L73`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/__init__.py#L73)
 </Accordion>
 
-<a id="api-dynamo-common-config-dump-environment-get-environment-vars"></a>
-<Accordion title="get_environment_vars (function)">
+<Accordion id="api-dynamo-common-config-dump-environment-get-environment-vars" title="get_environment_vars (function)">
 Get relevant environment variables based on prefixes.
 
 ```python
@@ -1004,8 +944,7 @@ get_environment_vars(prefixes: Optional[List[str]] = None, include_sensitive: bo
 [`components/src/dynamo/common/config_dump/environment.py#L51`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/config_dump/environment.py#L51)
 </Accordion>
 
-<a id="api-dynamo-common-storage-get-fs"></a>
-<Accordion title="get_fs (function)">
+<Accordion id="api-dynamo-common-storage-get-fs" title="get_fs (function)">
 Initialize fsspec filesystem for the given URL.
 
 ```python
@@ -1019,8 +958,7 @@ get_fs(fs_url: str) -> DirFileSystem
 [`components/src/dynamo/common/storage.py#L42`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/storage.py#L42)
 </Accordion>
 
-<a id="api-dynamo-common-config-dump-system-info-get-gpu-info"></a>
-<Accordion title="get_gpu_info (function)">
+<Accordion id="api-dynamo-common-config-dump-system-info-get-gpu-info" title="get_gpu_info (function)">
 Get GPU information if available.
 
 ```python
@@ -1034,8 +972,7 @@ get_gpu_info() -> Optional[Dict[str, Any]]
 [`components/src/dynamo/common/config_dump/system_info.py#L98`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/config_dump/system_info.py#L98)
 </Accordion>
 
-<a id="api-dynamo-common-lora-manager-get-lora-manager"></a>
-<Accordion title="get_lora_manager (function)">
+<Accordion id="api-dynamo-common-lora-manager-get-lora-manager" title="get_lora_manager (function)">
 Return the LoRAManager singleton, or None when DYN_LORA_ENABLED is unset.
 
 ```python
@@ -1049,8 +986,7 @@ get_lora_manager() -> Optional[LoRAManager]
 [`components/src/dynamo/common/lora/manager.py#L145`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/lora/manager.py#L145)
 </Accordion>
 
-<a id="api-dynamo-common-storage-get-media-url"></a>
-<Accordion title="get_media_url (function)">
+<Accordion id="api-dynamo-common-storage-get-media-url" title="get_media_url (function)">
 Build a public URL for a file stored in the media filesystem.
 
 ```python
@@ -1064,8 +1000,7 @@ get_media_url(fs: DirFileSystem, storage_path: str, base_url: Optional[str] = No
 [`components/src/dynamo/common/storage.py#L72`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/storage.py#L72)
 </Accordion>
 
-<a id="api-dynamo-common-config-dump-system-info-get-runtime-info"></a>
-<Accordion title="get_runtime_info (function)">
+<Accordion id="api-dynamo-common-config-dump-system-info-get-runtime-info" title="get_runtime_info (function)">
 Get Python runtime information.
 
 ```python
@@ -1079,8 +1014,7 @@ get_runtime_info() -> Dict[str, Any]
 [`components/src/dynamo/common/config_dump/system_info.py#L60`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/config_dump/system_info.py#L60)
 </Accordion>
 
-<a id="api-dynamo-common-config-dump-system-info-get-system-info"></a>
-<Accordion title="get_system_info (function)">
+<Accordion id="api-dynamo-common-config-dump-system-info-get-system-info" title="get_system_info (function)">
 Get comprehensive system information.
 
 ```python
@@ -1094,8 +1028,7 @@ get_system_info() -> Dict[str, Any]
 [`components/src/dynamo/common/config_dump/system_info.py#L13`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/config_dump/system_info.py#L13)
 </Accordion>
 
-<a id="api-dynamo-common-recv-forward-pass-metrics-main"></a>
-<Accordion title="main (function)">
+<Accordion id="api-dynamo-common-recv-forward-pass-metrics-main" title="main (function)">
 No summary available.
 
 ```python
@@ -1109,8 +1042,7 @@ main() -> None
 [`components/src/dynamo/common/recv_forward_pass_metrics.py#L89`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/recv_forward_pass_metrics.py#L89)
 </Accordion>
 
-<a id="api-dynamo-common-config-dump-config-dumper-register-encoder"></a>
-<Accordion title="register_encoder (function)">
+<Accordion id="api-dynamo-common-config-dump-config-dumper-register-encoder" title="register_encoder (function)">
 Decorator to register custom encoders for specific types.
 
 ```python
@@ -1124,8 +1056,7 @@ register_encoder(type_class: type) -> Any
 [`components/src/dynamo/common/config_dump/config_dumper.py#L209`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/config_dump/config_dumper.py#L209)
 </Accordion>
 
-<a id="api-dynamo-common-rl-admin-register-rl-routes"></a>
-<Accordion title="register_rl_routes (function)">
+<Accordion id="api-dynamo-common-rl-admin-register-rl-routes" title="register_rl_routes (function)">
 Register worker system routes and optionally expose route descriptors.
 
 ```python
@@ -1139,8 +1070,7 @@ register_rl_routes(runtime: Any, registry: RLRouteRegistry, routes: Mapping[str,
 [`components/src/dynamo/common/rl/admin.py#L155`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/rl/admin.py#L155)
 </Accordion>
 
-<a id="api-dynamo-common-rl-admin-require-lora-load-request"></a>
-<Accordion title="require_lora_load_request (function)">
+<Accordion id="api-dynamo-common-rl-admin-require-lora-load-request" title="require_lora_load_request (function)">
 Validate the shared URI-based LoRA load request shape.
 
 ```python
@@ -1154,8 +1084,7 @@ require_lora_load_request(request: Mapping[str, Any] | None) -> tuple[str, str]
 [`components/src/dynamo/common/rl/admin.py#L54`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/rl/admin.py#L54)
 </Accordion>
 
-<a id="api-dynamo-common-rl-admin-require-lora-unload-request"></a>
-<Accordion title="require_lora_unload_request (function)">
+<Accordion id="api-dynamo-common-rl-admin-require-lora-unload-request" title="require_lora_unload_request (function)">
 Validate the shared LoRA unload request shape.
 
 ```python
@@ -1169,8 +1098,7 @@ require_lora_unload_request(request: Mapping[str, Any] | None) -> str
 [`components/src/dynamo/common/rl/admin.py#L76`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/rl/admin.py#L76)
 </Accordion>
 
-<a id="api-dynamo-common-recv-forward-pass-metrics-run"></a>
-<Accordion title="run (function)">
+<Accordion id="api-dynamo-common-recv-forward-pass-metrics-run" title="run (function)">
 No summary available.
 
 ```python
@@ -1184,8 +1112,7 @@ run(args: argparse.Namespace) -> None
 [`components/src/dynamo/common/recv_forward_pass_metrics.py#L136`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/recv_forward_pass_metrics.py#L136)
 </Accordion>
 
-<a id="api-dynamo-common-storage-upload-to-fs"></a>
-<Accordion title="upload_to_fs (function)">
+<Accordion id="api-dynamo-common-storage-upload-to-fs" title="upload_to_fs (function)">
 Upload bytes to the media filesystem and return the public URL.
 
 ```python

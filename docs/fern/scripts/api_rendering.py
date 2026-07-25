@@ -81,12 +81,12 @@ def _module_intro(module: Module) -> str:
 def _symbol_section(symbol: Symbol) -> list[str]:
     """One anchored accordion carrying a symbol's signature and methods.
 
-    The anchor precedes the accordion so a deep link scrolls to it even while
-    the body is collapsed.
+    The explicit id keeps deep links stable: Fern's own title-derived id
+    collides for same-named symbols across submodules.
     """
+    title = mdx_attribute(f"{symbol.name} ({symbol.kind})")
     return [
-        f'<a id="{symbol_anchor(symbol)}"></a>',
-        f'<Accordion title="{mdx_attribute(f"{symbol.name} ({symbol.kind})")}">',
+        f'<Accordion id="{symbol_anchor(symbol)}" title="{title}">',
         *_symbol_body(symbol),
         "</Accordion>",
     ]

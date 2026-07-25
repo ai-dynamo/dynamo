@@ -9,8 +9,7 @@ subtitle: Custom logits processors for LLM token generation.
 
 `dynamo.logits_processing` publishes 4 classes and 0 functions. Source: [`lib/bindings/python/src/dynamo/logits_processing/__init__.py`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/logits_processing/__init__.py)
 
-<a id="api-dynamo-logits-processing-base-baselogitsprocessor"></a>
-<Accordion title="BaseLogitsProcessor (class)">
+<Accordion id="api-dynamo-logits-processing-base-baselogitsprocessor" title="BaseLogitsProcessor (class)">
 Protocol for logits processors in Dynamo.
 
 ```python
@@ -20,8 +19,7 @@ from dynamo.logits_processing import BaseLogitsProcessor
 [`lib/bindings/python/src/dynamo/logits_processing/base.py#L16`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/logits_processing/base.py#L16)
 </Accordion>
 
-<a id="api-dynamo-logits-processing-examples-forced-sequence-forcedsequencelogitsprocessor"></a>
-<Accordion title="ForcedSequenceLogitsProcessor (class)">
+<Accordion id="api-dynamo-logits-processing-examples-forced-sequence-forcedsequencelogitsprocessor" title="ForcedSequenceLogitsProcessor (class)">
 Forces the next ``len(token_ids)`` outputs, then EOS thereafter.
 
 ```python
@@ -39,8 +37,7 @@ ForcedSequenceLogitsProcessor(token_ids: Sequence[int], eos_token_id: int)
 - `__init__(token_ids: Sequence[int], eos_token_id: int)` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/logits_processing/examples/forced_sequence.py#L27))
 </Accordion>
 
-<a id="api-dynamo-logits-processing-examples-hello-world-helloworldlogitsprocessor"></a>
-<Accordion title="HelloWorldLogitsProcessor (class)">
+<Accordion id="api-dynamo-logits-processing-examples-hello-world-helloworldlogitsprocessor" title="HelloWorldLogitsProcessor (class)">
 Sample Logits Processor that always outputs a hardcoded
 
 ```python
@@ -58,8 +55,7 @@ HelloWorldLogitsProcessor(tokenizer: PreTrainedTokenizerBase)
 - `__init__(tokenizer: PreTrainedTokenizerBase)` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/logits_processing/examples/hello_world.py#L21))
 </Accordion>
 
-<a id="api-dynamo-logits-processing-examples-temperature-temperatureprocessor"></a>
-<Accordion title="TemperatureProcessor (class)">
+<Accordion id="api-dynamo-logits-processing-examples-temperature-temperatureprocessor" title="TemperatureProcessor (class)">
 Example logits processor that applies temperature scaling.
 
 ```python

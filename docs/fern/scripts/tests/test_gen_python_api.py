@@ -260,17 +260,23 @@ def test_render_module_page_wraps_every_symbol_in_an_accordion(
 
 
 @pytest.mark.parametrize("module_name", _MODULE_NAMES)
-def test_render_module_page_anchors_precede_accordions(
+def test_render_module_page_gives_each_accordion_an_explicit_id(
     modules_by_name: dict[str, api_discovery.Module],
     module_name: str,
 ) -> None:
-    """Deep links target the symbol anchor, which must sit outside the
-    collapsed region to remain a reliable scroll target."""
+    """Accordion takes the deep-link id natively.
+
+    Fern derives an id from the title when none is given, which collides for
+    same-named symbols; passing a qualname-derived id keeps them distinct. An
+    empty ``<a id>`` before the accordion would also do it, but renders as a
+    link with no text -- a real accessibility violation.
+    """
     module = modules_by_name[module_name]
     text = api_rendering.render_module_page(module)
+    assert "<a id=" not in text
     for symbol in module.symbols:
         anchor = api_rendering.symbol_anchor(symbol)
-        assert f'<a id="{anchor}"></a>\n<Accordion ' in text
+        assert f'<Accordion id="{anchor}"' in text
 
 
 @pytest.mark.parametrize("module_name", _MODULE_NAMES)

@@ -9,8 +9,7 @@ subtitle: Rust-backed distributed runtime, KV router, and endpoint bindings.
 
 `dynamo._core` publishes 71 classes and 20 functions. Source: [`lib/bindings/python/src/dynamo/_core.pyi`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi)
 
-<a id="api-dynamo-core-aicengineconfig"></a>
-<Accordion title="AicEngineConfig (class)">
+<Accordion id="api-dynamo-core-aicengineconfig" title="AicEngineConfig (class)">
 AIC model/backend identity used by native forward-pass estimates.
 
 ```python
@@ -28,8 +27,7 @@ AicEngineConfig(model_name: str, backend: str, system_name: str = 'h200_sxm', ba
 - `__init__(model_name: str, backend: str, system_name: str = 'h200_sxm', backend_version: Optional[str] = None, tp_size: int = 1, pp_size: int = 1, moe_tp_size: Optional[int] = None, moe_ep_size: Optional[int] = None, attention_dp_size: Optional[int] = None, model_arch: Optional[str] = None, weight_dtype: Optional[str] = None, moe_dtype: Optional[str] = None, activation_dtype: Optional[str] = None, kv_cache_dtype: Optional[str] = None, kv_block_size: Optional[int] = None, extra: Optional[dict[str, str]] = None) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1630))
 </Accordion>
 
-<a id="api-dynamo-core-aicperfconfig"></a>
-<Accordion title="AicPerfConfig (class)">
+<Accordion id="api-dynamo-core-aicperfconfig" title="AicPerfConfig (class)">
 No summary available.
 
 ```python
@@ -47,8 +45,7 @@ AicPerfConfig(aic_backend: str, aic_system: str, aic_model_path: str, aic_tp_siz
 - `__init__(aic_backend: str, aic_system: str, aic_model_path: str, aic_tp_size: int = 1, aic_backend_version: Optional[str] = None, aic_moe_tp_size: Optional[int] = None, aic_moe_ep_size: Optional[int] = None, aic_attention_dp_size: Optional[int] = None, aic_nextn: Optional[int] = None, aic_nextn_accept_rates: Optional[str] = None) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1612))
 </Accordion>
 
-<a id="api-dynamo-core-approxkvindexer"></a>
-<Accordion title="ApproxKvIndexer (class)">
+<Accordion id="api-dynamo-core-approxkvindexer" title="ApproxKvIndexer (class)">
 An approximate KV Indexer that doesn't receive KV cache events from workers.
 
 ```python
@@ -69,8 +66,7 @@ ApproxKvIndexer(endpoint: Endpoint, kv_block_size: int, router_ttl_secs: float =
 - `process_routing_decision_for_request(tokens: List[int], worker_id: int, dp_rank: int = 0) -> None` — Notify the indexer that a token sequence has been routed to a specific worker. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1069))
 </Accordion>
 
-<a id="api-dynamo-core-block"></a>
-<Accordion title="Block (class)">
+<Accordion id="api-dynamo-core-block" title="Block (class)">
 A KV cache block
 
 ```python
@@ -84,8 +80,7 @@ from dynamo._core import Block
 - `to_list() -> List[Layer]` — Get a list of layers ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2462))
 </Accordion>
 
-<a id="api-dynamo-core-blocklist"></a>
-<Accordion title="BlockList (class)">
+<Accordion id="api-dynamo-core-blocklist" title="BlockList (class)">
 A list of KV cache blocks
 
 ```python
@@ -99,8 +94,7 @@ from dynamo._core import BlockList
 - `to_list() -> List[Block]` — Get a list of blocks ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2512))
 </Accordion>
 
-<a id="api-dynamo-core-blockmanager"></a>
-<Accordion title="BlockManager (class)">
+<Accordion id="api-dynamo-core-blockmanager" title="BlockManager (class)">
 A KV cache block manager
 
 ```python
@@ -122,8 +116,7 @@ BlockManager(worker_id: int, num_layer: int, page_size: int, inner_dim: int, dty
 - `allocate_device_blocks(count: int) -> BlockList` — Allocate a list of device blocks ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2606))
 </Accordion>
 
-<a id="api-dynamo-core-cancelled"></a>
-<Accordion title="Cancelled (class)">
+<Accordion id="api-dynamo-core-cancelled" title="Cancelled (class)">
 The request was cancelled.
 
 ```python
@@ -133,8 +126,7 @@ from dynamo._core import Cancelled
 [`lib/bindings/python/src/dynamo/_core.pyi#L3016`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L3016)
 </Accordion>
 
-<a id="api-dynamo-core-cannotconnect"></a>
-<Accordion title="CannotConnect (class)">
+<Accordion id="api-dynamo-core-cannotconnect" title="CannotConnect (class)">
 Failed to establish a connection.
 
 ```python
@@ -144,8 +136,7 @@ from dynamo._core import CannotConnect
 [`lib/bindings/python/src/dynamo/_core.pyi#L3001`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L3001)
 </Accordion>
 
-<a id="api-dynamo-core-client"></a>
-<Accordion title="Client (class)">
+<Accordion id="api-dynamo-core-client" title="Client (class)">
 A client capable of calling served instances of an endpoint
 
 ```python
@@ -165,8 +156,7 @@ from dynamo._core import Client
 - `generate(request: JsonLike, annotated: bool | None = True, context: Context | None = None) -> AsyncIterator[JsonLike]` — Generate a response from the endpoint ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L389))
 </Accordion>
 
-<a id="api-dynamo-core-connectiontimeout"></a>
-<Accordion title="ConnectionTimeout (class)">
+<Accordion id="api-dynamo-core-connectiontimeout" title="ConnectionTimeout (class)">
 A connection or request timed out.
 
 ```python
@@ -176,8 +166,7 @@ from dynamo._core import ConnectionTimeout
 [`lib/bindings/python/src/dynamo/_core.pyi#L3011`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L3011)
 </Accordion>
 
-<a id="api-dynamo-core-context"></a>
-<Accordion title="Context (class)">
+<Accordion id="api-dynamo-core-context" title="Context (class)">
 Context wrapper around AsyncEngineContext for Python bindings.
 
 ```python
@@ -204,8 +193,7 @@ Context(id: Optional[str] = None, metadata: Optional[Dict[str, str]] = None) -> 
 - `start_span(name: str, attrs: Optional[dict[str, Any]] = None) -> SpanProxy` — Open a child span under ``engine.generate`` with a dynamic name. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L609))
 </Accordion>
 
-<a id="api-dynamo-core-contextmetadata"></a>
-<Accordion title="ContextMetadata (class)">
+<Accordion id="api-dynamo-core-contextmetadata" title="ContextMetadata (class)">
 Live mutable view over propagated context metadata.
 
 ```python
@@ -225,8 +213,7 @@ from dynamo._core import ContextMetadata
 - `copy() -> Dict[str, str]` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L474))
 </Accordion>
 
-<a id="api-dynamo-core-disconnected"></a>
-<Accordion title="Disconnected (class)">
+<Accordion id="api-dynamo-core-disconnected" title="Disconnected (class)">
 An established connection was lost.
 
 ```python
@@ -236,8 +223,7 @@ from dynamo._core import Disconnected
 [`lib/bindings/python/src/dynamo/_core.pyi#L3006`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L3006)
 </Accordion>
 
-<a id="api-dynamo-core-distributedruntime"></a>
-<Accordion title="DistributedRuntime (class)">
+<Accordion id="api-dynamo-core-distributedruntime" title="DistributedRuntime (class)">
 The runtime object for dynamo applications
 
 ```python
@@ -254,8 +240,7 @@ from dynamo._core import DistributedRuntime
 - `register_engine_route(route_name: str, callback: Callable[[dict], Awaitable[dict]]) -> None` — Register an async callback for /engine/&#123;route_name&#125; on the system status server. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L183))
 </Accordion>
 
-<a id="api-dynamo-core-dynamoexception"></a>
-<Accordion title="DynamoException (class)">
+<Accordion id="api-dynamo-core-dynamoexception" title="DynamoException (class)">
 Base exception for all Dynamo error types.
 
 ```python
@@ -265,8 +250,7 @@ from dynamo._core import DynamoException
 [`lib/bindings/python/src/dynamo/_core.pyi#L2986`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2986)
 </Accordion>
 
-<a id="api-dynamo-core-endpoint"></a>
-<Accordion title="Endpoint (class)">
+<Accordion id="api-dynamo-core-endpoint" title="Endpoint (class)">
 An Endpoint is a single API endpoint
 
 ```python
@@ -285,8 +269,7 @@ from dynamo._core import Endpoint
 - `register_endpoint_instance() -> None` — Re-register this endpoint instance to discovery. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L294))
 </Accordion>
 
-<a id="api-dynamo-core-enginecapacity"></a>
-<Accordion title="EngineCapacity (class)">
+<Accordion id="api-dynamo-core-enginecapacity" title="EngineCapacity (class)">
 Per-engine capacity result.
 
 ```python
@@ -296,8 +279,7 @@ from dynamo._core import EngineCapacity
 [`lib/bindings/python/src/dynamo/_core.pyi#L1699`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1699)
 </Accordion>
 
-<a id="api-dynamo-core-enginecapacityrequest"></a>
-<Accordion title="EngineCapacityRequest (class)">
+<Accordion id="api-dynamo-core-enginecapacityrequest" title="EngineCapacityRequest (class)">
 Request shape and SLA policy for find_engine_capacity_rps.
 
 ```python
@@ -315,8 +297,7 @@ EngineCapacityRequest(isl: int, osl: int, ttft_sla_ms: Optional[float] = None, i
 - `__init__(isl: int, osl: int, ttft_sla_ms: Optional[float] = None, itl_sla_ms: Optional[float] = None, e2e_latency_sla_ms: Optional[float] = None, kv_hit_rate: Optional[float] = None, optimization_target: OptimizationTarget = OptimizationTarget.Throughput) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1687))
 </Accordion>
 
-<a id="api-dynamo-core-engineconfig"></a>
-<Accordion title="EngineConfig (class)">
+<Accordion id="api-dynamo-core-engineconfig" title="EngineConfig (class)">
 Holds internal configuration for a Dynamo engine.
 
 ```python
@@ -326,8 +307,7 @@ from dynamo._core import EngineConfig
 [`lib/bindings/python/src/dynamo/_core.pyi#L2308`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2308)
 </Accordion>
 
-<a id="api-dynamo-core-engineperflimits"></a>
-<Accordion title="EnginePerfLimits (class)">
+<Accordion id="api-dynamo-core-engineperflimits" title="EnginePerfLimits (class)">
 Engine limits used by engine-level helper queries and default correction bounds.
 
 ```python
@@ -345,8 +325,7 @@ EnginePerfLimits(max_num_batched_tokens: int = 8192, max_num_seqs: int = 512, ma
 - `__init__(max_num_batched_tokens: int = 8192, max_num_seqs: int = 512, max_kv_tokens: int = 2000000) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1658))
 </Accordion>
 
-<a id="api-dynamo-core-engineshutdown"></a>
-<Accordion title="EngineShutdown (class)">
+<Accordion id="api-dynamo-core-engineshutdown" title="EngineShutdown (class)">
 The engine process has shut down or crashed.
 
 ```python
@@ -356,8 +335,7 @@ from dynamo._core import EngineShutdown
 [`lib/bindings/python/src/dynamo/_core.pyi#L3021`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L3021)
 </Accordion>
 
-<a id="api-dynamo-core-enginetype"></a>
-<Accordion title="EngineType (class)">
+<Accordion id="api-dynamo-core-enginetype" title="EngineType (class)">
 Engine type for Dynamo workers
 
 ```python
@@ -367,8 +345,7 @@ from dynamo._core import EngineType
 [`lib/bindings/python/src/dynamo/_core.pyi#L2864`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2864)
 </Accordion>
 
-<a id="api-dynamo-core-entrypointargs"></a>
-<Accordion title="EntrypointArgs (class)">
+<Accordion id="api-dynamo-core-entrypointargs" title="EntrypointArgs (class)">
 Settings to connect an input to a worker and run them.
 
 ```python
@@ -386,8 +363,7 @@ EntrypointArgs(engine_type: EngineType, model_path: Optional[str] = None, model_
 - `__init__(engine_type: EngineType, model_path: Optional[str] = None, model_name: Optional[str] = None, endpoint_id: Optional[str] = None, template_file: Optional[str] = None, router_config: Optional[RouterConfig] = None, kv_cache_block_size: Optional[int] = None, http_host: Optional[str] = None, http_port: Optional[int] = None, http_metrics_port: Optional[int] = None, tls_cert_path: Optional[str] = None, tls_key_path: Optional[str] = None, extra_engine_args: Optional[str] = None, mocker_engine_args: Optional[MockEngineArgs] = None, runtime_config: Optional[ModelRuntimeConfig] = None, namespace: Optional[str] = None, namespace_prefix: Optional[str] = None, is_prefill: bool = False, is_decode: bool = False, migration_limit: int = 0, chat_engine_factory: Optional[Callable] = None, aic_perf_config: Optional[AicPerfConfig] = None) -> None` — Create EntrypointArgs. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2877))
 </Accordion>
 
-<a id="api-dynamo-core-fpmdirectpublisher"></a>
-<Accordion title="FpmDirectPublisher (class)">
+<Accordion id="api-dynamo-core-fpmdirectpublisher" title="FpmDirectPublisher (class)">
 Direct Forward Pass Metrics publisher used by in-process producers such
 
 ```python
@@ -407,8 +383,7 @@ FpmDirectPublisher(endpoint: Endpoint, worker_id: str, dp_size: int = 1) -> None
 - `shutdown() -> None` — Shut down the publisher and its per-rank serialization tasks. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1255))
 </Accordion>
 
-<a id="api-dynamo-core-fpmeventrelay"></a>
-<Accordion title="FpmEventRelay (class)">
+<Accordion id="api-dynamo-core-fpmeventrelay" title="FpmEventRelay (class)">
 Relay that bridges ForwardPassMetrics from a local raw ZMQ PUB socket
 
 ```python
@@ -427,8 +402,7 @@ FpmEventRelay(endpoint: Endpoint, zmq_endpoint: str) -> None
 - `shutdown() -> None` — Shut down the relay task. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1192))
 </Accordion>
 
-<a id="api-dynamo-core-fpmeventsubscriber"></a>
-<Accordion title="FpmEventSubscriber (class)">
+<Accordion id="api-dynamo-core-fpmeventsubscriber" title="FpmEventSubscriber (class)">
 Subscriber for ForwardPassMetrics from the Dynamo event plane.
 
 ```python
@@ -451,8 +425,7 @@ FpmEventSubscriber(endpoint: Endpoint) -> None
 - `shutdown() -> None` — Shut down the subscriber (all background tasks). ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1348))
 </Accordion>
 
-<a id="api-dynamo-core-httpasyncengine"></a>
-<Accordion title="HttpAsyncEngine (class)">
+<Accordion id="api-dynamo-core-httpasyncengine" title="HttpAsyncEngine (class)">
 An async engine for a distributed Dynamo http service. This is an extension of the
 
 ```python
@@ -462,8 +435,7 @@ from dynamo._core import HttpAsyncEngine
 [`lib/bindings/python/src/dynamo/_core.pyi#L1394`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1394)
 </Accordion>
 
-<a id="api-dynamo-core-httpservice"></a>
-<Accordion title="HttpService (class)">
+<Accordion id="api-dynamo-core-httpservice" title="HttpService (class)">
 A HTTP service for dynamo applications.
 
 ```python
@@ -483,8 +455,7 @@ HttpService(port: Optional[int] = None) -> None
 - `shutdown() -> None` — Shutdown the HTTP service by cancelling its internal token. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1377))
 </Accordion>
 
-<a id="api-dynamo-core-invalidargument"></a>
-<Accordion title="InvalidArgument (class)">
+<Accordion id="api-dynamo-core-invalidargument" title="InvalidArgument (class)">
 Invalid input (e.g., prompt exceeds context length).
 
 ```python
@@ -494,8 +465,7 @@ from dynamo._core import InvalidArgument
 [`lib/bindings/python/src/dynamo/_core.pyi#L2996`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2996)
 </Accordion>
 
-<a id="api-dynamo-core-kservegrpcservice"></a>
-<Accordion title="KserveGrpcService (class)">
+<Accordion id="api-dynamo-core-kservegrpcservice" title="KserveGrpcService (class)">
 A gRPC service implementing the KServe protocol for dynamo applications.
 
 ```python
@@ -524,8 +494,7 @@ KserveGrpcService(port: Optional[int] = None, host: Optional[str] = None) -> Non
 - `shutdown() -> None` — Shutdown the KServe gRPC service by cancelling its internal token. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1535))
 </Accordion>
 
-<a id="api-dynamo-core-kveventpublisher"></a>
-<Accordion title="KvEventPublisher (class)">
+<Accordion id="api-dynamo-core-kveventpublisher" title="KvEventPublisher (class)">
 A KV event publisher will publish KV events corresponding to the component.
 
 ```python
@@ -546,8 +515,7 @@ KvEventPublisher(endpoint: Endpoint, worker_id: Optional[int] = None, kv_block_s
 - `shutdown() -> None` — Shuts down the event publisher, stopping any background tasks. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1163))
 </Accordion>
 
-<a id="api-dynamo-core-kvindexer"></a>
-<Accordion title="KvIndexer (class)">
+<Accordion id="api-dynamo-core-kvindexer" title="KvIndexer (class)">
 A KV Indexer that tracks KV Events emitted by workers. Events include add_block and remove_block.
 
 ```python
@@ -568,8 +536,7 @@ KvIndexer(endpoint: Endpoint, block_size: int) -> None
 - `block_size() -> int` — Return the block size of the KV Indexer. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1009))
 </Accordion>
 
-<a id="api-dynamo-core-kvrouter"></a>
-<Accordion title="KvRouter (class)">
+<Accordion id="api-dynamo-core-kvrouter" title="KvRouter (class)">
 A KV-aware router that performs intelligent routing based on KV cache overlap.
 
 ```python
@@ -595,8 +562,7 @@ KvRouter(endpoint: Endpoint, block_size: int, kv_router_config: KvRouterConfig, 
 - `free(request_id: str) -> None` — Free a request by its ID, signaling the router to release resources. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2847))
 </Accordion>
 
-<a id="api-dynamo-core-kvrouterconfig"></a>
-<Accordion title="KvRouterConfig (class)">
+<Accordion id="api-dynamo-core-kvrouterconfig" title="KvRouterConfig (class)">
 Values for KV router
 
 ```python
@@ -617,8 +583,7 @@ KvRouterConfig(overlap_score_weight: Optional[float] = None, host_cache_hit_weig
 - `with_overrides(overlap_score_weight: Optional[float] = None, *, overlap_score_credit: Optional[float] = None, prefill_load_scale: Optional[float] = None) -> KvRouterConfig` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1903))
 </Accordion>
 
-<a id="api-dynamo-core-kvbmrequest"></a>
-<Accordion title="KvbmRequest (class)">
+<Accordion id="api-dynamo-core-kvbmrequest" title="KvbmRequest (class)">
 A request for KV cache
 
 ```python
@@ -636,8 +601,7 @@ KvbmRequest(request_id: int, tokens: List[int], block_size: int) -> None
 - `__init__(request_id: int, tokens: List[int], block_size: int) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2627))
 </Accordion>
 
-<a id="api-dynamo-core-layer"></a>
-<Accordion title="Layer (class)">
+<Accordion id="api-dynamo-core-layer" title="Layer (class)">
 A KV cache block layer
 
 ```python
@@ -647,8 +611,7 @@ from dynamo._core import Layer
 [`lib/bindings/python/src/dynamo/_core.pyi#L2412`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2412)
 </Accordion>
 
-<a id="api-dynamo-core-loradownloader"></a>
-<Accordion title="LoRADownloader (class)">
+<Accordion id="api-dynamo-core-loradownloader" title="LoRADownloader (class)">
 Unified interface for LoRA downloading and caching (local file:// and S3 s3:// URIs).
 
 ```python
@@ -671,8 +634,7 @@ LoRADownloader(cache_path: Optional[str] = None) -> None
 - `uri_to_cache_key(uri: str) -> str` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2274))
 </Accordion>
 
-<a id="api-dynamo-core-mediadecoder"></a>
-<Accordion title="MediaDecoder (class)">
+<Accordion id="api-dynamo-core-mediadecoder" title="MediaDecoder (class)">
 Media decoder for image and video preprocessing.
 
 ```python
@@ -691,8 +653,7 @@ MediaDecoder() -> None
 - `enable_image(decoder_options: Dict[str, Any]) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2282))
 </Accordion>
 
-<a id="api-dynamo-core-mediafetcher"></a>
-<Accordion title="MediaFetcher (class)">
+<Accordion id="api-dynamo-core-mediafetcher" title="MediaFetcher (class)">
 Media fetcher for loading remote image/video URLs.
 
 ```python
@@ -715,8 +676,7 @@ MediaFetcher() -> None
 - `timeout_ms(timeout_ms: int) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2293))
 </Accordion>
 
-<a id="api-dynamo-core-mockengineargs"></a>
-<Accordion title="MockEngineArgs (class)">
+<Accordion id="api-dynamo-core-mockengineargs" title="MockEngineArgs (class)">
 No summary available.
 
 ```python
@@ -739,8 +699,7 @@ MockEngineArgs(engine_type: str = 'vllm', num_gpu_blocks: Optional[int] = None, 
 - `with_overrides(bootstrap_port: Optional[int] = None, zmq_kv_events_port: Optional[int] = None, zmq_replay_port: Optional[int] = None, kv_bytes_per_token: Optional[int] = None, num_gpu_blocks: Optional[int] = None, aic_backend: Optional[str] = None, aic_system: Optional[str] = None, aic_backend_version: Optional[str] = None, aic_tp_size: Optional[int] = None, aic_model_path: Optional[str] = None, aic_moe_tp_size: Optional[int] = None, aic_moe_ep_size: Optional[int] = None, aic_attention_dp_size: Optional[int] = None, aic_nextn: Optional[int] = None, aic_nextn_accept_rates: Optional[str] = None, aic_mtp_seed: Optional[int] = None, gpu_memory_utilization: Optional[float] = None, mem_fraction_static: Optional[float] = None, free_gpu_memory_fraction: Optional[float] = None, enable_prefix_caching: Optional[bool] = None, worker_type: Optional[str] = None) -> MockEngineArgs` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2153))
 </Accordion>
 
-<a id="api-dynamo-core-modelcardinstanceid"></a>
-<Accordion title="ModelCardInstanceId (class)">
+<Accordion id="api-dynamo-core-modelcardinstanceid" title="ModelCardInstanceId (class)">
 Unique identifier for a worker instance: namespace, component, endpoint and instance_id.
 
 ```python
@@ -754,8 +713,7 @@ from dynamo._core import ModelCardInstanceId
 - `triple() -> Tuple[str, str, str]` — Triple of namespace, component and endpoint this worker is serving. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L406))
 </Accordion>
 
-<a id="api-dynamo-core-modeldeploymentcard"></a>
-<Accordion title="ModelDeploymentCard (class)">
+<Accordion id="api-dynamo-core-modeldeploymentcard" title="ModelDeploymentCard (class)">
 A model deployment card is a collection of model information
 
 ```python
@@ -775,8 +733,7 @@ from dynamo._core import ModelDeploymentCard
 - `runtime_config() -> Any` — Return the runtime configuration as a dict. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L801))
 </Accordion>
 
-<a id="api-dynamo-core-modelinput"></a>
-<Accordion title="ModelInput (class)">
+<Accordion id="api-dynamo-core-modelinput" title="ModelInput (class)">
 What type of request this model needs: Text, Tokens or Tensor
 
 ```python
@@ -786,8 +743,7 @@ from dynamo._core import ModelInput
 [`lib/bindings/python/src/dynamo/_core.pyi#L1541`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1541)
 </Accordion>
 
-<a id="api-dynamo-core-modelruntimeconfig"></a>
-<Accordion title="ModelRuntimeConfig (class)">
+<Accordion id="api-dynamo-core-modelruntimeconfig" title="ModelRuntimeConfig (class)">
 A model runtime configuration is a collection of runtime information
 
 ```python
@@ -811,8 +767,7 @@ ModelRuntimeConfig() -> None
 - `set_disaggregated_endpoint(bootstrap_host: str | None = None, bootstrap_port: int | None = None) -> None` — Set the disaggregated endpoint for the model ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L853))
 </Accordion>
 
-<a id="api-dynamo-core-modeltype"></a>
-<Accordion title="ModelType (class)">
+<Accordion id="api-dynamo-core-modeltype" title="ModelType (class)">
 What type of request this model supports: Chat, Completions, Embedding, Tensor, Images, Videos, Realtime, or Empty (no OpenAI surface)
 
 ```python
@@ -826,8 +781,7 @@ from dynamo._core import ModelType
 - `supports_chat() -> bool` — Return True if this model type supports chat. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1569))
 </Accordion>
 
-<a id="api-dynamo-core-optimizationtarget"></a>
-<Accordion title="OptimizationTarget (class)">
+<Accordion id="api-dynamo-core-optimizationtarget" title="OptimizationTarget (class)">
 No summary available.
 
 ```python
@@ -837,8 +791,7 @@ from dynamo._core import OptimizationTarget
 [`lib/bindings/python/src/dynamo/_core.pyi#L1680`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1680)
 </Accordion>
 
-<a id="api-dynamo-core-overlapscores"></a>
-<Accordion title="OverlapScores (class)">
+<Accordion id="api-dynamo-core-overlapscores" title="OverlapScores (class)">
 A collection of prefix matching scores of workers for a given token ids.
 
 ```python
@@ -848,8 +801,7 @@ from dynamo._core import OverlapScores
 [`lib/bindings/python/src/dynamo/_core.pyi#L881`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L881)
 </Accordion>
 
-<a id="api-dynamo-core-plannerdecision"></a>
-<Accordion title="PlannerDecision (class)">
+<Accordion id="api-dynamo-core-plannerdecision" title="PlannerDecision (class)">
 A request from planner to client to perform a scaling action.
 
 ```python
@@ -859,8 +811,7 @@ from dynamo._core import PlannerDecision
 [`lib/bindings/python/src/dynamo/_core.pyi#L2931`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2931)
 </Accordion>
 
-<a id="api-dynamo-core-plannerreplaybridge"></a>
-<Accordion title="PlannerReplayBridge (class)">
+<Accordion id="api-dynamo-core-plannerreplaybridge" title="PlannerReplayBridge (class)">
 Step-based bridge for driving an offline replay with a Python planner.
 
 ```python
@@ -882,8 +833,7 @@ PlannerReplayBridge(trace_file: str | os.PathLike[str], extra_engine_args: MockE
 - `finalize() -> Dict[str, Any]` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2410))
 </Accordion>
 
-<a id="api-dynamo-core-pyasyncrequeststream"></a>
-<Accordion title="PyAsyncRequestStream (class)">
+<Accordion id="api-dynamo-core-pyasyncrequeststream" title="PyAsyncRequestStream (class)">
 Python-visible inbound iterator handed to bidirectional engine
 
 ```python
@@ -893,8 +843,7 @@ from dynamo._core import PyAsyncRequestStream
 [`lib/bindings/python/src/dynamo/_core.pyi#L304`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L304)
 </Accordion>
 
-<a id="api-dynamo-prometheus-metrics-runtimemetrics"></a>
-<Accordion title="PyRuntimeMetrics (class)">
+<Accordion id="api-dynamo-prometheus-metrics-runtimemetrics" title="PyRuntimeMetrics (class)">
 Helper class for registering Prometheus metrics callbacks on an Endpoint.
 
 ```python
@@ -908,8 +857,7 @@ from dynamo._core import PyRuntimeMetrics
 - `register_prometheus_expfmt_callback(callback: Callable[[], str]) -> None` — Register a Python callback that returns Prometheus exposition text. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/prometheus_metrics.pyi#L19))
 </Accordion>
 
-<a id="api-dynamo-core-pythonasyncengine"></a>
-<Accordion title="PythonAsyncEngine (class)">
+<Accordion id="api-dynamo-core-pythonasyncengine" title="PythonAsyncEngine (class)">
 Bridge a Python async generator onto Dynamo's AsyncEngine interface.
 
 ```python
@@ -927,8 +875,7 @@ PythonAsyncEngine(generator: Any, event_loop: Any) -> None
 - `__init__(generator: Any, event_loop: Any) -> None` — Wrap a Python generator and event loop for use with Dynamo services. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1388))
 </Accordion>
 
-<a id="api-dynamo-core-radixtree"></a>
-<Accordion title="RadixTree (class)">
+<Accordion id="api-dynamo-core-radixtree" title="RadixTree (class)">
 A RadixTree that tracks KV cache blocks and can find prefix matches for sequences.
 
 ```python
@@ -951,8 +898,7 @@ RadixTree() -> None
 - `dump_tree_as_events() -> List[str]` — Dump the current RadixTree state as a list of JSON-serialized KV cache events. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L968))
 </Accordion>
 
-<a id="api-dynamo-core-reasoningconfig"></a>
-<Accordion title="ReasoningConfig (class)">
+<Accordion id="api-dynamo-core-reasoningconfig" title="ReasoningConfig (class)">
 No summary available.
 
 ```python
@@ -970,8 +916,7 @@ ReasoningConfig(start_thinking_token_id: int, end_thinking_token_id: int, thinki
 - `__init__(start_thinking_token_id: int, end_thinking_token_id: int, thinking_ratio: float) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1912))
 </Accordion>
 
-<a id="api-dynamo-core-routerconfig"></a>
-<Accordion title="RouterConfig (class)">
+<Accordion id="api-dynamo-core-routerconfig" title="RouterConfig (class)">
 How to route the request
 
 ```python
@@ -989,8 +934,7 @@ RouterConfig(mode: RouterMode, config: Optional[KvRouterConfig] = None, active_d
 - `__init__(mode: RouterMode, config: Optional[KvRouterConfig] = None, active_decode_blocks_threshold: Optional[float] = None, active_prefill_tokens_threshold: Optional[int] = None, active_prefill_tokens_threshold_frac: Optional[float] = None, enforce_disagg: bool = False) -> None` — Create a RouterConfig. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1589))
 </Accordion>
 
-<a id="api-dynamo-core-routermode"></a>
-<Accordion title="RouterMode (class)">
+<Accordion id="api-dynamo-core-routermode" title="RouterMode (class)">
 Router mode for load balancing requests across workers
 
 ```python
@@ -1000,8 +944,7 @@ from dynamo._core import RouterMode
 [`lib/bindings/python/src/dynamo/_core.pyi#L1573`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1573)
 </Accordion>
 
-<a id="api-dynamo-core-routingconstraints"></a>
-<Accordion title="RoutingConstraints (class)">
+<Accordion id="api-dynamo-core-routingconstraints" title="RoutingConstraints (class)">
 Request-side routing constraints.
 
 ```python
@@ -1019,8 +962,7 @@ RoutingConstraints(required_taints: Optional[Set[str]] = None, preferred_taints:
 - `__init__(required_taints: Optional[Set[str]] = None, preferred_taints: Optional[Dict[str, float]] = None) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L875))
 </Accordion>
 
-<a id="api-dynamo-core-rustengineperfmodel"></a>
-<Accordion title="RustEnginePerfModel (class)">
+<Accordion id="api-dynamo-core-rustengineperfmodel" title="RustEnginePerfModel (class)">
 Engine-level performance model backed by AIC forward-pass modeling.
 
 ```python
@@ -1045,8 +987,7 @@ from dynamo._core import RustEnginePerfModel
 - `find_engine_capacity_rps(request: EngineCapacityRequest) -> Optional[EngineCapacity]` — Search sustainable per-engine RPS; inspect eligible to see whether eligible SLA metrics passed. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1779))
 </Accordion>
 
-<a id="api-dynamo-core-rustengineperfoptions"></a>
-<Accordion title="RustEnginePerfOptions (class)">
+<Accordion id="api-dynamo-core-rustengineperfoptions" title="RustEnginePerfOptions (class)">
 Online tuning options for RustEnginePerfModel.
 
 ```python
@@ -1064,8 +1005,7 @@ RustEnginePerfOptions(max_observations: int = 64, min_observations: int = 5, buc
 - `__init__(max_observations: int = 64, min_observations: int = 5, bucket_count: int = 16, max_num_tokens: int = 8192, max_batch_size: int = 512, max_kv_tokens: int = 2000000) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1669))
 </Accordion>
 
-<a id="api-dynamo-core-selectionservice"></a>
-<Accordion title="SelectionService (class)">
+<Accordion id="api-dynamo-core-selectionservice" title="SelectionService (class)">
 In-process handle to a runtime-free Dynamo selection core.
 
 ```python
@@ -1097,8 +1037,7 @@ SelectionService(*, indexer_threads: int = 4) -> None
 - `potential_loads(request: JsonLike) -> JsonLike` — Per-worker potential loads for a prompt, without booking. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L766))
 </Accordion>
 
-<a id="api-dynamo-core-selectionserviceerror"></a>
-<Accordion title="SelectionServiceError (class)">
+<Accordion id="api-dynamo-core-selectionserviceerror" title="SelectionServiceError (class)">
 Raised by `SelectionService` for selector failures that are not malformed
 
 ```python
@@ -1108,8 +1047,7 @@ from dynamo._core import SelectionServiceError
 [`lib/bindings/python/src/dynamo/_core.pyi#L3031`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L3031)
 </Accordion>
 
-<a id="api-dynamo-core-sglangargs"></a>
-<Accordion title="SglangArgs (class)">
+<Accordion id="api-dynamo-core-sglangargs" title="SglangArgs (class)">
 No summary available.
 
 ```python
@@ -1127,8 +1065,7 @@ SglangArgs(schedule_policy: Optional[str] = None, page_size: Optional[int] = Non
 - `__init__(schedule_policy: Optional[str] = None, page_size: Optional[int] = None, max_prefill_tokens: Optional[int] = None, chunked_prefill_size: Optional[int] = None, clip_max_new_tokens: Optional[int] = None, schedule_conservativeness: Optional[float] = None) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1921))
 </Accordion>
 
-<a id="api-dynamo-core-spanproxy"></a>
-<Accordion title="SpanProxy (class)">
+<Accordion id="api-dynamo-core-spanproxy" title="SpanProxy (class)">
 Unified span handle returned by ``Context.current_span()`` (the
 
 ```python
@@ -1145,8 +1082,7 @@ from dynamo._core import SpanProxy
 - `close() -> None` — End the underlying span (child spans only — no-op for the ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L646))
 </Accordion>
 
-<a id="api-dynamo-core-streamincomplete"></a>
-<Accordion title="StreamIncomplete (class)">
+<Accordion id="api-dynamo-core-streamincomplete" title="StreamIncomplete (class)">
 The response stream was terminated before completion.
 
 ```python
@@ -1156,8 +1092,7 @@ from dynamo._core import StreamIncomplete
 [`lib/bindings/python/src/dynamo/_core.pyi#L3026`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L3026)
 </Accordion>
 
-<a id="api-dynamo-core-trtllmargs"></a>
-<Accordion title="TrtllmArgs (class)">
+<Accordion id="api-dynamo-core-trtllmargs" title="TrtllmArgs (class)">
 No summary available.
 
 ```python
@@ -1175,8 +1110,7 @@ TrtllmArgs(capacity_scheduler_policy: Optional[str] = None) -> None
 - `__init__(capacity_scheduler_policy: Optional[str] = None) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1933))
 </Accordion>
 
-<a id="api-dynamo-core-unknown"></a>
-<Accordion title="Unknown (class)">
+<Accordion id="api-dynamo-core-unknown" title="Unknown (class)">
 Uncategorized or unknown error.
 
 ```python
@@ -1186,8 +1120,7 @@ from dynamo._core import Unknown
 [`lib/bindings/python/src/dynamo/_core.pyi#L2991`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2991)
 </Accordion>
 
-<a id="api-dynamo-core-virtualconnectorclient"></a>
-<Accordion title="VirtualConnectorClient (class)">
+<Accordion id="api-dynamo-core-virtualconnectorclient" title="VirtualConnectorClient (class)">
 How a client discovers planner requests and marks them complete
 
 ```python
@@ -1208,8 +1141,7 @@ VirtualConnectorClient(runtime: DistributedRuntime, dynamo_namespace: str) -> No
 - `wait() -> None` — Blocks until there is a new decision to fetch using 'get' ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2973))
 </Accordion>
 
-<a id="api-dynamo-core-virtualconnectorcoordinator"></a>
-<Accordion title="VirtualConnectorCoordinator (class)">
+<Accordion id="api-dynamo-core-virtualconnectorcoordinator" title="VirtualConnectorCoordinator (class)">
 Internal planner virtual connector component
 
 ```python
@@ -1231,8 +1163,7 @@ VirtualConnectorCoordinator(runtime: DistributedRuntime, dynamo_namespace: str, 
 - `wait_for_scaling_completion() -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2958))
 </Accordion>
 
-<a id="api-dynamo-core-workermetricspublisher"></a>
-<Accordion title="WorkerMetricsPublisher (class)">
+<Accordion id="api-dynamo-core-workermetricspublisher" title="WorkerMetricsPublisher (class)">
 A metrics publisher will provide metrics to the router for load monitoring.
 
 ```python
@@ -1252,8 +1183,7 @@ WorkerMetricsPublisher() -> None
 - `publish(dp_rank: Optional[int] = None, active_decode_blocks: int | None = None, kv_used_blocks: int | None = None) -> None` — Publish worker metrics for load monitoring. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L677))
 </Accordion>
 
-<a id="api-dynamo-core-workertype"></a>
-<Accordion title="WorkerType (class)">
+<Accordion id="api-dynamo-core-workertype" title="WorkerType (class)">
 Processing stage a worker handles.
 
 ```python
@@ -1263,8 +1193,7 @@ from dynamo._core import WorkerType
 [`lib/bindings/python/src/dynamo/_core.pyi#L2178`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2178)
 </Accordion>
 
-<a id="api-dynamo-core-backend"></a>
-<Accordion title="backend (class)">
+<Accordion id="api-dynamo-core-backend" title="backend (class)">
 No summary available.
 
 ```python
@@ -1274,8 +1203,7 @@ from dynamo._core import backend
 [`lib/bindings/python/src/dynamo/_core.pyi#L3051`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L3051)
 </Accordion>
 
-<a id="api-dynamo-core-compute-block-hash-for-seq"></a>
-<Accordion title="compute_block_hash_for_seq (function)">
+<Accordion id="api-dynamo-core-compute-block-hash-for-seq" title="compute_block_hash_for_seq (function)">
 Compute block hashes for a sequence of tokens, optionally including multimodal metadata.
 
 ```python
@@ -1289,8 +1217,7 @@ compute_block_hash_for_seq(tokens: List[int], kv_block_size: int, block_mm_infos
 [`lib/bindings/python/src/dynamo/_core.pyi#L413`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L413)
 </Accordion>
 
-<a id="api-dynamo-core-fetch-model"></a>
-<Accordion title="fetch_model (function)">
+<Accordion id="api-dynamo-core-fetch-model" title="fetch_model (function)">
 Download a model from Hugging Face, returning its local path.
 
 ```python
@@ -1304,8 +1231,7 @@ fetch_model(remote_name: str, ignore_weights: bool = False) -> str
 [`lib/bindings/python/src/dynamo/_core.pyi#L2295`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2295)
 </Accordion>
 
-<a id="api-dynamo-core-get-reasoning-parser-names"></a>
-<Accordion title="get_reasoning_parser_names (function)">
+<Accordion id="api-dynamo-core-get-reasoning-parser-names" title="get_reasoning_parser_names (function)">
 Get list of available reasoning parser names.
 
 ```python
@@ -1319,8 +1245,7 @@ get_reasoning_parser_names() -> list[str]
 [`lib/bindings/python/src/dynamo/_core.pyi#L32`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L32)
 </Accordion>
 
-<a id="api-dynamo-core-get-tool-parser-names"></a>
-<Accordion title="get_tool_parser_names (function)">
+<Accordion id="api-dynamo-core-get-tool-parser-names" title="get_tool_parser_names (function)">
 Get list of available tool parser names.
 
 ```python
@@ -1334,8 +1259,7 @@ get_tool_parser_names() -> list[str]
 [`lib/bindings/python/src/dynamo/_core.pyi#L28`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L28)
 </Accordion>
 
-<a id="api-dynamo-core-log-message"></a>
-<Accordion title="log_message (function)">
+<Accordion id="api-dynamo-core-log-message" title="log_message (function)">
 Log a message from Python with file and line info
 
 ```python
@@ -1349,8 +1273,7 @@ log_message(level: str, message: str, module: str, file: str, line: int) -> None
 [`lib/bindings/python/src/dynamo/_core.pyi#L22`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L22)
 </Accordion>
 
-<a id="api-dynamo-core-lora-name-to-id"></a>
-<Accordion title="lora_name_to_id (function)">
+<Accordion id="api-dynamo-core-lora-name-to-id" title="lora_name_to_id (function)">
 Generate a deterministic integer ID from a LoRA name using blake3 hash.
 
 ```python
@@ -1364,8 +1287,7 @@ lora_name_to_id(lora_name: str) -> int
 [`lib/bindings/python/src/dynamo/_core.pyi#L2253`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2253)
 </Accordion>
 
-<a id="api-dynamo-core-make-engine"></a>
-<Accordion title="make_engine (function)">
+<Accordion id="api-dynamo-core-make-engine" title="make_engine (function)">
 Make an engine matching the args
 
 ```python
@@ -1379,8 +1301,7 @@ make_engine(distributed_runtime: DistributedRuntime, args: EntrypointArgs) -> En
 [`lib/bindings/python/src/dynamo/_core.pyi#L2312`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2312)
 </Accordion>
 
-<a id="api-dynamo-core-parse-reasoning-batch"></a>
-<Accordion title="parse_reasoning_batch (function)">
+<Accordion id="api-dynamo-core-parse-reasoning-batch" title="parse_reasoning_batch (function)">
 Parse reasoning from a complete model output string using the specified parser.
 
 ```python
@@ -1394,8 +1315,7 @@ parse_reasoning_batch(parser_name: str, message: str, token_ids: Optional[List[i
 [`lib/bindings/python/src/dynamo/_core.pyi#L81`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L81)
 </Accordion>
 
-<a id="api-dynamo-core-parse-reasoning-stream"></a>
-<Accordion title="parse_reasoning_stream (function)">
+<Accordion id="api-dynamo-core-parse-reasoning-stream" title="parse_reasoning_stream (function)">
 Parse reasoning from streaming chunks using one stateful parser instance.
 
 ```python
@@ -1409,8 +1329,7 @@ parse_reasoning_stream(parser_name: str, chunks: List[str], token_chunks: Option
 [`lib/bindings/python/src/dynamo/_core.pyi#L94`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L94)
 </Accordion>
 
-<a id="api-dynamo-core-parse-tool-calls-batch"></a>
-<Accordion title="parse_tool_calls_batch (function)">
+<Accordion id="api-dynamo-core-parse-tool-calls-batch" title="parse_tool_calls_batch (function)">
 Parse tool calls from a model output string using the specified parser.
 
 ```python
@@ -1424,8 +1343,7 @@ parse_tool_calls_batch(parser_name: str, message: str, tools_json: Optional[str]
 [`lib/bindings/python/src/dynamo/_core.pyi#L36`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L36)
 </Accordion>
 
-<a id="api-dynamo-core-parse-tool-calls-stream"></a>
-<Accordion title="parse_tool_calls_stream (function)">
+<Accordion id="api-dynamo-core-parse-tool-calls-stream" title="parse_tool_calls_stream (function)">
 Parse streamed tool-call chunks using the specified parser.
 
 ```python
@@ -1439,8 +1357,7 @@ parse_tool_calls_stream(parser_name: str, chunks_json: str, tools_json: Optional
 [`lib/bindings/python/src/dynamo/_core.pyi#L61`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L61)
 </Accordion>
 
-<a id="api-dynamo-core-register-model"></a>
-<Accordion title="register_model (function)">
+<Accordion id="api-dynamo-core-register-model" title="register_model (function)">
 Attach the model at path to the given endpoint, and advertise it as model_type.
 
 ```python
@@ -1454,8 +1371,7 @@ register_model(model_input: ModelInput, model_type: ModelType, endpoint: Endpoin
 [`lib/bindings/python/src/dynamo/_core.pyi#L2197`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2197)
 </Accordion>
 
-<a id="api-dynamo-core-resolve-routing-image-token-id"></a>
-<Accordion title="resolve_routing_image_token_id (function)">
+<Accordion id="api-dynamo-core-resolve-routing-image-token-id" title="resolve_routing_image_token_id (function)">
 Routing-side image-placeholder token id for a model, resolved with the
 
 ```python
@@ -1469,8 +1385,7 @@ resolve_routing_image_token_id(model_id: str, model_dir: str) -> Optional[int]
 [`lib/bindings/python/src/dynamo/_core.pyi#L2257`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2257)
 </Accordion>
 
-<a id="api-dynamo-core-run-input"></a>
-<Accordion title="run_input (function)">
+<Accordion id="api-dynamo-core-run-input" title="run_input (function)">
 Start an engine, connect it to an input, and run until stopped.
 
 ```python
@@ -1484,8 +1399,7 @@ run_input(runtime: DistributedRuntime, input: str, engine_config: EngineConfig) 
 [`lib/bindings/python/src/dynamo/_core.pyi#L2316`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2316)
 </Accordion>
 
-<a id="api-dynamo-core-run-kv-indexer"></a>
-<Accordion title="run_kv_indexer (function)">
+<Accordion id="api-dynamo-core-run-kv-indexer" title="run_kv_indexer (function)">
 Run the KV indexer with the given arguments.
 
 ```python
@@ -1499,8 +1413,7 @@ run_kv_indexer(args: List[str]) -> None
 [`lib/bindings/python/src/dynamo/_core.pyi#L107`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L107)
 </Accordion>
 
-<a id="api-dynamo-core-run-mocker-synthetic-trace-replay"></a>
-<Accordion title="run_mocker_synthetic_trace_replay (function)">
+<Accordion id="api-dynamo-core-run-mocker-synthetic-trace-replay" title="run_mocker_synthetic_trace_replay (function)">
 Replay a synthetic mocker workload without requiring a trace file.
 
 ```python
@@ -1514,8 +1427,7 @@ run_mocker_synthetic_trace_replay(input_tokens: int, output_tokens: int, request
 [`lib/bindings/python/src/dynamo/_core.pyi#L2350`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2350)
 </Accordion>
 
-<a id="api-dynamo-core-run-mocker-trace-replay"></a>
-<Accordion title="run_mocker_trace_replay (function)">
+<Accordion id="api-dynamo-core-run-mocker-trace-replay" title="run_mocker_trace_replay (function)">
 Replay a mocker trace file and return the simulation report for aggregated vLLM or SGLang configs.
 
 ```python
@@ -1529,8 +1441,7 @@ run_mocker_trace_replay(trace_file: str | os.PathLike[str], extra_engine_args: O
 [`lib/bindings/python/src/dynamo/_core.pyi#L2320`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2320)
 </Accordion>
 
-<a id="api-dynamo-core-run-select-service"></a>
-<Accordion title="run_select_service (function)">
+<Accordion id="api-dynamo-core-run-select-service" title="run_select_service (function)">
 Run the Dynamo selection service with the given arguments.
 
 ```python
@@ -1544,8 +1455,7 @@ run_select_service(args: List[str]) -> None
 [`lib/bindings/python/src/dynamo/_core.pyi#L115`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L115)
 </Accordion>
 
-<a id="api-dynamo-core-run-slot-tracker"></a>
-<Accordion title="run_slot_tracker (function)">
+<Accordion id="api-dynamo-core-run-slot-tracker" title="run_slot_tracker (function)">
 Run the KV router slot tracker with the given arguments.
 
 ```python
@@ -1559,8 +1469,7 @@ run_slot_tracker(args: List[str]) -> None
 [`lib/bindings/python/src/dynamo/_core.pyi#L111`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L111)
 </Accordion>
 
-<a id="api-dynamo-core-unregister-model"></a>
-<Accordion title="unregister_model (function)">
+<Accordion id="api-dynamo-core-unregister-model" title="unregister_model (function)">
 Unregister a model from the discovery system.
 
 ```python

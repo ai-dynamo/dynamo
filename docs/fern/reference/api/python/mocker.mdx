@@ -9,8 +9,7 @@ subtitle: Mock engine used to run Dynamo workflows without a real GPU backend.
 
 `dynamo.mocker` publishes 13 classes and 17 functions. Source: [`components/src/dynamo/mocker/__init__.py`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/__init__.py)
 
-<a id="api-dynamo-core-aicengineconfig"></a>
-<Accordion title="AicEngineConfig (class)">
+<Accordion id="api-dynamo-core-aicengineconfig" title="AicEngineConfig (class)">
 AIC model/backend identity used by native forward-pass estimates.
 
 ```python
@@ -28,8 +27,7 @@ AicEngineConfig(model_name: str, backend: str, system_name: str = 'h200_sxm', ba
 - `__init__(model_name: str, backend: str, system_name: str = 'h200_sxm', backend_version: Optional[str] = None, tp_size: int = 1, pp_size: int = 1, moe_tp_size: Optional[int] = None, moe_ep_size: Optional[int] = None, attention_dp_size: Optional[int] = None, model_arch: Optional[str] = None, weight_dtype: Optional[str] = None, moe_dtype: Optional[str] = None, activation_dtype: Optional[str] = None, kv_cache_dtype: Optional[str] = None, kv_block_size: Optional[int] = None, extra: Optional[dict[str, str]] = None) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1630))
 </Accordion>
 
-<a id="api-dynamo-core-enginecapacity"></a>
-<Accordion title="EngineCapacity (class)">
+<Accordion id="api-dynamo-core-enginecapacity" title="EngineCapacity (class)">
 Per-engine capacity result.
 
 ```python
@@ -39,8 +37,7 @@ from dynamo.mocker import EngineCapacity
 [`lib/bindings/python/src/dynamo/_core.pyi#L1699`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1699)
 </Accordion>
 
-<a id="api-dynamo-core-enginecapacityrequest"></a>
-<Accordion title="EngineCapacityRequest (class)">
+<Accordion id="api-dynamo-core-enginecapacityrequest" title="EngineCapacityRequest (class)">
 Request shape and SLA policy for find_engine_capacity_rps.
 
 ```python
@@ -58,8 +55,7 @@ EngineCapacityRequest(isl: int, osl: int, ttft_sla_ms: Optional[float] = None, i
 - `__init__(isl: int, osl: int, ttft_sla_ms: Optional[float] = None, itl_sla_ms: Optional[float] = None, e2e_latency_sla_ms: Optional[float] = None, kv_hit_rate: Optional[float] = None, optimization_target: OptimizationTarget = OptimizationTarget.Throughput) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1687))
 </Accordion>
 
-<a id="api-dynamo-core-engineperflimits"></a>
-<Accordion title="EnginePerfLimits (class)">
+<Accordion id="api-dynamo-core-engineperflimits" title="EnginePerfLimits (class)">
 Engine limits used by engine-level helper queries and default correction bounds.
 
 ```python
@@ -77,8 +73,7 @@ EnginePerfLimits(max_num_batched_tokens: int = 8192, max_num_seqs: int = 512, ma
 - `__init__(max_num_batched_tokens: int = 8192, max_num_seqs: int = 512, max_kv_tokens: int = 2000000) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1658))
 </Accordion>
 
-<a id="api-dynamo-core-mockengineargs"></a>
-<Accordion title="MockEngineArgs (class)">
+<Accordion id="api-dynamo-core-mockengineargs" title="MockEngineArgs (class)">
 No summary available.
 
 ```python
@@ -101,8 +96,7 @@ MockEngineArgs(engine_type: str = 'vllm', num_gpu_blocks: Optional[int] = None, 
 - `with_overrides(bootstrap_port: Optional[int] = None, zmq_kv_events_port: Optional[int] = None, zmq_replay_port: Optional[int] = None, kv_bytes_per_token: Optional[int] = None, num_gpu_blocks: Optional[int] = None, aic_backend: Optional[str] = None, aic_system: Optional[str] = None, aic_backend_version: Optional[str] = None, aic_tp_size: Optional[int] = None, aic_model_path: Optional[str] = None, aic_moe_tp_size: Optional[int] = None, aic_moe_ep_size: Optional[int] = None, aic_attention_dp_size: Optional[int] = None, aic_nextn: Optional[int] = None, aic_nextn_accept_rates: Optional[str] = None, aic_mtp_seed: Optional[int] = None, gpu_memory_utilization: Optional[float] = None, mem_fraction_static: Optional[float] = None, free_gpu_memory_fraction: Optional[float] = None, enable_prefix_caching: Optional[bool] = None, worker_type: Optional[str] = None) -> MockEngineArgs` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2153))
 </Accordion>
 
-<a id="api-dynamo-core-optimizationtarget"></a>
-<Accordion title="OptimizationTarget (class)">
+<Accordion id="api-dynamo-core-optimizationtarget" title="OptimizationTarget (class)">
 No summary available.
 
 ```python
@@ -112,8 +106,7 @@ from dynamo.mocker import OptimizationTarget
 [`lib/bindings/python/src/dynamo/_core.pyi#L1680`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1680)
 </Accordion>
 
-<a id="api-dynamo-core-plannerreplaybridge"></a>
-<Accordion title="PlannerReplayBridge (class)">
+<Accordion id="api-dynamo-core-plannerreplaybridge" title="PlannerReplayBridge (class)">
 Step-based bridge for driving an offline replay with a Python planner.
 
 ```python
@@ -135,8 +128,7 @@ PlannerReplayBridge(trace_file: str | os.PathLike[str], extra_engine_args: MockE
 - `finalize() -> Dict[str, Any]` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2410))
 </Accordion>
 
-<a id="api-dynamo-mocker-args-profiledataresult"></a>
-<Accordion title="ProfileDataResult (class)">
+<Accordion id="api-dynamo-mocker-args-profiledataresult" title="ProfileDataResult (class)">
 Result of processing --planner-profile-data argument. Cleans up tmpdir on deletion.
 
 ```python
@@ -154,8 +146,7 @@ ProfileDataResult(npz_path: Path | None, tmpdir: tempfile.TemporaryDirectory | N
 - `__init__(npz_path: Path | None, tmpdir: tempfile.TemporaryDirectory | None)` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/args.py#L44))
 </Accordion>
 
-<a id="api-dynamo-core-reasoningconfig"></a>
-<Accordion title="ReasoningConfig (class)">
+<Accordion id="api-dynamo-core-reasoningconfig" title="ReasoningConfig (class)">
 No summary available.
 
 ```python
@@ -173,8 +164,7 @@ ReasoningConfig(start_thinking_token_id: int, end_thinking_token_id: int, thinki
 - `__init__(start_thinking_token_id: int, end_thinking_token_id: int, thinking_ratio: float) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1912))
 </Accordion>
 
-<a id="api-dynamo-core-rustengineperfmodel"></a>
-<Accordion title="RustEnginePerfModel (class)">
+<Accordion id="api-dynamo-core-rustengineperfmodel" title="RustEnginePerfModel (class)">
 Engine-level performance model backed by AIC forward-pass modeling.
 
 ```python
@@ -199,8 +189,7 @@ from dynamo.mocker import RustEnginePerfModel
 - `find_engine_capacity_rps(request: EngineCapacityRequest) -> Optional[EngineCapacity]` — Search sustainable per-engine RPS; inspect eligible to see whether eligible SLA metrics passed. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1779))
 </Accordion>
 
-<a id="api-dynamo-core-rustengineperfoptions"></a>
-<Accordion title="RustEnginePerfOptions (class)">
+<Accordion id="api-dynamo-core-rustengineperfoptions" title="RustEnginePerfOptions (class)">
 Online tuning options for RustEnginePerfModel.
 
 ```python
@@ -218,8 +207,7 @@ RustEnginePerfOptions(max_observations: int = 64, min_observations: int = 5, buc
 - `__init__(max_observations: int = 64, min_observations: int = 5, bucket_count: int = 16, max_num_tokens: int = 8192, max_batch_size: int = 512, max_kv_tokens: int = 2000000) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1669))
 </Accordion>
 
-<a id="api-dynamo-core-sglangargs"></a>
-<Accordion title="SglangArgs (class)">
+<Accordion id="api-dynamo-core-sglangargs" title="SglangArgs (class)">
 No summary available.
 
 ```python
@@ -237,8 +225,7 @@ SglangArgs(schedule_policy: Optional[str] = None, page_size: Optional[int] = Non
 - `__init__(schedule_policy: Optional[str] = None, page_size: Optional[int] = None, max_prefill_tokens: Optional[int] = None, chunked_prefill_size: Optional[int] = None, clip_max_new_tokens: Optional[int] = None, schedule_conservativeness: Optional[float] = None) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1921))
 </Accordion>
 
-<a id="api-dynamo-core-trtllmargs"></a>
-<Accordion title="TrtllmArgs (class)">
+<Accordion id="api-dynamo-core-trtllmargs" title="TrtllmArgs (class)">
 No summary available.
 
 ```python
@@ -256,8 +243,7 @@ TrtllmArgs(capacity_scheduler_policy: Optional[str] = None) -> None
 - `__init__(capacity_scheduler_policy: Optional[str] = None) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1933))
 </Accordion>
 
-<a id="api-dynamo-mocker-config-apply-worker-engine-args-overrides"></a>
-<Accordion title="apply_worker_engine_args_overrides (function)">
+<Accordion id="api-dynamo-mocker-config-apply-worker-engine-args-overrides" title="apply_worker_engine_args_overrides (function)">
 No summary available.
 
 ```python
@@ -271,8 +257,7 @@ apply_worker_engine_args_overrides(engine_args: MockEngineArgs, *, kv_bytes_per_
 [`components/src/dynamo/mocker/config.py#L328`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/config.py#L328)
 </Accordion>
 
-<a id="api-dynamo-mocker-config-build-mocker-engine-args"></a>
-<Accordion title="build_mocker_engine_args (function)">
+<Accordion id="api-dynamo-mocker-config-build-mocker-engine-args" title="build_mocker_engine_args (function)">
 No summary available.
 
 ```python
@@ -286,8 +271,7 @@ build_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs
 [`components/src/dynamo/mocker/config.py#L216`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/config.py#L216)
 </Accordion>
 
-<a id="api-dynamo-mocker-config-build-runtime-config"></a>
-<Accordion title="build_runtime_config (function)">
+<Accordion id="api-dynamo-mocker-config-build-runtime-config" title="build_runtime_config (function)">
 No summary available.
 
 ```python
@@ -301,8 +285,7 @@ build_runtime_config(engine_args: MockEngineArgs) -> tuple[int, ModelRuntimeConf
 [`components/src/dynamo/mocker/config.py#L346`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/config.py#L346)
 </Accordion>
 
-<a id="api-dynamo-mocker-main-compute-stagger-delay"></a>
-<Accordion title="compute_stagger_delay (function)">
+<Accordion id="api-dynamo-mocker-main-compute-stagger-delay" title="compute_stagger_delay (function)">
 Compute the stagger delay based on worker count to give the frontend time to process registrations.
 
 ```python
@@ -316,8 +299,7 @@ compute_stagger_delay(num_workers: int, stagger_delay: float) -> float
 [`components/src/dynamo/mocker/main.py#L104`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/main.py#L104)
 </Accordion>
 
-<a id="api-dynamo-mocker-main-graceful-shutdown"></a>
-<Accordion title="graceful_shutdown (function)">
+<Accordion id="api-dynamo-mocker-main-graceful-shutdown" title="graceful_shutdown (function)">
 Shutdown dynamo distributed runtime instances.
 
 ```python
@@ -331,8 +313,7 @@ graceful_shutdown(runtimes: list)
 [`components/src/dynamo/mocker/main.py#L34`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/main.py#L34)
 </Accordion>
 
-<a id="api-dynamo-mocker-main-launch-workers"></a>
-<Accordion title="launch_workers (function)">
+<Accordion id="api-dynamo-mocker-main-launch-workers" title="launch_workers (function)">
 Launch mocker worker(s) with isolated DistributedRuntime instances.
 
 ```python
@@ -346,8 +327,7 @@ launch_workers(args: argparse.Namespace, base_engine_args)
 [`components/src/dynamo/mocker/main.py#L126`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/main.py#L126)
 </Accordion>
 
-<a id="api-dynamo-mocker-config-load-mocker-engine-args"></a>
-<Accordion title="load_mocker_engine_args (function)">
+<Accordion id="api-dynamo-mocker-config-load-mocker-engine-args" title="load_mocker_engine_args (function)">
 No summary available.
 
 ```python
@@ -361,8 +341,7 @@ load_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs
 [`components/src/dynamo/mocker/config.py#L316`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/config.py#L316)
 </Accordion>
 
-<a id="api-dynamo-mocker-main-main"></a>
-<Accordion title="main (function)">
+<Accordion id="api-dynamo-mocker-main-main" title="main (function)">
 No summary available.
 
 ```python
@@ -376,8 +355,7 @@ main()
 [`components/src/dynamo/mocker/main.py#L254`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/main.py#L254)
 </Accordion>
 
-<a id="api-dynamo-mocker-args-non-negative-float"></a>
-<Accordion title="non_negative_float (function)">
+<Accordion id="api-dynamo-mocker-args-non-negative-float" title="non_negative_float (function)">
 No summary available.
 
 ```python
@@ -391,8 +369,7 @@ non_negative_float(value: str) -> float
 [`components/src/dynamo/mocker/args.py#L31`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/args.py#L31)
 </Accordion>
 
-<a id="api-dynamo-mocker-args-non-negative-int"></a>
-<Accordion title="non_negative_int (function)">
+<Accordion id="api-dynamo-mocker-args-non-negative-int" title="non_negative_int (function)">
 No summary available.
 
 ```python
@@ -406,8 +383,7 @@ non_negative_int(value: str) -> int
 [`components/src/dynamo/mocker/args.py#L21`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/args.py#L21)
 </Accordion>
 
-<a id="api-dynamo-mocker-args-parse-args"></a>
-<Accordion title="parse_args (function)">
+<Accordion id="api-dynamo-mocker-args-parse-args" title="parse_args (function)">
 Parse command-line arguments for the Dynamo mocker engine.
 
 ```python
@@ -421,8 +397,7 @@ parse_args(argv: list[str] | None = None) -> argparse.Namespace
 [`components/src/dynamo/mocker/args.py#L165`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/args.py#L165)
 </Accordion>
 
-<a id="api-dynamo-mocker-args-parse-bootstrap-ports"></a>
-<Accordion title="parse_bootstrap_ports (function)">
+<Accordion id="api-dynamo-mocker-args-parse-bootstrap-ports" title="parse_bootstrap_ports (function)">
 Parse comma-separated bootstrap ports string into list of integers.
 
 ```python
@@ -436,8 +411,7 @@ parse_bootstrap_ports(ports_str: str | None) -> list[int]
 [`components/src/dynamo/mocker/args.py#L158`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/args.py#L158)
 </Accordion>
 
-<a id="api-dynamo-mocker-main-prefetch-model"></a>
-<Accordion title="prefetch_model (function)">
+<Accordion id="api-dynamo-mocker-main-prefetch-model" title="prefetch_model (function)">
 Pre-fetch model from HuggingFace to avoid rate limiting with many workers.
 
 ```python
@@ -451,8 +425,7 @@ prefetch_model(model_path: str) -> None
 [`components/src/dynamo/mocker/main.py#L45`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/main.py#L45)
 </Accordion>
 
-<a id="api-dynamo-mocker-args-resolve-planner-profile-data"></a>
-<Accordion title="resolve_planner_profile_data (function)">
+<Accordion id="api-dynamo-mocker-args-resolve-planner-profile-data" title="resolve_planner_profile_data (function)">
 Resolve --planner-profile-data to an NPZ file path.
 
 ```python
@@ -466,8 +439,7 @@ resolve_planner_profile_data(planner_profile_data: Path | None) -> ProfileDataRe
 [`components/src/dynamo/mocker/args.py#L59`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/args.py#L59)
 </Accordion>
 
-<a id="api-dynamo-mocker-run-mocker-trace-replay"></a>
-<Accordion title="run_mocker_trace_replay (function)">
+<Accordion id="api-dynamo-mocker-run-mocker-trace-replay" title="run_mocker_trace_replay (function)">
 No summary available.
 
 ```python
@@ -481,8 +453,7 @@ run_mocker_trace_replay(trace_file, extra_engine_args = None, router_config = No
 [`components/src/dynamo/mocker/__init__.py#L41`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/__init__.py#L41)
 </Accordion>
 
-<a id="api-dynamo-mocker-args-validate-worker-type-args"></a>
-<Accordion title="validate_worker_type_args (function)">
+<Accordion id="api-dynamo-mocker-args-validate-worker-type-args" title="validate_worker_type_args (function)">
 Resolve disaggregation mode from --disaggregation-mode or legacy boolean flags.
 
 ```python
@@ -496,8 +467,7 @@ validate_worker_type_args(args: argparse.Namespace) -> None
 [`components/src/dynamo/mocker/args.py#L112`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/args.py#L112)
 </Accordion>
 
-<a id="api-dynamo-mocker-main-worker"></a>
-<Accordion title="worker (function)">
+<Accordion id="api-dynamo-mocker-main-worker" title="worker (function)">
 Main worker function that launches mocker instances.
 
 ```python

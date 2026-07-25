@@ -9,8 +9,7 @@ subtitle: Request-router configuration and command-line argument groups.
 
 `dynamo.router` publishes 2 classes and 3 functions. Source: [`components/src/dynamo/router/__init__.py`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/__init__.py)
 
-<a id="api-dynamo-router-args-dynamorouterarggroup"></a>
-<Accordion title="DynamoRouterArgGroup (class)">
+<Accordion id="api-dynamo-router-args-dynamorouterarggroup" title="DynamoRouterArgGroup (class)">
 CLI argument group for standalone router options.
 
 ```python
@@ -24,8 +23,7 @@ from dynamo.router.args import DynamoRouterArgGroup
 - `add_arguments(parser) -> None` — Add router-owned arguments to parser. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/args.py#L76))
 </Accordion>
 
-<a id="api-dynamo-router-args-dynamorouterconfig"></a>
-<Accordion title="DynamoRouterConfig (class)">
+<Accordion id="api-dynamo-router-args-dynamorouterconfig" title="DynamoRouterConfig (class)">
 Typed configuration for the standalone KV router (router-owned options only).
 
 ```python
@@ -39,8 +37,7 @@ from dynamo.router.args import DynamoRouterConfig
 - `validate() -> None` — Validate config invariants (aligned with Rust KvRouterConfig where applicable). ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/args.py#L30))
 </Accordion>
 
-<a id="api-dynamo-router-args-build-aic-perf-config"></a>
-<Accordion title="build_aic_perf_config (function)">
+<Accordion id="api-dynamo-router-args-build-aic-perf-config" title="build_aic_perf_config (function)">
 No summary available.
 
 ```python
@@ -54,8 +51,7 @@ build_aic_perf_config(router_config: DynamoRouterConfig) -> AicPerfConfig | None
 [`components/src/dynamo/router/args.py#L118`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/args.py#L118)
 </Accordion>
 
-<a id="api-dynamo-router-args-build-kv-router-config"></a>
-<Accordion title="build_kv_router_config (function)">
+<Accordion id="api-dynamo-router-args-build-kv-router-config" title="build_kv_router_config (function)">
 Build KvRouterConfig from DynamoRouterConfig.
 
 ```python
@@ -69,8 +65,7 @@ build_kv_router_config(router_config: DynamoRouterConfig) -> KvRouterConfig
 [`components/src/dynamo/router/args.py#L113`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/args.py#L113)
 </Accordion>
 
-<a id="api-dynamo-router-args-parse-args"></a>
-<Accordion title="parse_args (function)">
+<Accordion id="api-dynamo-router-args-parse-args" title="parse_args (function)">
 Parse command-line arguments for the standalone router.
 
 ```python

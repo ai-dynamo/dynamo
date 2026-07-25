@@ -298,10 +298,28 @@ def test_kubernetes_field_type_links_resolve(
     """Every local fragment link must land on an anchor the page renders,
     otherwise a field type deep-links into nothing."""
     _, mdx = kubernetes_page
-    rendered_anchors = set(re.findall(r'<a id="([^"]+)"></a>', mdx))
+    rendered_anchors = set(re.findall(r'<(?:Accordion|div) id="([^"]+)"', mdx))
     local_link_targets = set(re.findall(r"\]\(#([^)]+)\)", mdx))
 
     assert local_link_targets <= rendered_anchors
+
+
+def test_kubernetes_external_type_links_leave_the_type_attribute(
+    kubernetes_page: _KubernetesPage,
+) -> None:
+    """Field types like ``metadata`` carry an absolute Markdown link to the
+    upstream Kubernetes API. An MDX attribute renders no Markdown, so the raw
+    ``[label](url)`` leaks through as mangled text -- the label belongs in
+    ``type`` and the link in the body, where Markdown is processed.
+    """
+    _, mdx = kubernetes_page
+    attributes = re.findall(r'\stype="([^"]*)"', mdx)
+
+    assert attributes, "no ParamField type attributes rendered"
+    leaked = [value for value in attributes if "](" in value]
+    assert not leaked, f"Markdown links leaked into type attributes: {leaked[:3]}"
+    assert 'type="ObjectMeta"' in mdx
+    assert "https://kubernetes.io/docs/reference/generated/kubernetes-api" in mdx
 
 
 def test_kubernetes_page_carries_full_field_semantics(
@@ -335,7 +353,7 @@ def test_kubernetes_page_carries_enum_semantics(
         if type_.enum_values
     )
 
-    assert f'<Accordion title="{enum_type.display_name}">' in mdx
+    assert f'title="{enum_type.display_name}">' in mdx
     for value in enum_type.enum_values:
         assert f'<Badge intent="note" minimal>{value.name}</Badge>' in mdx
 
