@@ -15,8 +15,8 @@ close version-drift deltas,"** not "re-land our stack."
 ## Status board
 - [x] **L0 — RW→RO weight commit/import** (no shadow, no scratch-KV) — **GREEN** 2026-07-25
 - [x] **L0 hardening** — backend fail-fast guard + logprobs A/B (RW vs RO bit-identical) — **DONE** 2026-07-25
-- [ ] **L1 — scratch-KV routing** (shadow reaches standby, KV routed to scratch pool)
-- [ ] **L2 — two-engine failover** (kill active → shadow promotes → serves; eager + graphs)
+- [x] **L1 — scratch-KV routing** — shadow reaches standby, single-block scratch, fail-closed guard never fires — **GREEN** 2026-07-25
+- [~] **L2 — two-engine failover** — **eager GREEN** (promote +8s, post-failover 200 +5s); graphs pass running
 
 ## Deltas layered on main (the 5 port patches)
 | # | Patch | File | Why 0.25.1 needs it |
@@ -46,6 +46,44 @@ Harness: `failover-kimi/kimi_rwro.sh`. Raw logs on pod: `/tmp/kimi_rwro/logs/`.
   **worst max |Δlogprob| = 0.000e+00 — bit-identical**. Prompts: capital-of-France (high), gold→"Au…79"
   (factual), two-plus-two (numeric), favorite-season (open/low-margin). → **R3 closed** (numerically exact,
   not just argmax-equivalent).
+
+## L1 + L2 results (2026-07-25, TP8, `kimi_failover.sh`)
+Two-engine intra-pod shadow failover: engine0 ACTIVE + engine1 SHADOW share GMS weights, kill engine0 → shadow
+promotes and serves. Env: `DYN_GMS_SCRATCH_SINGLE_BLOCK=1 DYN_NO_AUTOTUNE=1 DYN_GMS_KVROUTE_V1=1`.
+
+- **L1 (scratch-KV routing):** `[KVROUTE] loaded` on all 8 workers; shadow reached **standby +139s**; the
+  scratch fail-closed guard (`no KV allocation was routed through scratch`) fired **0 times**. The `dyn_kvroute.py`
+  V1 fix works. Definitive corroboration: shadow overhead is only **+4.3 GiB** (single-block scratch 0.5 GiB) —
+  real KV would be ~65 GiB → OOM, per-layer scratch ~30 GiB.
+- **L2 eager:** ACTIVE serves 200 → kill whole engine0 → **SHADOW PROMOTED +8s** → **post-failover 200 at +5s**
+  ("Paris…"). The +5s is the frontend evicting the dead active's discovery entry (retry-with-backoff, expected).
+
+### Memory / concurrency study (answers: can we bring up a shadow next to a live active?)
+Ceiling = **183,359 MiB** (B200). 1 Hz all-GPU sampler (`dev_mem.csv`) + phase markers (`phases.csv`),
+analyzed by `analyze_mem.py`. Per-GPU (uniform across all 8):
+
+| metric | eager | graphs |
+|---|---|---|
+| active resting (weights 73 shared + real KV + rt) | 147,359 MiB (143.9 GiB) | 147,477 MiB |
+| colocated resting (active + resting shadow) | 151,721 MiB | 154,071 MiB |
+| **Q1 — shadow steady overhead** (coloc − active) | **+4,362 MiB (~4.3 GiB)** | **+6,594 MiB (~6.4 GiB)** |
+| **Q2 — replenishment bring-up peak** (shadow init w/ live active) | **155,859 MiB (152.2 GiB)** | **157,397 MiB (153.7 GiB)** |
+| headroom at replenishment peak | **27,500 MiB (~26.9 GiB)** | **25,962 MiB (~25.4 GiB)** |
+| **failover promotion transient peak** (scratch→real KV swap) | ≤155,859 (no spike) | **182,069 MiB (177.8 GiB) on 2/8 GPUs — 1s** |
+| headroom at promotion | ~27 GiB | **~1,290 MiB (~1.3 GiB)** ⚠️ |
+| replenishment verdict | **FITS** | **FITS** |
+
+**Takeaways:** (1) The resting shadow is cheap — **~4.3 GiB eager / ~6.4 GiB graphs** on top of a live active (it
+shares the 73 GiB weights via GMS and holds *scratch*-KV, not real KV; graphs costs ~2 GiB more for capture
+residency). (2) **Replenishment** (bring a shadow up beside a serving active) peaks only ~4–6 GiB above colocated
+resting — autotune-off killed the warmup burst, single-block scratch keeps scratch at 0.5 GiB — so it fits with
+**~25–27 GiB to spare** in both modes. Green-light for shadow replenishment on promotion (the TRTLLM "fail-once"
+limitation). (3) ⚠️ **New risk (graphs only): the failover PROMOTION transient** — the scratch→real KV swap
+(`reallocate_all_handles`) — briefly spiked to **177.8 GiB on 2/8 GPUs (GPU1, GPU7), ~1.3 GiB from the ceiling**,
+for a single 1s sample at +4s post-kill. Eager showed no such spike (stayed ≤152). So the tightest point in the
+graphs lifecycle is promotion, not init/colocation. Worth a headroom margin (lower `--gpu-memory-utilization`, or
+free the dying active's KV before the swap) before trusting graphs-mode promotion on larger models. Compare 0.23.0
+baseline: eager colocated peak 149 / graphs 160 GiB.
 
 ---
 
