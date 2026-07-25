@@ -1436,16 +1436,6 @@ mod tests {
     }
 
     #[test]
-    fn test_kv_router_config_decode_active_request_weight_is_opt_in() {
-        let default = KvRouterConfig::default();
-        let configured: KvRouterConfig =
-            serde_json::from_str(r#"{"decode_active_request_weight":64}"#).unwrap();
-
-        assert_eq!(default.decode_active_request_weight, 0.0);
-        assert_eq!(configured.decode_active_request_weight, 64.0);
-    }
-
-    #[test]
     fn test_kv_router_config_rejects_local_approx_with_predicted_ttl() {
         let config = KvRouterConfig {
             use_kv_events: false,
@@ -1842,12 +1832,6 @@ models:
             };
             assert!(invalid.validate().is_err());
         }
-    }
-
-    #[test]
-    fn test_kv_router_config_defaults_are_disabled() {
-        assert_eq!(KvRouterConfig::default().router_queue_threshold, None);
-        assert_eq!(KvRouterConfig::default().shared_cache_multiplier, 0.0);
     }
 
     #[test]

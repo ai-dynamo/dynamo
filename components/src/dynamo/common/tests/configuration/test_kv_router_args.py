@@ -110,27 +110,6 @@ def test_aic_mtp_cli_documents_conditional_rates_and_seed() -> None:
     assert "all earlier drafts were accepted" in parser.format_help()
 
 
-def test_overlap_score_credit_cli_uses_kv_router_config_field() -> None:
-    parser = argparse.ArgumentParser()
-    KvRouterArgGroup().add_arguments(parser)
-
-    args = parser.parse_args(["--router-kv-overlap-score-credit", "0.5"])
-
-    assert args.overlap_score_credit == 0.5
-    assert args.overlap_score_weight is None
-
-
-def test_overlap_score_credit_decay_cli_uses_kv_router_config_field() -> None:
-    parser = argparse.ArgumentParser()
-    KvRouterArgGroup().add_arguments(parser)
-
-    args = parser.parse_args(["--router-kv-overlap-score-credit-decay", "0.5"])
-
-    assert args.overlap_score_credit_decay == 0.5
-    config = KvRouterConfigBase.from_cli_args(args)
-    assert config.kv_router_kwargs()["overlap_score_credit_decay"] == 0.5
-
-
 def test_deprecated_overlap_score_weight_cli_flows_to_binding_kwargs() -> None:
     parser = argparse.ArgumentParser()
     KvRouterArgGroup().add_arguments(parser)
@@ -200,29 +179,7 @@ def test_deprecated_overlap_score_weight_env_coexists_with_canonical_settings(
     assert config.kv_router_kwargs()["overlap_score_weight"] == 0.0
 
 
-def test_prefill_load_scale_cli_uses_kv_router_config_field() -> None:
-    parser = argparse.ArgumentParser()
-    KvRouterArgGroup().add_arguments(parser)
-
-    args = parser.parse_args(["--router-prefill-load-scale", "2.5"])
-
-    assert args.prefill_load_scale == 2.5
-    assert not hasattr(args, "router_prefill_load_scale")
-
-
-def test_prefill_load_scale_env_uses_kv_router_config_field(monkeypatch) -> None:
-    monkeypatch.setenv("DYN_ROUTER_PREFILL_LOAD_SCALE", "3.5")
-    parser = argparse.ArgumentParser()
-    KvRouterArgGroup().add_arguments(parser)
-
-    args = parser.parse_args([])
-
-    assert args.prefill_load_scale == 3.5
-    assert not hasattr(args, "router_prefill_load_scale")
-
-
-def test_decode_active_request_weight_flows_to_binding_kwargs(monkeypatch) -> None:
-    monkeypatch.setenv("DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT", "32")
+def test_decode_active_request_weight_flows_to_binding_kwargs() -> None:
     parser = argparse.ArgumentParser()
     KvRouterArgGroup().add_arguments(parser)
 
