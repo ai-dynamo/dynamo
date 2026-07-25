@@ -5,12 +5,11 @@ title: API Reference
 subtitle: Language-by-language public surface for Dynamo, discovered from the source tree
 ---
 
-import { ReferenceStyles } from "@/components/ReferenceStyles";
-import { ApiReferenceHero } from "@/components/ApiReferenceHero";
-
-<ReferenceStyles />
-
-<ApiReferenceHero />
+<CardGroup cols={3}>
+<Card title="Python" href="python/README.mdx">Worker decorators, HTTP frontend, planner / router / mocker configuration, and the Rust-backed runtime bindings.</Card>
+<Card title="Rust" href="rust/README.mdx">Distributed runtime crates published on crates.io, pinned to the current release.</Card>
+<Card title="Kubernetes" href="../../kubernetes/api-reference-fern.mdx">DynamoGraphDeployment, DynamoGraphDeploymentRequest, and DynamoComponentDeployment custom-resource fields.</Card>
+</CardGroup>
 
 The API Reference is a machine-generated view of Dynamo's public surface, kept
 honest by static analysis of the source tree. Each module page lists every

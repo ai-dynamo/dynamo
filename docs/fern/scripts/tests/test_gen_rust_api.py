@@ -119,29 +119,38 @@ def test_bindings_link_to_repository_source(
     assert all("docs.rs" not in binding.source_href for binding in reference.bindings)
 
 
-def test_rendered_typescript_is_typed_complete_and_deterministic(
+def test_rendered_page_is_complete_and_deterministic(
     reference: rust_api_discovery.RustReference,
 ) -> None:
-    first = rust_api_rendering.render_ts_data(reference)
-    second = rust_api_rendering.render_ts_data(reference)
-    assert first == second
-    assert rust_api_rendering.TS_GENERATED_MARKER in first
-    assert "export interface RustCrate" in first
-    assert "export const RUST_CRATES: RustCrate[]" in first
+    first = rust_api_rendering.render_page(reference)
+    assert first == rust_api_rendering.render_page(reference)
+    assert rust_api_rendering.MDX_GENERATED_MARKER in first
     for name in EXPECTED_CRATES:
-        assert f'"{name}"' in first
+        assert name in first
 
 
-def test_rendered_page_has_frontmatter_component_and_llms_twin(
+def test_rendered_page_is_native_mdx(
     reference: rust_api_discovery.RustReference,
 ) -> None:
+    """Crate tables are plain Markdown, so Fern indexes them for search and
+    derives the Markdown twin itself instead of a hand-built fallback."""
     page = rust_api_rendering.render_page(reference)
     assert page.startswith("---\n# SPDX-FileCopyrightText:")
     assert "title: Rust API" in page
-    assert "import { ApiRustIndex }" in page
-    assert "<llms-only>" in page and "</llms-only>" in page
-    assert "### Core Crates" in page
+    assert "ApiRustIndex" not in page
+    assert "<llms-only>" not in page
+    assert "## Core Crates" in page
     assert "cargo add dynamo-runtime@1.3.0" in page
+
+
+def test_rendered_page_leads_with_native_crate_cards(
+    reference: rust_api_discovery.RustReference,
+) -> None:
+    """Each crate group gets a card linking to its release-pinned docs.rs."""
+    page = rust_api_rendering.render_page(reference)
+    assert "<CardGroup" in page
+    for crate in reference.crates:
+        assert f'href="{crate.docs_href}"' in page
 
 
 def test_generator_writes_and_checks_outputs(
@@ -149,7 +158,6 @@ def test_generator_writes_and_checks_outputs(
     cached_reference: rust_api_discovery.RustReference,
 ) -> None:
     assert gen_rust_api.main(["--fern-root", str(workspace)]) == 0
-    assert (workspace / "components" / "rust-api-reference.data.ts").is_file()
     assert (workspace / "reference" / "api" / "rust" / "README.mdx").is_file()
     assert gen_rust_api.main(["--fern-root", str(workspace), "--check"]) == 0
 
@@ -164,13 +172,13 @@ def test_check_mode_detects_rust_page_drift(
     assert gen_rust_api.main(["--fern-root", str(workspace), "--check"]) == 1
 
 
-def test_rust_page_is_registered_and_linked_from_the_hero() -> None:
+def test_rust_page_is_registered_and_linked_from_the_landing() -> None:
     index = (FERN_ROOT / "index.yml").read_text(encoding="utf-8")
-    hero = (FERN_ROOT / "components" / "ApiReferenceHero.tsx").read_text(
+    landing = (FERN_ROOT / "reference" / "api" / "README.mdx").read_text(
         encoding="utf-8"
     )
     assert "reference/api/rust/README.mdx" in index
-    assert 'landingHref: "api/rust"' in hero
+    assert 'href="rust/README.mdx"' in landing
 
 
 def test_shipped_rust_outputs_are_fresh(
@@ -179,11 +187,7 @@ def test_shipped_rust_outputs_are_fresh(
 ) -> None:
     generated = tmp_path / "generated"
     generated.mkdir()
-    shutil.copytree(FERN_ROOT / "components", generated / "components")
     shutil.copytree(FERN_ROOT / "reference", generated / "reference")
-    assert rust_api_rendering.render_ts_data(reference) == (
-        generated / "components" / "rust-api-reference.data.ts"
-    ).read_text(encoding="utf-8")
     assert rust_api_rendering.render_page(reference) == (
         generated / "reference" / "api" / "rust" / "README.mdx"
     ).read_text(encoding="utf-8")

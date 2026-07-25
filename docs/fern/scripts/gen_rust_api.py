@@ -11,7 +11,7 @@ from pathlib import Path
 
 from rust_api_discovery import RustReference
 from rust_api_discovery import discover_rust_reference as _discover_rust_reference
-from rust_api_rendering import render_page, render_ts_data
+from rust_api_rendering import render_page
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent.parent.parent
@@ -22,9 +22,6 @@ DEFAULT_RELEASES_DATA = DEFAULT_FERN_ROOT / "components" / "releases.data.ts"
 def _outputs(fern_root: Path, reference: RustReference) -> dict[Path, str]:
     """Build every generated Rust output in one pass."""
     return {
-        fern_root
-        / "components"
-        / "rust-api-reference.data.ts": render_ts_data(reference),
         fern_root / "reference" / "api" / "rust" / "README.mdx": render_page(reference),
     }
 

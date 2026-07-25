@@ -30,7 +30,7 @@ K8S_DIR = FERN_ROOT / "kubernetes"
 INDEX_YML = FERN_ROOT / "index.yml"
 DOCS_YML = FERN_ROOT / "docs.yml"
 REF_STYLES_COMPONENT = COMPONENTS_DIR / "ReferenceStyles.tsx"
-HERO_COMPONENT = COMPONENTS_DIR / "ApiReferenceHero.tsx"
+API_LANDING = FERN_ROOT / "reference" / "api" / "README.mdx"
 
 
 def _reference_general_layout() -> list[dict[str, Any]]:
@@ -186,42 +186,41 @@ def test_kubernetes_api_url_redirects_present() -> None:
         )
 
 
-def test_api_reference_hero_points_kubernetes_at_colocated_route() -> None:
-    """LANGUAGE_CARDS must point Kubernetes at the colocated API Reference route."""
-    source = HERO_COMPONENT.read_text(encoding="utf-8")
-    hero_match = re.search(
-        r'label:\s*"Kubernetes".*?landingHref:\s*"([^"]+)"',
+def test_api_landing_points_kubernetes_at_colocated_route() -> None:
+    """The landing card group must point Kubernetes at the colocated route."""
+    source = API_LANDING.read_text(encoding="utf-8")
+    card = re.search(
+        r'<Card title="Kubernetes" href="([^"]+)"',
         source,
-        flags=re.DOTALL,
     )
 
-    assert hero_match is not None, "Kubernetes card not found in LANGUAGE_CARDS"
-    assert hero_match.group(1) == "api/kubernetes", (
-        f"Kubernetes landingHref must point at colocated api/kubernetes, got "
-        f"{hero_match.group(1)!r}"
+    assert card is not None, "Kubernetes card not found on the API landing page"
+    assert (
+        card.group(1) == "../../kubernetes/api-reference-fern.mdx"
+    ), f"Kubernetes card must point at the colocated page, got {card.group(1)!r}"
+    assert (
+        "kubernetes-api/full-api-reference" not in source
+    ), "landing must not reference the removed kubernetes-api variant"
+
+
+def test_api_reference_ships_no_bespoke_render_components() -> None:
+    """Every API surface renders through native Fern MDX, so the reference owns
+    no React render components at all."""
+    retired = (
+        "ApiSurfaceBrowser.tsx",
+        "ApiPythonIndex.tsx",
+        "ApiRustIndex.tsx",
+        "ApiKubernetesReference.tsx",
+        "KubernetesSchemaDetails.tsx",
+        "KubernetesApiTypes.ts",
+        "api-reference.data.ts",
+        "rust-api-reference.data.ts",
+        "ApiReferenceHero.tsx",
     )
-    assert (
-        "../kubernetes-api/full-api-reference" not in source
-    ), "hero must not reference the removed kubernetes-api variant"
-
-
-def test_shared_filter_primitives_live_in_reference_styles() -> None:
-    """Filter rail and pill styles must be shared, not duplicated per component."""
-    styles = REF_STYLES_COMPONENT.read_text(encoding="utf-8")
-
-    assert (
-        ".dynref-filter-rail" in styles
-    ), "shared filter rail class missing from ReferenceStyles"
-    assert (
-        ".dynref-filter-pill" in styles
-    ), "shared filter pill class missing from ReferenceStyles"
-
-    source = (COMPONENTS_DIR / "ApiRustIndex.tsx").read_text(encoding="utf-8")
-    # The per-component pill selector must be gone; only :checked sibling
-    # active-state rules that hang off the shared rail may remain.
-    assert (
-        'className="dynref-ari-pill"' not in source
-    ), "ApiRustIndex.tsx still hardcodes its own pill class"
+    for name in retired:
+        assert not (
+            COMPONENTS_DIR / name
+        ).exists(), f"{name} should be gone after the native-MDX migration"
 
 
 def test_shared_index_page_title_lives_in_reference_styles() -> None:

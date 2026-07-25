@@ -187,10 +187,8 @@ const REFERENCE_CSS = `
     --dynref-nested-border: #2b2b2b;
 }
 
-/* Shared "index page title" for the API landing components (Python index,
-   Rust crates, Kubernetes hero, API Reference hero). 20px keeps the
-   compact-index visual density; the individual components used to pick
-   22px vs 20px inconsistently. */
+/* Shared "index page title" for the reference landing components. 20px keeps
+   the compact-index visual density. */
 .dynref-index-header {
     display: flex;
     flex-wrap: wrap;
@@ -221,35 +219,6 @@ const REFERENCE_CSS = `
 .dynref-index-meta a {
     color: inherit;
     text-decoration: underline;
-}
-
-/* Shared CSS-only filter rail + pills. Each component keeps its own
-   :checked sibling active-state rules (component-local IDs), but the pill
-   dimensions and hover treatment are one style so the four filter surfaces
-   feel identical. Composes with the .dynref-vh hidden radio pattern. */
-.dynref-filter-rail {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    margin: 0 0 12px;
-}
-
-.dynref-filter-pill {
-    display: inline-flex;
-    align-items: center;
-    min-height: 28px;
-    padding: 4px 10px;
-    border: 1px solid var(--border, var(--grayscale-a5));
-    border-radius: var(--rounded, 6px);
-    background: transparent;
-    color: var(--pst-color-text-base);
-    font-size: 12.5px;
-    line-height: 1;
-    cursor: pointer;
-}
-
-.dynref-filter-pill:hover {
-    border-color: var(--nv-color-green, #76B900);
 }
 
 /* Category chips — palette replicated from main.css .dynamo-chip-*. */

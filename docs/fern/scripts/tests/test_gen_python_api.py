@@ -423,19 +423,21 @@ def test_python_landing_links_to_fern_routes_not_mdx_files() -> None:
         assert not href.endswith(".mdx")
 
 
-def test_reference_hero_uses_version_relative_site_routes() -> None:
-    """The API landing's React links must resolve without MDX rewriting.
+def test_api_landing_links_resolve_through_the_file_graph() -> None:
+    """Card hrefs use source paths, not site routes.
 
-    Every landingHref sits inside the ``api/`` segment now that Kubernetes
-    lives alongside Python and Rust under the same API Reference section.
+    Fern resolves a relative ``.mdx`` path through the file graph and its
+    broken-link checker verifies it, so the links survive a slug rename. Site
+    routes look right and silently rot -- the React hero these cards replaced
+    pointed at ``api/python``, which never resolved.
     """
-    source = (COMPONENTS_DIR / "ApiReferenceHero.tsx").read_text(encoding="utf-8")
-    assert 'landingHref: "api/python"' in source
-    assert 'landingHref: "api/rust"' in source
-    assert 'landingHref: "api/kubernetes"' in source
-    assert 'landingHref: "../kubernetes-api/full-api-reference"' not in source
-    assert "href={`api/python/${mod.slug}`}" in source
-    assert "python/README.mdx" not in source
+    source = (FERN_ROOT / "reference" / "api" / "README.mdx").read_text(
+        encoding="utf-8"
+    )
+    assert 'href="python/README.mdx"' in source
+    assert 'href="rust/README.mdx"' in source
+    assert 'href="../../kubernetes/api-reference-fern.mdx"' in source
+    assert "kubernetes-api/full-api-reference" not in source
 
 
 def test_generated_pages_do_not_leak_maintainer_instructions() -> None:
