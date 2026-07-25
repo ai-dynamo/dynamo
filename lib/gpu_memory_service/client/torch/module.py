@@ -196,11 +196,24 @@ def materialize_module_from_gms(
             param = mod._parameters[attr]
             if param is not None:
                 if param.shape != tensor.shape or param.dtype != tensor.dtype:
-                    raise RuntimeError(
-                        f"Shape/dtype mismatch for {name}: "
-                        f"param={tuple(param.shape)}/{param.dtype}, "
-                        f"gms={tuple(tensor.shape)}/{tensor.dtype}"
+                    # Post-load weight transforms (e.g. NVFP4 MoE
+                    # w13_input_scale (E,2)->(E,)) give the RW writer a
+                    # different shape than the RO meta param, which skips
+                    # post-load hooks. The committed tensor is authoritative
+                    # (the writer served at that shape), so adopt it.
+                    logger.debug(
+                        "[GMS] Adopting committed shape for %s: "
+                        "meta=%s/%s -> gms=%s/%s",
+                        name,
+                        tuple(param.shape),
+                        param.dtype,
+                        tuple(tensor.shape),
+                        tensor.dtype,
                     )
+                    mod._parameters[attr] = torch.nn.Parameter(
+                        tensor, requires_grad=param.requires_grad
+                    )
+                    continue
                 if param.is_meta or param.device != tensor.device:
                     mod._parameters[attr] = torch.nn.Parameter(
                         tensor, requires_grad=param.requires_grad
