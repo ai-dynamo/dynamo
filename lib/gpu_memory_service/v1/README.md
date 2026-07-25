@@ -147,9 +147,9 @@ Copied-out tensors retain ordinary `gc.collect()` and
 
 Commit logs once per rank/device:
 
-- logical retained Parameter tensor bytes;
+- unique physical byte-span coverage retained by Parameters;
 - aligned retained GMS bytes and allocation count;
-- tensor-to-allocated ratio;
+- Parameter-span-to-allocated ratio;
 - fragmentation bytes and percentage; and
 - actual unique bytes copied to the default allocator.
 

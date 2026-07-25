@@ -9,7 +9,7 @@ import gc
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from gpu_memory_service.core.client.torch.tensor import isolate_tensors
+from gpu_memory_service.core.client.torch.tensor import isolate_tensors, tensor_span
 
 if TYPE_CHECKING:
     import torch
@@ -85,7 +85,7 @@ def normalize_captured_tensors(
 ) -> tuple[int, int]:
     """Rebind every captured non-Parameter TensorImpl to cloned storage."""
     gc.collect()
-    retained_gms_tensor_bytes = 0
+    retained_parameter_spans: list[tuple[int, int]] = []
     copied_out_bytes = 0
     for discovered in _discover_live_storages(model):
         if _containing_mapping(discovered, mappings) is None:
@@ -95,9 +95,12 @@ def normalize_captured_tensors(
             for tensor_object in discovered.objects
             if tensor_object.is_parameter
         ]
-        retained_gms_tensor_bytes += sum(
-            int(tensor_object.tensor.numel()) * int(tensor_object.tensor.element_size())
+        storage_start = int(discovered.storage.data_ptr())
+        retained_parameter_spans.extend(
+            (storage_start + start, storage_start + end)
             for tensor_object in parameters
+            if tensor_object.tensor.numel()
+            for start, end in (tensor_span(tensor_object.tensor),)
         )
         non_parameters = [
             tensor_object
@@ -107,4 +110,10 @@ def normalize_captured_tensors(
         copied_out_bytes += isolate_tensors(
             [tensor_object.tensor for tensor_object in non_parameters]
         )
-    return retained_gms_tensor_bytes, copied_out_bytes
+
+    retained_gms_parameter_span_bytes = 0
+    retained_end = 0
+    for start, end in sorted(retained_parameter_spans):
+        retained_gms_parameter_span_bytes += max(end - max(start, retained_end), 0)
+        retained_end = max(retained_end, end)
+    return retained_gms_parameter_span_bytes, copied_out_bytes

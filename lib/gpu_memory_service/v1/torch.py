@@ -58,9 +58,10 @@ class SnapshotTorchPool:
 
     def _finalize_model_load(self, model: "Callable[[], object]") -> None:
         try:
-            retained_gms_tensor_bytes, copied_out_bytes = normalize_captured_tensors(
-                model(), self._manager.mappings
-            )
+            (
+                retained_gms_parameter_span_bytes,
+                copied_out_bytes,
+            ) = normalize_captured_tensors(model(), self._manager.mappings)
             self._torch.cuda.synchronize(self.device)
             self._destroy_model_load_pool()
         except Exception as cause:
@@ -70,17 +71,19 @@ class SnapshotTorchPool:
         retained_gms_allocated_bytes = sum(
             mapping.aligned_size for mapping in self._manager.mappings
         )
-        fragmentation_bytes = retained_gms_allocated_bytes - retained_gms_tensor_bytes
+        fragmentation_bytes = (
+            retained_gms_allocated_bytes - retained_gms_parameter_span_bytes
+        )
         logger.info(
             "GMS weights committed device=%d "
-            "retained_gms_tensor_bytes=%d retained_gms_allocated_bytes=%d "
-            "tensor_to_allocated_ratio=%.6f fragmentation_bytes=%d "
+            "retained_gms_parameter_span_bytes=%d retained_gms_allocated_bytes=%d "
+            "parameter_span_to_allocated_ratio=%.6f fragmentation_bytes=%d "
             "fragmentation_percent=%.2f copied_out_bytes=%d "
             "retained_gms_allocation_count=%d",
             self.device,
-            retained_gms_tensor_bytes,
+            retained_gms_parameter_span_bytes,
             retained_gms_allocated_bytes,
-            retained_gms_tensor_bytes / retained_gms_allocated_bytes,
+            retained_gms_parameter_span_bytes / retained_gms_allocated_bytes,
             fragmentation_bytes,
             fragmentation_bytes / retained_gms_allocated_bytes * 100,
             copied_out_bytes,
