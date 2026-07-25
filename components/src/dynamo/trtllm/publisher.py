@@ -22,6 +22,8 @@ Event Flow:
 import asyncio
 import concurrent.futures
 import logging
+import os
+import re
 import threading
 import time
 import traceback
@@ -111,6 +113,94 @@ def _to_signed_i64(value: int | None) -> int | None:
     if value < -(2**63):
         return ((value + 2**63) % 2**64) - 2**63
     return value
+
+
+def _offset_endpoint_port(endpoint: str, rank: int) -> str:
+    """Apply vLLM's base-port-plus-rank convention."""
+    if rank == 0:
+        return endpoint
+    if "inproc" in endpoint:
+        return f"{endpoint}_dp{rank}"
+    if "tcp" in endpoint and ":" in endpoint:
+        last_colon_idx = endpoint.rfind(":")
+        base_addr = endpoint[:last_colon_idx]
+        base_port = int(endpoint[last_colon_idx + 1 :])
+        new_port = base_port + rank
+        if new_port > 65_535:
+            raise ValueError(f"KV event endpoint port exceeds 65535 for rank {rank}")
+        return f"{base_addr}:{new_port}"
+    raise ValueError("Invalid KV event endpoint: must contain 'inproc' or 'tcp'")
+
+
+def _expand_slurm_nodelist(nodelist: str) -> list[str]:
+    """Expand the numeric bracket form used by SLURM_STEP_NODELIST."""
+    groups: list[str] = []
+    start = 0
+    depth = 0
+    for index, character in enumerate(nodelist):
+        if character == "[":
+            depth += 1
+        elif character == "]":
+            depth -= 1
+        elif character == "," and depth == 0:
+            groups.append(nodelist[start:index])
+            start = index + 1
+    groups.append(nodelist[start:])
+
+    hosts: list[str] = []
+    for group in groups:
+        match = re.fullmatch(r"([^\[]*)\[([^\]]+)\](.*)", group)
+        if match is None:
+            hosts.append(group)
+            continue
+        prefix, ranges, suffix = match.groups()
+        for item in ranges.split(","):
+            if "-" not in item:
+                hosts.append(f"{prefix}{item}{suffix}")
+                continue
+            first, last = item.split("-", 1)
+            width = max(len(first), len(last))
+            hosts.extend(
+                f"{prefix}{value:0{width}d}{suffix}"
+                for value in range(int(first), int(last) + 1)
+            )
+    return hosts
+
+
+def _native_kv_event_hosts(
+    attention_dp_size: int, gpus_per_node: Optional[int]
+) -> list[str]:
+    """Map each attention-DP rank to the host running its direct publisher."""
+    if not gpus_per_node or attention_dp_size <= gpus_per_node:
+        return ["127.0.0.1"] * attention_dp_size
+
+    step_nodelist = os.environ.get("SLURM_STEP_NODELIST")
+    if not step_nodelist:
+        raise RuntimeError(
+            "Native TRT-LLM KV event subscribers require SLURM_STEP_NODELIST "
+            "for a multi-node distributed worker"
+        )
+    nodes = _expand_slurm_nodelist(step_nodelist)
+    required_nodes = (attention_dp_size + gpus_per_node - 1) // gpus_per_node
+    if len(nodes) != required_nodes:
+        raise RuntimeError(
+            "Native TRT-LLM KV event publisher discovery expected "
+            f"{required_nodes} worker nodes from SLURM_STEP_NODELIST, got "
+            f"{len(nodes)}: {nodes}"
+        )
+    return [nodes[rank // gpus_per_node] for rank in range(attention_dp_size)]
+
+
+def _native_kv_event_connect_endpoint(endpoint: str, rank: int, host: str) -> str:
+    endpoint = _offset_endpoint_port(endpoint, rank)
+    if not endpoint.startswith("tcp://"):
+        if host != "127.0.0.1":
+            raise ValueError("Multi-node native KV events require a TCP endpoint")
+        return endpoint
+    address, port = endpoint.removeprefix("tcp://").rsplit(":", 1)
+    if address in {"*", "0.0.0.0", "[::]"}:
+        address = host
+    return f"tcp://{address}:{port}"
 
 
 class ZmqKvEventPublisher:
@@ -401,6 +491,9 @@ class Publisher:
         metrics_collector: Any = None,
         kv_state_endpoint: Optional[str] = None,
         image_token_id: Optional[int] = None,
+        native_kv_events_config: Optional[dict[str, Any]] = None,
+        native_kv_events_gpus_per_node: Optional[int] = None,
+        publish_legacy_kv_events: bool = True,
     ) -> None:
         self.endpoint = endpoint
         self.engine = engine
@@ -416,6 +509,9 @@ class Publisher:
         self.metrics_collector = metrics_collector
         self.kv_state_endpoint = kv_state_endpoint
         self.image_token_id = image_token_id
+        self.native_kv_events_config = native_kv_events_config
+        self.native_kv_events_gpus_per_node = native_kv_events_gpus_per_node
+        self.publish_legacy_kv_events = publish_legacy_kv_events
         self.attention_dp_size = engine.get_attention_dp_size()
 
         # The first few kv events from the model engine are always "created" type events.
@@ -500,7 +596,46 @@ class Publisher:
             )
             self.fpm_publisher = None
 
-        # Setup the kv cache events publisher
+        # Setup the kv cache events publisher.
+        if self.native_kv_events_config is not None:
+            self.kv_event_publishers = {}
+            base_endpoint = self.native_kv_events_config["endpoint"]
+            topic = self.native_kv_events_config.get("topic", "")
+            rank_hosts = _native_kv_event_hosts(
+                self.attention_dp_size, self.native_kv_events_gpus_per_node
+            )
+            for rank in range(self.attention_dp_size):
+                zmq_endpoint = _native_kv_event_connect_endpoint(
+                    base_endpoint, rank, rank_hosts[rank]
+                )
+                self.kv_event_publishers[rank] = KvEventPublisher(
+                    endpoint=self.endpoint,
+                    kv_block_size=self.kv_block_size,
+                    zmq_endpoint=zmq_endpoint,
+                    zmq_topic=topic,
+                    enable_local_indexer=self.enable_local_indexer,
+                    dp_rank=rank,
+                    kv_state_endpoint=self.kv_state_endpoint,
+                    image_token_id=self.image_token_id,
+                )
+                logging.info(
+                    "Created native TRT-LLM KV event subscriber for "
+                    "attention_dp_rank=%d endpoint=%s topic=%r",
+                    rank,
+                    zmq_endpoint,
+                    topic,
+                )
+            logging.info(
+                "Native TRT-LLM KV events enabled with %d direct subscriber(s); "
+                "legacy engine polling is disabled",
+                self.attention_dp_size,
+            )
+            return
+
+        if not self.publish_legacy_kv_events:
+            logging.info("KV event publishing is disabled")
+            return
+
         # Publisher selection based on consolidator configuration:
         # - With consolidator: Use ZmqKvEventPublisher (this module) → ZMQ → Consolidator → NATS → Router
         # - Without consolidator: Use KvEventPublisher → NATS → Router (direct)
@@ -1086,6 +1221,17 @@ class Publisher:
         if self.zmq_kv_event_publisher:
             self.zmq_kv_event_publisher.shutdown()
 
+        if self.kv_event_publishers:
+            for rank, publisher in self.kv_event_publishers.items():
+                try:
+                    publisher.shutdown()
+                except RuntimeError as e:
+                    logging.warning(
+                        "KV event publisher shutdown failed for rank=%d: %s",
+                        rank,
+                        e,
+                    )
+
         # Shutdown FpmDirectPublisher (stops the per-rank serialization tasks
         # and the event-plane publisher task on the Rust side). PyO3 surfaces
         # shutdown failures as PyRuntimeError; narrower catch keeps real
@@ -1148,6 +1294,9 @@ async def get_publisher(
     metrics_collector: Any = None,
     kv_state_endpoint: Optional[str] = None,
     image_token_id: Optional[int] = None,
+    native_kv_events_config: Optional[dict[str, Any]] = None,
+    native_kv_events_gpus_per_node: Optional[int] = None,
+    publish_legacy_kv_events: bool = True,
 ) -> AsyncGenerator[Publisher, None]:
     publisher = Publisher(
         endpoint,
@@ -1163,6 +1312,9 @@ async def get_publisher(
         metrics_collector=metrics_collector,
         kv_state_endpoint=kv_state_endpoint,
         image_token_id=image_token_id,
+        native_kv_events_config=native_kv_events_config,
+        native_kv_events_gpus_per_node=native_kv_events_gpus_per_node,
+        publish_legacy_kv_events=publish_legacy_kv_events,
     )
     try:
         publisher.initialize()
