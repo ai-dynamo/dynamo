@@ -23,7 +23,6 @@ import asyncio
 import concurrent.futures
 import logging
 import os
-import re
 import threading
 import time
 import traceback
@@ -62,6 +61,7 @@ _POLLING_BATCH_MAX_ITEMS = 256
 _KV_EVENTS_MIN_SLEEP_SEC = 0.005
 _KV_EVENTS_MAX_SLEEP_SEC = 0.02
 _KV_EVENTS_BACKOFF_FACTOR = 1.5
+_NATIVE_KV_EVENT_HOSTS_ENV = "DYN_TRTLLM_KV_EVENT_HOSTS"
 
 # InflightBatchingStats fields the FPM publisher consumes. As of
 # NVIDIA/TensorRT-LLM#13199 (merged 2026-04-27) all 11 fields live nested
@@ -132,61 +132,30 @@ def _offset_endpoint_port(endpoint: str, rank: int) -> str:
     raise ValueError("Invalid KV event endpoint: must contain 'inproc' or 'tcp'")
 
 
-def _expand_slurm_nodelist(nodelist: str) -> list[str]:
-    """Expand the numeric bracket form used by SLURM_STEP_NODELIST."""
-    groups: list[str] = []
-    start = 0
-    depth = 0
-    for index, character in enumerate(nodelist):
-        if character == "[":
-            depth += 1
-        elif character == "]":
-            depth -= 1
-        elif character == "," and depth == 0:
-            groups.append(nodelist[start:index])
-            start = index + 1
-    groups.append(nodelist[start:])
-
-    hosts: list[str] = []
-    for group in groups:
-        match = re.fullmatch(r"([^\[]*)\[([^\]]+)\](.*)", group)
-        if match is None:
-            hosts.append(group)
-            continue
-        prefix, ranges, suffix = match.groups()
-        for item in ranges.split(","):
-            if "-" not in item:
-                hosts.append(f"{prefix}{item}{suffix}")
-                continue
-            first, last = item.split("-", 1)
-            width = max(len(first), len(last))
-            hosts.extend(
-                f"{prefix}{value:0{width}d}{suffix}"
-                for value in range(int(first), int(last) + 1)
-            )
-    return hosts
-
-
 def _native_kv_event_hosts(
     attention_dp_size: int, gpus_per_node: Optional[int]
 ) -> list[str]:
     """Map each attention-DP rank to the host running its direct publisher."""
-    if not gpus_per_node or attention_dp_size <= gpus_per_node:
+    if attention_dp_size < 1:
+        raise ValueError(f"attention_dp_size must be positive, got {attention_dp_size}")
+    if not gpus_per_node or gpus_per_node < 1:
+        raise ValueError("gpus_per_node must be positive for native TRT-LLM KV events")
+    if attention_dp_size <= gpus_per_node:
         return ["127.0.0.1"] * attention_dp_size
 
-    step_nodelist = os.environ.get("SLURM_STEP_NODELIST")
-    if not step_nodelist:
+    raw_hosts = os.environ.get(_NATIVE_KV_EVENT_HOSTS_ENV)
+    if not raw_hosts:
         raise RuntimeError(
-            "Native TRT-LLM KV event subscribers require SLURM_STEP_NODELIST "
-            "for a multi-node distributed worker"
+            "Native TRT-LLM KV event subscribers require "
+            f"{_NATIVE_KV_EVENT_HOSTS_ENV} for a multi-node distributed worker"
         )
-    nodes = _expand_slurm_nodelist(step_nodelist)
+    nodes = [host.strip() for host in raw_hosts.split(",") if host.strip()]
     required_nodes = (attention_dp_size + gpus_per_node - 1) // gpus_per_node
     if len(nodes) != required_nodes:
         raise RuntimeError(
             "Native TRT-LLM KV event publisher discovery expected "
-            f"{required_nodes} worker nodes from SLURM_STEP_NODELIST, got "
-            f"{len(nodes)}: {nodes}"
+            f"{required_nodes} ordered endpoint hosts from "
+            f"{_NATIVE_KV_EVENT_HOSTS_ENV}, got {len(nodes)}: {nodes}"
         )
     return [nodes[rank // gpus_per_node] for rank in range(attention_dp_size)]
 
