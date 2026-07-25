@@ -44,11 +44,16 @@ Launch a frontend and TensorRT-LLM backend to test metrics:
 # Start frontend (default port 8000, override with --http-port or DYN_HTTP_PORT env var)
 $ python -m dynamo.frontend
 
-# Enable system metrics server on port 8081 and enable metrics collection
-$ DYN_SYSTEM_PORT=8081 python -m dynamo.trtllm --model <model_name> --publish-events-and-metrics
+# Enable system metrics server on port 8081 and TRT-LLM metrics collection
+$ DYN_SYSTEM_PORT=8081 python -m dynamo.trtllm --model <model_name> \
+    --override-engine-args \
+    '{"return_perf_metrics": true, "enable_iter_perf_stats": true}'
 ```
 
 **Note:** The `backend` must be set to `"pytorch"` for metrics collection (enforced in `components/src/dynamo/trtllm/main.py`). TensorRT-LLM's `MetricsCollector` integration has only been tested/validated with the PyTorch backend.
+
+KV-event publication is configured independently with `--publish-kv-events`.
+That flag does not enable either TensorRT-LLM performance option.
 
 Wait for the TensorRT-LLM worker to start, then send requests and check metrics:
 
@@ -138,7 +143,7 @@ TensorRT-LLM provides Prometheus metrics through the `MetricsCollector` class (s
 
 ### Additional Operational Metrics
 
-Dynamo adds the following operational metrics for TensorRT-LLM workers. These complement the engine's native metrics above with request-level observability that the engine does not provide. All metrics use the `trtllm_` prefix and are automatically enabled when `--publish-events-and-metrics` is set.
+Dynamo adds the following operational metrics for TensorRT-LLM workers. These complement the engine's native metrics above with request-level observability that the engine does not provide. All metrics use the `trtllm_` prefix. Enable their required TensorRT-LLM performance data explicitly with `return_perf_metrics` and `enable_iter_perf_stats`, as shown above.
 
 Metric name constants are defined in `lib/runtime/src/metrics/prometheus_names.rs` (`trtllm_additional` module).
 
@@ -211,7 +216,7 @@ TensorRT-LLM provides extensive performance data beyond the basic Prometheus met
 
 - **Prometheus Integration**: Uses the `MetricsCollector` class from `tensorrt_llm.metrics` (see [collector.py](https://github.com/NVIDIA/TensorRT-LLM/blob/main/tensorrt_llm/metrics/collector.py))
 - **Dynamo Integration**: Uses `register_engine_metrics_callback()` function with `metric_prefix_filter=["trtllm_"]`
-- **Engine Configuration**: `return_perf_metrics` set to `True` when `--publish-events-and-metrics` is enabled
+- **Engine Configuration**: Set `return_perf_metrics` and `enable_iter_perf_stats` explicitly through `--extra-engine-args` or `--override-engine-args`
 - **Initialization**: Metrics appear after TensorRT-LLM engine initialization completes
 - **Metadata**: `MetricsCollector` initialized with model metadata (model name, engine type)
 

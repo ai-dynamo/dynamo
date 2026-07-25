@@ -429,8 +429,10 @@ async def test_init_llm_worker_engine_args_without_overrides(monkeypatch):
     """Without overrides, engine_args passed to get_llm_engine use CLI defaults."""
     monkeypatch.delenv("DYN_TRTLLM_MAX_NUM_TOKENS", raising=False)
     monkeypatch.delenv("DYN_TRTLLM_MAX_BATCH_SIZE", raising=False)
+    monkeypatch.delenv("DYN_TRTLLM_EXTRA_ENGINE_ARGS", raising=False)
+    monkeypatch.delenv("DYN_TRTLLM_OVERRIDE_ENGINE_ARGS", raising=False)
 
-    config = parse_args(["--model", "fake-model"])
+    config = parse_args(["--model", "fake-model", "--publish-kv-events"])
 
     with (
         mock.patch("dynamo.trtllm.workers.llm_worker.tokenizer_factory"),
@@ -452,6 +454,8 @@ async def test_init_llm_worker_engine_args_without_overrides(monkeypatch):
         engine_args = exc_info.value.engine_args
         assert engine_args["max_num_tokens"] == config.max_num_tokens
         assert engine_args["max_batch_size"] == config.max_batch_size
+        assert "return_perf_metrics" not in engine_args
+        assert "enable_iter_perf_stats" not in engine_args
 
 
 @pytest.mark.asyncio

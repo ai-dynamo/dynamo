@@ -321,11 +321,6 @@ async def init_llm_worker(
         "max_seq_len": config.max_seq_len,
         "max_beam_width": config.max_beam_width,
         "max_batch_size": config.max_batch_size,
-        "return_perf_metrics": config.publish_events_and_metrics,
-        # enable_iter_perf_stats is required for PyTorch backend to compute iteration-level
-        # stats (KV cache utilization, hit rate). TensorRT backend always has this enabled.
-        # See TRT-LLM PR #11243: MetricsCollector.log_iteration_stats() needs these stats.
-        "enable_iter_perf_stats": config.publish_events_and_metrics,
         "kv_connector_config": kv_connector_config,
     }
 
@@ -362,6 +357,11 @@ async def init_llm_worker(
         except json.JSONDecodeError as e:
             logging.error(f"Failed to parse override_engine_args as JSON: {e}")
             sys.exit(1)
+
+    perf_metrics_enabled = bool(
+        arg_map.get("return_perf_metrics", False)
+        or arg_map.get("enable_iter_perf_stats", False)
+    )
 
     _sync_config_from_engine_args(config, arg_map)
 
@@ -697,7 +697,7 @@ async def init_llm_worker(
         # This enables exposing TRT-LLM's native Prometheus metrics (request latency, TTFT, TPOT, etc.)
         metrics_collector = None
         additional_metrics = None
-        if config.publish_events_and_metrics:
+        if perf_metrics_enabled:
             try:
                 model_name_for_metrics = config.served_model_name or config.model
                 metrics_collector = MetricsCollector(
@@ -843,8 +843,8 @@ async def init_llm_worker(
         ).to_dict()
 
         if config.publish_events_and_metrics:
-            # Initialize and pass in the publisher to the request handler to
-            # publish events and metrics.
+            # Initialize the KV-event publisher. Its cache-load telemetry is
+            # used by the router and is separate from TRT-LLM performance stats.
             # Use model as fallback if served_model_name is not provided
             model_name_for_metrics = config.served_model_name or config.model
             metrics_labels = [
