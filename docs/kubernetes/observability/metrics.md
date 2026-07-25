@@ -126,15 +126,26 @@ NIXL telemetry is disabled by default. When enabled, NIXL metrics will be expose
 
 ### Create PodMonitors
 
-The Prometheus Operator uses PodMonitor resources to automatically discover and scrape metrics from pods. The Dynamo platform Helm chart creates PodMonitors when prometheus-operator CRDs are present, and the operator labels pods with:
+The Prometheus Operator uses PodMonitor resources to automatically discover and scrape metrics from pods. The Dynamo platform Helm chart creates PodMonitors, and the operator labels pods with:
 - `nvidia.com/metrics-enabled: "true"` - Enables metrics collection
 - `nvidia.com/dynamo-component-type: "frontend|worker|decode|prefill|…"` - Identifies the component type
+
+Whether the chart creates them is controlled by `dynamo-operator.dynamo.metrics.podMonitors.enabled`, which is tri-state:
+
+| Value | Behavior |
+|---|---|
+| `null` (default) | Auto-detect. Creates PodMonitors only when the prometheus-operator CRDs exist in the cluster, which requires a live cluster lookup and so works with `helm install` and `helm upgrade`. |
+| `true` | Always create. Use with `helm template` and GitOps workflows, where CRDs cannot be detected and auto-detect would silently create nothing. |
+| `false` | Never create, even when prometheus-operator is installed. |
+
+The chart creates these PodMonitors:
 
 | PodMonitor | Selects | Scrapes |
 |---|---|---|
 | `dynamo-frontend` | `component-type: frontend` | port `http` (`/metrics`) |
-| `dynamo-worker` | `worker` / `decode` / `prefill` | port `system` (worker metrics), ports `system-0` / `system-1` when present (GMS shadow-failover), and port `http` when present (frontend sidecar) |
+| `dynamo-worker` | `worker` / `decode` / `prefill` | port `system` (worker metrics), ports `system-0` / `system-1` when present (GMS shadow-failover), port `http` when present (frontend sidecar), and port `nixl` when `dynamo-operator.dynamo.metrics.podMonitors.nixlTelemetry=true` |
 | `dynamo-planner` | `component-type: planner` | port `metrics` |
+| `dynamo-router` | `component-type: default` | port 9090 (`DYN_SYSTEM_PORT`), addressed by relabeling rather than a named container port |
 
 In Gateway API / EPP deployments, each worker pod runs a frontend sidecar in `--router-mode direct` that exposes `dynamo_frontend_*` (including `dynamo_frontend_cached_tokens`) on port `http` (8000). The worker PodMonitor scrapes that named port when the sidecar is present; pods without an `http` container port are skipped for that endpoint.
 
