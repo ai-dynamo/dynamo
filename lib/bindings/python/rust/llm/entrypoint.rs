@@ -469,9 +469,7 @@ impl RouterConfig {
             ));
         }
         if non_cpu_to_cpu_ratio.is_some_and(|ratio| ratio < 1) {
-            return Err(PyValueError::new_err(
-                "non_cpu_to_cpu_ratio must be >= 1",
-            ));
+            return Err(PyValueError::new_err("non_cpu_to_cpu_ratio must be >= 1"));
         }
         RsLoadThresholdConfig {
             active_decode_blocks_threshold,
@@ -499,9 +497,7 @@ impl RouterConfig {
     #[setter(non_cpu_to_cpu_ratio)]
     fn set_non_cpu_to_cpu_ratio(&mut self, value: Option<usize>) -> PyResult<()> {
         if value.is_some_and(|ratio| ratio < 1) {
-            return Err(PyValueError::new_err(
-                "non_cpu_to_cpu_ratio must be >= 1",
-            ));
+            return Err(PyValueError::new_err("non_cpu_to_cpu_ratio must be >= 1"));
         }
         self.non_cpu_to_cpu_ratio = value;
         Ok(())
