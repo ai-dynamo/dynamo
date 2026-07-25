@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Iterator
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,7 @@ import api_rendering
 import gen_python_api
 import kubernetes_api_discovery
 import kubernetes_api_rendering
+import markdown_rendering
 import pytest
 import rust_api_rendering
 import yaml
@@ -214,16 +216,12 @@ def test_shared_filter_primitives_live_in_reference_styles() -> None:
         ".dynref-filter-pill" in styles
     ), "shared filter pill class missing from ReferenceStyles"
 
-    for tsx_name, per_component_class in (
-        ("ApiRustIndex.tsx", ".dynref-ari-pill"),
-        ("ApiSurfaceBrowser.tsx", ".dynref-asb-pill"),
-    ):
-        source = (COMPONENTS_DIR / tsx_name).read_text(encoding="utf-8")
-        # The per-component pill selector must be gone; only :checked sibling
-        # active-state rules that hang off the shared rail may remain.
-        assert (
-            f'className="{per_component_class[1:]}"' not in source
-        ), f"{tsx_name} still hardcodes its own pill class"
+    source = (COMPONENTS_DIR / "ApiRustIndex.tsx").read_text(encoding="utf-8")
+    # The per-component pill selector must be gone; only :checked sibling
+    # active-state rules that hang off the shared rail may remain.
+    assert (
+        'className="dynref-ari-pill"' not in source
+    ), "ApiRustIndex.tsx still hardcodes its own pill class"
 
 
 def test_shared_index_page_title_lives_in_reference_styles() -> None:
@@ -235,23 +233,46 @@ def test_shared_index_page_title_lives_in_reference_styles() -> None:
     ), "shared index title class missing from ReferenceStyles"
 
 
-def test_python_component_uses_qualnames_for_identity_and_imports() -> None:
-    source = (COMPONENTS_DIR / "ApiSurfaceBrowser.tsx").read_text(encoding="utf-8")
-    anchor_helper = re.search(r"function symbolAnchorId.*?\n}", source, flags=re.DOTALL)
-    import_helper = re.search(
-        r"function symbolImportStatement.*?\n}", source, flags=re.DOTALL
+def test_python_anchors_use_qualnames_so_duplicate_names_stay_distinct() -> None:
+    """Two submodules can expose the same symbol name; anchoring on the bare
+    name would collide and send both deep links to the first one."""
+    shared_name = api_discovery.Symbol(
+        name="Client",
+        kind="class",
+        qualname="dynamo._core.Client",
+        import_path="dynamo._core.Client",
+        summary="",
+        signature="",
+        source_path="lib/x.py",
+        source_line=1,
+        source_href="https://example.invalid",
+    )
+    other = replace(shared_name, qualname="dynamo.llm.Client")
+
+    assert api_rendering.symbol_anchor(shared_name) != api_rendering.symbol_anchor(
+        other
     )
 
-    assert anchor_helper is not None
-    assert "symbol.qualname" in anchor_helper.group()
-    assert source.count("key={s.qualname}") == 2
-    assert import_helper is not None
-    assert "symbol.importPath.lastIndexOf" in import_helper.group()
-    assert "data-dynref-copy={symbolImportStatement(symbol)}" in source
-    assert "from ${mod.name} import" not in source
-    data = (COMPONENTS_DIR / "api-reference.data.ts").read_text(encoding="utf-8")
-    assert 'name: "PyRuntimeMetrics"' in data
-    assert 'importPath: "dynamo._core.PyRuntimeMetrics"' in data
+
+def test_python_imports_use_the_public_alias_path() -> None:
+    """Griffe resolves symbols to their defining module; importing from the
+    canonical path breaks when the public surface re-exports under an alias."""
+    symbol = api_discovery.Symbol(
+        name="PyRuntimeMetrics",
+        kind="class",
+        qualname="dynamo._core.internal.PyRuntimeMetrics",
+        import_path="dynamo._core.PyRuntimeMetrics",
+        summary="",
+        signature="",
+        source_path="lib/x.py",
+        source_line=1,
+        source_href="https://example.invalid",
+    )
+
+    assert (
+        api_rendering.import_statement(symbol)
+        == "from dynamo._core import PyRuntimeMetrics"
+    )
 
 
 @pytest.fixture(scope="module")
@@ -454,13 +475,14 @@ def test_python_signature_preserves_all_parameter_kinds(tmp_path: Path) -> None:
     assert "value, *, flag: bool = False" in keyword_signature
 
 
-def test_python_llms_fallback_includes_signatures_and_methods() -> None:
+def test_python_page_includes_signatures_and_methods() -> None:
+    """Signatures and public methods must be in the page itself, since Fern
+    derives the Markdown and llms.txt twins from it."""
     rendered = api_rendering.render_module_page(_SAMPLE_MODULE)
-    llms_body = rendered.split("<llms-only>", 1)[1].split("</llms-only>", 1)[0]
 
-    assert _SAMPLE_SYMBOL.signature in llms_body
-    assert _SAMPLE_METHOD.signature in llms_body
-    assert _SAMPLE_METHOD.summary in llms_body
+    assert _SAMPLE_SYMBOL.signature in rendered
+    assert _SAMPLE_METHOD.signature in rendered
+    assert _SAMPLE_METHOD.summary in rendered
 
 
 def test_kubernetes_sources_use_supported_admonitions() -> None:
@@ -510,10 +532,7 @@ def test_python_generator_detects_and_removes_orphaned_pages(
     assert not orphan.exists()
 
 
-@pytest.mark.parametrize(
-    "cell_renderer",
-    (api_rendering._cell, rust_api_rendering._cell),
-)
+@pytest.mark.parametrize("cell_renderer", (rust_api_rendering._cell,))
 def test_mdx_table_cells_escape_source_metacharacters(
     cell_renderer: Callable[[str], str],
 ) -> None:
@@ -524,6 +543,18 @@ def test_mdx_table_cells_escape_source_metacharacters(
     assert "&#123;item&#125;" in rendered
     assert "&lt;Widget&gt;" in rendered
     assert "\\|" in rendered
+
+
+def test_mdx_prose_escapes_jsx_but_spares_inline_code() -> None:
+    """Entities are not decoded inside code spans, so escaping there would
+    surface a literal ``&lt;`` to the reader."""
+    rendered = markdown_rendering.escape_mdx_prose(
+        "Takes a `map<string, int>` and {opts} for <Widget>"
+    )
+
+    assert "`map<string, int>`" in rendered
+    assert "&#123;opts&#125;" in rendered
+    assert "&lt;Widget&gt;" in rendered
 
 
 def test_kubernetes_attributes_escape_source_metacharacters() -> None:

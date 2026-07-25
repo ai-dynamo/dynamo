@@ -36,14 +36,15 @@ The [`docs/fern/scripts/gen_python_api.py`][gen] script parses the Dynamo
 Python source with [griffe][griffe] — no import, no build, no runtime
 dependency on backend containers. From one parse it writes:
 
-- [`docs/fern/components/api-reference.data.ts`][data] — a typed TypeScript
-  data module the Reference components read from.
 - [`docs/fern/reference/api/python/README.mdx`][landing] — the Python API
-  landing page.
+  landing page, a card index of every curated module.
 - [`docs/fern/reference/api/python/<module>.mdx`][pages] — one page per
-  curated module. Each page ends in an `<llms-only>` fallback so agent
-  Markdown exports still see the full symbol table when the React
-  components are stripped.
+  curated module, with an anchored accordion per symbol carrying its import
+  statement, signature, and public methods.
+
+Every page is plain MDX built from Fern's own components, so the whole
+surface is indexed for search and Fern derives the Markdown and `llms.txt`
+twins from it directly.
 
 Run the generator locally after editing the Python source or the module list:
 
@@ -56,7 +57,6 @@ python3 docs/fern/scripts/gen_python_api.py --check    # drift check (exit 1 if 
 content before it ships.
 
 [gen]: https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/scripts/gen_python_api.py
-[data]: https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/components/api-reference.data.ts
 [landing]: https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/reference/api/python/README.mdx
 [pages]: https://github.com/ai-dynamo/dynamo/tree/main/docs/fern/reference/api/python
 [griffe]: https://mkdocstrings.github.io/griffe/

@@ -48,12 +48,6 @@ pytestmark = [pytest.mark.pre_merge, pytest.mark.gpu_0, pytest.mark.unit]
 REPO_ROOT = Path(__file__).resolve().parents[4]
 FERN_ROOT = REPO_ROOT / "docs" / "fern"
 COMPONENTS_DIR = FERN_ROOT / "components"
-API_COMPONENT_FILES = (
-    COMPONENTS_DIR / "ApiReferenceHero.tsx",
-    COMPONENTS_DIR / "ApiSurfaceBrowser.tsx",
-    COMPONENTS_DIR / "ApiPythonIndex.tsx",
-)
-DATA_TS = COMPONENTS_DIR / "api-reference.data.ts"
 PY_PAGES_DIR = FERN_ROOT / "reference" / "api" / "python"
 PY_LANDING = PY_PAGES_DIR / "README.mdx"
 
@@ -230,61 +224,67 @@ def test_discover_all_modules_returns_the_full_curated_list(
 # ---------------------------------------------------------------------------
 
 
-def test_render_ts_data_module_lists_every_curated_module(
-    all_modules: list[api_discovery.Module],
-) -> None:
-    """The typed data module the visual components read from must carry
-    every curated module the generator discovered; a missing entry hides
-    that module from the UI even when the page exists."""
-    text = api_rendering.render_ts_data(all_modules)
-    assert text.startswith("/*\n * SPDX-FileCopyrightText:")
-    assert "SPDX-License-Identifier: Apache-2.0" in text
-    assert api_rendering.TS_GENERATED_MARKER in text
-    assert "docs/fern/scripts/api_discovery.py" in text
-    for needle in (
-        "export type ApiSymbolKind",
-        "export interface ApiSymbol",
-        "export interface ApiMethod",
-        "export interface ApiModule",
-        "export const API_MODULES: ApiModule[]",
-    ):
-        assert needle in text, f"missing {needle!r} in generated TS data"
-    for module_name in CURATED_MODULE_NAMES:
-        assert f'"{module_name}"' in text, f"{module_name} missing from TS data"
-
-
-def test_render_ts_data_module_is_deterministic(
-    all_modules: list[api_discovery.Module],
-) -> None:
-    a = api_rendering.render_ts_data(all_modules)
-    b = api_rendering.render_ts_data(all_modules)
-    assert a == b
-
-
 _MODULE_NAMES = [spec[0] for spec in api_discovery.MODULES]
 
 
 @pytest.mark.parametrize("module_name", _MODULE_NAMES)
-def test_render_module_page_has_frontmatter_component_and_llms_only(
+def test_render_module_page_is_native_mdx(
     modules_by_name: dict[str, api_discovery.Module],
     module_name: str,
 ) -> None:
-    """Each per-module MDX page must open with an SPDX-plus-title
-    frontmatter block, mount the ``ApiSurfaceBrowser`` visual component,
-    and emit an ``<llms-only>`` Markdown fallback so agents can still
-    read the surface when the components are stripped."""
+    """Each per-module page carries SPDX frontmatter and builds its body from
+    Fern's own components, so the symbols stay searchable and Fern derives the
+    Markdown twin itself rather than a hand-maintained fallback."""
     module = modules_by_name[module_name]
     text = api_rendering.render_module_page(module)
     assert text.startswith("---\n# SPDX-FileCopyrightText:")
     assert "SPDX-License-Identifier: Apache-2.0" in text
     assert f"title: {module.name}" in text
-    assert "import { ApiSurfaceBrowser }" in text
-    assert f'module="{module.name}"' in text
-    assert "<llms-only>" in text and "</llms-only>" in text
+    assert "ApiSurfaceBrowser" not in text
+    assert "<llms-only>" not in text
     body_lines = text.split("---\n", 2)[-1].splitlines()
     assert not any(
         ln.strip().startswith("# ") for ln in body_lines
     ), "body must not contain an H1 (Fern renders the title from the nav)"
+
+
+@pytest.mark.parametrize("module_name", _MODULE_NAMES)
+def test_render_module_page_wraps_every_symbol_in_an_accordion(
+    modules_by_name: dict[str, api_discovery.Module],
+    module_name: str,
+) -> None:
+    """Accordion content stays indexed for search while collapsed."""
+    module = modules_by_name[module_name]
+    text = api_rendering.render_module_page(module)
+    assert text.count("<Accordion ") == len(module.symbols)
+
+
+@pytest.mark.parametrize("module_name", _MODULE_NAMES)
+def test_render_module_page_anchors_precede_accordions(
+    modules_by_name: dict[str, api_discovery.Module],
+    module_name: str,
+) -> None:
+    """Deep links target the symbol anchor, which must sit outside the
+    collapsed region to remain a reliable scroll target."""
+    module = modules_by_name[module_name]
+    text = api_rendering.render_module_page(module)
+    for symbol in module.symbols:
+        anchor = api_rendering.symbol_anchor(symbol)
+        assert f'<a id="{anchor}"></a>\n<Accordion ' in text
+
+
+@pytest.mark.parametrize("module_name", _MODULE_NAMES)
+def test_render_module_page_emits_copyable_import_fences(
+    modules_by_name: dict[str, api_discovery.Module],
+    module_name: str,
+) -> None:
+    """A Python code fence gives Fern's own copy button and syntax
+    highlighting, replacing the bespoke copy-to-clipboard affordance."""
+    module = modules_by_name[module_name]
+    text = api_rendering.render_module_page(module)
+    for symbol in module.symbols:
+        assert api_rendering.import_statement(symbol) in text
+    assert "```python" in text
 
 
 @pytest.mark.parametrize("module_name", _MODULE_NAMES)
@@ -321,10 +321,22 @@ def test_render_python_landing_lists_every_curated_module(
     text = api_rendering.render_landing_page(all_modules)
     assert text.startswith("---\n# SPDX-FileCopyrightText:")
     assert "title: Python API" in text
-    assert "import { ApiPythonIndex }" in text
-    assert "<llms-only>" in text and "</llms-only>" in text
     for module_name in CURATED_MODULE_NAMES:
         assert module_name in text, f"landing missing {module_name}"
+
+
+def test_render_python_landing_uses_native_cards(
+    all_modules: list[api_discovery.Module],
+) -> None:
+    """Module entry points render as native cards linking to Fern routes,
+    not a hand-styled grid emitting ``.mdx`` hrefs."""
+    text = api_rendering.render_landing_page(all_modules)
+    assert "ApiPythonIndex" not in text
+    assert "<llms-only>" not in text
+    assert "<CardGroup" in text
+    for module in all_modules:
+        assert f'href="python/{module.slug}"' in text
+    assert '.mdx"' not in text
 
 
 # ---------------------------------------------------------------------------
@@ -339,7 +351,6 @@ def test_generator_writes_landing_data_and_every_module_page(
     fern = workspace / "docs" / "fern"
     rc = gen_python_api.main(["--fern-root", str(fern)])
     assert rc == 0
-    assert (fern / "components" / "api-reference.data.ts").is_file()
     assert (fern / "reference" / "api" / "python" / "README.mdx").is_file()
     for spec in api_discovery.MODULES:
         page = fern / "reference" / "api" / "python" / f"{spec[1]}.mdx"
@@ -353,22 +364,6 @@ def test_check_mode_returns_zero_on_fresh_outputs(
     fern = workspace / "docs" / "fern"
     assert gen_python_api.main(["--fern-root", str(fern)]) == 0
     assert gen_python_api.main(["--fern-root", str(fern), "--check"]) == 0
-
-
-def test_check_mode_flags_ts_data_drift(
-    workspace: Path,
-    cached_discovery: list[api_discovery.Module],
-) -> None:
-    fern = workspace / "docs" / "fern"
-    assert gen_python_api.main(["--fern-root", str(fern)]) == 0
-    data = fern / "components" / "api-reference.data.ts"
-    data.write_text(
-        data.read_text(encoding="utf-8").replace(
-            'name: "dynamo.runtime"', 'name: "MUTATED_BY_TEST"', 1
-        ),
-        encoding="utf-8",
-    )
-    assert gen_python_api.main(["--fern-root", str(fern), "--check"]) == 1
 
 
 def test_check_mode_flags_module_page_drift(
@@ -406,7 +401,7 @@ def test_no_hardcoded_dev_paths_in_any_generated_output() -> None:
     """No output the generator produces may bake in a ``/dynamo/dev`` URL:
     Fern serves each doc version under its own prefix, and a hardcoded
     ``/dev`` path in a versioned snapshot links back to the dev site."""
-    generated_paths = [DATA_TS, PY_LANDING]
+    generated_paths = [PY_LANDING]
     for spec in api_discovery.MODULES:
         generated_paths.append(PY_PAGES_DIR / f"{spec[1]}.mdx")
     for path in generated_paths:
@@ -417,26 +412,15 @@ def test_no_hardcoded_dev_paths_in_any_generated_output() -> None:
         ), f"{path.relative_to(REPO_ROOT)}: hardcoded '/dynamo/dev' path found"
 
 
-@pytest.mark.parametrize("component_path", API_COMPONENT_FILES, ids=lambda p: p.name)
-def test_api_component_has_no_versioned_docs_paths(component_path: Path) -> None:
-    """Fern serves each doc version under its own path prefix; hardcoding
-    ``/dynamo/dev/...`` in a component links a versioned snapshot back to
-    ``/dev`` and breaks cross-version navigation. The three API components
-    must all pass this check."""
-    source = component_path.read_text(encoding="utf-8")
-    assert "/dynamo/dev" not in source, (
-        f"{component_path.name}: hardcoded '/dynamo/dev' path -- use "
-        "relative MDX links so versioned snapshots resolve correctly."
-    )
-
-
-def test_python_index_links_to_fern_routes_not_mdx_files() -> None:
-    """Runtime component hrefs are not rewritten by Fern's MDX compiler."""
-    source = (COMPONENTS_DIR / "ApiPythonIndex.tsx").read_text(encoding="utf-8")
-    helper = re.search(r"function modulePageHref.*?\n}", source, re.DOTALL)
-    assert helper is not None
-    assert "return `python/${mod.slug}`;" in helper.group()
-    assert ".mdx" not in helper.group()
+def test_python_landing_links_to_fern_routes_not_mdx_files() -> None:
+    """Card hrefs must be site routes; Fern only rewrites relative links in
+    Markdown, not ``.mdx`` paths handed to a component."""
+    source = PY_LANDING.read_text(encoding="utf-8")
+    hrefs = re.findall(r'href="([^"]+)"', source)
+    assert hrefs
+    for href in hrefs:
+        assert href.startswith("python/"), f"unexpected landing href {href!r}"
+        assert not href.endswith(".mdx")
 
 
 def test_reference_hero_uses_version_relative_site_routes() -> None:
@@ -454,29 +438,15 @@ def test_reference_hero_uses_version_relative_site_routes() -> None:
     assert "python/README.mdx" not in source
 
 
-def test_api_component_has_no_fallback_maintainer_instructions() -> None:
-    """The unknown-module path in :class:`ApiSurfaceBrowser` must not
-    render internal maintenance directions. The leading ``/* ... */`` JSDoc
-    header is stripped before scanning so it can still reference the
-    generator by name for reviewer context."""
-    source = (COMPONENTS_DIR / "ApiSurfaceBrowser.tsx").read_text(encoding="utf-8")
-    body = _strip_leading_block_comment(source)
-    for leak in ("and re-run the generator", "docs/fern/scripts/gen_python_api.py"):
-        assert leak not in body, (
-            f"ApiSurfaceBrowser.tsx: unknown-module fallback still surfaces "
-            f"internal instructions ({leak!r})."
+def test_generated_pages_do_not_leak_maintainer_instructions() -> None:
+    """Generated pages are reader-facing; the regeneration workflow belongs
+    in the API overview, not in the middle of a reference page."""
+    for spec in api_discovery.MODULES:
+        text = (PY_PAGES_DIR / f"{spec[1]}.mdx").read_text(encoding="utf-8")
+        body = text.split("---\n", 2)[-1].replace(
+            api_rendering.MDX_GENERATED_MARKER, ""
         )
-
-
-def _strip_leading_block_comment(source: str) -> str:
-    """Drop the initial ``/* ... */`` JSDoc block from a TSX source file."""
-    stripped = source.lstrip()
-    if not stripped.startswith("/*"):
-        return source
-    end = stripped.find("*/")
-    if end == -1:
-        return source
-    return stripped[end + 2 :]
+        assert "re-run the generator" not in body
 
 
 def test_index_yml_registers_every_generated_module_page() -> None:

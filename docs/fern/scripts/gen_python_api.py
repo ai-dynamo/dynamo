@@ -5,20 +5,15 @@
 
 Thin CLI/orchestrator that composes :mod:`api_discovery` (griffe-driven
 static discovery of the eleven curated Dynamo Python packages) with
-:mod:`api_rendering` (deterministic TypeScript + MDX serialization) to
-emit three outputs from one parse:
+:mod:`api_rendering` (deterministic MDX serialization) to emit two kinds of
+output from one parse:
 
-  * ``docs/fern/components/api-reference.data.ts`` -- a typed TypeScript
-    data module the React ``ApiPythonIndex`` and ``ApiSurfaceBrowser``
-    components read from. Includes every class's public methods so the
-    compact-grouped page layout can expand into per-symbol detail.
   * ``docs/fern/reference/api/python/README.mdx`` -- the Python language
-    landing page, a compact grouped index of every curated module.
+    landing page, a ``<CardGroup>`` indexing every curated module.
   * ``docs/fern/reference/api/python/<slug>.mdx`` -- one page per curated
-    module. The MDX file is generated end-to-end (no manual stubs); the
-    generated span contains an ``<llms-only>`` Markdown fallback so agent
-    exports still see the full symbol table when the React components are
-    stripped.
+    module, generated end-to-end (no manual stubs), with an anchored
+    ``<Accordion>`` per symbol carrying its import statement, signature,
+    and public methods.
 
 Usage (from any cwd; paths resolve relative to this file)::
 
@@ -39,7 +34,7 @@ import sys
 from pathlib import Path
 
 from api_discovery import Module, discover_all_modules
-from api_rendering import render_landing_page, render_module_page, render_ts_data
+from api_rendering import render_landing_page, render_module_page
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_FERN_ROOT = SCRIPT_DIR.parent
@@ -53,14 +48,9 @@ def _landing_page_path(fern_root: Path) -> Path:
     return fern_root / "reference" / "api" / "python" / "README.mdx"
 
 
-def _data_ts_path(fern_root: Path) -> Path:
-    return fern_root / "components" / "api-reference.data.ts"
-
-
 def _rendered_outputs(fern_root: Path, modules: list[Module]) -> dict[Path, str]:
     """Compute every output path -> new text mapping in one deterministic pass."""
     outputs: dict[Path, str] = {
-        _data_ts_path(fern_root): render_ts_data(modules),
         _landing_page_path(fern_root): render_landing_page(modules),
     }
     for module in modules:
