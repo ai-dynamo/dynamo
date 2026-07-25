@@ -26,8 +26,6 @@ func TestGetContainerGPUsRecognizesMIGResources(t *testing.T) {
 }
 
 func TestVLLMBackend_UpdateContainer(t *testing.T) {
-	backend := &VLLMBackend{}
-
 	tests := []struct {
 		name                string
 		numberOfNodes       int32
@@ -36,6 +34,7 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 		multinodeDeployer   MultinodeDeployer
 		initialContainer    *corev1.Container
 		gpuCount            int64 // GPU count for the test case
+		resolvedGPUCount    int64
 		expectedArgs        []string
 		expectNotModified   bool // If true, container args should not change
 		expectProbesRemoved bool // If true, probes should be nil
@@ -187,11 +186,61 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 			expectedArgs:        []string{"-m", "dynamo.vllm", tensorParallelSizeFlag, "16", "--distributed-executor-backend", "mp", "--nnodes", "2", "--master-addr", "$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE)", "--master-port", commonconsts.VLLMMpMasterPort, "--node-rank", "0"},
 			expectProbesRemoved: true,
 		},
+		{
+			name:          "multinode leader uses GPU count resolved from DRA",
+			numberOfNodes: 2,
+			role:          RoleLeader,
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				Annotations: map[string]string{
+					commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "mp",
+				},
+				Resources: &v1alpha1.Resources{
+					Claims: []corev1.ResourceClaim{{Name: "gpu"}},
+				},
+			},
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialContainer: &corev1.Container{
+				Command: []string{"python3"},
+				Args:    []string{"-m", "dynamo.vllm", tensorParallelSizeFlag, "2"},
+			},
+			resolvedGPUCount: 1,
+			expectedArgs: []string{
+				"-m", "dynamo.vllm", tensorParallelSizeFlag, "2",
+				"--distributed-executor-backend", "mp",
+				"--nnodes", "2",
+				"--master-addr", "$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE)",
+				"--master-port", commonconsts.VLLMMpMasterPort,
+				"--node-rank", "0",
+			},
+			expectProbesRemoved: true,
+		},
+		{
+			name:          "multinode worker computes data parallel ranks from DRA GPU count",
+			numberOfNodes: 2,
+			role:          RoleWorker,
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				Resources: &v1alpha1.Resources{
+					Claims: []corev1.ResourceClaim{{Name: "gpu"}},
+				},
+			},
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialContainer: &corev1.Container{
+				Command: []string{"python3"},
+				Args:    []string{"-m", "dynamo.vllm", dataParallelSizeFlag, "2"},
+			},
+			resolvedGPUCount: 1,
+			expectedArgs: []string{fmt.Sprintf(
+				"exec python3 -m dynamo.vllm %s 2 --data-parallel-hybrid-lb --data-parallel-size-local 1 --data-parallel-start-rank $(( 1 * $((GROVE_PCLQ_POD_INDEX + 1)) )) --data-parallel-address $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE) --data-parallel-rpc-port 13445",
+				dataParallelSizeFlag,
+			)},
+			expectProbesRemoved: true,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			g := gomega.NewGomegaWithT(t)
+			backend := &VLLMBackend{GPUsPerNode: tt.resolvedGPUCount}
 
 			initialContainerArgs := append([]string{}, tt.initialContainer.Args...)
 
@@ -656,18 +705,8 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 
 			initialContainerArgs := append([]string{}, tt.initialContainer.Args...)
 
-			// Create resources from GPU count
-			var resources *v1alpha1.Resources
-			if tt.gpuCount > 0 {
-				resources = &v1alpha1.Resources{
-					Limits: &v1alpha1.ResourceItem{
-						GPU: strconv.FormatInt(tt.gpuCount, 10),
-					},
-				}
-			}
-
 			// Call updateVLLMMultinodeArgs with annotations
-			updateVLLMMultinodeArgs(tt.initialContainer, tt.role, "test-service", tt.multinodeDeployer, betaResourceRequirements(t, resources), 2, tt.annotations)
+			updateVLLMMultinodeArgs(tt.initialContainer, tt.role, "test-service", tt.multinodeDeployer, tt.gpuCount, 2, tt.annotations)
 
 			if tt.expectNotModified {
 				// Args should not have changed

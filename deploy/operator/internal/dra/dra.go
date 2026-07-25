@@ -104,6 +104,166 @@ func ExtractGPUCountFromResourceRequirements(resources corev1.ResourceRequiremen
 	return 0, nil
 }
 
+// ResolveGPUCount returns the number of GPUs requested by a container, including
+// devices requested through DRA ResourceClaims. Scalar resources take precedence
+// because operator-managed DRA paths intentionally retain them until rendering.
+func ResolveGPUCount(
+	ctx context.Context,
+	cl client.Reader,
+	namespace string,
+	podSpec *corev1.PodSpec,
+	resources corev1.ResourceRequirements,
+) (int, error) {
+	scalarCount, err := ExtractGPUCountFromResourceRequirements(resources)
+	if err != nil || scalarCount > 0 || len(resources.Claims) == 0 {
+		return scalarCount, err
+	}
+	if cl == nil {
+		return 0, fmt.Errorf("cannot resolve GPU ResourceClaims without a Kubernetes client")
+	}
+	if podSpec == nil {
+		return 0, fmt.Errorf("cannot resolve GPU ResourceClaims without a pod spec")
+	}
+
+	podClaims := make(map[string]corev1.PodResourceClaim, len(podSpec.ResourceClaims))
+	for _, claim := range podSpec.ResourceClaims {
+		podClaims[claim.Name] = claim
+	}
+
+	total := 0
+	seen := make(map[string]struct{}, len(resources.Claims))
+	for _, containerClaim := range resources.Claims {
+		key := containerClaim.Name + "\x00" + containerClaim.Request
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+
+		podClaim, ok := podClaims[containerClaim.Name]
+		if !ok {
+			return 0, fmt.Errorf("container ResourceClaim %q has no matching pod resourceClaim", containerClaim.Name)
+		}
+		claimSpec, err := getClaimSpec(ctx, cl, namespace, podClaim)
+		if err != nil {
+			return 0, err
+		}
+		count, err := gpuCountFromClaimSpec(claimSpec, containerClaim.Request)
+		if err != nil {
+			return 0, fmt.Errorf("cannot determine GPU count for ResourceClaim %q: %w", containerClaim.Name, err)
+		}
+		total += count
+	}
+	return total, nil
+}
+
+func getClaimSpec(
+	ctx context.Context,
+	cl client.Reader,
+	namespace string,
+	podClaim corev1.PodResourceClaim,
+) (*resourcev1.ResourceClaimSpec, error) {
+	switch {
+	case podClaim.ResourceClaimTemplateName != nil && *podClaim.ResourceClaimTemplateName != "":
+		name := *podClaim.ResourceClaimTemplateName
+		template := &resourcev1.ResourceClaimTemplate{}
+		if err := cl.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, template); err != nil {
+			return nil, fmt.Errorf("failed to get ResourceClaimTemplate %s/%s: %w", namespace, name, err)
+		}
+		return &template.Spec.Spec, nil
+	case podClaim.ResourceClaimName != nil && *podClaim.ResourceClaimName != "":
+		name := *podClaim.ResourceClaimName
+		claim := &resourcev1.ResourceClaim{}
+		if err := cl.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, claim); err != nil {
+			return nil, fmt.Errorf("failed to get ResourceClaim %s/%s: %w", namespace, name, err)
+		}
+		return &claim.Spec, nil
+	default:
+		return nil, fmt.Errorf("pod resourceClaim %q does not reference a ResourceClaim or ResourceClaimTemplate", podClaim.Name)
+	}
+}
+
+func gpuCountFromClaimSpec(spec *resourcev1.ResourceClaimSpec, requestName string) (int, error) {
+	total := 0
+	foundRequest := requestName == ""
+	for _, request := range spec.Devices.Requests {
+		if requestName != "" && request.Name != requestName {
+			continue
+		}
+		foundRequest = true
+
+		count, isGPU, err := gpuCountFromDeviceRequest(request)
+		if err != nil {
+			return 0, err
+		}
+		if isGPU {
+			total += count
+		}
+	}
+	if !foundRequest {
+		return 0, fmt.Errorf("device request %q was not found", requestName)
+	}
+	return total, nil
+}
+
+func gpuCountFromDeviceRequest(request resourcev1.DeviceRequest) (int, bool, error) {
+	if request.Exactly != nil {
+		if !isGPUDeviceClassName(request.Exactly.DeviceClassName) {
+			return 0, false, nil
+		}
+		count, err := exactDeviceCount(request.Exactly.AllocationMode, request.Exactly.Count)
+		return count, true, err
+	}
+
+	var count int
+	var hasGPU, hasNonGPU bool
+	for _, subRequest := range request.FirstAvailable {
+		if !isGPUDeviceClassName(subRequest.DeviceClassName) {
+			hasNonGPU = true
+			continue
+		}
+		candidateCount, err := exactDeviceCount(subRequest.AllocationMode, subRequest.Count)
+		if err != nil {
+			return 0, false, err
+		}
+		if hasGPU && candidateCount != count {
+			return 0, false, fmt.Errorf("GPU device request %q has firstAvailable alternatives with different counts", request.Name)
+		}
+		count = candidateCount
+		hasGPU = true
+	}
+	if hasGPU && hasNonGPU {
+		return 0, false, fmt.Errorf("device request %q mixes GPU and non-GPU firstAvailable alternatives", request.Name)
+	}
+	return count, hasGPU, nil
+}
+
+func exactDeviceCount(mode resourcev1.DeviceAllocationMode, count int64) (int, error) {
+	switch mode {
+	case "", resourcev1.DeviceAllocationModeExactCount:
+		if count == 0 {
+			return 1, nil
+		}
+		if count < 0 {
+			return 0, fmt.Errorf("GPU device count must be positive")
+		}
+		return int(count), nil
+	case resourcev1.DeviceAllocationModeAll:
+		return 0, fmt.Errorf("GPU allocationMode %q has no deterministic per-node device count", mode)
+	default:
+		return 0, fmt.Errorf("unsupported GPU allocationMode %q", mode)
+	}
+}
+
+func isGPUDeviceClassName(name string) bool {
+	normalized := strings.ToLower(name)
+	return normalized == "gpu" ||
+		strings.HasPrefix(normalized, "gpu.") ||
+		strings.HasPrefix(normalized, "gpu/") ||
+		strings.HasSuffix(normalized, "/gpu") ||
+		strings.Contains(normalized, "/gpu.") ||
+		strings.Contains(normalized, "/gpu-")
+}
+
 // RemoveGPUResources deletes all scalar GPU resource entries from a resource list.
 func RemoveGPUResources(resources corev1.ResourceList) {
 	for _, name := range gpuResourceNames(resources) {

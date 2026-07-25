@@ -38,12 +38,14 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/onsi/gomega"
 	"github.com/onsi/gomega/format"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	istioNetworking "istio.io/api/networking/v1beta1"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	resourcev1 "k8s.io/api/resource/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -3477,4 +3479,93 @@ func TestGenerateWorkerPodTemplateSpecDoesNotRequireGPUResource(t *testing.T) {
 	require.NotNil(t, got)
 	require.Equal(t, "worker", got.Labels["role"])
 	require.Equal(t, commonconsts.MainContainerName, got.Spec.Containers[0].Name)
+}
+
+func TestGeneratePodTemplateSpec_VLLMMultinodeDRA(t *testing.T) {
+	t.Log("Create a one-GPU ResourceClaimTemplate")
+	s := scheme.Scheme
+	require.NoError(t, resourcev1.AddToScheme(s))
+	claimTemplate := &resourcev1.ResourceClaimTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "one-gpu", Namespace: "default"},
+		Spec: resourcev1.ResourceClaimTemplateSpec{
+			Spec: resourcev1.ResourceClaimSpec{
+				Devices: resourcev1.DeviceClaim{
+					Requests: []resourcev1.DeviceRequest{{
+						Name: "gpu",
+						Exactly: &resourcev1.ExactDeviceRequest{
+							DeviceClassName: "gpu.nvidia.com",
+							AllocationMode:  resourcev1.DeviceAllocationModeExactCount,
+							Count:           1,
+						},
+					}},
+				},
+			},
+		},
+	}
+
+	t.Log("Create an LWS-backed two-node TP=2 vLLM component using only DRA")
+	dcd := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "dra-test-agg", Namespace: "default"},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "agg",
+				ComponentType: v1beta1.ComponentTypeWorker,
+				Multinode:     &v1beta1.MultinodeSpec{NodeCount: 2},
+				PodTemplate: &corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{
+						Annotations: map[string]string{
+							commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "mp",
+						},
+					},
+					Spec: corev1.PodSpec{
+						ResourceClaims: []corev1.PodResourceClaim{{
+							Name:                      "gpu",
+							ResourceClaimTemplateName: ptr.To("one-gpu"),
+						}},
+						Containers: []corev1.Container{{
+							Name:    commonconsts.MainContainerName,
+							Image:   "vllm-test",
+							Command: []string{"python3"},
+							Args:    []string{"-m", "dynamo.vllm", "--tensor-parallel-size", "2"},
+							Resources: corev1.ResourceRequirements{
+								Claims: []corev1.ResourceClaim{{Name: "gpu"}},
+							},
+						}},
+					},
+				},
+			},
+		},
+	}
+	reconciler := &DynamoComponentDeploymentReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(s).
+			WithObjects(dcd, claimTemplate).
+			Build(),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{},
+		DockerSecretRetriever: &mockDockerSecretRetriever{
+			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
+				return nil, nil
+			},
+		},
+	}
+	opt := generateResourceOption{dynamoComponentDeployment: dcd}
+
+	t.Log("Render both LWS roles")
+	leaderTemplate, err := reconciler.generatePodTemplateSpec(context.Background(), opt, dynamo.RoleLeader)
+	require.NoError(t, err)
+	workerTemplate, err := reconciler.generatePodTemplateSpec(context.Background(), opt, dynamo.RoleWorker)
+	require.NoError(t, err)
+
+	t.Log("Verify role-specific MP launch flags and preserved DRA claims")
+	leader := leaderTemplate.Spec.Containers[0]
+	worker := workerTemplate.Spec.Containers[0]
+	assert.Contains(t, leader.Args, "--nnodes")
+	assert.Contains(t, leader.Args, "--node-rank")
+	assert.Contains(t, leader.Args, "0")
+	assert.Contains(t, worker.Args, "--headless")
+	assert.Contains(t, worker.Args, "$(LWS_WORKER_INDEX)")
+	assert.Equal(t, []corev1.ResourceClaim{{Name: "gpu"}}, leader.Resources.Claims)
+	assert.Equal(t, []corev1.ResourceClaim{{Name: "gpu"}}, worker.Resources.Claims)
 }

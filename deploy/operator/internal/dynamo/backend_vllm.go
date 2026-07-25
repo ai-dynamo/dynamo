@@ -27,6 +27,7 @@ const (
 
 type VLLMBackend struct {
 	ParentGraphDeploymentName string
+	GPUsPerNode               int64
 }
 
 func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
@@ -51,8 +52,13 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 
 	if isMultinode {
 		resources := resourceRequirementsWithFallback(container.Resources, GetMainContainerResources(component))
+		gpusPerNode := b.GPUsPerNode
+		if gpusPerNode == 0 {
+			gpusPerNode = getContainerGPUs(&resources)
+		}
+
 		// Apply multinode-specific argument modifications
-		updateVLLMMultinodeArgs(container, role, serviceName, multinodeDeployer, &resources, numberOfNodes, annotations)
+		updateVLLMMultinodeArgs(container, role, serviceName, multinodeDeployer, gpusPerNode, numberOfNodes, annotations)
 
 		if shouldUseMpBackend(annotations) {
 			container.Env = append(container.Env, corev1.EnvVar{
@@ -266,9 +272,9 @@ func (b *VLLMBackend) shouldInjectVLLMMpWaitLeaderInit(podSpec *corev1.PodSpec, 
 
 // updateVLLMMultinodeArgs dispatches to the appropriate injection function based on
 // parallelism strategy (TP/PP distributed vs data-parallel) and executor backend (mp vs ray).
-func updateVLLMMultinodeArgs(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, resources *corev1.ResourceRequirements, numberOfNodes int32, annotations map[string]string) {
+func updateVLLMMultinodeArgs(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, gpusPerNode int64, numberOfNodes int32, annotations map[string]string) {
 	expandedArgs := getExpandedArgs(container)
-	needsDistributed := needsTensorParallelMultinodeLaunch(expandedArgs, resources)
+	needsDistributed := needsTensorParallelMultinodeLaunch(expandedArgs, gpusPerNode)
 
 	if needsDistributed && shouldUseMpBackend(annotations) {
 		injectMpDistributedLaunchFlags(container, role, serviceName, multinodeDeployer, numberOfNodes)
@@ -286,8 +292,8 @@ func updateVLLMMultinodeArgs(container *corev1.Container, role Role, serviceName
 		// only the leader node is in the Ray cluster when create_dp_placement_groups runs,
 		// so vLLM naturally places all initial DP workers on the leader node.
 		injectElasticEPRayLaunchFlags(container, role, serviceName, multinodeDeployer)
-	} else if needsDataParallelMultinodeLaunch(expandedArgs, resources) {
-		injectDataParallelLaunchFlags(container, role, serviceName, multinodeDeployer, resources, numberOfNodes)
+	} else if needsDataParallelMultinodeLaunch(expandedArgs, gpusPerNode) {
+		injectDataParallelLaunchFlags(container, role, serviceName, multinodeDeployer, gpusPerNode, numberOfNodes)
 	} else {
 		logger := log.Log.WithName("vllm-backend")
 		logger.Info("No need to inject tensor or data parallel flags for multinode deployments", "args", strings.Join(container.Args, " "))
@@ -474,14 +480,13 @@ func hasFlag(expandedArgs []string, flag string) bool {
 	return false
 }
 
-func injectDataParallelLaunchFlags(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, resources *corev1.ResourceRequirements, numberOfNodes int32) {
+func injectDataParallelLaunchFlags(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, gpusPerNode int64, numberOfNodes int32) {
 	expandedArgs := getExpandedArgs(container)
 	leaderHostname := multinodeDeployer.GetLeaderHostname(serviceName)
 
 	// Calculate engines per node
-	containerGPUs := getContainerGPUs(resources)
 	worldSize := getWorldSize(expandedArgs) // TP * PP per engine
-	dataParallelSizeLocal := containerGPUs / worldSize
+	dataParallelSizeLocal := gpusPerNode / worldSize
 
 	// Get total DP size from args, or calculate from nodes
 	totalDPSize := getFlagValue(expandedArgs, dataParallelSizeFlag)
@@ -533,12 +538,11 @@ func injectDataParallelLaunchFlags(container *corev1.Container, role Role, servi
 
 // needsMultinodeDistributedLaunch returns true when the model's world size (TP * PP)
 // exceeds the GPU count of a single node, requiring multi-node distribution (via mp or ray).
-func needsTensorParallelMultinodeLaunch(expandedArgs []string, resources *corev1.ResourceRequirements) bool {
-	containerGPUs := getContainerGPUs(resources)
-	if containerGPUs == 0 {
+func needsTensorParallelMultinodeLaunch(expandedArgs []string, gpusPerNode int64) bool {
+	if gpusPerNode == 0 {
 		return false
 	}
-	return getWorldSize(expandedArgs) > containerGPUs
+	return getWorldSize(expandedArgs) > gpusPerNode
 }
 
 func getWorldSize(expandedArgs []string) int64 {
@@ -548,13 +552,12 @@ func getWorldSize(expandedArgs []string) int64 {
 }
 
 // if world size across all DP ranks > GPU count, then we need to inject data parallel multinode coordination
-func needsDataParallelMultinodeLaunch(expandedArgs []string, resources *corev1.ResourceRequirements) bool {
+func needsDataParallelMultinodeLaunch(expandedArgs []string, gpusPerNode int64) bool {
 	dataParallelSize := getFlagValue(expandedArgs, dataParallelSizeFlag)
-	containerGPUs := getContainerGPUs(resources)
-	if containerGPUs == 0 {
+	if gpusPerNode == 0 {
 		return false
 	}
-	return getWorldSize(expandedArgs)*dataParallelSize > containerGPUs
+	return getWorldSize(expandedArgs)*dataParallelSize > gpusPerNode
 }
 
 func getFlagValue(expandedArgs []string, flag string) int64 {
