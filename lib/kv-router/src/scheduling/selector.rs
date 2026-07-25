@@ -234,8 +234,8 @@ impl DefaultWorkerSelector {
         let prefill_cost_blocks = weights.prefill_load_scale * adjusted_prefill_blocks;
         let worker_load = worker_load.unwrap_or_default();
         let decode_cost_blocks = worker_load.potential_decode_blocks() as f64;
-        let active_request_cost_blocks =
-            self.kv_router_config.decode_active_request_weight * worker_load.active_requests as f64;
+        let active_request_cost_blocks = self.kv_router_config.decode_active_request_weight
+            * worker_load.potential_active_requests as f64;
         let logit = prefill_cost_blocks + decode_cost_blocks + active_request_cost_blocks;
 
         if shared_beyond > 0 {
@@ -1449,7 +1449,7 @@ mod tests {
             crate::sequences::WorkerLoadProjection {
                 active_prefill_tokens: 16,
                 active_decode_blocks: 2,
-                active_requests: 0,
+                potential_active_requests: 0,
                 additional_active_blocks: 3,
             },
         );
@@ -1474,14 +1474,14 @@ mod tests {
     }
 
     #[test]
-    fn test_worker_logit_can_charge_active_requests() {
+    fn test_worker_logit_can_charge_potential_active_requests() {
         let worker = WorkerWithDpRank::from_worker_id(0);
         let mut request = base_request(0);
         request.worker_loads.insert(
             worker,
             crate::sequences::WorkerLoadProjection {
                 active_decode_blocks: 100,
-                active_requests: 4,
+                potential_active_requests: 4,
                 ..Default::default()
             },
         );

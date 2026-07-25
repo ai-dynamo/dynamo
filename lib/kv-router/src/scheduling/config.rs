@@ -611,9 +611,10 @@ pub struct KvRouterConfig {
     /// prefill load. Defaults to 1.0.
     pub prefill_load_scale: f64,
 
-    /// Block-equivalent cost added for each active request on a candidate
-    /// worker. This can balance decode batch size when per-request decode
-    /// compute matters more than resident KV footprint. Defaults to 0.0.
+    /// Block-equivalent cost added for each potential active request on a
+    /// candidate worker, including the incoming request. This can balance
+    /// decode batch size when per-request decode compute matters more than
+    /// resident KV footprint. Defaults to 0.0.
     pub decode_active_request_weight: f64,
 
     #[serde(default = "default_host_cache_hit_weight")]
