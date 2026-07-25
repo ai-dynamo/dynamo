@@ -2890,7 +2890,7 @@ mod tests {
 
         // Test retrieval
         assert_eq!(
-            tree.prefix(&psh1).get(&psh1).map(|v| v.clone()),
+            tree.prefix(&psh1).get(&psh1).cloned(),
             Some("value1".to_string())
         );
     }
@@ -2910,8 +2910,8 @@ mod tests {
         tree.prefix(&plh2).insert(plh2, 200);
 
         assert_eq!(tree.len(), 2);
-        assert_eq!(tree.prefix(&plh1).get(&plh1).map(|v| *v), Some(100));
-        assert_eq!(tree.prefix(&plh2).get(&plh2).map(|v| *v), Some(200));
+        assert_eq!(tree.prefix(&plh1).get(&plh1).copied(), Some(100));
+        assert_eq!(tree.prefix(&plh2).get(&plh2).copied(), Some(200));
     }
 
     #[test]
