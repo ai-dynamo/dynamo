@@ -14,6 +14,7 @@ close version-drift deltas,"** not "re-land our stack."
 
 ## Status board
 - [x] **L0 — RW→RO weight commit/import** (no shadow, no scratch-KV) — **GREEN** 2026-07-25
+- [x] **L0 hardening** — backend fail-fast guard + logprobs A/B (RW vs RO bit-identical) — **DONE** 2026-07-25
 - [ ] **L1 — scratch-KV routing** (shadow reaches standby, KV routed to scratch pool)
 - [ ] **L2 — two-engine failover** (kill active → shadow promotes → serves; eager + graphs)
 
@@ -34,6 +35,17 @@ RO  registered +139s | rebuilt 60 MoE kernels/worker (all 8 TP) | 0 tracebacks/a
     imported 71.41 GiB/worker | infer 200 "Paris. Paris is a major European city…" (byte-identical to RW)
 ```
 Harness: `failover-kimi/kimi_rwro.sh`. Raw logs on pod: `/tmp/kimi_rwro/logs/`.
+
+### L0 hardening (2026-07-25)
+- **Backend fail-fast guard** (`_rebuild_ro_moe_kernels`): logs the selected NVFP4 backend and
+  **refuses to serve** on any backend outside `_RO_VALIDATED_NVFP4_BACKENDS = {FLASHINFER_TRTLLM,
+  FLASHINFER_CUTLASS}` (override `DYN_GMS_ALLOW_UNVALIDATED_MOE_BACKEND=1`). Confirmed it logs
+  `rebuilding MoE kernels for NVFP4 backend FLASHINFER_TRTLLM` and serves. → **R1 mitigated** (silent-wrong on
+  a backend swap is now a loud, actionable error).
+- **Logprobs A/B** (`kimi_rwro_ab.sh`, 4 diverse-margin prompts, `logprobs:5`): RW vs RO tokens all match and
+  **worst max |Δlogprob| = 0.000e+00 — bit-identical**. Prompts: capital-of-France (high), gold→"Au…79"
+  (factual), two-plus-two (numeric), favorite-season (open/low-margin). → **R3 closed** (numerically exact,
+  not just argmax-equivalent).
 
 ---
 
