@@ -9,7 +9,12 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
+pytestmark = [
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+    pytest.mark.gpu_0,
+    pytest.mark.router,
+]
 
 
 def stub_module(name: str, **attributes: object) -> types.ModuleType:
