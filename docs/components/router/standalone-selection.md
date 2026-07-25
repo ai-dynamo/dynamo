@@ -47,8 +47,10 @@ indexer recovery, replica synchronization, and shutdown. It exposes the same
 worker, selection, bookkeeping, inspection, peer-membership, and recovery
 operations as the standalone HTTP service.
 
-`SelectionCore::new_local` creates an intentionally unsynchronized core for
-tests and local-only use. Production integrations should use
+`SelectionCore::try_new_local` creates an intentionally unsynchronized core for
+tests and local-only use while reporting invalid tracking-hash configuration.
+`SelectionCore::new_local` remains available for compatibility and panics on
+invalid configuration. Production integrations should use
 `SelectionServiceBuilder` so startup recovery, readiness, and background-task
 lifecycle remain consistent with the standalone service.
 
@@ -69,6 +71,9 @@ APIs. Those bindings should wrap `SelectionService` rather than construct
 | `--selection-cache-ttl-secs` | `120` | Seconds an unclaimed pending selection lives before eviction. |
 | `--selection-cache-max-entries` | `4096` | Maximum resident pending selections, evicting oldest first. |
 | `--selection-cache-max-bytes` | `268435456` | Approximate byte budget across resident pending selections. |
+| `--router-tracking-hash` | environment/default | Override the tracking algorithm with `public-xxh3-v1` or experimental `keyed-xxh3-v1`. |
+| `--router-tracking-key-file` | environment/none | Override the path to the 32-byte provider key file. |
+| `--router-tracking-key-id` | environment/none | Override the provider-managed key epoch. |
 
 Router scheduling behavior continues to use the standard Dynamo router
 environment configuration.
@@ -176,6 +181,13 @@ snapshot.
 
 The previous public fields `cached_tokens` and `effective_overlap_blocks` have
 been removed. Their values remain internal scheduler inputs.
+
+When a request supplies `token_ids`, the selector derives tracking hashes with
+its configured tracking-hash context while retaining public hashes for indexer
+lookups. Requests that instead supply `block_hashes`, `sequence_hashes`, and
+`isl_tokens` remain trusted precomputed inputs. The service does not reject,
+rewrite, or label those identities in keyed mode. Configure every precomputed
+hash producer with the same algorithm, key, and key ID as the selector.
 
 ## Ray Select-Then-Reserve Flow
 
@@ -322,6 +334,10 @@ replica-sync peers. They do not alter the HTTP indexer-recovery peers.
   resynchronization for replica lifecycle events.
 - Unknown worker, model, routing-group, DP-rank, and block-size events are dropped.
   Register the same worker catalog on every selector before routing traffic.
+- Replica messages carry opaque tracking hashes and do not negotiate the
+  tracking algorithm or key epoch. Configure all hash producers consistently.
+  For key rotation, stop traffic, change the key and key ID together, restart
+  all producers, and recreate derived tracker state before resuming traffic.
 - The v1 replica envelope uses `routing_group` and is incompatible with binaries that
   send `tenant_id`. Drain active reservations and lifecycle traffic, upgrade all connected
   selectors together, re-register worker catalogs, and then resume traffic. Active advisory

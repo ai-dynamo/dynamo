@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Installation Guide
-subtitle: Installs the GPU Operator and Dynamo Platform Helm charts along with optional Grove, RDMA, and Prometheus add-ons.
+subtitle: Installs accelerator resource components and the Dynamo Platform with optional Grove, RDMA, and Prometheus add-ons.
 ---
 
 This guide walks you through installing everything needed to deploy models with Dynamo on Kubernetes. Follow the steps in order — each builds on the previous one.
@@ -11,25 +11,54 @@ This guide walks you through installing everything needed to deploy models with 
 
 Before you begin, make sure you have:
 
+<Tabs>
+<Tab title="CUDA">
+
 - A **Kubernetes cluster (v1.30+)** with GPU-capable nodes. See the cloud provider guides if you need to create one:
   - [Amazon EKS](cloud-providers/eks/eks.md) | [Azure AKS](cloud-providers/aks/aks.md) | [Google GKE](cloud-providers/gke/gke.md)
   - For local development: [Minikube Setup](deployment/minikube.md)
+
 - **kubectl** v1.30+ — [Install kubectl](https://kubernetes.io/docs/tasks/tools/#kubectl)
 - **Helm** v3.0+ — [Install Helm](https://helm.sh/docs/intro/install/)
 
 > [!IMPORTANT]
 > **Cloud provider GPU drivers**: The GPU Operator (Step 1) installs GPU drivers for you. When creating your cluster's GPU node pools, **do not enable provider-managed GPU driver installation** (e.g., skip AKS GPU driver install, don't use GKE `--accelerator gpu-driver-version=latest`). If your nodes already have provider-managed drivers, see the GPU Operator step for how to handle this.
 
+</Tab>
+<Tab title="XPU">
+
+- A **Kubernetes cluster (v1.34+)** with XPU-capable nodes and Dynamic Resource Allocation (DRA) API v1 enabled. For local development: [Minikube Setup](deployment/minikube.md)
+- [Intel resource drivers for Kubernetes](https://github.com/intel/intel-resource-drivers-for-kubernetes) installed with a `gpu.intel.com` `DeviceClass`
+- **kubectl** matching your Kubernetes minor version (v1.34+ for these DRA API v1 templates) — [Install kubectl](https://kubernetes.io/docs/tasks/tools/#kubectl)
+- **Helm** v3.0+ — [Install Helm](https://helm.sh/docs/intro/install/)
+
+</Tab>
+</Tabs>
+
 Verify your tools:
+
+<Tabs>
+<Tab title="CUDA">
 
 ```bash
 kubectl version --client  # Should show v1.30+
 helm version              # Should show v3.0+
 ```
 
+</Tab>
+<Tab title="XPU">
+
+```bash
+kubectl version --client  # Should match your Kubernetes minor version, v1.34+ for these DRA API v1 templates
+helm version              # Should show v3.0+
+```
+
+</Tab>
+</Tabs>
+
 ## Overview
 
-Every Dynamo deployment requires two Helm charts: the **GPU Operator** (Step 1) and the **Dynamo Platform** (Step 2). Everything else is optional. Decide what optional components you need before starting so you can install them in Step 3.
+Every Dynamo deployment requires accelerator resource components (Step 1) and the **Dynamo Platform** (Step 2). CUDA uses the NVIDIA GPU Operator, while XPU uses Intel resource drivers with DRA. Everything else is optional. Decide what optional components you need before starting so you can install them in Step 3.
 
 | Optional Component | When you need it | Required for |
 |-----------|-----------------|--------------|
@@ -46,7 +75,10 @@ Every Dynamo deployment requires two Helm charts: the **GPU Operator** (Step 1) 
 
 **Shared storage** — Prevents each pod from downloading model weights independently. Without it, large models (>70B) take hours to download per pod, and many replicas will hit HuggingFace rate limits. Not enforced by the operator — this is an operational concern. See [Model Caching](model-caching.md) for the full walkthrough.
 
-## Step 1: Install the GPU Operator
+## Step 1: Install Accelerator Resource Components
+
+<Tabs>
+<Tab title="CUDA">
 
 The [NVIDIA GPU Operator](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/getting-started.html) automates deployment of all NVIDIA software components needed to provision GPUs — drivers, container toolkit, device plugin, and monitoring.
 
@@ -76,6 +108,21 @@ Verify the GPU Operator is running:
 kubectl get pods -n gpu-operator
 # Expected: gpu-operator, nvidia-driver-daemonset, nvidia-device-plugin-daemonset, etc. all Running
 ```
+
+</Tab>
+<Tab title="XPU">
+
+Install the [Intel resource drivers for Kubernetes](https://github.com/intel/intel-resource-drivers-for-kubernetes), then verify DRA resources:
+
+```bash
+kubectl get deviceclasses
+kubectl get resourceslices
+```
+
+The vLLM XPU deployment templates expect a `gpu.intel.com` `DeviceClass`.
+
+</Tab>
+</Tabs>
 
 ## Step 2: Install the Dynamo Platform
 

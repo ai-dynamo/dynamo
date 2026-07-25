@@ -13,10 +13,10 @@ pub mod vllm;
 pub use crate::common::protocols::ForwardPassSnapshot;
 use crate::common::protocols::{DirectRequest, FpmPublisher, KvEventPublishers, OutputSignal};
 use dynamo_kv_router::protocols::RouterEvent;
-pub(crate) use kv_event_sink::{
-    CapturedRouterEventBuffer, capture_deferred_kv_publish_sink, capture_router_event_sink,
+pub(crate) use kv_event_sink::{CapturedRouterEventBuffer, capture_router_event_sink};
+pub(crate) use live_boundary::{
+    LiveBoundaryCore, LivePassExecution, LiveSchedulerState, spawn_live_scheduler,
 };
-pub(crate) use live_boundary::{LiveBoundaryCore, LiveEffectsPublisher};
 pub(crate) use source_holds::{
     ActiveHandoffRequests, DestinationHolds, PendingDestinations, RemovedSource, SourceCompletion,
     SourceHolds,
@@ -125,12 +125,12 @@ pub(crate) fn build_fpm_snapshot(
 }
 
 /// Return (visible output tokens, request-forwards) for accept-length
-/// accounting. One output signal corresponds to one visible token; multiple
-/// signals with the same UUID in a pass are an MTP/spec-decode burst.
+/// accounting. A signal with a token corresponds to one visible token; multiple
+/// token signals with the same UUID in a pass are an MTP/spec-decode burst.
 pub(crate) fn accept_length_sample(output_signals: &[OutputSignal]) -> (usize, usize) {
     let visible_tokens = output_signals
         .iter()
-        .filter(|signal| !signal.rejected)
+        .filter(|signal| !signal.rejected && signal.token_id.is_some())
         .count();
     if visible_tokens == 0 {
         return (0, 0);
@@ -138,7 +138,7 @@ pub(crate) fn accept_length_sample(output_signals: &[OutputSignal]) -> (usize, u
 
     let request_forwards = output_signals
         .iter()
-        .filter(|signal| !signal.rejected)
+        .filter(|signal| !signal.rejected && signal.token_id.is_some())
         .map(|signal| signal.uuid)
         .collect::<std::collections::HashSet<_>>()
         .len();
@@ -411,6 +411,13 @@ impl SchedulerHandle for EngineScheduler {
         }
     }
 
+    fn cancellation_sender(&self) -> mpsc::Sender<SchedulerCancellationEnvelope> {
+        match self {
+            Self::Vllm(scheduler) => scheduler.cancellation_sender(),
+            Self::Sglang(scheduler) => scheduler.cancellation_sender(),
+        }
+    }
+
     fn take_lifecycle_receiver(&mut self) -> Option<mpsc::Receiver<SchedulerLifecycleEvent>> {
         match self {
             Self::Vllm(scheduler) => scheduler.take_lifecycle_receiver(),
@@ -422,6 +429,50 @@ impl SchedulerHandle for EngineScheduler {
 pub struct SchedulerCommandEnvelope {
     pub command: SchedulerCommand,
     pub reply: oneshot::Sender<anyhow::Result<SchedulerCommandEffects>>,
+}
+
+/// Output channel used by a live scheduler.
+///
+/// Existing replay callers use the unbounded variant. Network-facing adapters
+/// use the bounded variant to cap scheduler-to-dispatcher accumulation. The
+/// live adapter also uses fixed-capacity request streams and cancels consumers
+/// that cannot keep up.
+#[derive(Clone)]
+pub(crate) enum SchedulerOutputSender {
+    Unbounded(mpsc::UnboundedSender<Vec<OutputSignal>>),
+    Bounded(mpsc::Sender<Vec<OutputSignal>>),
+}
+
+impl SchedulerOutputSender {
+    pub(crate) async fn send(&self, signals: Vec<OutputSignal>) -> Result<(), Vec<OutputSignal>> {
+        match self {
+            Self::Unbounded(tx) => tx.send(signals).map_err(|error| error.0),
+            Self::Bounded(tx) => tx.send(signals).await.map_err(|error| error.0),
+        }
+    }
+}
+
+impl From<mpsc::UnboundedSender<Vec<OutputSignal>>> for SchedulerOutputSender {
+    fn from(tx: mpsc::UnboundedSender<Vec<OutputSignal>>) -> Self {
+        Self::Unbounded(tx)
+    }
+}
+
+pub struct SchedulerCancellationEnvelope {
+    pub request_id: Uuid,
+    pub discard_pending_output: bool,
+    pub reply: oneshot::Sender<anyhow::Result<SchedulerCommandEffects>>,
+}
+
+impl From<SchedulerCancellationEnvelope> for SchedulerCommandEnvelope {
+    fn from(cancellation: SchedulerCancellationEnvelope) -> Self {
+        Self {
+            command: SchedulerCommand::CancelRequest {
+                request_id: cancellation.request_id,
+            },
+            reply: cancellation.reply,
+        }
+    }
 }
 
 /// Engine-agnostic scheduler interface.
@@ -438,8 +489,15 @@ pub trait SchedulerHandle: Send + Sync {
     /// Get a watch receiver for scheduler metrics (active decode blocks, etc.).
     fn metrics_receiver(&self) -> tokio::sync::watch::Receiver<MockerMetrics>;
 
-    /// Bounded lifecycle-control channel for disaggregated handoff sessions.
+    /// Bounded ordered channel for request and disaggregated lifecycle commands.
     fn command_sender(&self) -> mpsc::Sender<SchedulerCommandEnvelope>;
+
+    /// Bounded cancellation channel observed even while a modeled pass is running.
+    ///
+    /// Cancellation removes scheduler state and can suppress pending output immediately. During a
+    /// modeled pass, published running/waiting metrics refresh at the next pass boundary; exact
+    /// mid-pass metrics would require incremental per-request residency accounting.
+    fn cancellation_sender(&self) -> mpsc::Sender<SchedulerCancellationEnvelope>;
 
     /// Take the single lifecycle-event stream owned by this DP-rank scheduler.
     fn take_lifecycle_receiver(&mut self) -> Option<mpsc::Receiver<SchedulerLifecycleEvent>>;
@@ -458,7 +516,7 @@ pub(crate) fn handoff_channel_capacity(args: &crate::common::protocols::MockEngi
 #[cfg(feature = "kvbm-offload")]
 pub async fn init_kvbm_live(
     args: &crate::common::protocols::MockEngineArgs,
-    kv_manager: &mut crate::kv_manager::KvManager,
+    kv_manager: &mut crate::kv_manager::G1Manager,
 ) -> anyhow::Result<Option<std::sync::Arc<std::sync::Mutex<crate::kvbm_offload::MockOffloadEngine>>>>
 {
     use crate::kvbm_offload::KvbmOffloadConfig;
@@ -477,7 +535,7 @@ pub async fn init_kvbm_live(
 #[cfg(feature = "kvbm-offload")]
 pub fn init_kvbm_offline(
     args: &crate::common::protocols::MockEngineArgs,
-    kv_manager: &mut crate::kv_manager::KvManager,
+    kv_manager: &mut crate::kv_manager::G1Manager,
 ) -> anyhow::Result<Option<std::sync::Arc<std::sync::Mutex<crate::kvbm_offload::MockOffloadEngine>>>>
 {
     use crate::kvbm_offload::KvbmOffloadConfig;
@@ -565,12 +623,111 @@ mod tests {
         }
     }
 
+    fn request_metrics(core: &EngineCore) -> MockerMetrics {
+        match core {
+            EngineCore::Vllm(core) => core.mocker_metrics(),
+            EngineCore::Sglang(core) => core.mocker_metrics(),
+        }
+    }
+
+    #[test]
+    fn request_cancellation_removes_waiting_and_running_requests_for_each_engine() {
+        for (case, engine_type) in [EngineType::Vllm, EngineType::Sglang]
+            .into_iter()
+            .enumerate()
+        {
+            let mut core = core(engine_type, WorkerType::Aggregated, 16);
+            let waiting_id = Uuid::from_u128(20_000 + case as u128);
+            core.receive(request(waiting_id, (0..4).collect()));
+            assert_eq!(request_metrics(&core).waiting_requests, 1);
+            assert_eq!(
+                core.apply_command(SchedulerCommand::CancelRequest {
+                    request_id: waiting_id,
+                })
+                .unwrap(),
+                SchedulerCommandResult::Applied
+            );
+            assert_eq!(
+                core.apply_command(SchedulerCommand::CancelRequest {
+                    request_id: waiting_id,
+                })
+                .unwrap(),
+                SchedulerCommandResult::Noop
+            );
+            assert_eq!(core.num_requests(), 0);
+
+            let running_id = Uuid::from_u128(20_100 + case as u128);
+            let mut running_request = request(running_id, (100..108).collect());
+            running_request.max_output_tokens = 32;
+            core.receive(running_request);
+            core.execute_hidden_pass(0.0);
+            assert_eq!(request_metrics(&core).running_requests, 1);
+            let active_blocks_before_cancel = request_metrics(&core).active_decode_blocks;
+            assert!(
+                active_blocks_before_cancel > 0,
+                "{engine_type:?} running request should own KV blocks"
+            );
+            assert_eq!(
+                core.apply_command(SchedulerCommand::CancelRequest {
+                    request_id: running_id,
+                })
+                .unwrap(),
+                SchedulerCommandResult::Applied
+            );
+            assert_eq!(core.num_requests(), 0);
+            let active_blocks_after_cancel = request_metrics(&core).active_decode_blocks;
+            assert!(
+                active_blocks_after_cancel < active_blocks_before_cancel,
+                "{engine_type:?} cancellation should release request-owned KV blocks"
+            );
+            if engine_type == EngineType::Vllm {
+                assert_eq!(active_blocks_after_cancel, 0);
+            }
+        }
+    }
     #[test]
     fn welford_acc_empty() {
         let acc = WelfordAcc::default();
         assert_eq!(acc.count, 0);
         assert_eq!(acc.sum, 0.0);
         assert_eq!(acc.variance(), 0.0);
+    }
+
+    #[test]
+    fn accept_length_ignores_terminal_signals_without_tokens() {
+        let token_uuid = Uuid::from_u128(1);
+        let signals = [
+            OutputSignal {
+                uuid: Uuid::from_u128(2),
+                token_id: None,
+                completed: true,
+                rejected: false,
+                handoff_delay_ms: None,
+            },
+            OutputSignal {
+                uuid: token_uuid,
+                token_id: Some(7),
+                completed: false,
+                rejected: false,
+                handoff_delay_ms: None,
+            },
+            OutputSignal {
+                uuid: token_uuid,
+                token_id: Some(8),
+                completed: true,
+                rejected: false,
+                handoff_delay_ms: None,
+            },
+            OutputSignal {
+                uuid: Uuid::from_u128(3),
+                token_id: Some(9),
+                completed: true,
+                rejected: true,
+                handoff_delay_ms: None,
+            },
+        ];
+
+        assert_eq!(accept_length_sample(&signals), (2, 1));
     }
 
     #[test]
@@ -1122,10 +1279,10 @@ mod tests {
 mod offload_init_tests {
     use super::{init_kvbm_live, init_kvbm_offline};
     use crate::common::protocols::{KvEventPublishers, MockEngineArgs};
-    use crate::kv_manager::KvManager;
+    use crate::kv_manager::G1Manager;
 
-    fn make_kv_manager() -> KvManager {
-        KvManager::new_with_event_sink(8, 4, KvEventPublishers::default(), 0)
+    fn make_kv_manager() -> G1Manager {
+        G1Manager::new_with_event_sink(8, 4, KvEventPublishers::default(), 0)
     }
 
     fn args_with_g2_and_bpt(bpt: usize) -> MockEngineArgs {

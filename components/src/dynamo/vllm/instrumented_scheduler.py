@@ -92,7 +92,7 @@ from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from itertools import count
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, cast
 
 import msgspec.structs
 import zmq
@@ -112,6 +112,13 @@ from dynamo.common.forward_pass_metrics import (
     encode,
 )
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.vllm.benchmark_points import (
+    BENCHMARK_MODES,
+    BenchmarkMode,
+    BenchmarkPoints,
+    DecodePointCandidate,
+    PrefillPointCandidate,
+)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -139,7 +146,7 @@ def _utc_now_rfc3339() -> str:
 
 @dataclass
 class BenchmarkConfig:
-    mode: Literal["prefill", "decode", "agg"] = "agg"
+    mode: BenchmarkMode = "agg"
     warmup_iterations: int = 5
     output_path: str = "/tmp/benchmark_results.json"
     timeout: int = 900
@@ -251,6 +258,46 @@ def _uniformly_limit_axis(values: Sequence[int], max_samples: int) -> list[int]:
     ]
 
 
+def _limit_cudagraph_axis(
+    values: Sequence[int],
+    capture_sizes: Sequence[int],
+    max_samples: int,
+) -> list[int]:
+    """Limit a graph-aware axis while preserving a small eager tail.
+
+    Values above the largest configured CUDA Graph capture size run eagerly.
+    When those eager-tail values are at most 20% of all candidates, retain the
+    complete tail and spend the remaining sample budget on the graph-covered
+    prefix. If the tail is larger, use the existing uniform whole-axis limit.
+    """
+    if max_samples < 2:
+        raise ValueError("uniform axis sample limits must be at least 2")
+
+    candidates = list(values)
+    if len(candidates) <= max_samples:
+        return candidates
+
+    captures = [int(size) for size in capture_sizes if int(size) >= 1]
+    if not captures:
+        return _uniformly_limit_axis(candidates, max_samples)
+
+    max_capture_size = max(captures)
+    graph_points = [value for value in candidates if value <= max_capture_size]
+    eager_tail = [value for value in candidates if value > max_capture_size]
+
+    # Compare as integers so the inclusive 20% boundary is exact.
+    protect_eager_tail = bool(eager_tail) and len(eager_tail) * 5 <= len(candidates)
+    graph_budget = max_samples - len(eager_tail)
+    if not protect_eager_tail or not graph_points or graph_budget < 1:
+        return _uniformly_limit_axis(candidates, max_samples)
+
+    if graph_budget == 1:
+        limited_graph_points = [graph_points[0]]
+    else:
+        limited_graph_points = _uniformly_limit_axis(graph_points, graph_budget)
+    return limited_graph_points + eager_tail
+
+
 def _cudagraph_axis_points(
     capture_sizes: Sequence[int],
     limit: int,
@@ -341,6 +388,7 @@ class _BenchmarkSynchronizer:
             self._socket.connect(self._endpoint)
         self._socket.setsockopt(zmq.LINGER, 0)
         self._cleanup_complete = False
+        self._flush_on_close = False
 
     @property
     def run_id(self) -> str | None:
@@ -353,7 +401,7 @@ class _BenchmarkSynchronizer:
     def close(self) -> None:
         linger = (
             self._timeout_ms + int(self.FINAL_GO_GRACE_SECONDS * 1000)
-            if self._cleanup_complete
+            if self._cleanup_complete or self._flush_on_close
             else 0
         )
         self._socket.close(linger=linger)
@@ -447,6 +495,16 @@ class _BenchmarkSynchronizer:
         deadline = time.monotonic() + self.timeout_seconds + self.FINAL_GO_GRACE_SECONDS
         self._recv_follower(deadline, point.benchmark_id, "group_commit")
         return _BenchmarkGroupResult(rank_results, group_stop_requested)
+
+    def abort(self, error: str) -> None:
+        """Notify peers before local benchmark cleanup closes the socket."""
+        if self.dp_rank == 0:
+            self._notify_error(self._all_follower_identities(), f"rank 0: {error}")
+            return
+        self._socket.send_json(
+            {"type": "abort", "dp_rank": self.dp_rank, "error": error}
+        )
+        self._flush_on_close = True
 
     def synchronize_boundary(
         self,
@@ -578,7 +636,6 @@ class _BenchmarkSynchronizer:
         expected_digest = local_ready["point_digest"]
         expected_summary = local_ready["output_summary"]
         identities: dict[int, bytes] = {}
-        last_identity: bytes | None = None
         validation_errors = []
         if local_ready.get("validation_error"):
             validation_errors.append(f"rank 0: {local_ready['validation_error']}")
@@ -601,8 +658,10 @@ class _BenchmarkSynchronizer:
                         "invalid attention-DP benchmark READY multipart message"
                     )
                 identity, payload = frames
-                last_identity = identity
                 message = json.loads(payload)
+                if not isinstance(message, dict):
+                    raise RuntimeError("invalid attention-DP benchmark READY message")
+                self._raise_if_peer_aborted(identity, message)
                 rank = message.get("dp_rank")
                 if (
                     message.get("type") != "ready"
@@ -642,10 +701,7 @@ class _BenchmarkSynchronizer:
                     )
                 identities[rank] = identity
         except Exception as error:
-            error_identities = set(identities.values())
-            if last_identity is not None:
-                error_identities.add(last_identity)
-            self._notify_error(error_identities, str(error))
+            self._notify_error(self._all_follower_identities(), str(error))
             raise
 
         if validation_errors:
@@ -684,7 +740,7 @@ class _BenchmarkSynchronizer:
                 },
             )
         except Exception as error:
-            self._notify_error(identities.values(), str(error))
+            self._notify_error(self._all_follower_identities(), str(error))
             raise
         return self._run_id
 
@@ -801,7 +857,7 @@ class _BenchmarkSynchronizer:
             )
             return _BenchmarkGroupResult(rank_results, stop_requested)
         except Exception as error:
-            self._notify_error(identities.values(), str(error))
+            self._notify_error(self._all_follower_identities(), str(error))
             raise
 
     def _coordinate_group_prepared(
@@ -901,7 +957,7 @@ class _BenchmarkSynchronizer:
             )
             return stop_requested
         except Exception as error:
-            self._notify_error(identities.values(), str(error))
+            self._notify_error(self._all_follower_identities(), str(error))
             raise
 
     def _coordinate_boundary_prepared(
@@ -971,7 +1027,7 @@ class _BenchmarkSynchronizer:
                 {"type": "cleanup_complete", "benchmark_id": benchmark_id},
             )
         except Exception as error:
-            self._notify_error(identities.values(), str(error))
+            self._notify_error(self._all_follower_identities(), str(error))
             raise
 
     def _recv_router(self, deadline: float, benchmark_id: int) -> tuple[bytes, dict]:
@@ -990,12 +1046,30 @@ class _BenchmarkSynchronizer:
         message = json.loads(payload)
         if not isinstance(message, dict):
             raise RuntimeError("invalid attention-DP benchmark message")
+        self._raise_if_peer_aborted(identity, message)
         if message.get("benchmark_id") != benchmark_id:
             raise RuntimeError(
                 "attention-DP benchmark id mismatch: "
                 f"expected={benchmark_id} actual={message.get('benchmark_id')}"
             )
         return identity, message
+
+    def _all_follower_identities(self) -> tuple[bytes, ...]:
+        return tuple(str(rank).encode() for rank in range(1, self.dp_size))
+
+    def _raise_if_peer_aborted(self, identity: bytes, message: dict) -> None:
+        if message.get("type") != "abort":
+            return
+        rank = message.get("dp_rank")
+        error = message.get("error")
+        if (
+            not isinstance(rank, int)
+            or not 1 <= rank < self.dp_size
+            or identity != str(rank).encode()
+            or not isinstance(error, str)
+        ):
+            raise RuntimeError(f"invalid attention-DP abort message: {message}")
+        raise RuntimeError(f"attention-DP benchmark rank {rank} aborted: {error}")
 
     def _send_to_all(self, identities: dict[int, bytes], message: dict) -> None:
         payload = json.dumps(message).encode()
@@ -1007,6 +1081,7 @@ class _BenchmarkSynchronizer:
         for identity in identities:
             try:
                 self._socket.send_multipart((identity, payload))
+                self._flush_on_close = True
             except zmq.ZMQError:
                 logger.debug(
                     "Could not notify disconnected ADP benchmark rank",
@@ -1205,7 +1280,11 @@ class InstrumentedScheduler(AsyncScheduler):
             try:
                 output = self._bench_step()
             except Exception as error:
-                logger.exception("Benchmark step failed, cleaning up")
+                point = self._bench_current_point
+                logger.exception(
+                    "Benchmark step failed, cleaning up (benchmark_id=%s)",
+                    point.benchmark_id if point is not None else None,
+                )
                 self._bench_abort(error)
                 raise
             if output is not None:
@@ -1214,7 +1293,11 @@ class InstrumentedScheduler(AsyncScheduler):
                 try:
                     self._bench_synchronize_output(output)
                 except Exception as error:
-                    logger.exception("Benchmark synchronization failed")
+                    point = self._bench_current_point
+                    logger.exception(
+                        "Benchmark synchronization failed (benchmark_id=%s)",
+                        point.benchmark_id if point is not None else None,
+                    )
                     self._bench_abort(error)
                     raise
                 self._schedule_times.append(time.monotonic())
@@ -1267,7 +1350,11 @@ class InstrumentedScheduler(AsyncScheduler):
                 try:
                     self._bench_synchronize_output(output)
                 except Exception as error:
-                    logger.exception("Benchmark synchronization failed")
+                    point = self._bench_current_point
+                    logger.exception(
+                        "Benchmark synchronization failed (benchmark_id=%s)",
+                        point.benchmark_id if point is not None else None,
+                    )
                     self._bench_abort(error)
                     raise
             self._schedule_times.append(time.monotonic())
@@ -1287,6 +1374,24 @@ class InstrumentedScheduler(AsyncScheduler):
         super().shutdown()
 
     def update_from_output(
+        self,
+        scheduler_output: SchedulerOutput,
+        model_runner_output: "ModelRunnerOutput",
+    ):
+        if not self._bench_active:
+            return self._update_from_output(scheduler_output, model_runner_output)
+        try:
+            return self._update_from_output(scheduler_output, model_runner_output)
+        except Exception as error:
+            point = self._bench_current_point
+            logger.exception(
+                "Benchmark output update failed, cleaning up (benchmark_id=%s)",
+                point.benchmark_id if point is not None else None,
+            )
+            self._bench_abort(error)
+            raise
+
+    def _update_from_output(
         self,
         scheduler_output: SchedulerOutput,
         model_runner_output: "ModelRunnerOutput",
@@ -1521,6 +1626,17 @@ class InstrumentedScheduler(AsyncScheduler):
             return
 
         cfg = bench_cfg if isinstance(bench_cfg, dict) else {}
+        raw_mode = cfg.get("mode", "agg")
+        if not isinstance(raw_mode, str) or raw_mode not in BENCHMARK_MODES:
+            raise ValueError("benchmark mode must be one of prefill, decode, or agg")
+        mode = cast(BenchmarkMode, raw_mode)
+        raw_points = cfg.get("points")
+        self._bench_explicit_points = (
+            BenchmarkPoints.model_validate(raw_points)
+            if raw_points is not None
+            else None
+        )
+
         # additional_config values arrive as strings from JSON; coerce to
         # the types that BenchmarkConfig expects.
         _INT_FIELDS = {
@@ -1536,9 +1652,9 @@ class InstrumentedScheduler(AsyncScheduler):
             if k in cfg and not isinstance(cfg[k], int):
                 cfg[k] = int(cfg[k])
         known = {f.name for f in BenchmarkConfig.__dataclass_fields__.values()}
-        self._bench_config = BenchmarkConfig(
-            **{k: v for k, v in cfg.items() if k in known}
-        )
+        config_values = {k: v for k, v in cfg.items() if k in known}
+        config_values["mode"] = mode
+        self._bench_config = BenchmarkConfig(**config_values)
         if self._bench_config.timeout <= 0:
             raise ValueError("benchmark timeout must be positive")
         uniform_sample_limits = {
@@ -1718,18 +1834,22 @@ class InstrumentedScheduler(AsyncScheduler):
             return
         self._bench_grid_built = True
         mode = self._bench_config.mode
-        if mode in ("prefill", "agg"):
-            points_before = len(self._bench_grid)
-            self._bench_generate_prefill_grid()
-            if len(self._bench_grid) == points_before:
-                self._bench_missing_phases.append("prefill")
-                logger.warning("Benchmark prefill phase generated no points")
-        if mode in ("decode", "agg"):
-            points_before = len(self._bench_grid)
-            self._bench_generate_decode_grid()
-            if len(self._bench_grid) == points_before:
-                self._bench_missing_phases.append("decode")
-                logger.warning("Benchmark decode phase generated no points")
+        explicit_points = self._bench_explicit_points
+        if explicit_points is not None:
+            self._bench_build_explicit_grid(explicit_points)
+        else:
+            if mode in ("prefill", "agg"):
+                points_before = len(self._bench_grid)
+                self._bench_generate_prefill_grid()
+                if len(self._bench_grid) == points_before:
+                    self._bench_missing_phases.append("prefill")
+                    logger.warning("Benchmark prefill phase generated no points")
+            if mode in ("decode", "agg"):
+                points_before = len(self._bench_grid)
+                self._bench_generate_decode_grid()
+                if len(self._bench_grid) == points_before:
+                    self._bench_missing_phases.append("decode")
+                    logger.warning("Benchmark decode phase generated no points")
         self._bench_expected_points = len(self._bench_grid)
         for benchmark_id, point in enumerate(self._bench_grid, start=1):
             point.benchmark_id = benchmark_id
@@ -1741,6 +1861,105 @@ class InstrumentedScheduler(AsyncScheduler):
         self._bench_grid_digest = hashlib.sha256(grid_payload).hexdigest()
         logger.info("Benchmark grid: %d points (%s mode)", len(self._bench_grid), mode)
 
+    def _bench_build_explicit_grid(self, points: BenchmarkPoints) -> None:
+        mode = self._bench_config.mode
+        if mode in ("prefill", "agg"):
+            self._bench_grid.extend(
+                self._bench_materialize_prefill_candidate(
+                    candidate, f"prefill[{index}]"
+                )
+                for index, candidate in enumerate(points.prefill)
+            )
+        if mode in ("decode", "agg"):
+            self._bench_feasible_max_decode_batch_size = (
+                self._bench_decode_feasible_max_batch_size()
+            )
+            self._bench_grid.extend(
+                self._bench_materialize_decode_candidate(candidate, f"decode[{index}]")
+                for index, candidate in enumerate(points.decode)
+            )
+
+    def _bench_materialize_prefill_candidate(
+        self, candidate: PrefillPointCandidate, path: str
+    ) -> BenchmarkPoint:
+        if (
+            candidate.total_kv_read_tokens > 0
+            and not self.cache_config.enable_prefix_caching
+        ):
+            raise ValueError(f"{path}: total_kv_read_tokens requires prefix caching")
+        if not self._bench_prefill_point_feasible(
+            candidate.total_prefill_tokens,
+            candidate.batch_size,
+            candidate.total_kv_read_tokens,
+        ):
+            self._bench_raise_explicit_infeasible(path, candidate)
+
+        capture_size, padding_tokens, reasons = self._bench_cudagraph_metadata(
+            candidate.total_prefill_tokens,
+            self._bench_prefill_capture_sizes,
+            self.max_num_scheduled_tokens,
+        )
+        return BenchmarkPoint(
+            point_type="prefill",
+            total_prefill_tokens=candidate.total_prefill_tokens,
+            total_kv_read_tokens=candidate.total_kv_read_tokens,
+            batch_size=candidate.batch_size,
+            expected_cudagraph_mode=(
+                self._bench_prefill_cudagraph_mode
+                if capture_size is not None
+                else "NONE"
+            ),
+            expected_capture_size=capture_size,
+            padding_tokens=padding_tokens,
+            sample_reasons=["explicit", *reasons],
+        )
+
+    def _bench_materialize_decode_candidate(
+        self, candidate: DecodePointCandidate, path: str
+    ) -> BenchmarkPoint:
+        if (
+            candidate.batch_size > self._bench_feasible_max_decode_batch_size
+            or not self._bench_decode_point_feasible(
+                candidate.batch_size, candidate.total_kv_read_tokens
+            )
+        ):
+            self._bench_raise_explicit_infeasible(path, candidate)
+
+        capture_size, padding_tokens, reasons = self._bench_cudagraph_metadata(
+            candidate.batch_size,
+            self._bench_decode_capture_sizes,
+            self._bench_feasible_max_decode_batch_size,
+        )
+        return BenchmarkPoint(
+            point_type="decode",
+            total_kv_read_tokens=candidate.total_kv_read_tokens,
+            batch_size=candidate.batch_size,
+            expected_cudagraph_mode=(
+                self._bench_decode_cudagraph_mode
+                if capture_size is not None
+                else "NONE"
+            ),
+            expected_capture_size=capture_size,
+            padding_tokens=padding_tokens,
+            sample_reasons=["explicit", *reasons],
+        )
+
+    def _bench_raise_explicit_infeasible(
+        self,
+        path: str,
+        candidate: PrefillPointCandidate | DecodePointCandidate,
+    ) -> None:
+        limits = {
+            "max_num_scheduled_tokens": self.max_num_scheduled_tokens,
+            "max_num_running_reqs": self.max_num_running_reqs,
+            "max_model_len": self.max_model_len,
+            "available_kv_blocks": self._bench_available_blocks(),
+        }
+        raise ValueError(
+            f"{path}: explicit benchmark point is infeasible: "
+            f"point={candidate.model_dump()} limits={limits}"
+        )
+
     def _bench_generate_prefill_grid(self) -> None:
         max_tokens = self.max_num_scheduled_tokens
         if max_tokens < 1:
@@ -1750,14 +1969,15 @@ class InstrumentedScheduler(AsyncScheduler):
             )
             return
 
-        total_prefill_tokens = _cudagraph_axis_points(
+        total_prefill_tokens = _limit_cudagraph_axis(
+            _cudagraph_axis_points(
+                self._bench_prefill_capture_sizes,
+                max_tokens,
+            ),
             self._bench_prefill_capture_sizes,
-            max_tokens,
-        )
-        total_prefill_tokens = _uniformly_limit_axis(
-            total_prefill_tokens,
             self._bench_config.prefill_max_new_token_samples,
         )
+        prefill_points: list[BenchmarkPoint] = []
         for total_tokens in total_prefill_tokens:
             for batch_size in self._bench_prefill_batch_sizes(total_tokens):
                 for total_kv_read_tokens in self._bench_prefill_kv_read_points(
@@ -1776,7 +1996,7 @@ class InstrumentedScheduler(AsyncScheduler):
                         self._bench_prefill_capture_sizes,
                         max_tokens,
                     )
-                    self._bench_grid.append(
+                    prefill_points.append(
                         BenchmarkPoint(
                             point_type="prefill",
                             total_prefill_tokens=total_tokens,
@@ -1792,6 +2012,11 @@ class InstrumentedScheduler(AsyncScheduler):
                             sample_reasons=sample_reasons,
                         )
                     )
+
+        # Generate axes in their natural ascending order, then reverse only the
+        # prefill phase so larger workload coordinates run first.  Keep
+        # decode ordering and the aggregate prefill-before-decode boundary intact.
+        self._bench_grid.extend(reversed(prefill_points))
 
     def _bench_prefill_batch_sizes(self, total_tokens: int) -> list[int]:
         """Return the smallest configured presets from the legal batch axis."""
@@ -2139,32 +2364,18 @@ class InstrumentedScheduler(AsyncScheduler):
             logger.warning("max_model_len too small for decode grid, skipping")
             return
 
-        min_blocks_per_request = self._bench_blocks_per_req(2)
-        if min_blocks_per_request < 1:
-            feasible_max_batch = self.max_num_running_reqs
-        else:
-            feasible_max_batch = (
-                self._bench_usable_blocks(
-                    self.max_num_running_reqs, reserve_watermark=True
-                )
-                // min_blocks_per_request
-            )
-        feasible_max_batch = min(
-            self.max_num_running_reqs,
-            self.max_num_scheduled_tokens,
-            feasible_max_batch,
-        )
-        self._bench_feasible_max_decode_batch_size = max(0, feasible_max_batch)
+        feasible_max_batch = self._bench_decode_feasible_max_batch_size()
+        self._bench_feasible_max_decode_batch_size = feasible_max_batch
         if feasible_max_batch < 1:
             logger.warning("KV cache too small for decode grid, skipping")
             return
 
-        batch_sizes = _cudagraph_axis_points(
+        batch_sizes = _limit_cudagraph_axis(
+            _cudagraph_axis_points(
+                self._bench_decode_capture_sizes,
+                feasible_max_batch,
+            ),
             self._bench_decode_capture_sizes,
-            feasible_max_batch,
-        )
-        batch_sizes = _uniformly_limit_axis(
-            batch_sizes,
             self._bench_config.decode_max_batch_size_samples,
         )
         for batch_size in batch_sizes:
@@ -2201,6 +2412,25 @@ class InstrumentedScheduler(AsyncScheduler):
                         sample_reasons=sample_reasons,
                     )
                 )
+
+    def _bench_decode_feasible_max_batch_size(self) -> int:
+        if self.max_model_len < 3:
+            return 0
+        min_blocks_per_request = self._bench_blocks_per_req(2)
+        if min_blocks_per_request < 1:
+            feasible_max_batch = self.max_num_running_reqs
+        else:
+            feasible_max_batch = (
+                self._bench_usable_blocks(
+                    self.max_num_running_reqs, reserve_watermark=True
+                )
+                // min_blocks_per_request
+            )
+        return min(
+            self.max_num_running_reqs,
+            self.max_num_scheduled_tokens,
+            feasible_max_batch,
+        )
 
     @staticmethod
     def _bench_decode_context_lengths(
@@ -2599,6 +2829,14 @@ class InstrumentedScheduler(AsyncScheduler):
             self._publisher.resume()
 
     def _bench_abort(self, error: Exception) -> None:
+        if self._bench_synchronizer is not None:
+            try:
+                self._bench_synchronizer.abort(str(error))
+            except zmq.ZMQError:
+                logger.warning(
+                    "Failed to notify attention-DP benchmark peers",
+                    exc_info=True,
+                )
         self._bench_cleanup_requests()
         self._bench_grid_error = str(error)
         cleanup_error: Exception | None = None
@@ -3054,6 +3292,11 @@ class InstrumentedScheduler(AsyncScheduler):
         return None
 
     def _bench_skip_point(self, point: BenchmarkPoint, reason: str) -> None:
+        if "explicit" in point.sample_reasons:
+            raise RuntimeError(
+                f"benchmark_id={point.benchmark_id}: "
+                f"explicit benchmark point failed: {reason}"
+            )
         self._bench_skipped_points.append(
             SkippedBenchmarkPoint(point=point, reason=reason)
         )
