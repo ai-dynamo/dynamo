@@ -1680,6 +1680,7 @@ impl ModelWatcher {
                     // Hand the monitor directly so the prefill Client can be attached
                     // to it on activation (no namespace lookup).
                     worker_monitor.clone(),
+                    non_cpu_to_cpu_ratio,
                 )
             });
 
