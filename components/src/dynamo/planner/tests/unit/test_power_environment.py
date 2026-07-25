@@ -5,9 +5,9 @@
 
 ``PlannerEnvironmentImpl._load_static_power_caps_at_startup`` reads DGD-owned
 caps once after worker readiness and fails closed on malformed or infeasible
-values. Caps are never re-adopted on ``refresh()``; a fingerprint check
-re-resolves via the production path and fails closed if the annotation or
-per-replica GPU topology drifts, so scale-ups cannot charge stale watts.
+values. Caps are startup-static for the Planner lifetime: ``refresh()`` never
+re-reads or re-adopts them. Annotation or topology changes take effect through
+a worker rollout plus Planner restart.
 """
 
 from unittest.mock import AsyncMock, Mock
@@ -21,7 +21,6 @@ from dynamo.planner.errors import DeploymentValidationError, PowerAnnotationInva
 from dynamo.planner.monitoring.dgd_services import (
     POWER_ANNOTATION_KEY,
     ComponentPowerConfig,
-    resolve_component_power_configs,
 )
 
 pytestmark = [
@@ -170,8 +169,14 @@ def test_restart_adopts_current_cap_not_stale_max():
 
 
 @pytest.mark.asyncio
-async def test_refresh_unchanged_fingerprint_keeps_startup_watts():
-    """Drift check re-resolves but never re-adopts when topology is unchanged."""
+async def test_refresh_does_not_reread_power_annotation():
+    """refresh() must not call get_component_power_configs after startup.
+
+    Caps are startup-static. Per Ted's review contract, the runtime tick loop
+    must not issue a DGD GET to re-resolve or drift-check the annotation —
+    annotation changes take effect only after a worker rollout plus Planner
+    restart.
+    """
     controller = _refresh_controller(_cfg("prefill", 700), _cfg("decode", 1200))
     env = _env(controller)
     env._load_static_power_caps_at_startup()
@@ -180,84 +185,8 @@ async def test_refresh_unchanged_fingerprint_keeps_startup_watts():
 
     await env.refresh()
 
-    controller.get_component_power_configs.assert_called_once()
+    controller.get_component_power_configs.assert_not_called()
     assert env.deployment_state().decode.power_watts_per_replica == 1200
-
-
-@pytest.mark.asyncio
-async def test_refresh_fails_closed_when_gpu_count_or_nodecount_changes():
-    """Topology drift through the production resolver must block scale-ups.
-
-    Example: 1×300 W → 4×300 W (nodeCount or GPU request) would otherwise leave
-    the Planner charging 300 W/replica after rollout completes.
-    """
-    dgd = _dgd(
-        _worker("VllmPrefillWorker", comp_type="prefill", watts="300", gpus="1"),
-        _worker("VllmDecodeWorker", comp_type="decode", watts="300", gpus="1"),
-    )
-
-    def get_power_configs(
-        *,
-        require_prefill=True,
-        require_decode=True,
-        deployment=None,
-        prefill_component_name=None,
-        decode_component_name=None,
-    ):
-        return resolve_component_power_configs(
-            deployment if deployment is not None else dgd,
-            require_prefill=require_prefill,
-            require_decode=require_decode,
-            prefill_name=prefill_component_name,
-            decode_name=decode_component_name,
-        )
-
-    controller = _refresh_controller(_cfg("prefill", 300), _cfg("decode", 300))
-    controller.get_component_power_configs = get_power_configs
-    controller.wait_for_settled_graph_deployment = AsyncMock(return_value=dgd)
-    controller.get_graph_deployment = Mock(return_value=dgd)
-    controller.async_init = AsyncMock()
-    controller.validate_deployment = AsyncMock()
-
-    env = _env(controller, budget=10000)
-    fpm = Mock()
-    fpm.async_init = AsyncMock()
-    fpm.refresh = AsyncMock()
-    env.fpm_provider = fpm
-
-    await env.initialize()
-    assert env.deployment_state().decode.power_watts_per_replica == 300
-
-    # Post-rollout topology: decode replica is now 4 GPUs × 300 W = 1200 W.
-    dgd["spec"]["components"][1] = _worker(
-        "VllmDecodeWorker",
-        comp_type="decode",
-        watts="300",
-        gpus="1",
-        node_count=4,
-    )
-    # Settled wait would return the post-rollout snapshot; refresh must still
-    # refuse to scale with the stale startup charge.
-    controller.wait_for_settled_graph_deployment = AsyncMock(return_value=dgd)
-
-    with pytest.raises(DeploymentValidationError, match="stale charge|topology"):
-        await env.refresh()
-    assert env.deployment_state().decode.power_watts_per_replica == 300
-
-
-@pytest.mark.asyncio
-async def test_refresh_fails_closed_when_cap_annotation_changes():
-    controller = _refresh_controller(_cfg("prefill", 700), _cfg("decode", 1200))
-    env = _env(controller)
-    env._load_static_power_caps_at_startup()
-    controller.get_component_power_configs.return_value = (
-        _cfg("prefill", 500),
-        _cfg("decode", 1200),
-    )
-
-    with pytest.raises(DeploymentValidationError, match="stale charge|topology"):
-        await env.refresh()
-    assert env.deployment_state().prefill.power_watts_per_replica == 700
 
 
 def test_call_with_optional_deployment_forwards_when_accepted():

@@ -90,10 +90,6 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
         self.runtime_namespace_source = runtime_namespace_source
         self._state = DeploymentState()
         self._metrics_state = Metrics()
-        # role -> (gpu_power_limit_watts, gpus_per_replica) captured at startup.
-        # refresh() re-resolves and fails closed on drift so scaling cannot
-        # resume with a stale watts_per_replica after topology/cap changes.
-        self._startup_power_fingerprints: dict[str, tuple[int, int]] = {}
 
     async def initialize(self) -> None:
         await self.controller.async_init()
@@ -139,15 +135,10 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
                 await self.runtime_namespace_source.refresh_runtime_namespace()
             )
 
-        # Power caps stay startup-static (never re-adopted here). Re-resolve
-        # only to fail closed when the annotation or per-replica GPU topology
-        # drifts — otherwise scale-ups would charge the stale startup watts.
         await self._refresh_deployment_state()
-        self._assert_startup_power_fingerprint_unchanged()
         if namespace_changed:
             await self.fpm_provider.async_init(self._runtime_namespace_or_none())
             await self._refresh_deployment_state()
-            self._assert_startup_power_fingerprint_unchanged()
         await self.fpm_provider.refresh(self._state)
         return self._state
 
@@ -344,9 +335,10 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
     ) -> None:
         """Read DGD-owned per-GPU caps once at startup; fail closed if bad.
 
-        Caps are adopted only here. Cap or topology changes after startup are
-        detected on ``refresh()`` (fingerprint drift) and require a Planner
-        restart so this hook re-runs against a settled post-rollout snapshot.
+        Caps are startup-static for the Planner lifetime. Annotation or
+        topology changes take effect through a worker rollout plus Planner
+        restart, which re-runs this hook against a settled post-rollout
+        snapshot.
         """
         if not self.config.enable_power_awareness:
             return
@@ -359,74 +351,11 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
             ) from exc
 
         state = self.deployment_state()
-        fingerprints: dict[str, tuple[int, int]] = {}
         if self.require_prefill and prefill_cfg is not None:
             self._adopt_power_config(state.prefill, prefill_cfg)
-            fingerprints["prefill"] = (
-                prefill_cfg.gpu_power_limit_watts,
-                prefill_cfg.gpus_per_replica,
-            )
         if self.require_decode and decode_cfg is not None:
             self._adopt_power_config(state.decode, decode_cfg)
-            fingerprints["decode"] = (
-                decode_cfg.gpu_power_limit_watts,
-                decode_cfg.gpus_per_replica,
-            )
-        self._startup_power_fingerprints = fingerprints
         self._validate_minimum_power_footprint(prefill_cfg, decode_cfg)
-
-    def _assert_startup_power_fingerprint_unchanged(
-        self, deployment: Optional[dict] = None
-    ) -> None:
-        """Fail closed if DGD power topology/caps drifted since startup.
-
-        ``watts_per_replica`` depends on the mutable annotation, per-pod GPU
-        request, and ``multinode.nodeCount``. Refresh updates replica/GPU
-        counts but never re-adopts power watts; if those inputs change after
-        a worker rollout, continuing with the startup value undercharges the
-        budget. Detect via the production resolver and require a Planner
-        restart (re-running ``_load_static_power_caps_at_startup``).
-        """
-        if not self.config.enable_power_awareness:
-            return
-        if not self._startup_power_fingerprints:
-            return
-
-        try:
-            prefill_cfg, decode_cfg = self._resolve_power_configs(deployment=deployment)
-        except Exception as exc:
-            raise DeploymentValidationError(
-                [
-                    "Failed to re-resolve DGD-owned power caps after refresh; "
-                    f"refusing to scale with an unverified fingerprint: {exc}"
-                ]
-            ) from exc
-
-        drifts: list[str] = []
-        for role, cfg in (("prefill", prefill_cfg), ("decode", decode_cfg)):
-            expected = self._startup_power_fingerprints.get(role)
-            if expected is None or cfg is None:
-                continue
-            current = (cfg.gpu_power_limit_watts, cfg.gpus_per_replica)
-            if current == expected:
-                continue
-            drifts.append(
-                f"{role}: startup cap={expected[0]}W × gpus={expected[1]} "
-                f"({expected[0] * expected[1]}W/replica) vs current "
-                f"cap={current[0]}W × gpus={current[1]} "
-                f"({current[0] * current[1]}W/replica)"
-            )
-        if drifts:
-            raise DeploymentValidationError(
-                [
-                    "Worker power topology or per-GPU cap changed since Planner "
-                    "startup ("
-                    + "; ".join(drifts)
-                    + "). Restart the Planner after the worker rollout completes "
-                    "so watts_per_replica is re-resolved from a settled DGD "
-                    "snapshot; refusing to scale with a stale charge."
-                ]
-            )
 
     def _resolve_power_configs(
         self,
@@ -435,9 +364,8 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
         """Resolve DGD power configs with the same name/generic semantics as startup.
 
         Uses ``get_component_power_configs`` (explicit backend names + unique
-        generic ``type: worker`` fallback). Called at startup to adopt static
-        caps and on ``refresh()`` only to fail closed on fingerprint drift —
-        never to re-adopt watts mid-lifetime.
+        generic ``type: worker`` fallback). Called at startup only to adopt
+        static caps. Never called at runtime — caps are startup-static.
         """
         get_configs = getattr(self.controller, "get_component_power_configs", None)
         if not callable(get_configs):
