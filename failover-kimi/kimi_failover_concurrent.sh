@@ -64,14 +64,16 @@ log "engine0 pid $P0 ; engine1 pid $P1 (racing flock)"
 L0=$OUT/logs/engine0.log; L1=$OUT/logs/engine1.log
 ACTIVE_LOG=""; SHADOW_LOG=""; ACTIVE_PID=""; SHADOW_PID=""
 for i in $(seq 1 $CO_TO); do
-  # resolve roles from logs (flock winner registers; loser waits for lock)
-  if [ -z "$ACTIVE_LOG" ]; then
-    if have "$L0" "waiting for lock"; then SHADOW_LOG=$L0; SHADOW_PID=$P0; ACTIVE_LOG=$L1; ACTIVE_PID=$P1; log "roles: engine1 ACTIVE, engine0 SHADOW (+${i}s)"
-    elif have "$L1" "waiting for lock"; then SHADOW_LOG=$L1; SHADOW_PID=$P1; ACTIVE_LOG=$L0; ACTIVE_PID=$P0; log "roles: engine0 ACTIVE, engine1 SHADOW (+${i}s)"; fi
+  # resolve roles: the flock LOSER is the only one that sleeps ("Engine sleeping"),
+  # so it is unambiguously the SHADOW; the other is ACTIVE. (Both transiently log
+  # "waiting for lock" during the race, so that string cannot distinguish them.)
+  if [ -z "$SHADOW_LOG" ]; then
+    if have "$L0" "Engine sleeping"; then SHADOW_LOG=$L0; SHADOW_PID=$P0; ACTIVE_LOG=$L1; ACTIVE_PID=$P1; log "roles: engine1 ACTIVE, engine0 SHADOW (+${i}s)"
+    elif have "$L1" "Engine sleeping"; then SHADOW_LOG=$L1; SHADOW_PID=$P1; ACTIVE_LOG=$L0; ACTIVE_PID=$P0; log "roles: engine0 ACTIVE, engine1 SHADOW (+${i}s)"; fi
   fi
   areg=0; sstb=0
+  [ -n "$SHADOW_LOG" ] && sstb=1   # shadow has slept -> standby
   [ -n "$ACTIVE_LOG" ] && have "$ACTIVE_LOG" "Registered endpoint" && areg=1
-  [ -n "$SHADOW_LOG" ] && have "$SHADOW_LOG" "waiting for lock" && sstb=1
   [ "$areg" = 1 ] && [ "$sstb" = 1 ] && { log "BOTH READY (active registered + shadow standby) +${i}s"; break; }
   kill -0 $P0 2>/dev/null || { log "engine0 DIED"; grep -anE "Error|OutOfMemory|Traceback|CUDA error|not validated|non-positive|routed through scratch" "$L0"|tail -12; exit 1; }
   kill -0 $P1 2>/dev/null || { log "engine1 DIED"; grep -anE "Error|OutOfMemory|Traceback|CUDA error|not validated|non-positive|routed through scratch" "$L1"|tail -12; exit 1; }
