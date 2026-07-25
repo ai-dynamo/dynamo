@@ -5,10 +5,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -79,18 +81,29 @@ func GetPodGPUUUIDs(ctx context.Context, podName, podNamespace, containerName st
 }
 
 // GetGPUUUIDsViaNvidiaSmi discovers GPU UUIDs by running nvidia-smi inside the
-// container's mount namespace. This is the fallback path when the kubelet
+// container's mount and PID namespaces. This is the fallback path when the kubelet
 // PodResources API does not report GPU devices (e.g. when GPUs are allocated
 // via DRA instead of the NVIDIA device plugin).
 func GetGPUUUIDsViaNvidiaSmi(ctx context.Context, hostProcPath string, pid int) ([]string, error) {
-	mountPath := fmt.Sprintf("%s/%d/ns/mnt", strings.TrimRight(hostProcPath, "/"), pid)
+	procPath := fmt.Sprintf("%s/%d/ns", strings.TrimRight(hostProcPath, "/"), pid)
 	cmd := exec.CommandContext(
 		ctx,
 		"nsenter",
-		fmt.Sprintf("--mount=%s", mountPath),
+		fmt.Sprintf("--mount=%s/mnt", procPath),
+		fmt.Sprintf("--pid=%s/pid", procPath),
 		"--",
 		"nvidia-smi", "--query-gpu=gpu_uuid", "--format=csv,noheader",
 	)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+			if errors.Is(err, syscall.ESRCH) {
+				return os.ErrProcessDone
+			}
+			return err
+		}
+		return nil
+	}
 	output, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("nvidia-smi via nsenter (pid %d) failed: %w", pid, err)

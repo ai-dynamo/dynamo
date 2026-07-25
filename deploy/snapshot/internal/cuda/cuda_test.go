@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"net"
+	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -212,6 +215,157 @@ func TestGetPodGPUUUIDs(t *testing.T) {
 			t.Fatalf("got %v, want %v", got, want)
 		}
 	}
+}
+
+func TestGetGPUUUIDsViaNvidiaSmiEntersMountAndPIDNamespaces(t *testing.T) {
+	binDir := t.TempDir()
+	argsPath := filepath.Join(t.TempDir(), "nsenter-args")
+	nsenterPath := filepath.Join(binDir, "nsenter")
+	nsenter := `#!/bin/sh
+printf '%s\n' "$@" > "$NSENTER_ARGS_FILE"
+printf ' GPU-first \nGPU-second\n'
+`
+	if err := os.WriteFile(nsenterPath, []byte(nsenter), 0o755); err != nil {
+		t.Fatalf("write fake nsenter: %v", err)
+	}
+	t.Setenv("PATH", binDir)
+	t.Setenv("NSENTER_ARGS_FILE", argsPath)
+
+	got, err := GetGPUUUIDsViaNvidiaSmi(context.Background(), "/host/proc/", 123)
+	if err != nil {
+		t.Fatalf("GetGPUUUIDsViaNvidiaSmi: %v", err)
+	}
+	if strings.Join(got, "\n") != "GPU-first\nGPU-second" {
+		t.Fatalf("got UUIDs %v, want [GPU-first GPU-second]", got)
+	}
+
+	args, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatalf("read fake nsenter arguments: %v", err)
+	}
+	want := strings.Join([]string{
+		"--mount=/host/proc/123/ns/mnt",
+		"--pid=/host/proc/123/ns/pid",
+		"--",
+		"nvidia-smi",
+		"--query-gpu=gpu_uuid",
+		"--format=csv,noheader",
+		"",
+	}, "\n")
+	if string(args) != want {
+		t.Fatalf("nsenter arguments:\ngot:\n%s\nwant:\n%s", args, want)
+	}
+}
+
+func TestGetGPUUUIDsViaNvidiaSmiCancellationKillsProcessGroup(t *testing.T) {
+	binDir := t.TempDir()
+	childPIDPath := filepath.Join(t.TempDir(), "child-pid")
+	nsenterPath := filepath.Join(binDir, "nsenter")
+	nsenter := `#!/bin/sh
+/bin/sleep 30 &
+printf '%s\n' "$!" > "$NSENTER_CHILD_PID_FILE"
+wait
+`
+	if err := os.WriteFile(nsenterPath, []byte(nsenter), 0o755); err != nil {
+		t.Fatalf("write fake nsenter: %v", err)
+	}
+	t.Setenv("PATH", binDir)
+	t.Setenv("NSENTER_CHILD_PID_FILE", childPIDPath)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := GetGPUUUIDsViaNvidiaSmi(ctx, "/host/proc", 123)
+		result <- err
+	}()
+
+	var childPIDBytes []byte
+	deadline := time.NewTimer(3 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		var err error
+		childPIDBytes, err = os.ReadFile(childPIDPath)
+		if err == nil && strings.HasSuffix(string(childPIDBytes), "\n") {
+			break
+		}
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("read fake nsenter child PID: %v", err)
+		}
+		select {
+		case err := <-result:
+			t.Fatalf("GetGPUUUIDsViaNvidiaSmi returned before child started: %v", err)
+		case <-deadline.C:
+			t.Fatal("timed out waiting for fake nsenter child PID")
+		case <-ticker.C:
+		}
+	}
+	childPID, err := strconv.Atoi(strings.TrimSpace(string(childPIDBytes)))
+	if err != nil {
+		t.Fatalf("parse fake nsenter child PID: %v", err)
+	}
+	t.Cleanup(func() {
+		if childPID != 0 {
+			_ = syscall.Kill(childPID, syscall.SIGKILL)
+		}
+	})
+
+	select {
+	case err := <-result:
+		t.Fatalf("GetGPUUUIDsViaNvidiaSmi returned before cancellation: %v", err)
+	default:
+	}
+	cancel()
+
+	select {
+	case err := <-result:
+		if err == nil {
+			t.Fatal("GetGPUUUIDsViaNvidiaSmi returned nil error after cancellation")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for GetGPUUUIDsViaNvidiaSmi after cancellation")
+	}
+
+	deadline.Reset(3 * time.Second)
+	for {
+		err = syscall.Kill(childPID, 0)
+		if errors.Is(err, syscall.ESRCH) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("check fake nsenter child process: %v", err)
+		}
+
+		stat, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(childPID), "stat"))
+		if err == nil {
+			statText := string(stat)
+			closingParen := strings.LastIndex(statText, ")")
+			if closingParen < 0 {
+				t.Fatalf("parse fake nsenter child process stat: %q", statText)
+			}
+			fields := strings.Fields(statText[closingParen+1:])
+			if len(fields) == 0 {
+				t.Fatalf("parse fake nsenter child process stat: %q", statText)
+			}
+			if fields[0] == "Z" {
+				break
+			}
+		} else if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ESRCH) {
+			break
+		} else {
+			t.Fatalf("read fake nsenter child process stat: %v", err)
+		}
+
+		select {
+		case <-deadline.C:
+			t.Fatalf("fake nsenter child process %d remains after cancellation", childPID)
+		case <-ticker.C:
+		}
+	}
+	childPID = 0
 }
 
 func TestDiscoverGPUUUIDsUsesPodResourcesForClassicPod(t *testing.T) {
