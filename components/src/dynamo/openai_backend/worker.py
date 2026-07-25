@@ -19,7 +19,7 @@ import uvloop
 from httpx_sse import aconnect_sse
 
 from dynamo.common.utils.graceful_shutdown import install_signal_handlers
-from dynamo.llm import HttpError, ModelInput, ModelType, register_model
+from dynamo.llm import HttpError, ModelInput, ModelType, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime, Endpoint, dynamo_worker
 
 LOGGER = logging.getLogger("dynamo.openai_backend.worker")
@@ -681,6 +681,7 @@ async def init(
             endpoint,
             config.model,
             model_name=config.served_model_name,
+            worker_type=WorkerType.Aggregated,
         )
 
         LOGGER.info(
