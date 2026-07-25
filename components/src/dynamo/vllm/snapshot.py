@@ -3,6 +3,7 @@
 
 import gc
 import logging
+import os
 from collections.abc import Callable
 
 from dynamo.common.snapshot.lifecycle import (
@@ -46,6 +47,10 @@ async def prepare_snapshot_engine(
         pause_args=(None,),
     )
     if not await snapshot_controller.wait_for_restore():
-        raise SystemExit(0)
+        logger.info(
+            "Initial vLLM snapshot captured successfully; exiting "
+            "without destroying the engine"
+        )
+        os._exit(0)
 
     return snapshot_controller
