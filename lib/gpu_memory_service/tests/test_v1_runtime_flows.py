@@ -34,7 +34,7 @@ def test_install_mapping_releases_import_when_map_fails() -> None:
     assert not vmm.imports
 
 
-def test_commit_sleep_wake_holds_ro_and_preserves_ids_and_vas(monkeypatch) -> None:
+def test_commit_sleep_wake_and_source_teardown_preserve_snapshot(monkeypatch) -> None:
     vmm = V1FakeVMM()
     allocations = GMSAllocationManager(vmm, 3)
     gms = GMS("GPU-0", allocations)
@@ -91,12 +91,28 @@ def test_commit_sleep_wake_holds_ro_and_preserves_ids_and_vas(monkeypatch) -> No
     assert sessions.sessions[-1].is_connected
     assert gms.snapshot().ro_session_count == 1
 
-    manager.retire()
+    second_import = vmm.mapped[second][1]
+    manager.free_from_allocator(second, 33)
+    assert {mapping.base for mapping in manager.mappings} == {first}
+    assert second_import not in vmm.imports
+    assert second not in vmm.mapped
+    assert second not in vmm.reservations
     assert allocations.allocation_count == 2
+    assert vmm.server_handles == handles
+    assert sessions.sessions[-1].is_connected
+    assert gms.snapshot().ro_session_count == 1
+
+    manager.sleep()
+    assert not sessions.sessions[-1].is_connected
+    manager.free_from_allocator(first, 65)
+    assert allocations.allocation_count == 2
+    assert not manager.mappings
     assert vmm.server_handles == handles
     assert not vmm.imports
     assert not vmm.reservations
     assert gms.snapshot().ro_session_count == 0
+    with pytest.raises(GMSError, match="retired"):
+        manager.wake()
 
     replacement = sessions("unused", RequestedLockType.RW, None)
     assert allocations.allocation_count == 0
