@@ -54,17 +54,28 @@ def dynamo_worker(enable_nats: Optional[bool] = None):
 def dynamo_endpoint(
     request_model: Union[Type[BaseModel], Type[Any]], response_model: Type[BaseModel]
 ) -> Callable:
-    """Decorator that parses incoming requests into Pydantic models on an async generator endpoint.
+    """Decorator that can parse a request payload into a Pydantic model before the endpoint runs.
 
-    When ``request_model`` is a Pydantic ``BaseModel`` subclass, the wrapper
-    converts the final positional argument from a JSON string or dictionary
-    before invoking the endpoint. Invalid payloads raise ``ValueError``.
+    Parsing applies only when ``request_model`` is a ``BaseModel`` subclass
+    *and* the wrapper receives one or two positional arguments -- ``(request)``
+    or ``(self, request)``. With three or more positional arguments, or when the
+    payload arrives by keyword, it is forwarded untouched. A ``str`` payload is
+    parsed with ``parse_raw`` and a ``dict`` with ``parse_obj``; any other type,
+    including an already-constructed ``request_model`` instance, is rejected.
     ``response_model`` is reserved for future validation; yielded items pass
     through unchanged today.
 
     Args:
-        request_model: Request class used to parse JSON strings or dictionaries.
+        request_model: Request class used to parse ``str`` or ``dict`` payloads.
+            Pass a non-``BaseModel`` type, as ``examples/custom_backend``
+            does with ``str``, to skip parsing entirely.
         response_model: Expected response class. Currently accepted but not enforced.
+
+    Raises:
+        ValueError: On the first ``__anext__()`` of the returned generator, not
+            when the decorated function is called, because the wrapper is
+            itself an async generator. Raised when the payload fails validation
+            or is neither ``str`` nor ``dict``.
 
     Examples:
         >>> from pydantic import BaseModel

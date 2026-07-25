@@ -1309,8 +1309,11 @@ from the filesystem's protocol and root path.
 **Examples**
 
 ```python
->>> get_media_url(get_fs("memory://media"), "videos/request.mp4", "https://cdn.example.com/media")
+>>> fs = get_fs("memory://media")
+>>> get_media_url(fs, "videos/request.mp4", "https://cdn.example.com/media")
 'https://cdn.example.com/media/videos/request.mp4'
+>>> get_media_url(fs, "videos/request.mp4")
+'memory:///media/videos/request.mp4'
 ```
 
 [`components/src/dynamo/common/storage.py#L73`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/storage.py#L73)
@@ -1511,5 +1514,5 @@ Optional CDN / proxy base URL for URL rewriting.
 
 - `str` — Public URL string for the uploaded file.
 
-[`components/src/dynamo/common/storage.py#L101`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/storage.py#L101)
+[`components/src/dynamo/common/storage.py#L104`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/storage.py#L104)
 </Accordion>

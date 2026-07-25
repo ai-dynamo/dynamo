@@ -78,7 +78,8 @@ jobs:
       with:
         python-version: '3.13'
     - name: Install API docs test dependencies
-      run: python3 -m pip install 'griffe==2.1.0' 'pytest>=8.0' 'pyyaml>=6.0'
+      # fsspec backs the storage.py doctest the suite executes.
+      run: python3 -m pip install 'griffe==2.1.0' 'pytest>=8.0' 'pyyaml>=6.0' 'fsspec'
     - name: Test generated API references
       run: python3 -m pytest -c /dev/null -q docs/fern/scripts/tests
     - name: Check generated API reference freshness

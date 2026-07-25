@@ -86,8 +86,11 @@ def get_media_url(
         Public URL string for the uploaded file.
 
     Examples:
-        >>> get_media_url(get_fs("memory://media"), "videos/request.mp4", "https://cdn.example.com/media")
+        >>> fs = get_fs("memory://media")
+        >>> get_media_url(fs, "videos/request.mp4", "https://cdn.example.com/media")
         'https://cdn.example.com/media/videos/request.mp4'
+        >>> get_media_url(fs, "videos/request.mp4")
+        'memory:///media/videos/request.mp4'
     """
     if base_url:
         return f"{base_url.rstrip('/')}/{storage_path}"
