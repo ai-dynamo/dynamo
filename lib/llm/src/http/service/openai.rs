@@ -1747,12 +1747,40 @@ fn backend_error_response(error_msg: String, status_code: StatusCode) -> ErrorRe
     }
 }
 
-/// Short pre-commit peek window. synchronous validation/backend errors should surface quickly,
-/// and the short window avoids delaying SSE headers for normal high-TTFT requests.
-const PRE_COMMIT_ERROR_PEEK_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(50);
+/// Default pre-commit peek window when `DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS` is
+/// unset. Chosen to sit above observed request-parse / admission latency at
+/// p99 and below typical engine TTFT — errors within this budget surface as
+/// HTTP 4xx, errors after it surface as SSE error frames.
+const PRE_COMMIT_ERROR_PEEK_DEFAULT_MS: u64 = 10;
 
-/// Streaming-path preflight peek. Polls the stream for at most
-/// `PRE_COMMIT_ERROR_PEEK_TIMEOUT`, buffering leading annotation frames.
+/// Read the pre-commit peek window from the environment.
+///
+/// `Some(dur)` — poll for that duration before committing SSE.
+/// `None` — the peek is disabled entirely (all errors surface as SSE frames
+/// post-HTTP-200).
+///
+/// Cached in a `LazyLock` because it's on the streaming hot path and env
+/// values are fixed at process start.
+fn pre_commit_error_peek_timeout() -> Option<std::time::Duration> {
+    use std::sync::LazyLock;
+    static CACHED: LazyLock<Option<std::time::Duration>> = LazyLock::new(|| {
+        match std::env::var(env_llm::DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS)
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+        {
+            Some(0) => None,
+            Some(ms) => Some(std::time::Duration::from_millis(ms)),
+            None => Some(std::time::Duration::from_millis(
+                PRE_COMMIT_ERROR_PEEK_DEFAULT_MS,
+            )),
+        }
+    });
+    *CACHED
+}
+
+/// Streaming-path preflight peek. Polls the stream for a bounded window
+/// (`DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS`, default 10ms) buffering leading
+/// annotation frames.
 async fn streaming_preflight_peek(
     mut stream: impl futures::Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>>
     + Send
@@ -1768,14 +1796,19 @@ async fn streaming_preflight_peek(
 > {
     use futures::stream::StreamExt;
 
+    let Some(peek_timeout) = pre_commit_error_peek_timeout() else {
+        return Ok(Box::pin(stream));
+    };
+
+    // Single deadline from function entry — the peek window is bounded by
+    // peek_timeout in total, not per-iteration.
+    let deadline = tokio::time::Instant::now() + peek_timeout;
     let mut buffered: Vec<Annotated<NvCreateChatCompletionStreamResponse>> = Vec::new();
 
     loop {
         let next = tokio::select! {
             item = stream.next() => item,
-            _ = tokio::time::sleep(PRE_COMMIT_ERROR_PEEK_TIMEOUT) => {
-                // Peek window elapsed with no error/data frame — commit SSE
-                // and let monitor_for_disconnects handle the rest.
+            _ = tokio::time::sleep_until(deadline) => {
                 return Ok(Box::pin(futures::stream::iter(buffered).chain(stream)));
             }
         };
@@ -2128,7 +2161,7 @@ async fn chat_completions(
         // (e.g. `Backend(InvalidArgument)` from a text-only model receiving
         // image content) before committing HTTP 200, so we can return the
         // typed 4xx that the non-streaming path returns. The peek window is
-        // short (`PRE_COMMIT_ERROR_PEEK_TIMEOUT`) — if no signal arrives,
+        // short (`DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS`) — if no signal arrives,
         // fall through to SSE, and `monitor_for_disconnects` owns the long
         // backend-inactivity timeout from there.
         let stream = streaming_preflight_peek(stream, &mut inflight_guard, &request_id).await?;

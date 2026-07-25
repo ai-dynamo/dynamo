@@ -84,7 +84,7 @@ impl
 
         let stream = stream! {
             // Emit the first token immediately so the frontend's initial
-            // stream-peek (check_for_backend_error) unblocks quickly — this
+            // stream-peek (streaming_preflight_peek) unblocks quickly — this
             // matches real engines (TTFT < 1s) rather than pathologically
             // delaying every event by max_tokens ms.
             let first = generator.create_choice(0, Some("choice 0".to_string()), None, None);

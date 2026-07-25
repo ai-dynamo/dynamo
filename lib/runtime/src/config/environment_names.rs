@@ -371,6 +371,19 @@ pub mod llm {
     /// Set to `0` or leave unset to disable the timeout (default: disabled).
     pub const DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS: &str = "DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS";
 
+    /// Pre-commit peek window in milliseconds for the streaming chat/responses
+    /// paths. Controls how long the frontend polls the engine stream for a
+    /// synchronous backend error before committing HTTP 200.
+    /// Trades a small first-token latency budget
+    /// for the ability to surface `Backend(InvalidArgument)` and other
+    /// request-validation errors as HTTP 4xx instead of an SSE error frame.
+    ///
+    /// The default (10 ms) is chosen to sit above observed request-parse /
+    /// admission latency at p99 and below typical engine TTFT. Tune upward if
+    /// admission latency is bimodal; tune to `0` to disable the peek entirely
+    /// (all errors surface as SSE frames post-HTTP-200).
+    pub const DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS: &str = "DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS";
+
     /// Enable the LoRA allocation controller (set to "true" to enable)
     pub const DYN_LORA_ALLOCATION_ENABLED: &str = "DYN_LORA_ALLOCATION_ENABLED";
 
@@ -810,6 +823,7 @@ mod tests {
             llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
             llm::DYN_HTTP_OVERLOAD_STATUS_CODE,
             llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS,
+            llm::DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS,
             llm::DYN_LORA_ENABLED,
             llm::DYN_LORA_PATH,
             llm::DYN_ENABLE_ANTHROPIC_API,
