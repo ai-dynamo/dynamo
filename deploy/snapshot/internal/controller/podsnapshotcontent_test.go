@@ -37,14 +37,23 @@ type fakeCheckpointer struct {
 	called bool
 	params CheckpointParams
 	err    error
+	// block, when non-nil, is received before returning so callers can observe
+	// mid-checkpoint state (e.g. the Lease exists while the dump runs).
+	block <-chan struct{}
 }
 
 // fn is the checkpointFn seam the NodeController invokes for the dump.
-func (fc *fakeCheckpointer) fn(_ context.Context, params CheckpointParams) error {
+func (fc *fakeCheckpointer) fn(ctx context.Context, params CheckpointParams) error {
 	fc.mu.Lock()
-	defer fc.mu.Unlock()
 	fc.called = true
 	fc.params = params
+	fc.mu.Unlock()
+	if fc.block != nil {
+		select {
+		case <-fc.block:
+		case <-ctx.Done():
+		}
+	}
 	return fc.err
 }
 
@@ -475,16 +484,23 @@ func TestReconcileSnapshotContent_NotReadyQuiesceNoOp(t *testing.T) {
 func TestReconcileSnapshotContent_CapturesFromPod(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
 	pod := makeSourcePod("abc")
-	fc := &fakeCheckpointer{}
+	// Block the fake checkpoint until we have verified the Lease exists. Without
+	// this, the goroutine can complete and releaseLease can delete the Lease before
+	// the assertion below, causing a spurious failure on fast runners.
+	unblock := make(chan struct{})
+	fc := &fakeCheckpointer{block: unblock}
 	w := makeNodeController(t, fc, content, pod)
 	w.runtime = &fakeRuntime{resolveContainerPID: 7}
 
 	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
 
-	// acquireLease runs synchronously in reconcileSourcePod before the goroutine is launched, so
-	// the Lease exists immediately after the function returns.
+	// The Lease is created synchronously inside reconcileSourcePod. The checkpoint
+	// goroutine is blocked on fc.block, so the Lease has not been released yet.
 	_, err := w.clientset.CoordinationV1().Leases("inference").Get(context.Background(), "checkpoint-lease-abc", metav1.GetOptions{})
 	assert.NoError(t, err, "Lease checkpoint-lease-abc must exist in namespace inference")
+
+	// Let the checkpoint proceed.
+	close(unblock)
 
 	require.Eventually(t, fc.wasCalled, time.Second, 5*time.Millisecond)
 
