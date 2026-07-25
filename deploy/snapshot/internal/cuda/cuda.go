@@ -152,6 +152,9 @@ func discoverGPUUUIDs(
 				"DRA GPU allocation has no resolvable UUIDs",
 			)
 		}
+		if len(gpuUUIDs) == 1 {
+			return append([]string(nil), gpuUUIDs...), nil
+		}
 		visibleGPUUUIDs, err := discoverVisibleGPUs(ctx, hostProcPath, pid)
 		if err != nil {
 			return nil, fmt.Errorf(
