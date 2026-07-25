@@ -95,6 +95,8 @@ runs:
       if: inputs.fresh_builder != 'true'
       continue-on-error: true
       shell: bash
+      env:
+        BUILDKIT_NAMESPACE: ${{ inputs.namespace }}
       run: |
         CUDA_ARG=""
         if [[ -n "${{ inputs.cuda_version }}" ]]; then

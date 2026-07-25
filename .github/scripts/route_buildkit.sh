@@ -144,7 +144,7 @@ else
 fi
 
 # --- CONFIGURATION ---
-NAMESPACE="buildkit"
+NAMESPACE="${BUILDKIT_NAMESPACE:-buildkit}"
 PORT="1234"
 MAX_POD_CHECK=10
 # ---------------------
