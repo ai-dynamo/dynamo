@@ -8,11 +8,12 @@ from .allocator import (
     create_torch_allocator,
     create_torch_mem_pool,
 )
-from .tensor import isolate_tensors
+from .tensor import isolate_tensors, tensor_span
 
 __all__ = [
     "TorchAllocatorCallbacks",
     "create_torch_allocator",
     "create_torch_mem_pool",
     "isolate_tensors",
+    "tensor_span",
 ]

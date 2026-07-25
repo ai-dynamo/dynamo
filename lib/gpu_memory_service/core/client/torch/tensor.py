@@ -13,7 +13,8 @@ if TYPE_CHECKING:
     import torch
 
 
-def _tensor_span(tensor: "torch.Tensor") -> tuple[int, int]:
+def tensor_span(tensor: "torch.Tensor") -> tuple[int, int]:
+    """Return the tensor's storage-relative byte span."""
     element_size = int(tensor.element_size())
     start = int(tensor.storage_offset())
     end = start
@@ -80,9 +81,7 @@ def isolate_tensors(
             _rebind(zero_elements, target, 0)
 
         groups: list[tuple[int, int, list[torch.Tensor]]] = []
-        spans = [
-            (*_tensor_span(tensor), tensor) for tensor in objects if tensor.numel()
-        ]
+        spans = [(*tensor_span(tensor), tensor) for tensor in objects if tensor.numel()]
         for start, end, tensor in sorted(spans, key=lambda item: (item[0], item[1])):
             if groups and start < groups[-1][1]:
                 group_start, group_end, group_tensors = groups[-1]

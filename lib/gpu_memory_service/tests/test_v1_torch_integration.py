@@ -23,6 +23,7 @@ def test_normalization_partitions_live_mixed_storage_by_tensor_span() -> None:
     source = torch.arange(64, dtype=torch.float32)
     source_storage = source.untyped_storage()
     model.weight = torch.nn.Parameter(source[:32])
+    model.overlapping_weight = torch.nn.Parameter(source[16:40])
     model.strided_weight = torch.nn.Parameter(source[32:52:2])
     model.register_buffer("overlap", model.weight[8:24])
     model.overlap_alias = model.overlap[4:12]
@@ -63,6 +64,7 @@ def test_normalization_partitions_live_mixed_storage_by_tensor_span() -> None:
         name: int(tensor._cdata)
         for name, tensor in (
             ("weight", model.weight),
+            ("overlapping_weight", model.overlapping_weight),
             ("strided_weight", model.strided_weight),
             ("overlap", model.overlap),
             ("overlap_alias", model.overlap_alias),
@@ -84,6 +86,7 @@ def test_normalization_partitions_live_mixed_storage_by_tensor_span() -> None:
         name: int(tensor._cdata)
         for name, tensor in (
             ("weight", model.weight),
+            ("overlapping_weight", model.overlapping_weight),
             ("strided_weight", model.strided_weight),
             ("overlap", model.overlap),
             ("overlap_alias", model.overlap_alias),
@@ -93,6 +96,7 @@ def test_normalization_partitions_live_mixed_storage_by_tensor_span() -> None:
         )
     } == tensor_impls
     assert int(model.weight.untyped_storage()._cdata) == original_storage
+    assert int(model.overlapping_weight.untyped_storage()._cdata) == original_storage
     assert int(model.strided_weight.untyped_storage()._cdata) == original_storage
     assert int(model.empty_view.untyped_storage()._cdata) != original_storage
     assert (
@@ -120,7 +124,7 @@ def test_normalization_partitions_live_mixed_storage_by_tensor_span() -> None:
         model.overlap_alias.fill_(23)
     assert model.overlap.tolist()[4:12] == [23.0] * 8
     assert model.weight.tolist()[12:20] == list(map(float, range(12, 20)))
-    assert accounting == ((32 + 10) * 4, (16 + 4 + 4) * 4)
+    assert accounting == (51 * 4, (16 + 4 + 4) * 4)
 
 
 @pytest.mark.post_merge
