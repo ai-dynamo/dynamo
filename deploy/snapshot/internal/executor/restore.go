@@ -38,6 +38,13 @@ type RestoreRequest struct {
 	// AccessMode is the operator-stamped storage access mode. For agentInject the
 	// workload pod has no checkpoint PVC mount, so the agent clones its own
 	// checkpoint dir and grafts it into the container ns via nsrestore.
+	//
+	// agentInject is only supported for restore workloads that cannot acquire
+	// CAP_SYS_ADMIN in the user namespace that owns their mount namespace.
+	// Linux does not expose the kernel-internal MNT_LOCK_READONLY flag through
+	// mount_setattr(2), so a sufficiently privileged workload could otherwise
+	// clear the graft's read-only mount attribute. Admission/callers must reject
+	// privileged or CAP_SYS_ADMIN-capable workloads when selecting agentInject.
 	AccessMode string
 }
 
@@ -231,6 +238,10 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 		if err != nil {
 			return nil, fmt.Errorf("agentInject checkpoint clone: %w", err)
 		}
+		// This defer owns the agent process's descriptor. ExtraFiles duplicates
+		// it into the child as fd 3; AttachCheckpointTree consumes and closes
+		// that child-side descriptor after move_mount. Closing either descriptor
+		// does not close the other process's descriptor.
 		defer tree.Close()
 		extraFiles = append(extraFiles, tree)
 		// First ExtraFiles entry lands at fd 3 in nsenter and is inherited by

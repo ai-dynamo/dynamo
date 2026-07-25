@@ -91,7 +91,7 @@ func PrepareRestorePodSpec(
 		if container == nil {
 			return fmt.Errorf("restore target container %q not found in pod spec (from %s annotation)", name, TargetContainersAnnotation)
 		}
-		if storage.BasePath != "" {
+		if storage.BasePath != "" && storage.AccessMode != StorageAccessModeAgentInject {
 			InjectCheckpointVolumeMount(container, storage.BasePath)
 		}
 		EnsureControlVolume(podSpec, container)
@@ -204,7 +204,7 @@ func ValidateRestorePodSpec(
 		if container == nil {
 			return fmt.Errorf("restore target container %q not found in pod spec (from %s annotation)", name, TargetContainersAnnotation)
 		}
-		if storage.BasePath != "" {
+		if storage.BasePath != "" && storage.AccessMode != StorageAccessModeAgentInject {
 			hasMount := false
 			for _, mount := range container.VolumeMounts {
 				if mount.Name == CheckpointVolumeName && mount.MountPath == storage.BasePath {
