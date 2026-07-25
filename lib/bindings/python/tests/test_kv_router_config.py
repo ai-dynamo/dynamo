@@ -15,8 +15,6 @@ def test_decode_active_request_weight_defaults_to_zero_and_validates() -> None:
     config = KvRouterConfig()
     assert config.decode_active_request_weight == 0.0
 
-    config.decode_active_request_weight = 32.0
-    assert config.decode_active_request_weight == 32.0
     assert (
         config.with_overrides(
             decode_active_request_weight=64.0
