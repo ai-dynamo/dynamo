@@ -1190,6 +1190,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `name` _string_ | Name of the source pod. |  | MinLength: 1 <br />Required: \{\} <br /> |
 | `uid` _[UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#uid-types-pkg)_ | UID of the source pod, recorded so the node agent dumps that specific<br />pod and not a same-named recreation. |  | Optional: \{\} <br /> |
+| `containers` _string array_ | Containers narrows the capture to these containers of the source pod. The<br />node agent reads this instead of the source pod's target-container<br />annotation. v1alpha1 supports exactly one container; the cap is lifted when<br />the runtime supports multi-container capture. |  | MaxItems: 1 <br />MinItems: 1 <br />Required: \{\} <br />items:MaxLength: 63 <br />items:MinLength: 1 <br />items:Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br /> |
 
 
 #### PodSnapshot
@@ -1322,7 +1323,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `podRef` _[PodReference](#podreference)_ | PodRef references the pod, in the PodSnapshot's namespace, that is captured.<br />The operator prepares the pod (control volume, target-container annotation,<br />checkpoint storage mount) before creating the PodSnapshot. |  | Required: \{\} <br /> |
+| `podRef` _[PodReference](#podreference)_ | PodRef references the pod, in the PodSnapshot's namespace, that is captured.<br />The operator prepares the pod (control volume, checkpoint storage mount)<br />before creating the PodSnapshot. The capture target container is carried on<br />PodRef.Containers, not a pod annotation. |  | Required: \{\} <br /> |
 
 
 #### PodSnapshotSpec

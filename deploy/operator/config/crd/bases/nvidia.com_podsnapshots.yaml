@@ -70,8 +70,9 @@ spec:
                     podRef:
                       description: |-
                         PodRef references the pod, in the PodSnapshot's namespace, that is captured.
-                        The operator prepares the pod (control volume, target-container annotation,
-                        checkpoint storage mount) before creating the PodSnapshot.
+                        The operator prepares the pod (control volume, checkpoint storage mount)
+                        before creating the PodSnapshot. The capture target container is carried on
+                        PodRef.Containers, not a pod annotation.
                       properties:
                         containers:
                           description: |-
