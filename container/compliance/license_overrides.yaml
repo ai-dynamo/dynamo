@@ -443,6 +443,7 @@ overrides:
 
   # --- Additional Python deps surfaced by vllm-dev / trtllm-dev / sglang-dev builds ---
   - { ecosystem: python, name: deep_gemm,                       license: "MIT",          source: "DeepSeek DeepGEMM — https://github.com/deepseek-ai/DeepGEMM (MIT)" }
+  - { ecosystem: python, name: hf_transfer,                     license: "Apache-2.0",   source: "PyPI metadata declares no license; upstream is Apache-2.0 — https://github.com/huggingface/hf_transfer/blob/main/LICENSE" }
   - { ecosystem: python, name: nvidia-cudnn-frontend,           license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA cuDNN Frontend — bundled under NVIDIA cuDNN SLA" }
   - { ecosystem: python, name: onnx,                            license: "Apache-2.0",   source: "ONNX — https://github.com/onnx/onnx (Apache-2.0)" }
   - { ecosystem: python, name: setuptools,                      license: "MIT",          source: "setuptools — pypa/setuptools (MIT)" }
