@@ -305,6 +305,84 @@ func TestDiscoverGPUUUIDsFallsBackToPodResourcesAfterDRAAPILookupError(t *testin
 	}
 }
 
+func TestDiscoverGPUUUIDsSkipsOrdinalDiscoveryForSingleDRAGPU(t *testing.T) {
+	nodeName := "node-1"
+	poolName := "pool-node-1"
+	namespace := "default"
+	podName := "test-pod"
+	claimName := "gpu-claim"
+	uuid := "GPU-aaaaaaaa-1111-2222-3333-444444444444"
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: namespace},
+		Spec: corev1.PodSpec{
+			NodeName: nodeName,
+			Containers: []corev1.Container{
+				{
+					Name: "main",
+					Resources: corev1.ResourceRequirements{
+						Claims: []corev1.ResourceClaim{{Name: "gpu"}},
+					},
+				},
+			},
+			ResourceClaims: []corev1.PodResourceClaim{
+				{
+					Name:              "gpu",
+					ResourceClaimName: &claimName,
+				},
+			},
+		},
+	}
+	claim := &resourcev1.ResourceClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: claimName, Namespace: namespace},
+		Status: resourcev1.ResourceClaimStatus{
+			Allocation: &resourcev1.AllocationResult{
+				Devices: resourcev1.DeviceAllocationResult{
+					Results: []resourcev1.DeviceRequestAllocationResult{
+						{Driver: nvidiaGPUDRADriver, Pool: poolName, Device: "gpu-0", Request: "gpu"},
+					},
+				},
+			},
+		},
+	}
+	slice := &resourcev1.ResourceSlice{
+		ObjectMeta: metav1.ObjectMeta{Name: poolName + "-gpu.nvidia.com-xxx"},
+		Spec: resourcev1.ResourceSliceSpec{
+			Driver:   nvidiaGPUDRADriver,
+			NodeName: &nodeName,
+			Pool:     resourcev1.ResourcePool{Name: poolName},
+			Devices: []resourcev1.Device{
+				{
+					Name: "gpu-0",
+					Attributes: map[resourcev1.QualifiedName]resourcev1.DeviceAttribute{
+						resourcev1.QualifiedName("uuid"): {StringValue: &uuid},
+					},
+				},
+			},
+		},
+	}
+
+	got, err := discoverGPUUUIDs(
+		context.Background(),
+		fake.NewSimpleClientset(pod, claim, slice),
+		podName,
+		namespace,
+		"main",
+		"/proc",
+		123,
+		func(context.Context, string, int) ([]string, error) {
+			return nil, errors.New("visible GPU discovery must not be called")
+		},
+		logr.Discard(),
+	)
+	if err != nil {
+		t.Fatalf("discoverGPUUUIDs: %v", err)
+	}
+	if len(got) != 1 || got[0] != uuid {
+		t.Fatalf("got %v, want [%s]", got, uuid)
+	}
+}
+
 func TestDiscoverGPUUUIDsOrdersDRAPodByContainerOrdinal(t *testing.T) {
 	previousSocketPath := podResourcesSocketPath
 	podResourcesSocketPath = filepath.Join(t.TempDir(), "missing-kubelet.sock")
