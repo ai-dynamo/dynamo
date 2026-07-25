@@ -104,25 +104,35 @@ class SnapshotMemoryManager:
             return base
 
     def free_from_allocator(self, base: int, size: int) -> None:
-        """Release one exact raw segment for the allocator's void callback."""
+        """Release one exact local segment and its uncommitted backing, if any."""
         with self._lock:
-            self._check_constructing()
+            self._check()
             mapping = self._mappings.get(base)
             if mapping is None or mapping.requested_size != size:
                 self._close_session()
                 raise self._latch("allocator free does not match an exact mapping")
-            if base not in self._imports:
+            session = self._session
+            constructing = (
+                session is not None and session.lock_type is GrantedLockType.RW
+            )
+            if session is not None and base not in self._imports:
                 self._close_session()
                 raise self._latch("allocator freed a mapping without an import")
             try:
                 self._select_device()
-                self._drop_import(mapping)
-                self._require_session().free(mapping.allocation_id)
+                if base in self._imports:
+                    self._drop_import(mapping)
+                if constructing:
+                    assert session is not None
+                    session.free(mapping.allocation_id)
                 self.vmm.address_free(mapping.base, mapping.reservation_size)
             except Exception as cause:
                 self._close_session()
                 raise self._latch("allocator free failed", cause) from cause
             del self._mappings[base]
+            if not constructing and not self._mappings:
+                self._close_session()
+                self._retired = True
 
     def commit(self) -> None:
         """Make every mapping RO and atomically downgrade the RW socket session."""
