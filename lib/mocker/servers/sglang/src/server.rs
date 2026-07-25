@@ -28,6 +28,7 @@ const MAX_NEW_TOKENS: i32 = 1_000_000;
 const MAX_TOP_LOGPROBS: usize = 20;
 
 type BoxStream<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send + 'static>>;
+type BoxedStatusResult<T> = Result<T, Box<Status>>;
 
 /// Wire-level SGLang role exposed by one mock server process.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -173,7 +174,7 @@ impl SglangMockerService {
         request: pb::GenerateRequest,
     ) -> Result<(PreparedRequest, LiveRequest), Status> {
         let disaggregated_params = request.disaggregated_params.clone();
-        let prepared = PreparedRequest::new(request, &self.config)?;
+        let prepared = PreparedRequest::new(request, &self.config).map_err(|status| *status)?;
         let live = self
             .engine
             .submit(prepared.direct_request())
@@ -247,7 +248,7 @@ impl pb::sglang_service_server::SglangService for SglangMockerService {
         let stream = async_stream::try_stream! {
             let mut output_tokens = Vec::with_capacity(prepared.max_output_tokens);
             while let Some(signal) = live.recv().await {
-                let token_id = checked_token(&signal)?;
+                let token_id = checked_token(&signal).map_err(|status| *status)?;
                 output_tokens.push(token_id);
                 let output_id = i32::try_from(token_id)
                     .map_err(|_| Status::internal("synthetic token ID does not fit i32"))?;
@@ -449,21 +450,25 @@ impl pb::sglang_service_server::SglangService for SglangMockerService {
     }
 }
 
+// Tonic requires `Status` at the RPC boundary, so boxing here would only be
+// undone immediately by every unsupported trait method.
+#[allow(clippy::result_large_err)]
 fn unsupported<T>(rpc: &str) -> Result<Response<T>, Status> {
     Err(Status::unimplemented(format!(
         "{rpc} is outside the SGLang sidecar test contract"
     )))
 }
 
-fn checked_token(signal: &OutputSignal) -> Result<u32, Status> {
+fn checked_token(signal: &OutputSignal) -> BoxedStatusResult<u32> {
     if signal.rejected {
-        return Err(Status::resource_exhausted(
-            "request exceeds the simulated KV-cache capacity",
-        ));
+        return Err(
+            Status::resource_exhausted("request exceeds the simulated KV-cache capacity").into(),
+        );
     }
     signal
         .token_id
         .ok_or_else(|| Status::internal("Mocker output signal is missing a token ID"))
+        .map_err(Into::into)
 }
 
 #[derive(Debug)]
@@ -479,26 +484,26 @@ struct PreparedRequest {
 }
 
 impl PreparedRequest {
-    fn new(request: pb::GenerateRequest, config: &MockerServerConfig) -> Result<Self, Status> {
+    fn new(request: pb::GenerateRequest, config: &MockerServerConfig) -> BoxedStatusResult<Self> {
         if request.input_ids.is_empty() {
-            return Err(Status::invalid_argument("input_ids must not be empty"));
+            return Err(Status::invalid_argument("input_ids must not be empty").into());
         }
         let prompt_tokens = request
             .input_ids
             .iter()
             .map(|token| {
                 u32::try_from(*token).map_err(|_| {
-                    Status::invalid_argument(format!(
+                    Box::new(Status::invalid_argument(format!(
                         "input_ids contains a negative token ID: {token}"
-                    ))
+                    )))
                 })
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<BoxedStatusResult<Vec<_>>>()?;
 
         if let Some(n) = request.sampling_params.as_ref().and_then(|params| params.n)
             && n != 1
         {
-            return Err(Status::invalid_argument("sampling_params.n must be 1"));
+            return Err(Status::invalid_argument("sampling_params.n must be 1").into());
         }
 
         let requested_max = request
@@ -509,7 +514,8 @@ impl PreparedRequest {
         if requested_max <= 0 || requested_max > MAX_NEW_TOKENS {
             return Err(Status::invalid_argument(format!(
                 "max_new_tokens must be between 1 and {MAX_NEW_TOKENS}"
-            )));
+            ))
+            .into());
         }
         let max_output_tokens = if config.mode == ServerMode::Prefill {
             1
@@ -521,15 +527,11 @@ impl PreparedRequest {
 
         let top_logprobs_num = request.top_logprobs_num.unwrap_or(0);
         if top_logprobs_num < 0 {
-            return Err(Status::invalid_argument(
-                "top_logprobs_num must not be negative",
-            ));
+            return Err(Status::invalid_argument("top_logprobs_num must not be negative").into());
         }
         let logprob_start_len = request.logprob_start_len.unwrap_or(-1);
         if logprob_start_len < -1 {
-            return Err(Status::invalid_argument(
-                "logprob_start_len must be -1 or greater",
-            ));
+            return Err(Status::invalid_argument("logprob_start_len must be -1 or greater").into());
         }
 
         let request_id = request
@@ -630,23 +632,28 @@ impl PreparedRequest {
 fn validate_role(
     config: &MockerServerConfig,
     params: Option<&pb::DisaggregatedParams>,
-) -> Result<(), Status> {
+) -> BoxedStatusResult<()> {
     match (config.mode, params) {
         (ServerMode::Aggregated, None) => Ok(()),
         (ServerMode::Aggregated, Some(_)) => Err(Status::failed_precondition(
             "aggregated mock server received disaggregated parameters",
-        )),
+        )
+        .into()),
         (ServerMode::Prefill | ServerMode::Decode, None) => Err(Status::failed_precondition(
             "disaggregated mock server requires bootstrap_host, bootstrap_port, and bootstrap_room",
-        )),
+        )
+        .into()),
         (ServerMode::Prefill | ServerMode::Decode, Some(params)) => {
             if params.bootstrap_host.trim().is_empty()
                 || params.bootstrap_port <= 0
                 || params.bootstrap_room < 0
             {
-                return Err(Status::invalid_argument(
-                    "disaggregated parameters must contain a host, positive port, and non-negative room",
-                ));
+                return Err(
+                    Status::invalid_argument(
+                        "disaggregated parameters must contain a host, positive port, and non-negative room",
+                    )
+                    .into(),
+                );
             }
             if config.mode == ServerMode::Prefill
                 && i32::from(config.bootstrap_port) != params.bootstrap_port
@@ -654,7 +661,8 @@ fn validate_role(
                 return Err(Status::failed_precondition(format!(
                     "prefill bootstrap_port {} does not match discovered port {}",
                     params.bootstrap_port, config.bootstrap_port
-                )));
+                ))
+                .into());
             }
             Ok(())
         }

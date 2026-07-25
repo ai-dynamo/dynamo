@@ -42,23 +42,29 @@ The wire-level role remains controlled by `--disaggregation-mode`.
 
 Run separate endpoints for prefill and decode:
 
+Run each command in a separate terminal:
+
 ```bash
 cargo run -p dynamo-sglang-mocker --bin dynamo-sglang-mocker-server -- \
   --listen 127.0.0.1:30001 --disaggregation-mode prefill \
   --bootstrap-host 127.0.0.1 --bootstrap-port 8998
+```
 
+```bash
 cargo run -p dynamo-sglang-mocker --bin dynamo-sglang-mocker-server -- \
   --listen 127.0.0.1:30002 --disaggregation-mode decode
 ```
 
 For local loopback testing, give the prefill sidecar an explicit reachable
-bootstrap host:
+bootstrap host. Run each sidecar in a separate terminal:
 
 ```bash
 cargo run -p dynamo-sglang-sidecar --bin dynamo-sglang-sidecar -- \
   --sglang-endpoint http://127.0.0.1:30001 \
   --bootstrap-host 127.0.0.1
+```
 
+```bash
 cargo run -p dynamo-sglang-sidecar --bin dynamo-sglang-sidecar -- \
   --sglang-endpoint http://127.0.0.1:30002
 ```
