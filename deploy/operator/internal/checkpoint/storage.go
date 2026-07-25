@@ -24,6 +24,20 @@ import (
 func StorageFromConfig(config configv1alpha1.CheckpointStorageConfiguration) (snapshotprotocol.Storage, bool, error) {
 	storageType := strings.TrimSpace(config.Type)
 	storageAccessMode := strings.TrimSpace(config.AccessMode)
+	switch storageAccessMode {
+	case "",
+		snapshotprotocol.StorageAccessModeAgentMount,
+		snapshotprotocol.StorageAccessModePodMount,
+		snapshotprotocol.StorageAccessModeAgentInject:
+	default:
+		return snapshotprotocol.Storage{}, false, fmt.Errorf(
+			"checkpoint.storage.accessMode %q is not supported; expected %q, %q, %q, or empty",
+			storageAccessMode,
+			snapshotprotocol.StorageAccessModeAgentMount,
+			snapshotprotocol.StorageAccessModePodMount,
+			snapshotprotocol.StorageAccessModeAgentInject,
+		)
+	}
 	agentInject := storageAccessMode == snapshotprotocol.StorageAccessModeAgentInject
 	pvcName := strings.TrimSpace(config.PVC.PVCName)
 	basePath := strings.TrimSpace(config.PVC.BasePath)

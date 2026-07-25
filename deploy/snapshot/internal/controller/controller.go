@@ -462,7 +462,8 @@ func (w *NodeController) startRestoreForContainer(
 	}
 
 	placeholderPID := 0
-	if strings.TrimSpace(w.config.Storage.AccessMode) == types.StorageAccessModePodMount {
+	accessMode := w.effectiveAccessMode(pod)
+	if accessMode == types.StorageAccessModePodMount {
 		resolvedPID, _, err := w.runtime.ResolveContainer(ctx, containerID)
 		if err != nil {
 			w.log.Error(err, "Failed to resolve restore standby container", "pod", podKey, "container", containerName)
@@ -476,7 +477,7 @@ func (w *NodeController) startRestoreForContainer(
 		w.log.Error(err, "Restore pod is missing storage metadata", "pod", podKey, "checkpoint_id", checkpointID)
 		return
 	}
-	if err := w.validatePodMountContainerPID(ctx, containerID, placeholderPID); err != nil {
+	if err := w.validatePodMountContainerPID(ctx, containerID, placeholderPID, accessMode); err != nil {
 		w.log.Error(err, "Restore placeholder container changed before storage access", "pod", podKey, "container", containerName)
 		return
 	}
@@ -739,7 +740,7 @@ func (w *NodeController) checkpointLocationsFromPod(pod *corev1.Pod, checkpointI
 	if !filepath.IsAbs(location) || filepath.Clean(location) != location {
 		return checkpointLocations{}, fmt.Errorf("checkpoint location must be an absolute, clean path: %q", location)
 	}
-	if strings.TrimSpace(w.config.Storage.AccessMode) == types.StorageAccessModePodMount {
+	if w.effectiveAccessMode(pod) == types.StorageAccessModePodMount {
 		if hostPID <= 0 {
 			return checkpointLocations{}, fmt.Errorf("host PID is required for %s storage access", types.StorageAccessModePodMount)
 		}
@@ -755,7 +756,8 @@ func (w *NodeController) checkpointLocationsFromPod(pod *corev1.Pod, checkpointI
 }
 
 func (w *NodeController) refreshRestoreCheckpointLocation(ctx context.Context, pod *corev1.Pod, containerID string, checkpointID string, checkpointLocation checkpointLocations) (checkpointLocations, error) {
-	if strings.TrimSpace(w.config.Storage.AccessMode) != types.StorageAccessModePodMount {
+	accessMode := w.effectiveAccessMode(pod)
+	if accessMode != types.StorageAccessModePodMount {
 		return checkpointLocation, nil
 	}
 
@@ -767,7 +769,7 @@ func (w *NodeController) refreshRestoreCheckpointLocation(ctx context.Context, p
 	if err != nil {
 		return checkpointLocations{}, err
 	}
-	if err := w.validatePodMountContainerPID(ctx, containerID, currentHostPID); err != nil {
+	if err := w.validatePodMountContainerPID(ctx, containerID, currentHostPID, accessMode); err != nil {
 		return checkpointLocations{}, err
 	}
 	return refreshedLocation, nil
@@ -788,8 +790,8 @@ func (w *NodeController) restoreCheckpointReady(log logr.Logger, podKey, checkpo
 	return true, nil
 }
 
-func (w *NodeController) validatePodMountContainerPID(ctx context.Context, containerID string, expectedHostPID int) error {
-	if strings.TrimSpace(w.config.Storage.AccessMode) != types.StorageAccessModePodMount {
+func (w *NodeController) validatePodMountContainerPID(ctx context.Context, containerID string, expectedHostPID int, accessMode string) error {
+	if accessMode != types.StorageAccessModePodMount {
 		return nil
 	}
 	if expectedHostPID <= 0 {

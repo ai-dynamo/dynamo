@@ -189,7 +189,7 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 	if err != nil {
 		return w.setSnapshotContentFailed(ctx, content, "InvalidDestination", err)
 	}
-	if err := w.validatePodMountContainerPID(ctx, containerID, containerPID); err != nil {
+	if err := w.validatePodMountContainerPID(ctx, containerID, containerPID, w.effectiveAccessMode(pod)); err != nil {
 		return w.setSnapshotContentFailed(ctx, content, "ContainerChanged", err)
 	}
 

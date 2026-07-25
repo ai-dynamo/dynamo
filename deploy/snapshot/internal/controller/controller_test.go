@@ -182,6 +182,45 @@ func TestCheckpointLocationsFromPod(t *testing.T) {
 		}
 	})
 
+	t.Run("operator-stamped agentInject overrides podMount agent config", func(t *testing.T) {
+		annotatedPod := pod.DeepCopy()
+		annotatedPod.Annotations[snapshotprotocol.CheckpointStorageAccessModeAnnotation] = types.StorageAccessModeAgentInject
+
+		w := makeTestController(t)
+		w.config.Storage.BasePath = "/checkpoints"
+		w.config.Storage.AccessMode = types.StorageAccessModePodMount
+
+		locations, err := w.checkpointLocationsFromPod(annotatedPod, "abc123", 0)
+		if err != nil {
+			t.Fatalf("checkpointLocationsFromPod() error = %v", err)
+		}
+
+		expected := "/checkpoints/abc123/versions/2"
+		if locations.HostPath != expected || locations.ContainerPath != expected {
+			t.Fatalf("locations = %#v, want host and container path %q", locations, expected)
+		}
+	})
+
+	t.Run("operator-stamped podMount overrides agentMount agent config", func(t *testing.T) {
+		annotatedPod := pod.DeepCopy()
+		annotatedPod.Annotations[snapshotprotocol.CheckpointStorageAccessModeAnnotation] = types.StorageAccessModePodMount
+
+		w := makeTestController(t)
+		w.config.Storage.BasePath = "/checkpoints"
+		w.config.Storage.AccessMode = types.StorageAccessModeAgentMount
+
+		locations, err := w.checkpointLocationsFromPod(annotatedPod, "abc123", 1234)
+		if err != nil {
+			t.Fatalf("checkpointLocationsFromPod() error = %v", err)
+		}
+
+		expectedContainerPath := "/checkpoints/abc123/versions/2"
+		expectedHostPath := filepath.Join(snapshotruntime.HostProcPath, "1234", "root", "checkpoints/abc123/versions/2")
+		if locations.HostPath != expectedHostPath || locations.ContainerPath != expectedContainerPath {
+			t.Fatalf("locations = %#v, want host %q and container %q", locations, expectedHostPath, expectedContainerPath)
+		}
+	})
+
 	t.Run("pod storage annotation overrides agent base path", func(t *testing.T) {
 		annotatedPod := pod.DeepCopy()
 		annotatedPod.Annotations[snapshotprotocol.CheckpointStorageBasePathAnnotation] = "/pod-checkpoints/"
@@ -713,4 +752,3 @@ func TestPollForContainerIDSkipsWhenRestoreAttemptAlreadyHeld(t *testing.T) {
 		}
 	}
 }
-

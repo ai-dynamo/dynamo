@@ -91,7 +91,12 @@ func PrepareRestorePodSpec(
 		if container == nil {
 			return fmt.Errorf("restore target container %q not found in pod spec (from %s annotation)", name, TargetContainersAnnotation)
 		}
-		if storage.BasePath != "" && storage.AccessMode != StorageAccessModeAgentInject {
+		if storage.AccessMode == StorageAccessModeAgentInject {
+			if err := validateAgentInjectTarget(container); err != nil {
+				return err
+			}
+		}
+		if storage.BasePath != "" && storage.PVCName != "" {
 			InjectCheckpointVolumeMount(container, storage.BasePath)
 		}
 		EnsureControlVolume(podSpec, container)
@@ -204,7 +209,12 @@ func ValidateRestorePodSpec(
 		if container == nil {
 			return fmt.Errorf("restore target container %q not found in pod spec (from %s annotation)", name, TargetContainersAnnotation)
 		}
-		if storage.BasePath != "" && storage.AccessMode != StorageAccessModeAgentInject {
+		if storage.AccessMode == StorageAccessModeAgentInject {
+			if err := validateAgentInjectTarget(container); err != nil {
+				return err
+			}
+		}
+		if storage.BasePath != "" && storage.PVCName != "" {
 			hasMount := false
 			for _, mount := range container.VolumeMounts {
 				if mount.Name == CheckpointVolumeName && mount.MountPath == storage.BasePath {
@@ -252,6 +262,24 @@ func ValidateRestorePodSpec(
 	profile := podSpec.SecurityContext.SeccompProfile
 	if profile.Type != corev1.SeccompProfileTypeLocalhost || profile.LocalhostProfile == nil || *profile.LocalhostProfile != seccompProfile {
 		return fmt.Errorf("expected localhost seccomp profile %q", seccompProfile)
+	}
+	return nil
+}
+
+func validateAgentInjectTarget(container *corev1.Container) error {
+	securityContext := container.SecurityContext
+	if securityContext == nil {
+		return nil
+	}
+	if securityContext.Privileged != nil && *securityContext.Privileged {
+		return fmt.Errorf("agentInject restore target container %q must not be privileged", container.Name)
+	}
+	if securityContext.Capabilities != nil {
+		for _, capability := range securityContext.Capabilities.Add {
+			if strings.EqualFold(string(capability), "SYS_ADMIN") {
+				return fmt.Errorf("agentInject restore target container %q must not add CAP_SYS_ADMIN", container.Name)
+			}
+		}
 	}
 	return nil
 }

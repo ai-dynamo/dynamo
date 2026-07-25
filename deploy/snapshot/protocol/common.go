@@ -52,13 +52,13 @@ const (
 	// silently disagree.
 	CheckpointStorageAccessModeAnnotation = "nvidia.com/snapshot-storage-access-mode"
 	CheckpointVolumeName                  = "checkpoint-storage"
-	DefaultCheckpointArtifactVersion    = "1"
-	DefaultCheckpointJobTTLSeconds      = int32(300)
-	DefaultSeccompLocalhostProfile      = "profiles/block-iouring.json"
-	StorageTypePVC                      = "pvc"
-	// StorageAccessModeAgentInject mirrors types.StorageAccessModeAgentInject so
-	// the operator (which imports protocol, not internal/types) can recognize the
-	// mode. In this mode the workload pod does not mount the checkpoint PVC.
+	DefaultCheckpointArtifactVersion      = "1"
+	DefaultCheckpointJobTTLSeconds        = int32(300)
+	DefaultSeccompLocalhostProfile        = "profiles/block-iouring.json"
+	StorageTypePVC                        = "pvc"
+	StorageAccessModeAgentMount           = "agentMount"
+	StorageAccessModePodMount             = "podMount"
+	// In agentInject mode the workload pod does not mount the checkpoint PVC.
 	StorageAccessModeAgentInject = "agentInject"
 
 	CheckpointStatusCompleted = "completed"

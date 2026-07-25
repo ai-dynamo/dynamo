@@ -167,6 +167,7 @@ func TestStorageFromConfig(t *testing.T) {
 	})
 
 	t.Run("agentInject resolves storage without a pvcName", func(t *testing.T) {
+		t.Log("Configure agentInject storage without a workload PVC")
 		storage, ok, err := StorageFromConfig(configv1alpha1.CheckpointStorageConfiguration{
 			Type:       snapshotprotocol.StorageTypePVC,
 			AccessMode: snapshotprotocol.StorageAccessModeAgentInject,
@@ -174,6 +175,8 @@ func TestStorageFromConfig(t *testing.T) {
 				BasePath: "/checkpoints",
 			},
 		})
+
+		t.Log("Verify storage resolves for agent-side injection")
 		require.NoError(t, err)
 		require.True(t, ok)
 		assert.Equal(t, snapshotprotocol.StorageTypePVC, storage.Type)
@@ -183,13 +186,31 @@ func TestStorageFromConfig(t *testing.T) {
 	})
 
 	t.Run("non-agentInject still requires a pvcName", func(t *testing.T) {
+		t.Log("Configure conventional storage without its required workload PVC")
 		_, _, err := StorageFromConfig(configv1alpha1.CheckpointStorageConfiguration{
 			Type: snapshotprotocol.StorageTypePVC,
 			PVC: configv1alpha1.CheckpointPVCConfig{
 				BasePath: "/checkpoints",
 			},
 		})
+
+		t.Log("Verify the incomplete storage configuration is rejected")
 		require.Error(t, err)
+	})
+
+	t.Run("unknown storage access mode is rejected", func(t *testing.T) {
+		t.Log("Configure storage with a misspelled access mode")
+		_, _, err := StorageFromConfig(configv1alpha1.CheckpointStorageConfiguration{
+			Type:       snapshotprotocol.StorageTypePVC,
+			AccessMode: "agentInjec",
+			PVC: configv1alpha1.CheckpointPVCConfig{
+				BasePath: "/checkpoints",
+			},
+		})
+
+		t.Log("Verify the unknown mode is not propagated into pod metadata")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "checkpoint.storage.accessMode")
 	})
 
 	t.Run("pvc config normalizes clean base path", func(t *testing.T) {
@@ -1023,13 +1044,16 @@ func TestApplyRestorePodMetadata_DisabledClearsAnnotation(t *testing.T) {
 
 func TestApplyRestoreCandidateMetadata(t *testing.T) {
 	t.Run("ready checkpoint stamps candidate metadata without restore labels", func(t *testing.T) {
+		t.Log("Start with stale restore storage metadata")
 		labels := map[string]string{
 			snapshotprotocol.CheckpointIDLabel: "stale",
 		}
 		annotations := map[string]string{
-			snapshotprotocol.CheckpointStatusAnnotation: "stale",
+			snapshotprotocol.CheckpointStatusAnnotation:            "stale",
+			snapshotprotocol.CheckpointStorageAccessModeAnnotation: snapshotprotocol.StorageAccessModeAgentInject,
 		}
 
+		t.Log("Reclassify the pod as a restore candidate")
 		err := ApplyRestoreCandidateMetadata(labels, annotations, &CheckpointInfo{
 			Enabled:                 true,
 			Exists:                  true,
@@ -1040,9 +1064,11 @@ func TestApplyRestoreCandidateMetadata(t *testing.T) {
 		})
 		require.NoError(t, err)
 
+		t.Log("Verify stale restore metadata is cleared before candidate metadata is stamped")
 		assert.Empty(t, labels[snapshotprotocol.CheckpointIDLabel])
 		assert.Empty(t, labels[snapshotprotocol.RestoreTargetLabel])
 		assert.Empty(t, annotations[snapshotprotocol.CheckpointStatusAnnotation])
+		assert.NotContains(t, annotations, snapshotprotocol.CheckpointStorageAccessModeAnnotation)
 		assert.Equal(t, consts.KubeLabelValueTrue, annotations[consts.CheckpointRestoreCandidateAnnotation])
 		assert.Equal(t, "worker-checkpoint", annotations[consts.CheckpointNameAnnotation])
 		assert.Equal(t, string(nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint), annotations[consts.CheckpointStartupPolicyAnnotation])
