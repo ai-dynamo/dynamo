@@ -29,10 +29,7 @@ from dynamo.common.snapshot.lifecycle import (
 )
 from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.sglang._compat import (
-    enable_disjoint_streaming_output,
-    ensure_sglang_tensor_image_size,
-)
+from dynamo.sglang._compat import ensure_sglang_tensor_image_size
 from dynamo.sglang.backend_args import DynamoSGLangArgGroup, DynamoSGLangConfig
 
 configure_dynamo_logging()
@@ -549,6 +546,8 @@ async def parse_args(
             f"Created stub ServerArgs for {worker_type}: model_path={server_args.model_path}"
         )
     else:
+        # Dynamo expects disjoint output_ids; ServerArgs is read-only after resolution.
+        parsed_args.incremental_streaming_output = True
         server_args = ServerArgs.from_cli_args(parsed_args)
         if server_args.get_model_config().is_multimodal:
             ensure_sglang_tensor_image_size()
@@ -559,12 +558,6 @@ async def parse_args(
             "SGLang integration. Dynamo normalizes request priority so higher "
             "values are always higher priority at the API layer."
         )
-
-    # Dynamo's streaming handlers expect disjoint output_ids from SGLang (only new
-    # tokens since last output), not cumulative tokens. Modern SGLang gates this
-    # behavior behind incremental_streaming_output, while older releases used
-    # stream_output.
-    enable_disjoint_streaming_output(server_args)
 
     if dynamo_config.use_sglang_tokenizer:
         warnings.warn(

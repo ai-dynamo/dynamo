@@ -173,18 +173,7 @@ def require_reasoning_kwargs(engine: Any, request: Mapping[str, Any]) -> dict[st
     return kwargs
 
 
-def enable_disjoint_streaming_output(server_args: Any) -> None:
-    """Enable SGLang's disjoint streaming output.
-
-    Diffusion workers pass a ``SimpleNamespace`` stub that does not carry the
-    field, so this is a no-op when the attribute is absent.
-    """
-    if hasattr(server_args, "incremental_streaming_output"):
-        server_args.incremental_streaming_output = True
-
-
 __all__ = [
-    "enable_disjoint_streaming_output",
     "ensure_sglang_tensor_image_size",
     "ensure_sglang_top_level_exports",
     "filter_supported_async_generate_kwargs",
