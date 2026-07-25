@@ -11,13 +11,25 @@
 //! corresponding entry to the macro invocation below to keep Python exceptions
 //! in sync.
 
-use dynamo_runtime::error::BackendError;
+use dynamo_runtime::error::{BackendError, ErrorType, match_error_chain};
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
 
 // Base exception for all Dynamo errors.
 pyo3::create_exception!(dynamo._core, DynamoException, pyo3::exceptions::PyException);
 pyo3::create_exception!(dynamo._core, RouterQueueLimitExceeded, DynamoException);
+pyo3::create_exception!(dynamo._core, ResourceExhausted, DynamoException);
+
+/// Preserve resource exhaustion as a typed exception across the Rust -> Python
+/// boundary. The generic binding fallback stringifies `anyhow::Error`, which
+/// loses `ErrorType::ResourceExhausted` and causes the HTTP layer to emit 500
+/// instead of a retryable status.
+pub fn routed_engine_error_to_pyerr(error: anyhow::Error) -> PyErr {
+    if match_error_chain(error.as_ref(), &[ErrorType::ResourceExhausted], &[]) {
+        return ResourceExhausted::new_err("Service temporarily overloaded");
+    }
+    crate::to_pyerr(error)
+}
 
 pub fn queue_rejection_to_pyerr(rejection: dynamo_kv_router::scheduling::QueueRejection) -> PyErr {
     let error = PyErr::new::<RouterQueueLimitExceeded, _>(rejection.to_string());
@@ -99,6 +111,10 @@ macro_rules! define_dynamo_exceptions {
             m.add(
                 "RouterQueueLimitExceeded",
                 m.py().get_type::<RouterQueueLimitExceeded>(),
+            )?;
+            m.add(
+                "ResourceExhausted",
+                m.py().get_type::<ResourceExhausted>(),
             )?;
             m.add(
                 "SelectionServiceError",
