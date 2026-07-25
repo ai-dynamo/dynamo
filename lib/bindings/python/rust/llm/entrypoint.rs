@@ -436,7 +436,6 @@ pub struct RouterConfig {
     /// Threshold for active prefill tokens as fraction of max_num_batched_tokens
     active_prefill_tokens_threshold_frac: Option<f64>,
     session_affinity_ttl_secs: Option<u64>,
-    #[pyo3(get, set)]
     non_cpu_to_cpu_ratio: Option<usize>,
 }
 
@@ -490,6 +489,22 @@ impl RouterConfig {
             session_affinity_ttl_secs,
             non_cpu_to_cpu_ratio,
         })
+    }
+
+    #[getter(non_cpu_to_cpu_ratio)]
+    fn non_cpu_to_cpu_ratio(&self) -> Option<usize> {
+        self.non_cpu_to_cpu_ratio
+    }
+
+    #[setter(non_cpu_to_cpu_ratio)]
+    fn set_non_cpu_to_cpu_ratio(&mut self, value: Option<usize>) -> PyResult<()> {
+        if value.is_some_and(|ratio| ratio < 1) {
+            return Err(PyValueError::new_err(
+                "non_cpu_to_cpu_ratio must be >= 1",
+            ));
+        }
+        self.non_cpu_to_cpu_ratio = value;
+        Ok(())
     }
 }
 
