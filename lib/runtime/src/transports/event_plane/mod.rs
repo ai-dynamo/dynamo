@@ -231,6 +231,11 @@ impl Stream for DeduplicatingStream {
     }
 }
 
+/// Keep publisher IDs representable as signed integers in Kubernetes discovery metadata.
+fn discovery_safe_publisher_id(random_id: u64) -> u64 {
+    random_id & (i64::MAX as u64)
+}
+
 /// Event publisher for a specific topic.
 pub struct EventPublisher {
     transport_kind: EventTransportKind,
@@ -359,9 +364,11 @@ impl EventPublisher {
         // can host multiple publishers for the same scope/topic, each with its
         // own ZMQ endpoint and sequence space, so the process ID is not unique
         // enough here.
-        let publisher_id = rand::rngs::OsRng
-            .try_next_u64()
-            .map_err(|error| anyhow::anyhow!("failed to generate publisher ID: {error}"))?;
+        let publisher_id = discovery_safe_publisher_id(
+            rand::rngs::OsRng
+                .try_next_u64()
+                .map_err(|error| anyhow::anyhow!("failed to generate publisher ID: {error}"))?,
+        );
         let discovery = Some(drt.discovery());
         let runtime_handle = drt.runtime().secondary();
         let subject = scope.subject(&topic);
@@ -886,6 +893,12 @@ fn current_timestamp_ms() -> u64 {
 mod tests {
     use super::*;
     use crate::config::environment_names::zmq_broker as broker_env;
+
+    #[test]
+    fn publisher_ids_fit_kubernetes_discovery_integer_range() {
+        assert_eq!(discovery_safe_publisher_id(42), 42);
+        assert_eq!(discovery_safe_publisher_id(u64::MAX), i64::MAX as u64);
+    }
 
     #[tokio::test]
     async fn direct_zmq_endpoint_scopes_are_isolated() {
