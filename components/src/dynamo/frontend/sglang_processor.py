@@ -484,6 +484,7 @@ class SglangProcessor:
             sglang_tools=convert_tools(request.get("tools")),
             tool_call_parser_name=self.tool_call_parser_name,
             eos_token_ids=self.eos_token_ids,
+            allow_parallel_tool_calls=request.get("parallel_tool_calls") is not False,
         )
 
         async for item in self._generate_and_stream(
@@ -541,6 +542,7 @@ class SglangProcessor:
             sglang_tools=convert_tools(request.get("tools")),
             tool_call_parser_name=self.tool_call_parser_name,
             eos_token_ids=self.eos_token_ids,
+            allow_parallel_tool_calls=request.get("parallel_tool_calls") is not False,
         )
 
         async for item in self._generate_and_stream(
