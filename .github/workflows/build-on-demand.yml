@@ -49,6 +49,30 @@ jobs:
   # FRAMEWORK PIPELINES (build-only)
   # ============================================================================
 
+  copy-sglang-efa-to-acr:
+    name: copy-sglang-runtime-efa-to-acr
+    needs: [init]
+    if: inputs.build_sglang
+    runs-on: prod-default-small-v2
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Copy existing SGLang EFA PR image to ACR
+        timeout-minutes: 30
+        uses: ./.github/actions/skopeo-copy
+        with:
+          source_registry: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          source_image: ai-dynamo/dynamo
+          source_tag: c7ae914fe42093ea993935d142385e9f2a84fe15-sglang-runtime-efa
+          target_registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          target_image: ai-dynamo/dynamo
+          target_tag: c7ae914fe42093ea993935d142385e9f2a84fe15-sglang-runtime-efa
+          source_aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          source_aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          target_azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          target_azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          target_azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+
   vllm-build:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [init]
@@ -66,7 +90,7 @@ jobs:
   sglang-build:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
     needs: [init]
-    if: inputs.build_sglang
+    if: false
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: sglang
