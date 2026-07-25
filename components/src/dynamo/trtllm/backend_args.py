@@ -173,7 +173,9 @@ class DynamoTrtllmArgGroup(ArgGroup):
                 "If set, publish KV cache events to the KV router. This does "
                 "not enable TensorRT-LLM performance metrics; configure "
                 "`return_perf_metrics` and `enable_iter_perf_stats` through "
-                "TensorRT-LLM engine arguments when needed."
+                "TensorRT-LLM engine arguments when needed. The deprecated "
+                "`--publish-events-and-metrics` alias retains its original "
+                "combined behavior for one release."
             ),
             dest="publish_events_and_metrics",
             # `obsolete_flag` accepts the old `--publish-events-and-metrics`
@@ -488,6 +490,7 @@ class DynamoTrtllmConfig(ConfigBase):
     extra_engine_args: str
     override_engine_args: str
     publish_events_and_metrics: bool
+    legacy_publish_events_and_metrics: bool = False
     load_format: str
     model_loader_extra_config: str
     guided_decoding_backend: Optional[str] = None

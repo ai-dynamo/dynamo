@@ -54,6 +54,9 @@ $ DYN_SYSTEM_PORT=8081 python -m dynamo.trtllm --model <model_name> \
 
 KV-event publication is configured independently with `--publish-kv-events`.
 That flag does not enable either TensorRT-LLM performance option.
+For backward compatibility, the deprecated `--publish-events-and-metrics`
+flag continues to enable KV events and both performance options for one
+release.
 
 Wait for the TensorRT-LLM worker to start, then send requests and check metrics:
 

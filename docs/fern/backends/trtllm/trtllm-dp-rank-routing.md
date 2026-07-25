@@ -46,5 +46,11 @@ or with an `--override-engine-args` JSON object:
   '{"return_perf_metrics": true, "enable_iter_perf_stats": true}'
 ```
 
+For one compatibility release, the deprecated
+`--publish-events-and-metrics` flag retains its previous combined behavior:
+it enables KV-event publication and both TensorRT-LLM performance options.
+Migrate without changing behavior by using `--publish-kv-events` together
+with the explicit engine settings above.
+
 > [!NOTE]
 > Attention DP requires TRT-LLM's PyTorch backend. AutoDeploy does not support attention DP.

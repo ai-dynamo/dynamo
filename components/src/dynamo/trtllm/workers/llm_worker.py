@@ -324,6 +324,13 @@ async def init_llm_worker(
         "kv_connector_config": kv_connector_config,
     }
 
+    # Preserve the deprecated combined flag's original behavior. These are
+    # defaults rather than forced overrides so explicit YAML/JSON engine
+    # settings below retain their existing precedence.
+    if config.legacy_publish_events_and_metrics:
+        arg_map["return_perf_metrics"] = True
+        arg_map["enable_iter_perf_stats"] = True
+
     arg_map["load_format"] = engine_load_format
 
     # Enable sleep_config when GMS manages weights — required for GMS

@@ -88,25 +88,37 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Config:
     """
     cli_args = list(argv) if argv is not None else sys.argv[1:]
 
-    # Deprecated alias: --publish-events-and-metrics maps to --publish-kv-events.
-    # Same for the legacy env var. Both are removed in the next release.
-    if any(
-        a.split("=", 1)[0]
-        in ("--publish-events-and-metrics", "--no-publish-events-and-metrics")
-        for a in cli_args
-    ):
+    # Track which spelling supplied the final CLI value so the deprecated
+    # combined flag can retain its legacy metrics behavior for one release.
+    legacy_cli_metrics: Optional[bool] = None
+    legacy_cli_seen = False
+    for arg in cli_args:
+        flag = arg.split("=", 1)[0]
+        if flag == "--publish-events-and-metrics":
+            legacy_cli_metrics = True
+            legacy_cli_seen = True
+        elif flag == "--no-publish-events-and-metrics":
+            legacy_cli_metrics = False
+            legacy_cli_seen = True
+        elif flag in ("--publish-kv-events", "--no-publish-kv-events"):
+            legacy_cli_metrics = False
+
+    if legacy_cli_seen:
         _warn_deprecated(
             "--publish-events-and-metrics is deprecated; use --publish-kv-events. "
-            "The old flag stays as an alias for one release."
+            "The old flag retains its combined KV-event and performance-metrics "
+            "behavior for one release."
         )
-    if (
+    legacy_env_used = (
         "DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS" in os.environ
         and "DYN_TRTLLM_PUBLISH_KV_EVENTS" not in os.environ
-    ):
+    )
+    if legacy_env_used:
         _warn_deprecated(
             "DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS is deprecated; use "
             "DYN_TRTLLM_PUBLISH_KV_EVENTS. The old env var stays as an "
-            "alias for one release."
+            "alias with combined KV-event and performance-metrics behavior "
+            "for one release."
         )
         os.environ["DYN_TRTLLM_PUBLISH_KV_EVENTS"] = os.environ[
             "DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS"
@@ -127,6 +139,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Config:
 
     parsed_args, remaining = parser.parse_known_args(cli_args)
     config = Config.from_cli_args(parsed_args)
+    legacy_metrics_source = (
+        legacy_cli_metrics if legacy_cli_metrics is not None else legacy_env_used
+    )
+    config.legacy_publish_events_and_metrics = bool(
+        config.publish_events_and_metrics and legacy_metrics_source
+    )
 
     # Parse dynamic --trtllm.* flags from the remaining args
     dynamic_overrides = parse_dynamic_flags(remaining)
