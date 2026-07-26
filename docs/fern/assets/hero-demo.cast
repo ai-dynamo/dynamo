@@ -1,4 +1,4 @@
-{"version": 3, "term": {"cols": 120, "rows": 32, "theme": {"fg": "#8b949e", "bg": "#101216", "palette": "#000000:#f78166:#56d364:#e3b341:#6ca4f8:#db61a2:#2b7489:#ffffff:#4d4d4d:#f78166:#56d364:#e3b341:#6ca4f8:#db61a2:#2b7489:#ffffff"}}, "timestamp": 1783553929, "idle_time_limit": 1.5, "command": "./hero-demo.sh", "env": {"SHELL": "/usr/bin/zsh"}}
+{"version": 3, "term": {"cols": 120, "rows": 32, "theme": {"fg": "#b8c0b9", "bg": "#071009", "palette": "#273129:#d6ddd7:#8fd120:#b8df7a:#aab3ac:#858f87:#c3cbc4:#e2e6e2:#667068:#eef1ee:#b8f36a:#d0eba7:#c4cbc5:#aab2ab:#d5dad6:#f7f9f7"}}, "timestamp": 1783553929, "idle_time_limit": 1.5, "command": "./hero-demo.sh", "env": {"SHELL": "/usr/bin/zsh"}}
 [0.005, "o", "\u001b[?25l\u001b[H\u001b[2J\u001b[3J"]
 [0.000, "o", "\r\n\r\n\u001b[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\u001b[0m"]
 [0.000, "o", "\r\n"]

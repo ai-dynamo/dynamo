@@ -119,7 +119,7 @@ step_header() {
 step_header_bars() {
     local emoji="$1" title="$2"
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "  ${RED}${BOLD}${emoji} ${title}${NC}"
+    echo -e "  ${GREEN}${BOLD}${emoji} ${title}${NC}"
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
 }

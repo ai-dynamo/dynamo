@@ -1183,64 +1183,203 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
 .dynamo-welcome__cta {
   display: inline-flex;
   align-items: center;
-  gap: 0.55rem;
-  min-height: 3.25rem;
+  gap: 0.65rem;
+  min-height: 3.15rem;
   margin-top: 1.35rem;
-  padding: 0.85rem 1.45rem;
-  border: 1px solid #76b900;
+  padding: 0.82rem 1.2rem 0.82rem 1.4rem;
+  border: 1px solid #68a400;
   border-radius: 999px;
   background: #76b900;
-  color: #0b0b0b !important;
-  font-size: 1rem;
-  font-weight: 650;
+  color: #0b0f08 !important;
+  font-size: 0.98rem;
+  font-weight: 680;
   line-height: 1;
+  letter-spacing: -0.01em;
   text-decoration: none !important;
-  box-shadow: 0 10px 30px rgba(76, 122, 0, 0.2);
+  box-shadow: 0 7px 18px rgba(54, 86, 0, 0.16);
   transition:
     transform 160ms ease,
+    border-color 160ms ease,
     background 160ms ease,
     box-shadow 160ms ease;
 }
 
 .dynamo-welcome__cta:hover {
-  transform: translateY(-2px);
-  background: #8bd000;
-  box-shadow: 0 14px 36px rgba(76, 122, 0, 0.28);
+  transform: translateY(-1px);
+  border-color: #5e9500;
+  background: #69a700;
+  box-shadow: 0 9px 22px rgba(54, 86, 0, 0.22);
+}
+
+.dynamo-welcome__cta:active {
+  transform: translateY(0);
 }
 
 .dynamo-welcome__cta:focus-visible {
-  outline: 3px solid rgba(118, 185, 0, 0.38);
+  outline: 3px solid rgba(118, 185, 0, 0.3);
   outline-offset: 4px;
 }
 
 .dynamo-welcome__cta svg {
-  width: 1.1rem;
-  height: 1.1rem;
+  width: 1rem;
+  height: 1rem;
   fill: none;
-  stroke: currentColor;
-  stroke-width: 2.25;
+  stroke: #0b0f08;
+  stroke-width: 2.35;
   stroke-linecap: round;
   stroke-linejoin: round;
+  transition: transform 160ms ease;
 }
 
-/* At a typical desktop viewport only the top of this frame is above the fold. */
+.dynamo-welcome__cta:hover svg {
+  transform: translateX(2px);
+}
+
+/* The demo reveals as the visitor leaves the opening hero. */
 .dynamo-welcome__terminal {
   position: relative;
-  margin: clamp(8rem, 18vh, 11rem) auto 4.5rem;
+  margin: clamp(7rem, 16vh, 10rem) auto 4.5rem;
 }
 
-.dynamo-welcome__terminal::before {
+/* A broad ambient caption appears only after the opening hero is left behind. */
+.dynamo-welcome__demo-reveal {
+  position: absolute;
+  z-index: 2;
+  top: clamp(-6.8rem, -10vh, -5.2rem);
+  left: 50%;
+  width: min(100%, 1040px);
+  margin: 0;
+  padding: 1rem clamp(1.25rem, 4vw, 3.5rem) 0.65rem;
+  isolation: isolate;
+  transform: translateX(-50%);
+}
+
+.dynamo-welcome__demo-reveal::before {
   content: "";
   position: absolute;
-  inset: -3rem 4% auto;
+  z-index: -1;
+  inset: -1.5rem 10% -1.25rem -2%;
+  background: radial-gradient(
+    ellipse at 22% 58%,
+    rgba(118, 185, 0, 0.17),
+    rgba(118, 185, 0, 0.055) 35%,
+    transparent 70%
+  );
+  filter: blur(18px);
+  opacity: 0;
+  transform: scaleX(0.55);
+  transform-origin: left;
+  transition:
+    opacity 520ms ease,
+    transform 760ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.dynamo-welcome__terminal[data-visible="true"] .dynamo-welcome__demo-reveal::before {
+  opacity: 1;
+  transform: scaleX(1);
+}
+
+.dynamo-welcome__demo-reveal p,
+.dynamo-welcome__demo-reveal h2 {
+  opacity: 0;
+  transform: translateX(-28px);
+  filter: blur(5px);
+  transition:
+    opacity 240ms ease,
+    transform 360ms cubic-bezier(0.22, 1, 0.36, 1),
+    filter 300ms ease;
+}
+
+.dynamo-welcome__terminal[data-visible="true"] .dynamo-welcome__demo-reveal p,
+.dynamo-welcome__terminal[data-visible="true"] .dynamo-welcome__demo-reveal h2 {
+  opacity: 1;
+  transform: none;
+  filter: none;
+  transition-delay: 180ms;
+}
+
+.dynamo-welcome__demo-reveal p {
+  margin: 0 0 0.42rem;
+  color: #579000;
+  font-family: RobotoMono, ui-monospace, monospace;
+  font-size: 0.68rem;
+  font-weight: 750;
+  letter-spacing: 0.11em;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
+.dark .dynamo-welcome__demo-reveal p {
+  color: #a4e344;
+}
+
+.dynamo-welcome__demo-reveal h2 {
+  margin: 0;
+  color: var(--grayscale-a12);
+  font-size: clamp(1.8rem, 4vw, 3.15rem);
+  font-weight: 610;
+  letter-spacing: -0.05em;
+  line-height: 1;
+}
+
+.dynamo-welcome__terminal-stage {
+  position: relative;
+  max-width: 1110px;
+  margin: 0 auto;
+  padding: clamp(1.35rem, 4.2vw, 3.5rem);
+  overflow: hidden;
+  border: 1px solid rgba(118, 185, 0, 0.48);
+  border-radius: 30px;
+  background:
+    linear-gradient(rgba(118, 185, 0, 0.055) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(118, 185, 0, 0.055) 1px, transparent 1px),
+    radial-gradient(
+      ellipse 72% 105% at 50% 0%,
+      rgba(118, 185, 0, 0.24),
+      rgba(118, 185, 0, 0.055) 48%,
+      transparent 76%
+    ),
+    linear-gradient(145deg, rgba(238, 248, 223, 0.16), rgba(220, 239, 194, 0.055));
+  background-size: 34px 34px, 34px 34px, auto, auto;
+  -webkit-backdrop-filter: blur(28px) saturate(135%);
+  backdrop-filter: blur(28px) saturate(135%);
+  box-shadow:
+    inset 0 1px 0 rgba(215, 255, 169, 0.14),
+    0 24px 70px rgba(0, 0, 0, 0.08),
+    0 0 54px rgba(118, 185, 0, 0.08);
+}
+
+.dark .dynamo-welcome__terminal-stage {
+  border-color: rgba(118, 185, 0, 0.5);
+  background:
+    linear-gradient(rgba(118, 185, 0, 0.06) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(118, 185, 0, 0.06) 1px, transparent 1px),
+    radial-gradient(
+      ellipse 72% 105% at 50% 0%,
+      rgba(118, 185, 0, 0.25),
+      rgba(35, 61, 12, 0.1) 48%,
+      transparent 76%
+    ),
+    linear-gradient(145deg, rgba(10, 18, 11, 0.38), rgba(2, 7, 3, 0.22));
+  background-size: 34px 34px, 34px 34px, auto, auto;
+  box-shadow:
+    inset 0 1px 0 rgba(187, 244, 112, 0.08),
+    0 30px 90px rgba(0, 0, 0, 0.3),
+    0 0 60px rgba(118, 185, 0, 0.1);
+}
+
+.dynamo-welcome__terminal-stage::before {
+  content: "";
+  position: absolute;
+  inset: -35% 12% auto;
   height: 70%;
   border-radius: 50%;
   background: radial-gradient(
     ellipse,
-    rgba(118, 185, 0, 0.15),
+    rgba(118, 185, 0, 0.18),
     transparent 68%
   );
-  filter: blur(30px);
+  filter: blur(28px);
   pointer-events: none;
 }
 
@@ -1249,9 +1388,27 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
   width: 100%;
   max-width: 1040px;
   margin: 0 auto;
-  border: 1px solid rgba(118, 185, 0, 0.28);
-  border-radius: 16px;
-  box-shadow: 0 30px 90px rgba(0, 0, 0, 0.28);
+  border: 1px solid rgba(142, 213, 43, 0.34);
+  border-radius: 18px;
+  background:
+    radial-gradient(circle at 18% -5%, rgba(118, 185, 0, 0.24), transparent 46%),
+    radial-gradient(circle at 82% 110%, rgba(42, 78, 18, 0.18), transparent 44%),
+    linear-gradient(145deg, rgba(8, 18, 10, 0.9), rgba(0, 5, 2, 0.96));
+  -webkit-backdrop-filter: blur(34px) saturate(145%);
+  backdrop-filter: blur(34px) saturate(145%);
+  box-shadow:
+    0 0 0 1px rgba(219, 255, 180, 0.035) inset,
+    0 24px 70px rgba(0, 0, 0, 0.32),
+    0 0 60px rgba(118, 185, 0, 0.07);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dynamo-welcome__demo-reveal::before,
+  .dynamo-welcome__demo-reveal p,
+  .dynamo-welcome__demo-reveal h2,
+  .dynamo-welcome__terminal-stage {
+    transition: none;
+  }
 }
 
 /* App-notification community stack on wide screens; it moves below the demo when space is tight. */
@@ -2279,7 +2436,23 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
   }
 
   .dynamo-welcome__terminal {
-    margin-top: 4.5rem;
+    margin-top: 6.5rem;
+  }
+
+  .dynamo-welcome__demo-reveal {
+    top: -5.25rem;
+    width: 100%;
+    margin: 0;
+    padding: 0.5rem 0.55rem 0.2rem;
+  }
+
+  .dynamo-welcome__demo-reveal h2 {
+    font-size: 1.7rem;
+  }
+
+  .dynamo-welcome__terminal-stage {
+    padding: 0.6rem;
+    border-radius: 21px;
   }
 
   .dynamo-welcome__statement {

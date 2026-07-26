@@ -10,7 +10,7 @@
  */
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { TerminalDemo } from "./TerminalDemo";
 import { UPCOMING_EVENTS } from "./events.generated";
 
@@ -174,6 +174,35 @@ export interface WelcomeHeroProps {
 }
 
 export function WelcomeHero({ src }: WelcomeHeroProps) {
+  const demoRef = useRef<HTMLElement | null>(null);
+  const [demoVisible, setDemoVisible] = useState(false);
+
+  useEffect(() => {
+    const demo = demoRef.current;
+    if (!demo) return;
+
+    let frame = 0;
+    const updateVisibility = () => {
+      frame = 0;
+      const top = demo.getBoundingClientRect().top;
+      setDemoVisible(window.scrollY > 80 && top < window.innerHeight * 0.82);
+    };
+    const onScroll = () => {
+      if (frame) return;
+      frame = window.requestAnimationFrame(updateVisibility);
+    };
+
+    window.addEventListener("scroll", onScroll, { passive: true });
+    window.addEventListener("resize", onScroll);
+    updateVisibility();
+
+    return () => {
+      if (frame) window.cancelAnimationFrame(frame);
+      window.removeEventListener("scroll", onScroll);
+      window.removeEventListener("resize", onScroll);
+    };
+  }, []);
+
   return (
     <div className="dynamo-welcome">
       <section
@@ -189,15 +218,26 @@ export function WelcomeHero({ src }: WelcomeHeroProps) {
         </a>
       </section>
 
-      <div className="dynamo-welcome__terminal">
-        <TerminalDemo
-          src={src}
-          title="Deploy Qwen3-235B with Dynamo"
-          idleTimeLimit={1.5}
-          speed={1.0}
-          rows="25"
-        />
-      </div>
+      <section
+        ref={demoRef}
+        className="dynamo-welcome__terminal"
+        data-visible={demoVisible}
+        aria-labelledby="dynamo-demo-heading"
+      >
+        <div className="dynamo-welcome__demo-reveal">
+          <p>Deployment walkthrough</p>
+          <h2 id="dynamo-demo-heading">See Dynamo in action</h2>
+        </div>
+        <div className="dynamo-welcome__terminal-stage">
+          <TerminalDemo
+            src={src}
+            title="Qwen3-235B deployment"
+            idleTimeLimit={1.5}
+            speed={1.0}
+            rows="25"
+          />
+        </div>
+      </section>
 
       <CommunityRail />
     </div>

@@ -3,39 +3,39 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Embed a terminal theme into an asciicast v3 header (in place).
-# Palette: GitHub Dark Default, but keeping GitHub "classic" yellow (#e3b341)
-# at both the normal and bright slots.
+# Palette: Dynamo Glass — black and deep green with NVIDIA-green accents
+# and neutral gray/off-white output inspired by the concept terminals below.
 #
 # Usage: apply-hero-theme.py <file.cast>
 import json
 import sys
 
 THEME = {
-    # Plain terminal output uses the default fg → keep it a soft gray so it
-    # reads as "normal output". Typed commands use WHITE (palette index 7),
-    # which we pin to pure white below so commands pop brighter than output.
-    "fg": "#8b949e",
-    "bg": "#0d1117",
+    # Green marks actions and success. Neutral grays carry normal output,
+    # metadata, and secondary narration so the demo stays crisp rather than
+    # tinting every semantic role green.
+    "fg": "#b8c0b9",
+    "bg": "#071009",
     "palette": ":".join(
         [
             # normal: black red green yellow blue magenta cyan white
-            "#484f58",
-            "#ff7b72",
-            "#3fb950",
-            "#e3b341",
-            "#58a6ff",
-            "#bc8cff",
-            "#39c5cf",
-            "#ffffff",
+            "#273129",
+            "#d6ddd7",
+            "#8fd120",
+            "#b8df7a",
+            "#aab3ac",
+            "#858f87",
+            "#c3cbc4",
+            "#e2e6e2",
             # bright
-            "#6e7681",
-            "#ffa198",
-            "#56d364",
-            "#e3b341",
-            "#79c0ff",
-            "#d2a8ff",
-            "#56d4dd",
-            "#ffffff",
+            "#667068",
+            "#eef1ee",
+            "#b8f36a",
+            "#d0eba7",
+            "#c4cbc5",
+            "#aab2ab",
+            "#d5dad6",
+            "#f7f9f7",
         ]
     ),
 }

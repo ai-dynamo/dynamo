@@ -89,7 +89,7 @@ export interface TerminalDemoProps {
   rows?: number;
   /** How the player scales to its container. Default "width". */
   fit?: FitMode;
-  /** Render the macOS-style title bar with traffic-light dots. Default true. */
+  /** Render the Dynamo product title bar. Default true. */
   titleBar?: boolean;
   /** Optional centered caption in the title bar (e.g. a command or hostname). */
   title?: string;
@@ -204,8 +204,8 @@ export function TerminalDemo({
           fit,
           startAt,
           // Only force a named theme when explicitly asked. Otherwise omit it so
-          // the player uses the cast's embedded term.theme header (our GitHub
-          // Dark palette). Passing theme="asciinema" would override that header.
+          // the player uses the cast's embedded Dynamo Glass term.theme header.
+          // Passing theme="asciinema" would override that palette.
           ...(theme ? { theme } : {}),
           ...(poster ? { poster } : {}),
           ...(cols ? { cols } : {}),
@@ -292,10 +292,17 @@ export function TerminalDemo({
       <style>{TERMINAL_DEMO_CSS}</style>
       {titleBar && (
         <div className="dynamo-terminal-demo__bar">
-          <span className="dynamo-terminal-demo__dot dynamo-terminal-demo__dot--red" />
-          <span className="dynamo-terminal-demo__dot dynamo-terminal-demo__dot--yellow" />
-          <span className="dynamo-terminal-demo__dot dynamo-terminal-demo__dot--green" />
+          <span className="dynamo-terminal-demo__window-controls" aria-hidden="true">
+            <span className="dynamo-terminal-demo__dot dynamo-terminal-demo__dot--red" />
+            <span className="dynamo-terminal-demo__dot dynamo-terminal-demo__dot--yellow" />
+            <span className="dynamo-terminal-demo__dot dynamo-terminal-demo__dot--green" />
+          </span>
+          <span className="dynamo-terminal-demo__product">Dynamo</span>
           {title && <span className="dynamo-terminal-demo__title">{title}</span>}
+          <span className="dynamo-terminal-demo__activity">
+            <span aria-hidden="true" />
+            Demo running
+          </span>
           <span className="dynamo-terminal-demo__toggle-wrap">
             <button
               type="button"
@@ -339,43 +346,88 @@ export default TerminalDemo;
  */
 const TERMINAL_DEMO_CSS = `
 .dynamo-terminal-demo {
+  position: relative;
   max-width: 860px;
   margin: 24px auto;
-  border-radius: 8px;
   overflow: hidden;
+  border-radius: 18px;
+  background: #030804;
   box-shadow: 0 4px 16px rgb(0 0 0 / 25%);
-  background: #1a1a2e;
 }
-/* macOS-style title bar (colors match the OpenShell reference). */
+/* Product chrome keeps the recording visually tied to the Dynamo landing page. */
 .dynamo-terminal-demo__bar {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr) auto auto;
   align-items: center;
-  gap: 8px;
-  padding: 6px 13px;
-  background: #252545;
+  gap: 12px;
+  min-height: 46px;
+  padding: 0 13px 0 16px;
+  position: relative;
+  z-index: 4;
+  border-bottom: 1px solid rgb(118 185 0 / 24%);
+  background: linear-gradient(180deg, rgb(15 25 17 / 62%), rgb(4 11 6 / 56%));
+  -webkit-backdrop-filter: blur(20px) saturate(128%);
+  backdrop-filter: blur(20px) saturate(128%);
+  box-shadow: inset 0 1px 0 rgb(224 255 191 / 6%);
+}
+.dynamo-terminal-demo__window-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding-right: 3px;
 }
 .dynamo-terminal-demo__dot {
-  width: 11px;
-  height: 11px;
+  display: block;
+  width: 10px;
+  height: 10px;
   border-radius: 50%;
-  display: inline-block;
+  box-shadow: inset 0 0 0 0.5px rgb(0 0 0 / 22%);
 }
-.dynamo-terminal-demo__dot--red { background: #ff5f56; }
-.dynamo-terminal-demo__dot--yellow { background: #ffbd2e; }
-.dynamo-terminal-demo__dot--green { background: #27c93f; }
-.dynamo-terminal-demo__title {
-  flex: 1;
-  text-align: center;
-  margin-right: 0; /* balanced by the toggle button on the right */
-  color: #c9ccd1;
-  /* macOS window-title style: system UI sans-serif, semibold, tight tracking. */
+.dynamo-terminal-demo__dot--red { background: #ff5f57; }
+.dynamo-terminal-demo__dot--yellow { background: #febc2e; }
+.dynamo-terminal-demo__dot--green { background: #28c840; }
+.dynamo-terminal-demo__product,
+.dynamo-terminal-demo__activity {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: #d7ded1;
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  font-size: 0.8rem;
-  font-weight: 600;
-  letter-spacing: -0.01em;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.055em;
+  text-transform: uppercase;
   white-space: nowrap;
+}
+.dynamo-terminal-demo__activity > span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #76b900;
+  box-shadow: 0 0 0 3px rgb(118 185 0 / 12%), 0 0 12px rgb(118 185 0 / 45%);
+}
+.dynamo-terminal-demo__activity {
+  color: #95a08e;
+  font-size: 0.64rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+.dynamo-terminal-demo__activity > span {
+  animation: dynamo-terminal-pulse 2s ease-in-out infinite;
+}
+@keyframes dynamo-terminal-pulse {
+  0%, 100% { opacity: 0.45; }
+  50% { opacity: 1; }
+}
+.dynamo-terminal-demo__title {
+  min-width: 0;
   overflow: hidden;
+  color: #aeb8aa;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-size: 0.78rem;
+  font-weight: 500;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
 /* Toggle button (top-right of the window bar) reveals the player's controls. */
 .dynamo-terminal-demo__toggle-wrap {
@@ -433,7 +485,9 @@ const TERMINAL_DEMO_CSS = `
 .dynamo-terminal-demo__player {
   width: 100%;
   aspect-ratio: var(--dynamo-term-aspect, 2.16);
-  background: #0d1117;
+  position: relative;
+  z-index: 1;
+  background: #030804;
   /* Clip the pre-fit frame: the player mounts at its natural font size for one
      frame before fit="width" scales it down, briefly overflowing this reserved
      box. Hide that overflow so the terminal never flashes oversized on load. */
@@ -447,9 +501,15 @@ const TERMINAL_DEMO_CSS = `
   display: block;
   width: 100%;
 }
-/* Match the player's terminal background to the cast's GitHub-Dark theme bg. */
-.dynamo-terminal-demo .asciinema-player {
-  background: #0d1117;
+/* Keep the terminal body solid and predictable; the title bar carries the gradient. */
+.dynamo-terminal-demo .ap-player {
+  --term-font-family: RobotoMono, "Cascadia Code", "Source Code Pro", Menlo, Consolas, "DejaVu Sans Mono", monospace, "Symbols Nerd Font" !important;
+  --term-color-background: #030804 !important;
+  background: #030804;
+}
+.dynamo-terminal-demo .ap-term {
+  border-color: #030804;
+  background: #030804;
 }
 /*
  * Playback-controls reveal: the player always builds its control bar (native
@@ -479,7 +539,7 @@ const TERMINAL_DEMO_CSS = `
   position: absolute;
   top: calc(100% + 6px);
   right: 0;
-  z-index: 40;
+  z-index: 100;
   padding: 4px 8px;
   border-radius: 6px;
   background: #1c2128;
@@ -500,7 +560,21 @@ const TERMINAL_DEMO_CSS = `
   opacity: 1;
   transform: translateY(0);
 }
+@media (prefers-reduced-motion: reduce) {
+  .dynamo-terminal-demo__activity > span {
+    animation: none;
+    opacity: 1;
+  }
+}
 @media (max-width: 640px) {
+  .dynamo-terminal-demo__bar {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    gap: 9px;
+  }
+  .dynamo-terminal-demo__product,
+  .dynamo-terminal-demo__activity {
+    display: none;
+  }
   .dynamo-terminal-demo {
     margin: 16px auto;
   }
