@@ -3,127 +3,145 @@ SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All 
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# GPU Memory Service Snapshot V1
+# GPU Memory Service V1
 
-Snapshot V1 is an experimental GMS profile for engines that are always
-replenished from a Dynamo Snapshot. CRIU preserves the process, Torch object
-graph, tensor layouts, and CUDA virtual addresses. GMS therefore needs to
-preserve only model Parameter backing and make it available again at those
-checkpointed addresses.
+GMS V1 is the rank-local memory layer for engines restored from a Dynamo
+Snapshot. Snapshot always captures an engine that has already slept. CRIU
+preserves its process, Torch objects, tensor layouts, allocation IDs, and CUDA
+virtual-address reservations. GMS owns only the physical backing that is
+reattached at those saved addresses.
 
-## Architecture
+V1 does not reconstruct a model or restore KV contents. It has no meta-model,
+custom model loader, tensor metadata manifest, scratch allocation, allocation
+pruning, or generic Snapshot lifecycle.
+
+## Two memory domains
+
+One sidecar process per engine rank serves two independent Unix-domain sockets:
+
+| Domain | Session policy | Sleep result | Wake result |
+|---|---|---|---|
+| `weights` | Persistent RW-to-RO publication | Local RO imports close; sidecar retains committed allocations | Saved allocation IDs map RO at saved VAs |
+| `kv_cache` | Ephemeral, exclusive RW epoch | Local imports close; RW disconnect clears all sidecar allocations | Saved IDs and sizes receive fresh handles mapped RW at saved VAs |
+
+Both domains use the shared GMS core for allocation ownership, session
+admission, transient `SCM_RIGHTS` exports, and CUDA VMM operations. They do not
+share allocation state or session state.
 
 ```mermaid
 flowchart LR
-    Worker["Engine worker<br/>Torch objects + CUDA VAs"]
-    CoreClient["GMS core client<br/>local imports + mappings"]
-    Socket["Unix socket<br/>session lease + RPC"]
-    CoreServer["Rank-local GMS core server<br/>allocation ID → CUDA handle"]
+    Worker["Restored engine rank<br/>Torch objects + saved VAs"]
+    Weights["V1 persistent Parameter policy"]
+    KV["V1 ephemeral KV policy"]
+    WeightsSocket["weights UDS<br/>RW → RO"]
+    KVSocket["kv_cache UDS<br/>exclusive RW"]
+    Sidecar["One rank-local V1 sidecar process"]
+    WeightsCore["Independent weights core"]
+    KVCore["Independent kv_cache core"]
 
-    Worker --> CoreClient
-    CoreClient <--> Socket
-    Socket <--> CoreServer
+    Worker --> Weights
+    Worker --> KV
+    Weights <--> WeightsSocket
+    KV <--> KVSocket
+    WeightsSocket <--> WeightsCore
+    KVSocket <--> KVCore
+    Sidecar --- WeightsCore
+    Sidecar --- KVCore
 ```
 
-There is one GMS server per engine rank. The server stores opaque allocation
-IDs, aligned sizes, and retained CUDA allocation handles. It does not store
-tensor metadata, module paths, StorageImpl identities, layouts, or client
-virtual addresses. Export file descriptors are transient: the server creates
-one for an export response and closes its copy after sending it with
-`SCM_RIGHTS`; the client import consumes and closes the received descriptor.
+The connected socket is the lease. A `kv_cache` RW session excludes another
+writer. Disconnecting it clears and releases the whole uncommitted KV epoch
+before the next writer is admitted. The active engine retains this lease while
+it can access KV memory, so process death is also a rank-local memory fence.
 
-The core contains mechanisms shared with other GMS profiles:
+The server retains CUDA handles, not one POSIX FD per allocation. Every export
+creates a transient FD, sends it with `SCM_RIGHTS`, and closes the server copy.
+The client import consumes and closes its received copy.
 
-- physical allocation ownership;
-- Unix-socket session admission and disconnect cleanup;
-- RW-to-RO commit;
-- local CUDA reserve, import, map, access, unmap, and release operations;
-- Torch pluggable-allocator and MemPool construction; and
-- alias-preserving tensor isolation.
+## Construction
 
-V1 adds only Snapshot policy: fresh construction, Parameter selection,
-commit, sleep, and exact-address wake.
+V1 uses vLLM's existing broad allocator scopes and its normal model loader:
 
-## Socket sessions
+1. The `weights` scope enters the GMS Parameter MemPool.
+2. vLLM performs normal model construction, loading, quantization, and
+   post-load transforms.
+3. V1 leaves final `nn.Parameter` objects on GMS storage and copies captured
+   non-Parameter tensors to default-allocator storage.
+4. Surviving Parameter mappings become read-only and the same `weights` socket
+   commits from RW to RO.
+5. The `kv_cache` scope enters the GMS KV MemPool.
+6. vLLM creates its normal KV tensors through the ephemeral manager while the
+   process retains the exclusive `kv_cache` RW socket.
 
-The connected, handshaken Unix socket is the lease:
+Other allocation scopes retain vLLM's existing behavior. V1 subclasses only
+vLLM's `SleepModeBackend`; it does not use `CuMemBackend` or `CuMemAllocator`
+for weight or KV sleep and wake.
 
-- one RW session excludes readers;
-- multiple RO sessions share a committed allocation epoch;
-- `RW_OR_RO` receives RW for an empty epoch or RO for a committed epoch;
-- a waiting writer blocks later readers;
-- commit changes the same socket from RW to RO; and
-- disconnect releases the lease. Disconnecting an uncommitted writer also
-  clears its partial allocation epoch.
-
-There is no unlock RPC, heartbeat, TTL, reconnect, or rollback protocol. The
-server detects a queued client disconnect and removes it from lock contention.
-
-## Snapshot lifecycle
+## Sleep and wake
 
 ```mermaid
-stateDiagram-v2
-    [*] --> Constructing: constructor opens RW
-    Constructing --> Committed: mappings become RO; commit same socket
-    Committed --> Asleep: unmap imports; close RO socket
-    Asleep --> Committed: open RO; import IDs at saved VAs
+sequenceDiagram
+    participant W as Engine rank
+    participant P as weights policy
+    participant K as kv_cache policy
+    participant PS as weights server
+    participant KS as kv_cache server
+
+    Note over W: generation already stopped
+    W->>P: sleep
+    P->>P: synchronize, unmap and release RO imports
+    P-->>PS: close RO
+    Note over PS: committed Parameter backing remains
+    W->>K: sleep
+    K->>K: synchronize, unmap and release RW imports
+    K-->>KS: close uncommitted RW last
+    Note over KS: clear entire KV epoch before next writer
+    Note over W: Snapshot captures sleeping process
+
+    W->>K: wake
+    K->>KS: acquire exclusive RW first
+    K->>KS: recreate saved IDs and aligned sizes
+    K->>K: map fresh handles RW at saved VAs
+    W->>P: wake
+    P->>PS: acquire RO against checkpointed identity
+    P->>P: map saved IDs RO at saved VAs
 ```
 
-A fresh V1 manager opens RW and allocates model-loading storage through GMS.
-Commit changes every surviving mapping to read-only and commits the same
-socket. Sleep unmaps and releases local imports, keeps the virtual-address
-reservations and allocation IDs, then closes the RO socket.
+KV tensor objects, mapping records, allocation IDs, sizes, and VA reservations
+survive sleep. KV contents and physical handles do not. Fresh backing is
+uninitialized; vLLM's normal post-wake path prepares the cache for use.
 
-CRIU restores the manager in its sleeping state; constructors do not rerun.
-Wake opens RO against the checkpointed server identity, exports the saved
-allocation IDs, and maps them read-only at the checkpointed virtual addresses.
-The sidecar never needs to know those addresses.
+Suspend unmaps and closes Parameters before touching KV, retaining the active KV
+lease until local memory is asleep. Resume acquires, recreates, and maps KV
+before mapping Parameters. Any error is fatal. V1 does not retry, roll back,
+fall back to native allocation, or continue with a partial wake.
 
-Failures are fail-stop. V1 closes its socket and propagates the error; it does
-not retry, reconnect, compensate, or roll back partially completed lifecycle
-operations.
+## Multi-rank ownership
 
-## Parameter capture and tensor isolation
+V1's backend is deliberately rank-local. It does not acquire a filesystem lock
+and does not elect a TP/PP/DP cohort.
 
-V1 uses vLLM's existing broad `weights` allocator scope without replacing the
-normal model loader:
+```mermaid
+flowchart TD
+    Coordinator["Coordinator-level flock<br/>elect one complete cohort"]
+    Winner["Winning multi-rank cohort"]
+    Rank0["Rank 0 low-level wake<br/>local kv_cache RW lease"]
+    RankN["Rank N low-level wake<br/>local kv_cache RW lease"]
 
-1. The worker enters a temporary GMS-backed Torch MemPool.
-2. vLLM performs normal model construction, loading, quantization, and
-   post-load transformations.
-3. V1 finds the final live Torch tensors backed by that pool.
-4. `nn.Parameter` TensorImpls remain on GMS storage.
-5. Literal non-Parameter TensorImpls are copied to default-allocator storage.
-6. Destroying the temporary pool releases captured allocations that no live
-   Parameter still uses.
-7. The remaining Parameter mappings become read-only and commit.
+    Coordinator --> Winner
+    Winner --> Rank0
+    Winner --> RankN
+```
 
-Isolation groups non-Parameter tensors by source storage and overlapping byte
-span. It preserves each TensorImpl, shape, stride, storage offset, and aliases
-between overlapping non-Parameter views. If a Parameter and a non-Parameter
-share storage, the non-Parameter is copied out and their storage alias is
-intentionally severed. Default-allocator tensors and non-Torch CUDA
-allocations are untouched.
+Coordinator-level flock and collective cohort selection remain outside this
+package and this change. Only the winning cohort may call low-level wake. Once
+called, each rank's `kv_cache` RW socket fences its local physical-memory epoch.
+The two lock levels are complementary and must not be collapsed into the
+per-rank backend.
 
-The commit log reports unique Parameter span bytes, retained aligned GMS
-bytes, their ratio, fragmentation, bytes copied out, and retained allocation
-count.
+## Running V1
 
-This Snapshot assumption removes V0's meta-model, custom model loader,
-persistent tensor/layout metadata, structural rematching, scratch KV, broad
-memory-accounting patches, and allocation-pruning path.
-
-## vLLM and KV cache
-
-`GMSV1Worker` selects `GMSV1SleepModeBackend` and routes only vLLM's `weights`
-scope through the GMS MemPool. Other scopes use vLLM's native behavior.
-
-The KV cache remains owned by vLLM's `CuMemAllocator`. On level-1 suspend,
-native vLLM discards KV backing before GMS unmaps Parameters. On resume, GMS
-restores Parameters first and vLLM then recreates KV backing at its preserved
-addresses. Partial-tag wake and non-level-1 sleep are not supported.
-
-Start one sidecar per rank:
+Start one two-domain sidecar per rank:
 
 ```text
 gms-v1-server --device 0
