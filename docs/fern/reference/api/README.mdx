@@ -31,15 +31,16 @@ and deep-links to the exact file and line on `main`.
 
 ## How It Stays Current
 
-The [`docs/fern/scripts/gen_python_api.py`][gen] script parses the Dynamo
-Python source with [griffe][griffe] — no import, no build, no runtime
-dependency on backend containers. From one parse it writes:
+The `docs/fern/scripts/gen_python_api.py` script parses the Dynamo Python
+source with [griffe][griffe] — no import, no build, no runtime dependency on
+backend containers. From one parse it writes:
 
-- [`docs/fern/reference/api/python/README.mdx`][landing] — the Python API
-  landing page, a card index of every curated module.
-- [`docs/fern/reference/api/python/<module>.mdx`][pages] — one page per
-  curated module, with an anchored accordion per symbol carrying its import
-  statement, signature, and public methods.
+- the [Python API landing page](python/README.mdx) at
+  `docs/fern/reference/api/python/README.mdx`, a card index of every curated
+  module.
+- `docs/fern/reference/api/python/<module>.mdx` — one page per curated module,
+  with an anchored accordion per symbol carrying its import statement,
+  signature, and public methods.
 
 Every page is plain MDX built from Fern's own components, so the whole
 surface is indexed for search and Fern derives the Markdown and `llms.txt`
@@ -55,8 +56,5 @@ python3 docs/fern/scripts/gen_python_api.py --check    # drift check (exit 1 if 
 `--check` is what CI runs against every commit to catch stale generated
 content before it ships.
 
-[gen]: https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/scripts/gen_python_api.py
-[landing]: https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/reference/api/python/README.mdx
-[pages]: https://github.com/ai-dynamo/dynamo/tree/main/docs/fern/reference/api/python
 [griffe]: https://mkdocstrings.github.io/griffe/
 [crates]: https://crates.io/search?q=ai-dynamo

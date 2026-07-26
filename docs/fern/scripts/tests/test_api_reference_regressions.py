@@ -203,6 +203,33 @@ def test_api_landing_points_kubernetes_at_colocated_route() -> None:
     ), "landing must not reference the removed kubernetes-api variant"
 
 
+_UNMERGED_DOCS_LINK_RE = re.compile(
+    r"https://github\.com/ai-dynamo/dynamo/(?:blob|tree)/main/docs/fern/\S*"
+)
+
+
+def _api_reference_pages() -> list[Path]:
+    """Every committed page this reference owns."""
+    pages = sorted((FERN_ROOT / "reference" / "api").rglob("*.mdx"))
+    pages.append(K8S_DIR / "api-reference-fern.mdx")
+    return pages
+
+
+def test_api_pages_never_link_to_docs_paths_through_main() -> None:
+    """These pages, their generator scripts, and the raw Kubernetes Markdown
+    all arrive in the same change. A ``blob/main`` deep link to any of them
+    resolves to a 404 until that change merges, so the link checker fails on
+    exactly the commits that introduce the pages. Reference the repo path as
+    inline code instead, or link the sibling page relatively."""
+    offenders: dict[str, list[str]] = {}
+    for page in _api_reference_pages():
+        found = _UNMERGED_DOCS_LINK_RE.findall(page.read_text(encoding="utf-8"))
+        if found:
+            offenders[str(page.relative_to(REPO_ROOT))] = found
+
+    assert not offenders, f"self-referential main links: {offenders}"
+
+
 def test_api_reference_ships_no_bespoke_render_components() -> None:
     """Every API surface renders through native Fern MDX, so the reference owns
     no React render components at all."""

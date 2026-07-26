@@ -36,10 +36,11 @@ MDX_GENERATED_MARKER = (
 )
 LOCAL_FRAGMENT_LINK_RE = re.compile(r"\[(?P<label>[^\]]+)\]\(#(?P<anchor>[^)]+)\)")
 MARKDOWN_LINK_RE = re.compile(r"\[(?P<label>[^\]]+)\]\((?P<target>[^)]+)\)")
-SOURCE_HREF_MD = (
-    "https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/kubernetes/"
-    "api-reference.md"
-)
+# Repo paths, not links: this page, its generator, and the raw Markdown all
+# land in the same change, so a github.com/.../blob/main deep link to any of
+# them 404s until that change merges and fails the link checker.
+SOURCE_PATH_MD = "docs/fern/kubernetes/api-reference.md"
+GENERATOR_PATH = "docs/fern/scripts/gen_kubernetes_api.py"
 
 _FRONTMATTER = (
     "---\n"
@@ -55,9 +56,7 @@ _FRONTMATTER = (
 _WARNING = (
     "> [!WARNING]\n"
     "> **Auto-generated from source.** This page is regenerated from the "
-    "Dynamo operator CRDs by "
-    "[`docs/fern/scripts/gen_kubernetes_api.py`](https://github.com/ai-dynamo/"
-    "dynamo/blob/main/docs/fern/scripts/gen_kubernetes_api.py) and covers "
+    f"Dynamo operator CRDs by `{GENERATOR_PATH}` and covers "
     "**every** type across all three API packages: the deprecated "
     "`nvidia.com/v1alpha1` surface, the supported `nvidia.com/v1beta1` surface, "
     "and the operator's own `operator.config.dynamo.nvidia.com/v1alpha1` "
@@ -85,9 +84,7 @@ def render_mdx(reference: KubernetesReference) -> str:
     parts.append("")
     parts.append(_operator_defaults(reference.operator_defaults))
     parts.append("")
-    parts.append(
-        f"Raw generated Markdown source: [`api-reference.md`]({SOURCE_HREF_MD})"
-    )
+    parts.append(f"Raw generated Markdown source: `{SOURCE_PATH_MD}`")
     return "\n".join(parts).rstrip() + "\n"
 
 

@@ -38,6 +38,12 @@ CORE_CRATES = {
     "kvbm-logical",
 }
 INTERNAL_CRATES = {"dynamo-rl", "dynamo-vllm-rs-backend", "kvbm-engine"}
+# A workspace release does not republish every crate. dynamo-config tops out at
+# 1.2.1 on crates.io, so pinning it to the workspace version emits a docs.rs URL
+# that 404s and fails the link checker. Keep the release data on the newest
+# version that actually shipped, and extend this map when another crate skips a
+# release rather than defaulting it back to the workspace version.
+LAGGING_CRATE_VERSIONS = {"dynamo-config": "1.2.1"}
 
 
 @pytest.fixture(scope="session")
@@ -78,8 +84,16 @@ def test_workspace_version_matches_current_release(
     reference: rust_api_discovery.RustReference,
 ) -> None:
     assert reference.workspace_version == "1.3.0"
-    current = [crate for crate in reference.crates if crate.badge != "Deprecated"]
+    current = [
+        crate
+        for crate in reference.crates
+        if crate.badge != "Deprecated" and crate.name not in LAGGING_CRATE_VERSIONS
+    ]
     assert {crate.version for crate in current} == {reference.workspace_version}
+    by_name = {crate.name: crate for crate in reference.crates}
+    for name, version in LAGGING_CRATE_VERSIONS.items():
+        assert by_name[name].version == version
+        assert by_name[name].docs_href == f"https://docs.rs/{name}/{version}"
 
 
 def test_crates_have_pinned_docs_rs_links(
