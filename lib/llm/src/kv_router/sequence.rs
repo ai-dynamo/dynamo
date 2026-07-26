@@ -506,6 +506,7 @@ mod tests {
             worker: WorkerWithDpRank::new(1, 0),
             data: ActiveSequenceEventData::AddRequest {
                 token_sequence: None,
+                prompt_tokens: 0,
                 track_prefill_tokens: false,
                 expected_output_tokens: None,
                 prefill_load_hint: None,

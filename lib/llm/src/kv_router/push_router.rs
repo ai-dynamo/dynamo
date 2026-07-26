@@ -3,7 +3,10 @@
 
 use std::{sync::Arc, time::Duration};
 
-use dynamo_kv_router::protocols::{TokensWithHashes, WorkerWithDpRank};
+use dynamo_kv_router::{
+    RouterDecodeLoadModel,
+    protocols::{TokensWithHashes, WorkerWithDpRank},
+};
 use dynamo_runtime::{
     error::{ErrorType, match_error_chain},
     metrics::frontend_perf::{STAGE_ROUTE, StageGuard},
@@ -181,6 +184,21 @@ impl KvPushRouter {
         phase: RequestPhase,
         is_query_only: bool,
     ) -> Result<(WorkerSelection, Option<AffinityAcquire>), Error> {
+        // DefaultADP deliberately load-balances decode requests across ranks.
+        // Do not acquire a session-affinity lease that would later reject a
+        // different selected rank. Explicit request pins are still enforced by
+        // select_worker.
+        if self.chooser.worker_type() == "decode"
+            && self.chooser.kv_router_config().decode_load_model
+                == RouterDecodeLoadModel::DefaultAdp
+        {
+            return Ok((
+                self.select_request(request, phase, is_query_only, None)
+                    .await?,
+                None,
+            ));
+        }
+
         let Some(affinity) = self.affinity.as_ref() else {
             return Ok((
                 self.select_request(request, phase, is_query_only, None)
@@ -665,7 +683,7 @@ mod tests {
 
     use dynamo_kv_router::{
         ActiveSequencesMultiWorker, DefaultWorkerSelector, SequencePublisher,
-        config::{KvRouterConfig, RouterQueuePolicy},
+        config::{KvRouterConfig, RouterDecodeLoadModel, RouterQueuePolicy},
         protocols::{ActiveLoad, ActiveSequenceEvent, RoutingConstraints},
         scheduling::{
             AdmissionAction, AdmissionDecision, AdmissionEvent, AdmissionId, AdmissionRequest,
@@ -685,7 +703,9 @@ mod tests {
     use super::*;
     use crate::{
         local_model::runtime_config::ModelRuntimeConfig,
-        protocols::common::extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
+        protocols::common::extensions::{
+            AgentContext, SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId,
+        },
     };
 
     fn request() -> PreprocessedRequest {
@@ -909,6 +929,21 @@ mod tests {
     }
 
     async fn router(session_affinity_ttl: Option<Duration>) -> (KvPushRouter, Runtime) {
+        let workers = HashMap::from([(7, ModelRuntimeConfig::default())]);
+        let config = KvRouterConfig {
+            skip_initial_worker_wait: true,
+            use_kv_events: false,
+            router_track_active_blocks: false,
+            ..Default::default()
+        };
+        router_with_config(session_affinity_ttl, config, workers).await
+    }
+
+    async fn router_with_config(
+        session_affinity_ttl: Option<Duration>,
+        config: KvRouterConfig,
+        workers: HashMap<u64, ModelRuntimeConfig>,
+    ) -> (KvPushRouter, Runtime) {
         let runtime = Runtime::from_current().unwrap();
         let distributed =
             DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
@@ -921,14 +956,7 @@ mod tests {
             .unwrap();
         let endpoint = component.endpoint("generate");
         let client = endpoint.client().await.unwrap();
-        let workers = HashMap::from([(7, ModelRuntimeConfig::default())]);
         let (_tx, workers) = watch::channel(workers);
-        let config = KvRouterConfig {
-            skip_initial_worker_wait: true,
-            use_kv_events: false,
-            router_track_active_blocks: false,
-            ..Default::default()
-        };
         let chooser = KvRouter::new(
             endpoint,
             client.clone(),
@@ -951,6 +979,61 @@ mod tests {
             .unwrap();
         let router = KvPushRouter::new(inner, Arc::new(chooser), session_affinity_ttl).unwrap();
         (router, runtime)
+    }
+
+    #[tokio::test]
+    async fn default_adp_decode_accepts_a_rank_different_from_session_affinity() {
+        let config = KvRouterConfig {
+            skip_initial_worker_wait: true,
+            use_kv_events: false,
+            router_track_active_blocks: false,
+            decode_load_model: RouterDecodeLoadModel::DefaultAdp,
+            ..Default::default()
+        };
+        let workers = HashMap::from([(
+            7,
+            ModelRuntimeConfig {
+                data_parallel_size: 2,
+                ..Default::default()
+            },
+        )]);
+        let (router, runtime) =
+            router_with_config(Some(Duration::from_secs(10)), config, workers).await;
+        let affinity = router.affinity.as_ref().unwrap();
+        let session_id = SessionAffinityId::new("default-adp-decode");
+        let bound_target = AffinityTarget {
+            worker_id: 7,
+            dp_rank: Some(1),
+        };
+        let AffinityAcquire::Initialize(initializer) =
+            affinity.acquire(&session_id, None).await.unwrap()
+        else {
+            panic!("first request must initialize");
+        };
+        drop(initializer.commit(bound_target).unwrap());
+
+        let mut request_data = request();
+        request_data.agent_context = Some(AgentContext {
+            session_id: session_id.as_str().to_string(),
+            parent_session_id: None,
+            session_final: None,
+            kv_hints: None,
+        });
+        let mut request = Context::new(request_data);
+        request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id.clone());
+
+        let (selection, operation) = router
+            .select_with_affinity(&request, RequestPhase::Decode, false)
+            .await
+            .unwrap();
+        assert_eq!(selection.dp_rank, 0);
+        assert!(
+            operation.is_none(),
+            "DefaultADP decode selection must not acquire a conflicting session-affinity lease"
+        );
+
+        drop(router);
+        runtime.shutdown();
     }
 
     async fn track_request(
