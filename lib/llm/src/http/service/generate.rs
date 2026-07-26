@@ -21,21 +21,25 @@ use axum::{
     routing::post,
 };
 use dynamo_runtime::pipeline::{AsyncEngineContext, AsyncEngineContextProvider, Context};
+use futures::StreamExt;
 use serde::Serialize;
 use tracing::Instrument;
 
 use super::disconnect::create_connection_monitor;
-use super::metrics::{CancellationLabels, ErrorType};
+use super::metrics::{CancellationLabels, ErrorType, HttpQueueGuard, ResponseMetricCollector};
 use super::openai::{
     check_model_serving_ready, check_ready, context_from_headers, get_body_limit,
     get_or_create_request_id, smart_json_error_middleware,
 };
 use super::{RouteDoc, service_v2};
-use crate::protocols::common::preprocessor::PreprocessedRequest;
+use crate::discovery::GenerateEngineSelection;
+use crate::protocols::common::preprocessor::{MmRoutingInfo, PreprocessedRequest};
+use crate::protocols::common::timing::RequestTracker;
 use crate::protocols::common::{SamplingOptions, StopConditions};
 use crate::protocols::openai::generate::{
     GenerateRequest, GenerateResponse, GenerateResponseOptions, SamplingParams, StreamOptions,
 };
+use crate::protocols::{Annotated, common::llm_backend::LLMEngineOutput};
 
 const X_REQUEST_ID_HEADER: &str = "x-request-id";
 const X_DATA_PARALLEL_RANK_HEADER: &str = "x-data-parallel-rank";
@@ -118,8 +122,19 @@ fn dynamo_routing_priority(vllm_priority: i32) -> i32 {
     vllm_priority.saturating_neg()
 }
 
-fn generate_dispatch_span(request_id: &str) -> tracing::Span {
-    tracing::info_span!(target: "request_span", "generate", request_id = %request_id)
+fn generate_dispatch_span(request_id: &str, model: &str) -> tracing::Span {
+    tracing::info_span!(
+        target: "request_span",
+        "generate",
+        request_id = %request_id,
+        model = %model,
+        input_tokens = tracing::field::Empty,
+        output_tokens = tracing::field::Empty,
+        ttft_ms = tracing::field::Empty,
+        avg_itl_ms = tracing::field::Empty,
+        prefill_worker_id = tracing::field::Empty,
+        decode_worker_id = tracing::field::Empty,
+    )
 }
 
 async fn run_until_killed<T>(
@@ -204,6 +219,261 @@ impl<'a> VllmTitoEnvelope<'a> {
     }
 }
 
+type MmPlaceholderRange = (usize, usize, u64, Option<Vec<bool>>);
+
+#[inline]
+fn intersecting_mm_ranges<'a>(
+    ranges: &'a [MmPlaceholderRange],
+    block_start: usize,
+    block_end: usize,
+    first_intersecting: &mut usize,
+    mut on_examined: impl FnMut(),
+) -> &'a [MmPlaceholderRange] {
+    while *first_intersecting < ranges.len() {
+        on_examined();
+        if ranges[*first_intersecting].1 > block_start {
+            break;
+        }
+        *first_intersecting += 1;
+    }
+
+    let start = *first_intersecting;
+    let mut end = start;
+    while end < ranges.len() {
+        on_examined();
+        if ranges[end].0 >= block_end {
+            break;
+        }
+        end += 1;
+    }
+
+    &ranges[start..end]
+}
+
+/// Build the routing-only token sequence used by vLLM KV events for multimodal
+/// prompts. The caller-provided `features` object remains opaque to execution;
+/// this projection reads only the hashes and placeholder ranges required to
+/// make request-side KV hashes match worker-side event hashes.
+fn generate_mm_routing_info(
+    request: &GenerateRequest,
+    kv_cache_block_size: u32,
+) -> Result<Option<MmRoutingInfo>, &'static str> {
+    let Some(features) = request.passthrough.get("features") else {
+        return Ok(None);
+    };
+    if features.is_null() {
+        return Ok(None);
+    }
+
+    let features = features
+        .as_object()
+        .ok_or("features must be a JSON object")?;
+    let Some(mm_hashes) = features.get("mm_hashes") else {
+        return Ok(None);
+    };
+    let mm_hashes = mm_hashes
+        .as_object()
+        .ok_or("features.mm_hashes must be a JSON object")?;
+    let mm_placeholders = features
+        .get("mm_placeholders")
+        .and_then(serde_json::Value::as_object)
+        .ok_or("features.mm_placeholders must be a JSON object")?;
+
+    if mm_hashes
+        .keys()
+        .chain(mm_placeholders.keys())
+        .any(|modality| modality != "image")
+    {
+        return Err("exact /generate MM routing currently supports image placeholders only");
+    }
+    if kv_cache_block_size == 0 {
+        return Err("KV cache block size must be non-zero");
+    }
+
+    let (hashes, placeholders) = match (mm_hashes.get("image"), mm_placeholders.get("image")) {
+        (None, None) => return Ok(None),
+        (Some(hashes), Some(placeholders)) => (
+            hashes
+                .as_array()
+                .ok_or("features.mm_hashes.image must be an array")?,
+            placeholders
+                .as_array()
+                .ok_or("features.mm_placeholders.image must be an array")?,
+        ),
+        _ => return Err("image hashes and placeholders must both be present"),
+    };
+    if hashes.len() != placeholders.len() {
+        return Err("image hashes and placeholders must have equal lengths");
+    }
+
+    let mut ranges: Vec<MmPlaceholderRange> = Vec::with_capacity(hashes.len());
+    for (hash, placeholder) in hashes.iter().zip(placeholders) {
+        let hash = hash
+            .as_str()
+            .and_then(dynamo_kv_router::protocols::hash_mm_identifier)
+            .ok_or("multimodal hashes must be non-empty strings")?;
+        let placeholder = placeholder
+            .as_object()
+            .ok_or("multimodal placeholders must be JSON objects")?;
+        let offset = placeholder
+            .get("offset")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or("multimodal placeholder offsets must be non-negative integers")?;
+        let length = placeholder
+            .get("length")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .filter(|value| *value > 0)
+            .ok_or("multimodal placeholder lengths must be positive integers")?;
+        let end = offset
+            .checked_add(length)
+            .filter(|end| *end <= request.token_ids.len())
+            .ok_or("multimodal placeholder range exceeds token_ids")?;
+        let is_embed = match placeholder.get("is_embed") {
+            None | Some(serde_json::Value::Null) => {
+                // vLLM 0.24 render responses omit sparse masks. A uniform
+                // placeholder span is safely dense; a mixed span is ambiguous
+                // and must retain token-only routing rather than over-substitute.
+                if request.token_ids[offset..end]
+                    .windows(2)
+                    .any(|pair| pair[0] != pair[1])
+                {
+                    return Err("mixed multimodal placeholder spans require is_embed");
+                }
+                None
+            }
+            Some(value) => {
+                let mask = value
+                    .as_array()
+                    .ok_or("multimodal placeholder is_embed must be an array")?;
+                if mask.len() != length {
+                    return Err(
+                        "multimodal placeholder is_embed length must match placeholder length",
+                    );
+                }
+                let mut parsed = Vec::with_capacity(mask.len());
+                for entry in mask {
+                    parsed.push(
+                        entry
+                            .as_bool()
+                            .ok_or("multimodal placeholder is_embed entries must be booleans")?,
+                    );
+                }
+                Some(parsed)
+            }
+        };
+        ranges.push((offset, end, hash, is_embed));
+    }
+
+    if ranges.is_empty() {
+        return Ok(None);
+    }
+
+    ranges.sort_unstable_by_key(|(offset, _, _, _)| *offset);
+    for pair in ranges.windows(2) {
+        let (_, previous_end, previous_hash, _) = &pair[0];
+        let (next_offset, _, next_hash, _) = &pair[1];
+        if previous_end > next_offset {
+            return Err("multimodal placeholder ranges must not overlap");
+        }
+        if previous_end == next_offset && previous_hash != next_hash {
+            return Err("adjacent multimodal placeholders must share an identifier");
+        }
+    }
+
+    // vLLM's current event normalizer associates MM objects with contiguous
+    // image-token runs by order, clamping excess runs to the last object in a
+    // block. A sparse mask can split one object into multiple runs, so verify
+    // that this run-order mapping still produces the request-side identity.
+    // If it does not, retain correctness by using ordinary token routing.
+    let block_size = kv_cache_block_size as usize;
+    let mut first_intersecting = 0;
+    for block_start in (0..request.token_ids.len()).step_by(block_size) {
+        let block_end = (block_start + block_size).min(request.token_ids.len());
+        let mut worker_objects = Vec::new();
+        let mut expected_by_position = vec![None; block_end - block_start];
+
+        let block_ranges = intersecting_mm_ranges(
+            &ranges,
+            block_start,
+            block_end,
+            &mut first_intersecting,
+            || {},
+        );
+        for (offset, end, hash, is_embed) in block_ranges {
+            let intersection_start = (*offset).max(block_start);
+            let intersection_end = (*end).min(block_end);
+            worker_objects.push(*hash);
+            for global_position in intersection_start..intersection_end {
+                let should_embed = is_embed
+                    .as_ref()
+                    .is_none_or(|mask| mask[global_position - *offset]);
+                if should_embed {
+                    expected_by_position[global_position - block_start] = Some(*hash);
+                }
+            }
+        }
+
+        let mut expected_runs = Vec::new();
+        let mut current_run = None;
+        for expected_hash in expected_by_position {
+            match (current_run, expected_hash) {
+                (None, Some(hash)) => {
+                    current_run = Some(hash);
+                    expected_runs.push(hash);
+                }
+                (Some(current), Some(hash)) if current != hash => {
+                    return Err("adjacent multimodal embed positions must share an identifier");
+                }
+                (Some(_), None) => current_run = None,
+                _ => {}
+            }
+        }
+
+        for (run_index, expected_hash) in expected_runs.into_iter().enumerate() {
+            let worker_hash = worker_objects
+                .get(run_index)
+                .or_else(|| worker_objects.last())
+                .copied();
+            if worker_hash != Some(expected_hash) {
+                return Err(
+                    "sparse multimodal layout cannot be normalized exactly by worker events",
+                );
+            }
+        }
+    }
+
+    let mut routing_token_ids = request.token_ids.clone();
+    for (offset, end, hash, is_embed) in ranges {
+        let pad = dynamo_kv_router::protocols::pad_value_for_mm_hash(hash);
+        if let Some(mask) = is_embed {
+            for (token, should_embed) in routing_token_ids[offset..end].iter_mut().zip(mask) {
+                if should_embed {
+                    *token = pad;
+                }
+            }
+        } else {
+            routing_token_ids[offset..end].fill(pad);
+        }
+    }
+
+    let padded_len = routing_token_ids
+        .len()
+        .div_ceil(block_size)
+        .checked_mul(block_size)
+        .ok_or("multimodal routing token length overflow")?;
+    routing_token_ids.resize(padded_len, 0);
+
+    Ok(Some(MmRoutingInfo {
+        routing_token_ids,
+        // vLLM events are normalized to the same pad-value token scheme, so
+        // MM identity is already present in the alternate routing tokens.
+        block_mm_infos: Vec::new(),
+        expanded_prompt_len: request.token_ids.len(),
+    }))
+}
+
 /// Project routing controls while retaining all engine-owned fields in
 /// `extra_args.vllm_tito`. The backend remains the authority for interpreting
 /// every vLLM-specific field.
@@ -212,13 +482,39 @@ fn preprocessed_from_generate(
     model: &str,
     data_parallel_rank: Option<u32>,
     request_id: &str,
+    kv_cache_block_size: u32,
+    supports_exact_mm_routing: bool,
+    lora_name: Option<String>,
 ) -> anyhow::Result<PreprocessedRequest> {
     let sampling = &request.sampling_params;
     let max_tokens = sampling.max_tokens();
     let min_tokens = sampling.min_tokens();
     let ignore_eos = sampling.ignore_eos();
     let routing_priority = dynamo_routing_priority(request.priority);
+    // With vLLM's default `enable_tower_connector_lora=false`, the vision tower
+    // and connector stay on base weights, so MM identifiers are adapter-invariant.
+    // `lora_name` separately salts the LM KV hashes below, allowing exact MM+LoRA
+    // routing. If tower/connector LoRA is enabled, vLLM scopes MM identifiers by
+    // adapter; that worker capability is not advertised here, so this projection
+    // can miss the correct MM cache owner (suboptimal routing, not unsafe reuse).
+    let mm_routing_info = if supports_exact_mm_routing {
+        match generate_mm_routing_info(&request, kv_cache_block_size) {
+            Ok(info) => info,
+            Err(reason) => {
+                tracing::debug!(
+                    target: "mm_routing",
+                    reason,
+                    "invalid /generate multimodal routing metadata; using token-only routing"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
     let vllm_tito = serde_json::to_value(VllmTitoEnvelope::new(&request, request_id))?;
+    let tracker = Arc::new(RequestTracker::new());
+    tracker.record_isl(request.token_ids.len(), None);
     let GenerateRequest {
         token_ids,
         cache_salt,
@@ -239,9 +535,11 @@ fn preprocessed_from_generate(
             ..Default::default()
         })
         .output_options(Default::default())
+        .mm_routing_info(mm_routing_info)
         .routing(Some(crate::protocols::common::preprocessor::RoutingHints {
             dp_rank: data_parallel_rank,
             expected_output_tokens: max_tokens,
+            lora_name,
             cache_namespace: cache_salt,
             // `priority_jump` is a boost-only scheduler input. Preserve penalties
             // in signed `priority`, matching the standard preprocessor projection.
@@ -254,8 +552,79 @@ fn preprocessed_from_generate(
             // that field from PreprocessedRequest.token_ids after routing.
             "vllm_tito": vllm_tito,
         })))
+        .tracker(Some(tracker))
         .build()
         .map_err(|error| anyhow::anyhow!("failed to build PreprocessedRequest: {error}"))
+}
+
+/// Metrics adapter for the raw engine stream used by `/inference/v1/generate`.
+///
+/// Unlike the OpenAI text endpoints, Generate deliberately bypasses the
+/// tokenizer/postprocessor pipeline that emits `LLMMetricAnnotation`. Its
+/// token IDs are already rendered, so observe the same response metrics from
+/// the raw token deltas while leaving tokenizer and media metrics untouched.
+struct GenerateMetricCollector {
+    response: ResponseMetricCollector,
+    http_queue: Option<HttpQueueGuard>,
+    tracker: Arc<RequestTracker>,
+    input_tokens: usize,
+    output_tokens: usize,
+}
+
+impl GenerateMetricCollector {
+    fn new(
+        metrics: Arc<super::metrics::Metrics>,
+        model: &str,
+        tracker: Arc<RequestTracker>,
+        input_tokens: usize,
+    ) -> Self {
+        let mut response = metrics.clone().create_response_collector(model);
+        response.set_input_sequence_length(input_tokens);
+        Self {
+            response,
+            http_queue: Some(metrics.create_http_queue_guard(model)),
+            tracker,
+            input_tokens,
+            output_tokens: 0,
+        }
+    }
+
+    fn observe(&mut self, annotated: &Annotated<LLMEngineOutput>) {
+        let Some(output) = annotated.data.as_ref() else {
+            return;
+        };
+
+        if let Some(worker) = self.tracker.get_worker_info() {
+            self.response.set_worker_info(
+                worker.prefill_worker_id,
+                worker.prefill_dp_rank,
+                self.tracker.prefill_worker_type().map(String::from),
+                worker.decode_worker_id,
+                worker.decode_dp_rank,
+                self.tracker.decode_worker_type().map(String::from),
+            );
+        }
+
+        let cached_tokens = output
+            .completion_usage
+            .as_ref()
+            .and_then(|usage| usage.prompt_tokens_details.as_ref())
+            .and_then(|details| details.cached_tokens)
+            .map(|tokens| tokens as usize);
+        self.response.observe_cached_tokens(cached_tokens);
+
+        let chunk_tokens = output.token_ids.len();
+        self.output_tokens += chunk_tokens;
+        self.response.observe_current_osl(self.output_tokens);
+        if self.response.is_first_token()
+            && chunk_tokens > 0
+            && let Some(guard) = self.http_queue.take()
+        {
+            drop(guard);
+        }
+        self.response
+            .observe_response(self.input_tokens, chunk_tokens);
+    }
 }
 
 /// Resolve, route, and dispatch a frontend-native token-in/token-out request.
@@ -310,8 +679,13 @@ async fn handler_generate(
         return response.into_response();
     }
 
-    let engine = match state.manager().get_generate_engine(&model) {
-        Ok(engine) => engine,
+    let GenerateEngineSelection {
+        engine,
+        kv_cache_block_size,
+        lora_name,
+        supports_exact_mm_routing,
+    } = match state.manager().get_generate_engine(&model) {
+        Ok(selection) => selection,
         Err(error) => {
             let (status, error_type) = match error {
                 crate::discovery::ModelManagerError::ModelUnavailable(_) => {
@@ -329,6 +703,9 @@ async fn handler_generate(
         &model,
         request_context.data_parallel_rank,
         &request_context.request_id,
+        kv_cache_block_size,
+        supports_exact_mm_routing,
+        lora_name,
     ) {
         Ok(preprocessed) => preprocessed,
         Err(error) => {
@@ -359,7 +736,7 @@ async fn handler_generate(
     )
     .await;
 
-    let dispatch_span = generate_dispatch_span(&request_id);
+    let dispatch_span = generate_dispatch_span(&request_id, &model);
     // Unary work must outlive the Axum handler so dropping the handler can signal
     // the armed connection monitor. The detached dispatch observes that kill at
     // each backend await point and then exits promptly.
@@ -395,12 +772,21 @@ async fn generate_dispatch(
     state: Arc<service_v2::State>,
     response_options: GenerateResponseOptions,
 ) -> Response {
+    let metric_model = state.manager().metric_model_for(&model).to_string();
+    let input_tokens = context.content().token_ids.len();
+    let tracker = context.content().tracker.clone().unwrap_or_else(|| {
+        let tracker = Arc::new(RequestTracker::new());
+        tracker.record_isl(input_tokens, None);
+        tracker
+    });
     let mut inflight_guard = state.metrics_clone().create_inflight_guard(
-        state.manager().metric_model_for(&model),
+        &metric_model,
         super::metrics::Endpoint::Generate,
         false,
         &request_id,
     );
+    let mut metric_collector =
+        GenerateMetricCollector::new(state.metrics_clone(), &metric_model, tracker, input_tokens);
     let request_context = context.context();
     let generate_result =
         match run_until_killed(request_context.as_ref(), engine.generate(context)).await {
@@ -434,7 +820,7 @@ async fn generate_dispatch(
                 tracing::warn!(%request_id, error = %format!("{error:#}"), "engine rejected generate request");
                 state
                     .metrics_clone()
-                    .inc_rejection(&model, super::metrics::Endpoint::Generate);
+                    .inc_rejection(&metric_model, super::metrics::Endpoint::Generate);
                 return generate_error_response(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "service_unavailable",
@@ -447,6 +833,7 @@ async fn generate_dispatch(
     };
 
     let engine_context = stream.context();
+    let stream = stream.inspect(move |annotated| metric_collector.observe(annotated));
     let response_result = match run_until_killed(
         request_context.as_ref(),
         GenerateResponse::from_annotated_stream_with_options(
@@ -502,6 +889,7 @@ mod tests {
             atomic::{AtomicBool, Ordering},
         },
         task::{Context as TaskContext, Poll},
+        time::Duration,
     };
 
     use super::service_v2::{HttpService, VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV};
@@ -583,6 +971,13 @@ mod tests {
 
     struct CancelledEngine;
 
+    struct MetricEngine;
+
+    struct TokenThenPendingEngine {
+        started: Arc<Notify>,
+        dropped: Arc<AtomicBool>,
+    }
+
     #[async_trait::async_trait]
     impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
         for CancelledEngine
@@ -612,6 +1007,66 @@ mod tests {
                 finish_reason: Some(self.0.clone()),
                 ..Default::default()
             })]);
+            Ok(ResponseStream::new(Box::pin(stream), request.context()))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for MetricEngine
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            let first = futures::stream::once(async {
+                Annotated::from_data(LLMEngineOutput {
+                    token_ids: vec![10],
+                    index: Some(0),
+                    ..Default::default()
+                })
+            });
+            let second = futures::stream::once(async {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+                Annotated::from_data(LLMEngineOutput {
+                    token_ids: vec![11],
+                    index: Some(0),
+                    finish_reason: Some(crate::protocols::common::FinishReason::Stop),
+                    completion_usage: Some(dynamo_protocols::types::CompletionUsage {
+                        prompt_tokens: 3,
+                        completion_tokens: 2,
+                        total_tokens: 5,
+                        prompt_tokens_details: Some(dynamo_protocols::types::PromptTokensDetails {
+                            audio_tokens: None,
+                            cached_tokens: Some(2),
+                        }),
+                        completion_tokens_details: None,
+                    }),
+                    ..Default::default()
+                })
+            });
+            let stream = first.chain(second);
+            Ok(ResponseStream::new(Box::pin(stream), request.context()))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for TokenThenPendingEngine
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            let first = futures::stream::once(async {
+                Annotated::from_data(LLMEngineOutput {
+                    token_ids: vec![10],
+                    index: Some(0),
+                    ..Default::default()
+                })
+            });
+            let pending = PendingOperation::new(self.started.clone(), self.dropped.clone());
+            let stream = first.chain(pending);
             Ok(ResponseStream::new(Box::pin(stream), request.context()))
         }
     }
@@ -672,6 +1127,32 @@ mod tests {
                 self.request_id = Some(format!("{value:?}"));
             }
         }
+    }
+
+    #[derive(Clone)]
+    struct InputTokensCaptureLayer(Arc<Mutex<Option<u64>>>);
+
+    impl<S: Subscriber> Layer<S> for InputTokensCaptureLayer {
+        fn on_record(
+            &self,
+            _id: &span::Id,
+            values: &span::Record<'_>,
+            _context: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            values.record(&mut InputTokensVisitor(self.0.clone()));
+        }
+    }
+
+    struct InputTokensVisitor(Arc<Mutex<Option<u64>>>);
+
+    impl Visit for InputTokensVisitor {
+        fn record_u64(&mut self, field: &Field, value: u64) {
+            if field.name() == "input_tokens" {
+                *self.0.lock().unwrap() = Some(value);
+            }
+        }
+
+        fn record_debug(&mut self, _field: &Field, _value: &dyn std::fmt::Debug) {}
     }
 
     /// Spin up an `HttpService` bound to an ephemeral port and return the port
@@ -843,9 +1324,16 @@ mod tests {
         let request: GenerateRequest =
             serde_json::from_value(raw.clone()).expect("deserialize request");
 
-        let preprocessed =
-            preprocessed_from_generate(request, "test-model", None, "resolved-request")
-                .expect("build request");
+        let preprocessed = preprocessed_from_generate(
+            request,
+            "test-model",
+            None,
+            "resolved-request",
+            16,
+            false,
+            None,
+        )
+        .expect("build request");
         assert_eq!(preprocessed.stop_conditions.max_tokens, Some(8));
         assert_eq!(preprocessed.stop_conditions.min_tokens, None);
         assert_eq!(
@@ -890,9 +1378,479 @@ mod tests {
             .and_then(|object| object.remove("token_ids"))
             .expect("token_ids in client request");
         assert_eq!(preprocessed.token_ids, vec![1, 2]);
+        assert_eq!(
+            preprocessed
+                .tracker
+                .as_ref()
+                .and_then(|tracker| tracker.isl_tokens()),
+            Some(2)
+        );
         assert_eq!(expected_token_ids, serde_json::json!([1, 2]));
         assert_eq!(envelope, &expected_envelope);
         assert!(envelope.get("token_ids").is_none());
+    }
+
+    #[test]
+    fn unrelated_features_do_not_attempt_exact_multimodal_routing() {
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [1, 2, 3],
+            "sampling_params": {},
+            "features": {"future_feature": [1, 2, 3]}
+        }))
+        .expect("deserialize request");
+
+        assert!(matches!(generate_mm_routing_info(&request, 16), Ok(None)));
+    }
+
+    #[test]
+    fn malformed_present_mm_hashes_still_disable_exact_multimodal_routing() {
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [1, 2, 3],
+            "sampling_params": {},
+            "features": {"mm_hashes": ["not-an-object"]}
+        }))
+        .expect("deserialize request");
+
+        assert_eq!(
+            generate_mm_routing_info(&request, 16)
+                .expect_err("malformed present metadata must remain an error"),
+            "features.mm_hashes must be a JSON object"
+        );
+    }
+
+    #[test]
+    fn block_range_sweep_is_linear_in_sparse_placeholder_count() {
+        let token_count = 16_384_usize;
+        let block_size = 16_usize;
+        let ranges = (0..token_count)
+            .step_by(2)
+            .map(|offset| (offset, offset + 1, offset as u64, None))
+            .collect::<Vec<_>>();
+        let block_count = token_count.div_ceil(block_size);
+        let mut first_intersecting = 0;
+        let mut visited = 0;
+        let mut examined = 0;
+
+        for block_start in (0..token_count).step_by(block_size) {
+            let block_end = (block_start + block_size).min(token_count);
+            let before = examined;
+            let block_ranges = intersecting_mm_ranges(
+                &ranges,
+                block_start,
+                block_end,
+                &mut first_intersecting,
+                || examined += 1,
+            );
+            visited += block_ranges.len();
+            assert!(examined > before);
+        }
+
+        assert!(visited < ranges.len() + block_count);
+        assert!(examined <= 2 * (ranges.len() + block_count));
+        assert_eq!(first_intersecting, ranges.len() - block_size / 2);
+    }
+
+    #[test]
+    fn multimodal_features_build_exact_routing_tokens_without_changing_execution_payload() {
+        let hash_a = "a".repeat(64);
+        let hash_b = "b".repeat(64);
+        let raw = serde_json::json!({
+            "token_ids": [10, 11, 12, 12, 12, 15, 16, 17, 17, 19],
+            "sampling_params": {},
+            "features": {
+                "mm_hashes": {"image": [hash_a, hash_b]},
+                "mm_placeholders": {"image": [
+                    {"offset": 2, "length": 3},
+                    {"offset": 7, "length": 2}
+                ]},
+                "kwargs_data": {"image": ["opaque-a", "opaque-b"]}
+            }
+        });
+        let request: GenerateRequest =
+            serde_json::from_value(raw.clone()).expect("deserialize request");
+
+        let preprocessed = preprocessed_from_generate(
+            request,
+            "test-model",
+            None,
+            "resolved-request",
+            4,
+            true,
+            None,
+        )
+        .expect("build request");
+
+        let pad_a = dynamo_kv_router::protocols::pad_value_for_mm_hash(0xaaaaaaaaaaaaaaaa);
+        let pad_b = dynamo_kv_router::protocols::pad_value_for_mm_hash(0xbbbbbbbbbbbbbbbb);
+        let mm = preprocessed
+            .mm_routing_info
+            .as_ref()
+            .expect("multimodal routing projection");
+        assert_eq!(
+            mm.routing_token_ids,
+            vec![10, 11, pad_a, pad_a, pad_a, 15, 16, pad_b, pad_b, 19, 0, 0]
+        );
+        assert!(mm.block_mm_infos.is_empty());
+        assert_eq!(mm.expanded_prompt_len, 10);
+
+        assert_eq!(
+            preprocessed.token_ids,
+            vec![10, 11, 12, 12, 12, 15, 16, 17, 17, 19]
+        );
+        let envelope = preprocessed
+            .extra_args
+            .as_ref()
+            .and_then(|extra| extra.get("vllm_tito"))
+            .expect("vllm_tito envelope");
+        assert_eq!(envelope["features"], raw["features"]);
+    }
+
+    #[test]
+    fn multimodal_routing_requires_worker_capability() {
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [10, 99, 99, 20],
+            "sampling_params": {},
+            "features": {
+                "mm_hashes": {"image": ["opaque-image"]},
+                "mm_placeholders": {"image": [{"offset": 1, "length": 2}]}
+            }
+        }))
+        .expect("deserialize request");
+
+        let preprocessed = preprocessed_from_generate(
+            request,
+            "test-model",
+            None,
+            "resolved-request",
+            4,
+            false,
+            None,
+        )
+        .expect("unsupported workers must retain token-only routing");
+
+        assert!(preprocessed.mm_routing_info.is_none());
+        assert_eq!(preprocessed.token_ids, vec![10, 99, 99, 20]);
+    }
+
+    #[test]
+    fn generate_mm_routing_hash_matches_normalized_vllm_worker_event() {
+        let mm_identifier = "1234567890abcdef".repeat(2);
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [10, 99, 99, 20],
+            "sampling_params": {},
+            "features": {
+                "mm_hashes": {"image": [mm_identifier.clone()]},
+                "mm_placeholders": {"image": [{"offset": 1, "length": 2}]}
+            }
+        }))
+        .expect("deserialize request");
+        let routing = generate_mm_routing_info(&request, 4)
+            .expect("valid MM routing metadata")
+            .expect("MM routing projection");
+        let request_hashes = dynamo_kv_router::protocols::compute_block_hash_for_seq(
+            &routing.routing_token_ids,
+            4,
+            dynamo_kv_router::protocols::BlockHashOptions::default(),
+        );
+
+        let event_block = dynamo_kv_router::zmq_wire::create_stored_block_from_parts(
+            4,
+            7,
+            &[10, 99, 99, 20],
+            dynamo_kv_router::zmq_wire::StoredBlockOptions {
+                mm_extra_info: Some(dynamo_kv_router::protocols::BlockExtraInfo {
+                    mm_objects: vec![dynamo_kv_router::protocols::BlockMmObjectInfo {
+                        mm_hash: dynamo_kv_router::protocols::hash_mm_identifier(&mm_identifier)
+                            .expect("non-empty identifier"),
+                        offsets: vec![(1, 3)],
+                    }],
+                }),
+                image_token_id: Some(99),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(request_hashes[0], event_block.tokens_hash);
+    }
+
+    #[test]
+    fn sparse_mm_embed_mask_matches_normalized_vllm_worker_event() {
+        let mm_identifier = "opaque-renderer-image-0";
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [10, 99, 42, 99, 20],
+            "sampling_params": {},
+            "features": {
+                "mm_hashes": {"image": [mm_identifier]},
+                "mm_placeholders": {"image": [{
+                    "offset": 1,
+                    "length": 3,
+                    "is_embed": [true, false, true]
+                }]}
+            }
+        }))
+        .expect("deserialize request");
+        let routing = generate_mm_routing_info(&request, 5)
+            .expect("valid sparse MM routing metadata")
+            .expect("MM routing projection");
+        let mm_hash = dynamo_kv_router::protocols::hash_mm_identifier(mm_identifier)
+            .expect("non-empty identifier");
+        let pad = dynamo_kv_router::protocols::pad_value_for_mm_hash(mm_hash);
+        assert_eq!(routing.routing_token_ids, vec![10, pad, 42, pad, 20]);
+
+        let request_hash = dynamo_kv_router::protocols::compute_block_hash_for_seq(
+            &routing.routing_token_ids,
+            5,
+            dynamo_kv_router::protocols::BlockHashOptions::default(),
+        )[0];
+        let event_block = dynamo_kv_router::zmq_wire::create_stored_block_from_parts(
+            5,
+            7,
+            &[10, 99, 42, 99, 20],
+            dynamo_kv_router::zmq_wire::StoredBlockOptions {
+                mm_extra_info: Some(dynamo_kv_router::protocols::BlockExtraInfo {
+                    mm_objects: vec![dynamo_kv_router::protocols::BlockMmObjectInfo {
+                        mm_hash,
+                        offsets: vec![],
+                    }],
+                }),
+                image_token_id: Some(99),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(request_hash, event_block.tokens_hash);
+    }
+
+    #[test]
+    fn mixed_placeholder_span_without_embed_mask_disables_exact_routing() {
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [10, 99, 42, 99, 20],
+            "sampling_params": {},
+            "features": {
+                "mm_hashes": {"image": ["image-0"]},
+                "mm_placeholders": {"image": [{"offset": 1, "length": 3}]}
+            }
+        }))
+        .expect("deserialize request");
+
+        assert_eq!(
+            generate_mm_routing_info(&request, 5)
+                .expect_err("an omitted sparse mask must not over-substitute tokens"),
+            "mixed multimodal placeholder spans require is_embed"
+        );
+    }
+
+    #[test]
+    fn sparse_multi_object_block_disables_inexact_projection() {
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [10, 99, 42, 99, 20, 99, 30],
+            "sampling_params": {},
+            "features": {
+                "mm_hashes": {"image": ["image-a", "image-b"]},
+                "mm_placeholders": {"image": [
+                    {
+                        "offset": 1,
+                        "length": 3,
+                        "is_embed": [true, false, true]
+                    },
+                    {"offset": 5, "length": 1}
+                ]}
+            }
+        }))
+        .expect("deserialize request");
+
+        assert_eq!(
+            generate_mm_routing_info(&request, 7)
+                .expect_err("worker run-order mapping would assign image B to image A"),
+            "sparse multimodal layout cannot be normalized exactly by worker events"
+        );
+    }
+
+    #[test]
+    fn invalid_multimodal_routing_metadata_falls_back_without_dropping_features() {
+        let raw = serde_json::json!({
+            "token_ids": [1, 2, 3, 4],
+            "sampling_params": {},
+            "features": {
+                "mm_hashes": {"image": [""]},
+                "mm_placeholders": {"image": [{"offset": 1, "length": 2}]},
+                "kwargs_data": {"image": ["opaque"]}
+            }
+        });
+        let request: GenerateRequest =
+            serde_json::from_value(raw.clone()).expect("deserialize request");
+
+        let preprocessed = preprocessed_from_generate(
+            request,
+            "test-model",
+            None,
+            "resolved-request",
+            4,
+            true,
+            None,
+        )
+        .expect("malformed routing metadata must not reject execution");
+
+        assert!(preprocessed.mm_routing_info.is_none());
+        assert_eq!(preprocessed.token_ids, vec![1, 2, 3, 4]);
+        let envelope = preprocessed
+            .extra_args
+            .as_ref()
+            .and_then(|extra| extra.get("vllm_tito"))
+            .expect("vllm_tito envelope");
+        assert_eq!(envelope["features"], raw["features"]);
+    }
+
+    #[test]
+    fn default_lora_mode_composes_mm_identity_with_lora_hashing() {
+        let mm_identifier = "opaque-renderer-image-0";
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [10, 99, 99, 20],
+            "sampling_params": {},
+            "features": {
+                "mm_hashes": {"image": [mm_identifier]},
+                "mm_placeholders": {"image": [{"offset": 1, "length": 2}]}
+            }
+        }))
+        .expect("deserialize request");
+
+        let preprocessed = preprocessed_from_generate(
+            request,
+            "adapter-a",
+            None,
+            "resolved-request",
+            4,
+            true,
+            Some("adapter-a".to_string()),
+        )
+        .expect("build request");
+
+        let routing_tokens = &preprocessed
+            .mm_routing_info
+            .as_ref()
+            .expect("default language-only LoRA keeps MM identifiers stable")
+            .routing_token_ids;
+        assert_eq!(
+            preprocessed
+                .routing
+                .as_ref()
+                .and_then(|routing| routing.lora_name.as_deref()),
+            Some("adapter-a")
+        );
+
+        let request_hash = dynamo_kv_router::protocols::compute_block_hash_for_seq(
+            routing_tokens,
+            4,
+            dynamo_kv_router::protocols::BlockHashOptions {
+                lora_name: Some("adapter-a"),
+                ..Default::default()
+            },
+        )[0];
+        let event_block = dynamo_kv_router::zmq_wire::create_stored_block_from_parts(
+            4,
+            7,
+            &[10, 99, 99, 20],
+            dynamo_kv_router::zmq_wire::StoredBlockOptions {
+                lora_name: Some("adapter-a"),
+                mm_extra_info: Some(dynamo_kv_router::protocols::BlockExtraInfo {
+                    mm_objects: vec![dynamo_kv_router::protocols::BlockMmObjectInfo {
+                        mm_hash: dynamo_kv_router::protocols::hash_mm_identifier(mm_identifier)
+                            .expect("non-empty identifier"),
+                        offsets: vec![(1, 3)],
+                    }],
+                }),
+                image_token_id: Some(99),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(request_hash, event_block.tokens_hash);
+    }
+
+    #[test]
+    fn overlapping_multimodal_placeholders_disable_mm_routing() {
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [9, 9, 9, 4],
+            "sampling_params": {},
+            "features": {
+                "mm_hashes": {"image": ["a".repeat(64), "b".repeat(64)]},
+                "mm_placeholders": {"image": [
+                    {"offset": 0, "length": 2},
+                    {"offset": 1, "length": 2}
+                ]}
+            }
+        }))
+        .expect("deserialize request");
+
+        assert_eq!(
+            generate_mm_routing_info(&request, 4).expect_err("overlap must disable MM routing"),
+            "multimodal placeholder ranges must not overlap"
+        );
+    }
+
+    #[test]
+    fn non_image_modality_disables_exact_mm_projection() {
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [1, 2, 3, 4],
+            "sampling_params": {},
+            "features": {
+                "mm_hashes": {"audio": ["audio-0"]},
+                "mm_placeholders": {"audio": [{"offset": 1, "length": 2}]}
+            }
+        }))
+        .expect("deserialize request");
+
+        assert_eq!(
+            generate_mm_routing_info(&request, 4)
+                .expect_err("non-image modality must disable exact projection"),
+            "exact /generate MM routing currently supports image placeholders only"
+        );
+    }
+
+    #[test]
+    fn image_hashes_and_placeholders_must_be_paired() {
+        for features in [
+            serde_json::json!({
+                "mm_hashes": {"image": ["image-0"]},
+                "mm_placeholders": {}
+            }),
+            serde_json::json!({
+                "mm_hashes": {},
+                "mm_placeholders": {"image": [{"offset": 1, "length": 2}]}
+            }),
+        ] {
+            let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+                "token_ids": [1, 2, 3, 4],
+                "sampling_params": {},
+                "features": features
+            }))
+            .expect("deserialize request");
+
+            assert_eq!(
+                generate_mm_routing_info(&request, 4)
+                    .expect_err("one-sided image metadata must disable exact routing"),
+                "image hashes and placeholders must both be present"
+            );
+        }
+    }
+
+    #[test]
+    fn image_hashes_and_placeholders_must_have_equal_lengths() {
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [1, 2, 3, 4],
+            "sampling_params": {},
+            "features": {
+                "mm_hashes": {"image": ["image-0", "image-1"]},
+                "mm_placeholders": {"image": [{"offset": 1, "length": 2}]}
+            }
+        }))
+        .expect("deserialize request");
+
+        assert_eq!(
+            generate_mm_routing_info(&request, 4)
+                .expect_err("item count mismatch must disable exact routing"),
+            "image hashes and placeholders must have equal lengths"
+        );
     }
 
     #[test]
@@ -904,9 +1862,16 @@ mod tests {
         }))
         .expect("deserialize request");
 
-        let preprocessed =
-            preprocessed_from_generate(request, "test-model", None, "resolved-request")
-                .expect("build request");
+        let preprocessed = preprocessed_from_generate(
+            request,
+            "test-model",
+            None,
+            "resolved-request",
+            16,
+            false,
+            None,
+        )
+        .expect("build request");
         assert_eq!(preprocessed.stop_conditions.max_tokens, None);
         assert_eq!(preprocessed.stop_conditions.min_tokens, None);
         assert_eq!(
@@ -927,9 +1892,16 @@ mod tests {
         }))
         .expect("deserialize request");
 
-        let preprocessed =
-            preprocessed_from_generate(request, "test-model", None, "resolved-request")
-                .expect("build request");
+        let preprocessed = preprocessed_from_generate(
+            request,
+            "test-model",
+            None,
+            "resolved-request",
+            16,
+            false,
+            None,
+        )
+        .expect("build request");
         assert_eq!(preprocessed.stop_conditions.min_tokens, Some(0));
     }
 
@@ -963,12 +1935,28 @@ mod tests {
             tracing_subscriber::registry().with(RequestIdCaptureLayer(captured_request_id.clone())),
         );
 
-        let _dispatch_span = generate_dispatch_span("header-request");
+        let dispatch_span = generate_dispatch_span("header-request", "test-model");
 
         assert_eq!(
             captured_request_id.lock().unwrap().as_deref(),
             Some("header-request")
         );
+        let fields = dispatch_span
+            .metadata()
+            .expect("dispatch span metadata")
+            .fields();
+        for field in [
+            "request_id",
+            "model",
+            "input_tokens",
+            "output_tokens",
+            "ttft_ms",
+            "avg_itl_ms",
+            "prefill_worker_id",
+            "decode_worker_id",
+        ] {
+            assert!(fields.field(field).is_some(), "missing span field {field}");
+        }
     }
 
     fn dispatch_test_context() -> Context<PreprocessedRequest> {
@@ -984,7 +1972,54 @@ mod tests {
         )
     }
 
-    fn assert_cancelled_dispatch_metrics(state: &service_v2::State) {
+    fn metric_value<'a>(
+        families: &'a [prometheus::proto::MetricFamily],
+        name: &str,
+        labels: &[(&str, &str)],
+    ) -> &'a prometheus::proto::Metric {
+        let family = families
+            .iter()
+            .find(|family| family.name() == name)
+            .unwrap_or_else(|| panic!("missing metric family {name}"));
+        family
+            .get_metric()
+            .iter()
+            .find(|metric| {
+                labels.iter().all(|(expected_name, expected_value)| {
+                    metric.get_label().iter().any(|label| {
+                        label.name() == *expected_name && label.value() == *expected_value
+                    })
+                })
+            })
+            .unwrap_or_else(|| panic!("missing {name} series with labels {labels:?}"))
+    }
+
+    fn histogram_sample_count_or_zero(
+        families: &[prometheus::proto::MetricFamily],
+        name: &str,
+        labels: &[(&str, &str)],
+    ) -> u64 {
+        families
+            .iter()
+            .find(|family| family.name() == name)
+            .and_then(|family| {
+                family.get_metric().iter().find(|metric| {
+                    labels.iter().all(|(expected_name, expected_value)| {
+                        metric.get_label().iter().any(|label| {
+                            label.name() == *expected_name && label.value() == *expected_value
+                        })
+                    })
+                })
+            })
+            .map(|metric| metric.get_histogram().get_sample_count())
+            .unwrap_or(0)
+    }
+
+    fn assert_cancelled_dispatch_metrics(
+        state: &service_v2::State,
+        expected_ttft_samples: u64,
+        expected_osl_samples: u64,
+    ) {
         let metric_model = state.manager().metric_model_for("test-model");
         let metrics = state.metrics_clone();
         assert_eq!(metrics.get_inflight_count(metric_model), 0);
@@ -997,6 +2032,33 @@ mod tests {
                 &ErrorType::Cancelled,
             ),
             1
+        );
+
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+        let families = registry.gather();
+        let model_labels = [("model", metric_model)];
+        assert_eq!(
+            metric_value(&families, "dynamo_frontend_queued_requests", &model_labels,)
+                .get_gauge()
+                .value(),
+            0.0
+        );
+        assert_eq!(
+            histogram_sample_count_or_zero(
+                &families,
+                "dynamo_frontend_time_to_first_token_seconds",
+                &model_labels,
+            ),
+            expected_ttft_samples
+        );
+        assert_eq!(
+            histogram_sample_count_or_zero(
+                &families,
+                "dynamo_frontend_output_sequence_tokens",
+                &model_labels,
+            ),
+            expected_osl_samples
         );
     }
 
@@ -1011,7 +2073,7 @@ mod tests {
             .expect("dispatch task panicked");
         assert_eq!(response.status().as_u16(), 499);
         assert!(dropped.load(Ordering::SeqCst));
-        assert_cancelled_dispatch_metrics(state);
+        assert_cancelled_dispatch_metrics(state, 0, 0);
     }
 
     async fn assert_request_kill_interrupts_pending(phase: PendingPhase) {
@@ -1101,11 +2163,15 @@ mod tests {
                 .await;
 
         assert_eq!(response.status().as_u16(), 499);
-        assert_cancelled_dispatch_metrics(state.as_ref());
+        assert_cancelled_dispatch_metrics(state.as_ref(), 0, 0);
     }
 
     #[tokio::test]
     async fn immediate_engine_cancellation_returns_499() {
+        let captured_input_tokens = Arc::new(Mutex::new(None));
+        let subscriber = tracing_subscriber::registry()
+            .with(InputTokensCaptureLayer(captured_input_tokens.clone()));
+        let _guard = tracing::subscriber::set_default(subscriber);
         let engine: crate::types::openai::generate::GenerateStreamingEngine =
             Arc::new(CancelledEngine);
         let service = HttpService::builder().build().unwrap();
@@ -1119,10 +2185,288 @@ mod tests {
             state.clone(),
             GenerateResponseOptions::default(),
         )
+        .instrument(generate_dispatch_span("req-immediate-cancel", "test-model"))
         .await;
 
         assert_eq!(response.status().as_u16(), 499);
-        assert_cancelled_dispatch_metrics(state.as_ref());
+        assert_eq!(*captured_input_tokens.lock().unwrap(), Some(1));
+        assert_cancelled_dispatch_metrics(state.as_ref(), 0, 0);
+    }
+
+    #[tokio::test]
+    async fn request_kill_after_first_token_records_partial_metrics() {
+        let started = Arc::new(Notify::new());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let engine: crate::types::openai::generate::GenerateStreamingEngine =
+            Arc::new(TokenThenPendingEngine {
+                started: started.clone(),
+                dropped: dropped.clone(),
+            });
+        let context = dispatch_test_context();
+        let request_context = context.context();
+        let service = HttpService::builder().build().unwrap();
+        let state = service.state_clone();
+        let task = tokio::spawn(generate_dispatch(
+            engine,
+            context,
+            "req-token-then-pending".to_string(),
+            "test-model".to_string(),
+            state.clone(),
+            GenerateResponseOptions::default(),
+        ));
+
+        started.notified().await;
+        request_context.kill();
+
+        let response = tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("dispatch did not stop promptly after request kill")
+            .expect("dispatch task panicked");
+        assert_eq!(response.status().as_u16(), 499);
+        assert!(dropped.load(Ordering::SeqCst));
+        assert_cancelled_dispatch_metrics(state.as_ref(), 1, 1);
+    }
+
+    #[tokio::test]
+    async fn zero_token_success_records_known_input_tokens_without_output_metrics() {
+        let captured_input_tokens = Arc::new(Mutex::new(None));
+        let subscriber = tracing_subscriber::registry()
+            .with(InputTokensCaptureLayer(captured_input_tokens.clone()));
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let (response, state) = async {
+            let engine: crate::types::openai::generate::GenerateStreamingEngine =
+                Arc::new(TerminalEngine(crate::protocols::common::FinishReason::Stop));
+            let service = HttpService::builder().build().unwrap();
+            let state = service.state_clone();
+            let response = generate_dispatch(
+                engine,
+                dispatch_test_context(),
+                "req-zero-token".to_string(),
+                "test-model".to_string(),
+                state.clone(),
+                GenerateResponseOptions::default(),
+            )
+            .instrument(generate_dispatch_span("req-zero-token", "test-model"))
+            .await;
+            (response, state)
+        }
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(*captured_input_tokens.lock().unwrap(), Some(1));
+        let metric_model = state.manager().metric_model_for("test-model");
+        assert_eq!(
+            state.metrics_clone().get_request_counter(
+                metric_model,
+                &Endpoint::Generate,
+                &RequestType::Unary,
+                &Status::Success,
+                &ErrorType::None,
+            ),
+            1
+        );
+
+        let registry = prometheus::Registry::new();
+        state.metrics_clone().register(&registry).unwrap();
+        let families = registry.gather();
+        let model_labels = [("model", metric_model)];
+        assert_eq!(
+            metric_value(&families, "dynamo_frontend_queued_requests", &model_labels,)
+                .get_gauge()
+                .value(),
+            0.0
+        );
+        assert_eq!(
+            histogram_sample_count_or_zero(
+                &families,
+                "dynamo_frontend_time_to_first_token_seconds",
+                &model_labels,
+            ),
+            0
+        );
+        assert_eq!(
+            histogram_sample_count_or_zero(
+                &families,
+                "dynamo_frontend_output_sequence_tokens",
+                &model_labels,
+            ),
+            0
+        );
+        assert_eq!(
+            histogram_sample_count_or_zero(
+                &families,
+                "dynamo_frontend_input_sequence_tokens",
+                &model_labels,
+            ),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_generate_populates_frontend_metrics() {
+        const MODEL: &str = "generate-metric-test-model";
+        const WORKER_ID: &str = "987654321";
+        const DP_RANK: &str = "3";
+
+        let tracker = Arc::new(RequestTracker::new());
+        tracker.record_isl(3, None);
+        tracker.record_worker(
+            WORKER_ID.parse().unwrap(),
+            Some(DP_RANK.parse().unwrap()),
+            crate::discovery::WORKER_TYPE_DECODE,
+        );
+        let context = Context::new(
+            PreprocessedRequest::builder()
+                .model(MODEL.to_string())
+                .token_ids(vec![1, 2, 3])
+                .stop_conditions(Default::default())
+                .sampling_options(Default::default())
+                .output_options(Default::default())
+                .tracker(Some(tracker))
+                .build()
+                .expect("build metric test request"),
+        );
+        let engine: crate::types::openai::generate::GenerateStreamingEngine =
+            Arc::new(MetricEngine);
+        let service = HttpService::builder().build().unwrap();
+        let state = service.state_clone();
+        let metric_model = state.manager().metric_model_for(MODEL).to_string();
+        let registry = prometheus::Registry::new();
+        state.metrics_clone().register(&registry).unwrap();
+
+        let response = generate_dispatch(
+            engine,
+            context,
+            "req-generate-metrics".to_string(),
+            MODEL.to_string(),
+            state.clone(),
+            GenerateResponseOptions::default(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(state.metrics_clone().get_inflight_count(&metric_model), 0);
+        assert_eq!(
+            state.metrics_clone().get_request_counter(
+                &metric_model,
+                &Endpoint::Generate,
+                &RequestType::Unary,
+                &Status::Success,
+                &ErrorType::None,
+            ),
+            1
+        );
+
+        let families = registry.gather();
+        let model_labels = [("model", metric_model.as_str())];
+        assert_eq!(
+            metric_value(
+                &families,
+                "dynamo_frontend_requests_started_total",
+                &[("model", metric_model.as_str()), ("endpoint", "generate")],
+            )
+            .get_counter()
+            .value(),
+            1.0
+        );
+        assert_eq!(
+            metric_value(&families, "dynamo_frontend_active_requests", &model_labels)
+                .get_gauge()
+                .value(),
+            0.0
+        );
+        assert_eq!(
+            metric_value(&families, "dynamo_frontend_queued_requests", &model_labels)
+                .get_gauge()
+                .value(),
+            0.0
+        );
+        assert_eq!(
+            metric_value(
+                &families,
+                "dynamo_frontend_request_duration_seconds",
+                &model_labels,
+            )
+            .get_histogram()
+            .get_sample_count(),
+            1
+        );
+        assert_eq!(
+            metric_value(
+                &families,
+                "dynamo_frontend_input_sequence_tokens",
+                &model_labels,
+            )
+            .get_histogram()
+            .get_sample_sum(),
+            3.0
+        );
+        assert_eq!(
+            metric_value(
+                &families,
+                "dynamo_frontend_output_sequence_tokens",
+                &model_labels,
+            )
+            .get_histogram()
+            .get_sample_sum(),
+            2.0
+        );
+        assert_eq!(
+            metric_value(
+                &families,
+                "dynamo_frontend_output_tokens_total",
+                &model_labels,
+            )
+            .get_counter()
+            .value(),
+            2.0
+        );
+        assert_eq!(
+            metric_value(
+                &families,
+                "dynamo_frontend_time_to_first_token_seconds",
+                &model_labels,
+            )
+            .get_histogram()
+            .get_sample_count(),
+            1
+        );
+        assert_eq!(
+            metric_value(
+                &families,
+                "dynamo_frontend_inter_token_latency_seconds",
+                &model_labels,
+            )
+            .get_histogram()
+            .get_sample_count(),
+            1
+        );
+        assert_eq!(
+            metric_value(&families, "dynamo_frontend_cached_tokens", &model_labels,)
+                .get_histogram()
+                .get_sample_sum(),
+            2.0
+        );
+
+        let worker_labels = [WORKER_ID, DP_RANK, crate::discovery::WORKER_TYPE_DECODE];
+        assert_eq!(
+            crate::http::service::metrics::WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE
+                .with_label_values(&worker_labels)
+                .get(),
+            3
+        );
+        assert!(
+            crate::http::service::metrics::WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE
+                .with_label_values(&worker_labels)
+                .get()
+                > 0.0
+        );
+        assert!(
+            crate::http::service::metrics::WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE
+                .with_label_values(&worker_labels)
+                .get()
+                > 0.0
+        );
     }
 
     #[test]
@@ -1134,9 +2478,16 @@ mod tests {
         }))
         .expect("deserialize request");
 
-        let preprocessed =
-            preprocessed_from_generate(request, "test-model", Some(3), "resolved-request")
-                .expect("build request");
+        let preprocessed = preprocessed_from_generate(
+            request,
+            "test-model",
+            Some(3),
+            "resolved-request",
+            16,
+            false,
+            None,
+        )
+        .expect("build request");
         let routing = preprocessed.routing.as_ref().expect("routing hints");
 
         assert_eq!(routing.dp_rank, Some(3));

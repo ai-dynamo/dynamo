@@ -24,6 +24,7 @@ class ZmqSource:
     endpoint: str
     topic: str = ""
     dp_rank: int = 0
+    image_token_id: Optional[int] = None
 
 
 @dataclass(frozen=True)
