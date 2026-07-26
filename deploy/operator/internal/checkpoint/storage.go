@@ -23,6 +23,10 @@ import (
 
 func StorageFromConfig(config configv1alpha1.CheckpointStorageConfiguration) (snapshotprotocol.Storage, bool, error) {
 	storageType := strings.TrimSpace(config.Type)
+	if storageType == configv1alpha1.CheckpointStorageTypeS3 {
+		return s3StorageFromConfig(config.S3)
+	}
+
 	pvcName := strings.TrimSpace(config.PVC.PVCName)
 	basePath := strings.TrimSpace(config.PVC.BasePath)
 	size := strings.TrimSpace(config.PVC.Size)
@@ -34,22 +38,22 @@ func StorageFromConfig(config configv1alpha1.CheckpointStorageConfiguration) (sn
 	}
 	if storageType != "" && storageType != snapshotprotocol.StorageTypePVC && !hasPVCConfig {
 		switch storageType {
-		case configv1alpha1.CheckpointStorageTypeS3, configv1alpha1.CheckpointStorageTypeOCI:
+		case configv1alpha1.CheckpointStorageTypeOCI:
 			return snapshotprotocol.Storage{}, false, nil
 		default:
-			return snapshotprotocol.Storage{}, false, fmt.Errorf("checkpoint.storage.type %q is not supported; only pvc is implemented today", storageType)
+			return snapshotprotocol.Storage{}, false, fmt.Errorf("checkpoint.storage.type %q is not supported; expected %q or %q", storageType, snapshotprotocol.StorageTypePVC, snapshotprotocol.StorageTypeS3)
 		}
 	}
 	if storageType == "" {
 		storageType = snapshotprotocol.StorageTypePVC
 	}
 	if storageType != snapshotprotocol.StorageTypePVC {
-		return snapshotprotocol.Storage{}, false, fmt.Errorf("checkpoint storage type %q is not supported; only pvc is implemented today", storageType)
+		return snapshotprotocol.Storage{}, false, fmt.Errorf("checkpoint storage type %q is not supported; expected %q or %q", storageType, snapshotprotocol.StorageTypePVC, snapshotprotocol.StorageTypeS3)
 	}
 	if pvcName == "" || basePath == "" {
 		return snapshotprotocol.Storage{}, false, fmt.Errorf("checkpoint.storage.pvc.pvcName and checkpoint.storage.pvc.basePath are required when checkpoint storage is configured")
 	}
-	basePath, err := normalizeStorageBasePath(basePath)
+	basePath, err := normalizeStorageBasePath(basePath, "checkpoint.storage.pvc.basePath")
 	if err != nil {
 		return snapshotprotocol.Storage{}, false, err
 	}
@@ -65,6 +69,29 @@ func StorageFromConfig(config configv1alpha1.CheckpointStorageConfiguration) (sn
 	}, true, nil
 }
 
+// s3StorageFromConfig resolves an S3 checkpoint storage config.
+// The snapshot-agent holds the authoritative S3 connection and credentials; the
+// operator only conveys the agent-local staging path and the s3 storage type to
+// workload pods (no PVC volume is mounted for s3).
+func s3StorageFromConfig(s3 configv1alpha1.CheckpointS3Config) (snapshotprotocol.Storage, bool, error) {
+	basePath := strings.TrimSpace(s3.BasePath)
+	if basePath == "" {
+		return snapshotprotocol.Storage{}, false, fmt.Errorf("checkpoint.storage.s3.basePath is required when checkpoint.storage.type is %q", configv1alpha1.CheckpointStorageTypeS3)
+	}
+	basePath, err := normalizeStorageBasePath(basePath, "checkpoint.storage.s3.basePath")
+	if err != nil {
+		return snapshotprotocol.Storage{}, false, err
+	}
+	return snapshotprotocol.Storage{
+		Type:             snapshotprotocol.StorageTypeS3,
+		BasePath:         basePath,
+		StagingSizeLimit: strings.TrimSpace(s3.Staging.SizeLimit),
+		StagingMedium:    strings.TrimSpace(s3.Staging.Medium),
+		StagingPVCName:   strings.TrimSpace(s3.Staging.PVCName),
+		StagingHostPath:  strings.TrimSpace(s3.Staging.HostPath),
+	}, true, nil
+}
+
 func EnsureStoragePVC(
 	ctx context.Context,
 	kubeClient ctrlclient.Client,
@@ -76,6 +103,11 @@ func EnsureStoragePVC(
 		return err
 	}
 	if !ok {
+		return nil
+	}
+	// Object-store (s3) backends need no PVC: the snapshot-agent stages
+	// artifacts on its own filesystem and uploads them to the bucket.
+	if storage.Type != snapshotprotocol.StorageTypePVC {
 		return nil
 	}
 	if kubeClient == nil {
@@ -157,13 +189,13 @@ func buildStoragePVC(namespace string, pvcConfig configv1alpha1.CheckpointPVCCon
 	}, nil
 }
 
-func normalizeStorageBasePath(basePath string) (string, error) {
+func normalizeStorageBasePath(basePath, field string) (string, error) {
 	basePath = strings.TrimSpace(basePath)
 	if basePath == "" {
-		return "", fmt.Errorf("checkpoint.storage.pvc.basePath is required when checkpoint storage is configured")
+		return "", fmt.Errorf("%s is required when checkpoint storage is configured", field)
 	}
 	if !strings.HasPrefix(basePath, "/") {
-		return "", fmt.Errorf("checkpoint.storage.pvc.basePath %q must be absolute", basePath)
+		return "", fmt.Errorf("%s %q must be absolute", field, basePath)
 	}
 	basePath = path.Clean(basePath)
 	basePath = strings.TrimRight(basePath, "/")

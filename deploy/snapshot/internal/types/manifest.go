@@ -12,7 +12,9 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const manifestFilename = "manifest.yaml"
+// ManifestFilename is the checkpoint manifest file name. Remote artifact stores
+// upload it last so its presence marks a complete, restorable artifact.
+const ManifestFilename = "manifest.yaml"
 
 // CheckpointManifest is saved as manifest.yaml at checkpoint time and loaded at restore.
 type CheckpointManifest struct {
@@ -155,7 +157,7 @@ func WriteManifest(checkpointDir string, data *CheckpointManifest) error {
 		return fmt.Errorf("failed to marshal checkpoint manifest: %w", err)
 	}
 
-	manifestPath := filepath.Join(checkpointDir, manifestFilename)
+	manifestPath := filepath.Join(checkpointDir, ManifestFilename)
 	if err := os.WriteFile(manifestPath, content, 0600); err != nil {
 		return fmt.Errorf("failed to write checkpoint manifest: %w", err)
 	}
@@ -165,7 +167,7 @@ func WriteManifest(checkpointDir string, data *CheckpointManifest) error {
 
 // ReadManifest reads checkpoint manifest from a checkpoint directory.
 func ReadManifest(checkpointDir string) (*CheckpointManifest, error) {
-	manifestPath := filepath.Join(checkpointDir, manifestFilename)
+	manifestPath := filepath.Join(checkpointDir, ManifestFilename)
 
 	content, err := os.ReadFile(manifestPath)
 	if err != nil {

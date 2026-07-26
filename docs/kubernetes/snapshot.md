@@ -29,9 +29,10 @@ For more background on the snapshot architecture and startup improvements, see
 - NVIDIA driver 580.xx or newer on the target GPU nodes (590.xx or newer if testing multi-GPU snapshots)
 - vLLM or SGLang backend today; TensorRT-LLM is supported only for the
   experimental single-GPU aggregated text worker path.
-- Checkpoint storage. `ReadWriteMany` is the safest default for cross-node or
-  concurrent multi-node access, but `podMount` mode can also use suitable
-  `ReadWriteOnce` storage for sequential checkpoint/restore workflows.
+- Checkpoint storage. A PVC (`ReadWriteMany` is the safest default for
+  cross-node or concurrent access; `podMount` mode can also use suitable
+  `ReadWriteOnce` storage for sequential workflows), or an S3-compatible object
+  store (no shared PVC required — see [S3 object storage](#s3-object-storage-alternative-to-a-pvc)).
 - **CRI-O / OpenShift:** set `runtime.type=crio` on the snapshot chart (and `openshift.enabled=true` on OpenShift). Defaults are for containerd; see the chart README for sockets and Helm flags.
 
 ## Quick Start via `DynamoCheckpoint` CR
@@ -188,6 +189,60 @@ kubectl rollout status daemonset/snapshot-agent -n dynamo-system
 kubectl get pods -n dynamo-system -l app.kubernetes.io/component=snapshot-agent -o wide
 kubectl get pvc snapshot-pvc -n ${NAMESPACE}
 ```
+
+### S3 object storage (alternative to a PVC)
+
+Instead of a shared PVC, checkpoint artifacts can be stored in any S3-compatible
+object store. The snapshot-agent stages each checkpoint on its own filesystem,
+uploads the artifact tree to the bucket, and downloads it back before restore —
+so no `ReadWriteMany` PVC is required. This mode uses `storage.accessMode=agentMount`
+and an existing bucket.
+
+Configure the agent (snapshot chart) with the S3 endpoint, bucket, and a
+credentials Secret, and the operator with a matching `basePath`:
+
+```bash
+kubectl -n ${NAMESPACE} create secret generic snapshot-s3-credentials \
+  --from-literal=AWS_ACCESS_KEY_ID=... \
+  --from-literal=AWS_SECRET_ACCESS_KEY=...
+
+helm upgrade --install snapshot ./deploy/helm/charts/snapshot \
+  --namespace ${NAMESPACE} --create-namespace \
+  --set storage.type=s3 \
+  --set storage.s3.endpoint=s3.example.com \
+  --set storage.s3.bucket=checkpoints \
+  --set storage.s3.credentialsSecretRef=snapshot-s3-credentials
+```
+
+```yaml
+dynamo-operator:
+  checkpoint:
+    enabled: true
+    storage:
+      type: s3
+      s3:
+        # Must match snapshot.storage.s3.basePath (the agent-local staging dir).
+        basePath: /var/lib/dynamo/checkpoints
+```
+
+Notes:
+
+- Credentials live only on the agent (projected from the Secret via `envFrom`),
+  never in a ConfigMap or pod annotation. The standard `AWS_*` names are honored.
+- Artifacts are keyed `s3://<bucket>/<prefix>/<checkpointId>/versions/<n>/...`.
+- Buckets are addressed virtual-hosted (DNS) style by default; set
+  `storage.s3.forcePathStyle=true` for endpoints without bucket DNS support
+  (e.g. an IP/`localhost` endpoint).
+- Staging volumes hold a full checkpoint artifact and default to an `emptyDir`
+  backed by node ephemeral storage (the agent stages at `basePath` during
+  checkpoint; restore pods get a matching volume the agent fills before CRIU
+  restore). Size them for your largest checkpoint via `storage.s3.staging.sizeLimit`
+  (chart, agent side) and `checkpoint.storage.s3.staging.sizeLimit` (operator,
+  restore side). For artifacts that exceed node ephemeral storage, override with
+  `staging.hostPath` (e.g. local NVMe) or `staging.pvcName`.
+
+Ready-to-edit manifests are in
+[`deploy/snapshot/examples/s3/`](../../deploy/snapshot/examples/s3/).
 
 ### 4. Create a standalone `DynamoCheckpoint`
 

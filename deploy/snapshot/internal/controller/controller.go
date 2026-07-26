@@ -35,6 +35,7 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/executor"
 	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/runtime"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/store"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 )
@@ -53,6 +54,10 @@ type NodeController struct {
 	log          logr.Logger
 	holderID     string
 	checkpointFn func(ctx context.Context, params CheckpointParams) error
+	// store mirrors checkpoint artifacts to/from an S3 object store when
+	// storage type is "s3". It is nil for PVC storage, in which case the
+	// agent-local staging directory is the durable artifact location.
+	store store.ArtifactStore
 
 	inFlight   map[string]struct{}
 	inFlightMu sync.Mutex
@@ -112,12 +117,39 @@ func NewNodeController(
 		return nil, fmt.Errorf("failed to create dynamic client: %w", err)
 	}
 
+	artifactStore, err := store.New(store.Config{
+		Backend: cfg.Storage.Type,
+		S3: store.S3Config{
+			Endpoint:        cfg.Storage.S3.Endpoint,
+			Bucket:          cfg.Storage.S3.Bucket,
+			Region:          cfg.Storage.S3.Region,
+			AccessKeyID:     cfg.Storage.S3.AccessKeyID,
+			SecretAccessKey: cfg.Storage.S3.SecretAccessKey,
+			SessionToken:    cfg.Storage.S3.SessionToken,
+			UseSSL:          cfg.Storage.S3.UseSSL,
+			ForcePathStyle:  cfg.Storage.S3.ForcePathStyle,
+			Concurrency:     cfg.Storage.S3.Concurrency,
+			PartSize:        cfg.Storage.S3.PartSize,
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create checkpoint artifact store: %w", err)
+	}
+	if artifactStore != nil {
+		log.Info("Checkpoint artifact object store enabled",
+			"backend", artifactStore.Backend(),
+			"bucket", cfg.Storage.S3.Bucket,
+			"endpoint", cfg.Storage.S3.Endpoint,
+		)
+	}
+
 	w := &NodeController{
 		config:    cfg,
 		clientset: clientset,
 		client:    typedClient,
 		dynClient: dynClient,
 		runtime:   rt,
+		store:     artifactStore,
 		log:       log,
 		holderID:  "snapshot-agent/" + uuid.NewString(),
 		inFlight:  make(map[string]struct{}),
@@ -461,8 +493,9 @@ func (w *NodeController) startRestoreForContainer(
 		return
 	}
 
+	reachIntoPod := w.restoreReachesIntoPod()
 	placeholderPID := 0
-	if strings.TrimSpace(w.config.Storage.AccessMode) == types.StorageAccessModePodMount {
+	if reachIntoPod {
 		resolvedPID, _, err := w.runtime.ResolveContainer(ctx, containerID)
 		if err != nil {
 			w.log.Error(err, "Failed to resolve restore standby container", "pod", podKey, "container", containerName)
@@ -471,16 +504,16 @@ func (w *NodeController) startRestoreForContainer(
 		placeholderPID = resolvedPID
 	}
 
-	checkpointLocation, err := w.checkpointLocationsFromPod(pod, checkpointID, placeholderPID)
+	checkpointLocation, err := w.checkpointLocationsFromPod(pod, checkpointID, placeholderPID, reachIntoPod)
 	if err != nil {
 		w.log.Error(err, "Restore pod is missing storage metadata", "pod", podKey, "checkpoint_id", checkpointID)
 		return
 	}
-	if err := w.validatePodMountContainerPID(ctx, containerID, placeholderPID); err != nil {
+	if err := w.validatePodMountContainerPID(ctx, containerID, placeholderPID, reachIntoPod); err != nil {
 		w.log.Error(err, "Restore placeholder container changed before storage access", "pod", podKey, "container", containerName)
 		return
 	}
-	checkpointReady, err := w.restoreCheckpointReady(w.log, podKey, checkpointID, checkpointLocation.HostPath)
+	checkpointReady, err := w.restoreCheckpointReady(ctx, w.log, pod, podKey, checkpointID, checkpointLocation.HostPath)
 	if err != nil {
 		w.log.Error(err, "Restore checkpoint path is invalid", "pod", podKey, "checkpoint_id", checkpointID, "checkpoint_location", checkpointLocation.HostPath)
 		return
@@ -558,7 +591,7 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 	if err != nil {
 		return fmt.Errorf("refresh restore checkpoint location: %w", err)
 	}
-	checkpointReady, err := w.restoreCheckpointReady(log, podKey, checkpointID, checkpointLocation.HostPath)
+	checkpointReady, err := w.restoreCheckpointReady(restoreCtx, log, pod, podKey, checkpointID, checkpointLocation.HostPath)
 	if err != nil {
 		return fmt.Errorf("validate refreshed checkpoint location: %w", err)
 	}
@@ -568,6 +601,32 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 
 	if err := setRestoreStatus(snapshotprotocol.RestoreStatusInProgress); err != nil {
 		return fmt.Errorf("failed to annotate pod with restore in_progress: %w", err)
+	}
+
+	// Object-store backend: materialize the artifact into the agent-local
+	// staging directory before the executor reads it from the filesystem.
+	if w.store != nil {
+		downloadPrefix := w.objectKeyPrefix(pod, checkpointID)
+		log.Info("Downloading checkpoint artifact from object store",
+			"backend", w.store.Backend(),
+			"key_prefix", downloadPrefix,
+			"dest", checkpointLocation.HostPath,
+		)
+		if err := w.store.Download(restoreCtx, downloadPrefix, checkpointLocation.HostPath); err != nil {
+			log.Error(err, "Failed to download checkpoint artifact from object store")
+			emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "RestoreFailed", fmt.Sprintf("object store download failed: %v", err))
+			if statusErr := setRestoreStatus(snapshotprotocol.RestoreStatusFailed); statusErr != nil {
+				return statusErr
+			}
+			placeholderHostPID, _, pidErr := w.runtime.ResolveContainerByPod(ctx, pod.Name, pod.Namespace, containerName)
+			if pidErr != nil {
+				return fmt.Errorf("artifact download failed and placeholder PID could not be resolved: %w", pidErr)
+			}
+			if killErr := snapshotruntime.SendSignalToPID(log, placeholderHostPID, syscall.SIGKILL, "restore artifact download failed"); killErr != nil {
+				return fmt.Errorf("artifact download failed and placeholder could not be killed: %w", killErr)
+			}
+			return nil
+		}
 	}
 
 	// Run the restore orchestrator (inspect + nsrestore).
@@ -696,7 +755,7 @@ func chooseActiveContent(objs []interface{}) string {
 	return chosen.Name
 }
 
-func (w *NodeController) checkpointLocationsFromPod(pod *corev1.Pod, checkpointID string, hostPID int) (checkpointLocations, error) {
+func (w *NodeController) checkpointLocationsFromPod(pod *corev1.Pod, checkpointID string, hostPID int, reachIntoPod bool) (checkpointLocations, error) {
 	rawBasePath, hasBasePathAnnotation := pod.Annotations[snapshotprotocol.CheckpointStorageBasePathAnnotation]
 	basePath := strings.TrimSpace(rawBasePath)
 	if basePath == "" {
@@ -725,9 +784,9 @@ func (w *NodeController) checkpointLocationsFromPod(pod *corev1.Pod, checkpointI
 	if !filepath.IsAbs(location) || filepath.Clean(location) != location {
 		return checkpointLocations{}, fmt.Errorf("checkpoint location must be an absolute, clean path: %q", location)
 	}
-	if strings.TrimSpace(w.config.Storage.AccessMode) == types.StorageAccessModePodMount {
+	if reachIntoPod {
 		if hostPID <= 0 {
-			return checkpointLocations{}, fmt.Errorf("host PID is required for %s storage access", types.StorageAccessModePodMount)
+			return checkpointLocations{}, fmt.Errorf("host PID is required to reach checkpoint storage through the workload pod")
 		}
 		hostLocation := filepath.Join(
 			snapshotruntime.HostProcPath,
@@ -740,26 +799,57 @@ func (w *NodeController) checkpointLocationsFromPod(pod *corev1.Pod, checkpointI
 	return checkpointLocations{HostPath: location, ContainerPath: location}, nil
 }
 
+// checkpointReachesIntoPod reports whether checkpoint storage is accessed
+// through the workload pod's mount namespace. Only podMount PVC storage is;
+// s3 checkpoints stage on the snapshot-agent's own filesystem.
+func (w *NodeController) checkpointReachesIntoPod() bool {
+	return strings.TrimSpace(w.config.Storage.AccessMode) == types.StorageAccessModePodMount
+}
+
+// restoreReachesIntoPod reports whether restore must reach the checkpoint
+// artifact through the workload pod's mount namespace (/host/proc/<pid>/root):
+// true for podMount PVC storage and for s3, where the restore pod stages the
+// downloaded artifact in a pod-local volume the agent fills via host proc and
+// CRIU restore reads from the container's mount namespace.
+func (w *NodeController) restoreReachesIntoPod() bool {
+	return strings.TrimSpace(w.config.Storage.AccessMode) == types.StorageAccessModePodMount || w.store != nil
+}
+
 func (w *NodeController) refreshRestoreCheckpointLocation(ctx context.Context, pod *corev1.Pod, containerID string, checkpointID string, checkpointLocation checkpointLocations) (checkpointLocations, error) {
-	if strings.TrimSpace(w.config.Storage.AccessMode) != types.StorageAccessModePodMount {
+	if !w.restoreReachesIntoPod() {
 		return checkpointLocation, nil
 	}
 
 	currentHostPID, _, err := w.runtime.ResolveContainer(ctx, containerID)
 	if err != nil {
-		return checkpointLocations{}, fmt.Errorf("re-resolve restore standby container %s before podMount storage access: %w", containerID, err)
+		return checkpointLocations{}, fmt.Errorf("re-resolve restore standby container %s before pod-mount storage access: %w", containerID, err)
 	}
-	refreshedLocation, err := w.checkpointLocationsFromPod(pod, checkpointID, currentHostPID)
+	refreshedLocation, err := w.checkpointLocationsFromPod(pod, checkpointID, currentHostPID, true)
 	if err != nil {
 		return checkpointLocations{}, err
 	}
-	if err := w.validatePodMountContainerPID(ctx, containerID, currentHostPID); err != nil {
+	if err := w.validatePodMountContainerPID(ctx, containerID, currentHostPID, true); err != nil {
 		return checkpointLocations{}, err
 	}
 	return refreshedLocation, nil
 }
 
-func (w *NodeController) restoreCheckpointReady(log logr.Logger, podKey, checkpointID, checkpointLocation string) (bool, error) {
+func (w *NodeController) restoreCheckpointReady(ctx context.Context, log logr.Logger, pod *corev1.Pod, podKey, checkpointID, checkpointLocation string) (bool, error) {
+	// Object-store backend: readiness is the presence of the artifact's
+	// manifest in the store, not a local directory (the artifact is downloaded
+	// lazily in runRestore once readiness is confirmed).
+	if w.store != nil {
+		prefix := w.objectKeyPrefix(pod, checkpointID)
+		ready, err := w.store.Exists(ctx, prefix)
+		if err != nil {
+			return false, fmt.Errorf("check object store artifact %s: %w", prefix, err)
+		}
+		if !ready {
+			log.V(1).Info("Checkpoint artifact not present in object store yet, skipping restore", "pod", podKey, "checkpoint_id", checkpointID, "key_prefix", prefix)
+		}
+		return ready, nil
+	}
+
 	info, err := os.Stat(checkpointLocation)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -774,23 +864,31 @@ func (w *NodeController) restoreCheckpointReady(log logr.Logger, podKey, checkpo
 	return true, nil
 }
 
-func (w *NodeController) validatePodMountContainerPID(ctx context.Context, containerID string, expectedHostPID int) error {
-	if strings.TrimSpace(w.config.Storage.AccessMode) != types.StorageAccessModePodMount {
+// objectKeyPrefix derives the object-store key prefix for a checkpoint artifact
+// from the pod's artifact-version annotation and the agent's configured bucket
+// prefix.
+func (w *NodeController) objectKeyPrefix(pod *corev1.Pod, checkpointID string) string {
+	version := strings.TrimSpace(pod.Annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation])
+	return snapshotprotocol.ObjectKeyPrefix(w.config.Storage.S3.Prefix, checkpointID, version)
+}
+
+func (w *NodeController) validatePodMountContainerPID(ctx context.Context, containerID string, expectedHostPID int, reachIntoPod bool) error {
+	if !reachIntoPod {
 		return nil
 	}
 	if expectedHostPID <= 0 {
-		return fmt.Errorf("host PID is required for %s storage access", types.StorageAccessModePodMount)
+		return fmt.Errorf("host PID is required to reach checkpoint storage through the workload pod")
 	}
 
 	currentHostPID, _, err := w.runtime.ResolveContainer(ctx, containerID)
 	if err != nil {
-		return fmt.Errorf("re-resolve container %s before podMount storage access: %w", containerID, err)
+		return fmt.Errorf("re-resolve container %s before pod-mount storage access: %w", containerID, err)
 	}
 	if currentHostPID != expectedHostPID {
-		return fmt.Errorf("container %s host PID changed from %d to %d before podMount storage access", containerID, expectedHostPID, currentHostPID)
+		return fmt.Errorf("container %s host PID changed from %d to %d before pod-mount storage access", containerID, expectedHostPID, currentHostPID)
 	}
 	if err := snapshotruntime.ValidateProcessState(snapshotruntime.HostProcPath, expectedHostPID); err != nil {
-		return fmt.Errorf("validate host PID %d before podMount storage access: %w", expectedHostPID, err)
+		return fmt.Errorf("validate host PID %d before pod-mount storage access: %w", expectedHostPID, err)
 	}
 	return nil
 }

@@ -185,11 +185,11 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 	if err != nil {
 		return w.setSnapshotContentFailed(ctx, content, "ContainerNotResolved", fmt.Errorf("resolve container %q: %w", containerName[0], err))
 	}
-	loc, err := w.checkpointLocationsFromPod(pod, id, containerPID)
+	loc, err := w.checkpointLocationsFromPod(pod, id, containerPID, w.checkpointReachesIntoPod())
 	if err != nil {
 		return w.setSnapshotContentFailed(ctx, content, "InvalidDestination", err)
 	}
-	if err := w.validatePodMountContainerPID(ctx, containerID, containerPID); err != nil {
+	if err := w.validatePodMountContainerPID(ctx, containerID, containerPID, w.checkpointReachesIntoPod()); err != nil {
 		return w.setSnapshotContentFailed(ctx, content, "ContainerChanged", err)
 	}
 
@@ -446,6 +446,26 @@ func (w *NodeController) executorCheckpoint(ctx context.Context, params Checkpoi
 			return fmt.Errorf("verify checkpoint path %s: %w", params.HostPath, statErr)
 		}
 		return fmt.Errorf("verify checkpoint path %s: not a directory", params.HostPath)
+	}
+
+	// Object-store backend: upload the verified artifact tree before signaling
+	// completion, so restore (which gates on the manifest in the store) never
+	// observes a partial artifact. ctx is the lease-scoped context, so losing
+	// the checkpoint lease cancels the upload. The manifest is uploaded last as
+	// the completion marker.
+	if w.store != nil {
+		prefix := w.objectKeyPrefix(params.Pod, params.CheckpointID)
+		log.Info("Uploading checkpoint artifact to object store",
+			"backend", w.store.Backend(), "key_prefix", prefix)
+		if err := w.store.Upload(ctx, params.HostPath, prefix); err != nil {
+			w.killCheckpointProcess(log, params.ContainerPID, "checkpoint upload failed")
+			return fmt.Errorf("upload checkpoint artifact to object store: %w", err)
+		}
+		// The durable copy now lives in the object store; reclaim agent-local
+		// staging. Best-effort — a leftover dir only holds scratch space.
+		if rmErr := os.RemoveAll(params.HostPath); rmErr != nil {
+			log.Error(rmErr, "Failed to remove local staging after object store upload", "path", params.HostPath)
+		}
 	}
 
 	if err := snapshotruntime.WriteControlSentinel(params.ContainerPID, snapshotprotocol.SnapshotCompleteFile); err != nil {

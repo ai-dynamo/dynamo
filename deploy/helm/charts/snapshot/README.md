@@ -98,14 +98,24 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 
 | Parameter | Meaning | Default |
 |-----------|---------|---------|
-| `storage.type` | Snapshot-owned storage backend | `pvc` |
-| `storage.accessMode` | `agentMount` for namespace-local agent PVC mount, or `podMount` for a single cluster agent that accesses workload-mounted PVCs | `agentMount` |
+| `storage.type` | Storage backend: `pvc` (shared volume) or `s3` (S3-compatible object store) | `pvc` |
+| `storage.accessMode` | `agentMount` for namespace-local agent PVC mount, or `podMount` for a single cluster agent that accesses workload-mounted PVCs. `s3` requires `agentMount` | `agentMount` |
 | `storage.pvc.create` | Create `snapshot-pvc` instead of using an existing PVC in `agentMount` mode | `true` |
 | `storage.pvc.name` | Checkpoint PVC name. Mounted by the agent in `agentMount` mode, or by workload pods in `podMount` mode | `snapshot-pvc` |
 | `storage.pvc.size` | Requested PVC size | `1Ti` |
 | `storage.pvc.storageClass` | Storage class name | `""` |
 | `storage.pvc.accessMode` | Access mode for the checkpoint PVC. `ReadWriteMany` is safest; `ReadWriteOnce` can be used with `podMount` for sequential checkpoint/restore on suitable storage backends | `ReadWriteMany` |
 | `storage.pvc.basePath` | Mount path for checkpoint storage: inside the `snapshot-agent` pod in `agentMount`, or inside checkpoint/restore workload pods in `podMount` | `/checkpoints` |
+| `storage.s3.endpoint` | S3 endpoint host[:port] (when `storage.type=s3`) | `""` |
+| `storage.s3.bucket` | Existing bucket holding checkpoint artifacts | `""` |
+| `storage.s3.basePath` | Agent-local staging dir (ephemeral `emptyDir`). Must match the operator's `checkpoint.storage.s3.basePath` | `/var/lib/dynamo/checkpoints` |
+| `storage.s3.credentialsSecretRef` | Secret providing `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, projected via `envFrom` | `""` |
+| `storage.s3.forcePathStyle` | Use path-style addressing; default is virtual-hosted (bucket DNS) style | `false` |
+| `storage.s3.useSSL` / `region` / `prefix` / `concurrency` | TLS toggle, region label, optional key prefix, parallel transfers | `true` / `""` / `""` / `8` |
+| `storage.s3.staging.sizeLimit` | Cap on the agent staging `emptyDir` (e.g. `200Gi`). Empty = node default | `""` |
+| `storage.s3.staging.medium` | Staging `emptyDir` medium: `""` (disk) or `Memory` (tmpfs) | `""` |
+| `storage.s3.staging.hostPath` | Override staging with a node host path (e.g. local NVMe) for large artifacts | `""` |
+| `storage.s3.staging.pvcName` | Override staging with an existing PVC | `""` |
 | `seccomp.deploy` | Deploy the CRIU seccomp profile ConfigMap and init container. Use this field name; `seccomp.enabled` is not a chart value | `true` |
 | `daemonset.image.repository` | Snapshot-agent image repository | `nvcr.io/nvidia/ai-dynamo/snapshot-agent` |
 | `daemonset.image.tag` | Snapshot-agent image tag | `1.0.0` |
@@ -114,8 +124,32 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 | `runtime.socketPath` | CRI socket (empty = default for `runtime.type`) | `""` |
 | `openshift.enabled` | OpenShift RBAC / SCC-related chart pieces | `false` |
 
-Reserved `s3` and `oci` values remain chart-owned placeholders for future
-snapshot backends, but only `pvc` is implemented today.
+### S3 object storage
+
+Set `storage.type=s3` to store checkpoint artifacts in any S3-compatible object
+store instead of a PVC. The agent stages each checkpoint on its own filesystem
+(`storage.s3.basePath`, an `emptyDir`), uploads the artifact tree to the bucket,
+and downloads it back before restore — so no shared `ReadWriteMany` PVC is
+needed. This requires `storage.accessMode=agentMount`; credentials come from
+`storage.s3.credentialsSecretRef` (projected via `envFrom`, never in the
+ConfigMap). Configure the operator with a matching `checkpoint.storage.s3.basePath`.
+See [`examples/s3`](../../../snapshot/examples/s3/) for ready-to-edit manifests.
+
+```bash
+kubectl create namespace ${NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -
+
+kubectl -n ${NAMESPACE} create secret generic snapshot-s3-credentials \
+  --from-literal=AWS_ACCESS_KEY_ID=... --from-literal=AWS_SECRET_ACCESS_KEY=...
+
+helm upgrade --install snapshot ./deploy/helm/charts/snapshot \
+  --namespace ${NAMESPACE} --create-namespace \
+  --set storage.type=s3 \
+  --set storage.s3.endpoint=s3.example.com \
+  --set storage.s3.bucket=checkpoints \
+  --set storage.s3.credentialsSecretRef=snapshot-s3-credentials
+```
+
+The `oci` value remains a chart-owned placeholder for a future backend.
 
 When using `storage.accessMode=podMount`, configure the Dynamo operator with
 the same workload PVC name and mount path. The snapshot chart value is

@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Helm values override for the Dynamo operator chart
+# (deploy/helm/charts/platform/components/operator) enabling checkpoint/restore
+# with the S3 object-store backend.
+#
+# The operator does not hold S3 credentials or connection details — those live
+# on the snapshot-agent (see snapshot-agent-values.yaml). The operator only
+# stamps workload pods with storage type=s3 and the agent-local staging
+# basePath, so basePath MUST match snapshot.storage.s3.basePath on the agent.
+
+checkpoint:
+  enabled: true
+  storage:
+    type: s3
+    s3:
+      # Must match snapshot.storage.s3.basePath on the snapshot-agent.
+      basePath: /var/lib/dynamo/checkpoints
+      # Informational mirrors of the agent's S3 config (non-secret).
+      bucket: checkpoints
+      endpoint: s3.example.com
+      prefix: ""

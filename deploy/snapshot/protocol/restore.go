@@ -11,6 +11,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -79,6 +80,11 @@ func PrepareRestorePodSpec(
 	EnsureLocalhostSeccompProfile(podSpec, seccompProfile)
 	if storage.PVCName != "" {
 		InjectCheckpointVolume(podSpec, storage.PVCName)
+	} else if storage.Type == StorageTypeS3 && storage.BasePath != "" {
+		// Object-store restore: the agent stages the downloaded artifact in this
+		// pod-local volume (reached via /host/proc/<pid>/root/<basePath>); CRIU
+		// restore then reads it from the container's mount namespace.
+		InjectCheckpointStagingVolume(podSpec, storage)
 	}
 	for _, name := range targets {
 		var container *corev1.Container
@@ -91,7 +97,11 @@ func PrepareRestorePodSpec(
 		if container == nil {
 			return fmt.Errorf("restore target container %q not found in pod spec (from %s annotation)", name, TargetContainersAnnotation)
 		}
-		if storage.BasePath != "" {
+		// Mount the checkpoint volume at BasePath for PVC-backed storage and for
+		// s3 restore staging. (For s3 the volume is the staging emptyDir/override
+		// injected above; for plain agent-FS s3 checkpoint there is no workload
+		// volume, but restore pods always get one so nsrestore can read it.)
+		if storage.BasePath != "" && (storage.PVCName != "" || storage.Type == StorageTypeS3) {
 			InjectCheckpointVolumeMount(container, storage.BasePath)
 		}
 		EnsureControlVolume(podSpec, container)
@@ -182,6 +192,17 @@ func ValidateRestorePodSpec(
 		if !hasVolume {
 			return fmt.Errorf("missing %s volume for PVC %s", CheckpointVolumeName, storage.PVCName)
 		}
+	} else if storage.Type == StorageTypeS3 && storage.BasePath != "" {
+		hasVolume := false
+		for _, volume := range podSpec.Volumes {
+			if volume.Name == CheckpointVolumeName {
+				hasVolume = true
+				break
+			}
+		}
+		if !hasVolume {
+			return fmt.Errorf("missing %s staging volume for s3 restore", CheckpointVolumeName)
+		}
 	}
 	hasControlVolume := false
 	for _, volume := range podSpec.Volumes {
@@ -204,7 +225,7 @@ func ValidateRestorePodSpec(
 		if container == nil {
 			return fmt.Errorf("restore target container %q not found in pod spec (from %s annotation)", name, TargetContainersAnnotation)
 		}
-		if storage.BasePath != "" {
+		if storage.BasePath != "" && (storage.PVCName != "" || storage.Type == StorageTypeS3) {
 			hasMount := false
 			for _, mount := range container.VolumeMounts {
 				if mount.Name == CheckpointVolumeName && mount.MountPath == storage.BasePath {
@@ -381,6 +402,56 @@ func InjectCheckpointVolume(podSpec *corev1.PodSpec, pvcName string) {
 			},
 		},
 	})
+}
+
+// InjectCheckpointStagingVolume adds the s3 restore staging volume (named
+// CheckpointVolumeName) to the pod spec if not already present. The agent
+// downloads the checkpoint artifact into this volume before CRIU restore reads
+// it from the container's mount namespace. The source defaults to an emptyDir
+// (tuned by StagingSizeLimit/StagingMedium); StagingPVCName or StagingHostPath
+// override it for artifacts that exceed node ephemeral storage.
+func InjectCheckpointStagingVolume(podSpec *corev1.PodSpec, storage Storage) {
+	for _, volume := range podSpec.Volumes {
+		if volume.Name == CheckpointVolumeName {
+			return
+		}
+	}
+	podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
+		Name:         CheckpointVolumeName,
+		VolumeSource: stagingVolumeSource(storage),
+	})
+}
+
+// stagingVolumeSource builds the restore staging volume source from the storage
+// config: an existing PVC, a node hostPath, or (default) an emptyDir.
+func stagingVolumeSource(storage Storage) corev1.VolumeSource {
+	switch {
+	case strings.TrimSpace(storage.StagingPVCName) != "":
+		return corev1.VolumeSource{
+			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+				ClaimName: strings.TrimSpace(storage.StagingPVCName),
+			},
+		}
+	case strings.TrimSpace(storage.StagingHostPath) != "":
+		hostPathType := corev1.HostPathDirectoryOrCreate
+		return corev1.VolumeSource{
+			HostPath: &corev1.HostPathVolumeSource{
+				Path: strings.TrimSpace(storage.StagingHostPath),
+				Type: &hostPathType,
+			},
+		}
+	default:
+		emptyDir := &corev1.EmptyDirVolumeSource{}
+		if medium := strings.TrimSpace(storage.StagingMedium); medium != "" {
+			emptyDir.Medium = corev1.StorageMedium(medium)
+		}
+		if sizeLimit := strings.TrimSpace(storage.StagingSizeLimit); sizeLimit != "" {
+			if q, err := resource.ParseQuantity(sizeLimit); err == nil {
+				emptyDir.SizeLimit = &q
+			}
+		}
+		return corev1.VolumeSource{EmptyDir: emptyDir}
+	}
 }
 
 func InjectCheckpointVolumeMount(container *corev1.Container, basePath string) {

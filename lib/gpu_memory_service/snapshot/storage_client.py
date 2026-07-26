@@ -13,7 +13,7 @@ import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
-from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Mapping, Optional, Sequence, Tuple
 
 from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
 from gpu_memory_service.common.locks import RequestedLockType
@@ -33,6 +33,9 @@ from gpu_memory_service.snapshot.transfer import (
 )
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from gpu_memory_service.snapshot.objectstore import S3ArtifactStore
 
 
 class GMSStorageClient:
@@ -286,6 +289,43 @@ class GMSStorageClient:
             len(saved_metadata),
         )
         return id_map
+
+    def save_and_upload(
+        self,
+        store: "S3ArtifactStore",
+        key_prefix: str,
+        *,
+        max_workers: int = 4,
+    ) -> SaveManifest:
+        """Save GMS state to ``output_dir``, then mirror it to the object store.
+
+        The snapshot is uploaded under ``key_prefix`` with the manifest written
+        last, so a concurrent restore that observes the manifest is guaranteed a
+        complete artifact.
+        """
+        manifest = self.save(max_workers=max_workers)
+        assert self.output_dir is not None
+        store.upload_tree(self.output_dir, key_prefix)
+        return manifest
+
+    def download_and_load(
+        self,
+        store: "S3ArtifactStore",
+        key_prefix: str,
+        input_dir: str,
+        *,
+        max_workers: int = 4,
+        clear_existing: bool = True,
+        transfer_backend: Optional[str] = None,
+    ) -> Dict[str, str]:
+        """Download a snapshot from the object store into ``input_dir`` and restore it."""
+        store.download_tree(key_prefix, input_dir)
+        return self.load_to_gms(
+            input_dir,
+            max_workers=max_workers,
+            clear_existing=clear_existing,
+            transfer_backend=transfer_backend,
+        )
 
     def _restore_metadata(
         self,

@@ -130,6 +130,13 @@ spec:
             - name: checkpoints
               mountPath: {{ .Values.storage.pvc.basePath }}
             {{- end }}
+            {{- if eq .Values.storage.type "s3" }}
+            # Agent-local staging for s3: CRIU writes here before upload and
+            # reads here after download. Ephemeral — the durable copy lives in
+            # the object store.
+            - name: checkpoints-staging
+              mountPath: {{ .Values.storage.s3.basePath }}
+            {{- end }}
             # Mount the runtime socket directory. Derived from runtime.socketPath
             # so overrides stay reachable inside the container.
             - name: runtime-run
@@ -186,6 +193,28 @@ spec:
         - name: checkpoints
           persistentVolumeClaim:
             claimName: {{ .Values.storage.pvc.name }}
+        {{- end }}
+        {{- if eq .Values.storage.type "s3" }}
+        # Staging for s3 checkpoint artifacts (holds the full artifact during
+        # upload). Defaults to an emptyDir; override with hostPath (e.g. local
+        # NVMe) or an existing PVC for artifacts that exceed node ephemeral
+        # storage.
+        - name: checkpoints-staging
+          {{- $st := .Values.storage.s3.staging | default dict }}
+          {{- if $st.pvcName }}
+          persistentVolumeClaim:
+            claimName: {{ $st.pvcName | quote }}
+          {{- else if $st.hostPath }}
+          hostPath:
+            path: {{ $st.hostPath | quote }}
+            type: DirectoryOrCreate
+          {{- else }}
+          emptyDir:
+            medium: {{ $st.medium | default "" | quote }}
+            {{- if $st.sizeLimit }}
+            sizeLimit: {{ $st.sizeLimit | quote }}
+            {{- end }}
+          {{- end }}
         {{- end }}
         # Runtime socket directory (read-write for checkpoint operations).
         # Same path inside and on the host so the agent dials runtime.socketPath

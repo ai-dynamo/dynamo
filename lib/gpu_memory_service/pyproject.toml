@@ -43,3 +43,7 @@ test = [
     "pytest>=8.3.4",
     "pytest-asyncio",
 ]
+# S3 object-store backend for weight snapshots.
+s3 = [
+    "fsspec[s3]>=2024.0.0",
+]

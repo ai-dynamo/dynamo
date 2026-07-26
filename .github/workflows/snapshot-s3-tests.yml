@@ -1,0 +1,138 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Validates the S3 object-store checkpoint and weight-snapshot path: snapshot and
+# operator unit tests, plus Helm rendering of the s3 example values. The live S3
+# round-trip tests run only when an S3 endpoint is supplied via repo vars/secrets
+# (otherwise they self-skip); CI pulls no object-store images.
+
+name: Snapshot S3 Storage Tests
+
+on:
+  pull_request:
+    paths:
+      - 'deploy/snapshot/**'
+      - 'deploy/operator/internal/checkpoint/**'
+      - 'deploy/operator/api/config/**'
+      - 'deploy/helm/charts/snapshot/**'
+      - 'deploy/helm/charts/platform/components/operator/templates/operator-config.yaml'
+      - 'lib/gpu_memory_service/snapshot/**'
+      - 'lib/gpu_memory_service/tests/snapshot/**'
+      - '.github/workflows/snapshot-s3-tests.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'deploy/snapshot/**'
+      - 'deploy/operator/internal/checkpoint/**'
+      - 'deploy/operator/api/config/**'
+      - 'deploy/helm/charts/snapshot/**'
+      - 'deploy/helm/charts/platform/components/operator/templates/operator-config.yaml'
+      - 'lib/gpu_memory_service/snapshot/**'
+      - 'lib/gpu_memory_service/tests/snapshot/**'
+      - '.github/workflows/snapshot-s3-tests.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  # --------------------------------------------------------------------------
+  # Go: snapshot store + snapshot/operator unit tests. The live S3 round-trip
+  # (TestS3RoundTrip) runs only when DYNAMO_TEST_S3_ENDPOINT is provided.
+  # --------------------------------------------------------------------------
+  go-tests:
+    name: Go snapshot/store tests
+    runs-on: ubuntu-latest
+    env:
+      DYNAMO_TEST_S3_ENDPOINT: ${{ vars.DYNAMO_TEST_S3_ENDPOINT }}
+      DYNAMO_TEST_S3_BUCKET: ${{ vars.DYNAMO_TEST_S3_BUCKET }}
+      DYNAMO_TEST_S3_ACCESS_KEY: ${{ secrets.DYNAMO_TEST_S3_ACCESS_KEY }}
+      DYNAMO_TEST_S3_SECRET_KEY: ${{ secrets.DYNAMO_TEST_S3_SECRET_KEY }}
+      DYNAMO_TEST_S3_SSL: ${{ vars.DYNAMO_TEST_S3_SSL }}
+      DYNAMO_TEST_S3_FORCE_PATH_STYLE: ${{ vars.DYNAMO_TEST_S3_FORCE_PATH_STYLE }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c  # v6.4.0
+        with:
+          go-version-file: deploy/snapshot/go.mod
+
+      - name: Snapshot unit tests (+ S3 round-trip when endpoint set)
+        working-directory: deploy/snapshot
+        run: go test ./... -count=1
+
+      - name: Operator checkpoint-storage unit tests
+        working-directory: deploy/operator
+        run: go test ./internal/checkpoint/... ./api/config/... -count=1
+
+  # --------------------------------------------------------------------------
+  # Python: GMS object-store unit tests. The live S3 round-trip runs only when
+  # GMS_SNAPSHOT_S3_BUCKET (and an endpoint) is provided.
+  # --------------------------------------------------------------------------
+  python-tests:
+    name: Python GMS store tests
+    runs-on: ubuntu-latest
+    env:
+      GMS_SNAPSHOT_S3_BUCKET: ${{ vars.DYNAMO_TEST_S3_BUCKET }}
+      FSSPEC_S3_ENDPOINT_URL: ${{ vars.DYNAMO_TEST_S3_ENDPOINT_URL }}
+      FSSPEC_S3_KEY: ${{ secrets.DYNAMO_TEST_S3_ACCESS_KEY }}
+      FSSPEC_S3_SECRET: ${{ secrets.DYNAMO_TEST_S3_SECRET_KEY }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: '3.12'
+
+      - name: Install test dependencies
+        run: python -m pip install --upgrade pip pytest pytest-timeout 'fsspec[s3]'
+
+      - name: GMS object-store tests (+ S3 round-trip when bucket set)
+        working-directory: lib
+        env:
+          PYTHONPATH: .
+        run: python -m pytest gpu_memory_service/tests/snapshot/test_objectstore.py -c /dev/null -p no:cacheprovider -v
+
+  # --------------------------------------------------------------------------
+  # Helm: render snapshot + operator charts with the s3 example values
+  # --------------------------------------------------------------------------
+  helm-render-s3:
+    name: Helm render (s3 example values)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Helm
+        uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112  # v4.3.0
+        with:
+          version: 'v3.17.3'
+
+      - name: Render snapshot agent (s3)
+        run: |
+          out=$(helm template snap deploy/helm/charts/snapshot \
+            -f deploy/snapshot/examples/s3/snapshot-agent-values.yaml)
+          echo "$out" | grep -q 'type: "s3"' || { echo "missing s3 storage type"; exit 1; }
+          echo "$out" | grep -q 'name: checkpoints-staging' || { echo "missing staging volume"; exit 1; }
+          echo "$out" | grep -q 'name: snapshot-s3-credentials' || { echo "missing creds envFrom"; exit 1; }
+          if echo "$out" | grep -q 'kind: PersistentVolumeClaim'; then echo "unexpected PVC for s3"; exit 1; fi
+          echo "snapshot s3 render OK"
+
+      - name: Render operator (s3 checkpoint storage)
+        run: |
+          out=$(helm template oper deploy/helm/charts/platform/components/operator \
+            -f deploy/snapshot/examples/s3/operator-values.yaml \
+            --set discoveryBackend=kubernetes \
+            --show-only templates/operator-config.yaml)
+          echo "$out" | grep -q 'type: "s3"' || { echo "missing operator s3 type"; exit 1; }
+          echo "$out" | grep -q 'basePath: "/var/lib/dynamo/checkpoints"' || { echo "missing s3 basePath"; exit 1; }
+          echo "operator s3 render OK"

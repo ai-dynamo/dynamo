@@ -260,6 +260,44 @@ func TestBuildCheckpointJob(t *testing.T) {
 	assert.Equal(t, []string{"--launch-job", "python3", "-m", "dynamo.vllm"}, job.Spec.Template.Spec.Containers[0].Args)
 }
 
+// TestBuildCheckpointJobS3StorageInjectsNoPVCVolume guards against re-injecting
+// a checkpoint PVC volume for s3 storage. The agent stages s3 artifacts on its
+// own filesystem, so the checkpoint pod must carry no checkpoint volume/mount
+// (a volume with an empty ClaimName would be invalid), while the storage-type
+// and base-path annotations must still be stamped for the agent.
+func TestBuildCheckpointJobS3StorageInjectsNoPVCVolume(t *testing.T) {
+	s := checkpointTestScheme()
+	ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhasePending)
+	r := makeCheckpointReconciler(s, ckpt)
+	r.Config.Checkpoint.Storage = configv1alpha1.CheckpointStorageConfiguration{
+		Type: configv1alpha1.CheckpointStorageTypeS3,
+		S3: configv1alpha1.CheckpointS3Config{
+			BasePath: "/var/lib/dynamo/checkpoints",
+			Bucket:   "checkpoints",
+			Endpoint: "s3.example.com",
+		},
+	}
+
+	// nil kubeClient is safe: EnsureStoragePVC returns early for non-pvc storage.
+	job, err := buildCheckpointJob(context.Background(), nil, r.Config, ckpt, defaultCheckpointJobName)
+	require.NoError(t, err)
+	podSpec := job.Spec.Template.Spec
+
+	for _, v := range podSpec.Volumes {
+		assert.NotEqual(t, snapshotprotocol.CheckpointVolumeName, v.Name, "s3 must not inject a checkpoint PVC volume")
+		if v.PersistentVolumeClaim != nil {
+			assert.NotEmpty(t, v.PersistentVolumeClaim.ClaimName, "must not inject a PVC volume with an empty ClaimName")
+		}
+	}
+	for _, m := range podSpec.Containers[0].VolumeMounts {
+		assert.NotEqual(t, snapshotprotocol.CheckpointVolumeName, m.Name, "s3 must not mount a checkpoint volume")
+	}
+
+	ann := job.Spec.Template.Annotations
+	assert.Equal(t, snapshotprotocol.StorageTypeS3, ann[snapshotprotocol.CheckpointStorageTypeAnnotation])
+	assert.Equal(t, "/var/lib/dynamo/checkpoints", ann[snapshotprotocol.CheckpointStorageBasePathAnnotation])
+}
+
 func TestBuildCheckpointJobWrapsWithCudaCheckpointForMultiGPU(t *testing.T) {
 	s := checkpointTestScheme()
 	ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhasePending)

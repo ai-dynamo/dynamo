@@ -157,7 +157,7 @@ func TestReadManifestRejectsMissingCheckpointID(t *testing.T) {
 	dir := t.TempDir()
 
 	content := []byte("createdAt: 2026-03-31T00:00:00Z\n")
-	if err := os.WriteFile(filepath.Join(dir, manifestFilename), content, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, ManifestFilename), content, 0o600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 

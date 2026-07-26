@@ -135,9 +135,42 @@ func TestStorageFromConfig(t *testing.T) {
 		assert.False(t, ok)
 	})
 
-	t.Run("legacy s3 type is ignored", func(t *testing.T) {
-		_, ok, err := StorageFromConfig(configv1alpha1.CheckpointStorageConfiguration{
+	t.Run("s3 type resolves object-store storage", func(t *testing.T) {
+		storage, ok, err := StorageFromConfig(configv1alpha1.CheckpointStorageConfiguration{
 			Type: configv1alpha1.CheckpointStorageTypeS3,
+			S3: configv1alpha1.CheckpointS3Config{
+				BasePath: "/var/lib/dynamo/checkpoints/",
+				Bucket:   "checkpoints",
+				Endpoint: "s3.example.com",
+			},
+		})
+		require.NoError(t, err)
+		require.True(t, ok)
+		assert.Equal(t, snapshotprotocol.StorageTypeS3, storage.Type)
+		assert.Empty(t, storage.PVCName)
+		assert.Equal(t, "/var/lib/dynamo/checkpoints", storage.BasePath)
+	})
+
+	t.Run("s3 type requires base path", func(t *testing.T) {
+		_, _, err := StorageFromConfig(configv1alpha1.CheckpointStorageConfiguration{
+			Type: configv1alpha1.CheckpointStorageTypeS3,
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "checkpoint.storage.s3.basePath")
+	})
+
+	t.Run("s3 type rejects relative base path", func(t *testing.T) {
+		_, _, err := StorageFromConfig(configv1alpha1.CheckpointStorageConfiguration{
+			Type: configv1alpha1.CheckpointStorageTypeS3,
+			S3:   configv1alpha1.CheckpointS3Config{BasePath: "checkpoints"},
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "must be absolute")
+	})
+
+	t.Run("legacy oci type is ignored", func(t *testing.T) {
+		_, ok, err := StorageFromConfig(configv1alpha1.CheckpointStorageConfiguration{
+			Type: configv1alpha1.CheckpointStorageTypeOCI,
 		})
 		require.NoError(t, err)
 		assert.False(t, ok)
