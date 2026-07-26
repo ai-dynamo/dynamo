@@ -128,3 +128,31 @@ def test_top_selection_refreshes_on_interval_or_membership_change():
     collector.counter_main = 6
     collector._refresh_top_ids()
     assert collector._gpu_top_ids == [[2]]
+
+
+def test_gpu_memory_tracker_prunes_dead_pids_while_keeping_the_aggregate():
+    """proc_gpu_mem used prune=False only to keep the aggregate, so every PID that
+    ever touched the GPU was retained forever. Pruning must not cost the aggregate."""
+    tracker = ProcessTracker(maxlen=4, prune=True, track_aggregate=True)
+
+    for pid in range(1, 51):
+        tracker.record({pid: 1.0}, _name)
+
+    assert len(tracker.series) <= 5
+    assert [
+        values for pid, _, _, values in tracker.series_for_ids([]) if pid == -1
+    ] == [[1.0, 1.0, 1.0, 1.0]]
+
+
+def test_aggregate_history_round_trips_without_recomputing_from_series():
+    tracker = ProcessTracker(maxlen=4, prune=True, track_aggregate=True)
+    tracker.record({1: 1.0, 2: 2.0}, _name)
+    tracker.record({3: 5.0}, _name)
+
+    restored = ProcessTracker(maxlen=4, prune=True, track_aggregate=True)
+    restored.load_dict(tracker.to_dict())
+
+    assert [(pid, values) for pid, _, _, values in restored.series_for_ids([1])] == [
+        (1, [1.0, 0.0]),
+        (-1, [2.0, 5.0]),
+    ]

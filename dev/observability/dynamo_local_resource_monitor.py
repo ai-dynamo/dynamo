@@ -341,7 +341,12 @@ def _classify_node_process(full_cmd: str) -> str:
 class ProcessTracker:
     """Track rolling per-process series with stable colors for the dashboard UI."""
 
-    def __init__(self, maxlen: int, prune: bool = True):
+    def __init__(
+        self,
+        maxlen: int,
+        prune: bool = True,
+        track_aggregate: bool | None = None,
+    ):
         self.maxlen = maxlen
         self._prune_enabled = prune
         self._len = 0
@@ -353,7 +358,13 @@ class ProcessTracker:
         self._next_slot = 0
         self._series_total: dict[int, float] = {}
         self._last_active: dict[int, int] = {}
-        self._aggregate_history = deque(maxlen=maxlen) if not prune else None
+        # Aggregate history is independent of pruning: record() sums each incoming
+        # sample, not the retained per-PID series, so evicting dead PIDs cannot
+        # distort it. Keep the historical default (aggregate implies no pruning)
+        # for callers that do not pass track_aggregate explicitly.
+        if track_aggregate is None:
+            track_aggregate = not prune
+        self._aggregate_history = deque(maxlen=maxlen) if track_aggregate else None
 
     def new_pids(self, data: dict[int, float]) -> set[int]:
         return set(data.keys()) - set(self.series.keys())
@@ -426,6 +437,11 @@ class ProcessTracker:
             "_pid_slot": {str(k): v for k, v in self._pid_slot.items()},
             "_free_slots": self._free_slots,
             "_next_slot": self._next_slot,
+            "_aggregate_history": (
+                list(self._aggregate_history)
+                if self._aggregate_history is not None
+                else None
+            ),
         }
 
     def load_dict(self, data: dict):
@@ -448,13 +464,17 @@ class ProcessTracker:
                     self._last_active[pid] = first_index + index
                     break
         if self._aggregate_history is not None:
-            aggregate_len = max(
-                (len(values) for values in self.series.values()), default=0
-            )
-            aggregate = [0.0] * aggregate_len
-            for values in self.series.values():
-                for i, value in enumerate(values):
-                    aggregate[i] += value
+            aggregate = data.get("_aggregate_history")
+            if aggregate is None:
+                # State files written before the aggregate was persisted: rebuild it
+                # from the retained series. Only exact when nothing was pruned.
+                aggregate_len = max(
+                    (len(values) for values in self.series.values()), default=0
+                )
+                aggregate = [0.0] * aggregate_len
+                for values in self.series.values():
+                    for i, value in enumerate(values):
+                        aggregate[i] += value
             self._aggregate_history = deque(aggregate, maxlen=self.maxlen)
 
     def _color_for(self, pid: int) -> str:
@@ -703,7 +723,9 @@ class MetricsCollector:
                 self.gpu_names.append(name)
                 mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
                 self.gpu_mem_total_gib.append(mem.total / (1024**3))
-                self.proc_gpu_mem.append(ProcessTracker(maxlen_main, prune=False))
+                self.proc_gpu_mem.append(
+                    ProcessTracker(maxlen_main, prune=True, track_aggregate=True)
+                )
                 self._gpu_top_ids.append([])
                 self.gpu_util.append(deque(maxlen=maxlen_main))
                 self.gpu_temp.append(deque(maxlen=maxlen_main))
@@ -1603,21 +1625,6 @@ def main():
         print("No NVIDIA GPUs detected -- CPU + Disk only")
     print()
 
-    collector = None
-    updater = PrometheusUpdater(gpu_count)
-    socketio = None
-    app = None
-    push_loop = None
-    if dashboard_enabled:
-        collector = MetricsCollector(
-            window_sec=args.window,
-            main_interval_ms=args.main_interval,
-            disk_interval_ms=args.disk_interval,
-            top_n=args.top_n,
-        )
-        collector.load_state()
-        socketio, app, push_loop = build_monitor_server(collector)
-
     workers: list[multiprocessing.Process] = []
     pipes: list[multiprocessing.connection.Connection] = []
 
@@ -1652,6 +1659,28 @@ def main():
         )
     )
 
+    # Fork the workers BEFORE the collector loads its persisted state. Each child
+    # inherits a copy-on-write snapshot of the parent's heap, so forking after
+    # load_state() pins that entire image in every worker for the process lifetime
+    # even though no worker ever reads it.
+    for w in workers:
+        w.start()
+
+    collector = None
+    updater = PrometheusUpdater(gpu_count)
+    socketio = None
+    app = None
+    push_loop = None
+    if dashboard_enabled:
+        collector = MetricsCollector(
+            window_sec=args.window,
+            main_interval_ms=args.main_interval,
+            disk_interval_ms=args.disk_interval,
+            top_n=args.top_n,
+        )
+        collector.load_state()
+        socketio, app, push_loop = build_monitor_server(collector)
+
     def _poll_pipes():
         live = list(pipes)
         while live:
@@ -1679,8 +1708,6 @@ def main():
                     if collector is not None:
                         collector.ingest_disk(msg[1], msg[2], msg[3])
 
-    for w in workers:
-        w.start()
     threading.Thread(target=_poll_pipes, daemon=True).start()
 
     def _shutdown(signum, _frame):
