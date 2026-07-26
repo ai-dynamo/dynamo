@@ -219,6 +219,9 @@ curl localhost:8000/v1/chat/completions \
 
 KVBM supports disaggregated serving where prefill and decode operations run on separate workers. KVBM is enabled on the prefill worker to offload KV cache.
 
+> [!IMPORTANT]
+> When using a hybrid model with `PdConnector`, pass `--disable-hybrid-kv-cache-manager` to every vLLM worker in the deployment, including both prefill and decode workers. `PdConnector` is not compatible with vLLM's hybrid KV cache manager.
+
 ### Disaggregated Serving with vLLM
 
 ```bash
