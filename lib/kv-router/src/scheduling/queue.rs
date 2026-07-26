@@ -11,6 +11,7 @@ use crossbeam_queue::SegQueue;
 use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
+use xxhash_rust::xxh3;
 
 use super::config::RouterQueuePolicy;
 use super::filter::RoutingEligibility;
@@ -44,6 +45,10 @@ const SHADOW_SESSION_PINS_ENV: &str = "DYN_ROUTER_SHADOW_SESSION_PINS";
 const SHADOW_SESSION_PIN_MAX_SESSIONS: usize = 100_000;
 const SHADOW_SESSION_PIN_FULL_LOG_LIMIT: usize = 100;
 const SHADOW_SESSION_PIN_LOG_INTERVAL: usize = 1_000;
+const BOUNDED_OVERLAP_LOAD_ROUTING_ENV: &str = "DYN_ROUTER_BOUNDED_OVERLAP_LOAD_ROUTING";
+const BOUNDED_OVERLAP_TOLERANCE_ENV: &str = "DYN_ROUTER_OVERLAP_TOLERANCE_BLOCKS";
+const BOUNDED_OVERLAP_DEFAULT_TOLERANCE_BLOCKS: u64 = 16;
+const BOUNDED_OVERLAP_LOG_INTERVAL: usize = 1_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ShadowSessionPinObservation {
@@ -64,9 +69,7 @@ struct ShadowSessionPins {
 
 impl ShadowSessionPins {
     fn from_env() -> Option<Self> {
-        let Some(value) = std::env::var(SHADOW_SESSION_PINS_ENV).ok() else {
-            return None;
-        };
+        let value = std::env::var(SHADOW_SESSION_PINS_ENV).ok()?;
         match dynamo_truthy::parse_bool_opt(&value) {
             Some(true) => {
                 tracing::warn!(
@@ -144,6 +147,192 @@ impl ShadowSessionPins {
             || self
                 .missing_session_ids
                 .is_multiple_of(SHADOW_SESSION_PIN_LOG_INTERVAL)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct BoundedOverlapChoice {
+    worker: WorkerWithDpRank,
+    selected_overlap_blocks: f64,
+    max_overlap_blocks: f64,
+    selected_active_prefill_tokens: usize,
+    candidate_count: usize,
+}
+
+struct BoundedOverlapLoadRouting {
+    tolerance_blocks: f64,
+    decisions: usize,
+    maximum_overlap_selected: usize,
+    overlap_tradeoffs: usize,
+    total_sacrificed_overlap_blocks: f64,
+    max_sacrificed_overlap_blocks: f64,
+}
+
+impl BoundedOverlapLoadRouting {
+    fn from_env() -> Option<Self> {
+        let value = std::env::var(BOUNDED_OVERLAP_LOAD_ROUTING_ENV).ok()?;
+        match dynamo_truthy::parse_bool_opt(&value) {
+            Some(true) => {}
+            Some(false) => return None,
+            None => {
+                tracing::error!(
+                    env_var = BOUNDED_OVERLAP_LOAD_ROUTING_ENV,
+                    env_value = value,
+                    "[BOUNDED_OVERLAP_LOAD_ROUTING_CONFIG_ERROR] expected a boolean; bounded-overlap load routing is disabled"
+                );
+                return None;
+            }
+        }
+
+        let tolerance_blocks = match std::env::var(BOUNDED_OVERLAP_TOLERANCE_ENV) {
+            Ok(value) => match value.parse::<u64>() {
+                Ok(value) => value,
+                Err(error) => {
+                    tracing::error!(
+                        env_var = BOUNDED_OVERLAP_TOLERANCE_ENV,
+                        env_value = value,
+                        %error,
+                        "[BOUNDED_OVERLAP_LOAD_ROUTING_CONFIG_ERROR] expected a non-negative integer; bounded-overlap load routing is disabled"
+                    );
+                    return None;
+                }
+            },
+            Err(std::env::VarError::NotPresent) => BOUNDED_OVERLAP_DEFAULT_TOLERANCE_BLOCKS,
+            Err(error) => {
+                tracing::error!(
+                    env_var = BOUNDED_OVERLAP_TOLERANCE_ENV,
+                    %error,
+                    "[BOUNDED_OVERLAP_LOAD_ROUTING_CONFIG_ERROR] could not read tolerance; bounded-overlap load routing is disabled"
+                );
+                return None;
+            }
+        };
+
+        tracing::warn!(
+            tolerance_blocks,
+            "[BOUNDED_OVERLAP_LOAD_ROUTING_ENABLED] maximum-overlap routing will use load within the configured block tolerance"
+        );
+        Some(Self {
+            tolerance_blocks: tolerance_blocks as f64,
+            decisions: 0,
+            maximum_overlap_selected: 0,
+            overlap_tradeoffs: 0,
+            total_sacrificed_overlap_blocks: 0.0,
+            max_sacrificed_overlap_blocks: 0.0,
+        })
+    }
+
+    fn tie_score(session_id: &str, worker: WorkerWithDpRank) -> u64 {
+        let worker_seed = worker.worker_id.rotate_left(17) ^ u64::from(worker.dp_rank);
+        xxh3::xxh3_64_with_seed(session_id.as_bytes(), worker_seed)
+    }
+
+    fn choose<C: WorkerConfigLike>(
+        &self,
+        session_id: &str,
+        request: &SchedulingRequest,
+        workers: &HashMap<WorkerId, C>,
+        eligibility: RoutingEligibility<'_>,
+    ) -> Option<BoundedOverlapChoice> {
+        let mut max_overlap_blocks = f64::NEG_INFINITY;
+        eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
+            max_overlap_blocks =
+                max_overlap_blocks.max(request.effective_overlap_blocks_for(worker));
+        });
+        if !max_overlap_blocks.is_finite() {
+            return None;
+        }
+
+        let mut candidate_count = 0;
+        let mut selected: Option<(WorkerWithDpRank, usize, usize, u64, f64)> = None;
+        eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
+            let overlap_blocks = request.effective_overlap_blocks_for(worker);
+            if overlap_blocks + self.tolerance_blocks < max_overlap_blocks {
+                return;
+            }
+            candidate_count += 1;
+            let load = request.worker_load_for(worker);
+            let tie_score = Self::tie_score(session_id, worker);
+            let replace = selected.as_ref().is_none_or(
+                |(
+                    selected_worker,
+                    selected_prefill_tokens,
+                    selected_decode_blocks,
+                    selected_tie_score,
+                    _,
+                )| {
+                    (load.active_prefill_tokens, load.potential_decode_blocks())
+                        < (*selected_prefill_tokens, *selected_decode_blocks)
+                        || (load.active_prefill_tokens, load.potential_decode_blocks())
+                            == (*selected_prefill_tokens, *selected_decode_blocks)
+                            && (tie_score > *selected_tie_score
+                                || tie_score == *selected_tie_score && worker < *selected_worker)
+                },
+            );
+            if replace {
+                selected = Some((
+                    worker,
+                    load.active_prefill_tokens,
+                    load.potential_decode_blocks(),
+                    tie_score,
+                    overlap_blocks,
+                ));
+            }
+        });
+
+        let (worker, selected_active_prefill_tokens, _, _, selected_overlap_blocks) = selected?;
+        Some(BoundedOverlapChoice {
+            worker,
+            selected_overlap_blocks,
+            max_overlap_blocks,
+            selected_active_prefill_tokens,
+            candidate_count,
+        })
+    }
+
+    fn record(&mut self, session_id: &str, choice: BoundedOverlapChoice) {
+        self.decisions += 1;
+        let sacrificed_overlap_blocks = choice.max_overlap_blocks - choice.selected_overlap_blocks;
+        if sacrificed_overlap_blocks > 0.0 {
+            self.overlap_tradeoffs += 1;
+            self.total_sacrificed_overlap_blocks += sacrificed_overlap_blocks;
+            self.max_sacrificed_overlap_blocks = self
+                .max_sacrificed_overlap_blocks
+                .max(sacrificed_overlap_blocks);
+            if self.overlap_tradeoffs <= SHADOW_SESSION_PIN_FULL_LOG_LIMIT
+                || self
+                    .overlap_tradeoffs
+                    .is_multiple_of(BOUNDED_OVERLAP_LOG_INTERVAL)
+            {
+                tracing::warn!(
+                    session_id,
+                    selected_worker_id = choice.worker.worker_id,
+                    selected_dp_rank = choice.worker.dp_rank,
+                    selected_overlap_blocks = choice.selected_overlap_blocks,
+                    max_overlap_blocks = choice.max_overlap_blocks,
+                    sacrificed_overlap_blocks,
+                    selected_active_prefill_tokens = choice.selected_active_prefill_tokens,
+                    candidate_count = choice.candidate_count,
+                    tolerance_blocks = self.tolerance_blocks,
+                    overlap_tradeoffs = self.overlap_tradeoffs,
+                    "[BOUNDED_OVERLAP_LOAD_ROUTING_TRADEOFF] lower load won within the overlap tolerance"
+                );
+            }
+        } else {
+            self.maximum_overlap_selected += 1;
+        }
+
+        if self.decisions.is_multiple_of(BOUNDED_OVERLAP_LOG_INTERVAL) {
+            tracing::warn!(
+                decisions = self.decisions,
+                maximum_overlap_selected = self.maximum_overlap_selected,
+                overlap_tradeoffs = self.overlap_tradeoffs,
+                total_sacrificed_overlap_blocks = self.total_sacrificed_overlap_blocks,
+                max_sacrificed_overlap_blocks = self.max_sacrificed_overlap_blocks,
+                tolerance_blocks = self.tolerance_blocks,
+                "[BOUNDED_OVERLAP_LOAD_ROUTING_STATUS] bounded-overlap load routing summary"
+            );
+        }
     }
 }
 
@@ -351,6 +540,7 @@ struct SchedulerQueueActor<
     overlap_refresh_after: Option<Duration>,
     overloaded_worker_provider: Option<OverloadedWorkerProvider>,
     shadow_session_pins: Option<ShadowSessionPins>,
+    bounded_overlap_load_routing: Option<BoundedOverlapLoadRouting>,
 }
 
 /// Queue that gates scheduling requests behind a capacity check.
@@ -530,6 +720,7 @@ impl<
             overlap_refresh_after,
             overloaded_worker_provider,
             shadow_session_pins: ShadowSessionPins::from_env(),
+            bounded_overlap_load_routing: BoundedOverlapLoadRouting::from_env(),
         };
         tokio::spawn(actor.run(admission_rx));
         Ok(Self {
@@ -1539,12 +1730,44 @@ impl<
             .slots
             .project_worker_loads(request.token_seq.as_deref(), decay_now);
 
+        let overloaded_worker_ids = self
+            .overloaded_worker_provider
+            .as_ref()
+            .and_then(|provider| provider());
+        let bounded_overlap_applies = request.mode.is_tracked()
+            && request.track_prefill_tokens
+            && request.pinned_worker.is_none()
+            && request.session_id.is_some()
+            && request
+                .router_config_override
+                .as_ref()
+                .and_then(|config| config.overlap_score_credit)
+                .is_none_or(|credit| credit > 0.0);
+        let bounded_overlap_choice = if bounded_overlap_applies {
+            let workers = self.workers_with_configs.borrow();
+            let eligibility = request.eligibility_with_overloaded(overloaded_worker_ids.as_ref());
+            self.bounded_overlap_load_routing
+                .as_ref()
+                .and_then(|routing| {
+                    routing.choose(
+                        request
+                            .session_id
+                            .as_deref()
+                            .expect("bounded-overlap routing requires a session ID"),
+                        &request,
+                        &workers,
+                        eligibility,
+                    )
+                })
+        } else {
+            None
+        };
+        if let Some(choice) = bounded_overlap_choice {
+            request.pinned_worker = Some(choice.worker);
+        }
+
         let selection = {
             let workers = self.workers_with_configs.borrow();
-            let overloaded_worker_ids = self
-                .overloaded_worker_provider
-                .as_ref()
-                .and_then(|provider| provider());
             let eligibility = request.eligibility_with_overloaded(overloaded_worker_ids.as_ref());
             self.selector
                 .select_worker(&workers, &request, eligibility, self.block_size)
@@ -1575,6 +1798,11 @@ impl<
                 );
             }
         };
+        if bounded_overlap_choice.is_some() {
+            // The temporary pin only constrains this selector call. Preserve the
+            // request's original unconstrained shape for diagnostics and booking.
+            request.pinned_worker = None;
+        }
 
         self.observe_shadow_session_pin(&request, selection.worker);
 
@@ -1622,7 +1850,18 @@ impl<
             worker: selection.worker,
             lora_name: request.lora_name.take(),
         };
+        let bounded_overlap_session_id =
+            bounded_overlap_choice.and_then(|_| request.session_id.as_deref().map(str::to_owned));
         let delivered = self.book_and_respond(request, sequence_request, response);
+        if delivered
+            && let (Some(routing), Some(session_id), Some(choice)) = (
+                self.bounded_overlap_load_routing.as_mut(),
+                bounded_overlap_session_id.as_deref(),
+                bounded_overlap_choice,
+            )
+        {
+            routing.record(session_id, choice);
+        }
         if let Some(ticket) = admission {
             if delivered {
                 let request_id = admission_key.expect("admitted request has a lifecycle key");
@@ -1981,7 +2220,7 @@ mod tests {
         AdmissionEvent, AdmissionId, AdmissionRequest, PolicyClassAdmissionPolicy,
         RefreshedOverlap, RequestProgress, RouterPolicyConfig,
     };
-    use crate::sequences::{ActiveSequencesMultiWorker, SequencePublisher};
+    use crate::sequences::{ActiveSequencesMultiWorker, SequencePublisher, WorkerLoadProjection};
     use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
     use crate::{DefaultWorkerSelector, WorkerSelector};
 
@@ -2566,6 +2805,106 @@ mod tests {
         assert_eq!(shadow.observations, 3);
         assert_eq!(shadow.respected, 1);
         assert_eq!(shadow.violations, 1);
+    }
+
+    #[test]
+    fn bounded_overlap_routing_uses_load_only_within_the_tolerance() {
+        let workers = HashMap::from([
+            (0, SimpleWorkerConfig::default()),
+            (1, SimpleWorkerConfig::default()),
+            (2, SimpleWorkerConfig::default()),
+        ]);
+        let worker0 = WorkerWithDpRank::from_worker_id(0);
+        let worker1 = WorkerWithDpRank::from_worker_id(1);
+        let worker2 = WorkerWithDpRank::from_worker_id(2);
+        let routing = BoundedOverlapLoadRouting {
+            tolerance_blocks: 16.0,
+            decisions: 0,
+            maximum_overlap_selected: 0,
+            overlap_tradeoffs: 0,
+            total_sacrificed_overlap_blocks: 0.0,
+            max_sacrificed_overlap_blocks: 0.0,
+        };
+        let (mut request, _response) = make_request("request-a", 4_096);
+        request.session_id = Some("session-a".to_string());
+        request.worker_loads = FxHashMap::from_iter([
+            (
+                worker0,
+                WorkerLoadProjection {
+                    active_prefill_tokens: 1_000,
+                    ..Default::default()
+                },
+            ),
+            (
+                worker1,
+                WorkerLoadProjection {
+                    active_prefill_tokens: 100,
+                    ..Default::default()
+                },
+            ),
+            (
+                worker2,
+                WorkerLoadProjection {
+                    active_prefill_tokens: 100,
+                    ..Default::default()
+                },
+            ),
+        ]);
+
+        let cold = routing
+            .choose("session-a", &request, &workers, request.eligibility())
+            .unwrap();
+        assert!(cold.worker == worker1 || cold.worker == worker2);
+        assert_eq!(
+            cold,
+            routing
+                .choose("session-a", &request, &workers, request.eligibility(),)
+                .unwrap()
+        );
+
+        request.overlap.effective_overlap_blocks.extend([
+            (worker0, 100.0),
+            (worker1, 100.0),
+            (worker2, 100.0),
+        ]);
+        request
+            .worker_loads
+            .get_mut(&worker0)
+            .unwrap()
+            .active_prefill_tokens = 50;
+        let tied = routing
+            .choose("session-a", &request, &workers, request.eligibility())
+            .unwrap();
+        assert_eq!(tied.worker, worker0);
+
+        request.overlap.effective_overlap_blocks.extend([
+            (worker0, 120.0),
+            (worker1, 90.0),
+            (worker2, 112.0),
+        ]);
+        request
+            .worker_loads
+            .get_mut(&worker0)
+            .unwrap()
+            .active_prefill_tokens = 1_000;
+        request
+            .worker_loads
+            .get_mut(&worker2)
+            .unwrap()
+            .active_prefill_tokens = 50;
+        let near = routing
+            .choose("session-a", &request, &workers, request.eligibility())
+            .unwrap();
+        assert_eq!(near.worker, worker2);
+
+        request
+            .overlap
+            .effective_overlap_blocks
+            .insert(worker2, 103.0);
+        let outside = routing
+            .choose("session-a", &request, &workers, request.eligibility())
+            .unwrap();
+        assert_eq!(outside.worker, worker0);
     }
 
     fn make_admission_request(
