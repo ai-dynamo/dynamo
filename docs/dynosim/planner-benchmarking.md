@@ -89,8 +89,9 @@ For AIC-backed MTP replay, set `aic_nextn` on the agg engine args or on the disa
 Download the trace:
 
 ```bash
-mkdir -p traces/mooncake_fast25 && cd traces/mooncake_fast25
-curl -sLO https://raw.githubusercontent.com/kvcache-ai/Mooncake/main/FAST25-release/traces/toolagent_trace.jsonl
+mkdir -p traces/mooncake_fast25
+curl -sL https://raw.githubusercontent.com/kvcache-ai/Mooncake/main/FAST25-release/traces/toolagent_trace.jsonl \
+  -o traces/mooncake_fast25/toolagent_trace.jsonl
 ```
 
 Run agg (2 workers, TP=1):

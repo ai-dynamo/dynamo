@@ -285,6 +285,10 @@ replay. Planner events share the simulation clock with workload, worker, router,
 events. Use the `--sla-*` flags separately to calculate goodput; those report thresholds do not
 change Planner's own scaling SLA.
 
+Planner-in-the-loop replay is offline only. For trace-driven runs, provide exactly one trace file
+in Mooncake format. Planner replay does not support `--report-jsonl` or
+`--max-sim-time-seconds`; synthetic inputs remain supported.
+
 See [Planner Simulation Benchmarking](planner-benchmarking.md) for configuration and interpretation.
 
 ## Read the Report

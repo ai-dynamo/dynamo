@@ -217,7 +217,7 @@ the result as system-path overhead plus configured simulated engine time, not GP
 
 Set `DYN_MOCKER_KV_CACHE_TRACE=1` to log structured allocation and eviction traces. Choose ZMQ
 events explicitly with `--event-plane zmq`; use `--zmq-kv-events-ports` and
-`--zmq-replay-ports` when an experiment needs fixed per-worker event and gap-recovery ports.
+`--zmq-replay-ports` when an experiment requires fixed per-worker event and gap-recovery ports.
 
 ## Kubernetes Examples
 
