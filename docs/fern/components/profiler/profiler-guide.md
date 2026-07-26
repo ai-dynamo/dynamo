@@ -516,7 +516,7 @@ Provide a base DGD config via the overrides section:
 ```yaml
 overrides:
   dgd:
-    apiVersion: nvidia.com/v1alpha1
+    apiVersion: nvidia.com/v1beta1
     kind: DynamoGraphDeployment
     metadata:
       name: my-dgd

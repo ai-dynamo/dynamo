@@ -67,12 +67,14 @@ const UP_CSS = `
 .dynref-up-pill {
     display: inline-flex;
     align-items: center;
-    padding: 2px 8px;
+    min-height: 24px;
+    padding: 2px 10px;
     border: 1px solid transparent;
-    border-radius: 6px;
+    border-radius: 999px;
     font-family: var(--pst-font-family-monospace, ui-monospace, SFMono-Regular, Menlo, monospace);
     font-size: 12px;
     font-variant-numeric: tabular-nums;
+    line-height: 1.2;
     white-space: nowrap;
 }
 
@@ -131,9 +133,10 @@ const UP_CSS = `
 .dynref-up-read {
     display: inline-flex;
     align-items: center;
-    padding: 2px 9px;
+    min-height: 24px;
+    padding: 2px 10px;
     border: 1px solid var(--dynref-blue-border);
-    border-radius: 6px;
+    border-radius: 999px;
     background: var(--dynref-blue-bg);
     color: var(--dynref-blue-fg);
     font-size: 12px;

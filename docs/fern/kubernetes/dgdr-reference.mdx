@@ -158,7 +158,7 @@ Only `model` is required; every other field has a default or is auto-detected.
     <a href="https://pkg.go.dev/k8s.io/api/batch/v1#JobSpec" target="_blank">batch/v1.JobSpec</a>
   </ParamField>
   <ParamField path="dgd" type="runtime.RawExtension">
-    A full or partial `nvidia.com/v1alpha1` DGD used as the base for the generated deployment; see the [DGD Reference](dgd-reference.mdx) for its fields. Values from profiling results are merged on top. See [Generated DGD overrides](#generated-dgd-overrides).
+    A partial, versioned DGD merged into the generated deployment. Use `nvidia.com/v1beta1` for new overrides; `nvidia.com/v1alpha1` remains supported for compatibility. See [Generated DGD overrides](#generated-dgd-overrides).
 
     <a href="https://pkg.go.dev/k8s.io/apimachinery/pkg/runtime#RawExtension" target="_blank">runtime.RawExtension</a>
   </ParamField>
@@ -552,7 +552,13 @@ These fields default from environment variables and are excluded from serialized
 
 ## Generated DGD overrides
 
-`spec.overrides.dgd` is a partial `nvidia.com/v1alpha1` DGD object merged into the profiler-generated deployment after Dynamo selects a configuration. Use it when the generated DGD needs a field that DGDR does not expose directly — including router mode, KV-event publication, and other frontend or worker settings, since DGDR does not yet expose first-class router or EPP features. `overrides.dgd` only patches components that already exist in the generated DGD; it cannot add a missing component (such as an `Epp`). Component names depend on the selected backend and topology, so inspect the generated DGD first, especially when `autoApply: false`.
+`spec.overrides.dgd` is a partial, versioned DGD merged into the profiler-generated deployment after
+Dynamo selects a configuration. Use `apiVersion: nvidia.com/v1beta1` and
+`kind: DynamoGraphDeployment` for new overrides. Components, pod-template containers, and container
+environment variables merge by `name`; atomic lists such as graph-level `spec.env` and container
+`args` replace their generated values.
+
+For example, set an environment variable on one generated component:
 
 ```yaml
 apiVersion: nvidia.com/v1beta1
@@ -564,19 +570,42 @@ spec:
   backend: sglang
   overrides:
     dgd:
-      apiVersion: nvidia.com/v1alpha1  # v1beta1 not yet supported for overrides
+      apiVersion: nvidia.com/v1beta1
       kind: DynamoGraphDeployment
       spec:
-        envs:
-          - name: TRITON_PTXAS_PATH
-            value: /usr/local/cuda/bin/ptxas
+        components:
+        - name: SGLangDecodeWorker  # replace with the generated component name
+          podTemplate:
+            spec:
+              containers:
+              - name: main
+                env:
+                - name: TRITON_PTXAS_PATH
+                  value: /usr/local/cuda/bin/ptxas
 ```
 
+Inspect `.status.profilingResults.selectedConfig` with `autoApply: false` to find component names.
+Overrides can modify only components present in the generated DGD; unknown names are ignored with a
+warning, and an override cannot add deployment topology. Labels and annotations merge,
+`metadata.name` selects the final DGD name, and other identity metadata is ignored. `status`, null
+values for typed fields, and field deletion are not supported.
+
 <Note>
-  `overrides.profilingJob` only customizes the profiling Job. Use `overrides.dgd` for settings that must appear on the deployed worker pods.
+  Existing `nvidia.com/v1alpha1` overrides remain supported. They use the older `spec.services`
+  shape, merge services by name, and append `extraPodSpec.mainContainer.args` to generated worker
+  arguments. In `v1beta1`, container `args` is atomic and replaces the generated list. Use
+  `v1beta1` for new overrides and provide the complete desired argument list when overriding
+  `args`.
 </Note>
 
-For worked examples — per-component env overrides, enabling KV-aware routing on the generated frontend, worker KV-event publication, and EPP/gateway topologies — see [DGDR Examples](dgdr-examples.md), [Router Guide](../components/router/router-guide.md), and [Gateway API Inference Extension](inference-gateway.mdx).
+<Note>
+  `overrides.profilingJob` customizes only the profiling Job. Use `overrides.dgd` for settings that
+  must appear on deployed components.
+</Note>
+
+For worked examples, see [DGDR Examples](dgdr-examples.md). For router configuration and EPP
+topologies, see the [Router Guide](../components/router/router-guide.md) and
+[Gateway API Inference Extension](inference-gateway.mdx).
 
 ## SKU format
 

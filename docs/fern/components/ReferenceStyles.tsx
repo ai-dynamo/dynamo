@@ -180,11 +180,14 @@ const REFERENCE_CSS = `
     align-items: center;
     gap: 0.3em;
     margin: 0.15rem 0.1rem;
-    padding: 0.1rem 0.5rem;
+    min-height: 24px;
+    padding: 2px 10px;
     border: 1px solid transparent;
-    border-radius: 6px;
+    border-radius: 999px;
     font-size: 0.8125rem;
     font-weight: 600;
+    line-height: 1.2;
+    white-space: nowrap;
 }
 
 /* NVIDIA green — GPU generations. */

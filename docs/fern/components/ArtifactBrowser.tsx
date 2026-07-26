@@ -82,7 +82,7 @@ const AB_CSS = `
     min-height: 30px;
     padding: 6px 10px;
     border: 1px solid var(--border, var(--grayscale-a5));
-    border-radius: var(--rounded, 6px);
+    border-radius: 999px;
     background: transparent;
     color: var(--pst-color-text-base);
     font-size: 12.5px;

@@ -244,7 +244,7 @@ The Planner's `sla` optimization target reads live TTFT/ITL from Prometheus, so 
 
 </Step>
 
-<Step title="Review and customize the generated DGD">
+<Step title="Review the generated DGD">
 
 For production, inspect the generated DGD before it deploys. Set `autoApply: false` so the DGDR stops at `Ready` and stores the config instead of deploying it.
 
@@ -261,29 +261,6 @@ kubectl get dgdr my-model -n <namespace> \
 # Review and edit my-dgd.yaml, then:
 kubectl apply -f my-dgd.yaml -n <namespace>
 ```
-
-When the generated DGD needs a field DGDR does not expose, supply a partial DGD under `overrides.dgd`. The operator merges it into the profiler-generated deployment after a configuration is selected. For example, to enable KV-aware routing on the generated `Frontend` (which defaults to `round-robin`):
-
-```yaml
-spec:
-  model: Qwen/Qwen3-0.6B
-  backend: vllm
-  overrides:
-    dgd:
-      apiVersion: nvidia.com/v1alpha1   # v1beta1 not yet supported for overrides
-      kind: DynamoGraphDeployment
-      spec:
-        services:
-          Frontend:
-            envs:
-              - name: DYN_ROUTER_MODE
-                value: kv
-```
-
-DGDR does not yet expose first-class router or EPP/Gateway features, so routing is configured this way. Service names depend on the selected backend and topology — inspect the generated DGD first, especially when `autoApply: false`. For the full routing, worker KV-event, and override patterns, see [DGDR Reference — Generated DGD Overrides](dgdr-reference.mdx#generated-dgd-overrides) and the [Router Guide](../components/router/router-guide.md).
-
-> [!IMPORTANT]
-> `overrides.dgd` only patches services that already exist in the generated DGD — it cannot add a missing service (for example an `Epp` service for Gateway routing). For EPP/Gateway topologies, author a direct DGD or use a GAIE recipe; see [Inference Gateway](inference-gateway.mdx).
 
 </Step>
 
@@ -342,6 +319,49 @@ kubectl delete dgd <generated-dgd-name> -n <namespace>
 
 > [!NOTE]
 > **TODO (author):** Confirm the generated DGD's name pattern (the [Deployment Overview](model-deployment-guide.md#dgd-persists-after-dgdr-deletion) example uses `my-model-dgd`) and how to look it up via the `dgdr.nvidia.com/name` label.
+
+## Optional: Customize the generated DGD
+
+Use `spec.overrides.dgd` when the generated DGD needs a field that DGDR does not expose directly.
+Provide a partial `nvidia.com/v1beta1` DGD. DGDR merges matching components, containers, and
+environment variables by `name` after profiling selects a configuration.
+
+For example, enable KV-aware routing on the generated `Frontend` component:
+
+```yaml
+spec:
+  model: Qwen/Qwen3-0.6B
+  backend: vllm
+  overrides:
+    dgd:
+      apiVersion: nvidia.com/v1beta1
+      kind: DynamoGraphDeployment
+      spec:
+        components:
+        - name: Frontend
+          podTemplate:
+            spec:
+              containers:
+              - name: main
+                env:
+                - name: DYN_ROUTER_MODE
+                  value: kv
+```
+
+Inspect `.status.profilingResults.selectedConfig` with `autoApply: false` to find the generated
+component names. An override can modify only components already present in that generated DGD; it
+cannot add a new worker, EPP, or other topology component.
+
+> [!IMPORTANT]
+> Older overrides used the `nvidia.com/v1alpha1` DGD shape. They remain supported for compatibility,
+> but their merge behavior differs: `spec.services` entries merge by service name, and worker
+> `extraPodSpec.mainContainer.args` values append to the generated arguments. In `v1beta1`, map lists
+> such as components, containers, and environment variables merge by `name`, while atomic lists such
+> as graph-level `spec.env` and container `args` replace the generated list. Use `v1beta1` for new
+> overrides and include the complete desired argument list when overriding `args`.
+
+For the complete merge, metadata, and validation rules, see
+[DGDR Reference — Generated DGD overrides](dgdr-reference.mdx#generated-dgd-overrides).
 
 ## Next steps
 

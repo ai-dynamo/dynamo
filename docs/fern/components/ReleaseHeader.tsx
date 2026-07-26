@@ -55,7 +55,7 @@ const RH_CSS = `
     align-items: center;
     padding: 3px 10px;
     border: 1px solid var(--border, var(--grayscale-a5));
-    border-radius: 6px;
+    border-radius: 999px;
     color: var(--pst-color-text-muted);
     font-size: 12px;
     font-weight: 600;

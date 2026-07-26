@@ -101,7 +101,7 @@ const TG_CSS = `
     min-height: 26px;
     padding: 4px 9px;
     border: 1px solid var(--border, var(--grayscale-a5));
-    border-radius: var(--rounded, 6px);
+    border-radius: 999px;
     background: transparent;
     color: var(--pst-color-text-base);
     font-family: var(--pst-font-family-monospace, ui-monospace, SFMono-Regular, Menlo, monospace);

@@ -125,7 +125,7 @@ Set your environment variables:
 
 ```bash
 export NAMESPACE=dynamo-system
-export RELEASE_VERSION=1.0.2  # match a version from https://github.com/ai-dynamo/dynamo/releases
+export RELEASE_VERSION=1.2.1  # match a version from https://github.com/ai-dynamo/dynamo/releases
 ```
 
 ```bash
@@ -159,7 +159,9 @@ helm install dynamo-platform dynamo-platform-$RELEASE_VERSION.tgz \
 > ```
 
 > [!WARNING]
-> **Namespace-restricted mode** (`namespaceRestriction.enabled=true`) is deprecated and will be removed in a future release. Use the default cluster-wide mode for all new deployments.
+> **Namespace-restricted mode** (`namespaceRestriction.enabled=true`) is only for development and
+> testing. It is not supported for production. Set `dynamo-operator.upgradeCRD=false`; see
+> [Dynamo Operator](dynamo-operator.md#namespace-restricted-mode).
 
 Verify the Dynamo platform is running:
 
@@ -199,6 +201,12 @@ For the `enabled=true` path, install Grove and KAI Scheduler separately first. S
 > |-----------------|---------------|-------|
 > | 1.0.x           | >= v0.13.0    | >= v0.1.0-alpha.6 |
 > | 1.1.x           | >= v0.13.4    | >= v0.1.0-alpha.8 |
+> | 1.3.x           | >= v0.13.4    | >= v0.1.0-alpha.8, < v0.1.0-alpha.9 |
+> | 1.4.x           | >= v0.13.4    | >= v0.1.0-alpha.10 |
+>
+> Upgrade Grove in lockstep with Dynamo while the Grove APIs remain unstable. Dynamo 1.3.x expects
+> Grove's earlier `ClusterTopology` API and is incompatible with the newer
+> `ClusterTopologyBinding` API. Dynamo 1.4.x expects `ClusterTopologyBinding`.
 
 #### LWS + Volcano
 
@@ -346,13 +354,15 @@ Found existing namespace-restricted Dynamo operators in namespaces: ...
 
 Cause: Attempting cluster-wide install on a shared cluster with existing namespace-restricted operators.
 
-Solution: Migrate the existing namespace-restricted operators to cluster-wide mode. Namespace-restricted mode is deprecated.
+Solution: Remove the development/test namespace-restricted operators, then install one cluster-wide
+operator for production use.
 
 **CRDs already exist**
 
 Cause: Installing CRDs on a cluster where they're already present (common on shared clusters).
 
-Solution: CRDs are installed automatically by the Helm chart. If you encounter conflicts, check existing CRDs with `kubectl get crd | grep dynamo`.
+Solution: The cluster-wide operator's `crd-apply` init container manages CRDs automatically. If you
+encounter conflicts, check existing CRDs with `kubectl get crd | grep dynamo`.
 
 **Pods not starting?**
 ```bash

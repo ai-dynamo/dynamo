@@ -89,13 +89,15 @@ const SC_CSS = `
     display: inline-flex;
     align-items: center;
     align-self: flex-start;
-    padding: 1px 8px;
+    min-height: 22px;
+    padding: 2px 9px;
     border: 1px solid var(--dynref-blue-border);
-    border-radius: 6px;
+    border-radius: 999px;
     background: var(--dynref-blue-bg);
     color: var(--dynref-blue-fg);
     font-size: 11.5px;
     font-weight: 600;
+    line-height: 1.2;
     white-space: nowrap;
 }
 `;
