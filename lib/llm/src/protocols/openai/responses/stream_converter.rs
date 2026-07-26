@@ -255,7 +255,8 @@ impl ResponseStreamConverter {
 
             if let Some(reasoning) = delta.reasoning_content.as_deref()
                 && !reasoning.is_empty()
-                && self.reasoning_summary_requested()
+                && !self.reasoning_done
+                && self.params.reasoning_summary_requested()
             {
                 self.accumulated_reasoning.push_str(reasoning);
                 if !self.reasoning_started {
@@ -504,14 +505,6 @@ impl ResponseStreamConverter {
         if should_finish_function_calls {
             self.append_pending_function_call_done_events(events);
         }
-    }
-
-    fn reasoning_summary_requested(&self) -> bool {
-        self.params
-            .reasoning
-            .as_ref()
-            .and_then(|reasoning| reasoning.summary)
-            .is_some()
     }
 
     fn append_reasoning_done_events(&mut self, events: &mut Vec<Result<Event, anyhow::Error>>) {
@@ -1357,6 +1350,36 @@ mod tests {
 
         assert!(events.is_empty());
         assert!(conv.completed_output().is_empty());
+    }
+
+    #[test]
+    fn test_reasoning_summary_ignores_updates_after_completion() {
+        use dynamo_protocols::types::responses::{Reasoning, ReasoningSummary};
+
+        let params = ResponseParams {
+            reasoning: Some(Reasoning {
+                effort: None,
+                summary: Some(ReasoningSummary::Auto),
+            }),
+            ..default_params()
+        };
+        let mut conv = ResponseStreamConverter::new("test-model".into(), params);
+
+        let _ = conv.process_chunk(&reasoning_chunk("summary"));
+        let _ = conv.process_chunk(&text_chunk("answer"));
+        let late_events = conv.process_chunk(&reasoning_chunk(" must not be appended"));
+
+        assert!(late_events.is_empty());
+        let output = conv.completed_output();
+        let OutputItem::Reasoning(reasoning) = &output[0] else {
+            panic!("expected reasoning output");
+        };
+        assert_eq!(
+            reasoning.summary,
+            vec![SummaryPart::SummaryText(SummaryTextContent {
+                text: "summary".to_string(),
+            })]
+        );
     }
 
     #[test]
