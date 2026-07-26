@@ -416,6 +416,16 @@ async fn select_and_reserve_books_and_duplicate_reservation_conflicts() {
     let body = response_json(response).await;
     assert_eq!(body["selection_id"], "res-a");
     assert_eq!(body["effective_prefill_tokens"], 4);
+    assert_eq!(body["isl_tokens"], 4);
+    let block_hashes = compute_block_hash_for_seq(&[1, 2, 3, 4], 4, BlockHashOptions::default());
+    let expected_sequence_hashes: Vec<i64> = compute_seq_hash_for_block(&block_hashes)
+        .iter()
+        .map(|hash| *hash as i64)
+        .collect();
+    assert_eq!(
+        body["sequence_hashes"],
+        serde_json::json!(expected_sequence_hashes)
+    );
 
     let loads_response = app
         .clone()

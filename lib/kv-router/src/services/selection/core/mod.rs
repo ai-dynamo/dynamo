@@ -717,6 +717,9 @@ impl SelectionCore {
                 track_prefill_tokens,
             )
         });
+        let response_sequence_hashes =
+            book.then(|| sequence_hashes.iter().map(|hash| *hash as i64).collect());
+        let response_isl_tokens = book.then_some(isl_tokens);
         let schedule_request = ScheduleRequest {
             mode,
             token_seq: Some(sequence_hashes),
@@ -777,6 +780,8 @@ impl SelectionCore {
 
         Ok(SelectResponse {
             selection_id,
+            sequence_hashes: response_sequence_hashes,
+            isl_tokens: response_isl_tokens,
             model_name: key.model_name,
             routing_group: key.routing_group,
             worker_id: response.best_worker.worker_id,

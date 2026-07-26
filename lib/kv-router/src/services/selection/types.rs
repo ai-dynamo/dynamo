@@ -517,6 +517,10 @@ pub struct OverlapScoresRequest {
 pub struct SelectResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selection_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sequence_hashes: Option<Vec<i64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub isl_tokens: Option<usize>,
     pub model_name: String,
     pub routing_group: String,
     pub worker_id: WorkerId,
