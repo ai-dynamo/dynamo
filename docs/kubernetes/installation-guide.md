@@ -275,10 +275,20 @@ For large clusters with frequent model updates, consider [ModelExpress](model-ca
 Run the pre-deployment check script to validate your cluster is ready for deployments:
 
 ```bash
+# For NVIDIA GPU clusters (default)
 ./deploy/pre-deployment/pre-deployment-check.sh
+
+# For Intel XPU clusters
+./deploy/pre-deployment/pre-deployment-check.sh --device xpu
 ```
 
-This checks kubectl connectivity, default StorageClass configuration, GPU node availability, and GPU Operator status. See [Pre-Deployment Checks](https://github.com/ai-dynamo/dynamo/tree/main/deploy/pre-deployment/README.md) for details.
+This checks kubectl connectivity, default StorageClass configuration, GPU/XPU node availability, and GPU Operator status.
+
+- **No default StorageClass?** → [No StorageClasses Available](https://github.com/ai-dynamo/dynamo/tree/main/deploy/pre-deployment/README.md#no-storageclasses-available)
+- **No GPU nodes (NVIDIA)?** → [No GPU Nodes Found (NVIDIA)](https://github.com/ai-dynamo/dynamo/tree/main/deploy/pre-deployment/README.md#no-gpu-nodes-found-nvidia)
+- **No XPU resources (Intel)?** → [No XPU Resources Found (Intel)](https://github.com/ai-dynamo/dynamo/tree/main/deploy/pre-deployment/README.md#no-xpu-resources-found-intel)
+
+See [Pre-Deployment Checks](https://github.com/ai-dynamo/dynamo/tree/main/deploy/pre-deployment/README.md) for details.
 
 ## Next Steps
 
