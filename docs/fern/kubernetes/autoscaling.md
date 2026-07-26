@@ -236,7 +236,7 @@ Dynamo exports several metrics useful for autoscaling. These are available at th
 
 > **See also**: For a complete list of Dynamo metrics, see the
 > [Metrics Catalog](../reference/observability/metrics-catalog.mdx). For Kubernetes dashboards, see
-> [Observability](observability/metrics.md).
+> [Observability](observability/metrics.mdx).
 
 #### Available Dynamo Metrics
 
@@ -763,4 +763,4 @@ If you see unstable scaling:
 - [Prometheus Adapter](https://github.com/kubernetes-sigs/prometheus-adapter)
 - [Planner Documentation](../components/planner/planner-guide.md)
 - [Metrics Catalog](../reference/observability/metrics-catalog.mdx)
-- [Observability](observability/metrics.md)
+- [Observability](observability/metrics.mdx)

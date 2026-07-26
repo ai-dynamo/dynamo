@@ -6,7 +6,7 @@ title: Mocker Engine Architecture
 
 The mocker is organized into several cooperating components that mirror the internal architecture of production LLM inference engines. The scheduler (vLLM-style and SGLang-style variants) and KV block manager live inside the engine core. Multi-engine behavior — KV transfer/offloading simulation, KV router simulation, planner simulation — is added by the DynoSim run harness on top of multiple engine cores; see [DynoSim Architecture](dynosim-architecture.md) for the component-level design and [offline replay internals](https://github.com/ai-dynamo/dynamo/blob/main/lib/mocker/src/replay/offline/README.md) for implementation details.
 
-For task-oriented instructions, see [Simulate a Kubernetes Deployment](../dynosim/mocker.md) or [Simulate a Local Deployment](../dynosim/mocker-local.md); for the command-line flags referenced throughout this page, see the [Mocker CLI Reference](../components/mocker/mocker-cli-reference.mdx).
+For task-oriented instructions, see [Simulate a Kubernetes Deployment](../dynosim/mocker.mdx) or [Simulate a Local Deployment](../dynosim/mocker-local.mdx); for the command-line flags referenced throughout this page, see the [Mocker CLI Reference](../components/mocker/mocker-cli-reference.mdx).
 
 ## Scheduler
 
@@ -131,7 +131,7 @@ The following features are not yet supported by the mocker:
 
 | Document | Description |
 |----------|-------------|
-| [Simulate a Kubernetes Deployment](../dynosim/mocker.md) | Deploy and run Mocker on Kubernetes |
-| [Simulate a Local Deployment](../dynosim/mocker-local.md) | Run Mocker from the command line |
+| [Simulate a Kubernetes Deployment](../dynosim/mocker.mdx) | Deploy and run Mocker on Kubernetes |
+| [Simulate a Local Deployment](../dynosim/mocker-local.mdx) | Run Mocker from the command line |
 | [Mocker CLI Reference](../components/mocker/mocker-cli-reference.mdx) | Command-line flags for `python -m dynamo.mocker` |
-| [Run a DynoSim Simulation](../dynosim/runs.md) | Run one workload through a simulated configuration with `python -m dynamo.replay` |
+| [Run a DynoSim Simulation](../dynosim/runs.mdx) | Run one workload through a simulated configuration with `python -m dynamo.replay` |

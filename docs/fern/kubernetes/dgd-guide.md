@@ -205,7 +205,7 @@ spec:
 Substitute `Qwen/Qwen3-32B` with your model, `hf-token-secret` with your Secret name if you changed it. Keeping the namespace, image, and token in the environment means the same YAML file works across clusters — you change the exports, not the spec.
 
 <Tip>
-**Large model?** By default every worker pod downloads the weights from HuggingFace on startup — slow for big models and prone to rate limits across many replicas. Cache the weights once on a shared volume and mount them into each worker. See [Model Caching](model-caching.md) (and [ModelExpress](modelexpress.md) for fleet-scale distribution).
+**Large model?** By default every worker pod downloads the weights from HuggingFace on startup — slow for big models and prone to rate limits across many replicas. Cache the weights once on a shared volume and mount them into each worker. See [Model Caching](model-caching.mdx) (and [ModelExpress](modelexpress.md) for fleet-scale distribution).
 </Tip>
 
 </Step>
@@ -734,13 +734,13 @@ These are independent capabilities you opt into per workload. None are required 
   <Card title="Set up KV-Aware Routing" icon="regular route" href="dgd-kv-routing.md">
     Route requests to the worker that already holds the prompt's KV cache prefix to cut TTFT.
   </Card>
-  <Card title="Set up KV Cache Offloading" icon="regular layer-group" href="dgd-kv-offloading.md">
+  <Card title="Set up KV Cache Offloading" icon="regular layer-group" href="dgd-kv-offloading.mdx">
     Spill KV blocks to host memory or disk to serve longer contexts and reuse cache.
   </Card>
   <Card title="Set up Disaggregated Serving" icon="regular arrows-split-up-and-left" href="../features/disaggregated-serving/README.md">
     Split prefill and decode into independently scaled workers with KV transfer over RDMA.
   </Card>
-  <Card title="Sizing with AIConfigurator" icon="regular ruler-combined" href="dgd-aiconfigurator.md">
+  <Card title="Sizing with AIConfigurator" icon="regular ruler-combined" href="dgd-aiconfigurator.mdx">
     Auto-pick TP/PP/DP and replica counts to meet a TTFT/ITL latency target.
   </Card>
   <Card title="Expose the Frontend" icon="regular globe" href="dgd-expose-frontend.md">
@@ -749,7 +749,7 @@ These are independent capabilities you opt into per workload. None are required 
   <Card title="Customize Health Probes" icon="regular heart-pulse" href="dgd-probes.md">
     Override the operator's default liveness, readiness, and startup probes when needed.
   </Card>
-  <Card title="Observability and Metrics" icon="regular chart-line" href="observability/metrics.md">
+  <Card title="Observability and Metrics" icon="regular chart-line" href="observability/metrics.mdx">
     Scrape Prometheus metrics — on by default; opt out with an annotation.
   </Card>
   <Card title="Auto Deploy with DGDR" icon="regular wand-magic-sparkles" href="dgdr-guide.md">

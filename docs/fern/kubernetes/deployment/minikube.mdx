@@ -7,17 +7,18 @@ subtitle: Sets up a local Minikube cluster with GPU support and Istio for runnin
 
 Don't have a Kubernetes cluster? No problem! You can set up a local development environment using Minikube. This guide walks through the set up of everything you need to run Dynamo Kubernetes Platform locally.
 
-## 1. Install Minikube
+<Steps toc={true}>
+<Step title="Install Minikube" id="1-install-minikube">
 First things first! Start by installing Minikube. Follow the official [Minikube installation guide](https://minikube.sigs.k8s.io/docs/start/) for your operating system.
 
-## 2. Configure GPU Support (Optional)
+</Step>
+<Step title="Configure GPU Support (Optional)" id="2-configure-gpu-support-optional">
 Planning to use GPU-accelerated workloads? You'll need to configure GPU support in Minikube. Follow the [Minikube GPU guide](https://minikube.sigs.k8s.io/docs/tutorials/nvidia/) to set up NVIDIA GPU support before proceeding.
 
-> [!TIP]
-> Make sure to configure GPU support before starting Minikube if you plan to use GPU workloads!
+<Tip>Make sure to configure GPU support before starting Minikube if you plan to use GPU workloads!</Tip>
 
-
-## 3. Start Minikube
+</Step>
+<Step title="Start Minikube" id="3-start-minikube">
 Time to launch your local cluster!
 
 ```bash
@@ -30,7 +31,8 @@ minikube addons enable istio
 minikube addons enable storage-provisioner-rancher
 ```
 
-## 4. Verify Installation
+</Step>
+<Step title="Verify Installation" id="4-verify-installation">
 Let's make sure everything is working correctly!
 
 ```bash
@@ -43,6 +45,9 @@ kubectl get pods -n istio-system
 # Verify storage class
 kubectl get storageclass
 ```
+
+</Step>
+</Steps>
 
 ## Next Steps
 

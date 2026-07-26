@@ -191,7 +191,7 @@ Pre-built recipes for common models:
 | DeepSeek-R1 | SGLang | Disaggregated | [View](recipes/deepseek-r1/sglang/) |
 | Qwen3-32B-FP8 | TensorRT-LLM | Aggregated | [View](recipes/qwen3-32b-fp8/trtllm/) |
 
-See [recipes/](recipes/README.md) for the full list. Cloud-specific guides: [AWS EKS](docs/fern/kubernetes/cloud-providers/eks/eks.md) · [Google GKE](docs/fern/kubernetes/cloud-providers/gke/gke.md) · [Azure AKS](docs/fern/kubernetes/cloud-providers/aks/aks.md) · [Amazon ECS](docs/fern/kubernetes/cloud-providers/ecs/ecs.md)
+See [recipes/](recipes/README.md) for the full list. Cloud-specific guides: [AWS EKS](docs/fern/kubernetes/cloud-providers/eks/eks.mdx) · [Google GKE](docs/fern/kubernetes/cloud-providers/gke/gke.mdx) · [Azure AKS](docs/fern/kubernetes/cloud-providers/aks/aks.mdx) · [Amazon ECS](docs/fern/kubernetes/cloud-providers/ecs/ecs.mdx)
 
 ## Building from Source
 

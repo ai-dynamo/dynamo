@@ -331,7 +331,7 @@ image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:x.y.z
 
 **For more troubleshooting:**
 - [Kubernetes Deployment Guide](../docs/fern/kubernetes/model-deployment-guide.md#troubleshooting)
-- [Observability Documentation](../docs/fern/kubernetes/observability/metrics.md)
+- [Observability Documentation](../docs/fern/kubernetes/observability/metrics.mdx)
 
 ## Related Documentation
 
@@ -340,7 +340,7 @@ image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:x.y.z
 - **[vLLM Backend Guide](../docs/fern/backends/vllm/README.md)** - vLLM-specific features
 - **[SGLang Backend Guide](../docs/fern/backends/sglang/README.md)** - SGLang-specific features
 - **[TensorRT-LLM Backend Guide](../docs/fern/backends/trtllm/README.md)** - TensorRT-LLM features
-- **[Observability](../docs/fern/kubernetes/observability/metrics.md)** - Monitoring and logging
+- **[Observability](../docs/fern/kubernetes/observability/metrics.mdx)** - Monitoring and logging
 - **[Benchmarking Guide](../docs/fern/benchmarks/benchmarking.md)** - Performance testing
 
 ## Contributing

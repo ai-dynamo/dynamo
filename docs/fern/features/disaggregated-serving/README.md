@@ -91,7 +91,7 @@ For the single-node example in this guide you need:
 3. **A HuggingFace token secret** (`hf-token-secret`) if the model is gated.
 
 Model caching (the PVC and `HF_HOME` wiring the workers mount) is configured
-separately — see [Model caching](../../kubernetes/dgd-kv-offloading.md). This
+separately — see [Model caching](../../kubernetes/dgd-kv-offloading.mdx). This
 guide omits those fields for clarity; without them the model downloads to the
 container's default cache.
 

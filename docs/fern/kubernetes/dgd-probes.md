@@ -33,7 +33,7 @@ The startup probe's 2-hour budget (10s × 720) is what tolerates long model down
 - **You want faster failure detection** for a small, fast-loading model. Lower the thresholds.
 
 > [!TIP]
-> Prefer [Model Caching](model-caching.md) over a longer startup probe when the bottleneck is download time — caching removes the per-pod download instead of just waiting longer for it.
+> Prefer [Model Caching](model-caching.mdx) over a longer startup probe when the bottleneck is download time — caching removes the per-pod download instead of just waiting longer for it.
 
 ## Override in a DGD
 
@@ -70,4 +70,4 @@ For multinode deployments the operator adjusts probes by backend and node role �
 
 - [Health Check Reference](../reference/observability/health-checks.mdx) — health endpoints and local-process signals.
 - [API Reference](api-reference.md) — full probe defaults per component type.
-- [Model Caching](model-caching.md) — remove startup download time instead of extending probes.
+- [Model Caching](model-caching.mdx) — remove startup download time instead of extending probes.

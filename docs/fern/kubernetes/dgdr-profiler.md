@@ -59,7 +59,7 @@ disagg Top Configurations: (Sorted by tokens/s/gpu)
 +------+--------------+---------------+--------+----------+------------+-------------+------------+-------------+
 ```
 
-Read the tables the same way as the [AIConfigurator sizing walkthrough](dgd-aiconfigurator.md#read-the-recommended-parallelism): `parallel` is the tensor- and pipeline-parallel layout (`tp4pp1` means TP 4, PP 1), `gpus/worker` equals TP × PP, and the disaggregated table sizes prefill `(p)` and decode `(d)` engines separately. The profiler takes the rank-1 row of the winning experiment and renders it into the generated DGD.
+Read the tables the same way as the [AIConfigurator sizing walkthrough](dgd-aiconfigurator.mdx#read-the-recommended-parallelism): `parallel` is the tensor- and pipeline-parallel layout (`tp4pp1` means TP 4, PP 1), `gpus/worker` equals TP × PP, and the disaggregated table sizes prefill `(p)` and decode `(d)` engines separately. The profiler takes the rank-1 row of the winning experiment and renders it into the generated DGD.
 
 </Step>
 
@@ -173,7 +173,7 @@ spec:
       enabled: true
 ```
 
-Mocker is a testing and experimentation path, not a serving deployment. It is independent of `searchStrategy` — enabling it does not change or override rapid versus thorough, and the profiler still runs the search strategy you set. The one interaction is with the Planner: when you enable mocker **alongside the Planner**, the Planner's pre-deployment sweeping cannot be `none`, because the mocker needs the simulated performance data that sweeping produces. Without a Planner, mocker carries no such requirement. For how the simulated backend works and how it models performance, see [Live Simulation with Mocker](../dynosim/mocker.md).
+Mocker is a testing and experimentation path, not a serving deployment. It is independent of `searchStrategy` — enabling it does not change or override rapid versus thorough, and the profiler still runs the search strategy you set. The one interaction is with the Planner: when you enable mocker **alongside the Planner**, the Planner's pre-deployment sweeping cannot be `none`, because the mocker needs the simulated performance data that sweeping produces. Without a Planner, mocker carries no such requirement. For how the simulated backend works and how it models performance, see [Live Simulation with Mocker](../dynosim/mocker.mdx).
 
 ## Accessing profiling artifacts
 
@@ -211,5 +211,5 @@ The interpolation `.npz` files are the same data the Planner consumes for autosc
 | Full field table and lifecycle | [DGDR Reference](dgdr-reference.mdx) |
 | Copy-ready DGDR manifests | [DGDR Examples](dgdr-examples.md) |
 | Runtime autoscaling from profiling data | [Planner Guide](../components/planner/planner-guide.md) |
-| Simulate engines without GPUs | [Live Simulation with Mocker](../dynosim/mocker.md) |
+| Simulate engines without GPUs | [Live Simulation with Mocker](../dynosim/mocker.mdx) |
 | Profiling algorithm internals and interpolation schema | [Profiler Guide](../components/profiler/profiler-guide.md) |

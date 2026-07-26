@@ -45,7 +45,7 @@ See [Session IDs](session-ids.mdx#session-id-inputs) and [Agent Hints](agent-hin
 
 <Step title="Configure a packaged harness when available">
 
-Point Codex, Pi, Claude Code, or another supported CLI at Dynamo. Supported harnesses emit native session headers, so you do not need to add `X-Dynamo-Session-ID` yourself. See [Agent Harnesses](agent-harnesses.md).
+Point Codex, Pi, Claude Code, or another supported CLI at Dynamo. Supported harnesses emit native session headers, so you do not need to add `X-Dynamo-Session-ID` yourself. See [Agent Harnesses](agent-harnesses.mdx).
 
 </Step>
 
@@ -86,13 +86,13 @@ Set `DYN_REQUEST_TRACE=1` on the frontend to capture timing, tool calls, and ses
   <Card title="Agent Hints" icon="regular sliders" href="agent-hints.md">
     Per-request priority, expected output length, and speculative prefill.
   </Card>
-  <Card title="Agent Harnesses" icon="regular terminal" href="agent-harnesses.md">
+  <Card title="Agent Harnesses" icon="regular terminal" href="agent-harnesses.mdx">
     Connect Codex, Pi, Claude Code, and other supported coding agents.
   </Card>
   <Card title="Agent Tracing" icon="regular chart-line" href="agent-tracing.md">
     Request traces, inferred tool calls, and Perfetto conversion.
   </Card>
-  <Card title="Agent Simulation" icon="regular play" href="agent-replay.md">
+  <Card title="Agent Simulation" icon="regular play" href="agent-replay.mdx">
     Convert agent traces into replay and simulation inputs.
   </Card>
   <Card title="ThunderAgent Program Scheduler" icon="regular clock" href="thunderagent-router.md">

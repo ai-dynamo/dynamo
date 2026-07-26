@@ -37,7 +37,7 @@ One capture supports both paths:
 | **Live replay with AIPerf** | Synthetic requests against a real Dynamo endpoint, model, and GPUs | Final latency, throughput, cache, and regression measurements |
 | **Offline simulation with DynoSim** | The request graph against Dynamo's simulated scheduler, router, and KV cache | Compare worker counts, serving topologies, routing policies, and KV-cache capacity |
 
-Live replay measures the real serving stack. Offline simulation predicts how a configuration behaves and should be followed by live validation for final numbers. See the official [AIPerf trace replay](https://github.com/ai-dynamo/aiperf/blob/main/docs/benchmark-modes/trace-replay.md) and [fixed schedule](https://github.com/ai-dynamo/aiperf/blob/main/docs/tutorials/fixed-schedule.md) guides for live benchmarking. See [DynoSim](../dynosim/README.md) and [DynoSim Runs](../dynosim/runs.md) for offline simulation.
+Live replay measures the real serving stack. Offline simulation predicts how a configuration behaves and should be followed by live validation for final numbers. See the official [AIPerf trace replay](https://github.com/ai-dynamo/aiperf/blob/main/docs/benchmark-modes/trace-replay.md) and [fixed schedule](https://github.com/ai-dynamo/aiperf/blob/main/docs/tutorials/fixed-schedule.md) guides for live benchmarking. See [DynoSim](../dynosim/README.md) and [DynoSim Runs](../dynosim/runs.mdx) for offline simulation.
 
 The complete flow is:
 
@@ -49,8 +49,8 @@ flowchart LR
     C --> W["Live replay trace"] --> P["AIPerf"] --> E["Dynamo endpoint"]
 ```
 
-## Step 1: Capture a Real Agent Run
-
+<Steps toc={true}>
+<Step title="Capture a Real Agent Run" id="step-1-capture-a-real-agent-run">
 Enable request tracing on the frontend that receives the agent traffic:
 
 ```bash
@@ -67,8 +67,8 @@ Each agent chain should send `X-Dynamo-Session-ID`. A child agent should also se
 
 Dynamo writes rotating `request-trace.NNNNNN.jsonl.gz` files. Stop the frontend, or otherwise allow tracing to flush, before using the files. See [Agent Tracing](agent-tracing.md) for configuration, the record schema, Perfetto conversion, and optional tool-event ingestion.
 
-## Step 2: Check the Capture
-
+</Step>
+<Step title="Check the Capture" id="step-2-check-the-capture">
 Before replaying, confirm that the trace contains the workload you intended:
 
 - `request_end` count matches the number of completed model requests
@@ -78,8 +78,8 @@ Before replaying, confirm that the trace contains the workload you intended:
 
 These are manual sanity checks. The replay tools validate required fields and consistent block sizes, but they cannot know the request or session counts you intended to capture. Checking both catches a wrong frontend, missing session headers, and an incomplete shutdown before those errors become misleading replay results.
 
-## Step 3: Prepare the Request Graph
-
+</Step>
+<Step title="Prepare the Request Graph" id="step-3-prepare-the-request-graph">
 Both replay paths build a graph from the same trace fields:
 
 - `session_id` orders requests into one linear agent chain
@@ -104,8 +104,8 @@ The output contains one replay graph per root session. Requests in a session rem
 
 The current live graph supports one direct child-session level. The converter rejects deeper trees instead of silently flattening them.
 
-## Step 4: Run the Replay
-
+</Step>
+<Step title="Run the Replay" id="step-4-run-the-replay">
 ### Live replay with AIPerf
 
 Replay against a Dynamo endpoint serving the target model:
@@ -149,8 +149,8 @@ python -m dynamo.replay /tmp/agent-run/request-trace.*.jsonl.gz \
 
 DynoSim derives and validates the block size across all shards. When every request carries session identity, it also reconstructs the agent DAG and tool-wait timing. `kv_router` requires at least two simulated workers. Change worker count, routing, or engine settings to compare configurations without running the model.
 
-## Step 5: Validate Fidelity
-
+</Step>
+<Step title="Validate Fidelity" id="step-5-validate-fidelity">
 For a successful live replay, check that:
 
 - captured, converted, dispatched, and completed request counts match
@@ -160,6 +160,9 @@ For a successful live replay, check that:
 - arrival-time, request-duration, and cache-reuse deltas are reported
 
 Keep the model, tokenizer, block size, worker topology, and initial cache state the same when measuring replay fidelity. For a DynoSim run, first verify request and token totals, then compare configurations using the generated report rather than treating simulation output as hardware measurements.
+
+</Step>
+</Steps>
 
 ## Fidelity Boundaries
 

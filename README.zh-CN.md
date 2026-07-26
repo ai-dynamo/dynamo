@@ -168,7 +168,7 @@ spec:
 | DeepSeek-R1 | SGLang | 分离式 | [查看](recipes/deepseek-r1/sglang/) |
 | Qwen3-32B-FP8 | TensorRT-LLM | 聚合式 | [查看](recipes/qwen3-32b-fp8/trtllm/) |
 
-完整列表见 [recipes/](recipes/README.md)。云平台专用指南：[AWS EKS](docs/fern/kubernetes/cloud-providers/eks/eks.md) · [Google GKE](docs/fern/kubernetes/cloud-providers/gke/gke.md) · [Azure AKS](docs/fern/kubernetes/cloud-providers/aks/aks.md) · [Amazon ECS](docs/fern/kubernetes/cloud-providers/ecs/ecs.md)
+完整列表见 [recipes/](recipes/README.md)。云平台专用指南：[AWS EKS](docs/fern/kubernetes/cloud-providers/eks/eks.mdx) · [Google GKE](docs/fern/kubernetes/cloud-providers/gke/gke.mdx) · [Azure AKS](docs/fern/kubernetes/cloud-providers/aks/aks.mdx) · [Amazon ECS](docs/fern/kubernetes/cloud-providers/ecs/ecs.mdx)
 
 ## 从源码构建
 

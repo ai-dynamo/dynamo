@@ -28,8 +28,8 @@ kubectl port-forward -n "$NAMESPACE" svc/<deployment-name>-frontend 8000:8000
 
 The service name is the DGD `metadata.name` followed by `-frontend`.
 
-## Run a baseline benchmark
-
+<Steps toc={true}>
+<Step title="Run a baseline benchmark" id="run-a-baseline-benchmark">
 In another terminal, set `--model` to the model name served by the deployment:
 
 ```bash
@@ -47,8 +47,8 @@ aiperf profile \
 AIPerf writes artifacts to `artifacts/` and prints a metrics summary. Record Time to First Token
 (TTFT), Inter-Token Latency (ITL), end-to-end latency, and output throughput.
 
-## Compare Kubernetes configurations
-
+</Step>
+<Step title="Compare Kubernetes configurations" id="compare-kubernetes-configurations">
 Change one deployment setting at a time, wait for the DGD to become ready, and rerun the same AIPerf
 command. Common comparisons include:
 
@@ -61,9 +61,12 @@ command. Common comparisons include:
 Keep the request shape, concurrency, and request count fixed so the results remain comparable. Then
 sweep concurrency to find the saturation point of the selected deployment.
 
+</Step>
+</Steps>
+
 ## Next steps
 
-- Use [Sizing with AIConfigurator](../kubernetes/dgd-aiconfigurator.md) to select additional DGD
+- Use [Sizing with AIConfigurator](../kubernetes/dgd-aiconfigurator.mdx) to select additional DGD
   configurations.
 - Use the full [Dynamo Benchmarking guide](../benchmarks/benchmarking.md) for in-cluster load
   generation, concurrency sweeps, arrival patterns, trace replay, visualization, and GPU telemetry.

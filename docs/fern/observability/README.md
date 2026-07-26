@@ -27,7 +27,7 @@ For scheduler telemetry, see [Observe a Local Deployment](local-observability.md
 
 ## Kubernetes stack
 
-On Kubernetes, install the monitoring backends once, then enable signals per deployment — see [Observability](../kubernetes/observability/metrics.md) under Operations for the per-deployment steps. The Dynamo operator wires metrics scraping automatically (it adds a `PodMonitor` to every managed pod), so the only one-time work is installing Prometheus, the exporters, and the logging stack.
+On Kubernetes, install the monitoring backends once, then enable signals per deployment — see [Observability](../kubernetes/observability/metrics.mdx) under Operations for the per-deployment steps. The Dynamo operator wires metrics scraping automatically (it adds a `PodMonitor` to every managed pod), so the only one-time work is installing Prometheus, the exporters, and the logging stack.
 
 ### kube-prometheus-stack
 
@@ -94,4 +94,4 @@ helm install --values alloy-custom-values.yaml \
   alloy grafana/k8s-monitoring -n $MONITORING_NAMESPACE
 ```
 
-The Alloy values file forwards logs to Loki, restricts collection to `$DYN_NAMESPACE`, and maps the `nvidia.com/dynamo-component-type` and `nvidia.com/dynamo-graph-deployment-name` pod labels into Loki labels so the logging dashboard can filter by deployment and component. Applying the Grafana datasource and logging dashboard, and enabling JSONL logging on a deployment, are covered in [Observability](../kubernetes/observability/metrics.md#logging) under Operations.
+The Alloy values file forwards logs to Loki, restricts collection to `$DYN_NAMESPACE`, and maps the `nvidia.com/dynamo-component-type` and `nvidia.com/dynamo-graph-deployment-name` pod labels into Loki labels so the logging dashboard can filter by deployment and component. Applying the Grafana datasource and logging dashboard, and enabling JSONL logging on a deployment, are covered in [Observability](../kubernetes/observability/metrics.mdx#logging) under Operations.

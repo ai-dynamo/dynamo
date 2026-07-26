@@ -35,8 +35,8 @@ Pick the guide that matches your fabric:
 
 | Platform | Fabric | Setup guide |
 |----------|--------|-------------|
-| Azure (AKS) | InfiniBand | [RDMA / InfiniBand on AKS](aks/rdma-infiniband.md) |
-| AWS (EKS) | EFA | [EFA (RDMA over AWS Fabric) on EKS](eks/efa.md) |
+| Azure (AKS) | InfiniBand | [RDMA / InfiniBand on AKS](aks/rdma-infiniband.mdx) |
+| AWS (EKS) | EFA | [EFA (RDMA over AWS Fabric) on EKS](eks/efa.mdx) |
 | On-premises / bare metal | InfiniBand or RoCE | [Disaggregated Communication Guide](../disagg-communication-guide.md) |
 
 Whatever the fabric, the building blocks are the same: an RDMA-capable NIC, a Kubernetes device plugin that advertises the NIC as a schedulable resource (such as `rdma/hca_shared_devices_a` or `vpc.amazonaws.com/efa`), the GPU Operator with GPUDirect RDMA enabled, and worker pods that request the RDMA resource.

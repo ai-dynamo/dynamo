@@ -14,8 +14,8 @@
 # limitations under the License.
 
 # Navigation structure for Dynamo docs
-# Tab-based navigation: Home, User Guide, Features, Walkthroughs, Recipes, Developer Guide,
-# Reference, Blog, and Community. Each content tab sets skip-slug: true so page URLs stay
+# Tab-based navigation: Home, User Guide, Features, Recipes, Developer Guide, Reference,
+# Blog, and Community. Each content tab sets skip-slug: true so page URLs stay
 # independent of which tab contains them. The Recipes tab keeps its recipes/ URL prefix.
 
 tabs:
@@ -30,10 +30,6 @@ tabs:
   use-cases:
     display-name: Features
     icon: puzzle-piece
-    skip-slug: true
-  well-lit-paths:
-    display-name: Walkthroughs
-    icon: compass
     skip-slug: true
   recipes:
     display-name: Recipes
@@ -99,9 +95,9 @@ navigation:
                 - page: Overview
                   path: kubernetes/cloud-providers/rdma-setup.md
                 - page: Infiniband on Azure
-                  path: kubernetes/cloud-providers/aks/rdma-infiniband.md
+                  path: kubernetes/cloud-providers/aks/rdma-infiniband.mdx
                 - page: EFA on AWS
-                  path: kubernetes/cloud-providers/eks/efa.md
+                  path: kubernetes/cloud-providers/eks/efa.mdx
             - section: Model Storage
               contents:
                 - page: Overview
@@ -109,9 +105,9 @@ navigation:
                 - page: AKS Storage
                   path: kubernetes/cloud-providers/aks/storage.md
                 - page: Azure Lustre CSI Driver
-                  path: kubernetes/cloud-providers/aks/azure-lustre-csi.md
+                  path: kubernetes/cloud-providers/aks/azure-lustre-csi.mdx
                 - page: EFS
-                  path: kubernetes/cloud-providers/eks/efs.md
+                  path: kubernetes/cloud-providers/eks/efs.mdx
             - page: Observability
               path: observability/README.md
             - section: Managed Kubernetes
@@ -119,19 +115,20 @@ navigation:
                 - section: EKS
                   contents:
                     - page: EKS Setup
-                      path: kubernetes/cloud-providers/eks/eks.md
+                      path: kubernetes/cloud-providers/eks/eks.mdx
                     - page: ECS
-                      path: kubernetes/cloud-providers/ecs/ecs.md
+                      path: kubernetes/cloud-providers/ecs/ecs.mdx
                 - section: Azure
                   contents:
                     - page: AKS Setup
-                      path: kubernetes/cloud-providers/aks/aks.md
+                      path: kubernetes/cloud-providers/aks/aks.mdx
                     - page: Spot VMs
-                      path: kubernetes/cloud-providers/aks/spot-vms.md
+                      slug: spot-vms
+                      path: kubernetes/cloud-providers/aks/spot-vms.mdx
                 - section: GCP
                   contents:
                     - page: GKE Setup
-                      path: kubernetes/cloud-providers/gke/gke.md
+                      path: kubernetes/cloud-providers/gke/gke.mdx
 
           # ==================== Usage ====================
           - section: Model Deployment
@@ -157,13 +154,13 @@ navigation:
                 path: features/disaggregated-serving/README.md
               - page: Sizing with AIConfigurator
                 slug: size-with-ai-configurator
-                path: kubernetes/dgd-aiconfigurator.md
+                path: kubernetes/dgd-aiconfigurator.mdx
               - page: Multinode Deployments
                 path: kubernetes/deployment/multinode-deployment.md
               - page: Model Caching
-                path: kubernetes/model-caching.md
+                path: kubernetes/model-caching.mdx
               - page: KV Cache Offloading
-                path: kubernetes/dgd-kv-offloading.md
+                path: kubernetes/dgd-kv-offloading.mdx
 
           - section: Fault Tolerance
             icon: shield-halved
@@ -187,16 +184,16 @@ navigation:
               - page: Dynamo Profiler
                 path: kubernetes/dgdr-profiler.md
               - page: Dynamo Planner
-                path: kubernetes/dgdr-planner.md
+                path: kubernetes/dgdr-planner.mdx
 
           - section: Operations
             icon: screwdriver-wrench
             collapsed: open-by-default
             contents:
               - page: Observability
-                path: kubernetes/observability/metrics.md
+                path: kubernetes/observability/metrics.mdx
               - page: Benchmarking with AIPerf
-                path: tools/aiperf.md
+                path: tools/aiperf.mdx
               - section: DynoSim
                 slug: dynosim
                 contents:
@@ -204,16 +201,16 @@ navigation:
                     path: dynosim/README.md
                   - page: Mocker Live Simulation
                     slug: live-simulation-with-mocker
-                    path: dynosim/mocker.md
+                    path: dynosim/mocker.mdx
                   - page: DynoSim Replay
                     slug: simulation-runs
-                    path: dynosim/runs.md
+                    path: dynosim/runs.mdx
                   - page: DynoSim Sweeps
                     slug: simulation-sweeps
-                    path: dynosim/sweeps.md
+                    path: dynosim/sweeps.mdx
                   - page: DynoSim Planner Replay
                     slug: planner-simulation-benchmarking
-                    path: dynosim/planner-benchmarking.md
+                    path: dynosim/planner-benchmarking.mdx
 
       # ==================== Local Deployment variant ====================
       # slug: cli preserves the existing CLI page URLs (previously the
@@ -240,10 +237,8 @@ navigation:
             contents:
               - page: Install Dynamo
                 path: getting-started/local-installation.mdx
-              - page: Building from Source
-                path: cli/building-from-source.md
               - page: Minikube Setup
-                path: kubernetes/deployment/minikube.md
+                path: kubernetes/deployment/minikube.mdx
               - page: Observability
                 path: cli/observability.mdx
 
@@ -278,13 +273,13 @@ navigation:
                   - page: Overview
                     path: dynosim/README.md
                   - page: Mocker Live Simulation
-                    path: dynosim/mocker-local.md
+                    path: dynosim/mocker-local.mdx
                   - page: DynoSim Replay
                     slug: simulation-runs
-                    path: dynosim/runs.md
+                    path: dynosim/runs.mdx
                   - page: DynoSim Sweeps
                     slug: simulation-sweeps
-                    path: dynosim/sweeps.md
+                    path: dynosim/sweeps.mdx
 
   - tab: use-cases
     layout:
@@ -301,11 +296,11 @@ navigation:
           - page: Agent Hints
             path: agents/agent-hints.md
           - page: Agent Harnesses
-            path: agents/agent-harnesses.md
+            path: agents/agent-harnesses.mdx
           - page: Agent Tracing
             path: agents/agent-tracing.md
           - page: Agent Simulation
-            path: agents/agent-replay.md
+            path: agents/agent-replay.mdx
           - page: ThunderAgent Program Scheduler
             path: agents/thunderagent-router.md
       - section: Multimodal Serving
@@ -378,15 +373,6 @@ navigation:
         contents:
           - page: Overview
             path: features/lora/README.md
-
-  - tab: well-lit-paths
-    layout:
-      # ==================== Walkthroughs ====================
-      - section: Walkthroughs
-        icon: road
-        contents:
-          - page: Overview
-            path: well-lit-paths/README.md
 
   - tab: recipes
     layout:
@@ -649,7 +635,7 @@ navigation:
                 collapsed: true
                 contents:
                   - page: Model Caching
-                    path: kubernetes/model-caching.md
+                    path: kubernetes/model-caching.mdx
                   - page: ModelExpress
                     path: kubernetes/modelexpress.md
               - section: Kubernetes Operator

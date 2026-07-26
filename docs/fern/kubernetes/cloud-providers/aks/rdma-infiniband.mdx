@@ -8,8 +8,9 @@ This guide covers setting up RDMA over InfiniBand on AKS for high-performance di
 
 Without RDMA, disaggregated inference falls back to TCP with severe performance degradation (~98s TTFT vs ~200-500ms with RDMA). See the [Disaggregated Communication Guide](../../disagg-communication-guide.md) for details on transport options and performance expectations.
 
-> [!NOTE]
-> The Network Operator and NicClusterPolicy steps in this guide are based on the [Azure AKS RDMA InfiniBand](https://github.com/Azure/aks-rdma-infiniband) repository. That project is open-source and not covered by Microsoft Azure support — file issues on the GitHub repository.
+<Note>
+The Network Operator and NicClusterPolicy steps in this guide are based on the [Azure AKS RDMA InfiniBand](https://github.com/Azure/aks-rdma-infiniband) repository. That project is open-source and not covered by Microsoft Azure support — file issues on the GitHub repository.
+</Note>
 
 ## Prerequisites
 
@@ -18,7 +19,7 @@ Without RDMA, disaggregated inference falls back to TCP with severe performance 
 - At least **2 GPU nodes** to enable cross-node RDMA communication
 - **ND-series VMs** with Mellanox ConnectX InfiniBand NICs (e.g., `Standard_ND96asr_v4`, `Standard_ND96isr_H100_v5`)
 - **Ubuntu OS** on the node pool (required for NVIDIA driver compatibility)
-- GPU driver installation **skipped** on the node pool (`--skip-gpu-driver-install`) — see [GPU Node Pool Setup](aks.md#step-2-add-a-gpu-node-pool)
+- GPU driver installation **skipped** on the node pool (`--skip-gpu-driver-install`) — see [GPU Node Pool Setup](aks.mdx#step-2-add-a-gpu-node-pool)
 
 **Register the AKS InfiniBand feature** to ensure nodes land on the same physical InfiniBand network:
 
@@ -40,8 +41,8 @@ The RDMA setup involves five components installed in this order:
 4. **RDMA Shared Device Plugin** — Exposes InfiniBand NICs to pods as a Kubernetes resource
 5. **GPU Operator** — Installed with RDMA-specific settings (NFD disabled, GPUDirect RDMA enabled, host MOFED)
 
-## Step 1: Install the NVIDIA Network Operator
-
+<Steps toc={true}>
+<Step title="Install the NVIDIA Network Operator" id="step-1-install-the-nvidia-network-operator">
 The [NVIDIA Network Operator](https://docs.nvidia.com/networking/display/kubernetes25100/index.html) automates deployment of networking components including Mellanox OFED drivers for InfiniBand support.
 
 Create the namespace and label it for privileged workloads:
@@ -80,8 +81,8 @@ Verify the Network Operator pod is running:
 kubectl get pods -n network-operator
 ```
 
-## Step 2: Apply the NicClusterPolicy
-
+</Step>
+<Step title="Apply the NicClusterPolicy" id="step-2-apply-the-nicclusterpolicy">
 The NicClusterPolicy configures the OFED driver (Mellanox OFED / DOCA driver) as a DaemonSet on all InfiniBand-capable nodes.
 
 Apply the base NicClusterPolicy using kustomize:
@@ -99,12 +100,13 @@ kubectl get pods -n network-operator -l app=mofed-ubuntu22.04-ds -w
 # Wait until all pods show Running
 ```
 
-## Step 3: Deploy the IB Node Configuration DaemonSet
-
+</Step>
+<Step title="Deploy the IB Node Configuration DaemonSet" id="step-3-deploy-the-ib-node-configuration-daemonset">
 This DaemonSet loads InfiniBand kernel modules and sets unlimited memlock limits on GPU nodes. This is required for RDMA to function — without it, InfiniBand device files may not exist and memory pinning for RDMA transfers will fail.
 
-> [!IMPORTANT]
-> This step is not covered in the Azure RDMA repo but is required for a working setup. The DaemonSet loads `ib_umad` and `rdma_ucm` kernel modules, sets unlimited memlock limits for containerd and kubelet, and restarts both services to apply the changes.
+<Info>
+This step is not covered in the Azure RDMA repo but is required for a working setup. The DaemonSet loads `ib_umad` and `rdma_ucm` kernel modules, sets unlimited memlock limits for containerd and kubelet, and restarts both services to apply the changes.
+</Info>
 
 Create `ib-node-config.yaml`:
 
@@ -167,8 +169,7 @@ spec:
         command: ["sh", "-c", "echo IB node config active; sleep infinity"]
 ```
 
-> [!NOTE]
-> Replace `<GPU_NODE_POOL_NAME>` with your GPU node pool name (e.g., `ndh100pool`).
+<Note>Replace `<GPU_NODE_POOL_NAME>` with your GPU node pool name (e.g., `ndh100pool`).</Note>
 
 ```bash
 kubectl apply -f ib-node-config.yaml
@@ -186,8 +187,8 @@ kubectl get pods -n kube-system -l app=ib-node-config -w
 - **Memlock limits** — RDMA requires pinning memory pages; without unlimited memlock, large transfers fail
 - **Service restarts** — containerd and kubelet must be restarted to pick up the new memlock limits
 
-## Step 4: Deploy the RDMA Shared Device Plugin
-
+</Step>
+<Step title="Deploy the RDMA Shared Device Plugin" id="step-4-deploy-the-rdma-shared-device-plugin">
 The RDMA Shared Device Plugin exposes InfiniBand NICs as a Kubernetes extended resource so pods can request RDMA access.
 
 Create the ConfigMap with the device plugin configuration:
@@ -265,8 +266,7 @@ spec:
           path: /dev/
 ```
 
-> [!NOTE]
-> Replace `<GPU_NODE_POOL_NAME>` with your GPU node pool name (e.g., `ndh100pool`).
+<Note>Replace `<GPU_NODE_POOL_NAME>` with your GPU node pool name (e.g., `ndh100pool`).</Note>
 
 ```bash
 kubectl apply -f rdma-configmap.yaml
@@ -279,8 +279,8 @@ Wait for the device plugin pods to start:
 kubectl get pods -n kube-system -l name=rdma-shared-dp-ds -w
 ```
 
-## Step 5: Install the GPU Operator (RDMA-Enabled)
-
+</Step>
+<Step title="Install the GPU Operator (RDMA-Enabled)" id="step-5-install-the-gpu-operator-rdma-enabled">
 Install the GPU Operator with RDMA-specific values:
 
 ```bash
@@ -302,6 +302,9 @@ Wait for the GPU Operator pods to reach `Running` state:
 ```bash
 kubectl get pods -n gpu-operator -w
 ```
+
+</Step>
+</Steps>
 
 ## Verification
 
@@ -350,10 +353,11 @@ resources:
     rdma/hca_shared_devices_a: 1
 ```
 
-> [!NOTE]
-> **`IPC_LOCK` capability is not required** when this setup is followed. `IPC_LOCK` is historically needed for RDMA because `ibv_reg_mr` calls `mlock()` to pin memory pages — but `mlock()` only needs the capability if the memlock rlimit would otherwise block it. The `ib-node-config` DaemonSet (Step 3) sets `LimitMEMLOCK=infinity` on the kubelet and containerd systemd units, so all pods on GPU nodes inherit an unlimited memlock limit and RDMA memory pinning works without any capability in the pod spec.
->
-> If you see `ENOMEM` errors from `ibv_reg_mr` and `ib-node-config` is running, verify that containerd and kubelet were restarted after the limits were applied (check the init container logs). If `ib-node-config` is not deployed, add `IPC_LOCK` to your pod's `securityContext.capabilities.add`.
+<Note>
+**`IPC_LOCK` capability is not required** when this setup is followed. `IPC_LOCK` is historically needed for RDMA because `ibv_reg_mr` calls `mlock()` to pin memory pages — but `mlock()` only needs the capability if the memlock rlimit would otherwise block it. The `ib-node-config` DaemonSet (Step 3) sets `LimitMEMLOCK=infinity` on the kubelet and containerd systemd units, so all pods on GPU nodes inherit an unlimited memlock limit and RDMA memory pinning works without any capability in the pod spec.
+
+If you see `ENOMEM` errors from `ibv_reg_mr` and `ib-node-config` is running, verify that containerd and kubelet were restarted after the limits were applied (check the init container logs). If `ib-node-config` is not deployed, add `IPC_LOCK` to your pod's `securityContext.capabilities.add`.
+</Note>
 
 ## Troubleshooting
 
@@ -408,8 +412,9 @@ If this returns empty, ensure `driver.rdma.enabled=true` and `driver.rdma.useHos
 kubectl rollout restart daemonset/nvidia-driver-daemonset -n gpu-operator
 ```
 
-> [!NOTE]
-> The [nvidia-peermem-reloader](https://github.com/Azure/aks-rdma-infiniband/tree/main/configs/nvidia-peermem-reloader) DaemonSet from the Azure RDMA repo is designed for clusters using **AKS-managed GPU drivers** (without the GPU Operator). It simply runs `modprobe nvidia-peermem` — which will fail on ND H100 v5 nodes because the host OS doesn't include the module. When using the GPU Operator (recommended), the operator handles `nvidia_peermem` automatically via `driver.rdma.enabled=true`.
+<Note>
+The [nvidia-peermem-reloader](https://github.com/Azure/aks-rdma-infiniband/tree/main/configs/nvidia-peermem-reloader) DaemonSet from the Azure RDMA repo is designed for clusters using **AKS-managed GPU drivers** (without the GPU Operator). It simply runs `modprobe nvidia-peermem` — which will fail on ND H100 v5 nodes because the host OS doesn't include the module. When using the GPU Operator (recommended), the operator handles `nvidia_peermem` automatically via `driver.rdma.enabled=true`.
+</Note>
 
 ## See Also
 

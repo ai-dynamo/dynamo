@@ -11,7 +11,7 @@ This filesystem will be used by Dynamo to store shared model weights and compila
 
 ## Prerequisites
 
-- EKS cluster created following the [EKS guide](eks.md)
+- EKS cluster created following the [EKS guide](eks.mdx)
 - Environment variables set:
 
 ```bash
@@ -20,8 +20,8 @@ export CLUSTER_NAME="ai-dynamo"
 export DYNAMO_NAMESPACE="dynamo-system"
 ```
 
-## Retrieve VPC and Subnet Information
-
+<Steps toc={true}>
+<Step title="Retrieve VPC and Subnet Information" id="retrieve-vpc-and-subnet-information">
 Get the VPC ID associated with your EKS cluster:
 
 ```bash
@@ -41,8 +41,8 @@ export VPC_CIDR=$(aws ec2 describe-vpcs \
   --output text)
 ```
 
-## Create a Security Group for EFS
-
+</Step>
+<Step title="Create a Security Group for EFS" id="create-a-security-group-for-efs">
 Create a security group that allows NFS traffic (port 2049) from within the VPC:
 
 ```bash
@@ -66,8 +66,8 @@ aws ec2 authorize-security-group-ingress \
   --region $AWS_REGION
 ```
 
-## Create the EFS File System
-
+</Step>
+<Step title="Create the EFS File System" id="create-the-efs-file-system">
 ```bash
 export EFS_FS_ID=$(aws efs create-file-system \
   --performance-mode generalPurpose \
@@ -91,8 +91,8 @@ aws efs describe-file-systems \
 
 You should see `available` before proceeding.
 
-## Create Mount Targets
-
+</Step>
+<Step title="Create Mount Targets" id="create-mount-targets">
 Mount targets allow your EKS nodes to access the EFS file system. You need one mount target per subnet where your nodes run.
 
 Get the subnet IDs used by your EKS cluster:
@@ -120,8 +120,9 @@ for SUBNET_ID in $(echo "$SUBNET_IDS" | tr '\t' '\n'); do
 done
 ```
 
-> [!NOTE]
-> EFS allows only one mount target per Availability Zone. If multiple subnets are in the same AZ, the command will fail for the duplicates, which is expected and safe to ignore.
+<Note>
+EFS allows only one mount target per Availability Zone. If multiple subnets are in the same AZ, the command will fail for the duplicates, which is expected and safe to ignore.
+</Note>
 
 Verify mount targets are available:
 
@@ -135,8 +136,8 @@ aws efs describe-mount-targets \
 
 Wait until all mount targets show `available` in the State column before proceeding.
 
-## Create Kubernetes StorageClass
-
+</Step>
+<Step title="Create Kubernetes StorageClass" id="create-kubernetes-storageclass">
 Create a StorageClass that uses the EFS CSI driver with dynamic provisioning:
 
 ```bash
@@ -155,8 +156,8 @@ parameters:
 EOF
 ```
 
-## Create a PersistentVolumeClaim
-
+</Step>
+<Step title="Create a PersistentVolumeClaim" id="create-a-persistentvolumeclaim">
 We create three separate PVCs because different Dynamo recipe examples reference each one individually:
 * `model-cache` stores downloaded model weights (e.g. from HuggingFace).
 * `compilation-cache` stores vLLM/TRT-LLM compilation artifacts.
@@ -209,11 +210,12 @@ spec:
 EOF
 ```
 
-> [!NOTE]
-> EFS is elastic, the `storage` value in the PVC is required by Kubernetes but does not limit the actual storage. EFS will grow and shrink automatically.
+<Note>
+EFS is elastic, the `storage` value in the PVC is required by Kubernetes but does not limit the actual storage. EFS will grow and shrink automatically.
+</Note>
 
-## Verify
-
+</Step>
+<Step title="Verify" id="verify">
 Confirm the PVC is bound:
 
 ```bash
@@ -228,6 +230,9 @@ compilation-cache   Bound    pvc-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx   5Gi     
 model-cache         Bound    pvc-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx   5Gi        RWX            efs-sc-dynamic   <unset>                 42s
 perf-cache          Bound    pvc-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx   5Gi        RWX            efs-sc-dynamic   <unset>                 41s
 ```
+
+</Step>
+</Steps>
 
 ## Cleanup
 

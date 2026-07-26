@@ -13,8 +13,8 @@ The simplest approach: create a shared PVC, run a one-time Job to download the m
 
 This is the pattern used by all Dynamo recipes today.
 
-### Step 1: Create a Shared PVC
-
+<Steps toc={true}>
+<Step title="Create a Shared PVC" id="step-1-create-a-shared-pvc">
 ```yaml
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -32,8 +32,8 @@ spec:
 `ReadWriteMany` access mode is required so multiple pods can mount the PVC simultaneously. Ensure your storage class supports RWX (e.g., NFS, CephFS, or cloud-provider shared file systems).
 </Note>
 
-### Step 2: Download the model
-
+</Step>
+<Step title="Download the model" id="step-2-download-the-model">
 ```yaml
 apiVersion: batch/v1
 kind: Job
@@ -105,8 +105,8 @@ Alternatively, look up the commit hash on the HuggingFace Hub model page under *
 
 You need this path for the `pvcModelPath` field in a DGDR spec (see [Deployment Overview — Model Caching](model-deployment-guide.md#production-detail-model-caching)).
 
-### Step 3: Mount in DynamoGraphDeployment
-
+</Step>
+<Step title="Mount in DynamoGraphDeployment" id="step-3-mount-in-dynamographdeployment">
 ```yaml
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
@@ -124,6 +124,9 @@ spec:
 ```
 
 All `VllmWorker` pods that mount `model-cache` now read from the shared cache, avoiding per-pod worker downloads. If you also want the frontend to reuse tokenizer and config files, mount the same PVC there too.
+
+</Step>
+</Steps>
 
 ### Compilation Cache
 

@@ -8,41 +8,19 @@ subtitle: Hardware, platform, and feature support for Dynamo backends
 import { ReferenceStyles } from "@/components/ReferenceStyles";
 import { CompatibilityHero } from "@/components/CompatibilityHero";
 import { FeatureHeatmap } from "@/components/FeatureHeatmap";
-import { BackendVersionMatrix } from "@/components/BackendVersionMatrix";
-import { CudaDriverMatrix } from "@/components/CudaDriverMatrix";
 import { RunsWhereWizard } from "@/components/RunsWhereWizard";
 
 <ReferenceStyles />
 
 <CompatibilityHero />
 
+For extended driver compatibility beyond the listed minimums, including forward compatibility and `cuda-compat` packages, see the [CUDA Compatibility documentation](https://docs.nvidia.com/deploy/cuda-compatibility/).
+
 <Note>
 See [Release Artifacts](release-artifacts.mdx) for the full artifact inventory — container images, wheels, Helm charts, and crates — and [Model Early Access Builds](model-early-access-builds.mdx) for per-model early access container builds.
 </Note>
 
-## Backend Dependencies
-
-The backend framework versions included with the current Dynamo release. Backend versions listed are the only versions tested and supported for each release. TensorRT-LLM does not support Python 3.11; installation of the `ai-dynamo[trtllm]` wheel will fail on Python 3.11.
-
-<BackendVersionMatrix />
-
-<Accordion title="Backend dependencies by release (back to v0.6.0)">
-  <BackendVersionMatrix mode="all" />
-</Accordion>
-
-## CUDA & Driver Requirements
-
-Dynamo container images include CUDA toolkit libraries; the host must have a compatible NVIDIA GPU driver.
-
-<CudaDriverMatrix />
-
-For extended driver compatibility beyond these minimums (forward compatibility, `cuda-compat` packages, troubleshooting), see the [CUDA Compatibility documentation](https://docs.nvidia.com/deploy/cuda-compatibility/).
-
-<Accordion title="CUDA & driver requirements by release">
-  <CudaDriverMatrix mode="all" />
-</Accordion>
-
-### What Runs Where
+## Find a Compatible Release
 
 Pick your backend and the CUDA generation your host driver supports to see which Dynamo releases you can run — and what to pull for the current one.
 

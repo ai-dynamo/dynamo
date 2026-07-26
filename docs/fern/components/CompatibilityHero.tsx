@@ -2,24 +2,27 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
- * CompatibilityHero — current-release summary panel for the Compatibility page.
- *
- * Renders the current stable release (version, date, release-notes link), the
- * per-backend engine + NIXL + CUDA toolkit pins, and the platform requirement
- * rows (GPU, OS, arch) from releases.data.ts. Server component; shared vocabulary
- * (panel, eyebrow, label, mono, chips, badges) comes from ReferenceStyles —
- * place <ReferenceStyles /> on the page alongside this component. Only the
- * .dynref-hero-* layout classes are defined here.
+ * CompatibilityHero — version-selectable compatibility summary for the
+ * Compatibility page. Combines backend, NIXL, UCX, CUDA toolkit, minimum
+ * driver, and current platform requirements in one card.
  */
+
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
 
 import {
   RELEASES,
+  MAIN_TOT,
   CURRENT_VERSION,
-  CURRENT_DATE,
-  CURRENT_TAG,
   CUDA_HISTORY,
   PLATFORM,
+  type BackendPins,
+  type Release,
 } from "./releases.data";
+
+const VERSION_PARAM = "compat-version";
+const MAIN_VALUE = "main";
 
 const HERO_CSS = `
 .dynref-hero-header {
@@ -27,7 +30,7 @@ const HERO_CSS = `
     flex-wrap: wrap;
     align-items: flex-end;
     justify-content: space-between;
-    gap: 8px 16px;
+    gap: 12px 20px;
     margin-bottom: 16px;
 }
 
@@ -43,8 +46,30 @@ const HERO_CSS = `
     line-height: 1.2;
 }
 
+.dynref-hero-selector-wrap {
+    display: grid;
+    gap: 5px;
+    min-width: min(100%, 220px);
+}
+
+.dynref-hero-selector {
+    min-height: 38px;
+    padding: 6px 34px 6px 10px;
+    border: 1px solid var(--border, var(--grayscale-a5));
+    border-radius: 8px;
+    background: var(--pst-color-surface);
+    color: var(--pst-color-text-base);
+    font: inherit;
+    font-size: 14px;
+}
+
+.dark .dynref-hero-selector {
+    background: #1d1d1d;
+    border-color: #3a3a3a;
+}
+
 .dynref-hero-meta {
-    margin: 0;
+    margin: -4px 0 16px;
 }
 
 .dynref-hero-meta a {
@@ -54,7 +79,7 @@ const HERO_CSS = `
 
 .dynref-hero-backends {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
     gap: 10px;
 }
 
@@ -83,11 +108,20 @@ const HERO_CSS = `
     font-size: 15px;
 }
 
-.dynref-hero-backend-cuda {
+.dynref-hero-dependency {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 3px 8px;
+    align-items: baseline;
+    margin-top: 6px;
+}
+
+.dynref-hero-cuda-row {
     display: flex;
     flex-wrap: wrap;
-    gap: 4px;
-    margin-top: 6px;
+    align-items: center;
+    gap: 4px 7px;
+    margin-top: 8px;
 }
 
 .dynref-hero-reqs {
@@ -106,115 +140,206 @@ const HERO_CSS = `
     align-items: center;
     gap: 0 4px;
 }
+
+.dynref-hero-empty {
+    margin: 8px 0 0;
+    color: var(--pst-color-text-muted);
+    font-size: 12px;
+}
+
+@media (max-width: 520px) {
+    .dynref-hero-selector-wrap { width: 100%; }
+    .dynref-hero-reqs { grid-template-columns: 1fr; gap: 4px; }
+}
 `;
 
-interface BackendCard {
-  label: string;
-  pin?: string;
-  nixl?: string;
+type BackendKey = "sglang" | "trtllm" | "vllm";
+type NixlKey = "nixlSglang" | "nixlTrtllm" | "nixlVllm";
+
+interface BackendDefinition {
+  key: BackendKey;
+  nixlKey: NixlKey;
+  label: "SGLang" | "TensorRT-LLM" | "vLLM";
+}
+
+const BACKENDS: BackendDefinition[] = [
+  { key: "sglang", nixlKey: "nixlSglang", label: "SGLang" },
+  { key: "trtllm", nixlKey: "nixlTrtllm", label: "TensorRT-LLM" },
+  { key: "vllm", nixlKey: "nixlVllm", label: "vLLM" },
+];
+
+function releaseType(release?: Release): { variant: "green" | "gray" | "amber"; label: string } {
+  if (!release) return { variant: "gray", label: "development" };
+  if (release.kind === "stable") return { variant: "green", label: "GA release" };
+  if (release.kind === "patch") return { variant: "gray", label: "Patch" };
+  if (release.kind === "model-build") return { variant: "amber", label: "Model build" };
+  return { variant: "amber", label: "Early access" };
+}
+
+function optionLabel(release: Release): string {
+  const suffix = release.kind === "stable" ? "GA" : release.kind === "patch" ? "patch" : "preview";
+  return `${release.version} — ${suffix}`;
 }
 
 export function CompatibilityHero() {
-  const current = RELEASES.find((r) => r.version === CURRENT_VERSION);
-  const pins = current?.pins ?? {};
+  const [selectedVersion, setSelectedVersion] = useState(CURRENT_VERSION);
 
-  const backends: BackendCard[] = [
-    { label: "SGLang", pin: pins.sglang, nixl: pins.nixlSglang },
-    { label: "TensorRT-LLM", pin: pins.trtllm, nixl: pins.nixlTrtllm },
-    { label: "vLLM", pin: pins.vllm, nixl: pins.nixlVllm },
-  ];
+  useEffect(() => {
+    const requested = new URLSearchParams(window.location.search).get(VERSION_PARAM);
+    if (requested === MAIN_VALUE || RELEASES.some((release) => release.version === requested)) {
+      setSelectedVersion(requested);
+    }
+  }, []);
+
+  const isMain = selectedVersion === MAIN_VALUE;
+  const selectedRelease = isMain
+    ? undefined
+    : RELEASES.find((release) => release.version === selectedVersion);
+  const pins: BackendPins = isMain ? MAIN_TOT : (selectedRelease?.pins ?? {});
+  const badge = releaseType(selectedRelease);
+  const cudaVersion = selectedVersion.replace(/^v/, "");
+  const cudaRows = useMemo(
+    () => (isMain ? [] : CUDA_HISTORY.filter((row) => row.version === cudaVersion)),
+    [cudaVersion, isMain],
+  );
+
+  function selectVersion(version: string) {
+    setSelectedVersion(version);
+    const url = new URL(window.location.href);
+    if (version === CURRENT_VERSION) url.searchParams.delete(VERSION_PARAM);
+    else url.searchParams.set(VERSION_PARAM, version);
+    window.history.replaceState({}, "", url);
+  }
 
   return (
     <>
       <style>{HERO_CSS}</style>
-      <section className="dynref-panel">
+      <section className="dynref-panel" aria-labelledby="compatibility-selection-title">
         <div className="dynref-hero-header">
           <div>
-            <p className="dynref-eyebrow">Current release</p>
-            <div className="dynref-hero-title">
-              Dynamo {CURRENT_VERSION}
-              <span className="dynref-badge dynref-badge--green">GA release</span>
+            <p className="dynref-eyebrow">Compatibility by version</p>
+            <div className="dynref-hero-title" id="compatibility-selection-title">
+              {isMain ? "Dynamo main branch" : `Dynamo ${selectedRelease?.version ?? selectedVersion}`}
+              <span className={`dynref-badge dynref-badge--${badge.variant}`}>{badge.label}</span>
             </div>
           </div>
-          <p className="dynref-muted dynref-hero-meta">
-            Released {current?.date ?? CURRENT_DATE} ·{" "}
-            <a href={current?.github}>Release notes</a>
-          </p>
+
+          <label className="dynref-hero-selector-wrap">
+            <span className="dynref-label">Dynamo version</span>
+            <select
+              className="dynref-hero-selector"
+              value={selectedVersion}
+              onChange={(event) => selectVersion(event.target.value)}
+            >
+              <option value={MAIN_VALUE}>main branch — development</option>
+              {RELEASES.map((release) => (
+                <option value={release.version} key={release.version}>
+                  {optionLabel(release)}
+                </option>
+              ))}
+            </select>
+          </label>
         </div>
 
-        <div className="dynref-hero-backends">
-          {backends.map((backend) => (
-            <div className="dynref-hero-backend" key={backend.label}>
-              <span className="dynref-hero-backend-name">{backend.label}</span>
-              <span className="dynref-mono dynref-hero-pin">{backend.pin}</span>
-              <span className="dynref-muted">
-                NIXL <span className="dynref-mono">{backend.nixl}</span>
-              </span>
-              <div className="dynref-hero-backend-cuda">
-                {CUDA_HISTORY.filter(
-                  (r) => r.version === CURRENT_TAG && r.backend === backend.label,
-                ).map((r) => (
-                  <span className="dynref-chip dynref-chip--cuda" key={r.toolkit}>
-                    CUDA {r.toolkit}
-                  </span>
-                ))}
-              </div>
-            </div>
-          ))}
-        </div>
-
-        <div className="dynref-hero-reqs">
-          <span className="dynref-label">GPU</span>
-          <div className="dynref-hero-req-values">
-            {PLATFORM.gpus.map((gpu) => (
-              <span className="dynref-chip dynref-chip--gpu" key={gpu}>
-                {gpu}
-              </span>
-            ))}
-          </div>
-
-          <span className="dynref-label">OS</span>
-          <div className="dynref-hero-req-values">
-            {PLATFORM.os.map((row) => (
-              <span
-                className={
-                  row.status === "Experimental"
-                    ? "dynref-chip dynref-chip--amber dynref-chip--exp"
-                    : `dynref-chip dynref-chip--${row.chip}`
-                }
-                key={`${row.name} ${row.version}`}
-              >
-                {row.name} {row.version}
-                {row.status === "Experimental" ? " · experimental" : ""}
-              </span>
-            ))}
-          </div>
-
-          <span className="dynref-label">Arch</span>
-          <div className="dynref-hero-req-values">
-            {PLATFORM.arch.map((arch) => (
-              <span className="dynref-chip dynref-chip--arch" key={arch}>
-                {arch}
-              </span>
-            ))}
-          </div>
-
-        </div>
-
-        <p className="dynref-muted dynref-grid-note">
-          CUDA 12 discontinued as of {CURRENT_VERSION}.
+        <p className="dynref-muted dynref-hero-meta">
+          {isMain ? (
+            "Unreleased dependency pins from the tip of the main branch."
+          ) : (
+            <>
+              Released {selectedRelease?.date ?? "date unavailable"}
+              {selectedRelease?.github && (
+                <>
+                  {" · "}
+                  <a href={selectedRelease.github}>Release notes</a>
+                </>
+              )}
+              {selectedRelease?.ucx && (
+                <>
+                  {" · "}UCX <span className="dynref-mono">{selectedRelease.ucx}</span>
+                </>
+              )}
+            </>
+          )}
         </p>
 
+        <div className="dynref-hero-backends">
+          {BACKENDS.map((backend) => {
+            const backendCuda = cudaRows.filter((row) => row.backend === backend.label);
+            return (
+              <div className="dynref-hero-backend" key={backend.label}>
+                <span className="dynref-hero-backend-name">{backend.label}</span>
+                <span className="dynref-mono dynref-hero-pin">
+                  {pins[backend.key] ?? "Not included"}
+                </span>
+                <div className="dynref-hero-dependency">
+                  <span className="dynref-label">NIXL</span>
+                  <span className="dynref-mono">{pins[backend.nixlKey] ?? "—"}</span>
+                </div>
+                {backendCuda.map((row) => (
+                  <div className="dynref-hero-cuda-row" key={row.toolkit}>
+                    <span
+                      className={`dynref-chip dynref-chip--cuda${
+                        row.note === "Experimental" ? " dynref-chip--exp" : ""
+                      }`}
+                    >
+                      CUDA {row.toolkit}
+                    </span>
+                    <span className="dynref-muted">
+                      Driver <span className="dynref-mono">{row.minDriver}</span>
+                    </span>
+                  </div>
+                ))}
+                {backendCuda.length === 0 && (
+                  <p className="dynref-hero-empty">
+                    {isMain ? "CUDA and driver requirements are published at release." : "No CUDA requirement recorded for this build."}
+                  </p>
+                )}
+              </div>
+            );
+          })}
+        </div>
+
+        {selectedVersion === CURRENT_VERSION && (
+          <div className="dynref-hero-reqs">
+            <span className="dynref-label">GPU</span>
+            <div className="dynref-hero-req-values">
+              {PLATFORM.gpus.map((gpu) => (
+                <span className="dynref-chip dynref-chip--gpu" key={gpu}>{gpu}</span>
+              ))}
+            </div>
+
+            <span className="dynref-label">OS</span>
+            <div className="dynref-hero-req-values">
+              {PLATFORM.os.map((row) => (
+                <span
+                  className={
+                    row.status === "Experimental"
+                      ? "dynref-chip dynref-chip--amber dynref-chip--exp"
+                      : `dynref-chip dynref-chip--${row.chip}`
+                  }
+                  key={`${row.name} ${row.version}`}
+                >
+                  {row.name} {row.version}
+                  {row.status === "Experimental" ? " · experimental" : ""}
+                </span>
+              ))}
+            </div>
+
+            <span className="dynref-label">Arch</span>
+            <div className="dynref-hero-req-values">
+              {PLATFORM.arch.map((arch) => (
+                <span className="dynref-chip dynref-chip--arch" key={arch}>{arch}</span>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {selectedRelease?.note && <p className="dynref-muted dynref-grid-note">{selectedRelease.note}</p>}
+        {selectedRelease?.delta && <p className="dynref-muted dynref-grid-note">{selectedRelease.delta}</p>}
+
         <p className="dynref-muted dynref-grid-note">
-          Early access: model builds are tracked in{" "}
-          <a href="/dynamo/dev/reference/model-early-access-builds">
-            Model Early Access Builds
-          </a>
-          ; platform previews under{" "}
-          <a href="/dynamo/dev/reference/release-artifacts#early-access-artifacts">
-            Early Access Artifacts
-          </a>
-          .
+          Backend versions listed are the versions tested and supported for the selected release.
+          TensorRT-LLM does not support Python 3.11.
         </p>
       </section>
     </>

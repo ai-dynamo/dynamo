@@ -24,7 +24,7 @@ Most deployments start with the core performance loop:
 |---|---|
 | Make serving more resilient | [Fault Tolerance](../fault-tolerance/README.md) |
 | Monitor local deployments | [Install Observability](../cli/observability.mdx) |
-| Reproduce traffic without a full engine | [Live Simulation with Mocker](../dynosim/mocker.md) |
+| Reproduce traffic without a full engine | [Live Simulation with Mocker](../dynosim/mocker.mdx) |
 | Add structured model outputs | [Tool Calling](../tool-calling/README.mdx) and [Reasoning](../reasoning/README.md) |
 | Build agent workloads | [Agents](../agents/README.md) |
 | Serve specialized workloads | [LoRA Adapters](lora/README.md), [Multimodal](multimodal/README.md), and [Diffusion](diffusion/README.md) |

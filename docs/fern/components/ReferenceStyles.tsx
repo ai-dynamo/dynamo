@@ -57,9 +57,9 @@ const REFERENCE_CSS = `
     --dynref-blue-bg: rgba(37, 99, 235, 0.1);
     --dynref-blue-border: rgba(37, 99, 235, 0.28);
     --dynref-blue-fg: #1D4ED8;
-    --dynref-teal-bg: rgba(13, 148, 136, 0.12);
-    --dynref-teal-border: rgba(13, 148, 136, 0.3);
-    --dynref-teal-fg: #0F766E;
+    --dynref-cuda-purple-bg: rgba(147, 51, 234, 0.1);
+    --dynref-cuda-purple-border: rgba(147, 51, 234, 0.3);
+    --dynref-cuda-purple-fg: #7E22CE;
     --dynref-orange-bg: rgba(233, 84, 32, 0.12);
     --dynref-orange-border: rgba(233, 84, 32, 0.3);
     --dynref-orange-fg: #C7401C;
@@ -79,9 +79,9 @@ const REFERENCE_CSS = `
     --dynref-blue-bg: rgba(59, 130, 246, 0.18);
     --dynref-blue-border: rgba(59, 130, 246, 0.42);
     --dynref-blue-fg: #93C5FD;
-    --dynref-teal-bg: rgba(13, 148, 136, 0.2);
-    --dynref-teal-border: rgba(13, 148, 136, 0.45);
-    --dynref-teal-fg: #5EEAD4;
+    --dynref-cuda-purple-bg: rgba(168, 85, 247, 0.2);
+    --dynref-cuda-purple-border: rgba(168, 85, 247, 0.46);
+    --dynref-cuda-purple-fg: #D8B4FE;
     --dynref-orange-bg: rgba(233, 84, 32, 0.2);
     --dynref-orange-border: rgba(233, 84, 32, 0.42);
     --dynref-orange-fg: #FF9068;
@@ -238,11 +238,11 @@ const REFERENCE_CSS = `
 }
 
 
-/* CUDA toolkit — teal. */
+/* CUDA toolkit — purple, kept distinct from the blue/cyan family. */
 .dynref-chip--cuda {
-    background: var(--dynref-teal-bg);
-    color: var(--dynref-teal-fg);
-    border-color: var(--dynref-teal-border);
+    background: var(--dynref-cuda-purple-bg);
+    color: var(--dynref-cuda-purple-fg);
+    border-color: var(--dynref-cuda-purple-border);
 }
 
 

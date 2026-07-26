@@ -24,11 +24,10 @@ AKS and your AMLFS filesystem must have network reachability. Two supported topo
 - **VNet peering**: Deploy AKS in its own VNet and peer it with the AMLFS VNet. The AKS infrastructure VNet lives in the auto-created resource group `MC_<aks-rg>_<aks-name>_<region>`.
 - **Shared VNet**: Use AKS's "Bring your own VNet" feature and deploy AKS in a dedicated subnet inside the AMLFS VNet. Do not use the same subnet as AMLFS.
 
-> [!WARNING]
-> Do not place AKS nodes and the AMLFS filesystem in the same subnet, even when sharing a VNet.
+<Warning>Do not place AKS nodes and the AMLFS filesystem in the same subnet, even when sharing a VNet.</Warning>
 
-## Step 1: Connect to your AKS cluster
-
+<Steps toc={true}>
+<Step title="Connect to your AKS cluster" id="step-1-connect-to-your-aks-cluster">
 ```bash
 az login
 
@@ -40,8 +39,8 @@ az aks get-credentials \
 kubectl config current-context
 ```
 
-## Step 2: Install the CSI driver
-
+</Step>
+<Step title="Install the CSI driver" id="step-2-install-the-csi-driver">
 There is no Helm chart. Install via the provided shell script:
 
 ```bash
@@ -64,8 +63,8 @@ kubectl get -n kube-system pod -l app=csi-azurelustre-controller
 kubectl get -n kube-system pod -l app=csi-azurelustre-node -o wide
 ```
 
-## Step 3: Configure storage
-
+</Step>
+<Step title="Configure storage" id="step-3-configure-storage">
 There are two provisioning modes depending on whether your AMLFS filesystem already exists.
 
 ### Option A: Static provisioning (existing AMLFS filesystem)
@@ -296,6 +295,9 @@ kubectl apply -f pvc-dynamic.yaml
 # Monitor provisioning (takes 10+ minutes)
 kubectl describe pvc pvc-lustre-dynamic
 ```
+
+</Step>
+</Steps>
 
 ## Troubleshooting
 

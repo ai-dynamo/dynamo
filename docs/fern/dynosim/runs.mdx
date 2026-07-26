@@ -11,7 +11,7 @@ registering workers, or sending HTTP requests. The command runs on your local ma
 configuration you evaluate can be a candidate for either Kubernetes or local CLI deployment. It
 does not require GPUs and produces an AIPerf-style summary plus a JSON report.
 
-Use [Simulate a Local Deployment with Mocker](mocker-local.md) instead when you need to exercise the
+Use [Simulate a Local Deployment with Mocker](mocker-local.mdx) instead when you need to exercise the
 live Dynamo frontend, discovery, routing, event publication, and worker lifecycle.
 
 Use this tutorial to establish a working baseline before changing topology, routing, or timing
@@ -31,8 +31,8 @@ uv pip install -e .
 
 The release build is recommended because the simulation is CPU-bound.
 
-## Run a synthetic workload
-
+<Steps toc={true}>
+<Step title="Run a synthetic workload" id="run-a-synthetic-workload">
 Start with a small aggregated simulation:
 
 ```bash
@@ -50,8 +50,8 @@ Start with a small aggregated simulation:
 The command prints a latency and throughput table. Confirm that all requests completed and that
 `/tmp/dynosim-synthetic.json` was created.
 
-## Add prefix reuse and multiple turns
-
+</Step>
+<Step title="Add prefix reuse and multiple turns" id="add-prefix-reuse-and-multiple-turns">
 Run a second synthetic workload with shared prefixes and three turns per session:
 
 ```bash
@@ -73,8 +73,8 @@ Run a second synthetic workload with shared prefixes and three turns per session
 Compare the prefix-cache reuse and latency metrics with the first run. Keep the worker count and
 engine arguments fixed so the workload change is the only variable.
 
-## Replay a saved trace
-
+</Step>
+<Step title="Replay a saved trace" id="replay-a-saved-trace">
 Download the public FAST'25 tool-agent trace:
 
 ```bash
@@ -98,8 +98,8 @@ Replay it with the trace block size used by the dataset:
 `--trace-block-size` describes how the trace encodes `hash_ids`. The engine `block_size` describes
 the simulated KV-cache block size, so the two values do not need to match.
 
-## Compare routing modes
-
+</Step>
+<Step title="Compare routing modes" id="compare-routing-modes">
 Run the same trace through the KV router. Change only the routing settings:
 
 ```bash
@@ -117,8 +117,8 @@ Compare `/tmp/dynosim-trace.json` and `/tmp/dynosim-kv-router.json`. Review thro
 Token (TTFT), Inter-Token Latency (ITL), and prefix-cache reuse before deciding whether the routing
 change is promising.
 
-## Simulate disaggregated serving
-
+</Step>
+<Step title="Simulate disaggregated serving" id="simulate-disaggregated-serving">
 Use separate prefill and decode worker pools and engine arguments:
 
 ```bash
@@ -134,11 +134,13 @@ Use separate prefill and decode worker pools and engine arguments:
 ```
 
 Compare this report with the aggregated baseline. If the result is worth exploring, use
-[Sweep DynoSim Configurations](sweeps.md) to search more worker and topology combinations.
+[Sweep DynoSim Configurations](sweeps.mdx) to search more worker and topology combinations.
 
-## Validate the result
-
+</Step>
+<Step title="Validate the result" id="validate-the-result">
 DynoSim models scheduler, KV-cache, routing, and timing behavior, but it does not replace a
 real-hardware benchmark. Validate the candidate with AIPerf against either a
-[Kubernetes deployment](../tools/aiperf.md) or a [local CLI deployment](../cli/aiperf.mdx) to include
+[Kubernetes deployment](../tools/aiperf.mdx) or a [local CLI deployment](../cli/aiperf.mdx) to include
 frontend, transport, engine, and GPU behavior.
+</Step>
+</Steps>

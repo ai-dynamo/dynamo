@@ -36,7 +36,7 @@ export DYN_REQUEST_TRACE_OUTPUT_PATH=/mnt/captures/run-42/request-trace
 
 <Step title="Run your agent workload">
 
-Send requests through a configured [Agent Harness](agent-harnesses.md) or custom client. Session identity enriches eligible `request_end` rows automatically; it does not require another trace flag.
+Send requests through a configured [Agent Harness](agent-harnesses.mdx) or custom client. Session identity enriches eligible `request_end` rows automatically; it does not require another trace flag.
 
 </Step>
 

@@ -9,9 +9,9 @@ DynoSim connects a workload driver to one or more Mocker engine cores and record
 timing for analysis. It supports a direct offline path for fast simulation and an online path that
 uses live Dynamo workers and runtime services.
 
-For task-oriented instructions, see [Run a DynoSim Simulation](../dynosim/runs.md),
-[Sweep DynoSim Configurations](../dynosim/sweeps.md), and
-[Benchmark Planner Decisions](../dynosim/planner-benchmarking.md). For engine-core details, see
+For task-oriented instructions, see [Run a DynoSim Simulation](../dynosim/runs.mdx),
+[Sweep DynoSim Configurations](../dynosim/sweeps.mdx), and
+[Benchmark Planner Decisions](../dynosim/planner-benchmarking.mdx). For engine-core details, see
 [Mocker Engine Architecture](mocker-architecture.md).
 
 ## Replay harness

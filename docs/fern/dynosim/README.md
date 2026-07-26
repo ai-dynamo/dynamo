@@ -62,11 +62,11 @@ AIC provides performance models and candidate-shape information. DynoSim uses th
 
 | Goal | Start Here |
 |---|---|
-| Run one trace or synthetic workload through one config | [Run a DynoSim Simulation](runs.md) |
-| Sweep topology and router choices under SLA/GPU constraints | [Sweep DynoSim Configurations](sweeps.md) |
-| Exercise a Kubernetes frontend/router setup without GPUs | [Simulate a Kubernetes Deployment](mocker.md) |
-| Exercise a local frontend/router setup without GPUs | [Simulate a Local Deployment](mocker-local.md) |
-| Study Planner scaling decisions against a trace | [Benchmark Planner Decisions](planner-benchmarking.md) |
+| Run one trace or synthetic workload through one config | [Run a DynoSim Simulation](runs.mdx) |
+| Sweep topology and router choices under SLA/GPU constraints | [Sweep DynoSim Configurations](sweeps.mdx) |
+| Exercise a Kubernetes frontend/router setup without GPUs | [Simulate a Kubernetes Deployment](mocker.mdx) |
+| Exercise a local frontend/router setup without GPUs | [Simulate a Local Deployment](mocker-local.mdx) |
+| Study Planner scaling decisions against a trace | [Benchmark Planner Decisions](planner-benchmarking.mdx) |
 | Generate a deployable Kubernetes config from model/SLA intent | [Model Deployment Guide](../kubernetes/model-deployment-guide.md) |
 
 DynoSim narrows the search space; it does not replace real-hardware validation. Use it to move quickly, find promising candidates, and understand failure modes before spending cluster time.

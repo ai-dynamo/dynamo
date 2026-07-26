@@ -38,8 +38,8 @@ EFA setup involves three pieces:
 2. **Container image** with libfabric + aws-ofi-nccl + Dynamo ([Step 3](#step-3-build-a-dynamo-efa-image)).
 3. **Workload spec** that selects the LIBFABRIC NIXL backend, requests EFA resources, and runs privileged ([Step 4](#step-4-configure-nixl-backend), [Step 5](#step-5-pod-resource-requests)).
 
-## Step 1: Install the AWS EFA Kubernetes Device Plugin
-
+<Steps toc={true}>
+<Step title="Install the AWS EFA Kubernetes Device Plugin" id="step-1-install-the-aws-efa-kubernetes-device-plugin">
 The AWS EFA Kubernetes Device Plugin exposes each node's EFA endpoints as the `vpc.amazonaws.com/efa` extended resource so pods can request them. AWS publishes two install paths — pick one:
 
 **Helm (recommended, from the official `aws/eks-charts` repo):**
@@ -72,8 +72,8 @@ kubectl get nodes -o json | jq '.items[] | select(.status.allocatable["vpc.amazo
 
 Each EFA-capable node should report a non-zero `vpc.amazonaws.com/efa` count (e.g., `32` on `p5.48xlarge`, reflecting that instance's EFA endpoint count). The exact count depends on instance type and how the node group's ENIs were configured at launch.
 
-## Step 2: Verify Host Kernel Modules
-
+</Step>
+<Step title="Verify Host Kernel Modules" id="step-2-verify-host-kernel-modules">
 Modern AWS GPU AMIs (Amazon Linux 2023, Ubuntu 22.04+, kernel ≥ 5.12) use **DMA-BUF** for GPU-Direct RDMA and **do not require** `nvidia-peermem` or `efa_nv_peermem`. The default AMIs for p5/p5e/p5en/p6-b200/GB200 ship with kernels in the 6.x line where DMA-BUF is the active path.
 
 To confirm:
@@ -93,8 +93,8 @@ cat /sys/module/efa/version
 
 If you are on an older kernel (< 5.12) and the host doesn't already have `efa_nv_peermem` loaded, the simplest path is to switch to an AMI that includes EFA host-level components — the EKS-optimized AL2023 NVIDIA AMI and all Bottlerocket AMIs include them. Otherwise, run [`aws-efa-installer`](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa-start.html#efa-start-enable) on the host (via a privileged DaemonSet or baked into a custom AMI). See [AWS — Manage EFA devices on Amazon EKS](https://docs.aws.amazon.com/eks/latest/userguide/device-management-efa.html) for the full picture.
 
-## Step 3: Build a Dynamo EFA Image
-
+</Step>
+<Step title="Build a Dynamo EFA Image" id="step-3-build-a-dynamo-efa-image">
 Dynamo's image build is two steps: `container/render.py` writes a Dockerfile for the chosen framework + target, then `docker build` consumes it. Passing `--make-efa` to `render.py` appends the AWS EFA installer stage from [`container/templates/aws.Dockerfile`](https://github.com/ai-dynamo/dynamo/blob/main/container/templates/aws.Dockerfile), which defines a stage named `aws` on top of `runtime`. **You must pass `--target aws` to `docker build`** — without it, `docker build` stops at the `runtime` stage and you get an image without EFA. See [`container/README.md`](https://github.com/ai-dynamo/dynamo/blob/main/container/README.md) for the full build workflow.
 
 ```bash
@@ -135,11 +135,12 @@ docker buildx build --platform=linux/arm64 --target aws \
 
 `--output-short-filename` writes to `container/rendered.Dockerfile`; omit it to get the long auto-generated filename (e.g., `vllm-runtime-cuda12.9-amd64-rendered.Dockerfile`) — useful when keeping several rendered Dockerfiles side by side.
 
-> [!IMPORTANT]
-> See [Known Issues](#known-issues) below for one case where the default-built image does **not** produce a working EFA deployment out of the box (GB200 / arm64 64K-page kernels). The symptom looks like a working setup but fails at startup during NIXL memory registration.
+<Info>
+See [Known Issues](#known-issues) below for one case where the default-built image does **not** produce a working EFA deployment out of the box (GB200 / arm64 64K-page kernels). The symptom looks like a working setup but fails at startup during NIXL memory registration.
+</Info>
 
-## Step 4: Configure NIXL Backend
-
+</Step>
+<Step title="Configure NIXL Backend" id="step-4-configure-nixl-backend">
 NIXL is the high-level KV transfer API and supports multiple backends. **For EFA, the LIBFABRIC backend must be selected.** UCX is NIXL's default backend, and while it has CUDA-IPC / RDMA transports available in the image, in standard pod-to-pod EFA configurations it lands on a slow transport (effectively TCP-speed at ~1–3 GB/s) instead of EFA's line rate. Empirically, LIBFABRIC is the only backend that reaches full EFA bandwidth on AWS.
 
 Each framework selects the backend differently:
@@ -182,9 +183,8 @@ env:
 
 When using `FI_EFA_USE_HUGE_PAGE=1`, also add `hugepages-2Mi: 5120Mi` to the pod resource limits.
 
-
-## Step 5: Pod Resource Requests
-
+</Step>
+<Step title="Pod Resource Requests" id="step-5-pod-resource-requests">
 Dynamo pods that use EFA must request the resource and run privileged:
 
 ```yaml
@@ -208,8 +208,12 @@ volumes:
     emptyDir: { medium: Memory, sizeLimit: 80Gi }
 ```
 
-> [!IMPORTANT]
-> `privileged: true` is required for NIXL to register CUDA VRAM with the EFA NIC via `fi_mr_reg`. `IPC_LOCK` alone is insufficient.
+<Info>
+`privileged: true` is required for NIXL to register CUDA VRAM with the EFA NIC via `fi_mr_reg`. `IPC_LOCK` alone is insufficient.
+</Info>
+
+</Step>
+</Steps>
 
 ## Known Issues
 
@@ -302,8 +306,9 @@ kubectl logs <decode-pod> | grep "External prefix cache hit rate"
 # Expected: "External prefix cache hit rate: 100.0%"
 ```
 
-> [!NOTE]
-> Do not use `rdma_write_bytes` or other `/sys/class/infiniband/*/counters/*` checks for EFA verification. EFA SRD uses SEND operations at the hardware level, not RDMA READ/WRITE — `rdma_write_bytes` is always 0 on correctly configured EFA by design. Use the Prometheus + `/proc/<pid>/maps` methodology above instead.
+<Note>
+Do not use `rdma_write_bytes` or other `/sys/class/infiniband/*/counters/*` checks for EFA verification. EFA SRD uses SEND operations at the hardware level, not RDMA READ/WRITE — `rdma_write_bytes` is always 0 on correctly configured EFA by design. Use the Prometheus + `/proc/<pid>/maps` methodology above instead.
+</Note>
 
 ## Common Failure Modes
 
@@ -321,7 +326,7 @@ kubectl logs <decode-pod> | grep "External prefix cache hit rate"
 ## References
 
 - [Disaggregated Communication Guide](../../disagg-communication-guide.md) — transport-layer fundamentals
-- [RDMA / InfiniBand on AKS](../aks/rdma-infiniband.md) — Azure equivalent
+- [RDMA / InfiniBand on AKS](../aks/rdma-infiniband.mdx) — Azure equivalent
 - [`container/templates/aws.Dockerfile`](https://github.com/ai-dynamo/dynamo/blob/main/container/templates/aws.Dockerfile) — EFA installer template
 - [AWS — Manage EFA devices on Amazon EKS](https://docs.aws.amazon.com/eks/latest/userguide/device-management-efa.html) — official EKS-side guide (DRA driver + device plugin)
 - [AWS EFA documentation](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa.html) — EC2-side EFA overview

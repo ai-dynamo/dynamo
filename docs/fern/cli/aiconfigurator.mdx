@@ -11,8 +11,8 @@ parallelism (PP), and the number of worker replicas to validate.
 
 AIConfigurator is an analytical performance model and configuration optimizer. It does not start a
 Dynamo frontend, simulate request-by-request scheduler or KV-cache behavior, or benchmark a live
-endpoint. Use [Mocker Live Simulation](../dynosim/mocker-local.md) for a live GPU-free deployment,
-[DynoSim Replay](../dynosim/runs.md) for request-level offline simulation, and
+endpoint. Use [Mocker Live Simulation](../dynosim/mocker-local.mdx) for a live GPU-free deployment,
+[DynoSim Replay](../dynosim/runs.mdx) for request-level offline simulation, and
 [Benchmarking with AIPerf](aiperf.mdx) for measurements against the running local endpoint.
 
 ## Prerequisites
@@ -41,8 +41,8 @@ aiconfigurator cli support \
   --backend vllm
 ```
 
-## Generate candidate configurations
-
+<Steps toc={true}>
+<Step title="Generate candidate configurations" id="generate-candidate-configurations">
 Run the optimizer with the local GPU budget and workload targets:
 
 ```bash
@@ -62,8 +62,8 @@ aiconfigurator cli default \
 provides the assumed GPUs per node and communication characteristics. AIConfigurator does not inspect
 which GPUs or nodes are currently free.
 
-## Apply a recommendation
-
+</Step>
+<Step title="Apply a recommendation" id="apply-a-recommendation">
 Choose a highly ranked row that meets the SLA. Translate its output into the local worker launch:
 
 | AIConfigurator output | Local deployment setting |
@@ -91,11 +91,13 @@ If one worker requires more GPUs than a node provides, follow
 [Multi-Node Deployment](multinode-deployment.mdx) rather than treating the GPU budget as one flat
 local device list.
 
-## Validate the recommendation
-
+</Step>
+<Step title="Validate the recommendation" id="validate-the-recommendation">
 AIConfigurator narrows the configurations to test; it does not replace measurement. Launch the
 recommended local deployment and use [Benchmarking with AIPerf](aiperf.mdx) to validate latency and
 throughput on the target hardware.
 
 For aggregated versus disaggregated analysis, generated artifacts, output fields, and advanced
 options, see the [AIConfigurator Reference](../features/disaggregated-serving/aiconfigurator.md).
+</Step>
+</Steps>

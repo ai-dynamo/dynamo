@@ -9,13 +9,14 @@ This tutorial runs the Dynamo Planner inside DynoSim so you can compare aggregat
 disaggregated topologies, tune SLA targets, and test sensitivity to worker startup time without a
 live cluster.
 
-> [!NOTE]
-> The production Planner scales Kubernetes or Global Planner deployments; it does not autoscale a
-> local CLI deployment. Although `python -m dynamo.replay` executes on your local machine, this
-> tutorial evaluates Planner decisions for a Kubernetes deployment through the virtual simulation
-> environment.
+<Note>
+The production Planner scales Kubernetes or Global Planner deployments; it does not autoscale a
+local CLI deployment. Although `python -m dynamo.replay` executes on your local machine, this
+tutorial evaluates Planner decisions for a Kubernetes deployment through the virtual simulation
+environment.
+</Note>
 
-For the general replay workflow, see [Run a DynoSim Simulation](runs.md). For Planner field types and
+For the general replay workflow, see [Run a DynoSim Simulation](runs.mdx). For Planner field types and
 defaults, see the
 [Planner Configuration reference](../components/planner/planner-config-reference.mdx). For how the
 simulation supplies metrics to the Planner, see
@@ -38,13 +39,14 @@ The commands below use AIConfigurator-backed engine timing. The relevant fields 
 the
 [DynoSim Replay CLI Reference](../components/mocker/replay-cli-reference.mdx#engine-timing-aic-fields-engine-args-json).
 
-> [!WARNING]
-> Set `prefill_engine_num_gpu` and `decode_engine_num_gpu` explicitly in every simulated Planner run.
-> The simulation adapter cannot auto-detect a deployment GPU count, and leaving both values unset
-> causes cumulative GPU-hours to report as zero.
+<Warning>
+Set `prefill_engine_num_gpu` and `decode_engine_num_gpu` explicitly in every simulated Planner run.
+The simulation adapter cannot auto-detect a deployment GPU count, and leaving both values unset
+causes cumulative GPU-hours to report as zero.
+</Warning>
 
-## Compare aggregated and disaggregated deployments
-
+<Steps toc={true}>
+<Step title="Compare aggregated and disaggregated deployments" id="compare-aggregated-and-disaggregated-deployments">
 Download the trace:
 
 ```bash
@@ -91,8 +93,8 @@ python -m dynamo.replay traces/mooncake_fast25/toolagent_trace.jsonl \
 
 Each run prints the AIPerf summary table to stdout and writes an HTML diagnostics report to `./planner_reports/<report_filename>`. For this trace with a long ISL and short OSL, agg is better than disagg, which gets slightly better ITL at the cost noticeably more GPU-hours.
 
-## Sweep cold-start time
-
+</Step>
+<Step title="Sweep cold-start time" id="sweep-cold-start-time">
 How sensitive is SLA attainment to engine startup time? Sweep `startup_time` from 0 to 300 seconds in 10-second steps and record TTFT/ITL/GPU-hours per run.
 
 ```bash
@@ -134,3 +136,5 @@ Observations from this sweep (agg, TTFT SLA 1,500 ms, ITL SLA 50 ms, H200-SXM, L
 - **SLA cliff near 100–120 s.** Below that, the planner scales up fast enough to hold TTFT; above it, p99 TTFT diverges and the system stays perpetually backlogged.
 - **Scaling-event count drops monotonically** (42 → 8) as startup grows — long-startup runs require load planner to wait for stabilization before the next scaling decision.
 - **ITL is less sensitive than TTFT** until the queue saturates. Below the cliff, ITL rises modestly (25 → 30 ms avg); above it, p90 ITL jumps to ~200 ms as decode requests starve.
+</Step>
+</Steps>

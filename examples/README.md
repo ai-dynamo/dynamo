@@ -43,10 +43,10 @@ If you want to see advanced, framework-specific deployment patterns and best pra
 
 Platform-specific manifests and templates for production environments. Deployment guides live under `docs/kubernetes/cloud-providers/`; each examples folder links to its guide.
 
-- **[Amazon EKS](deployments/EKS/README.md)** - Manifests and templates ([deployment guide](../docs/fern/kubernetes/cloud-providers/eks/eks.md))
-- **[Azure AKS](deployments/AKS/README.md)** - Helm values ([deployment guide](../docs/fern/kubernetes/cloud-providers/aks/aks.md))
-- **[Amazon ECS](deployments/ECS/README.md)** - Task definitions ([deployment guide](../docs/fern/kubernetes/cloud-providers/ecs/ecs.md))
-- **[Google GKE](deployments/GKE/README.md)** - DGD manifests ([deployment guide](../docs/fern/kubernetes/cloud-providers/gke/gke.md))
+- **[Amazon EKS](deployments/EKS/README.md)** - Manifests and templates ([deployment guide](../docs/fern/kubernetes/cloud-providers/eks/eks.mdx))
+- **[Azure AKS](deployments/AKS/README.md)** - Helm values ([deployment guide](../docs/fern/kubernetes/cloud-providers/aks/aks.mdx))
+- **[Amazon ECS](deployments/ECS/README.md)** - Task definitions ([deployment guide](../docs/fern/kubernetes/cloud-providers/ecs/ecs.mdx))
+- **[Google GKE](deployments/GKE/README.md)** - DGD manifests ([deployment guide](../docs/fern/kubernetes/cloud-providers/gke/gke.mdx))
 
 ## Runtime Examples
 

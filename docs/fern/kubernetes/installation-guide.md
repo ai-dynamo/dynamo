@@ -16,8 +16,8 @@ cluster:
 <Tab title="NVIDIA GPU">
 
 - A Kubernetes 1.30 or later cluster with NVIDIA GPU nodes. See the cloud provider guides if you need to create one:
-  - [Amazon EKS](cloud-providers/eks/eks.md) | [Azure AKS](cloud-providers/aks/aks.md) | [Google GKE](cloud-providers/gke/gke.md)
-  - For local development: [Minikube Setup](deployment/minikube.md)
+  - [Amazon EKS](cloud-providers/eks/eks.mdx) | [Azure AKS](cloud-providers/aks/aks.mdx) | [Google GKE](cloud-providers/gke/gke.mdx)
+  - For local development: [Minikube Setup](deployment/minikube.mdx)
 - `kubectl` 1.30 or later.
 
 > [!IMPORTANT]
@@ -61,9 +61,9 @@ Every Dynamo deployment requires accelerator support and the **Dynamo Platform**
 
 **Network Operator / RDMA** — Without RDMA, disaggregated inference falls back to TCP automatically, but with severe performance degradation (~98s TTFT vs ~200-500ms with RDMA). Required for any production disaggregated deployment. Setup is cloud-provider-specific — see the [Disaggregated Communication Guide](disagg-communication-guide.md) and your cloud provider guide.
 
-**kube-prometheus-stack** — Required for the Planner's `sla` optimization mode (it reads live TTFT/ITL metrics from Prometheus). Also required for KEDA/HPA-based autoscaling. The Planner's `throughput` mode can function without it using internal queue depth signals, but metrics-driven features will not work. See [Metrics](observability/metrics.md) for details.
+**kube-prometheus-stack** — Required for the Planner's `sla` optimization mode (it reads live TTFT/ITL metrics from Prometheus). Also required for KEDA/HPA-based autoscaling. The Planner's `throughput` mode can function without it using internal queue depth signals, but metrics-driven features will not work. See [Metrics](observability/metrics.mdx) for details.
 
-**Shared storage** — Prevents each pod from downloading model weights independently. Without it, large models (>70B) take hours to download per pod, and many replicas will hit HuggingFace rate limits. Not enforced by the operator — this is an operational concern. See [Model Caching](model-caching.md) for the full walkthrough.
+**Shared storage** — Prevents each pod from downloading model weights independently. Without it, large models (>70B) take hours to download per pod, and many replicas will hit HuggingFace rate limits. Not enforced by the operator — this is an operational concern. See [Model Caching](model-caching.mdx) for the full walkthrough.
 
 <Steps toc={true} tocDepth={2}>
 
@@ -86,8 +86,8 @@ helm install gpu-operator nvidia/gpu-operator \
 ```
 
 Set `driver.enabled=false` when the nodes already have provider-managed NVIDIA drivers. See the
-[AKS](cloud-providers/aks/aks.md), [EKS](cloud-providers/eks/eks.md), or
-[GKE](cloud-providers/gke/gke.md) guide for provider-specific requirements.
+[AKS](cloud-providers/aks/aks.mdx), [EKS](cloud-providers/eks/eks.mdx), or
+[GKE](cloud-providers/gke/gke.mdx) guide for provider-specific requirements.
 
 Verify the installation:
 
@@ -238,9 +238,9 @@ See the [LWS docs](https://lws.sigs.k8s.io/docs/) and [Volcano docs](https://git
 
 RDMA setup is cloud-provider-specific. See the [Disaggregated Communication Guide](disagg-communication-guide.md) for transport options, UCX configuration, and performance expectations, and your cloud provider guide for setup instructions:
 
-- [AKS — InfiniBand + Network Operator](cloud-providers/aks/rdma-infiniband.md)
-- [EKS — EFA device plugin](cloud-providers/eks/eks.md) (also see the [EFA configuration guide](disagg-communication-guide.md#aws-efa-configuration))
-- [GKE — GPUDirect-TCPXO](cloud-providers/gke/gke.md)
+- [AKS — InfiniBand + Network Operator](cloud-providers/aks/rdma-infiniband.mdx)
+- [EKS — EFA device plugin](cloud-providers/eks/eks.mdx) (also see the [EFA configuration guide](disagg-communication-guide.md#aws-efa-configuration))
+- [GKE — GPUDirect-TCPXO](cloud-providers/gke/gke.mdx)
 
 ### kube-prometheus-stack
 
@@ -257,17 +257,17 @@ helm install prometheus prometheus-community/kube-prometheus-stack \
   --set-json 'prometheus.prometheusSpec.probeNamespaceSelector={}'
 ```
 
-Then uncomment the `prometheusEndpoint` line in the Dynamo install command. The Dynamo operator automatically creates PodMonitors for its components. See [Metrics](observability/metrics.md) for dashboard setup and available metrics, and [Logging](../observability/README.md) for the Grafana Loki + Alloy logging stack.
+Then uncomment the `prometheusEndpoint` line in the Dynamo install command. The Dynamo operator automatically creates PodMonitors for its components. See [Metrics](observability/metrics.mdx) for dashboard setup and available metrics, and [Logging](../observability/README.md) for the Grafana Loki + Alloy logging stack.
 
 ### Shared Storage for Model Caching
 
 Set up a `ReadWriteMany` PVC so all pods share downloaded model weights instead of each downloading independently. No Dynamo chart flags are needed — storage is configured in your deployment spec. Setup is cloud-provider-specific:
 
 - [AKS — Azure Files / Managed Lustre](cloud-providers/aks/storage.md)
-- [EKS — EFS](cloud-providers/eks/efs.md)
-- GKE — Cloud Filestore (see [GKE guide](cloud-providers/gke/gke.md))
+- [EKS — EFS](cloud-providers/eks/efs.mdx)
+- GKE — Cloud Filestore (see [GKE guide](cloud-providers/gke/gke.mdx))
 
-For large clusters with frequent model updates, consider [ModelExpress](model-caching.md#option-2-modelexpress-p2p-distribution) for P2P model distribution and ModelStreamer for direct streaming from object storage. See [Model Caching](model-caching.md) for the full walkthrough including the download Job, mount configuration, and ModelExpress setup.
+For large clusters with frequent model updates, consider [ModelExpress](model-caching.mdx#option-2-modelexpress-p2p-distribution) for P2P model distribution and ModelStreamer for direct streaming from object storage. See [Model Caching](model-caching.mdx) for the full walkthrough including the download Job, mount configuration, and ModelExpress setup.
 
 </Step>
 

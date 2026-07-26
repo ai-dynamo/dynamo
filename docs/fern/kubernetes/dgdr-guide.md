@@ -195,9 +195,9 @@ spec:
 
 The operator mounts the PVC read-only into the profiling job and passes it through to the generated DGD, so both profiling and serving use the cached weights.
 
-`pvcModelPath` must be the HuggingFace snapshot path inside the PVC: `hub/models--<org>--<model>/snapshots/<commit-hash>`. Substitute `/` with `--` in the model ID, and replace `<commit-hash>` with the actual snapshot revision. See [Model Caching — Find the Snapshot Path](model-caching.md#find-the-snapshot-path) for how to look it up.
+`pvcModelPath` must be the HuggingFace snapshot path inside the PVC: `hub/models--<org>--<model>/snapshots/<commit-hash>`. Substitute `/` with `--` in the model ID, and replace `<commit-hash>` with the actual snapshot revision. See [Model Caching — Find the Snapshot Path](model-caching.mdx#find-the-snapshot-path) for how to look it up.
 
-**Setup:** create a `ReadWriteMany` PVC ([Installation Guide — Shared Storage](installation-guide.md#shared-storage-for-model-caching)), run a one-time download Job to populate it, then reference it here. See [Model Caching](model-caching.md) for the full walkthrough.
+**Setup:** create a `ReadWriteMany` PVC ([Installation Guide — Shared Storage](installation-guide.md#shared-storage-for-model-caching)), run a one-time download Job to populate it, then reference it here. See [Model Caching](model-caching.mdx) for the full walkthrough.
 
 For gated models, create the token secret the profiler and pods read automatically:
 

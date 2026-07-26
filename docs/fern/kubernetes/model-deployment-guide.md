@@ -291,7 +291,7 @@ the cached weights.
 that `huggingface-cli download` creates when `HF_HOME` is set to the mount
 point. Replace `<org>--<model>` by substituting `/` with `--` in the model ID,
 and replace `<commit-hash>` with the actual snapshot revision. See
-[Model Caching](model-caching.md#find-the-snapshot-path) for how to look up the
+[Model Caching](model-caching.mdx#find-the-snapshot-path) for how to look up the
 hash after downloading.
 
 ### Setup
@@ -302,7 +302,7 @@ hash after downloading.
 2. Run a one-time download Job to populate the PVC.
 3. Reference the PVC in your DGDR's `modelCache` field.
 
-See [Model Caching](model-caching.md) for the full walkthrough with YAML
+See [Model Caching](model-caching.mdx) for the full walkthrough with YAML
 examples.
 
 ### Private and Gated Models
@@ -587,7 +587,7 @@ spec:
 - [DGDR Examples](../components/profiler/profiler-examples.md) — Ready-to-use YAML for various scenarios
 - [Profiler Guide](../components/profiler/profiler-guide.md) — Profiling algorithms, picking modes, gate checks
 - [Planner Guide](../components/planner/planner-guide.md) — Scaling modes, PlannerConfig reference
-- [Model Caching](model-caching.md) — PVC setup, ModelExpress, and ModelStreamer
+- [Model Caching](model-caching.mdx) — PVC setup, ModelExpress, and ModelStreamer
 - [Deploy with DGD](dgd-guide.md) — Author and apply a DGD for a custom topology
 - [Multinode Deployments](deployment/multinode-deployment.md) — Grove, LWS, and multinode details
 - [Disaggregated Communication](disagg-communication-guide.md) — NIXL, RDMA, and networking

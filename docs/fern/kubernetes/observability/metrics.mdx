@@ -125,6 +125,8 @@ for topology support, configuration, schema, and rotation behavior.
 
 ## View dashboards
 
+<Steps toc={true}>
+<Step title="Load the dashboards" id="load-the-dashboards">
 Load each dashboard by applying its ConfigMap. Each is labeled `grafana_dashboard: "1"`, so the Grafana sidecar (included in kube-prometheus-stack) discovers and imports it automatically.
 
 ```bash
@@ -141,8 +143,8 @@ kubectl apply -n monitoring -f deploy/observability/logging/grafana/logging-dash
 
 The application dashboard includes panels for frontend request rates, time to first token, inter-token latency, request duration, input/output sequence lengths, GPU utilization (via DCGM), node CPU and system load, and per-pod CPU and memory.
 
-### Open Grafana and Prometheus
-
+</Step>
+<Step title="Open Grafana and Prometheus" id="open-grafana-and-prometheus">
 ```bash
 # Grafana credentials
 export GRAFANA_USER=$(kubectl get secret -n monitoring prometheus-grafana -o jsonpath="{.data.admin-user}" | base64 --decode)
@@ -162,6 +164,9 @@ kubectl port-forward svc/prometheus-kube-prometheus-prometheus 9090:9090 -n moni
 Visit `http://localhost:9090` and use the queries below.
 
 To view logs, open **Home > Dashboards > Dynamo Logs** in Grafana. The dashboard filters by DynamoGraphDeployment, namespace, and component type (frontend, worker, and so on).
+
+</Step>
+</Steps>
 
 ## Useful queries
 
@@ -239,8 +244,9 @@ sum by (resource_type, status) (
    kubectl get prometheus -o yaml | grep -iE "podMonitorSelector|serviceMonitorSelector"
    ```
 
-> [!NOTE]
-> Prometheus metric families are registered lazily: each label set is created the first time it fires, so a freshly-started process shows empty metric families until the first relevant request. An idle cluster does not mean scraping is broken.
+<Note>
+Prometheus metric families are registered lazily: each label set is created the first time it fires, so a freshly-started process shows empty metric families until the first relevant request. An idle cluster does not mean scraping is broken.
+</Note>
 
 ### Dashboard not appearing in Grafana
 

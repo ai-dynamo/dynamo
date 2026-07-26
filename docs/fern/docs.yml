@@ -33,6 +33,13 @@ versions:
     path: ./index.yml
 
 redirects:
+  # Removed placeholder and duplicate navigation entries.
+  - source: "/dynamo/dev/walkthroughs/overview"
+    destination: "/dynamo/dev/recipes/browse"
+  - source: "/dynamo/dev/cli/building-from-source"
+    destination: "/dynamo/dev/advanced-customizations/building-from-source"
+  - source: "/dynamo/dev/kubernetes/installation/managed-kubernetes/azure/spot-v-ms"
+    destination: "/dynamo/dev/kubernetes/installation/managed-kubernetes/azure/spot-vms"
   - source: "/dynamo/index.html"
     destination: "/dynamo/"
   - source: "/dynamo/dev/index.html"

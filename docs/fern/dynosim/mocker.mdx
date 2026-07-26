@@ -9,7 +9,7 @@ Mocker is a simulated Dynamo backend. It registers workers, publishes KV events,
 responses while exercising the same frontend and routing path as a model-serving deployment.
 
 Use this tutorial to deploy Mocker with a `DynamoGraphDeployment` (DGD). For local development, see
-[Simulate a Local Deployment](mocker-local.md). For configuration details, see the
+[Simulate a Local Deployment](mocker-local.mdx). For configuration details, see the
 [Mocker CLI Reference](../components/mocker/mocker-cli-reference.mdx). For implementation details,
 see [Mocker Engine Architecture](../design-docs/mocker-architecture.md).
 
@@ -24,8 +24,8 @@ Before you begin:
 
 Mocker runs in the planner image and does not request GPU resources.
 
-## Deploy an aggregated simulation
-
+<Steps toc={true}>
+<Step title="Deploy an aggregated simulation" id="deploy-an-aggregated-simulation">
 Create `mocker-agg.yaml`:
 
 ```yaml
@@ -77,8 +77,8 @@ The checked-in
 [aggregated Mocker example](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/mocker/deploy/v1beta1/agg.yaml)
 contains the complete deployment manifest.
 
-## Send a request
-
+</Step>
+<Step title="Send a request" id="send-a-request">
 Forward the frontend service to port 8000:
 
 ```bash
@@ -100,8 +100,8 @@ curl localhost:8000/v1/chat/completions \
 A successful response confirms that the frontend discovered the Mocker worker and routed the
 request through the deployment.
 
-## Simulate disaggregated serving
-
+</Step>
+<Step title="Simulate disaggregated serving" id="simulate-disaggregated-serving">
 Start from the checked-in
 [disaggregated Mocker example](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/mocker/deploy/v1beta1/disagg.yaml).
 It defines separate prefill and decode components. The prefill worker uses:
@@ -137,8 +137,8 @@ kubectl logs -n "$NAMESPACE" \
 Use the logs to confirm that both worker stages registered and that requests moved from prefill to
 decode.
 
-## Try another simulation
-
+</Step>
+<Step title="Try another simulation" id="try-another-simulation">
 Change one setting at a time and repeat the request:
 
 - Increase `replicas` to exercise routing across more workers.
@@ -146,7 +146,9 @@ Change one setting at a time and repeat the request:
   [Mocker CLI Reference](../components/mocker/mocker-cli-reference.mdx).
 - Enable the Planner to test scaling behavior with simulated workers.
 - Compare the simulation with a real-GPU deployment by using
-  [Benchmarking with AIPerf](../tools/aiperf.md).
+  [Benchmarking with AIPerf](../tools/aiperf.mdx).
 
 DynoSim helps test control-plane behavior and shortlist configurations. Validate performance
 conclusions on the target GPU hardware before production use.
+</Step>
+</Steps>

@@ -39,7 +39,7 @@ Custom clients should send the canonical Dynamo headers. When `X-Dynamo-Session-
 
 ## Native Agent Headers
 
-Dynamo also recognizes the current stable identity headers emitted by the following coding agents. The [frontend API surface compliance test](https://github.com/ai-dynamo/dynamo/blob/main/tests/frontend/test_frontend_api_surface_compliance.py) catches header changes as coding agents evolve. See [Agent Harnesses](agent-harnesses.md) for packaged setup.
+Dynamo also recognizes the current stable identity headers emitted by the following coding agents. The [frontend API surface compliance test](https://github.com/ai-dynamo/dynamo/blob/main/tests/frontend/test_frontend_api_surface_compliance.py) catches header changes as coding agents evolve. See [Agent Harnesses](agent-harnesses.mdx) for packaged setup.
 
 <Tabs>
   <Tab title="Claude Code">
@@ -78,7 +78,7 @@ Session identity is passive metadata. Sending a session ID does not enable stick
 
 ## Related
 
-- [Agent Harnesses](agent-harnesses.md) — connect supported coding-agent CLIs to Dynamo
+- [Agent Harnesses](agent-harnesses.mdx) — connect supported coding-agent CLIs to Dynamo
 - [Agent Tracing](agent-tracing.md) — join LLM and tool spans on `session_id`
-- [Agent Simulation](agent-replay.md) — replay captured agent traces
+- [Agent Simulation](agent-replay.mdx) — replay captured agent traces
 - [ThunderAgent Program Scheduler](thunderagent-router.md) — program-level scheduling keyed by `session_id`

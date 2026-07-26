@@ -7,8 +7,8 @@ subtitle: Deploys the Dynamo platform on Amazon EKS, including cluster creation,
 
 This guide demonstrates the Dynamo platform on Amazon Elastic Kubernetes Service (EKS).
 
-## Clone the repository and set working directory
-
+<Steps toc={true}>
+<Step title="Clone the repository and set working directory" id="clone-the-repository-and-set-working-directory">
 Manifest and template paths in this guide are relative to `examples/deployments/EKS/` in the Dynamo repository.
 
 ```bash
@@ -16,8 +16,8 @@ git clone https://github.com/ai-dynamo/dynamo.git
 cd dynamo/examples/deployments/EKS
 ```
 
-## Setup environment variables
-
+</Step>
+<Step title="Setup environment variables" id="setup-environment-variables">
 We will use those environment variables throughout this guide.
 If you would like to use a different region, modify the `AWS_REGION` variable
 
@@ -28,9 +28,8 @@ export DYNAMO_NAMESPACE="dynamo-system"
 export DYNAMO_RELEASE_VERSION="1.2.1"
 ```
 
-
-## Install CLIs
-
+</Step>
+<Step title="Install CLIs" id="install-clis">
 ### Install AWS CLI ([AWS CLI installation guide](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html))
 
 ```bash
@@ -68,8 +67,8 @@ chmod 700 get_helm.sh
 ./get_helm.sh
 ```
 
-## Create an EKS Auto Mode cluster
-
+</Step>
+<Step title="Create an EKS Auto Mode cluster" id="create-an-eks-auto-mode-cluster">
 Creating an EKS Auto Mode cluster using Eksctl with `eksctl.yaml`.
 This will create an EKS Auto Mode cluster with the Amazon EFS CSI Driver installed as an addon, we will later use Amazon EFS to store model weights and compilation to be used by Dynamo.
 
@@ -93,8 +92,8 @@ Creating a GPU NodePool that targets the **g5,g6,g6e,g7e,p5,p5e,p5en** instance 
 kubectl apply -f automode-np-gpu.yaml
 ```
 
-## Create a default StorageClass
-
+</Step>
+<Step title="Create a default StorageClass" id="create-a-default-storageclass">
 Create a default StorageClass to use the storage capability of EKS Auto Mode, this will make the default StorageClass to use EBS volumes for Stateful workloads needed by NATS that is used with Dynamo.
 
 ```bash
@@ -118,12 +117,12 @@ parameters:
 EOF
 ```
 
-## Create an Amazon EFS shared file system
+</Step>
+<Step title="Create an Amazon EFS shared file system" id="create-an-amazon-efs-shared-file-system">
+Follow the [EFS setup guide](efs.mdx) to create an EFS file system and make it available as shared storage for Dynamo workloads.
 
-Follow the [EFS setup guide](efs.md) to create an EFS file system and make it available as shared storage for Dynamo workloads.
-
-## Install Dynamo Kubernetes Platform
-
+</Step>
+<Step title="Install Dynamo Kubernetes Platform" id="install-dynamo-kubernetes-platform">
 ### Install Dynamo Platform
 ```bash
 helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-"$DYNAMO_RELEASE_VERSION".tgz
@@ -164,8 +163,8 @@ dynamomodels.nvidia.com                           2026-03-17T13:18:10Z
 dynamoworkermetadatas.nvidia.com                  2026-03-17T13:18:11Z
 ```
 
-## Deploy a Dynamo DynamoGraphDeployment (DGD)
-
+</Step>
+<Step title="Deploy a Dynamo DynamoGraphDeployment (DGD)" id="deploy-a-dynamo-dynamographdeployment-dgd">
 | Manifest | Description |
 |----------|-------------|
 | `manifests/vllm/disagg.yaml` | Disaggregated prefill/decode DGD using NIXL with LIBFABRIC backend over EFA. Targets `g7e.12xlarge` instances with GPUDirect RDMA support for high-throughput KV-cache transfer between prefill and decode workers. |
@@ -383,6 +382,9 @@ Cleanup
 kubectl -n ${DYNAMO_NAMESPACE} delete -f manifests/vllm/agg.yaml
 ```
 
+</Step>
+</Steps>
+
 ## Using On-Demand Capacity Reservations (ODCR) and Capacity Blocks (CBs) for ML
 
 GPU instances can be difficult to acquire on-demand. AWS provides two reservation mechanisms to guarantee capacity for ML workloads:
@@ -392,8 +394,9 @@ GPU instances can be difficult to acquire on-demand. AWS provides two reservatio
 
 EKS Auto Mode uses Karpenter under the hood, which models reserved capacity as `karpenter.sh/capacity-type: reserved` and prioritizes it over on-demand and spot.
 
-> [!NOTE]
-> By default, EKS Auto Mode can launch into open ODCRs automatically, but does not prioritize them. Capacity Blocks are never used automatically. Both require explicit `capacityReservationSelectorTerms` configuration on a NodeClass to be prioritized and labeled as `reserved`.
+<Note>
+By default, EKS Auto Mode can launch into open ODCRs automatically, but does not prioritize them. Capacity Blocks are never used automatically. Both require explicit `capacityReservationSelectorTerms` configuration on a NodeClass to be prioritized and labeled as `reserved`.
+</Note>
 
 ### Create a NodeClass with Capacity Reservation
 
@@ -499,8 +502,9 @@ NAME           NODECLASS      NODES   READY   AGE
 gpu-reserved   gpu-reserved   0       True    8s
 ```
 
-> [!NOTE]
-> When configuring `capacityReservationSelectorTerms` on any NodeClass in the cluster, EKS Auto Mode will stop automatically using open ODCRs for all NodeClasses. Make sure all NodeClasses that should use ODCRs have explicit selector terms configured.
+<Note>
+When configuring `capacityReservationSelectorTerms` on any NodeClass in the cluster, EKS Auto Mode will stop automatically using open ODCRs for all NodeClasses. Make sure all NodeClasses that should use ODCRs have explicit selector terms configured.
+</Note>
 
 ### Targeting Reserved Nodes from Workloads
 
@@ -552,7 +556,7 @@ Delete the AutoMode GPU nodepool
 kubectl delete nodepool gpu
 ```
 
-Cleanup EFS related resources, follow the [EFS setup guide](efs.md#cleanup) cleanup section
+Cleanup EFS related resources, follow the [EFS setup guide](efs.mdx#cleanup) cleanup section
 
 Delete the EKS Auto Mode cluster using Eksctl
 

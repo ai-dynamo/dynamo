@@ -75,7 +75,7 @@ When both modes are enabled, throughput-based scaling provides a capacity floor 
 ### Prerequisites
 
 - Dynamo platform installed on Kubernetes ([Installation Guide](../../kubernetes/installation-guide.md))
-- kube-prometheus-stack installed ([Metrics Setup](../../kubernetes/observability/metrics.md))
+- kube-prometheus-stack installed ([Metrics Setup](../../kubernetes/observability/metrics.mdx))
 
 ### Default Mode (zero config)
 
