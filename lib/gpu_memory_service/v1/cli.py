@@ -4,8 +4,11 @@
 from __future__ import annotations
 
 import argparse
-import threading
+import signal
+from collections.abc import Sequence
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextlib import ExitStack
+from threading import Event
 
 import torch
 from gpu_memory_service.common.utils import get_socket_path
@@ -19,6 +22,33 @@ _DOMAINS = ("weights", "kv_cache")
 
 def _gpu_uuid(device: int) -> str:
     return str(torch.cuda.get_device_properties(device).uuid)
+
+
+def run_servers(
+    servers: Sequence[GMSRPCServer],
+    stop: Event | None = None,
+) -> None:
+    """Serve both domains; when either stops, stop the other and raise."""
+    with ThreadPoolExecutor(
+        max_workers=len(servers), thread_name_prefix="gms-v1"
+    ) as executor:
+        futures = [executor.submit(server.serve_forever) for server in servers]
+        try:
+            while True:
+                done, _ = wait(
+                    futures,
+                    timeout=0.1 if stop is not None else None,
+                    return_when=FIRST_COMPLETED,
+                )
+                if done:
+                    for future in done:
+                        future.result()
+                    raise RuntimeError("GMS server stopped unexpectedly")
+                if stop is not None and stop.is_set():
+                    return
+        finally:
+            for server in servers:
+                server.shutdown()
 
 
 def main() -> None:
@@ -41,17 +71,14 @@ def main() -> None:
             )
             for domain in _DOMAINS
         ]
-        kv_thread = threading.Thread(
-            target=servers[1].serve_forever,
-            name="gms-v1-kv-cache",
-            daemon=True,
-        )
-        kv_thread.start()
-        try:
-            servers[0].serve_forever()
-        finally:
-            servers[1].shutdown()
-            kv_thread.join()
+        stop = Event()
+
+        def terminate(*_args) -> None:
+            stop.set()
+
+        signal.signal(signal.SIGTERM, terminate)
+        signal.signal(signal.SIGINT, terminate)
+        run_servers(servers, stop)
 
 
 if __name__ == "__main__":
