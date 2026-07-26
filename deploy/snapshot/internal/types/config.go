@@ -6,6 +6,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 )
 
 // AgentConfig holds the full agent configuration: static checkpoint settings
@@ -22,10 +24,15 @@ type AgentConfig struct {
 const (
 	// StorageAccessModeAgentMount means the snapshot-agent pod mounts the
 	// checkpoint store directly at Storage.BasePath.
-	StorageAccessModeAgentMount = "agentMount"
+	StorageAccessModeAgentMount = snapshotprotocol.StorageAccessModeAgentMount
 	// StorageAccessModePodMount means workload pods mount the checkpoint PVC,
 	// and snapshot-agent reaches it through /host/proc/<pid>/root.
-	StorageAccessModePodMount = "podMount"
+	StorageAccessModePodMount = snapshotprotocol.StorageAccessModePodMount
+	// StorageAccessModeAgentInject means workload pods do NOT mount the checkpoint
+	// PVC. The snapshot-agent mounts it (like agentMount) and, for restore, grafts
+	// the checkpoint dir into the target container's mount namespace via
+	// open_tree(OPEN_TREE_CLONE)+move_mount before nsrestore reads it.
+	StorageAccessModeAgentInject = snapshotprotocol.StorageAccessModeAgentInject
 )
 
 func (c *AgentConfig) LoadEnvOverrides() {
@@ -58,11 +65,11 @@ func (c *AgentConfig) Validate() error {
 		accessMode = StorageAccessModeAgentMount
 	}
 	switch accessMode {
-	case StorageAccessModeAgentMount, StorageAccessModePodMount:
+	case StorageAccessModeAgentMount, StorageAccessModePodMount, StorageAccessModeAgentInject:
 	default:
 		return &ConfigError{
 			Field:   "storage.accessMode",
-			Message: fmt.Sprintf("unsupported access mode %q; expected %q or %q", c.Storage.AccessMode, StorageAccessModeAgentMount, StorageAccessModePodMount),
+			Message: fmt.Sprintf("unsupported access mode %q; expected %q, %q, or %q", c.Storage.AccessMode, StorageAccessModeAgentMount, StorageAccessModePodMount, StorageAccessModeAgentInject),
 		}
 	}
 	c.Storage.AccessMode = accessMode

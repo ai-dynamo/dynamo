@@ -35,6 +35,17 @@ type RestoreRequest struct {
 	TargetPodIP                 string
 	ContainerName               string
 	Clientset                   kubernetes.Interface
+	// AccessMode is the operator-stamped storage access mode. For agentInject the
+	// workload pod has no checkpoint PVC mount, so the agent clones its own
+	// checkpoint dir and grafts it into the container ns via nsrestore.
+	//
+	// agentInject is only supported for restore workloads that cannot acquire
+	// CAP_SYS_ADMIN in the user namespace that owns their mount namespace.
+	// Linux does not expose the kernel-internal MNT_LOCK_READONLY flag through
+	// mount_setattr(2), so a sufficiently privileged workload could otherwise
+	// clear the graft's read-only mount attribute. Admission/callers must reject
+	// privileged or CAP_SYS_ADMIN-capable workloads when selecting agentInject.
+	AccessMode string
 }
 
 // Restore performs external restore for the given request.
@@ -218,7 +229,28 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 		args = append(args, "--target-pod-ip", req.TargetPodIP)
 	}
 
+	// agentInject: the workload pod does not mount the checkpoint PVC. Clone the
+	// agent's own checkpoint dir into a detached mount and hand it to nsrestore,
+	// which grafts it into the container's mount namespace at --checkpoint-path.
+	var extraFiles []*os.File
+	if req.AccessMode == types.StorageAccessModeAgentInject {
+		tree, err := snapshotruntime.OpenCheckpointTree(req.CheckpointLocation)
+		if err != nil {
+			return nil, fmt.Errorf("agentInject checkpoint clone: %w", err)
+		}
+		// This defer owns the agent process's descriptor. ExtraFiles duplicates
+		// it into the child as fd 3; AttachCheckpointTree consumes and closes
+		// that child-side descriptor after move_mount. Closing either descriptor
+		// does not close the other process's descriptor.
+		defer tree.Close()
+		extraFiles = append(extraFiles, tree)
+		// First ExtraFiles entry lands at fd 3 in nsenter and is inherited by
+		// nsrestore across the execve chain (nsenter does not close it).
+		args = append(args, "--checkpoint-fd", "3")
+	}
+
 	cmd := exec.CommandContext(ctx, "nsenter", args...)
+	cmd.ExtraFiles = extraFiles
 	// Inherit the agent environment so nsrestore uses the same logger settings.
 	cmd.Env = os.Environ()
 	log.V(1).Info("Executing nsenter + nsrestore", "cmd", cmd.String())

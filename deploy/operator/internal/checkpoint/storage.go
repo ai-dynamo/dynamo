@@ -23,12 +23,28 @@ import (
 
 func StorageFromConfig(config configv1alpha1.CheckpointStorageConfiguration) (snapshotprotocol.Storage, bool, error) {
 	storageType := strings.TrimSpace(config.Type)
+	storageAccessMode := strings.TrimSpace(config.AccessMode)
+	switch storageAccessMode {
+	case "",
+		snapshotprotocol.StorageAccessModeAgentMount,
+		snapshotprotocol.StorageAccessModePodMount,
+		snapshotprotocol.StorageAccessModeAgentInject:
+	default:
+		return snapshotprotocol.Storage{}, false, fmt.Errorf(
+			"checkpoint.storage.accessMode %q is not supported; expected %q, %q, %q, or empty",
+			storageAccessMode,
+			snapshotprotocol.StorageAccessModeAgentMount,
+			snapshotprotocol.StorageAccessModePodMount,
+			snapshotprotocol.StorageAccessModeAgentInject,
+		)
+	}
+	agentInject := storageAccessMode == snapshotprotocol.StorageAccessModeAgentInject
 	pvcName := strings.TrimSpace(config.PVC.PVCName)
 	basePath := strings.TrimSpace(config.PVC.BasePath)
 	size := strings.TrimSpace(config.PVC.Size)
 	storageClassName := strings.TrimSpace(config.PVC.StorageClassName)
 	accessMode := strings.TrimSpace(config.PVC.AccessMode)
-	hasPVCConfig := pvcName != "" || basePath != "" || config.PVC.Create || size != "" || storageClassName != "" || accessMode != ""
+	hasPVCConfig := pvcName != "" || basePath != "" || config.PVC.Create || size != "" || storageClassName != "" || accessMode != "" || storageAccessMode != ""
 	if storageType == "" && !hasPVCConfig {
 		return snapshotprotocol.Storage{}, false, nil
 	}
@@ -46,22 +62,32 @@ func StorageFromConfig(config configv1alpha1.CheckpointStorageConfiguration) (sn
 	if storageType != snapshotprotocol.StorageTypePVC {
 		return snapshotprotocol.Storage{}, false, fmt.Errorf("checkpoint storage type %q is not supported; only pvc is implemented today", storageType)
 	}
-	if pvcName == "" || basePath == "" {
-		return snapshotprotocol.Storage{}, false, fmt.Errorf("checkpoint.storage.pvc.pvcName and checkpoint.storage.pvc.basePath are required when checkpoint storage is configured")
+	// agentInject: the workload pod never mounts the checkpoint PVC, so pvcName is
+	// not required (and is deliberately left empty so no PVC is injected into the
+	// pod). Only basePath is needed to locate the artifact.
+	if basePath == "" || (!agentInject && pvcName == "") {
+		return snapshotprotocol.Storage{}, false, fmt.Errorf("checkpoint.storage.pvc.basePath (and pvcName unless accessMode=agentInject) are required when checkpoint storage is configured")
 	}
 	basePath, err := normalizeStorageBasePath(basePath)
 	if err != nil {
 		return snapshotprotocol.Storage{}, false, err
 	}
-	if config.PVC.Create {
+	// agentInject does not create a workload-namespace PVC; skip PVC access-mode
+	// validation, which only governs operator-created claims.
+	if config.PVC.Create && !agentInject {
 		if _, err := storagePVCAccessMode(accessMode); err != nil {
 			return snapshotprotocol.Storage{}, false, err
 		}
 	}
+	resolvedPVCName := pvcName
+	if agentInject {
+		resolvedPVCName = ""
+	}
 	return snapshotprotocol.Storage{
-		Type:     snapshotprotocol.StorageTypePVC,
-		PVCName:  pvcName,
-		BasePath: basePath,
+		Type:       snapshotprotocol.StorageTypePVC,
+		PVCName:    resolvedPVCName,
+		BasePath:   basePath,
+		AccessMode: storageAccessMode,
 	}, true, nil
 }
 
@@ -76,6 +102,11 @@ func EnsureStoragePVC(
 		return err
 	}
 	if !ok {
+		return nil
+	}
+	// agentInject leaves PVCName empty: the workload pod never mounts a PVC, so
+	// there is no namespace-local claim for the operator to ensure or create.
+	if storage.PVCName == "" {
 		return nil
 	}
 	if kubeClient == nil {

@@ -3282,6 +3282,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `type` _string_ | Type is the storage backend type. Only pvc is implemented today. |  |  |
+| `accessMode` _string_ | AccessMode selects how the snapshot-agent reaches storage and must match the<br />snapshot chart's storage.accessMode. "agentInject" tells the operator to<br />stamp checkpoint metadata but NOT mount the PVC into workload pods (the agent<br />grafts the checkpoint into the container instead); pvcName is then not<br />required. Empty/"agentMount"/"podMount" preserve the existing behavior. |  |  |
 | `pvc` _[CheckpointPVCConfig](#checkpointpvcconfig)_ | PVC configuration for pvc-based settings. |  |  |
 | `s3` _[CheckpointS3Config](#checkpoints3config)_ | Deprecated: S3 is retained for compatibility and ignored. |  |  |
 | `oci` _[CheckpointOCIConfig](#checkpointociconfig)_ | Deprecated: OCI is retained for compatibility and ignored. |  |  |

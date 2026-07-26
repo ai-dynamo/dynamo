@@ -78,8 +78,13 @@ func buildCheckpointJob(
 	if storage, ok, err := checkpoint.StorageFromConfig(config.Checkpoint.Storage); err != nil {
 		return nil, err
 	} else if ok {
-		snapshotprotocol.InjectCheckpointVolume(&podTemplate.Spec, storage.PVCName)
-		snapshotprotocol.InjectCheckpointVolumeMount(targetContainer, storage.BasePath)
+		// agentInject leaves PVCName empty: skip injecting the PVC into the
+		// checkpoint Job pod. The agent writes the dump through its own mount, so
+		// only the storage metadata (type/basePath/accessMode) needs stamping.
+		if storage.PVCName != "" {
+			snapshotprotocol.InjectCheckpointVolume(&podTemplate.Spec, storage.PVCName)
+			snapshotprotocol.InjectCheckpointVolumeMount(targetContainer, storage.BasePath)
+		}
 		if podTemplate.Annotations == nil {
 			podTemplate.Annotations = map[string]string{}
 		}

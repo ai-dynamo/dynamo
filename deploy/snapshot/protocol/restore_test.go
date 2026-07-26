@@ -11,6 +11,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 )
 
 func TestNewRestorePod(t *testing.T) {
@@ -252,6 +253,83 @@ func TestNewRestorePodRejectsUnknownContainer(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), `"ghost"`) {
 		t.Fatalf("expected unknown-container error, got %v", err)
+	}
+}
+
+func TestPrepareRestorePodSpecSkipsMountWithoutPVC(t *testing.T) {
+	t.Log("Configure resolved storage without a workload PVC")
+	podSpec := corev1.PodSpec{
+		Containers: []corev1.Container{{Name: "main"}},
+	}
+	storage := Storage{
+		Type:     StorageTypePVC,
+		PVCName:  "",
+		BasePath: "/checkpoints",
+	}
+	annotations := map[string]string{TargetContainersAnnotation: "main"}
+	if err := PrepareRestorePodSpec(&podSpec, annotations, storage, DefaultSeccompLocalhostProfile, true); err != nil {
+		t.Fatalf("PrepareRestorePodSpec error: %v", err)
+	}
+
+	t.Log("Verify restore shaping does not create a dangling checkpoint mount")
+	for _, v := range podSpec.Volumes {
+		if v.Name == CheckpointVolumeName {
+			t.Fatalf("storage without a PVC must not inject the %s volume: %#v", CheckpointVolumeName, podSpec.Volumes)
+		}
+	}
+	for _, m := range podSpec.Containers[0].VolumeMounts {
+		if m.Name == CheckpointVolumeName {
+			t.Fatalf("storage without a PVC must not inject the %s volume mount: %#v", CheckpointVolumeName, podSpec.Containers[0].VolumeMounts)
+		}
+	}
+
+	t.Log("Verify the PVC-free restore pod still satisfies the protocol")
+	if err := ValidateRestorePodSpec(&podSpec, annotations, storage, DefaultSeccompLocalhostProfile); err != nil {
+		t.Fatalf("ValidateRestorePodSpec rejected storage without a PVC: %v", err)
+	}
+}
+
+func TestPrepareRestorePodSpecAgentInjectRejectsMountAdminTargets(t *testing.T) {
+	tests := []struct {
+		name            string
+		securityContext *corev1.SecurityContext
+	}{
+		{
+			name: "privileged",
+			securityContext: &corev1.SecurityContext{
+				Privileged: ptr.To(true),
+			},
+		},
+		{
+			name: "CAP_SYS_ADMIN",
+			securityContext: &corev1.SecurityContext{
+				Capabilities: &corev1.Capabilities{
+					Add: []corev1.Capability{"SYS_ADMIN"},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			podSpec := corev1.PodSpec{
+				Containers: []corev1.Container{{
+					Name:            "main",
+					SecurityContext: tt.securityContext,
+				}},
+			}
+			storage := Storage{
+				Type:       StorageTypePVC,
+				BasePath:   "/checkpoints",
+				AccessMode: StorageAccessModeAgentInject,
+			}
+			annotations := map[string]string{TargetContainersAnnotation: "main"}
+
+			err := PrepareRestorePodSpec(&podSpec, annotations, storage, DefaultSeccompLocalhostProfile, true)
+			if err == nil {
+				t.Fatal("expected agentInject to reject a mount-admin-capable target")
+			}
+		})
 	}
 }
 

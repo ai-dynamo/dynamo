@@ -6,8 +6,8 @@ kind: ConfigMap
 {{- if ne .Values.storage.type "pvc" }}
 {{- fail (printf "snapshot.storage.type=%q is not supported yet; only pvc is currently implemented" .Values.storage.type) }}
 {{- end }}
-{{- if not (has .Values.storage.accessMode (list "agentMount" "podMount")) }}
-{{- fail (printf "snapshot.storage.accessMode=%q is not supported; expected agentMount or podMount" .Values.storage.accessMode) }}
+{{- if not (has .Values.storage.accessMode (list "agentMount" "podMount" "agentInject")) }}
+{{- fail (printf "snapshot.storage.accessMode=%q is not supported; expected agentMount, podMount, or agentInject" .Values.storage.accessMode) }}
 {{- end }}
 metadata:
   name: {{ include "snapshot.fullname" . }}-config

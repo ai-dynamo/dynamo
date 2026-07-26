@@ -46,11 +46,20 @@ const (
 
 	CheckpointStorageTypeAnnotation     = "nvidia.com/snapshot-storage-type"
 	CheckpointStorageBasePathAnnotation = "nvidia.com/snapshot-storage-base-path"
-	CheckpointVolumeName                = "checkpoint-storage"
-	DefaultCheckpointArtifactVersion    = "1"
-	DefaultCheckpointJobTTLSeconds      = int32(300)
-	DefaultSeccompLocalhostProfile      = "profiles/block-iouring.json"
-	StorageTypePVC                      = "pvc"
+	// CheckpointStorageAccessModeAnnotation carries the operator-resolved storage
+	// access mode to the agent. The operator is the sole writer; the agent treats
+	// this stamped value as authoritative over its own config so the two cannot
+	// silently disagree.
+	CheckpointStorageAccessModeAnnotation = "nvidia.com/snapshot-storage-access-mode"
+	CheckpointVolumeName                  = "checkpoint-storage"
+	DefaultCheckpointArtifactVersion      = "1"
+	DefaultCheckpointJobTTLSeconds        = int32(300)
+	DefaultSeccompLocalhostProfile        = "profiles/block-iouring.json"
+	StorageTypePVC                        = "pvc"
+	StorageAccessModeAgentMount           = "agentMount"
+	StorageAccessModePodMount             = "podMount"
+	// In agentInject mode the workload pod does not mount the checkpoint PVC.
+	StorageAccessModeAgentInject = "agentInject"
 
 	CheckpointStatusCompleted = "completed"
 	CheckpointStatusFailed    = "failed"
@@ -69,6 +78,10 @@ type Storage struct {
 	Location string
 	PVCName  string
 	BasePath string
+	// AccessMode mirrors the agent storage access mode (agentMount, podMount,
+	// agentInject). For agentInject the workload pod never mounts the PVC, so
+	// PVCName is empty and the agent grafts the checkpoint into the container.
+	AccessMode string
 }
 
 type RestoreStatusAnnotationKeys struct {
@@ -223,9 +236,13 @@ func ApplyCheckpointStorageMetadata(annotations map[string]string, storage Stora
 	}
 	delete(annotations, CheckpointStorageTypeAnnotation)
 	delete(annotations, CheckpointStorageBasePathAnnotation)
+	delete(annotations, CheckpointStorageAccessModeAnnotation)
 	storageType := strings.TrimSpace(storage.Type)
 	if storageType != "" {
 		annotations[CheckpointStorageTypeAnnotation] = storageType
+	}
+	if accessMode := strings.TrimSpace(storage.AccessMode); accessMode != "" {
+		annotations[CheckpointStorageAccessModeAnnotation] = accessMode
 	}
 	basePath := strings.TrimSpace(storage.BasePath)
 	if basePath != "" {
@@ -269,8 +286,9 @@ func resolveStorageConfig(storage Storage) (Storage, error) {
 		basePath = "/"
 	}
 	return Storage{
-		Type:     storageType,
-		PVCName:  strings.TrimSpace(storage.PVCName),
-		BasePath: basePath,
+		Type:       storageType,
+		PVCName:    strings.TrimSpace(storage.PVCName),
+		BasePath:   basePath,
+		AccessMode: strings.TrimSpace(storage.AccessMode),
 	}, nil
 }
