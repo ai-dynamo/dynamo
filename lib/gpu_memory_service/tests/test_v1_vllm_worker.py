@@ -13,6 +13,7 @@ pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.unit,
     pytest.mark.vllm,
+    pytest.mark.core,
     pytest.mark.gpu_0,
 ]
 
@@ -26,7 +27,7 @@ def vllm_modules():
     return backend, worker
 
 
-def test_worker_routes_broad_weights_to_gms_and_kv_cache_to_vllm(
+def test_worker_routes_weights_and_kv_cache_scopes_to_gms(
     vllm_modules,
     monkeypatch,
 ) -> None:
@@ -44,21 +45,21 @@ def test_worker_routes_broad_weights_to_gms_and_kv_cache_to_vllm(
     class Backend:
         @contextmanager
         def capture_weights(self, model):
-            events.append("gms_enter")
+            events.append(("gms_enter", "weights"))
             yield
-            events.append(("gms_exit", model()))
+            events.append(("gms_exit", "weights", model()))
+
+        @contextmanager
+        def capture_kv_cache(self):
+            events.append(("gms_enter", "kv_cache"))
+            yield
+            events.append(("gms_exit", "kv_cache"))
 
     selected_backend = Backend()
 
     def init_device(instance):
         events.append("vllm_init")
         instance.model_runner = ModelRunner()
-
-    @contextmanager
-    def native_pool(tag):
-        events.append(("native_enter", tag))
-        yield
-        events.append(("native_exit", tag))
 
     monkeypatch.setattr(worker_module.Worker, "init_device", init_device)
     monkeypatch.setattr(
@@ -69,7 +70,7 @@ def test_worker_routes_broad_weights_to_gms_and_kv_cache_to_vllm(
     monkeypatch.setattr(
         worker_module.Worker,
         "_maybe_get_memory_pool_context",
-        lambda _instance, tag: native_pool(tag),
+        lambda _instance, tag: pytest.fail(f"native vLLM pool used for {tag}"),
     )
 
     worker = object.__new__(worker_module.GMSV1Worker)
@@ -94,44 +95,54 @@ def test_worker_routes_broad_weights_to_gms_and_kv_cache_to_vllm(
         "vllm_init",
         "get_backend",
         "get_backend",
-        "gms_enter",
+        ("gms_enter", "weights"),
         "load_model",
         ("get_model", final_model),
-        ("gms_exit", final_model),
-        ("native_enter", "kv_cache"),
+        ("gms_exit", "weights", final_model),
+        "get_backend",
+        ("gms_enter", "kv_cache"),
         "allocate_kv",
-        ("native_exit", "kv_cache"),
+        ("gms_exit", "kv_cache"),
     ]
 
 
-def test_backend_composes_native_kv_and_gms_weight_lifecycle(
+def test_backend_orders_gms_lifecycle_without_native_cumem(
     vllm_modules,
     monkeypatch,
 ) -> None:
     backend_module, _worker_module = vllm_modules
     events = []
-    allocator = SimpleNamespace(
-        sleep=lambda offload_tags: events.append(("native_sleep", offload_tags)),
-        wake_up=lambda tags: events.append(("native_wake", tags)),
-    )
+
+    def native_allocator():
+        pytest.fail("GMS V1 invoked vLLM's native CuMem allocator")
+
     monkeypatch.setattr(
-        "vllm.device_allocator.get_mem_allocator_instance", lambda: allocator
+        "vllm.device_allocator.get_mem_allocator_instance",
+        native_allocator,
     )
 
     backend = object.__new__(backend_module.GMSV1SleepModeBackend)
-    backend_module.CuMemBackend.__init__(backend)
-    backend._pool = SimpleNamespace(
-        sleep=lambda: events.append("gms_sleep"),
-        wake=lambda: events.append("gms_wake"),
+    backend_module.SleepModeBackend.__init__(backend)
+    backend._pools = SimpleNamespace(
+        raise_if_allocator_failed=lambda: events.append("allocator_ok"),
+        weights=SimpleNamespace(
+            sleep=lambda: events.append("weights_sleep"),
+            wake=lambda: events.append("weights_wake"),
+        ),
+        kv_cache=SimpleNamespace(
+            sleep=lambda: events.append("kv_sleep"),
+            wake=lambda: events.append("kv_wake"),
+        ),
     )
 
     backend.suspend()
     backend.resume()
 
     assert events == [
-        ("native_sleep", ("weights",)),
-        "gms_sleep",
-        "gms_wake",
-        ("native_wake", None),
+        "allocator_ok",
+        "weights_sleep",
+        "kv_sleep",
+        "kv_wake",
+        "weights_wake",
     ]
     assert backend.state() == "RUNNING"

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Whole-engine snapshot lifecycle for the experimental GMS V1 worker."""
+"""GMS-owned vLLM sleep lifecycle for Parameters and KV cache."""
 
 from __future__ import annotations
 
@@ -11,10 +11,13 @@ from typing import TYPE_CHECKING
 import torch
 from gpu_memory_service.common.utils import get_socket_path
 from gpu_memory_service.common.vmm import get_vmm
-from gpu_memory_service.v1.memory_manager import SnapshotMemoryManager
-from gpu_memory_service.v1.torch import SnapshotTorchPool
+from gpu_memory_service.v1.memory_manager import (
+    EphemeralKVCacheMemoryManager,
+    PersistentParameterMemoryManager,
+)
+from gpu_memory_service.v1.torch import V1TorchPools
 from vllm.device_allocator.sleep_mode_backend import (
-    CuMemBackend,
+    SleepModeBackend,
     SleepModeBackendFactory,
 )
 
@@ -22,27 +25,36 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from contextlib import AbstractContextManager
 
-BACKEND_NAME = "gms-v1-snapshot"
+BACKEND_NAME = "gms-v1"
 logger = logging.getLogger(__name__)
 
 
-class GMSV1SleepModeBackend(CuMemBackend):
-    """Compose native KV-cache sleep with GMS V1 parameter sleep."""
+class GMSV1SleepModeBackend(SleepModeBackend):
+    """Own the rank-local GMS Parameter and ephemeral KV domains."""
 
     def __init__(self) -> None:
         super().__init__()
         device = torch.cuda.current_device()
-        manager = SnapshotMemoryManager(
-            get_socket_path(device, "snapshot-v1"),
-            get_vmm(),
+        vmm = get_vmm()
+        weights = PersistentParameterMemoryManager(
+            get_socket_path(device, "weights"),
+            vmm,
             device,
         )
-        self._pool = SnapshotTorchPool(manager)
+        kv_cache = EphemeralKVCacheMemoryManager(
+            get_socket_path(device, "kv_cache"),
+            vmm,
+            device,
+        )
+        self._pools = V1TorchPools(weights, kv_cache)
 
     def capture_weights(
         self, model: "Callable[[], object]"
     ) -> "AbstractContextManager[None]":
-        return self._pool.capture_weights(model)
+        return self._pools.capture_weights(model)
+
+    def capture_kv_cache(self) -> "AbstractContextManager[None]":
+        return self._pools.capture_kv_cache()
 
     def suspend(self, level: int = 1) -> None:
         if level != 1:
@@ -51,8 +63,10 @@ class GMSV1SleepModeBackend(CuMemBackend):
             raise RuntimeError(f"cannot suspend GMS V1 from {self._state}")
 
         try:
-            super().suspend(level)
-            self._pool.sleep()
+            self._pools.raise_if_allocator_failed()
+            self._pools.weights.sleep()
+            self._pools.kv_cache.sleep()
+            self._state = "SUSPENDED"
         except Exception as cause:
             logger.exception("GMS V1 suspend failed; terminating the worker process")
             raise SystemExit(1) from cause
@@ -65,11 +79,16 @@ class GMSV1SleepModeBackend(CuMemBackend):
 
         try:
             self._state = "RESUMING"
-            self._pool.wake()
-            super().resume(tags)
+            self._pools.kv_cache.wake()
+            self._pools.weights.wake()
+            self._state = "RUNNING"
         except Exception as cause:
             logger.exception("GMS V1 resume failed; terminating the worker process")
             raise SystemExit(1) from cause
+
+    @classmethod
+    def preserves_communicators(cls) -> bool:
+        return True
 
 
 SleepModeBackendFactory.register_backend(
