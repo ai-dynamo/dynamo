@@ -740,7 +740,6 @@ navigation:
           - page: DCO and Licensing
             path: contributing/dco-and-licensing.md
           - section: Documentation
-            icon: file-lines
             contents:
               - page: Documentation Style Guide
                 path: documentation-style-guide.md
