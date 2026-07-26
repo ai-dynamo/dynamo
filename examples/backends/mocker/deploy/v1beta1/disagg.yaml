@@ -61,6 +61,8 @@ spec:
           - /workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D
           - --disaggregation-mode
           - prefill
+          - --bootstrap-ports
+          - "50100"
           command:
           - python3
           - -m

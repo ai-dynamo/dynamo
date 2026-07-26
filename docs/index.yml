@@ -300,6 +300,9 @@ navigation:
               - page: Live Simulation with Mocker
                 path: dynosim/mocker.md
                 slug: mocker
+              - page: Simulation Model
+                path: dynosim/modeling.md
+                slug: modeling
               - page: Simulation Runs
                 path: dynosim/runs.md
                 slug: runs
