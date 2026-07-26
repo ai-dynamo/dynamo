@@ -294,6 +294,9 @@ navigation:
               - page: Live Simulation with Mocker
                 path: ../pages-dev/dynosim/mocker.md
                 slug: mocker
+              - page: Simulation Model
+                path: ../pages-dev/dynosim/modeling.md
+                slug: modeling
               - page: Simulation Runs
                 path: ../pages-dev/dynosim/runs.md
                 slug: runs
@@ -395,6 +398,8 @@ navigation:
                 path: ../pages-dev/backends/vllm/vllm-examples.md
               - page: KV Cache Offloading
                 path: ../pages-dev/backends/vllm/vllm-kv-offloading.md
+              - page: Native KV Offloading
+                path: ../pages-dev/backends/vllm/vllm-native-kv-offloading.md
               - page: Observability
                 path: ../pages-dev/backends/vllm/vllm-observability.md
               - page: vLLM-Omni
@@ -440,6 +445,8 @@ navigation:
                 path: ../pages-dev/components/router/router-disaggregated-serving.md
               - page: Topology-Aware KV Transfer
                 path: ../pages-dev/components/router/topology-aware-kv-transfer.md
+              - page: Offloading Support Matrix
+                path: ../pages-dev/components/router/router-offloading.md
               - page: Router Operations
                 path: ../pages-dev/components/router/router-operations.md
               - page: Router Examples

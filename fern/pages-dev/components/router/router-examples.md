@@ -284,6 +284,7 @@ This approach gives you complete control over routing decisions, allowing you to
 - **Minimize TTFT**: Select worker with lowest `potential_prefill_tokens`
 - **Maximize cache reuse**: Use `best_worker()` which considers both prefill and decode loads
 - **Balance load**: Consider both `potential_prefill_tokens` and `potential_decode_blocks` together
+- **Balance active batches**: Include `active_requests` when decode step latency depends materially on request count
 
 See [Router Design](../../design-docs/router-design.md) for architecture details and the cost function algorithm.
 

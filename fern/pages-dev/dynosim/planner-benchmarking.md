@@ -1,15 +1,16 @@
 ---
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Planner DynoSim Benchmarking
 subtitle: Drive the planner in the simulation loop against a saved trace to evaluate SLA behavior and scaling decisions
 ---
 
-This guide shows how to benchmark the Dynamo Planner against a recorded trace by running it inside DynoSim. Use it to compare `agg` vs `disagg` topologies, tune SLA targets, and study how deployment realities (engine startup time, worker counts) affect planner behavior — all without bringing up a live cluster.
+Run the Dynamo Planner against a recorded trace inside DynoSim to compare aggregated and
+disaggregated topologies, tune SLA targets, and study worker-count or startup-time sensitivity.
 
 For the general mechanics of DynoSim runs (input format, arrival speedup, router modes, synthetic workloads), see [DynoSim Runs](runs.md). This guide focuses on the `--planner-config` path.
 
-## 1. Setup
+## Setup
 
 ### Build
 
@@ -22,7 +23,8 @@ runtime `_core` module from the bindings package:
 uv pip install -e .
 ```
 
-The `--release` flag is strongly recommended. DynoSim execution is largely single-threaded and CPU-bound on the mocker engine core; a debug build can be 5–10× slower, which compounds across sweep runs.
+Use a release build for repeated runs; debug builds add substantial CPU overhead to the Mocker
+engine core.
 
 ### Key Planner Config Knobs
 
@@ -82,19 +84,20 @@ The raw `64` output tokens still feed KV residency, context-length estimates, an
 
 For AIC-backed MTP replay, set `aic_nextn` on the agg engine args or on the disagg decode engine args, and set `aic_nextn_accept_rates` to control the mocker burst sampler. The planner bootstrap path asks AIC for raw forward iteration time with zero accept rates internally, so the regression is trained on undiscounted wall time and the planner applies the observed replay accept length exactly once.
 
-## 2. Example: Agg vs Disagg On The Mooncake Agentic Trace
+## Compare Aggregated and Disaggregated Topologies
 
 Download the trace:
 
 ```bash
-mkdir -p traces/mooncake_fast25 && cd traces/mooncake_fast25
-curl -sLO https://raw.githubusercontent.com/kvcache-ai/Mooncake/main/FAST25-release/traces/toolagent_trace.jsonl
+mkdir -p traces/mooncake_fast25
+curl -sL https://raw.githubusercontent.com/kvcache-ai/Mooncake/main/FAST25-release/traces/toolagent_trace.jsonl \
+  -o traces/mooncake_fast25/toolagent_trace.jsonl
 ```
 
 Run agg (2 workers, TP=1):
 
 ```bash
-python -m dynamo.replay traces/mooncake_fast25/toolagent_trace.jsonl \
+.venv/bin/python -m dynamo.replay traces/mooncake_fast25/toolagent_trace.jsonl \
   --planner-config '{
     "mode": "agg",
     "optimization_target": "sla",
@@ -112,7 +115,7 @@ python -m dynamo.replay traces/mooncake_fast25/toolagent_trace.jsonl \
 Run disagg (1P1D, TP=1):
 
 ```bash
-python -m dynamo.replay traces/mooncake_fast25/toolagent_trace.jsonl \
+.venv/bin/python -m dynamo.replay traces/mooncake_fast25/toolagent_trace.jsonl \
   --planner-config '{
     "mode": "disagg",
     "optimization_target": "sla",
@@ -128,9 +131,11 @@ python -m dynamo.replay traces/mooncake_fast25/toolagent_trace.jsonl \
   --num-prefill-workers 1 --num-decode-workers 1 --arrival-speedup-ratio 1.0
 ```
 
-Each run prints the AIPerf summary table to stdout and writes an HTML diagnostics report to `./planner_reports/<report_filename>`. For this trace with a long ISL and short OSL, agg is better than disagg, which gets slightly better ITL at the cost noticeably more GPU-hours.
+Each run prints the AIPerf summary table and writes an HTML diagnostics report under
+`planner_reports/`. Compare the latency, throughput, scaling events, and cumulative GPU-hours in
+the two reports.
 
-## 3. Example: Cold-Start-Time Sweep
+## Sweep Cold-Start Time
 
 How sensitive is SLA attainment to engine startup time? Sweep `startup_time` from 0 to 300 seconds in 10-second steps and record TTFT/ITL/GPU-hours per run.
 
@@ -151,7 +156,7 @@ run_one() {
   else
     extra=$(printf '{"aic_backend":"vllm","aic_system":"h200_sxm","aic_model_path":"nvidia/Llama-3.1-8B-Instruct-FP8","aic_tp_size":1,"startup_time":%d}' "$s")
   fi
-  python -m dynamo.replay "$TRACE" \
+  .venv/bin/python -m dynamo.replay "$TRACE" \
     --planner-config "$(printf '{"mode":"agg","optimization_target":"sla","ttft_ms":1500,"itl_ms":50,"enable_throughput_scaling":true,"enable_load_scaling":true,"pre_deployment_sweeping_mode":"rapid","throughput_adjustment_interval_seconds":300,"load_adjustment_interval_seconds":10,"prefill_engine_num_gpu":1,"decode_engine_num_gpu":1,"report_filename":"%s"}' "$name")" \
     --extra-engine-args "$extra" \
     --num-workers 2 --arrival-speedup-ratio 1.0 \
@@ -164,12 +169,6 @@ export -f run_one
 seq 0 10 300 | xargs -n1 -P12 -I{} bash -c 'run_one "$@"' _ {}
 ```
 
-Each run emits the AIPerf metrics table (parse TTFT / ITL avg / p90) and its HTML report (grep `GPU hours: <float>`). Plotting those against `startup_time` gives:
-
-![Planner DynoSim — startup time sweep](../assets/img/planner-replay-startup-sweep.png)
-
-Observations from this sweep (agg, TTFT SLA 1,500 ms, ITL SLA 50 ms, H200-SXM, Llama-3.1-8B-FP8, TP=1):
-
-- **SLA cliff near 100–120 s.** Below that, the planner scales up fast enough to hold TTFT; above it, p99 TTFT diverges and the system stays perpetually backlogged.
-- **Scaling-event count drops monotonically** (42 → 8) as startup grows — long-startup runs require load planner to wait for stabilization before the next scaling decision.
-- **ITL is less sensitive than TTFT** until the queue saturates. Below the cliff, ITL rises modestly (25 → 30 ms avg); above it, p90 ITL jumps to ~200 ms as decode requests starve.
+Each run emits the AIPerf metrics table, JSON report, and Planner HTML report. Plot TTFT, ITL,
+scaling events, and cumulative GPU-hours against `startup_time` to identify the range that needs
+live validation.

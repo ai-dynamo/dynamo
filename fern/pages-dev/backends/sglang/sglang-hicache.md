@@ -19,7 +19,9 @@ What Dynamo adds on top of HiCache:
 - **Tier-aware routing.** The KV router tracks which cache tier each block lives on (GPU / Host / External) and uses that when scoring candidate workers — not just device overlap.
 - **Shared-pool awareness.** When an external backend such as Mooncake is configured, the router queries the shared pool in parallel with its own indexer so it can discount prefill cost for blocks any worker can fetch, not just blocks the candidate holds locally.
 
-If you are running a single worker with HiCache and no shared pool, no Dynamo-side configuration is required — the worker reports KV events to the router as usual.
+If you are running a single worker with HiCache and no shared pool, no
+HiCache-specific router configuration is required. Enable KV routing on the
+frontend as shown below.
 
 ## Running SGLang with HiCache
 
@@ -33,13 +35,14 @@ python -m dynamo.sglang \
   --hicache-ratio 2 \
   --hicache-write-policy write_through \
   --hicache-storage-backend nixl \
+  --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}' \
   --skip-tokenizer-init
 ```
 
 Then start the frontend:
 
 ```bash
-python -m dynamo.frontend --http-port 8000
+python -m dynamo.frontend --http-port 8000 --router-mode kv
 ```
 
 <Note>
@@ -101,31 +104,41 @@ For each candidate worker, the router computes a **logit** (lower wins):
 
 ```text
 # Without shared cache
-adjusted_prefill_blocks = max(
-    prefill_blocks
-    - overlap_score_credit * device_overlap_blocks
-    - host_cache_hit_weight * host_overlap_blocks
-    - disk_cache_hit_weight * disk_overlap_blocks,
-    0,
-)
-logit = prefill_load_scale * adjusted_prefill_blocks + decode_blocks
-
-# With shared cache
-shared_beyond = shared_cache_hits.hits_beyond(device_overlap_blocks)
-adjusted_prefill_blocks = max(
+adjusted_prefill_blocks = (
     prefill_blocks
     - overlap_score_credit * device_overlap_blocks
     - host_cache_hit_weight * host_overlap_blocks
     - disk_cache_hit_weight * disk_overlap_blocks
-    - shared_cache_multiplier * shared_beyond,
-    0,
 )
-logit = prefill_load_scale * adjusted_prefill_blocks + decode_blocks
+active_request_blocks = decode_active_request_weight * active_requests
+logit = (
+    prefill_load_scale * adjusted_prefill_blocks
+    + potential_decode_blocks
+    + active_request_blocks
+)
+
+# With shared cache
+shared_beyond = shared_cache_hits.hits_beyond(device_overlap_blocks)
+adjusted_prefill_blocks = (
+    prefill_blocks
+    - overlap_score_credit * device_overlap_blocks
+    - host_cache_hit_weight * host_overlap_blocks
+    - disk_cache_hit_weight * disk_overlap_blocks
+    - shared_cache_multiplier * shared_beyond
+)
+active_request_blocks = decode_active_request_weight * active_requests
+logit = (
+    prefill_load_scale * adjusted_prefill_blocks
+    + potential_decode_blocks
+    + active_request_blocks
+)
 ```
 
 `hits_beyond(n)` counts shared-cache pages at positions `>= n` — "pages past my device prefix that I can still fetch from Mooncake instead of recomputing."
 
-**Worked example.** Request is 4 blocks, `shared_cache_multiplier = 0.5`, `block_size = 1`, `overlap_score_credit = 1.0` (the maximum device-local overlap credit). Shared pool contains blocks 0–3.
+`decode_active_request_weight` defaults to `0`. Set it above `0` only when decode step latency depends materially on active batch size; the setting is independent of HiCache lookup and shared-pool credit.
+
+**Worked example.** Request is 4 blocks, `shared_cache_multiplier = 0.5`, `block_size = 1`, `overlap_score_credit = 1.0`, no existing decode load, and the default `decode_active_request_weight = 0`. Shared pool contains blocks 0–3.
 
 | Worker | Device overlap | `hits_beyond`  | Device credit | Shared credit | Adjusted prefill | Logit          |
 | ------ | -------------- | -------------- | ------------- | ------------- | ---------------- | -------------- |
@@ -164,10 +177,11 @@ python -m dynamo.sglang \
   --hicache-write-policy write_through \
   --hicache-storage-backend mooncake \
   --hicache-storage-backend-extra-config '{"master_server_address": "mooncake-master.internal:50051"}' \
+  --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}' \
   --skip-tokenizer-init
 ```
 
-Launch additional workers on other GPUs / hosts with the same Mooncake config so they back to the same cluster.
+Launch additional workers on other GPUs / hosts with the same Mooncake config so they point to the same cluster. Give each worker on the same host its own `--kv-events-config` endpoint port (for example `tcp://*:5558`).
 
 **Dynamo frontend** — enable tier-aware routing:
 
@@ -226,6 +240,7 @@ curl -s localhost:8000/metrics | grep shared_cache
 
 ## Further Reading
 
+- [Offloading Support Matrix](../../components/router/router-offloading.md) — cross-framework support matrix for KV routing with offloading
 - [SGLang HiCache Design](https://docs.sglang.ai/advanced_features/hicache_design.html) and [Best Practices](https://docs.sglang.ai/advanced_features/hicache_best_practices.html)
 - [Mooncake](https://github.com/kvcache-ai/Mooncake) — the shared KV store used as the external tier
 - [SGLang PR #22894](https://github.com/sgl-project/sglang/pull/22894) — the tier-annotated events prerequisite

@@ -74,6 +74,7 @@ explains when to adjust these settings.
 | `--router-track-active-blocks` / `--no-router-track-active-blocks` | `DYN_ROUTER_TRACK_ACTIVE_BLOCKS` | `true` | Track blocks used by in-progress requests for load balancing |
 | `--router-track-output-blocks` / `--no-router-track-output-blocks` | `DYN_ROUTER_TRACK_OUTPUT_BLOCKS` | `false` | Track output blocks with fractional decay during generation |
 | `--router-assume-kv-reuse` / `--no-router-assume-kv-reuse` | `DYN_ROUTER_ASSUME_KV_REUSE` | `true` | Assume KV cache reuse when tracking active blocks |
+| `--router-decode-active-request-weight` | `DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT` | `0.0` | Experimental finite, nonnegative block-equivalent decode cost added for each active request on a candidate worker |
 | `--router-tracking-hash` | `DYN_ROUTER_TRACKING_HASH` | `public-xxh3-v1` | Tracking-identity algorithm: `public-xxh3-v1` or experimental `keyed-xxh3-v1` |
 | `--router-tracking-key-file` | `DYN_ROUTER_TRACKING_KEY_FILE` | — | File containing exactly 32 raw key bytes. Required by `keyed-xxh3-v1` |
 | `--router-tracking-key-id` | `DYN_ROUTER_TRACKING_KEY_ID` | — | Nonempty provider-managed key epoch. Required by `keyed-xxh3-v1` |
