@@ -430,6 +430,8 @@ typography:
     name: RobotoMono
     paths:
       - path: ./assets/fonts/RobotoMono.woff2
+        weight: 100 700
+        style: normal
 theme:
   page-actions: toolbar
   footer-nav: minimal

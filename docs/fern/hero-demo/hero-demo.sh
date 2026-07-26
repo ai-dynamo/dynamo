@@ -15,8 +15,7 @@
 # Deterministic: no randomness, fixed strings -> identical every recording.
 #
 # Record with:
-#   asciinema rec --cols 120 --rows 32 --idle-time-limit 1.5 \
-#     --command ./hero-demo.sh hero-demo.cast
+#   ./record-hero.sh
 #
 set -euo pipefail
 
