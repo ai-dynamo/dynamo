@@ -30,7 +30,9 @@ class GMSV1Worker(Worker):
         self._get_sleep_mode_backend()
 
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager[None]:
+        backend = self._get_sleep_mode_backend()
         if tag == "weights":
-            backend = self._get_sleep_mode_backend()
             return backend.capture_weights(self.model_runner.get_model)
+        if tag == "kv_cache":
+            return backend.capture_kv_cache()
         return super()._maybe_get_memory_pool_context(tag)

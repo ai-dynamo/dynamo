@@ -17,7 +17,10 @@ from gpu_memory_service.core.protocol import send_message
 from gpu_memory_service.core.server.allocations import GMSAllocationManager
 from gpu_memory_service.core.server.gms import GMS
 from gpu_memory_service.core.server.rpc import GMSRPCServer
-from gpu_memory_service.v1.memory_manager import SnapshotMemoryManager
+from gpu_memory_service.v1.memory_manager import (
+    EphemeralKVCacheMemoryManager,
+    PersistentParameterMemoryManager,
+)
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.integration, pytest.mark.gpu_0]
 
@@ -200,56 +203,50 @@ def test_disconnected_queued_writer_preserves_committed_epoch(tmp_path) -> None:
         _stop(server, thread)
 
 
-def test_snapshot_manager_preserves_ids_and_vas_across_sleep_and_wake(
+def test_kv_epoch_is_exclusive_and_wake_recreates_backing_at_saved_vas(
     tmp_path, monkeypatch
 ) -> None:
     path = str(tmp_path / "gms-v1.sock")
     vmm, allocations, gms, server, thread = _start(path)
     monkeypatch.setattr(
-        SnapshotMemoryManager,
+        EphemeralKVCacheMemoryManager,
         "_gpu_identity",
         lambda self: "GPU-0",
     )
-    manager = SnapshotMemoryManager(path, vmm, 0)
+    manager = EphemeralKVCacheMemoryManager(path, vmm, 0)
     first = manager.allocate(65)
     second = manager.allocate(33)
     before = {mapping.base: mapping.allocation_id for mapping in manager.mappings}
-    handles = set(vmm.server_handles)
-
-    manager.commit()
-    assert gms.snapshot().ro_session_count == 1
+    first_epoch_handles = set(vmm.server_handles)
     assert set(vmm.mapped) == {first, second}
-    assert set(vmm.access.values()) == {GrantedLockType.RO}
+    assert set(vmm.access.values()) == {GrantedLockType.RW}
 
+    waiting, connected, waiter = _open_in_thread(path, RequestedLockType.RW)
+    _wait_for(lambda: gms.snapshot().waiting_writers == 1)
+    assert not connected.is_set()
     manager.sleep()
-    _wait_for(lambda: gms.snapshot().ro_session_count == 0)
+    assert connected.wait(5)
+    next_writer = waiting.pop()
     assert set(vmm.reservations) == {first, second}
     assert not vmm.mapped
-    assert vmm.server_handles == handles
+    assert allocations.allocation_count == 0
+    assert not vmm.server_handles
+    next_writer.close()
+    waiter.join(timeout=5)
+    assert not waiter.is_alive()
 
     manager.wake()
     assert {
         mapping.base: mapping.allocation_id for mapping in manager.mappings
     } == before
     assert set(vmm.mapped) == {first, second}
-    assert set(vmm.access.values()) == {GrantedLockType.RO}
-
-    manager.free_from_allocator(second, 33)
-    manager.sleep()
-    _wait_for(lambda: gms.snapshot().ro_session_count == 0)
-    manager.free_from_allocator(first, 65)
-    assert not manager.mappings
-    assert not vmm.imports
-    assert not vmm.reservations
+    assert set(vmm.access.values()) == {GrantedLockType.RW}
+    assert vmm.server_handles.isdisjoint(first_epoch_handles)
     assert allocations.allocation_count == 2
 
-    replacement = GMSClientSession(path, RequestedLockType.RW)
-    try:
-        assert allocations.allocation_count == 0
-        assert not vmm.server_handles
-    finally:
-        replacement.close()
-        _stop(server, thread)
+    manager.sleep()
+    _wait_for(lambda: allocations.allocation_count == 0)
+    _stop(server, thread)
 
 
 def test_snapshot_wake_rejects_another_server_incarnation(
@@ -258,11 +255,11 @@ def test_snapshot_wake_rejects_another_server_incarnation(
     path = str(tmp_path / "gms-v1.sock")
     vmm, allocations, gms, server, thread = _start(path)
     monkeypatch.setattr(
-        SnapshotMemoryManager,
+        PersistentParameterMemoryManager,
         "_gpu_identity",
         lambda self: "GPU-0",
     )
-    manager = SnapshotMemoryManager(path, vmm, 0)
+    manager = PersistentParameterMemoryManager(path, vmm, 0)
     manager.allocate(64)
     manager.commit()
     manager.sleep()

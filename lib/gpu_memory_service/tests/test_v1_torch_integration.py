@@ -146,22 +146,37 @@ def test_real_cuda_normalization_releases_nonparameter_mapping() -> None:
         from gpu_memory_service.core.server.allocations import GMSAllocationManager
         from gpu_memory_service.core.server.gms import GMS
         from gpu_memory_service.core.server.rpc import GMSRPCServer
-        from gpu_memory_service.v1.memory_manager import SnapshotMemoryManager
-        from gpu_memory_service.v1.torch import SnapshotTorchPool
+        from gpu_memory_service.v1.memory_manager import (
+            EphemeralKVCacheMemoryManager,
+            PersistentParameterMemoryManager,
+        )
+        from gpu_memory_service.v1.torch import V1TorchPools
 
         torch.cuda.set_device(0)
         vmm = get_vmm()
         gpu_uuid = str(torch.cuda.get_device_properties(0).uuid)
         with tempfile.TemporaryDirectory() as directory:
-            path = os.path.join(directory, "gms-v1.sock")
-            allocations = GMSAllocationManager(vmm, 0)
-            gms = GMS(gpu_uuid, allocations)
-            with GMSRPCServer(path, gms) as server:
-                thread = threading.Thread(target=server.serve_forever, daemon=True)
-                thread.start()
+            weights_path = os.path.join(directory, "weights.sock")
+            kv_path = os.path.join(directory, "kv_cache.sock")
+            weights_gms = GMS(gpu_uuid, GMSAllocationManager(vmm, 0))
+            kv_gms = GMS(gpu_uuid, GMSAllocationManager(vmm, 0))
+            with (
+                GMSRPCServer(weights_path, weights_gms) as weights_server,
+                GMSRPCServer(kv_path, kv_gms) as kv_server,
+            ):
+                threads = [
+                    threading.Thread(
+                        target=server.serve_forever,
+                        daemon=True,
+                    )
+                    for server in (weights_server, kv_server)
+                ]
+                for thread in threads:
+                    thread.start()
                 try:
-                    manager = SnapshotMemoryManager(path, vmm, 0)
-                    pool = SnapshotTorchPool(manager)
+                    manager = PersistentParameterMemoryManager(weights_path, vmm, 0)
+                    kv_manager = EphemeralKVCacheMemoryManager(kv_path, vmm, 0)
+                    pool = V1TorchPools(manager, kv_manager)
                     model = None
                     with pool.capture_weights(lambda: model):
                         parameter_backing = torch.arange(
@@ -230,24 +245,27 @@ def test_real_cuda_normalization_releases_nonparameter_mapping() -> None:
                         (mapping.base, mapping.allocation_id)
                         for mapping in manager.mappings
                     )
-                    pool.sleep()
+                    manager.sleep()
                     deadline = time.monotonic() + 5
                     while (
-                        gms.snapshot().ro_session_count
+                        weights_gms.snapshot().ro_session_count
                         and time.monotonic() < deadline
                     ):
                         time.sleep(0.005)
-                    assert gms.snapshot().ro_session_count == 0
-                    pool.wake()
+                    assert weights_gms.snapshot().ro_session_count == 0
+                    manager.wake()
                     assert before == tuple(
                         (mapping.base, mapping.allocation_id)
                         for mapping in manager.mappings
                     )
                     manager.retire()
+                    kv_manager.sleep()
                 finally:
-                    server.shutdown()
-                    thread.join(timeout=10)
-                    assert not thread.is_alive()
+                    weights_server.shutdown()
+                    kv_server.shutdown()
+                    for thread in threads:
+                        thread.join(timeout=10)
+                        assert not thread.is_alive()
         """
     )
     subprocess.run([sys.executable, "-c", code], check=True, timeout=120)
