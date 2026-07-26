@@ -166,6 +166,9 @@ KV hit rate and speculative decode accept length are runtime engine/router signa
 | `report_output_dir` | string | `./planner_reports` | Directory for HTML diagnostics reports. |
 | `live_dashboard_port` | int | `8080` | Port for the live diagnostics dashboard HTTP server. Set to `0` to disable. When enabled, visit `http://host:port/` to view a real-time Plotly report of accumulated snapshots. |
 
+The live dashboard binds to `0.0.0.0` and does not authenticate callers. Set `live_dashboard_port: 0` when it is
+not needed. Otherwise, expose it only on a trusted network or through an authenticating proxy.
+
 The same diagnostic signals surfaced in these reports are also exported as Prometheus metrics under the `dynamo_planner_*` prefix—for example estimated TTFT/ITL (`dynamo_planner_estimated_ttft_ms`, `dynamo_planner_estimated_itl_ms`), recommended replica counts (`dynamo_planner_predicted_num_prefill_replicas`, `dynamo_planner_predicted_num_decode_replicas`), per-engine capacity and FPM queue depths, and load/throughput scaling decision enums.
 
 The Replica Counts plot overlays actual prefill/decode replicas with discrete recommendation markers for the Planner's recommended prefill/decode replicas. When `advisory: true`, these recommended counts are suggestions only; the Planner records what it would do without applying the change.
@@ -189,6 +192,18 @@ Existing planner fields still drive the builtin plugins:
 - `throughput_adjustment_interval_seconds` schedules `builtin_load_predict` and `builtin_throughput_propose`. The throughput proposer requires the prediction from the same tick, so it only fires when the predict plugin fires.
 - When both builtins propose targets in the same tick, load-based scaling runs after throughput-based scaling and preserves the existing behavior: throughput updates the lower-bound replicas, then load-based scaling can adjust above that floor and apply the global GPU budget clamp.
 - After the plugin pipeline finishes, the planner applies the same final `min_endpoint` and GPU-budget safety checks to builtin and external-plugin targets before scaling the deployment.
+
+#### Plugin Security
+
+When `plugin_registration.auth.trusted_sources` is empty, the planner falls back to dev-only unauthenticated
+registration and logs a warning. For production, set `trusted_sources: [static_secret]`, populate
+`plugin_registration.auth.static_secrets` from a Kubernetes Secret, and do not store shared secrets in a ConfigMap
+or source-controlled values file.
+
+The registration gateway defaults to a pod-local Unix socket. Plaintext TCP registration and external gRPC plugin
+transport fail closed unless their insecure options are enabled. Keep the Unix socket for same-pod plugins; for
+cross-pod plugins, place traffic inside an authenticated and encrypted channel. An in-process plugin runs with the
+planner process's privileges and should be treated as trusted code.
 
 #### DGDR example
 

@@ -254,10 +254,30 @@ production topics apply:
 
 | Concern | Why it matters | Section |
 |---|---|---|
+| Image and model provenance | Containers, model repositories, tokenizers, and remote model code execute inside the serving workload. | [Model and Image Trust](#production-detail-model-and-image-trust) |
 | Model startup is slow or the model is gated | Avoid repeated downloads and pass `HF_TOKEN` cleanly. | [Model Caching](#production-detail-model-caching) |
 | Traffic changes over time | Planner can scale prefill/decode replicas at runtime. | [Planner](#production-detail-planner) |
 | The model spans nodes or uses disaggregated serving | Grove/LWS and RDMA affect scheduling and KV transfer. | [Multinode and RDMA](#production-detail-multinode-and-rdma) |
 | You need a specific inference engine | Backend choice affects MoE support, thorough profiling, and distributed behavior. | [Backend Selection](#production-detail-backend-selection) |
+
+## Production Detail: Model and Image Trust
+
+Treat runtime images, model repositories, tokenizers, and custom model code as executable dependencies. Use
+supported [Dynamo release artifacts](../reference/release-artifacts.md), pin production images by digest, and pin
+remote models to an immutable commit or revision. Control who can replace artifacts in registries, object storage,
+and persistent volumes.
+
+Some Hugging Face models ship custom Python referenced by the `auto_map` field in `config.json`. vLLM and SGLang
+require `--trust-remote-code` to load these models; enabling it permits model-supplied code to execute in the serving
+process.
+
+Generated worker arguments can already contain `--trust-remote-code`, including arguments supplied by model-specific
+configuration generation. The flag permits code execution; its presence does not record who approved that execution.
+DGDR does not expose first-class fields for remote-code consent or an immutable remote model revision. Do not replace
+DGDR-generated worker arguments to add the flag: `v1beta1` container `args` are atomic, so an override would discard
+profiler-generated settings. When custom model code is required, use a reviewed, pinned
+[local snapshot](model-caching.md#find-the-snapshot-path) or author a reviewed [direct DGD](deployment/create-deployment.md)
+instead.
 
 ## Production Detail: Model Caching
 

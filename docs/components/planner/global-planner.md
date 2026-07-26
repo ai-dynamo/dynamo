@@ -239,6 +239,10 @@ The values passed to `--managed-namespaces` are the pool planners' **Dynamo name
 
 **Management modes**: When `--managed-namespaces` is set (explicit mode), only the listed Dynamo namespaces are authorized to send scale requests, and only their corresponding DGDs count toward the GPU budget. DGD names are derived from the Dynamo namespace using the operator convention `DYN_NAMESPACE = {k8s_namespace}-{dgd_name}`. When omitted (implicit mode), any caller is accepted and all DGDs in the Kubernetes namespace count toward the GPU budget.
 
+> [!WARNING]
+> `--managed-namespaces` checks the `caller_namespace` carried in each request; it does not authenticate the caller.
+> Keep the Global Planner endpoint on a trusted runtime network and authenticate traffic at the transport boundary.
+
 If you want the central executor to reject scale requests that exceed a total GPU budget, add `--max-total-gpus`. See [examples/global_planner/global-planner-gpu-budget.yaml](https://github.com/ai-dynamo/dynamo/blob/main/examples/global_planner/global-planner-gpu-budget.yaml).
 
 ## Step 3: Create One DGD Per Pool
