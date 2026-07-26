@@ -192,10 +192,12 @@ Each page is a triple — page + catalog entry + nav:
 3. **Wire navigation** in `docs/index.yml`: a `- page:` under `- tab: recipes` for recipes, or under
    the **Feature Benchmarks** section (`- tab: docs`) for benchmarks. Per-benchmark pages are usually
    `hidden: true` (surfaced from the landing page).
-4. **Patch `fern/main.css` only if** the page introduces a picker axis value not already supported
-   (`recipe-sku`: `b200`/`h200`/`h100`/`gb200`/`hopper`/`blackwell`; `recipe-usecase`:
-   `chat`/`agentic`; `recipe-variant`: `agg`/`disagg`/…). A value missing from CSS renders but
-   filters nothing.
+4. **Patch `fern/components/RecipeStyles.tsx` only if** the page introduces a picker axis value not
+   already supported (`recipe-sku`: `b200`/`h200`/`h100`/`gb200`/`hopper`/`blackwell`;
+   `recipe-usecase`: `chat`/`agentic`; `recipe-variant`: `agg`/`disagg`/…). A value missing from CSS
+   renders but filters nothing. A new value needs up to three rule groups there: the picker hide
+   rule (the "Variant visibility" `body:has(...)` block) and, if it is also a landing-page filter,
+   the chip label rule and the card filter rule — details in the authoritative guide above.
 5. **Add the landing card** in `docs/recipes/README.mdx` and update the model/target counts.
 6. **Validate**: `python3 docs/recipes/_catalog/validate.py` (covers both catalogs), then `fern
    check` and `fern docs broken-links`.
@@ -388,7 +390,7 @@ CI**, so run it by hand for any `_catalog/` change. Optional local preview: `fer
 ## Commit
 
 ```bash
-git add docs/ fern/docs.yml          # also recipes/ examples/ fern/main.css when touched
+git add docs/ fern/docs.yml          # also recipes/ examples/ fern/components/ when touched
 git commit -s -m "docs: <add|update|move|remove> <page-title>"
 ```
 
@@ -404,7 +406,7 @@ git commit -s -m "docs: <add|update|move|remove> <page-title>"
 | 404 after a move/rename | Add a **dev-scoped** `fern/docs.yml` redirect (`/dynamo/dev/<old>` → `/dynamo/dev/<new>`); don't redirect `latest`/unversioned (those serve the frozen newest release) |
 | MDX parse error | Replace `<https://...>` with `[text](https://...)`; escape stray `<`/`>`; blank line after `<div ...>` and before `</div>`, code fences at column 0 |
 | Page missing from site | Ensure the nav entry exists in `index.yml`; allow a few minutes for sync |
-| Target picker renders but filters nothing | Use `className` (not `class`) and the exact `dynamo-target-picker` classes; and ensure the axis `value=` is in `fern/main.css` (add its hide rule) |
+| Target picker renders but filters nothing | Use `className` (not `class`) and the exact `dynamo-target-picker` classes; and ensure the axis `value=` is in `fern/components/RecipeStyles.tsx` (add its hide rule in the "Variant visibility" block) |
 | `validate.py` fails (orphan/dangling/id) | `_catalog/<id>.yaml` filename, internal `id:`, and the `index.yaml` entry must all match; every deploy/perf asset path must resolve |
 | Recipe page absent from the Recipes tab | Add the `- page:` under `- tab: recipes` **and** the `<id>` to `_catalog/index.yaml` |
 
@@ -419,7 +421,7 @@ git commit -s -m "docs: <add|update|move|remove> <page-title>"
 | `docs/` | Content directory (`.md`, plus `.mdx` for recipe/benchmark pages) |
 | `docs/assets/` | Images, SVGs, fonts |
 | `fern/docs.yml` | Fern site configuration + `redirects:` |
-| `fern/main.css` | Pure-CSS target-picker axis values (recipe/benchmark pages) |
+| `fern/components/RecipeStyles.tsx` | Pure-CSS picker axis values + landing-page filter rules (imported as `<RecipeStyles />` on recipe/benchmark pages) |
 | `fern/convert_callouts.py` | Callout conversion (GitHub -> Fern) |
 | `recipes/README.md` | Available Recipes tables (code recipes) |
 | `recipes/CONTRIBUTING.md` | How to contribute a code recipe |

@@ -12,9 +12,10 @@ CSS-coupled vocabulary. For the machine-readable catalog contract, see the
 
 > [!IMPORTANT]
 > The picker is **pure CSS** (no JavaScript). Every allowed dimension value is
-> hardcoded in `fern/main.css`. A page that uses a value not listed below will
-> render the picker but **filter nothing** — adding a new value requires a
-> `fern/main.css` edit (see [Adding a new axis value](#adding-a-new-axis-value)).
+> hardcoded in `fern/components/RecipeStyles.tsx`. A page that uses a value not
+> listed below will render the picker but **filter nothing** — adding a new value
+> requires a `RecipeStyles.tsx` edit (see
+> [Adding a new axis value](#adding-a-new-axis-value)).
 
 ## Steps to add a page
 
@@ -29,8 +30,8 @@ CSS-coupled vocabulary. For the machine-readable catalog contract, see the
    run `python3 docs/recipes/_catalog/validate.py`.
 3. **Wire navigation** in `docs/index.yml` (add the `- page:` under the Recipes
    tab or the Feature Benchmarks section).
-4. **Patch `fern/main.css` only if** the page introduces a picker axis value not
-   already supported (see below).
+4. **Patch `fern/components/RecipeStyles.tsx` only if** the page introduces a
+   picker axis value not already supported (see below).
 5. Add the landing-page card (`docs/recipes/README.mdx`) and update the model /
    target counts.
 6. Run `fern check` and `fern docs broken-links`; preview with `fern docs dev`.
@@ -157,8 +158,8 @@ matching `data-*` attributes. Space-separated values mean "applies to several"
 
 ## CSS-coupled vocabulary
 
-The hide/highlight rules in `fern/main.css` enumerate every allowed value.
-A new value renders but filters nothing until CSS is added.
+The hide/highlight rules in `fern/components/RecipeStyles.tsx` enumerate every
+allowed value. A new value renders but filters nothing until CSS is added.
 
 | Dimension (`name=`) | Supported `value=` |
 | --- | --- |
@@ -168,23 +169,35 @@ A new value renders but filters nothing until CSS is added.
 
 Landing-page filter chips (`docs/recipes/README.mdx`) are a separate
 vocabulary — `provider`, `runtime`, `hardware`, `technique`, `workload` — also
-hardcoded in CSS; a chip that matches no card is a dead end, so only add a chip
-when a card carries the matching `data-*` token.
+hardcoded in `RecipeStyles.tsx`; a chip that matches no card is a dead end, so
+only add a chip when a card carries the matching `data-*` token.
 
 ## Adding a new axis value
 
-To support, e.g., an `mi300` SKU or a `disagg-3node` topology:
+To support, e.g., an `mi300` SKU or a `disagg-3node` topology, edit
+`fern/components/RecipeStyles.tsx`. A fully wired value touches up to three
+rule groups there:
 
-1. In `fern/main.css`, find the picker `body:has(...)` block and add the
-   hide rule:
+1. **Picker hide rule** — in the "Variant visibility" `body:has(...)` block,
+   add:
    ```css
    body:has(input[name="recipe-sku"][value="mi300"]:checked) [data-sku]:not([data-sku~="mi300"]) { display: none; }
    ```
-2. If the value participates in Expected-Performance row highlighting, add it to
-   the matching `tr[data-...]` rule group too.
-3. Then use the value in the page's picker inputs and `data-*` blocks.
+   If the value participates in Expected-Performance row highlighting, add it
+   to the matching `tr[data-...]` rule group too.
+2. **Landing chip label rule** — if the value also becomes a landing-page
+   filter chip (e.g. a new GPU under `hardware`), add its
+   `#<dim>-<value>:checked ~ .dynamo-recipe-browser label[for="<dim>-<value>"]`
+   selector to the selected-chip highlight group.
+3. **Landing card filter rule** — add the matching
+   `#<dim>-<value>:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-<dim>~="<value>"])`
+   selector to the card-hiding group.
 
-Skipping step 1 produces a picker that renders but silently filters nothing.
+Then use the value in the page's picker inputs and `data-*` blocks (and, for
+landing chips, tag the card in `docs/recipes/README.mdx`).
+
+Skipping step 1 produces a picker that renders but silently filters nothing;
+skipping 2–3 produces a chip that highlights or filters nothing.
 
 ## Why it's pure CSS
 
@@ -194,7 +207,8 @@ safely on older browsers (all variants show stacked rather than breaking).
 Hidden variants use `display: none` (clean a11y tree); comparison tables dim
 non-selected rows with `opacity` so every row stays readable.
 
-This component styling lives entirely under the `dynamo-*` namespace and only
-renders when `fern/main.css` is applied — see the preview-vs-production note in
-`.github/workflows/fern-docs.yml` (PR previews skip the global theme so project
-CSS renders).
+This component styling lives entirely under the `dynamo-*` namespace and ships
+with the page itself: each recipe/benchmark page imports `<RecipeStyles />`
+from `fern/components/RecipeStyles.tsx`, which injects the rules as a component
+`<style>` block (so they compose with the NVIDIA global theme — see the
+preview-vs-production note in `.github/workflows/fern-docs.yml`).
