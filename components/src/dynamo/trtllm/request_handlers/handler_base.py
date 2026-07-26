@@ -1160,6 +1160,21 @@ class HandlerBase(BaseGenerativeHandler):
                 f"Using dynamo router dp_rank={dp_rank} for TRTLLM attention DP scheduling"
             )
 
+        if (
+            self.disaggregation_mode == DisaggregationMode.DECODE
+            and dp_rank is not None
+            and disaggregated_params is not None
+            and os.getenv("DYN_ROUTER_DECODE_ADP_SHADOW_TRACE", "").lower()
+            in {"1", "true", "yes", "on"}
+        ):
+            logging.info(
+                "[DYNAMO_TRTLLM_ADP_SHADOW_REQUEST] "
+                "context_id=%s disagg_request_id=%s dynamo_dp_rank=%s",
+                context.id(),
+                disaggregated_params.disagg_request_id,
+                dp_rank,
+            )
+
         # Priority is a float in [0.0, 1.0]; health checks use 1.0. Default is 0.5.
         priority = request.get("priority", DEFAULT_REQUEST_PRIORITY)
         cache_salt = request_cache_salt(request)

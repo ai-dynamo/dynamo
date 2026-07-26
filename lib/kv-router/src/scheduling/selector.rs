@@ -275,8 +275,23 @@ impl DefaultWorkerSelector {
         request_blocks: u64,
     ) -> Result<WorkerSelectionResult, KvSchedulerError> {
         let mut best: Option<(usize, usize, WorkerWithDpRank)> = None;
+        let shadow_trace_enabled = std::env::var("DYN_ROUTER_DECODE_ADP_SHADOW_TRACE")
+            .ok()
+            .as_deref()
+            .and_then(dynamo_truthy::parse_bool_opt)
+            .unwrap_or(false);
+        let mut candidate_states = shadow_trace_enabled.then(Vec::new);
         eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
             let load = request.worker_load_for(worker);
+            if let Some(states) = candidate_states.as_mut() {
+                states.push((
+                    worker,
+                    load.active_prompt_tokens,
+                    load.active_requests,
+                    load.active_decode_blocks,
+                    load.additional_active_blocks,
+                ));
+            }
             let candidate = (load.active_prompt_tokens, load.active_requests, worker);
             if best.is_none_or(|current| candidate < current) {
                 best = Some(candidate);
@@ -296,6 +311,17 @@ impl DefaultWorkerSelector {
 
         let effective_overlap_blocks = request.effective_overlap_blocks_for(worker);
         let cached_tokens = request.effective_cached_tokens_for(worker);
+        if let Some(mut states) = candidate_states {
+            states.sort_unstable_by_key(|state| state.0);
+            tracing::info!(
+                request_id = request.mode.request_id().unwrap_or("unknown"),
+                selected_worker_id = worker.worker_id,
+                selected_dp_rank = worker.dp_rank,
+                isl_tokens = request.isl_tokens,
+                candidate_states = ?states,
+                "[DYNAMO_DEFAULT_ADP_DECISION]"
+            );
+        }
         tracing::info!(
             router_mode = "kv",
             decode_load_model = "default_adp",
