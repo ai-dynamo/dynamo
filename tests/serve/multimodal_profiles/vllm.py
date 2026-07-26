@@ -18,7 +18,11 @@ from tests.utils.multimodal import (
     make_image_payload_uuid_passthrough,
     make_video_payload,
 )
-from tests.utils.payload_builder import chat_payload, chat_payload_default
+from tests.utils.payload_builder import (
+    chat_payload,
+    chat_payload_default,
+    image_token_metrics_payload,
+)
 
 # LLaVA 1.5 color-identification reference set: the model legitimately
 # emits these colors (though the order/subset varies across CUDA backends
@@ -269,7 +273,10 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 requested_vllm_kv_cache_bytes=920_126_000,  # 2x safety over min=460_062_720
                 tests=[
                     # HTTP-URL color test on hybrid Mamba/full-attention VL.
-                    MmCase(payload=make_image_payload(["green"])),
+                    MmCase(
+                        payload=make_image_payload(["green"]),
+                        followup_payloads=[image_token_metrics_payload()],
+                    ),
                     # Inline-base64 + --frontend-decoding (NIXL RDMA path).
                     # post_merge for the NIXL-stub reason — local pre-merge
                     # builds outside Docker ship a NIXL stub that errors on
