@@ -1555,6 +1555,216 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
   text-transform: uppercase;
 }
 
+/* Mermaid diagrams use the same soft, technical framing as the Dynamo story stage. */
+.mermaid-container {
+  position: relative;
+  display: grid;
+  min-height: 180px;
+  place-items: center;
+  margin: 1.75rem 0 2rem;
+  padding: clamp(3.5rem, 7vw, 4.5rem) clamp(1.25rem, 4vw, 3rem)
+    clamp(1.5rem, 4vw, 3rem);
+  overflow: hidden;
+  border: 1px solid rgba(77, 105, 39, 0.2);
+  border-radius: 24px;
+  background:
+    radial-gradient(circle at 16% 8%, rgba(118, 185, 0, 0.2), transparent 34%),
+    linear-gradient(
+      145deg,
+      rgba(245, 249, 238, 0.98),
+      rgba(235, 240, 229, 0.94)
+    );
+  box-shadow: 0 24px 60px rgba(23, 42, 0, 0.12);
+}
+
+.mermaid-container::before {
+  content: "DYNAMO / DIAGRAM";
+  position: absolute;
+  top: 1.25rem;
+  left: 1.4rem;
+  color: #55723a;
+  font-family: RobotoMono, ui-monospace, monospace;
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  pointer-events: none;
+}
+
+.dark .mermaid-container {
+  border-color: rgba(118, 185, 0, 0.2);
+  background:
+    radial-gradient(circle at 16% 8%, rgba(118, 185, 0, 0.2), transparent 34%),
+    linear-gradient(145deg, rgba(16, 20, 12, 0.98), rgba(5, 7, 4, 0.98));
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.34);
+}
+
+.dark .mermaid-container::before {
+  color: #8fb65a;
+}
+
+.mermaid-container svg,
+.mermaid-container-expanded svg {
+  font-family: var(
+    --font-body,
+    Inter,
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    sans-serif
+  ) !important;
+}
+
+.mermaid-container svg :is(text, tspan, .label, .nodeLabel, foreignObject *),
+.mermaid-container-expanded
+  svg
+  :is(text, tspan, .label, .nodeLabel, foreignObject *) {
+  font-family: inherit !important;
+}
+
+.mermaid-container svg .nodeLabel,
+.mermaid-container-expanded svg .nodeLabel {
+  color: #1e2a13 !important;
+  font-weight: 600;
+}
+
+.dark .mermaid-container svg .nodeLabel,
+.dark .mermaid-container-expanded svg .nodeLabel {
+  color: #eef6e4 !important;
+}
+
+/*
+ * Mermaid adds an empty style attribute to default node shapes and a fill style
+ * to explicitly themed nodes. Excluding the latter preserves semantic colors in
+ * diagrams that use classDef or per-node style directives.
+ */
+.mermaid-container
+  svg
+  .node
+  > :is(rect.label-container, polygon.label-container, path.label-container, circle.label-container, ellipse.label-container):not(
+    [style*="fill"]
+  ),
+.mermaid-container-expanded
+  svg
+  .node
+  > :is(rect.label-container, polygon.label-container, path.label-container, circle.label-container, ellipse.label-container):not(
+    [style*="fill"]
+  ) {
+  fill: #f1f7e8 !important;
+  stroke: #76b900 !important;
+  stroke-width: 1.4px !important;
+  filter: drop-shadow(0 5px 10px rgba(42, 68, 7, 0.1));
+}
+
+.mermaid-container svg .node > rect.label-container:not([style*="fill"]),
+.mermaid-container-expanded
+  svg
+  .node
+  > rect.label-container:not([style*="fill"]) {
+  rx: 11px;
+  ry: 11px;
+}
+
+.dark
+  .mermaid-container
+  svg
+  .node
+  > :is(rect.label-container, polygon.label-container, path.label-container, circle.label-container, ellipse.label-container):not(
+    [style*="fill"]
+  ),
+.dark
+  .mermaid-container-expanded
+  svg
+  .node
+  > :is(rect.label-container, polygon.label-container, path.label-container, circle.label-container, ellipse.label-container):not(
+    [style*="fill"]
+  ) {
+  fill: #18210f !important;
+  stroke: #76b900 !important;
+  filter: drop-shadow(0 5px 12px rgba(0, 0, 0, 0.28));
+}
+
+.mermaid-container svg :is(.flowchart-link, .edgePath .path),
+.mermaid-container-expanded svg :is(.flowchart-link, .edgePath .path) {
+  stroke: #607f35 !important;
+  stroke-width: 1.35px !important;
+}
+
+.mermaid-container svg .marker,
+.mermaid-container svg marker path,
+.mermaid-container svg marker polygon,
+.mermaid-container-expanded svg .marker,
+.mermaid-container-expanded svg marker path,
+.mermaid-container-expanded svg marker polygon {
+  fill: #607f35 !important;
+  stroke: #607f35 !important;
+}
+
+.dark .mermaid-container svg :is(.flowchart-link, .edgePath .path),
+.dark .mermaid-container-expanded svg :is(.flowchart-link, .edgePath .path) {
+  stroke: #8fb65a !important;
+}
+
+.dark .mermaid-container svg .marker,
+.dark .mermaid-container svg marker path,
+.dark .mermaid-container svg marker polygon,
+.dark .mermaid-container-expanded svg .marker,
+.dark .mermaid-container-expanded svg marker path,
+.dark .mermaid-container-expanded svg marker polygon {
+  fill: #8fb65a !important;
+  stroke: #8fb65a !important;
+}
+
+.mermaid-container svg .cluster rect,
+.mermaid-container-expanded svg .cluster rect {
+  fill: rgba(255, 255, 255, 0.42) !important;
+  stroke: rgba(83, 112, 44, 0.36) !important;
+  rx: 16px;
+  ry: 16px;
+}
+
+.dark .mermaid-container svg .cluster rect,
+.dark .mermaid-container-expanded svg .cluster rect {
+  fill: rgba(118, 185, 0, 0.05) !important;
+  stroke: rgba(143, 182, 90, 0.34) !important;
+}
+
+.mermaid-container svg .edgeLabel p,
+.mermaid-container svg .edgeLabel rect,
+.mermaid-container-expanded svg .edgeLabel p,
+.mermaid-container-expanded svg .edgeLabel rect {
+  fill: #edf4e4 !important;
+  background: #edf4e4 !important;
+  border-radius: 6px;
+}
+
+.dark .mermaid-container svg .edgeLabel p,
+.dark .mermaid-container svg .edgeLabel rect,
+.dark .mermaid-container-expanded svg .edgeLabel p,
+.dark .mermaid-container-expanded svg .edgeLabel rect {
+  fill: #11180b !important;
+  background: #11180b !important;
+}
+
+.mermaid-container-expanded {
+  padding: clamp(1rem, 3vw, 2.5rem);
+  border: 1px solid rgba(77, 105, 39, 0.2);
+  border-radius: 24px;
+  background:
+    radial-gradient(circle at 16% 8%, rgba(118, 185, 0, 0.16), transparent 34%),
+    linear-gradient(
+      145deg,
+      rgba(245, 249, 238, 0.98),
+      rgba(235, 240, 229, 0.94)
+    );
+}
+
+.dark .mermaid-container-expanded {
+  border-color: rgba(118, 185, 0, 0.2);
+  background:
+    radial-gradient(circle at 16% 8%, rgba(118, 185, 0, 0.18), transparent 34%),
+    linear-gradient(145deg, rgba(16, 20, 12, 0.98), rgba(5, 7, 4, 0.98));
+}
+
 /* Scroll-driven feature story: copy advances on the left while one large visual stays pinned. */
 .dynamo-story {
   display: grid;
@@ -1720,7 +1930,7 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
   background: #24243d;
 }
 
-.dynamo-story-windowbar > span {
+.dynamo-story-windowbar > span:not(.dynamo-story-window-label) {
   width: 0.68rem;
   height: 0.68rem;
   border-radius: 50%;
@@ -1734,10 +1944,18 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
   background: #28c840;
 }
 
-.dynamo-story-windowbar code {
+.dynamo-story-window-label {
+  display: block;
   margin-left: auto;
+  padding: 0;
+  border: 0;
+  background: transparent;
   color: #d7d7e2;
+  font-family: RobotoMono, ui-monospace, monospace;
   font-size: 0.72rem;
+  font-weight: 500;
+  line-height: 1;
+  box-shadow: none;
 }
 
 .dynamo-story-graphic--performance,

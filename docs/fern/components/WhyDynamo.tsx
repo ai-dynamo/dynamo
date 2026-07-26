@@ -46,7 +46,7 @@ function PerformanceGraphic() {
         <span />
         <span />
         <span />
-        <code>dynamo metrics</code>
+        <span className="dynamo-story-window-label">dynamo metrics</span>
       </div>
       <div className="dynamo-story-metrics">
         <div>
@@ -81,7 +81,7 @@ function EnginesGraphic() {
         <span />
         <span />
         <span />
-        <code>dynamo serve</code>
+        <span className="dynamo-story-window-label">dynamo serve</span>
       </div>
       <pre>
         <span className="prompt">$</span> dynamo serve --backend <b>vllm</b>
