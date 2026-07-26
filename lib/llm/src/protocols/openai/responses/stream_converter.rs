@@ -31,7 +31,7 @@ use uuid::Uuid;
 
 use dynamo_protocols::types::{ChatCompletionMessageContent, FinishReason};
 
-use super::ResponseParams;
+use super::{ReasoningTokenCounter, ResponseParams};
 use crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
 use crate::protocols::unified::ResponsesContext;
 
@@ -49,6 +49,10 @@ pub struct ResponseStreamConverter {
     message_started: bool,
     message_output_index: u32,
     accumulated_text: String,
+    // Reasoning usage tracking
+    reasoning_token_counter: ReasoningTokenCounter,
+    saw_reasoning: bool,
+    saw_visible_output: bool,
     // Function call tracking
     function_call_items: Vec<FunctionCallState>,
     // Output index counter
@@ -92,6 +96,9 @@ impl ResponseStreamConverter {
             message_started: false,
             message_output_index: 0,
             accumulated_text: String::new(),
+            reasoning_token_counter: ReasoningTokenCounter::default(),
+            saw_reasoning: false,
+            saw_visible_output: false,
             function_call_items: Vec::new(),
             next_output_index: 0,
             usage: None,
@@ -212,8 +219,15 @@ impl ResponseStreamConverter {
         chunk: &NvCreateChatCompletionStreamResponse,
         events: &mut Vec<Result<Event, anyhow::Error>>,
     ) {
+        self.reasoning_token_counter.observe(chunk);
+
         // Capture usage stats from the final chunk (sent when stream_options.include_usage=true)
         if let Some(ref u) = chunk.inner.usage {
+            let backend_reasoning_tokens = u
+                .completion_tokens_details
+                .as_ref()
+                .and_then(|details| details.reasoning_tokens)
+                .filter(|count| *count > 0);
             self.usage = Some(ResponseUsage {
                 input_tokens: u.prompt_tokens,
                 input_tokens_details: InputTokenDetails {
@@ -225,11 +239,16 @@ impl ResponseStreamConverter {
                 },
                 output_tokens: u.completion_tokens,
                 output_tokens_details: OutputTokenDetails {
-                    reasoning_tokens: u
-                        .completion_tokens_details
-                        .as_ref()
-                        .and_then(|d| d.reasoning_tokens)
-                        .unwrap_or(0),
+                    reasoning_tokens: backend_reasoning_tokens.unwrap_or_else(|| {
+                        let counted = self.reasoning_token_counter.total();
+                        if counted > 0 {
+                            counted
+                        } else if self.saw_reasoning && !self.saw_visible_output {
+                            u.completion_tokens
+                        } else {
+                            0
+                        }
+                    }),
                 },
                 total_tokens: u.total_tokens,
             });
@@ -238,6 +257,24 @@ impl ResponseStreamConverter {
         let mut should_finish_function_calls = false;
         for choice in &chunk.inner.choices {
             let delta = &choice.delta;
+
+            if delta
+                .reasoning_content
+                .as_deref()
+                .is_some_and(|reasoning| !reasoning.is_empty())
+            {
+                self.saw_reasoning = true;
+            }
+            if delta.content.as_ref().is_some_and(|content| match content {
+                ChatCompletionMessageContent::Text(text) => !text.is_empty(),
+                ChatCompletionMessageContent::Parts(parts) => !parts.is_empty(),
+            }) || delta
+                .tool_calls
+                .as_ref()
+                .is_some_and(|calls| !calls.is_empty())
+            {
+                self.saw_visible_output = true;
+            }
 
             // Handle text content deltas — extract text from the enum
             let content_text = match &delta.content {
@@ -1023,6 +1060,59 @@ mod tests {
         }
     }
 
+    fn reasoning_chunk(text: &str) -> NvCreateChatCompletionStreamResponse {
+        #[allow(deprecated)]
+        NvCreateChatCompletionStreamResponse {
+            inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
+                id: "chat-1".into(),
+                choices: vec![ChatChoiceStream {
+                    index: 0,
+                    delta: ChatCompletionStreamResponseDelta {
+                        content: None,
+                        function_call: None,
+                        tool_calls: None,
+                        role: None,
+                        refusal: None,
+                        reasoning_content: Some(text.into()),
+                    },
+                    finish_reason: None,
+                    logprobs: None,
+                }],
+                created: 0,
+                model: "test".into(),
+                service_tier: None,
+                system_fingerprint: None,
+                object: "chat.completion.chunk".into(),
+                usage: None,
+            },
+            nvext: None,
+            llm_metrics: None,
+        }
+    }
+
+    fn with_completion_token_ids(
+        mut chunk: NvCreateChatCompletionStreamResponse,
+        token_ids: &[u32],
+    ) -> NvCreateChatCompletionStreamResponse {
+        chunk.nvext = Some(serde_json::json!({
+            "completion_token_ids": token_ids,
+        }));
+        chunk
+    }
+
+    fn usage_chunk(completion_tokens: u32) -> NvCreateChatCompletionStreamResponse {
+        let mut chunk = text_chunk("");
+        chunk.inner.choices.clear();
+        chunk.inner.usage = Some(dynamo_protocols::types::CompletionUsage {
+            prompt_tokens: 5,
+            completion_tokens,
+            total_tokens: 5 + completion_tokens,
+            prompt_tokens_details: None,
+            completion_tokens_details: None,
+        });
+        chunk
+    }
+
     /// Extract the SSE event type from a Result<Event, _>.
     fn event_type(event: &Result<Event, anyhow::Error>) -> String {
         let debug = format!("{:?}", event.as_ref().unwrap());
@@ -1127,6 +1217,46 @@ mod tests {
                 "response.output_item.done".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn test_reasoning_usage_counts_generated_token_ids() {
+        let mut conv = ResponseStreamConverter::new("test-model".into(), default_params());
+
+        let _ = conv.process_chunk(&with_completion_token_ids(
+            reasoning_chunk("two decoded tokens"),
+            &[11, 12],
+        ));
+        let _ = conv.process_chunk(&with_completion_token_ids(text_chunk("answer"), &[13]));
+        let _ = conv.process_chunk(&usage_chunk(3));
+
+        let usage = conv.usage.expect("usage chunk should be captured");
+        assert_eq!(usage.output_tokens, 3);
+        assert_eq!(usage.output_tokens_details.reasoning_tokens, 2);
+    }
+
+    #[test]
+    fn test_reasoning_usage_counts_ids_deferred_to_usage_chunk() {
+        let mut conv = ResponseStreamConverter::new("test-model".into(), default_params());
+
+        let _ = conv.process_chunk(&reasoning_chunk("reasoning without per-delta token ids"));
+        let _ = conv.process_chunk(&with_completion_token_ids(usage_chunk(3), &[11, 12, 13]));
+
+        let usage = conv.usage.expect("usage chunk should be captured");
+        assert_eq!(usage.output_tokens, 3);
+        assert_eq!(usage.output_tokens_details.reasoning_tokens, 3);
+    }
+
+    #[test]
+    fn test_reasoning_only_usage_falls_back_to_output_tokens_without_ids() {
+        let mut conv = ResponseStreamConverter::new("test-model".into(), default_params());
+
+        let _ = conv.process_chunk(&reasoning_chunk("reasoning without token ids"));
+        let _ = conv.process_chunk(&usage_chunk(3));
+
+        let usage = conv.usage.expect("usage chunk should be captured");
+        assert_eq!(usage.output_tokens, 3);
+        assert_eq!(usage.output_tokens_details.reasoning_tokens, 3);
     }
 
     #[test]
