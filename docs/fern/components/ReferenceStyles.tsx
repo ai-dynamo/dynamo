@@ -248,11 +248,14 @@ const REFERENCE_CSS = `
 .dynref-badge {
     display: inline-flex;
     align-items: center;
-    padding: 1px 8px;
+    min-height: 22px;
+    padding: 2px 9px;
     border: 1px solid transparent;
-    border-radius: 6px;
+    border-radius: 999px;
     font-size: 11.5px;
     font-weight: 600;
+    line-height: 1.2;
+    letter-spacing: 0.01em;
     white-space: nowrap;
 }
 

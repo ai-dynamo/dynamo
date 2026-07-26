@@ -2,8 +2,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Quickstart
-subtitle: Get a Dynamo OpenAI-compatible endpoint running in a container in about 5 minutes.
+subtitle: Get a Dynamo OpenAI-compatible endpoint running locally on an NVIDIA GPU or Intel XPU.
 ---
+
+import { InstallSelector } from "@/components/InstallSelector";
+import { WorkerSelector } from "@/components/WorkerSelector";
 
 {/* Looking for the project README? See /README.md at the repo root: https://github.com/ai-dynamo/dynamo/blob/main/README.md */}
 
@@ -28,105 +31,78 @@ subtitle: Get a Dynamo OpenAI-compatible endpoint running in a container in abou
 Dynamo is backend-agnostic and Kubernetes-native without being Kubernetes-only. Use this container path to try the same frontend/router/worker stack locally; use the Kubernetes path when you want the operator, CRDs, Gateway API integration, autoscaling, scheduling, and cluster lifecycle management.
 </Note>
 
-## Pull a Container
+## Run Dynamo Locally
 
-Containers have all dependencies pre-installed. Pick your backend:
+<Steps>
+  <Step title="Choose and install a build">
+    {/* BEGIN:install-selector — dev-only interactive selector; release snapshots replace this block with static, version-pinned commands */}
+    <InstallSelector />
+    {/* END:install-selector */}
 
-<Tabs>
-  <Tab title="SGLang" language="sglang">
+    <Warning>
+    **Hugging Face token required for gated models.** Llama, Kimi, Qwen-VL, and other gated models require `HF_TOKEN` in your environment and accepting the model card's license on huggingface.co. Set `export HF_TOKEN=hf_…` before launching.
+    </Warning>
+
+    The remaining steps run inside the selected container. If you installed an NVIDIA wheel instead, run the same `python3 -m dynamo.*` commands in your Python environment. See [Local Installation](local-installation.mdx) for host prerequisites and virtual environment setup.
+
+    For published NVIDIA container versions and tags, see [Release Artifacts](../reference/release-artifacts.mdx#container-images).
+  </Step>
+
+  <Step title="Start the frontend">
+    Start the OpenAI-compatible frontend on port 8000:
+
     ```bash
-    docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.1
+    python3 -m dynamo.frontend --discovery-backend file
     ```
-  </Tab>
-  <Tab title="TensorRT-LLM" language="trtllm">
+
+    <Tip>
+    `--discovery-backend file` avoids needing etcd. To run the frontend and worker in the same terminal, background each command with `> logfile.log 2>&1 &`.
+    </Tip>
+  </Step>
+
+  <Step title="Start a worker">
+    In another terminal, select the hardware and backend you installed, then launch the worker:
+
+    <WorkerSelector />
+  </Step>
+
+  <Step title="Verify the endpoint">
+    Check that the endpoint is up:
+
     ```bash
-    docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.1
+    curl -sf http://localhost:8000/health && echo OK
     ```
-  </Tab>
-  <Tab title="vLLM" language="vllm">
-    ```bash
-    docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
+
+    If you see `OK`, send a chat completion:
+
+    <CodeBlocks>
+    ```bash title="Request"
+    curl localhost:8000/v1/chat/completions \
+      -H "Content-Type: application/json" \
+      -d '{"model": "Qwen/Qwen3-0.6B",
+           "messages": [{"role": "user", "content": "Hello!"}],
+           "max_tokens": 50}'
     ```
-  </Tab>
-</Tabs>
 
-<Warning>
-**Hugging Face token required for gated models.** Llama, Kimi, Qwen-VL, and other gated models require `HF_TOKEN` in your environment and accepting the model card's license on huggingface.co. Set `export HF_TOKEN=hf_…` before launching.
-</Warning>
-
-For container versions and tags, see [Release Artifacts](../reference/release-artifacts.mdx#container-images).
-
-## Start the Frontend
-
-In your container, start the OpenAI-compatible frontend on port 8000:
-
-```bash
-python3 -m dynamo.frontend --discovery-backend file
-```
-
-<Tip>
-`--discovery-backend file` avoids needing etcd. To run frontend and worker in the same terminal, background each command with `> logfile.log 2>&1 &`.
-</Tip>
-
-## Start a Worker
-
-In another terminal, launch a worker for your backend:
-
-<Tabs>
-  <Tab title="SGLang" language="sglang">
-    ```bash
-    python3 -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --discovery-backend file
+    ```json title="Response"
+    {
+      "id": "chatcmpl-...",
+      "model": "Qwen/Qwen3-0.6B",
+      "choices": [{
+        "index": 0,
+        "message": {"role": "assistant", "content": "Hello! How can I help you today?"},
+        "finish_reason": "stop"
+      }],
+      "usage": {"prompt_tokens": 9, "completion_tokens": 10, "total_tokens": 19}
+    }
     ```
-  </Tab>
-  <Tab title="TensorRT-LLM" language="trtllm">
-    ```bash
-    python3 -m dynamo.trtllm --model-path Qwen/Qwen3-0.6B --discovery-backend file
-    ```
-  </Tab>
-  <Tab title="vLLM" language="vllm">
-    ```bash
-    python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --discovery-backend file \
-      --kv-events-config '{"enable_kv_cache_events": false}'
-    ```
-  </Tab>
-</Tabs>
+    </CodeBlocks>
 
-## Verify and Test
-
-Check the endpoint is up:
-
-```bash
-curl -sf http://localhost:8000/health && echo OK
-```
-
-If you see `OK`, send a chat completion:
-
-<CodeBlocks>
-```bash title="Request"
-curl localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model": "Qwen/Qwen3-0.6B",
-       "messages": [{"role": "user", "content": "Hello!"}],
-       "max_tokens": 50}'
-```
-
-```json title="Response"
-{
-  "id": "chatcmpl-...",
-  "model": "Qwen/Qwen3-0.6B",
-  "choices": [{
-    "index": 0,
-    "message": {"role": "assistant", "content": "Hello! How can I help you today?"},
-    "finish_reason": "stop"
-  }],
-  "usage": {"prompt_tokens": 9, "completion_tokens": 10, "total_tokens": 19}
-}
-```
-</CodeBlocks>
-
-<Info>
-Connection refused? The frontend takes a few seconds to start — retry. For production liveness and readiness probes, see [Health Check Reference](../reference/observability/health-checks.mdx).
-</Info>
+    <Info>
+    Connection refused? The frontend takes a few seconds to start — retry. For production liveness and readiness probes, see [Health Check Reference](../reference/observability/health-checks.mdx).
+    </Info>
+  </Step>
+</Steps>
 
 ## From the Digest
 

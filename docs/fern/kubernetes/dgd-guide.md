@@ -728,6 +728,9 @@ This runs eight TP-2 workers (16 GPUs). To turn it into one of the variations ab
 These are independent capabilities you opt into per workload. None are required for a working deployment.
 
 <CardGroup cols={2}>
+  <Card title="Deploy on Intel GPUs" icon="regular microchip" href="dgd-intel-xpu.mdx">
+    Adapt the DGD for Intel XPU with a custom vLLM runtime image and Kubernetes DRA.
+  </Card>
   <Card title="Set up KV-Aware Routing" icon="regular route" href="dgd-kv-routing.md">
     Route requests to the worker that already holds the prompt's KV cache prefix to cut TTFT.
   </Card>

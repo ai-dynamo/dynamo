@@ -142,6 +142,8 @@ navigation:
                 path: getting-started/kubernetes-deployment.md
               - page: Deploy with DGD
                 path: kubernetes/dgd-guide.md
+              - page: Deploy on Intel GPUs
+                path: kubernetes/dgd-intel-xpu.mdx
               - section: KV-Aware Routing
                 collapsed: open-by-default
                 contents:

@@ -2,33 +2,53 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Installation Guide
+subtitle: Install accelerator support and the Dynamo Platform on Kubernetes.
 ---
 
 This guide walks you through installing everything needed to deploy models with Dynamo on Kubernetes. Follow the steps in order — each builds on the previous one.
 
 ## Prerequisites
 
-Before you begin, make sure you have:
+Before you begin, make sure you have Helm v3 or later and choose the accelerator type in your
+cluster:
 
-- A **Kubernetes cluster (v1.24+)** with GPU-capable nodes. See the cloud provider guides if you need to create one:
+<Tabs>
+<Tab title="NVIDIA GPU">
+
+- A Kubernetes 1.30 or later cluster with NVIDIA GPU nodes. See the cloud provider guides if you need to create one:
   - [Amazon EKS](cloud-providers/eks/eks.md) | [Azure AKS](cloud-providers/aks/aks.md) | [Google GKE](cloud-providers/gke/gke.md)
   - For local development: [Minikube Setup](deployment/minikube.md)
-- **kubectl** v1.24+ — [Install kubectl](https://kubernetes.io/docs/tasks/tools/#kubectl)
-- **Helm** v3.0+ — [Install Helm](https://helm.sh/docs/intro/install/)
+- `kubectl` 1.30 or later.
 
 > [!IMPORTANT]
-> **Cloud provider GPU drivers**: The GPU Operator (Step 1) installs GPU drivers for you. When creating your cluster's GPU node pools, **do not enable provider-managed GPU driver installation** (e.g., skip AKS GPU driver install, don't use GKE `--accelerator gpu-driver-version=latest`). If your nodes already have provider-managed drivers, see the GPU Operator step for how to handle this.
+> The GPU Operator in the first installation step can install NVIDIA drivers. Do not also enable
+> provider-managed drivers when you create the GPU node pool. If the nodes already have drivers,
+> disable GPU Operator driver management as shown in that step.
 
-Verify your tools:
+</Tab>
+<Tab title="Intel GPU">
+
+- A Kubernetes 1.34 or later cluster with Intel GPU nodes and the `resource.k8s.io/v1` Dynamic Resource Allocation (DRA) API.
+- `kubectl` matching the cluster's Kubernetes minor version.
+- The [Intel resource drivers for Kubernetes](https://github.com/intel/intel-resource-drivers-for-kubernetes) installed with a `DeviceClass` named `gpu.intel.com`.
+
+> [!IMPORTANT]
+> The Dynamo Platform chart does not install the Intel GPU node driver or Intel resource driver.
+> Install them before Dynamo workloads request Intel GPUs.
+
+</Tab>
+</Tabs>
+
+Verify the client tools:
 
 ```bash
-kubectl version --client  # Should show v1.24+
-helm version              # Should show v3.0+
+kubectl version --client
+helm version
 ```
 
 ## Overview
 
-Every Dynamo deployment requires two Helm charts: the **GPU Operator** (Step 1) and the **Dynamo Platform** (Step 2). Everything else is optional. Decide what optional components you need before starting so you can install them in Step 3.
+Every Dynamo deployment requires accelerator support and the **Dynamo Platform**. NVIDIA GPU clusters can use the NVIDIA GPU Operator. Intel GPU clusters use the Intel resource driver with DRA. The Dynamo Platform installation is the same after the cluster exposes its accelerator resources. Everything else is optional.
 
 | Optional Component | When you need it | Required for |
 |-----------|-----------------|--------------|
@@ -47,39 +67,55 @@ Every Dynamo deployment requires two Helm charts: the **GPU Operator** (Step 1) 
 
 <Steps toc={true} tocDepth={2}>
 
-<Step title="Install the GPU Operator">
+<Step title="Install accelerator support">
 
-The [NVIDIA GPU Operator](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/getting-started.html) automates deployment of all NVIDIA software components needed to provision GPUs — drivers, container toolkit, device plugin, and monitoring.
+<Tabs>
+<Tab title="NVIDIA GPU">
+
+The [NVIDIA GPU Operator](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/getting-started.html) automates deployment of the drivers, container toolkit, device plugin, and monitoring components used by NVIDIA GPU nodes.
 
 ```bash
 helm repo add nvidia https://helm.ngc.nvidia.com/nvidia
 helm repo update
-```
 
-```bash
 helm install gpu-operator nvidia/gpu-operator \
-  --namespace gpu-operator --create-namespace
-  # Note: add \ to --create-namespace above when uncommenting the flag below
-  # Uncomment if your nodes already have provider-managed GPU drivers installed:
+  --namespace gpu-operator \
+  --create-namespace
+  # Add a trailing \ above before uncommenting the following setting.
   # --set driver.enabled=false
 ```
 
-If your GPU nodes already have provider-managed drivers installed (e.g., you used GKE's `--accelerator gpu-driver-version=latest`), uncomment the `driver.enabled=false` line above so the operator doesn't conflict with the existing drivers.
+Set `driver.enabled=false` when the nodes already have provider-managed NVIDIA drivers. See the
+[AKS](cloud-providers/aks/aks.md), [EKS](cloud-providers/eks/eks.md), or
+[GKE](cloud-providers/gke/gke.md) guide for provider-specific requirements.
 
-> [!NOTE]
-> Some cloud providers require additional GPU Operator configuration. See your provider guide for details:
-> - [AKS GPU Operator setup](cloud-providers/aks/aks.md) — skip AKS-managed GPU driver install on node pools
-> - [EKS GPU Operator setup](cloud-providers/eks/eks.md)
-> - [GKE GPU Operator setup](cloud-providers/gke/gke.md) — `LD_LIBRARY_PATH` and `ldconfig` init requirements
-
-Verify the GPU Operator is running:
+Verify the installation:
 
 ```bash
-kubectl get pods -n gpu-operator
-# Expected: gpu-operator, nvidia-device-plugin-daemonset, etc. all Running
-# Note: nvidia-driver-daemonset appears only when the operator manages the driver;
-# with provider-managed drivers (--set driver.enabled=false) it is not present.
+kubectl get pods --namespace gpu-operator
 ```
+
+</Tab>
+<Tab title="Intel GPU">
+
+Install the [Intel resource drivers for Kubernetes](https://github.com/intel/intel-resource-drivers-for-kubernetes) by following the project's installation instructions. The driver must publish a `DeviceClass` named `gpu.intel.com` and `ResourceSlice` objects for the Intel GPU nodes.
+
+Verify the DRA API and Intel devices:
+
+```bash
+kubectl api-resources --api-group=resource.k8s.io | grep -E 'deviceclasses|resourceclaims|resourceslices'
+kubectl get deviceclass gpu.intel.com
+kubectl get resourceslices
+```
+
+The Dynamo Platform chart does not install these Intel components. After they are present, install
+Dynamo normally in the next step. The operator automatically detects `resource.k8s.io/v1`; no
+Dynamo Helm value is required to enable DRA.
+
+For a complete deployment, see [Deploy on Intel GPUs with DRA](dgd-intel-xpu.mdx).
+
+</Tab>
+</Tabs>
 
 </Step>
 
