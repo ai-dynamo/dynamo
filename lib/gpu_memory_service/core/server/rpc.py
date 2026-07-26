@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import socket
 import socketserver
 from pathlib import Path
 
@@ -114,8 +115,25 @@ class GMSRPCServer(socketserver.ThreadingUnixStreamServer):
     def __init__(self, path: str, gms: GMS):
         self.path = path
         self.gms = gms
+        self._prepare_socket_path()
         super().__init__(path, _GMSRequestHandler)
         os.chmod(path, 0o600)
+
+    def _prepare_socket_path(self) -> None:
+        if not os.path.exists(self.path):
+            return
+
+        probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            probe.connect(self.path)
+        except OSError:
+            if os.path.exists(self.path):
+                os.unlink(self.path)
+            return
+        finally:
+            probe.close()
+
+        raise RuntimeError(f"GMS already running at {self.path}")
 
     def server_close(self) -> None:
         super().server_close()
