@@ -158,8 +158,7 @@ spec:
           - "5.0"
           - --planner-profile-data
           - /workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D
-          - --disaggregation-mode
-          - prefill
+          - --is-prefill-worker
           command:
           - python3
           - -m
@@ -229,8 +228,7 @@ spec:
           - "5.0"
           - --planner-profile-data
           - /workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D
-          - --disaggregation-mode
-          - prefill
+          - --is-prefill-worker
           command:
           - python3
           - -m
@@ -301,8 +299,6 @@ spec:
           - "5.0"
           - --planner-profile-data
           - /workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D
-          - --disaggregation-mode
-          - decode
           command:
           - python3
           - -m
@@ -373,8 +369,6 @@ spec:
           - "5.0"
           - --planner-profile-data
           - /workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D
-          - --disaggregation-mode
-          - decode
           command:
           - python3
           - -m

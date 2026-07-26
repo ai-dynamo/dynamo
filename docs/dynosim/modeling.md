@@ -104,7 +104,24 @@ the lower-tier configuration.
 
 ## Prefill/Decode Handoff
 
-Disaggregated vLLM and SGLang workers coordinate an ownership lifecycle:
+Live disaggregated Mocker has two handoff paths. The prefill worker's bootstrap configuration,
+rather than its engine type alone, selects the path.
+
+### Direct Completion Path
+
+This is the default when the prefill worker omits `--bootstrap-ports`. The prefill worker completes
+the request, and the router consumes that result before dispatching decode. There is no handoff ID,
+source/destination rendezvous, destination reservation, or coordinated activation and release.
+
+The direct path still applies the simple full-prompt line-rate delay as part of prefill completion
+when transfer bandwidth and KV bytes per token are available. It does not use destination cache
+state, so `--kv-transfer-timing-mode destination_missing` does not apply.
+
+### Coordinated Bootstrap Path
+
+Set `--bootstrap-ports` on prefill workers to advertise a handoff endpoint. The router can then
+dispatch decode with a handoff ID and endpoint while prefill remains active. The two workers
+coordinate this lifecycle:
 
 1. The source finishes prefill and holds the terminal prefill result.
 2. The destination accepts the request and reserves capacity.
@@ -113,19 +130,21 @@ Disaggregated vLLM and SGLang workers coordinate an ownership lifecycle:
 5. The source releases its hold.
 
 Cancellation and failure paths release the corresponding reservation or hold. vLLM uses
-source-first coordination; SGLang uses destination-first coordination.
+source-first coordination; SGLang uses destination-first coordination. TensorRT-LLM handoff is not
+supported.
 
-The handoff delay is a per-request line-rate model:
+Both paths use a per-request line-rate model:
 
 ```text
 transfer time = transferred KV bytes / kv_transfer_bandwidth
 transferred KV bytes = charged tokens * kv_bytes_per_token
 ```
 
-`--kv-transfer-timing-mode full_prompt` charges the full logical prompt.
-`destination_missing` charges only the prompt footprint missing at the destination and can produce
-zero delay on a full destination hit. The handoff model does not make concurrent requests contend
-for a shared link; KVBM tier movement uses the separate processor-sharing model described above.
+The direct path always charges the full logical prompt. In the coordinated path,
+`--kv-transfer-timing-mode full_prompt` does the same, while `destination_missing` charges only the
+prompt footprint missing at the destination and can produce zero delay on a full destination hit.
+Neither handoff path makes concurrent requests contend for a shared link; KVBM tier movement uses
+the separate processor-sharing model described above.
 
 Mocker derives `kv_bytes_per_token` from model metadata and `--kv-cache-dtype` when possible. Set
 `--kv-bytes-per-token` when the model configuration is unavailable or when the experiment requires

@@ -87,7 +87,7 @@ python3 -m dynamo.mocker --help
 | Control prefix and prefill behavior | `--enable-prefix-caching`, `--enable-chunked-prefill`, `--preemption-mode` |
 | Scale the worker topology | `--num-workers`, `--data-parallel-size`, `--stagger-delay` |
 | Choose timing | `--planner-profile-data`, `--aic-perf-model`, `--aic-*`, `--speedup-ratio`, `--decode-speedup-ratio` |
-| Configure P/D handoff | `--disaggregation-mode`, `--bootstrap-ports`, `--kv-transfer-bandwidth`, `--kv-transfer-timing-mode` |
+| Configure direct or coordinated P/D handoff | `--disaggregation-mode`, `--bootstrap-ports`, `--kv-transfer-bandwidth`, `--kv-transfer-timing-mode` |
 | Configure KVBM lower tiers | `--num-g2-blocks`, `--num-g3-blocks`, `--enable-g4-storage`, `--offload-batch-size`, `--bandwidth-*-gbps` |
 | Select runtime integration | `--discovery-backend`, `--request-plane`, `--event-plane`, `--endpoint` |
 | Replay exact outputs | `--response-replay-trace-path` |
@@ -162,18 +162,16 @@ topology and boundaries.
 
 ## Run Disaggregated Workers
 
-Prefill and decode workers use separate endpoints and coordinate each request through a handoff
-lifecycle. Configure bootstrap ports on prefill workers; decode workers receive the selected
-endpoint through request metadata.
+Prefill and decode workers use separate endpoints. Without bootstrap ports, Mocker uses the direct
+completion path: prefill completes, the router forwards its result to decode, and no coordinated
+reservation or activation lifecycle runs.
 
 Start a prefill worker:
 
 ```bash
 python3 -m dynamo.mocker \
     --model-path Qwen/Qwen3-0.6B \
-    --disaggregation-mode prefill \
-    --bootstrap-ports 50100 \
-    --kv-transfer-timing-mode destination_missing
+    --disaggregation-mode prefill
 ```
 
 Start a decode worker:
@@ -181,13 +179,23 @@ Start a decode worker:
 ```bash
 python3 -m dynamo.mocker \
     --model-path Qwen/Qwen3-0.6B \
-    --disaggregation-mode decode \
-    --kv-transfer-timing-mode destination_missing
+    --disaggregation-mode decode
 ```
 
-`--kv-transfer-bandwidth` controls the line-rate handoff delay. Mocker derives bytes per token from
-the model configuration and `--kv-cache-dtype`; use `--kv-bytes-per-token` to override it. Set
-`--kv-transfer-bandwidth 0` to disable the delay. TensorRT-LLM disaggregation is not supported.
+The direct path still applies a full-prompt line-rate transfer delay when transfer bandwidth and KV
+bytes per token are available.
+
+To exercise coordinated handoff, add `--bootstrap-ports 50100` to the prefill worker. The router
+then gives decode the selected endpoint and handoff ID. Use
+`--kv-transfer-timing-mode destination_missing` on both workers when transfer cost should reflect
+the destination's existing prefix instead of the full prompt. This mode exercises vLLM's
+source-first lifecycle or SGLang's destination-first lifecycle, including destination reservation,
+activation, cancellation, and source release.
+
+`--kv-transfer-bandwidth` controls the line-rate delay in both paths. Mocker derives bytes per token
+from the model configuration and `--kv-cache-dtype`; use `--kv-bytes-per-token` to override it. Set
+`--kv-transfer-bandwidth 0` to disable the delay. TensorRT-LLM disaggregation is not supported. See
+[Prefill/Decode Handoff](modeling.md#prefilldecode-handoff) for the semantic differences.
 
 ## Scale Workers and Observe Overhead
 
