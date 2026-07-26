@@ -3752,9 +3752,6 @@ impl OpenAIPreprocessor {
     /// `Annotated<CreateChatCompletionStreamResponse>`, runs the moved jail, and
     /// re-wraps the result.
     ///
-    /// `nvext` is not populated on the streaming tool-call path (only the unary
-    /// aggregator/anthropic paths set it), so the jail never needs to preserve
-    /// it and re-wrapped chunks carry `nvext: None`.
     pub fn apply_tool_calling_jail<S>(
         tool_call_parser: Option<String>,
         tool_choice: Option<dynamo_protocols::types::ChatCompletionToolChoiceOption>,
@@ -3788,6 +3785,7 @@ impl OpenAIPreprocessor {
         struct PendingMetrics {
             template: Option<LLMMetricAnnotation>,
             chunk_tokens: usize,
+            nvext: Option<serde_json::Value>,
         }
         let pending = Arc::new(Mutex::new(PendingMetrics::default()));
         let pending_in = Arc::clone(&pending);
@@ -3821,10 +3819,16 @@ impl OpenAIPreprocessor {
 
         // dynamo `Annotated<Nv>` -> jail `Annotated<Create>` (buffer llm_metrics)
         let jail_input = stream.map(move |mut a| {
-            if let Some(metrics) = a.data.as_mut().and_then(|nv| nv.llm_metrics.take()) {
+            if let Some(nv) = a.data.as_mut() {
                 let mut p = pending_in.lock().expect("jail metrics buffer poisoned");
-                p.chunk_tokens = p.chunk_tokens.saturating_add(metrics.chunk_tokens);
-                p.template = Some(metrics);
+                if let Some(metrics) = nv.llm_metrics.take() {
+                    p.chunk_tokens = p.chunk_tokens.saturating_add(metrics.chunk_tokens);
+                    p.template = Some(metrics);
+                }
+                crate::protocols::common::extensions::merge_response_nvext(
+                    &mut p.nvext,
+                    nv.nvext.take(),
+                );
             }
             // Buffer input content only for glm47 (truncation recovery).
             // Only retain from the last <tool_call> marker onward to bound
@@ -3875,21 +3879,23 @@ impl OpenAIPreprocessor {
             jail_input,
         )
         .flat_map(move |a| {
-            // Stamp the accumulated metrics onto the next emitted data chunk;
-            // data-less/synthesized chunks carry it forward (or `None`).
-            let llm_metrics = a.data.as_ref().and_then(|_| {
+            // Stamp accumulated Dynamo-only metadata onto the next emitted data
+            // chunk; data-less chunks carry it forward. The jail may buffer and
+            // fold multiple token chunks, so completion_token_ids are merged.
+            let (llm_metrics, nvext) = a.data.as_ref().map_or((None, None), |_| {
                 let mut p = pending.lock().expect("jail metrics buffer poisoned");
                 let chunk_tokens = p.chunk_tokens;
                 p.chunk_tokens = 0;
-                p.template.take().map(|mut metrics| {
+                let llm_metrics = p.template.take().map(|mut metrics| {
                     metrics.chunk_tokens = chunk_tokens;
                     metrics
-                })
+                });
+                (llm_metrics, p.nvext.take())
             });
             let mut nv_chunk = Annotated {
                 data: a.data.map(|inner| NvCreateChatCompletionStreamResponse {
                     inner,
-                    nvext: None,
+                    nvext,
                     llm_metrics,
                 }),
                 id: a.id,

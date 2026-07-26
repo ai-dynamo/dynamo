@@ -1917,11 +1917,11 @@ mod tests {
 
     // The jail moved to dynamo-parsers and operates on the shared
     // `Create` payload, so the boundary adapter (apply_tool_calling_jail) must
-    // buffer the dynamo-only typed `llm_metrics` and re-attach it. This asserts
-    // the buffered chunk_tokens sum and latest output_tokens survive the jail on
-    // a tool-call stream (they'd all be None without the buffer/re-attach).
+    // buffer Dynamo-only metadata and re-attach it. This asserts the buffered
+    // chunk_tokens, latest output_tokens, and completion token IDs survive the
+    // jail on a tool-call stream.
     #[tokio::test]
-    async fn jail_preserves_llm_metrics_across_buffered_tool_call() {
+    async fn jail_preserves_dynamo_metadata_across_buffered_tool_call() {
         use dynamo_llm::protocols::common::metrics::LLMMetricAnnotation;
         use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
         use dynamo_protocols::types::{
@@ -1962,7 +1962,10 @@ mod tests {
                         service_tier: None,
                         system_fingerprint: None,
                     },
-                    nvext: None,
+                    nvext: Some(serde_json::json!({
+                        "completion_token_ids":
+                            ((output_tokens - chunk_tokens)..output_tokens).collect::<Vec<_>>(),
+                    })),
                     llm_metrics: Some(LLMMetricAnnotation {
                         input_tokens: 7,
                         output_tokens,
@@ -2021,6 +2024,18 @@ mod tests {
             max_osl,
             Some(7),
             "final cumulative output_tokens must survive the jail"
+        );
+        let completion_token_ids: Vec<u64> = out
+            .iter()
+            .filter_map(|a| a.data.as_ref().and_then(|d| d.nvext.as_ref()))
+            .filter_map(|nvext| nvext.get("completion_token_ids"))
+            .flat_map(|ids| ids.as_array().into_iter().flatten())
+            .filter_map(serde_json::Value::as_u64)
+            .collect();
+        assert_eq!(
+            completion_token_ids,
+            (0..7).collect::<Vec<_>>(),
+            "completion token IDs must survive the jail in generation order"
         );
     }
 }

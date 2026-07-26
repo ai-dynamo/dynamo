@@ -33,7 +33,10 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 use validator::Validate;
 
-use super::chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionResponse};
+use super::chat_completions::{
+    NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
+    NvCreateChatCompletionStreamResponse,
+};
 use super::{OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider};
 use crate::protocols::common::extensions::{NvExt, NvExtProvider};
 
@@ -1049,6 +1052,62 @@ impl ResponseParams {
     }
 }
 
+/// Counts generated token IDs while the reasoning parser classifies streamed
+/// deltas. Responses requests opt into the internal token-ID extension so this
+/// remains exact even when one decoded delta contains multiple tokens.
+#[derive(Debug, Default)]
+pub(crate) struct ReasoningTokenCounter {
+    total: u32,
+    active: bool,
+}
+
+impl ReasoningTokenCounter {
+    pub(crate) fn observe(&mut self, chunk: &NvCreateChatCompletionStreamResponse) {
+        let token_count = chunk
+            .nvext
+            .as_ref()
+            .and_then(|nvext| nvext.get("completion_token_ids"))
+            .and_then(serde_json::Value::as_array)
+            .map_or(0, |ids| ids.len().try_into().unwrap_or(u32::MAX));
+        if chunk.inner.choices.is_empty() {
+            // Some backends attach the generated token IDs only to the final,
+            // choice-less usage chunk. Preserve the classification established
+            // by preceding deltas so those IDs are still accounted correctly.
+            if self.active {
+                self.total = self.total.saturating_add(token_count);
+            }
+            return;
+        }
+
+        let has_reasoning = chunk
+            .inner
+            .choices
+            .iter()
+            .any(|choice| choice.delta.reasoning_content.is_some());
+        let has_visible_output = chunk.inner.choices.iter().any(|choice| {
+            choice.delta.content.is_some()
+                || choice
+                    .delta
+                    .tool_calls
+                    .as_ref()
+                    .is_some_and(|calls| !calls.is_empty())
+        });
+
+        if token_count > 0 && (has_reasoning || (self.active && !has_visible_output)) {
+            self.total = self.total.saturating_add(token_count);
+        }
+        if has_reasoning {
+            self.active = true;
+        } else if has_visible_output {
+            self.active = false;
+        }
+    }
+
+    pub(crate) fn total(&self) -> u32 {
+        self.total
+    }
+}
+
 /// Normalize tools so that `FunctionTool.strict` is always set.
 /// The upstream type uses `skip_serializing_if = "Option::is_none"` on `strict`,
 /// so `None` causes the field to be omitted during JSON serialization.
@@ -1114,7 +1173,13 @@ pub fn chat_completion_to_response(
     params: &ResponseParams,
     api_context: Option<&crate::protocols::unified::ResponsesContext>,
 ) -> Result<NvResponse, anyhow::Error> {
-    let nvext = nv_resp.nvext.clone();
+    let mut nvext = nv_resp.nvext.clone();
+    if let Some(serde_json::Value::Object(fields)) = nvext.as_mut() {
+        fields.remove("completion_token_ids");
+        if fields.is_empty() {
+            nvext = None;
+        }
+    }
     let chat_resp = nv_resp.inner;
     let message_id = format!("msg_{}", Uuid::new_v4().simple());
     let response_id = format!("resp_{}", Uuid::new_v4().simple());
@@ -3576,6 +3641,25 @@ thinking
             panic!("expected reasoning output");
         };
         assert_eq!(reasoning.status, Some(OutputStatus::Incomplete));
+    }
+
+    #[test]
+    fn test_internal_completion_token_ids_are_not_exposed() {
+        let mut chat_resp = make_chat_resp_with_text("answer");
+        chat_resp.nvext = Some(serde_json::json!({
+            "completion_token_ids": [1, 2, 3],
+            "worker_id": {"decode_worker_id": 7},
+        }));
+
+        let resp =
+            chat_completion_to_response(chat_resp, &ResponseParams::default(), None).unwrap();
+
+        assert_eq!(
+            resp.nvext,
+            Some(serde_json::json!({
+                "worker_id": {"decode_worker_id": 7},
+            }))
+        );
     }
 
     /// Pass-through metadata fields the OpenResponses spec includes on the
