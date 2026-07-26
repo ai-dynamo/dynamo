@@ -629,7 +629,9 @@ class PlannerConfig(BaseModel):
             "scaling. Per-GPU caps are read from DGD worker podTemplate "
             "annotations; this planner combines them with total_gpu_power_limit "
             "to publish power-budget gauges and clamp scale-up. Requires "
-            "total_gpu_power_limit and environment='kubernetes'."
+            "total_gpu_power_limit, environment='kubernetes', and "
+            "mode in ('disagg', 'prefill', 'decode'). Not supported for "
+            "mode='agg'."
         ),
     )
     total_gpu_power_limit: Optional[int] = Field(

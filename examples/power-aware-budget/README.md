@@ -55,9 +55,10 @@ renders it into the Deployment / LeaderWorkerSet template.
    }
    ```
 
-   `enable_power_awareness` requires `environment: "kubernetes"` and a
-   `total_gpu_power_limit > 0`. Per-GPU caps are **not** set here — they live on
-   the worker `podTemplate` annotations only.
+   `enable_power_awareness` requires `environment: "kubernetes"`, a
+   `total_gpu_power_limit > 0`, and `mode` set to `disagg`, `prefill`, or
+   `decode` (`agg` is not currently supported). Per-GPU caps are **not** set
+   here — they live on the worker `podTemplate` annotations only.
 
 ## Projection
 

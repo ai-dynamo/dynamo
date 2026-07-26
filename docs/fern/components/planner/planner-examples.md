@@ -81,7 +81,8 @@ The mounted PlannerConfig enables it:
 }
 ```
 
-`enable_power_awareness` requires `environment: "kubernetes"`. See the
+`enable_power_awareness` requires `environment: "kubernetes"` and
+`mode` set to `disagg`, `prefill`, or `decode` (`agg` is not supported). See the
 `power-aware-budget/` directory in
 [Dynamo examples](https://github.com/ai-dynamo/dynamo/tree/main/examples) for
 the full annotation + config contract and its limitations (the budget is a
