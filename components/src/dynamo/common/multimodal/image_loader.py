@@ -46,6 +46,8 @@ def decoded_content_hash_key(metadata: Any) -> str | None:
     if any(char not in "0123456789abcdef" for char in key):
         return None
     return key
+
+
 UUID_ONLY_VARIANT_KEY: Final = "UuidOnly"
 
 

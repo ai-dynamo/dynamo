@@ -67,11 +67,11 @@ def test_extract_media_inputs_supports_mixed_image_and_video():
 
 
 @pytest.mark.multimodal
-def test_extract_media_urls_rejects_multimodal_cache_uuid():
+def test_extract_media_inputs_rejects_multimodal_cache_uuid():
     handler = MultimodalEncodeWorkerHandler.__new__(MultimodalEncodeWorkerHandler)
 
     with pytest.raises(ValueError, match="supported only by the vLLM backend"):
-        handler._extract_media_urls(
+        handler._extract_media_inputs(
             {
                 "multi_modal_uuids": {"image_url": ["cached-image"]},
             }
