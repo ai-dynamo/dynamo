@@ -57,6 +57,6 @@ python -m dynamo.frontend --router-mode kv --http-port 8000
 - **[分离式服务](/dynamo/dev/components/router/disaggregated-serving)**：Prefill 和 decode 路由设置
 - **[Router Operations](/dynamo/dev/components/router/router-operations)**：副本、持久化和恢复
 - **[Router Examples](/dynamo/dev/components/router/router-examples)**：Python API 用法、K8s 示例和自定义路由模式
-- **[Router Testing](https://github.com/ai-dynamo/dynamo/blob/daf44c6bf194ae7c56961b14f6cfa7edfe25af28/docs/components/router/router-testing.md)**：从 Rust 单元测试到基于 fixture 的 replay 和完整进程 E2E 的测试层级
+- **[Router Testing](https://github.com/ai-dynamo/dynamo/blob/68817ca65e98b5d1c4b347f2b6d8c9bf0246a2fd/docs/components/router/router-testing.md)**：从 Rust 单元测试到基于 fixture 的 replay 和完整进程 E2E 的测试层级
 - **[Standalone Indexer](/dynamo/dev/components/router/standalone-indexer)**：将 KV indexer 作为单独服务运行，以便独立扩缩容
 - **[Router Design](/dynamo/dev/design-docs/component-design/router-design)**：架构细节、算法和事件传输模式
