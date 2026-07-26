@@ -31,6 +31,7 @@ from dynamo.common.multimodal.image_loader import (
     URL_VARIANT_KEY,
     decoded_content_hash_key,
 )
+from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.llm import MultimodalEmbeddingCachePublisher
 from dynamo.sglang.args import Config
@@ -485,10 +486,14 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
             {"image_url": [{"Url": "https://..."} | {"Decoded": {...}}, ...],
              "video_url": [{"Url": "https://..."}, ...]}
 
+        Multimodal cache UUIDs are rejected before URL extraction because
+        SGLang cannot resolve payload-free media slots.
+
         Returns:
             Tuple of (image wire items, video URLs). Decoded images are loaded
             asynchronously by _prepare_image_inputs.
         """
+        reject_unsupported_multimodal_uuids(request.get("multi_modal_uuids"))
         mm_data = request.get("multi_modal_data")
         if not mm_data:
             raise ValueError("multi_modal_data is required for the encode worker.")

@@ -58,12 +58,14 @@ For basic model registration without KV routing, use `--router-mode round-robin`
 
 - **[Router Guide](router-guide.md)**: Deployment modes, quick start, and page map
 - **[Routing Concepts](router-concepts.md)**: Cost model and worker-selection behavior
+- **[Multi-DC KV Routing and the DC Relay](multi-dc-kv-routing.md)**: DC-local aggregation, pools, publication, and global CKF ingestion
 - **[Router Filtering](router-filtering.md)**: Candidate eligibility, DP-rank filtering, and busy-threshold overload handling
 - **[Frontend Configuration Reference](../frontend/configuration.md#router)**: Canonical embedded-router flags and environment variables
 - **[Configuration and Tuning](router-configuration.md)**: Router behavior, transport modes, and tuning guidance
 - **[Deficit Round Robin Queue Scheduling](deficit-round-robin.md)**: Weighted policy-class arbitration, cursor movement, and bulk virtual rounds
 - **[Priority Scheduling](priority-scheduling.md)**: Router queue, backend engine, and cache priority behavior
 - **[Disaggregated Serving](router-disaggregated-serving.md)**: Prefill and decode routing setups
+- **[Offloading Support Matrix](router-offloading.md)**: Per-framework support and setup for KV routing with tiered KV cache offloading
 - **[Router Operations](router-operations.md)**: Replicas, persistence, and recovery
 - **[Router Examples](router-examples.md)**: Python API usage, K8s examples, and custom routing patterns
 - **[Router Testing](router-testing.md)**: Test layers from Rust unit tests to fixture-backed replay and full process E2E

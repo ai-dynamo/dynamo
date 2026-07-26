@@ -53,9 +53,9 @@ behavior, and oversized-request bulk credit, see
 These signals affect candidate scoring, not hard filtering:
 
 - KV cache overlap on device, host-pinned memory, disk, or shared cache
-- Active decode blocks and prompt-side prefill load
+- Active decode blocks, active-request count, and prompt-side prefill load
 - `preferred_taints`, which multiply the worker cost when present
 - `router_temperature`, which samples among eligible candidates when non-zero
-- `overlap_score_credit`, `prefill_load_scale`, and shared-cache weighting
+- `overlap_score_credit`, `prefill_load_scale`, `decode_active_request_weight`, and shared-cache weighting
 
 Use required taints or allowed worker IDs when routing must exclude workers. Use preferred taints and cost-model tuning when routing should only bias toward a subset.

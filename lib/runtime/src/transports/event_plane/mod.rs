@@ -16,7 +16,10 @@ pub use dynamic_subscriber::DynamicSubscriber;
 pub use frame::{FRAME_HEADER_SIZE, FRAME_VERSION, Frame, FrameError, FrameHeader};
 pub use traits::{EventEnvelope, EventStream, TypedEventStream};
 pub use transport::{EventTransportRx, EventTransportTx, WireStream};
-pub use zmq_transport::{ZmqPubTransport, ZmqSubTransport};
+pub use zmq_transport::{
+    ValidatedEnvelope, ValidatedZmqSource, ValidatedZmqSourceError, ZmqPubTransport,
+    ZmqSubTransport,
+};
 
 // Re-export transport kind from discovery for convenience
 pub use crate::discovery::{EventScope, EventTransportKind};
@@ -54,6 +57,31 @@ use crate::utils::local_ip_for_advertise;
 struct BrokerEndpoints {
     xsub_endpoints: Vec<String>,
     xpub_endpoints: Vec<String>,
+}
+
+/// Whether the configured event plane selects direct per-publisher ZMQ sockets.
+///
+/// This intentionally answers only the topology question needed by specialized
+/// consumers. Broker discovery and connection errors remain owned by the normal
+/// [`EventSubscriber`] construction path.
+pub fn uses_direct_zmq(transport_kind: EventTransportKind) -> bool {
+    uses_direct_zmq_from_lookup(transport_kind, |key| std::env::var_os(key))
+}
+
+fn uses_direct_zmq_from_lookup(
+    transport_kind: EventTransportKind,
+    mut get_env: impl FnMut(&str) -> Option<std::ffi::OsString>,
+) -> bool {
+    if transport_kind != EventTransportKind::Zmq {
+        return false;
+    }
+
+    if get_env(crate::config::environment_names::zmq_broker::DYN_ZMQ_BROKER_URL).is_some() {
+        return false;
+    }
+
+    !get_env(crate::config::environment_names::zmq_broker::DYN_ZMQ_BROKER_ENABLED)
+        .is_some_and(|value| crate::config::is_truthy(&value.to_string_lossy()))
 }
 
 /// Resolve ZMQ broker endpoints from environment or discovery
@@ -231,6 +259,11 @@ impl Stream for DeduplicatingStream {
     }
 }
 
+/// Keep the shared wire, channel, and source publisher ID representable in Kubernetes metadata.
+fn discovery_safe_publisher_id(random_id: u64) -> u64 {
+    random_id & (i64::MAX as u64)
+}
+
 /// Event publisher for a specific topic.
 pub struct EventPublisher {
     transport_kind: EventTransportKind,
@@ -359,9 +392,11 @@ impl EventPublisher {
         // can host multiple publishers for the same scope/topic, each with its
         // own ZMQ endpoint and sequence space, so the process ID is not unique
         // enough here.
-        let publisher_id = rand::rngs::OsRng
-            .try_next_u64()
-            .map_err(|error| anyhow::anyhow!("failed to generate publisher ID: {error}"))?;
+        let publisher_id = discovery_safe_publisher_id(
+            rand::rngs::OsRng
+                .try_next_u64()
+                .map_err(|error| anyhow::anyhow!("failed to generate publisher ID: {error}"))?,
+        );
         let discovery = Some(drt.discovery());
         let runtime_handle = drt.runtime().secondary();
         let subject = scope.subject(&topic);
@@ -886,6 +921,46 @@ fn current_timestamp_ms() -> u64 {
 mod tests {
     use super::*;
     use crate::config::environment_names::zmq_broker as broker_env;
+
+    #[test]
+    fn publisher_ids_fit_kubernetes_discovery_integer_range() {
+        assert_eq!(discovery_safe_publisher_id(42), 42);
+        assert!(i64::try_from(discovery_safe_publisher_id(u64::MAX)).is_ok());
+    }
+
+    #[test]
+    fn direct_zmq_topology_selection_is_narrow() {
+        let lookup = |url: Option<&str>, enabled: Option<&str>| {
+            let url = url.map(std::ffi::OsString::from);
+            let enabled = enabled.map(std::ffi::OsString::from);
+            move |key: &str| match key {
+                broker_env::DYN_ZMQ_BROKER_URL => url.clone(),
+                broker_env::DYN_ZMQ_BROKER_ENABLED => enabled.clone(),
+                _ => None,
+            }
+        };
+
+        assert!(uses_direct_zmq_from_lookup(
+            EventTransportKind::Zmq,
+            lookup(None, None)
+        ));
+        assert!(!uses_direct_zmq_from_lookup(
+            EventTransportKind::Zmq,
+            lookup(Some("xsub=tcp://broker:5555,xpub=tcp://broker:5556"), None)
+        ));
+        assert!(!uses_direct_zmq_from_lookup(
+            EventTransportKind::Zmq,
+            lookup(None, Some("true"))
+        ));
+        assert!(uses_direct_zmq_from_lookup(
+            EventTransportKind::Zmq,
+            lookup(None, Some("false"))
+        ));
+        assert!(!uses_direct_zmq_from_lookup(
+            EventTransportKind::Nats,
+            lookup(None, None)
+        ));
+    }
 
     #[tokio::test]
     async fn direct_zmq_endpoint_scopes_are_isolated() {

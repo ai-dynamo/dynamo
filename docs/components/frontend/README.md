@@ -97,4 +97,5 @@ See the [Frontend Guide](frontend-guide.md) for full configuration options.
 | [Configuration Reference](configuration.md) | All CLI arguments, env vars, and HTTP endpoints |
 | [Frontend Guide](frontend-guide.md) | KServe gRPC configuration and integration |
 | [NVIDIA Request Extensions (nvext)](nvext.md) | Custom request fields for routing hints and cache control |
+| [Python Route Extensions](python-route-extensions.md) | Register additional HTTP routes on the frontend from a Python package |
 | [Router Documentation](../router/README.md) | KV-aware routing configuration |
