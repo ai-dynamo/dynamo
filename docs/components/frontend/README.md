@@ -86,7 +86,7 @@ spec:
 |-----------|---------|-------------|
 | `--http-port` | 8000 | HTTP server port |
 | `--kserve-grpc-server` | false | Enable KServe gRPC server |
-| `--router-mode` | `round-robin` | Routing strategy: `round-robin`, `random`, `kv`, `direct`, `least-loaded`, `device-aware-weighted` (`power-of-two` and `least-loaded` use synchronous prefill fallback in disaggregated prefill mode) |
+| `--router-mode` | `round-robin` | Routing strategy: `round-robin`, `random`, `power-of-two`, `kv`, `direct`, `least-loaded`, `device-aware-weighted` (`power-of-two` and `least-loaded` use synchronous prefill fallback in disaggregated prefill mode) |
 
 See the [Frontend Guide](frontend-guide.md) for full configuration options.
 
@@ -97,4 +97,5 @@ See the [Frontend Guide](frontend-guide.md) for full configuration options.
 | [Configuration Reference](configuration.md) | All CLI arguments, env vars, and HTTP endpoints |
 | [Frontend Guide](frontend-guide.md) | KServe gRPC configuration and integration |
 | [NVIDIA Request Extensions (nvext)](nvext.md) | Custom request fields for routing hints and cache control |
+| [Python Route Extensions](python-route-extensions.md) | Register additional HTTP routes on the frontend from a Python package |
 | [Router Documentation](../router/README.md) | KV-aware routing configuration |

@@ -28,7 +28,7 @@ from tests.router.e2e_harness import (
     run_router_decisions_test,
 )
 from tests.router.helper import generate_random_suffix
-from tests.utils.constants import DefaultPort
+from tests.utils.constants import DynamoPortRange
 from tests.utils.device import get_default_vllm_block_size
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.port_utils import allocate_ports, deallocate_ports
@@ -107,18 +107,20 @@ class XPUVLLMProcess(ManagedEngineProcessMixin):
         self._request = request
         self._request_plane = request_plane
 
-        self._system_ports = allocate_ports(num_workers, DefaultPort.SYSTEM1.value)
-        self._kv_event_ports = allocate_ports(num_workers, DefaultPort.SYSTEM1.value)
-        self._nixl_ports = allocate_ports(num_workers, DefaultPort.SYSTEM1.value)
-        self._fpm_ports = allocate_ports(num_workers, DefaultPort.SYSTEM1.value)
-        request.addfinalizer(
-            lambda: deallocate_ports(
-                self._system_ports
-                + self._kv_event_ports
-                + self._nixl_ports
-                + self._fpm_ports
-            )
-        )
+        allocated_ports: list[int] = []
+        request.addfinalizer(lambda: deallocate_ports(allocated_ports))
+
+        self._system_ports = allocate_ports(num_workers, DynamoPortRange.ROUTER.value)
+        allocated_ports.extend(self._system_ports)
+
+        self._kv_event_ports = allocate_ports(num_workers, DynamoPortRange.ROUTER.value)
+        allocated_ports.extend(self._kv_event_ports)
+
+        self._nixl_ports = allocate_ports(num_workers, DynamoPortRange.NIXL.value)
+        allocated_ports.extend(self._nixl_ports)
+
+        self._fpm_ports = allocate_ports(num_workers, DynamoPortRange.FPM.value)
+        allocated_ports.extend(self._fpm_ports)
 
         if vllm_args is None:
             vllm_args = {}

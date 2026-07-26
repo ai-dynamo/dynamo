@@ -62,6 +62,7 @@ rules:
   verbs:
   - delete
   - patch
+{{- if not .Values.namespaceRestriction.enabled }}
 - apiGroups:
   - admissionregistration.k8s.io
   resources:
@@ -86,6 +87,7 @@ rules:
   - patch
   - update
   - watch
+{{- end }}
 - apiGroups:
   - ""
   resources:

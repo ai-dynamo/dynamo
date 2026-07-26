@@ -10,7 +10,12 @@ import logging
 import warnings
 from typing import Optional
 
-from tensorrt_llm.llmapi import BuildConfig
+# trtllm >= 1.3.0rc21 removed BuildConfig; its fields moved to BaseLlmArgs
+# Remove this try-except once we bump trtllm version to >= 1.3.0rc21
+try:
+    from tensorrt_llm.llmapi import BuildConfig
+except ImportError:
+    from tensorrt_llm.llmapi.llm_args import BaseLlmArgs as BuildConfig
 
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
@@ -90,6 +95,14 @@ class DynamoTrtllmArgGroup(ArgGroup):
             env_var="DYN_TRTLLM_ENABLE_ATTENTION_DP",
             default=False,
             help="Enable attention data parallelism. When enabled, attention_dp_size equals tensor_parallel_size.",
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--conversation-affinity",
+            env_var="DYN_ENGINE_CONV_AFFINITY",
+            default=False,
+            help="Force engine-owned conversation-affinity ADP routing: the engine picks the "
+            "attention-DP rank from the conversation id, even if the router selects a rank.",
         )
         add_argument(
             g,
@@ -471,6 +484,7 @@ class DynamoTrtllmConfig(ConfigBase):
     pipeline_parallel_size: int
     expert_parallel_size: Optional[int]
     enable_attention_dp: bool
+    conversation_affinity: bool
     kv_block_size: int
     gpus_per_node: Optional[int] = None
     max_batch_size: int

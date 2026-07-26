@@ -81,7 +81,7 @@ spec:
       targetPort: 2379
       name: client
 # ---------------------------------------------------------------------------
-# 2. nats — event-plane (with JetStream)
+# 2. nats — NATS Core event plane
 # ---------------------------------------------------------------------------
 ---
 apiVersion: apps/v1
@@ -107,7 +107,6 @@ spec:
         - name: nats
           image: nats:2.12.4
           args:
-            - "-js"
             - "-a"
             - "0.0.0.0"
             - "-p"

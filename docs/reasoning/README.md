@@ -67,6 +67,14 @@ require the opening tag to be present in the model output.
 | `step3` | Step-3 / Step-3-Reasoning | Dynamo-only | Yes | `<think>...</think>` |
 | `basic` | Generic CoT models | Dynamo-only | No | Plain `<think>...</think>` |
 
+## Model-Specific Limitations
+
+> [!WARNING]
+> Kimi K2.7 may ignore `chat_template_kwargs.thinking=false` and continue to
+> generate reasoning. Dynamo can separate emitted reasoning when a compatible
+> parser is configured, but it cannot force the model to disable reasoning.
+> Treat the request flag as best-effort for Kimi K2.7.
+
 ## Common Parser Pairings
 
 Some models need both parsers configured together. Common pairings include:

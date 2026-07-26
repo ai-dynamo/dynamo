@@ -28,7 +28,7 @@ from tests.router.helper import (
     get_kv_indexer_test_env,
     wait_for_indexer_workers_active,
 )
-from tests.utils.constants import DefaultPort
+from tests.utils.constants import DynamoPortRange
 from tests.utils.gpu_args import build_gpu_mem_args
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.port_utils import (
@@ -94,7 +94,6 @@ class VLLMProcess(ManagedEngineProcessMixin):
         data_parallel_size: Optional[int] = None,
         request_plane: str = "tcp",
         store_backend: str = "etcd",
-        durable_kv_events: bool = False,
         namespace: Optional[str] = None,
         gpu_start_index: int = 0,
         disaggregation_mode: Optional[str] = None,
@@ -116,7 +115,6 @@ class VLLMProcess(ManagedEngineProcessMixin):
             data_parallel_size: If set, enables data parallelism with this many ranks (num_workers must equal data_parallel_size)
             request_plane: Request plane to use ("nats", "tcp"). Defaults to "tcp".
             store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
-            durable_kv_events: If True, use JetStream for durable KV events. Defaults to False (NATS Core mode).
         """
         # Generate unique namespace for isolation
         namespace_suffix = generate_random_suffix()
@@ -140,11 +138,17 @@ class VLLMProcess(ManagedEngineProcessMixin):
         self._indexer_process: Optional[ManagedProcess] = None
         self._indexer_b_process: Optional[ManagedProcess] = None
 
+        allocated_ports: list[int] = []
+        request.addfinalizer(lambda: deallocate_ports(allocated_ports))
+
         # Dynamically allocate unique system, KV event, and NIXL side-channel
         # ports (one of each per worker) to avoid conflicts in parallel test runs.
-        self._system_ports = allocate_ports(num_workers, DefaultPort.SYSTEM1.value)
-        self._kv_event_ports = allocate_ports(num_workers, DefaultPort.SYSTEM1.value)
-        self._nixl_ports = allocate_ports(num_workers, DefaultPort.SYSTEM1.value)
+        self._system_ports = allocate_ports(num_workers, DynamoPortRange.ROUTER.value)
+        allocated_ports.extend(self._system_ports)
+        self._kv_event_ports = allocate_ports(num_workers, DynamoPortRange.ROUTER.value)
+        allocated_ports.extend(self._kv_event_ports)
+        self._nixl_ports = allocate_ports(num_workers, DynamoPortRange.NIXL.value)
+        allocated_ports.extend(self._nixl_ports)
         # Per-worker forward-pass-metrics (FPM) base ports. Setting
         # DYN_FORWARDPASS_METRIC_PORT makes dynamo.vllm auto-inject
         # InstrumentedScheduler, whose ZMQ PUB binds ``base_port + dp_rank`` in
@@ -163,29 +167,24 @@ class VLLMProcess(ManagedEngineProcessMixin):
         # uses num_workers=1.) External/hybrid LB, where dp_start > 0, isn't used.
         self._fpm_block = max(1, data_parallel_size or 1)
         self._fpm_ports = allocate_contiguous_ports(
-            num_workers, self._fpm_block, DefaultPort.SYSTEM1.value
+            num_workers, self._fpm_block, DynamoPortRange.FPM.value
         )
+        allocated_ports.extend(self._fpm_ports)
         self._replay_ports = (
-            allocate_ports(num_workers, DefaultPort.SYSTEM1.value)
+            allocate_ports(num_workers, DynamoPortRange.ROUTER.value)
             if standalone_indexer and zmq_replay
             else []
         )
+        allocated_ports.extend(self._replay_ports)
         self._indexer_ports = (
-            allocate_ports(2, DefaultPort.SYSTEM1.value) if standalone_indexer else []
+            allocate_ports(2, DynamoPortRange.ROUTER.value)
+            if standalone_indexer
+            else []
         )
+        allocated_ports.extend(self._indexer_ports)
         if standalone_indexer:
             self._standalone_indexer_port = self._indexer_ports[0]
             self._standalone_indexer_b_port = self._indexer_ports[1]
-        request.addfinalizer(
-            lambda: deallocate_ports(
-                self._system_ports
-                + self._kv_event_ports
-                + self._nixl_ports
-                + self._fpm_ports
-                + self._replay_ports
-                + self._indexer_ports
-            )
-        )
 
         if vllm_args is None:
             vllm_args = {}
@@ -267,10 +266,6 @@ class VLLMProcess(ManagedEngineProcessMixin):
                         # "--kv-transfer-config", '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',  # Required for KV transfer between DP ranks
                     ]
                 )
-
-            # Use --durable-kv-events to enable JetStream mode (local indexer disabled)
-            if durable_kv_events:
-                command.append("--durable-kv-events")
 
             # Ports are dynamically allocated for xdist-safe parallel execution.
             system_port = self._system_ports[worker_idx]
@@ -681,23 +676,15 @@ def test_router_decisions_vllm_disagg(
     331_801_000
 )  # KV cache cap (2x safety over min=165_900_288)
 @pytest.mark.timeout(690)  # 3x ~230s under new scheduler (3d1554f)
-@pytest.mark.parametrize(
-    "store_backend,durable_kv_events,request_plane",
-    [
-        ("etcd", False, "tcp"),
-    ],
-    ids=["nats_core"],
-    indirect=["durable_kv_events", "request_plane"],
-)
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
+@pytest.mark.parametrize("event_plane", ["nats"], indirect=True)
 def test_vllm_indexers_sync(
     request,
     runtime_services_dynamic_ports,
     predownload_models,
-    file_storage_backend,
     set_ucx_tls_no_mm,
-    store_backend,
-    durable_kv_events,
     request_plane,
+    event_plane,
 ):
     run_indexers_sync_test(
         engine_process_cls=VLLMProcess,
@@ -705,9 +692,9 @@ def test_vllm_indexers_sync(
         engine_args=VLLM_ARGS,
         request=request,
         runtime_services_dynamic_ports=runtime_services_dynamic_ports,
-        store_backend=store_backend,
-        durable_kv_events=durable_kv_events,
+        store_backend="etcd",
         request_plane=request_plane,
+        event_plane=event_plane,
         block_size=BLOCK_SIZE,
         model_name=MODEL_NAME,
         num_workers=2,

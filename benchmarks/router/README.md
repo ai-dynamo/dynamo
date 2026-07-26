@@ -157,10 +157,6 @@ This starts the router with:
 - KV cache routing mode
 - HTTP port 8000
 
-The default event path uses NATS Core/local-indexer mode. `--router-reset-states`
-only applies to deprecated durable JetStream mode (`--router-durable-kv-events`)
-and is not needed for these benchmark commands.
-
 To see all available router arguments, run:
 ```bash
 python -m dynamo.frontend --help

@@ -226,7 +226,7 @@ Planner can read these traffic signals from either the public `Frontend` or a po
 
 | Planner input | Frontend source | Router source |
 |---|---|---|
-| Request count | `dynamo_frontend_requests_total` | `dynamo_component_router_requests_total` |
+| Request count | `dynamo_frontend_requests_started_total` | `dynamo_component_router_requests_started_total` |
 | TTFT | `dynamo_frontend_time_to_first_token_seconds` | `dynamo_component_router_time_to_first_token_seconds` |
 | ITL | `dynamo_frontend_inter_token_latency_seconds` | `dynamo_component_router_inter_token_latency_seconds` |
 | Request duration | `dynamo_frontend_request_duration_seconds` | `dynamo_component_request_duration_seconds` until router-specific duration metrics are available |
@@ -235,6 +235,8 @@ Planner can read these traffic signals from either the public `Frontend` or a po
 | KV hit rate | `dynamo_component_router_kv_hit_rate` | `dynamo_component_router_kv_hit_rate` |
 
 The throughput planner uses request count, ISL, OSL, and optional KV hit rate as the core traffic forecast inputs. The router component metric supplies KV hit rate for both traffic metric sources. TTFT, ITL, and request duration are also scraped and exported as observed diagnostics.
+
+The request-count metrics increase when the Frontend accepts a request or the router scheduler admits it, before the response completes. Planner falls back to the corresponding completed-request counter when an older Frontend or router does not expose the started counter. This compatibility fallback can underestimate demand during backpressure.
 
 **Load-based scaling** uses ForwardPassMetrics (FPM) from the Dynamo event plane:
 - Per-iteration wall time, scheduled prefill/decode tokens, and queued request status

@@ -5,25 +5,81 @@ SPDX-License-Identifier: Apache-2.0
 
 # DeepSeek-V4-Flash Recipe
 
-Aggregated-serving recipes for **DeepSeek-V4-Flash** on Dynamo. Two backends (**vLLM** and **SGLang**) and two hardware targets (**B200** and **GB200**) are documented side by side. All four variants are single-replica decode-only deployments using 4 GPUs.
+Serving recipes for **DeepSeek-V4-Flash** on Dynamo — a MoE model (284B total / 13B active) with hybrid CSA + HCA attention and a Blackwell FP4 indexer cache. B200 recipes serve the `nvidia/DeepSeek-V4-Flash-NVFP4` checkpoint; H200 serves the public `deepseek-ai/DeepSeek-V4-Flash` (see [`model-cache/model-download.yaml`](model-cache/model-download.yaml)). Two families today — see [Recipes](#recipes):
 
-| Variant | Backend | Hardware | Manifest | Topology | Container |
-|---------|---------|----------|----------|----------|-----------|
-| **vllm-agg-b200**     | vLLM   | 4x B200  | [`vllm/agg_b200/deploy.yaml`](vllm/agg_b200/deploy.yaml)     | DP=4 + Expert Parallel, TP=1                   | Prebuilt NGC image (`...1.2.0-deepseek-v4-cuda13-dev.3`, multi-arch) |
-| **vllm-agg-gb200**    | vLLM   | 4x GB200 | [`vllm/agg_gb200/deploy.yaml`](vllm/agg_gb200/deploy.yaml)   | TP=4 + Expert Parallel, `deep_gemm_mega_moe`   | Prebuilt NGC image (`...1.2.0-deepseek-v4-cuda13-dev.3`, multi-arch) |
-| **sglang-agg**        | SGLang | 4x B200  | [`sglang/agg/deploy.yaml`](sglang/agg/deploy.yaml)           | TP=4, MXFP4 MoE via FlashInfer, EAGLE MTP 3/4 | Prebuilt NGC image (`...1.2.0-deepseek-v4-cuda12-dev.3`); optional [custom build](../container/) |
-| **sglang-agg-gb200**  | SGLang | 4x GB200 | [`sglang/agg-gb200/deploy.yaml`](sglang/agg-gb200/deploy.yaml) | TP=4, MXFP4 MoE via FlashInfer, EAGLE MTP 3/4 | Prebuilt NGC image (`...1.2.0-deepseek-v4-cuda13-dev.3`, arm64) |
+- **Agentic (vLLM)** — the benchmarked, workload-tuned picks (B200 & H200, AGG + disaggregated); numbers in [Performance](#performance).
+- **Day-0** — the original single-node aggregated recipes (B200/GB200, vLLM + SGLang).
 
-The B200 variants fill 4 of 8 GPUs on a B200 node; the GB200 variants fill all 4 GPUs of a single GB200 NVL4 tray.
+Shared operational details — [workloads](../README.md#optimization-targets), [per-rank NIC mapping](../README.md#per-rank-nic-mapping-b200--h200-disaggregated) (disaggregated GDR), and [known limitations](../README.md#known-limitations) — live in the [top-level DeepSeek-V4 README](../README.md).
 
-Status: **Experimental** (Day-0). Modality: text only.
+## Recipes
+
+### Agentic (vLLM)
+
+Prefill/decode parallelism + spec-decode differ in disaggregated variants (`prefill / decode`).
+
+| Variant | GPUs | Prefill / Decode | MoE backend | Spec. decode | `max_model_len` | Disagg fabric |
+|---|---|---|---|---|---|---|
+| [`agg-b200-agentic`](vllm/agg-b200-agentic/deploy.yaml) | 4× B200 | TP4 | FLASHINFER_TRTLLM | none | 1,048,576 | — |
+| [`agg-h200-agentic`](vllm/agg-h200-agentic/deploy.yaml) | 4× H200 | DP4 + TP1 + EP | MARLIN (FLASHINFER_MLA attn) | MTP-1 | 1,048,576 | — |
+| [`disagg-b200-agentic`](vllm/disagg-b200-agentic/deploy.yaml) | 12× B200 (2P·1D) | TP4 / TP4 | FLASHINFER_TRTLLM | none | 1,048,576 | NIXL GDR |
+| [`disagg-h200-agentic`](vllm/disagg-h200-agentic/deploy.yaml) | 28× H200 (4P·3D) | DP4+TP1+EP / DP4+TP1+EP | MARLIN (FLASHINFER_MLA attn) | none / MTP-1 | 1,048,576 | NIXL GDR ¹ |
+
+B200 = `nvidia/DeepSeek-V4-Flash-NVFP4`; H200 = `deepseek-ai/DeepSeek-V4-Flash`. Common: FP8 KV, block 256, KV-aware routing, prefix caching. Modality: text; reasoning + tool calling supported.
+
+¹ Disaggregated uses NIXL over RDMA/GDR — see [Per-rank NIC mapping](../README.md#per-rank-nic-mapping-b200--h200-disaggregated).
+
+### Day-0
+
+Original single-node aggregated recipes — all single-replica. **Experimental (Day-0). Text only.**
+
+| Variant | Backend | GPUs | Parallelism | MoE backend | Spec. decode |
+|---|---|---|---|---|---|
+| [`vllm-agg-b200`](vllm/agg_b200/deploy.yaml) | vLLM | 4× B200 | DP4 + TP1 + EP | vLLM V4 expert (FP4) | none |
+| [`vllm-agg-gb200`](vllm/agg_gb200/deploy.yaml) | vLLM | 4× GB200 | TP4 + EP | `deep_gemm_mega_moe` | none |
+| [`sglang-agg`](sglang/agg/deploy.yaml) | SGLang | 4× B200 | TP4 | `flashinfer_mxfp4` | EAGLE MTP 3/4 |
+| [`sglang-agg-gb200`](sglang/agg-gb200/deploy.yaml) | SGLang | 4× GB200 | TP4 | `flashinfer_mxfp4` | EAGLE MTP 3/4 |
+
+The B200 variants fill 4 of 8 GPUs on a B200 node; the GB200 variants fill all 4 GPUs of a single GB200 NVL4 tray. All use prebuilt NGC images ².
+
+² Day-0 container images — vLLM (both): `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.3` (multi-arch); SGLang B200: `…/sglang-runtime:1.2.0-deepseek-v4-cuda12-dev.3`; SGLang GB200: `…/sglang-runtime:1.2.0-deepseek-v4-cuda13-dev.3` (arm64). To rebuild from source (custom Dynamo branch, different engine base, etc.), see [`../container/README.md`](../container/README.md).
+
+## Performance
+
+Floor-picks (max system tok/s/GPU at user_p50 ≥ 50), default temperature. Agentic variants only; Day-0 recipes are functional (unbenchmarked). Workload definitions: [Optimization targets](../README.md#optimization-targets).
+
+> **Disaggregated floor-picks require the per-rank NIC mapping (GDR).** These disagg numbers were measured with GDR (per-rank affine NIC); to reproduce them, set **both** NIC env vars per [Per-rank NIC mapping](../README.md#per-rank-nic-mapping-b200--h200-disaggregated). Without them, KV transfer falls back to host-staging and won't reach these figures (see §Per-rank NIC mapping).
+
+### Agentic workload
+
+| Variant | Concurrency | User tok/s | System tok/s/GPU |
+|---|---:|---:|---:|
+| [`agg-b200-agentic`](vllm/agg-b200-agentic/deploy.yaml) | 38 | 50.6 | 362.1 |
+| [`disagg-b200-agentic`](vllm/disagg-b200-agentic/deploy.yaml) | 128 | 50.35 | 409.9 |
+| [`agg-h200-agentic`](vllm/agg-h200-agentic/deploy.yaml) | 16 | 50.7 | 145.4 |
+| [`disagg-h200-agentic`](vllm/disagg-h200-agentic/deploy.yaml) | 128 | 51.8 | 201.9 |
+
+### Custom workload
+
+| Variant | Concurrency | User tok/s | System tok/s/GPU |
+|---|---:|---:|---:|
+| [`agg-b200-agentic`](vllm/agg-b200-agentic/deploy.yaml) | 64 | 50.1 | 741.6 |
+| [`disagg-b200-agentic`](vllm/disagg-b200-agentic/deploy.yaml) | 128 | 51.9 | 738.2 ³ |
+| [`agg-h200-agentic`](vllm/agg-h200-agentic/deploy.yaml) | 16 | 58.9 | 222.0 |
+| [`disagg-h200-agentic`](vllm/disagg-h200-agentic/deploy.yaml) | 416 | 51.8 | 513.6 |
+
+³ Measured at the **1P1D** prefill:decode ratio (optimal for this decode-heavy workload); the shipped `disagg-b200-agentic` deploy.yaml is **2P1D** (agentic-tuned) — same config, only the replica count differs. To reproduce this custom-workload number, set `VllmPrefillWorker`/`VllmDecodeWorker` replicas to 1P1D.
+
+**AGG figures are single-replica floor-picks.** Deploy AGG as independent single-replica DGDs for linear scaling — KV-routed *multi*-replica AGG does **not** improve per-GPU throughput ([Known limitations](../README.md#known-limitations)).
 
 ## Prerequisites
 
 1. **Dynamo Platform installed** — see the [Kubernetes Deployment Guide](../../../docs/kubernetes/README.md).
-2. **GPU cluster.** At least 4 GPUs of the matching arch available on one node:
-   - **B200 variants**: 4 B200 GPUs (x86_64).
-   - **GB200 variants**: 4 GB200 GPUs (single NVL4 tray, arm64). Nodes must be labeled `nvidia.com/gpu.product=NVIDIA-GB200` and tainted `kubernetes.io/arch=arm64:NoSchedule` (the manifests carry the matching `nodeSelector` + `toleration`).
+2. **GPU cluster** of the matching arch. Each worker pod requests **4 GPUs**; totals per variant:
+   - **AGG** (`agg-b200-agentic` / `agg-h200-agentic`): **4 GPUs on one node** (x86_64).
+   - **DisAgg B200** (`disagg-b200-agentic`, 2P1D): **12 B200** — (2 prefill + 1 decode) pods × 4 GPUs, across **multiple nodes**; needs the [per-rank NIC mapping](../README.md#per-rank-nic-mapping-b200--h200-disaggregated).
+   - **DisAgg H200** (`disagg-h200-agentic`, 4P3D): **28 H200** — (4 prefill + 3 decode) pods × 4 GPUs, across **multiple nodes**; same NIC mapping.
+   - **GB200 Day-0 variants**: 4 GB200 GPUs (single NVL4 tray, arm64). Nodes must be labeled `nvidia.com/gpu.product=NVIDIA-GB200` and tainted `kubernetes.io/arch=arm64:NoSchedule` (the manifests carry the matching `nodeSelector` + `toleration`).
 3. **HuggingFace token** with access to `deepseek-ai/DeepSeek-V4-Flash`.
 
 ## Quick Start
@@ -48,134 +104,52 @@ kubectl apply -f model-cache/model-download.yaml -n ${NAMESPACE}
 kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=7200s
 ```
 
-### Deploy — vLLM B200 (`vllm-agg-b200`)
+### Deploy
+
+Same flow for **every** variant (Agentic and Day-0): apply its `deploy.yaml`, then wait on its DGD.
+First worker launch loads weights and warms CUDA graphs / kernels — up to ~60 min (the manifests' startup
+probes allow for it).
 
 ```bash
-kubectl apply -f vllm/agg_b200/deploy.yaml -n ${NAMESPACE}
+# RECIPE = the deploy.yaml path from the tables above, e.g.:
+#   agentic: vllm/{agg,disagg}-{b200,h200}-agentic
+#   Day-0:   vllm/agg_b200 | vllm/agg_gb200 | sglang/agg | sglang/agg-gb200
+RECIPE=vllm/agg-b200-agentic
 
-# First launch of the decode worker takes up to ~60 minutes (weight load +
-# FlashInfer autotune + cudagraph warmup). The startup probe is sized for this.
+kubectl apply -f ${RECIPE}/deploy.yaml -n ${NAMESPACE}
+
+# Wait on the deployment (DGD name = metadata.name in that deploy.yaml):
+DGD=$(awk '/^metadata:/{m=1} m && /name:/{print $2; exit}' ${RECIPE}/deploy.yaml)
 kubectl wait --for=condition=Ready pod \
-  -l nvidia.com/dynamo-graph-deployment-name=dsv4-flash-agg \
+  -l nvidia.com/dynamo-graph-deployment-name=${DGD} \
   -n ${NAMESPACE} --timeout=3600s
 ```
 
-### Deploy — vLLM GB200 (`vllm-agg-gb200`)
+**Disaggregated variants:** first set `VLLM_GPU_NIC_PCIE_MAPPING` in the manifest — see
+[Per-rank NIC mapping](../README.md#per-rank-nic-mapping-b200--h200-disaggregated).
+
+### Test the Deployment
+
+Port-forward the deployment's frontend (`<DGD>-frontend`), then send an OpenAI-compatible request. The `model` field is the served name for your `RECIPE` — the examples below use the B200 default (`nvidia/DeepSeek-V4-Flash-NVFP4`); on H200 use `deepseek-ai/DeepSeek-V4-Flash`. Same endpoints for vLLM and SGLang:
 
 ```bash
-kubectl apply -f vllm/agg_gb200/deploy.yaml -n ${NAMESPACE}
+kubectl port-forward svc/${DGD}-frontend 8000:8000 -n ${NAMESPACE}
 
-# First launch ~60 minutes; the manifest's startup probe allows for it.
-kubectl wait --for=condition=Ready pod \
-  -l nvidia.com/dynamo-graph-deployment-name=dsv4-flash-agg \
-  -n ${NAMESPACE} --timeout=3600s
-```
-
-### Deploy — SGLang B200 (`sglang-agg`)
-
-```bash
-kubectl apply -f sglang/agg/deploy.yaml -n ${NAMESPACE}
-
-# First launch of the decode worker takes up to ~60 minutes (weight load +
-# DeepGEMM warmup + cudagraph warmup). The startup probe is sized for this.
-kubectl wait --for=condition=Ready pod \
-  -l nvidia.com/dynamo-graph-deployment-name=sglang-dsv4-flash \
-  -n ${NAMESPACE} --timeout=3600s
-```
-
-### Deploy — SGLang GB200 (`sglang-agg-gb200`)
-
-```bash
-kubectl apply -f sglang/agg-gb200/deploy.yaml -n ${NAMESPACE}
-
-kubectl wait --for=condition=Ready pod \
-  -l nvidia.com/dynamo-graph-deployment-name=sglang-dsv4-flash \
-  -n ${NAMESPACE} --timeout=3600s
-```
-
-## Test the Deployment
-
-Port-forward the variant you deployed:
-
-```bash
-# vLLM
-kubectl port-forward svc/dsv4-flash-agg-frontend 8000:8000 -n ${NAMESPACE}
-
-# SGLang
-kubectl port-forward svc/sglang-dsv4-flash-frontend 8000:8000 -n ${NAMESPACE}
-```
-
-Either way the request shape is the same — same model name, same OpenAI-compatible endpoints:
-
-```bash
 curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "deepseek-ai/DeepSeek-V4-Flash",
+    "model": "nvidia/DeepSeek-V4-Flash-NVFP4",
     "messages": [{"role": "user", "content": "Hello!"}],
-    "max_tokens": 100
+    "max_tokens": 512
   }'
 ```
 
-## Recipe Details
+Flash reasons by default, so the chain-of-thought fills `message.reasoning_content` and the final
+answer lands in `message.content`. With too small a `max_tokens` the budget is spent on reasoning
+before any `content` is emitted (`content: null`, `finish_reason: "length"`) — that's expected, not a
+failure; raise `max_tokens` (or see [Verifying Reasoning](#verifying-reasoning)).
 
-### vLLM B200 (`vllm/agg_b200/deploy.yaml`)
-
-| Flag | Purpose |
-|------|---------|
-| `--tokenizer-mode deepseek_v4` | Selects the DeepSeek-V4 tokenizer |
-| `--dyn-reasoning-parser deepseek_v4` | Extracts chain-of-thought into `message.reasoning_content` |
-| `--dyn-tool-call-parser deepseek_v4` | Emits OpenAI-compatible structured `tool_calls` |
-| `--attention-config '{"use_fp4_indexer_cache":true}'` | Blackwell FP4 indexer cache for CSA+HCA attention |
-| `--kv-cache-dtype fp8` + `--block-size 256` | FP8 KV cache; block size matches the upstream recipe |
-| `--tensor-parallel-size 1 --data-parallel-size 4 --enable-expert-parallel` | DP=4 + EP across the 4 GPUs (TP=1) |
-| `--compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["all"]}'` | Single-node DEP compilation config from the upstream recipe |
-| `--no-enable-flashinfer-autotune` | Skip per-shape FlashInfer autotuning at startup; required on dsv4 for correct accuracy |
-| `--max-num-seqs 256` | Concurrency cap |
-
-### vLLM GB200 (`vllm/agg_gb200/deploy.yaml`)
-
-Same OpenAI-renderer wiring as the B200 variant; differences below come from the [upstream vLLM GB200 recipe](https://recipes.vllm.ai/deepseek-ai/DeepSeek-V4-Flash?features=tool_calling,reasoning&hardware=gb200) for V4-Flash.
-
-| Flag / env | Purpose |
-|---|---|
-| `--tensor-parallel-size 4 --enable-expert-parallel` | **TP=4 + EP** across the 4 GPUs of the NVL4 tray (DP dropped — the GB200 tray's intra-tray NVLink makes TP attractive for this size class) |
-| `--moe-backend deep_gemm_mega_moe` | DeepGEMM "mega MoE" kernel — the optimized FP8 MoE path for V4 expert routing on Blackwell |
-| `--no-enable-flashinfer-autotune` | Skip per-shape FlashInfer autotuning at startup; required on dsv4 for correct accuracy |
-| `NCCL_NVLS_ENABLE=1`, `NCCL_P2P_LEVEL=NVL`, `VLLM_USE_NCCL_SYMM_MEM=1` | Enable NVLink Sharp (NVLS) multicast for one-shot all-reduce on the tray |
-
-### SGLang B200 (`sglang/agg/deploy.yaml`)
-
-| Flag | Purpose |
-|------|---------|
-| `--dyn-reasoning-parser deepseek_v4` | Extracts chain-of-thought into `message.reasoning_content` |
-| `--dyn-tool-call-parser deepseek_v4` | Emits OpenAI-compatible structured `tool_calls` |
-| `--trust-remote-code` | Required for the V4 architecture's custom modeling code |
-| `--tp 4` | Tensor-parallel across the 4 GPUs of one node |
-| `--moe-runner-backend flashinfer_mxfp4` | MXFP4 MoE kernel via FlashInfer for the V4 expert weights |
-| `--speculative-algo EAGLE` + `--speculative-num-steps 3` + `--speculative-eagle-topk 1` + `--speculative-num-draft-tokens 4` | EAGLE MTP speculative decoding (3 draft steps, top-1 over the EAGLE head, 4 draft tokens per step) |
-| `--chunked-prefill-size 4096` | Chunk long prompts at 4k tokens for steady-state decode interleaving |
-| `--disable-flashinfer-autotune` | Skip per-shape autotuning at startup; the dsv4 base ships pre-tuned defaults |
-
-## Model Details
-
-| | |
-|---|---|
-| **Model** | `deepseek-ai/DeepSeek-V4-Flash` (MoE, 284B total / 13B active) |
-| **Checkpoint** | Mixed FP4 (expert weights) + FP8 (attention, norm, router) |
-| **Attention** | Hybrid CSA + HCA with Blackwell FP4 indexer cache |
-
-Recipe-level (per-variant) settings:
-
-| | vLLM B200 (`vllm-agg-b200`) | vLLM GB200 (`vllm-agg-gb200`) | SGLang B200 (`sglang-agg`) | SGLang GB200 (`sglang-agg-gb200`) |
-|---|---|---|---|---|
-| **Backend image** | Prebuilt `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.3` (multi-arch) | Prebuilt `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.3` (multi-arch) | Prebuilt `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-deepseek-v4-cuda12-dev.3` | Prebuilt `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-deepseek-v4-cuda13-dev.3` |
-| **Parallelism** | DP=4 + Expert Parallel, TP=1 | TP=4 + Expert Parallel | TP=4 | TP=4 |
-| **MoE backend** | vLLM's V4 expert kernel (FP4) | DeepGEMM mega MoE | FlashInfer MXFP4 | FlashInfer MXFP4 |
-| **KV cache** | FP8, block size 256 | FP8, block size 256 | engine default | engine default |
-| **Speculative decoding** | — | — | EAGLE MTP (3 steps / 4 draft tokens) | EAGLE MTP (3 steps / 4 draft tokens) |
-
-## Verifying Reasoning
+### Verifying Reasoning
 
 Same flow on both variants — same model, same `--dyn-reasoning-parser deepseek_v4`:
 
@@ -183,7 +157,7 @@ Same flow on both variants — same model, same `--dyn-reasoning-parser deepseek
 curl -s http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "deepseek-ai/DeepSeek-V4-Flash",
+    "model": "nvidia/DeepSeek-V4-Flash-NVFP4",
     "messages": [{"role": "user", "content": "What is 2+2? Answer briefly."}],
     "max_tokens": 200
   }' | python3 -m json.tool
@@ -197,7 +171,7 @@ Expected:
 
 If `reasoning_content` is `null` and `</think>` appears in `content`, the reasoning parser isn't wired up — confirm `--dyn-reasoning-parser deepseek_v4` is on the worker command.
 
-## Verifying Tool Calling
+### Verifying Tool Calling
 
 Same flow on both variants:
 
@@ -205,7 +179,7 @@ Same flow on both variants:
 curl -s http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "deepseek-ai/DeepSeek-V4-Flash",
+    "model": "nvidia/DeepSeek-V4-Flash-NVFP4",
     "messages": [{"role": "user", "content": "What is the weather in San Francisco?"}],
     "tools": [{
       "type": "function",
@@ -232,31 +206,3 @@ Expected:
 - `choices[0].message.reasoning_content` may contain the model's reasoning about tool selection.
 
 If `tool_calls` is missing and raw tool-call markers appear in `content`, confirm `--dyn-tool-call-parser deepseek_v4` is on the worker command.
-
-## Notes
-
-### Common
-
-- **Storage class.** Update `storageClassName` in `model-cache/model-cache.yaml` to a RWX class that can serve the PVC to Frontend and worker pods.
-- **Model size.** `deepseek-ai/DeepSeek-V4-Flash` is ~160 GB on disk (46 safetensors shards in FP4+FP8 mixed form). The 400Gi PVC leaves headroom for HF cache metadata and one alternate revision.
-- **Parser flags.** Use the Dynamo variants on the worker (`--dyn-reasoning-parser`, `--dyn-tool-call-parser`). Each engine's native `--reasoning-parser` / `--tool-call-parser` are engine-side and do not feed the Dynamo OpenAI renderer.
-- **Offline model cache.** Both workers run with `HF_HUB_OFFLINE=1` so the engine reads cached weights from the PVC and never contacts the HF Hub at startup. The HF token secret is mounted defensively; it isn't required at runtime once the download Job has completed.
-- **First launch is slow.** Decode workers load weights and warm CUDA graphs / DeepGEMM kernels on first launch; the manifests' startup probes allow up to ~60 min (`failureThreshold: 360` at `periodSeconds: 10`).
-
-### vLLM-specific
-
-- **Prebuilt images.** Both `vllm/agg_b200/deploy.yaml` and `vllm/agg_gb200/deploy.yaml` reference `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.3` (multi-arch). To rebuild from source (custom Dynamo branch, different vLLM base, etc.), see [`<repo_root>/container/README.md`](../../../container/README.md).
-- **Engine-ready timeout.** `VLLM_ENGINE_READY_TIMEOUT_S=3600` matches the startup probe budget on both variants.
-- **DP stability (B200 only).** `VLLM_RANDOMIZE_DP_DUMMY_INPUTS=1` and `VLLM_SKIP_P2P_CHECK=1` mirror the DeepSeek-R1 vLLM recipe and stabilize DP dummy inputs. The GB200 variant uses TP (no DP), so `VLLM_RANDOMIZE_DP_DUMMY_INPUTS` is not set.
-- **FlashInfer autotune.** `--no-enable-flashinfer-autotune` skips per-shape FlashInfer autotuning at startup and is set on both vLLM variants. Required on dsv4: the autotuner currently produces tunings that regress GSM8k accuracy. Skipping it also shortens first-launch warmup.
-- **FlashInfer TRT-LLM allreduce on GB200.** You may see a non-fatal startup warning `Failed to initialize FlashInfer Allreduce norm fusion workspace ... Flashinfer allreduce-norm fusion will be disabled`. vLLM falls back to a non-fused allreduce + RMSNorm; correctness is unaffected. To enable the fused kernel, set the compilation pass: `--compilation-config '{"mode":3,"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["all"],"pass_config":{"fuse_allreduce_rms":true}}'`.
-
-### SGLang-specific
-
-- **Prebuilt images.** `sglang/agg/deploy.yaml` references `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-deepseek-v4-cuda12-dev.3` and `sglang/agg-gb200/deploy.yaml` references the arm64 sibling `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-deepseek-v4-cuda13-dev.3`. To rebuild either (custom Dynamo branch, different SGLang base, etc.), see [`recipes/deepseek-v4/container/README.md`](../container/README.md).
-- **DeepGEMM / FlashInfer warmup.** `SGLANG_JIT_DEEPGEMM_PRECOMPILE=0` + `SGLANG_JIT_DEEPGEMM_FAST_WARMUP=1` skip the slow precompile and use the fast warmup path. `--disable-flashinfer-autotune` skips per-shape FlashInfer autotuning at startup; the dsv4 base ships pre-tuned defaults.
-- **NCCL / Gloo.** `NCCL_CUMEM_ENABLE=1` is set for V4 NCCL collectives on Blackwell. `GLOO_SOCKET_IFNAME=eth0` pins Gloo to the standard pod interface.
-
-## Sibling Recipe
-
-[DeepSeek-V4-Pro](../deepseek-v4-pro/) is the larger sibling (1.6T / 49B active, 1M context, 8x B200) and shares the same dsv4 vLLM and SGLang container images.

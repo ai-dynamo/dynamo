@@ -69,22 +69,23 @@ behavior.
 
 When the chat template injects a reasoning start token (e.g. `<think>`)
 into the prompt, the preprocessor sets `prompt_injected_reasoning=true`
-so the parser starts in reasoning mode immediately. Combined with the
-`last_is_tool` gate:
+so the parser starts in reasoning mode immediately.
 
-- `last_is_tool == true` → force-reasoning **off** (current behavior).
-  Rationale: tool-continuation turns produce the final user-facing
-  answer directly from the tool result; force-reasoning would mislabel
-  that final answer as `reasoning_content`. Matches SGLang's observed
-  Kimi K2.5 behavior.
-- `last_is_tool == false` → force-reasoning honored.
+Thinking arguments are normalized to a JSON boolean before prompt
+rendering so the template, SGLang guided-output gate, and postprocessor
+use the same value. The accepted enabled values are `true`, `"true"`, `"1"`,
+`"yes"`, `"on"`, and nonzero numbers. Kimi defaults an omitted value to
+enabled; `thinking=false` and equivalent falsey values disable PRE.2.
 
-**Tension:** DSv4 disagrees with this gate — the V4 formatter *seeds*
-`<think>` into the prompt after a merged tool result, so DSv4 needs
-force-reasoning **on** even when `last_is_tool`. Tracked in
-[#8901](https://github.com/ai-dynamo/dynamo/pull/8901). Resolution
-likely requires per-parser handling of this gate (mirror PRE.2's
-match-on-parser shape) rather than a global behavior.
+Kimi tool-continuation turns therefore honor prompt-injected reasoning
+for both explicit and default-enabled thinking. K2.5 can rarely return a
+marker-free answer despite a thinking prompt; without output buffering,
+that model deviation is classified as reasoning content.
+
+For other parsers, `prompt_injected_reasoning` continues to start the
+configured parser in reasoning mode. This includes DSv4, whose formatter
+can seed `<think>` after a merged tool result; see
+[#8901](https://github.com/ai-dynamo/dynamo/pull/8901).
 
 **Wrong value silently produces:** `</think>` literal leaking into
 `content` (DSv4) or final answer mislabeled as reasoning (Kimi K2.5).
@@ -142,7 +143,7 @@ if you know the answer, fill it in.
 |---|---|---|---|---|---|
 | `harmony` (tool) / `gpt_oss` (reasoning) | **YES** | — | — | — | Channels: `<\|channel\|>analysis<\|message\|>...<\|end\|>`. gpt-oss-20B/120B. |
 | `gemma4` (tool + reasoning) | **YES** | `enable_thinking=false` | — | — | Prompt trigger: `<\|think\|>` in the system turn. Parser-visible reasoning output: `<\|channel>thought\n...<channel\|>`. |
-| `kimi_k25` (reasoning) | ? — markers are `<\|tool_calls_section_*\|>`, likely YES | `thinking=false` | — | OFF when last_is_tool (currently global) | Special-token markers in K2/K2.5/K2.6. |
+| `kimi_k25` (reasoning) | **YES** | normalized `thinking=false` | — | ON when thinking is enabled or omitted; OFF when disabled | `thinking` and `enable_thinking` are normalized before rendering; omitted means enabled. Marker-free K2.5 post-tool answers are a known model deviation. |
 | `deepseek_v3` / `deepseek_v3_1` (tool + reasoning) | ? — Unicode markers (`<｜tool_calls_section_begin｜>`); likely YES | opt in with `thinking=true` | — | — | Force-reasoning aliases use shape-aware guided JSON parsing. |
 | `deepseek_v3_2` / `deepseek_v4` (DSML) | ? — DSML markers (`<｜DSML｜tool_calls>`); likely YES | `thinking=false` / `thinking_mode=chat` | — | **NEEDS ON** even when last_is_tool (V4 formatter seeds `<think>`); see #8901 | DSv3.2 / DSv4 grammar. |
 | `deepseek_r1` (reasoning) | NO (uses plain `<think>`) | `thinking=false` | — | — | DeepSeek-R1. |
@@ -179,9 +180,9 @@ if you know the answer, fill it in.
    leading reasoning marker that should become normal content? If yes,
    add an explicit strip/pass-through case and stream test coverage.
 4. PRE.3: when the previous turn is a tool call, does the model
-   re-enter reasoning (DSv4) or skip straight to answer (Kimi K2.5)?
-   Document explicitly in this table; current code uses a global gate
-   that may need to become parser-specific (see #8901).
+   re-enter reasoning (DSv4 and Kimi K2.6 with `thinking=true`) or skip
+   straight to the answer (legacy Kimi K2.5 behavior)? Document the request
+   controls and parser-specific behavior explicitly in this table.
 5. PRE.4: confirm `tool_choice = required/named` doesn't conflict with
    the parser's behavior. Add shape detection only after proving both bare-JSON
    and reasoning-boundary JSON paths.

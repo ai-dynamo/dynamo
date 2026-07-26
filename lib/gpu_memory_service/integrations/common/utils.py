@@ -23,6 +23,18 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def torch_device():
+    """Return the torch device module (torch.cuda or torch.xpu) for the active VMM device."""
+    from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm_device_type
+
+    device_type = get_vmm_device_type()
+    if device_type == VMMDeviceType.CUDA:
+        return torch.cuda
+    if device_type == VMMDeviceType.XPU:
+        return torch.xpu
+    raise RuntimeError(f"Unsupported VMM device type: {device_type!r}")
+
+
 @dataclass(frozen=True)
 class GMSCommittedMemoryStats:
     committed_bytes: int

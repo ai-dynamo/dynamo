@@ -17,15 +17,15 @@
 {{- if $operatorValues.namespaceRestriction.enabled }}
 
 ================================================================================
-  DEPRECATION WARNING
+  DEVELOPMENT AND TESTING ONLY
 ================================================================================
-  Namespace-restricted mode (namespaceRestriction.enabled=true) is DEPRECATED
-  and will be removed in a future release.
+  Namespace-restricted mode (namespaceRestriction.enabled=true) is not
+  supported for production.
 
   The operator is configured for namespace: {{ default .Release.Namespace $operatorValues.namespaceRestriction.targetNamespace }}
 
-  Please migrate to cluster-wide mode by removing the namespaceRestriction
-  configuration from your values.
+  This release must use dynamo-operator.upgradeCRD=false and use CRDs managed
+  by the cluster-wide operator. Use cluster-wide mode for production deployments.
 
   See: https://github.com/ai-dynamo/dynamo/blob/main/docs/kubernetes/installation-guide.md
 ================================================================================

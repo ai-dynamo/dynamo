@@ -155,6 +155,134 @@ class TestPrepareRequestToolStripping:  # FRONTEND.1 + FRONTEND.3 — tool strip
         ), "No tools in request should produce None tools in template"
 
 
+class TestChatTemplateArgsPassthrough:
+    """Per-request chat template kwargs must survive into the rendered template.
+
+    pythonize serializes the request field under its Rust name
+    ``chat_template_args`` (serde ``alias`` is deserialize-only), so the vLLM
+    processor must read that key, not only vLLM's native ``chat_template_kwargs``.
+    """
+
+    def test_chat_template_args_reaches_template(self, tokenizer):
+        """Kwargs keyed as chat_template_args (the pythonize'd key) reach the template."""
+        _, _, _, _, chat_params = _prepare_request(
+            {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                "chat_template_args": {"enable_thinking": False},
+            },
+            tokenizer=tokenizer,
+            tool_parser_class=None,
+        )
+        assert (
+            chat_params.chat_template_kwargs.get("enable_thinking") is False
+        ), "chat_template_args must be forwarded to the chat template"
+
+    def test_chat_template_kwargs_native_key_still_works(self, tokenizer):
+        """The vLLM-native chat_template_kwargs key keeps working."""
+        _, _, _, _, chat_params = _prepare_request(
+            {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                "chat_template_kwargs": {"enable_thinking": False},
+            },
+            tokenizer=tokenizer,
+            tool_parser_class=None,
+        )
+        assert (
+            chat_params.chat_template_kwargs.get("enable_thinking") is False
+        ), "native chat_template_kwargs must be forwarded to the chat template"
+
+    def test_nested_reasoning_effort_is_not_clobbered(self, tokenizer):
+        """A reasoning_effort nested in template kwargs survives the top-level default."""
+        _, _, _, _, chat_params = _prepare_request(
+            {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                "chat_template_args": {"reasoning_effort": "high"},
+            },
+            tokenizer=tokenizer,
+            tool_parser_class=None,
+        )
+        assert (
+            chat_params.chat_template_kwargs.get("reasoning_effort") == "high"
+        ), "nested reasoning_effort must not be overwritten by an absent top-level field"
+
+    def test_top_level_reasoning_effort_wins_over_nested(self, tokenizer):
+        """An explicit top-level reasoning_effort overrides a nested one."""
+        _, _, _, _, chat_params = _prepare_request(
+            {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                "reasoning_effort": "low",
+                "chat_template_args": {"reasoning_effort": "high"},
+            },
+            tokenizer=tokenizer,
+            tool_parser_class=None,
+        )
+        assert chat_params.chat_template_kwargs.get("reasoning_effort") == "low"
+
+    def test_reserved_render_key_in_template_args_does_not_crash(self, tokenizer):
+        """A renderer-reserved key nested in template kwargs must not raise TypeError."""
+        _, _, _, _, chat_params = _prepare_request(
+            {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                "chat_template_args": {"documents": [{"text": "doc"}]},
+            },
+            tokenizer=tokenizer,
+            tool_parser_class=None,
+        )
+        # Renderer-managed value wins over the client's nested key (no crash either).
+        assert chat_params.chat_template_kwargs["documents"] is None
+
+
+class TestServerDefaultChatTemplateKwargs:
+    """The server-wide --default-chat-template-kwargs must reach the template."""
+
+    def _enable_thinking(self, tokenizer, request_args):
+        """Return the template's enable_thinking under a `{enable_thinking: False}` default."""
+        request = {"model": MODEL, "messages": [{"role": "user", "content": "Hello"}]}
+        if request_args is not None:
+            request["chat_template_args"] = request_args
+        _, _, _, _, chat_params = _prepare_request(
+            request,
+            tokenizer=tokenizer,
+            tool_parser_class=None,
+            default_chat_template_kwargs={"enable_thinking": False},
+        )
+        return chat_params.chat_template_kwargs.get("enable_thinking")
+
+    @pytest.mark.parametrize(
+        "request_args, expected",
+        [
+            (None, False),  # omitted request kwargs: the server default applies
+            ({"enable_thinking": True}, True),  # a request kwarg overrides the default
+            (
+                {"enable_thinking": None},
+                False,
+            ),  # unset (None) request value keeps the default
+        ],
+    )
+    def test_server_default_precedence(self, tokenizer, request_args, expected):
+        assert self._enable_thinking(tokenizer, request_args) is expected
+
+    def test_server_default_is_not_mutated(self, tokenizer):
+        """Processing must not mutate the shared server-default dict."""
+        default = {"enable_thinking": False}
+        _prepare_request(
+            {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                "reasoning_effort": "high",
+            },
+            tokenizer=tokenizer,
+            tool_parser_class=None,
+            default_chat_template_kwargs=default,
+        )
+        assert default == {"enable_thinking": False}
+
+
 class TestMultimodalFeatureMetadata:
     def _feature(
         self, modality, mm_hash, offset, length, data=_DEFAULT_MM_DATA, is_embed=None
@@ -320,6 +448,59 @@ async def test_prepare_mm_routing_skips_single_modality_transfer_for_mixed_featu
     }
 
 
+@pytest.mark.asyncio
+@pytest.mark.multimodal
+async def test_prepare_mm_routing_opaque_uuid_skips_routing_and_transfer(
+    vllm_processor_module,
+    monkeypatch,
+):
+    def fail_routing(*args, **kwargs):
+        raise AssertionError("opaque user UUIDs must not be parsed as routing hashes")
+
+    monkeypatch.setattr(
+        vllm_processor_module,
+        "build_mm_routing_info_from_features",
+        fail_routing,
+    )
+
+    def fail_sender():
+        raise AssertionError("opaque user UUIDs must be processed by the worker")
+
+    monkeypatch.setattr(vllm_processor_module, "MmKwargsShmSender", fail_sender)
+
+    processor = vllm_processor_module.VllmProcessor.__new__(
+        vllm_processor_module.VllmProcessor
+    )
+    processor.block_size = 16
+    processor.nixl_mm_enabled = True
+    processor.use_shm_transfer = True
+    processor._sender = None
+
+    feature_hash = "derived-from-uuid-and-processor-kwargs"
+    vllm_preproc = SimpleNamespace(
+        prompt_token_ids=list(range(16)),
+        mm_features=[
+            SimpleNamespace(
+                modality="image",
+                mm_hash=feature_hash,
+                data=object(),
+                mm_position=SimpleNamespace(offset=0, length=16),
+            )
+        ],
+    )
+    dynamo_preproc = {"multi_modal_uuids": {"image_url": ["opaque-user-key"]}}
+
+    mm_routing_info, cleanup_items, transferred = await processor._prepare_mm_routing(
+        vllm_preproc,
+        dynamo_preproc,
+    )
+
+    assert mm_routing_info is None
+    assert cleanup_items == []
+    assert transferred is False
+    assert "extra_args" not in dynamo_preproc
+
+
 class TestReasoningParserMetadata:
     def test_no_reasoning_parser_returns_none(self):
         from dynamo.frontend.vllm_processor import _build_reasoning_parser_metadata
@@ -394,6 +575,102 @@ class TestReasoningParserMetadata:
                 "chat_template_kwargs": {"reasoning_effort": "high"}
             },
         }
+
+
+@pytest.mark.asyncio
+@pytest.mark.multimodal
+async def test_build_engine_inputs_preserves_multimodal_uuids(
+    vllm_processor_module,
+):
+    class Renderer:
+        async def process_for_engine_async(self, prompt, arrival_time):
+            assert prompt == {
+                "prompt": "rendered prompt",
+                "prompt_token_ids": [1, 2, 3],
+                "multi_modal_data": {"image": [image]},
+                "multi_modal_uuids": {"image": ["opaque-user-key"]},
+                "cache_salt": "salt",
+                "mm_processor_kwargs": {"do_sample_frames": False},
+            }
+            assert isinstance(arrival_time, float)
+            return {"type": "multimodal", "mm_hashes": ["opaque-user-key"]}
+
+    image = object()
+    engine_inputs = await vllm_processor_module._build_engine_inputs(
+        Renderer(),
+        {
+            "prompt": "rendered prompt",
+            "multi_modal_data": {"image": [image]},
+            "multi_modal_uuids": {"image": ["opaque-user-key"]},
+        },
+        [1, 2, 3],
+        cache_salt="salt",
+        mm_processor_kwargs={"do_sample_frames": False},
+    )
+
+    assert engine_inputs == {
+        "type": "multimodal",
+        "mm_hashes": ["opaque-user-key"],
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.multimodal
+async def test_build_engine_inputs_defers_uuid_only_processing_to_worker(
+    vllm_processor_module,
+):
+    class Renderer:
+        async def process_for_engine_async(self, prompt, arrival_time):
+            assert prompt == {
+                "prompt": "rendered prompt",
+                "prompt_token_ids": [1, 2, 3],
+                "cache_salt": "salt",
+                "mm_processor_kwargs": {"do_sample_frames": False},
+            }
+            assert isinstance(arrival_time, float)
+            return {"type": "token", "prompt_token_ids": [1, 2, 3]}
+
+    engine_inputs = await vllm_processor_module._build_engine_inputs(
+        Renderer(),
+        {
+            "prompt": "rendered prompt",
+            "multi_modal_data": {"image": [None]},
+            "multi_modal_uuids": {"image": ["worker-cached-image"]},
+        },
+        [1, 2, 3],
+        cache_salt="salt",
+        mm_processor_kwargs={"do_sample_frames": False},
+        defer_multimodal_processing=True,
+    )
+
+    assert engine_inputs == {"type": "token", "prompt_token_ids": [1, 2, 3]}
+
+
+@pytest.mark.multimodal
+def test_normalize_vllm_image_parts_defaults_detail_without_lifting_nested_uuid(
+    vllm_processor_module,
+) -> None:
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "https://example.com/image.png",
+                        "detail": None,
+                        "uuid": "92b888ad-e64a-478f-b688-5091e16544e3",
+                    },
+                }
+            ],
+        }
+    ]
+
+    vllm_processor_module._normalize_vllm_image_parts(messages)
+
+    part = messages[0]["content"][0]
+    assert "uuid" not in part
+    assert part["image_url"]["detail"] == "auto"
 
 
 class _FakeOutputProcessor:

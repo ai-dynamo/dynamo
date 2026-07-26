@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 ECOSYSTEM = "dpkg"
 
-_COPYRIGHT_DIR = Path("/usr/share/doc")
+_COPYRIGHT_DIR = Path("usr/share/doc")
 
 
 # ---- Debian short-name → SPDX ID mapping ----------------------------------------
@@ -361,7 +361,7 @@ def _parse_free_form(text: str) -> str | None:
     return None
 
 
-def _resolve_license(pkg_name: str, version: str = "") -> str:
+def _resolve_license(pkg_name: str, version: str = "", root: Path = Path("/")) -> str:
     """Return the SPDX expression for a single dpkg package, or UNKNOWN.
 
     Resolution order:
@@ -381,7 +381,7 @@ def _resolve_license(pkg_name: str, version: str = "") -> str:
     if overridden:
         return overridden
 
-    copyright_path = _COPYRIGHT_DIR / pkg_name / "copyright"
+    copyright_path = root / _COPYRIGHT_DIR / pkg_name / "copyright"
     if not copyright_path.is_file():
         return UNKNOWN
 
@@ -398,7 +398,7 @@ def _resolve_license(pkg_name: str, version: str = "") -> str:
 # ---- Distribution scan ---------------------------------------------------------
 
 
-def collect_components() -> list[Component]:
+def collect_components(root: Path = Path("/")) -> list[Component]:
     """Run dpkg-query, resolve licenses, return Components.
 
     Returns an empty list (with a warning) when dpkg-query is unavailable —
@@ -406,13 +406,12 @@ def collect_components() -> list[Component]:
     (e.g. macOS dev shells, Alpine builders, distroless images). Inside the
     runtime images we ship, dpkg-query is always present.
     """
+    cmd = ["dpkg-query", "-W", "-f=${Package}\\t${Version}\\n"]
+    if root != Path("/"):
+        cmd.insert(1, f"--admindir={root / 'var/lib/dpkg'}")
+
     try:
-        result = subprocess.run(
-            ["dpkg-query", "-W", "-f=${Package}\\t${Version}\\n"],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
     except FileNotFoundError:
         logger.warning(
             "dpkg-query not found; skipping dpkg generator. "
@@ -431,7 +430,7 @@ def collect_components() -> list[Component]:
         version = version.strip()
         if not name or not version:
             continue
-        spdx = _resolve_license(name, version)
+        spdx = _resolve_license(name, version, root)
         if spdx == UNKNOWN:
             unresolved += 1
         components.append(
@@ -445,8 +444,9 @@ def collect_components() -> list[Component]:
         )
 
     logger.info(
-        "Collected %d dpkg packages (%d unresolved → UNKNOWN)",
+        "Collected %d dpkg packages from %s (%d unresolved → UNKNOWN)",
         len(components),
+        root,
         unresolved,
     )
     return components
@@ -455,6 +455,7 @@ def collect_components() -> list[Component]:
 def generate(
     output_dir: Path,
     subtract: set[tuple[str, str]] | None = None,
+    root: Path = Path("/"),
 ) -> list[Component]:
     """Read dpkg state, write NOTICES-Apt.txt + dpkg-deps.csv.
 
@@ -463,7 +464,7 @@ def generate(
     """
     from . import common
 
-    components = collect_components()
+    components = collect_components(root)
     if subtract:
         components = common.subtract_baseline(components, subtract)
     common.write_notices(ECOSYSTEM, components, output_dir)
