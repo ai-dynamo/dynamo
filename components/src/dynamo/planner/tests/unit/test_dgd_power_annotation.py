@@ -156,7 +156,14 @@ def test_asymmetric_caps_are_independent():
 
 
 # --------------------------------------------------------------------------- #
-# resolve_component_power_configs — aggregate
+# resolve_component_power_configs — aggregate (parser-level coverage only)
+#
+# These tests verify that the power parser's _resolve_one_power_service()
+# fallback can read a generic type:worker component. They do NOT imply that
+# mode="agg" + enable_power_awareness=True is supported end-to-end: the
+# Kubernetes validate_deployment and GPU-count paths use the typed decode
+# resolver, which does not follow the generic type:worker fallback. Power
+# awareness is explicitly rejected for mode="agg" in PlannerConfig validation.
 # --------------------------------------------------------------------------- #
 
 

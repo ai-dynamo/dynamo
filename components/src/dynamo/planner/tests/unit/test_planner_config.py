@@ -81,6 +81,19 @@ def test_power_awareness_requires_kubernetes_environment():
         )
 
 
+def test_power_awareness_rejects_agg_mode():
+    """Power awareness is not supported with mode='agg': the Kubernetes
+    validate_deployment and GPU-count paths use the typed decode resolver, which
+    does not follow the generic type:worker fallback used by the power parser."""
+    with pytest.raises(ValidationError, match="not supported with mode='agg'"):
+        PlannerConfig(
+            namespace="test-ns",
+            mode="agg",
+            enable_power_awareness=True,
+            total_gpu_power_limit=5000,
+        )
+
+
 def test_power_awareness_enabled_with_required_fields_ok():
     """Budget present and environment=kubernetes (default): config validates."""
     config = PlannerConfig(

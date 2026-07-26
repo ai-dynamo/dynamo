@@ -803,6 +803,14 @@ class PlannerConfig(BaseModel):
                     "which only the Kubernetes connector resolves; virtual/replay and "
                     "global-planner modes have no DGD with authoritative caps."
                 )
+            if self.mode == "agg":
+                raise ValueError(
+                    "enable_power_awareness=True is not supported with mode='agg'. "
+                    "The Kubernetes deployment-validation and GPU-count paths use the "
+                    "typed decode role resolver, which does not follow the generic "
+                    "type:worker fallback used by the power parser. Power awareness "
+                    "is supported for mode='disagg', 'prefill', and 'decode'."
+                )
 
         if self.environment == "global-planner" and not self.global_planner_namespace:
             raise ValueError(

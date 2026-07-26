@@ -96,6 +96,10 @@ class TestGetComponentPowerConfigs:
         assert decode.watts_per_replica == 1200  # 4 GPU × 300 W
 
     def test_resolves_agg_decode_only(self, connector, mock_kube_api):
+        # Parser-level coverage only: verifies the generic type:worker fallback
+        # in _resolve_one_power_service(). mode="agg" + enable_power_awareness
+        # is rejected by PlannerConfig validation because the shared deployment-
+        # validation and GPU-count paths do not follow this fallback.
         mock_kube_api.get_graph_deployment.return_value = _dgd(
             _worker("VllmWorker", "worker", "300", "4"),
         )
