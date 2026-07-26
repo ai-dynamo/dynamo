@@ -28,7 +28,7 @@ limitations under the License.
 
 <!-- The SVG badge uses systemLanguage so it only draws for Simplified Chinese/China browser language preferences. -->
 <p align="left">
-  <a href="./README.zh-CN.md" hreflang="zh-CN"><img src="./docs/assets/img/readme-zh-cn-link.svg" alt="简体中文" height="28" /></a>
+  <a href="./README.zh-CN.md" hreflang="zh-CN"><img src="./docs/fern/assets/img/readme-zh-cn-link.svg" alt="简体中文" height="28" /></a>
 </p>
 
 # Dynamo
@@ -67,7 +67,7 @@ If you're running a single model on a single GPU, your inference engine alone is
 | [**SLA-Based Planner**](https://docs.nvidia.com/dynamo/components/planner/planner-guide) | ✅ | ✅ | ✅ |
 | [**KVBM**](https://docs.nvidia.com/dynamo/components/kvbm) | 🚧 | ✅ | ✅ |
 | [**Multimodal**](https://docs.nvidia.com/dynamo/user-guides/multimodal) | ✅ | ✅ | ✅ |
-| [**Tool Calling**](docs/tool-calling/README.md) | ✅ | ✅ | ✅ |
+| [**Tool Calling**](docs/fern/tool-calling/README.mdx) | ✅ | ✅ | ✅ |
 
 > **[Full Feature Matrix →](https://docs.nvidia.com/dynamo/resources/feature-matrix)** — LoRA, request migration, speculative decoding, and feature interactions.
 
@@ -160,9 +160,9 @@ Install [uv](https://github.com/astral-sh/uv) (`curl -LsSf https://astral.sh/uv/
 uv pip install --prerelease=allow "ai-dynamo[sglang]"   # or [vllm]
 ```
 
-> **Note:** TensorRT-LLM requires `pip` with `--extra-index-url https://pypi.nvidia.com`. See the [install guide](docs/getting-started/local-installation.md) for TRT-LLM-specific instructions.
+> **Note:** TensorRT-LLM requires `pip` with `--extra-index-url https://pypi.nvidia.com`. See the [install guide](docs/fern/getting-started/local-installation.mdx) for TRT-LLM-specific instructions.
 
-Then start the frontend and a worker as shown above. See the [full installation guide](docs/getting-started/local-installation.md) for system dependencies and backend-specific notes.
+Then start the frontend and a worker as shown above. See the [full installation guide](docs/fern/getting-started/local-installation.mdx) for system dependencies and backend-specific notes.
 
 ### Option C: Kubernetes (recommended)
 
@@ -191,11 +191,11 @@ Pre-built recipes for common models:
 | DeepSeek-R1 | SGLang | Disaggregated | [View](recipes/deepseek-r1/sglang/) |
 | Qwen3-32B-FP8 | TensorRT-LLM | Aggregated | [View](recipes/qwen3-32b-fp8/trtllm/) |
 
-See [recipes/](recipes/README.md) for the full list. Cloud-specific guides: [AWS EKS](docs/kubernetes/cloud-providers/eks/eks.md) · [Google GKE](docs/kubernetes/cloud-providers/gke/gke.md) · [Azure AKS](docs/kubernetes/cloud-providers/aks/aks.md) · [Amazon ECS](docs/kubernetes/cloud-providers/ecs/ecs.md)
+See [recipes/](recipes/README.md) for the full list. Cloud-specific guides: [AWS EKS](docs/fern/kubernetes/cloud-providers/eks/eks.md) · [Google GKE](docs/fern/kubernetes/cloud-providers/gke/gke.md) · [Azure AKS](docs/fern/kubernetes/cloud-providers/aks/aks.md) · [Amazon ECS](docs/fern/kubernetes/cloud-providers/ecs/ecs.md)
 
 ## Building from Source
 
-For contributors who want to build and develop locally. See the [full build guide](docs/getting-started/building-from-source.md) for details.
+For contributors who want to build and develop locally. See the [full build guide](docs/fern/getting-started/building-from-source.md) for details.
 
 ```bash
 # Install system deps (Ubuntu 24.04)
@@ -239,8 +239,8 @@ Dynamo is built in the open with an OSS-first development model. We welcome cont
 
 Dynamo provides comprehensive benchmarking tools:
 
-- **[Benchmarking Guide](docs/benchmarks/benchmarking.md)** – Compare deployment topologies using AIPerf
-- **[SLA-Driven Deployments](docs/components/planner/planner-guide.md)** – Optimize deployments to meet SLA requirements
+- **[Benchmarking Guide](docs/fern/benchmarks/benchmarking.md)** – Compare deployment topologies using AIPerf
+- **[SLA-Driven Deployments](docs/fern/components/planner/planner-guide.md)** – Optimize deployments to meet SLA requirements
 
 ## Frontend OpenAPI Specification
 
@@ -254,7 +254,7 @@ This writes to `docs/reference/api/openapi.json`.
 
 ## Service Discovery and Messaging
 
-Dynamo uses TCP for inter-component communication. On Kubernetes, native resources ([CRDs + EndpointSlices](docs/kubernetes/service-discovery.md)) handle service discovery. External services are optional for most deployments:
+Dynamo uses TCP for inter-component communication. On Kubernetes, native resources ([CRDs + EndpointSlices](docs/fern/kubernetes/service-discovery.md)) handle service discovery. External services are optional for most deployments:
 
 | Deployment | etcd | NATS | Notes |
 |------------|------|------|-------|
@@ -291,8 +291,8 @@ To quickly setup both: `docker compose -f dev/docker-compose.yml up -d`
 <!-- Reference links for Feature Compatibility Matrix -->
 [disagg]: docs/design-docs/disagg-serving.md
 [kv-routing]: docs/components/router/README.md
-[planner]: docs/components/planner/planner-guide.md
+[planner]: docs/fern/components/planner/planner-guide.md
 [kvbm]: docs/components/kvbm/README.md
 [migration]: docs/fault-tolerance/request-migration.md
 [lora]: examples/backends/vllm/deploy/lora/README.md
-[tools]: docs/tool-calling/README.md
+[tools]: docs/fern/tool-calling/README.mdx

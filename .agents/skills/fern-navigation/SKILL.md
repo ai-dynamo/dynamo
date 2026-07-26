@@ -1,6 +1,14 @@
 ---
 name: fern-navigation
 description: Knowledge of Fern's site-level navigation and structure configuration — how a docs site is organized in `docs.yml` (and product/version `.yml` files) using sections, pages, folders, tabs, tab variants, versions, products, changelogs, and site-level settings, plus per-page frontmatter. Use when designing or changing the shape of a Fern docs site (adding a tab, splitting into products, cutting a version, restructuring the sidebar, moving the changelog, tuning the navbar/layout/theme) or when a user asks "what options does Fern give me for navigation" or "how do I configure X in docs.yml". Complements fern-components (in-page MDX components) and dynamo-docs (this repo's page placement, style guide, and .md/.mdx rules).
+license: Apache-2.0
+metadata:
+  author: NVIDIA
+  tags:
+    - fern
+    - docs
+    - navigation
+
 ---
 
 # Fern Navigation & Site Structure

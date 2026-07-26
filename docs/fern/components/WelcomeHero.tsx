@@ -127,8 +127,8 @@ function CommunityRail() {
     },
     {
       app: "WeChat",
-      message: "Ask to join the Dynamo community group",
-      href: "/dynamo/dev/contribution-guide.zh-CN",
+      message: "Request a group invite in Dynamo Discussions",
+      href: "https://github.com/ai-dynamo/dynamo/discussions/categories/general",
       icon: <WeChatIcon />,
       tone: "wechat",
     },

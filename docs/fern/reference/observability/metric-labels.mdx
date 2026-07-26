@@ -85,6 +85,14 @@ Added by an individual metric family. Each label appears only on the metrics not
   `[Shared]` On `dynamo_frontend_worker_*` — the data-parallel rank of the worker. Example: `0`.
 </ParamField>
 
+<ParamField path="policy_class" type="string">
+  `[Shared]` On `dynamo_frontend_router_queue_*` — the resolved physical scheduler queue. With policy-family or cache-bucket configuration, this can differ from the family requested by the client.
+</ParamField>
+
+<ParamField path="reason" type="string">
+  `[Shared]` On `dynamo_frontend_router_queue_backpressure_total` — the configured queue limit that rejected the request.
+</ParamField>
+
 <ParamField path="migration_type" type="string">
   `[Shared]` On `dynamo_frontend_model_migration_total` — the category of request migration triggered by worker unavailability.
 
@@ -100,7 +108,7 @@ Added by an individual metric family. Each label appears only on the metrics not
 <ParamField path="status" type="string">
   `[Shared]` On `dynamo_component_kv_cache_events_applied` — the outcome of applying a KV cache event to the router's radix-tree index.
 
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>ok</Badge> <Badge intent="note" minimal>parent_block_not_found</Badge> <Badge intent="note" minimal>block_not_found</Badge> <Badge intent="note" minimal>invalid_block</Badge></span>
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>ok</Badge> <Badge intent="note" minimal>parent_block_not_found</Badge> <Badge intent="note" minimal>block_not_found</Badge> <Badge intent="note" minimal>invalid_block</Badge> <Badge intent="note" minimal>capacity_exhausted</Badge> <Badge intent="note" minimal>indexer_invariant_violation</Badge></span>
 </ParamField>
 
 <ParamField path="event_type" type="string">
@@ -176,7 +184,7 @@ Values you will see in the `dynamo_endpoint` label on backend workers.
 | Value | Meaning |
 |-------|---------|
 | `generate` | Main inference RPC; one increment per request received. On a prefill worker this counts prefill-stage `generate` calls; on a decode worker this counts decode-stage `generate` calls. |
-| `clear_kv_blocks` | Admin RPC to flush the worker's KV cache. Registered on both prefill and decode workers. |
+| `clear_kv_blocks` | Legacy vLLM distributed admin RPC to flush the worker KV cache. Unified vLLM exposes `/engine/control/clear_kv_blocks` on the system server instead; that route does not emit this component endpoint label. |
 | `worker_kv_indexer_query_dp{N}` | KV-router queries to the worker's local KV indexer about its cached prefix blocks. One endpoint per data-parallel rank (`_dp0`, `_dp1`, …). Appears on the worker that owns the prefix caches the router consults — in disaggregated serving that is the prefill worker. |
 
 ### Component error types

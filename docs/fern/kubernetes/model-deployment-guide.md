@@ -52,7 +52,7 @@ flowchart LR
 
 | Resource or path | What it is | Use it when | Learn more |
 |---|---|---|---|
-| `DynamoGraphDeployment` (DGD) | The canonical live deployment for a Dynamo inference graph. | You have a known-good configuration or tuned YAML. | [Creating Deployments](deployment/create-deployment.md), [DGD API](api-reference.md#dynamographdeployment) |
+| `DynamoGraphDeployment` (DGD) | The canonical live deployment for a Dynamo inference graph. | You have a known-good configuration or tuned YAML. | [Deploy with DGD](dgd-guide.md), [DGD API](api-reference.md#dynamographdeployment) |
 | `DynamoComponentDeployment` (DCD) | The per-component deployment objects created from a DGD. | Usually not authored directly; inspect them to debug frontend/router/worker rollout. | [DCD API](api-reference.md#dynamocomponentdeployment) |
 | `DynamoGraphDeploymentRequest` (DGDR) | A deploy-by-intent request that profiles your model/hardware and generates a DGD. | You want Dynamo to size the deployment, choose parallelism, configure supported generated-deployment features such as Planner, or produce DGD YAML. | [DGDR Reference](dgdr-reference.mdx) |
 | Recipes | Curated `deploy.yaml` manifests that are already DGD specs. | A recipe matches your model, backend, hardware, and serving mode. | [Dynamo recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes) |
@@ -67,8 +67,8 @@ are reference material; you can read them as needed instead of going linearly.
 |---|---|---|
 | A recipe matches your model/backend/hardware | Apply the recipe's model cache resources, then apply its `deploy.yaml`. | [Deploy a Tuned DGD from Recipes](#deploy-a-tuned-dgd-from-recipes) |
 | You want Dynamo to generate the deployment | Create a DGDR. Use `autoApply: true` to let the operator create the DGD, or `autoApply: false` to inspect the generated DGD YAML first. | [Use DGDR to Generate a DGD](#use-dgdr-to-generate-a-dgd) |
-| You already know the exact topology | Author or edit a DGD directly, then apply it with `kubectl`. | [Creating Deployments](deployment/create-deployment.md) |
-| You are deploying vLLM on Intel XPU | Use the XPU DRA templates and an XPU runtime image. | [Creating Deployments](deployment/create-deployment.md) |
+| You already know the exact topology | Author or edit a DGD directly, then apply it with `kubectl`. | [Deploy with DGD](dgd-guide.md) |
+| You are deploying vLLM on Intel XPU | Use the XPU DRA templates and an XPU runtime image. | [vLLM Deployment Templates](../templates/vllm.mdx) |
 | You are preparing for production | Add model caching, choose backend/search strategy, and validate networking/planner needs. | [Production Details](#production-details) |
 
 ## Deploy a Tuned DGD from Recipes
@@ -588,6 +588,6 @@ spec:
 - [Profiler Guide](../components/profiler/profiler-guide.md) — Profiling algorithms, picking modes, gate checks
 - [Planner Guide](../components/planner/planner-guide.md) — Scaling modes, PlannerConfig reference
 - [Model Caching](model-caching.md) — PVC setup, ModelExpress, and ModelStreamer
-- [Creating Deployments](deployment/create-deployment.md) — Manual DGD spec for hand-crafted configs
+- [Deploy with DGD](dgd-guide.md) — Author and apply a DGD for a custom topology
 - [Multinode Deployments](deployment/multinode-deployment.md) — Grove, LWS, and multinode details
 - [Disaggregated Communication](disagg-communication-guide.md) — NIXL, RDMA, and networking

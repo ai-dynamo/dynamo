@@ -18,7 +18,7 @@ Before authoring a DGD, make sure you have:
 - A Kubernetes cluster with the **Dynamo Platform installed**. See the [Installation Guide](installation-guide.md).
 - `kubectl` access to that cluster and a target namespace.
 - A **HuggingFace token** for gated or rate-limited models (you create the Secret in step 1).
-- New to Dynamo on Kubernetes? Run one model end to end with the [Kubernetes Quickstart](README.md) first, then come back here to author your own spec.
+- New to Dynamo on Kubernetes? Run one model end to end with the [Kubernetes Quickstart](quickstart.mdx) first, then come back here to author your own spec.
 
 For the concepts behind the CRDs and the operator, see the [Deployment Overview](model-deployment-guide.md) and the [API Reference](api-reference.md).
 
@@ -335,7 +335,7 @@ If you are staying aggregated, keep the single worker and continue to the next s
 
 In the disaggregated spec, `type: prefill` and `type: decode` tag the roles, the KV cache moves over NIXL (`--kv-transfer-config`), and `sharedMemorySize` is raised for the transfer. When you disaggregate, the next step's sizing applies to prefill and decode **separately** — you pick TP/PP for each role.
 
-The fastest way to start is to copy a backend template rather than type the spec from scratch. Each backend ships `agg.yaml` and `disagg.yaml` under its `deploy/` folder — for vLLM, [`examples/backends/vllm/deploy/`](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/deploy/README.md) (SGLang and TensorRT-LLM have equivalent `deploy/` folders). Adapt the model, image, and parallelism to your case.
+The fastest way to start is to copy a ready-to-apply Kubernetes template rather than type the spec from scratch. Choose the [vLLM](../templates/vllm.mdx), [SGLang](../templates/sglang.mdx), or [TensorRT-LLM](../templates/trtllm.mdx) templates in the Recipes tab, then adapt the model, image, and parallelism to your case.
 
 For disaggregation-specific configuration — RDMA resources, UCX environment variables, and prefill/decode scaling — see [Disaggregated Serving](../features/disaggregated-serving/README.md).
 
@@ -728,28 +728,28 @@ This runs eight TP-2 workers (16 GPUs). To turn it into one of the variations ab
 These are independent capabilities you opt into per workload. None are required for a working deployment.
 
 <CardGroup cols={2}>
-  <Card title="Set up KV-Aware Routing" icon="regular route" href="/dynamo/dev/kubernetes/dgd-kv-routing">
+  <Card title="Set up KV-Aware Routing" icon="regular route" href="dgd-kv-routing.md">
     Route requests to the worker that already holds the prompt's KV cache prefix to cut TTFT.
   </Card>
-  <Card title="Set up KV Cache Offloading" icon="regular layer-group" href="/dynamo/dev/kubernetes/dgd-kv-offloading">
+  <Card title="Set up KV Cache Offloading" icon="regular layer-group" href="dgd-kv-offloading.md">
     Spill KV blocks to host memory or disk to serve longer contexts and reuse cache.
   </Card>
-  <Card title="Set up Disaggregated Serving" icon="regular arrows-split-up-and-left" href="/dynamo/dev/features/disaggregated-serving">
+  <Card title="Set up Disaggregated Serving" icon="regular arrows-split-up-and-left" href="../features/disaggregated-serving/README.md">
     Split prefill and decode into independently scaled workers with KV transfer over RDMA.
   </Card>
-  <Card title="Sizing with AIConfigurator" icon="regular ruler-combined" href="/dynamo/dev/kubernetes/dgd-aiconfigurator">
+  <Card title="Sizing with AIConfigurator" icon="regular ruler-combined" href="dgd-aiconfigurator.md">
     Auto-pick TP/PP/DP and replica counts to meet a TTFT/ITL latency target.
   </Card>
-  <Card title="Expose the Frontend" icon="regular globe" href="/dynamo/dev/kubernetes/dgd-expose-frontend">
+  <Card title="Expose the Frontend" icon="regular globe" href="dgd-expose-frontend.md">
     Give the Frontend a stable external address with a Kubernetes Ingress, a LoadBalancer Service, or GAIE.
   </Card>
-  <Card title="Customize Health Probes" icon="regular heart-pulse" href="/dynamo/dev/kubernetes/dgd-probes">
+  <Card title="Customize Health Probes" icon="regular heart-pulse" href="dgd-probes.md">
     Override the operator's default liveness, readiness, and startup probes when needed.
   </Card>
-  <Card title="Observability and Metrics" icon="regular chart-line" href="/dynamo/dev/kubernetes/observability/metrics">
+  <Card title="Observability and Metrics" icon="regular chart-line" href="observability/metrics.md">
     Scrape Prometheus metrics — on by default; opt out with an annotation.
   </Card>
-  <Card title="Auto Deploy with DGDR" icon="regular wand-magic-sparkles" href="/dynamo/dev/kubernetes/dgdr-guide">
+  <Card title="Auto Deploy with DGDR" icon="regular wand-magic-sparkles" href="dgdr-guide.md">
     Let the Planner pick parallelism and autoscale to an SLA — authored as a DGDR, not a DGD.
   </Card>
 </CardGroup>

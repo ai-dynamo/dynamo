@@ -85,7 +85,7 @@ the git source) and imports `dynamo.common.backend`. The steps below
 assume you're starting a fresh package in your own repo.
 
 The reference example is the **sample engine** at
-[`sample_engine.py`](../../components/src/dynamo/common/backend/sample_engine.py)
+[`sample_engine.py`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/sample_engine.py)
 — a complete, runnable implementation under 120 lines. Read it
 alongside this guide.
 
@@ -93,9 +93,9 @@ alongside this guide.
 
 - This guide — step-by-step walkthrough for someone starting a new
   backend from scratch.
-- [`LLMEngine` ABC docstrings](../../components/src/dynamo/common/backend/engine.py)
+- [`LLMEngine` ABC docstrings](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py)
   — authoritative method-by-method contract.
-- [Package README](../../components/src/dynamo/common/backend/README.md)
+- [Package README](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/README.md)
   — in-tree reference: `GenerateRequest` / `GenerateChunk` field
   definitions, per-engine cancellation cookbook (vLLM / SGLang /
   TRT-LLM), full `DynamoException` table, file index, and the
@@ -108,7 +108,7 @@ contract — what every engine on the unified path gets — plus the
 gaps that apply to all three engines. Per-engine specifics (vLLM
 sleep/wake, SGLang diffusion, TRT-LLM custom logits processors,
 etc.) live in the
-[package README](../../components/src/dynamo/common/backend/README.md#feature-gaps).
+[package README](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/README.md#feature-gaps).
 
 **Supported today**
 
@@ -411,7 +411,7 @@ request. Called concurrently for multiple in-flight requests.
 
 **Contract** (chunk shape is defined by the `GenerateChunk` TypedDict
 — see
-[Request / Response Types](../../components/src/dynamo/common/backend/README.md#request--response-types)
+[Request / Response Types](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/README.md#request--response-types)
 in the package README for the field reference):
 
 - Every chunk carries `token_ids` and `index` (use `0` for single
@@ -577,7 +577,7 @@ by the worker.
 
 Rust backends use the equivalent `LLMEngine::kv_event_sources()` trait method;
 see [Rust Step 4](#rust-step-4-implement-the-llmengine-trait) and the
-[`LLMEngine` trait](../../lib/backend-common/src/engine.rs).
+[`LLMEngine` trait](https://github.com/ai-dynamo/dynamo/blob/main/lib/backend-common/src/engine.rs).
 
 Use `ZmqSource` when the engine already emits Dynamo-compatible KV events on a
 ZMQ socket, as vLLM and SGLang do:
@@ -653,7 +653,7 @@ Pair this with the `[project.scripts]` entry from Step 1's
 **Errors**: the framework wraps non-`DynamoException` errors raised
 from `generate()` (or lifecycle methods) as `Unknown`. For typed
 error reporting, raise a `DynamoException` subclass directly from
-[`dynamo.llm.exceptions`](../../components/src/dynamo/common/backend/README.md#error-handling)
+[`dynamo.llm.exceptions`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/README.md#error-handling)
 — it propagates unchanged through the Rust bridge:
 
 ```python
@@ -694,7 +694,7 @@ pip install -e ".[dev]"
 ```
 
 The sample engine has a unit-test
-[suite](../../components/src/dynamo/common/backend/tests/test_engine.py)
+[suite](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/tests/test_engine.py)
 that you can copy as a starting point. The shape of a useful test:
 
 ```python
@@ -795,7 +795,7 @@ the framework configures `tracing` from `DYN_LOG`.
 
 ### Python reference: sample engine
 
-[`sample_engine.py`](../../components/src/dynamo/common/backend/sample_engine.py)
+[`sample_engine.py`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/sample_engine.py)
 is the canonical minimal reference. Run it as-is:
 
 ```bash
@@ -832,11 +832,11 @@ Before shipping:
 
 ### Python see also
 
-- [`LLMEngine` ABC](../../components/src/dynamo/common/backend/engine.py)
+- [`LLMEngine` ABC](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py)
   — authoritative contract.
-- [Package README](../../components/src/dynamo/common/backend/README.md)
+- [Package README](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/README.md)
   — feature gaps, error model, request/response contract.
-- [Sample engine](../../components/src/dynamo/common/backend/sample_engine.py)
+- [Sample engine](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/sample_engine.py)
   — example user guide.
 - Rust tab on this page — the Rust counterpart, same contract,
   lower-level.
@@ -903,7 +903,7 @@ contract — what every engine on the unified path gets, whether
 written in Rust directly or plugged in from Python via the PyO3
 `Worker` shim. Per-engine specifics (vLLM sleep/wake, SGLang
 diffusion, TRT-LLM custom logits processors, etc.) live in the
-[Python package README](../../components/src/dynamo/common/backend/README.md#feature-gaps).
+[Python package README](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/README.md#feature-gaps).
 
 **Supported today**
 
@@ -1302,7 +1302,7 @@ additionally exposes `notify_first_token()` for decode-mode requests
 — most engines can ignore it; the framework auto-fires on the first
 non-empty chunk.
 
-**Contract** (the [debug-mode validator](../../lib/backend-common/src/validate.rs)
+**Contract** (the [debug-mode validator](https://github.com/ai-dynamo/dynamo/blob/main/lib/backend-common/src/validate.rs)
 panics on violations):
 
 - Exactly one **terminal item** must be the last item yielded. A
@@ -1392,7 +1392,7 @@ async fn generate(
 2. During cleanup the stream sees both `ctx.stopped()` and
    `rx.recv() -> None` simultaneously; `biased` picks the clean
    cancellation path instead of erroring on a closed channel. The
-   mocker's [stream body](../../lib/backend-common/examples/mocker/src/engine.rs)
+   mocker's [stream body](https://github.com/ai-dynamo/dynamo/blob/main/lib/backend-common/examples/mocker/src/engine.rs)
    spells this out.
 
 If your engine doesn't have a receiver — e.g. you're computing tokens
@@ -1595,8 +1595,8 @@ event/request planes), the Dynamo Python frontend (HTTP → backend
 discovery), and your backend.
 
 The fastest path is to copy the **mocker example's
-[`docker-compose.yml`](../../lib/backend-common/examples/mocker/docker-compose.yml)
-and [`Dockerfile.frontend`](../../lib/backend-common/examples/mocker/Dockerfile.frontend)**,
+[`docker-compose.yml`](https://github.com/ai-dynamo/dynamo/blob/main/lib/backend-common/examples/mocker/docker-compose.yml)
+and [`Dockerfile.frontend`](https://github.com/ai-dynamo/dynamo/blob/main/lib/backend-common/examples/mocker/Dockerfile.frontend)**,
 swap in your image, and run `docker compose up --build`. That brings
 up NATS + etcd + the Python frontend (built from the dynamo workspace
 at the same SHA as your backend) + your backend, all on one network.
@@ -1666,18 +1666,18 @@ Before shipping:
 
 ### Rust see also
 
-- [Crate README](../../lib/backend-common/README.md) — in-tree
+- [Crate README](https://github.com/ai-dynamo/dynamo/blob/main/lib/backend-common/README.md) — in-tree
   reference (architecture, file index, contracts at a glance).
-- [`LLMEngine` trait](../../lib/backend-common/src/engine.rs) — authoritative contract.
-- [Design notes](../../lib/backend-common/CLAUDE.md) — rationale and
+- [`LLMEngine` trait](https://github.com/ai-dynamo/dynamo/blob/main/lib/backend-common/src/engine.rs) — authoritative contract.
+- [Design notes](https://github.com/ai-dynamo/dynamo/blob/main/lib/backend-common/CLAUDE.md) — rationale and
   invariants.
-- [`Worker`](../../lib/backend-common/src/worker.rs) — runtime
+- [`Worker`](https://github.com/ai-dynamo/dynamo/blob/main/lib/backend-common/src/worker.rs) — runtime
   lifecycle internals (signal handling, graceful shutdown, model
   registration).
-- [Conformance kit](../../lib/backend-common/src/testing.rs) —
+- [Conformance kit](https://github.com/ai-dynamo/dynamo/blob/main/lib/backend-common/src/testing.rs) —
   `run_conformance`, `mock_context`, `cancelling_context`.
 - [Mocker backend](../backends/mocker_backend/README.md) — example user guide.
-- [Python sibling](../../components/src/dynamo/common/backend/README.md)
+- [Python sibling](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/README.md)
   — Python ABC layered over this crate.
 
 </Tab>

@@ -34,6 +34,31 @@ Single-engine simulation is the fast path for one worker. Multi-engine simulatio
 multi-worker deployments, disaggregated prefill and decode pools, KV routing, and Planner-in-the-loop
 experiments.
 
+## Trace ingestion and session reconstruction
+
+```mermaid
+flowchart LR
+    M["Mooncake-compatible JSONL"] --> MP["Mooncake parser"]
+    D["Dynamo request-trace shards"] --> DP["dynamo.request.trace.v1 parser"]
+    MP --> N["Normalized replay workload"]
+    DP --> B{"agent_context on every request?"}
+    B -->|No| S["Standard request model"]
+    B -->|Yes| A["Agent-aware session model"]
+    S --> N
+    A --> N
+    N --> LD["Load driver"]
+```
+
+Mooncake-compatible formats carry request timing, token lengths, prefix hashes, and optional session
+or dependency fields. Dynamo request traces are loaded directly from one or more JSONL or JSONL.GZ
+shards. The loader maps Dynamo's sequence-aware hashes to compact replay IDs without writing an
+intermediate Mooncake file and validates that every shard uses the same embedded trace block size.
+
+Context-free Dynamo records become independent requests. When every request contains
+`agent_context`, the loader reconstructs session dependencies and tool waits. It rejects mixed traces
+instead of silently dropping agent relationships. This path preserves session identity exported by
+supported agent harnesses, including parent and child sessions.
+
 ## Component composition
 
 ```mermaid
@@ -78,6 +103,25 @@ queueing uses simulation time in offline mode.
 The router observes request admission, prefill completion, and sequence release. It can estimate
 prompt-side load from token counts or an AIConfigurator timing model. These estimates influence
 worker selection but do not replace the engine scheduler's own queue and KV-cache behavior.
+
+Policy-class replay uses the same policy-family and cache-bucket model as the live router:
+
+```mermaid
+flowchart LR
+    R["Replay request"] --> C{"policy_class"}
+    C -->|Exact explicit class| Q["Physical policy queue"]
+    C -->|Known family| B["Observed uncached-ISL bucket"]
+    C -->|Missing or unknown| F["default_policy_family"]
+    F --> B
+    B --> Q
+    Q --> D["Deficit round-robin dispatch"]
+```
+
+The replay CLI loads the startup-only policy YAML, selects an exact model profile when `--model-name`
+is set, and otherwise uses the root profile. A recognized family combines with the router-observed
+uncached Input Sequence Length (ISL) bucket. An exact explicit class bypasses bucketing. Ordinary
+physical-class names do not bypass classification; they fall back to the selected profile's default
+family.
 
 ## Planner simulation adapter
 

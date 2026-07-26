@@ -45,8 +45,8 @@ embedding it directly as a standalone Rust dependency.
 ## Further Reading
 
 - Mocker guide:
-  [../../docs/dynosim/mocker.md](../../docs/dynosim/mocker.md)
+  [../../docs/fern/dynosim/mocker.md](../../docs/fern/dynosim/mocker.md)
 - DynoSim runs guide:
-  [../../docs/dynosim/runs.md](../../docs/dynosim/runs.md)
+  [../../docs/fern/dynosim/runs.md](../../docs/fern/dynosim/runs.md)
 - Python component README:
   [../../components/src/dynamo/mocker/README.md](../../components/src/dynamo/mocker/README.md)

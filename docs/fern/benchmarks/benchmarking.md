@@ -314,7 +314,7 @@ Server-side benchmarking runs directly within the Kubernetes cluster, eliminatin
 
 ## Prerequisites
 
-1. **Kubernetes cluster** with NVIDIA GPUs and Dynamo namespace setup (see [Dynamo Kubernetes Platform docs](../kubernetes/README.md))
+1. **Kubernetes cluster** with NVIDIA GPUs and Dynamo namespace setup (see [Dynamo Kubernetes Platform docs](../kubernetes/quickstart.mdx))
 2. **Storage**: PersistentVolumeClaim configured with appropriate permissions (see [deploy/utils README](https://github.com/ai-dynamo/dynamo/blob/main/deploy/utils/README.md))
 3. **Docker image** containing AIPerf (Dynamo runtime images include it)
 
@@ -439,7 +439,7 @@ AIPerf has many capabilities beyond basic profiling. Here are some particularly 
 
 | Feature | Description | Docs |
 |---------|-------------|------|
-| Priority Validation | Send per-request `nvext.agent_hints.priority` values and verify router or backend priority behavior under contention | [Priority Scheduling](../components/router/priority-scheduling.md#verify-priority-is-working) |
+| Priority Validation | Send per-request `nvext.agent_hints.priority` values and verify router or backend priority behavior under contention | [Priority Scheduling](../agents/priority-scheduling.md#verify-priority-is-working) |
 | Trace Replay | Replay production traces for deterministic benchmarking | [Trace Replay](https://github.com/ai-dynamo/aiperf/blob/main/docs/benchmark-modes/trace-replay.md) |
 | Arrival Patterns | Poisson, constant, gamma traffic distributions | [Arrival Patterns](https://github.com/ai-dynamo/aiperf/blob/main/docs/tutorials/arrival-patterns.md) |
 | Gradual Ramping | Smooth ramp-up of concurrency and request rate | [Ramping](https://github.com/ai-dynamo/aiperf/blob/main/docs/tutorials/ramping.md) |

@@ -10,7 +10,7 @@ Multinode deployments require either Grove + KAI Scheduler or an alternative orc
 
 ## Option 1: Grove + KAI Scheduler
 
-Grove is the default and recommended orchestrator for multinode deployments. It requires KAI Scheduler as well. There are two ways to enable Grove and KAI Scheduler, either dynamo can install it automatically (recommended for development and testing), or you can install them separately (recommended for production). 
+Grove is the default and recommended orchestrator for multinode deployments. It requires KAI Scheduler as well. There are two ways to enable Grove and KAI Scheduler, either dynamo can install it automatically (recommended for development and testing), or you can install them separately (recommended for production).
 
 <Tabs>
   <Tab title="Managed Installation" value="managed">
@@ -26,8 +26,8 @@ Grove is the default and recommended orchestrator for multinode deployments. It 
   ```
   </Tab>
   <Tab title="External Installation" value="external">
-  The external installation is recommended for production or if it's already installed on your system. It allows you to install Grove and KAI Scheduler separately, and manage their lifecycle independently or share them across namespaces. 
-  
+  The external installation is recommended for production or if it's already installed on your system. It allows you to install Grove and KAI Scheduler separately, and manage their lifecycle independently or share them across namespaces.
+
   See the [Grove installation guide](https://github.com/NVIDIA/grove/blob/main/docs/installation.md) and [KAI Scheduler deployment guide](https://github.com/NVIDIA/KAI-Scheduler) for instructions.
 
   Then, run the following command to install or configure Dynamo to use the existing Grove and KAI Scheduler:

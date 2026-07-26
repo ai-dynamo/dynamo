@@ -2,133 +2,132 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Request Rejection Architecture
+subtitle: Worker-load event processing, busy-state aggregation, overload errors, and hard worker admission limits.
 ---
 
-This document describes the internals of how Dynamo implements request rejection (load shedding) to prevent system overload and maintain service stability under high load.
+Dynamo implements request rejection (load shedding) at two layers: Frontend routing can avoid workers
+reported as busy, and each worker can enforce a hard request-plane concurrency cap.
 
-This is an architecture reference. For how to enable, tune, and monitor request rejection, see the [Request Rejection](../fault-tolerance/request-rejection.md) use-case guide. For the metrics rejection emits, see [Cancellation and rejection](../reference/observability/metrics-catalog.mdx#cancellation-and-rejection) in the Metrics Catalog.
+For deployment steps, see [Request Rejection](../fault-tolerance/request-rejection.md). For exact
+configuration fields, see [Frontend Configuration](../components/frontend/frontend-config-reference.mdx#fault-tolerance)
+and [Runtime Configuration](../reference/runtime-config-reference.mdx#operations).
 
-## Overview
+## Request Flow
 
-Request rejection proactively rejects new requests when workers are overloaded. This prevents cascading failures from resource exhaustion, degraded latency for all requests, and out-of-memory conditions on GPU workers. When all workers exceed their configured busy thresholds, new requests receive an HTTP 503 (Service Unavailable) response, signaling clients to retry later.
-
-## Architecture
-
-```
+```text
                                     ┌─────────────────┐
-                                    │  Worker Monitor │
-                                    │  (Background)   │
+                                    │ Worker Monitor  │
+                                    │  (background)   │
                                     └────────┬────────┘
-                                             │ Updates busy list
+                                             │ worker-load updates
                                              ▼
 ┌──────────┐    ┌──────────┐    ┌─────────────────────┐    ┌──────────┐
-│  Client  │───▶│ Frontend │───▶│    Push Router      │───▶│  Worker  │
-└──────────┘    └──────────┘    │ (checks busy list)  │    └──────────┘
-                                └─────────────────────┘
-                                         │
-                                         │ If all workers busy
-                                         ▼
+│  Client  │───▶│ Frontend │───▶│     Push Router     │───▶│  Worker  │
+└──────────┘    └──────────┘    │ excludes busy set   │    └──────────┘
+                                └──────────┬──────────┘
+                                           │ every eligible worker busy
+                                           ▼
                                 ┌─────────────────────┐
-                                │   HTTP 503 Error    │
-                                │ "All workers busy"  │
+                                │ HTTP 529 Overloaded │
                                 └─────────────────────┘
 ```
 
-## Busy Detection Logic
+The router distinguishes two failure classes:
 
-Workers are marked as "busy" based on a dual-threshold system. A worker is considered busy when **either** threshold is exceeded. The thresholds themselves are configured on the frontend — see [Enable admission control on the Frontend](../fault-tolerance/request-rejection.md#enable-admission-control-on-the-frontend) in the use-case guide.
+- **Overloaded** means workers are registered but every eligible worker is busy. The Frontend returns
+  HTTP 529 by default.
+- **Unavailable** means no usable service path exists. The Frontend returns HTTP 503.
 
-### KV Cache Block Threshold
+`DYN_HTTP_OVERLOAD_STATUS_CODE` can change the overload response code for client compatibility. It is
+read once and cached; invalid or out-of-range values fall back to 529.
 
-Monitors the percentage of KV cache blocks in use:
+## Independently Enabled Signals
 
-```
-busy = active_decode_blocks / kv_total_blocks > threshold
-```
+All three busy thresholds are `None` by default. Setting a numeric value activates only that signal;
+there is no master admission-control switch.
 
-Example: With `active_decode_blocks_threshold=0.85`, a worker using 87% of its KV cache blocks is marked busy.
+For each data-parallel rank, the monitor evaluates the configured checks with OR logic:
 
-### Prefill Token Threshold
+```text
+decode_busy = active_decode_blocks / kv_total_blocks > decode_threshold
+absolute_prefill_busy = active_prefill_tokens > absolute_prefill_threshold
+fractional_prefill_busy =
+    active_prefill_tokens > fractional_prefill_threshold * max_num_batched_tokens
 
-Monitors the number of tokens currently being prefilled:
-
-```
-busy = active_prefill_tokens > threshold
-```
-
-Example: With `active_prefill_tokens_threshold=10000`, a worker prefilling 12,000 tokens is marked busy.
-
-### Data-Parallel Rank Aggregation
-
-For workers with multiple data-parallel ranks (tensor parallelism), the worker is only marked busy if **ALL** ranks are busy:
-
-```python
-def is_busy(worker):
-    return all(rank.is_busy() for rank in worker.dp_ranks)
+rank_busy = any(configured check is true)
+worker_busy = all(data-parallel ranks are busy)
 ```
 
-This prevents false positives when only some ranks are temporarily loaded.
+The fractional and absolute prefill checks can be enabled separately or together. A worker is not
+excluded until all of its data-parallel ranks are busy, which avoids discarding capacity on ranks that
+can still admit work.
+
+Decode-block rejection depends on the KV router worker-load path. `--router-mode kv` initializes that
+path. `--router-track-output-blocks` adds generated output tokens to the router's observed active-block
+count; without it, long outputs can consume KV cache without appearing in the tracked load. The
+separate `--router-track-active-blocks` option affects the router cost model and is not a prerequisite
+for busy rejection.
 
 ## Worker Load Monitoring
 
-The `KvWorkerMonitor` runs as a background task that:
+`KvWorkerMonitor`:
 
-1. Subscribes to KV cache metrics events from workers
-2. Maintains load state for each worker instance
-3. Recalculates busy instances when metrics change
-4. Updates the router with the current busy list
+1. Subscribes to worker KV and prefill load events.
+2. Stores per-worker, per-rank values such as `active_decode_blocks`, `kv_total_blocks`,
+   `active_prefill_tokens`, and `max_num_batched_tokens`.
+3. Recalculates the busy set when load or runtime configuration changes.
+4. Publishes the current busy set to the router.
 
-### Metrics Collected
+A `POST /busy_threshold` update changes the stored threshold configuration. It does not synchronously
+recompute every worker. The next worker-load or runtime-configuration update triggers reevaluation, so
+a new threshold can take a short time to change routing decisions.
 
-Workers publish these metrics for monitoring:
+## Rejection Path
 
-| Metric | Description |
-|--------|-------------|
-| `active_decode_blocks` | Number of KV cache blocks currently in use |
-| `kv_total_blocks` | Total KV cache blocks available |
-| `active_prefill_tokens` | Number of tokens currently being prefilled |
+When a request arrives:
 
-## Rejection Behavior
+1. The push router resolves the registered workers for the model.
+2. If at least one busy threshold is configured, the router removes workers in the current busy set.
+3. If registered workers exist but no eligible worker remains, the router returns
+   `PipelineError::ServiceOverloaded`.
+4. The HTTP layer maps overload to the configured overload status, 529 by default.
+5. The Frontend increments `dynamo_frontend_model_rejection_total`.
 
-### Request Flow
-
-1. Request arrives at frontend
-2. Push router checks if busy threshold is configured
-3. If configured, router retrieves list of free (non-busy) instances
-4. If no free instances exist (but instances are registered):
-   - Request is rejected with `PipelineError::ServiceOverloaded`
-   - HTTP 503 response is returned to client
-
-### Error Response
-
-When requests are rejected, clients receive:
-
-```http
-HTTP/1.1 503 Service Unavailable
-Content-Type: application/json
-
-{
-  "message": "Service temporarily unavailable: All workers are busy, please retry later",
-  "type": "service_unavailable",
-  "code": 503
-}
-```
+The Frontend also exports the latest observed worker values through
+`dynamo_frontend_worker_active_decode_blocks` and
+`dynamo_frontend_worker_active_prefill_tokens`, which help distinguish missing telemetry from a
+threshold that is simply too high.
 
 ## Worker-Side Request Admission
 
-In addition to the frontend's metric-driven busy detection above, a worker can enforce a hard concurrency cap directly at its request-plane ingress. This is disabled by default — when neither knob is set, the worker behaves exactly as before (a large pool plus a large overflow queue, no rejection). For the configuration knobs (`--engine-request-limit`, `DYN_DYNAMO_REQUEST_QUEUE_LIMIT`), see [Add a worker-side hard cap](../fault-tolerance/request-rejection.md#add-a-worker-side-hard-cap) in the use-case guide.
+A worker can impose a hard cap independently of Frontend busy detection. Setting
+`--engine-request-limit N` creates `N` engine slots. Requests that arrive while those slots are full
+enter a small Dynamo overflow queue of size `Q`. When the engine and queue are both full, the worker
+returns `Server overloaded: worker at capacity`; the Frontend maps the resulting
+`ResourceExhausted` error to HTTP 529 and temporarily skips that worker on the next routing decision.
 
-### Admission Mechanism
-
-When `--engine-request-limit` is set, the worker accepts a request directly into the engine while a slot is free; once all `N` engine slots are busy, further requests go into the small overflow queue of size `Q`; when the engine **and** the queue are both full the worker rejects the request with `Server overloaded: worker at capacity`. The frontend maps this rejection to `ResourceExhausted` → **HTTP 503**, and temporarily marks the worker overloaded so it is skipped on the next routing decision (cleared automatically on the next metric recompute). The effective hard cap is **N + Q** in-flight requests per worker.
+The effective maximum is `N + Q` requests. `DYN_DYNAMO_REQUEST_QUEUE_LIMIT` defaults to `16`, is an
+advanced override, must be at least `2`, and is read only when the engine limit is enabled.
 
 ### Overflow Channel Sizing
 
-The overflow channel is sized to `Q-1` because the single dispatcher holds one request in transit between the queue and the engine; this makes the cap exact for **Q ≥ 2** (at `Q = 1` the channel floors at 1, so the queued peak is 2 — hence the `Q ≥ 2` requirement). `DYN_DYNAMO_REQUEST_QUEUE_LIMIT` defaults to **16** (hard cap `N + 16`) and only takes effect when the engine limit is set.
+The channel capacity is `Q - 1` because one dispatcher task can hold a request between the queue and
+an engine slot. This produces an exact `N + Q` cap for `Q >= 2`. A value of `1` would still require a
+channel capacity of one and could permit two queued requests, which is why the supported minimum is
+`2`.
+
+Worker admission exports:
+
+- `dynamo_rejection_request_total`
+- `dynamo_engine_request`
+- `dynamo_request_queue`
+
+See [Cancellation and Rejection](../reference/observability/metrics-catalog.mdx#cancellation-and-rejection)
+for metric types and labels.
 
 ## Related Documentation
 
-- [Request Rejection](../fault-tolerance/request-rejection.md) - How to enable, tune, and monitor request rejection (use-case guide)
-- [Request Migration Architecture](request-migration.md) - Recovering in-flight requests after worker failure
-- [Metrics Catalog](../reference/observability/metrics-catalog.mdx#cancellation-and-rejection) - Rejection and admission metrics
+- [Request Rejection](../fault-tolerance/request-rejection.md) - Enable, tune, verify, and troubleshoot load shedding
+- [Frontend Configuration](../components/frontend/frontend-config-reference.mdx#fault-tolerance) - Threshold and overload response fields
+- [Runtime Configuration](../reference/runtime-config-reference.mdx#operations) - Worker hard-cap fields
 - [Observability Architecture](observability.md#active-worker-health-checks) - Worker health monitoring

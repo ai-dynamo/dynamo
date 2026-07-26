@@ -60,7 +60,7 @@ Open `/tmp/dynamo-request-trace.perfetto.json` in the [Perfetto UI](https://ui.p
 
 </Steps>
 
-For every request-trace environment variable and default, see [Request Replay Tracing](../observability/request-tracing.md#configuration).
+For every request-trace environment variable and default, see [Request Trace Reference](../reference/observability/request-tracing.mdx#configuration).
 
 ## Choose the Tool Detail You Need
 

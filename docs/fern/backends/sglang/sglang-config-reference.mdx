@@ -54,12 +54,20 @@ Each field is both a CLI flag and an environment variable. The CLI flag takes pr
 
 ## Worker role
 
-The SGLang wrapper dispatches to one of several worker roles based on these flags. Set at most one role flag per worker; the default (no role flag) is a standard LLM decode/aggregated worker.
+The SGLang wrapper selects a worker role from these flags and the native `--disaggregation-mode` argument. The default, with no role-specific flags, is a standard LLM decode or aggregated worker.
 
 <ParamField path="--enable-multimodal" type="boolean" default="false">
-  Enable multimodal processing. When an explicit `--disaggregation-mode` is provided, this selects the matching Dynamo multimodal EPD (encode/prefill/decode) worker role.
+  Enable multimodal processing for workers that receive raw image or video inputs. Combine it with `--dedicated-mm-encoder` only for internal workers that consume or forward embeddings from a separate encode worker.
 
   Environment variable: `DYN_SGL_ENABLE_MULTIMODAL`
+</ParamField>
+
+<ParamField path="--dedicated-mm-encoder" type="boolean" default="false">
+  Select the internal multimodal topology with a dedicated encode worker. Set this on PD, prefill, and decode workers that consume or forward precomputed embeddings. Do not set it on native P/D workers that receive raw media metadata or on the encode worker itself.
+
+  Requires `--enable-multimodal` and `--disaggregation-mode=pd`, `--disaggregation-mode=prefill`, or `--disaggregation-mode=decode`.
+
+  Environment variable: `DYN_SGL_DEDICATED_MM_ENCODER`
 </ParamField>
 
 <ParamField path="--embedding-worker" type="boolean" default="false">
@@ -145,7 +153,7 @@ These flags are retained for backward compatibility and will be removed in a fut
 </ParamField>
 
 <ParamField path="--multimodal-worker" type="boolean" default="false" deprecated={true}>
-  **Deprecated** — use `--enable-multimodal` with `--disaggregation-mode=pd`, `--disaggregation-mode=prefill`, or `--disaggregation-mode=decode`. The legacy flag is mapped to those arguments at startup.
+  **Deprecated** — use `--enable-multimodal --dedicated-mm-encoder` with `--disaggregation-mode=pd`, `--disaggregation-mode=prefill`, or `--disaggregation-mode=decode`. The legacy flag is mapped to those arguments at startup.
 
   Environment variable: `DYN_SGL_MULTIMODAL_WORKER`
 </ParamField>
@@ -153,7 +161,9 @@ These flags are retained for backward compatibility and will be removed in a fut
 ## Validation rules
 
 - `--disagg-config` and `--disagg-config-key` must both be set, or both unset.
-- `--frontend-decoding` cannot be combined with the EPD multimodal topology (`--multimodal-encode-worker` / `--multimodal-worker`).
+- `--dedicated-mm-encoder` requires `--enable-multimodal`.
+- `--dedicated-mm-encoder` is valid only with `--disaggregation-mode=pd`, `--disaggregation-mode=prefill`, or `--disaggregation-mode=decode`; do not combine it with `--disaggregation-mode=encode`.
+- `--frontend-decoding` cannot be combined with the dedicated EPD multimodal topology (`--dedicated-mm-encoder`, `--multimodal-encode-worker`, or `--multimodal-worker`).
 
 ## Related pages
 

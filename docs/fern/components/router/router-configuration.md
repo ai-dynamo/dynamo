@@ -7,7 +7,7 @@ subtitle: Router behavior, event transport, load tracking, and tuning guidance
 
 This page explains router behavior and tuning for frontend-embedded and standalone
 deployments. For the exact frontend flag names, environment variables, defaults, and
-boolean forms, use the [Frontend Configuration Reference](../frontend/configuration.md#router).
+boolean forms, use the [Frontend Configuration Reference](../frontend/frontend-config-reference.mdx#router).
 For the routing cost model and worker-selection behavior, see
 [Routing Concepts](router-concepts.md).
 
@@ -23,7 +23,7 @@ For the routing cost model and worker-selection behavior, see
 - `--router-temperature`: Controls worker selection randomness through softmax sampling of normalized router cost logits. A value of 0 (default) ensures deterministic selection of the lowest-cost worker, while higher values introduce more randomness.
 - `--router-track-prefill-tokens`: Enables prompt-side load accounting in the worker cost model. This should stay enabled if you want queue thresholds, `active_prefill_tokens`, and AIC prefill load decay to reflect prompt work.
 - `--router-prefill-load-model`: Selects the router's prompt-side load model. `none` keeps the existing static prompt load accounting. `aic` predicts one expected prefill duration per admitted request and lazily decays only the oldest active prefill request on each worker.
-- `--router-queue-threshold`: Optional queue threshold fraction for prefill token capacity. Queueing is disabled by default; setting a numeric value enables it. The router holds incoming requests in a priority queue while all eligible workers exceed `threshold * max_num_batched_tokens`, releasing them when capacity frees up. This defers dispatch rather than rejecting work, so routing decisions use the freshest load metrics at the moment a request is sent to a worker. `nvext.agent_hints.strict_priority` selects an absolute pending-queue tier, while `nvext.agent_hints.priority` adjusts ordering within the configured policy. Must be greater than or equal to 0; use `0.0` for maximum queueing sensitivity. See the SGLang note under [Tuning Guidelines](#tuning-guidelines) for caveats around how `max_num_batched_tokens` is populated on that backend, and see [Priority Scheduling](priority-scheduling.md) for how router priority differs from backend engine priority.
+- `--router-queue-threshold`: Optional queue threshold fraction for prefill token capacity. Queueing is disabled by default; setting a numeric value enables it. The router holds incoming requests in a priority queue while all eligible workers exceed `threshold * max_num_batched_tokens`, releasing them when capacity frees up. This defers dispatch rather than rejecting work, so routing decisions use the freshest load metrics at the moment a request is sent to a worker. `nvext.agent_hints.strict_priority` selects an absolute pending-queue tier, while `nvext.agent_hints.priority` adjusts ordering within the configured policy. Must be greater than or equal to 0; use `0.0` for maximum queueing sensitivity. See the SGLang note under [Tuning Guidelines](#tuning-guidelines) for caveats around how `max_num_batched_tokens` is populated on that backend, and see [Priority Scheduling](../../agents/priority-scheduling.md) for how router priority differs from backend engine priority.
 - `--router-queue-policy`: Scheduling policy for the router queue: `fcfs` (default) or `wspt`.
 - `--router-policy-config`: Startup-only policy-family and cache-bucket YAML path. When omitted, `--router-queue-threshold` and `--router-queue-policy` define one synthetic policy class. The equivalent environment variable is `DYN_ROUTER_POLICY_CONFIG`.
 
@@ -72,7 +72,7 @@ DRR charges the uncached-token snapshot captured at enqueue, while raw, cached,
 and uncached snapshots remain unchanged for limits, WSPT, counters, and later
 dispatch. For the ring cursor, deficit charging, weighted bursts, and bounded
 bulk-credit behavior, see
-[Deficit Round Robin Queue Scheduling](deficit-round-robin.md).
+[Deficit Round Robin Queue Scheduling](router-configuration.md#policy-class-queues).
 
 Every matrix class must identify both `policy_family` and `cache_bucket`; a
 class with neither field is explicit, while specifying only one is invalid.
@@ -86,7 +86,7 @@ profile; fields, buckets, families, and classes are not inherited. With no
 YAML, the router uses a synthetic `default` class and does not compute cache
 state for classification. The synthetic class queues only when
 `--router-queue-threshold` is set. See the tested
-[sample policy](../../../examples/router/policy-class-queues.yaml).
+[sample policy](https://github.com/ai-dynamo/dynamo/blob/main/examples/router/policy-class-queues.yaml).
 
 ```bash
 python -m dynamo.frontend \
@@ -155,7 +155,7 @@ the ingress or load balancer to consistently route a session to one frontend, or
 an authoritative external binding store. When hashing at ingress, hash the raw
 session header rather than Dynamo's normalized internal `session_id`: canonical
 clients send `X-Dynamo-Session-ID`, while agent-native clients use the corresponding
-header listed in [Session IDs](../../agents/session-ids.md). Agent-native identity is
+header listed in [Session IDs](../../agents/session-ids.mdx). Agent-native identity is
 normalized only after the request reaches the frontend.
 
 Direct mode still requires the phase-appropriate explicit worker ID on every

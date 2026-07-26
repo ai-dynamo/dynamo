@@ -33,7 +33,7 @@ Before authoring a DGDR, make sure you have:
 - `kubectl` access to that cluster and a target namespace.
 - GPU nodes the operator can discover (via DCGM or node labels). The operator auto-detects SKU, VRAM, and GPU count; you can override any of these (see [Step 4](#set-hardware-and-handle-large-or-multinode-models)).
 - A **HuggingFace token secret** named `hf-token-secret` in the namespace for gated or rate-limited models — both the profiling job and the deployed pods use it.
-- New to Dynamo on Kubernetes? Run one model end to end with the [Kubernetes Quickstart](README.md) first.
+- New to Dynamo on Kubernetes? Run one model end to end with the [Kubernetes Quickstart](quickstart.mdx) first.
 
 For SLA-driven autoscaling, also install [Prometheus](installation-guide.md#kube-prometheus-stack) before creating the DGDR (see [Step 6](#enable-the-planner-for-runtime-autoscaling)).
 
@@ -283,7 +283,7 @@ spec:
 DGDR does not yet expose first-class router or EPP/Gateway features, so routing is configured this way. Service names depend on the selected backend and topology — inspect the generated DGD first, especially when `autoApply: false`. For the full routing, worker KV-event, and override patterns, see [DGDR Reference — Generated DGD Overrides](dgdr-reference.mdx#generated-dgd-overrides) and the [Router Guide](../components/router/router-guide.md).
 
 > [!IMPORTANT]
-> `overrides.dgd` only patches services that already exist in the generated DGD — it cannot add a missing service (for example an `Epp` service for Gateway routing). For EPP/Gateway topologies, author a direct DGD or use a GAIE recipe; see [Inference Gateway](inference-gateway.md).
+> `overrides.dgd` only patches services that already exist in the generated DGD — it cannot add a missing service (for example an `Epp` service for Gateway routing). For EPP/Gateway topologies, author a direct DGD or use a GAIE recipe; see [Inference Gateway](inference-gateway.mdx).
 
 </Step>
 

@@ -12,10 +12,15 @@ Dynamo emits three signals — **metrics** (Prometheus), **logs** (structured te
 | Signal | Turn it on with | Collected by |
 |--------|-----------------|--------------|
 | Metrics | `DYN_SYSTEM_PORT` (workers/router); the frontend serves metrics on its HTTP port | Prometheus |
-| Traces | `OTEL_EXPORT_ENABLED=true` + `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | Tempo |
+| Traces | `OTEL_EXPORT_ENABLED=true` + an OTLP endpoint | Tempo |
 | Logs | `DYN_LOGGING_JSONL=true` (+ `OTEL_EXPORT_ENABLED` to export) | Loki |
+| FPM traces | `DYN_FPM_TRACE=1` or `--fpm-trace` | Rotating gzip JSONL files |
+| Health status | `/live` and `/health` endpoints | Supervisors or Kubernetes probes |
+| Request traces | `DYN_REQUEST_TRACE=1` or `DYN_REQUEST_TRACE_RECORDS` | Files, NATS, stderr, or OTLP logs |
 
-`OTEL_EXPORT_ENABLED` is the master switch for both traces and logs — without it, neither leaves the process even when Tempo and Loki are healthy. OTLP endpoints must be gRPC listeners (Dynamo's exporter does not speak OTLP/HTTP). For the full variable catalog — defaults, per-signal grouping, and the Kubernetes operator presets — see [Environment Variables](../reference/observability/environment-variables.mdx).
+`OTEL_EXPORT_ENABLED` is the master switch for both traces and logs — without it, neither leaves the process even when Tempo and Loki are healthy. Dynamo supports OTLP over `grpc` and `http/protobuf`. Use `OTEL_EXPORTER_OTLP_ENDPOINT` for a shared collector or signal-specific endpoint variables for separate destinations. For the full variable catalog — defaults, per-signal grouping, and the Kubernetes operator presets — see [Environment Variables](../reference/observability/environment-variables.mdx).
+
+For scheduler telemetry, see [Observe a Local Deployment](local-observability.mdx#capture-forward-pass-metrics). For replay metadata or request payload capture, see [Observe a Local Deployment](local-observability.mdx#capture-and-replay-requests).
 
 > [!NOTE]
 > Prometheus metric families are registered lazily: each label set is created the first time it fires, so a freshly-started process shows empty metric families until the first relevant request. An idle cluster does not mean scraping is broken.

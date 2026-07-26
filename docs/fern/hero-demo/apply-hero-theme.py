@@ -16,14 +16,28 @@ THEME = {
     # which we pin to pure white below so commands pop brighter than output.
     "fg": "#8b949e",
     "bg": "#0d1117",
-    "palette": ":".join([
-        # normal: black red green yellow blue magenta cyan white
-        "#484f58", "#ff7b72", "#3fb950", "#e3b341",
-        "#58a6ff", "#bc8cff", "#39c5cf", "#ffffff",
-        # bright
-        "#6e7681", "#ffa198", "#56d364", "#e3b341",
-        "#79c0ff", "#d2a8ff", "#56d4dd", "#ffffff",
-    ]),
+    "palette": ":".join(
+        [
+            # normal: black red green yellow blue magenta cyan white
+            "#484f58",
+            "#ff7b72",
+            "#3fb950",
+            "#e3b341",
+            "#58a6ff",
+            "#bc8cff",
+            "#39c5cf",
+            "#ffffff",
+            # bright
+            "#6e7681",
+            "#ffa198",
+            "#56d364",
+            "#e3b341",
+            "#79c0ff",
+            "#d2a8ff",
+            "#56d4dd",
+            "#ffffff",
+        ]
+    ),
 }
 
 
@@ -35,7 +49,7 @@ def main(path: str) -> None:
     lines[0] = json.dumps(header) + "\n"
     with open(path, "w") as f:
         f.writelines(lines)
-    dur = sum(json.loads(l)[0] for l in lines[1:] if l.strip())
+    dur = sum(json.loads(line)[0] for line in lines[1:] if line.strip())
     print(f"themed {path}; duration ~{dur:.1f}s")
 
 

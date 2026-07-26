@@ -262,7 +262,7 @@ jobs:
           # Order matters: transform digest/ first so the second sub() won't re-match it
           # (they'll start with ../ which doesn't match ^[a-zA-Z]).
           yq -i '(.. | select(has("path")).path) |= sub("^digest/", "../digest/")' docs-checkout/fern/versions/dev.yml
-yq -i '(.. | select(has("path")).path) |= sub("^\./welcome\.mdx$", "../welcome.mdx")' docs-checkout/fern/versions/dev.yml
+          yq -i '(.. | select(has("path")).path) |= sub("^\./welcome\.mdx$", "../welcome.mdx")' docs-checkout/fern/versions/dev.yml
           yq -i '(.. | select(has("path")).path) |= sub("^([a-zA-Z])", "../pages-dev/${1}")' docs-checkout/fern/versions/dev.yml
 
       - name: Propagate shared Reference nav to released versions

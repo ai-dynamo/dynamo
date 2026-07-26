@@ -6,10 +6,6 @@ sidebar-title: Overview
 subtitle: Choose a contribution path and find the guide for your next step
 ---
 
-<p align="left">
-  <a href="./contribution-guide.zh-CN.md" hreflang="zh-CN"><img src="./assets/img/readme-zh-cn-link.svg" alt="简体中文" height="28" /></a>
-</p>
-
 NVIDIA Dynamo is an open-source distributed inference platform. Contributions can include code,
 documentation, bug reports, design proposals, reviews, and community support.
 

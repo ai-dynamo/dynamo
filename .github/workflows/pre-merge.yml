@@ -80,6 +80,7 @@ jobs:
     - name: Install Fern CLI
       run: npm install -g fern-api
     - name: Validate Fern configuration
+      working-directory: docs/fern
       run: fern check
 
   fern-broken-links:
@@ -97,6 +98,7 @@ jobs:
     - name: Install Fern CLI
       run: npm install -g fern-api
     - name: Check for broken links
+      working-directory: docs/fern
       run: fern docs broken-links
 
   operator:

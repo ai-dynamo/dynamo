@@ -8,7 +8,7 @@ subtitle: Every environment variable that controls Dynamo metrics, tracing, logg
 This page catalogs the environment variables that govern Dynamo observability. Set them on every
 frontend, router, or worker that should emit a signal. For local procedures, see
 [Observe a Local Deployment](../../observability/local-observability.mdx) and
-[Check Local Deployment Health](../../observability/health-checks.mdx).
+[Observe a Local Deployment](../../observability/local-observability.mdx#check-deployment-health).
 
 The canonical list of variable names lives in [`lib/runtime/src/config/environment_names.rs`](https://github.com/ai-dynamo/dynamo/blob/main/lib/runtime/src/config/environment_names.rs), which groups them by area (logging, OTLP, system server, canary, request trace). The logging and OTLP variables are read in [`lib/runtime/src/logging.rs`](https://github.com/ai-dynamo/dynamo/blob/main/lib/runtime/src/logging.rs) `setup_logging()`; the `DYN_SYSTEM_*` and health variables are read by the system-status server. The backend log-level variables (`VLLM_LOGGING_LEVEL`, `TLLM_LOG_LEVEL`) are read by the respective engines, not the Dynamo runtime.
 
@@ -111,19 +111,41 @@ Every Dynamo process reads its own environment at startup, so set these on each 
 ## OpenTelemetry (traces and logs)
 
 <ParamField path="OTEL_EXPORT_ENABLED" type="boolean" default="false">
-  Master switch for OTLP export. Gates **both** traces and logs. Without it, traces and logs never leave the process — Tempo and Loki stay empty even when healthy.
+  Master switch for OTLP export. Gates both traces and runtime logs. Request trace records require the separate `otel` request-trace sink.
 </ParamField>
 
-<ParamField path="OTEL_EXPORTER_OTLP_TRACES_ENDPOINT" type="string" default="http://localhost:4317">
-  OTLP gRPC endpoint for traces. Must be a gRPC listener — Dynamo's exporter does not speak OTLP/HTTP, even though the OTel Collector also listens on `:4318`.
+<ParamField path="OTEL_EXPORTER_OTLP_ENDPOINT" type="string">
+  Generic endpoint for traces and logs. For `grpc`, Dynamo uses it as-is. For `http/protobuf`, Dynamo appends `/v1/traces` or `/v1/logs`. When unset, each signal uses its protocol default.
 </ParamField>
 
-<ParamField path="OTEL_EXPORTER_OTLP_LOGS_ENDPOINT" type="string" default="same as traces endpoint">
-  OTLP gRPC endpoint for logs. Defaults to `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` when unset. Same gRPC-only constraint as the traces endpoint.
+<ParamField path="OTEL_EXPORTER_OTLP_TRACES_ENDPOINT" type="string">
+  Trace-only endpoint, used as-is. Falls back to `OTEL_EXPORTER_OTLP_ENDPOINT`, then `http://localhost:4317` for `grpc` or `http://localhost:4318/v1/traces` for `http/protobuf`.
+</ParamField>
+
+<ParamField path="OTEL_EXPORTER_OTLP_LOGS_ENDPOINT" type="string">
+  Log-only endpoint, used as-is. Falls back to `OTEL_EXPORTER_OTLP_ENDPOINT`, then `http://localhost:4317` for `grpc` or `http://localhost:4318/v1/logs` for `http/protobuf`. It does not fall back to the traces endpoint.
+</ParamField>
+
+<ParamField path="OTEL_EXPORTER_OTLP_PROTOCOL" type="string" default="grpc">
+  Default OTLP transport for traces and logs.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>grpc</Badge> <Badge intent="note" minimal>http/protobuf</Badge></span>
+</ParamField>
+
+<ParamField path="OTEL_EXPORTER_OTLP_TRACES_PROTOCOL" type="string">
+  Trace-only protocol override. Falls back to `OTEL_EXPORTER_OTLP_PROTOCOL`.
+</ParamField>
+
+<ParamField path="OTEL_EXPORTER_OTLP_LOGS_PROTOCOL" type="string">
+  Log-only protocol override. Falls back to `OTEL_EXPORTER_OTLP_PROTOCOL`.
+</ParamField>
+
+<ParamField path="OTEL_TRACES_SAMPLE_RATIO" type="number">
+  Head-sampling ratio in `[0.0, 1.0]`. Unset exports every trace. For example, `0.01` retains approximately one percent of traces.
 </ParamField>
 
 <ParamField path="OTEL_SERVICE_NAME" type="string" default="dynamo">
-  Service name attached to traces and spans. Set a per-component value (e.g. `dynamo-frontend`) so services are distinguishable in Tempo.
+  Service name attached to exported telemetry. Use a per-component value such as `dynamo-frontend` to distinguish services.
 </ParamField>
 
 ## Logging
@@ -214,49 +236,97 @@ Every Dynamo process reads its own environment at startup, so set these on each 
   `@/path/to/payload.json` and takes precedence over the backend's default payload.
 </ParamField>
 
-## Request replay tracing
+## Forward Pass Metrics tracing
 
-Per-request JSONL capture for [Mooncake replay](../../observability/request-tracing.md). Primarily a local-development workflow.
+<ParamField path="DYN_FPM_TRACE" type="boolean">
+  Enables Forward Pass Metrics persistence. Equivalent to the worker `--fpm-trace` switch.
+</ParamField>
+
+<ParamField path="DYN_FPM_OUTPUT_PATH" type="string" default="/tmp/dynamo-fpm">
+  Output prefix for `<prefix>.<producer-id>.<index>.jsonl.gz` files.
+</ParamField>
+
+<ParamField path="DYN_FPM_MODE" type="string" default="sampled">
+  Capture mode: `sampled` writes the latest changed value per worker and data-parallel rank; `full` writes every valid payload.
+</ParamField>
+
+<ParamField path="DYN_FPM_SAMPLE_INTERVAL_MS" type="integer" default="5000">
+  Sampling interval used by `sampled` mode.
+</ParamField>
+
+<ParamField path="DYN_FPM_JSONL_GZ_ROLL_BYTES" type="integer" default="268435456">
+  Segment roll threshold in uncompressed JSONL bytes.
+</ParamField>
+
+<ParamField path="DYN_FPM_MAX_SEGMENTS" type="integer" default="4">
+  Number of segments retained independently for each producer.
+</ParamField>
+
+See [Forward Pass Metrics Trace Reference](forward-pass-metrics-tracing.mdx) for topology support and file semantics.
+
+## Request tracing
 
 <ParamField path="DYN_REQUEST_TRACE" type="boolean">
-  Truthy master switch that enables request-replay capture. Unset by default.
+  Master switch. When enabled without an explicit record selection, emits `request_end,tool`.
 </ParamField>
 
-<ParamField path="DYN_REQUEST_TRACE_SINKS" type="string" default="jsonl_gz">
-  Comma-separated sinks: `jsonl`, `jsonl_gz`, or `stderr`.
+<ParamField path="DYN_REQUEST_TRACE_RECORDS" type="string" default="request_end,tool">
+  Comma-separated record types: `request_end`, `request_payload`, and `tool`.
 </ParamField>
 
-<ParamField path="DYN_REQUEST_TRACE_OUTPUT_PATH" type="string" default="/tmp/dynamo-request-trace">
-  Literal JSONL path or gzip segment prefix for captured rows.
+<ParamField path="DYN_REQUEST_TRACE_SINKS" type="string" default="file">
+  Comma-separated sinks: `file`, `stderr`, `nats`, and `otel`.
+</ParamField>
+
+<ParamField path="DYN_REQUEST_TRACE_FILE_PATH" type="string" default="/tmp/dynamo-request-trace">
+  Literal JSONL path or gzip segment prefix, depending on `DYN_REQUEST_TRACE_FILE_FORMAT`.
+</ParamField>
+
+<ParamField path="DYN_REQUEST_TRACE_FILE_FORMAT" type="string" default="jsonl_gz">
+  File encoding: `jsonl` or rotating `jsonl_gz`.
 </ParamField>
 
 <ParamField path="DYN_REQUEST_TRACE_CAPACITY" type="integer" default="1024">
   Best-effort in-process broadcast capacity.
 </ParamField>
 
-<ParamField path="DYN_REQUEST_TRACE_JSONL_BUFFER_BYTES" type="integer" default="1048576">
-  JSONL or gzip batching threshold in bytes.
+<ParamField path="DYN_REQUEST_TRACE_NATS_SUBJECT" type="string" default="dynamo.request_trace.v1">
+  Subject used by the `nats` sink.
 </ParamField>
 
-<ParamField path="DYN_REQUEST_TRACE_JSONL_FLUSH_INTERVAL_MS" type="integer" default="1000">
-  Periodic flush interval in milliseconds.
+<ParamField path="DYN_REQUEST_TRACE_OTEL_MAX_PAYLOAD_BYTES" type="integer" default="4194304">
+  Maximum serialized OTLP payload attribute size. Oversized payload rows emit an incomplete marker.
 </ParamField>
 
-<ParamField path="DYN_REQUEST_TRACE_JSONL_GZ_ROLL_BYTES" type="integer" default="268435456">
+<ParamField path="DYN_REQUEST_TRACE_FILE_BUFFER_BYTES" type="integer" default="1048576">
+  File batching threshold in bytes.
+</ParamField>
+
+<ParamField path="DYN_REQUEST_TRACE_FILE_FLUSH_INTERVAL_MS" type="integer" default="1000">
+  Periodic file flush interval in milliseconds.
+</ParamField>
+
+<ParamField path="DYN_REQUEST_TRACE_FILE_ROLL_BYTES" type="integer" default="268435456">
   Gzip roll threshold in uncompressed bytes.
 </ParamField>
 
-<ParamField path="DYN_REQUEST_TRACE_JSONL_GZ_ROLL_LINES" type="integer">
-  Optional gzip roll threshold in records. Unset by default.
+<ParamField path="DYN_REQUEST_TRACE_FILE_ROLL_LINES" type="integer">
+  Optional gzip roll threshold in records.
 </ParamField>
 
 <ParamField path="DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT" type="string">
-  Optional ZMQ PULL bind address for harness tool events. Set on the process that should own tool-event ingress, usually the frontend. Unset by default.
+  Optional ZMQ PULL bind address for harness tool events. Configure it on only one process.
 </ParamField>
 
 <ParamField path="DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC" type="string" default="agent-tool-events">
-  First-frame ZMQ topic filter, used when the ZMQ endpoint is configured.
+  First-frame ZMQ topic filter.
 </ParamField>
+
+<ParamField path="DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST" type="string">
+  Comma- or whitespace-separated allowlist of HTTP header names captured on `request_payload` rows. Values are not redacted.
+</ParamField>
+
+See [Request Trace Reference](request-tracing.mdx) for compatibility aliases, sink behavior, and record semantics.
 
 ## Related
 

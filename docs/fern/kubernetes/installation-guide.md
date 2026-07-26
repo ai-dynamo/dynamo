@@ -213,7 +213,7 @@ helm install prometheus prometheus-community/kube-prometheus-stack \
   --set-json 'prometheus.prometheusSpec.probeNamespaceSelector={}'
 ```
 
-Then uncomment the `prometheusEndpoint` line in the Dynamo install command. The Dynamo operator automatically creates PodMonitors for its components. See [Metrics](observability/metrics.md) for dashboard setup and available metrics, and [Logging](observability/logging.md) for the Grafana Loki + Alloy logging stack.
+Then uncomment the `prometheusEndpoint` line in the Dynamo install command. The Dynamo operator automatically creates PodMonitors for its components. See [Metrics](observability/metrics.md) for dashboard setup and available metrics, and [Logging](../observability/README.md) for the Grafana Loki + Alloy logging stack.
 
 ### Shared Storage for Model Caching
 
@@ -350,6 +350,6 @@ kubectl delete crd <crd-name>
 ## Reference
 
 - [Helm Chart Configuration](https://github.com/ai-dynamo/dynamo/tree/main/deploy/helm/charts/platform/README.md)
-- [Create Custom Deployments](./deployment/create-deployment.md)
+- [Deploy with DGD](dgd-guide.md)
 - [Dynamo Operator Details](./dynamo-operator.md)
 - [ModelExpress Server](https://github.com/ai-dynamo/modelexpress)

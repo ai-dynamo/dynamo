@@ -60,19 +60,50 @@ export DYN_LOG='info,dynamo_runtime::system_status_server=trace'
 
 ## OTLP Export
 
-`OTEL_EXPORT_ENABLED=true` is the master switch for both trace and log export. By default, logs use
-`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`; set `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` to route them separately.
-Dynamo's exporter connects to an OTLP gRPC listener.
+`OTEL_EXPORT_ENABLED=true` is the master switch for runtime trace and log export. Configure a
+generic endpoint for both signals:
 
 ```bash
 export DYN_LOGGING_JSONL=true
 export OTEL_EXPORT_ENABLED=true
-export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:4317
-# Optional separate log collector:
-# export OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://localhost:4317
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+export OTEL_EXPORTER_OTLP_PROTOCOL=grpc
 ```
 
-Set these variables on every process whose logs you want to export.
+Use `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` for signal-specific
+destinations. Signal-specific endpoints are used as-is. For a generic `http/protobuf` endpoint,
+Dynamo appends `/v1/traces` or `/v1/logs`.
+
+<Warning>
+`OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` does not fall back to
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`. If only the traces endpoint is set, logs use the generic
+endpoint or the protocol default and can be silently dropped when no collector is listening there.
+</Warning>
+
+Set these variables on every process whose telemetry you want to export. Use
+`OTEL_TRACES_SAMPLE_RATIO` to apply head sampling to traces; leaving it unset exports every trace.
+
+## Request Payload Export
+
+Request payload logging uses the request trace pipeline rather than the runtime log stream. Enable
+the `request_payload` record and include the `otel` sink:
+
+```bash
+export DYN_REQUEST_TRACE_RECORDS=request_payload
+export DYN_REQUEST_TRACE_SINKS=otel
+export OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://otel-collector:4317
+export OTEL_EXPORTER_OTLP_LOGS_PROTOCOL=grpc
+```
+
+Each request trace row maps to one OTLP `LogRecord` in scope `dynamo.request_trace`. Combining
+sinks, such as `file,otel`, writes the same row to every selected destination. `stderr` alone never
+exports over OTLP.
+
+Canceled and failed chat requests retain the request payload and omit the response. Set
+`DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST` to capture selected request headers. Captured values
+are unredacted, so do not allowlist credentials.
+
+For limits and record semantics, see [Request Trace Reference](request-tracing.mdx).
 
 ## Request Correlation
 

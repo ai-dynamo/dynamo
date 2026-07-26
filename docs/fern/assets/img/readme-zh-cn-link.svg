@@ -3,7 +3,7 @@
   <desc id="desc">A language-gated link badge for Simplified Chinese readers.</desc>
   <switch>
     <g systemLanguage="zh-CN,zh-Hans-CN,zh-Hans">
-      <a href="../../../README.zh-CN.md" target="_top">
+      <a href="../../../../README.zh-CN.md" target="_top">
         <rect x="0.5" y="0.5" width="111" height="27" rx="6" fill="#f6ffed" stroke="#52c41a"/>
         <text x="56" y="18" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Noto Sans CJK SC,Microsoft YaHei,sans-serif" font-size="13" font-weight="600" fill="#135200">简体中文</text>
       </a>

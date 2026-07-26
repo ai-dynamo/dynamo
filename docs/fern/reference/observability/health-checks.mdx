@@ -7,7 +7,7 @@ subtitle: Health endpoints, status codes, paths, and active-check configuration
 
 Dynamo exposes two related health interfaces: HTTP status endpoints for external observers and
 optional canary requests that actively exercise idle worker endpoints. For a local procedure, see
-[Check Local Deployment Health](../../observability/health-checks.mdx).
+[Observe a Local Deployment](../../observability/local-observability.mdx#check-deployment-health).
 
 ## Endpoint Summary
 
@@ -32,9 +32,11 @@ A live frontend returns `200 OK`:
 }
 ```
 
-During shutdown, `/live` returns `503 Service Unavailable` with status `shutting_down`.
+During graceful shutdown, `/live` remains `200 OK` while the Frontend is draining admitted requests.
+After the drain finishes or times out and the service enters the stopping state, `/live` returns
+`503 Service Unavailable` with status `shutting_down`.
 
-The frontend `/health` endpoint returns `200 OK` and lists the endpoints and instances currently
+The frontend `/health` endpoint returns `200 OK` while ready and lists the endpoints and instances currently
 visible through discovery:
 
 ```json
@@ -55,7 +57,10 @@ visible through discovery:
 ```
 
 An empty `endpoints` or `instances` array means the frontend does not currently discover workers; it
-does not change the frontend response status by itself.
+does not change the frontend response status by itself. As soon as graceful draining starts, `/health`
+returns `503 Service Unavailable` with status `not_ready` and a `stage` value that identifies the
+current lifecycle stage. This removes the Frontend from readiness routing before admitted responses
+finish.
 
 ## System-Status Responses
 
@@ -77,7 +82,8 @@ Before the component is ready, `/health` and `/live` return `503 Service Unavail
 }
 ```
 
-After startup, both paths return `200 OK` with status `ready`:
+The worker `/live` and `/health` paths currently report the same system-status payload and status
+code. After startup, both paths return `200 OK` with status `ready`:
 
 ```json
 {

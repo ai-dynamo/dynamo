@@ -820,5 +820,5 @@ resources:
 
 - [Disaggregated Serving Architecture](../design-docs/disagg-serving.md)
 - [AIConfigurator Deployment Guide](../features/disaggregated-serving/README.md)
-- [NIXL Benchmark Deployment](../../deploy/pre-deployment/nixl/README.md)
+- [NIXL Benchmark Deployment](https://github.com/ai-dynamo/dynamo/blob/main/deploy/pre-deployment/nixl/README.md)
 - [KV Cache Transfer Methods](../backends/trtllm/trtllm-kv-cache-transfer.md)

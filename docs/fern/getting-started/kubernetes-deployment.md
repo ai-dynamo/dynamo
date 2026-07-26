@@ -63,7 +63,7 @@ the architecture and the disaggregation-specific configuration.
 
 ## Where to go next
 
-Run one model end to end with the [Kubernetes Quickstart](../kubernetes/README.md)
+Run one model end to end with the [Kubernetes Quickstart](../kubernetes/quickstart.mdx)
 first if you are new here. Then pick your path:
 
 | Goal | Guide |
@@ -77,4 +77,4 @@ first if you are new here. Then pick your path:
 | Load models faster across pods | [Model Caching](../kubernetes/model-caching.md) |
 
 If you are still evaluating Dynamo locally, start with the [Quickstart](quickstart.mdx)
-and [Local Installation](local-installation.md) first.
+and [Local Installation](local-installation.mdx) first.

@@ -205,13 +205,6 @@ For the timing-model design, see [Mocker Engine Architecture](../../design-docs/
   Comma-separated ZMQ ROUTER base ports for gap recovery, one per worker.
 </ParamField>
 
-<ParamField path="--durable-kv-events" type="boolean" default="false">
-  Deprecated JetStream KV-event mode. Prefer the local indexer / event-plane subscriber path.
-
-  > [!WARNING]
-  > Deprecated. Do not use for new tests.
-</ParamField>
-
 ## SGLang-specific
 
 Apply only when `--engine-type sglang`.

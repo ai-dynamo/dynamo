@@ -1,13 +1,14 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Set up KV-Aware Routing
-subtitle: Enable the KV router in a DynamoGraphDeployment so requests land on the worker most likely to have the prompt's prefix cached.
+title: KV-Aware Routing with the Dynamo Frontend
+sidebar-title: Dynamo Frontend
+subtitle: Configure the Dynamo Frontend to select the worker most likely to have the prompt prefix cached.
 ---
 
-KV-aware routing sends each request to the worker most likely to already hold the prompt's KV cache prefix, improving Time To First Token (TTFT) and throughput over round-robin. Turning it on in a DynamoGraphDeployment (DGD) takes two steps: switch the **Frontend** into KV mode, and have the **workers** publish KV cache events so the router knows what each worker has cached.
+In this topology, the Dynamo Frontend receives each request and selects the worker most likely to already hold the prompt's KV cache prefix. Use it when clients send requests directly to a Dynamo Frontend Service. If a Kubernetes Gateway receives requests first, use [Gateway API routing](inference-gateway.mdx) instead.
 
-This is a [how-to](dgd-guide.md) for an existing deployment. For the routing cost model and concepts, see [Routing Concepts](../components/router/router-concepts.md); for the full flag and env reference, see the [Router Guide](../components/router/router-guide.md).
+Turning it on in a DynamoGraphDeployment (DGD) takes two steps: switch the **Frontend** into KV mode, and have the **workers** publish KV cache events so the router knows what each worker has cached. This is a [how-to](dgd-guide.md) for an existing deployment. For the routing cost model and concepts, see [Routing Concepts](../components/router/router-concepts.md); for the full flag and env reference, see the [Router Guide](../components/router/router-guide.md).
 
 <Steps toc={true} tocDepth={2}>
 
@@ -67,13 +68,13 @@ The Frontend and worker snippets above are drawn from the [disagg-kv-router reci
 
 </Steps>
 
-## Tuning knobs
+## Tuning Knobs
 
 The KV router scores each worker as `prefill_load_scale * adjusted_prefill_blocks + decode_blocks`, where cache-overlap credit subtracts from the prefill load. Two knobs shift that balance; set them as Frontend `args` (or the `DYN_*` env equivalents). Start with the defaults and adjust only if you have a measured TTFT or ITL problem.
 
 For the flag/env/default reference, see the [Frontend Configuration Reference](../components/frontend/frontend-config-reference.mdx#router); for the full cost-model detail and every related flag, see [Configuration and Tuning](../components/router/router-configuration.md#tuning-guidelines).
 
-### Cache-overlap credit
+### Cache-Overlap Credit
 
 `--router-kv-overlap-score-credit` (env `DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT`) is the primary cache-reuse knob. It credits device-local prefix overlap against a worker's prefill load, biasing requests toward workers that already hold the prompt's prefix.
 
@@ -83,7 +84,7 @@ For the flag/env/default reference, see the [Frontend Configuration Reference](.
 
 Most deployments should leave this at `1.0`. Lower it only when cache-rich workers are getting overloaded while others sit idle.
 
-### Prompt-side load weight
+### Prompt-Side Load Weight
 
 `--router-prefill-load-scale` (env `DYN_ROUTER_PREFILL_LOAD_SCALE`) scales the prompt-side prefill load after overlap credit is applied, setting how much prompt work counts relative to decode-side block load.
 
@@ -91,16 +92,18 @@ Most deployments should leave this at `1.0`. Lower it only when cache-rich worke
 - **Raise above `1.0`** when long prompts are saturating workers and you want the router to steer new requests away from workers already doing heavy prefill.
 - **Lower below `1.0`** when decode-side pressure dominates and you want routing driven mainly by active decode blocks.
 
-### Route on load only
+### Route on Load Only
 
 `--no-router-kv-events` (env `DYN_ROUTER_USE_KV_EVENTS=false`) disables event tracking; the router predicts cache state from its own routing decisions with TTL-based expiration instead of consuming real KV events. Use it only when you are not confident the backend emits KV events correctly. `--router-reset-states` clears cached routing state on Frontend restart.
 
-## Routing with disaggregated serving
+## Routing with Disaggregated Serving
 
 In a disaggregated graph, the router operates over prefill and decode workers separately. The prefill workers publish KV events (the second step above) and the router selects among them; the internal prefill router activates automatically. See [Router with Disaggregated Serving](../components/router/router-disaggregated-serving.md).
 
-## Related pages
+## Related Pages
 
+- [KV-Aware Routing on Kubernetes](kv-aware-routing.md) — compare the Frontend and Gateway API topologies.
+- [Gateway API Routing](inference-gateway.mdx) — place endpoint selection in the Dynamo EPP.
 - [Router Guide](../components/router/router-guide.md) — deployment modes, full CLI and env reference.
 - [Routing Concepts](../components/router/router-concepts.md) — cost model and worker selection.
 - [Router with Disaggregated Serving](../components/router/router-disaggregated-serving.md) — prefill/decode routing.

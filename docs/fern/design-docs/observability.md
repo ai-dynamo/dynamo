@@ -56,6 +56,56 @@ events emitted inside a request span can therefore include three correlation key
 This is why JSONL logging is required for reliable log-to-trace correlation: the identifiers remain
 separate fields instead of being embedded in formatted text.
 
+## Forward Pass Metrics Persistence
+
+Forward Pass Metrics (FPM) tracing branches from the Rust publication path after Dynamo has
+validated and normalized the backend payload. The branch is additive: the event-plane publisher
+continues independently of the local persistence consumer.
+
+```mermaid
+flowchart LR
+    B[vLLM or SGLang relay] --> P[Rust FPM publisher]
+    T[TensorRT-LLM or mocker direct publisher] --> P
+    P --> E[Event plane]
+    P --> Q[Bounded trace queue]
+    Q --> S{Capture mode}
+    S -->|sampled| C[Latest changed key per interval]
+    S -->|full| A[Every valid payload]
+    C --> W[Per-producer gzip JSONL writer]
+    A --> W
+```
+
+The trace queue is bounded and producer enqueueing is nonblocking. When persistence falls behind,
+Dynamo drops trace records instead of delaying inference or event-plane publication. `sampled` mode
+coalesces records by `(namespace, component, worker_id, dp_rank)` and writes only changed counters at
+the configured interval. `full` mode preserves every accepted payload, including idle heartbeats.
+
+A writer owns one producer-specific file sequence. Rotation uses uncompressed JSONL bytes, retention
+applies independently to each producer, and graceful shutdown flushes accepted pending records. These
+properties make the files useful for analysis but not equivalent to a durable event log.
+
+## Request Trace Fan-Out
+
+Request tracing separates record creation from destination selection. The frontend creates
+`request_end` and optional `request_payload` rows, while a harness can inject tool events through
+ZMQ. Dynamo normalizes the rows before sending each one to every configured sink.
+
+```mermaid
+flowchart LR
+    F[Frontend request lifecycle] --> R[Request trace record]
+    H[Harness tool event over ZMQ] --> R
+    R --> X{Configured sinks}
+    X --> J[JSONL or JSONL.GZ]
+    X --> N[NATS]
+    X --> O[OTLP LogRecord]
+    X --> D[stderr]
+```
+
+The OTLP request-trace sink uses the logs protocol and endpoint resolution rules but does not depend
+on the runtime log stream. Selecting `stderr` while configuring an OTLP endpoint does not export the
+row; the sink list must include `otel`. Header capture is applied only to payload rows and stores
+unredacted allowlisted values.
+
 ## Active Worker Health Checks
 
 HTTP `/live` and `/health` endpoints are passive: they report current process and runtime state when
@@ -79,7 +129,9 @@ failure-detection path is required.
 ## Related Documentation
 
 - [Observe a Local Deployment](../observability/local-observability.mdx)
-- [Check Local Deployment Health](../observability/health-checks.mdx)
+- [Observe a Local Deployment](../observability/local-observability.mdx#check-deployment-health)
 - [Local Observability Stack Reference](../reference/observability/local-stack.mdx)
 - [Health Check Reference](../reference/observability/health-checks.mdx)
 - [Logging Reference](../reference/observability/logging.mdx)
+- [Forward Pass Metrics Trace Reference](../reference/observability/forward-pass-metrics-tracing.mdx)
+- [Request Trace Reference](../reference/observability/request-tracing.mdx)

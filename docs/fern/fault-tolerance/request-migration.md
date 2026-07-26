@@ -5,10 +5,6 @@ title: Request Migration
 subtitle: Keep in-flight generations alive across worker failures by retrying them on a healthy worker.
 ---
 
-<p align="left">
-  <a href="./request-migration.zh-CN.md" hreflang="zh-CN"><img src="../assets/img/readme-zh-cn-link.svg" alt="简体中文" height="28" /></a>
-</p>
-
 When a worker fails mid-generation, Dynamo can migrate the in-progress request to a healthy worker and continue from the exact point of failure — no tokens lost or duplicated, and no interruption visible to the client. Migration is configured once on the **Frontend** and applies globally to every model it serves.
 
 Migration is **off by default** (`--migration-limit 0`). The steps below turn it on, optionally bound its memory use, and verify it is working.
@@ -50,6 +46,32 @@ Optional. Migration caches token state for each in-flight request so it can be r
 ```
 
 Once a request's total sequence length (prompt + generated tokens) **strictly exceeds** this limit, migration is disabled for that request and token tracking stops. Exactly at the limit is still migratable. The check runs both at request start (prompt length) and during generation. Leave it unset for no limit.
+
+</Step>
+
+<Step title="Tune temporary worker inhibition">
+
+After a request-path failure, each runtime client temporarily removes the failed worker from its local
+routing set while service discovery propagates the authoritative worker state. The default local
+inhibition window is `5` seconds. Usually no change is required.
+
+To shorten, extend, or disable that local protection, set `DYN_RUNTIME_INHIBITED_DURATION_SECS` on
+the client process, such as the Frontend or another component that dispatches requests:
+
+```yaml
+          env:
+            - name: DYN_RUNTIME_INHIBITED_DURATION_SECS
+              value: "10"
+```
+
+Set the value to `0` to disable local inhibition. The runtime reads it once when the first client is
+initialized, so restart the process after changing it. Discovery updates can restore or remove a
+worker before the window expires. Direct dispatch bypasses local inhibition and continues to honor an
+upstream-selected worker while that worker remains in service discovery.
+
+See [Runtime Configuration](../reference/runtime-config-reference.mdx#fault-tolerance) for the field
+reference and [Distributed Runtime](../design-docs/distributed-runtime.md#local-worker-inhibition) for
+the routing behavior.
 
 </Step>
 

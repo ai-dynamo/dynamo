@@ -8,7 +8,7 @@ subtitle: Field reference for the Dynamo-specific CLI flags and environment vari
 `DynamoVllmConfig` holds the Dynamo-specific configuration for the vLLM backend (`python -m dynamo.vllm`). Every field, type, default, and choice on this page comes from the [`DynamoVllmArgGroup` and `DynamoVllmConfig`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/vllm/backend_args.py) definitions. For features and operational details, see the [vLLM Reference Guide](vllm-reference-guide.md).
 
 <Note>
-  These are **only** the Dynamo wrapper flags. The vLLM backend also accepts every native vLLM `EngineArgs` argument (`--model`, `--tensor-parallel-size`, `--max-model-len`, and so on) in the same command, plus the cross-cutting [Dynamo Runtime](../../reference/runtime-config-reference.mdx) flags (`--namespace`, `--endpoint`, and others). This page covers neither — only the vLLM-specific `DYN_VLLM_*` surface.
+  These are **only** the Dynamo wrapper flags. The vLLM backend also accepts every native vLLM `EngineArgs` argument (`--model`, `--tensor-parallel-size`, `--max-model-len`, and so on) in the same command, plus the cross-cutting [Dynamo Runtime](../../reference/runtime-config-reference.mdx) flags (`--namespace`, `--endpoint`, and others). Except for the KV event interoperability note below, this page covers neither — only the vLLM-specific `DYN_VLLM_*` surface.
 </Note>
 
 ## How the config is loaded
@@ -52,6 +52,24 @@ Each field is both a CLI flag and an environment variable. The CLI flag takes pr
   </Tab>
 </Tabs>
 </Card>
+
+## Native KV event configuration
+
+`--kv-events-config` and `--enable-prefix-caching` are native vLLM engine arguments rather than `DynamoVllmConfig` fields, but they determine whether a worker publishes the cache events used by event-driven KV-aware routing.
+
+> [!IMPORTANT]
+> Starting the frontend with `--router-mode kv` does not configure event publishing on vLLM workers. Enable publishing explicitly on every aggregated or prefill worker whose cache state the router should track.
+
+```bash
+python -m dynamo.vllm \
+  --model Qwen/Qwen3-0.6B \
+  --enable-prefix-caching \
+  --kv-events-config '{"enable_kv_cache_events":true,"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'
+```
+
+The `endpoint` value is the base ZeroMQ port. vLLM assigns each data-parallel rank the port at `base port + data-parallel rank`. When multiple workers share a host or network namespace, reserve one port per rank and choose base ports whose resulting ranges do not overlap.
+
+If workers do not publish KV events, configure the frontend with `--no-router-kv-events` for prediction-based KV routing or `--load-aware` for load-only routing.
 
 ## Worker role and disaggregation
 

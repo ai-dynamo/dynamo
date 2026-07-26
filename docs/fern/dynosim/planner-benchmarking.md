@@ -23,10 +23,12 @@ simulation supplies metrics to the Planner, see
 
 ## Prerequisites
 
-Build the Rust runtime bindings and install the Python components from the repository root:
+Build the Rust runtime bindings and install the Python components from the repository root. Activate
+the project virtual environment so the remaining commands use its `python` executable:
 
 ```bash
-.venv/bin/maturin develop --release -m lib/bindings/python/Cargo.toml
+source .venv/bin/activate
+maturin develop --release -m lib/bindings/python/Cargo.toml
 uv pip install -e .
 ```
 
@@ -53,7 +55,7 @@ curl -sLO https://raw.githubusercontent.com/kvcache-ai/Mooncake/main/FAST25-rele
 Run agg (2 workers, TP=1):
 
 ```bash
-.venv/bin/python -m dynamo.replay traces/mooncake_fast25/toolagent_trace.jsonl \
+python -m dynamo.replay traces/mooncake_fast25/toolagent_trace.jsonl \
   --planner-config '{
     "mode": "agg",
     "optimization_target": "sla",
@@ -71,7 +73,7 @@ Run agg (2 workers, TP=1):
 Run disagg (1P1D, TP=1):
 
 ```bash
-.venv/bin/python -m dynamo.replay traces/mooncake_fast25/toolagent_trace.jsonl \
+python -m dynamo.replay traces/mooncake_fast25/toolagent_trace.jsonl \
   --planner-config '{
     "mode": "disagg",
     "optimization_target": "sla",
@@ -110,7 +112,7 @@ run_one() {
   else
     extra=$(printf '{"aic_backend":"vllm","aic_system":"h200_sxm","aic_model_path":"nvidia/Llama-3.1-8B-Instruct-FP8","aic_tp_size":1,"startup_time":%d}' "$s")
   fi
-  .venv/bin/python -m dynamo.replay "$TRACE" \
+  python -m dynamo.replay "$TRACE" \
     --planner-config "$(printf '{"mode":"agg","optimization_target":"sla","ttft_ms":1500,"itl_ms":50,"enable_throughput_scaling":true,"enable_load_scaling":true,"pre_deployment_sweeping_mode":"rapid","throughput_adjustment_interval_seconds":300,"load_adjustment_interval_seconds":10,"prefill_engine_num_gpu":1,"decode_engine_num_gpu":1,"report_filename":"%s"}' "$name")" \
     --extra-engine-args "$extra" \
     --num-workers 2 --arrival-speedup-ratio 1.0 \

@@ -5,7 +5,7 @@ title: Runtime Configuration (DynamoRuntimeConfig)
 subtitle: Field reference for the cross-cutting Dynamo runtime CLI flags and environment variables shared by every backend and the frontend.
 ---
 
-`DynamoRuntimeConfig` holds the configuration that is **common to every Dynamo process** — the frontend, the standalone router, and all three backend workers (vLLM, SGLang, TRT-LLM) parse this same argument group. Every field, type, default, and choice on this page comes from the [`DynamoRuntimeArgGroup` and `DynamoRuntimeConfig`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/configuration/groups/runtime_args.py) definitions.
+`DynamoRuntimeConfig` holds the configuration that is **common to every Dynamo process** — the frontend, the standalone router, and all three backend workers (vLLM, SGLang, TRT-LLM) parse this same argument group. Most fields, types, defaults, and choices on this page come from the [`DynamoRuntimeArgGroup` and `DynamoRuntimeConfig`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/configuration/groups/runtime_args.py) definitions. The page also catalogs runtime environment-only controls implemented below the Python argument layer.
 
 <Note>
   These are the **shared** Dynamo runtime flags. Each backend also has its own backend-specific flags: [vLLM Configuration](../backends/vllm/vllm-config-reference.mdx), [SGLang Configuration](../backends/sglang/sglang-config-reference.mdx), and [TensorRT-LLM Configuration](../backends/trtllm/trtllm-config-reference.mdx). This page covers neither native engine arguments nor backend-specific `DYN_*` prefixed flags — only the flags from `DynamoRuntimeArgGroup`.
@@ -13,7 +13,7 @@ subtitle: Field reference for the cross-cutting Dynamo runtime CLI flags and env
 
 ## How the config is loaded
 
-Each field is both a CLI flag and an environment variable. The CLI flag takes precedence; the environment variable is the fallback. Boolean fields are negatable — `--dyn-enable-structural-tag` sets it on, `--no-dyn-enable-structural-tag` sets it off.
+Unless a field is marked environment-only, it has both a CLI flag and an environment variable. The CLI flag takes precedence; the environment variable is the fallback. Boolean fields are negatable — `--dyn-enable-structural-tag` sets it on, `--no-dyn-enable-structural-tag` sets it off.
 
 <Card>
 <Tabs>
@@ -111,8 +111,9 @@ Each field is both a CLI flag and an environment variable. The CLI flag takes pr
   Environment variable: `DYN_REQUEST_PLANE`
 </ParamField>
 
-<ParamField path="--event-plane" type="string" default="null">
-  Event publishing transport. When unset, auto-detected from `--discovery-backend`: `zmq` for `file` or `mem` backends (no external services required), `nats` for `etcd` or `kubernetes`. See [Event Plane](../design-docs/event-plane.md) for design details.
+<ParamField path="--event-plane" type="string" default="zmq">
+  Event publishing transport. ZMQ is the default for every discovery backend; select `nats`
+  explicitly to use NATS Core. See [Event Plane](../design-docs/event-plane.md) for design details.
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>nats</Badge> <Badge intent="note" minimal>zmq</Badge></span>
 
@@ -201,6 +202,16 @@ Each field is both a CLI flag and an environment variable. The CLI flag takes pr
   Environment variable: `DYN_MEDIA_OUTPUT_HTTP_URL`
 </ParamField>
 
+## Fault tolerance
+
+<ParamField path="DYN_RUNTIME_INHIBITED_DURATION_SECS" type="integer" default="5">
+  Maximum number of seconds that a runtime client locally removes a worker from normal routing after
+  a request-path failure while service discovery propagates the worker state. Set to `0` to disable
+  local inhibition. The process reads this value once when the first client initializes; restart the
+  process after changing it. Discovery updates remain authoritative, and direct dispatch bypasses the
+  local inhibited set while the selected worker remains in discovery.
+</ParamField>
+
 ## Operations
 
 <ParamField path="--dump-config-to" type="string" default="null">
@@ -216,19 +227,17 @@ Each field is both a CLI flag and an environment variable. The CLI flag takes pr
 </ParamField>
 
 <ParamField path="--engine-request-limit" type="integer" default="null">
-  Maximum number of requests handled concurrently by the engine (worker-pool semaphore size). Enables worker-side request rejection when set; disabled by default. Must be a positive integer. When set, the Rust runtime reads `DYN_ENGINE_REQUEST_LIMIT` directly. An overflow queue of up to `N+16` requests is maintained internally and is not a user-facing knob.
+  Maximum requests handled concurrently by the engine. Setting a positive integer enables worker-side
+  admission control. When the engine slots and the Dynamo overflow queue are full, the worker rejects
+  the request and the Frontend returns the configured overload status, 529 by default.
 
   Environment variable: `DYN_ENGINE_REQUEST_LIMIT`
 </ParamField>
 
-## Deprecated
-
-These flags are retained for backward compatibility and will be removed in a future release.
-
-<ParamField path="--durable-kv-events" type="boolean" default="false" deprecated={true}>
-  **Deprecated** — Enable durable KV events using NATS JetStream instead of the local indexer. This option will be removed in a future release. The event-plane subscriber (`local_indexer` mode) is now the recommended path and is automatically enabled when this flag is off.
-
-  Environment variable: `DYN_DURABLE_KV_EVENTS`
+<ParamField path="DYN_DYNAMO_REQUEST_QUEUE_LIMIT" type="integer" default="16">
+  Advanced overflow-queue size for requests waiting in Dynamo before entering the engine. Applies only
+  when `--engine-request-limit` or `DYN_ENGINE_REQUEST_LIMIT` is set. Must be at least `2`; the
+  effective per-worker cap is the engine limit plus this queue limit.
 </ParamField>
 
 ## Related pages

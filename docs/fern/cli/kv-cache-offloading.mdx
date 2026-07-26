@@ -49,9 +49,9 @@ separate features that can operate alongside the selected backend.
   </Step>
   <Step title="Start Offloading">
 
-Choose a backend and follow its tab. Each example uses `Qwen/Qwen3-0.6B` and one GPU. The vLLM
-launch scripts start both the Dynamo frontend and the worker, and stop both processes when you press
-`Ctrl+C`.
+Choose a backend and follow its tab. The primary examples use `Qwen/Qwen3-0.6B` and one GPU; the
+optional disaggregated FlexKV example uses two GPUs. The vLLM launch scripts start the Dynamo
+frontend and workers, and stop all processes when you press `Ctrl+C`.
 
 <Tabs>
   <Tab title="KVBM">
@@ -172,8 +172,22 @@ cd examples/backends/vllm
 FLEXKV_CPU_CACHE_GB=32 ./launch/agg_flexkv.sh
 ```
 
-The script sets `DYNAMO_USE_FLEXKV=1` and selects `FlexKVConnectorV1`. For SSD and distributed-cache
-configuration, see the [FlexKV documentation](https://github.com/taco-project/FlexKV/tree/main/docs).
+The script sets `DYNAMO_USE_FLEXKV=1` and selects `FlexKVConnectorV1`.
+
+To test the experimental disaggregated FlexKV topology on two GPUs, run:
+
+```bash
+cd examples/backends/vllm
+./launch/disagg_flexkv.sh
+```
+
+The script starts the decode worker with `NixlConnector` and the prefill worker with `PdConnector`,
+which combines `FlexKVConnectorV1` for offloading with `NixlConnector` for prefill/decode transfer.
+It selects the prefill role with `--disaggregation-mode prefill`; do not use the deprecated
+`--is-prefill-worker` flag.
+
+For SSD and distributed-cache configuration, see the
+[FlexKV documentation](https://github.com/taco-project/FlexKV/tree/main/docs).
 
   </Tab>
 </Tabs>

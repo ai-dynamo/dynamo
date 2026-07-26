@@ -166,6 +166,9 @@ redirects:
     destination: "/dynamo/dev/backends/custom-backend/custom-backend-overview"
   - source: "/dynamo/latest/planner/planner_intro.html"
     destination: "/dynamo/components/planner"
+  # The former Creating Deployments page was consolidated into Deploy with DGD.
+  - source: "/dynamo/dev/kubernetes/deployment/create-deployment"
+    destination: "/dynamo/dev/kubernetes/dgd-guide"
   # Kubernetes sidebar reorganization: keep old section-generated URLs working.
   - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/quickstart"
     destination: "/dynamo/dev/kubernetes-deployment/start-here/kubernetes-quickstart"
@@ -216,7 +219,11 @@ redirects:
   - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/developing-with-tilt"
     destination: "/dynamo/dev/kubernetes-deployment/advanced-platform/developing-with-tilt"
   - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/inference-gateway-gaie"
-    destination: "/dynamo/dev/integrations/kubernetes-integrations/gateway-api-inference-extension-gaie"
+    destination: "/dynamo/dev/kubernetes/model-deployment/kv-aware-routing/gateway-api"
+  - source: "/dynamo/dev/knowledge-base/kubernetes/kubernetes-operator/inference-gateway-gaie"
+    destination: "/dynamo/dev/kubernetes/model-deployment/kv-aware-routing/gateway-api"
+  - source: "/dynamo/dev/kubernetes/model-deployment/kv-aware-routing"
+    destination: "/dynamo/dev/kubernetes/model-deployment/kv-aware-routing/overview"
   # User Guide operations restructure: the CLI tools section was flattened.
   - source: "/dynamo/dev/kubernetes/operations/cli-tools/sizing-with-ai-configurator"
     destination: "/dynamo/dev/kubernetes/model-deployment/size-with-ai-configurator"
@@ -407,9 +414,7 @@ experimental:
 colors:
   accentPrimary:
     dark: '#76B900'
-    # Darkened NVIDIA green for light mode: #76B900 on white is 2.41:1,
-    # below the 3:1 minimum Fern warns about; #538300 passes (~4.3:1).
-    light: '#538300'
+    light: '#76B900'
   background:
     light: '#FFFFFF'
     dark: '#000000'

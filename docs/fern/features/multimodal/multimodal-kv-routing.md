@@ -77,7 +77,7 @@ The routing flow in general has three steps:
     bash examples/backends/vllm/launch/agg_multimodal_router_chat_processor.sh
     ```
 
-    See [vLLM Multimodal](../../knowledge-base/modular-components/backends/v-llm/vllm-multimodal#multimodal-kv-routing) for model support, hashing behavior, transfer modes, and configuration.
+    See [vLLM Multimodal](multimodal-vllm.md#multimodal-kv-routing) for model support, hashing behavior, transfer modes, and configuration.
   </Tab>
   <Tab title="SGLang" language="sglang">
     ```bash
@@ -87,7 +87,7 @@ The routing flow in general has three steps:
 
     The launcher configures KV events and matching frontend and worker block sizes.
 
-    See [SGLang Multimodal](../../knowledge-base/modular-components/backends/sg-lang/sglang-multimodal#multimodal-kv-routing) for prerequisites, configuration, fallback behavior, and verification.
+    See [SGLang Multimodal](multimodal-sglang.md#multimodal-kv-routing) for prerequisites, configuration, fallback behavior, and verification.
   </Tab>
   <Tab title="TensorRT-LLM" language="trtllm">
     ```bash
@@ -97,7 +97,7 @@ The routing flow in general has three steps:
 
     The launcher enables multimodal serving, KV event publishing, block reuse, and KV-aware routing.
 
-    See [TensorRT-LLM Multimodal](../../knowledge-base/modular-components/backends/tensor-rt-llm/tensorrt-llm-multimodal#multimodal-kv-routing) for worker requirements, supported models, and limitations.
+    See [TensorRT-LLM Multimodal](multimodal-trtllm.md#multimodal-kv-routing) for worker requirements, supported models, and limitations.
   </Tab>
 </Tabs>
 
@@ -105,7 +105,7 @@ The routing flow in general has three steps:
 
 | Backend | Routing Path | Status | Notes |
 |---------|--------------|--------|-------|
-| [vLLM](../../knowledge-base/modular-components/backends/v-llm/vllm-multimodal#multimodal-kv-routing) | Rust frontend (default) | <Badge intent="success" minimal>Yes</Badge> | Supported families include Qwen2-VL, Qwen2.5-VL, Qwen3-VL, LLaVA 1.5, LLaVA-NeXT, Llama 4, Kimi K2.5/K2.6, Qwen3.5, and Qwen3.6. The rest use text-prefix-only routing. |
-| [vLLM](../../knowledge-base/modular-components/backends/v-llm/vllm-multimodal#multimodal-kv-routing) | Python chat processor | <Badge intent="success" minimal>Yes</Badge> | Uses vLLM’s own multimodal processor — supports any VLM that vLLM supports. |
-| [SGLang](../../knowledge-base/modular-components/backends/sg-lang/sglang-multimodal#multimodal-kv-routing) | Rust frontend (default) | <Badge intent="success" minimal>Yes</Badge> | Dynamo's SGLang image includes hash-forwarding support; custom installations must add it. |
-| [TensorRT-LLM](../../knowledge-base/modular-components/backends/tensor-rt-llm/tensorrt-llm-multimodal#multimodal-kv-routing) | Rust frontend (default) | <Badge intent="success" minimal>Yes</Badge> | Supported model scope is the Qwen2-VL family (Qwen2-VL / Qwen2.5-VL / Qwen3-VL) and Kimi (Kimi-K2.5 / Kimi-K2.6). Other multimodal models fall back to text-prefix routing. |
+| [vLLM](multimodal-vllm.md#multimodal-kv-routing) | Rust frontend (default) | <Badge intent="success" minimal>Yes</Badge> | Supported families include Qwen2-VL, Qwen2.5-VL, Qwen3-VL, LLaVA 1.5, LLaVA-NeXT, Llama 4, Kimi K2.5/K2.6, Qwen3.5, and Qwen3.6. The rest use text-prefix-only routing. |
+| [vLLM](multimodal-vllm.md#multimodal-kv-routing) | Python chat processor | <Badge intent="success" minimal>Yes</Badge> | Uses vLLM’s own multimodal processor — supports any VLM that vLLM supports. |
+| [SGLang](multimodal-sglang.md#multimodal-kv-routing) | Rust frontend (default) | <Badge intent="success" minimal>Yes</Badge> | Dynamo's SGLang image includes hash-forwarding support; custom installations must add it. |
+| [TensorRT-LLM](multimodal-trtllm.md#multimodal-kv-routing) | Rust frontend (default) | <Badge intent="success" minimal>Yes</Badge> | Supported model scope is the Qwen2-VL family (Qwen2-VL / Qwen2.5-VL / Qwen3-VL) and Kimi (Kimi-K2.5 / Kimi-K2.6). Other multimodal models fall back to text-prefix routing. |

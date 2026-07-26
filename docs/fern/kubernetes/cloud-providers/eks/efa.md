@@ -95,7 +95,7 @@ If you are on an older kernel (< 5.12) and the host doesn't already have `efa_nv
 
 ## Step 3: Build a Dynamo EFA Image
 
-Dynamo's image build is two steps: `container/render.py` writes a Dockerfile for the chosen framework + target, then `docker build` consumes it. Passing `--make-efa` to `render.py` appends the AWS EFA installer stage from [`container/templates/aws.Dockerfile`](../../../../container/templates/aws.Dockerfile), which defines a stage named `aws` on top of `runtime`. **You must pass `--target aws` to `docker build`** — without it, `docker build` stops at the `runtime` stage and you get an image without EFA. See [`container/README.md`](../../../../container/README.md) for the full build workflow.
+Dynamo's image build is two steps: `container/render.py` writes a Dockerfile for the chosen framework + target, then `docker build` consumes it. Passing `--make-efa` to `render.py` appends the AWS EFA installer stage from [`container/templates/aws.Dockerfile`](https://github.com/ai-dynamo/dynamo/blob/main/container/templates/aws.Dockerfile), which defines a stage named `aws` on top of `runtime`. **You must pass `--target aws` to `docker build`** — without it, `docker build` stops at the `runtime` stage and you get an image without EFA. See [`container/README.md`](https://github.com/ai-dynamo/dynamo/blob/main/container/README.md) for the full build workflow.
 
 ```bash
 # vLLM EFA image (amd64 or arm64 — vllm/vllm-openai is multi-arch)
@@ -322,7 +322,7 @@ kubectl logs <decode-pod> | grep "External prefix cache hit rate"
 
 - [Disaggregated Communication Guide](../../disagg-communication-guide.md) — transport-layer fundamentals
 - [RDMA / InfiniBand on AKS](../aks/rdma-infiniband.md) — Azure equivalent
-- [`container/templates/aws.Dockerfile`](../../../../container/templates/aws.Dockerfile) — EFA installer template
+- [`container/templates/aws.Dockerfile`](https://github.com/ai-dynamo/dynamo/blob/main/container/templates/aws.Dockerfile) — EFA installer template
 - [AWS — Manage EFA devices on Amazon EKS](https://docs.aws.amazon.com/eks/latest/userguide/device-management-efa.html) — official EKS-side guide (DRA driver + device plugin)
 - [AWS EFA documentation](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa.html) — EC2-side EFA overview
 - [`aws/eks-charts` — `aws-efa-k8s-device-plugin`](https://github.com/aws/eks-charts/tree/master/stable/aws-efa-k8s-device-plugin) — Helm chart source

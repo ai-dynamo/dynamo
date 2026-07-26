@@ -8,7 +8,7 @@ subtitle: Practical DynamoGraphDeploymentRequest examples covering AIC estimates
 Practical examples for deploying with `DynamoGraphDeploymentRequest` (DGDR).
 The DGDR workflow can use native AIC estimates, optional bootstrap profiling
 data, or live FPM warmup depending on the model/backend combination. For DGDR
-concepts, see the [DGDR Reference](dgdr.md). For profiling concepts, see the
+concepts, see the [DGDR Reference](dgdr-reference.mdx). For profiling concepts, see the
 [Profiler Guide](../components/profiler/profiler-guide.md).
 
 ## DGDR Examples
@@ -156,7 +156,7 @@ The override's API version controls its merge semantics. In particular, the
 `v1beta1` graph-level `spec.env` list and container `args` replace their
 generated lists, while nested container environment variables merge by name.
 `v1alpha1` worker arguments append for compatibility. See
-[Generated DGD Overrides](dgdr.md#generated-dgd-overrides) for the complete
+[Generated DGD Overrides](dgdr-reference.mdx#generated-dgd-overrides) for the complete
 behavior and direct-profiler requirements.
 
 ### Inline Configuration (Simple Use Cases)
@@ -261,5 +261,5 @@ kubectl delete pod pvc-access-pod -n $NAMESPACE
 
 ## Related Documentation
 
-- [DGDR Reference](dgdr.md) -- DGDR field reference and lifecycle
+- [DGDR Reference](dgdr-reference.mdx) -- DGDR field reference and lifecycle
 - [Profiler Guide](../components/profiler/profiler-guide.md) -- Profiling workflow

@@ -58,14 +58,21 @@ def _have_gh() -> bool:
 def _gh_json(endpoint: str):
     out = subprocess.run(
         ["gh", "api", endpoint],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout
     return json.loads(out)
 
 
 def _http_json(url: str):
-    req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json",
-                                               "User-Agent": "fern-navigation-skill"})
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "fern-navigation-skill",
+        },
+    )
     with urllib.request.urlopen(req, timeout=30) as r:
         return json.loads(r.read().decode())
 
@@ -74,12 +81,22 @@ def fetch_tree() -> dict[str, str]:
     """Return {path: blob_sha} for every tracked page in the live repo."""
     endpoint = f"repos/{REPO}/git/trees/{BRANCH}?recursive=1"
     try:
-        data = _gh_json(endpoint) if _have_gh() else _http_json(f"https://api.github.com/{endpoint}")
-    except Exception as exc:  # noqa: BLE001 -- surface a clean message, any failure mode
-        raise SystemExit(f"error: could not fetch repo tree ({exc}).\n"
-                         f"Check your internet connection, or authenticate `gh auth login`.")
+        data = (
+            _gh_json(endpoint)
+            if _have_gh()
+            else _http_json(f"https://api.github.com/{endpoint}")
+        )
+    except (
+        Exception
+    ) as exc:  # noqa: BLE001 -- surface a clean message, any failure mode
+        raise SystemExit(
+            f"error: could not fetch repo tree ({exc}).\n"
+            f"Check your internet connection, or authenticate `gh auth login`."
+        )
     if data.get("truncated"):
-        raise SystemExit("error: GitHub returned a truncated tree; cannot reliably diff.")
+        raise SystemExit(
+            "error: GitHub returned a truncated tree; cannot reliably diff."
+        )
 
     tracked: dict[str, str] = {}
     for entry in data.get("tree", []):
@@ -95,8 +112,16 @@ def fetch_content(path: str) -> str:
     """Return the decoded text of a single page from the live repo."""
     if _have_gh():
         b64 = subprocess.run(
-            ["gh", "api", f"repos/{REPO}/contents/{path}?ref={BRANCH}", "--jq", ".content"],
-            capture_output=True, text=True, check=True,
+            [
+                "gh",
+                "api",
+                f"repos/{REPO}/contents/{path}?ref={BRANCH}",
+                "--jq",
+                ".content",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
         ).stdout
         return base64.b64decode(b64).decode("utf-8", "replace")
     raw = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}/{path}"
@@ -149,14 +174,20 @@ def cmd_check() -> int:
     new = fetch_tree()
     added, removed, changed = diff(old, new)
     if not (added or removed or changed):
-        print(f"In sync with {REPO}@{BRANCH} "
-              f"(last synced {manifest.get('fetched_at', '?')}, {len(old)} pages).")
+        print(
+            f"In sync with {REPO}@{BRANCH} "
+            f"(last synced {manifest.get('fetched_at', '?')}, {len(old)} pages)."
+        )
         return 0
-    print(f"DRIFT vs {REPO}@{BRANCH} (last synced {manifest.get('fetched_at', '?')}):\n")
+    print(
+        f"DRIFT vs {REPO}@{BRANCH} (last synced {manifest.get('fetched_at', '?')}):\n"
+    )
     for label, items in (("new", added), ("removed", removed), ("changed", changed)):
         for p in items:
             print(f"  {label:8} {short(p)}")
-    print("\nRun `--fetch` to download the changed pages, update the reference, then `--sync`.")
+    print(
+        "\nRun `--fetch` to download the changed pages, update the reference, then `--sync`."
+    )
     return 2
 
 
@@ -165,9 +196,15 @@ def cmd_fetch(out_dir: Path, fetch_all: bool) -> int:
     old = manifest.get("pages", {})
     new = fetch_tree()
     added, _removed, changed = diff(old, new)
-    targets = sorted(new) if (fetch_all or not manifest) else sorted(set(added) | set(changed))
+    targets = (
+        sorted(new)
+        if (fetch_all or not manifest)
+        else sorted(set(added) | set(changed))
+    )
     if not targets:
-        print("Nothing to fetch: already in sync. (Use `--all` to force a full download.)")
+        print(
+            "Nothing to fetch: already in sync. (Use `--all` to force a full download.)"
+        )
         return 0
     out_dir.mkdir(parents=True, exist_ok=True)
     for path in targets:
@@ -175,8 +212,10 @@ def cmd_fetch(out_dir: Path, fetch_all: bool) -> int:
         dest.write_text(fetch_content(path))
         print(f"  wrote {dest}")
     print(f"\n{len(targets)} page(s) written to {out_dir}.")
-    print("Update references/navigation-reference.md (and the SKILL.md tables) from these, "
-          "then run `--sync` to record the new SHAs.")
+    print(
+        "Update references/navigation-reference.md (and the SKILL.md tables) from these, "
+        "then run `--sync` to record the new SHAs."
+    )
     return 0
 
 
@@ -186,25 +225,44 @@ def cmd_sync() -> int:
     added, removed, changed = diff(prior, new)
     write_manifest(new)
     if prior:
-        print(f"Manifest synced: {len(new)} pages "
-              f"(+{len(added)} / -{len(removed)} / ~{len(changed)} since last sync).")
+        print(
+            f"Manifest synced: {len(new)} pages "
+            f"(+{len(added)} / -{len(removed)} / ~{len(changed)} since last sync)."
+        )
     else:
         print(f"Manifest initialized: {len(new)} pages recorded from {REPO}@{BRANCH}.")
     return 0
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Refresh/track the Fern navigation source pages.")
+    ap = argparse.ArgumentParser(
+        description="Refresh/track the Fern navigation source pages."
+    )
     g = ap.add_mutually_exclusive_group()
-    g.add_argument("--check", action="store_true",
-                   help="Report drift vs the manifest (default). Exit 2 if drift, 0 if in sync.")
-    g.add_argument("--fetch", action="store_true",
-                   help="Download changed pages (or --all) to --out for re-summarizing.")
-    g.add_argument("--sync", action="store_true",
-                   help="Record the current upstream SHAs as the manifest (init, or after updating).")
-    ap.add_argument("--all", action="store_true", help="With --fetch, download every tracked page.")
-    ap.add_argument("--out", type=Path, default=Path("/tmp/fern-navigation-refresh"),
-                    help="Output dir for --fetch (default: /tmp/fern-navigation-refresh).")
+    g.add_argument(
+        "--check",
+        action="store_true",
+        help="Report drift vs the manifest (default). Exit 2 if drift, 0 if in sync.",
+    )
+    g.add_argument(
+        "--fetch",
+        action="store_true",
+        help="Download changed pages (or --all) to --out for re-summarizing.",
+    )
+    g.add_argument(
+        "--sync",
+        action="store_true",
+        help="Record the current upstream SHAs as the manifest (init, or after updating).",
+    )
+    ap.add_argument(
+        "--all", action="store_true", help="With --fetch, download every tracked page."
+    )
+    ap.add_argument(
+        "--out",
+        type=Path,
+        default=Path("/tmp/fern-navigation-refresh"),
+        help="Output dir for --fetch (default: /tmp/fern-navigation-refresh).",
+    )
     args = ap.parse_args()
 
     if args.fetch:

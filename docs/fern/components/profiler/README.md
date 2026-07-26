@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Profiler
+subtitle: Automated performance analysis that finds optimal prefill and decode parallelism and generates SLA-driven deployment configurations.
 ---
 
 The Dynamo Profiler is an automated performance analysis tool that measures model inference characteristics to optimize deployment configurations. It determines optimal tensor parallelism (TP) settings for prefill and decode phases, generates performance interpolation data, and enables SLA-driven autoscaling through the Planner.
@@ -14,7 +15,6 @@ The Dynamo Profiler is an automated performance analysis tool that measures mode
 | MoE Model Profiling | ✅ | 🚧 | 🚧 |
 | AI Configurator (Offline) | ✅ | ✅ | ✅ |
 | Online Profiling (AIPerf) | ✅ | ✅ | ✅ |
-| Interactive WebUI | ✅ | ✅ | ✅ |
 | Runtime Profiling Endpoints | ✅ | ❌ | ❌ |
 
 ## Quick Start
@@ -96,6 +96,6 @@ Suggested decode TP:4 (ITL 4.83 ms, throughput 51.22 tokens/s/GPU)
 |----------|-------------|
 | [Profiler Guide](profiler-guide.md) | Configuration, methods, and troubleshooting |
 | [Profiler Configuration Reference](profiler-config-reference.mdx) | CLI arguments for the SLA and per-endpoint profilers |
-| [Profiler Examples](profiler-examples.md) | Complete DGDR YAMLs, WebUI, script examples |
+| [Profiler Examples](profiler-examples.md) | Complete DGDR YAMLs and script examples |
 | [SLA Planner Guide](../planner/planner-guide.md) | End-to-end deployment workflow |
 | [SLA Planner Architecture](../planner/planner-guide.md) | How the Planner uses profiling data |

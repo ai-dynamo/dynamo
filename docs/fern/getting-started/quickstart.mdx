@@ -7,23 +7,19 @@ subtitle: Get a Dynamo OpenAI-compatible endpoint running in a container in abou
 
 {/* Looking for the project README? See /README.md at the repo root: https://github.com/ai-dynamo/dynamo/blob/main/README.md */}
 
-<p align="left">
-  <a href="./quickstart.zh-CN.mdx" hreflang="zh-CN"><img src="../assets/img/readme-zh-cn-link.svg" alt="简体中文" height="28" /></a>
-</p>
-
 ## Choose Your Path
 
 <CardGroup cols={4}>
-  <Card title="Quickstart" icon="regular bolt" href="/dynamo/dev/getting-started/quickstart">
+  <Card title="Quickstart" icon="regular bolt" href="quickstart.mdx">
     You're here. Container fast path.
   </Card>
-  <Card title="Local Installation" icon="regular laptop-code" href="/dynamo/dev/getting-started/local-installation">
+  <Card title="Local Installation" icon="regular laptop-code" href="local-installation.mdx">
     Full walkthrough — PyPI, configuration.
   </Card>
-  <Card title="Kubernetes" icon="regular cubes" href="/dynamo/dev/getting-started/kubernetes-deployment">
+  <Card title="Kubernetes" icon="regular cubes" href="kubernetes-deployment.md">
     Kubernetes-native production path.
   </Card>
-  <Card title="Build from Source" icon="regular code-branch" href="/dynamo/dev/getting-started/building-from-source">
+  <Card title="Build from Source" icon="regular code-branch" href="../cli/building-from-source.md">
     For contributors against `main`.
   </Card>
 </CardGroup>
@@ -148,16 +144,13 @@ Connection refused? The frontend takes a few seconds to start — retry. For pro
 Pick a full install path from the [four options above](#choose-your-path), or explore how Dynamo works under the hood:
 
 <CardGroup cols={2}>
-  <Card title="Architecture" icon="regular sitemap" href="/dynamo/dev/design-docs/overall-architecture">
+  <Card title="Architecture" icon="regular sitemap" href="../design-docs/architecture.md">
     How the frontend, router, and workers fit together.
   </Card>
-  <Card title="Frontend Guide" icon="regular bolt" href="/dynamo/dev/components/frontend">
+  <Card title="Frontend Guide" icon="regular bolt" href="../components/frontend/README.md">
     Worker discovery, multi-model routing, OpenAI compat.
   </Card>
-  <Card title="KV Cache Aware Routing" icon="regular route" href="/dynamo/dev/components/router/routing-concepts#kv-cache-routing">
+  <Card title="KV Cache Aware Routing" icon="regular route" href="../components/router/router-concepts.md#kv-cache-routing">
     How the router places requests for prefix reuse.
-  </Card>
-  <Card title="Health Checks" icon="regular heart-pulse" href="/dynamo/dev/user-guides/observability-local/health-checks">
-    Liveness and readiness probes for production deployments.
   </Card>
 </CardGroup>

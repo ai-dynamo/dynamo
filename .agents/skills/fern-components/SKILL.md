@@ -1,6 +1,14 @@
 ---
 name: fern-components
 description: Knowledge of Fern's built-in MDX component library (accordions, callouts, cards, steps, tabs, code blocks, API-reference snippets, and more) for authoring docs pages. Use when writing or editing a Fern `.mdx` page and deciding whether a component would present content better than plain Markdown, when a user asks "what Fern components exist" or "how do I use `<X>`", or when reviewing a page for missed opportunities to use a component. Complements dynamo-docs (which owns page placement, nav, frontmatter, and the style guide).
+license: Apache-2.0
+metadata:
+  author: NVIDIA
+  tags:
+    - fern
+    - docs
+    - mdx
+
 ---
 
 # Fern Components

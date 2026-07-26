@@ -61,6 +61,24 @@ When using Kubernetes discovery, the KV store backend automatically switches to 
   - **Kubernetes mode**: Endpoint information is stored in DynamoWorkerMetadata CRD resources, which are watched by other components for discovery.
   - **KV Store mode**: Endpoint information is stored in etcd at a path following the naming: `/services/{namespace}/{component}/{endpoint}-{lease_id}`. Note that endpoints of different workers of the same type (i.e., two `VllmPrefillWorker`s in one deployment) share the same `Namespace`, `Component`, and `Endpoint` name. They are distinguished by their different primary `lease_id`.
 
+## Local Worker Inhibition
+
+A request-path failure can be observed by a client before the service-discovery watcher has removed
+the failed worker. To close that propagation window, each runtime client keeps a local inhibited set.
+After a routed request fails, the client temporarily removes that worker from normal local selection.
+
+The process-wide inhibition duration comes from `DYN_RUNTIME_INHIBITED_DURATION_SECS`, defaults to
+`5` seconds, and is resolved once when the first client is initialized. A value of `0` disables local
+inhibition. Discovery remains authoritative: a discovery update can restore or remove a worker before
+the local timer expires.
+
+Direct dispatch bypasses the inhibited set because an upstream router has already selected a specific
+worker. The dispatch is still allowed only while that worker remains present in service discovery.
+This preserves explicit routing decisions without allowing a stale worker that discovery has removed.
+
+For deployment configuration, see
+[Request Migration](../fault-tolerance/request-migration.md#tune-temporary-worker-inhibition).
+
 ## Calling Endpoints
 
 Dynamo uses a `Client` object to call an endpoint. When a `Client` is created, it is given the name of the `Namespace`, `Component`, and `Endpoint`. It then watches for endpoint changes:

@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 # fern/dev.sh — toggle a fast-hot-reload "fern-rooted" docs layout for local dev.
 #
 # WHY THIS EXISTS

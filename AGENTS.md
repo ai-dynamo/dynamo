@@ -37,6 +37,8 @@ to it — edit only the canonical copy. Reach for the right group first:
 - `dynamo-clone-hotpath-audit` — audit Rust hot-path `.clone()` calls
 - `dynamo-docs` — Fern docs-site content per the style guide
 - `dynamo-frontend-benchmark` — benchmark/profile the frontend against mock workers
+- `fern-components` — Fern MDX component library and usage guidance
+- `fern-navigation` — Fern navigation and site-structure configuration guidance
 - `dynamo-kv-replay-parity` — validate offline KV replay parity and performance
 - `graham-code-review` — strict Rust/systems review in Graham King's style
 - `pr-monitor` — CI health check, failure root-cause, and skip analysis
@@ -150,6 +152,6 @@ See [`docs/contribution-guide.md`](docs/contribution-guide.md) for the full work
 
 Any change under `docs/`, `examples/`, or `recipes/` must follow
 [`docs/AGENTS.md`](docs/AGENTS.md) and the
-[documentation style guide](docs/documentation-style-guide.md): SPDX headers, Fern
+[documentation style guide](docs/fern/documentation-style-guide.md): SPDX headers, Fern
 frontmatter (no body `# H1`), GitHub-style admonitions, and backend casing
 (vLLM / SGLang / TensorRT-LLM). The deterministic subset is enforced pre-merge.

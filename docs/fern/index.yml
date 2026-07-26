@@ -77,7 +77,7 @@ navigation:
               - page: Introduction
                 path: getting-started/introduction.mdx
               - page: Quickstart
-                path: kubernetes/README.md
+                path: kubernetes/quickstart.mdx
               - link: Compatibility
                 href: /dynamo/dev/reference/compatibility
                 target: _blank
@@ -92,6 +92,8 @@ navigation:
               path: kubernetes/installation-guide.md
             - page: Multinode Orchestration
               path: kubernetes/multinode-installation.md
+            - page: Gateway API Routing
+              path: kubernetes/gateway-api-installation.mdx
             - section: RDMA Setup
               contents:
                 - page: Overview
@@ -140,8 +142,15 @@ navigation:
                 path: getting-started/kubernetes-deployment.md
               - page: Deploy with DGD
                 path: kubernetes/dgd-guide.md
-              - page: KV Aware Routing
-                path: kubernetes/dgd-kv-routing.md
+              - section: KV-Aware Routing
+                collapsed: open-by-default
+                contents:
+                  - page: Overview
+                    path: kubernetes/kv-aware-routing.md
+                  - page: Dynamo Frontend
+                    path: kubernetes/dgd-kv-routing.md
+                  - page: Gateway API
+                    path: kubernetes/inference-gateway.mdx
               - page: Disaggregated Serving
                 path: features/disaggregated-serving/README.md
               - page: Sizing with AIConfigurator
@@ -259,8 +268,6 @@ navigation:
             contents:
               - page: Observability
                 path: observability/local-observability.mdx
-              - page: Health Checks
-                path: observability/health-checks.mdx
               - page: Benchmarking with AIPerf
                 path: cli/aiperf.mdx
               - section: DynoSim
@@ -389,6 +396,12 @@ navigation:
           - page: Overview
             path: recipes/README.mdx
             slug: browse
+          - page: GLM-5.2
+            path: recipes/glm-5-2.mdx
+            slug: glm-5-2
+          - page: Inkling NVFP4
+            path: recipes/inkling.mdx
+            slug: inkling
           - page: Kimi-K2.6
             path: recipes/kimi-k2-6.mdx
             slug: kimi-k2-6
@@ -401,6 +414,12 @@ navigation:
           - page: GLM-5 NVFP4
             path: recipes/glm-5-nvfp4.mdx
             slug: glm-5-nvfp4
+          - page: DeepSeek-V4-Pro
+            path: recipes/deepseek-v4-pro.mdx
+            slug: deepseek-v4-pro
+          - page: DeepSeek-V4-Flash
+            path: recipes/deepseek-v4-flash.mdx
+            slug: deepseek-v4-flash
           - page: DeepSeek V3.2 NVFP4
             path: recipes/deepseek-v3-2-nvfp4.mdx
             slug: deepseek-v3-2-nvfp4
@@ -502,6 +521,8 @@ navigation:
                     path: components/frontend/README.md
                   - page: Frontend Guide
                     path: components/frontend/frontend-guide.md
+                  - page: Python Route Extensions
+                    path: components/frontend/python-route-extensions.md
                   - page: Tokenizer
                     path: components/frontend/Tokenizer.md
               - section: Router
@@ -644,8 +665,6 @@ navigation:
                     path: kubernetes/autoscaling.md
                   - page: Rolling Update
                     path: kubernetes/rolling-update.md
-                  - page: Inference Gateway (GAIE)
-                    path: kubernetes/inference-gateway.md
                   - page: Snapshot
                     path: kubernetes/snapshot.md
                   - page: Shadow Engine Failover
@@ -676,6 +695,8 @@ navigation:
                 path: design-docs/vllm-omni-disaggregated.md
               - page: Distributed Runtime
                 path: design-docs/distributed-runtime.md
+              - page: Gateway API Routing
+                path: design-docs/gateway-api-routing.md
               - page: Observability Architecture
                 path: design-docs/observability.md
               - page: DynoSim Architecture
@@ -759,8 +780,6 @@ navigation:
         hidden: true
         contents:
           # -- Kubernetes (hidden sub-pages) --
-          - page: Creating Deployments
-            path: kubernetes/deployment/create-deployment.md
           - page: FluxCD
             path: kubernetes/fluxcd.md
           - page: Model Caching with Fluid
@@ -883,6 +902,8 @@ navigation:
             path: components/mocker/sweep-reference.mdx
           - page: Global Router Configuration
             path: components/router/global-router-config-reference.mdx
+          - page: Gateway API Routing
+            path: components/router/gateway-api-reference.mdx
 
       # ==================== Backends variant ====================
       - title: Backends
@@ -909,6 +930,10 @@ navigation:
             path: reference/observability/health-checks.mdx
           - page: Logging
             path: reference/observability/logging.mdx
+          - page: Forward Pass Metrics Traces
+            path: reference/observability/forward-pass-metrics-tracing.mdx
+          - page: Request Traces
+            path: reference/observability/request-tracing.mdx
           - page: Environment Variables
             path: reference/observability/environment-variables.mdx
           - page: Metrics Catalog

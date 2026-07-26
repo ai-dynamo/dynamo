@@ -631,7 +631,7 @@ aiconfigurator cli support \
 
 **"Context stopped or killed" errors (disaggregated only)**:
 - Deploy ETCD and NATS infrastructure (required for KV cache transfer)
-- See [Dynamo Kubernetes Guide](../../kubernetes/README.md) for platform setup
+- See [Dynamo Kubernetes Guide](../../kubernetes/quickstart.mdx) for platform setup
 
 ### Performance Issues
 

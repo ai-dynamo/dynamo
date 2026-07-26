@@ -42,7 +42,7 @@ See the per-feature sections below for detailed per-backend status.
 
 ### GPU Memory Service (GMS)
 
-- Out-of-process GPU memory manager for zero-copy sharing of weights and KV across workers on the same GPU; foundation for Shadow Engine Failover. [Architecture](../../lib/gpu_memory_service/README.md)
+- Out-of-process GPU memory manager for zero-copy sharing of weights and KV across workers on the same GPU; foundation for Shadow Engine Failover. [Architecture](https://github.com/ai-dynamo/dynamo/blob/main/lib/gpu_memory_service/README.md)
 - In Kubernetes, GMS is wired in via [Dynamic Resource Allocation](https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/), configured through the `gpuMemoryService` field on the `DynamoGraphDeployment` CR.
 
 #### Status

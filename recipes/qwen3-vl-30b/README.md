@@ -18,7 +18,7 @@ This recipe demonstrates the performance difference when embedding cache is enab
 
 To reproduce the results in the table, the following is required:
 
-1. **Dynamo Platform installed** - See [Kubernetes Deployment Guide](../../docs/kubernetes/README.md)
+1. **Dynamo Platform installed** - See [Kubernetes Deployment Guide](../../docs/fern/kubernetes/quickstart.mdx)
 2. **GB200**
 3. **HuggingFace token** configured:
    ```bash

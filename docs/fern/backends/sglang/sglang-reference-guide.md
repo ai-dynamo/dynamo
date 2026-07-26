@@ -35,7 +35,7 @@ These arguments are added by Dynamo on top of SGLang's native arguments. For the
 |----------|---------|---------|-------------|
 | `--endpoint` | `DYN_ENDPOINT` | Auto-generated | Dynamo endpoint in `dyn://namespace.component.endpoint` format |
 | `--use-sglang-tokenizer` | `DYN_SGL_USE_TOKENIZER` | `false` | **[Deprecated]** Use `--dyn-chat-processor sglang` on the frontend instead. See [SGLang Chat Processor](sglang-chat-processor.md). |
-| `--dyn-tool-call-parser` | `DYN_TOOL_CALL_PARSER` | `None` | [Tool call](../../tool-calling/README.md#supported-tool-call-parsers) parser (overrides SGLang's `--tool-call-parser`) |
+| `--dyn-tool-call-parser` | `DYN_TOOL_CALL_PARSER` | `None` | [Tool call](../../tool-calling/README.mdx#supported-tool-call-parsers) parser (overrides SGLang's `--tool-call-parser`) |
 | `--dyn-reasoning-parser` | `DYN_REASONING_PARSER` | `None` | [Reasoning](../../reasoning/README.md#supported-reasoning-parsers) parser for chain-of-thought models |
 | `--custom-jinja-template` | `DYN_CUSTOM_JINJA_TEMPLATE` | `None` | Custom chat template path (incompatible with `--use-sglang-tokenizer`) |
 | `--embedding-worker` | `DYN_SGL_EMBEDDING_WORKER` | `false` | Run as embedding worker (also sets SGLang's `--is-embedding`) |
@@ -50,7 +50,7 @@ These arguments are added by Dynamo on top of SGLang's native arguments. For the
 `--disagg-config` and `--disagg-config-key` must be provided together. The selected section is written to a temp YAML file and passed to SGLang's `--config` flag.
 </Note>
 
-The current supported parser names for both flags are documented in [Tool Call Parsing (Dynamo)](../../tool-calling/README.md#supported-tool-call-parsers) and [Reasoning Parsing (Dynamo)](../../reasoning/README.md#supported-reasoning-parsers).
+The current supported parser names for both flags are documented in [Tool Call Parsing (Dynamo)](../../tool-calling/README.mdx#supported-tool-call-parsers) and [Reasoning Parsing (Dynamo)](../../reasoning/README.md#supported-reasoning-parsers).
 
 ## Tokenizer Behavior
 

@@ -186,7 +186,7 @@ navigation:
   - section: Getting Started
     contents:
       - page: Quickstart
-        path: getting-started/quickstart.mdxx
+        path: getting-started/quickstart.mdx
       - page: Support Matrix
         path: reference/support-matrix.md
 ```
@@ -361,7 +361,7 @@ workflows. Authors never need to run it manually.
 ## Running Locally
 
 You can preview the documentation site on your machine using the
-[Fern CLI](https://buildwithfern.com/learn/cli-api/overview). This is useful
+[Fern CLI](https://buildwithfern.com/learn/docs/getting-started/overview/). This is useful
 for verifying layout, navigation, and content before opening a PR.
 
 ### Prerequisites

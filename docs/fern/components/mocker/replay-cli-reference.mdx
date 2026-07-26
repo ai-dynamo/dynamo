@@ -15,13 +15,15 @@ The command reuses the mocker engine, so engine behavior is configured through J
 individual flags. For the underlying engine settings, see the
 [Mocker CLI Reference](mocker-cli-reference.mdx).
 
-`python -m dynamo.replay` requires exactly one of: a positional trace file, or all of
-`--input-tokens`, `--output-tokens`, and `--request-count`.
+`python -m dynamo.replay` requires exactly one of: positional trace files, or all of
+`--input-tokens`, `--output-tokens`, and `--request-count`. The `dynamo` format accepts one or more
+trace shards. Every other trace format requires exactly one file.
 
 ## Workload input
 
-<ParamField path="trace_file" type="positional path" default="null">
-  Mooncake-style JSONL trace. Mutually exclusive with the synthetic-workload flags below.
+<ParamField path="trace_files" type="positional path(s)" default="null">
+  Input trace path. The `dynamo` format accepts one or more JSONL or JSONL.GZ shards. Other formats
+  accept one JSONL file. Mutually exclusive with the synthetic-workload flags below.
 </ParamField>
 
 <ParamField path="--input-tokens" type="integer" default="null">
@@ -41,13 +43,19 @@ individual flags. For the underlying engine settings, see the
 <ParamField path="--trace-format" type="string" default="mooncake">
   Trace parser.
 
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>mooncake</Badge> <Badge intent="note" minimal>mooncake-delta</Badge> <Badge intent="note" minimal>agentic_mooncake</Badge> <Badge intent="note" minimal>applied_compute_agentic</Badge></span>
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>mooncake</Badge> <Badge intent="note" minimal>mooncake-delta</Badge> <Badge intent="note" minimal>agentic_mooncake</Badge> <Badge intent="note" minimal>applied_compute_agentic</Badge> <Badge intent="note" minimal>dynamo</Badge></span>
 </ParamField>
 
 <ParamField path="--trace-block-size" type="integer" default="512">
   How many tokens each `hash_id` in the dataset represents. Trace-file runs only; separate from the
-  engine `block_size`. Public Mooncake/toolagent traces use `512`.
+  engine `block_size`. Public Mooncake/toolagent traces use `512`. Dynamo request traces embed this
+  value; replay derives it when the flag is omitted and rejects an explicit mismatch.
 </ParamField>
+
+> [!NOTE]
+> The `mooncake-delta`, `agentic_mooncake`, and `dynamo` formats were added after Dynamo v1.2.1.
+> The `ai-dynamo` 1.2.x wheels on PyPI accept only `mooncake` and
+> `applied_compute_agentic`.
 
 ### Synthetic workload shaping
 
@@ -86,6 +94,7 @@ Mooncake-style JSONL traces contain one request per line. A basic row accepts:
 | `hash_ids` | Prefix-block identifiers from the source trace |
 | `priority` | Optional signed soft-priority hint |
 | `strict_priority` | Optional unsigned queue tier; larger values run first |
+| `policy_class` | Optional requested policy family or exact explicit class |
 
 Example:
 
@@ -116,12 +125,26 @@ Set `--trace-format agentic_mooncake` to model request-level dependencies. Each 
 |---|---|
 | `wait_for` | Request IDs that must complete before this request starts |
 | `branches` | Child request IDs spawned by this request |
-| `prefix_reset` | Marks the first row in a trajectory |
+| `prefix_reset` | Marks the first row in a session |
 | `delay` | Additional delay after dependencies complete |
 | `tool_wait_ms` | Simulated tool-execution delay |
 
 Rows without `wait_for` use their timestamp as the start time. Rows with dependencies wait for all
 listed requests and then apply `delay + tool_wait_ms`.
+
+Agentic Mooncake is an input format for externally authored Mooncake-compatible traces. It is not an
+intermediate representation for Dynamo request traces.
+
+### Dynamo request traces
+
+Set `--trace-format dynamo` to read one or more `dynamo.request.trace.v1` JSONL or JSONL.GZ shards.
+DynoSim reads the original records directly and does not create an intermediate Mooncake file. It
+derives and validates the trace block size across all shards.
+
+Rows without `agent_context` use the standard request model. If every request contains
+`agent_context`, DynoSim reconstructs the agent-aware model, including session dependencies and tool
+waits. A replay cannot mix context-free and agent-aware request rows. For the complete capture schema,
+see [Observe a Local Deployment](../../observability/local-observability.mdx#capture-and-replay-requests).
 
 `--trace-block-size` defines how many tokens each trace `hash_id` represents. It is independent from
 the simulated engine `block_size`.
@@ -190,6 +213,22 @@ fall back to `MockEngineArgs::default()` and `KvRouterConfig::default()`.
   KV-router policy tuning, for example `{"router_queue_policy":"fcfs"}` or
   `{"router_prefill_load_model":"aic"}`. Accepts a partial JSON object.
 </ParamField>
+
+<ParamField path="--router-policy-config" type="path" default="null">
+  Startup-only policy-family and cache-bucket queue YAML. Overrides `router_policy_config` inside
+  `--router-config`. When omitted, DynoSim checks `DYN_ROUTER_POLICY_CONFIG`.
+</ParamField>
+
+<ParamField path="--model-name" type="string" default="null">
+  Exact model profile to select from `--router-policy-config`. When omitted, the YAML root profile is
+  used.
+</ParamField>
+
+Requests can set `policy_class` in Mooncake JSONL rows. A recognized policy family combines with the
+router-observed uncached Input Sequence Length (ISL) bucket to select a physical queue. An exact
+explicit class bypasses cache bucketing. Missing, unknown, and ordinary physical-class names use the
+selected profile's `default_policy_family`. For the YAML schema and queue behavior, see
+[Router Configuration](../router/router-configuration.md#policy-class-queues).
 
 ### Engine-timing AIC fields (engine-args JSON)
 

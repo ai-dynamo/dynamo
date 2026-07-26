@@ -15,7 +15,9 @@ The knobs are three timeouts plus enabling migration. The default flow: endpoint
 
 <Step title="Set the pod termination grace period">
 
-Kubernetes gives a terminating pod `terminationGracePeriodSeconds` to exit before it sends `SIGKILL` (default 30s). Set it to cover your expected request completion time so draining isn't cut short:
+Kubernetes gives a terminating pod `terminationGracePeriodSeconds` to exit before it sends `SIGKILL`.
+Dynamo operator-created pods default to **60 seconds**. Set a longer value when expected generation
+time or high utilization can keep admitted requests active beyond that window:
 
 ```yaml
 apiVersion: nvidia.com/v1alpha1
@@ -24,28 +26,29 @@ spec:
   services:
     VllmWorker:
       extraPodSpec:
-        terminationGracePeriodSeconds: 60  # allow time for request draining
+        terminationGracePeriodSeconds: 180  # allow time for request draining
 ```
 
 Rough guidance:
 
 | Workload | Suggested `terminationGracePeriodSeconds` |
 |----------|-------------------------------------------|
-| Short requests (< 10s) | 30s |
-| Long generation (> 30s) | 120s+ |
+| Short requests (< 10s) | 60s |
+| Long generation (> 30s) or high utilization | 120s+ |
 
 </Step>
 
 <Step title="Tune the drain windows">
 
-Two environment variables control Dynamo's internal draining, set on the worker component's `env:`:
+Three environment variables control Dynamo's internal draining. Set the HTTP timeout on the Frontend and the runtime values on worker components:
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
+| `DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` | `5` | How long the Frontend waits for admitted HTTP and WebSocket inference requests to finish before it cancels runtime state. |
 | `DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS` | `5` | How long workers keep serving after endpoints unregister from discovery, before endpoints are invalidated. |
 | `DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` | `900` | Upper bound on waiting for in-flight requests to finish. If draining exceeds this, Dynamo logs the remaining endpoint count and tears down anyway. |
 
-The defaults are sound for most deployments. Raise the timeout only if you serve very long generations and want to guarantee they complete; keep it below `terminationGracePeriodSeconds` so Dynamo drains on its own terms before Kubernetes force-kills the pod.
+The defaults are sound for most deployments. Raise the relevant timeout only for long generations or sustained high utilization. Keep every internal timeout below `terminationGracePeriodSeconds` so Dynamo can finish its own cleanup before Kubernetes force-kills the pod.
 
 </Step>
 
@@ -81,7 +84,14 @@ INFO  DistributedRuntime shutdown complete
 DEBUG Cleaning up worker
 ```
 
-During shutdown the worker's health endpoints go unavailable, its readiness probe fails, and Kubernetes stops routing new traffic to it while existing requests complete. If a pod is being `SIGKILL`ed before draining finishes, increase `terminationGracePeriodSeconds` (step 1) or lower the drain timeout (step 2).
+During Frontend shutdown, `/health` returns 503 so readiness routing stops, while `/live` remains
+200 so Kubernetes does not restart the process during the drain. New OpenAI-compatible requests return
+503, but admitted response bodies and accepted `/v1/realtime` WebSocket sessions continue until they
+finish or `DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` expires.
+
+During worker shutdown, endpoints unregister and stop receiving new work while admitted requests
+complete. If a pod receives `SIGKILL` before draining finishes, increase
+`terminationGracePeriodSeconds` (step 1) or lower the relevant internal timeout (step 2).
 
 </Step>
 

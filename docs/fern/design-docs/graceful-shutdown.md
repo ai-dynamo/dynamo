@@ -78,10 +78,24 @@ generate_endpoint.serve_endpoint(
 
 | Component | Default Behavior | Rationale |
 |-----------|------------------|-----------|
-| **Frontend** | N/A (HTTP server) | HTTP server handles its own shutdown |
+| **Frontend** | HTTP request draining | Stop admission while response bodies and upgraded WebSocket tasks complete |
 | **Prefill Workers** | `graceful_shutdown=True` | Prefill operations must complete to avoid wasted computation |
 | **Decode Workers** | `graceful_shutdown=True` | Decode operations should complete to avoid wasted computation |
 | **Router** | `graceful_shutdown=True` | Ensure routing decisions complete |
+
+### Frontend HTTP Draining
+
+The Frontend uses a separate HTTP drain state before it cancels the distributed runtime:
+
+1. Mark the server as draining.
+2. Return `503 Service Unavailable` from `/health` and reject new OpenAI-compatible requests with 503.
+3. Keep `/live` at `200 OK` so liveness probes do not restart the process while requests drain.
+4. Wait for admitted response bodies, including streaming responses, to complete.
+5. Continue tracking accepted `/v1/realtime` WebSocket sessions until their tasks exit, even though the HTTP upgrade response has completed.
+6. After `DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` expires (default `5` seconds), enter the stopping state and cancel runtime state.
+
+This separates readiness from liveness: traffic is removed promptly without turning an intentional
+drain into a restart loop.
 
 ### Migration Integration
 
@@ -183,7 +197,7 @@ async def _initiate_shutdown(self, error: Exception):
 
 1. Kubernetes sends `SIGTERM` to the pod
 2. Dynamo initiates graceful shutdown
-3. Pod has `terminationGracePeriodSeconds` to complete (default: 30s)
+3. Dynamo operator-created pods have `terminationGracePeriodSeconds` to complete (default: 60s)
 4. If not terminated, Kubernetes sends `SIGKILL`
 
 ### Health Check Integration

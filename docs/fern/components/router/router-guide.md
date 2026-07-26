@@ -29,7 +29,7 @@ This command:
 
 Backend workers register themselves using the `register_model` API. For accurate prefix-cache state, workers must also publish KV cache events with the backend-specific event flags; otherwise the router can run in approximate mode with `--no-router-kv-events`.
 
-The [Frontend Configuration Reference](../frontend/configuration.md#router) is the
+The [Frontend Configuration Reference](../frontend/frontend-config-reference.mdx#router) is the
 canonical list of embedded-router CLI arguments, environment variables, defaults,
 and boolean forms. Use [Configuration and Tuning](router-configuration.md) for
 workload-specific guidance, [Router Filtering](router-filtering.md) for candidate
@@ -61,7 +61,7 @@ spec:
 - Use `--no-router-kv-events` for approximate cache-state prediction when workers are not publishing events
 
 For exact environment-variable mappings, see the
-[Frontend Configuration Reference](../frontend/configuration.md#router). For complete
+[Frontend Configuration Reference](../frontend/frontend-config-reference.mdx#router). For complete
 Kubernetes examples and tuning guidance, see
 [Kubernetes Examples](router-examples.md#k8s-examples) and
 [Configuration and Tuning](router-configuration.md).
@@ -148,8 +148,7 @@ Disaggregated mode is activated automatically when prefill workers register alon
 ## More Router Docs
 
 - **[Routing Concepts](router-concepts.md)**: Cost model, worker selection, and routing primitives
-- **[Multi-DC KV Routing and the DC Relay](multi-dc-kv-routing.md)**: DC-local exact ownership, pool publication, and cross-DC CKF search
-- **[Frontend Configuration Reference](../frontend/configuration.md#router)**: Canonical router flags, environment variables, defaults, and boolean forms
+- **[Frontend Configuration Reference](../frontend/frontend-config-reference.mdx#router)**: Canonical router flags, environment variables, defaults, and boolean forms
 - **[Configuration and Tuning](router-configuration.md)**: Router behavior, transport modes, load tracking, and tuning guidance
 - **[Disaggregated Serving](router-disaggregated-serving.md)**: Prefill and decode routing setups
 - **[Topology-Aware KV Transfer](topology-aware-kv-transfer.md)**: Runtime metadata and decode routing constraints for topology-aware prefill/decode handoff

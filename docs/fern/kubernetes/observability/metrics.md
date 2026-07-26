@@ -78,9 +78,50 @@ spec:
   envs:
     - name: OTEL_EXPORT_ENABLED
       value: "true"
-    - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
-      value: "http://tempo.observability.svc.cluster.local:4317"
+    - name: OTEL_EXPORTER_OTLP_ENDPOINT
+      value: "http://otel-collector.observability.svc.cluster.local:4317"
+    - name: OTEL_EXPORTER_OTLP_PROTOCOL
+      value: "grpc"
 ```
+
+Use signal-specific endpoints only when traces and logs have different collectors. The logs endpoint does not fall back to the traces endpoint. For HTTP/protobuf, set `OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf`; Dynamo appends signal paths only to the generic endpoint.
+
+To export chat payload records through the same collector, also set `DYN_REQUEST_TRACE_RECORDS=request_payload` and `DYN_REQUEST_TRACE_SINKS=otel`. See [Request Trace Reference](../../reference/observability/request-tracing.mdx).
+
+### Forward Pass Metrics Trace Files
+
+Forward Pass Metrics (FPM) tracing records backend scheduler telemetry to rotating gzip JSONL files.
+To retain the files across pod replacement, mount a persistent volume on each worker and set the
+output prefix inside that mount:
+
+```yaml
+spec:
+  pvcs:
+    - create: false
+      name: fpm-traces
+  services:
+    VllmWorker:
+      volumeMounts:
+        - name: fpm-traces
+          mountPoint: /var/log/dynamo
+      extraPodSpec:
+        mainContainer:
+          env:
+            - name: DYN_FPM_TRACE
+              value: "1"
+            - name: DYN_FPM_OUTPUT_PATH
+              value: /var/log/dynamo/fpm
+```
+
+Replace `VllmWorker` with each worker service that should write a trace. The PVC must already exist
+when `create: false`. Dynamo writes a separate producer-specific file sequence for every worker, so
+size retention for the number of replicas and old producer IDs that can remain on the volume.
+
+Graceful shutdown flushes accepted records. `SIGKILL`, node loss, queue pressure, and upstream
+transport loss can still create gaps. Treat the files as observability data, not as a durable event
+plane or replay input. See
+[Forward Pass Metrics Trace Reference](../../reference/observability/forward-pass-metrics-tracing.mdx)
+for topology support, configuration, schema, and rotation behavior.
 
 ## View dashboards
 

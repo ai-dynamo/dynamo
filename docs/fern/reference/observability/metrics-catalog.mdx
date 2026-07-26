@@ -64,6 +64,36 @@ Emitted by the HTTP frontend at `/metrics` on port 8000 by default. Most carry a
   Cached tokens (prefix cache hits) per request.
 </ParamField>
 
+<ParamField path="dynamo_frontend_tokenizer_cache_hits_total" type="counter">
+  L1 tokenizer prefix-cache hits across all models. One outcome is recorded per encode operation or batch item.
+</ParamField>
+
+<ParamField path="dynamo_frontend_tokenizer_cache_misses_total" type="counter">
+  L1 tokenizer prefix-cache misses across all models.
+</ParamField>
+
+<ParamField path="dynamo_frontend_tokenizer_cache_cached_tokens_total" type="counter">
+  Tokens returned from the L1 tokenizer prefix cache. Labeled by `model`.
+</ParamField>
+
+<ParamField path="dynamo_frontend_tokenizer_cache_uncached_tokens_total" type="counter">
+  Tokens freshly encoded after an L1 tokenizer cache lookup. Labeled by `model`.
+</ParamField>
+
+Use this PromQL expression to calculate the five-minute token reuse ratio by model:
+
+```promql
+sum by (model) (rate(dynamo_frontend_tokenizer_cache_cached_tokens_total[5m]))
+/
+(
+  sum by (model) (rate(dynamo_frontend_tokenizer_cache_cached_tokens_total[5m]))
+  +
+  sum by (model) (rate(dynamo_frontend_tokenizer_cache_uncached_tokens_total[5m]))
+)
+```
+
+The ratio is defined only when the model has an active L1 cache and observed tokens. Partial hits increment both token counters. The counters remain zero when `DYN_TOKENIZER_CACHE=0`, encoding fails, or the tokenizer has no registered special-token boundaries.
+
 <ParamField path="dynamo_frontend_inter_token_latency_seconds" type="histogram">
   Inter-token latency in seconds.
 </ParamField>
@@ -102,14 +132,14 @@ Counters for [request migration](../../fault-tolerance/request-migration.md), th
 
 ### Cancellation and rejection
 
-Counters for requests that end early: [cancellations](../../design-docs/request-cancellation.md) (the client or frontend aborts an in-flight request) and [rejections](../../fault-tolerance/request-rejection.md) (the frontend sheds load with HTTP 503 when all workers are busy). The worker-side counterparts are under [Component metrics](#component-metrics).
+Counters for requests that end early: [cancellations](../../design-docs/request-cancellation.md) (the client or frontend aborts an in-flight request) and [rejections](../../fault-tolerance/request-rejection.md) (the Frontend sheds load with HTTP 529 by default when all workers are busy). The worker-side counterparts are under [Component metrics](#component-metrics).
 
 <ParamField path="dynamo_frontend_model_cancellation_total" type="counter">
   Total request cancellations detected by the frontend (client disconnect or stream close). Labeled by `model`, `endpoint` (the API route — `chat_completions`, `completions`, `embeddings`, …), and [`request_type`](metric-labels.mdx#request_type) (`unary` or `stream`).
 </ParamField>
 
 <ParamField path="dynamo_frontend_model_rejection_total" type="counter">
-  Total requests rejected because all workers were busy (surfaced to the client as HTTP 503). Incremented when the router returns `ResourceExhausted`. Labeled by `model` and `endpoint` (the API route).
+  Total requests rejected because all workers were busy (surfaced to the client as HTTP 529 by default). Incremented when the router returns `ResourceExhausted`. Labeled by `model` and `endpoint` (the API route).
 </ParamField>
 
 ### Per-worker load and timing gauges
@@ -224,6 +254,10 @@ The router exposes metrics for routing decisions and overhead. Not every metric 
 
 `dynamo_component_router_*` histograms and counters for aggregate request-level statistics. On the frontend, exposed at `/metrics` on the HTTP port; on the standalone router, exposed on `DYN_SYSTEM_PORT`. Populated per-request when `--router-mode kv` is active; registered with zero values in non-KV modes.
 
+<ParamField path="dynamo_component_router_requests_started_total" type="counter">
+  Requests admitted by the router scheduler.
+</ParamField>
+
 <ParamField path="dynamo_component_router_requests_total" type="counter">
   Total requests processed by the router.
 </ParamField>
@@ -274,15 +308,31 @@ The router exposes metrics for routing decisions and overhead. Not every metric 
 
 ### Router queue metrics
 
+The frontend registers these metrics when queueing is enabled by `--router-queue-threshold` or a threshold in `--router-policy-config`. They carry `model`, `worker_type`, and `policy_class`. With policy-family or cache-bucket configuration, `policy_class` is the resolved physical queue.
+
 <ParamField path="dynamo_frontend_router_queue_pending_requests" type="gauge">
-  Requests pending in the router scheduler queue. Registered only when `--router-queue-threshold` is set. Labeled by `worker_type` (`prefill` or `decode`) to distinguish queues in disaggregated mode.
+  Requests pending in the router scheduler queue.
+</ParamField>
+
+<ParamField path="dynamo_frontend_router_queue_pending_isl_tokens" type="gauge">
+  Raw input-sequence tokens pending in the queue.
+</ParamField>
+
+<ParamField path="dynamo_frontend_router_queue_pending_cached_tokens" type="gauge">
+  Cached-token estimate captured when each request enters the queue.
+</ParamField>
+
+<ParamField path="dynamo_frontend_router_queue_backpressure_total" type="counter">
+  Queue rejections by configured limit reason. Also labeled by `reason`.
 </ParamField>
 
 ### KV indexer metrics
 
 <ParamField path="dynamo_component_kv_cache_events_applied" type="counter">
-  KV cache events applied to the router's radix-tree index. Appears only when `--router-kv-overlap-score-credit` is greater than 0 (default) and workers publish KV events. Labeled by `status` and `event_type` — see [Metric-specific labels](metric-labels.mdx#metric-specific-labels).
+  KV cache events applied to the router's radix-tree index. Includes events applied to the device tier and lower tiers such as host-pinned memory and disk. Appears only when `--router-kv-overlap-score-credit` is greater than 0 and workers publish KV events. Labeled by `status` and `event_type` — see [Metric-specific labels](metric-labels.mdx#metric-specific-labels).
 </ParamField>
+
+The standalone indexer exposes the device-tier-only counter `dynamo_kvrouter_kv_cache_events_applied`; see [Standalone KV Indexer](../../components/router/standalone-indexer.md).
 
 ### Availability by configuration
 
@@ -292,7 +342,7 @@ Not all router metrics appear in every deployment. This matrix shows which group
 |---|---|---|---|---|
 | `dynamo_component_router_*` | Registered and populated | Registered and populated | Registered, **always zero** | Populated (on `DYN_SYSTEM_PORT`) |
 | `dynamo_router_overhead_*` | Registered and populated | Registered and populated | **Not registered** | **Not created** |
-| `dynamo_frontend_router_queue_*` | Registered; populated when `--router-queue-threshold` set | Registered; populated when `--router-queue-threshold` set | **Not registered** | **Not created** |
+| `dynamo_frontend_router_queue_*` | Registered; populated when a CLI or policy-class queue threshold is set | Registered; populated when a CLI or policy-class queue threshold is set | **Not registered** | **Not created** |
 | `dynamo_component_kv_cache_events_applied` | Populated when KV events received | Populated when KV events received | **Not registered** | Populated when KV events received |
 | `dynamo_frontend_worker_*` | Registered and populated | Registered and populated (`worker_type` = `prefill`/`decode`) | Registered and populated (`worker_type` = `decode`) | **Not created** |
 

@@ -253,9 +253,9 @@ client -> Gateway -> EPP selects worker -> worker frontend sidecar -> engine
 > deployment. Use a direct DGD manifest or a GAIE recipe for EPP deployments.
 > For manifests, `frontendSidecar` configuration, direct routing, EPP routing
 > variables such as `DYN_USE_KV_EVENTS`, and route setup, see
-> [Gateway API Inference Extension](inference-gateway.md). The same guide also
+> [Gateway API Inference Extension](inference-gateway.mdx). The same guide also
 > documents the optional
-> [Rust EPP](inference-gateway.md#4b-build-rust-epp-image-optional--experimental),
+> [Rust EPP](../components/router/gateway-api-reference.mdx),
 > which is currently experimental.
 
 ---

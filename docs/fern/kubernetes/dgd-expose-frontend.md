@@ -67,12 +67,12 @@ Send requests to the external IP on port 8000.
 
 ## Option 3: The Inference Gateway (GAIE)
 
-The [Gateway API Inference Extension (GAIE)](inference-gateway.md) is a different mechanism: instead of exposing one Frontend, it puts a Gateway in front of one or more deployments and makes model-aware routing decisions in an Endpoint Picker Plugin (EPP). The Frontend runs with `--router-mode direct` and respects the EPP's routing. Use GAIE when you serve multiple models or deployments behind one address. See [Inference Gateway (GAIE)](inference-gateway.md).
+The [Gateway API Inference Extension (GAIE)](inference-gateway.mdx) is a different mechanism: instead of exposing one Frontend, it puts a Gateway in front of one or more deployments and makes model-aware routing decisions in an Endpoint Picker Plugin (EPP). The Frontend runs with `--router-mode direct` and respects the EPP's routing. Use GAIE when you serve multiple models or deployments behind one address. See [Inference Gateway (GAIE)](inference-gateway.mdx).
 
 > [!NOTE]
 > A Kubernetes Ingress and GAIE are independent. An Ingress (Option 1) exposes a single Frontend Service; GAIE routes across deployments through the Gateway API and does not use an Ingress.
 
 ## Related pages
 
-- [Inference Gateway (GAIE)](inference-gateway.md) — Gateway API model-aware routing.
+- [Inference Gateway (GAIE)](inference-gateway.mdx) — Gateway API model-aware routing.
 - [API Reference — IngressSpec](api-reference.md#ingressspec) — full field reference.

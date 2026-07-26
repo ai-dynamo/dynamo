@@ -140,7 +140,7 @@ Read the diagram left to right for request traffic: clients call the control `Fr
 
 ## Prerequisites
 
-- Dynamo Kubernetes Platform installed. See [Kubernetes Quickstart](../../kubernetes/README.md).
+- Dynamo Kubernetes Platform installed. See [Kubernetes Quickstart](../../kubernetes/quickstart.mdx).
 - Prometheus deployed and scraping router metrics. The global planner examples assume cluster Prometheus is available.
 - Backend images available for your chosen framework (`vllm`, `sglang`, or `trtllm`).
 - Secrets for model access, such as a Hugging Face token secret.

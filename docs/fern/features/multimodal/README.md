@@ -42,8 +42,8 @@ Dynamo provides support for improving latency and throughput for multimodal work
 
 Reference implementations for deploying multimodal models for each backend:
 
-- [SGLang Multimodal](../../knowledge-base/modular-components/backends/sg-lang/sglang-multimodal)
-- [TensorRT-LLM Multimodal](../../knowledge-base/modular-components/backends/tensor-rt-llm/tensorrt-llm-multimodal)
-- [vLLM Multimodal](../../knowledge-base/modular-components/backends/v-llm/vllm-multimodal)
+- [SGLang Multimodal](multimodal-sglang.md)
+- [TensorRT-LLM Multimodal](multimodal-trtllm.md)
+- [vLLM Multimodal](multimodal-vllm.md)
 
-To use an author-provided custom vision tower or projector, see [Custom Vision Encoders](../../advanced-customizations/custom-vision-encoders).
+To use an author-provided custom vision tower or projector, see [Custom Vision Encoders](custom-vision-encoder.md).

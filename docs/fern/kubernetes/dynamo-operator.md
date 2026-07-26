@@ -183,7 +183,7 @@ A pre-built Grafana dashboard is available for visualizing operator metrics. The
 
 For complete setup instructions and metrics reference, see:
 
-**📖 [Operator Metrics Guide](./observability/operator-metrics.md)**
+**📖 [Operator Metrics Guide](../reference/observability/operator-metrics.mdx)**
 
 ## Installation
 

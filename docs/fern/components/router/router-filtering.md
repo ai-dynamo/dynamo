@@ -46,7 +46,7 @@ Queueing does not permanently remove a worker from the candidate set. It delays 
 When policy classes are configured, the router uses weighted DRR to choose
 which dispatchable class runs next. For credit accumulation, blocked-class
 behavior, and oversized-request bulk credit, see
-[Deficit Round Robin Queue Scheduling](deficit-round-robin.md).
+[Deficit Round Robin Queue Scheduling](router-configuration.md#policy-class-queues).
 
 ## Scoring Signals
 

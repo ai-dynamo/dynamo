@@ -6,13 +6,9 @@ sidebar-title: Local Installation
 description: Install Dynamo on a local machine or VM with containers or PyPI
 ---
 
-<p align="left">
-  <a href="./local-installation.zh-CN.md" hreflang="zh-CN"><img src="../assets/img/readme-zh-cn-link.svg" alt="简体中文" height="28" /></a>
-</p>
-
 This guide walks through installing Dynamo on a local machine or VM with one or more GPUs.
 
-For production multi-node clusters, see the [Kubernetes Deployment Guide](../kubernetes/README.md). To build from source for development, see [Building from Source](../cli/building-from-source.md).
+For production multi-node clusters, see the [Kubernetes Deployment Guide](../kubernetes/quickstart.mdx). To build from source for development, see [Building from Source](../cli/building-from-source.md).
 
 ## System Requirements
 
@@ -48,7 +44,7 @@ nvidia-smi
 ```
 
 <Note>
-This covers single-machine setups only. Multi-node disaggregated serving additionally needs an RDMA-capable interconnect (NIXL/UCX) — out of scope for this guide. For clusters, the [Kubernetes Deployment Guide](../kubernetes/README.md) covers the GPU Operator and, where applicable, the Network Operator instead of these host-level installs.
+This covers single-machine setups only. Multi-node disaggregated serving additionally needs an RDMA-capable interconnect (NIXL/UCX) — out of scope for this guide. For clusters, the [Kubernetes Deployment Guide](../kubernetes/quickstart.mdx) covers the GPU Operator and, where applicable, the Network Operator instead of these host-level installs.
 </Note>
 
 ## Install Dynamo
@@ -229,4 +225,4 @@ docker run --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.1
 - [Backend Guides](../backends/sglang/README.md) -- Backend-specific configuration and features
 - [Disaggregated Serving](../features/disaggregated-serving/README.md) -- Scale prefill and decode independently
 - [KV Cache Aware Routing](../components/router/router-guide.md) -- Smart request routing
-- [Kubernetes Deployment](../kubernetes/README.md) -- Production multi-node deployments
+- [Kubernetes Deployment](../kubernetes/quickstart.mdx) -- Production multi-node deployments
