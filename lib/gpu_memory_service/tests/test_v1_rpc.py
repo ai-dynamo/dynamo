@@ -9,7 +9,7 @@ import threading
 import time
 
 import pytest
-from _v1_fakes import V1FakeVMM
+from _fake_vmm import FakeVMM
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.core.client.session import GMSClientSession
 from gpu_memory_service.core.errors import FatalGMSError, GMSError
@@ -17,12 +17,13 @@ from gpu_memory_service.core.protocol import send_message
 from gpu_memory_service.core.server.allocations import GMSAllocationManager
 from gpu_memory_service.core.server.gms import GMS
 from gpu_memory_service.core.server.rpc import GMSRPCServer
+from gpu_memory_service.v1.memory_manager import SnapshotMemoryManager
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.integration, pytest.mark.gpu_0]
 
 
 def _start(path):
-    vmm = V1FakeVMM()
+    vmm = FakeVMM(granularity=64)
     allocations = GMSAllocationManager(vmm, 0)
     gms = GMS("GPU-0", allocations)
     server = GMSRPCServer(path, gms)
@@ -83,7 +84,7 @@ def test_rw_abort_clears_epoch_and_releases_socket_lock(tmp_path) -> None:
         _stop(server, thread)
 
 
-def test_commit_holds_same_socket_ro_and_future_writer_starts_new_epoch(
+def test_commit_holds_same_socket_ro_and_rw_or_ro_respects_writer_priority(
     tmp_path,
 ) -> None:
     path = str(tmp_path / "gms-v1.sock")
@@ -92,7 +93,7 @@ def test_commit_holds_same_socket_ro_and_future_writer_starts_new_epoch(
     writer.allocate("committed", 64)
     original_handles = set(vmm.server_handles)
     reader_result, reader_connected, reader_thread = _open_in_thread(
-        path, RequestedLockType.RO
+        path, RequestedLockType.RW_OR_RO
     )
     assert not reader_connected.wait(0.05)
 
@@ -107,7 +108,7 @@ def test_commit_holds_same_socket_ro_and_future_writer_starts_new_epoch(
     )
     _wait_for(lambda: gms.snapshot().waiting_writers == 1)
     late_reader_result, late_reader_connected, late_reader_thread = _open_in_thread(
-        path, RequestedLockType.RO
+        path, RequestedLockType.RW_OR_RO
     )
     assert not late_reader_connected.wait(0.05)
     reader.close()
@@ -157,10 +158,7 @@ def test_exports_use_fresh_transient_server_fds(tmp_path) -> None:
         initial_fd_count = len(os.listdir("/proc/self/fd"))
         writer.allocate("allocation", 64)
         assert len(os.listdir("/proc/self/fd")) == initial_fd_count
-        assert not vmm.export_fds
-
         received_fds = [writer.export("allocation"), writer.export("allocation")]
-        assert len(vmm.export_fds) == 2
         assert allocations.allocation_count == 1
         _wait_for(lambda: len(os.listdir("/proc/self/fd")) == initial_fd_count + 2)
         for received_fd in received_fds:
@@ -199,4 +197,83 @@ def test_disconnected_queued_writer_preserves_committed_epoch(tmp_path) -> None:
         assert allocations.allocation_count == 1
     finally:
         verifier.close()
+        _stop(server, thread)
+
+
+def test_snapshot_manager_preserves_ids_and_vas_across_sleep_and_wake(
+    tmp_path, monkeypatch
+) -> None:
+    path = str(tmp_path / "gms-v1.sock")
+    vmm, allocations, gms, server, thread = _start(path)
+    monkeypatch.setattr(
+        SnapshotMemoryManager,
+        "_gpu_identity",
+        lambda self: "GPU-0",
+    )
+    manager = SnapshotMemoryManager(path, vmm, 0)
+    first = manager.allocate(65)
+    second = manager.allocate(33)
+    before = {mapping.base: mapping.allocation_id for mapping in manager.mappings}
+    handles = set(vmm.server_handles)
+
+    manager.commit()
+    assert gms.snapshot().ro_session_count == 1
+    assert set(vmm.mapped) == {first, second}
+    assert set(vmm.access.values()) == {GrantedLockType.RO}
+
+    manager.sleep()
+    _wait_for(lambda: gms.snapshot().ro_session_count == 0)
+    assert set(vmm.reservations) == {first, second}
+    assert not vmm.mapped
+    assert vmm.server_handles == handles
+
+    manager.wake()
+    assert {
+        mapping.base: mapping.allocation_id for mapping in manager.mappings
+    } == before
+    assert set(vmm.mapped) == {first, second}
+    assert set(vmm.access.values()) == {GrantedLockType.RO}
+
+    manager.free_from_allocator(second, 33)
+    manager.sleep()
+    _wait_for(lambda: gms.snapshot().ro_session_count == 0)
+    manager.free_from_allocator(first, 65)
+    assert not manager.mappings
+    assert not vmm.imports
+    assert not vmm.reservations
+    assert allocations.allocation_count == 2
+
+    replacement = GMSClientSession(path, RequestedLockType.RW)
+    try:
+        assert allocations.allocation_count == 0
+        assert not vmm.server_handles
+    finally:
+        replacement.close()
+        _stop(server, thread)
+
+
+def test_snapshot_wake_rejects_another_server_incarnation(
+    tmp_path, monkeypatch
+) -> None:
+    path = str(tmp_path / "gms-v1.sock")
+    vmm, allocations, gms, server, thread = _start(path)
+    monkeypatch.setattr(
+        SnapshotMemoryManager,
+        "_gpu_identity",
+        lambda self: "GPU-0",
+    )
+    manager = SnapshotMemoryManager(path, vmm, 0)
+    manager.allocate(64)
+    manager.commit()
+    manager.sleep()
+    _wait_for(lambda: gms.snapshot().ro_session_count == 0)
+
+    gms.server_nonce = "replacement"
+    try:
+        with pytest.raises(FatalGMSError, match="incarnation"):
+            manager.wake()
+        assert gms.snapshot().ro_session_count == 0
+        assert not vmm.imports
+        assert allocations.allocation_count == 1
+    finally:
         _stop(server, thread)
