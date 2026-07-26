@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
 use std::time::Duration;
 
 use crossbeam_queue::SegQueue;
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 
@@ -40,6 +40,129 @@ use crate::sequences::{ActiveSequencesMultiWorker, SequencePublisher, SequenceRe
 pub const DEFAULT_MAX_BATCHED_TOKENS: u64 = 10_000_000;
 
 const ADMISSION_CHANNEL_CAPACITY: usize = 65_536;
+const SHADOW_SESSION_PINS_ENV: &str = "DYN_ROUTER_SHADOW_SESSION_PINS";
+const SHADOW_SESSION_PIN_MAX_SESSIONS: usize = 100_000;
+const SHADOW_SESSION_PIN_FULL_LOG_LIMIT: usize = 100;
+const SHADOW_SESSION_PIN_LOG_INTERVAL: usize = 1_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShadowSessionPinObservation {
+    FirstSeen,
+    Respected,
+    Violated { expected: WorkerWithDpRank },
+    CapacityExceeded,
+}
+
+struct ShadowSessionPins {
+    pins: FxHashMap<String, WorkerWithDpRank>,
+    observations: usize,
+    respected: usize,
+    violations: usize,
+    missing_session_ids: usize,
+    capacity_exceeded: usize,
+}
+
+impl ShadowSessionPins {
+    fn from_env() -> Option<Self> {
+        let Some(value) = std::env::var(SHADOW_SESSION_PINS_ENV).ok() else {
+            return None;
+        };
+        match dynamo_truthy::parse_bool_opt(&value) {
+            Some(true) => {
+                tracing::warn!(
+                    max_sessions = SHADOW_SESSION_PIN_MAX_SESSIONS,
+                    full_violation_log_limit = SHADOW_SESSION_PIN_FULL_LOG_LIMIT,
+                    report_interval = SHADOW_SESSION_PIN_LOG_INTERVAL,
+                    "[SHADOW_SESSION_PIN_ENABLED] diagnostic shadow session pins are enabled; routing decisions are not modified"
+                );
+                Some(Self {
+                    pins: FxHashMap::default(),
+                    observations: 0,
+                    respected: 0,
+                    violations: 0,
+                    missing_session_ids: 0,
+                    capacity_exceeded: 0,
+                })
+            }
+            Some(false) => None,
+            None => {
+                tracing::error!(
+                    env_var = SHADOW_SESSION_PINS_ENV,
+                    env_value = value,
+                    "[SHADOW_SESSION_PIN_CONFIG_ERROR] expected a boolean; shadow session pins are disabled"
+                );
+                None
+            }
+        }
+    }
+
+    fn observe(
+        &mut self,
+        session_id: Option<&str>,
+        selected: WorkerWithDpRank,
+    ) -> Option<ShadowSessionPinObservation> {
+        let Some(session_id) = session_id else {
+            self.missing_session_ids += 1;
+            return None;
+        };
+
+        self.observations += 1;
+        if let Some(expected) = self.pins.get(session_id).copied() {
+            if expected == selected {
+                self.respected += 1;
+                return Some(ShadowSessionPinObservation::Respected);
+            }
+            self.violations += 1;
+            return Some(ShadowSessionPinObservation::Violated { expected });
+        }
+
+        if self.pins.len() >= SHADOW_SESSION_PIN_MAX_SESSIONS {
+            self.capacity_exceeded += 1;
+            return Some(ShadowSessionPinObservation::CapacityExceeded);
+        }
+
+        self.pins.insert(session_id.to_owned(), selected);
+        Some(ShadowSessionPinObservation::FirstSeen)
+    }
+
+    fn should_log_full_violation(&self) -> bool {
+        self.violations <= SHADOW_SESSION_PIN_FULL_LOG_LIMIT
+            || self
+                .violations
+                .is_multiple_of(SHADOW_SESSION_PIN_LOG_INTERVAL)
+    }
+
+    fn should_report(&self) -> bool {
+        self.observations > 0
+            && self
+                .observations
+                .is_multiple_of(SHADOW_SESSION_PIN_LOG_INTERVAL)
+    }
+
+    fn should_report_missing_session_id(&self) -> bool {
+        self.missing_session_ids == 1
+            || self
+                .missing_session_ids
+                .is_multiple_of(SHADOW_SESSION_PIN_LOG_INTERVAL)
+    }
+}
+
+#[derive(Debug)]
+#[allow(dead_code)] // Fields are consumed together through the bounded Debug snapshot.
+struct ShadowCandidateState {
+    worker: WorkerWithDpRank,
+    selected: bool,
+    expected: bool,
+    eligibility_error: Option<String>,
+    effective_cached_tokens: usize,
+    effective_overlap_blocks: f64,
+    device_overlap_blocks: usize,
+    host_pinned_overlap_blocks: usize,
+    disk_overlap_blocks: usize,
+    active_prefill_tokens: usize,
+    active_decode_blocks: usize,
+    additional_active_blocks: usize,
+}
 
 struct ClassQueueCounters {
     pending_count: AtomicUsize,
@@ -227,6 +350,7 @@ struct SchedulerQueueActor<
     overlap_scores_refresh: Option<Arc<RF>>,
     overlap_refresh_after: Option<Duration>,
     overloaded_worker_provider: Option<OverloadedWorkerProvider>,
+    shadow_session_pins: Option<ShadowSessionPins>,
 }
 
 /// Queue that gates scheduling requests behind a capacity check.
@@ -405,6 +529,7 @@ impl<
             overlap_scores_refresh,
             overlap_refresh_after,
             overloaded_worker_provider,
+            shadow_session_pins: ShadowSessionPins::from_env(),
         };
         tokio::spawn(actor.run(admission_rx));
         Ok(Self {
@@ -1451,6 +1576,8 @@ impl<
             }
         };
 
+        self.observe_shadow_session_pin(&request, selection.worker);
+
         let (admission, request_progress) = match admission {
             Some(RequestAdmission { ticket, progress }) => (Some(ticket), Some(progress)),
             None => (None, None),
@@ -1522,6 +1649,152 @@ impl<
             }
         }
         (false, delivered)
+    }
+
+    fn observe_shadow_session_pin(
+        &mut self,
+        request: &SchedulingRequest,
+        selected: WorkerWithDpRank,
+    ) {
+        if !request.mode.is_tracked() {
+            return;
+        }
+
+        let Some(shadow) = self.shadow_session_pins.as_mut() else {
+            return;
+        };
+        let observation = shadow.observe(request.session_id.as_deref(), selected);
+        if request.session_id.is_none() {
+            if shadow.should_report_missing_session_id() {
+                tracing::error!(
+                    missing_session_ids = shadow.missing_session_ids,
+                    request_id = request.mode.request_id().unwrap_or("unknown"),
+                    "[SHADOW_SESSION_PIN_MISSING_SESSION_ID] tracked request has no session ID; verify the benchmark forwards x-dynamo-session-id"
+                );
+            }
+            return;
+        }
+
+        let session_id = request
+            .session_id
+            .as_deref()
+            .expect("checked session ID presence");
+        match observation.expect("session ID produces a shadow observation") {
+            ShadowSessionPinObservation::FirstSeen => {
+                tracing::info!(
+                    session_id,
+                    worker_id = selected.worker_id,
+                    dp_rank = selected.dp_rank,
+                    pinned_sessions = shadow.pins.len(),
+                    "[SHADOW_SESSION_PIN_CREATED] first KV-routing choice established a non-enforcing shadow pin"
+                );
+            }
+            ShadowSessionPinObservation::Respected => {}
+            ShadowSessionPinObservation::Violated { expected } => {
+                let should_log_full = shadow.should_log_full_violation();
+                let violations = shadow.violations;
+                let observations = shadow.observations;
+                if should_log_full {
+                    let overloaded_worker_ids = self
+                        .overloaded_worker_provider
+                        .as_ref()
+                        .and_then(|provider| provider());
+                    let workers = self.workers_with_configs.borrow();
+                    let eligibility =
+                        request.eligibility_with_overloaded(overloaded_worker_ids.as_ref());
+                    let mut candidate_states = Vec::new();
+                    for (&worker_id, config) in workers.iter() {
+                        let start = config.data_parallel_start_rank();
+                        let end = start + config.data_parallel_size();
+                        for dp_rank in start..end {
+                            let worker = WorkerWithDpRank::new(worker_id, dp_rank);
+                            let load = request.worker_load_for(worker);
+                            candidate_states.push(ShadowCandidateState {
+                                worker,
+                                selected: worker == selected,
+                                expected: worker == expected,
+                                eligibility_error: eligibility
+                                    .validate_worker_rank(&workers, worker)
+                                    .err()
+                                    .map(|error| error.to_string()),
+                                effective_cached_tokens: request
+                                    .effective_cached_tokens_for(worker),
+                                effective_overlap_blocks: request
+                                    .effective_overlap_blocks_for(worker),
+                                device_overlap_blocks: request
+                                    .overlap
+                                    .tier_overlap_blocks
+                                    .device
+                                    .get(&worker)
+                                    .copied()
+                                    .unwrap_or(0),
+                                host_pinned_overlap_blocks: request
+                                    .overlap
+                                    .tier_overlap_blocks
+                                    .host_pinned
+                                    .get(&worker)
+                                    .copied()
+                                    .unwrap_or(0),
+                                disk_overlap_blocks: request
+                                    .overlap
+                                    .tier_overlap_blocks
+                                    .disk
+                                    .get(&worker)
+                                    .copied()
+                                    .unwrap_or(0),
+                                active_prefill_tokens: load.active_prefill_tokens,
+                                active_decode_blocks: load.active_decode_blocks,
+                                additional_active_blocks: load.additional_active_blocks,
+                            });
+                        }
+                    }
+                    candidate_states.sort_unstable_by_key(|state| state.worker);
+                    tracing::error!(
+                        session_id,
+                        request_id = request.mode.request_id().unwrap_or("unknown"),
+                        expected_worker_id = expected.worker_id,
+                        expected_dp_rank = expected.dp_rank,
+                        selected_worker_id = selected.worker_id,
+                        selected_dp_rank = selected.dp_rank,
+                        isl_tokens = request.isl_tokens,
+                        request_blocks = request.request_blocks(self.block_size),
+                        track_prefill_tokens = request.track_prefill_tokens,
+                        expected_output_tokens = ?request.expected_output_tokens,
+                        router_config_override = ?request.router_config_override,
+                        allowed_worker_ids = ?request.allowed_worker_ids,
+                        overloaded_worker_ids = ?overloaded_worker_ids,
+                        candidate_states = ?candidate_states,
+                        observations,
+                        violations,
+                        "[SHADOW_SESSION_PIN_VIOLATION] KV routing did not select the session's first worker"
+                    );
+                }
+            }
+            ShadowSessionPinObservation::CapacityExceeded => {
+                tracing::error!(
+                    session_id,
+                    selected_worker_id = selected.worker_id,
+                    selected_dp_rank = selected.dp_rank,
+                    pinned_sessions = shadow.pins.len(),
+                    capacity_exceeded = shadow.capacity_exceeded,
+                    "[SHADOW_SESSION_PIN_CAPACITY_EXCEEDED] no shadow pin was recorded"
+                );
+            }
+        }
+
+        if shadow.should_report() {
+            let violation_rate = shadow.violations as f64 / shadow.observations as f64;
+            tracing::warn!(
+                pinned_sessions = shadow.pins.len(),
+                observations = shadow.observations,
+                respected = shadow.respected,
+                violations = shadow.violations,
+                violation_rate,
+                missing_session_ids = shadow.missing_session_ids,
+                capacity_exceeded = shadow.capacity_exceeded,
+                "[SHADOW_SESSION_PIN_STATUS] non-enforcing shadow pin summary"
+            );
+        }
     }
 
     /// Completes the tracked-admission ownership handoff.
@@ -2262,6 +2535,37 @@ mod tests {
             resp_tx: Some(tx),
         };
         (req, rx)
+    }
+
+    #[test]
+    fn shadow_session_pins_report_first_match_and_mismatch_without_enforcing() {
+        let mut shadow = ShadowSessionPins {
+            pins: FxHashMap::default(),
+            observations: 0,
+            respected: 0,
+            violations: 0,
+            missing_session_ids: 0,
+            capacity_exceeded: 0,
+        };
+        let first = WorkerWithDpRank::new(7, 3);
+        let different = WorkerWithDpRank::new(8, 1);
+
+        assert_eq!(
+            shadow.observe(Some("session-a"), first),
+            Some(ShadowSessionPinObservation::FirstSeen)
+        );
+        assert_eq!(
+            shadow.observe(Some("session-a"), first),
+            Some(ShadowSessionPinObservation::Respected)
+        );
+        assert_eq!(
+            shadow.observe(Some("session-a"), different),
+            Some(ShadowSessionPinObservation::Violated { expected: first })
+        );
+        assert_eq!(shadow.pins["session-a"], first);
+        assert_eq!(shadow.observations, 3);
+        assert_eq!(shadow.respected, 1);
+        assert_eq!(shadow.violations, 1);
     }
 
     fn make_admission_request(
