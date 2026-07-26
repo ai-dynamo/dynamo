@@ -61,3 +61,8 @@ flat-line through the baseline outage, while failover climbs steadily throughout
 |:---:|:---:|
 | ![](baseline/http_status_over_time.png) | ![](failover/http_status_over_time.png) |
 | ![](baseline/cumulative_successes.png) | ![](failover/cumulative_successes.png) |
+
+---
+
+_Related: [single failure on a 2-node fleet](../kimi-single-failure-2node/README.md) — the milder case
+where one of two workers is lost (50% capacity → graceful degradation, not a blackout)._
