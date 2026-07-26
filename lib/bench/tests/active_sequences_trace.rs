@@ -147,6 +147,7 @@ async fn active_sequences_replay_matches_sequential_direct_oracle() -> anyhow::R
         SequenceRequest {
             request_id: "0:request-a".to_string(),
             token_sequence: Some(hashes),
+            prompt_tokens: 256,
             track_prefill_tokens: true,
             expected_output_tokens: Some(8),
             prefill_load_hint: Some(PrefillLoadHint {

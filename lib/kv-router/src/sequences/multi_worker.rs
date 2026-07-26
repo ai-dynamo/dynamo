@@ -294,6 +294,8 @@ pub enum SequenceError {
 pub struct SequenceRequest {
     pub request_id: RequestId,
     pub token_sequence: Option<Vec<SequenceHash>>,
+    /// Original prompt length before cache reuse.
+    pub prompt_tokens: usize,
     pub track_prefill_tokens: bool,
     pub expected_output_tokens: Option<u32>,
     pub prefill_load_hint: Option<PrefillLoadHint>,
@@ -771,6 +773,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             worker: req.worker,
             data: ActiveSequenceEventData::AddRequest {
                 token_sequence: req.token_sequence.clone(),
+                prompt_tokens: req.prompt_tokens,
                 track_prefill_tokens: req.track_prefill_tokens,
                 expected_output_tokens: req.expected_output_tokens,
                 prefill_load_hint: req.prefill_load_hint,
@@ -1115,6 +1118,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         let SequenceRequest {
             request_id,
             token_sequence,
+            prompt_tokens,
             track_prefill_tokens,
             expected_output_tokens,
             prefill_load_hint,
@@ -1146,10 +1150,11 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             }
             let slot = &table.slots[idx];
             let mut seq = slot.sequences.write();
-            let outcome = seq.add_request_with_prefill_tracking(
+            let outcome = seq.add_request_with_prompt_and_prefill_tracking(
                 request_id,
                 token_sequence,
                 expected_output_tokens,
+                prompt_tokens,
                 track_prefill_tokens,
                 prefill_load_hint,
                 decay_now,
@@ -1715,6 +1720,7 @@ mod tests {
             worker,
             data: ActiveSequenceEventData::AddRequest {
                 token_sequence: Some(token_sequence),
+                prompt_tokens: 0,
                 track_prefill_tokens: true,
                 expected_output_tokens: None,
                 prefill_load_hint: tracking_hint(12),
@@ -1754,6 +1760,7 @@ mod tests {
         SequenceRequest {
             request_id: request_id.to_string(),
             token_sequence: Some(vec![1, 2, 3]),
+            prompt_tokens: 0,
             track_prefill_tokens: true,
             expected_output_tokens: None,
             prefill_load_hint: tracking_hint(12),
@@ -1852,6 +1859,7 @@ mod tests {
                 SequenceRequest {
                     request_id: "req-1".to_string(),
                     token_sequence: Some(vec![1, 2, 3]),
+                    prompt_tokens: 0,
                     track_prefill_tokens: false,
                     expected_output_tokens: None,
                     prefill_load_hint: None,
@@ -1882,6 +1890,7 @@ mod tests {
                 SequenceRequest {
                     request_id: a_oldest.clone(),
                     token_sequence: Some(vec![1, 2, 3]),
+                    prompt_tokens: 0,
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
                     prefill_load_hint: modeled_hint(100, 10),
@@ -1896,6 +1905,7 @@ mod tests {
                 SequenceRequest {
                     request_id: "a-later".to_string(),
                     token_sequence: Some(vec![4, 5, 6]),
+                    prompt_tokens: 0,
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
                     prefill_load_hint: modeled_hint(60, 4),
@@ -1910,6 +1920,7 @@ mod tests {
                 SequenceRequest {
                     request_id: "b-unmodeled".to_string(),
                     token_sequence: Some(vec![7, 8, 9]),
+                    prompt_tokens: 0,
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
                     prefill_load_hint: tracking_hint(12),
@@ -1951,6 +1962,7 @@ mod tests {
                 SequenceRequest {
                     request_id: "oldest".to_string(),
                     token_sequence: Some(vec![1, 2, 3]),
+                    prompt_tokens: 0,
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
                     prefill_load_hint: modeled_hint(100, 10),
@@ -1965,6 +1977,7 @@ mod tests {
                 SequenceRequest {
                     request_id: later.clone(),
                     token_sequence: Some(vec![4, 5, 6]),
+                    prompt_tokens: 0,
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
                     prefill_load_hint: modeled_hint(40, 4),
@@ -2020,6 +2033,7 @@ mod tests {
                 SequenceRequest {
                     request_id: "req-a".to_string(),
                     token_sequence: Some(vec![1, 2, 3]),
+                    prompt_tokens: 12,
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
                     prefill_load_hint: tracking_hint(12),
@@ -2041,6 +2055,7 @@ mod tests {
                 SequenceRequest {
                     request_id: "req-b".to_string(),
                     token_sequence: Some(vec![1, 2, 4]),
+                    prompt_tokens: 12,
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
                     prefill_load_hint: tracking_hint(12),
@@ -2074,6 +2089,7 @@ mod tests {
                 active_prefill_tokens: 0,
                 active_decode_blocks: 2,
                 active_requests: 1,
+                active_prompt_tokens: 12,
                 additional_active_blocks: 1,
             })
         );
@@ -2083,6 +2099,7 @@ mod tests {
                 active_prefill_tokens: 12,
                 active_decode_blocks: 3,
                 active_requests: 1,
+                active_prompt_tokens: 12,
                 additional_active_blocks: 2,
             })
         );
@@ -2099,6 +2116,7 @@ mod tests {
                 SequenceRequest {
                     request_id: "req-a".to_string(),
                     token_sequence: Some(vec![1, 2, 4, 5]),
+                    prompt_tokens: 0,
                     track_prefill_tokens: false,
                     expected_output_tokens: None,
                     prefill_load_hint: None,
@@ -2135,6 +2153,7 @@ mod tests {
                 SequenceRequest {
                     request_id: "base".to_string(),
                     token_sequence: Some(base_prompt.clone()),
+                    prompt_tokens: 0,
                     track_prefill_tokens: false,
                     expected_output_tokens: None,
                     prefill_load_hint: None,
@@ -2149,6 +2168,7 @@ mod tests {
                 SequenceRequest {
                     request_id: "lora".to_string(),
                     token_sequence: Some(lora_prompt),
+                    prompt_tokens: 0,
                     track_prefill_tokens: false,
                     expected_output_tokens: None,
                     prefill_load_hint: None,
@@ -2195,6 +2215,7 @@ mod tests {
                 SequenceRequest {
                     request_id: "req-a".to_string(),
                     token_sequence: Some(prompt_a.clone()),
+                    prompt_tokens: 0,
                     track_prefill_tokens: false,
                     expected_output_tokens: None,
                     prefill_load_hint: None,
@@ -2209,6 +2230,7 @@ mod tests {
                 SequenceRequest {
                     request_id: "req-b".to_string(),
                     token_sequence: Some(prompt_b.clone()),
+                    prompt_tokens: 0,
                     track_prefill_tokens: false,
                     expected_output_tokens: None,
                     prefill_load_hint: None,
@@ -2267,6 +2289,7 @@ mod tests {
                 SequenceRequest {
                     request_id: "req-1".to_string(),
                     token_sequence: Some(vec![1, 2, 3]),
+                    prompt_tokens: 0,
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
                     prefill_load_hint: tracking_hint(12),
@@ -2311,6 +2334,7 @@ mod tests {
                     SequenceRequest {
                         request_id: request_id.to_string(),
                         token_sequence: Some(token_sequence),
+                        prompt_tokens: 0,
                         track_prefill_tokens: true,
                         expected_output_tokens: None,
                         prefill_load_hint: tracking_hint(4),
@@ -2346,6 +2370,7 @@ mod tests {
                 SequenceRequest {
                     request_id: "req-1".to_string(),
                     token_sequence: Some(vec![1, 2, 3]),
+                    prompt_tokens: 0,
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
                     prefill_load_hint: tracking_hint(12),
@@ -2363,6 +2388,7 @@ mod tests {
                 SequenceRequest {
                     request_id: "req-2".to_string(),
                     token_sequence: Some(vec![1, 2, 3]),
+                    prompt_tokens: 0,
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
                     prefill_load_hint: tracking_hint(12),
@@ -2728,6 +2754,7 @@ mod tests {
                     worker,
                     data: ActiveSequenceEventData::AddRequest {
                         token_sequence: Some(vec![1, 2, 3]),
+                        prompt_tokens: 0,
                         track_prefill_tokens: true,
                         expected_output_tokens: None,
                         prefill_load_hint: tracking_hint(12),
@@ -2776,6 +2803,7 @@ mod tests {
                         worker,
                         data: ActiveSequenceEventData::AddRequest {
                             token_sequence: Some(vec![1, 2, 3]),
+                            prompt_tokens: 0,
                             track_prefill_tokens: true,
                             expected_output_tokens: None,
                             prefill_load_hint: modeled_hint(12, 10),
@@ -2819,6 +2847,7 @@ mod tests {
                         worker,
                         data: ActiveSequenceEventData::AddRequest {
                             token_sequence: Some(vec![4, 5, 6]),
+                            prompt_tokens: 0,
                             track_prefill_tokens: true,
                             expected_output_tokens: None,
                             prefill_load_hint: modeled_hint(12, 6),
@@ -2877,6 +2906,7 @@ mod tests {
                             worker,
                             data: ActiveSequenceEventData::AddRequest {
                                 token_sequence: Some(vec![1, 2, 3]),
+                                prompt_tokens: 0,
                                 track_prefill_tokens: true,
                                 expected_output_tokens: None,
                                 prefill_load_hint: modeled_hint(100, 10),
@@ -2889,6 +2919,7 @@ mod tests {
                             worker,
                             data: ActiveSequenceEventData::AddRequest {
                                 token_sequence: Some(vec![4, 5, 6]),
+                                prompt_tokens: 0,
                                 track_prefill_tokens: true,
                                 expected_output_tokens: None,
                                 prefill_load_hint: modeled_hint(40, 4),
@@ -2953,6 +2984,7 @@ mod tests {
                 worker,
                 data: ActiveSequenceEventData::AddRequest {
                     token_sequence: Some(vec![1, 2, 3]),
+                    prompt_tokens: 0,
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
                     prefill_load_hint: tracking_hint(12),
@@ -3049,6 +3081,7 @@ mod tests {
                 SequenceRequest {
                     request_id: "req-1".to_string(),
                     token_sequence: Some(vec![1, 2, 3]),
+                    prompt_tokens: 0,
                     track_prefill_tokens: false,
                     expected_output_tokens: None,
                     prefill_load_hint: None,
@@ -3091,6 +3124,7 @@ mod tests {
                 SequenceRequest {
                     request_id: "req-1".to_string(),
                     token_sequence: Some(vec![1, 2, 3]),
+                    prompt_tokens: 0,
                     track_prefill_tokens: false,
                     expected_output_tokens: None,
                     prefill_load_hint: None,
@@ -3126,6 +3160,7 @@ mod tests {
                 SequenceRequest {
                     request_id: request_id.clone(),
                     token_sequence: Some(vec![1, 2, 3]),
+                    prompt_tokens: 0,
                     track_prefill_tokens: false,
                     expected_output_tokens: None,
                     prefill_load_hint: None,
@@ -3174,6 +3209,7 @@ mod tests {
                 SequenceRequest {
                     request_id: "req-1".to_string(),
                     token_sequence: Some(vec![1, 2, 3]),
+                    prompt_tokens: 0,
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
                     prefill_load_hint: Some(PrefillLoadHint {

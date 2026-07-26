@@ -183,10 +183,18 @@ def test_decode_active_request_weight_flows_to_binding_kwargs() -> None:
     parser = argparse.ArgumentParser()
     KvRouterArgGroup().add_arguments(parser)
 
-    args = parser.parse_args(["--router-decode-active-request-weight", "64"])
+    args = parser.parse_args(
+        [
+            "--router-decode-active-request-weight",
+            "64",
+            "--router-decode-load-model",
+            "default_adp",
+        ]
+    )
     kwargs = KvRouterConfigBase.from_cli_args(args).kv_router_kwargs()
 
     assert kwargs["decode_active_request_weight"] == 64.0
+    assert kwargs["decode_load_model"] == "default_adp"
 
 
 def test_load_aware_cli_applies_no_cache_load_balancing_preset() -> None:

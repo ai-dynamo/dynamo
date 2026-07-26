@@ -835,6 +835,7 @@ mod tests {
                     SequenceRequest {
                         request_id: format!("endpoint-a-request-{request_index}"),
                         token_sequence: Some(vec![1, 2, 3, 4]),
+                        prompt_tokens: 4,
                         track_prefill_tokens: true,
                         expected_output_tokens: None,
                         prefill_load_hint: tracking_hint(4),
@@ -920,6 +921,7 @@ mod tests {
             SequenceRequest {
                 request_id: "request_0".to_string(),
                 token_sequence: Some(vec![0, 1, 2]),
+                prompt_tokens: 12,
                 track_prefill_tokens: true,
                 expected_output_tokens: None,
                 prefill_load_hint: tracking_hint(12),
@@ -933,6 +935,7 @@ mod tests {
             SequenceRequest {
                 request_id: "request_1".to_string(),
                 token_sequence: Some(vec![3, 4]),
+                prompt_tokens: 8,
                 track_prefill_tokens: true,
                 expected_output_tokens: None,
                 prefill_load_hint: tracking_hint(8),
@@ -946,6 +949,7 @@ mod tests {
             SequenceRequest {
                 request_id: "request_2".to_string(),
                 token_sequence: Some(vec![0, 1, 2, 3]),
+                prompt_tokens: 16,
                 track_prefill_tokens: true,
                 expected_output_tokens: None,
                 prefill_load_hint: tracking_hint(16),
@@ -1076,6 +1080,7 @@ mod tests {
             SequenceRequest {
                 request_id: "request_0".to_string(),
                 token_sequence: None,
+                prompt_tokens: 12,
                 track_prefill_tokens: true,
                 expected_output_tokens: None,
                 prefill_load_hint: tracking_hint(12),
@@ -1089,6 +1094,7 @@ mod tests {
             SequenceRequest {
                 request_id: "request_1".to_string(),
                 token_sequence: None,
+                prompt_tokens: 8,
                 track_prefill_tokens: true,
                 expected_output_tokens: None,
                 prefill_load_hint: tracking_hint(8),
@@ -1102,6 +1108,7 @@ mod tests {
             SequenceRequest {
                 request_id: "request_2".to_string(),
                 token_sequence: None,
+                prompt_tokens: 16,
                 track_prefill_tokens: true,
                 expected_output_tokens: None,
                 prefill_load_hint: tracking_hint(16),

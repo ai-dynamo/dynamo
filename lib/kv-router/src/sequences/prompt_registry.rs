@@ -30,6 +30,9 @@ pub struct WorkerLoadProjection {
     pub active_prefill_tokens: usize,
     pub active_decode_blocks: usize,
     pub active_requests: usize,
+    /// Sum of each active request's original prompt length. Unlike
+    /// `active_decode_blocks`, shared prefixes are counted once per request.
+    pub active_prompt_tokens: usize,
     /// Request blocks not already shared with active sequences on this worker.
     ///
     /// These blocks may still exist in an inactive cache; this field describes
@@ -59,6 +62,7 @@ pub type PotentialLoadMaps = (
 pub(super) struct WorkerLoadSnapshot {
     pub(super) active_blocks: usize,
     pub(super) active_requests: usize,
+    pub(super) active_prompt_tokens: usize,
     pub(super) prefill: PrefillLoadSnapshot,
 }
 
@@ -335,6 +339,7 @@ impl PromptRegistry {
                     active_prefill_tokens: load.active_tokens(decay_now),
                     active_decode_blocks: load.active_blocks,
                     active_requests: load.active_requests,
+                    active_prompt_tokens: load.active_prompt_tokens,
                     additional_active_blocks: query_len.saturating_sub(overlap_depth),
                 },
             );
@@ -443,6 +448,7 @@ mod tests {
         WorkerLoadSnapshot {
             active_blocks,
             active_requests: 0,
+            active_prompt_tokens: 0,
             prefill: PrefillLoadSnapshot::default(),
         }
     }
@@ -457,6 +463,7 @@ mod tests {
         WorkerLoadSnapshot {
             active_blocks,
             active_requests: 0,
+            active_prompt_tokens: 0,
             prefill: PrefillLoadSnapshot {
                 prefill_full_tokens_sum,
                 anchored_prefill: Some(AnchoredPrefillSnapshot {

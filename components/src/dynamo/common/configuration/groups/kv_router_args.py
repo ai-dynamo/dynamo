@@ -30,6 +30,7 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "overlap_score_credit_decay",
     "prefill_load_scale",
     "decode_active_request_weight",
+    "decode_load_model",
     "host_cache_hit_weight",
     "disk_cache_hit_weight",
     "router_temperature",
@@ -113,6 +114,7 @@ class KvRouterConfigBase(ConfigBase):
     overlap_score_credit_decay: float
     prefill_load_scale: float
     decode_active_request_weight: float
+    decode_load_model: str
     host_cache_hit_weight: float
     disk_cache_hit_weight: float
     router_temperature: float
@@ -232,6 +234,22 @@ class KvRouterArgGroup(ArgGroup):
             ),
             arg_type=float,
             dest="decode_active_request_weight",
+        )
+        add_argument(
+            g,
+            flag_name="--router-decode-load-model",
+            env_var="DYN_ROUTER_DECODE_LOAD_MODEL",
+            default="blocks",
+            choices=["blocks", "default_adp"],
+            help=(
+                "[EXPERIMENTAL] KV Router: Decode load signal. 'blocks' uses "
+                "Dynamo's projected active-KV-block score. 'default_adp' "
+                "approximates TensorRT-LLM DefaultADPRouter by minimizing summed "
+                "original prompt tokens, then active request count, then rank; "
+                "decode-side session affinity is ignored in this mode."
+            ),
+            arg_type=str,
+            dest="decode_load_model",
         )
         add_argument(
             g,

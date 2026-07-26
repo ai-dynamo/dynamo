@@ -292,6 +292,7 @@ impl SlotTrackerRegistry {
             SequenceRequest {
                 request_id,
                 token_sequence: Some(sequence_hashes),
+                prompt_tokens: new_isl_tokens,
                 track_prefill_tokens: prefill_load_hint.is_some(),
                 expected_output_tokens: None,
                 prefill_load_hint,
@@ -531,6 +532,7 @@ mod tests {
                 worker,
                 data: ActiveSequenceEventData::AddRequest {
                     token_sequence: Some(vec![1, 2, 3]),
+                    prompt_tokens: 0,
                     track_prefill_tokens: false,
                     expected_output_tokens: None,
                     prefill_load_hint: None,

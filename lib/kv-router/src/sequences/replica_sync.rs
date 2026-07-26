@@ -174,6 +174,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         match data {
             ActiveSequenceEventData::AddRequest {
                 token_sequence,
+                prompt_tokens,
                 track_prefill_tokens,
                 expected_output_tokens,
                 prefill_load_hint,
@@ -195,10 +196,11 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 let (expired_request_ids, load) = {
                     let slot = &table.slots[idx];
                     let mut seq = slot.sequences.write();
-                    let outcome = seq.add_request_with_prefill_tracking(
+                    let outcome = seq.add_request_with_prompt_and_prefill_tracking(
                         request_id,
                         token_sequence,
                         expected_output_tokens,
+                        prompt_tokens,
                         track_prefill_tokens,
                         prefill_load_hint,
                         decay_now,

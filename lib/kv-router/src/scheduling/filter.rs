@@ -58,6 +58,16 @@ impl<'a> RoutingEligibility<'a> {
         self.pinned_worker
     }
 
+    /// Preserve all hard eligibility constraints while allowing the selector to
+    /// ignore a soft session-affinity pin.
+    #[inline]
+    pub fn without_pinned_worker(self) -> Self {
+        Self {
+            pinned_worker: None,
+            ..self
+        }
+    }
+
     #[inline]
     pub fn caller_allows_worker_id(&self, worker_id: WorkerId) -> bool {
         self.allowed_worker_ids

@@ -988,6 +988,7 @@ where
             .add_request(SequenceRequest {
                 request_id: request_id.clone(),
                 token_sequence: maybe_seq_hashes,
+                prompt_tokens: isl_tokens,
                 track_prefill_tokens,
                 expected_output_tokens,
                 prefill_load_hint,
