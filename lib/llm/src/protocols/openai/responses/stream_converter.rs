@@ -14,14 +14,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::response::sse::Event;
 use dynamo_protocols::types::responses::{
-    AssistantRole, FunctionToolCall, InputTokenDetails, Instructions, OutputContent, OutputItem,
-    OutputMessage, OutputMessageContent, OutputStatus, OutputTextContent, OutputTokenDetails,
-    Response, ResponseCompletedEvent, ResponseContentPartAddedEvent, ResponseContentPartDoneEvent,
-    ResponseCreatedEvent, ResponseFailedEvent, ResponseFunctionCallArgumentsDeltaEvent,
-    ResponseFunctionCallArgumentsDoneEvent, ResponseInProgressEvent, ResponseOutputItemAddedEvent,
-    ResponseOutputItemDoneEvent, ResponseStreamEvent, ResponseTextDeltaEvent,
-    ResponseTextDoneEvent, ResponseTextParam, ResponseUsage, ServiceTier, Status,
-    TextResponseFormatConfiguration, ToolChoiceOptions, ToolChoiceParam, Truncation,
+    AssistantRole, FunctionToolCall, IncompleteDetails, InputTokenDetails, Instructions,
+    OutputContent, OutputItem, OutputMessage, OutputMessageContent, OutputStatus,
+    OutputTextContent, OutputTokenDetails, Response, ResponseCompletedEvent,
+    ResponseContentPartAddedEvent, ResponseContentPartDoneEvent, ResponseCreatedEvent,
+    ResponseFailedEvent, ResponseFunctionCallArgumentsDeltaEvent,
+    ResponseFunctionCallArgumentsDoneEvent, ResponseInProgressEvent, ResponseIncompleteEvent,
+    ResponseOutputItemAddedEvent, ResponseOutputItemDoneEvent, ResponseStreamEvent,
+    ResponseTextDeltaEvent, ResponseTextDoneEvent, ResponseTextParam, ResponseUsage, ServiceTier,
+    Status, TextResponseFormatConfiguration, ToolChoiceOptions, ToolChoiceParam, Truncation,
 };
 use serde::{
     Serialize,
@@ -55,6 +56,8 @@ pub struct ResponseStreamConverter {
     next_output_index: u32,
     // Usage stats from the backend's final chunk
     usage: Option<ResponseUsage>,
+    // The backend exhausted the output budget.
+    output_limit_reached: bool,
 }
 
 struct FunctionCallState {
@@ -95,6 +98,7 @@ impl ResponseStreamConverter {
             function_call_items: Vec::new(),
             next_output_index: 0,
             usage: None,
+            output_limit_reached: false,
         }
     }
 
@@ -111,6 +115,7 @@ impl ResponseStreamConverter {
     }
 
     fn make_response(&self, status: Status, output: Vec<OutputItem>) -> Response {
+        let is_incomplete = status == Status::Incomplete;
         let completed_at = if status == Status::Completed {
             Some(
                 SystemTime::now()
@@ -156,7 +161,9 @@ impl ResponseStreamConverter {
             billing: None,
             conversation: None,
             error: None,
-            incomplete_details: None,
+            incomplete_details: is_incomplete.then(|| IncompleteDetails {
+                reason: "max_output_tokens".to_string(),
+            }),
             instructions: self.params.instructions.clone().map(Instructions::Text),
             max_output_tokens: self.params.max_output_tokens,
             previous_response_id: self
@@ -238,6 +245,10 @@ impl ResponseStreamConverter {
         let mut should_finish_function_calls = false;
         for choice in &chunk.inner.choices {
             let delta = &choice.delta;
+
+            if choice.finish_reason == Some(FinishReason::Length) {
+                self.output_limit_reached = true;
+            }
 
             // Handle text content deltas — extract text from the enum
             let content_text = match &delta.content {
@@ -439,6 +450,7 @@ impl ResponseStreamConverter {
         &mut self,
         events: &mut Vec<Result<Event, anyhow::Error>>,
     ) {
+        let output_status = self.output_status();
         // `started` is set only after `has_identity()` observes both required
         // fields, matching Anthropic's `is_emit_ready()` identity requirement.
         let mut pending: Vec<_> = self
@@ -481,14 +493,31 @@ impl ResponseStreamConverter {
                         namespace: None,
                         name: fc_name,
                         arguments: accumulated_args,
-                        status: Some(OutputStatus::Completed),
+                        status: Some(output_status),
                     }),
                 });
             events.push(self.make_sse_event(&item_done));
         }
     }
 
+    fn output_status(&self) -> OutputStatus {
+        if self.output_limit_reached {
+            OutputStatus::Incomplete
+        } else {
+            OutputStatus::Completed
+        }
+    }
+
+    fn terminal_status(&self) -> Status {
+        if self.output_limit_reached {
+            Status::Incomplete
+        } else {
+            Status::Completed
+        }
+    }
+
     fn completed_output(&self) -> Vec<OutputItem> {
+        let output_status = self.output_status();
         let mut output = Vec::new();
         if self.message_started {
             output.push((
@@ -502,7 +531,7 @@ impl ResponseStreamConverter {
                     })],
                     role: AssistantRole::Assistant,
                     phase: None,
-                    status: OutputStatus::Completed,
+                    status: output_status,
                 }),
             ));
         }
@@ -516,7 +545,7 @@ impl ResponseStreamConverter {
                         namespace: None,
                         name: function_call.name.clone(),
                         arguments: function_call.accumulated_args.clone(),
-                        status: Some(OutputStatus::Completed),
+                        status: Some(output_status),
                     }),
                 ));
             }
@@ -534,6 +563,8 @@ impl ResponseStreamConverter {
 
     /// Append remaining output completion events and `response.completed` at stream end.
     pub fn append_end_events(&mut self, events: &mut Vec<Result<Event, anyhow::Error>>) {
+        let output_status = self.output_status();
+
         // Close text message if it was started
         if self.message_started {
             let text_done = ResponseStreamEvent::ResponseOutputTextDone(ResponseTextDoneEvent {
@@ -573,7 +604,7 @@ impl ResponseStreamConverter {
                         })],
                         role: AssistantRole::Assistant,
                         phase: None,
-                        status: OutputStatus::Completed,
+                        status: output_status,
                     }),
                 });
             events.push(self.make_sse_event(&item_done));
@@ -582,12 +613,20 @@ impl ResponseStreamConverter {
         // Fallback for backends that end the transport without a finish-reason chunk.
         self.append_pending_function_call_done_events(events);
 
-        // Emit response.completed
-        let completed = ResponseStreamEvent::ResponseCompleted(ResponseCompletedEvent {
-            sequence_number: self.next_seq(),
-            response: self.make_response(Status::Completed, self.completed_output()),
-        });
-        events.push(self.make_sse_event(&completed));
+        let terminal_status = self.terminal_status();
+        let response = self.make_response(terminal_status.clone(), self.completed_output());
+        let terminal = if terminal_status == Status::Incomplete {
+            ResponseStreamEvent::ResponseIncomplete(ResponseIncompleteEvent {
+                sequence_number: self.next_seq(),
+                response,
+            })
+        } else {
+            ResponseStreamEvent::ResponseCompleted(ResponseCompletedEvent {
+                sequence_number: self.next_seq(),
+                response,
+            })
+        };
+        events.push(self.make_sse_event(&terminal));
     }
 
     /// Emit error events when the stream ends due to a backend error.
@@ -1127,6 +1166,34 @@ mod tests {
                 "response.output_item.done".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn test_length_finish_reason_emits_incomplete_terminal_response() {
+        let mut conv = ResponseStreamConverter::new("test-model".into(), default_params());
+        let _ = conv.process_chunk(&text_chunk("partial"));
+        let _ = conv.process_chunk(&finish_chunk(FinishReason::Length));
+
+        let end_events = conv.emit_end_events();
+        assert_eq!(
+            event_types(&end_events).last().map(String::as_str),
+            Some("response.incomplete")
+        );
+
+        let response = conv.make_response(conv.terminal_status(), conv.completed_output());
+        assert_eq!(response.status, Status::Incomplete);
+        assert_eq!(
+            response
+                .incomplete_details
+                .as_ref()
+                .map(|details| details.reason.as_str()),
+            Some("max_output_tokens")
+        );
+        assert_eq!(response.completed_at, None);
+        let OutputItem::Message(message) = &response.output[0] else {
+            panic!("expected message output");
+        };
+        assert_eq!(message.status, OutputStatus::Incomplete);
     }
 
     #[test]

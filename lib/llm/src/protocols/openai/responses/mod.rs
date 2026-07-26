@@ -6,13 +6,13 @@ pub mod stream_converter;
 use std::collections::HashMap;
 
 use dynamo_protocols::types::responses::{
-    AssistantRole, FunctionCallOutput, FunctionToolCall, IncludeEnum, InputContent, InputItem,
-    InputOutputMessageContent, InputParam, InputRole, InputTokenDetails, Instructions, Item,
-    MessageItem, OutputItem, OutputMessage, OutputMessageContent, OutputStatus, OutputTextContent,
-    OutputTokenDetails, PromptCacheRetention, Reasoning, ReasoningItem, Response,
-    ResponseTextParam, ResponseUsage, Role as ResponseRole, ServiceTier, Status, SummaryPart,
-    SummaryTextContent, TextResponseFormatConfiguration, Tool, ToolChoiceOptions, ToolChoiceParam,
-    Truncation,
+    AssistantRole, FunctionCallOutput, FunctionToolCall, IncludeEnum, IncompleteDetails,
+    InputContent, InputItem, InputOutputMessageContent, InputParam, InputRole, InputTokenDetails,
+    Instructions, Item, MessageItem, OutputItem, OutputMessage, OutputMessageContent, OutputStatus,
+    OutputTextContent, OutputTokenDetails, PromptCacheRetention, Reasoning, ReasoningItem,
+    Response, ResponseTextParam, ResponseUsage, Role as ResponseRole, ServiceTier, Status,
+    SummaryPart, SummaryTextContent, TextResponseFormatConfiguration, Tool, ToolChoiceOptions,
+    ToolChoiceParam, Truncation,
 };
 use dynamo_protocols::types::{
     ChatCompletionMessageToolCall, ChatCompletionNamedToolChoice,
@@ -988,8 +988,12 @@ pub fn chat_completion_to_response(
 
     let choice = chat_resp.choices.into_iter().next();
     let mut output = Vec::new();
+    let mut output_limit_reached = false;
 
     if let Some(choice) = choice {
+        output_limit_reached =
+            choice.finish_reason == Some(dynamo_protocols::types::FinishReason::Length);
+
         // Handle structured tool calls
         if let Some(tool_calls) = choice.message.tool_calls {
             for tc in &tool_calls {
@@ -1078,17 +1082,34 @@ pub fn chat_completion_to_response(
     }
 
     let created_at = chat_resp.created as u64;
+    let status = if output_limit_reached {
+        Status::Incomplete
+    } else {
+        Status::Completed
+    };
+    if output_limit_reached {
+        for item in &mut output {
+            match item {
+                OutputItem::Message(message) => message.status = OutputStatus::Incomplete,
+                OutputItem::FunctionCall(call) => call.status = Some(OutputStatus::Incomplete),
+                OutputItem::Reasoning(reasoning) => {
+                    reasoning.status = Some(OutputStatus::Incomplete)
+                }
+                _ => {}
+            }
+        }
+    }
     let response = Response {
         id: response_id,
         object: "response".to_string(),
         created_at,
-        completed_at: Some(created_at),
+        completed_at: (!output_limit_reached).then_some(created_at),
         model: if chat_resp.model == "unknown" {
             params.model.clone().unwrap_or(chat_resp.model)
         } else {
             chat_resp.model
         },
-        status: Status::Completed,
+        status,
         output,
         // Spec-required defaults (OpenResponses requires these as non-null)
         background: Some(false),
@@ -1116,7 +1137,9 @@ pub fn chat_completion_to_response(
         billing: None,
         conversation: None,
         error: None,
-        incomplete_details: None,
+        incomplete_details: output_limit_reached.then(|| IncompleteDetails {
+            reason: "max_output_tokens".to_string(),
+        }),
         instructions: params.instructions.clone().map(Instructions::Text),
         max_output_tokens: params.max_output_tokens,
         previous_response_id: api_context.and_then(|ctx| ctx.previous_response_id.clone()),
@@ -2968,6 +2991,30 @@ thinking
         let params = ResponseParams::default();
         let resp = chat_completion_to_response(chat_resp, &params, None).unwrap();
         assert_eq!(resp.inner.truncation, Some(Truncation::Disabled));
+    }
+
+    #[test]
+    fn test_length_finish_reason_returns_incomplete_response() {
+        let mut chat_resp = make_chat_resp_with_text("partial");
+        chat_resp.inner.choices[0].finish_reason =
+            Some(dynamo_protocols::types::FinishReason::Length);
+
+        let resp =
+            chat_completion_to_response(chat_resp, &ResponseParams::default(), None).unwrap();
+
+        assert_eq!(resp.inner.status, Status::Incomplete);
+        assert_eq!(resp.inner.completed_at, None);
+        assert_eq!(
+            resp.inner
+                .incomplete_details
+                .as_ref()
+                .map(|details| details.reason.as_str()),
+            Some("max_output_tokens")
+        );
+        let OutputItem::Message(message) = &resp.inner.output[0] else {
+            panic!("expected message output");
+        };
+        assert_eq!(message.status, OutputStatus::Incomplete);
     }
 
     /// Pass-through metadata fields the OpenResponses spec includes on the
