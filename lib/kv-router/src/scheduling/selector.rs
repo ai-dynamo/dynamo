@@ -330,14 +330,6 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
         assert!(request.isl_tokens > 0);
         let use_default_adp = self.worker_type == "decode"
             && self.kv_router_config.decode_load_model == RouterDecodeLoadModel::DefaultAdp;
-        let ignore_session_pin = use_default_adp
-            && request.session_id.is_some()
-            && eligibility.pinned_worker().is_some();
-        let eligibility = if ignore_session_pin {
-            eligibility.without_pinned_worker()
-        } else {
-            eligibility
-        };
         eligibility.validate_pinned_worker_allowed()?;
 
         let pinned_worker = eligibility.pinned_worker();
@@ -718,7 +710,7 @@ mod tests {
     }
 
     #[test]
-    fn default_adp_decode_uses_prompt_sum_then_request_count_and_ignores_session_pin() {
+    fn default_adp_decode_uses_prompt_sum_then_request_count_and_honors_pin() {
         use crate::test_utils::SimpleWorkerConfig;
 
         let workers = HashMap::from([
@@ -727,8 +719,6 @@ mod tests {
             (2, SimpleWorkerConfig::default()),
         ]);
         let mut request = base_request(64);
-        request.session_id = Some("session-a".to_string());
-        request.pinned_worker = Some(WorkerWithDpRank::from_worker_id(0));
         request.worker_loads = FxHashMap::from_iter([
             (
                 WorkerWithDpRank::from_worker_id(0),
@@ -772,7 +762,7 @@ mod tests {
 
         assert_eq!(result.worker, WorkerWithDpRank::from_worker_id(2));
 
-        request.session_id = None;
+        request.pinned_worker = Some(WorkerWithDpRank::from_worker_id(0));
         let explicit = selector
             .select_worker(&workers, &request, request.eligibility(), 16)
             .unwrap();
