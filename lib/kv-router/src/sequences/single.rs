@@ -47,6 +47,7 @@ pub(super) struct RequestState {
     blocks: RequestBlockChain,
     started_at: Instant,
     expected_output_tokens: Option<u32>,
+    prompt_tokens: usize,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -110,6 +111,7 @@ pub struct ActiveSequences {
     requests: HashMap<RequestId, RequestState>,
     prefill: PrefillLoadTracker,
     blocks: BlockTracker,
+    active_prompt_tokens: usize,
     last_expiry_check_time: Instant,
     expiry_duration: Option<Duration>,
 }
@@ -147,6 +149,7 @@ impl ActiveSequences {
             requests: HashMap::new(),
             prefill: PrefillLoadTracker::default(),
             blocks: BlockTracker::default(),
+            active_prompt_tokens: 0,
             last_expiry_check_time: Instant::now(),
             expiry_duration,
         }
@@ -163,6 +166,14 @@ impl ActiveSequences {
         );
         self.blocks
             .assert_consistent(self.requests.values().map(|state| &state.blocks));
+        assert_eq!(
+            self.active_prompt_tokens,
+            self.requests
+                .values()
+                .map(|state| state.prompt_tokens)
+                .sum::<usize>(),
+            "active prompt-token total must equal the sum of live requests",
+        );
     }
 
     #[inline]
@@ -182,11 +193,12 @@ impl ActiveSequences {
 
     /// Add a new request with optional prompt-token load accounting.
     /// Returns block membership transitions plus any expired request IDs removed during cleanup.
-    pub(super) fn add_request_with_prefill_tracking(
+    pub(super) fn add_request_with_prompt_and_prefill_tracking(
         &mut self,
         request_id: RequestId,
         token_sequence: Option<Vec<SequenceHash>>,
         expected_output_tokens: Option<u32>,
+        prompt_tokens: usize,
         track_prefill_tokens: bool,
         prefill_load_hint: Option<PrefillLoadHint>,
         decay_now: Instant,
@@ -231,8 +243,13 @@ impl ActiveSequences {
                 blocks,
                 started_at,
                 expected_output_tokens,
+                prompt_tokens,
             },
         );
+        self.active_prompt_tokens = self
+            .active_prompt_tokens
+            .checked_add(prompt_tokens)
+            .expect("active prompt-token total overflow");
 
         if let Some(prefill) = prefill {
             self.prefill.insert(&request_id, prefill, decay_now);
@@ -240,6 +257,30 @@ impl ActiveSequences {
 
         self.validate_state();
         outcome
+    }
+
+    #[cfg(test)]
+    pub(super) fn add_request_with_prefill_tracking(
+        &mut self,
+        request_id: RequestId,
+        token_sequence: Option<Vec<SequenceHash>>,
+        expected_output_tokens: Option<u32>,
+        track_prefill_tokens: bool,
+        prefill_load_hint: Option<PrefillLoadHint>,
+        decay_now: Instant,
+    ) -> SequenceMutationOutcome {
+        let prompt_tokens = prefill_load_hint
+            .map(|hint| hint.initial_effective_prefill_tokens)
+            .unwrap_or_else(|| token_sequence.as_ref().map_or(0, Vec::len));
+        self.add_request_with_prompt_and_prefill_tracking(
+            request_id,
+            token_sequence,
+            expected_output_tokens,
+            prompt_tokens,
+            track_prefill_tokens,
+            prefill_load_hint,
+            decay_now,
+        )
     }
 
     /// Mark prefill as completed for a request, removing it from prompt-load tracking.
@@ -266,6 +307,10 @@ impl ActiveSequences {
 
         let blocks = request_state.blocks;
         let _ = request_state.expected_output_tokens;
+        self.active_prompt_tokens = self
+            .active_prompt_tokens
+            .checked_sub(request_state.prompt_tokens)
+            .expect("active prompt-token total underflow");
         let mut membership_delta = PromptMembershipDelta::default();
         membership_delta.push_remove(self.blocks.release(blocks));
 
@@ -342,6 +387,7 @@ impl ActiveSequences {
         WorkerLoadSnapshot {
             active_blocks: self.active_blocks(),
             active_requests: self.requests.len(),
+            active_prompt_tokens: self.active_prompt_tokens,
             prefill: self.prefill.snapshot(),
         }
     }

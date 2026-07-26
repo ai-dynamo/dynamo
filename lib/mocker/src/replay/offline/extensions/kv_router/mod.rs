@@ -820,6 +820,7 @@ impl OfflineReplayRouter {
                 SequenceRequest {
                     request_id,
                     token_sequence: request.token_seq,
+                    prompt_tokens: request.isl_tokens,
                     track_prefill_tokens: request.track_prefill_tokens,
                     expected_output_tokens: request.expected_output_tokens,
                     prefill_load_hint,

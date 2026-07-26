@@ -493,6 +493,7 @@ pub(crate) fn prepare_active_sequences_trial(
                 LanePayload::ProjectAndAdd(SequenceRequest {
                     request_id: request.request_id.clone(),
                     token_sequence: Some(token_sequence),
+                    prompt_tokens: request.isl,
                     track_prefill_tokens: true,
                     expected_output_tokens: Some(request.output_length),
                     prefill_load_hint: Some(PrefillLoadHint {
@@ -1652,6 +1653,7 @@ mod tests {
         SequenceRequest {
             request_id: request_id.to_string(),
             token_sequence: Some(hashes.to_vec()),
+            prompt_tokens: hashes.len() * 128,
             track_prefill_tokens: true,
             expected_output_tokens: Some(8),
             prefill_load_hint: Some(PrefillLoadHint {

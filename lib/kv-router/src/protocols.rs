@@ -736,6 +736,9 @@ pub struct PrefillLoadHint {
 pub enum ActiveSequenceEventData {
     AddRequest {
         token_sequence: Option<Vec<SequenceHash>>,
+        /// Original prompt length before cache reuse.
+        #[serde(default)]
+        prompt_tokens: usize,
         #[serde(default = "default_track_prefill_tokens")]
         track_prefill_tokens: bool,
         expected_output_tokens: Option<u32>,

@@ -1489,6 +1489,7 @@ impl<
         let sequence_request = SequenceRequest {
             request_id,
             token_sequence: request.token_seq.take(),
+            prompt_tokens: request.isl_tokens,
             track_prefill_tokens: request.track_prefill_tokens,
             expected_output_tokens: request.expected_output_tokens,
             prefill_load_hint,
@@ -4441,6 +4442,7 @@ policy_classes:
                 SequenceRequest {
                     request_id: "occupy-during-refresh".to_string(),
                     token_sequence: None,
+                    prompt_tokens: isl,
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
                     prefill_load_hint: Some(PrefillLoadHint {

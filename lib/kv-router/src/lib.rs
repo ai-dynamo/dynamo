@@ -47,8 +47,8 @@ pub use self::sequences::{PrefillTokenDeltas, WorkerLoadProjection};
 pub use concurrent_radix_tree::ConcurrentRadixTree;
 pub use concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
 pub use config::{
-    ConditionalDisaggPolicyKind, KvRouterConfig, RouterConfigOverride, RouterPrefillLoadModel,
-    RouterQueuePolicy, SharedCacheType,
+    ConditionalDisaggPolicyKind, KvRouterConfig, RouterConfigOverride, RouterDecodeLoadModel,
+    RouterPrefillLoadModel, RouterQueuePolicy, SharedCacheType,
 };
 pub use identity::{DEFAULT_ROUTING_GROUP, DcId, RoutingPartitionId, RoutingPartitionRef};
 #[allow(deprecated)]

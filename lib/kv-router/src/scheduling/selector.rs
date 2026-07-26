@@ -9,7 +9,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
 
-use super::config::KvRouterConfig;
+use super::config::{KvRouterConfig, RouterDecodeLoadModel};
 use super::filter::{RoutingEligibility, WorkerEligibilityError};
 use super::types::{KvSchedulerError, SchedulingRequest};
 use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
@@ -266,6 +266,57 @@ impl DefaultWorkerSelector {
 
         logit
     }
+
+    fn select_default_adp_worker<C: WorkerConfigLike>(
+        &self,
+        workers: &HashMap<WorkerId, C>,
+        request: &SchedulingRequest,
+        eligibility: RoutingEligibility<'_>,
+        request_blocks: u64,
+    ) -> Result<WorkerSelectionResult, KvSchedulerError> {
+        let mut best: Option<(usize, usize, WorkerWithDpRank)> = None;
+        eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
+            let load = request.worker_load_for(worker);
+            let candidate = (load.active_prompt_tokens, load.active_requests, worker);
+            if best.is_none_or(|current| candidate < current) {
+                best = Some(candidate);
+            }
+        });
+
+        let Some((active_prompt_tokens, active_requests, worker)) = best else {
+            if eligibility.has_eligible_worker_ignoring_overload(
+                workers
+                    .iter()
+                    .map(|(&worker_id, config)| (worker_id, config)),
+            ) {
+                return Err(KvSchedulerError::AllEligibleWorkersOverloaded);
+            }
+            return Err(KvSchedulerError::NoEndpoints);
+        };
+
+        let effective_overlap_blocks = request.effective_overlap_blocks_for(worker);
+        let cached_tokens = request.effective_cached_tokens_for(worker);
+        tracing::info!(
+            router_mode = "kv",
+            decode_load_model = "default_adp",
+            worker_id = worker.worker_id,
+            worker_type = %self.worker_type,
+            dp_rank = worker.dp_rank,
+            active_prompt_tokens,
+            active_requests,
+            session_affinity_ignored = request.session_id.is_some()
+                && request.pinned_worker.is_some()
+                && eligibility.pinned_worker().is_none(),
+            "Selected worker"
+        );
+
+        Ok(WorkerSelectionResult {
+            worker,
+            required_blocks: request_blocks,
+            effective_overlap_blocks,
+            cached_tokens,
+        })
+    }
 }
 
 impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
@@ -277,6 +328,16 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
         block_size: u32,
     ) -> Result<WorkerSelectionResult, KvSchedulerError> {
         assert!(request.isl_tokens > 0);
+        let use_default_adp = self.worker_type == "decode"
+            && self.kv_router_config.decode_load_model == RouterDecodeLoadModel::DefaultAdp;
+        let ignore_session_pin = use_default_adp
+            && request.session_id.is_some()
+            && eligibility.pinned_worker().is_some();
+        let eligibility = if ignore_session_pin {
+            eligibility.without_pinned_worker()
+        } else {
+            eligibility
+        };
         eligibility.validate_pinned_worker_allowed()?;
 
         let pinned_worker = eligibility.pinned_worker();
@@ -300,6 +361,10 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
         }
 
         let request_blocks = request.request_blocks(block_size);
+
+        if use_default_adp {
+            return self.select_default_adp_worker(workers, request, eligibility, request_blocks);
+        }
 
         let weights = LogitWeights {
             overlap_score_credit: request
@@ -650,6 +715,68 @@ mod tests {
             assert_eq!(result.0, worker, "Should return the only available worker");
             assert_eq!(result.1, logit, "Should return the selected worker's logit");
         }
+    }
+
+    #[test]
+    fn default_adp_decode_uses_prompt_sum_then_request_count_and_ignores_session_pin() {
+        use crate::test_utils::SimpleWorkerConfig;
+
+        let workers = HashMap::from([
+            (0, SimpleWorkerConfig::default()),
+            (1, SimpleWorkerConfig::default()),
+            (2, SimpleWorkerConfig::default()),
+        ]);
+        let mut request = base_request(64);
+        request.session_id = Some("session-a".to_string());
+        request.pinned_worker = Some(WorkerWithDpRank::from_worker_id(0));
+        request.worker_loads = FxHashMap::from_iter([
+            (
+                WorkerWithDpRank::from_worker_id(0),
+                crate::sequences::WorkerLoadProjection {
+                    active_decode_blocks: 0,
+                    active_requests: 1,
+                    active_prompt_tokens: 1_000,
+                    ..Default::default()
+                },
+            ),
+            (
+                WorkerWithDpRank::from_worker_id(1),
+                crate::sequences::WorkerLoadProjection {
+                    active_decode_blocks: 10,
+                    active_requests: 10,
+                    active_prompt_tokens: 500,
+                    ..Default::default()
+                },
+            ),
+            (
+                WorkerWithDpRank::from_worker_id(2),
+                crate::sequences::WorkerLoadProjection {
+                    active_decode_blocks: 20,
+                    active_requests: 2,
+                    active_prompt_tokens: 500,
+                    ..Default::default()
+                },
+            ),
+        ]);
+        let selector = DefaultWorkerSelector::new(
+            Some(KvRouterConfig {
+                decode_load_model: RouterDecodeLoadModel::DefaultAdp,
+                ..Default::default()
+            }),
+            "decode",
+        );
+
+        let result = selector
+            .select_worker(&workers, &request, request.eligibility(), 16)
+            .unwrap();
+
+        assert_eq!(result.worker, WorkerWithDpRank::from_worker_id(2));
+
+        request.session_id = None;
+        let explicit = selector
+            .select_worker(&workers, &request, request.eligibility(), 16)
+            .unwrap();
+        assert_eq!(explicit.worker, WorkerWithDpRank::from_worker_id(0));
     }
 
     #[test]
@@ -1450,6 +1577,7 @@ mod tests {
                 active_prefill_tokens: 16,
                 active_decode_blocks: 2,
                 active_requests: 0,
+                active_prompt_tokens: 0,
                 additional_active_blocks: 3,
             },
         );

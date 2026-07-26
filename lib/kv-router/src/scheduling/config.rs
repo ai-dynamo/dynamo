@@ -126,6 +126,7 @@ fn log_env_config(config: &KvRouterConfig) {
         overlap_score_credit_decay = config.overlap_score_credit_decay,
         prefill_load_scale = config.prefill_load_scale,
         decode_active_request_weight = config.decode_active_request_weight,
+        decode_load_model = %config.decode_load_model,
         router_temperature = config.router_temperature,
         use_kv_events = config.use_kv_events,
         router_replica_sync = config.router_replica_sync,
@@ -177,6 +178,9 @@ fn kv_router_config_from_lookup(
     }
     if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT") {
         config.decode_active_request_weight = value;
+    }
+    if let Some(value) = get_env("DYN_ROUTER_DECODE_LOAD_MODEL") {
+        config.decode_load_model = value.parse()?;
     }
     for key in [
         "DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT",
@@ -365,6 +369,41 @@ impl RouterPrefillLoadModel {
     }
 }
 
+/// Load signal used when selecting a decode data-parallel rank.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RouterDecodeLoadModel {
+    /// Existing Dynamo score based on projected active KV blocks.
+    #[default]
+    Blocks,
+    /// Approximate TensorRT-LLM's DefaultADPRouter by minimizing the sum of
+    /// original prompt tokens, then active request count, then rank.
+    DefaultAdp,
+}
+
+impl fmt::Display for RouterDecodeLoadModel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Blocks => f.write_str("blocks"),
+            Self::DefaultAdp => f.write_str("default_adp"),
+        }
+    }
+}
+
+impl FromStr for RouterDecodeLoadModel {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "blocks" => Ok(Self::Blocks),
+            "default_adp" => Ok(Self::DefaultAdp),
+            _ => Err(format!(
+                "unknown decode load model: {s:?}, expected 'blocks' or 'default_adp'"
+            )),
+        }
+    }
+}
+
 /// Which conditional-disagg bypass policy to run.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -511,6 +550,7 @@ struct KvRouterConfigSerde {
     overlap_score_credit_decay: f64,
     prefill_load_scale: f64,
     decode_active_request_weight: f64,
+    decode_load_model: RouterDecodeLoadModel,
     overlap_score_weight: Option<f64>,
     host_cache_hit_weight: f64,
     disk_cache_hit_weight: f64,
@@ -555,6 +595,7 @@ impl Default for KvRouterConfigSerde {
             overlap_score_credit_decay: config.overlap_score_credit_decay,
             prefill_load_scale: config.prefill_load_scale,
             decode_active_request_weight: config.decode_active_request_weight,
+            decode_load_model: config.decode_load_model,
             overlap_score_weight: None,
             host_cache_hit_weight: config.host_cache_hit_weight,
             disk_cache_hit_weight: config.disk_cache_hit_weight,
@@ -615,6 +656,11 @@ pub struct KvRouterConfig {
     /// worker. This can balance decode batch size when per-request decode
     /// compute matters more than resident KV footprint. Defaults to 0.0.
     pub decode_active_request_weight: f64,
+
+    /// Decode load model. `default_adp` approximates TensorRT-LLM's
+    /// DefaultADPRouter using summed original prompt tokens and active request
+    /// count, and intentionally ignores decode-side session affinity.
+    pub decode_load_model: RouterDecodeLoadModel,
 
     #[serde(default = "default_host_cache_hit_weight")]
     pub host_cache_hit_weight: f64,
@@ -766,6 +812,7 @@ impl Default for KvRouterConfig {
             overlap_score_credit_decay: default_overlap_score_credit_decay(),
             prefill_load_scale: default_prefill_load_scale(),
             decode_active_request_weight: default_decode_active_request_weight(),
+            decode_load_model: RouterDecodeLoadModel::default(),
             host_cache_hit_weight: default_host_cache_hit_weight(),
             disk_cache_hit_weight: default_disk_cache_hit_weight(),
             router_temperature: 0.0,
@@ -823,6 +870,7 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
             overlap_score_credit_decay: compat.overlap_score_credit_decay,
             prefill_load_scale,
             decode_active_request_weight: compat.decode_active_request_weight,
+            decode_load_model: compat.decode_load_model,
             host_cache_hit_weight: compat.host_cache_hit_weight,
             disk_cache_hit_weight: compat.disk_cache_hit_weight,
             router_temperature: compat.router_temperature,
