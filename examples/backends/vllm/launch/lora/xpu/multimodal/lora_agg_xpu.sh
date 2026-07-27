@@ -89,6 +89,9 @@ echo "=================================================="
 
 # ── Environment setup ────────────────────────────────────────────────────
 
+# Target the Intel XPU device
+export VLLM_TARGET_DEVICE=xpu
+
 # Use TCP transport for multimodal workloads (base64 images can exceed NATS 1MB limit)
 export DYN_REQUEST_PLANE=tcp
 

@@ -106,7 +106,7 @@ curl -X DELETE http://localhost:8081/v1/loras/my-vlm-lora | jq .
 
 ### 8. Stop the server
 
-Press `Ctrl+C` in the terminal running `lora_agg.sh`. The trap handler will clean up child processes.
+Press `Ctrl+C` in the terminal running `lora_agg_xpu.sh`. The trap handler will clean up child processes.
 
 ## Configuration
 
