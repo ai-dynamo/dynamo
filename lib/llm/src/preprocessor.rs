@@ -76,7 +76,10 @@ use crate::protocols::{
 };
 use crate::tokenizers::traits::Tokenizer;
 
-use crate::preprocessor::prompt::{MediaRequestExt, prompt_formatter_from_mdc};
+use crate::preprocessor::prompt::{
+    MediaRequestExt, ToolArgumentsMode, ToolArgumentsModeGuard, detect_tool_arguments_mode,
+    mdc_jinja_template_text, prompt_formatter_from_mdc,
+};
 use dynamo_renderer::{OAIChatLikeRequest, PromptFormatter, PromptInput, TextInput, TokenInput};
 
 pub use crate::protocols::common::llm_backend::{BackendOutput, PreprocessedRequest};
@@ -326,6 +329,10 @@ pub struct OpenAIPreprocessor {
     /// KV cache block size published in the model deployment card.
     kv_cache_block_size: usize,
     tool_call_parser: Option<String>,
+    /// Whether the loaded chat template requires tool_calls[*].function.arguments
+    /// as a parsed serde_json object (vs. the OpenAI wire-schema JSON string).
+    /// Derived once from the Jinja template source at construction.
+    tool_arguments_mode: ToolArgumentsMode,
     media_loader: Option<MediaLoader>,
     /// Max context length (in tokens) this model can handle, from ModelDeploymentCard
     context_length: u32,
@@ -658,6 +665,12 @@ impl OpenAIPreprocessor {
         };
         let model_info = model_info.get_model_info()?;
         let tool_call_parser = mdc.runtime_config.tool_call_parser.clone();
+        // Detect argument mode from the Jinja template source once at construction.
+        // Falls back to JsonString (no-op normalization) for models without a .jinja file.
+        let tool_arguments_mode = mdc_jinja_template_text(&mdc)
+            .as_deref()
+            .map(detect_tool_arguments_mode)
+            .unwrap_or_default();
 
         if let Some(ref lora_name) = lora_name {
             tracing::info!(model = %mdc.display_name, lora_name, "LoRA adapter detected in MDC");
@@ -850,6 +863,7 @@ impl OpenAIPreprocessor {
             runtime_config,
             kv_cache_block_size,
             tool_call_parser,
+            tool_arguments_mode,
             media_loader,
             context_length,
             #[cfg(feature = "mm-routing")]
@@ -919,6 +933,7 @@ impl OpenAIPreprocessor {
         let template_start = Instant::now();
         let formatted_prompt = {
             let _nvtx = dynamo_nvtx_range!("preprocess.template");
+            let _mode_guard = ToolArgumentsModeGuard::new(self.tool_arguments_mode);
             self.apply_template(request)
                 .with_context(|| "Failed to apply prompt template")?
         };

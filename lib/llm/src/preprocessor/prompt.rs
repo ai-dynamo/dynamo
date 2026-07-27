@@ -35,13 +35,335 @@ pub trait MediaRequestExt {
     fn media_io_kwargs(&self) -> Option<&MediaDecoder>;
 }
 
+/// How a chat template expects tool_calls[*].function.arguments to be passed.
+/// Inferred once from the Jinja source at formatter construction; never from the
+/// served model name, which is arbitrary and not reliable for template detection.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum ToolArgumentsMode {
+    /// Template receives arguments as a JSON-object string (OpenAI wire default).
+    #[default]
+    JsonString,
+    /// Template calls `.items()` on arguments (e.g. GLM-5.2's
+    /// `{% for k, v in _args.items() %}`), so arguments must be a parsed object.
+    ParsedObject,
+}
+
+pub fn detect_tool_arguments_mode(template: &str) -> ToolArgumentsMode {
+    // GLM-5.2: `{% set _args = tc.arguments %}{% for k, v in _args.items() %}`
+    if template.contains("_args.items()") || template.contains("arguments.items()") {
+        ToolArgumentsMode::ParsedObject
+    } else {
+        ToolArgumentsMode::JsonString
+    }
+}
+
+thread_local! {
+    /// Argument mode for the current formatter.render() call. Set by the preprocessor
+    /// immediately before the synchronous `apply_template` invocation; never across an
+    /// `.await` point. Using a thread-local avoids adding a field to
+    /// `NvCreateChatCompletionRequest` (which would require updating every struct literal).
+    static RENDER_TOOL_ARGUMENTS_MODE: std::cell::Cell<ToolArgumentsMode> =
+        const { std::cell::Cell::new(ToolArgumentsMode::JsonString) };
+}
+
+/// RAII guard that sets the thread-local tool-argument mode for the duration of a
+/// synchronous rendering call and restores the previous mode on drop.
+///
+/// SAFETY: Only use in a *synchronous* (non-`async`) scope with no `.await`
+/// between guard creation and drop. Thread-locals are not preserved across
+/// async executor boundaries — the task may resume on a different OS thread.
+pub(crate) struct ToolArgumentsModeGuard {
+    previous: ToolArgumentsMode,
+}
+
+impl ToolArgumentsModeGuard {
+    pub(crate) fn new(mode: ToolArgumentsMode) -> Self {
+        let previous = RENDER_TOOL_ARGUMENTS_MODE.with(|m| m.replace(mode));
+        Self { previous }
+    }
+}
+
+impl Drop for ToolArgumentsModeGuard {
+    fn drop(&mut self) {
+        RENDER_TOOL_ARGUMENTS_MODE.with(|m| m.set(self.previous));
+    }
+}
+
+pub(crate) fn get_tool_arguments_mode_for_render() -> ToolArgumentsMode {
+    RENDER_TOOL_ARGUMENTS_MODE.with(|m| m.get())
+}
+
+/// Extract the Jinja template source from a ModelDeploymentCard for analysis.
+///
+/// Priority order:
+/// 1. `mdc.chat_template_file` — standalone `.jinja` or `chat_template.json` file.
+/// 2. `mdc.prompt_formatter` — `tokenizer_config.json` with an embedded
+///    `"chat_template"` string (the normal HF layout for most models).
+///
+/// This covers both layouts so models that ship only a tokenizer config are not
+/// silently left in [`ToolArgumentsMode::JsonString`] when their template calls
+/// `.items()` on tool-call arguments.
+pub fn mdc_jinja_template_text(mdc: &ModelDeploymentCard) -> Option<String> {
+    fn read_embedded(checked_file: &crate::common::checked_file::CheckedFile) -> Option<String> {
+        let path = checked_file.path()?;
+        let contents = std::fs::read_to_string(path).ok()?;
+        let config: serde_json::Value = serde_json::from_str(&contents).ok()?;
+        let value = config.get("chat_template")?;
+        if let Some(s) = value.as_str() {
+            return Some(s.to_owned());
+        }
+        // Some HF configs store templates as [{name, template}, ...]. Concatenate
+        // so .items() in any variant is visible to detect_tool_arguments_mode.
+        if let Some(arr) = value.as_array() {
+            let combined: String = arr
+                .iter()
+                .filter_map(|v| v.get("template").and_then(|t| t.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !combined.is_empty() {
+                return Some(combined);
+            }
+        }
+        None
+    }
+
+    if let Some(artifact) = mdc.chat_template_file.as_ref() {
+        match artifact {
+            PromptFormatterArtifact::HfChatTemplateJinja { file, .. } => {
+                if let Some(path) = file.path() {
+                    if let Ok(s) = std::fs::read_to_string(path) {
+                        return Some(s);
+                    }
+                }
+            }
+            // HfChatTemplateJson and HfTokenizerConfigJson both embed the template
+            // under the "chat_template" JSON key; read_embedded handles both.
+            PromptFormatterArtifact::HfChatTemplateJson { file, .. }
+            | PromptFormatterArtifact::HfTokenizerConfigJson(file) => {
+                if let Some(s) = read_embedded(file) {
+                    return Some(s);
+                }
+            }
+        }
+    }
+
+    // Fallback: normal HF layout stores tokenizer_config.json in mdc.prompt_formatter;
+    // chat_template_file is None unless a separate template file was present.
+    if let Some(PromptFormatterArtifact::HfTokenizerConfigJson(f)) = mdc.prompt_formatter.as_ref() {
+        if let Some(s) = read_embedded(f) {
+            return Some(s);
+        }
+    }
+
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detect_mode_glm_items_pattern() {
+        let glm_snippet = r#"
+            {%- set _args = tc.arguments -%}
+            {%- for k, v in _args.items() -%}
+        "#;
+        assert_eq!(
+            detect_tool_arguments_mode(glm_snippet),
+            ToolArgumentsMode::ParsedObject
+        );
+    }
+
+    #[test]
+    fn detect_mode_direct_arguments_items() {
+        assert_eq!(
+            detect_tool_arguments_mode("{% for k, v in arguments.items() %}"),
+            ToolArgumentsMode::ParsedObject
+        );
+    }
+
+    #[test]
+    fn detect_mode_standard_template_no_items() {
+        let standard = r#"{% for tc in tool_calls %}{{ tc.function.arguments }}{% endfor %}"#;
+        assert_eq!(
+            detect_tool_arguments_mode(standard),
+            ToolArgumentsMode::JsonString
+        );
+    }
+
+    #[test]
+    fn normalize_parses_json_string_to_object() {
+        let mut msgs = serde_json::json!([{
+            "role": "assistant",
+            "tool_calls": [{
+                "function": {
+                    "name": "read",
+                    "arguments": r#"{"path": "/tmp/foo"}"#
+                }
+            }]
+        }]);
+        normalize_tool_call_arguments(&mut msgs);
+        let args = &msgs[0]["tool_calls"][0]["function"]["arguments"];
+        assert!(
+            args.is_object(),
+            "arguments should be an object after normalization"
+        );
+        assert_eq!(args["path"], "/tmp/foo");
+    }
+
+    #[test]
+    fn normalize_ignores_non_assistant_messages() {
+        let mut msgs = serde_json::json!([{
+            "role": "user",
+            "content": "hello"
+        }]);
+        let original = msgs.clone();
+        normalize_tool_call_arguments(&mut msgs);
+        assert_eq!(msgs, original);
+    }
+
+    #[test]
+    fn normalize_skips_already_object_arguments() {
+        // If somehow arguments is already an object, it should remain unchanged.
+        let mut msgs = serde_json::json!([{
+            "role": "assistant",
+            "tool_calls": [{
+                "function": {
+                    "name": "f",
+                    "arguments": {"key": "val"}
+                }
+            }]
+        }]);
+        normalize_tool_call_arguments(&mut msgs);
+        let args = &msgs[0]["tool_calls"][0]["function"]["arguments"];
+        assert!(args.is_object());
+        assert_eq!(args["key"], "val");
+    }
+
+    /// Test that mdc_jinja_template_text reads the embedded chat_template
+    /// from mdc.prompt_formatter (the HfTokenizerConfigJson / normal HF layout).
+    #[test]
+    fn mdc_template_text_reads_prompt_formatter_embedded() {
+        use crate::model_card::{ModelDeploymentCard, PromptFormatterArtifact};
+
+        // Write a minimal tokenizer_config.json with a chat_template that uses .items()
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tc_path = dir.path().join("tokenizer_config.json");
+        std::fs::write(
+            &tc_path,
+            r#"{"tokenizer_class":"PreTrainedTokenizer","chat_template":"{% for k, v in _args.items() %}"}"#,
+        )
+        .expect("write");
+
+        let checked =
+            crate::common::checked_file::CheckedFile::from_disk(&tc_path).expect("CheckedFile");
+
+        // Build a minimal MDC with only prompt_formatter set.
+        let mut mdc = ModelDeploymentCard::default();
+        mdc.prompt_formatter = Some(PromptFormatterArtifact::HfTokenizerConfigJson(checked));
+
+        let text = mdc_jinja_template_text(&mdc).expect("should find template");
+        assert!(
+            text.contains("_args.items()"),
+            "extracted template should contain .items() pattern"
+        );
+        assert_eq!(
+            detect_tool_arguments_mode(&text),
+            ToolArgumentsMode::ParsedObject
+        );
+    }
+
+    /// Test that chat_template.json (HfChatTemplateJson) is also detected.
+    #[test]
+    fn mdc_template_text_reads_chat_template_json() {
+        use crate::model_card::{ModelDeploymentCard, PromptFormatterArtifact};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("chat_template.json");
+        std::fs::write(
+            &path,
+            r#"{"chat_template":"{% for k, v in arguments.items() %}"}"#,
+        )
+        .expect("write");
+
+        let checked =
+            crate::common::checked_file::CheckedFile::from_disk(&path).expect("CheckedFile");
+
+        let mut mdc = ModelDeploymentCard::default();
+        mdc.chat_template_file = Some(PromptFormatterArtifact::HfChatTemplateJson {
+            file: checked,
+            is_custom: false,
+        });
+
+        let text = mdc_jinja_template_text(&mdc).expect("template");
+        assert_eq!(
+            detect_tool_arguments_mode(&text),
+            ToolArgumentsMode::ParsedObject
+        );
+    }
+}
+
+/// Parse `tool_calls[*].function.arguments` from JSON string to object in a
+/// serialized messages array before handing it to MiniJinja.
+/// Only applied when `ToolArgumentsMode::ParsedObject` is detected from the template.
+pub(crate) fn normalize_tool_call_arguments(messages_json: &mut serde_json::Value) {
+    let Some(messages) = messages_json.as_array_mut() else {
+        return;
+    };
+    for message in messages {
+        let Some(tool_calls) = message
+            .get_mut("tool_calls")
+            .and_then(serde_json::Value::as_array_mut)
+        else {
+            continue;
+        };
+        for tc in tool_calls.iter_mut() {
+            let Some(args_str) = tc.pointer("/function/arguments").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let value = match serde_json::from_str::<serde_json::Value>(args_str) {
+                Ok(v) if v.is_object() => v,
+                Ok(_) => {
+                    // Scalar or array — GLM's .items() would panic at render time.
+                    tracing::warn!(
+                        args_len = args_str.len(),
+                        "tool_call arguments parsed to a non-object; \
+                         substituting {{}} for GLM template safety"
+                    );
+                    serde_json::Value::Object(serde_json::Map::new())
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        args_len = args_str.len(),
+                        "tool_call arguments are not valid JSON; \
+                         substituting {{}} for GLM template safety"
+                    );
+                    serde_json::Value::Object(serde_json::Map::new())
+                }
+            };
+            if let Some(obj) = tc
+                .get_mut("function")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                obj.insert("arguments".to_string(), value);
+            }
+        }
+    }
+}
+
 impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
     fn model(&self) -> String {
         self.inner.model.clone()
     }
 
     fn messages(&self) -> Value {
-        let messages_json = serde_json::to_value(&self.inner.messages).unwrap();
+        let mut messages_json = serde_json::to_value(&self.inner.messages).unwrap();
+        // Normalize tool_calls[*].function.arguments from JSON string to object when
+        // the loaded Jinja template requires dict args (e.g. GLM-5.2 .items() call).
+        // The mode is written by OpenAIPreprocessor::preprocess before template render.
+        if get_tool_arguments_mode_for_render() == ToolArgumentsMode::ParsedObject {
+            normalize_tool_call_arguments(&mut messages_json);
+        }
         Value::from_serialize(&messages_json)
     }
 
