@@ -56,9 +56,10 @@ result: at 50% capacity loss the pain is decode, not TTFT).
 
 ## Goodput — % of requests meeting SLA
 
-SLA = TTFT ≤ 5 s **and** decode ≥ 40 tok/s/user. Pre-kill the two arms are identical; through the
-survivor-overload window the baseline dips repeatedly to 30–50% while failover recovers to ~90–100%
-within ~60 s.
+SLA = TTFT ≤ 5 s **and** decode ≥ 40 tok/s/user. Pre-kill the two arms are identical (0.0 pp gap); the
+drop begins exactly at the fault, and through the survivor-overload window the baseline dips repeatedly
+to 30–50% while failover recovers to ~90–100% within ~60 s. Charts are binned at each request's
+**completion** time (a request's SLA outcome is realized when it finishes, not when it starts).
 
 ![](sla/goodput_pct.png)
 
@@ -72,11 +73,11 @@ Measured from the kill through recovery. TPS (decode) is the differentiator — 
 
 | | meets TTFT SLA | meets TPS SLA | **meets both (goodput)** |
 |---|---|---|---|
-| **failover** | 97.5% | 93.3% | **93.1%** |
-| **baseline** | 97.2% | 77.4% | **76.7%** |
+| **failover** | 96.1% | 92.0% | **91.7%** |
+| **baseline** | 95.0% | 74.8% | **74.1%** |
 
 The breakdown shows the baseline's window filling with **"TPS < 40"** (slow decode), not failures —
-without failover, ~1 in 4 requests misses the SLA during the incident, vs ~1 in 14 with failover.
+without failover, ~1 in 4 requests misses the SLA during the incident, vs ~1 in 12 with failover.
 
 ## Cumulative goodput
 
