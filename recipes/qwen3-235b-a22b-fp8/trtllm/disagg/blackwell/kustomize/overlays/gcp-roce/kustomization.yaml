@@ -6,6 +6,8 @@ sortOptions:
   order: fifo
 resources:
   - ../_rdma
+components:
+  - ../../../../../../../kustomize/components/disagg-workers/gke-roce
 patches:
   - target:
       group: nvidia.com
