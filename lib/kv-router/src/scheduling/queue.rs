@@ -211,7 +211,6 @@ struct SchedulerQueueActor<
     pending: PolicyQueue<QueuedRequest>,
     tracked_admissions: HashMap<String, TrackedAdmission>,
     cleanup: Arc<AdmissionCleanup>,
-    queueing_enabled: bool,
     profile: PolicyProfile,
     queue_recheck_interval: Duration,
     next_queue_recheck: Instant,
@@ -389,7 +388,6 @@ impl<
             pending,
             tracked_admissions: HashMap::new(),
             cleanup: Arc::clone(&cleanup),
-            queueing_enabled,
             profile,
             queue_recheck_interval,
             next_queue_recheck: now + queue_recheck_interval,
@@ -530,10 +528,9 @@ impl<
         block_hashes: Option<Vec<LocalBlockHash>>,
         lease: Option<Box<RequestLifecycleLease>>,
     ) -> Option<Box<RequestLifecycleLease>> {
-        if self.queueing_enabled && lease.is_none() && request.mode.lifecycle_request_id().is_some()
-        {
+        if lease.is_none() && request.mode.lifecycle_request_id().is_some() {
             request.respond(Err(KvSchedulerError::BookingFailed(
-                "admission-managed requests must be scheduled through LocalScheduler".to_string(),
+                "lifecycle-tracked requests must be scheduled through LocalScheduler".to_string(),
             )));
             return None;
         }
@@ -574,9 +571,6 @@ impl<
         &self,
         request_id: Option<&str>,
     ) -> Option<Box<RequestLifecycleLease>> {
-        if !self.queueing_enabled {
-            return None;
-        }
         request_id?;
         Some(Box::new(RequestLifecycleLease {
             cleanup: Arc::clone(&self.cleanup),
@@ -685,7 +679,7 @@ impl<
     async fn run(mut self, mut rx: mpsc::Receiver<AdmissionCommand>) {
         let mut commands_since_cleanup = 0usize;
         while let Some(command) = rx.recv().await {
-            let drain_cleanup = self.queueing_enabled && {
+            let drain_cleanup = {
                 commands_since_cleanup += 1;
                 let drain_cleanup = rx.is_empty() || commands_since_cleanup == 256;
                 if drain_cleanup {
@@ -1546,7 +1540,13 @@ impl<
         }
 
         let request_id = sequence_request.request_id.clone();
-        if let Err(error) = self.slots.add_request(sequence_request, Instant::now()) {
+        let booking = if request.mode.lifecycle_request_id().is_some() {
+            self.slots
+                .add_lifecycle_owned_request(sequence_request, Instant::now())
+        } else {
+            self.slots.add_request(sequence_request, Instant::now())
+        };
+        if let Err(error) = booking {
             tracing::warn!(%request_id, %error, "Failed to book scheduler state");
             request.respond(Err(KvSchedulerError::BookingFailed(error.to_string())));
             return false;
@@ -2755,14 +2755,82 @@ policy_classes:
     }
 
     #[tokio::test]
-    async fn disabled_queueing_has_no_cancellation_lease() {
-        let (queue, _slots) = make_queue(1, 16, 64, None);
+    async fn disabled_queueing_lifecycle_lease_cleans_up_booking() {
+        let (queue, slots) = make_queue(1, 16, 64, None);
+        let (request, response) = make_admission_request("default-path", 64);
 
-        assert!(
-            queue
-                .new_request_lifecycle_lease(Some("default-path"))
-                .is_none()
+        let mut lease = enqueue_with_lease(&queue, request).await;
+        response.await.unwrap().unwrap();
+        assert_eq!(
+            slots
+                .active_request_counts()
+                .get(&WorkerWithDpRank::new(0, 0))
+                .copied(),
+            Some(1)
         );
+
+        let (full_tx, _full_rx) = mpsc::channel(1);
+        full_tx.send(AdmissionCommand::Cleanup).await.unwrap();
+        lease.actor_tx = full_tx;
+        drop(lease);
+        assert_eq!(
+            slots
+                .active_request_counts()
+                .get(&WorkerWithDpRank::new(0, 0))
+                .copied(),
+            Some(1),
+            "saturated cleanup wake must leave cleanup for the next actor command"
+        );
+
+        let (mut wake_request, wake_response) = make_request("cleanup-wake", 64);
+        wake_request.mode = ScheduleMode::QueryOnly { request_id: None };
+        queue.enqueue(wake_request).await;
+        wake_response.await.unwrap().unwrap();
+        slots.assert_completely_drained(decay_now());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn booking_expiry_follows_schedule_mode_ownership() {
+        let (queue, slots) = make_queue(1, 16, 1_000, Some(0.9));
+
+        let (lifecycle_request, lifecycle_response) = make_admission_request("lifecycle-owned", 64);
+        let lease = enqueue_with_lease(&queue, lifecycle_request).await;
+        lifecycle_response.await.unwrap().unwrap();
+
+        let (external_request, external_response) = make_request("externally-owned", 64);
+        queue.enqueue(external_request).await;
+        external_response.await.unwrap().unwrap();
+        assert_eq!(
+            slots
+                .active_request_counts()
+                .get(&WorkerWithDpRank::new(0, 0))
+                .copied(),
+            Some(2)
+        );
+
+        tokio::time::advance(Duration::from_secs(331)).await;
+        slots.force_expire_requests_across_all_workers();
+        assert_eq!(
+            slots
+                .active_request_counts()
+                .get(&WorkerWithDpRank::new(0, 0))
+                .copied(),
+            Some(2)
+        );
+
+        tokio::time::advance(Duration::from_secs(600)).await;
+        slots.force_expire_requests_across_all_workers();
+
+        assert_eq!(
+            slots
+                .active_request_counts()
+                .get(&WorkerWithDpRank::new(0, 0))
+                .copied(),
+            Some(1)
+        );
+        drop(lease);
+        queue.update().await;
+        slots.assert_completely_drained(decay_now());
     }
 
     #[tokio::test]

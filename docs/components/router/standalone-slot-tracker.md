@@ -221,8 +221,10 @@ an unknown request. Unknown trackers return `404`.
 Lifecycle writes preserve the core slot tracker's arrival ordering. Consumers should
 normally wait for `/add` success before sending later lifecycle writes. The service does
 not repair reordered delivery: an early unknown `/free` or `/prefill_complete` is
-forgotten, so a later `/add` may remain accounted until a later free or expiry. A request
-older than 300 seconds may be removed by inherited stale-request cleanup.
+forgotten, so a later `/add` may remain accounted until a later free or defensive cleanup.
+The tracker removes externally managed requests after a fixed 15-minute orphan grace. This
+cleanup bounds stale accounting after a missed `/free`; it is not a request-processing
+timeout.
 
 ## Load API
 

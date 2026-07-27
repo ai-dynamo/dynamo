@@ -613,8 +613,9 @@ pub mod router {
     pub const DYN_ROUTER_QUEUE_POLICY: &str = "DYN_ROUTER_QUEUE_POLICY";
     pub const DYN_ROUTER_POLICY_CONFIG: &str = "DYN_ROUTER_POLICY_CONFIG";
 
-    /// Stale active-request cleanup guard in seconds; this is not a request timeout.
-    pub const DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS: &str = "DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS";
+    /// Timeout for orphaned active-request records received through multi-router replica sync.
+    pub const DYN_ROUTER_REPLICA_SYNC_ORPHAN_TIMEOUT_SECS: &str =
+        "DYN_ROUTER_REPLICA_SYNC_ORPHAN_TIMEOUT_SECS";
 }
 
 /// Request plane transport environment variables
@@ -877,7 +878,7 @@ mod tests {
             router::DYN_ROUTER_QUEUE_THRESHOLD,
             router::DYN_ROUTER_QUEUE_POLICY,
             router::DYN_ROUTER_POLICY_CONFIG,
-            router::DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS,
+            router::DYN_ROUTER_REPLICA_SYNC_ORPHAN_TIMEOUT_SECS,
             request_plane::DYN_REQUEST_PLANE_CODEC,
             // TCP Response Stream
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT,

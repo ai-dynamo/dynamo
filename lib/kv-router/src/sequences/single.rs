@@ -32,20 +32,33 @@ use super::prefill_tracker::{PrefillLoadState, PrefillLoadTracker};
 use super::prompt_registry::WorkerLoadSnapshot;
 use crate::protocols::PrefillLoadHint;
 
-/// Duration after which stale requests may be expired (5 minutes).
-pub const DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION: Duration = Duration::from_secs(300);
+/// Defensive grace period for requests whose lifecycle is not owned by the router.
+const ORPHANED_REQUEST_EXPIRY_DURATION: Duration = Duration::from_secs(15 * 60);
 
-/// How often we *check* for stale requests (30 seconds). This is not
-/// the expiration time, that is DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION.
+/// How often we *check* for orphan-guarded requests (30 seconds). This is not
+/// the 15-minute orphan grace period.
 const CHECK_EXPIRY_FREQUENCY: Duration = Duration::from_secs(30);
 
 // TODO: use the common request_id if it exists in the repo
 pub type RequestId = String;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RequestCleanupPolicy {
+    LifecycleOwned,
+    OrphanGuarded,
+    ReplicaOrphanGuarded(Duration),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct RequestTiming {
+    pub cleanup_policy: RequestCleanupPolicy,
+    pub decay_now: Instant,
+}
+
 #[derive(Debug)]
 pub(super) struct RequestState {
     blocks: RequestBlockChain,
-    started_at: Instant,
+    expires_at: Option<Instant>,
     expected_output_tokens: Option<u32>,
 }
 
@@ -108,47 +121,48 @@ pub(super) struct SequenceMutationOutcome {
 #[derive(Debug)]
 pub struct ActiveSequences {
     requests: HashMap<RequestId, RequestState>,
+    expiring_request_count: usize,
     prefill: PrefillLoadTracker,
     blocks: BlockTracker,
     last_expiry_check_time: Instant,
-    expiry_duration: Option<Duration>,
+    orphaned_request_expiry_duration: Option<Duration>,
 }
 
 impl ActiveSequences {
     /// Create a new SharedSequenceManager instance
-    #[cfg(test)]
     pub(super) fn new(block_size: usize) -> Self {
-        Self::new_with_expiry(block_size, Some(DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION))
+        Self::new_with_orphaned_request_expiry(block_size, Some(ORPHANED_REQUEST_EXPIRY_DURATION))
     }
 
-    /// Creates a tracker with an explicit stale-request expiry duration.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `expiry_duration` is zero or `block_size` is zero.
+    /// Creates a tracker with an explicit orphaned-request expiry duration for tests.
+    #[cfg(test)]
     pub(super) fn new_with_expiry_duration(block_size: usize, expiry_duration: Duration) -> Self {
-        assert!(
-            !expiry_duration.is_zero(),
-            "expiry_duration must be greater than zero"
-        );
-        Self::new_with_expiry(block_size, Some(expiry_duration))
+        Self::new_with_orphaned_request_expiry(block_size, Some(expiry_duration))
     }
 
     /// Creates a tracker that relies only on explicit request lifecycle events.
     pub(super) fn new_without_expiry(block_size: usize) -> Self {
-        Self::new_with_expiry(block_size, None)
+        Self::new_with_orphaned_request_expiry(block_size, None)
     }
 
-    /// Builds a tracker from an optional stale-request expiry policy.
-    fn new_with_expiry(block_size: usize, expiry_duration: Option<Duration>) -> Self {
+    /// Builds a tracker from an optional orphaned-request expiry policy.
+    fn new_with_orphaned_request_expiry(
+        block_size: usize,
+        orphaned_request_expiry_duration: Option<Duration>,
+    ) -> Self {
         assert!(block_size > 0, "block_size must be greater than 0");
+        assert!(
+            orphaned_request_expiry_duration.is_none_or(|duration| !duration.is_zero()),
+            "expiry_duration must be greater than zero"
+        );
 
         Self {
             requests: HashMap::new(),
+            expiring_request_count: 0,
             prefill: PrefillLoadTracker::default(),
             blocks: BlockTracker::default(),
             last_expiry_check_time: Instant::now(),
-            expiry_duration,
+            orphaned_request_expiry_duration,
         }
     }
 
@@ -160,6 +174,14 @@ impl ActiveSequences {
         assert!(
             active_prefills.is_subset(&active_requests),
             "prefill tracker cannot reference missing request state",
+        );
+        assert_eq!(
+            self.expiring_request_count,
+            self.requests
+                .values()
+                .filter(|state| state.expires_at.is_some())
+                .count(),
+            "expiring request count must match request state",
         );
         self.blocks
             .assert_consistent(self.requests.values().map(|state| &state.blocks));
@@ -182,6 +204,7 @@ impl ActiveSequences {
 
     /// Add a new request with optional prompt-token load accounting.
     /// Returns block membership transitions plus any expired request IDs removed during cleanup.
+    #[cfg(test)]
     pub(super) fn add_request_with_prefill_tracking(
         &mut self,
         request_id: RequestId,
@@ -191,6 +214,29 @@ impl ActiveSequences {
         prefill_load_hint: Option<PrefillLoadHint>,
         decay_now: Instant,
     ) -> SequenceMutationOutcome {
+        self.add_request_with_cleanup_policy(
+            request_id,
+            token_sequence,
+            expected_output_tokens,
+            track_prefill_tokens,
+            prefill_load_hint,
+            RequestTiming {
+                cleanup_policy: RequestCleanupPolicy::OrphanGuarded,
+                decay_now,
+            },
+        )
+    }
+
+    /// Adds a request with an explicit lifecycle-cleanup policy.
+    pub(super) fn add_request_with_cleanup_policy(
+        &mut self,
+        request_id: RequestId,
+        token_sequence: Option<Vec<SequenceHash>>,
+        expected_output_tokens: Option<u32>,
+        track_prefill_tokens: bool,
+        prefill_load_hint: Option<PrefillLoadHint>,
+        timing: RequestTiming,
+    ) -> SequenceMutationOutcome {
         if self.requests.contains_key(&request_id) {
             tracing::error!("Request {request_id} is already active. Ignoring duplicate add.");
             return SequenceMutationOutcome::default();
@@ -198,6 +244,15 @@ impl ActiveSequences {
 
         let mut outcome = self.force_expiry();
         let started_at = Instant::now();
+        let expires_at = match timing.cleanup_policy {
+            RequestCleanupPolicy::LifecycleOwned => None,
+            RequestCleanupPolicy::OrphanGuarded => self
+                .orphaned_request_expiry_duration
+                .and_then(|duration| started_at.checked_add(duration)),
+            RequestCleanupPolicy::ReplicaOrphanGuarded(duration) => {
+                started_at.checked_add(duration)
+            }
+        };
 
         let prompt_hashes = token_sequence.unwrap_or_default();
         let (blocks, first_new_prompt_idx) = self.blocks.acquire_prompt(&prompt_hashes);
@@ -229,13 +284,14 @@ impl ActiveSequences {
             request_id.clone(),
             RequestState {
                 blocks,
-                started_at,
+                expires_at,
                 expected_output_tokens,
             },
         );
+        self.expiring_request_count += usize::from(expires_at.is_some());
 
         if let Some(prefill) = prefill {
-            self.prefill.insert(&request_id, prefill, decay_now);
+            self.prefill.insert(&request_id, prefill, timing.decay_now);
         }
 
         self.validate_state();
@@ -263,6 +319,7 @@ impl ActiveSequences {
             tracing::warn!("Trying to free non-existent request {request_id}");
             return PromptMembershipDelta::default();
         };
+        self.expiring_request_count -= usize::from(request_state.expires_at.is_some());
 
         let blocks = request_state.blocks;
         let _ = request_state.expected_output_tokens;
@@ -301,12 +358,12 @@ impl ActiveSequences {
         Some(random_hash)
     }
 
-    /// Force expiry of stale requests if the timer has elapsed.
+    /// Force expiry of orphan-guarded requests if the timer has elapsed.
     /// Returns block membership transitions plus the set of expired request IDs that were removed.
     pub(super) fn force_expiry(&mut self) -> SequenceMutationOutcome {
-        let Some(expiry_duration) = self.expiry_duration else {
+        if self.expiring_request_count == 0 {
             return SequenceMutationOutcome::default();
-        };
+        }
         let now = Instant::now();
 
         if now < self.last_expiry_check_time + CHECK_EXPIRY_FREQUENCY {
@@ -314,13 +371,10 @@ impl ActiveSequences {
         }
 
         self.last_expiry_check_time = now;
-        let Some(expired_requests_time) = now.checked_sub(expiry_duration) else {
-            return SequenceMutationOutcome::default();
-        };
         let expired_request_ids: HashSet<RequestId> = self
             .requests
             .iter()
-            .filter(|(_, state)| state.started_at < expired_requests_time)
+            .filter(|(_, state)| state.expires_at.is_some_and(|expires_at| expires_at <= now))
             .map(|(request_id, _)| request_id.clone())
             .collect();
 
@@ -330,7 +384,7 @@ impl ActiveSequences {
         };
 
         for request_id in &outcome.expired_request_ids {
-            tracing::warn!("Expiring stale request: {}", request_id);
+            tracing::warn!("Expiring orphan-guarded request: {}", request_id);
             outcome.membership_delta.extend(self.free(request_id, now));
         }
 
@@ -721,7 +775,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn test_force_expiry() {
         let block_size = 4;
-        let mut seq_manager = ActiveSequences::new(block_size);
+        let mut seq_manager =
+            ActiveSequences::new_with_expiry_duration(block_size, Duration::from_secs(300));
 
         seq_manager.add_request_with_prefill_tracking(
             "r1".to_string(),
@@ -783,43 +838,10 @@ mod tests {
         seq_manager.assert_consistent();
     }
 
-    /// Verifies that force-expiry honors a custom cleanup duration.
-    #[tokio::test(start_paused = true)]
-    async fn test_force_expiry_uses_custom_duration() {
-        let block_size = 4;
-        let mut seq_manager =
-            ActiveSequences::new_with_expiry_duration(block_size, Duration::from_secs(60));
-
-        seq_manager.add_request_with_prefill_tracking(
-            "r1".to_string(),
-            Some(vec![1, 2]),
-            None,
-            true,
-            tracking_hint(8),
-            Instant::now(),
-        );
-        assert_eq!(seq_manager.active_blocks(), 2);
-
-        tokio::time::advance(Duration::from_secs(61)).await;
-        let expired = seq_manager.force_expiry();
-        assert_eq!(
-            expired.expired_request_ids,
-            HashSet::from(["r1".to_string()])
-        );
-        assert_eq!(seq_manager.active_blocks(), 0);
-        seq_manager.assert_consistent();
-    }
-
-    /// Verifies that a zero cleanup duration is rejected.
-    #[test]
-    #[should_panic(expected = "expiry_duration must be greater than zero")]
-    fn test_custom_expiry_rejects_zero_duration() {
-        let _ = ActiveSequences::new_with_expiry_duration(4, Duration::ZERO);
-    }
-
     #[tokio::test(start_paused = true)]
     async fn test_force_expiry_reanchors_new_oldest_request() {
-        let mut seq_manager = ActiveSequences::new(4);
+        let mut seq_manager =
+            ActiveSequences::new_with_expiry_duration(4, Duration::from_secs(300));
         let first_decay_now = Instant::now();
 
         seq_manager.add_request_with_prefill_tracking(
