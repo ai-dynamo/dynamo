@@ -57,6 +57,43 @@ global:
     # create PodCliqueSets for multinode deployments.
     enabled: false
 
+  lws:
+    # -- Whether this chart should install the bundled LeaderWorkerSet (LWS) subchart.
+    # When true, deploys the LWS operator cluster-wide. LWS is the multinode
+    # orchestrator used by the operator's LWS pathway.
+    # NOTE: For production environments, it is recommended to install LWS separately.
+    install: false
+    # -- Whether to enable LWS integration (multinode orchestration via LeaderWorkerSets).
+    # Set to true when LWS is available in the cluster (installed externally).
+    # Automatically true when install=true. The operator uses this to decide whether to
+    # create LeaderWorkerSets for multinode deployments.
+    # NOTE: The operator requires both the LWS API group and the Volcano API group
+    # for the LWS pathway. If this value is explicitly set to true, startup will
+    # fail unless both APIs are available.
+    enabled: false
+
+  disaggregatedset:
+    # -- Whether to enable DisaggregatedSet (DS) support on top of LWS.
+    # This is an operator-facing intent flag only.
+    # This chart does not automatically sync DS enablement between the operator
+    # flags under `global` and the upstream LWS chart settings:
+    # - If you install LWS via this chart (`global.lws.install=true`), you must
+    #   also set `lws.enableDisaggregatedSet=true` to enable DS ClusterRoles and
+    #   the validating webhook in the upstream LWS chart.
+    # - If you install LWS separately, `enableDisaggregatedSet` must be set on
+    #   the external LWS release, not here.
+    # Requires LWS to be installed (either via `global.lws.install=true` or
+    # externally). The DS CRD and bundled controller ship with the LWS chart and
+    # are always present once LWS is installed.
+    # DS orchestrates N LeaderWorkerSets (one per role) and is the recommended
+    # orchestrator for prefill/decode disaggregation.
+    install: false
+    # -- Whether to enable DS integration in the operator.
+    # Set to true to make the operator create DisaggregatedSets for multinode
+    # deployments when the DGD carries the `nvidia.com/enable-disaggregatedset:
+    # "true"` annotation. This is not automatically set when install=true.
+    enabled: false
+
 # Subcharts configuration
 
 # Dynamo operator configuration
@@ -285,6 +322,21 @@ grove:
   # -- Node tolerations for Grove pods
   tolerations: []
   # -- Affinity for Grove pods
+  affinity: {}
+
+# LeaderWorkerSet component - multinode orchestration
+# Installation is controlled by global.lws.install above.
+# Integration is controlled by global.lws.enabled above.
+lws:
+  # -- Install the DisaggregatedSet editor/viewer/admin ClusterRoles and
+  # validating webhook in the LWS chart. The DisaggregatedSet CRD and the
+  # bundled controller ship with the LWS chart and are always installed once
+  # LWS is enabled. Set to true when `global.disaggregatedset.install=true`
+  # so the operator can use the DS pathway.
+  enableDisaggregatedSet: false
+  # -- Node tolerations for LWS pods
+  tolerations: []
+  # -- Affinity for LWS pods
   affinity: {}
 
 # Kai Scheduler component - advanced workload scheduling
