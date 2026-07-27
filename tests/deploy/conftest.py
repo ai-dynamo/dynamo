@@ -73,12 +73,6 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help="Default model for DynamoGraphDeploymentRequest tests.",
     )
     parser.addoption(
-        "--dgdr-backend",
-        default="vllm",
-        choices=("auto", "vllm", "sglang", "trtllm"),
-        help="Default backend for DynamoGraphDeploymentRequest tests.",
-    )
-    parser.addoption(
         "--dgdr-no-mocker",
         action="store_true",
         help="Use real inference workers instead of GPU-free mocker workers.",
@@ -101,19 +95,9 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help="Short prefix for resources created by DGDR tests.",
     )
     parser.addoption(
-        "--dgdr-pvc-name",
-        default="",
-        help="Model-cache PVC for real-GPU DGDR tests.",
-    )
-    parser.addoption(
         "--dgdr-pvc-model-path",
         default="",
-        help="Model snapshot path inside --dgdr-pvc-name.",
-    )
-    parser.addoption(
-        "--dgdr-pvc-mount-path",
-        default="/home/dynamo/.cache/huggingface",
-        help="Profiler mount path for the model-cache PVC.",
+        help="Model snapshot path inside --model-cache-pvc.",
     )
     parser.addoption(
         "--dgdr-total-gpus",
@@ -257,8 +241,11 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo):
     """Expose the call outcome to resource-owning deploy fixtures."""
 
     outcome = yield
-    if call.when == "call":
-        item.stash[_deploy_test_failed_key] = outcome.get_result().failed
+    if call.when in ("setup", "call"):
+        item.stash[_deploy_test_failed_key] = (
+            item.stash.get(_deploy_test_failed_key, False)
+            or outcome.get_result().failed
+        )
 
 
 def _filter_targets(
@@ -376,14 +363,14 @@ async def dgdr_manager(
             namespace=namespace,
             image=image,
             model=request.config.getoption("--dgdr-model"),
-            backend=request.config.getoption("--dgdr-backend"),
+            backend=request.config.getoption("--framework") or "vllm",
             mocker=not request.config.getoption("--dgdr-no-mocker"),
             profiling_timeout=request.config.getoption("--dgdr-profiling-timeout"),
             deploy_timeout=request.config.getoption("--dgdr-deploy-timeout"),
             name_prefix=request.config.getoption("--dgdr-name-prefix"),
-            pvc_name=request.config.getoption("--dgdr-pvc-name"),
+            pvc_name=request.config.getoption("--model-cache-pvc"),
             pvc_model_path=request.config.getoption("--dgdr-pvc-model-path"),
-            pvc_mount_path=request.config.getoption("--dgdr-pvc-mount-path"),
+            pvc_mount_path=request.config.getoption("--model-cache-mount"),
             total_gpus=request.config.getoption("--dgdr-total-gpus"),
             hf_token_secret=request.config.getoption("--dgdr-hf-token-secret"),
         )

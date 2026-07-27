@@ -441,7 +441,7 @@ async def test_dgdr_lifecycle_with_custom_hardware(
 
 
 @pytest.mark.gpu_0
-@pytest.mark.timeout(10920)
+@pytest.mark.timeout(6600)
 async def test_dgdr_profiling_backends_sequentially(
     dgdr_manager: ManagedDGDR,
 ) -> None:
