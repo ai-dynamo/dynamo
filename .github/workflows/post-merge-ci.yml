@@ -439,6 +439,7 @@ jobs:
     uses: ./.github/workflows/shared-test.yml
     with:
       dd_env: post-merge
+      dd_flaky_retry_enabled: ${{ github.event_name == 'workflow_dispatch' && 'false' || 'true' }}
       test_suite_name: vllm
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
@@ -521,6 +522,7 @@ jobs:
     uses: ./.github/workflows/shared-test.yml
     with:
       dd_env: post-merge
+      dd_flaky_retry_enabled: ${{ github.event_name == 'workflow_dispatch' && 'false' || 'true' }}
       test_suite_name: sglang
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
@@ -562,6 +564,7 @@ jobs:
     uses: ./.github/workflows/shared-test.yml
     with:
       dd_env: post-merge
+      dd_flaky_retry_enabled: ${{ github.event_name == 'workflow_dispatch' && 'false' || 'true' }}
       test_suite_name: trtllm
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
@@ -847,6 +850,7 @@ jobs:
 
   deploy-operator:
     needs: [operator]
+    if: github.event_name != 'workflow_dispatch'
     runs-on: prod-deploy-tester-v1
     outputs:
       namespace: ${{ steps.setup.outputs.namespace }}
@@ -1314,7 +1318,7 @@ jobs:
             --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-dynamo-frontend
 
   deploy-cleanup:
-    if: always()
+    if: always() && github.event_name != 'workflow_dispatch'
     needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-gaie]
     runs-on: prod-deploy-tester-v1
     steps:
@@ -1453,7 +1457,7 @@ jobs:
       - deploy-cleanup-checkpoint-vllm
       - deploy-cleanup-checkpoint-sglang
       - deploy-cleanup-checkpoint-trtllm
-    if: always()
+    if: always() && github.event_name != 'workflow_dispatch'
     steps:
       - name: "Check all deploy test jobs"
         run: |
