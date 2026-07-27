@@ -2281,12 +2281,10 @@ impl OpenAIPreprocessor {
     {
         use crate::protocols::openai::chat_completions::unified_parser;
 
-        if unified_parser::enabled()
-            && unified_parser::configured(
-                self.tool_call_parser.as_deref(),
-                self.runtime_config.reasoning_parser.as_deref(),
-            )
-        {
+        if let Some(family) = unified_parser::selected_family(
+            self.tool_call_parser.as_deref(),
+            self.runtime_config.reasoning_parser.as_deref(),
+        ) {
             let tool_definitions = request.inner.tools.as_ref().map(|tools| {
                 tools
                     .iter()
@@ -2299,15 +2297,18 @@ impl OpenAIPreprocessor {
             });
             let prefill = if prompt_injected_reasoning {
                 dynamo_parsers_v2::UnifiedParserPrefill::Reasoning
-            } else {
+            } else if family == dynamo_parsers_v2::KIMI_K3_FAMILY {
                 // K3's non-thinking generation prompt ends inside the response
                 // channel, so the model does not repeat its opening marker.
                 dynamo_parsers_v2::UnifiedParserPrefill::Response
+            } else {
+                dynamo_parsers_v2::UnifiedParserPrefill::None
             };
             return Ok(Box::pin(unified_parser::apply_stream(
                 stream,
                 tool_definitions,
                 prefill,
+                family,
             ))
                 as Pin<
                     Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>,
@@ -3048,6 +3049,8 @@ impl OpenAIPreprocessor {
         // - mistral: `[THINK]` / `[/THINK]` reasoning markers.
         // - minimax_m3: `]<]minimax[>[` tool-call namespace tokens and
         //   `<mm:think>` reasoning markers.
+        // - qwen3_coder: `<think>` / `</think>` reasoning markers and
+        //   `<tool_call>` XML tool-call markers.
         // - inkling: `<|message_model|>` / `<|content_thinking|>` /
         //   `<|content_text|>` / `<|content_invoke_tool_json|>` / `<|end_message|>`
         //   channel markers, consumed by both the tool-call and reasoning parsers.
@@ -3062,6 +3065,7 @@ impl OpenAIPreprocessor {
                 | Some("minimax-m3")
                 | Some("minimax_m3_nom")
                 | Some("minimax-m3-nom")
+                | Some("qwen3_coder")
                 | Some("inkling")
         ) || matches!(
             reasoning_parser,
@@ -4252,6 +4256,12 @@ mod tests {
                 Some("kimi_k3"),
                 true,
                 "kimi_k3 paired unified parser → required",
+            ),
+            (
+                Some("qwen3_coder"),
+                Some("qwen3"),
+                true,
+                "qwen3_coder + qwen3 paired unified parser → required",
             ),
             (
                 Some("kimi_k3"),

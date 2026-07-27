@@ -370,12 +370,11 @@ impl DeltaAggregator {
             }
         }
 
-        let use_kimi_k3_unified_parser = super::unified_parser::enabled()
-            && super::unified_parser::configured(
-                parsing_options.tool_call_parser.as_deref(),
-                parsing_options.reasoning_parser.as_deref(),
-            );
-        if use_kimi_k3_unified_parser {
+        let unified_parser_family = super::unified_parser::selected_family(
+            parsing_options.tool_call_parser.as_deref(),
+            parsing_options.reasoning_parser.as_deref(),
+        );
+        if let Some(family) = unified_parser_family {
             for choice in aggregator.choices.values_mut() {
                 if choice.text.is_empty()
                     || choice
@@ -385,7 +384,7 @@ impl DeltaAggregator {
                 {
                     continue;
                 }
-                match super::unified_parser::parse_complete(&choice.text) {
+                match super::unified_parser::parse_complete(family, &choice.text) {
                     Ok(parsed) => {
                         choice.text = parsed.text;
                         if !parsed.reasoning.is_empty() {
@@ -407,14 +406,15 @@ impl DeltaAggregator {
                     Err(error) => {
                         tracing::debug!(
                             error = %error,
-                            "failed to parse aggregated Kimi K3 unified output"
+                            family,
+                            "failed to parse aggregated unified output"
                         );
                     }
                 }
             }
         }
 
-        if !use_kimi_k3_unified_parser
+        if unified_parser_family.is_none()
             && let Some(parser) = parsing_options.tool_call_parser.as_deref()
         {
             for choice in aggregator.choices.values_mut() {

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Opt-in ordered reasoning, text, and tool-call parsing for Kimi K3.
+//! Opt-in ordered reasoning, text, and tool-call parsing.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::LazyLock;
@@ -9,8 +9,9 @@ use std::sync::LazyLock;
 use async_stream::stream;
 use dynamo_parsers::tool_calling::ToolDefinition;
 use dynamo_parsers_v2::{
-    KIMI_K3_FAMILY, Tool, UnifiedParser, UnifiedParserEvent, UnifiedParserOutput,
-    UnifiedParserPrefill, create_unified_parser_for_family,
+    KIMI_K3_FAMILY, QWEN3_CODER_FAMILY, QWEN3_REASONING_FAMILY, Tool, UnifiedParser,
+    UnifiedParserEvent, UnifiedParserOutput, UnifiedParserPrefill,
+    create_unified_parser_for_family,
 };
 use dynamo_protocols::types::{
     ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionMessageToolCall,
@@ -24,14 +25,38 @@ use uuid::Uuid;
 
 use super::NvCreateChatCompletionStreamResponse;
 
-pub(crate) fn enabled() -> bool {
+fn is_kimi_k3_enabled() -> bool {
     static ENABLED: LazyLock<bool> =
         LazyLock::new(|| env_is_truthy(env_llm::DYN_ENABLE_KIMI_K3_UNIFIED_PARSER));
     *ENABLED
 }
 
-pub(crate) fn configured(tool_call_parser: Option<&str>, reasoning_parser: Option<&str>) -> bool {
-    tool_call_parser == Some(KIMI_K3_FAMILY) && reasoning_parser == Some(KIMI_K3_FAMILY)
+fn is_qwen_enabled() -> bool {
+    static ENABLED: LazyLock<bool> =
+        LazyLock::new(|| env_is_truthy(env_llm::DYN_ENABLE_QWEN_UNIFIED_PARSER));
+    *ENABLED
+}
+
+pub(crate) fn configured_family(
+    tool_call_parser: Option<&str>,
+    reasoning_parser: Option<&str>,
+) -> Option<&'static str> {
+    match (tool_call_parser, reasoning_parser) {
+        (Some(KIMI_K3_FAMILY), Some(KIMI_K3_FAMILY)) => Some(KIMI_K3_FAMILY),
+        (Some(QWEN3_CODER_FAMILY), Some(QWEN3_REASONING_FAMILY)) => Some(QWEN3_CODER_FAMILY),
+        _ => None,
+    }
+}
+
+pub(crate) fn selected_family(
+    tool_call_parser: Option<&str>,
+    reasoning_parser: Option<&str>,
+) -> Option<&'static str> {
+    configured_family(tool_call_parser, reasoning_parser).filter(|family| match *family {
+        KIMI_K3_FAMILY => is_kimi_k3_enabled(),
+        QWEN3_CODER_FAMILY => is_qwen_enabled(),
+        _ => false,
+    })
 }
 
 pub(crate) struct CompleteOutput {
@@ -40,9 +65,9 @@ pub(crate) struct CompleteOutput {
     pub tool_calls: Vec<ChatCompletionMessageToolCall>,
 }
 
-pub(crate) fn parse_complete(content: &str) -> anyhow::Result<CompleteOutput> {
-    let mut parser = create_unified_parser_for_family(KIMI_K3_FAMILY, &[])?;
-    parser.initialize(detect_prefill(content))?;
+pub(crate) fn parse_complete(family: &str, content: &str) -> anyhow::Result<CompleteOutput> {
+    let mut parser = create_unified_parser_for_family(family, &[])?;
+    parser.initialize(detect_prefill(family, content)?)?;
     let output = parser.parse_complete(content)?;
 
     let mut text = String::new();
@@ -88,26 +113,40 @@ pub(crate) fn parse_complete(content: &str) -> anyhow::Result<CompleteOutput> {
     })
 }
 
-fn detect_prefill(content: &str) -> UnifiedParserPrefill {
-    const THINK_CLOSE: &str = "<|close|>think<|sep|>";
-    const RESPONSE_OPEN: &str = "<|open|>response<|sep|>";
-    const RESPONSE_CLOSE: &str = "<|close|>response<|sep|>";
-    const TOOLS_OPEN: &str = "<|open|>tools<|sep|>";
+fn detect_prefill(family: &str, content: &str) -> anyhow::Result<UnifiedParserPrefill> {
+    match family {
+        KIMI_K3_FAMILY => {
+            const THINK_CLOSE: &str = "<|close|>think<|sep|>";
+            const RESPONSE_OPEN: &str = "<|open|>response<|sep|>";
+            const RESPONSE_CLOSE: &str = "<|close|>response<|sep|>";
+            const TOOLS_OPEN: &str = "<|open|>tools<|sep|>";
 
-    if content.starts_with("<|open|>") {
-        return UnifiedParserPrefill::None;
+            if content.starts_with("<|open|>") {
+                return Ok(UnifiedParserPrefill::None);
+            }
+            if content.find(THINK_CLOSE).is_some_and(|think_end| {
+                content
+                    .find(RESPONSE_OPEN)
+                    .is_none_or(|response_open| think_end < response_open)
+            }) {
+                return Ok(UnifiedParserPrefill::Reasoning);
+            }
+            if content.contains(RESPONSE_CLOSE) || content.contains(TOOLS_OPEN) {
+                return Ok(UnifiedParserPrefill::Response);
+            }
+            Ok(UnifiedParserPrefill::None)
+        }
+        QWEN3_CODER_FAMILY => {
+            if content.contains("<think>") {
+                Ok(UnifiedParserPrefill::None)
+            } else if content.contains("</think>") {
+                Ok(UnifiedParserPrefill::Reasoning)
+            } else {
+                Ok(UnifiedParserPrefill::Response)
+            }
+        }
+        other => anyhow::bail!("no prefill detector for unified parser family '{other}'"),
     }
-    if content.find(THINK_CLOSE).is_some_and(|think_end| {
-        content
-            .find(RESPONSE_OPEN)
-            .is_none_or(|response_open| think_end < response_open)
-    }) {
-        return UnifiedParserPrefill::Reasoning;
-    }
-    if content.contains(RESPONSE_CLOSE) || content.contains(TOOLS_OPEN) {
-        return UnifiedParserPrefill::Response;
-    }
-    UnifiedParserPrefill::None
 }
 
 fn to_v2_tools(tools: Option<&[ToolDefinition]>) -> Vec<Tool> {
@@ -124,6 +163,7 @@ fn to_v2_tools(tools: Option<&[ToolDefinition]>) -> Vec<Tool> {
 }
 
 struct ChoiceState {
+    family: &'static str,
     parser: Box<dyn UnifiedParser>,
     parser_failed: bool,
     opened_calls: HashSet<usize>,
@@ -131,10 +171,15 @@ struct ChoiceState {
 }
 
 impl ChoiceState {
-    fn new(tools: &[Tool], prefill: UnifiedParserPrefill) -> anyhow::Result<Self> {
-        let mut parser = create_unified_parser_for_family(KIMI_K3_FAMILY, tools)?;
+    fn new(
+        family: &'static str,
+        tools: &[Tool],
+        prefill: UnifiedParserPrefill,
+    ) -> anyhow::Result<Self> {
+        let mut parser = create_unified_parser_for_family(family, tools)?;
         parser.initialize(prefill)?;
         Ok(Self {
+            family,
             parser,
             parser_failed: false,
             opened_calls: HashSet::new(),
@@ -153,7 +198,8 @@ impl ChoiceState {
         if let Err(error) = self.parser.parse_into(delta, &mut output) {
             tracing::warn!(
                 error = %error,
-                "Kimi K3 unified parser failed; falling back to plain text"
+                family = self.family,
+                "unified parser failed; falling back to plain text"
             );
             self.parser_failed = true;
             let recovered = self.parser.reset();
@@ -176,7 +222,8 @@ impl ChoiceState {
             Err(error) => {
                 tracing::warn!(
                     error = %error,
-                    "Kimi K3 unified parser finish failed; recovering buffered text"
+                    family = self.family,
+                    "unified parser finish failed; recovering buffered text"
                 );
                 self.parser_failed = true;
                 let mut output = UnifiedParserOutput::default();
@@ -328,26 +375,18 @@ fn response_with_choice(
     Annotated::from_data(data)
 }
 
-/// Apply one Kimi K3 unified parser per response choice.
+/// Apply one unified parser per response choice.
 pub(crate) fn apply_stream<S>(
     stream_in: S,
     tool_definitions: Option<Vec<ToolDefinition>>,
     prefill: UnifiedParserPrefill,
+    family: &'static str,
 ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
 where
     S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
 {
     let tools = to_v2_tools(tool_definitions.as_deref());
     stream! {
-        if ChoiceState::new(&tools, prefill).is_err() {
-            tracing::warn!("Kimi K3 unified parser construction failed; passing stream through");
-            tokio::pin!(stream_in);
-            while let Some(response) = stream_in.next().await {
-                yield response;
-            }
-            return;
-        }
-
         let mut states = HashMap::<u32, ChoiceState>::new();
         let mut finished = HashSet::<u32>::new();
         let mut template: Option<NvCreateChatCompletionStreamResponse> = None;
@@ -390,10 +429,24 @@ where
                     continue;
                 }
 
-                let state = states.entry(original.index).or_insert_with(|| {
-                    ChoiceState::new(&tools, prefill)
-                        .expect("Kimi K3 parser construction validated before stream")
-                });
+                let state = match states.entry(original.index) {
+                    std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        match ChoiceState::new(family, &tools, prefill) {
+                            Ok(state) => entry.insert(state),
+                            Err(error) => {
+                                tracing::warn!(
+                                    error = %error,
+                                    family,
+                                    choice = original.index,
+                                    "unified parser construction failed; passing choice through"
+                                );
+                                emitted.push(original);
+                                continue;
+                            }
+                        }
+                    }
+                };
                 let mut output = UnifiedParserOutput::default();
                 if let Some(ChatCompletionMessageContent::Text(text)) =
                     original.delta.content.as_ref()
@@ -499,6 +552,7 @@ mod tests {
             stream::iter([chunk(output, true)]),
             None,
             UnifiedParserPrefill::None,
+            KIMI_K3_FAMILY,
         )
         .collect::<Vec<_>>()
         .await;
@@ -540,6 +594,7 @@ mod tests {
             )]),
             None,
             UnifiedParserPrefill::Reasoning,
+            KIMI_K3_FAMILY,
         )
         .collect::<Vec<_>>()
         .await;
@@ -578,6 +633,7 @@ mod tests {
             ]),
             None,
             UnifiedParserPrefill::None,
+            KIMI_K3_FAMILY,
         )
         .collect::<Vec<_>>()
         .await;
@@ -603,22 +659,36 @@ mod tests {
 
     #[test]
     fn requires_matching_explicit_parser_names() {
-        assert!(configured(Some("kimi_k3"), Some("kimi_k3")));
-        assert!(!configured(Some("kimi_k3"), Some("kimi")));
-        assert!(!configured(None, Some("kimi_k3")));
+        assert_eq!(
+            configured_family(Some("kimi_k3"), Some("kimi_k3")),
+            Some(KIMI_K3_FAMILY)
+        );
+        assert_eq!(
+            configured_family(Some("qwen3_coder"), Some("qwen3")),
+            Some(QWEN3_CODER_FAMILY)
+        );
+        assert_eq!(configured_family(Some("kimi_k3"), Some("kimi")), None);
+        assert_eq!(
+            configured_family(Some("qwen3_coder"), Some("deepseek_r1")),
+            None
+        );
+        assert_eq!(configured_family(None, Some("kimi_k3")), None);
     }
 
     #[test]
     fn parses_complete_reasoning_prefill_with_tool_call() {
-        let parsed = parse_complete(concat!(
-            "hidden<|close|>think<|sep|>",
-            "<|open|>response<|sep|>visible<|close|>response<|sep|>",
-            "<|open|>tools<|sep|>",
-            "<|open|>call tool=\"lookup\" index=\"1\"<|sep|>",
-            "<|open|>argument key=\"q\" type=\"string\"<|sep|>x",
-            "<|close|>argument<|sep|><|close|>call<|sep|>",
-            "<|close|>tools<|sep|><|close|>message<|sep|>"
-        ))
+        let parsed = parse_complete(
+            KIMI_K3_FAMILY,
+            concat!(
+                "hidden<|close|>think<|sep|>",
+                "<|open|>response<|sep|>visible<|close|>response<|sep|>",
+                "<|open|>tools<|sep|>",
+                "<|open|>call tool=\"lookup\" index=\"1\"<|sep|>",
+                "<|open|>argument key=\"q\" type=\"string\"<|sep|>x",
+                "<|close|>argument<|sep|><|close|>call<|sep|>",
+                "<|close|>tools<|sep|><|close|>message<|sep|>"
+            ),
+        )
         .unwrap();
 
         assert_eq!(parsed.reasoning, "hidden");
@@ -633,8 +703,111 @@ mod tests {
     fn detects_response_prefill_for_aggregate_output() {
         assert_eq!(
             detect_prefill(
+                KIMI_K3_FAMILY,
                 "visible<|close|>response<|sep|><|open|>tools<|sep|><|close|>tools<|sep|>"
+            )
+            .unwrap(),
+            UnifiedParserPrefill::Response
+        );
+    }
+
+    #[tokio::test]
+    async fn emits_qwen_reasoning_text_and_tool_chunks() {
+        let output = concat!(
+            "<think>reason</think>answer ",
+            "<tool_call>\n",
+            "<function=get_weather>\n",
+            "<parameter=city>Tokyo</parameter>\n",
+            "</function>\n",
+            "</tool_call>"
+        );
+        let tools = vec![ToolDefinition {
+            name: "get_weather".to_string(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"]
+            })),
+            strict: None,
+        }];
+        let responses = apply_stream(
+            stream::iter([chunk(output, true)]),
+            Some(tools),
+            UnifiedParserPrefill::None,
+            QWEN3_CODER_FAMILY,
+        )
+        .collect::<Vec<_>>()
+        .await;
+        let choices = responses
+            .iter()
+            .flat_map(|response| response.data.as_ref().unwrap().inner.choices.iter())
+            .collect::<Vec<_>>();
+
+        assert_eq!(choices.len(), 3);
+        assert_eq!(
+            choices[0].delta.reasoning_content.as_deref(),
+            Some("reason")
+        );
+        assert_eq!(
+            choices[1].delta.content,
+            Some(ChatCompletionMessageContent::Text("answer ".to_string()))
+        );
+        let tool = choices[2]
+            .delta
+            .tool_calls
+            .as_ref()
+            .unwrap()
+            .first()
+            .unwrap();
+        assert!(tool.id.is_some());
+        assert_eq!(
+            tool.function.as_ref().unwrap().name.as_deref(),
+            Some("get_weather")
+        );
+        assert_eq!(
+            tool.function.as_ref().unwrap().arguments.as_deref(),
+            Some(r#"{"city":"Tokyo"}"#)
+        );
+        assert_eq!(choices[2].finish_reason, Some(FinishReason::ToolCalls));
+    }
+
+    #[test]
+    fn parses_complete_qwen_reasoning_prefill_with_tool_call() {
+        let parsed = parse_complete(
+            QWEN3_CODER_FAMILY,
+            concat!(
+                "hidden</think>",
+                "<tool_call>\n",
+                "<function=get_weather>\n",
+                "<parameter=city>Tokyo</parameter>\n",
+                "</function>\n",
+                "</tool_call>"
             ),
+        )
+        .unwrap();
+
+        assert_eq!(parsed.reasoning, "hidden");
+        assert_eq!(parsed.text, "");
+        assert_eq!(parsed.tool_calls.len(), 1);
+        assert_eq!(parsed.tool_calls[0].function.name, "get_weather");
+        assert_eq!(
+            parsed.tool_calls[0].function.arguments,
+            r#"{"city":"Tokyo"}"#
+        );
+    }
+
+    #[test]
+    fn detects_qwen_prefill_from_complete_output() {
+        assert_eq!(
+            detect_prefill(QWEN3_CODER_FAMILY, "<think>reason</think>answer").unwrap(),
+            UnifiedParserPrefill::None
+        );
+        assert_eq!(
+            detect_prefill(QWEN3_CODER_FAMILY, "reason</think>answer").unwrap(),
+            UnifiedParserPrefill::Reasoning
+        );
+        assert_eq!(
+            detect_prefill(QWEN3_CODER_FAMILY, "answer").unwrap(),
             UnifiedParserPrefill::Response
         );
     }

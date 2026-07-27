@@ -35,11 +35,10 @@ impl OpenAIPreprocessor {
             return Ok(false);
         };
 
-        if crate::protocols::openai::chat_completions::unified_parser::enabled()
-            && crate::protocols::openai::chat_completions::unified_parser::configured(
-                Some(parser_name),
-                self.runtime_config.reasoning_parser.as_deref(),
-            )
+        if crate::protocols::openai::chat_completions::unified_parser::selected_family(
+            Some(parser_name),
+            self.runtime_config.reasoning_parser.as_deref(),
+        ) == Some(dynamo_parsers_v2::KIMI_K3_FAMILY)
         {
             return self.apply_kimi_k3_structural_tag(
                 tool_choice,

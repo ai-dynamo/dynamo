@@ -367,6 +367,12 @@ pub mod llm {
     /// split reasoning parser plus v1 tool-call jail.
     pub const DYN_ENABLE_KIMI_K3_UNIFIED_PARSER: &str = "DYN_ENABLE_KIMI_K3_UNIFIED_PARSER";
 
+    /// \[EXPERIMENTAL\] Enable the ordered Qwen unified parser when the configured
+    /// tool-call parser is `qwen3_coder` and the reasoning parser is `qwen3`.
+    /// The unified path composes Qwen reasoning with the parser-v2 XML tool parser
+    /// and bypasses the split reasoning parser plus v1 tool-call jail.
+    pub const DYN_ENABLE_QWEN_UNIFIED_PARSER: &str = "DYN_ENABLE_QWEN_UNIFIED_PARSER";
+
     /// Backend stream inactivity timeout in seconds.
     ///
     /// When set to a positive integer, the frontend will kill the engine context
@@ -828,6 +834,7 @@ mod tests {
             llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH,
             llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2,
             llm::DYN_ENABLE_KIMI_K3_UNIFIED_PARSER,
+            llm::DYN_ENABLE_QWEN_UNIFIED_PARSER,
             llm::DYN_LORA_ALLOCATION_ENABLED,
             llm::DYN_LORA_ALLOCATION_ALGORITHM,
             llm::DYN_LORA_ALLOCATION_TIMESTEP_SECS,
