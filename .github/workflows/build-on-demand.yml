@@ -136,7 +136,7 @@ jobs:
     runs-on: prod-builder-v3
     timeout-minutes: 60
     env:
-      PRODUCT_SHA: a34c8ac7f37b219af83b98dd214ccc98b155f54d
+      PRODUCT_SHA: 25ef6f94051317ee894bfa15c3b94979f93d98c6
       ACR_IMAGE_BASE: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo
     steps:
       - name: Checkout build ref
@@ -151,9 +151,7 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" != "${PRODUCT_SHA}"
           test "$(git diff --name-only "${PRODUCT_SHA}" HEAD)" = \
-            "$(printf '%s\n' \
-              .github/workflows/build-on-demand.yml \
-              .github/workflows/shared-build-image.yml)"
+            ".github/workflows/build-on-demand.yml"
 
       - name: Initialize Dynamo builder
         uses: ./.github/actions/init-dynamo-builder
