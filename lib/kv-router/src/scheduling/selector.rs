@@ -234,14 +234,16 @@ impl DefaultWorkerSelector {
         let prefill_cost_blocks = weights.prefill_load_scale * adjusted_prefill_blocks;
         let worker_load = worker_load.unwrap_or_default();
         let decode_cost_blocks = worker_load.potential_decode_blocks() as f64;
-        let logit = prefill_cost_blocks + decode_cost_blocks;
+        let active_request_cost_blocks =
+            self.kv_router_config.decode_active_request_weight * worker_load.active_requests as f64;
+        let logit = prefill_cost_blocks + decode_cost_blocks + active_request_cost_blocks;
 
         if shared_beyond > 0 {
             tracing::debug!(
                 "{formula_name} for worker_id={} dp_rank={:?} with {effective_overlap_blocks:.2} effective cached blocks, \
                  {shared_beyond} shared blocks beyond device (multiplier={shared_cache_multiplier:.2}): {logit:.3} \
-                 = prefill_load_scale * adjusted_prefill_blocks + decode_blocks \
-                 = {prefill_load_scale:.3} * {adjusted_prefill_blocks:.3} + {decode_cost_blocks:.3} \
+                 = prefill_load_scale * adjusted_prefill_blocks + decode_blocks + active_request_cost_blocks \
+                 = {prefill_load_scale:.3} * {adjusted_prefill_blocks:.3} + {decode_cost_blocks:.3} + {active_request_cost_blocks:.3} \
                  (raw_prefill_blocks: {raw_prefill_blocks:.3}, overlap_credit_blocks: {overlap_credit_blocks:.3}, \
                  overlap_credit_decay: {overlap_credit_decay:.3})",
                 worker.worker_id,
@@ -252,8 +254,8 @@ impl DefaultWorkerSelector {
         } else {
             tracing::debug!(
                 "{formula_name} for worker_id={} dp_rank={:?} with {effective_overlap_blocks:.2} effective cached blocks: {logit:.3} \
-                 = prefill_load_scale * adjusted_prefill_blocks + decode_blocks \
-                 = {prefill_load_scale:.3} * {adjusted_prefill_blocks:.3} + {decode_cost_blocks:.3} \
+                 = prefill_load_scale * adjusted_prefill_blocks + decode_blocks + active_request_cost_blocks \
+                 = {prefill_load_scale:.3} * {adjusted_prefill_blocks:.3} + {decode_cost_blocks:.3} + {active_request_cost_blocks:.3} \
                  (raw_prefill_blocks: {raw_prefill_blocks:.3}, overlap_credit_blocks: {overlap_credit_blocks:.3}, \
                  overlap_credit_decay: {overlap_credit_decay:.3})",
                 worker.worker_id,
@@ -1447,6 +1449,7 @@ mod tests {
             crate::sequences::WorkerLoadProjection {
                 active_prefill_tokens: 16,
                 active_decode_blocks: 2,
+                active_requests: 0,
                 additional_active_blocks: 3,
             },
         );
@@ -1467,6 +1470,43 @@ mod tests {
         assert_eq!(
             selector.worker_logit(&request, worker, 16, 0, weights, "test"),
             -7.0
+        );
+    }
+
+    #[test]
+    fn test_worker_logit_can_charge_active_requests() {
+        let worker = WorkerWithDpRank::from_worker_id(0);
+        let mut request = base_request(0);
+        request.worker_loads.insert(
+            worker,
+            crate::sequences::WorkerLoadProjection {
+                active_decode_blocks: 100,
+                active_requests: 4,
+                ..Default::default()
+            },
+        );
+        let weights = LogitWeights {
+            overlap_score_credit: 1.0,
+            overlap_score_credit_decay: 0.0,
+            prefill_load_scale: 1.0,
+            shared_cache_multiplier: 0.0,
+        };
+        let default = DefaultWorkerSelector::new(Some(KvRouterConfig::default()), "test");
+        let weighted = DefaultWorkerSelector::new(
+            Some(KvRouterConfig {
+                decode_active_request_weight: 32.0,
+                ..Default::default()
+            }),
+            "test",
+        );
+
+        assert_eq!(
+            default.worker_logit(&request, worker, 16, 0, weights, "test"),
+            100.0
+        );
+        assert_eq!(
+            weighted.worker_logit(&request, worker, 16, 0, weights, "test"),
+            228.0
         );
     }
 

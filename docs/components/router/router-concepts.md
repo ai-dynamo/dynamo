@@ -19,19 +19,21 @@ KV cache reuse introduces complexity to LLM serving load balancing. While it can
 
 ![Request tokens are hashed and evaluated using KV indexer prefix hits and slot tracker active load before the router selects the lowest-cost worker. Worker KV events update the indexer through the event plane.](../../assets/img/router-kv-routing-overview.jpg)
 
-The cost function combines two worker-specific projections:
+The cost function combines three worker-specific cost terms:
 
 - **Prefill cost**: Active prompt work already assigned to the worker plus the incoming request's uncached prompt work. Device, host, disk, and shared-cache hits reduce this cost according to their configured credits.
 - **Decode cost**: Active KV blocks already assigned to the worker plus the blocks projected for the incoming request.
+- **Active-request cost**: An optional block-equivalent charge for each request already active on the worker. This term can represent decode regimes where step latency follows batch size more closely than resident KV footprint.
 
 ```text
 raw_prefill_blocks = active_prefill_blocks + incoming_prompt_blocks
-adjusted_prefill_blocks = max(raw_prefill_blocks - overlap_credit_blocks, 0)
-decode_blocks = active_decode_blocks + incoming_active_blocks
-cost = prefill_load_scale * adjusted_prefill_blocks + decode_blocks
+adjusted_prefill_blocks = raw_prefill_blocks - overlap_credit_blocks
+potential_decode_blocks = active_decode_blocks + incoming_active_blocks
+active_request_blocks = decode_active_request_weight * active_requests
+cost = prefill_load_scale * adjusted_prefill_blocks + potential_decode_blocks + active_request_blocks
 ```
 
-`overlap_credit_blocks` combines the configured device, host, disk, and shared-cache credits. `overlap_score_credit_decay` can reduce the device-local portion when a cache-rich worker has excess active prefill load. The router selects the lowest-cost eligible worker. For exact tuning behavior, see [Configuration and Tuning](router-configuration.md#tuning-guidelines).
+`overlap_credit_blocks` combines the configured device, host, disk, and shared-cache credits. `overlap_score_credit_decay` can reduce the device-local portion when a cache-rich worker has excess active prefill load. `decode_active_request_weight` defaults to `0`, so the active-request term is opt-in. The router selects the lowest-cost eligible worker. For exact tuning behavior, see [Configuration and Tuning](router-configuration.md#tuning-guidelines).
 
 ### Active Load Modeling
 
@@ -49,9 +51,11 @@ This model changes router-side prompt load accounting only; it does not change b
 
 #### Decode Load Modeling
 
-For decode load, the router tracks active KV blocks assigned to each worker. By default, this covers the prompt-side blocks that are already assigned to active requests and frees them when each request finishes.
+For decode load, the router tracks active KV blocks and active-request count for each worker. It captures both values in the same request-specific worker-load projection. By default, the cost covers the prompt-side blocks that are already assigned to active requests and frees them when each request finishes.
 
 When `--router-track-output-blocks` is enabled, the router also adds placeholder output blocks as generation crosses block boundaries. If the request includes `nvext.agent_hints.osl`, those output blocks receive a fractional weight based on progress toward the expected output length. This expected OSL proxy lets requests near completion contribute less future decode load. Without an expected OSL, tracked output blocks count at full weight until the request finishes.
+
+When `--router-decode-active-request-weight` is positive, every active request also adds the configured block-equivalent cost. This can improve data-parallel batch balance when decode latency is sensitive to request count, but it can reduce cache locality or over-penalize batches when KV-memory traffic remains the dominant cost. The default is `0`.
 
 For the flags that enable these models, see [Configuration and Tuning](router-configuration.md).
 

@@ -256,6 +256,7 @@ async def test_handle_non_leader_node_resolves_worker_before_kv_publish(monkeypa
         def __init__(self):
             self.generate_endpoint = FakeEndpoint()
             self.server_args = server_args
+            self.dynamo_args = SimpleNamespace(use_kv_events=True)
             self.kv_worker_id = None
 
         def init_kv_event_publish(self):
@@ -303,6 +304,7 @@ async def test_handle_non_leader_node_skips_kv_publish_without_resolved_worker(
     class FakePublisher:
         generate_endpoint = object()
         server_args = SimpleNamespace(kv_events_config='{"endpoint": "tcp://*:5557"}')
+        dynamo_args = SimpleNamespace(use_kv_events=True)
         kv_worker_id = None
 
         def init_kv_event_publish(self):
@@ -348,6 +350,7 @@ async def test_handle_non_leader_node_cleans_up_when_resolution_fails(monkeypatc
     class FakePublisher:
         generate_endpoint = object()
         server_args = SimpleNamespace(kv_events_config='{"endpoint": "tcp://*:5557"}')
+        dynamo_args = SimpleNamespace(use_kv_events=True)
 
         def cleanup(self):
             cleanup_called.set()
@@ -404,7 +407,11 @@ def test_init_kv_event_publish_uses_worker_id_override(monkeypatch):
     )
     config = SimpleNamespace(
         server_args=server_args,
-        dynamo_args=SimpleNamespace(enable_local_indexer=True, kv_state_endpoint=None),
+        dynamo_args=SimpleNamespace(
+            enable_local_indexer=True,
+            kv_state_endpoint=None,
+            use_kv_events=True,
+        ),
     )
     publisher = DynamoSglangPublisher(
         engine=SimpleNamespace(),
@@ -419,6 +426,25 @@ def test_init_kv_event_publish_uses_worker_id_override(monkeypatch):
     assert len(publishers) == 4
     assert [call["dp_rank"] for call in calls] == [4, 5, 6, 7]
     assert {call["worker_id"] for call in calls} == {1234}
+
+
+def test_init_kv_event_publish_uses_effective_kv_event_setting():
+    server_args = SimpleNamespace(
+        kv_events_config='{"publisher": "null", "endpoint": "tcp://*:5557"}',
+        node_rank=1,
+    )
+    config = SimpleNamespace(
+        server_args=server_args,
+        dynamo_args=SimpleNamespace(use_kv_events=False),
+    )
+    publisher = DynamoSglangPublisher(
+        engine=SimpleNamespace(),
+        config=config,
+        generate_endpoint=SimpleNamespace(),
+        component_gauges=SimpleNamespace(),
+    )
+
+    assert publisher.init_kv_event_publish() == []
 
 
 def test_init_kv_event_publish_allows_zero_worker_id_override(monkeypatch):
@@ -461,7 +487,11 @@ def test_init_kv_event_publish_allows_zero_worker_id_override(monkeypatch):
     )
     config = SimpleNamespace(
         server_args=server_args,
-        dynamo_args=SimpleNamespace(enable_local_indexer=True, kv_state_endpoint=None),
+        dynamo_args=SimpleNamespace(
+            enable_local_indexer=True,
+            kv_state_endpoint=None,
+            use_kv_events=True,
+        ),
     )
     publisher = DynamoSglangPublisher(
         engine=SimpleNamespace(
@@ -618,6 +648,7 @@ async def test_setup_sgl_metrics_returns_publisher_for_chat_worker(monkeypatch):
         dynamo_args=SimpleNamespace(
             embedding_worker=False,
             component="sglang-decode",
+            use_kv_events=False,
         ),
         server_args=engine.server_args,
     )

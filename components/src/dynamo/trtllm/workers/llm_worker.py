@@ -371,9 +371,11 @@ async def init_llm_worker(
         # Add it to kv_cache_config while preserving all settings from YAML
         current_kv_config = arg_map["kv_cache_config"]
         if isinstance(current_kv_config, KvCacheConfig):
-            # Convert KvCacheConfig object to dict, preserving ALL existing settings
-            # This ensures YAML overrides are not lost when adding event_buffer_max_size
-            current_kv_config = current_kv_config.model_dump(exclude_none=True)
+            # Convert to a dict while preserving only explicitly configured settings.
+            # Generic defaults must remain unset so TRT-LLM can apply model defaults.
+            current_kv_config = current_kv_config.model_dump(
+                exclude_none=True, exclude_unset=True
+            )
             arg_map["kv_cache_config"] = current_kv_config
 
         if not isinstance(current_kv_config, dict):
@@ -664,6 +666,7 @@ async def init_llm_worker(
             config.enable_local_indexer
             and config.disaggregation_mode != DisaggregationMode.DECODE
         )
+        runtime_config.kv_event_publishing_enabled = config.publish_events_and_metrics
         # Set data_parallel_size for attention DP mode
         # This enables the router's scheduler to correctly iterate over all dp_ranks
         # Need to name ADP as `data_parallel_size` for parity with other frameworks
