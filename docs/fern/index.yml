@@ -60,9 +60,13 @@ navigation:
   - tab: user-guide
     variants:
       # ==================== Kubernetes Deployment variant ====================
-      # skip-slug preserves the existing K8s page URLs (previously the
-      # Kubernetes Guide tab used skip-slug: true).
+      # The variant contributes an explicit `kubernetes` slug segment, mirroring
+      # the sibling Local (CLI) variant's `slug: cli`. This namespaces every K8s
+      # page (kubernetes/...), keeps it collision-free, and matches the
+      # kubernetes/ redirect destinations in docs.yml. All previously-live K8s
+      # URLs are preserved via the docs.yml redirect table (see B2).
       - title: Kubernetes
+        slug: kubernetes
         icon: fa-brands fa-kubernetes
         layout:
           # ==================== Getting Started ====================
@@ -135,10 +139,14 @@ navigation:
             icon: microchip
             collapsed: open-by-default
             contents:
+              - page: Model Deployment Guide
+                path: kubernetes/model-deployment-guide.md
               - page: Introduction
                 path: getting-started/kubernetes-deployment.md
               - page: Deploy with DGD
                 path: kubernetes/dgd-guide.md
+              - page: Expose the Frontend
+                path: kubernetes/dgd-expose-frontend.md
               - page: Deploy on Intel GPUs
                 path: kubernetes/dgd-intel-xpu.mdx
               - section: KV-Aware Routing
@@ -181,6 +189,8 @@ navigation:
               - page: Auto Deploy with DGDR
                 slug: dgdr-walkthrough
                 path: kubernetes/dgdr-guide.md
+              - page: DGDR Examples
+                path: kubernetes/dgdr-examples.md
               - page: Dynamo Profiler
                 path: kubernetes/dgdr-profiler.md
               - page: Dynamo Planner
@@ -194,11 +204,20 @@ navigation:
                 path: kubernetes/observability/metrics.mdx
               - page: Benchmarking with AIPerf
                 path: tools/aiperf.mdx
+              - page: Health Probes
+                path: kubernetes/dgd-probes.md
+              - page: Cold Start and Resiliency
+                path: kubernetes/cold-start-and-resiliency.md
+              - page: Performance Tuning
+                path: performance/tuning.md
               - section: DynoSim
                 slug: dynosim
                 contents:
                   - page: Overview
                     path: dynosim/README.md
+                  - page: Simulation Model
+                    slug: simulation-model
+                    path: dynosim/modeling.md
                   - page: Mocker Live Simulation
                     slug: live-simulation-with-mocker
                     path: dynosim/mocker.mdx
@@ -272,6 +291,9 @@ navigation:
                 contents:
                   - page: Overview
                     path: dynosim/README.md
+                  - page: Simulation Model
+                    slug: simulation-model
+                    path: dynosim/modeling.md
                   - page: Mocker Live Simulation
                     path: dynosim/mocker-local.mdx
                   - page: DynoSim Replay
@@ -295,6 +317,8 @@ navigation:
             path: agents/session-ids.mdx
           - page: Agent Hints
             path: agents/agent-hints.md
+          - page: Priority Scheduling
+            path: agents/priority-scheduling.md
           - page: Agent Harnesses
             path: agents/agent-harnesses.mdx
           - page: Agent Tracing
@@ -355,6 +379,8 @@ navigation:
             path: tool-calling/chat-processors.mdx
           - page: Tool Call Parsing
             path: tool-calling/README.mdx
+          - page: Structural Tag
+            path: tool-calling/structural-tag.md
           - page: Reasoning Parsing
             path: reasoning/README.md
           - page: Troubleshooting Tool Calls
@@ -462,6 +488,22 @@ navigation:
           - page: Browse All Benchmarks
             path: benchmarks/README.mdx
             slug: browse
+          - page: Benchmarking Guide
+            path: benchmarks/benchmarking.md
+            slug: benchmarking
+            hidden: true
+          - page: Embedding Cache
+            path: benchmarks/embedding_cache.md
+            slug: embedding-cache
+            hidden: true
+          - page: Mocker Trace Replay
+            path: benchmarks/mocker-trace-replay.md
+            slug: mocker-trace-replay
+            hidden: true
+          - page: Planner Replay Benchmarking
+            path: benchmarks/planner-replay-benchmarking.md
+            slug: planner-replay-benchmarking
+            hidden: true
           - page: Qwen3-32B KV Routing A/B
             path: benchmarks/qwen3-32b-kv-routing.mdx
             slug: qwen3-32b-kv-routing
@@ -522,14 +564,24 @@ navigation:
                     path: components/router/router-guide.md
                   - page: Routing Concepts
                     path: components/router/router-concepts.md
+                  - page: Worker Filtering
+                    path: components/router/router-filtering.md
                   - page: Configuration and Tuning
                     path: components/router/router-configuration.md
+                  - page: Deficit Round Robin
+                    path: components/router/deficit-round-robin.md
                   - page: Disaggregated Serving
                     path: components/router/router-disaggregated-serving.md
+                  - page: Offloading Support Matrix
+                    path: components/router/router-offloading.md
                   - page: Topology-Aware KV Transfer
                     path: components/router/topology-aware-kv-transfer.md
+                  - page: Multi-DC KV Routing
+                    path: components/router/multi-dc-kv-routing.md
                   - page: Router Operations
                     path: components/router/router-operations.md
+                  - page: Router Testing
+                    path: components/router/router-testing.md
                   - page: Router Examples
                     path: components/router/router-examples.md
                   - page: Global Router Configuration
@@ -538,6 +590,8 @@ navigation:
                     path: components/router/standalone-indexer.md
                   - page: Standalone Slot Tracker
                     path: components/router/standalone-slot-tracker.md
+                  - page: Standalone Selection
+                    path: components/router/standalone-selection.md
                   - page: KV Event Replay Comparison
                     path: components/router/kv-event-replay-comparison.md
                   - page: Router Design
@@ -583,6 +637,8 @@ navigation:
                         path: backends/sglang/README.md
                       - page: Reference Guide
                         path: backends/sglang/sglang-reference-guide.md
+                      - page: Agents on SGLang
+                        path: backends/sglang/agents.md
                       - page: Chat Processor
                         path: backends/sglang/sglang-chat-processor.md
                       - page: Logits Processing
@@ -623,6 +679,8 @@ navigation:
                         path: backends/vllm/vllm-logits-processing.md
                       - page: KV Cache Offloading
                         path: backends/vllm/vllm-kv-offloading.md
+                      - page: Native KV Offloading
+                        path: backends/vllm/vllm-native-kv-offloading.md
                       - page: Observability
                         path: backends/vllm/vllm-observability.md
                       - page: Multimodal
@@ -766,6 +824,10 @@ navigation:
       - section: Additional Resources
         hidden: true
         contents:
+          - page: Runtime Development Guide
+            path: development/runtime-guide.md
+          - page: Jail Stream
+            path: development/jail-stream.md
           # -- Kubernetes (hidden sub-pages) --
           - page: FluxCD
             path: kubernetes/fluxcd.md
@@ -812,6 +874,8 @@ navigation:
         layout:
           - page: Compatibility
             path: reference/compatibility.mdx
+          - page: Examples
+            path: getting-started/examples.md
           - page: Release Artifacts
             path: reference/release-artifacts.mdx
           - section: Releases
@@ -891,6 +955,8 @@ navigation:
             path: components/router/global-router-config-reference.mdx
           - page: Gateway API Routing
             path: components/router/gateway-api-reference.mdx
+          - page: ThunderAgent Scheduler
+            path: reference/agents/thunderagent-scheduler.mdx
 
       # ==================== Backends variant ====================
       - title: Backends
@@ -925,6 +991,8 @@ navigation:
             path: reference/observability/environment-variables.mdx
           - page: Metrics Catalog
             path: reference/observability/metrics-catalog.mdx
+          - page: Metrics Comparison
+            path: observability/metrics-comparison.md
           - page: Metric Labels
             path: reference/observability/metric-labels.mdx
           - page: Operator Metrics
