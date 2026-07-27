@@ -33,23 +33,9 @@ spec:
             emptyDir:
               medium: Memory
               sizeLimit: 64Gi
-      resources:
-        limits:
-          custom:
-            rdma/ib: "1"
-        requests:
-          custom:
-            rdma/ib: "1"
     DecodeWorker:
       extraPodSpec:
         mainContainer:
           env: *nscaleEnvironment
           volumeMounts: *ibVolumeMounts
         volumes: *ibVolumes
-      resources:
-        limits:
-          custom:
-            rdma/ib: "1"
-        requests:
-          custom:
-            rdma/ib: "1"
