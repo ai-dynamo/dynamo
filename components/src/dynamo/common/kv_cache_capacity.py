@@ -5,10 +5,7 @@
 
 from __future__ import annotations
 
-from dynamo.common.token_capacity import (
-    get_capacity_tokens,
-    token_capacity_payload,
-)
+from dynamo.common.token_capacity import get_capacity_tokens, token_capacity_payload
 
 KV_CACHE_CAPACITY_RUNTIME_KEY = "kv_cache_capacity"
 
