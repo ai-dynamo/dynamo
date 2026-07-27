@@ -10,6 +10,7 @@ import logging
 import random
 import threading
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from typing import (
     Any,
@@ -147,7 +148,7 @@ class RLMixin:
                 }
         if dataclasses.is_dataclass(result) and not isinstance(result, type):
             return self._normalize_json_value(result)
-        if isinstance(result, dict):
+        if isinstance(result, Mapping):
             return self._normalize_json_value(result)
         return {"result": self._normalize_json_value(result)}
 
@@ -163,7 +164,7 @@ class RLMixin:
 
         is_dataclass = dataclasses.is_dataclass(value) and not isinstance(value, type)
         if not is_dataclass and not isinstance(
-            value, (dict, list, tuple, set, frozenset)
+            value, (Mapping, list, tuple, set, frozenset)
         ):
             return str(value)
 
@@ -180,7 +181,7 @@ class RLMixin:
                     )
                     for field in dataclasses.fields(value)
                 }
-            if isinstance(value, dict):
+            if isinstance(value, Mapping):
                 return {
                     str(key): self._normalize_json_value(item, active_ids)
                     for key, item in value.items()

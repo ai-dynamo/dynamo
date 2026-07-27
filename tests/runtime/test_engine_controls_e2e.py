@@ -2,9 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-import dataclasses
-from collections.abc import Awaitable, Callable
-from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -36,43 +33,34 @@ async def _post_with_retry(
     raise AssertionError(f"system server did not accept connections: {last_error}")
 
 
-async def _post_engine_route(
-    monkeypatch: pytest.MonkeyPatch,
-    dynamo_dynamic_ports,
-    route: str,
-    handler: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]],
-    body: dict[str, Any],
-) -> httpx.Response:
-    system_port = dynamo_dynamic_ports.system_ports[0]
-    monkeypatch.setenv("DYN_SYSTEM_PORT", str(system_port))
-    # Keep this local-only test independent of ambient CI NATS_SERVER settings.
-    runtime = DistributedRuntime(
-        asyncio.get_running_loop(), "mem", "tcp", event_plane="zmq"
-    )
-    runtime.register_engine_route(route, handler)
-
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            return await _post_with_retry(
-                client, f"http://127.0.0.1:{system_port}/engine/{route}", body
-            )
-    finally:
-        runtime.shutdown()
-
-
+# The Python bindings share one Tokio runtime for the process. shutdown() is
+# terminal, so tests in this module must leave it alive for later tests and
+# retry attempts.
 @pytest.mark.asyncio
 async def test_engine_control_route_invokes_registered_callback(
     monkeypatch: pytest.MonkeyPatch, dynamo_dynamic_ports
 ):
+    system_port = dynamo_dynamic_ports.system_ports[0]
+    monkeypatch.setenv("DYN_SYSTEM_PORT", str(system_port))
+
+    # Keep this local-only test independent of ambient CI NATS_SERVER settings.
+    runtime = DistributedRuntime(
+        asyncio.get_running_loop(), "mem", "tcp", event_plane="zmq"
+    )
     calls: list[dict[str, Any]] = []
 
     async def sleep_control(body: dict[str, Any]) -> dict[str, Any]:
         calls.append(body)
         return {"status": "ok", "control": "sleep", "body": body}
 
-    response = await _post_engine_route(
-        monkeypatch, dynamo_dynamic_ports, "control/sleep", sleep_control, {"level": 1}
-    )
+    runtime.register_engine_route("control/sleep", sleep_control)
+
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        response = await _post_with_retry(
+            client,
+            f"http://127.0.0.1:{system_port}/engine/control/sleep",
+            {"level": 1},
+        )
 
     assert response.status_code == 200
     assert response.json() == {
@@ -81,85 +69,3 @@ async def test_engine_control_route_invokes_registered_callback(
         "body": {"level": 1},
     }
     assert calls == [{"level": 1}]
-
-
-@pytest.mark.asyncio
-@pytest.mark.sglang
-@pytest.mark.timeout(30)
-async def test_tokenizer_manager_internal_state_route_serializes_nested_dataclass(
-    monkeypatch: pytest.MonkeyPatch, dynamo_dynamic_ports
-):
-    handler_base = pytest.importorskip(
-        "dynamo.sglang.request_handlers.handler_base",
-        reason="SGLang is required for the tokenizer manager route",
-    )
-
-    @dataclasses.dataclass
-    class PhaseConfig:
-        backend: str
-        max_bs: int | None
-        bs: list[int] | None
-        tc_compiler: str
-        full_prefill_max_req: int | None = None
-
-    @dataclasses.dataclass
-    class CudaGraphConfig:
-        decode: PhaseConfig
-        prefill: PhaseConfig
-
-    async def get_internal_state() -> list[dict[str, Any]]:
-        return [
-            {
-                "dp_rank": 0,
-                "tp_size": 4,
-                "pp_size": 2,
-                "dp_size": 8,
-                "cuda_graph_config": CudaGraphConfig(
-                    decode=PhaseConfig("full", 32, [1, 2, 4, 8], "eager"),
-                    prefill=PhaseConfig(
-                        "breakable", None, [1], "eager", full_prefill_max_req=4
-                    ),
-                ),
-                "tp_rank_ids": (0, 1, 2, 3),
-                "active_batch_ids": {7, 9},
-            }
-        ]
-
-    handler = handler_base.RLMixin()
-    handler.engine = SimpleNamespace(
-        tokenizer_manager=SimpleNamespace(
-            auto_create_handle_loop=lambda: None,
-            get_internal_state=get_internal_state,
-        )
-    )
-
-    response = await _post_engine_route(
-        monkeypatch,
-        dynamo_dynamic_ports,
-        "call_tokenizer_manager",
-        handler.call_tokenizer_manager,
-        {"method": "get_internal_state"},
-    )
-    assert response.status_code == 200
-    state = response.json()["result"][0]
-    assert state["tp_size"] == 4
-    assert state["pp_size"] == 2
-    assert state["dp_size"] == 8
-    assert state["cuda_graph_config"] == {
-        "decode": {
-            "backend": "full",
-            "max_bs": 32,
-            "bs": [1, 2, 4, 8],
-            "tc_compiler": "eager",
-            "full_prefill_max_req": None,
-        },
-        "prefill": {
-            "backend": "breakable",
-            "max_bs": None,
-            "bs": [1],
-            "tc_compiler": "eager",
-            "full_prefill_max_req": 4,
-        },
-    }
-    assert state["tp_rank_ids"] == [0, 1, 2, 3]
-    assert set(state["active_batch_ids"]) == {7, 9}

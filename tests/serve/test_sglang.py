@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 import pytest
+import requests
 
 from tests.serve.common import (
     SERVE_TEST_DIR,
@@ -62,6 +63,21 @@ class SGLangConfig(EngineConfig):
     stragglers: list[str] = field(default_factory=lambda: ["SGLANG:EngineCore"])
 
 
+def _assert_internal_state_serializes(system_port: int) -> None:
+    response = requests.post(
+        f"http://127.0.0.1:{system_port}/engine/call_tokenizer_manager",
+        json={"method": "get_internal_state"},
+        timeout=10,
+    )
+    assert response.status_code == 200, response.text
+
+    state = response.json()["result"][0]
+    assert state["tp_size"] == 1
+    assert state["pp_size"] == 1
+    assert state["dp_size"] == 1
+    assert {"decode", "prefill"} <= state["cuda_graph_config"].keys()
+
+
 sglang_dir = os.environ.get("SGLANG_DIR") or os.path.join(
     WORKSPACE_DIR, "examples/backends/sglang"
 )
@@ -110,7 +126,7 @@ sglang_configs = {
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
-        env={},
+        env={"DYN_SGL_ENABLE_RL": "true"},
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
             chat_payload_default(),
@@ -873,7 +889,19 @@ def test_sglang_deployment(
     config = dataclasses.replace(
         sglang_config_test, frontend_port=dynamo_dynamic_ports.frontend_port
     )
-    run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
+    if config.name == "aggregated":
+
+        def post_validation() -> None:
+            _assert_internal_state_serializes(dynamo_dynamic_ports.system_ports[0])
+
+    else:
+        post_validation = None
+    run_serve_deployment(
+        config,
+        request,
+        ports=dynamo_dynamic_ports,
+        post_validation=post_validation,
+    )
 
 
 @pytest.mark.e2e

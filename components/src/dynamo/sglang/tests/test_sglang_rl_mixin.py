@@ -7,7 +7,7 @@ import dataclasses
 import json
 import sys
 import types
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -149,6 +149,10 @@ class TestNormalizeResult:
     def test_dict_normalized(self):
         d = {"foo": "bar", "count": 3}
         assert self.handler._normalize_result(d) == d
+
+    def test_mapping_normalized(self):
+        value = MappingProxyType({"nested": {"count": 3}})
+        assert self.handler._normalize_result(value) == {"nested": {"count": 3}}
 
     def test_dataclass(self):
         @dataclasses.dataclass
