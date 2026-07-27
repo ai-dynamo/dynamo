@@ -32,7 +32,6 @@ use tokio_util::sync::CancellationToken;
 use crate::kv_router::indexer::{RecoveryResetReason, RecoveryTarget, SourceEpoch};
 
 use super::host::KvDcRelayError;
-use super::resolution::PoolBinding;
 
 const DEFAULT_MAILBOX_CAPACITY: usize = 256;
 const DEFAULT_PENDING_BLOCK_PERMITS: usize = 65_536;
@@ -257,7 +256,7 @@ fn actor_fault_category(disposition: CkfFailureDisposition) -> ActorFaultCategor
 pub(super) struct StreamScope {
     pub(super) process_incarnation: u64,
     pub(super) layout_generation: u64,
-    pub(super) pool_binding: PoolBinding,
+    pub(super) pool_id: dynamo_kv_router::identity::PoolId,
 }
 
 #[derive(Debug, Clone)]
@@ -276,12 +275,12 @@ impl DcCkfDeltaSink for BroadcastDeltaSink {
 #[derive(Debug, Clone)]
 pub(crate) struct KvDcRelayHandle {
     sender: mpsc::Sender<ActorCommand>,
+    identity: ProducerIdentity,
     payload_permits: Arc<Semaphore>,
     fence: CancellationToken,
     stopped: CancellationToken,
     #[cfg(feature = "ckf-diagnostics")]
     pub(super) diagnostics: ActorDiagnosticsHandle,
-    pub(super) scope: StreamScope,
 }
 
 impl KvDcRelayHandle {
@@ -330,7 +329,7 @@ impl KvDcRelayHandle {
         let (sender, receiver) = mpsc::channel(capacity);
         let (publication_tx, _) = broadcast::channel(DEFAULT_PUBLICATION_CAPACITY);
         let identity = ProducerIdentity::new(
-            scope.pool_binding.pool_id(),
+            scope.pool_id,
             scope.process_incarnation,
             scope.layout_generation,
             state.format(),
@@ -359,15 +358,19 @@ impl KvDcRelayHandle {
         Ok((
             Self {
                 sender,
+                identity,
                 payload_permits: Arc::new(Semaphore::new(DEFAULT_PENDING_BLOCK_PERMITS)),
                 fence,
                 stopped,
                 #[cfg(feature = "ckf-diagnostics")]
                 diagnostics,
-                scope,
             },
             fault_rx,
         ))
+    }
+
+    pub(super) const fn identity(&self) -> ProducerIdentity {
+        self.identity
     }
 
     async fn submit<T>(
@@ -1314,14 +1317,10 @@ mod tests {
     use dynamo_kv_router::protocols::{
         KvCacheEvent, KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash,
     };
-    use dynamo_runtime::protocols::EndpointId;
 
     use super::*;
-    use crate::kv_dc_relay::resolution::EndpointLocator;
 
-    fn scope(name: &str) -> StreamScope {
-        let endpoint = format!("ns.worker.{name}");
-        let endpoint_id = EndpointId::from(endpoint.as_str());
+    fn scope(_name: &str) -> StreamScope {
         let dc_id = DcId::new(2);
         let domain = IndexerDomainId::new(
             CacheSemanticsId::new([1; 16], IdentitySource::Explicit),
@@ -1330,11 +1329,7 @@ mod tests {
         StreamScope {
             process_incarnation: 1,
             layout_generation: 1,
-            pool_binding: PoolBinding::new(
-                PoolId::new(domain, dc_id),
-                EndpointLocator::new(dc_id, endpoint_id),
-                None,
-            ),
+            pool_id: PoolId::new(domain, dc_id),
         }
     }
 
@@ -1399,10 +1394,7 @@ mod tests {
             snapshot.buckets.len(),
             snapshot.identity.format().bucket_count()
         );
-        assert_eq!(
-            actor_health(&handle).mailbox_capacity,
-            DEFAULT_MAILBOX_CAPACITY
-        );
+        assert_eq!(handle.mailbox_capacity(), DEFAULT_MAILBOX_CAPACITY);
         assert!(
             handle
                 .diagnostics

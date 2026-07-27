@@ -1,13 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! DC-scoped KV-cache Relay with one serialized CKF actor per serving endpoint.
+//! DC-scoped KV-cache Relay with one serialized CKF actor per physical pool.
 //!
 //! Dynamo discovery and worker-local recovery feed endpoint actors. The actors'
 //! exact member ownership is authoritative; each materialization publishes one
-//! physical CKF layout for a future Relay-to-global-router adapter.
-//! The subscription seam remains crate-private: a standalone/WAN publisher API
-//! requires delivery cursors and recovery semantics and is intentionally deferred.
+//! physical CKF layout through the crate-private subscription boundary.
+//! The pool publication subscription seam remains crate-private.
 //!
 //! NOTE: One serialized actor per endpoint pool is the current measured choice, not a claim that
 //! it scales indefinitely. A worker-partitioned, multi-issuer Mooncake comparison found the
@@ -20,29 +19,28 @@ use std::sync::Arc;
 use std::time::Duration;
 
 #[cfg(feature = "ckf-diagnostics")]
-use std::sync::atomic::AtomicU64;
-#[cfg(feature = "ckf-diagnostics")]
 use std::sync::atomic::Ordering;
-#[cfg(feature = "ckf-diagnostics")]
-use std::time::Instant;
 
 use dynamo_kv_router::identity::PoolId;
-use dynamo_kv_router::indexer::cuckoo::{CkfConfig, CkfFailureAction};
+use dynamo_kv_router::indexer::cuckoo::CkfFailureAction;
 use dynamo_kv_router::protocols::{DpRank, KvCacheEventError, WorkerId};
 use dynamo_runtime::component::Component;
 use dynamo_runtime::protocols::EndpointId;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use parking_lot::Mutex;
 use serde::Serialize;
-use tokio::sync::{RwLock, Semaphore, mpsc, watch};
-use tokio::task::JoinHandle;
+use tokio::sync::{RwLock, Semaphore, watch};
+use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 
-use super::actor::{ActorFault, KvDcRelayHandle, KvDcRelayRecoveryTarget, StreamScope};
+use super::actor::{ActorFault, KvDcRelayHandle, KvDcRelayRecoveryTarget};
 use super::discovery::{
-    DcDiscoveryFilter, DcMembershipView, DcMembershipWatch, EndpointMembership, KvCacheDomainKey,
+    DcMembershipView, DcMembershipWatch, DomainMembership, DomainSlotId, KvCacheDomainKey,
+    KvDcRelayDiscoveryConfig,
 };
-use super::resolution::{EndpointLocator, PoolBinding, stable_dc_id};
+use super::identity::{CanonicalModelRegistration, ModelAliasBinding, ModelPoolBinding};
+use super::pool_registry::{PoolActorConfig, PoolAttachRequest, PoolAttachment, PoolRegistry};
+use super::resolution::stable_dc_id;
 use crate::discovery::{KvSourceMembershipCoordinator, KvSourceMembershipWatch};
 #[cfg(feature = "ckf-diagnostics")]
 use crate::kv_router::indexer::WorkerQueryHealthSnapshot;
@@ -50,6 +48,7 @@ use crate::kv_router::indexer::{
     DEFAULT_RECOVERY_ATTEMPT_TIMEOUT, RecoverySupervisor, TargetFaultDisposition,
     start_target_subscriber,
 };
+use crate::local_model::runtime_config::ModelRuntimeConfig;
 
 pub const DEFAULT_EXPECTED_UNIQUE_BLOCKS: usize = 1_048_576;
 const DEFAULT_RECOVERY_FETCH_CONCURRENCY: usize = 16;
@@ -66,6 +65,9 @@ pub enum KvDcRelayError {
     #[cfg(feature = "ckf-diagnostics")]
     #[error("unknown or inactive serving endpoint {0}")]
     UnknownEndpoint(String),
+    #[cfg(feature = "ckf-diagnostics")]
+    #[error("serving endpoint {0} contains multiple indexer domains")]
+    AmbiguousEndpoint(String),
     #[error(
         "stale source epoch for worker {worker_id} rank {dp_rank}: current {current}, received {received}"
     )]
@@ -140,7 +142,7 @@ pub struct KvDcRelayEndpointStats {
     pub lifecycle: String,
     pub layout_generation: u64,
     pub cache_domain: Option<KvDcRelayCacheDomainStats>,
-    pub compatibility_conflict: bool,
+    pub membership_conflicts: Vec<String>,
     pub models: Vec<String>,
     pub aliases: Vec<String>,
     pub roles: Vec<String>,
@@ -295,7 +297,7 @@ impl SlotLifecycle {
 struct EndpointSlotStatus {
     lifecycle: SlotLifecycle,
     layout_generation: u64,
-    membership: Option<EndpointMembership>,
+    membership: Option<DomainMembership>,
     actor: Option<KvDcRelayHandle>,
     #[cfg(feature = "ckf-diagnostics")]
     recovery: WorkerQueryHealthSnapshot,
@@ -317,16 +319,16 @@ impl Default for EndpointSlotStatus {
 type SharedEndpointStatus = Arc<RwLock<EndpointSlotStatus>>;
 
 struct EndpointSlotTask {
-    metadata: watch::Sender<Option<EndpointMembership>>,
+    metadata: watch::Sender<Option<DomainMembership>>,
     status: SharedEndpointStatus,
     task: JoinHandle<()>,
 }
 
-struct EndpointActorRuntime {
-    handle: KvDcRelayHandle,
+struct EndpointPoolRuntime {
+    attachment: PoolAttachment,
     recovery: RecoverySupervisor<KvDcRelayRecoveryTarget>,
-    faults: mpsc::Receiver<ActorFault>,
     binding: ActorBinding,
+    registrations: Vec<CanonicalModelRegistration>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -344,7 +346,8 @@ pub struct KvDcRelay {
     cancel: CancellationToken,
     membership: Mutex<Option<DcMembershipWatch>>,
     supervisor: Mutex<Option<JoinHandle<()>>>,
-    statuses: Arc<RwLock<HashMap<EndpointId, SharedEndpointStatus>>>,
+    statuses: Arc<RwLock<HashMap<DomainSlotId, SharedEndpointStatus>>>,
+    pools: Arc<PoolRegistry>,
 }
 
 impl KvDcRelay {
@@ -353,6 +356,11 @@ impl KvDcRelay {
         dc_id: String,
         config: KvDcRelayConfig,
     ) -> anyhow::Result<Self> {
+        anyhow::ensure!(!dc_id.is_empty(), "KV DC Relay dc_id must not be empty");
+        anyhow::ensure!(
+            dc_id.trim() == dc_id,
+            "KV DC Relay dc_id must not contain leading or trailing whitespace"
+        );
         anyhow::ensure!(
             config.publication_threshold != 0,
             "KV DC Relay publication_threshold must be positive"
@@ -369,27 +377,34 @@ impl KvDcRelay {
             threshold: config.publication_threshold,
             delay: Duration::from_millis(config.publication_delay_ms),
         };
+        let discovery = KvDcRelayDiscoveryConfig {
+            watch_all: config.namespace_filter.is_none(),
+            namespaces: config.namespace_filter.into_iter().collect(),
+            endpoint_prefixes: config.endpoint_prefix.into_iter().collect(),
+        };
         let cancel = component.drt().child_token();
-        let membership = DcMembershipWatch::start(
-            component.drt().discovery(),
-            DcDiscoveryFilter {
-                namespace: config.namespace_filter,
-                endpoint_prefix: config.endpoint_prefix,
-            },
-            cancel.clone(),
-        )
-        .await?;
+        let membership =
+            DcMembershipWatch::start(component.drt().discovery(), discovery, cancel.clone())
+                .await?;
         let membership_rx = membership.subscribe();
         let statuses = Arc::new(RwLock::new(HashMap::new()));
         let dc_id: Arc<str> = Arc::from(dc_id);
         let process_incarnation = component.drt().connection_id();
+        let ckf_dc_id = stable_dc_id(dc_id.as_ref());
+        let pools = Arc::new(PoolRegistry::new(
+            process_incarnation,
+            PoolActorConfig {
+                expected_unique_blocks: DEFAULT_EXPECTED_UNIQUE_BLOCKS,
+                publication_threshold: publication.threshold,
+                publication_delay: publication.delay,
+            },
+        ));
         let supervisor = tokio::spawn(run_host_supervisor(
             component,
-            dc_id.clone(),
-            process_incarnation,
+            ckf_dc_id,
             membership_rx,
             statuses.clone(),
-            publication,
+            pools.clone(),
             Duration::from_millis(config.recovery_attempt_timeout_ms),
             cancel.child_token(),
         ));
@@ -402,7 +417,20 @@ impl KvDcRelay {
             membership: Mutex::new(Some(membership)),
             supervisor: Mutex::new(Some(supervisor)),
             statuses,
+            pools,
         })
+    }
+
+    pub async fn model_pool_bindings(&self) -> Vec<ModelPoolBinding> {
+        self.pools.model_pool_bindings().await
+    }
+
+    pub async fn model_alias_bindings(&self) -> Vec<ModelAliasBinding> {
+        self.pools.model_alias_bindings().await
+    }
+
+    pub async fn model_pool_bindings_for(&self, requested_model: &str) -> Vec<ModelPoolBinding> {
+        self.pools.model_pool_bindings_for(requested_model).await
     }
 
     #[cfg(feature = "ckf-diagnostics")]
@@ -412,11 +440,11 @@ impl KvDcRelay {
             .read()
             .await
             .iter()
-            .map(|(endpoint, status)| (endpoint.clone(), status.clone()))
+            .map(|(slot_id, status)| (slot_id.clone(), status.clone()))
             .collect();
         let mut endpoints = Vec::with_capacity(statuses.len());
-        for (endpoint, status) in statuses {
-            endpoints.push(endpoint_stats(endpoint, status).await?);
+        for (slot_id, status) in statuses {
+            endpoints.push(endpoint_stats(slot_id, status).await?);
         }
         endpoints
             .sort_unstable_by(|left, right| left.serving_endpoint.cmp(&right.serving_endpoint));
@@ -434,12 +462,20 @@ impl KvDcRelay {
         &self,
         endpoint: &EndpointId,
     ) -> Result<KvDcRelayDiagnosticSnapshot, KvDcRelayError> {
-        let status = self
+        let matching: Vec<_> = self
             .statuses
             .read()
             .await
-            .get(endpoint)
-            .cloned()
+            .iter()
+            .filter(|(slot_id, _)| &slot_id.endpoint == endpoint)
+            .map(|(_, status)| status.clone())
+            .collect();
+        if matching.len() > 1 {
+            return Err(KvDcRelayError::AmbiguousEndpoint(endpoint.to_string()));
+        }
+        let status = matching
+            .into_iter()
+            .next()
             .ok_or_else(|| KvDcRelayError::UnknownEndpoint(endpoint.to_string()))?;
         let status = status.read().await;
         let handle = status
@@ -521,35 +557,32 @@ impl KvDcRelay {
 #[allow(clippy::too_many_arguments)]
 async fn run_host_supervisor(
     component: Component,
-    dc_id: Arc<str>,
-    process_incarnation: u64,
+    ckf_dc_id: dynamo_kv_router::DcId,
     mut membership_rx: watch::Receiver<DcMembershipView>,
-    statuses: Arc<RwLock<HashMap<EndpointId, SharedEndpointStatus>>>,
-    publication: ActorPublicationConfig,
+    statuses: Arc<RwLock<HashMap<DomainSlotId, SharedEndpointStatus>>>,
+    pools: Arc<PoolRegistry>,
     recovery_attempt_timeout: Duration,
     cancel: CancellationToken,
 ) {
     let recovery_fetch_permit = Arc::new(Semaphore::new(DEFAULT_RECOVERY_FETCH_CONCURRENCY));
-    let mut slots: HashMap<EndpointId, EndpointSlotTask> = HashMap::new();
-    let ckf_dc_id = stable_dc_id(dc_id.as_ref());
+    let mut slots: HashMap<DomainSlotId, EndpointSlotTask> = HashMap::new();
+    let mut retired_slots = JoinSet::new();
 
     loop {
-        let mut view = membership_rx.borrow_and_update().clone();
-        reject_duplicate_live_pools(&mut view, ckf_dc_id);
-        for (endpoint, membership) in &view.endpoints {
-            let slot = slots.entry(endpoint.clone()).or_insert_with(|| {
+        let view = membership_rx.borrow_and_update().clone();
+        for (slot_id, membership) in view.domains.iter() {
+            let slot = slots.entry(slot_id.clone()).or_insert_with(|| {
                 let (metadata, metadata_rx) = watch::channel(None);
                 let status = Arc::new(RwLock::new(EndpointSlotStatus::default()));
                 let task = tokio::spawn(run_endpoint_slot(
                     component.clone(),
-                    dc_id.clone(),
-                    process_incarnation,
-                    endpoint.clone(),
+                    ckf_dc_id,
+                    slot_id.clone(),
                     metadata_rx,
                     status.clone(),
                     Arc::new(Semaphore::new(1)),
                     recovery_fetch_permit.clone(),
-                    publication,
+                    pools.clone(),
                     recovery_attempt_timeout,
                     cancel.child_token(),
                 ));
@@ -559,16 +592,12 @@ async fn run_host_supervisor(
                     task,
                 }
             });
-            slot.metadata.send_replace(Some(membership.clone()));
+            publish_endpoint_metadata_if_changed(&slot.metadata, membership);
         }
-        for (endpoint, slot) in &slots {
-            if !view.endpoints.contains_key(endpoint) {
-                slot.metadata.send_replace(None);
-            }
-        }
+        retire_departed_endpoint_slots(&view, &mut slots, &mut retired_slots);
         *statuses.write().await = slots
             .iter()
-            .map(|(endpoint, slot)| (endpoint.clone(), slot.status.clone()))
+            .map(|(slot_id, slot)| (slot_id.clone(), slot.status.clone()))
             .collect();
 
         tokio::select! {
@@ -578,77 +607,100 @@ async fn run_host_supervisor(
                     break;
                 }
             }
+            retired = retired_slots.join_next(), if !retired_slots.is_empty() => {
+                report_retired_endpoint_slot(retired);
+            }
         }
     }
 
-    drop(
-        slots
-            .values()
-            .map(|slot| slot.metadata.clone())
-            .collect::<Vec<_>>(),
-    );
-    for (_, slot) in slots {
+    for (slot_id, slot) in slots {
         drop(slot.metadata);
-        if let Err(error) = slot.task.await
-            && !error.is_cancelled()
-        {
-            tracing::warn!(%error, "KV DC Relay endpoint slot failed during shutdown");
+        report_endpoint_slot_exit(slot_id, slot.task.await);
+    }
+    while let Some(retired) = retired_slots.join_next().await {
+        report_retired_endpoint_slot(Some(retired));
+    }
+    pools.shutdown().await;
+}
+
+fn publish_endpoint_metadata_if_changed(
+    sender: &watch::Sender<Option<DomainMembership>>,
+    membership: &DomainMembership,
+) {
+    sender.send_if_modified(|current| {
+        if current.as_ref() == Some(membership) {
+            return false;
         }
+        *current = Some(membership.clone());
+        true
+    });
+}
+
+fn retire_departed_endpoint_slots(
+    view: &DcMembershipView,
+    slots: &mut HashMap<DomainSlotId, EndpointSlotTask>,
+    retired_slots: &mut JoinSet<(DomainSlotId, Result<(), tokio::task::JoinError>)>,
+) {
+    let departed: Vec<_> = slots
+        .keys()
+        .filter(|slot_id| !view.domains.contains_key(*slot_id))
+        .cloned()
+        .collect();
+    for slot_id in departed {
+        let Some(slot) = slots.remove(&slot_id) else {
+            continue;
+        };
+        drop(slot.metadata);
+        retired_slots.spawn(async move {
+            let result = slot.task.await;
+            (slot_id, result)
+        });
     }
 }
 
-fn reject_duplicate_live_pools(view: &mut DcMembershipView, dc_id: dynamo_kv_router::DcId) {
-    let mut owners: HashMap<PoolId, Vec<EndpointId>> = HashMap::new();
-    for (endpoint, membership) in &view.endpoints {
-        if membership.compatibility_conflict {
-            continue;
-        }
-        let Some(domain) = &membership.domain else {
-            continue;
-        };
-        owners
-            .entry(PoolId::new(domain.id, dc_id))
-            .or_default()
-            .push(endpoint.clone());
-    }
+type RetiredEndpointSlot =
+    Result<(DomainSlotId, Result<(), tokio::task::JoinError>), tokio::task::JoinError>;
 
-    for (pool_id, endpoints) in owners {
-        if endpoints.len() < 2 {
-            continue;
+fn report_retired_endpoint_slot(retired: Option<RetiredEndpointSlot>) {
+    match retired {
+        Some(Ok((slot_id, result))) => report_endpoint_slot_exit(slot_id, result),
+        Some(Err(error)) if !error.is_cancelled() => {
+            tracing::warn!(%error, "KV DC Relay endpoint retirement monitor failed");
         }
-        tracing::error!(
-            %pool_id,
-            endpoints = ?endpoints,
-            "multiple live serving endpoints resolve to one CKF pool; fencing all colliding endpoints"
-        );
-        for endpoint in endpoints {
-            if let Some(membership) = view.endpoints.get_mut(&endpoint) {
-                membership.compatibility_conflict = true;
-            }
-        }
+        Some(Err(_)) | None => {}
+    }
+}
+
+fn report_endpoint_slot_exit(slot_id: DomainSlotId, result: Result<(), tokio::task::JoinError>) {
+    if let Err(error) = result
+        && !error.is_cancelled()
+    {
+        tracing::warn!(endpoint = %slot_id.endpoint, %error, "KV DC Relay domain slot failed");
     }
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn run_endpoint_slot(
     component: Component,
-    dc_id: Arc<str>,
-    process_incarnation: u64,
-    endpoint: EndpointId,
-    mut metadata_rx: watch::Receiver<Option<EndpointMembership>>,
+    ckf_dc_id: dynamo_kv_router::DcId,
+    slot_id: DomainSlotId,
+    mut metadata_rx: watch::Receiver<Option<DomainMembership>>,
     status: SharedEndpointStatus,
     rebuild_permit: Arc<Semaphore>,
     recovery_fetch_permit: Arc<Semaphore>,
-    publication: ActorPublicationConfig,
+    pools: Arc<PoolRegistry>,
     recovery_attempt_timeout: Duration,
     cancel: CancellationToken,
 ) {
-    let mut config_tx: Option<
-        watch::Sender<HashMap<WorkerId, crate::local_model::runtime_config::ModelRuntimeConfig>>,
-    > = None;
+    let endpoint = slot_id.endpoint.clone();
+    let mut config_tx: Option<watch::Sender<HashMap<WorkerId, ModelRuntimeConfig>>> = None;
     let mut source_watch: Option<KvSourceMembershipWatch> = None;
-    let mut actor: Option<EndpointActorRuntime> = None;
+    let mut runtime: Option<EndpointPoolRuntime> = None;
     let mut layout_generation = 0u64;
+    let mut retry_binding: Option<ActorBinding> = None;
+    let mut retry_delay = Duration::from_millis(100);
+    let mut start_failures = 0u64;
+    let mut registration_refresh_failures = 0u64;
 
     loop {
         let membership = metadata_rx.borrow_and_update().clone();
@@ -663,7 +715,13 @@ async fn run_endpoint_slot(
 
         if let Some(membership) = &membership {
             if let Some(sender) = &config_tx {
-                sender.send_replace(membership.runtime_configs.clone());
+                sender.send_if_modified(|current| {
+                    if current == &membership.runtime_configs {
+                        return false;
+                    }
+                    current.clone_from(&membership.runtime_configs);
+                    true
+                });
             } else {
                 let (sender, configs) = watch::channel(membership.runtime_configs.clone());
                 let coordinator = KvSourceMembershipCoordinator::start(
@@ -676,12 +734,44 @@ async fn run_endpoint_slot(
             }
         }
 
+        if let (Some(active), Some(membership)) = (runtime.as_mut(), membership.as_ref())
+            && membership.is_materializable()
+            && active.registrations != membership.registrations
+        {
+            match pools
+                .replace_registrations(&mut active.attachment, membership.registrations.clone())
+                .await
+            {
+                Ok(()) => {
+                    registration_refresh_failures = 0;
+                    active.registrations.clone_from(&membership.registrations);
+                }
+                Err(error) => {
+                    registration_refresh_failures = registration_refresh_failures.saturating_add(1);
+                    if registration_refresh_failures == 1 {
+                        tracing::warn!(
+                            %endpoint,
+                            %error,
+                            "Failed to refresh KV DC Relay model bindings"
+                        );
+                    } else {
+                        tracing::debug!(
+                            %endpoint,
+                            %error,
+                            registration_refresh_failures,
+                            "KV DC Relay model binding refresh failed again"
+                        );
+                    }
+                }
+            }
+        }
+
         let source_view = source_watch.as_ref().map(|watch| watch.borrow().clone());
         let desired_binding = membership.as_ref().and_then(|membership| {
-            if membership.compatibility_conflict {
+            if !membership.is_materializable() {
                 return None;
             }
-            let domain = membership.domain.clone()?;
+            let domain = membership.domain.clone();
             let kv_state_endpoint = source_view.as_ref()?.resolved_kv_state_endpoint()?.clone();
             source_view
                 .as_ref()?
@@ -693,14 +783,20 @@ async fn run_endpoint_slot(
                     kv_state_endpoint,
                 })
         });
+        if retry_binding.as_ref() != desired_binding.as_ref() {
+            retry_binding = desired_binding.clone();
+            retry_delay = Duration::from_millis(100);
+            start_failures = 0;
+            registration_refresh_failures = 0;
+        }
 
-        let binding_changed = actor
+        let binding_changed = runtime
             .as_ref()
             .is_some_and(|active| Some(&active.binding) != desired_binding.as_ref());
         if binding_changed || membership.is_none() {
-            if let Some(active) = actor.take() {
+            if let Some(active) = runtime.take() {
                 status.write().await.lifecycle = SlotLifecycle::Draining;
-                stop_endpoint_actor(active).await;
+                stop_endpoint_pool(active, &pools).await;
                 let mut current = status.write().await;
                 current.actor = None;
                 if membership.is_some() {
@@ -719,7 +815,7 @@ async fn run_endpoint_slot(
             }
         }
 
-        if actor.is_none()
+        if runtime.is_none()
             && let (Some(binding), Some(membership), Some(membership_watch)) = (
                 desired_binding.clone(),
                 membership.clone(),
@@ -728,18 +824,16 @@ async fn run_endpoint_slot(
         {
             status.write().await.lifecycle = SlotLifecycle::Starting;
             let candidate_generation = membership.generation;
-            layout_generation = layout_generation.saturating_add(1);
-            match start_endpoint_actor(
+            match start_endpoint_pool(
                 component.clone(),
-                dc_id.clone(),
-                process_incarnation,
+                ckf_dc_id,
                 endpoint.clone(),
-                layout_generation,
                 binding.clone(),
+                membership.registrations.clone(),
                 membership_watch,
                 rebuild_permit.clone(),
                 recovery_fetch_permit.clone(),
-                publication,
+                pools.clone(),
                 recovery_attempt_timeout,
                 cancel.child_token(),
             )
@@ -754,17 +848,26 @@ async fn run_endpoint_slot(
                             watch.borrow().resolved_kv_state_endpoint().cloned()
                         }) == Some(binding.kv_state_endpoint.clone()) =>
                 {
+                    retry_delay = Duration::from_millis(100);
+                    start_failures = 0;
+                    registration_refresh_failures = 0;
+                    layout_generation = candidate.attachment.layout_generation;
                     let mut current = status.write().await;
                     current.layout_generation = layout_generation;
-                    current.actor = Some(candidate.handle.clone());
+                    current.actor = Some(candidate.attachment.handle.clone());
                     current.lifecycle = SlotLifecycle::Active;
-                    actor = Some(candidate);
+                    runtime = Some(candidate);
                 }
                 Ok(candidate) => {
-                    stop_endpoint_actor(candidate).await;
+                    stop_endpoint_pool(candidate, &pools).await;
                 }
                 Err(error) => {
-                    tracing::error!(%endpoint, %error, "Failed to materialize KV DC Relay endpoint actor");
+                    start_failures = start_failures.saturating_add(1);
+                    if start_failures == 1 {
+                        tracing::error!(%endpoint, %error, "Failed to materialize KV DC Relay endpoint actor");
+                    } else {
+                        tracing::debug!(%endpoint, %error, start_failures, retry_ms = retry_delay.as_millis(), "KV DC Relay endpoint actor retry failed");
+                    }
                     let mut current = status.write().await;
                     current.lifecycle = SlotLifecycle::Fenced;
                     current.actor = None;
@@ -772,44 +875,67 @@ async fn run_endpoint_slot(
             }
         }
 
-        if membership
-            .as_ref()
-            .is_some_and(|membership| membership.compatibility_conflict)
-        {
-            status.write().await.lifecycle = SlotLifecycle::Fenced;
-        }
-
         enum SlotInput {
             Metadata,
             Source,
+            SourceClosed,
             Fault(ActorFault),
-            ActorExited,
+            PoolUnavailable,
             Health,
+            Retry,
             Cancelled,
         }
+        let pool_cancel = runtime
+            .as_ref()
+            .map(|active| active.attachment.pool_cancel.clone());
         let input = tokio::select! {
             _ = cancel.cancelled() => SlotInput::Cancelled,
             changed = metadata_rx.changed() => {
                 if changed.is_ok() { SlotInput::Metadata } else { SlotInput::Cancelled }
             }
-            changed = async { source_watch.as_mut().expect("guarded source watch").changed().await }, if source_watch.is_some() => {
-                if changed.is_ok() { SlotInput::Source } else { SlotInput::Metadata }
+            changed = async {
+                let Some(source_watch) = source_watch.as_mut() else {
+                    return std::future::pending().await;
+                };
+                source_watch.changed().await
+            } => {
+                if changed.is_ok() { SlotInput::Source } else { SlotInput::SourceClosed }
             }
-            fault = async { actor.as_mut().expect("guarded actor").faults.recv().await }, if actor.is_some() => {
+            fault = async {
+                let Some(runtime) = runtime.as_mut() else {
+                    return std::future::pending().await;
+                };
+                runtime.attachment.faults.recv().await
+            } => {
                 match fault {
                     Some(fault) => SlotInput::Fault(fault),
-                    None => SlotInput::ActorExited,
+                    None => SlotInput::PoolUnavailable,
                 }
             }
-            _ = diagnostic_tick(), if actor.is_some() => SlotInput::Health,
+            _ = async {
+                let Some(pool_cancel) = pool_cancel.as_ref() else {
+                    return std::future::pending().await;
+                };
+                pool_cancel.cancelled().await
+            } => SlotInput::PoolUnavailable,
+            _ = diagnostic_tick(), if runtime.is_some() => SlotInput::Health,
+            _ = tokio::time::sleep(retry_delay), if runtime.is_none() && desired_binding.is_some() => SlotInput::Retry,
         };
         match input {
             SlotInput::Metadata | SlotInput::Source | SlotInput::Health => {}
-            SlotInput::ActorExited => {
-                tracing::error!(%endpoint, "KV DC Relay actor exited unexpectedly; rebuilding its producer generation");
+            SlotInput::SourceClosed => {
+                tracing::debug!(%endpoint, "KV source membership watch closed; rebinding");
+                config_tx = None;
+                source_watch = None;
+            }
+            SlotInput::Retry => {
+                retry_delay = retry_delay.saturating_mul(2).min(Duration::from_secs(5));
+            }
+            SlotInput::PoolUnavailable => {
+                tracing::warn!(%endpoint, "KV DC Relay pool generation became unavailable; restarting pool actor");
                 status.write().await.lifecycle = SlotLifecycle::Fenced;
-                if let Some(active) = actor.take() {
-                    stop_endpoint_actor(active).await;
+                if let Some(active) = runtime.take() {
+                    stop_endpoint_pool(active, &pools).await;
                 }
                 let mut current = status.write().await;
                 current.actor = None;
@@ -827,7 +953,7 @@ async fn run_endpoint_slot(
                 match fault.disposition.action {
                     CkfFailureAction::ContinueCapacityOmission => {}
                     CkfFailureAction::ReportResourceFailure => {
-                        if let Some(active) = actor.as_ref() {
+                        if let Some(active) = runtime.as_ref() {
                             let disposition = active
                                 .recovery
                                 .client()
@@ -853,7 +979,7 @@ async fn run_endpoint_slot(
                         }
                     }
                     CkfFailureAction::RejectSource => {
-                        if let Some(active) = actor.as_ref() {
+                        if let Some(active) = runtime.as_ref() {
                             active
                                 .recovery
                                 .client()
@@ -865,8 +991,8 @@ async fn run_endpoint_slot(
                         // The producer's exact state is suspect. Retire its publisher and source
                         // bindings before the slot loop constructs a fresh layout generation.
                         status.write().await.lifecycle = SlotLifecycle::Fenced;
-                        if let Some(active) = actor.take() {
-                            fence_endpoint_actor(active).await;
+                        if let Some(active) = runtime.take() {
+                            fence_endpoint_pool(active, &pools).await;
                         }
                         status.write().await.actor = None;
                     }
@@ -879,14 +1005,14 @@ async fn run_endpoint_slot(
         }
 
         #[cfg(feature = "ckf-diagnostics")]
-        if let Some(active) = &actor {
+        if let Some(active) = &runtime {
             status.write().await.recovery = active.recovery.client().health_snapshot().await;
         }
     }
 
-    if let Some(active) = actor {
+    if let Some(active) = runtime {
         status.write().await.lifecycle = SlotLifecycle::Draining;
-        stop_endpoint_actor(active).await;
+        stop_endpoint_pool(active, &pools).await;
     }
     let mut current = status.write().await;
     current.actor = None;
@@ -901,37 +1027,26 @@ async fn diagnostic_tick() {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn start_endpoint_actor(
+async fn start_endpoint_pool(
     component: Component,
-    dc_id: Arc<str>,
-    process_incarnation: u64,
+    ckf_dc_id: dynamo_kv_router::DcId,
     endpoint: EndpointId,
-    layout_generation: u64,
     binding: ActorBinding,
+    registrations: Vec<CanonicalModelRegistration>,
     membership_watch: KvSourceMembershipWatch,
     rebuild_permit: Arc<Semaphore>,
     recovery_fetch_permit: Arc<Semaphore>,
-    publication: ActorPublicationConfig,
+    pools: Arc<PoolRegistry>,
     recovery_attempt_timeout: Duration,
     cancel: CancellationToken,
-) -> anyhow::Result<EndpointActorRuntime> {
-    let mut config = CkfConfig::new(DEFAULT_EXPECTED_UNIQUE_BLOCKS);
-    config.publish_every_n_events = publication.threshold;
-    let ckf_dc_id = stable_dc_id(dc_id.as_ref());
-    let scope = StreamScope {
-        process_incarnation,
-        layout_generation,
-        pool_binding: PoolBinding::new(
-            PoolId::new(binding.domain.id, ckf_dc_id),
-            EndpointLocator::new(ckf_dc_id, endpoint.clone()),
-            Some(EndpointLocator::new(
-                ckf_dc_id,
-                binding.kv_state_endpoint.clone(),
-            )),
-        ),
-    };
-    let (handle, faults) =
-        KvDcRelayHandle::spawn_with_publication_delay(config, scope, publication.delay)?;
+) -> anyhow::Result<EndpointPoolRuntime> {
+    let attachment = pools
+        .attach(PoolAttachRequest {
+            pool_id: PoolId::new(binding.domain.id, ckf_dc_id),
+            endpoint: endpoint.clone(),
+            registrations: registrations.clone(),
+        })
+        .await?;
     let initial_recoveries = membership_watch
         .borrow()
         .sources
@@ -944,14 +1059,14 @@ async fn start_endpoint_actor(
         })
         .collect();
     let target = KvDcRelayRecoveryTarget::new(
-        handle.clone(),
+        attachment.handle.clone(),
         rebuild_permit,
         initial_recoveries,
         recovery_attempt_timeout,
     );
     let recovery = match start_target_subscriber(
-        component,
-        endpoint,
+        component.clone(),
+        endpoint.clone(),
         target,
         membership_watch,
         "kv-dc-relay".to_string(),
@@ -964,37 +1079,52 @@ async fn start_endpoint_actor(
     {
         Ok(recovery) => recovery,
         Err(error) => {
-            let _ = handle.shutdown().await;
+            // `detach` owns the actor fault receiver and is cancellation-sensitive; this
+            // endpoint-slot task is joined by the host, so keep the await inline and drive it to
+            // completion before returning.
+            let _ = pools.detach(attachment).await;
             return Err(error);
         }
     };
-    Ok(EndpointActorRuntime {
-        handle,
+    Ok(EndpointPoolRuntime {
+        attachment,
         recovery,
-        faults,
         binding,
+        registrations,
     })
 }
 
-async fn stop_endpoint_actor(active: EndpointActorRuntime) {
+async fn stop_endpoint_pool(active: EndpointPoolRuntime, pools: &PoolRegistry) {
     active.recovery.shutdown().await;
-    if let Err(error) = active.handle.shutdown().await {
-        tracing::warn!(%error, endpoint = %active.handle.scope.pool_binding.serving_endpoint().endpoint_id(), "Failed to drain KV DC Relay endpoint actor");
+    let pool_id = active.attachment.pool_id;
+    let endpoint = active.binding.kv_state_endpoint.clone();
+    // Keep this await inline: `detach` owns the actor fault receiver and must complete its
+    // actor round-trip before the endpoint-slot task exits. The host joins every slot during
+    // retirement and shutdown rather than aborting it.
+    if let Err(error) = pools.detach(active.attachment).await {
+        tracing::warn!(%error, %pool_id, %endpoint, "Failed to detach KV DC Relay pool actor");
     }
 }
 
-async fn fence_endpoint_actor(active: EndpointActorRuntime) {
+async fn fence_endpoint_pool(active: EndpointPoolRuntime, pools: &PoolRegistry) {
     // Stop publication first. Recovery shutdown may attempt rank resets, but a producer whose
     // exact state is suspect must not emit another apparently valid delta while being retired.
-    if let Err(error) = active.handle.fence().await {
-        tracing::warn!(%error, endpoint = %active.handle.scope.pool_binding.serving_endpoint().endpoint_id(), "Failed to fence KV DC Relay endpoint actor cleanly");
+    let pool_id = active.attachment.pool_id;
+    if let Err(error) = pools.fence(pool_id).await {
+        tracing::warn!(%error, %pool_id, "Failed to fence KV DC Relay pool generation cleanly");
     }
     active.recovery.shutdown().await;
+    // Even though the pool is already fenced and absent from the catalog, drive detach to
+    // completion so its fault route is retired with the actor. The host joins
+    // this endpoint-slot task and never aborts the detach future.
+    if let Err(error) = pools.detach(active.attachment).await {
+        tracing::warn!(%error, %pool_id, "Failed to detach fenced KV DC Relay pool actor");
+    }
 }
 
 #[cfg(feature = "ckf-diagnostics")]
 async fn endpoint_stats(
-    endpoint: EndpointId,
+    slot_id: DomainSlotId,
     status: SharedEndpointStatus,
 ) -> Result<KvDcRelayEndpointStats, KvDcRelayError> {
     let status = status.read().await.clone();
@@ -1008,9 +1138,9 @@ async fn endpoint_stats(
             Some(KvDcRelayAggregationStats {
                 members: members
                     .into_iter()
-                    .map(|(worker, blocks)| KvDcRelayMemberStats {
-                        worker_id: worker.worker_id,
-                        dp_rank: worker.dp_rank,
+                    .map(|(source, blocks)| KvDcRelayMemberStats {
+                        worker_id: source.worker_id,
+                        dp_rank: source.dp_rank,
                         blocks,
                     })
                     .collect(),
@@ -1055,16 +1185,22 @@ async fn endpoint_stats(
     };
     let membership = status.membership;
     Ok(KvDcRelayEndpointStats {
-        serving_endpoint: endpoint.to_string(),
+        serving_endpoint: slot_id.endpoint.to_string(),
         lifecycle: status.lifecycle.as_str().to_string(),
         layout_generation: status.layout_generation,
         cache_domain: membership
             .as_ref()
-            .and_then(|membership| membership.domain.as_ref())
-            .map(cache_domain_stats),
-        compatibility_conflict: membership
+            .map(|membership| cache_domain_stats(&membership.domain)),
+        membership_conflicts: membership
             .as_ref()
-            .is_some_and(|membership| membership.compatibility_conflict),
+            .map(|membership| {
+                membership
+                    .conflicts
+                    .iter()
+                    .map(|conflict| format!("{conflict:?}"))
+                    .collect()
+            })
+            .unwrap_or_default(),
         models: membership
             .as_ref()
             .map(|membership| membership.models.clone())
@@ -1162,53 +1298,41 @@ fn actor_health(handle: &KvDcRelayHandle) -> KvDcRelayActorStats {
 
 #[cfg(test)]
 mod tests {
-    use dynamo_kv_router::identity::{
-        CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, RoutingScopeId,
-    };
-
     use super::*;
-    use crate::kv_dc_relay::resolution::ResolvedIndexerDomain;
 
-    fn membership(endpoint: &str, domain: ResolvedIndexerDomain) -> EndpointMembership {
-        EndpointMembership {
-            endpoint: EndpointId::from(endpoint),
-            generation: 1,
-            domain: Some(domain),
-            compatibility_conflict: false,
-            models: Vec::new(),
-            aliases: Vec::new(),
-            roles: Vec::new(),
-            runtime_configs: HashMap::new(),
-        }
-    }
-
-    #[test]
-    fn simultaneous_endpoints_cannot_own_one_pool() {
-        let domain_id = IndexerDomainId::new(
-            CacheSemanticsId::new([1; 16], IdentitySource::Explicit),
-            RoutingScopeId::new([2; 16], IdentitySource::Explicit),
+    #[tokio::test]
+    async fn departed_endpoint_slots_are_reaped_instead_of_parked() {
+        let endpoint = EndpointId::from("prod.backend.generate");
+        let domain = super::super::resolution::resolve_indexer_domain(
+            &crate::model_card::ModelDeploymentCard::with_name_only("model"),
+            &endpoint,
+            1,
         );
-        let domain = ResolvedIndexerDomain {
-            id: domain_id,
-            diagnostic_model_artifact: "model".to_string(),
-            kv_block_size: 512,
-            event_hash_format: 1,
+        let slot_id = DomainSlotId {
+            endpoint,
+            indexer_domain: domain.id,
         };
-        let first = membership("ns/router/first", domain.clone());
-        let second = membership("ns/router/second", domain);
-        let mut view = DcMembershipView {
-            endpoints: HashMap::from([
-                (first.endpoint.clone(), first),
-                (second.endpoint.clone(), second),
-            ]),
-        };
+        let (metadata, mut metadata_rx) = watch::channel(None);
+        let task = tokio::spawn(async move { while metadata_rx.changed().await.is_ok() {} });
+        let mut slots = HashMap::from([(
+            slot_id.clone(),
+            EndpointSlotTask {
+                metadata,
+                status: Arc::new(RwLock::new(EndpointSlotStatus::default())),
+                task,
+            },
+        )]);
+        let mut retired_slots = JoinSet::new();
 
-        reject_duplicate_live_pools(&mut view, DcId::new(7));
-
-        assert!(
-            view.endpoints
-                .values()
-                .all(|membership| membership.compatibility_conflict)
+        retire_departed_endpoint_slots(
+            &DcMembershipView::default(),
+            &mut slots,
+            &mut retired_slots,
         );
+
+        assert!(slots.is_empty());
+        let (retired_slot, result) = retired_slots.join_next().await.unwrap().unwrap();
+        assert_eq!(retired_slot, slot_id);
+        result.unwrap();
     }
 }
