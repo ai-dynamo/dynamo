@@ -2347,6 +2347,202 @@ async fn tool_calls_qwen3_coder_auto_routes_through_experimental_gate() {
     );
 }
 
+struct QwenV1ToolChoiceCase {
+    name: &'static str,
+    tool_choice: Option<ChatCompletionToolChoiceOption>,
+    payload_chunks: Vec<&'static str>,
+}
+
+fn qwen_v1_tool_choice_cases() -> Vec<QwenV1ToolChoiceCase> {
+    let native_xml_chunks = || {
+        vec![
+            "<tool_",
+            "call>\n<function=get_",
+            "weather>\n<parameter=location>\nSan ",
+            "Francisco\n</parameter>\n</function>\n</tool_call>",
+        ]
+    };
+
+    vec![
+        QwenV1ToolChoiceCase {
+            name: "omitted + native XML",
+            tool_choice: None,
+            payload_chunks: native_xml_chunks(),
+        },
+        QwenV1ToolChoiceCase {
+            name: "auto + native XML",
+            tool_choice: Some(ChatCompletionToolChoiceOption::Auto),
+            payload_chunks: native_xml_chunks(),
+        },
+        QwenV1ToolChoiceCase {
+            name: "named + guided bare parameters",
+            tool_choice: Some(ChatCompletionToolChoiceOption::Named(
+                ChatCompletionNamedToolChoice {
+                    r#type: ChatCompletionToolType::Function,
+                    function: FunctionName {
+                        name: "get_weather".to_string(),
+                    },
+                },
+            )),
+            payload_chunks: vec!["{\"loc", "ation\":\"San Francisco\"}"],
+        },
+        QwenV1ToolChoiceCase {
+            name: "required + guided bare tool array",
+            tool_choice: Some(ChatCompletionToolChoiceOption::Required),
+            payload_chunks: vec![
+                "[{\"name\":\"get_weather\",\"para",
+                "meters\":{\"location\":\"San Francisco\"}}]",
+            ],
+        },
+    ]
+}
+
+fn qwen_v1_request(
+    tool_choice: Option<ChatCompletionToolChoiceOption>,
+) -> NvCreateChatCompletionRequest {
+    let mut request = streaming_tool_request(ChatCompletionToolChoiceOption::Auto);
+    request.inner.tool_choice = tool_choice;
+    request
+}
+
+fn qwen_v1_input_chunks(payload_chunks: &[&str]) -> Vec<NvCreateChatCompletionStreamResponse> {
+    let mut input_chunks = vec![
+        mock_content_chunk("Let me check."),
+        mock_content_chunk("</think>"),
+    ];
+    input_chunks.extend(payload_chunks.iter().map(|chunk| mock_content_chunk(chunk)));
+    input_chunks.push(mock_final_chunk());
+    input_chunks
+}
+
+/// Production v1 path for Qwen3-Coder across every tool-choice shape.
+///
+/// Omitted/auto consume native Qwen XML in marker-based mode. Named/required consume
+/// guided-decoding JSON in Immediate mode. Fragmenting the markers and JSON verifies
+/// that backend stream coalescing does not change the protocol result.
+#[tokio::test]
+async fn qwen3_coder_v1_stream_tool_choice_matrix() {
+    assert!(
+        !dynamo_runtime::config::env_is_truthy("DYN_ENABLE_EXPERIMENTAL_PARSERS_V2"),
+        "v1 matrix requires DYN_ENABLE_EXPERIMENTAL_PARSERS_V2 to be unset"
+    );
+
+    for case in qwen_v1_tool_choice_cases() {
+        let preprocessor = build_preprocessor(Some("qwen3"), Some("qwen3_coder"));
+        let request = qwen_v1_request(case.tool_choice);
+        let input_stream = stream::iter(
+            qwen_v1_input_chunks(&case.payload_chunks)
+                .into_iter()
+                .map(Annotated::from_data),
+        );
+        let output_stream = preprocessor
+            .postprocessor_parsing_stream(input_stream, &request, true, false)
+            .expect("postprocessor_parsing_stream should build");
+        let DrainOutput {
+            reasoning,
+            content,
+            tool_calls,
+            finish_reasons,
+        } = drain_stream(output_stream).await;
+
+        assert_eq!(
+            reasoning.trim(),
+            "Let me check.",
+            "{}: reasoning must be separated from the tool payload",
+            case.name
+        );
+        assert_clean_tool_call(case.name, &content, &tool_calls, "San Francisco");
+        assert!(
+            finish_reasons.contains(&FinishReason::ToolCalls),
+            "{}: expected ToolCalls finish_reason, got: {finish_reasons:?}",
+            case.name
+        );
+    }
+}
+
+/// Non-stream parity for the Qwen3-Coder v1 tool-choice matrix.
+///
+/// The HTTP `stream=false` path uses the same postprocessed stream and folds it through
+/// `NvCreateChatCompletionResponse::from_annotated_stream`; verify that aggregation
+/// preserves the structured call and does not reintroduce raw tool payload content.
+#[tokio::test]
+async fn qwen3_coder_v1_nonstream_tool_choice_matrix() {
+    assert!(
+        !dynamo_runtime::config::env_is_truthy("DYN_ENABLE_EXPERIMENTAL_PARSERS_V2"),
+        "v1 matrix requires DYN_ENABLE_EXPERIMENTAL_PARSERS_V2 to be unset"
+    );
+
+    for case in qwen_v1_tool_choice_cases() {
+        let preprocessor = build_preprocessor(Some("qwen3"), Some("qwen3_coder"));
+        let request = qwen_v1_request(case.tool_choice);
+        let input_stream = stream::iter(
+            qwen_v1_input_chunks(&case.payload_chunks)
+                .into_iter()
+                .map(Annotated::from_data),
+        );
+        let output_stream = preprocessor
+            .postprocessor_parsing_stream(input_stream, &request, true, false)
+            .expect("postprocessor_parsing_stream should build");
+
+        let response = NvCreateChatCompletionResponse::from_annotated_stream(
+            output_stream,
+            ParsingOptions::new(Some("qwen3_coder".to_string()), Some("qwen3".to_string())),
+        )
+        .await
+        .expect("aggregation should succeed");
+        let choice = &response.inner.choices[0];
+        let content = choice
+            .message
+            .content
+            .as_ref()
+            .map(get_text)
+            .unwrap_or_default();
+
+        assert!(
+            content.is_empty(),
+            "{}: tool payload leaked into aggregated content: {content:?}",
+            case.name
+        );
+        assert_eq!(
+            choice.message.reasoning_content.as_deref(),
+            Some("Let me check."),
+            "{}: aggregated reasoning mismatch",
+            case.name
+        );
+        assert_eq!(
+            choice.finish_reason,
+            Some(FinishReason::ToolCalls),
+            "{}: aggregated finish_reason mismatch",
+            case.name
+        );
+
+        let tool_calls = choice
+            .message
+            .tool_calls
+            .as_ref()
+            .unwrap_or_else(|| panic!("{}: expected one aggregated tool call", case.name));
+        assert_eq!(
+            tool_calls.len(),
+            1,
+            "{}: expected one aggregated tool call",
+            case.name
+        );
+        assert_eq!(
+            tool_calls[0].function.name, "get_weather",
+            "{}: wrong aggregated tool name",
+            case.name
+        );
+        let arguments: Value = serde_json::from_str(&tool_calls[0].function.arguments)
+            .unwrap_or_else(|error| panic!("{}: arguments are not JSON: {error}", case.name));
+        assert_eq!(
+            arguments,
+            serde_json::json!({"location": "San Francisco"}),
+            "{}: wrong aggregated arguments",
+            case.name
+        );
+    }
+}
+
 /// DeepSeek V4/GLM + required + `prompt_injected_reasoning=true` +
 /// reasoning-close-marker JSON. This is not bare JSON; the reasoning parser
 /// must strip the pre-`</think>` prefix before the immediate jail sees JSON.
