@@ -141,7 +141,7 @@ RUN gcc -O2 -Wall -Wextra -o /cuda-checkpoint-helper \
 # =============================================================================
 # Stage: CRIU Builder - Build CRIU with CUDA plugin
 # =============================================================================
-FROM ubuntu:24.04 AS criu-builder
+FROM ubuntu:22.04 AS criu-builder
 
 ARG CRIU_REPO
 ARG CRIU_REF
@@ -161,6 +161,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     protobuf-c-compiler \
     protobuf-compiler \
     python3 \
+    python3-pip \
     python3-protobuf \
     libgnutls28-dev \
     libnftables-dev \
@@ -381,14 +382,20 @@ RUN if [ "${TARGETARCH}" != "amd64" ]; then \
     fi
 
 # Install minimal runtime dependencies for CRIU restore (nsrestore runs here via nsenter)
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN . /etc/os-release \
+    && case "${VERSION_ID}" in \
+        22.04) gnutls_package=libgnutls30 ;; \
+        24.04) gnutls_package=libgnutls30t64 ;; \
+        *) echo "ERROR: unsupported Ubuntu release ${VERSION_ID}" >&2; exit 1 ;; \
+    esac \
+    && apt-get update && apt-get install -y --no-install-recommends \
     libbsd0 \
     libcap2 \
     libnet1 \
     libnl-3-200 \
     libnl-route-3-200 \
     libprotobuf-c1 \
-    libgnutls30t64 \
+    "${gnutls_package}" \
     libnftables1 \
     iproute2 \
     iptables \
