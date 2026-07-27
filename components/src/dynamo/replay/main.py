@@ -30,6 +30,7 @@ from dynamo.common.forward_pass_metrics import (
 from dynamo.llm import AicPerfConfig, KvRouterConfig
 from dynamo.mocker import MockEngineArgs
 from dynamo.mocker.utils.kv_cache import compute_kv_bytes_per_token
+from dynamo.planner.offline.trace_data import extract_traffic_observations_from_trace
 from dynamo.replay import run_synthetic_trace_replay, run_trace_replay
 from dynamo.replay.reporting import format_report_table, write_report_json
 
@@ -403,7 +404,8 @@ class SyntheticWorkload:
 
 
 def _run_planner_replay(
-    trace_file: str | None,
+    trace_files: Sequence[str | os.PathLike[str]] | None,
+    trace_format: str,
     extra_engine_args: MockEngineArgs | None,
     prefill_engine_args: MockEngineArgs | None,
     decode_engine_args: MockEngineArgs | None,
@@ -413,7 +415,7 @@ def _run_planner_replay(
     num_decode_workers: int,
     router_mode: str,
     arrival_speedup_ratio: float,
-    trace_block_size: int,
+    trace_block_size: int | None,
     planner_config_arg: str,
     model_name: str | None = None,
     benchmark_granularity: int = 8,
@@ -446,9 +448,9 @@ def _run_planner_replay(
     planner_config = PlannerConfig.from_config_arg(planner_config_arg)
     planner_config.advisory = True
 
-    if (trace_file is None) == (synthetic is None):
+    if (trace_files is None) == (synthetic is None):
         raise ValueError(
-            "planner replay requires exactly one of trace_file or synthetic"
+            "planner replay requires exactly one of trace_files or synthetic"
         )
 
     if planner_config.mode == "agg":
@@ -478,10 +480,11 @@ def _run_planner_replay(
                 sla_e2e_ms=sla_e2e_ms,
             )
         else:
-            if trace_file is None:  # guaranteed by the trace/synthetic check above
-                raise ValueError("planner replay needs trace_file in trace mode")
-            bridge = PlannerReplayBridge(
-                trace_file=trace_file,
+            if trace_files is None:  # guaranteed by the trace/synthetic check above
+                raise ValueError("planner replay needs trace_files in trace mode")
+            bridge = PlannerReplayBridge.from_trace_files(
+                trace_files=trace_files,
+                trace_format=trace_format,
                 extra_engine_args=extra_engine_args,
                 num_workers=num_workers,
                 router_mode=router_mode,
@@ -527,10 +530,11 @@ def _run_planner_replay(
                 sla_e2e_ms=sla_e2e_ms,
             )
         else:
-            if trace_file is None:  # guaranteed by the trace/synthetic check above
-                raise ValueError("planner replay needs trace_file in trace mode")
-            bridge = PlannerReplayBridge.create_disagg(
-                trace_file=trace_file,
+            if trace_files is None:  # guaranteed by the trace/synthetic check above
+                raise ValueError("planner replay needs trace_files in trace mode")
+            bridge = PlannerReplayBridge.from_trace_files_disagg(
+                trace_files=trace_files,
+                trace_format=trace_format,
                 prefill_engine_args=prefill_engine_args,
                 decode_engine_args=decode_engine_args,
                 num_prefill_workers=num_prefill_workers,
@@ -555,10 +559,17 @@ def _run_planner_replay(
             f"planner-in-the-loop replay supports mode='agg' or 'disagg', got '{planner_config.mode}'"
         )
 
+    warmup_observations = None
+    if planner_config.load_predictor_warmup_trace is not None:
+        warmup_observations = extract_traffic_observations_from_trace(
+            planner_config.load_predictor_warmup_trace,
+            planner_config.throughput_adjustment_interval_seconds,
+        )
     adapter = ReplayPlannerAdapter(
         planner_config=planner_config,
         bridge=bridge,
         capabilities=capabilities,
+        warmup_observations=warmup_observations,
     )
 
     # Bootstrap regression models from mocker's perf model.
@@ -990,8 +1001,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.planner_config is not None:
         if args.replay_mode != "offline":
             parser.error("--planner-config only supports --replay-mode=offline")
-        if using_trace_file and args.trace_format != "mooncake":
-            parser.error("--planner-config only supports --trace-format=mooncake")
+        if using_trace_file and args.trace_format not in ("mooncake", "dynamo"):
+            parser.error(
+                "--planner-config only supports --trace-format=mooncake or dynamo"
+            )
 
         synthetic = None
         if not using_trace_file:
@@ -1009,7 +1022,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
 
         planner_report = _run_planner_replay(
-            trace_file=args.trace_files[0] if using_trace_file else None,
+            trace_files=args.trace_files if using_trace_file else None,
+            trace_format=args.trace_format,
             extra_engine_args=extra_engine_args,
             prefill_engine_args=prefill_engine_args,
             decode_engine_args=decode_engine_args,
@@ -1019,9 +1033,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             num_decode_workers=args.num_decode_workers,
             router_mode=args.router_mode,
             arrival_speedup_ratio=args.arrival_speedup_ratio,
-            trace_block_size=(
-                args.trace_block_size if args.trace_block_size is not None else 512
-            ),
+            trace_block_size=args.trace_block_size,
             planner_config_arg=args.planner_config,
             model_name=args.model_name,
             benchmark_granularity=args.benchmark_granularity,

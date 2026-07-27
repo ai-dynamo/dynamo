@@ -2273,21 +2273,18 @@ pub struct PlannerReplayBridge {
     handle: Option<dynamo_mocker::replay::PlannerReplayHandle>,
 }
 
-#[pymethods]
 impl PlannerReplayBridge {
-    /// Create a bridge for an aggregated Mooncake-style JSONL trace replay.
-    #[new]
-    #[pyo3(signature = (trace_file, extra_engine_args, num_workers, router_mode="round_robin", router_config=None, model_name=None, arrival_speedup_ratio=1.0, trace_block_size=512, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, replay_concurrency=None))]
     #[allow(clippy::too_many_arguments)]
-    fn new(
-        trace_file: PathBuf,
+    fn from_trace_files_inner(
+        trace_files: Vec<PathBuf>,
+        trace_format: dynamo_mocker::loadgen::TraceFileFormat,
         extra_engine_args: &MockEngineArgs,
         num_workers: usize,
         router_mode: &str,
         router_config: Option<KvRouterConfig>,
         model_name: Option<String>,
         arrival_speedup_ratio: f64,
-        trace_block_size: usize,
+        trace_block_size: Option<usize>,
         sla_ttft_ms: Option<f64>,
         sla_itl_ms: Option<f64>,
         sla_e2e_ms: Option<f64>,
@@ -2305,13 +2302,13 @@ impl PlannerReplayBridge {
             itl_ms: sla_itl_ms,
             e2e_ms: sla_e2e_ms,
         };
-
         let max_in_flight = parse_replay_concurrency(replay_concurrency).map_err(to_pyerr)?;
-        let handle = dynamo_mocker::replay::PlannerReplayHandle::from_trace_file(
+        let handle = dynamo_mocker::replay::PlannerReplayHandle::from_trace_files(
             args,
             router_config,
             None,
-            &trace_file,
+            &trace_files,
+            trace_format,
             trace_block_size,
             num_workers,
             arrival_speedup_ratio,
@@ -2320,18 +2317,15 @@ impl PlannerReplayBridge {
             sla,
         )
         .map_err(to_pyerr)?;
-
         Ok(Self {
             handle: Some(handle),
         })
     }
 
-    /// Create a bridge for a disaggregated Mooncake-style JSONL trace replay.
-    #[staticmethod]
-    #[pyo3(signature = (trace_file, prefill_engine_args, decode_engine_args, num_prefill_workers, num_decode_workers, router_mode="round_robin", router_config=None, model_name=None, arrival_speedup_ratio=1.0, trace_block_size=512, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, replay_concurrency=None))]
     #[allow(clippy::too_many_arguments)]
-    fn create_disagg(
-        trace_file: PathBuf,
+    fn from_trace_files_disagg_inner(
+        trace_files: Vec<PathBuf>,
+        trace_format: dynamo_mocker::loadgen::TraceFileFormat,
         prefill_engine_args: &MockEngineArgs,
         decode_engine_args: &MockEngineArgs,
         num_prefill_workers: usize,
@@ -2340,7 +2334,7 @@ impl PlannerReplayBridge {
         router_config: Option<KvRouterConfig>,
         model_name: Option<String>,
         arrival_speedup_ratio: f64,
-        trace_block_size: usize,
+        trace_block_size: Option<usize>,
         sla_ttft_ms: Option<f64>,
         sla_itl_ms: Option<f64>,
         sla_e2e_ms: Option<f64>,
@@ -2366,13 +2360,13 @@ impl PlannerReplayBridge {
             itl_ms: sla_itl_ms,
             e2e_ms: sla_e2e_ms,
         };
-
         let max_in_flight = parse_replay_concurrency(replay_concurrency).map_err(to_pyerr)?;
-        let handle = dynamo_mocker::replay::PlannerReplayHandle::from_trace_file_disagg(
+        let handle = dynamo_mocker::replay::PlannerReplayHandle::from_trace_files_disagg(
             config,
             router_config,
             None,
-            &trace_file,
+            &trace_files,
+            trace_format,
             trace_block_size,
             arrival_speedup_ratio,
             max_in_flight,
@@ -2380,10 +2374,162 @@ impl PlannerReplayBridge {
             sla,
         )
         .map_err(to_pyerr)?;
-
         Ok(Self {
             handle: Some(handle),
         })
+    }
+}
+
+#[pymethods]
+impl PlannerReplayBridge {
+    /// Create a bridge for an aggregated Mooncake-style JSONL trace replay.
+    #[new]
+    #[pyo3(signature = (trace_file, extra_engine_args, num_workers, router_mode="round_robin", router_config=None, model_name=None, arrival_speedup_ratio=1.0, trace_block_size=512, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, replay_concurrency=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        trace_file: PathBuf,
+        extra_engine_args: &MockEngineArgs,
+        num_workers: usize,
+        router_mode: &str,
+        router_config: Option<KvRouterConfig>,
+        model_name: Option<String>,
+        arrival_speedup_ratio: f64,
+        trace_block_size: usize,
+        sla_ttft_ms: Option<f64>,
+        sla_itl_ms: Option<f64>,
+        sla_e2e_ms: Option<f64>,
+        replay_concurrency: Option<isize>,
+    ) -> PyResult<Self> {
+        Self::from_trace_files_inner(
+            vec![trace_file],
+            dynamo_mocker::loadgen::TraceFileFormat::Mooncake,
+            extra_engine_args,
+            num_workers,
+            router_mode,
+            router_config,
+            model_name,
+            arrival_speedup_ratio,
+            Some(trace_block_size),
+            sla_ttft_ms,
+            sla_itl_ms,
+            sla_e2e_ms,
+            replay_concurrency,
+        )
+    }
+
+    /// Create a bridge for aggregated Mooncake or Dynamo request trace files.
+    #[staticmethod]
+    #[pyo3(signature = (trace_files, trace_format, extra_engine_args, num_workers, router_mode="round_robin", router_config=None, model_name=None, arrival_speedup_ratio=1.0, trace_block_size=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, replay_concurrency=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn from_trace_files(
+        trace_files: Vec<PathBuf>,
+        trace_format: &str,
+        extra_engine_args: &MockEngineArgs,
+        num_workers: usize,
+        router_mode: &str,
+        router_config: Option<KvRouterConfig>,
+        model_name: Option<String>,
+        arrival_speedup_ratio: f64,
+        trace_block_size: Option<usize>,
+        sla_ttft_ms: Option<f64>,
+        sla_itl_ms: Option<f64>,
+        sla_e2e_ms: Option<f64>,
+        replay_concurrency: Option<isize>,
+    ) -> PyResult<Self> {
+        Self::from_trace_files_inner(
+            trace_files,
+            parse_trace_file_format(trace_format)?,
+            extra_engine_args,
+            num_workers,
+            router_mode,
+            router_config,
+            model_name,
+            arrival_speedup_ratio,
+            trace_block_size,
+            sla_ttft_ms,
+            sla_itl_ms,
+            sla_e2e_ms,
+            replay_concurrency,
+        )
+    }
+
+    /// Create a bridge for a disaggregated Mooncake-style JSONL trace replay.
+    #[staticmethod]
+    #[pyo3(signature = (trace_file, prefill_engine_args, decode_engine_args, num_prefill_workers, num_decode_workers, router_mode="round_robin", router_config=None, model_name=None, arrival_speedup_ratio=1.0, trace_block_size=512, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, replay_concurrency=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn create_disagg(
+        trace_file: PathBuf,
+        prefill_engine_args: &MockEngineArgs,
+        decode_engine_args: &MockEngineArgs,
+        num_prefill_workers: usize,
+        num_decode_workers: usize,
+        router_mode: &str,
+        router_config: Option<KvRouterConfig>,
+        model_name: Option<String>,
+        arrival_speedup_ratio: f64,
+        trace_block_size: usize,
+        sla_ttft_ms: Option<f64>,
+        sla_itl_ms: Option<f64>,
+        sla_e2e_ms: Option<f64>,
+        replay_concurrency: Option<isize>,
+    ) -> PyResult<Self> {
+        Self::from_trace_files_disagg_inner(
+            vec![trace_file],
+            dynamo_mocker::loadgen::TraceFileFormat::Mooncake,
+            prefill_engine_args,
+            decode_engine_args,
+            num_prefill_workers,
+            num_decode_workers,
+            router_mode,
+            router_config,
+            model_name,
+            arrival_speedup_ratio,
+            Some(trace_block_size),
+            sla_ttft_ms,
+            sla_itl_ms,
+            sla_e2e_ms,
+            replay_concurrency,
+        )
+    }
+
+    /// Create a bridge for disaggregated Mooncake or Dynamo request trace files.
+    #[staticmethod]
+    #[pyo3(signature = (trace_files, trace_format, prefill_engine_args, decode_engine_args, num_prefill_workers, num_decode_workers, router_mode="round_robin", router_config=None, model_name=None, arrival_speedup_ratio=1.0, trace_block_size=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, replay_concurrency=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn from_trace_files_disagg(
+        trace_files: Vec<PathBuf>,
+        trace_format: &str,
+        prefill_engine_args: &MockEngineArgs,
+        decode_engine_args: &MockEngineArgs,
+        num_prefill_workers: usize,
+        num_decode_workers: usize,
+        router_mode: &str,
+        router_config: Option<KvRouterConfig>,
+        model_name: Option<String>,
+        arrival_speedup_ratio: f64,
+        trace_block_size: Option<usize>,
+        sla_ttft_ms: Option<f64>,
+        sla_itl_ms: Option<f64>,
+        sla_e2e_ms: Option<f64>,
+        replay_concurrency: Option<isize>,
+    ) -> PyResult<Self> {
+        Self::from_trace_files_disagg_inner(
+            trace_files,
+            parse_trace_file_format(trace_format)?,
+            prefill_engine_args,
+            decode_engine_args,
+            num_prefill_workers,
+            num_decode_workers,
+            router_mode,
+            router_config,
+            model_name,
+            arrival_speedup_ratio,
+            trace_block_size,
+            sla_ttft_ms,
+            sla_itl_ms,
+            sla_e2e_ms,
+            replay_concurrency,
+        )
     }
 
     /// Create a bridge for an aggregated **synthetic** workload: `request_count`

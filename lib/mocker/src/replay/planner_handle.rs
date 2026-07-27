@@ -9,7 +9,7 @@
 //! which observes per-tick metrics and returns the scale decision plus the next
 //! tick time. The simulation owns the drive loop — there is no external stepping.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use super::offline::agg::RoundRobinAggRuntime;
@@ -22,7 +22,7 @@ use super::{
     TraceSimulationReport,
 };
 use crate::common::protocols::MockEngineArgs;
-use crate::loadgen::{Trace, WorkloadDriver};
+use crate::loadgen::{DynamoRequestTrace, Trace, TraceFileFormat, WorkloadDriver};
 use anyhow::Result;
 
 #[allow(clippy::large_enum_variant)]
@@ -71,12 +71,56 @@ fn prepare_mooncake_trace(
     arrival_speedup_ratio: f64,
     max_in_flight: Option<usize>,
 ) -> Result<Trace> {
-    let trace = Trace::from_mooncake(trace_path, trace_block_size)?.normalize_session_starts()?;
+    let trace = Trace::from_mooncake(trace_path, trace_block_size)?;
+    prepare_trace_timing(trace, arrival_speedup_ratio, max_in_flight)
+}
+
+fn prepare_trace_timing(
+    trace: Trace,
+    arrival_speedup_ratio: f64,
+    max_in_flight: Option<usize>,
+) -> Result<Trace> {
+    let trace = trace.normalize_session_starts()?;
     if max_in_flight.is_none() {
         Ok(trace.speed_up_timing(arrival_speedup_ratio)?)
     } else {
         Ok(trace)
     }
+}
+
+fn prepare_trace_files(
+    trace_paths: &[PathBuf],
+    trace_format: TraceFileFormat,
+    trace_block_size: Option<usize>,
+    arrival_speedup_ratio: f64,
+    max_in_flight: Option<usize>,
+) -> Result<Trace> {
+    let trace = match trace_format {
+        TraceFileFormat::Mooncake => {
+            let [trace_path] = trace_paths else {
+                anyhow::bail!(
+                    "Mooncake planner replay requires exactly one trace file, got {}",
+                    trace_paths.len()
+                );
+            };
+            Trace::from_mooncake(trace_path, trace_block_size.unwrap_or(512))?
+        }
+        TraceFileFormat::Dynamo => {
+            match DynamoRequestTrace::from_request_trace_files(trace_paths, trace_block_size)? {
+                DynamoRequestTrace::Standard(trace) => trace,
+                DynamoRequestTrace::Agentic(_) => {
+                    anyhow::bail!(
+                        "agentic Dynamo request traces are not supported by planner replay"
+                    )
+                }
+            }
+        }
+        other => anyhow::bail!(
+            "planner replay supports trace formats 'mooncake' and 'dynamo', got '{}'",
+            other.as_str()
+        ),
+    };
+    prepare_trace_timing(trace, arrival_speedup_ratio, max_in_flight)
 }
 
 impl PlannerReplayHandle {
@@ -147,6 +191,40 @@ impl PlannerReplayHandle {
     ) -> Result<Self> {
         let trace = prepare_mooncake_trace(
             trace_path,
+            trace_block_size,
+            arrival_speedup_ratio,
+            max_in_flight,
+        )?;
+        Self::from_trace(
+            args,
+            router_config,
+            prefill_load_estimator,
+            trace,
+            num_workers,
+            max_in_flight,
+            router_mode,
+            sla,
+        )
+    }
+
+    /// Create an aggregated handle from Mooncake or Dynamo request trace files.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_trace_files(
+        args: MockEngineArgs,
+        router_config: Option<ReplayKvRouterConfig>,
+        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+        trace_paths: &[PathBuf],
+        trace_format: TraceFileFormat,
+        trace_block_size: Option<usize>,
+        num_workers: usize,
+        arrival_speedup_ratio: f64,
+        max_in_flight: Option<usize>,
+        router_mode: ReplayRouterMode,
+        sla: SlaThresholds,
+    ) -> Result<Self> {
+        let trace = prepare_trace_files(
+            trace_paths,
+            trace_format,
             trace_block_size,
             arrival_speedup_ratio,
             max_in_flight,
@@ -235,6 +313,38 @@ impl PlannerReplayHandle {
         )
     }
 
+    /// Create a disaggregated handle from Mooncake or Dynamo request trace files.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_trace_files_disagg(
+        config: OfflineDisaggReplayConfig,
+        router_config: Option<ReplayKvRouterConfig>,
+        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+        trace_paths: &[PathBuf],
+        trace_format: TraceFileFormat,
+        trace_block_size: Option<usize>,
+        arrival_speedup_ratio: f64,
+        max_in_flight: Option<usize>,
+        router_mode: ReplayRouterMode,
+        sla: SlaThresholds,
+    ) -> Result<Self> {
+        let trace = prepare_trace_files(
+            trace_paths,
+            trace_format,
+            trace_block_size,
+            arrival_speedup_ratio,
+            max_in_flight,
+        )?;
+        Self::from_trace_disagg(
+            config,
+            router_config,
+            prefill_load_estimator,
+            trace,
+            max_in_flight,
+            router_mode,
+            sla,
+        )
+    }
+
     /// Run the whole replay to completion with the planner driving the tick cadence
     /// via `hook`. This is the unified entrypoint that replaces the external
     /// `advance_to`/`apply_scaling` stepping loop: the simulation owns the drive loop
@@ -255,11 +365,16 @@ impl PlannerReplayHandle {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+
     use super::PlannerReplayHandle;
     use crate::common::protocols::{MockEngineArgs, WorkerType};
-    use crate::loadgen::{ArrivalSpec, DelaySpec, LengthSpec, SyntheticTraceSpec, Trace};
+    use crate::loadgen::{
+        ArrivalSpec, DelaySpec, LengthSpec, SyntheticTraceSpec, Trace, TraceFileFormat,
+    };
     use crate::replay::NoopPlannerHook;
     use crate::replay::{OfflineDisaggReplayConfig, ReplayRouterMode, SlaThresholds};
+    use tempfile::NamedTempFile;
 
     const NUM_SESSIONS: usize = 8;
 
@@ -297,6 +412,53 @@ mod tests {
             arrival_seed: 42,
         })
         .unwrap()
+    }
+
+    fn request_trace_shard(request_id: &str, received_ms: u64, hash: u64) -> NamedTempFile {
+        let mut file = NamedTempFile::new().unwrap();
+        let row = serde_json::json!({
+            "schema": "dynamo.request.trace.v1",
+            "event_type": "request_end",
+            "event_time_unix_ms": received_ms + 10,
+            "request": {
+                "request_id": request_id,
+                "request_received_ms": received_ms,
+                "output_tokens": 4,
+                "replay": {
+                    "trace_block_size": 4,
+                    "input_length": 4,
+                    "input_sequence_hashes": [hash],
+                }
+            }
+        });
+        writeln!(file, "{row}").unwrap();
+        file
+    }
+
+    #[test]
+    fn from_trace_files_accepts_multi_shard_dynamo_trace() {
+        let first = request_trace_shard("first", 1_000, 11);
+        let second = request_trace_shard("second", 1_010, 12);
+        let paths = vec![first.path().to_path_buf(), second.path().to_path_buf()];
+
+        let report = PlannerReplayHandle::from_trace_files(
+            small_args(),
+            None,
+            None,
+            &paths,
+            TraceFileFormat::Dynamo,
+            None,
+            1,
+            1.0,
+            None,
+            ReplayRouterMode::RoundRobin,
+            SlaThresholds::default(),
+        )
+        .unwrap()
+        .run(Box::new(NoopPlannerHook))
+        .unwrap();
+
+        assert_eq!(report.request_counts.completed_requests, 2);
     }
 
     #[test]

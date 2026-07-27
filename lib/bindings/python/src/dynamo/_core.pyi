@@ -2659,6 +2659,23 @@ class PlannerReplayBridge:
     ) -> None: ...
 
     @staticmethod
+    def from_trace_files(
+        trace_files: List[str | os.PathLike[str]],
+        trace_format: str,
+        extra_engine_args: MockEngineArgs,
+        num_workers: int,
+        router_mode: str = "round_robin",
+        router_config: Optional[KvRouterConfig] = None,
+        model_name: Optional[str] = None,
+        arrival_speedup_ratio: float = 1.0,
+        trace_block_size: Optional[int] = None,
+        sla_ttft_ms: Optional[float] = None,
+        sla_itl_ms: Optional[float] = None,
+        sla_e2e_ms: Optional[float] = None,
+        replay_concurrency: Optional[int] = None,
+    ) -> "PlannerReplayBridge": ...
+
+    @staticmethod
     def create_disagg(
         trace_file: str | os.PathLike[str],
         prefill_engine_args: MockEngineArgs,
@@ -2670,6 +2687,25 @@ class PlannerReplayBridge:
         model_name: Optional[str] = None,
         arrival_speedup_ratio: float = 1.0,
         trace_block_size: int = 512,
+        sla_ttft_ms: Optional[float] = None,
+        sla_itl_ms: Optional[float] = None,
+        sla_e2e_ms: Optional[float] = None,
+        replay_concurrency: Optional[int] = None,
+    ) -> "PlannerReplayBridge": ...
+
+    @staticmethod
+    def from_trace_files_disagg(
+        trace_files: List[str | os.PathLike[str]],
+        trace_format: str,
+        prefill_engine_args: MockEngineArgs,
+        decode_engine_args: MockEngineArgs,
+        num_prefill_workers: int,
+        num_decode_workers: int,
+        router_mode: str = "round_robin",
+        router_config: Optional[KvRouterConfig] = None,
+        model_name: Optional[str] = None,
+        arrival_speedup_ratio: float = 1.0,
+        trace_block_size: Optional[int] = None,
         sla_ttft_ms: Optional[float] = None,
         sla_itl_ms: Optional[float] = None,
         sla_e2e_ms: Optional[float] = None,

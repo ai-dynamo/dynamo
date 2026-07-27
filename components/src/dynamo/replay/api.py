@@ -54,30 +54,34 @@ def run_trace_replay(
 ):
     trace_files = _normalize_trace_files(trace_files)
     if planner_config is not None:
-        # Planner replay is offline-only and Mooncake-only; reject controls the
+        # Planner replay is offline-only; reject controls the
         # planner path ignores so callers fail fast instead of silently getting an
         # offline planner run (matches the CLI's guardrails).
         if replay_mode != "offline":
             raise ValueError(
                 "planner_config replay only supports replay_mode='offline'"
             )
-        if trace_format != "mooncake":
+        if trace_format not in ("mooncake", "dynamo"):
             raise ValueError(
-                "planner_config replay only supports trace_format='mooncake'"
+                "planner_config replay only supports trace_format='mooncake' or 'dynamo'"
             )
         if report_jsonl_path is not None:
             raise ValueError("report_jsonl_path is not supported with planner_config")
         if max_sim_time_ms is not None:
             raise ValueError("max_sim_time_ms is not supported with planner_config")
-        if len(trace_files) != 1:
-            raise ValueError("planner_config replay requires exactly one trace file")
+        if trace_format != "dynamo" and len(trace_files) != 1:
+            raise ValueError(
+                f"planner_config replay with trace_format={trace_format!r} "
+                "requires exactly one trace file"
+            )
         # Planner-in-the-loop: the Rust bridge owns the sim loop and calls back into
         # the Python planner adapter once per PlannerTick (main._run_planner_replay),
         # returning a ReplayPlannerReport (its .trace_report matches the static dict).
         from dynamo.replay.main import _run_planner_replay
 
         return _run_planner_replay(
-            trace_file=trace_files[0],
+            trace_files=trace_files,
+            trace_format=trace_format,
             extra_engine_args=extra_engine_args,
             prefill_engine_args=prefill_engine_args,
             decode_engine_args=decode_engine_args,
@@ -87,9 +91,7 @@ def run_trace_replay(
             num_decode_workers=num_decode_workers,
             router_mode=router_mode,
             arrival_speedup_ratio=arrival_speedup_ratio,
-            trace_block_size=(
-                trace_block_size if trace_block_size is not None else 512
-            ),
+            trace_block_size=trace_block_size,
             model_name=model_name,
             planner_config_arg=_planner_config_arg(planner_config),
             benchmark_granularity=benchmark_granularity,
@@ -166,7 +168,8 @@ def run_synthetic_trace_replay(
         from dynamo.replay.main import SyntheticWorkload, _run_planner_replay
 
         return _run_planner_replay(
-            trace_file=None,
+            trace_files=None,
+            trace_format="mooncake",
             extra_engine_args=extra_engine_args,
             prefill_engine_args=prefill_engine_args,
             decode_engine_args=decode_engine_args,
