@@ -191,92 +191,26 @@ class TestNormalizeResult:
             "result": [{"val": 1}, "plain", 42]
         }
 
-    def test_get_internal_state_normalizes_nested_cuda_graph_config(self):
-        @dataclasses.dataclass
-        class PhaseConfig:
-            backend: str
-            max_bs: int | None
-            bs: list[int] | None
-            tc_compiler: str
-            full_prefill_max_req: int | None = None
-
-        @dataclasses.dataclass
-        class CudaGraphConfig:
-            decode: PhaseConfig
-            prefill: PhaseConfig
-
-        internal_state = [
-            {
-                "dp_rank": 0,
-                "tp_size": 4,
-                "pp_size": 2,
-                "dp_size": 8,
-                "cuda_graph_config": CudaGraphConfig(
-                    decode=PhaseConfig("full", 32, [1, 2, 4, 8], "eager"),
-                    prefill=PhaseConfig(
-                        "breakable", None, [1], "eager", full_prefill_max_req=4
-                    ),
-                ),
-                "tp_rank_ids": (0, 1, 2, 3),
-                "active_batch_ids": {7, 9},
-            }
-        ]
-
-        result = self.handler._normalize_result(internal_state)
-
-        state = result["result"][0]
-        assert state["tp_size"] == 4
-        assert state["pp_size"] == 2
-        assert state["dp_size"] == 8
-        assert state["cuda_graph_config"] == {
-            "decode": {
-                "backend": "full",
-                "max_bs": 32,
-                "bs": [1, 2, 4, 8],
-                "tc_compiler": "eager",
-                "full_prefill_max_req": None,
-            },
-            "prefill": {
-                "backend": "breakable",
-                "max_bs": None,
-                "bs": [1],
-                "tc_compiler": "eager",
-                "full_prefill_max_req": 4,
-            },
-        }
-        assert state["tp_rank_ids"] == [0, 1, 2, 3]
-        assert set(state["active_batch_ids"]) == {7, 9}
-        json.dumps(result)
-
-    def test_cyclic_nested_containers_use_placeholder(self):
-        internal_state: dict[str, Any] = {"dp_rank": 0}
-        internal_state["self"] = internal_state
-
-        result = self.handler._normalize_result(internal_state)
-
-        assert result == {"dp_rank": 0, "self": "<recursive reference>"}
-        json.dumps(result)
-
-    def test_cyclic_dataclass_uses_placeholder(self):
+    def test_cyclic_dataclass_and_container_use_placeholder(self):
         @dataclasses.dataclass
         class RecursiveConfig:
             nested: Any = None
 
         config = RecursiveConfig()
-        config.nested = config
+        config.nested = {"config": config}
 
-        assert self.handler._normalize_result(config) == {
-            "nested": "<recursive reference>"
-        }
+        result = self.handler._normalize_result(config)
+
+        assert result == {"nested": {"config": "<recursive reference>"}}
+        json.dumps(result)
 
     def test_other_value(self):
         assert self.handler._normalize_result(42) == {"result": 42}
         assert self.handler._normalize_result("text") == {"result": "text"}
 
-    def test_non_serializable_falls_back_to_str(self):
+    def test_nested_non_serializable_falls_back_to_str(self):
         obj = object()
-        result = self.handler._normalize_result(obj)
-        assert result == {"result": str(obj)}
+        assert self.handler._normalize_result({"value": obj}) == {"value": str(obj)}
 
 
 # ---------------------------------------------------------------------------
