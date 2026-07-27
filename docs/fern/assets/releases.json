@@ -1808,6 +1808,26 @@
       "firstTimers": 34,
       "breaking": 41,
       "knownIssues": 14
+    },
+    "v0.9.0": {
+      "firstTimers": 14,
+      "breaking": 1,
+      "knownIssues": 13
+    },
+    "v0.8.0": {
+      "firstTimers": 20,
+      "breaking": 0,
+      "knownIssues": 14
+    },
+    "v0.7.0": {
+      "firstTimers": 2,
+      "breaking": 0,
+      "knownIssues": 7
+    },
+    "v0.6.0": {
+      "firstTimers": 4,
+      "breaking": 0,
+      "knownIssues": 3
     }
   },
   "nightliesNote": "ai-dynamo and ai-dynamo-runtime nightly builds from main publish wheels tagged *.devYYYYMMDD (since Apr 24, 2026). Install with pip or uv using --pre and the NVIDIA extra-index pattern shown above."
