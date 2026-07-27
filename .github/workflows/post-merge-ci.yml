@@ -197,7 +197,7 @@ jobs:
       framework: vllm
       target: runtime
       cuda_version: '["13.0"]'
-      platform: 'linux/amd64,linux/arm64'
+      platform: ${{ github.event_name == 'workflow_dispatch' && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       inline_compliance: true
       build_timeout_minutes: 120
@@ -214,7 +214,7 @@ jobs:
   vllm-dev-build:
     name: vllm-dev
     needs: [config]
-    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_vllm == 'true'
+    if: github.event_name != 'workflow_dispatch'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: vllm
@@ -232,7 +232,7 @@ jobs:
   vllm-efa-build:
     name: vllm-runtime-efa
     needs: [config]
-    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_vllm == 'true'
+    if: github.event_name != 'workflow_dispatch'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: vllm
@@ -262,7 +262,7 @@ jobs:
       framework: sglang
       target: runtime
       cuda_version: '["13.0"]'
-      platform: 'linux/amd64,linux/arm64'
+      platform: ${{ github.event_name == 'workflow_dispatch' && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       inline_compliance: true
       build_timeout_minutes: 120
@@ -279,7 +279,7 @@ jobs:
   sglang-dev-build:
     name: sglang-dev
     needs: [config]
-    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_sglang == 'true'
+    if: github.event_name != 'workflow_dispatch'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: sglang
@@ -297,7 +297,7 @@ jobs:
   sglang-efa-build:
     name: sglang-runtime-efa
     needs: [config]
-    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_sglang == 'true'
+    if: github.event_name != 'workflow_dispatch'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: sglang
@@ -327,7 +327,7 @@ jobs:
       framework: trtllm
       target: runtime
       cuda_version: '["13.1"]'
-      platform: 'linux/amd64,linux/arm64'
+      platform: ${{ github.event_name == 'workflow_dispatch' && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       inline_compliance: true
       build_timeout_minutes: 120
@@ -344,7 +344,7 @@ jobs:
   trtllm-dev-build:
     name: trtllm-dev
     needs: [config]
-    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_trtllm == 'true'
+    if: github.event_name != 'workflow_dispatch'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: trtllm
@@ -362,7 +362,7 @@ jobs:
   trtllm-efa-build:
     name: trtllm-runtime-efa
     needs: [config]
-    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_trtllm == 'true'
+    if: github.event_name != 'workflow_dispatch'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: trtllm
@@ -408,7 +408,7 @@ jobs:
   frontend-build:
     name: frontend
     needs: [config]
-    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_vllm == 'true'
+    if: github.event_name != 'workflow_dispatch'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: dynamo
@@ -443,21 +443,22 @@ jobs:
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
-      platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
-      run_cpu_only_tests: true
+      platform: ${{ github.event_name == 'workflow_dispatch' && '["amd64"]' || '["amd64", "arm64"]' }}
+      run_cpu_only_tests: ${{ github.event_name != 'workflow_dispatch' }}
       cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0'
-      gpu_test_markers: '(pre_merge or post_merge) and vllm and gpu_1'
+      gpu_test_markers: ${{ github.event_name == 'workflow_dispatch' && 'token_budget_parity and vllm and gpu_1' || '(pre_merge or post_merge) and vllm and gpu_1' }}
       gpu_test_timeout_minutes: 120
       # Profiled tests (those carrying @pytest.mark.profiled_vram_gib(N)) run concurrently in
       # the parallel stage; the rest fall through to the sequential stage. 24 GiB admits all
       # currently profiled vLLM tests (max is ~20.4 GiB) on a 48 GiB GPU.
-      run_gpu_parallel_tests: true
+      run_gpu_parallel_tests: ${{ github.event_name != 'workflow_dispatch' }}
       gpu_parallel_max_vram_gib: '24'
     secrets: inherit
 
   vllm-multi-gpu-test:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
-    needs: [vllm-build]
+    needs: [config, vllm-build]
+    if: github.event_name != 'workflow_dispatch'
     uses: ./.github/workflows/shared-test.yml
     with:
       dd_env: post-merge
@@ -492,7 +493,7 @@ jobs:
   vllm-kvbm-tests:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [config, vllm-build]
-    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_vllm == 'true'
+    if: github.event_name != 'workflow_dispatch'
     uses: ./.github/workflows/shared-test.yml
     with:
       dd_env: post-merge
@@ -524,21 +525,22 @@ jobs:
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
-      platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
-      run_cpu_only_tests: true
+      platform: ${{ github.event_name == 'workflow_dispatch' && '["amd64"]' || '["amd64", "arm64"]' }}
+      run_cpu_only_tests: ${{ github.event_name != 'workflow_dispatch' }}
       cpu_only_test_markers: '(pre_merge or post_merge) and sglang and gpu_0'
-      gpu_test_markers: '(pre_merge or post_merge) and sglang and gpu_1'
+      gpu_test_markers: ${{ github.event_name == 'workflow_dispatch' && 'token_budget_parity and sglang and gpu_1' || '(pre_merge or post_merge) and sglang and gpu_1' }}
       gpu_test_timeout_minutes: 120
       # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
       # Current single-GPU runners are 24 GiB, so this cap admits the profiled SGLang pool
       # while yielding one auto slot today. Larger runners will get more slots from the same markers.
-      run_gpu_parallel_tests: true
+      run_gpu_parallel_tests: ${{ github.event_name != 'workflow_dispatch' }}
       gpu_parallel_max_vram_gib: '24'
     secrets: inherit
 
   sglang-multi-gpu-test:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
-    needs: [sglang-build]
+    needs: [config, sglang-build]
+    if: github.event_name != 'workflow_dispatch'
     uses: ./.github/workflows/shared-test.yml
     with:
       dd_env: post-merge
@@ -564,21 +566,22 @@ jobs:
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
-      platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
-      run_cpu_only_tests: true
+      platform: ${{ github.event_name == 'workflow_dispatch' && '["amd64"]' || '["amd64", "arm64"]' }}
+      run_cpu_only_tests: ${{ github.event_name != 'workflow_dispatch' }}
       cpu_only_test_markers: '(pre_merge or post_merge) and trtllm and gpu_0'
-      gpu_test_markers: '(pre_merge or post_merge) and trtllm and gpu_1'
+      gpu_test_markers: ${{ github.event_name == 'workflow_dispatch' && 'token_budget_parity and trtllm and gpu_1' || '(pre_merge or post_merge) and trtllm and gpu_1' }}
       gpu_test_timeout_minutes: 120
       # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
       # Current single-GPU runners are 24 GiB, so this cap admits the profiled TRT-LLM pool
       # while yielding one auto slot today. Larger runners will get more slots from the same markers.
-      run_gpu_parallel_tests: true
+      run_gpu_parallel_tests: ${{ github.event_name != 'workflow_dispatch' }}
       gpu_parallel_max_vram_gib: '24'
     secrets: inherit
 
   trtllm-multi-gpu-test:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
-    needs: [trtllm-build]
+    needs: [config, trtllm-build]
+    if: github.event_name != 'workflow_dispatch'
     uses: ./.github/workflows/shared-test.yml
     with:
       dd_env: post-merge
@@ -637,7 +640,7 @@ jobs:
   vllm-test-xpu:
     name: vllm-xpu
     needs: [config]
-    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_vllm == 'true'
+    if: github.event_name != 'workflow_dispatch'
     uses: ./.github/workflows/xpu-ci.yaml
     with:
       framework: vllm
@@ -675,6 +678,7 @@ jobs:
   vllm-copy-to-acr:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [vllm-build]
+    if: github.event_name != 'workflow_dispatch'
     uses: ./.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
@@ -723,6 +727,7 @@ jobs:
   sglang-copy-to-acr:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
     needs: [sglang-build]
+    if: github.event_name != 'workflow_dispatch'
     uses: ./.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
@@ -774,6 +779,7 @@ jobs:
   trtllm-copy-to-acr:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
     needs: [trtllm-build]
+    if: github.event_name != 'workflow_dispatch'
     uses: ./.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
