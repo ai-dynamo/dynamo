@@ -11,14 +11,16 @@ import pytest
 import torch
 from _deps import HAS_CUDA
 from gpu_memory_service.core.client.memory_manager import LocalMapping
-from gpu_memory_service.v1.tensor import normalize_captured_tensors
+from gpu_memory_service.v1.parameter_storage import (
+    copy_non_parameter_tensors_to_default_allocator,
+)
 
 
 @pytest.mark.pre_merge
 @pytest.mark.unit
 @pytest.mark.none
 @pytest.mark.gpu_0
-def test_normalization_partitions_live_mixed_storage_by_tensor_span() -> None:
+def test_copy_out_preserves_tensorimpls_and_nonparameter_aliases() -> None:
     model = torch.nn.Module()
     source = torch.arange(64, dtype=torch.float32)
     source_storage = source.untyped_storage()
@@ -80,7 +82,7 @@ def test_normalization_partitions_live_mixed_storage_by_tensor_span() -> None:
         model.empty_view.stride(),
     )
 
-    accounting = normalize_captured_tensors(model, (mapping,))
+    accounting = copy_non_parameter_tensors_to_default_allocator(model, (mapping,))
 
     assert {
         name: int(tensor._cdata)
@@ -131,26 +133,45 @@ def test_normalization_partitions_live_mixed_storage_by_tensor_span() -> None:
 @pytest.mark.integration
 @pytest.mark.gpu_1
 @pytest.mark.skipif(not HAS_CUDA, reason="CUDA is required")
-def test_real_cuda_normalization_releases_nonparameter_mapping() -> None:
+def test_real_cuda_allocator_and_dual_domain_lifecycle() -> None:
     """Use a subprocess because Torch allocator callbacks are process-global."""
     code = textwrap.dedent(
         """
         import os
+        import sys
         import tempfile
         import threading
-        import time
+        import types
 
         import torch
 
         from gpu_memory_service.common.vmm import get_vmm
-        from gpu_memory_service.core.server.allocations import GMSAllocationManager
-        from gpu_memory_service.core.server.gms import GMS
+        from gpu_memory_service.core.server.gms import GMSServerMemoryManager
         from gpu_memory_service.core.server.rpc import GMSRPCServer
-        from gpu_memory_service.v1.memory_manager import (
-            EphemeralKVCacheMemoryManager,
-            PersistentParameterMemoryManager,
+
+        sleep_mode_backend = types.ModuleType(
+            "vllm.device_allocator.sleep_mode_backend"
         )
-        from gpu_memory_service.v1.torch import V1TorchPools
+        class SleepModeBackend:
+            def __init__(self):
+                self._state = "RUNNING"
+        class SleepModeBackendFactory:
+            @classmethod
+            def register_backend(cls, *args):
+                pass
+        sleep_mode_backend.SleepModeBackend = SleepModeBackend
+        sleep_mode_backend.SleepModeBackendFactory = SleepModeBackendFactory
+        vllm = types.ModuleType("vllm")
+        vllm.__path__ = []
+        device_allocator = types.ModuleType("vllm.device_allocator")
+        device_allocator.__path__ = []
+        sys.modules["vllm"] = vllm
+        sys.modules["vllm.device_allocator"] = device_allocator
+        sys.modules[
+            "vllm.device_allocator.sleep_mode_backend"
+        ] = sleep_mode_backend
+
+        from gpu_memory_service.v1.integrations.vllm import backend as backend_module
 
         torch.cuda.set_device(0)
         vmm = get_vmm()
@@ -158,8 +179,8 @@ def test_real_cuda_normalization_releases_nonparameter_mapping() -> None:
         with tempfile.TemporaryDirectory() as directory:
             weights_path = os.path.join(directory, "weights.sock")
             kv_path = os.path.join(directory, "kv_cache.sock")
-            weights_gms = GMS(gpu_uuid, GMSAllocationManager(vmm, 0))
-            kv_gms = GMS(gpu_uuid, GMSAllocationManager(vmm, 0))
+            weights_gms = GMSServerMemoryManager(gpu_uuid, vmm, 0)
+            kv_gms = GMSServerMemoryManager(gpu_uuid, vmm, 0)
             with (
                 GMSRPCServer(weights_path, weights_gms) as weights_server,
                 GMSRPCServer(kv_path, kv_gms) as kv_server,
@@ -174,11 +195,14 @@ def test_real_cuda_normalization_releases_nonparameter_mapping() -> None:
                 for thread in threads:
                     thread.start()
                 try:
-                    manager = PersistentParameterMemoryManager(weights_path, vmm, 0)
-                    kv_manager = EphemeralKVCacheMemoryManager(kv_path, vmm, 0)
-                    pool = V1TorchPools(manager, kv_manager)
+                    backend_module.get_socket_path = lambda device, domain: (
+                        weights_path if domain == "weights" else kv_path
+                    )
+                    backend_module.get_vmm = lambda: vmm
+                    backend = backend_module.GMSV1SleepModeBackend()
+                    manager = backend._weights
                     model = None
-                    with pool.capture_weights(lambda: model):
+                    with backend.capture_weights(lambda: model):
                         parameter_backing = torch.arange(
                             4 * 1024 * 1024,
                             device="cuda",
@@ -245,21 +269,17 @@ def test_real_cuda_normalization_releases_nonparameter_mapping() -> None:
                         (mapping.base, mapping.allocation_id)
                         for mapping in manager.mappings
                     )
-                    manager.sleep()
-                    deadline = time.monotonic() + 5
-                    while (
-                        weights_gms.snapshot().ro_session_count
-                        and time.monotonic() < deadline
-                    ):
-                        time.sleep(0.005)
-                    assert weights_gms.snapshot().ro_session_count == 0
-                    manager.wake()
+                    with backend.capture_kv_cache():
+                        kv = torch.empty(1024, device="cuda")
+                    backend.suspend()
+                    backend.resume()
                     assert before == tuple(
                         (mapping.base, mapping.allocation_id)
                         for mapping in manager.mappings
                     )
-                    manager.retire()
-                    kv_manager.sleep()
+                    assert kv.data_ptr() in {
+                        mapping.base for mapping in backend._kv_cache.mappings
+                    }
                 finally:
                     weights_server.shutdown()
                     kv_server.shutdown()
