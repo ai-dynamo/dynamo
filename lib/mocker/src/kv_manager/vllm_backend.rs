@@ -332,7 +332,7 @@ impl VllmKvManager {
             !self.request_blocks.contains_key(&request_id),
             "destination request already owns a block table"
         );
-        let (prefix, fresh) = match layout.as_ref() {
+        let outcome = match layout.as_ref() {
             Some(VllmBlockLayout {
                 blocks,
                 local_hashes,
@@ -346,13 +346,21 @@ impl VllmKvManager {
                     parent.as_ref(),
                 );
                 self.validate_fresh_partials(blocks);
-                let prefix = self.resident_prefix(blocks);
-                let fresh = blocks.len() - prefix.len();
-                (prefix, fresh)
+                if self.enable_prefix_caching {
+                    self.pool.reserve_resident_prefix(
+                        blocks.iter().map_while(|block| match block {
+                            UniqueBlock::FullBlock(hash) => Some(*hash),
+                            UniqueBlock::PartialBlock(_) => None,
+                        }),
+                        blocks.len(),
+                    )
+                } else {
+                    self.pool.reserve(&[], blocks.len())
+                }
             }
-            None => (Vec::new(), 0),
+            None => self.pool.reserve(&[], 0),
         };
-        let Some(outcome) = self.pool.reserve(&prefix, fresh) else {
+        let Some(outcome) = outcome else {
             return VllmAcquire::CapacityExhausted;
         };
         self.publish_removed(outcome.removed);
@@ -633,21 +641,6 @@ impl VllmKvManager {
             );
             first_partial.get_or_insert(*uuid);
         }
-    }
-
-    fn resident_prefix(&self, blocks: &[UniqueBlock]) -> Vec<SequenceHash> {
-        if !self.enable_prefix_caching {
-            return Vec::new();
-        }
-        blocks
-            .iter()
-            .map_while(|block| match block {
-                UniqueBlock::FullBlock(hash) if self.pool.prefix_hit(*hash).is_some() => {
-                    Some(*hash)
-                }
-                _ => None,
-            })
-            .collect()
     }
 
     /// Release request blocks in caller-provided eviction-priority order.
