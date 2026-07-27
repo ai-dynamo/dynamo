@@ -74,5 +74,5 @@ python examples/aisimulate/spica/tools/run_load_predictor_sweep.py \
 
 ## Documentation
 
-Read the [Spica documentation](../../../docs/components/aisimulate/spica/README.md)
+Read the [Spica documentation](../../../docs/fern/components/aisimulate/spica/README.md)
 for the search flow, workload schema, optimization goals, and search-space reference.

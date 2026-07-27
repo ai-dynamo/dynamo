@@ -2,25 +2,87 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::VecDeque;
+use std::marker::PhantomData;
 
 use anyhow::Result;
 use uuid::Uuid;
 
-use super::{ReadyArrival, ReplayMode};
+use super::ReplayMode;
 use crate::common::protocols::DirectRequest;
-use crate::loadgen::WorkloadDriver;
+use crate::loadgen::{ReplayRequestHashes, ReplayRequestPayload, WorkloadDriver};
+use crate::replay::offline::core::{AdmissionSource as CoreAdmissionSource, ReadyArrival};
+
+pub(in crate::replay) trait ReplayAdmissionMetadata: Sized {
+    fn from_hashes(hashes: Option<ReplayRequestHashes>) -> Self;
+    fn for_prefill(self) -> Self;
+    fn max_output_tokens_override(&self) -> Option<usize>;
+    fn into_hashes(self) -> Option<ReplayRequestHashes>;
+}
+
+pub(in crate::replay) type NoReplayMetadata = ();
+
+impl ReplayAdmissionMetadata for () {
+    #[inline]
+    fn from_hashes(_hashes: Option<ReplayRequestHashes>) -> Self {}
+
+    #[inline]
+    fn for_prefill(self) -> Self {}
+
+    #[inline]
+    fn max_output_tokens_override(&self) -> Option<usize> {
+        None
+    }
+
+    #[inline]
+    fn into_hashes(self) -> Option<ReplayRequestHashes> {
+        None
+    }
+}
+
+#[derive(Debug, Default)]
+pub(in crate::replay) struct KvReplayMetadata {
+    hashes: Option<ReplayRequestHashes>,
+    max_output_tokens_override: Option<usize>,
+}
+
+impl ReplayAdmissionMetadata for KvReplayMetadata {
+    #[inline]
+    fn from_hashes(hashes: Option<ReplayRequestHashes>) -> Self {
+        Self {
+            hashes,
+            max_output_tokens_override: None,
+        }
+    }
+
+    #[inline]
+    fn for_prefill(mut self) -> Self {
+        self.max_output_tokens_override = Some(1);
+        self
+    }
+
+    #[inline]
+    fn max_output_tokens_override(&self) -> Option<usize> {
+        self.max_output_tokens_override
+    }
+
+    #[inline]
+    fn into_hashes(self) -> Option<ReplayRequestHashes> {
+        self.hashes
+    }
+}
 
 enum AdmissionSource {
     Requests(VecDeque<DirectRequest>),
     Workload(WorkloadDriver),
 }
 
-pub(in crate::replay::offline) struct AdmissionQueue {
+pub(in crate::replay::offline) struct AdmissionQueue<Metadata = KvReplayMetadata> {
     source: AdmissionSource,
     mode: ReplayMode,
+    metadata: PhantomData<Metadata>,
 }
 
-impl AdmissionQueue {
+impl<Metadata: ReplayAdmissionMetadata> AdmissionQueue<Metadata> {
     pub(in crate::replay::offline) fn new_requests(
         source: VecDeque<DirectRequest>,
         mode: ReplayMode,
@@ -28,6 +90,7 @@ impl AdmissionQueue {
         Self {
             source: AdmissionSource::Requests(source),
             mode,
+            metadata: PhantomData,
         }
     }
 
@@ -38,6 +101,7 @@ impl AdmissionQueue {
         Self {
             source: AdmissionSource::Workload(driver),
             mode,
+            metadata: PhantomData,
         }
     }
 
@@ -60,11 +124,15 @@ impl AdmissionQueue {
         }
     }
 
-    pub(in crate::replay::offline) fn drain_ready(
+    /// Offline replay keeps full-prompt workload arrivals compact while they
+    /// wait in an aggregated or prefill router queue. Legacy request queues
+    /// and cumulative-delta workloads remain materialized because they do not
+    /// have an independent compact prompt representation.
+    pub(in crate::replay::offline) fn drain_ready_compact(
         &mut self,
         now_ms: f64,
         cluster_in_flight: usize,
-    ) -> Result<Vec<ReadyArrival>> {
+    ) -> Result<Vec<ReadyArrival<ReplayRequestPayload, Metadata>>> {
         match (&self.mode, &mut self.source) {
             (ReplayMode::Trace, AdmissionSource::Requests(pending)) => {
                 let mut ready = Vec::new();
@@ -80,9 +148,9 @@ impl AdmissionQueue {
                         .pop_front()
                         .expect("front request must exist when arrival is ready");
                     ready.push(ReadyArrival {
-                        request,
+                        request: ReplayRequestPayload::materialized(request),
                         arrival_time_ms,
-                        replay_hashes: None,
+                        metadata: Metadata::from_hashes(None),
                         session_id: None,
                         turn_index: None,
                     });
@@ -90,7 +158,7 @@ impl AdmissionQueue {
                 Ok(ready)
             }
             (ReplayMode::Trace, AdmissionSource::Workload(driver)) => Ok(driver
-                .pop_ready(now_ms, usize::MAX)
+                .pop_ready_compact(now_ms, usize::MAX)
                 .into_iter()
                 .map(|ready| {
                     let session_id = ready.emit_session_metadata.then_some(ready.session_id);
@@ -98,7 +166,7 @@ impl AdmissionQueue {
                     ReadyArrival {
                         request: ready.request,
                         arrival_time_ms: ready.scheduled_ready_at_ms,
-                        replay_hashes: ready.replay_hashes,
+                        metadata: Metadata::from_hashes(ready.replay_hashes),
                         session_id,
                         turn_index,
                     }
@@ -108,13 +176,14 @@ impl AdmissionQueue {
                 let mut ready = Vec::new();
                 let mut simulated_in_flight = cluster_in_flight;
                 while simulated_in_flight < *max_in_flight {
-                    let Some(request) = pending.pop_front() else {
+                    let Some(mut request) = pending.pop_front() else {
                         break;
                     };
+                    request.arrival_timestamp_ms = Some(now_ms);
                     ready.push(ReadyArrival {
-                        request,
+                        request: ReplayRequestPayload::materialized(request),
                         arrival_time_ms: now_ms,
-                        replay_hashes: None,
+                        metadata: Metadata::from_hashes(None),
                         session_id: None,
                         turn_index: None,
                     });
@@ -126,7 +195,7 @@ impl AdmissionQueue {
                 // The driver owns the session cap and only ever holds active sessions'
                 // turns in its heap, so drain everything ready in heap (i.e. limit=usize MAX).
                 Ok(driver
-                    .pop_ready(now_ms, usize::MAX)
+                    .pop_ready_compact(now_ms, usize::MAX)
                     .into_iter()
                     .map(|ready| {
                         let session_id = ready.emit_session_metadata.then_some(ready.session_id);
@@ -134,7 +203,7 @@ impl AdmissionQueue {
                         ReadyArrival {
                             request: ready.request,
                             arrival_time_ms: now_ms,
-                            replay_hashes: ready.replay_hashes,
+                            metadata: Metadata::from_hashes(ready.replay_hashes),
                             session_id,
                             turn_index,
                         }
@@ -142,14 +211,6 @@ impl AdmissionQueue {
                     .collect())
             }
         }
-    }
-
-    pub(in crate::replay::offline) fn on_request_completed(
-        &mut self,
-        uuid: Uuid,
-        now_ms: f64,
-    ) -> Result<()> {
-        self.on_request_terminal(uuid, now_ms, false)
     }
 
     pub(in crate::replay::offline) fn on_request_terminal(
@@ -192,5 +253,38 @@ impl AdmissionQueue {
             AdmissionSource::Requests(pending) => pending.len(),
             AdmissionSource::Workload(driver) => driver.total_turns(),
         }
+    }
+}
+
+impl<Metadata: ReplayAdmissionMetadata> CoreAdmissionSource for AdmissionQueue<Metadata> {
+    type Request = ReplayRequestPayload;
+    type Metadata = Metadata;
+
+    fn next_ready_time_ms(&mut self) -> Option<f64> {
+        AdmissionQueue::next_ready_time_ms(self)
+    }
+
+    fn drain_ready(
+        &mut self,
+        now_ms: f64,
+        cluster_in_flight: usize,
+    ) -> Result<Vec<ReadyArrival<Self::Request, Self::Metadata>>> {
+        AdmissionQueue::drain_ready_compact(self, now_ms, cluster_in_flight)
+    }
+
+    fn on_output_token(&mut self, request_id: Uuid, token_id: u32) -> Result<()> {
+        AdmissionQueue::on_output_token(self, request_id, token_id)
+    }
+
+    fn on_terminal(&mut self, request_id: Uuid, now_ms: f64, rejected: bool) -> Result<()> {
+        AdmissionQueue::on_request_terminal(self, request_id, now_ms, rejected)
+    }
+
+    fn is_drained(&self) -> bool {
+        AdmissionQueue::is_drained(self)
+    }
+
+    fn total_requests(&self) -> usize {
+        AdmissionQueue::total_requests(self)
     }
 }

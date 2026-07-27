@@ -38,6 +38,6 @@ Run Spica with a YAML configuration:
 python -m aisimulate.spica --config examples/aisimulate/spica/configs/smart_sweep.yaml
 ```
 
-Read the [Spica documentation](../docs/components/aisimulate/spica/README.md)
+Read the [Spica documentation](../docs/fern/components/aisimulate/spica/README.md)
 for its configuration, search-space, and replay behavior. Runnable configurations and tools live
 under [`examples/aisimulate/spica`](../examples/aisimulate/spica/README.md).

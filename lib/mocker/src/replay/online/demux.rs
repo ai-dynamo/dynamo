@@ -78,6 +78,13 @@ pub(super) async fn run_demux(
     stats: Arc<SharedLiveRuntimeStats>,
 ) -> TraceSimulationReport {
     let mut collector = TraceCollector::default();
+    // Folding a long token timeline on this single-threaded demux would delay
+    // dequeue-time timestamps for unrelated output batches. Preserve the
+    // historical live behavior and aggregate only after all channels close.
+    // TODO: Timestamp output batches at the scheduler publication boundary so
+    // live replay can fold timelines on terminal without distorting latency
+    // metrics, while also releasing completed-request timestamps promptly.
+    collector.set_defer_token_timeline_finalization(true);
     let mut arrivals_open = true;
     let mut admissions_open = true;
     let mut outputs_open = true;

@@ -119,6 +119,7 @@ core:
   # TODO(will): Move TokenSpeed to a dedicated framework filter once CI has
   # TokenSpeed Docker images and backend-specific build/test jobs.
   - 'components/src/dynamo/tokenspeed/**'
+  - 'components/src/dynamo/squeeze_evolve/**'
   - '*.toml'
   - '*.lock'
   - '*.py'
@@ -137,7 +138,7 @@ operator:
   - 'deploy/operator/.*'
   # Operator imports the local snapshot module.
   - 'deploy/snapshot/**'
-  - 'docs/kubernetes/api-reference.md'
+  - 'docs/fern/kubernetes/api-reference.md'
   - 'deploy/helm/charts/platform/**'
   # The operator check owns the real Go/Python DGD override contract test.
   - 'components/src/dynamo/profiler/utils/dgd_override.py'
