@@ -88,23 +88,15 @@ def require_lora_unload_request(request: Mapping[str, Any] | None) -> str:
 class RLRouteRegistry:
     """Registry for worker RL admin route descriptors."""
 
-    # Framework-neutral engine metadata the RL discovery contract carries verbatim.
-    # Supplied by the engine that owns them; the registry never derives them. Any
-    # RL framework driving collective weight transfer needs these facts, so they
-    # stay engine-descriptive and free of framework-specific topology assumptions.
-    ENGINE_METADATA_KEYS = ("world_size", "model")
-
     def __init__(
         self,
         runtime: Any,
         *,
         logger_: logging.Logger | None = None,
-        engine_metadata: Mapping[str, Any] | None = None,
     ) -> None:
         self._runtime = runtime
         self._logger = logger_ or logger
         self.routes: dict[str, RLRouteHandler] = {}
-        self._engine_metadata = dict(engine_metadata or {})
 
     def add_route(self, name: str, handler: RLRouteHandler) -> None:
         self.routes[name] = handler
@@ -124,11 +116,6 @@ class RLRouteRegistry:
             system_url = system_url_fn()
             if system_url:
                 response["system_url"] = system_url
-
-        for key in self.ENGINE_METADATA_KEYS:
-            value = self._engine_metadata.get(key)
-            if value is not None:
-                response[key] = value
 
         return response
 
