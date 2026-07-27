@@ -13,6 +13,9 @@ use crate::proto as pb;
 use crate::proto::control_client::ControlClient;
 use crate::proto::inference_client::InferenceClient;
 
+const SCHEMA_REVISION: u32 = 1;
+const MINIMUM_CLIENT_REVISION: u32 = 1;
+
 pub type Control = ControlClient<Channel>;
 pub type Inference = InferenceClient<Channel>;
 
@@ -192,7 +195,7 @@ fn validate_schema(
     engine: &pb::ServerInfo,
     expected_schema_release: Option<&str>,
 ) -> Result<(), DynamoError> {
-    let client_revision = openengine_proto::SCHEMA_REVISION;
+    let client_revision = SCHEMA_REVISION;
     if engine.schema_revision == 0 {
         return Err(invalid_arg("OpenEngine reported invalid schema revision 0"));
     }
@@ -202,16 +205,15 @@ fn validate_schema(
             engine.minimum_client_revision
         )));
     }
-    if engine.schema_revision < openengine_proto::MINIMUM_CLIENT_REVISION {
+    if engine.schema_revision < MINIMUM_CLIENT_REVISION {
         return Err(invalid_arg(format!(
             "OpenEngine schema revision {} is older than this sidecar's minimum compatible revision {}",
-            engine.schema_revision,
-            openengine_proto::MINIMUM_CLIENT_REVISION,
+            engine.schema_revision, MINIMUM_CLIENT_REVISION,
         )));
     }
-    if !is_commit_sha(&engine.schema_release) {
+    if !is_immutable_schema_release(&engine.schema_release) {
         return Err(invalid_arg(format!(
-            "OpenEngine schema_release `{}` is not an immutable 40-character Git commit",
+            "OpenEngine schema_release `{}` is not an immutable BSR or Git commit",
             engine.schema_release
         )));
     }
@@ -226,8 +228,8 @@ fn validate_schema(
     Ok(())
 }
 
-fn is_commit_sha(value: &str) -> bool {
-    value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+fn is_immutable_schema_release(value: &str) -> bool {
+    matches!(value.len(), 32 | 40) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn backend(kind: BackendError, message: impl Into<String>) -> DynamoError {
@@ -305,7 +307,7 @@ mod tests {
     #[test]
     fn rejects_nonimmutable_schema_release() {
         let mut engine = pb::ServerInfo {
-            schema_revision: openengine_proto::SCHEMA_REVISION,
+            schema_revision: SCHEMA_REVISION,
             minimum_client_revision: 1,
             schema_release: "unreleased".to_string(),
             ..Default::default()
@@ -319,13 +321,15 @@ mod tests {
         assert!(validate_schema(&engine, None).is_err());
         engine.schema_release = env!("OPENENGINE_PROTO_COMMIT").to_string();
         assert!(validate_schema(&engine, None).is_ok());
-        engine.schema_revision = openengine_proto::SCHEMA_REVISION + 1;
+        engine.schema_revision = SCHEMA_REVISION + 1;
         assert!(
             validate_schema(&engine, None).is_ok(),
             "newer additive servers remain compatible when their minimum client revision allows this sidecar"
         );
-        engine.schema_revision = openengine_proto::SCHEMA_REVISION;
+        engine.schema_revision = SCHEMA_REVISION;
         engine.schema_release = "0123456789abcdef0123456789abcdef01234567".to_string();
+        assert!(validate_schema(&engine, None).is_ok());
+        engine.schema_release = "0123456789abcdef0123456789abcdef".to_string();
         assert!(validate_schema(&engine, None).is_ok());
         assert!(validate_schema(&engine, Some(env!("OPENENGINE_PROTO_COMMIT"))).is_err());
         engine.schema_release = "v0.2.0".to_string();

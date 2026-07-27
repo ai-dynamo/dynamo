@@ -1,31 +1,20 @@
 # Dynamo OpenEngine sidecar
 
-This crate consumes generated `openengine-proto` 0.3.0 bindings from immutable
-OpenEngine commit `a66ff6f73a65e262a7c3edd5ea6fd0d8701d402f`.
+This crate generates its Rust client and server bindings from the OpenEngine schema at immutable source commit `57cd5033554cd22ab9645ae6c17f34d7fa9f5bb0`. It does not consume a language-specific OpenEngine package or check generated bindings into Dynamo.
 
-The `dynamo-openengine-sidecar` binary is intentionally engine-neutral. The
-same artifact discovers and serves TRT-LLM, vLLM, and SGLang endpoints without
-engine-name dispatch. `--expected-engine` and `--expected-schema-release` are
-optional deployment assertions; compatible schema revision ranges are
-negotiated independently of the release assertion.
+The `dynamo-openengine-sidecar` binary is intentionally engine-neutral. The same artifact discovers and serves TRT-LLM, vLLM, and SGLang endpoints without engine-name dispatch. `--expected-engine` and `--expected-schema-release` are optional deployment assertions; compatible schema revision ranges are negotiated independently of the release assertion.
 
-OpenEngine advertises the canonical model and tokenizer separately. Dynamo
-uses the tokenizer source for preprocessing, registers the primary served name
-plus aliases, forwards context-first handoff attributes without interpreting
-engine-specific profiles, and creates typed bootstrap sessions only when the
-connector advertises `supports_client_bootstrap`.
+`ModelInfo.model_id` is the canonical model and tokenizer source used by Dynamo preprocessing. The sidecar registers the primary served name plus aliases and forwards context-first handoff data without interpreting engine-specific attributes. Client-created bootstrap endpoint, room, and handoff identifiers are carried losslessly under `attributes_struct["openengine.client_bootstrap.v1"]`; a prefill connector's routable `local_endpoints` entry enables Dynamo's concurrent bootstrap path.
 
-Launch and DGD examples live under each engine's `examples/backends/<engine>`
-tree. In Kubernetes, mount the same tokenizer/model cache into the CPU sidecar
-and GPU engine containers, and mount one shared LoRA cache across P/D pods.
+Launch and DGD examples live under each engine's `examples/backends/<engine>` tree. In Kubernetes, mount the same tokenizer/model cache into the CPU sidecar and GPU engine containers, and mount one shared LoRA cache across P/D pods.
 
-`Cargo.toml` uses the pinned Git dependency so clean CI and release builds do
-not depend on a sibling checkout. To develop against a local OpenEngine
-worktree, add an uncommitted Cargo patch with an absolute path:
+For local development, set `OPENENGINE_PROTO_ROOT` to either the OpenEngine checkout root or its `proto` directory. The build verifies that a Git checkout is exactly at the pinned source commit. When the schema is published to the Buf Schema Registry, export its immutable BSR module commit and point the same variable at the export:
 
-```toml
-[patch."https://github.com/ai-dynamo/openengine.git"]
-openengine-proto = { path = "/absolute/path/to/openengine/packages/rust/openengine-proto" }
+```bash
+OPENENGINE_PROTO_ROOT=/home/connorc/sidecar/openengine-trtllm cargo build -p dynamo-openengine-sidecar
+
+buf export buf.build/openengine/openengine:<immutable-bsr-commit> --output /tmp/openengine-schema
+OPENENGINE_PROTO_ROOT=/tmp/openengine-schema cargo build -p dynamo-openengine-sidecar
 ```
 
-Remove the override before generating `Cargo.lock` or publishing changes.
+The current sidecar worktree defaults to the requested local sibling checkout when `OPENENGINE_PROTO_ROOT` is unset. Release and CI builds should always provide an explicit immutable BSR export.

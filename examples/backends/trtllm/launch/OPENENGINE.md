@@ -9,10 +9,7 @@ These scripts run the TRT-LLM HTTP server and its optional OpenEngine sibling
 against the same `LLM`, then register a CPU-only `dynamo-openengine-sidecar`
 worker with Dynamo.
 
-The examples use the OpenEngine schema release
-`a66ff6f73a65e262a7c3edd5ea6fd0d8701d402f`. Install the matching local
-OpenEngine Python package in the TRT-LLM environment and build the Rust sidecar
-against the same local checkout before launching them.
+The examples use OpenEngine schema release `57cd5033554cd22ab9645ae6c17f34d7fa9f5bb0`. Generate the TRT-LLM Python bindings and Rust sidecar bindings from that source checkout, or from the corresponding immutable BSR module export once published, before launching them.
 
 | Script | Model/default | GPUs | Coverage |
 | --- | --- | ---: | --- |

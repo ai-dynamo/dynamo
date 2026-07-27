@@ -16,7 +16,7 @@ pub use engine::OpenEngineSidecar;
 pub const OPENENGINE_PROTO_COMMIT: &str = env!("OPENENGINE_PROTO_COMMIT");
 
 pub mod proto {
-    pub use openengine_proto::openengine::v1::*;
+    tonic::include_proto!("openengine.v1");
 }
 
 #[cfg(test)]

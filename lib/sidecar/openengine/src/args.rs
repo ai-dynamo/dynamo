@@ -51,10 +51,6 @@ pub struct Args {
     #[arg(long, default_value_t = 300)]
     pub health_deadline_secs: u64,
 
-    /// Maximum time to wait for terminal Drain and a quiescent load snapshot.
-    #[arg(long, env = "OPENENGINE_DRAIN_TIMEOUT_SECS", default_value_t = 25)]
-    pub drain_timeout_secs: u64,
-
     /// Polling interval for OpenEngine load snapshots.
     #[arg(long, default_value_t = 1)]
     pub load_poll_interval_secs: u64,
@@ -66,7 +62,6 @@ impl Args {
             connect_timeout: Duration::from_secs(self.connect_timeout_secs),
             poll_interval: Duration::from_secs(self.health_poll_interval_secs.max(1)),
             deadline: Duration::from_secs(self.health_deadline_secs),
-            drain_timeout: Duration::from_secs(self.drain_timeout_secs.max(1)),
             load_poll_interval: Duration::from_secs(self.load_poll_interval_secs.max(1)),
             connections: self.openengine_connections.max(1),
         }
@@ -78,7 +73,6 @@ pub struct TransportConfig {
     pub connect_timeout: Duration,
     pub poll_interval: Duration,
     pub deadline: Duration,
-    pub drain_timeout: Duration,
     pub load_poll_interval: Duration,
     pub connections: usize,
 }

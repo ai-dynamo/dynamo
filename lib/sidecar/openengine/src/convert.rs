@@ -77,11 +77,9 @@ pub fn build_generate_request(
     }
 
     // Context-first multimodal decode still needs the original ordered media
-    // and processor options (for example, TRT-LLM recomputes mRoPE metadata
-    // locally). Capability validation in the engine rejects unsupported P/D
-    // modalities before this conversion runs.
+    // (for example, TRT-LLM recomputes mRoPE metadata locally). The server
+    // validates role/modality support before admission.
     let media = build_media(request)?;
-    let media_options = build_media_options(request, &media)?;
     let input = request
         .extra_args
         .as_ref()
@@ -182,7 +180,6 @@ pub fn build_generate_request(
             .and_then(|value| value.lora_name.clone())
             .unwrap_or_default(),
         extra: None,
-        media_options,
     })
 }
 
@@ -390,43 +387,6 @@ fn media_source(value: &str) -> pb::media_item::Source {
     }
 }
 
-fn build_media_options(
-    request: &PreprocessedRequest,
-    media: &[pb::MediaItem],
-) -> Result<Option<prost_types::Struct>, DynamoError> {
-    let Some(options) = request.mm_processor_kwargs.as_ref() else {
-        return Ok(None);
-    };
-    if !options.is_object() {
-        return Err(client::invalid_arg("mm_processor_kwargs must be an object"));
-    }
-    let already_keyed = ["image", "video", "audio"]
-        .iter()
-        .any(|key| options.get(key).is_some());
-    let value = if already_keyed {
-        options.clone()
-    } else {
-        let mut keyed = serde_json::Map::new();
-        for modality in media
-            .iter()
-            .filter_map(|item| pb::Modality::try_from(item.modality).ok())
-        {
-            let key = match modality {
-                pb::Modality::Image | pb::Modality::Unspecified => "image",
-                pb::Modality::Video => "video",
-                pb::Modality::Audio => "audio",
-            };
-            keyed
-                .entry(key.to_string())
-                .or_insert_with(|| options.clone());
-        }
-        serde_json::Value::Object(keyed)
-    };
-    json_to_prost_struct(&value)
-        .map(Some)
-        .ok_or_else(|| client::invalid_arg("media options must be an object"))
-}
-
 pub fn token_output(value: pb::TokenOutput) -> LLMEngineOutput {
     let token_ids = value.tokens.iter().map(|token| token.token_id).collect();
     let tokens = Some(
@@ -475,18 +435,6 @@ pub fn token_output(value: pb::TokenOutput) -> LLMEngineOutput {
 }
 
 pub fn kv_session_to_disagg_json(value: pb::KvSessionRef) -> serde_json::Value {
-    let bootstrap = value.bootstrap.map(|bootstrap| {
-        serde_json::json!({
-            "endpoint": bootstrap.endpoint.map(|endpoint| serde_json::json!({
-                "host": endpoint.host,
-                "port": endpoint.port,
-                "protocol": endpoint.protocol,
-            })),
-            // This value can exceed JavaScript's exact integer range. Keep the
-            // opaque Dynamo handoff lossless by carrying it as decimal text.
-            "room_id": bootstrap.room_id.to_string(),
-        })
-    });
     serde_json::json!({
         "session_id": value.session_id,
         "transfer_backend": value.transfer_backend,
@@ -497,8 +445,6 @@ pub fn kv_session_to_disagg_json(value: pb::KvSessionRef) -> serde_json::Value {
         })).collect::<Vec<_>>(),
         "dp_rank": value.dp_rank,
         "attributes_struct": value.attributes_struct.as_ref().map(prost_struct_to_json),
-        "handoff_profile": value.handoff_profile,
-        "bootstrap": bootstrap,
     })
 }
 
@@ -520,7 +466,6 @@ pub fn disagg_json_to_kv_session(
     };
     let session_id = required_string("session_id")?;
     let transfer_backend = required_string("transfer_backend")?;
-    let handoff_profile = required_string("handoff_profile")?;
     let dp_rank = object
         .get("dp_rank")
         .and_then(serde_json::Value::as_u64)
@@ -543,45 +488,12 @@ pub fn disagg_json_to_kv_session(
             ));
         }
     };
-    let bootstrap = match object.get("bootstrap") {
-        None | Some(serde_json::Value::Null) => None,
-        Some(value) => {
-            let bootstrap = value
-                .as_object()
-                .ok_or_else(|| client::invalid_arg("handoff `bootstrap` must be an object"))?;
-            let endpoint = bootstrap
-                .get("endpoint")
-                .ok_or_else(|| client::invalid_arg("handoff bootstrap omitted `endpoint`"))?;
-            let room_id = bootstrap
-                .get("room_id")
-                .and_then(|value| {
-                    value.as_u64().or_else(|| {
-                        value
-                            .as_str()
-                            .filter(|value| canonical_u64(value))
-                            .and_then(|value| value.parse().ok())
-                    })
-                })
-                .ok_or_else(|| {
-                    client::invalid_arg(
-                        "handoff bootstrap `room_id` must be a uint64 or canonical decimal string",
-                    )
-                })?;
-            Some(pb::KvBootstrap {
-                endpoint: Some(endpoint_from_json(endpoint, "handoff bootstrap endpoint")?),
-                room_id,
-            })
-        }
-    };
-
     Ok(pb::KvSessionRef {
         session_id,
         transfer_backend,
         endpoints,
         dp_rank,
         attributes_struct,
-        handoff_profile,
-        bootstrap,
     })
 }
 
@@ -613,12 +525,6 @@ fn endpoint_from_json(
         port: u32::from(port),
         protocol: protocol.to_owned(),
     })
-}
-
-fn canonical_u64(value: &str) -> bool {
-    value
-        .parse::<u64>()
-        .is_ok_and(|parsed| parsed.to_string() == value)
 }
 
 pub fn json_to_prost_struct(value: &serde_json::Value) -> Option<prost_types::Struct> {

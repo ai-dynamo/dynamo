@@ -32,6 +32,8 @@ use crate::convert;
 use crate::kv;
 use crate::proto as pb;
 
+const CLIENT_BOOTSTRAP_ATTRIBUTE: &str = "openengine.client_bootstrap.v1";
+
 fn request_error_stream(
     error: DynamoError,
 ) -> BoxStream<'static, Result<LLMEngineOutput, DynamoError>> {
@@ -132,12 +134,7 @@ impl OpenEngineSidecar {
         validate_model(&bootstrap)?;
         let role = engine_role(&bootstrap)?;
         let disaggregation_mode = role_to_mode(role);
-        let model_name = bootstrap
-            .model
-            .tokenizer
-            .as_ref()
-            .and_then(|tokenizer| nonempty(&tokenizer.source))
-            .unwrap_or_else(|| bootstrap.model.model_id.clone());
+        let model_name = bootstrap.model.model_id.clone();
         let served_model_name = (!bootstrap.model.served_model_name.is_empty())
             .then(|| bootstrap.model.served_model_name.clone());
         let (fatal, _) = watch::channel(None);
@@ -201,12 +198,8 @@ impl OpenEngineSidecar {
                 Ok(Ok(response)) => {
                     let state = pb::HealthState::try_from(response.into_inner().state)
                         .unwrap_or(pb::HealthState::Unspecified);
-                    match state {
-                        pb::HealthState::Ready => return Ok(()),
-                        pb::HealthState::Draining => {
-                            return Err(client::engine_shutdown("OpenEngine is draining"));
-                        }
-                        _ => {}
+                    if state == pb::HealthState::Ready {
+                        return Ok(());
                     }
                 }
                 Ok(Err(error)) => tracing::debug!(%error, "OpenEngine health poll failed"),
@@ -330,18 +323,12 @@ impl LLMEngine for OpenEngineSidecar {
                 Ok(LLMEngineOutput::stop().with_usage(usage(prompt_tokens, 0)))
             })));
         }
-        let connector_uses_client_bootstrap = discovery
-            .engine
-            .kv_connector
-            .as_ref()
-            .and_then(|connector| connector.supports_client_bootstrap)
-            == Some(true);
         if self.disaggregation_mode.is_decode()
             && request.prefill_result.is_none()
-            && !(connector_uses_client_bootstrap && request.bootstrap_info.is_some())
+            && request.bootstrap_info.is_none()
         {
             return Ok(request_error_stream(client::invalid_arg(
-                "decode worker requires a context-first prefill_result or advertised client bootstrap",
+                "decode worker requires a context-first prefill_result or client bootstrap",
             )));
         }
         if let Err(error) =
@@ -387,7 +374,7 @@ impl LLMEngine for OpenEngineSidecar {
             .kv
             .as_ref()
             .and_then(|kv| kv.session.as_ref())
-            .and_then(|session| session.bootstrap.clone());
+            .and_then(owned_client_bootstrap_attribute);
         let metadata = match convert::generate_metadata(&request, ctx.metadata(), is_prefill) {
             Ok(metadata) => metadata,
             Err(error) => return Ok(request_error_stream(error)),
@@ -733,11 +720,7 @@ impl LLMEngine for OpenEngineSidecar {
             pool.control_client(),
             kv::SourceDiscovery {
                 expected_ranks: advertised_dp_ranks(discovery)?,
-                routing_image_token_id: discovery
-                    .model
-                    .multimodal_capabilities
-                    .as_ref()
-                    .and_then(|capabilities| capabilities.routing_image_token_id),
+                routing_image_token_id: None,
                 deadline: self.transport.connect_timeout,
                 cancel: self.cancel.clone(),
                 tasks: self.background_tasks.clone(),
@@ -772,112 +755,6 @@ impl LLMEngine for OpenEngineSidecar {
                 Ok(())
             })),
         })
-    }
-
-    async fn drain(&self) -> Result<(), DynamoError> {
-        let Some(pool) = self.pool.get() else {
-            return Ok(());
-        };
-        let client_timeout = self.transport.drain_timeout;
-        let deadline = Instant::now() + client_timeout;
-        let deadline_ms = client_timeout.as_millis().min(u32::MAX as u128) as u32;
-        let mut stream = tokio::time::timeout(
-            self.transport.drain_timeout,
-            pool.control_client().drain(pb::DrainRequest {
-                stop_accepting_new_requests: true,
-                deadline_ms: Some(deadline_ms),
-                // The sidecar owns only its tracked request IDs. Let cleanup
-                // abort those stragglers at the local deadline rather than
-                // asking the shared engine server to abort unrelated HTTP
-                // requests process-wide.
-                abort_after_deadline: false,
-            }),
-        )
-        .await
-        .map_err(|_| client::engine_shutdown("OpenEngine Drain startup timed out"))?
-        .map_err(|status| client::status_to_dynamo("Drain", status))?
-        .into_inner();
-        let mut drain_complete = false;
-        loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Err(client::engine_shutdown("OpenEngine Drain timed out"));
-            }
-            let response = tokio::time::timeout(remaining, stream.message())
-                .await
-                .map_err(|_| client::engine_shutdown("OpenEngine Drain stream timed out"))?
-                .map_err(|status| client::status_to_dynamo("Drain stream", status))?;
-            let Some(response) = response else {
-                break;
-            };
-            match response.event {
-                Some(pb::drain_response::Event::State(value))
-                    if pb::DrainState::try_from(value).ok() == Some(pb::DrainState::Complete) =>
-                {
-                    drain_complete = true;
-                    break;
-                }
-                Some(pb::drain_response::Event::Error(error)) => {
-                    return Err(client::engine_error_to_dynamo(&error));
-                }
-                _ => {}
-            }
-        }
-        if !drain_complete {
-            return Err(client::engine_shutdown(
-                "OpenEngine Drain stream ended without COMPLETE",
-            ));
-        }
-
-        loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Err(client::engine_shutdown(
-                    "OpenEngine remained non-quiescent after terminal Drain",
-                ));
-            }
-            let load_timeout = self.transport.connect_timeout.min(remaining);
-            match tokio::time::timeout(
-                load_timeout,
-                pool.control_client().get_load(pb::GetLoadRequest {
-                    include_per_rank: false,
-                }),
-            )
-            .await
-            {
-                Ok(Ok(response)) if load_is_quiescent(response.get_ref()) => return Ok(()),
-                Ok(Ok(response)) => {
-                    let load = response.into_inner();
-                    tracing::debug!(
-                        running_requests = ?load.running_requests,
-                        queued_requests = ?load.queued_requests,
-                        active_kv_sessions = ?load.active_kv_sessions,
-                        "waiting for OpenEngine to quiesce after terminal Drain"
-                    );
-                }
-                Ok(Err(status)) => {
-                    tracing::debug!(
-                        %status,
-                        "OpenEngine GetLoad failed while verifying drain quiescence"
-                    );
-                }
-                Err(_) => {
-                    tracing::debug!(
-                        "OpenEngine GetLoad timed out while verifying drain quiescence"
-                    );
-                }
-            }
-            tokio::time::sleep(
-                self.transport
-                    .load_poll_interval
-                    .min(deadline.saturating_duration_since(Instant::now())),
-            )
-            .await;
-        }
-    }
-
-    fn drain_before_discovery_unregister(&self) -> bool {
-        false
     }
 
     async fn supported_updates(&self) -> Result<Vec<String>, DynamoError> {
@@ -1242,27 +1119,6 @@ fn validate_model(discovery: &Discovery) -> Result<(), DynamoError> {
             "OpenEngine model must explicitly advertise token-id input required by the Dynamo worker pipeline",
         ));
     }
-    if discovery.engine.schema_revision >= 3 && discovery.model.tokenizer.is_none() {
-        return Err(client::invalid_arg(
-            "OpenEngine schema revision 3 requires tokenizer discovery",
-        ));
-    }
-    if let Some(tokenizer) = discovery.model.tokenizer.as_ref() {
-        if tokenizer.source.is_empty() {
-            return Err(client::invalid_arg(
-                "OpenEngine tokenizer discovery omitted its source",
-            ));
-        }
-        // Dynamo's Rust tokenizer reproduces the default/auto tokenizer.json
-        // path. Python slow tokenizers and implementation-specific modes can
-        // produce different IDs and must fail before worker registration.
-        if !matches!(tokenizer.mode.as_str(), "auto" | "default") {
-            return Err(client::invalid_arg(format!(
-                "OpenEngine tokenizer mode `{}` is not supported by Dynamo's local tokenizer pipeline",
-                tokenizer.mode
-            )));
-        }
-    }
     validate_role_connector(discovery)?;
     Ok(())
 }
@@ -1277,13 +1133,11 @@ fn validate_role_connector(discovery: &Discovery) -> Result<(), DynamoError> {
     })?;
     if connector.enabled != Some(true)
         || connector.supports_abort_cleanup != Some(true)
-        || connector.supports_drain != Some(true)
         || connector.transfer_backend.is_empty()
-        || connector.handoff_profile.is_empty()
         || connector.supported_protocols.is_empty()
     {
         return Err(client::invalid_arg(
-            "disaggregated OpenEngine role requires an enabled, drainable, abort-cleanable KV connector with a backend and protocol",
+            "disaggregated OpenEngine role requires an enabled, abort-cleanable KV connector with a backend and protocol",
         ));
     }
     if role == pb::EngineRole::Prefill && connector.supports_remote_prefill != Some(true) {
@@ -1294,14 +1148,6 @@ fn validate_role_connector(discovery: &Discovery) -> Result<(), DynamoError> {
     if role == pb::EngineRole::Decode && connector.supports_decode_pull != Some(true) {
         return Err(client::invalid_arg(
             "OpenEngine decode role does not advertise decode-pull KV support",
-        ));
-    }
-    if role == pb::EngineRole::Prefill
-        && connector.supports_client_bootstrap == Some(true)
-        && client_bootstrap_endpoint(discovery).is_none()
-    {
-        return Err(client::invalid_arg(
-            "client-bootstrap prefill connector omitted a routable local endpoint",
         ));
     }
     Ok(())
@@ -1321,11 +1167,6 @@ fn apply_client_bootstrap(
         discovery.engine.kv_connector.as_ref().ok_or_else(|| {
             client::invalid_arg("bootstrap request requires KV connector discovery")
         })?;
-    if connector.supports_client_bootstrap != Some(true) {
-        return Err(client::invalid_arg(
-            "OpenEngine KV connector does not advertise client bootstrap",
-        ));
-    }
     if !(mode.is_prefill() || mode.is_decode()) {
         return Err(client::invalid_arg(
             "client bootstrap is valid only for prefill/decode roles",
@@ -1365,45 +1206,65 @@ fn apply_client_bootstrap(
             .and_then(|parallelism| parallelism.data_parallel_start_rank)
             .unwrap_or(0)
     });
-    let bootstrap = pb::KvBootstrap {
-        endpoint: Some(pb::KvEndpoint {
-            host: info.bootstrap_host.clone(),
-            port: u32::from(info.bootstrap_port),
-            protocol: protocol.to_string(),
-        }),
-        room_id: info.bootstrap_room,
-    };
+    let bootstrap = serde_json::json!({
+        "endpoint": {
+            "host": info.bootstrap_host,
+            "port": info.bootstrap_port,
+            "protocol": protocol,
+        },
+        // Struct numbers are IEEE-754 doubles. Preserve the full u64.
+        "room_id": info.bootstrap_room.to_string(),
+        "handoff_id": info.handoff_id.map(|value| value.to_string()),
+    });
     let kv = generated.kv.get_or_insert_with(pb::KvOptions::default);
     match kv.session.as_mut() {
-        Some(session) => {
-            if session.handoff_profile != connector.handoff_profile {
-                return Err(client::invalid_arg(format!(
-                    "prefill handoff profile `{}` does not match connector profile `{}`",
-                    session.handoff_profile, connector.handoff_profile
-                )));
-            }
-            if let Some(existing) = session.bootstrap.as_ref()
-                && existing != &bootstrap
-            {
-                return Err(client::invalid_arg(
-                    "prefill handoff bootstrap conflicts with Dynamo routing bootstrap",
-                ));
-            }
-            session.bootstrap = Some(bootstrap);
-        }
+        Some(session) => merge_client_bootstrap(session, bootstrap)?,
         None => {
-            kv.session = Some(pb::KvSessionRef {
+            let mut session = pb::KvSessionRef {
                 session_id: request_id.to_string(),
                 transfer_backend: connector.transfer_backend.clone(),
                 endpoints: Vec::new(),
                 dp_rank: rank,
                 attributes_struct: None,
-                handoff_profile: connector.handoff_profile.clone(),
-                bootstrap: Some(bootstrap),
-            });
+            };
+            merge_client_bootstrap(&mut session, bootstrap)?;
+            kv.session = Some(session);
         }
     }
     Ok(())
+}
+
+fn merge_client_bootstrap(
+    session: &mut pb::KvSessionRef,
+    bootstrap: serde_json::Value,
+) -> Result<(), DynamoError> {
+    let mut attributes = session
+        .attributes_struct
+        .as_ref()
+        .map(convert::prost_struct_to_json)
+        .unwrap_or_else(|| serde_json::json!({}));
+    let object = attributes.as_object_mut().ok_or_else(|| {
+        client::invalid_arg("KV session attributes_struct must contain an object")
+    })?;
+    if let Some(existing) = object.get(CLIENT_BOOTSTRAP_ATTRIBUTE)
+        && existing != &bootstrap
+    {
+        return Err(client::invalid_arg(
+            "prefill handoff bootstrap conflicts with Dynamo routing bootstrap",
+        ));
+    }
+    object.insert(CLIENT_BOOTSTRAP_ATTRIBUTE.to_string(), bootstrap);
+    session.attributes_struct = convert::json_to_prost_struct(&attributes);
+    Ok(())
+}
+
+fn owned_client_bootstrap_attribute(session: &pb::KvSessionRef) -> Option<serde_json::Value> {
+    session
+        .attributes_struct
+        .as_ref()
+        .map(convert::prost_struct_to_json)?
+        .get(CLIENT_BOOTSTRAP_ATTRIBUTE)
+        .cloned()
 }
 
 fn validate_decode_handoff(
@@ -1442,13 +1303,13 @@ fn validate_decode_handoff(
             )));
         }
     }
-    validate_session_profile_and_bootstrap(connector, session, None)
+    Ok(())
 }
 
 fn validate_prefill_handoff(
     discovery: &Discovery,
     session: &pb::KvSessionRef,
-    requested_bootstrap: Option<&pb::KvBootstrap>,
+    requested_bootstrap: Option<&serde_json::Value>,
 ) -> Result<(), DynamoError> {
     let connector =
         discovery.engine.kv_connector.as_ref().ok_or_else(|| {
@@ -1478,51 +1339,17 @@ fn validate_prefill_handoff(
             session.dp_rank
         )));
     }
-    validate_session_profile_and_bootstrap(connector, session, requested_bootstrap)
-        .map_err(|error| client::engine_shutdown(error.to_string()))
-}
-
-fn validate_session_profile_and_bootstrap(
-    connector: &pb::KvConnectorInfo,
-    session: &pb::KvSessionRef,
-    requested_bootstrap: Option<&pb::KvBootstrap>,
-) -> Result<(), DynamoError> {
-    if session.handoff_profile != connector.handoff_profile {
-        return Err(client::invalid_arg(format!(
-            "KV handoff profile `{}` does not match connector profile `{}`",
-            session.handoff_profile, connector.handoff_profile
-        )));
-    }
-    if connector.supports_client_bootstrap == Some(true) {
-        let bootstrap = session.bootstrap.as_ref().ok_or_else(|| {
-            client::invalid_arg("client-bootstrap KV session omitted typed bootstrap")
+    if let Some(expected) = requested_bootstrap {
+        let actual = owned_client_bootstrap_attribute(session).ok_or_else(|| {
+            client::engine_shutdown(
+                "OpenEngine PrefillReady omitted the requested client bootstrap attributes",
+            )
         })?;
-        let endpoint = bootstrap.endpoint.as_ref().ok_or_else(|| {
-            client::invalid_arg("client-bootstrap KV session omitted bootstrap endpoint")
-        })?;
-        if endpoint.host.is_empty()
-            || endpoint.port == 0
-            || endpoint.port > u32::from(u16::MAX)
-            || !connector
-                .supported_protocols
-                .iter()
-                .any(|protocol| protocol == &endpoint.protocol)
-        {
-            return Err(client::invalid_arg(
-                "client-bootstrap KV session has an invalid endpoint",
+        if &actual != expected {
+            return Err(client::engine_shutdown(
+                "OpenEngine PrefillReady returned different client bootstrap attributes than requested",
             ));
         }
-        if let Some(expected) = requested_bootstrap
-            && bootstrap != expected
-        {
-            return Err(client::invalid_arg(
-                "OpenEngine PrefillReady returned a different bootstrap session than requested",
-            ));
-        }
-    } else if session.bootstrap.is_some() {
-        return Err(client::invalid_arg(
-            "KV session supplied bootstrap for a connector that does not advertise it",
-        ));
     }
     Ok(())
 }
@@ -1651,21 +1478,7 @@ fn validate_request_capabilities(
             "OpenEngine does not support require_reasoning",
         ));
     }
-    let supports_client_bootstrap = discovery
-        .engine
-        .kv_connector
-        .as_ref()
-        .and_then(|connector| connector.supports_client_bootstrap)
-        == Some(true);
-    if mode.is_prefill() || mode.is_decode() {
-        if supports_client_bootstrap != request.bootstrap_info.is_some() {
-            return Err(client::invalid_arg(if supports_client_bootstrap {
-                "OpenEngine connector requires Dynamo client bootstrap"
-            } else {
-                "OpenEngine connector does not support Dynamo client bootstrap"
-            }));
-        }
-    } else if request.bootstrap_info.is_some() {
+    if !(mode.is_prefill() || mode.is_decode()) && request.bootstrap_info.is_some() {
         return Err(client::invalid_arg(
             "aggregated OpenEngine requests cannot carry Dynamo bootstrap",
         ));
@@ -1778,45 +1591,29 @@ fn validate_request_capabilities(
     }
     let Some(media) = request.multi_modal_data.as_ref() else {
         if request.mm_processor_kwargs.is_some() {
-            return Err(client::invalid_arg("media options require media inputs"));
+            return Err(client::invalid_arg(
+                "OpenEngine does not transport per-request media processor options",
+            ));
         }
         return Ok(());
     };
-    let Some(capabilities) = discovery.model.multimodal_capabilities.as_ref() else {
+    if discovery.model.supports_multimodal != Some(true) {
         return Err(client::invalid_arg(
             "OpenEngine model does not advertise multimodal support",
         ));
-    };
-    let supported = if mode.is_prefill() || mode.is_decode() {
-        &capabilities.prefill_decode_modalities
-    } else {
-        &capabilities.aggregate_modalities
-    };
+    }
     for (key, values) in media {
-        let modality = match key.as_str() {
-            "image_url" => pb::Modality::Image,
-            "video_url" => pb::Modality::Video,
-            "audio_url" => pb::Modality::Audio,
+        match key.as_str() {
+            "image_url" | "video_url" | "audio_url" => {}
             _ => {
                 return Err(client::invalid_arg(format!(
                     "unsupported media key `{key}`"
                 )));
             }
-        };
-        if !supported.contains(&(modality as i32)) {
-            return Err(client::invalid_arg(format!(
-                "OpenEngine model does not support {modality:?} in {mode:?} mode"
-            )));
         }
         for value in values {
-            let source_type = match value {
-                MultimodalData::Url(url) if url.as_str().starts_with("data:") => {
-                    pb::MediaSourceType::DataUri
-                }
-                MultimodalData::RawUrl(url) if url.starts_with("data:") => {
-                    pb::MediaSourceType::DataUri
-                }
-                MultimodalData::Url(_) | MultimodalData::RawUrl(_) => pb::MediaSourceType::Url,
+            match value {
+                MultimodalData::Url(_) | MultimodalData::RawUrl(_) => {}
                 MultimodalData::Decoded(_) => {
                     return Err(client::invalid_arg(
                         "OpenEngine sidecar cannot dereference decoded/RDMA media; configure URL/data passthrough",
@@ -1827,19 +1624,12 @@ fn validate_request_capabilities(
                         "OpenEngine sidecar cannot resolve UUID-only media from a backend-local cache; configure URL/data passthrough",
                     ));
                 }
-            };
-            if !capabilities.source_types.contains(&(source_type as i32)) {
-                return Err(client::invalid_arg(format!(
-                    "OpenEngine model does not support {source_type:?} media sources"
-                )));
             }
         }
     }
-    if request.mm_processor_kwargs.is_some()
-        && capabilities.supports_per_request_media_options != Some(true)
-    {
+    if request.mm_processor_kwargs.is_some() {
         return Err(client::invalid_arg(
-            "OpenEngine model does not support per-request media options",
+            "OpenEngine does not transport per-request media processor options",
         ));
     }
     Ok(())
@@ -1936,9 +1726,6 @@ fn build_engine_config(discovery: &Discovery) -> EngineConfig {
     aliases.retain(|alias| !alias.is_empty() && alias != &served_model_name);
     aliases.sort();
     aliases.dedup();
-    let connector = discovery.engine.kv_connector.as_ref();
-    let multimodal = model.multimodal_capabilities.as_ref();
-    let tokenizer = model.tokenizer.as_ref();
     EngineConfig {
         model: model.model_id.clone(),
         served_model_name: Some(served_model_name),
@@ -1951,34 +1738,6 @@ fn build_engine_config(discovery: &Discovery) -> EngineConfig {
             (
                 "openengine_schema_release".to_string(),
                 serde_json::json!(discovery.engine.schema_release),
-            ),
-            (
-                "openengine_tokenizer_source".to_string(),
-                serde_json::json!(
-                    tokenizer
-                        .map(|value| value.source.as_str())
-                        .unwrap_or_default()
-                ),
-            ),
-            (
-                "openengine_tokenizer_mode".to_string(),
-                serde_json::json!(
-                    tokenizer
-                        .map(|value| value.mode.as_str())
-                        .unwrap_or_default()
-                ),
-            ),
-            (
-                "openengine_handoff_profile".to_string(),
-                serde_json::json!(
-                    connector
-                        .map(|value| value.handoff_profile.as_str())
-                        .unwrap_or_default()
-                ),
-            ),
-            (
-                "openengine_routing_image_token_id".to_string(),
-                serde_json::json!(multimodal.and_then(|value| value.routing_image_token_id)),
             ),
         ]
         .into_iter()
@@ -2003,9 +1762,6 @@ fn client_bootstrap_endpoint(discovery: &Discovery) -> Option<&pb::KvEndpoint> {
         return None;
     }
     let connector = discovery.engine.kv_connector.as_ref()?;
-    if connector.supports_client_bootstrap != Some(true) {
-        return None;
-    }
     connector.local_endpoints.iter().find(|endpoint| {
         !endpoint.host.is_empty()
             && endpoint.port > 0

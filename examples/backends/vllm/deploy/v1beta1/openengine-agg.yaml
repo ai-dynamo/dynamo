@@ -31,7 +31,7 @@ spec:
           - --expected-engine
           - vllm
           - --expected-schema-release
-          - a66ff6f73a65e262a7c3edd5ea6fd0d8701d402f
+          - 57cd5033554cd22ab9645ae6c17f34d7fa9f5bb0
           command: [dynamo-openengine-sidecar]
           env:
           - name: DYN_NAMESPACE
@@ -82,7 +82,7 @@ spec:
           - name: VLLM_USE_RUST_FRONTEND
             value: "1"
           - name: OPENENGINE_SCHEMA_RELEASE
-            value: a66ff6f73a65e262a7c3edd5ea6fd0d8701d402f
+            value: 57cd5033554cd22ab9645ae6c17f34d7fa9f5bb0
           image: my-registry/vllm-openengine:my-tag
           name: engine
           resources:
