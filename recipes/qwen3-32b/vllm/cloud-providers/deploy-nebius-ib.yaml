@@ -46,10 +46,10 @@ spec:
           env:
           - name: KV_TRANSFER_CONFIG
             value: '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
-          - name: NCCL_SOCKET_IFNAME
-            value: eth0
           - name: UCX_RNDV_THRESH
             value: "8192"
+          - name: NCCL_SOCKET_IFNAME
+            value: eth0
           - name: NIXL_TELEMETRY_ENABLE
             value: "y"
           - name: NIXL_TELEMETRY_EXPORTER
@@ -87,17 +87,14 @@ spec:
             privileged: true
             runAsUser: 0
           volumeMounts:
-          - mountPath: /model-cache
-            name: model-cache
           - mountPath: /dev/infiniband
             name: ib
           - mountPath: /dev/shm
             name: shm
+          - mountPath: /model-cache
+            name: model-cache
           workingDir: /workspace
         volumes:
-        - name: model-cache
-          persistentVolumeClaim:
-            claimName: model-cache
         - hostPath:
             path: /dev/infiniband
           name: ib
@@ -105,6 +102,9 @@ spec:
             medium: Memory
             sizeLimit: 64Gi
           name: shm
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
       replicas: 1
       resources:
         limits:
@@ -212,17 +212,14 @@ spec:
             privileged: true
             runAsUser: 0
           volumeMounts:
-          - mountPath: /model-cache
-            name: model-cache
           - mountPath: /dev/infiniband
             name: ib
           - mountPath: /dev/shm
             name: shm
+          - mountPath: /model-cache
+            name: model-cache
           workingDir: /workspace
         volumes:
-        - name: model-cache
-          persistentVolumeClaim:
-            claimName: model-cache
         - hostPath:
             path: /dev/infiniband
           name: ib
@@ -230,6 +227,9 @@ spec:
             medium: Memory
             sizeLimit: 64Gi
           name: shm
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
       replicas: 1
       resources:
         limits:

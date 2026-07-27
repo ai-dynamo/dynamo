@@ -13,48 +13,10 @@ spec:
             - &nebiusTransfer
               name: KV_TRANSFER_CONFIG
               value: '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
-            - &nebiusSocket
-              name: NCCL_SOCKET_IFNAME
-              value: eth0
-          volumeMounts: &ibVolumeMounts
-            - name: model-cache
-              mountPath: /model-cache
-            - name: ib
-              mountPath: /dev/infiniband
-            - name: shm
-              mountPath: /dev/shm
-        volumes: &ibVolumes
-          - name: model-cache
-            persistentVolumeClaim:
-              claimName: model-cache
-          - name: ib
-            hostPath:
-              path: /dev/infiniband
-          - name: shm
-            emptyDir:
-              medium: Memory
-              sizeLimit: 64Gi
-      resources:
-        limits:
-          custom:
-            rdma/ib: "1"
-        requests:
-          custom:
-            rdma/ib: "1"
     DecodeWorker:
       extraPodSpec:
         mainContainer:
           env:
             - *nebiusTransfer
-            - *nebiusSocket
             - name: UCX_RNDV_THRESH
               value: "8192"
-          volumeMounts: *ibVolumeMounts
-        volumes: *ibVolumes
-      resources:
-        limits:
-          custom:
-            rdma/ib: "1"
-        requests:
-          custom:
-            rdma/ib: "1"

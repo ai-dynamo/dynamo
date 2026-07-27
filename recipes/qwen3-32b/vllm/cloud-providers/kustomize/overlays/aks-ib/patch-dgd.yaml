@@ -26,14 +26,9 @@ spec:
             - name: NCCL_SOCKET_IFNAME
               value: eth0
           volumeMounts: &aksVolumeMounts
-            - name: model-cache
-              mountPath: /model-cache
             - name: ib
               mountPath: /dev/infiniband
         volumes: &aksVolumes
-          - name: model-cache
-            persistentVolumeClaim:
-              claimName: model-cache
           - name: ib
             hostPath:
               path: /dev/infiniband

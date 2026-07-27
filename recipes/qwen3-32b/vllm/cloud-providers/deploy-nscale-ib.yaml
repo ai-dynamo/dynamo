@@ -87,21 +87,18 @@ spec:
             privileged: true
             runAsUser: 0
           volumeMounts:
-          - mountPath: /model-cache
-            name: model-cache
           - mountPath: /dev/infiniband
             name: ib
           - mountPath: /dev/shm
             name: shm
+          - mountPath: /model-cache
+            name: model-cache
           workingDir: /workspace
         tolerations:
         - effect: NoSchedule
           key: nvidia.com/gpu
           operator: Exists
         volumes:
-        - name: model-cache
-          persistentVolumeClaim:
-            claimName: model-cache
         - hostPath:
             path: /dev/infiniband
           name: ib
@@ -109,6 +106,9 @@ spec:
             medium: Memory
             sizeLimit: 64Gi
           name: shm
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
       replicas: 1
       resources:
         limits:
@@ -219,21 +219,18 @@ spec:
             privileged: true
             runAsUser: 0
           volumeMounts:
-          - mountPath: /model-cache
-            name: model-cache
           - mountPath: /dev/infiniband
             name: ib
           - mountPath: /dev/shm
             name: shm
+          - mountPath: /model-cache
+            name: model-cache
           workingDir: /workspace
         tolerations:
         - effect: NoSchedule
           key: nvidia.com/gpu
           operator: Exists
         volumes:
-        - name: model-cache
-          persistentVolumeClaim:
-            claimName: model-cache
         - hostPath:
             path: /dev/infiniband
           name: ib
@@ -241,6 +238,9 @@ spec:
             medium: Memory
             sizeLimit: 64Gi
           name: shm
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
       replicas: 1
       resources:
         limits:
