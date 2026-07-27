@@ -6,7 +6,7 @@ const VLLM_BACKEND: &str = include_str!("vllm_backend.rs");
 
 /// Every KV cache group implementation, by the label a failure should name.
 const VLLM_GROUPS: [(&str, &str); 2] = [
-    ("vllm_groups/mod.rs", include_str!("vllm_groups/mod.rs")),
+    ("vllm_groups.rs", include_str!("vllm_groups.rs")),
     (
         "vllm_groups/full_attention.rs",
         include_str!("vllm_groups/full_attention.rs"),

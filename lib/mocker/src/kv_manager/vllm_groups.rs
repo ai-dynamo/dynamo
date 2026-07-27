@@ -129,7 +129,7 @@ impl GroupManager {
         blocks: &[UniqueBlock],
     ) {
         match self {
-            Self::FullAttention(group) => group.deref(pool, request_id, blocks),
+            Self::FullAttention(group) => group.release(pool, request_id, blocks),
         }
     }
 

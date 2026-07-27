@@ -379,7 +379,7 @@ impl VllmKvManager {
         );
         let (prefix, fresh, attention_fresh, attention_prefix) = match layout.as_ref() {
             Some(layout) => {
-                let alloc = Self::destination_alloc(request_id, layout, 0);
+                let alloc = Self::destination_alloc(request_id, layout, 0, false);
                 alloc.validate();
                 self.attention().validate_fresh_partials(alloc.blocks);
                 // No prior lookup authorized this transfer's reusable prefix, so
@@ -387,9 +387,8 @@ impl VllmKvManager {
                 // itself against the prefix the request will keep.
                 let attention_prefix = self
                     .attention()
-                    .resident_prefix(&self.pool, &layout.blocks)
-                    .len();
-                let alloc = Self::destination_alloc(request_id, layout, attention_prefix);
+                    .resident_prefix_len(&self.pool, &layout.blocks);
+                let alloc = Self::destination_alloc(request_id, layout, attention_prefix, false);
                 let (prefix, fresh) = self.group_demand(&alloc);
                 let attention_fresh = self.attention().fresh_blocks(&alloc);
                 (prefix, fresh, attention_fresh, attention_prefix)
@@ -415,6 +414,7 @@ impl VllmKvManager {
         request_id: Uuid,
         layout: &VllmBlockLayout,
         reusable_prefix_blocks: usize,
+        cache_fresh: bool,
     ) -> GroupAllocation<'_> {
         GroupAllocation {
             request_id,
@@ -423,7 +423,7 @@ impl VllmKvManager {
             token_ids: layout.token_ids.as_deref(),
             parent: layout.parent.as_ref(),
             reusable_prefix_blocks,
-            cache_fresh: true,
+            cache_fresh,
         }
     }
 
@@ -443,8 +443,7 @@ impl VllmKvManager {
             self.pool.cancel(pool);
             return;
         };
-        let mut alloc = Self::destination_alloc(request_id, &layout, attention_prefix);
-        alloc.cache_fresh = self.enable_prefix_caching;
+        let alloc = Self::destination_alloc(request_id, &layout, attention_prefix, self.enable_prefix_caching);
         alloc.validate();
         self.attention().validate_fresh_partials(alloc.blocks);
         self.commit_groups(&alloc, &mut pool);

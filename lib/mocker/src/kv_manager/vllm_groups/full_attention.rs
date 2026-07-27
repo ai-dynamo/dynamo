@@ -89,25 +89,23 @@ impl FullAttentionGroup {
         alloc.blocks.len() - alloc.reusable_prefix_blocks
     }
 
-    /// Longest resident prefix of `blocks`, for a destination reservation whose
-    /// reusable prefix has not been authorized by a prior lookup.
-    pub(crate) fn resident_prefix(
+    /// Length of the longest resident prefix of `blocks`, for a destination
+    /// reservation whose reusable prefix has not been authorized by a prior lookup.
+    pub(crate) fn resident_prefix_len(
         &self,
         pool: &VllmBlockPool,
         blocks: &[UniqueBlock],
-    ) -> Vec<GroupedHash> {
+    ) -> usize {
         if !self.enable_prefix_caching {
-            return Vec::new();
+            return 0;
         }
         blocks
             .iter()
-            .map_while(|block| match block {
-                UniqueBlock::FullBlock(hash) if pool.prefix_hit(self.key(*hash)).is_some() => {
-                    Some(self.key(*hash))
-                }
-                _ => None,
+            .take_while(|block| match block {
+                UniqueBlock::FullBlock(hash) => pool.prefix_hit(self.key(*hash)).is_some(),
+                _ => false,
             })
-            .collect()
+            .count()
     }
 
     pub(crate) fn longest_cache_hit(
@@ -297,7 +295,7 @@ impl FullAttentionGroup {
     /// Like vLLM's `BlockPool::free_blocks`, the physical pool is lineage-agnostic:
     /// reversing the request-owned table here makes suffix/leaf blocks older LRU
     /// candidates than their parents, so capacity pressure evicts the leaf first.
-    pub(crate) fn deref(
+    pub(crate) fn release(
         &mut self,
         pool: &mut VllmBlockPool,
         request_id: Uuid,
