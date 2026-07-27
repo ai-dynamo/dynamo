@@ -1,21 +1,22 @@
 # dynamo-mocker
 
-`dynamo-mocker` is a GPU-free simulation crate for Dynamo's LLM scheduling and KV-cache behavior.
-It is used for testing, replay, and benchmarking workflows where you want realistic scheduler and
-cache behavior without running a real inference engine.
+`dynamo-mocker` is the shared engine-simulation crate behind live Mocker workers and offline
+DynoSim replay. It models scheduler, KV-cache, timing, handoff, and lower-tier behavior without
+executing model inference on GPUs.
 
 ## What This Crate Provides
 
 - `MockEngineArgs` for configuring a simulated engine
-- `engine::create_engine` for building a vLLM-style or SGLang-style mock scheduler
+- `engine::create_engine` for building vLLM, SGLang, or TensorRT-LLM engine behavior
 - `KvEventPublishers` hooks for emitting router-visible KV cache events
 - `loadgen` and `replay` modules for synthetic and trace-driven experiments
+- `kvbm_offload` for multi-tier KV movement and bandwidth sharing
 
 ## Basic Rust Usage
 
 ```rust
 use dynamo_mocker::common::protocols::{
-    DirectRequest, KvEventPublishers, MockEngineArgs,
+    DirectRequest, FpmPublisher, KvEventPublishers, MockEngineArgs,
 };
 use dynamo_mocker::engine::create_engine;
 
@@ -27,20 +28,25 @@ let args = MockEngineArgs::builder()
     .build()
     .unwrap();
 
-let engine = create_engine(args, 0, None, KvEventPublishers::default(), None);
+let engine = create_engine(
+    args,
+    0,
+    None,
+    KvEventPublishers::default(),
+    None,
+    FpmPublisher::default(),
+);
 
 engine.receive(DirectRequest {
     tokens: vec![1, 2, 3, 4],
     max_output_tokens: 16,
-    uuid: None,
     dp_rank: 0,
-    arrival_timestamp_ms: None,
+    ..DirectRequest::default()
 });
 ```
 
-This crate is also the foundation for Dynamo's higher-level mocker CLI and replay tooling. In many
-deployments you will interact with it indirectly through the Python entry points rather than
-embedding it directly as a standalone Rust dependency.
+Most users interact with the crate through `python -m dynamo.mocker` for live workers or
+`python -m dynamo.replay` for deterministic offline experiments.
 
 ## Further Reading
 
@@ -48,5 +54,7 @@ embedding it directly as a standalone Rust dependency.
   [../../docs/dynosim/mocker.md](../../docs/dynosim/mocker.md)
 - DynoSim runs guide:
   [../../docs/dynosim/runs.md](../../docs/dynosim/runs.md)
+- Simulation model:
+  [../../docs/dynosim/modeling.md](../../docs/dynosim/modeling.md)
 - Python component README:
   [../../components/src/dynamo/mocker/README.md](../../components/src/dynamo/mocker/README.md)

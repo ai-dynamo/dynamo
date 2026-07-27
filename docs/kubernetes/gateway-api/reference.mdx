@@ -155,6 +155,7 @@ Set these values on the EPP component unless the deployment manifest says otherw
 | `DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT` | `1.0` | Controls device-local prefix-overlap credit. Higher values prefer workers with cached prompt prefixes. |
 | `DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT_DECAY` | `0.0` | Reduces prefix-overlap credit as active prefill load rises above the least-loaded eligible worker. |
 | `DYN_ROUTER_PREFILL_LOAD_SCALE` | `1.0` | Scales prompt-side prefill load after cache-hit credits are applied. |
+| `DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT` | `0.0` | Adds block-equivalent routing cost for each active request. Tune only when decode step latency depends materially on active batch size. |
 | `DYN_ROUTER_TEMPERATURE` | `0.0` | `0.0` selects deterministically. Higher values allow more worker exploration through softmax sampling. |
 | `DYN_ROUTER_REPLICA_SYNC` | `false` | Publishes and subscribes KV active-sequence state across router replicas. |
 | `DYN_ROUTER_SESSION_AFFINITY_TTL_SECS` | unset | Enables session affinity and best-effort binding sync with this router-local idle TTL. |
