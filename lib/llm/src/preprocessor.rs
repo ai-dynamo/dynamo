@@ -2938,12 +2938,40 @@ impl OpenAIPreprocessor {
         let pending = Arc::new(Mutex::new(PendingMetrics::default()));
         let pending_in = Arc::clone(&pending);
 
+        // Per-choice recovery state — allocated only for glm47 since only that
+        // parser emits <tool_call> XML that can be truncated at max_tokens.
+        // Buffers raw input per choice.index so n > 1 is handled correctly.
+        #[derive(Default)]
+        struct ChoiceRecovery {
+            input_text: String,
+        }
+        let is_glm47 = tool_call_parser.as_deref() == Some("glm47");
+        let choice_recovery: Arc<Mutex<std::collections::HashMap<u32, ChoiceRecovery>>> =
+            Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let choice_recovery_in = Arc::clone(&choice_recovery);
+
         // dynamo `Annotated<Nv>` -> jail `Annotated<Create>` (buffer llm_metrics)
         let jail_input = stream.map(move |mut a| {
             if let Some(metrics) = a.data.as_mut().and_then(|nv| nv.llm_metrics.take()) {
                 let mut p = pending_in.lock().expect("jail metrics buffer poisoned");
                 p.chunk_tokens = p.chunk_tokens.saturating_add(metrics.chunk_tokens);
                 p.template = Some(metrics);
+            }
+            // Buffer input content only for glm47 (truncation recovery).
+            if is_glm47 {
+                if let Some(data) = &a.data {
+                    let mut cr = choice_recovery_in.lock().expect("choice recovery poisoned");
+                    for choice in &data.inner.choices {
+                        if let Some(ChatCompletionMessageContent::Text(content)) =
+                            &choice.delta.content
+                        {
+                            cr.entry(choice.index)
+                                .or_default()
+                                .input_text
+                                .push_str(content);
+                        }
+                    }
+                }
             }
             JailAnnotated {
                 data: a.data.map(|nv| nv.inner),
@@ -2962,7 +2990,7 @@ impl OpenAIPreprocessor {
             uses_tool_call_structural_tag,
             jail_input,
         )
-        .map(move |a| {
+        .flat_map(move |a| {
             // Stamp the accumulated metrics onto the next emitted data chunk;
             // data-less/synthesized chunks carry it forward (or `None`).
             let llm_metrics = a.data.as_ref().and_then(|_| {
@@ -2974,7 +3002,7 @@ impl OpenAIPreprocessor {
                     metrics
                 })
             });
-            Annotated {
+            let nv_chunk = Annotated {
                 data: a.data.map(|inner| NvCreateChatCompletionStreamResponse {
                     inner,
                     nvext: None,
@@ -2984,7 +3012,63 @@ impl OpenAIPreprocessor {
                 event: a.event,
                 comment: a.comment,
                 error: a.error.map(DynamoError::msg),
+            };
+
+            // glm47: on finish_reason=length, recover the last incomplete <tool_call>
+            // block. rfind skips complete blocks, so earlier parsed tool calls are
+            // never duplicated as raw content. Recovered content WILL contain raw
+            // <tool_call> markup — callers that require strict "no tool tags in content"
+            // must filter on finish_reason=length.
+            let mut recoveries: Vec<Annotated<NvCreateChatCompletionStreamResponse>> = Vec::new();
+            if is_glm47 {
+                if let Some(ref data) = nv_chunk.data {
+                    let mut cr = choice_recovery.lock().expect("choice recovery poisoned");
+                    for choice in &data.inner.choices {
+                        let state = cr.entry(choice.index).or_default();
+                        if matches!(
+                            choice.finish_reason,
+                            Some(dynamo_protocols::types::FinishReason::Length)
+                        ) {
+                            let recovered =
+                                state.input_text.rfind("<tool_call>").and_then(|start| {
+                                    let tail = &state.input_text[start..];
+                                    if !tail.contains("</tool_call>") {
+                                        Some(tail.to_string())
+                                    } else {
+                                        None
+                                    }
+                                });
+                            if let Some(recovered) = recovered {
+                                tracing::warn!(
+                                    choice_index = choice.index,
+                                    recovered_bytes = recovered.len(),
+                                    "glm47 streaming: partial <tool_call> emitted as content \
+                                     on length finish (TRT-LLM parity; raw markup in content)"
+                                );
+                                let mut rec = nv_chunk.clone();
+                                if let Some(ref mut rd) = rec.data {
+                                    rd.inner.usage = None;
+                                    rd.llm_metrics = None;
+                                    rd.inner.choices.retain(|c| c.index == choice.index);
+                                    for rc in &mut rd.inner.choices {
+                                        rc.delta.content = Some(
+                                            ChatCompletionMessageContent::Text(recovered.clone()),
+                                        );
+                                        rc.delta.tool_calls = None;
+                                        rc.finish_reason = None;
+                                    }
+                                }
+                                recoveries.push(rec);
+                            }
+                        }
+                    }
+                }
             }
+
+            let mut out = Vec::with_capacity(recoveries.len() + 1);
+            out.extend(recoveries);
+            out.push(nv_chunk);
+            futures::stream::iter(out)
         })
     }
 
