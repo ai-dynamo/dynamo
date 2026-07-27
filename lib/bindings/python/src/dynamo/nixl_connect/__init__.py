@@ -25,7 +25,7 @@ import time
 import uuid
 import zlib
 from abc import ABC, abstractmethod
-from enum import IntEnum
+from enum import Enum, IntEnum
 from functools import cached_property
 from typing import Any, List, Optional
 
@@ -115,6 +115,23 @@ class AbstractOperation(ABC):
         remote_descriptors: Optional[Descriptor | list[Descriptor]],
         notification_key: Optional[str],
     ) -> None:
+        """
+        Initialises an abstract NIXL RDMA operation.
+
+        Parameters
+        ----------
+        connection : Connection
+            The local NIXL connection to use for the operation.
+        operation_kind : OperationKind
+            The kind of operation (READ or WRITE).
+        local_descriptors : Descriptor | list[Descriptor]
+            One or more local memory descriptors for the operation.
+        remote_descriptors : Descriptor | list[Descriptor] | None
+            One or more remote memory descriptors, or None for passive operations.
+        notification_key : str | None
+            Completion-notification key; a random UUID is generated when None.
+        """
+
         if not isinstance(connection, Connection):
             raise TypeError(
                 "Argument `connection` must be `dynamo.nixl_connect.Connection`."
@@ -170,12 +187,12 @@ class AbstractOperation(ABC):
         self._operation_kind: OperationKind = operation_kind
         self._local_desc_list: Descriptor | list[Descriptor] = local_descriptors
         self._local_desc_tlist: Optional[list[tuple[int, int, int]]] = None
-        self._local_device_kind: DeviceKind = DeviceKind.UNSPECIFIED
+        self._local_mem_type: Optional[DeviceMemType] = None
         self._remote_desc_list: Optional[Descriptor | list[Descriptor]] = (
             None if remote_descriptors is None else remote_descriptors
         )
         self._remote_desc_tlist: Optional[list[tuple[int, int, int]]] = None
-        self._remote_device_kind: DeviceKind = DeviceKind.UNSPECIFIED
+        self._remote_mem_type: Optional[DeviceMemType] = None
 
         # Register local descriptors with NIXL.
         # Note: Only local descriptors should be registered with NIXL,
@@ -192,15 +209,15 @@ class AbstractOperation(ABC):
             )
 
         # Record local descriptors.
-        device_kind, desc_tlist = self._create_desc_tlist(local_descriptors)
-        self._local_desc_tlist = desc_tlist
-        self._local_device_kind = device_kind
+        self._local_mem_type, self._local_desc_tlist = self._create_desc_tlist(
+            local_descriptors
+        )
 
         # Record remote descriptors when provided.
         if remote_descriptors is not None:
-            device_kind, desc_tlist = self._create_desc_tlist(remote_descriptors)
-            self._remote_desc_tlist = desc_tlist
-            self._remote_device_kind = device_kind
+            self._remote_mem_type, self._remote_desc_tlist = self._create_desc_tlist(
+                remote_descriptors
+            )
 
     def __del__(self) -> None:
         self._release()
@@ -258,26 +275,21 @@ class AbstractOperation(ABC):
     def _create_desc_tlist(
         self,
         descriptors: Descriptor | list[Descriptor],
-    ) -> tuple[DeviceKind, list[tuple[int, int, int]]]:
+    ) -> tuple[DeviceMemType, list[tuple[int, int, int]]]:
         """
-        Helper function to create a list of tuples (ptr, size, device) from descriptors.
+        Helper to build a list of `(ptr, size, device_id)` tuples and return it
+        alongside the shared NIXL `DeviceMemType` for all descriptors.
         """
+        desc_seq = descriptors if isinstance(descriptors, list) else [descriptors]
+        mem_type = desc_seq[0].device.mem_type
         descriptor_tuples: list[tuple[int, int, int]] = []
-        device_kind: DeviceKind = DeviceKind.UNSPECIFIED
-        if isinstance(descriptors, list):
-            device_kind = descriptors[0].device.kind
-            for desc in descriptors:
-                if device_kind != desc.device.kind:
-                    raise ValueError(
-                        "All local descriptors must have the same memory type."
-                    )
-                descriptor_tuples.append((desc.ptr, desc.size, desc.device.id))
-        else:
-            device_kind = descriptors.device.kind
-            descriptor_tuples.append(
-                (descriptors.ptr, descriptors.size, descriptors.device.id)
-            )
-        return (device_kind, descriptor_tuples)
+        for desc in desc_seq:
+            if desc.device.mem_type is not mem_type:
+                raise ValueError(
+                    "All descriptors in an operation must share the same memory type."
+                )
+            descriptor_tuples.append((desc.ptr, desc.size, desc.device.id))
+        return (mem_type, descriptor_tuples)
 
 
 class ActiveOperation(AbstractOperation):
@@ -383,14 +395,14 @@ class ActiveOperation(AbstractOperation):
 
         self._local_xfer_descs = self._connection._nixl.get_xfer_descs(
             descs=self._local_desc_tlist,
-            mem_type=self._local_device_kind.nixl_mem_type,
+            mem_type=self._local_mem_type.value,
         )
         logger.debug(
             f"dynamo.nixl_connect.{self.__class__.__name__}: Created local NIXL transfer descriptors: {self._local_xfer_descs}"
         )
         self._remote_xfer_descs = self._connection._nixl.get_xfer_descs(
             descs=self._remote_desc_tlist,
-            mem_type=self._remote_device_kind.nixl_mem_type,
+            mem_type=self._remote_mem_type.value,
         )
         logger.debug(
             f"dynamo.nixl_connect.{self.__class__.__name__}: Created remote NIXL transfer descriptors: {self._remote_xfer_descs}"
@@ -993,10 +1005,10 @@ class Descriptor:
 
             self._data_ptr = data.data_ptr()
             self._data_size = data.numel() * data.element_size()
-            if data.is_cuda:
-                self._data_device = Device((DeviceKind.CUDA, data.get_device()))
-            elif data.device.type == "xpu":
-                self._data_device = Device((DeviceKind.XPU, data.get_device()))
+            if data.device.type == "cpu":
+                self._data_device = Device("cpu")
+            else:
+                self._data_device = Device(f"{data.device.type}:{data.get_device()}")
             self._data_ref = data
 
             logger.debug(
@@ -1163,7 +1175,6 @@ class Descriptor:
                 "Descriptor can only be deregistered from the connection it was registered with. "
                 f"Existing connection: {self._connection.name if self._connection is not None else None}, requested connection: {connection.name}."
             )
-            return
 
         if self._nixl_hndl is None:
             logger.warning(
@@ -1204,29 +1215,18 @@ class Descriptor:
         if self._nixl_hndl is not None:
             return
 
-        # Register the memory with NIXL.
-        if isinstance(self._data_ref, torch.Tensor):
-            # TODO: Remove the following WA when default NIXL version with dynamo is updated to > v1.0.1
-            # XPU tensors passed before https://github.com/ai-dynamo/nixl/pull/1534 fix need the following WA:
-            if self._data_ref.device.type == "xpu":
-                mem_type = "VRAM"
-                reg_list = [
-                    (self._data_ptr, self._data_size, self._data_device.id, mem_type)
-                ]
-                nixl_hndl = connection._nixl.register_memory(reg_list, mem_type)
-            else:
-                nixl_hndl = connection._nixl.register_memory(self._data_ref)
-            # After NIXL is updated we can simply use this one-line instead:
-            # nixl_hndl = connection._nixl.register_memory(self._data_ref)
+        # TODO: Remove XPU WA when Dynamo's NIXL floor is bumped past v1.0.1.
+        # NIXL < v1.0.1 does not recognize "xpu" in its implicit mem type derivation.
+        # Fixed in upstream NIXL with https://github.com/ai-dynamo/nixl/pull/1534.
+        if (
+            isinstance(self._data_ref, torch.Tensor)
+            and self._data_ref.device.type != "xpu"
+        ):
+            self._nixl_hndl = connection._nixl.register_memory(self._data_ref)
         else:
-            mem_type = self._data_device.kind.nixl_mem_type
-            reg_list = [
-                (self._data_ptr, self._data_size, self._data_device.id, mem_type)
-            ]
-            nixl_hndl = connection._nixl.register_memory(reg_list, mem_type)
-
-        # Mark as bound after successful registration.
-        self._nixl_hndl = nixl_hndl
+            mem_type = self._data_device.mem_type.value
+            reg_list = [(self._data_ptr, self._data_size, self._data_device.id, "")]
+            self._nixl_hndl = connection._nixl.register_memory(reg_list, mem_type)
         self._connection = connection
 
         logger.debug(
@@ -1282,115 +1282,107 @@ class Descriptor:
 
 class Device:
     """
-    Represents a device in the system.
+    Device a memory allocation lives on: a NIXL `DeviceMemType` (DRAM or
+    VRAM), an integer device ordinal, and a framework `name` (e.g. "cpu",
+    "cuda") kept for display and wire round-trip.
     """
 
     def __init__(
         self,
-        metadata: str | tuple[DeviceKind, int],
+        metadata: str | tuple[DeviceMemType, int],
     ) -> None:
+        """
+        Creates a Device from a framework device string or a (DeviceMemType, id) tuple.
+
+        Parameters
+        ----------
+        metadata : str | tuple[DeviceMemType, int]
+            Either a framework device string such as "cpu" or "cuda:0", or
+            a (DeviceMemType, device_id) tuple.  The strings "host" and "gpu"
+            are accepted as aliases for "cpu" and "cuda", respectively.
+
+        Raises
+        ------
+        ValueError
+            When *metadata* is ``None``.
+        TypeError
+            When *metadata* is not a recognised string or ``(DeviceMemType, int)`` tuple.
+        """
+
         if metadata is None:
             raise ValueError("Argument `metadata` cannot be `None`.")
+
+        if isinstance(metadata, str):
+            s = metadata.strip().lower()
+            if s in ("cpu", "host"):
+                self._mem_type = DeviceMemType.DRAM
+                self._device_id = 0
+                self._device_name = "cpu"
+                return
+
+            # Everything non-cpu is VRAM (cuda, xpu, future accelerators).
+            name, _, idx = s.partition(":")
+            if name == "gpu":
+                name = "cuda"
+            self._mem_type = DeviceMemType.VRAM
+            self._device_id = int(idx) if idx else 0
+            self._device_name = name
+            return
+
         if (
             isinstance(metadata, tuple)
             and len(metadata) == 2
-            and isinstance(metadata[0], DeviceKind)
+            and isinstance(metadata[0], DeviceMemType)
             and isinstance(metadata[1], int)
         ):
-            kind, device_id = metadata
-        elif isinstance(metadata, str):
-            metadata = metadata.strip().lower()
-            if metadata.startswith("cuda") or metadata.startswith("gpu"):
-                kind = DeviceKind.CUDA
-                device_id = (
-                    0 if metadata.find(":") == -1 else int(metadata.split(":")[1])
-                )
-            elif metadata.startswith("xpu"):
-                kind = DeviceKind.XPU
-                device_id = (
-                    0 if metadata.find(":") == -1 else int(metadata.split(":")[1])
-                )
-            elif metadata.startswith("cpu") or metadata.startswith("host"):
-                kind = DeviceKind.HOST
-                device_id = 0
-            else:
-                raise ValueError(
-                    "Argument `metadata` must be in the format 'cuda:<device_id>', 'xpu:<device_id>', or 'cpu'."
-                )
-        else:
-            raise TypeError(
-                "Argument `metadata` must be a `tuple[MemoryKind, int]` or a `str`."
-            )
+            self._mem_type = metadata[0]
+            self._device_id = metadata[1]
+            self._device_name = "cpu" if metadata[0] is DeviceMemType.DRAM else "cuda"
+            return
 
-        self._device_id = device_id
-        self._kind = kind
+        raise TypeError(
+            "Argument `metadata` must be a `str` or `tuple[DeviceMemType, int]`."
+        )
 
     def __repr__(self) -> str:
-        return f"{self.__class__.__name__}(kind={self._kind}, id={self._device_id})"
+        return f"{self.__class__.__name__}({self})"
 
     def __str__(self) -> str:
-        return (
-            f"{self._kind}:{self._device_id}"
-            if self._kind in (DeviceKind.CUDA, DeviceKind.XPU)
-            else f"{self._kind}"
-        )
+        if self._mem_type is DeviceMemType.DRAM:
+            return self._device_name
+        return f"{self._device_name}:{self._device_id}"
 
     @property
     def id(self) -> int:
-        """
-        Gets the device ID of the device.
-        """
+        """Gets the device ordinal (always 0 for DRAM)."""
         return self._device_id
 
     @property
-    def kind(self) -> DeviceKind:
-        """
-        Gets the memory kind of the device.
-        """
-        return self._kind
-
-
-class DeviceKind(IntEnum):
-    """
-    Type of memory a descriptor has been allocated to.
-    """
-
-    UNSPECIFIED = 0
-
-    HOST = 1
-    """
-    System (CPU) memory.
-    """
-
-    CUDA = 2
-    """
-    CUDA addressable device (GPU) memory.
-    """
-
-    XPU = 3
-    """
-    Intel XPU (Level-Zero) device memory.
-    """
-
-    def __str__(self) -> str:
-        if self == DeviceKind.HOST:
-            return "cpu"
-        elif self == DeviceKind.CUDA:
-            return "cuda"
-        elif self == DeviceKind.XPU:
-            return "xpu"
-        else:
-            return "<invalid>"
+    def mem_type(self) -> DeviceMemType:
+        """Gets the NIXL memory segment kind (DRAM or VRAM)."""
+        return self._mem_type
 
     @property
-    def nixl_mem_type(self) -> str:
-        """Return the canonical NIXL segment name for this device kind."""
-        if self == DeviceKind.HOST:
-            return "DRAM"
-        elif self in (DeviceKind.CUDA, DeviceKind.XPU):
-            return "VRAM"
-        else:
-            return "VRAM"
+    def name(self) -> str:
+        """Gets the framework device name (e.g. "cpu", "cuda", "xpu")."""
+        return self._device_name
+
+
+class DeviceMemType(str, Enum):
+    """
+    NIXL memory segment kind. The enum *value* is the canonical NIXL segment
+    name, so it can be passed directly to the NIXL API without translation.
+    """
+
+    DRAM = "DRAM"
+    """System (CPU) memory."""
+
+    VRAM = "VRAM"
+    """Device (GPU/XPU) memory."""
+
+    def __str__(self) -> str:
+        """Returns the canonical NIXL segment name ("DRAM" or "VRAM")."""
+        return self.value
 
 
 class OperationKind(IntEnum):
