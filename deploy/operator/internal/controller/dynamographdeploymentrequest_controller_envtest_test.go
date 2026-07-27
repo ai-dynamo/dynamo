@@ -1404,7 +1404,7 @@ spec:
 			})
 			Expect(err).NotTo(HaveOccurred())
 
-			t.Log("Backfill the observed spec fingerprint")
+			t.Log("Continue reconciliation after initialization")
 			result, err := reconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: types.NamespacedName{Name: dgdrName, Namespace: namespace},
 			})

@@ -551,9 +551,6 @@ func (r *DynamoGraphDeploymentRequestReconciler) handlePendingPhase(ctx context.
 			return r.updatePhaseWithCondition(ctx, dgdr, nvidiacomv1beta1.DGDRPhaseFailed, nvidiacomv1beta1.ConditionTypeValidation, metav1.ConditionFalse, nvidiacomv1beta1.EventReasonValidationFailed, err.Error())
 		}
 
-		// Set observedGeneration to track the spec we're processing
-		dgdr.Status.ObservedGeneration = dgdr.Generation
-
 		dgdr.AddStatusCondition(metav1.Condition{
 			Type:               nvidiacomv1beta1.ConditionTypeValidation,
 			Status:             metav1.ConditionTrue,
@@ -2433,8 +2430,10 @@ func setSucceededCondition(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest, 
 func (r *DynamoGraphDeploymentRequestReconciler) updatePhase(ctx context.Context, dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest, phase nvidiacomv1beta1.DGDRPhase, message string) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	logger.Info("Updating DGDR phase", "name", dgdr.Name, "phase", phase, "message", message)
+	if err := observeCurrentDGDRSpec(dgdr); err != nil {
+		return ctrl.Result{}, err
+	}
 	dgdr.Status.Phase = phase
-	dgdr.Status.ObservedGeneration = dgdr.Generation
 	setSucceededCondition(dgdr, phase)
 	if err := r.Status().Update(ctx, dgdr); err != nil {
 		return ctrl.Result{}, err
@@ -2452,8 +2451,10 @@ func (r *DynamoGraphDeploymentRequestReconciler) updatePhaseWithCondition(
 	reason string,
 	message string,
 ) (ctrl.Result, error) {
+	if err := observeCurrentDGDRSpec(dgdr); err != nil {
+		return ctrl.Result{}, err
+	}
 	dgdr.Status.Phase = phase
-	dgdr.Status.ObservedGeneration = dgdr.Generation
 
 	// Set the specific condition first so setSucceededCondition can surface it.
 	dgdr.AddStatusCondition(metav1.Condition{
@@ -2471,6 +2472,16 @@ func (r *DynamoGraphDeploymentRequestReconciler) updatePhaseWithCondition(
 	}
 
 	return ctrl.Result{}, nil
+}
+
+func observeCurrentDGDRSpec(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) error {
+	specFingerprint, err := dgdrutil.SpecFingerprint(&dgdr.Spec)
+	if err != nil {
+		return err
+	}
+	dgdr.Status.ObservedGeneration = dgdr.Generation
+	dgdr.Status.ObservedSpecFingerprint = specFingerprint
+	return nil
 }
 
 // SetupWithManager sets up the controller with the Manager
