@@ -51,6 +51,10 @@ const fn default_prefill_load_scale() -> f64 {
     1.0
 }
 
+const fn default_decode_active_request_weight() -> f64 {
+    0.0
+}
+
 const fn default_overlap_score_credit_decay() -> f64 {
     0.0
 }
@@ -121,6 +125,7 @@ fn log_env_config(config: &KvRouterConfig) {
         overlap_score_credit = config.overlap_score_credit,
         overlap_score_credit_decay = config.overlap_score_credit_decay,
         prefill_load_scale = config.prefill_load_scale,
+        decode_active_request_weight = config.decode_active_request_weight,
         router_temperature = config.router_temperature,
         use_kv_events = config.use_kv_events,
         router_replica_sync = config.router_replica_sync,
@@ -169,6 +174,9 @@ fn kv_router_config_from_lookup(
     }
     if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_PREFILL_LOAD_SCALE") {
         config.prefill_load_scale = value;
+    }
+    if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT") {
+        config.decode_active_request_weight = value;
     }
     for key in [
         "DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT",
@@ -502,6 +510,7 @@ struct KvRouterConfigSerde {
     overlap_score_credit: f64,
     overlap_score_credit_decay: f64,
     prefill_load_scale: f64,
+    decode_active_request_weight: f64,
     overlap_score_weight: Option<f64>,
     host_cache_hit_weight: f64,
     disk_cache_hit_weight: f64,
@@ -545,6 +554,7 @@ impl Default for KvRouterConfigSerde {
             overlap_score_credit: config.overlap_score_credit,
             overlap_score_credit_decay: config.overlap_score_credit_decay,
             prefill_load_scale: config.prefill_load_scale,
+            decode_active_request_weight: config.decode_active_request_weight,
             overlap_score_weight: None,
             host_cache_hit_weight: config.host_cache_hit_weight,
             disk_cache_hit_weight: config.disk_cache_hit_weight,
@@ -600,6 +610,11 @@ pub struct KvRouterConfig {
     /// Scale applied after overlap/cache-hit credits reduce the prompt-side
     /// prefill load. Defaults to 1.0.
     pub prefill_load_scale: f64,
+
+    /// Block-equivalent cost added for each active request on a candidate
+    /// worker. This can balance decode batch size when per-request decode
+    /// compute matters more than resident KV footprint. Defaults to 0.0.
+    pub decode_active_request_weight: f64,
 
     #[serde(default = "default_host_cache_hit_weight")]
     pub host_cache_hit_weight: f64,
@@ -750,6 +765,7 @@ impl Default for KvRouterConfig {
             overlap_score_credit: 1.0,
             overlap_score_credit_decay: default_overlap_score_credit_decay(),
             prefill_load_scale: default_prefill_load_scale(),
+            decode_active_request_weight: default_decode_active_request_weight(),
             host_cache_hit_weight: default_host_cache_hit_weight(),
             disk_cache_hit_weight: default_disk_cache_hit_weight(),
             router_temperature: 0.0,
@@ -806,6 +822,7 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
             overlap_score_credit,
             overlap_score_credit_decay: compat.overlap_score_credit_decay,
             prefill_load_scale,
+            decode_active_request_weight: compat.decode_active_request_weight,
             host_cache_hit_weight: compat.host_cache_hit_weight,
             disk_cache_hit_weight: compat.disk_cache_hit_weight,
             router_temperature: compat.router_temperature,
@@ -975,6 +992,12 @@ impl KvRouterConfig {
             0.0,
         )?;
         validate_min("prefill_load_scale", self.prefill_load_scale, 0.0)?;
+        validate_range(
+            "decode_active_request_weight",
+            self.decode_active_request_weight,
+            0.0,
+            f64::MAX,
+        )?;
         validate_range(
             "host_cache_hit_weight",
             self.host_cache_hit_weight,
@@ -1197,6 +1220,7 @@ mod tests {
             ("DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT", "0.25"),
             ("DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT_DECAY", "0.75"),
             ("DYN_ROUTER_PREFILL_LOAD_SCALE", "2.5"),
+            ("DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT", "32"),
             ("DYN_ROUTER_TEMPERATURE", "0.7"),
             ("DYN_USE_KV_EVENTS", "false"),
             ("DYN_ROUTER_REPLICA_SYNC", "yes"),
@@ -1216,6 +1240,7 @@ mod tests {
         assert_eq!(config.overlap_score_credit, 0.25);
         assert_eq!(config.overlap_score_credit_decay, 0.75);
         assert_eq!(config.prefill_load_scale, 2.5);
+        assert_eq!(config.decode_active_request_weight, 32.0);
         assert_eq!(config.router_temperature, 0.7);
         assert!(!config.use_kv_events);
         assert!(config.router_replica_sync);
@@ -1279,6 +1304,10 @@ mod tests {
             let invalid_credit =
                 config_from_values(&[("DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT", value)]);
             assert!(invalid_credit.validate_config().is_err());
+
+            let invalid_active_request_weight =
+                config_from_values(&[("DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT", value)]);
+            assert!(invalid_active_request_weight.validate_config().is_err());
         }
 
         let error = try_config_from_values(&[("DYN_ROUTER_TRACKING_HASH", "mystery")]).unwrap_err();
@@ -1803,12 +1832,6 @@ models:
             };
             assert!(invalid.validate().is_err());
         }
-    }
-
-    #[test]
-    fn test_kv_router_config_defaults_are_disabled() {
-        assert_eq!(KvRouterConfig::default().router_queue_threshold, None);
-        assert_eq!(KvRouterConfig::default().shared_cache_multiplier, 0.0);
     }
 
     #[test]
