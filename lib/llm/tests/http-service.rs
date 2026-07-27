@@ -1655,6 +1655,9 @@ async fn test_streaming_responses_returns_4xx_on_backend_invalid_argument() {
         text.contains("Received multimodal data but multimodal processing is not enabled"),
         "expected typed backend error message forwarded to client; got: {text}"
     );
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
 }
 
 #[tokio::test]
