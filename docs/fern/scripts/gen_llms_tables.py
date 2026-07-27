@@ -13,9 +13,13 @@ wrapped in <llms-only> so only agent exports see them.
 
 A page may carry more than one generated span, each keyed by its own marker
 name. reference/compatibility.mdx also carries a human-facing
-``support-matrix`` span: a collapsed <Accordion> with the CUDA toolkit and
-minimum driver matrix for the mainline (stable minor) releases, so the
-matrix is readable on the page itself and not only in the agent twin.
+``support-matrix`` span: a single collapsed <Accordion> holding the CUDA
+toolkit and minimum driver matrix for every released line (stable releases
+and their patches), split into one captioned table per minor line so a
+header stays in view while scrolling. The agent twin on the same page keeps
+the matrix as one flat table instead -- the human cut is optimized for
+scanning, the agent cut for parsing, so the two spans are deliberately
+different renderings of the same rows rather than a redundant pair.
 
 It also emits three machine-readable outputs from the same parse:
 
@@ -603,10 +607,43 @@ def released_versions(data: dict) -> set[str]:
     }
 
 
+def minor_line(version: str) -> str:
+    """'1.2.1' -> '1.2.x' -- the caption a matrix table is grouped under."""
+    parts = version.split(".")
+    if len(parts) < 2 or not (parts[0].isdigit() and parts[1].isdigit()):
+        raise TSParseError(
+            f"CUDA_HISTORY version {version!r} is not MAJOR.MINOR... -- the "
+            "support matrix cannot group it by minor line"
+        )
+    return f"{parts[0]}.{parts[1]}.x"
+
+
+def group_by_minor_line(data: dict, versions: set[str]) -> dict[str, set[str]]:
+    """Minor line -> its versions, keyed in CUDA_HISTORY order (newest first).
+
+    Insertion order carries the sort: CUDA_HISTORY is maintained newest-first,
+    so the first time a minor line is seen fixes its position, and dicts
+    preserve that. No separate version sort to drift out of step with it.
+    """
+    groups: dict[str, set[str]] = {}
+    for row in data["CUDA_HISTORY"]:
+        if row["version"] in versions:
+            groups.setdefault(minor_line(row["version"]), set()).add(row["version"])
+    return groups
+
+
 def render_support_matrix(data: dict) -> str:
-    """Human-facing collapsed CUDA/driver matrix for the released lines."""
+    """Human-facing collapsed CUDA/driver matrix for the released lines.
+
+    One captioned table per minor line, all inside a single <Accordion>. A
+    flat 60-row run pushes its header off screen inside a collapsed panel;
+    per-line tables repeat the header every few rows. Separate tables rather
+    than a version column blanked after its first row -- blank leading cells
+    are ambiguous once the page is flattened into the agent markdown export.
+    """
     versions = released_versions(data)
-    if not {r["version"] for r in data["CUDA_HISTORY"]} & versions:
+    groups = group_by_minor_line(data, versions)
+    if not groups:
         raise TSParseError(
             "no CUDA_HISTORY row matches a released RELEASES version -- the "
             "support-matrix accordion would render an empty table"
@@ -614,13 +651,15 @@ def render_support_matrix(data: dict) -> str:
 
     parts = [
         '<Accordion title="CUDA toolkit and minimum driver by release">',
-        "Every released line — stable releases and their patches. Platform "
-        "previews and model-specific builds are not listed individually; the "
-        "notes below cover their toolkit support, and "
-        "[Releases (machine-readable)](releases-data.mdx) has the full "
-        "release inventory.",
-        cuda_table(data, versions),
+        "Every released line — stable releases and their patches, grouped by "
+        "minor line, newest first. Platform previews and model-specific "
+        "builds are not listed individually; the notes below cover their "
+        "toolkit support, and [Releases (machine-readable)](releases-data.mdx) "
+        "has the full release inventory.",
     ]
+    for line, line_versions in groups.items():
+        parts.append(f"**{line}**")
+        parts.append(cuda_table(data, line_versions))
     cuda_notes = data.get("CUDA_NOTES") or []
     if cuda_notes:
         parts.append("\n".join(f"- {note}" for note in cuda_notes))
