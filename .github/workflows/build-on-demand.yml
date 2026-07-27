@@ -22,6 +22,10 @@ on:
         description: 'Build and push operator image, tagged with branch name'
         type: boolean
         default: false
+      build_gms_v1_artifacts:
+        description: 'Build exact-product-tree vLLM placeholder and snapshot agent'
+        type: boolean
+        default: false
 
 env:
   BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
@@ -124,6 +128,110 @@ jobs:
       copy_timeout_minutes: 10
     secrets: inherit
 
+  gms-v1-artifacts:
+    name: GMS V1 Snapshot Artifacts
+    needs: [init, vllm-copy-to-acr]
+    if: inputs.build_gms_v1_artifacts && inputs.build_vllm
+    runs-on: prod-builder-v3
+    timeout-minutes: 60
+    env:
+      PRODUCT_SHA: d622d07561807eeab3ecedc841fc2bd29b62b89a
+      ACR_IMAGE_BASE: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo
+    steps:
+      - name: Checkout build ref
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Verify immutable product tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code "${PRODUCT_SHA}" -- \
+            . ':(exclude).github/workflows/build-on-demand.yml'
+
+      - name: Initialize Dynamo builder
+        uses: ./.github/actions/init-dynamo-builder
+        with:
+          builder_name: ${{ env.BUILDER_NAME }}
+          flavor: general
+          arch: linux/amd64
+
+      - name: Log in to ACR
+        uses: ./.github/actions/docker-login
+        with:
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+
+      - name: Build exact-SHA vLLM placeholder
+        working-directory: deploy/snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --builder "${BUILDER_NAME}" \
+            --progress plain \
+            --platform linux/amd64 \
+            --target placeholder \
+            --push \
+            --provenance mode=max \
+            --metadata-file "${GITHUB_WORKSPACE}/vllm-placeholder-metadata.json" \
+            --tag "${ACR_IMAGE_BASE}:${PRODUCT_SHA}-vllm-placeholder" \
+            --build-context snapshot=../snapshot \
+            --build-context operator=../operator \
+            --build-arg "BASE_IMAGE=${ACR_IMAGE_BASE}:${GITHUB_SHA}-vllm-runtime" \
+            --file Dockerfile \
+            .
+
+      - name: Refresh BuildKit builder
+        uses: ./.github/actions/builder-refresher
+        with:
+          builder_name: ${{ env.BUILDER_NAME }}
+          flavor: general
+          arch: linux/amd64
+
+      - name: Build exact-SHA Snapshot Agent
+        working-directory: deploy/snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --builder "${BUILDER_NAME}" \
+            --progress plain \
+            --platform linux/amd64 \
+            --target agent \
+            --push \
+            --provenance mode=max \
+            --metadata-file "${GITHUB_WORKSPACE}/snapshot-agent-metadata.json" \
+            --tag "${ACR_IMAGE_BASE}:${PRODUCT_SHA}-snapshot-agent" \
+            --build-context snapshot=../snapshot \
+            --build-context operator=../operator \
+            --build-context compliance=../../container/compliance \
+            --build-arg "BASELINE_SBOM_FILE=cuda-dl-base@8315e245" \
+            --file Dockerfile \
+            .
+
+      - name: Record immutable image digests
+        shell: bash
+        run: |
+          set -euo pipefail
+          for metadata in \
+            vllm-placeholder-metadata.json \
+            snapshot-agent-metadata.json; do
+            jq -er '."containerimage.digest"' "${metadata}"
+          done
+
+      - name: Upload BuildKit metadata
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        with:
+          name: gms-v1-snapshot-artifacts-${{ env.PRODUCT_SHA }}
+          path: |
+            vllm-placeholder-metadata.json
+            snapshot-agent-metadata.json
+          retention-days: 30
+
   # ============================================================================
   # OPERATOR (build-only)
   # ============================================================================
@@ -194,7 +302,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [init, vllm-build, sglang-build, trtllm-build, operator]
+    needs: [init, vllm-build, sglang-build, trtllm-build, gms-v1-artifacts, operator]
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
