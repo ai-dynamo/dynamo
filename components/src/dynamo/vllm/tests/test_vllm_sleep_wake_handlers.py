@@ -3,7 +3,7 @@
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, call
 
 import pytest
 
@@ -96,6 +96,27 @@ async def test_pause_without_level_uses_vllm_default_sleep():
     assert changed is True
     engine_client.pause_generation.assert_awaited_once()
     engine_client.sleep.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_wraps_sleep_wake_with_communicator_checkpoint_calls():
+    engine_client = AsyncMock()
+    controller = VllmEnginePauseController(
+        engine_client,
+        prepare_for_process_checkpoint=True,
+    )
+
+    assert await controller.pause(None) is True
+    assert await controller.resume() is True
+
+    assert engine_client.mock_calls == [
+        call.pause_generation(),
+        call.sleep(),
+        call.checkpoint_prepare(),
+        call.checkpoint_restore(),
+        call.wake_up(),
+        call.resume_generation(),
+    ]
 
 
 @pytest.mark.asyncio
