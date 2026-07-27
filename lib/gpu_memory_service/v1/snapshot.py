@@ -61,6 +61,7 @@ def save_weights(
     if shard_size_bytes <= 0:
         raise ValueError("shard_size_bytes must be positive")
 
+    setup_t0 = monotonic()
     vmm = get_vmm()
     vmm.ensure_initialized()
     vmm.runtime_set_device(device)
@@ -74,6 +75,17 @@ def save_weights(
         _map_export(session, record, vmm, device, granularity, GrantedLockType.RO)
         for record in records
     ]
+    total_bytes = sum(record.aligned_size for record in records)
+    logger.info(
+        "GMS V1 saver enumerate/map/import setup device=%d allocations=%d bytes=%d "
+        "elapsed=%.3fs",
+        device,
+        len(records),
+        total_bytes,
+        monotonic() - setup_t0,
+    )
+
+    write_t0 = monotonic()
     artifact_path = Path(artifact_dir)
     shards_path = artifact_path / _SHARDS_DIR
     shards_path.mkdir(parents=True, exist_ok=True)
@@ -85,13 +97,29 @@ def save_weights(
         shard_size_bytes,
     )
     vmm.synchronize()
+    logger.info(
+        "GMS V1 saver device-to-file shard write device=%d allocations=%d bytes=%d "
+        "elapsed=%.3fs",
+        device,
+        len(records),
+        total_bytes,
+        monotonic() - write_t0,
+    )
+
+    release_t0 = monotonic()
     _release_mappings(vmm, mappings)
     session.close()
+    logger.info(
+        "GMS V1 saver release device=%d allocations=%d bytes=%d elapsed=%.3fs",
+        device,
+        len(records),
+        total_bytes,
+        monotonic() - release_t0,
+    )
 
     manifest = SnapshotManifest(_MANIFEST_VERSION, tuple(allocations))
     artifact_path.mkdir(parents=True, exist_ok=True)
     (artifact_path / _MANIFEST_NAME).write_bytes(msgspec.json.encode(manifest))
-    total_bytes = sum(record.aligned_size for record in records)
     logger.info(
         "GMS V1 saver total device=%d allocations=%d bytes=%d elapsed=%.3fs",
         device,
@@ -108,7 +136,7 @@ def hydrate_weights(
     device: int,
     *,
     max_workers: int = 16,
-) -> _GMSClientSession:
+) -> None:
     """Hydrate exact V1 weight IDs into a fresh server and publish them."""
     started_at = monotonic()
     manifest = _load_manifest(artifact_dir)
@@ -199,7 +227,7 @@ def hydrate_weights(
         total_bytes,
         monotonic() - started_at,
     )
-    return session
+    session.close()
 
 
 def _load_manifest(artifact_dir: str) -> SnapshotManifest:
