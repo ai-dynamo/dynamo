@@ -11,6 +11,9 @@ use crate::protocols::*;
 use dynamo_tokens::SequenceHash;
 use rustc_hash::FxHashMap;
 
+#[cfg(feature = "bench")]
+use super::{EventCompletionBuffer, EventCompletionWriter, ObservationSeal};
+
 /// Trait for types that may represent an error response.
 /// Used for RPC-style responses that can indicate success or failure.
 pub trait MaybeError {
@@ -75,15 +78,21 @@ pub struct WorkerKvQueryRequest {
     /// Successful buffer-backed recovery may still return through the current
     /// newest buffered event.
     pub end_event_id: Option<u64>,
+
+    /// Opt in to an explicit [`WorkerKvQueryResponse::TreeDumpFailed`] result.
+    /// Named MessagePack clients that predate this field deserialize it as false.
+    #[serde(default)]
+    pub supports_tree_dump_failed: bool,
 }
 
 /// Response from a worker's local KV indexer.
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[non_exhaustive]
 pub enum WorkerKvQueryResponse {
     /// Events served from the circular buffer with original event IDs. The batch
     /// is recovery-equivalent to replaying the requested `start_event_id` through
-    /// the current buffered tail. If the range contains one or more `Cleared`
-    /// barriers, the worker may omit events before the last clear while preserving
+    /// the current buffered tail. If the rank stream contains one or more `Cleared`
+    /// events, the source may omit events before the latest clear while preserving
     /// that clear event and all following events. `last_event_id` is taken from the
     /// same buffer snapshot and should be used as the recovery watermark after
     /// applying the batch.
@@ -98,6 +107,10 @@ pub enum WorkerKvQueryResponse {
         events: Vec<RouterEvent>,
         last_event_id: u64,
     },
+    /// The exact tree dump could not be produced. This is distinct from an
+    /// authoritative empty tree so recovery can apply its explicit fail-open
+    /// reset policy without mistaking an indexer failure for exact state.
+    TreeDumpFailed { last_event_id: u64, message: String },
     /// Requested range is newer than available data
     TooNew {
         requested_start: Option<u64>,
@@ -465,6 +478,20 @@ pub enum WorkerTask {
         event: RouterEvent,
         resp: oneshot::Sender<bool>,
     },
+    #[cfg(feature = "bench")]
+    InstallObservation {
+        writer: EventCompletionWriter,
+        resp: oneshot::Sender<bool>,
+    },
+    #[cfg(feature = "bench")]
+    ObservedEvent {
+        event: RouterEvent,
+        correlation_id: u32,
+    },
+    #[cfg(feature = "bench")]
+    SealObservation(oneshot::Sender<Option<ObservationSeal>>),
+    #[cfg(feature = "bench")]
+    HarvestObservation(oneshot::Sender<EventCompletionBuffer>),
     Anchor {
         worker: WorkerWithDpRank,
         anchor: AnchorTask,
@@ -474,6 +501,8 @@ pub enum WorkerTask {
         worker_id: WorkerId,
         /// True for the one shared-state backend task that owns structural cleanup.
         sweep_tree: bool,
+        /// Acknowledges completion of this lane's cold-path removal phase.
+        resp: oneshot::Sender<()>,
     },
     /// Remove a single dp_rank for a worker.
     RemoveWorkerDpRank {

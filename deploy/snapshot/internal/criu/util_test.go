@@ -124,6 +124,47 @@ func TestApplyCommonSettings(t *testing.T) {
 		}
 	})
 
+	t.Run("imageIoMode direct sets IMAGE_IO_DIRECT", func(t *testing.T) {
+		opts := &criurpc.CriuOpts{}
+		settings := &types.CRIUSettings{ImageIoMode: "direct"}
+		if err := applyCommonSettings(opts, settings); err != nil {
+			t.Fatalf("applyCommonSettings: %v", err)
+		}
+		if opts.GetImageIoMode() != criurpc.CriuImageIoMode_IMAGE_IO_DIRECT {
+			t.Errorf("ImageIoMode = %v, want IMAGE_IO_DIRECT", opts.GetImageIoMode())
+		}
+	})
+
+	t.Run("imageIoMode empty defaults to IMAGE_IO_DIRECT", func(t *testing.T) {
+		opts := &criurpc.CriuOpts{}
+		settings := &types.CRIUSettings{}
+		if err := applyCommonSettings(opts, settings); err != nil {
+			t.Fatalf("applyCommonSettings: %v", err)
+		}
+		if opts.GetImageIoMode() != criurpc.CriuImageIoMode_IMAGE_IO_DIRECT {
+			t.Errorf("ImageIoMode = %v, want IMAGE_IO_DIRECT", opts.GetImageIoMode())
+		}
+	})
+
+	t.Run("imageIoMode writeback sets IMAGE_IO_WRITEBACK", func(t *testing.T) {
+		opts := &criurpc.CriuOpts{}
+		settings := &types.CRIUSettings{ImageIoMode: "writeback"}
+		if err := applyCommonSettings(opts, settings); err != nil {
+			t.Fatalf("applyCommonSettings: %v", err)
+		}
+		if opts.GetImageIoMode() != criurpc.CriuImageIoMode_IMAGE_IO_WRITEBACK {
+			t.Errorf("ImageIoMode = %v, want IMAGE_IO_WRITEBACK", opts.GetImageIoMode())
+		}
+	})
+
+	t.Run("invalid imageIoMode returns error", func(t *testing.T) {
+		opts := &criurpc.CriuOpts{}
+		settings := &types.CRIUSettings{ImageIoMode: "bogus"}
+		if err := applyCommonSettings(opts, settings); err == nil {
+			t.Error("expected error for invalid ImageIoMode")
+		}
+	})
+
 	t.Run("invalid mode returns error", func(t *testing.T) {
 		opts := &criurpc.CriuOpts{}
 		settings := &types.CRIUSettings{ManageCgroupsMode: "invalid"}

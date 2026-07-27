@@ -1,25 +1,23 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
-use dynamo_runtime::{
-    discovery::ClaimPayloadFuture,
-    pipeline::{
-        AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, Error, ManyOut, PushRouter,
-        SingleIn, async_trait as pipeline_async_trait,
-    },
-    traits::DistributedRuntimeProvider,
+use dynamo_runtime::pipeline::{
+    AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, Error, ManyOut, PushRouter,
+    SingleIn, async_trait as pipeline_async_trait,
 };
 
 use super::{
-    AffinityCoordinator, AffinityTarget, LlmResponse, ResolvedAffinity,
+    AffinityCoordinator, AffinityTarget, LlmResponse,
     coordinator::{affinity_id, invalid_argument},
-    explicit_target, session_final,
+    explicit_target,
 };
 use crate::{
     preprocessor::PreprocessedRequest,
-    protocols::common::timing::{RequestPhase, WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL},
+    protocols::common::timing::{
+        RequestPhase, RequestTracker, WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL,
+    },
 };
 
 pub struct SessionAffinityPushRouter {
@@ -34,20 +32,20 @@ impl SessionAffinityPushRouter {
         ttl: Option<Duration>,
         direct: bool,
     ) -> Result<Self, Error> {
-        let affinity = ttl
-            .map(|ttl| {
-                AffinityCoordinator::new_distributed(
-                    ttl,
-                    inner.client.endpoint.id().to_string(),
-                    inner.client.endpoint.drt().discovery(),
-                )
-            })
-            .transpose()?;
-        Ok(Self {
+        let affinity = ttl.map(AffinityCoordinator::new).transpose()?;
+        Ok(Self::new_with_coordinator(inner, affinity, direct))
+    }
+
+    pub(crate) fn new_with_coordinator(
+        inner: PushRouter<PreprocessedRequest, LlmResponse>,
+        affinity: Option<AffinityCoordinator>,
+        direct: bool,
+    ) -> Self {
+        Self {
             inner,
             affinity,
             direct,
-        })
+        }
     }
 
     fn phase(request: &PreprocessedRequest) -> RequestPhase {
@@ -58,8 +56,8 @@ impl SessionAffinityPushRouter {
             .unwrap_or(RequestPhase::Aggregated)
     }
 
-    fn record_target(request: &PreprocessedRequest, target: AffinityTarget) {
-        let Some(tracker) = request.tracker.as_ref() else {
+    fn record_target(tracker: Option<&RequestTracker>, target: AffinityTarget) {
+        let Some(tracker) = tracker else {
             return;
         };
         let worker_type = if tracker.phase() == RequestPhase::Prefill {
@@ -70,55 +68,69 @@ impl SessionAffinityPushRouter {
         tracker.record_worker(target.worker_id, target.dp_rank, worker_type);
     }
 
+    fn prepare_resolved_target(
+        request: &mut PreprocessedRequest,
+        requested: AffinityTarget,
+        worker_id: u64,
+    ) -> (Option<Arc<RequestTracker>>, AffinityTarget) {
+        let dp_rank = requested
+            .dp_rank
+            .filter(|_| worker_id == requested.worker_id);
+        request.routing_mut().dp_rank = dp_rank;
+        (
+            request.tracker.take(),
+            AffinityTarget { worker_id, dp_rank },
+        )
+    }
+
+    fn direct_target(
+        &self,
+        explicit: Option<AffinityTarget>,
+        phase: RequestPhase,
+    ) -> Result<Option<AffinityTarget>, Error> {
+        if !self.direct {
+            return Ok(explicit);
+        }
+        explicit.map(Some).ok_or_else(|| {
+            invalid_argument(format!(
+                "worker ID required for {phase} request in Direct routing mode"
+            ))
+        })
+    }
+
     pub fn peek_next_worker(&self) -> Option<u64> {
         self.inner.peek_next_worker()
     }
 
-    async fn resolve_affinity(
+    async fn acquire_routable(
         &self,
         session_id: &crate::protocols::common::extensions::SessionAffinityId,
-        phase: RequestPhase,
-        request: &PreprocessedRequest,
+        explicit: Option<AffinityTarget>,
         request_context: &dyn AsyncEngineContext,
-    ) -> Result<(ResolvedAffinity, bool), Error> {
+    ) -> Result<super::AffinityAcquire, Error> {
         let affinity = self
             .affinity
             .as_ref()
             .expect("affinity acquisition requires an enabled coordinator");
         let operation = affinity
-            .acquire_with_context(session_id, request_context)
+            .acquire_with_context(session_id, explicit, request_context)
             .await?;
-        let resolved = operation
-            .resolve(|| -> ClaimPayloadFuture<'_> {
-                Box::pin(async move {
-                    let target = explicit_target(request, phase)?
-                        .or_else(|| {
-                            self.inner
-                                .peek_worker_for_request(request)
-                                .map(|worker_id| AffinityTarget {
-                                    worker_id,
-                                    dp_rank: None,
-                                })
-                        })
-                        .ok_or_else(|| {
-                            if self.direct {
-                                invalid_argument(
-                                    "worker ID required to create Direct session affinity",
-                                )
-                            } else {
-                                anyhow::anyhow!("no worker available for session affinity")
-                            }
-                        })?;
-                    Ok(serde_json::to_value(target)?)
-                })
-            })
-            .await?;
-        let proposal_was_explicit = if resolved.was_created() {
-            explicit_target(request, phase)?.is_some()
-        } else {
-            false
+        let Some(target) = operation.target() else {
+            return Ok(operation);
         };
-        Ok((resolved, proposal_was_explicit))
+        if self
+            .inner
+            .client
+            .instance_ids_avail()
+            .contains(&target.worker_id)
+        {
+            return Ok(operation);
+        }
+
+        operation.invalidate();
+        affinity
+            .acquire_with_context(session_id, explicit, request_context)
+            .await
     }
 
     /// Adapts the generic worker-only router while keeping a known rank attached
@@ -132,7 +144,8 @@ impl SessionAffinityPushRouter {
     where
         F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M, Error>,
     {
-        self.inner
+        let ((metadata, tracker, target), stream) = self
+            .inner
             .select_and_dispatch_exact(
                 request,
                 pinned_target.map(|target| target.worker_id),
@@ -142,33 +155,13 @@ impl SessionAffinityPushRouter {
                         dp_rank: None,
                     });
                     debug_assert_eq!(target.worker_id, worker_id);
-                    prepare(request, target)
+                    let metadata = prepare(request, target)?;
+                    Ok((metadata, request.tracker.take(), target))
                 },
             )
-            .await
-    }
-
-    async fn book_and_dispatch_exact_target<M, F>(
-        &self,
-        request: SingleIn<PreprocessedRequest>,
-        target: AffinityTarget,
-        advance_round_robin: bool,
-        prepare: F,
-    ) -> Result<(M, ManyOut<LlmResponse>), Error>
-    where
-        F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M, Error>,
-    {
-        self.inner
-            .book_and_dispatch_exact(
-                request,
-                target.worker_id,
-                advance_round_robin,
-                move |request, worker_id| {
-                    debug_assert_eq!(target.worker_id, worker_id);
-                    prepare(request, target)
-                },
-            )
-            .await
+            .await?;
+        Self::record_target(tracker.as_deref(), target);
+        Ok((metadata, stream))
     }
 
     pub async fn select_and_dispatch_prefill<M, F>(
@@ -190,11 +183,14 @@ impl SessionAffinityPushRouter {
                 .select_and_dispatch_exact_target(request, explicit, prepare)
                 .await;
         }
+        let explicit = self.direct_target(
+            explicit_target(&request, RequestPhase::Prefill)?,
+            RequestPhase::Prefill,
+        )?;
         let Some(session_id) = session_id else {
-            let explicit = explicit_target(&request, RequestPhase::Prefill)?;
             let Some(target) = explicit else {
                 return Err(invalid_argument(
-                    "worker ID required for prefill request in Direct routing mode",
+                    "Direct routing requires an explicit prefill target",
                 ));
             };
             return self
@@ -203,47 +199,48 @@ impl SessionAffinityPushRouter {
         };
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
         if is_query_only {
-            let bound = self
+            let selected = self
                 .affinity
                 .as_ref()
                 .expect("affinity query requires an enabled coordinator")
-                .query_target(&session_id)?;
-            let selected = match bound {
-                Some(target) => Some(target),
-                None => explicit_target(&request, RequestPhase::Prefill)?,
-            };
+                .query_target(&session_id, explicit)?
+                .or(explicit);
             return self
-                .select_and_dispatch_exact_target(request, selected, move |request, target| {
-                    Self::record_target(request, target);
-                    prepare(request, target)
-                })
+                .select_and_dispatch_exact_target(request, selected, prepare)
                 .await;
         }
 
-        let close_on_finish = session_final(request.content());
         let request_context = request.context();
-        let (resolved, proposal_was_explicit) = self
-            .resolve_affinity(
-                &session_id,
-                RequestPhase::Prefill,
-                request.content(),
-                request_context.as_ref(),
-            )
+        let operation = self
+            .acquire_routable(&session_id, explicit, request_context.as_ref())
             .await?;
-        let target = resolved.target();
-        let advance_round_robin = resolved.was_created() && !proposal_was_explicit;
-        let (metadata, stream) = self
-            .book_and_dispatch_exact_target(
+        let selected = operation.target().or(explicit);
+        let rank = selected.and_then(|target| target.dp_rank);
+        let dispatch = self
+            .inner
+            .select_and_dispatch_exact(
                 request,
-                target,
-                advance_round_robin,
-                move |request, target| {
-                    Self::record_target(request, target);
-                    prepare(request, target)
+                selected.map(|target| target.worker_id),
+                move |request, worker_id| {
+                    let target = AffinityTarget {
+                        worker_id,
+                        dp_rank: rank,
+                    };
+                    let metadata = prepare(request, target)?;
+                    Ok((metadata, request.tracker.take(), target))
                 },
             )
-            .await?;
-        Ok((metadata, resolved.into_stream(stream, close_on_finish)))
+            .await;
+        let ((metadata, tracker, target), stream) = match dispatch {
+            Ok(result) => result,
+            Err(error) => {
+                operation.invalidate();
+                return Err(error);
+            }
+        };
+        let stream = operation.into_stream(target, stream)?;
+        Self::record_target(tracker.as_deref(), target);
+        Ok((metadata, stream))
     }
 }
 
@@ -262,68 +259,108 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LlmResponse>, Error>
             None
         };
         if !self.direct && session_id.is_none() {
-            return self.inner.generate(request).await;
+            let ((tracker, target), stream) = self
+                .inner
+                .select_and_dispatch(request, |request, worker_id| {
+                    Ok((
+                        request.tracker.take(),
+                        AffinityTarget {
+                            worker_id,
+                            dp_rank: None,
+                        },
+                    ))
+                })
+                .await?;
+            Self::record_target(tracker.as_deref(), target);
+            return Ok(stream);
         }
+        let explicit = self.direct_target(explicit_target(&request, phase)?, phase)?;
         let Some(session_id) = session_id else {
-            let explicit = explicit_target(&request, phase)?;
             let Some(target) = explicit else {
                 return Err(invalid_argument(format!(
-                    "worker ID required for {phase} request in Direct routing mode"
+                    "Direct routing requires an explicit {phase} target"
                 )));
             };
-            return self.inner.direct(request, target.worker_id).await;
+            let ((tracker, target), stream) = self
+                .inner
+                .direct_within_prepared(
+                    request,
+                    target.worker_id,
+                    None,
+                    move |request, worker_id| {
+                        Ok(Self::prepare_resolved_target(request, target, worker_id))
+                    },
+                )
+                .await?;
+            Self::record_target(tracker.as_deref(), target);
+            return Ok(stream);
         };
 
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
         if is_query_only {
-            let bound = self
+            let target = self
                 .affinity
                 .as_ref()
                 .expect("affinity query requires an enabled coordinator")
-                .query_target(&session_id)?;
-            let target = match bound {
-                Some(target) => Some(target),
-                None => explicit_target(&request, phase)?,
-            };
-            let (_, stream) = self
-                .select_and_dispatch_exact_target(request, target, move |request, target| {
-                    if target.dp_rank.is_some() {
-                        request.routing_mut().dp_rank = target.dp_rank;
-                    }
-                    Self::record_target(request, target);
-                    Ok(())
-                })
+                .query_target(&session_id, explicit)?
+                .or(explicit);
+            let rank = target.and_then(|target| target.dp_rank);
+            let ((tracker, target), stream) = self
+                .inner
+                .select_and_dispatch_exact(
+                    request,
+                    target.map(|target| target.worker_id),
+                    move |request, worker_id| {
+                        if rank.is_some() {
+                            request.routing_mut().dp_rank = rank;
+                        }
+                        Ok((
+                            request.tracker.take(),
+                            AffinityTarget {
+                                worker_id,
+                                dp_rank: rank,
+                            },
+                        ))
+                    },
+                )
                 .await?;
+            Self::record_target(tracker.as_deref(), target);
             return Ok(stream);
         }
 
-        let close_on_finish = session_final(request.content());
         let request_context = request.context();
-        let (resolved, proposal_was_explicit) = self
-            .resolve_affinity(
-                &session_id,
-                phase,
-                request.content(),
-                request_context.as_ref(),
-            )
+        let operation = self
+            .acquire_routable(&session_id, explicit, request_context.as_ref())
             .await?;
-        let target = resolved.target();
-        let advance_round_robin = resolved.was_created() && !proposal_was_explicit;
-        let (_, stream) = self
-            .book_and_dispatch_exact_target(
+        let selected = operation.target().or(explicit);
+        let rank = selected.and_then(|target| target.dp_rank);
+        let dispatch = self
+            .inner
+            .select_and_dispatch_exact(
                 request,
-                target,
-                advance_round_robin,
-                move |request, target| {
-                    if target.dp_rank.is_some() {
-                        request.routing_mut().dp_rank = target.dp_rank;
+                selected.map(|target| target.worker_id),
+                move |request, worker_id| {
+                    if rank.is_some() {
+                        request.routing_mut().dp_rank = rank;
                     }
-                    Self::record_target(request, target);
-                    Ok(())
+                    let target = AffinityTarget {
+                        worker_id,
+                        dp_rank: rank,
+                    };
+                    Ok((request.tracker.take(), target))
                 },
             )
-            .await?;
-        Ok(resolved.into_stream(stream, close_on_finish))
+            .await;
+        let ((tracker, target), stream) = match dispatch {
+            Ok(result) => result,
+            Err(error) => {
+                operation.invalidate();
+                return Err(error);
+            }
+        };
+        let stream = operation.into_stream(target, stream)?;
+        Self::record_target(tracker.as_deref(), target);
+        Ok(stream)
     }
 }
 
@@ -339,7 +376,9 @@ mod tests {
     use crate::protocols::common::{
         extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
         preprocessor::RoutingHints,
+        timing::RequestTracker,
     };
+    use crate::session_affinity::AffinityAcquire;
 
     fn request(worker_id: Option<u64>, query_only: bool) -> PreprocessedRequest {
         PreprocessedRequest::builder()
@@ -377,6 +416,30 @@ mod tests {
             .expect("test router must enable affinity")
     }
 
+    #[test]
+    fn direct_fallback_clears_stale_dp_rank() {
+        let tracker = Arc::new(RequestTracker::new());
+        let mut content = request(Some(7), false);
+        content.routing_mut().dp_rank = Some(3);
+        content.tracker = Some(tracker.clone());
+
+        let (prepared_tracker, target) = SessionAffinityPushRouter::prepare_resolved_target(
+            &mut content,
+            AffinityTarget {
+                worker_id: 7,
+                dp_rank: Some(3),
+            },
+            8,
+        );
+
+        assert_eq!(content.routing.unwrap().dp_rank, None);
+        assert_eq!(tracker.prefill_worker_id(), None);
+        assert_eq!(tracker.decode_worker_id(), None);
+        SessionAffinityPushRouter::record_target(prepared_tracker.as_deref(), target);
+        assert_eq!(tracker.prefill_worker_id(), Some(8));
+        assert_eq!(tracker.decode_worker_id(), Some(8));
+    }
+
     #[tokio::test]
     async fn session_affinity_disabled_simple_router_has_no_coordinator() {
         let runtime = Runtime::from_current().unwrap();
@@ -405,34 +468,107 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_affinity_failed_dispatch_preserves_created_claim() {
+    async fn failed_non_kv_dispatch_does_not_record_selected_worker() {
         let runtime = Runtime::from_current().unwrap();
         let distributed =
             DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
                 .await
                 .unwrap();
-        let client = distributed
-            .namespace("session_affinity_adapters".to_string())
+        let component = distributed
+            .namespace("session_affinity_worker_disclosure".to_string())
             .unwrap()
             .component("workers".to_string())
-            .unwrap()
-            .endpoint("direct")
-            .client()
-            .await
             .unwrap();
-        let inner = PushRouter::from_client(client, RouterMode::Direct)
-            .await
-            .unwrap();
-        let router =
-            SessionAffinityPushRouter::new(inner, Some(Duration::from_secs(10)), true).unwrap();
 
-        assert!(
-            router
-                .generate(affinity_request(Some(99), false))
+        for (index, mode) in [
+            RouterMode::Random,
+            RouterMode::RoundRobin,
+            RouterMode::PowerOfTwoChoices,
+            RouterMode::LeastLoaded,
+            RouterMode::DeviceAwareWeighted,
+            RouterMode::Direct,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let endpoint = component.endpoint(format!("mode-{index}"));
+            let client = endpoint.client().await.unwrap();
+            endpoint.register_endpoint_instance().await.unwrap();
+            let worker_id = client.wait_for_instances().await.unwrap()[0].id();
+            let inner = PushRouter::from_client(client, mode).await.unwrap();
+            let router =
+                SessionAffinityPushRouter::new(inner, None, mode.is_direct_routing()).unwrap();
+            let tracker = Arc::new(RequestTracker::new());
+            let mut content = request(mode.is_direct_routing().then_some(worker_id), false);
+            content.tracker = Some(tracker.clone());
+
+            let _ = tokio::time::timeout(
+                Duration::from_millis(100),
+                router.generate(Context::new(content)),
+            )
+            .await;
+
+            assert_eq!(
+                tracker.prefill_worker_id(),
+                None,
+                "{mode:?} must not disclose a worker before dispatch succeeds"
+            );
+            assert_eq!(
+                tracker.decode_worker_id(),
+                None,
+                "{mode:?} must not disclose a worker before dispatch succeeds"
+            );
+        }
+
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn session_affinity_simple_modes_rollback_failed_initialization() {
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
                 .await
-                .is_err()
-        );
-        assert_eq!(affinity(&router).entry_count(), 1);
+                .unwrap();
+        let namespace = distributed
+            .namespace("session_affinity_adapters".to_string())
+            .unwrap();
+        let component = namespace.component("workers".to_string()).unwrap();
+
+        for (index, mode) in [
+            RouterMode::Random,
+            RouterMode::RoundRobin,
+            RouterMode::PowerOfTwoChoices,
+            RouterMode::LeastLoaded,
+            RouterMode::DeviceAwareWeighted,
+            RouterMode::Direct,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let endpoint = component.endpoint(format!("mode-{index}"));
+            let client = endpoint.client().await.unwrap();
+            let inner = PushRouter::from_client(client, mode).await.unwrap();
+            let router = SessionAffinityPushRouter::new(
+                inner,
+                Some(Duration::from_secs(10)),
+                mode.is_direct_routing(),
+            )
+            .unwrap();
+            let worker_id = mode.is_direct_routing().then_some(99);
+
+            assert!(
+                router
+                    .generate(affinity_request(worker_id, false))
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                affinity(&router).entry_count(),
+                0,
+                "failed {mode:?} dispatch must release initialization"
+            );
+        }
 
         runtime.shutdown();
     }
@@ -536,6 +672,8 @@ mod tests {
             let mut content = request(None, false);
             content.routing_mut().prefill_worker_id = Some(worker_id);
             content.routing_mut().prefill_dp_rank = Some(0);
+            let tracker = Arc::new(RequestTracker::new());
+            content.tracker = Some(tracker.clone());
             let mut observed = None;
 
             let error = router
@@ -548,13 +686,15 @@ mod tests {
 
             assert!(error.to_string().contains("stop before dispatch"));
             assert_eq!(observed, Some(expected));
+            assert_eq!(tracker.prefill_worker_id(), None);
+            assert_eq!(tracker.decode_worker_id(), None);
         }
 
         runtime.shutdown();
     }
 
     #[tokio::test]
-    async fn session_affinity_binding_wins_before_invalid_explicit_proposal() {
+    async fn session_affinity_unavailable_target_is_invalidated() {
         let runtime = Runtime::from_current().unwrap();
         let distributed =
             DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
@@ -574,29 +714,29 @@ mod tests {
         let router =
             SessionAffinityPushRouter::new(inner, Some(Duration::from_secs(10)), false).unwrap();
         let session_id = SessionAffinityId::new("adapter-session");
-        let unavailable_target = AffinityTarget {
-            worker_id: 99,
-            dp_rank: None,
+        let AffinityAcquire::Initialize(initializer) =
+            affinity(&router).acquire(&session_id, None).await.unwrap()
+        else {
+            panic!("first request must initialize");
         };
-        let resolved = affinity(&router)
-            .acquire(&session_id)
-            .await
-            .unwrap()
-            .resolve(|| Box::pin(async move { Ok(serde_json::to_value(unavailable_target)?) }))
-            .await
-            .unwrap();
-        drop(resolved);
+        drop(
+            initializer
+                .commit(AffinityTarget {
+                    worker_id: 99,
+                    dp_rank: None,
+                })
+                .unwrap(),
+        );
 
-        let mut request = affinity_request(None, false);
-        request.routing_mut().dp_rank = Some(0);
-        let error = router.generate(request).await.unwrap_err();
-        assert!(!error.to_string().contains("DP rank requires"));
+        assert!(
+            router
+                .generate(affinity_request(None, false))
+                .await
+                .is_err()
+        );
         assert_eq!(
-            affinity(&router).query_target(&session_id).unwrap(),
-            Some(AffinityTarget {
-                worker_id: 99,
-                dp_rank: None,
-            })
+            affinity(&router).query_target(&session_id, None).unwrap(),
+            None
         );
 
         runtime.shutdown();

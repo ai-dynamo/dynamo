@@ -79,6 +79,24 @@ impl OccupancyPermit {
         }
     }
 
+    /// Move the occupancy charge to a different worker.
+    ///
+    /// Transport resolution ([`PushRouter::resolve_transport`]) may fall back to
+    /// a worker other than the one originally selected when the selected
+    /// instance disappears mid-dispatch. Without retargeting, the original
+    /// worker would stay charged while the worker that actually received the
+    /// request goes uncharged, skewing load-aware routing during discovery
+    /// churn. Increments the new worker before decrementing the old so the
+    /// charge is never transiently dropped.
+    fn retarget(&mut self, instance_id: u64) {
+        if self.instance_id == instance_id {
+            return;
+        }
+        self.state.increment(instance_id);
+        self.state.decrement(self.instance_id);
+        self.instance_id = instance_id;
+    }
+
     fn into_tracked_stream<U: Data>(mut self, stream: ManyOut<U>) -> ManyOut<U> {
         self.armed = false;
         let engine_ctx = stream.context();
@@ -95,24 +113,6 @@ impl OccupancyPermit {
 
     fn instance_id(&self) -> u64 {
         self.instance_id
-    }
-
-    /// Move the occupancy charge to a different worker.
-    ///
-    /// Transport resolution ([`PushRouter::resolve_transport`]) may fall back to
-    /// a worker other than the one originally selected when the selected
-    /// instance disappears mid-dispatch. Without retargeting, the original
-    /// worker would stay charged while the worker that actually received the
-    /// request goes uncharged, skewing load-aware routing during discovery
-    /// churn. Increments the new worker before decrementing the old so the
-    /// charge is never transiently dropped.
-    fn retarget(&mut self, new_instance_id: u64) {
-        if !self.armed || new_instance_id == self.instance_id {
-            return;
-        }
-        self.state.increment(new_instance_id);
-        self.state.decrement(self.instance_id);
-        self.instance_id = new_instance_id;
     }
 }
 
@@ -690,6 +690,19 @@ where
 
     /// Issue a request to the next available instance in a round-robin fashion
     pub async fn round_robin(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
+        self.round_robin_prepared(request, |_, _| Ok(()))
+            .await
+            .map(|(_, stream)| stream)
+    }
+
+    async fn round_robin_prepared<M, F>(
+        &self,
+        request: SingleIn<T>,
+        prepare: F,
+    ) -> anyhow::Result<(M, ManyOut<U>)>
+    where
+        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+    {
         let counter = self.round_robin_counter.fetch_add(1, Ordering::Relaxed) as usize;
 
         let (instance_id, candidate_count) = {
@@ -707,13 +720,25 @@ where
             "Selected worker"
         );
 
-        self.generate_with_fault_detection(instance_id, request, TransportFallback::Allow)
+        self.dispatch_selected(instance_id, request, None, prepare)
             .await
-            .map(|(stream, _)| stream)
     }
 
     /// Issue a request to a random endpoint
     pub async fn random(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
+        self.random_prepared(request, |_, _| Ok(()))
+            .await
+            .map(|(_, stream)| stream)
+    }
+
+    async fn random_prepared<M, F>(
+        &self,
+        request: SingleIn<T>,
+        prepare: F,
+    ) -> anyhow::Result<(M, ManyOut<U>)>
+    where
+        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+    {
         let (instance_id, candidate_count) = {
             let routing_instances = self.client.routing_instances();
             let count = routing_instances.free_ids().len();
@@ -730,9 +755,8 @@ where
             "Selected worker"
         );
 
-        self.generate_with_fault_detection(instance_id, request, TransportFallback::Allow)
+        self.dispatch_selected(instance_id, request, None, prepare)
             .await
-            .map(|(stream, _)| stream)
     }
 
     /// Select a worker for a load-aware routing mode (`PowerOfTwoChoices`,
@@ -751,10 +775,19 @@ where
     /// `least_loaded`, `device_aware_weighted`) must always apply their named
     /// strategy regardless of how the router is configured, while the
     /// bidirectional `generate` path passes `self.router_mode`.
+    ///
+    /// `request` carries the request content when the caller has it (the unary
+    /// path). The bidirectional path passes `None`: it must reserve a worker
+    /// before any inbound frame is observed, so content-derived affinity (the
+    /// multimodal embedding cache consulted by `DeviceAwareWeighted`) is simply
+    /// unavailable and selection falls back to the device-ratio group. The
+    /// returned permit is `None` only when selection was not charged against
+    /// the occupancy counter (full embedding-cache hit).
     async fn select_load_aware_worker(
         &self,
         mode: RouterMode,
-    ) -> anyhow::Result<(u64, OccupancyPermit)> {
+        request: Option<&T>,
+    ) -> anyhow::Result<(u64, Option<OccupancyPermit>)> {
         let state = self.occupancy_state()?;
         match mode {
             RouterMode::PowerOfTwoChoices => {
@@ -766,7 +799,7 @@ where
                     p2c_select_from(state.as_ref(), routing_instances.free_ids())
                 };
                 state.increment(instance_id);
-                Ok((instance_id, OccupancyPermit::new(state, instance_id)))
+                Ok((instance_id, Some(OccupancyPermit::new(state, instance_id))))
             }
             RouterMode::LeastLoaded => {
                 let routing_instances = self.client.routing_instances();
@@ -775,11 +808,15 @@ where
                     .select_exact_min_and_increment(&instance_ids)
                     .await
                     .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?;
-                tracing::trace!(
-                    "least loaded router selected {instance_id} (connections: {})",
-                    state.load(instance_id)
+                let permit = OccupancyPermit::new(state.clone(), instance_id);
+                tracing::info!(
+                    router_mode = "least-loaded",
+                    worker_id = instance_id,
+                    candidate_count = instance_ids.len(),
+                    load = state.load(instance_id),
+                    "Selected worker"
                 );
-                Ok((instance_id, OccupancyPermit::new(state, instance_id)))
+                Ok((instance_id, Some(permit)))
             }
             RouterMode::DeviceAwareWeighted => {
                 let routing_instances = self.client.routing_instances();
@@ -788,44 +825,43 @@ where
                     return Err(self.empty_free_pool_error(&routing_instances));
                 }
 
+                // Apply a unified policy for all endpoints.
                 let endpoint_id = self.client.endpoint.id();
 
-                // For encoder endpoints, partition by device type
-                let instances = self.client.instances();
-                let device_type_map: std::collections::HashMap<u64, Option<DeviceType>> = instances
-                    .iter()
-                    .map(|inst| (inst.instance_id, inst.device_type.clone()))
-                    .collect();
+                let selection =
+                    self.device_aware_candidates(request, state.as_ref(), &instance_ids);
 
-                // Apply budget-based routing to determine which group to send to
-                let cuda_to_cpu_ratio = std::env::var("DYN_ENCODER_CUDA_TO_CPU_RATIO")
-                    .ok()
-                    .and_then(|v| v.parse::<usize>().ok())
-                    .filter(|v| *v >= 1)
-                    .unwrap_or(8);
-                let candidates = device_aware_candidate_group(
-                    state.as_ref(),
-                    &instance_ids,
-                    &device_type_map,
-                    cuda_to_cpu_ratio,
-                );
-
-                // Empty group: budget-selected device class has no free workers.
-                let instance_id = state
-                    .select_exact_min_and_increment(&candidates)
-                    .await
-                    .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?;
+                // Only full cache hits bypass weighted accounting; partial hits still follow the
+                // device-aware ratio because some image encoding remains for this request.
+                let instance_id = if selection.full_embedding_cache_hit {
+                    state.select_exact_min(&selection.candidates).await
+                } else {
+                    state
+                        .select_exact_min_and_increment(&selection.candidates)
+                        .await
+                }
+                .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?;
+                let permit = if selection.full_embedding_cache_hit {
+                    None
+                } else {
+                    Some(OccupancyPermit::new(state.clone(), instance_id))
+                };
                 let is_cpu = matches!(
-                    device_type_map.get(&instance_id),
+                    selection.device_type_map.get(&instance_id),
                     Some(Some(DeviceType::Cpu))
                 );
                 tracing::info!(
+                    router_mode = "device-aware-weighted",
+                    worker_id = instance_id,
+                    candidate_count = selection.candidates.len(),
+                    load = state.load(instance_id),
                     endpoint = %endpoint_id,
-                    selected_instance = instance_id,
                     is_cpu,
-                    "DeviceAwareWeighted selected instance"
+                    embedding_cache_hit = selection.embedding_cache_hit,
+                    request_cache_keys = selection.request_cache_keys,
+                    "Selected worker"
                 );
-                Ok((instance_id, OccupancyPermit::new(state, instance_id)))
+                Ok((instance_id, permit))
             }
             other => Err(anyhow::anyhow!(
                 "select_load_aware_worker called for non-load-aware router mode {other:?}"
@@ -836,20 +872,24 @@ where
     /// Issue a request using power-of-two-choices: pick 2 random healthy workers,
     /// route to the one with fewer in-flight requests.
     pub async fn power_of_two_choices(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
-        let (instance_id, mut permit) = self
-            .select_load_aware_worker(RouterMode::PowerOfTwoChoices)
-            .await?;
-
-        match self
-            .generate_with_fault_detection(instance_id, request, TransportFallback::Allow)
+        self.power_of_two_choices_prepared(request, |_, _| Ok(()))
             .await
-        {
-            Ok((stream, resolved_id)) => {
-                permit.retarget(resolved_id);
-                Ok(permit.into_tracked_stream(stream))
-            }
-            Err(err) => Err(err),
-        }
+            .map(|(_, stream)| stream)
+    }
+
+    async fn power_of_two_choices_prepared<M, F>(
+        &self,
+        request: SingleIn<T>,
+        prepare: F,
+    ) -> anyhow::Result<(M, ManyOut<U>)>
+    where
+        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+    {
+        let (instance_id, permit) = self
+            .select_load_aware_worker(RouterMode::PowerOfTwoChoices, None)
+            .await?;
+        self.dispatch_selected(instance_id, request, permit, prepare)
+            .await
     }
 
     /// Issue a request to a specific endpoint
@@ -871,19 +911,26 @@ where
         instance_id: u64,
         allowed_fallback: Option<&HashSet<u64>>,
     ) -> anyhow::Result<ManyOut<U>> {
-        // When fault detection is disabled, check the raw discovery list
-        // (not filtered by report_instance_down) so transient failures
-        // don't poison the instance for subsequent retries.
-        let found = {
-            if self.fault_detection_enabled {
-                let routing_instances = self.client.routing_instances();
-                routing_instances.routable_ids().contains(&instance_id)
-            } else {
-                self.client.instance_ids().contains(&instance_id)
-            }
-        };
+        self.direct_within_prepared(request, instance_id, allowed_fallback, |_, _| Ok(()))
+            .await
+            .map(|(_, stream)| stream)
+    }
 
-        if !found {
+    /// Like [`Self::direct_within`], but prepares the request after transport resolution and
+    /// returns the preparation metadata alongside the response stream.
+    pub async fn direct_within_prepared<M, F>(
+        &self,
+        request: SingleIn<T>,
+        instance_id: u64,
+        allowed_fallback: Option<&HashSet<u64>>,
+        prepare: F,
+    ) -> anyhow::Result<(M, ManyOut<U>)>
+    where
+        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+    {
+        // Direct dispatch honors the caller-selected worker while it remains in discovery.
+        // Local inhibition only filters worker selection owned by this router.
+        if !self.client.instance_ids().contains(&instance_id) {
             return Err(DynamoError::builder()
                 .error_type(ErrorType::CannotConnect)
                 .message(format!(
@@ -903,9 +950,8 @@ where
         let fallback = allowed_fallback
             .map(TransportFallback::Within)
             .unwrap_or(TransportFallback::Allow);
-        self.generate_with_fault_detection(instance_id, request, fallback)
+        self.generate_with_fault_detection_prepared(instance_id, request, fallback, prepare)
             .await
-            .map(|(stream, _)| stream)
     }
 
     /// Dispatch to exactly one worker without transport fallback.
@@ -919,7 +965,6 @@ where
     ) -> anyhow::Result<ManyOut<U>> {
         self.generate_with_fault_detection(instance_id, request, TransportFallback::Deny)
             .await
-            .map(|(stream, _)| stream)
     }
 
     /// Select and book one worker, prepare the request for that exact worker,
@@ -945,25 +990,56 @@ where
         Ok((metadata, stream))
     }
 
-    /// Book a previously arbitrated worker and dispatch without reselection or fallback.
-    pub async fn book_and_dispatch_exact<M, F>(
+    /// Select a worker using the configured routing mode, prepare the request with the worker
+    /// that survives transport resolution, then dispatch with normal fallback behavior.
+    pub async fn select_and_dispatch<M, F>(
         &self,
-        mut request: SingleIn<T>,
-        instance_id: u64,
-        advance_round_robin: bool,
+        request: SingleIn<T>,
         prepare: F,
     ) -> anyhow::Result<(M, ManyOut<U>)>
     where
         F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
     {
-        if advance_round_robin && self.router_mode == RouterMode::RoundRobin {
-            self.round_robin_counter.fetch_add(1, Ordering::Relaxed);
+        match self.router_mode {
+            RouterMode::Random => self.random_prepared(request, prepare).await,
+            RouterMode::RoundRobin => self.round_robin_prepared(request, prepare).await,
+            RouterMode::PowerOfTwoChoices => {
+                self.power_of_two_choices_prepared(request, prepare).await
+            }
+            RouterMode::LeastLoaded => self.least_loaded_prepared(request, prepare).await,
+            RouterMode::DeviceAwareWeighted => {
+                self.device_aware_weighted_prepared(request, prepare).await
+            }
+            RouterMode::KV => anyhow::bail!("KV routing should not call select_and_dispatch"),
+            RouterMode::Direct => anyhow::bail!(
+                "Direct routing should use direct_within_prepared instead of select_and_dispatch"
+            ),
         }
-        let (instance_id, permit) = self
-            .select_exact_target(request.content(), Some(instance_id))
+    }
+
+    async fn dispatch_selected<M, F>(
+        &self,
+        instance_id: u64,
+        request: SingleIn<T>,
+        mut permit: Option<OccupancyPermit>,
+        prepare: F,
+    ) -> anyhow::Result<(M, ManyOut<U>)>
+    where
+        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+    {
+        let (metadata, stream) = self
+            .generate_with_fault_detection_prepared(
+                instance_id,
+                request,
+                TransportFallback::Allow,
+                |request, resolved_instance_id| {
+                    if let Some(permit) = permit.as_mut() {
+                        permit.retarget(resolved_instance_id);
+                    }
+                    prepare(request, resolved_instance_id)
+                },
+            )
             .await?;
-        let metadata = prepare(&mut request, instance_id)?;
-        let stream = self.dispatch_exact(request, instance_id).await?;
         let stream = match permit {
             Some(permit) => permit.into_tracked_stream(stream),
             None => stream,
@@ -980,69 +1056,33 @@ where
     /// If only one device class exists (all CPU or all non-CPU), this naturally
     /// degenerates to least-loaded routing over the available instances.
     pub async fn device_aware_weighted(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
-        let state = self.occupancy_state()?;
-        let routing_instances = self.client.routing_instances();
-        let instance_ids = routing_instances.free_ids().to_vec();
-
-        if instance_ids.is_empty() {
-            return Err(self.empty_free_pool_error(&routing_instances));
-        }
-
-        // Apply a unified policy for all endpoints.
-        let endpoint_id = self.client.endpoint.id();
-
-        let selection =
-            self.device_aware_candidates(request.content(), state.as_ref(), &instance_ids);
-
-        // Only full cache hits bypass weighted accounting; partial hits still follow the
-        // device-aware ratio because some image encoding remains for this request.
-        let instance_id = if selection.full_embedding_cache_hit {
-            state.select_exact_min(&selection.candidates).await
-        } else {
-            state
-                .select_exact_min_and_increment(&selection.candidates)
-                .await
-        }
-        .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?;
-        let permit = if selection.full_embedding_cache_hit {
-            None
-        } else {
-            Some(OccupancyPermit::new(state.clone(), instance_id))
-        };
-        let is_cpu = matches!(
-            selection.device_type_map.get(&instance_id),
-            Some(Some(DeviceType::Cpu))
-        );
-        tracing::info!(
-            router_mode = "device-aware-weighted",
-            worker_id = instance_id,
-            candidate_count = selection.candidates.len(),
-            load = state.load(instance_id),
-            endpoint = %endpoint_id,
-            is_cpu,
-            embedding_cache_hit = selection.embedding_cache_hit,
-            request_cache_keys = selection.request_cache_keys,
-            "Selected worker"
-        );
-
-        match self
-            .generate_with_fault_detection(instance_id, request, TransportFallback::Allow)
+        self.device_aware_weighted_prepared(request, |_, _| Ok(()))
             .await
-        {
-            Ok((stream, resolved_id)) => Ok(match permit {
-                Some(mut permit) => {
-                    permit.retarget(resolved_id);
-                    permit.into_tracked_stream(stream)
-                }
-                None => stream,
-            }),
-            Err(err) => Err(err),
-        }
+            .map(|(_, stream)| stream)
     }
 
+    async fn device_aware_weighted_prepared<M, F>(
+        &self,
+        request: SingleIn<T>,
+        prepare: F,
+    ) -> anyhow::Result<(M, ManyOut<U>)>
+    where
+        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+    {
+        let (instance_id, permit) = self
+            .select_load_aware_worker(RouterMode::DeviceAwareWeighted, Some(request.content()))
+            .await?;
+
+        self.dispatch_selected(instance_id, request, permit, prepare)
+            .await
+    }
+
+    /// `request` is `None` on the bidirectional path, which reserves a worker
+    /// before any inbound frame exists: with no content there are no cache keys,
+    /// so selection degenerates to the device-ratio group.
     fn device_aware_candidates(
         &self,
-        request: &T,
+        request: Option<&T>,
         state: &RoutingOccupancyState,
         instance_ids: &[u64],
     ) -> DeviceAwareCandidates {
@@ -1059,7 +1099,8 @@ where
             .unwrap_or(8);
 
         let (request_cache_keys, cache_matched_candidates) =
-            if let (Some(indexer), Some(extractor)) = (
+            if let (Some(request), Some(indexer), Some(extractor)) = (
+                request,
                 self.multimodal_cache_indexer.as_ref(),
                 self.multimodal_cache_key_extractor.as_ref(),
             ) {
@@ -1105,20 +1146,25 @@ where
 
     /// Issue a request to the instance with the fewest active connections.
     pub async fn least_loaded(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
-        let (instance_id, mut permit) = self
-            .select_load_aware_worker(RouterMode::LeastLoaded)
+        self.least_loaded_prepared(request, |_, _| Ok(()))
+            .await
+            .map(|(_, stream)| stream)
+    }
+
+    async fn least_loaded_prepared<M, F>(
+        &self,
+        request: SingleIn<T>,
+        prepare: F,
+    ) -> anyhow::Result<(M, ManyOut<U>)>
+    where
+        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+    {
+        let (instance_id, permit) = self
+            .select_load_aware_worker(RouterMode::LeastLoaded, None)
             .await?;
 
-        match self
-            .generate_with_fault_detection(instance_id, request, TransportFallback::Allow)
+        self.dispatch_selected(instance_id, request, permit, prepare)
             .await
-        {
-            Ok((stream, resolved_id)) => {
-                permit.retarget(resolved_id);
-                Ok(permit.into_tracked_stream(stream))
-            }
-            Err(err) => Err(err),
-        }
     }
 
     /// Select the next worker according to the routing mode.
@@ -1215,23 +1261,6 @@ where
         }
     }
 
-    /// Peek the worker this routing mode would choose for a request without booking it.
-    pub fn peek_worker_for_request(&self, request: &T) -> Option<u64> {
-        let instance_ids = self.client.routing_instances().free_ids().to_vec();
-        if instance_ids.is_empty() {
-            return None;
-        }
-
-        match self.router_mode {
-            RouterMode::DeviceAwareWeighted => {
-                let state = self.occupancy_state.as_deref()?;
-                let selection = self.device_aware_candidates(request, state, &instance_ids);
-                state.peek_min(&selection.candidates)
-            }
-            _ => self.peek_next_worker(),
-        }
-    }
-
     async fn select_exact_target(
         &self,
         request: &T,
@@ -1283,8 +1312,11 @@ where
                         instance_id
                     }
                     RouterMode::DeviceAwareWeighted => {
-                        let selection =
-                            self.device_aware_candidates(request, state.as_ref(), &instance_ids);
+                        let selection = self.device_aware_candidates(
+                            Some(request),
+                            state.as_ref(),
+                            &instance_ids,
+                        );
                         let instance_id = if selection.full_embedding_cache_hit {
                             state.select_exact_min(&selection.candidates).await
                         } else {
@@ -1349,16 +1381,27 @@ where
     }
     */
 
-    /// Returns the resolved worker id alongside the stream. The returned id may
-    /// differ from `instance_id` when [`Self::resolve_transport`] falls back to
-    /// another worker; load-aware callers use it to retarget their occupancy
-    /// permit onto the worker that actually received the request.
     async fn generate_with_fault_detection(
         &self,
         instance_id: u64,
         request: SingleIn<T>,
         fallback: TransportFallback<'_>,
-    ) -> anyhow::Result<(ManyOut<U>, u64)> {
+    ) -> anyhow::Result<ManyOut<U>> {
+        self.generate_with_fault_detection_prepared(instance_id, request, fallback, |_, _| Ok(()))
+            .await
+            .map(|(_, stream)| stream)
+    }
+
+    async fn generate_with_fault_detection_prepared<M, F>(
+        &self,
+        instance_id: u64,
+        mut request: SingleIn<T>,
+        fallback: TransportFallback<'_>,
+        prepare: F,
+    ) -> anyhow::Result<(M, ManyOut<U>)>
+    where
+        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+    {
         let route_start = Instant::now();
         let request_id = request.id().to_string();
         let route_span = if matches!(self.router_mode, RouterMode::KV) {
@@ -1376,6 +1419,7 @@ where
 
         let (instance_id, address, transport_kind, instance) =
             self.resolve_transport(instance_id, fallback)?;
+        let metadata = prepare(&mut request, instance_id)?;
         let request = request.map(|req| AddressedRequest::with_instance(req, address, instance));
 
         STAGE_DURATION_SECONDS
@@ -1388,8 +1432,8 @@ where
             .generate(request)
             .instrument(route_span)
             .await;
-        self.wrap_with_fault_detection(stream, instance_id)
-            .map(|stream| (stream, instance_id))
+        let stream = self.wrap_with_fault_detection(stream, instance_id)?;
+        Ok((metadata, stream))
     }
 
     /// Reject early if the selected worker is overloaded and fault detection
@@ -1629,16 +1673,19 @@ where
     T: Data + Serialize,
     U: Data + for<'de> Deserialize<'de> + MaybeError,
 {
-    /// Bidirectional sibling of [`Self::generate_with_fault_detection`].
+    /// Bidirectional sibling of [`Self::dispatch_selected`].
     ///
-    /// Returns the stream alongside the resolved worker id (see that method)
-    /// so load-aware callers can retarget their occupancy permit when
-    /// [`Self::resolve_transport`] falls back to a different worker.
+    /// `permit` carries the occupancy charge taken at selection time. As on the
+    /// unary path it is retargeted onto the worker that survives
+    /// [`Self::resolve_transport`] — which may differ from `instance_id` during
+    /// discovery churn — before dispatch, then attached to the response stream
+    /// so the slot is released when the stream ends or is dropped.
     async fn bidirectional_dispatch(
         &self,
         instance_id: u64,
         input: ManyIn<T>,
-    ) -> anyhow::Result<(ManyOut<U>, u64)> {
+        mut permit: Option<OccupancyPermit>,
+    ) -> anyhow::Result<ManyOut<U>> {
         let route_start = Instant::now();
         let request_id = input.context().id().to_string();
         let route_span = tracing::info_span!(
@@ -1651,6 +1698,9 @@ where
         self.check_workers_available(instance_id, &request_id)?;
         let (instance_id, address, transport_kind, instance) =
             self.resolve_transport(instance_id, TransportFallback::Allow)?;
+        if let Some(permit) = permit.as_mut() {
+            permit.retarget(instance_id);
+        }
 
         STAGE_DURATION_SECONDS
             .with_label_values(&[STAGE_ROUTE])
@@ -1662,8 +1712,11 @@ where
             .generate_bidirectional(instance, address, input)
             .instrument(route_span)
             .await;
-        self.wrap_with_fault_detection(stream, instance_id)
-            .map(|stream| (stream, instance_id))
+        let stream = self.wrap_with_fault_detection(stream, instance_id)?;
+        Ok(match permit {
+            Some(permit) => permit.into_tracked_stream(stream),
+            None => stream,
+        })
     }
 }
 
@@ -1716,18 +1769,17 @@ where
             // to the response stream so the slot is released when the stream ends
             // (or dropped early). `select_load_aware_worker` returns a clear
             // "no instances" / "all busy" error when the candidate pool is empty.
+            // `None` request content: no frame has been observed yet, so
+            // `DeviceAwareWeighted` selects on the device ratio alone.
             RouterMode::PowerOfTwoChoices
             | RouterMode::LeastLoaded
             | RouterMode::DeviceAwareWeighted => {
-                let (instance_id, mut permit) =
-                    self.select_load_aware_worker(self.router_mode).await?;
-                return match self.bidirectional_dispatch(instance_id, input).await {
-                    Ok((stream, resolved_id)) => {
-                        permit.retarget(resolved_id);
-                        Ok(permit.into_tracked_stream(stream))
-                    }
-                    Err(err) => Err(err),
-                };
+                let (instance_id, permit) = self
+                    .select_load_aware_worker(self.router_mode, None)
+                    .await?;
+                return self
+                    .bidirectional_dispatch(instance_id, input, permit)
+                    .await;
             }
             RouterMode::RoundRobin | RouterMode::Random => {}
         }
@@ -1738,9 +1790,7 @@ where
             .select_next_worker()
             .ok_or_else(|| anyhow::anyhow!("no instances available for bidirectional routing"))?;
 
-        self.bidirectional_dispatch(instance_id, input)
-            .await
-            .map(|(stream, _)| stream)
+        self.bidirectional_dispatch(instance_id, input, None).await
     }
 }
 
@@ -2146,7 +2196,8 @@ mod tests {
                 "{mode:?} is now wired for bidirectional dispatch; must not claim it is unsupported: got {err_msg}"
             );
             assert!(
-                err_msg.contains("no instances")
+                err_msg.contains("No workers available")
+                    || err_msg.contains("no instances")
                     || err_msg.contains("All workers are busy")
                     || err_msg.contains("not initialized"),
                 "error should describe the empty/unavailable pool: got {err_msg}"
@@ -2200,7 +2251,7 @@ mod tests {
                 .unwrap();
 
             let (selected, _permit) = router
-                .select_load_aware_worker(mode)
+                .select_load_aware_worker(mode, None)
                 .await
                 .unwrap_or_else(|e| panic!("{mode:?} should select the available worker: {e:?}"));
             assert!(
@@ -2239,7 +2290,7 @@ mod tests {
         // `OccupancyPermit` is intentionally not `Debug`, so match instead of
         // `expect_err` to pull out the error.
         let err = match router
-            .select_load_aware_worker(RouterMode::RoundRobin)
+            .select_load_aware_worker(RouterMode::RoundRobin, None)
             .await
         {
             Ok(_) => {
@@ -2728,6 +2779,70 @@ mod tests {
         rt.shutdown();
     }
 
+    /// Direct dispatch honors an upstream-selected worker even after local inhibition.
+    #[tokio::test]
+    async fn direct_dispatch_ignores_local_inhibition() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt
+            .namespace("test_direct_bypasses_inhibition".to_string())
+            .unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+        let client = endpoint.client().await.unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        let instance_id = client.wait_for_instances().await.unwrap()[0].id();
+
+        // KV routing selects upstream and dispatches through PushRouter::direct.
+        let router = PushRouter::<u64, TestResponse>::from_client(client.clone(), RouterMode::KV)
+            .await
+            .unwrap();
+
+        client.report_instance_down(instance_id);
+        assert!(
+            !client.instance_ids_avail().contains(&instance_id),
+            "precondition: worker should be locally inhibited"
+        );
+
+        let result = router
+            .direct_within_prepared(
+                SingleIn::new(42),
+                instance_id,
+                None,
+                |_, selected_instance_id| {
+                    assert_eq!(selected_instance_id, instance_id);
+                    Err::<(), _>(anyhow::anyhow!("direct prepare sentinel"))
+                },
+            )
+            .await;
+        let error = match result {
+            Ok(_) => panic!("direct dispatch should reach request preparation"),
+            Err(error) => error,
+        };
+        assert_eq!(error.to_string(), "direct prepare sentinel");
+
+        let missing_instance_id = instance_id.wrapping_add(1);
+        let result = router
+            .direct_within_prepared(SingleIn::new(42), missing_instance_id, None, |_, _| {
+                Ok::<(), anyhow::Error>(())
+            })
+            .await;
+        let error = match result {
+            Ok(_) => panic!("direct dispatch should reject a worker absent from discovery"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("instance_id={missing_instance_id} not found")),
+            "unexpected missing-worker error: {error}"
+        );
+
+        rt.shutdown();
+    }
+
     /// When the router selects an instance that has deregistered between selection
     /// and transport resolution, it should fall back to another available instance
     /// rather than returning a 500 error.
@@ -2783,6 +2898,49 @@ mod tests {
             );
         }
 
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn prepared_dispatch_observes_worker_after_transport_fallback() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("test_prepared_transport_fallback".to_string())
+            .unwrap()
+            .component("test_component".to_string())
+            .unwrap()
+            .endpoint("test_endpoint".to_string());
+        let client = endpoint.client().await.unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        let real_id = client.wait_for_instances().await.unwrap()[0].id();
+        let stale_id = real_id.wrapping_add(1);
+        client.override_instance_avail(vec![stale_id, real_id]);
+        let router = PushRouter::<u64, TestResponse>::from_client(client, RouterMode::LeastLoaded)
+            .await
+            .unwrap();
+        let state = router.occupancy_state.clone().unwrap();
+        state.increment(real_id);
+        let state_for_prepare = state.clone();
+        let observed = Arc::new(AtomicU64::new(0));
+        let observed_for_prepare = observed.clone();
+
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            router.select_and_dispatch(SingleIn::new(42), move |_, worker_id| {
+                assert_eq!(state_for_prepare.load(stale_id), 0);
+                assert_eq!(state_for_prepare.load(worker_id), 2);
+                observed_for_prepare.store(worker_id, Ordering::Relaxed);
+                Ok(())
+            }),
+        )
+        .await;
+
+        assert_eq!(observed.load(Ordering::Relaxed), real_id);
+        assert_eq!(state.load(real_id), 1);
+        state.decrement(real_id);
         rt.shutdown();
     }
 

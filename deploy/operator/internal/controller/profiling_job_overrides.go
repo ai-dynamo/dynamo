@@ -18,8 +18,12 @@
 package controller
 
 import (
+	"errors"
+	"fmt"
+
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/utils/ptr"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 )
@@ -76,6 +80,99 @@ func ensureOutputCopierKubeAPIAccess(job *batchv1.Job) {
 	}
 }
 
+// ensureDGDOverrideTool delivers the operator-owned override CLI to the profiler
+// through an emptyDir. It runs after user overrides so reserved delivery fields
+// always describe the binary from the configured operator image.
+func ensureDGDOverrideTool(
+	job *batchv1.Job,
+	operatorImage string,
+	pullPolicy corev1.PullPolicy,
+) error {
+	if operatorImage == "" {
+		return errors.New("operator image must be configured when a DGD override is present")
+	}
+	if pullPolicy == "" {
+		pullPolicy = corev1.PullIfNotPresent
+	}
+
+	spec := &job.Spec.Template.Spec
+	spec.Volumes = mergeNamedSlice(
+		spec.Volumes,
+		[]corev1.Volume{{
+			Name: VolumeNameDGDOverrideTool,
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{},
+			},
+		}},
+		func(volume corev1.Volume) string { return volume.Name },
+	)
+	for i := range spec.InitContainers {
+		spec.InitContainers[i].VolumeMounts = removeVolumeMountByNameOrPath(
+			spec.InitContainers[i].VolumeMounts,
+			VolumeNameDGDOverrideTool,
+			DGDOverrideToolMountPath,
+		)
+	}
+	installer := corev1.Container{
+		Name:            ContainerNameDGDOverrideInstaller,
+		Image:           operatorImage,
+		ImagePullPolicy: pullPolicy,
+		Command:         []string{"/dgd-apply-overrides"},
+		Args:            []string{"--install-to", DGDOverrideToolPath},
+		SecurityContext: &corev1.SecurityContext{
+			AllowPrivilegeEscalation: ptr.To(false),
+			ReadOnlyRootFilesystem:   ptr.To(true),
+			RunAsNonRoot:             ptr.To(true),
+			RunAsUser:                ptr.To[int64](1000),
+			RunAsGroup:               ptr.To[int64](1000),
+			Capabilities: &corev1.Capabilities{
+				Drop: []corev1.Capability{"ALL"},
+			},
+			SeccompProfile: &corev1.SeccompProfile{
+				Type: corev1.SeccompProfileTypeRuntimeDefault,
+			},
+		},
+		VolumeMounts: []corev1.VolumeMount{{
+			Name:      VolumeNameDGDOverrideTool,
+			MountPath: DGDOverrideToolMountPath,
+		}},
+	}
+	spec.InitContainers = mergeNamedSlice(
+		spec.InitContainers,
+		[]corev1.Container{installer},
+		func(container corev1.Container) string { return container.Name },
+	)
+
+	foundProfiler := false
+	for i := range spec.Containers {
+		container := &spec.Containers[i]
+		container.VolumeMounts = removeVolumeMountByNameOrPath(
+			container.VolumeMounts,
+			VolumeNameDGDOverrideTool,
+			DGDOverrideToolMountPath,
+		)
+		if container.Name != ContainerNameProfiler {
+			continue
+		}
+		foundProfiler = true
+		container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
+			Name:      VolumeNameDGDOverrideTool,
+			MountPath: DGDOverrideToolMountPath,
+			ReadOnly:  true,
+		})
+		container.Env = mergeNamedSlice(
+			container.Env,
+			[]corev1.EnvVar{{Name: EnvDGDOverrideToolPath, Value: DGDOverrideToolPath}},
+			func(env corev1.EnvVar) string { return env.Name },
+		)
+	}
+
+	if !foundProfiler {
+		return fmt.Errorf("profiling Job has no %q container", ContainerNameProfiler)
+	}
+	return nil
+}
+
 func outputCopierKubeAPIAccessVolume() corev1.Volume {
 	expirationSeconds := int64(ServiceAccountTokenExpirationSeconds)
 	return corev1.Volume{
@@ -125,6 +222,20 @@ func removeVolumeMountByName(mounts []corev1.VolumeMount, name string) []corev1.
 	result := make([]corev1.VolumeMount, 0, len(mounts))
 	for _, mount := range mounts {
 		if mount.Name != name {
+			result = append(result, mount)
+		}
+	}
+	return result
+}
+
+func removeVolumeMountByNameOrPath(mounts []corev1.VolumeMount, name, path string) []corev1.VolumeMount {
+	if len(mounts) == 0 {
+		return mounts
+	}
+
+	result := make([]corev1.VolumeMount, 0, len(mounts))
+	for _, mount := range mounts {
+		if mount.Name != name && mount.MountPath != path {
 			result = append(result, mount)
 		}
 	}

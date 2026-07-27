@@ -199,8 +199,18 @@ VLLM_ZMQ_PORT_DECODE=${VLLM_ZMQ_PORT_DECODE:-20082}
 #     is ignored.
 # For LLaVA-1.5-7b the encoder peak is ~13.5 GB regardless of GPU size or fraction
 # (verified empirically for the e_pd topology — same load path applies here).
+#
+# VLLM_USE_V2_MODEL_RUNNER=0 forces vLLM's V1 model runner for the encode worker.
+# vLLM 0.25.x's V2 model runner has a broken encoder-only init for dense VLMs:
+# the mm_encoder_only load runs a memory profile_run that executes the language
+# model on Meta tensors, hitting the `_C::rms_norm` custom op (no fake/Meta
+# kernel) and crashing at startup with NotImplementedError even under
+# --enforce-eager. The V1 runner keeps vLLM's encoder-only vision tower (no full
+# model load). Short-term workaround; drop it (set VLLM_USE_V2_MODEL_RUNNER=1)
+# once the V2 encoder-only path is fixed upstream. MoE VLMs are unaffected.
 echo "Starting encode worker on GPU $DYN_ENCODE_WORKER_GPU (--gpu-memory-utilization $DYN_ENCODE_GPU_MEM)..."
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
+VLLM_USE_V2_MODEL_RUNNER=${VLLM_USE_V2_MODEL_RUNNER:-0} \
 VLLM_NIXL_SIDE_CHANNEL_PORT=$VLLM_NIXL_SIDE_CHANNEL_PORT_ENCODE \
 CUDA_VISIBLE_DEVICES=$DYN_ENCODE_WORKER_GPU \
 python -m dynamo.vllm --enable-multimodal --disaggregation-mode encode --model $MODEL_NAME --gpu-memory-utilization $DYN_ENCODE_GPU_MEM $EXTRA_ARGS --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_ZMQ_PORT_ENCODE}\"}" &

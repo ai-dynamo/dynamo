@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::io::Write;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -8,14 +9,20 @@ use std::sync::{
 use std::time::Duration;
 
 use anyhow::{Context as _, anyhow};
+use async_nats::jetstream;
 use async_trait::async_trait;
+use dynamo_runtime::config::environment_names::llm::request_trace as env_request_trace;
+use dynamo_runtime::transports::nats;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
 use crate::telemetry::jsonl::{JsonlSinkOptions, JsonlWriter};
 use crate::telemetry::jsonl_gz::{JsonlGzipSinkOptions, JsonlGzipWriter};
 
-use super::{RequestTracePolicy, RequestTraceRecord, config};
+use super::{
+    RequestTraceFileFormat, RequestTracePolicy, RequestTraceRecord, RequestTraceSinkKind, config,
+    otel_sink::OtelRequestTraceSink,
+};
 
 static WORKERS_STARTED: AtomicBool = AtomicBool::new(false);
 
@@ -23,6 +30,7 @@ static WORKERS_STARTED: AtomicBool = AtomicBool::new(false);
 pub trait RequestTraceSink: Send + Sync {
     fn name(&self) -> &'static str;
     async fn emit(&self, record: &RequestTraceRecord);
+    async fn shutdown(&self) {}
 }
 
 pub struct StderrRequestTraceSink;
@@ -35,13 +43,53 @@ impl RequestTraceSink for StderrRequestTraceSink {
 
     async fn emit(&self, record: &RequestTraceRecord) {
         match serde_json::to_string(record) {
-            Ok(json) => tracing::info!(
-                target = "dynamo_llm::request_trace",
-                log_type = "request_trace",
-                record = %json,
-                "request_trace"
-            ),
+            Ok(json) => {
+                if let Err(error) = writeln!(std::io::stderr(), "{json}") {
+                    tracing::warn!(%error, "request trace stderr write failed");
+                }
+            }
             Err(error) => tracing::warn!("request trace serialization failed: {error}"),
+        }
+    }
+}
+
+pub struct NatsRequestTraceSink {
+    js: jetstream::Context,
+    subject: String,
+}
+
+impl NatsRequestTraceSink {
+    async fn from_policy(policy: &RequestTracePolicy) -> anyhow::Result<Self> {
+        let nats_client = nats::ClientOptions::default()
+            .connect()
+            .await
+            .with_context(|| {
+                format!(
+                    "Attempting to connect NATS request trace sink from env var {}",
+                    env_request_trace::DYN_REQUEST_TRACE_SINKS
+                )
+            })?;
+        Ok(Self {
+            js: nats_client.jetstream().clone(),
+            subject: policy.nats_subject.clone(),
+        })
+    }
+}
+
+#[async_trait]
+impl RequestTraceSink for NatsRequestTraceSink {
+    fn name(&self) -> &'static str {
+        "nats"
+    }
+
+    async fn emit(&self, record: &RequestTraceRecord) {
+        match serde_json::to_vec(record) {
+            Ok(bytes) => {
+                if let Err(error) = self.js.publish(self.subject.clone(), bytes.into()).await {
+                    tracing::warn!("request trace nats: publish failed: {error}");
+                }
+            }
+            Err(error) => tracing::warn!("request trace nats: serialize failed: {error}"),
         }
     }
 }
@@ -59,18 +107,18 @@ impl JsonlRequestTraceSink {
     }
 
     async fn from_policy(policy: &RequestTracePolicy) -> anyhow::Result<Self> {
-        let path = policy.output_path.clone().ok_or_else(|| {
+        let path = policy.file_path.clone().ok_or_else(|| {
             anyhow!(
-                "{} must be set when {} includes jsonl",
-                dynamo_runtime::config::environment_names::llm::request_trace::DYN_REQUEST_TRACE_OUTPUT_PATH,
-                dynamo_runtime::config::environment_names::llm::request_trace::DYN_REQUEST_TRACE_SINKS
+                "{} must be set when {} includes file",
+                env_request_trace::DYN_REQUEST_TRACE_FILE_PATH,
+                env_request_trace::DYN_REQUEST_TRACE_SINKS
             )
         })?;
         Self::new(
             path,
             JsonlSinkOptions {
-                buffer_bytes: policy.jsonl_buffer_bytes,
-                flush_interval: Duration::from_millis(policy.jsonl_flush_interval_ms.max(1)),
+                buffer_bytes: policy.file_buffer_bytes,
+                flush_interval: Duration::from_millis(policy.file_flush_interval_ms.max(1)),
             },
         )
         .await
@@ -80,12 +128,12 @@ impl JsonlRequestTraceSink {
 #[async_trait]
 impl RequestTraceSink for JsonlRequestTraceSink {
     fn name(&self) -> &'static str {
-        "jsonl"
+        "file"
     }
 
     async fn emit(&self, record: &RequestTraceRecord) {
         if self.writer.send(record.clone()).await.is_err() {
-            tracing::warn!("request trace jsonl sink closed; dropping record");
+            tracing::warn!("request trace file sink closed; dropping record");
         }
     }
 }
@@ -103,20 +151,21 @@ impl JsonlGzipRequestTraceSink {
     }
 
     async fn from_policy(policy: &RequestTracePolicy) -> anyhow::Result<Self> {
-        let path = policy.output_path.clone().ok_or_else(|| {
+        let path = policy.file_path.clone().ok_or_else(|| {
             anyhow!(
-                "{} must be set when {} includes jsonl_gz",
-                dynamo_runtime::config::environment_names::llm::request_trace::DYN_REQUEST_TRACE_OUTPUT_PATH,
-                dynamo_runtime::config::environment_names::llm::request_trace::DYN_REQUEST_TRACE_SINKS
+                "{} must be set when {} includes file",
+                env_request_trace::DYN_REQUEST_TRACE_FILE_PATH,
+                env_request_trace::DYN_REQUEST_TRACE_SINKS
             )
         })?;
         Self::new(
             path,
             JsonlGzipSinkOptions {
-                buffer_bytes: policy.jsonl_buffer_bytes,
-                flush_interval: Duration::from_millis(policy.jsonl_flush_interval_ms.max(1)),
-                roll_uncompressed_bytes: policy.jsonl_gz_roll_bytes,
-                roll_lines: policy.jsonl_gz_roll_lines,
+                buffer_bytes: policy.file_buffer_bytes,
+                flush_interval: Duration::from_millis(policy.file_flush_interval_ms.max(1)),
+                roll_uncompressed_bytes: policy.file_roll_bytes,
+                roll_lines: policy.file_roll_lines,
+                max_segments: None,
             },
         )
         .await
@@ -126,12 +175,12 @@ impl JsonlGzipRequestTraceSink {
 #[async_trait]
 impl RequestTraceSink for JsonlGzipRequestTraceSink {
     fn name(&self) -> &'static str {
-        "jsonl_gz"
+        "file"
     }
 
     async fn emit(&self, record: &RequestTraceRecord) {
         if self.writer.send(record.clone()).await.is_err() {
-            tracing::warn!("request trace jsonl_gz sink closed; dropping record");
+            tracing::warn!("request trace file sink closed; dropping record");
         }
     }
 }
@@ -139,14 +188,23 @@ impl RequestTraceSink for JsonlGzipRequestTraceSink {
 async fn parse_sinks_from_env() -> anyhow::Result<Vec<Arc<dyn RequestTraceSink>>> {
     let policy = config::policy();
     let mut sinks: Vec<Arc<dyn RequestTraceSink>> = Vec::new();
-    for name in &policy.sinks {
-        match name.as_str() {
-            "stderr" => sinks.push(Arc::new(StderrRequestTraceSink)),
-            "jsonl" => sinks.push(Arc::new(JsonlRequestTraceSink::from_policy(policy).await?)),
-            "jsonl_gz" => sinks.push(Arc::new(
-                JsonlGzipRequestTraceSink::from_policy(policy).await?,
-            )),
-            other => tracing::warn!(%other, "request trace: unknown sink ignored"),
+    for sink_kind in &policy.sinks {
+        match sink_kind {
+            RequestTraceSinkKind::Stderr => sinks.push(Arc::new(StderrRequestTraceSink)),
+            RequestTraceSinkKind::Nats => {
+                sinks.push(Arc::new(NatsRequestTraceSink::from_policy(policy).await?))
+            }
+            RequestTraceSinkKind::Otel => {
+                sinks.push(Arc::new(OtelRequestTraceSink::from_policy(policy).await?))
+            }
+            RequestTraceSinkKind::File => match policy.file_format {
+                RequestTraceFileFormat::Jsonl => {
+                    sinks.push(Arc::new(JsonlRequestTraceSink::from_policy(policy).await?))
+                }
+                RequestTraceFileFormat::JsonlGz => sinks.push(Arc::new(
+                    JsonlGzipRequestTraceSink::from_policy(policy).await?,
+                )),
+            },
         }
     }
     Ok(sinks)
@@ -193,7 +251,7 @@ async fn spawn_workers(shutdown: CancellationToken) -> anyhow::Result<()> {
                                 ) => break,
                             }
                         }
-                        return;
+                        break;
                     }
                     message = receiver.recv() => {
                         match message {
@@ -208,9 +266,13 @@ async fn spawn_workers(shutdown: CancellationToken) -> anyhow::Result<()> {
                     }
                 }
             }
+            sink.shutdown().await;
         });
     }
 
+    if sink_count == 0 {
+        tracing::warn!("request trace is enabled but no valid request trace sinks were configured");
+    }
     tracing::info!(sinks = sink_count, "Request trace sinks ready");
     Ok(())
 }
@@ -226,7 +288,9 @@ mod tests {
     use crate::telemetry::jsonl_gz::segment_path;
 
     use super::*;
-    use crate::request_trace::{RequestTraceEventType, RequestTraceMetrics, RequestTraceSchema};
+    use crate::request_trace::RequestTraceEventType;
+    use crate::request_trace::RequestTraceMetrics;
+    use crate::request_trace::RequestTraceSchema;
 
     fn sample_record() -> RequestTraceRecord {
         RequestTraceRecord {
@@ -260,6 +324,7 @@ mod tests {
                 finish_reason_metadata: None,
             }),
             tool: None,
+            payload: None,
         }
     }
 
@@ -303,6 +368,7 @@ mod tests {
                 flush_interval: Duration::from_secs(60),
                 roll_uncompressed_bytes: 1024 * 1024,
                 roll_lines: Some(1),
+                max_segments: None,
             },
         )
         .await

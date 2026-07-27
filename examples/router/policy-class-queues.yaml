@@ -13,6 +13,7 @@ policy_classes:
     cache_bucket: cached
     queue_policy: wspt
     quantum: 2048
+    prefill_busy_threshold_frac: 16.0
     request_queue_limit_per_worker: 1024
     cached_token_queue_limit_per_worker: 2097152
   - name: uncached
@@ -20,6 +21,7 @@ policy_classes:
     cache_bucket: uncached
     queue_policy: fcfs
     quantum: 512
+    prefill_busy_threshold_frac: 16.0
     request_queue_limit_per_worker: 512
     raw_isl_token_queue_limit_per_worker: 1048576
   - name: latency_cached
@@ -27,17 +29,20 @@ policy_classes:
     cache_bucket: cached
     queue_policy: wspt
     quantum: 4096
+    prefill_busy_threshold_frac: 16.0
     request_queue_limit_per_worker: 256
   - name: latency_uncached
     policy_family: latency
     cache_bucket: uncached
     queue_policy: wspt
     quantum: 1024
+    prefill_busy_threshold_frac: 16.0
     request_queue_limit_per_worker: 128
     raw_isl_token_queue_limit_per_worker: 524288
   - name: custom_priority
     queue_policy: wspt
     quantum: 4096
+    prefill_busy_threshold_frac: 16.0
     request_queue_limit_per_worker: 128
 
 models:
@@ -54,22 +59,26 @@ models:
         cache_bucket: cached
         queue_policy: wspt
         quantum: 4096
+        prefill_busy_threshold_frac: 16.0
         request_queue_limit_per_worker: 256
       - name: latency_uncached
         policy_family: latency
         cache_bucket: uncached
         queue_policy: wspt
         quantum: 1024
+        prefill_busy_threshold_frac: 16.0
         request_queue_limit_per_worker: 128
       - name: batch_cached
         policy_family: batch
         cache_bucket: cached
         queue_policy: fcfs
         quantum: 2048
+        prefill_busy_threshold_frac: 16.0
         cached_token_queue_limit_per_worker: 1048576
       - name: batch_uncached
         policy_family: batch
         cache_bucket: uncached
         queue_policy: fcfs
         quantum: 1024
+        prefill_busy_threshold_frac: 16.0
         raw_isl_token_queue_limit_per_worker: 524288

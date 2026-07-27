@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::core::ReplayWorkerCore;
+use super::components::ReplayWorkerCore;
 use super::progress::ReplayProgress;
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
 use crate::loadgen::WorkloadDriver;
@@ -114,25 +114,24 @@ impl SingleRuntime {
     fn enqueue_trace_arrivals(&mut self) {
         let mut ready_requests = Vec::new();
         match &mut self.admission {
-            AdmissionSource::Requests(pending) => loop {
-                let Some(next_arrival_ms) = pending
+            AdmissionSource::Requests(pending) => {
+                while let Some(next_arrival_ms) = pending
                     .front()
                     .and_then(|request| request.arrival_timestamp_ms)
-                else {
-                    break;
-                };
-                if next_arrival_ms > self.current_time_ms {
-                    break;
-                }
+                {
+                    if next_arrival_ms > self.current_time_ms {
+                        break;
+                    }
 
-                let request = pending
-                    .pop_front()
-                    .expect("front request must exist when arrival is available");
-                let arrival_ms = request
-                    .arrival_timestamp_ms
-                    .expect("trace replay requests must have an arrival timestamp");
-                ready_requests.push((request, arrival_ms));
-            },
+                    let request = pending
+                        .pop_front()
+                        .expect("front request must exist when arrival is available");
+                    let arrival_ms = request
+                        .arrival_timestamp_ms
+                        .expect("trace replay requests must have an arrival timestamp");
+                    ready_requests.push((request, arrival_ms));
+                }
+            }
             AdmissionSource::Workload(driver) => {
                 ready_requests.extend(
                     driver
@@ -256,7 +255,8 @@ impl SingleRuntime {
             } else {
                 ReplayTerminalStatus::Completed
             };
-            self.collector.on_terminal(signal.uuid, status);
+            self.collector
+                .on_terminal(signal.uuid, self.current_time_ms, status);
         }
         for _ in 0..completed_requests {
             self.progress.inc_completed();
@@ -332,6 +332,7 @@ mod tests {
     use crate::common::protocols::EngineType;
     use crate::loadgen::{SessionTrace, Trace, TurnTrace};
     use crate::replay::{ReplayTerminalStatus, TraceRequestStatsSnapshot, TraceSimulationReport};
+    use crate::scheduler::EnginePassResult;
     use rstest::rstest;
     use std::collections::{HashMap, VecDeque};
     use uuid::Uuid;
@@ -350,19 +351,27 @@ mod tests {
         snapshots: HashMap<Uuid, TraceRequestStatsSnapshot>,
     }
 
+    fn record_manual_terminals(collector: &mut TraceCollector, pass: &EnginePassResult) {
+        for signal in pass.output_signals.iter().filter(|signal| signal.completed) {
+            let status = if signal.rejected {
+                ReplayTerminalStatus::Rejected
+            } else {
+                ReplayTerminalStatus::Completed
+            };
+            collector.on_terminal(signal.uuid, pass.end_ms, status);
+        }
+    }
+
     fn enqueue_trace_arrivals_manual(
         pending: &mut VecDeque<DirectRequest>,
         worker: &mut ReplayWorkerCore,
         collector: &mut TraceCollector,
         current_time_ms: f64,
     ) {
-        loop {
-            let Some(next_arrival_ms) = pending
-                .front()
-                .and_then(|request| request.arrival_timestamp_ms)
-            else {
-                break;
-            };
+        while let Some(next_arrival_ms) = pending
+            .front()
+            .and_then(|request| request.arrival_timestamp_ms)
+        {
             if next_arrival_ms > current_time_ms {
                 break;
             }
@@ -537,6 +546,7 @@ mod tests {
             }
 
             let pass = worker.execute_pass(&mut collector, current_time_ms);
+            record_manual_terminals(&mut collector, &pass);
             if first_decode_end_ms == 0.0 && !pass.output_signals.is_empty() {
                 first_decode_end_ms = pass.end_ms;
             }
@@ -590,6 +600,7 @@ mod tests {
             }
 
             let pass = worker.execute_pass(&mut collector, current_time_ms);
+            record_manual_terminals(&mut collector, &pass);
             current_time_ms = pass.end_ms;
         }
 

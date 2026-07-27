@@ -4,6 +4,7 @@
 """Live-cluster DGD checkpoint/restore deploy test."""
 
 import asyncio
+import copy
 import logging
 import time
 from dataclasses import dataclass
@@ -24,6 +25,15 @@ from tests.utils.managed_deployment import (
 
 logger = logging.getLogger(__name__)
 
+# kr8s port-forward teardown runs in background threads; on pod termination it
+# can surface expected OSErrors (e.g. EADDRINUSE for a local port still in
+# TIME_WAIT) via threading.excepthook. Under filterwarnings=error those would
+# fail this live-cluster test, so scope the suppression to this module only
+# rather than globally hiding unrelated background-thread crashes.
+pytestmark = pytest.mark.filterwarnings(
+    "ignore::pytest.PytestUnhandledThreadExceptionWarning"
+)
+
 TRANSIENT_K8S_EXCEPTIONS = (
     aiohttp.ClientError,
     asyncio.TimeoutError,
@@ -36,6 +46,8 @@ CHECKPOINT_PLURAL = "dynamocheckpoints"
 FRONTEND_COMPONENT = "Frontend"
 TARGET_CONTAINER = "main"
 CHECKPOINT_MODEL = "Qwen/Qwen3-0.6B"
+CHECKPOINT_STORAGE_MOUNT_PATH = "/checkpoints"
+TRTLLM_HF_HOME = f"{CHECKPOINT_STORAGE_MOUNT_PATH}/trtllm-hf-cache"
 
 CHECKPOINT_ID_LABEL = "nvidia.com/snapshot-checkpoint-id"
 CHECKPOINT_SOURCE_LABEL = "nvidia.com/snapshot-is-checkpoint-source"
@@ -72,6 +84,12 @@ class CheckpointBackendConfig:
     target_container: str
     model: str
     args: tuple[str, ...]
+    env: tuple[tuple[str, str], ...] = ()
+    extra_volumes: tuple[dict[str, Any], ...] = ()
+    extra_volume_mounts: tuple[dict[str, Any], ...] = ()
+    pod_spec_updates: dict[str, Any] | None = None
+    container_resources: dict[str, Any] | None = None
+    checkpoint_startup_policy: str | None = None
 
 
 CHECKPOINT_BACKENDS = {
@@ -118,6 +136,77 @@ CHECKPOINT_BACKENDS = {
             "--skip-tokenizer-init",
         ),
     ),
+    "trtllm": CheckpointBackendConfig(
+        name="trtllm",
+        manifest=(
+            "examples",
+            "backends",
+            "trtllm",
+            "deploy",
+            "v1beta1",
+            "agg.yaml",
+        ),
+        decode_component="TRTLLMWorker",
+        frontend_component=FRONTEND_COMPONENT,
+        target_container=TARGET_CONTAINER,
+        model=CHECKPOINT_MODEL,
+        # Only the CI-sizing overrides that differ from TensorRT-LLM defaults
+        # are passed. The remaining single-GPU snapshot settings from
+        # examples/backends/trtllm/engine_configs/qwen3/snapshot.yaml are already
+        # defaults or no-ops for dense Qwen3-0.6B: tensor/pipeline parallel = 1,
+        # no expert parallel or attention DP, pytorch backend (forced by the
+        # worker), and chunked prefill (inert at max-batch-size 1).
+        args=(
+            "--model-path",
+            CHECKPOINT_MODEL,
+            "--served-model-name",
+            CHECKPOINT_MODEL,
+            "--max-num-tokens",
+            "1024",
+            "--max-batch-size",
+            "1",
+            "--free-gpu-memory-fraction",
+            "0.10",
+        ),
+        # Keep the raw DGD PVC-free: the checkpoint operator mounts
+        # snapshot-pvc at /checkpoints for checkpoint/restore pods, so HF_HOME
+        # there preserves model files across restore without a model-cache PVC.
+        env=(("UCX_TLS", "tcp,self"), ("HF_HOME", TRTLLM_HF_HOME)),
+        # Match the base TRTLLM snapshot recipe and avoid cold-worker/restore
+        # rollout overlap during initial DGD startup.
+        checkpoint_startup_policy="WaitForCheckpoint",
+        pod_spec_updates={
+            "runtimeClassName": "nvidia",
+            "securityContext": {
+                "fsGroup": 1000,
+                "fsGroupChangePolicy": "OnRootMismatch",
+            },
+        },
+        container_resources={
+            "requests": {
+                "cpu": "4",
+                "memory": "16Gi",
+                "nvidia.com/gpu": "1",
+                "ephemeral-storage": "10Gi",
+            },
+            "limits": {
+                "cpu": "8",
+                "memory": "32Gi",
+                "nvidia.com/gpu": "1",
+            },
+        },
+        extra_volumes=(
+            {"name": "criu-work", "emptyDir": {}},
+            {
+                "name": "dev-net-tun",
+                "hostPath": {"path": "/dev/net/tun", "type": "CharDevice"},
+            },
+        ),
+        extra_volume_mounts=(
+            {"name": "criu-work", "mountPath": "/var/criu-work"},
+            {"name": "dev-net-tun", "mountPath": "/dev/net/tun"},
+        ),
+    ),
 }
 
 
@@ -156,19 +245,42 @@ def _new_checkpoint_spec(
     raw_spec = deployment_spec.spec()
     decode = _component(raw_spec, backend.decode_component)
     pod_spec = decode.setdefault("podTemplate", {}).setdefault("spec", {})
-    pod_spec["nodeSelector"] = dict(GPU_NODE_SELECTOR)
-    pod_spec["tolerations"] = list(GPU_TOLERATIONS)
     containers = pod_spec.setdefault("containers", [])
     if not containers:
         raise AssertionError(
             f"component {backend.decode_component!r} has no containers"
         )
-    containers[0]["args"] = list(backend.args)
+    pod_spec["nodeSelector"] = dict(GPU_NODE_SELECTOR)
+    pod_spec["tolerations"] = list(GPU_TOLERATIONS)
+    if backend.pod_spec_updates:
+        pod_spec.update(copy.deepcopy(backend.pod_spec_updates))
+    container = containers[0]
+    container["args"] = list(backend.args)
+    if backend.container_resources:
+        container["resources"] = copy.deepcopy(backend.container_resources)
+    if backend.extra_volumes:
+        pod_spec.setdefault("volumes", []).extend(
+            copy.deepcopy(volume) for volume in backend.extra_volumes
+        )
+    if backend.extra_volume_mounts:
+        container.setdefault("volumeMounts", []).extend(
+            copy.deepcopy(mount) for mount in backend.extra_volume_mounts
+        )
+    if backend.env:
+        env = container.setdefault("env", [])
+        for name, value in backend.env:
+            for item in env:
+                if item.get("name") == name:
+                    item["value"] = value
+                    break
+            else:
+                env.append({"name": name, "value": value})
 
-    decode.setdefault("experimental", {})["checkpoint"] = {
-        "enabled": True,
-        "targetContainerName": backend.target_container,
-    }
+    checkpoint = decode.setdefault("experimental", {}).setdefault("checkpoint", {})
+    checkpoint["enabled"] = True
+    checkpoint["targetContainerName"] = backend.target_container
+    if backend.checkpoint_startup_policy is not None:
+        checkpoint["startupPolicy"] = backend.checkpoint_startup_policy
     return deployment_spec
 
 

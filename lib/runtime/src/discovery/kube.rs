@@ -15,17 +15,23 @@ use utils::{KubeDiscoveryMode, PodInfo};
 
 use crate::CancellationToken;
 use crate::discovery::{
-    ClaimCloseOutcome, ClaimOutcome, ClaimPayloadFuture, Discovery, DiscoveryEvent,
-    DiscoveryInstance, DiscoveryInstanceId, DiscoveryMetadata, DiscoveryQuery, DiscoverySpec,
-    DiscoveryStream, MetadataSnapshot,
+    Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryMetadata,
+    DiscoveryQuery, DiscoverySpec, DiscoveryStream, MetadataSnapshot,
 };
 use anyhow::Result;
 use async_trait::async_trait;
 use kube::{Api, Client as KubeClient, api::DeleteParams};
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::RwLock;
+
+fn validate_kubernetes_publisher_id(publisher_id: u64) -> Result<()> {
+    if i64::try_from(publisher_id).is_err() {
+        anyhow::bail!("Kubernetes discovery publisher ID {publisher_id} exceeds i64::MAX");
+    }
+
+    Ok(())
+}
 
 /// Kubernetes-based discovery client
 #[derive(Clone)]
@@ -35,7 +41,6 @@ pub struct KubeDiscoveryClient {
     metadata_watch: tokio::sync::watch::Receiver<Arc<MetadataSnapshot>>,
     kube_client: KubeClient,
     pod_info: PodInfo,
-    claim_warning_emitted: Arc<AtomicBool>,
 }
 
 impl KubeDiscoveryClient {
@@ -107,18 +112,7 @@ impl KubeDiscoveryClient {
             metadata_watch: watch_rx,
             kube_client,
             pod_info,
-            claim_warning_emitted: Arc::new(AtomicBool::new(false)),
         })
-    }
-
-    fn warn_claims_unsupported(&self) {
-        if self.claim_warning_emitted.swap(true, Ordering::Relaxed) {
-            return;
-        }
-
-        tracing::warn!(
-            "Kubernetes discovery does not coordinate session affinity across frontend processes; using process-local affinity"
-        );
     }
 }
 
@@ -129,11 +123,18 @@ impl Discovery for KubeDiscoveryClient {
     }
 
     async fn register_internal(&self, spec: DiscoverySpec) -> Result<DiscoveryInstance> {
-        let instance_id = self.instance_id();
-        let instance = spec.with_instance_id(instance_id);
+        match &spec {
+            DiscoverySpec::EventChannel { publisher_id, .. }
+            | DiscoverySpec::EventSource { publisher_id, .. } => {
+                validate_kubernetes_publisher_id(*publisher_id)?;
+            }
+            _ => {}
+        }
+        let instance = spec.into_instance(self.instance_id());
+        let instance_id = instance.instance_id();
 
         tracing::debug!(
-            "Registering instance: {:?} with instance_id={:x}",
+            "Registering discovery instance: {:?}, instance_id={:x}",
             instance,
             instance_id
         );
@@ -171,20 +172,23 @@ impl Discovery for KubeDiscoveryClient {
                 );
                 metadata.register_model_card(instance.clone())?;
             }
-            DiscoveryInstance::EventChannel {
-                namespace,
-                component,
-                topic,
-                ..
-            } => {
+            DiscoveryInstance::EventChannel { scope, topic, .. } => {
                 tracing::info!(
-                    "Registering event channel: namespace={}, component={}, topic={}, instance_id={:x}",
-                    namespace,
-                    component,
+                    "Registering event channel: scope={:?}, topic={}, instance_id={:x}",
+                    scope,
                     topic,
                     instance_id
                 );
                 metadata.register_event_channel(instance.clone())?;
+            }
+            DiscoveryInstance::EventSource { scope, topic, .. } => {
+                tracing::info!(
+                    "Registering event source: scope={:?}, topic={}, publisher_id={:x}",
+                    scope,
+                    topic,
+                    instance_id
+                );
+                metadata.register_event_source(instance.clone())?;
             }
         }
 
@@ -214,7 +218,7 @@ impl Discovery for KubeDiscoveryClient {
     }
 
     async fn unregister(&self, instance: DiscoveryInstance) -> Result<()> {
-        let instance_id = self.instance_id();
+        let instance_id = instance.instance_id();
 
         // Write to local metadata and persist to CR
         // IMPORTANT: Hold the write lock across the CR write to prevent race conditions
@@ -249,20 +253,23 @@ impl Discovery for KubeDiscoveryClient {
                 );
                 metadata.unregister_model_card(&instance)?;
             }
-            DiscoveryInstance::EventChannel {
-                namespace,
-                component,
-                topic,
-                ..
-            } => {
+            DiscoveryInstance::EventChannel { scope, topic, .. } => {
                 tracing::info!(
-                    "Unregistering event channel: namespace={}, component={}, topic={}, instance_id={:x}",
-                    namespace,
-                    component,
+                    "Unregistering event channel: scope={:?}, topic={}, instance_id={:x}",
+                    scope,
                     topic,
                     instance_id
                 );
                 metadata.unregister_event_channel(&instance)?;
+            }
+            DiscoveryInstance::EventSource { scope, topic, .. } => {
+                tracing::info!(
+                    "Unregistering event source: scope={:?}, topic={}, publisher_id={:x}",
+                    scope,
+                    topic,
+                    instance_id
+                );
+                metadata.unregister_event_source(&instance)?;
             }
         }
 
@@ -510,18 +517,15 @@ impl Discovery for KubeDiscoveryClient {
         let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(event_rx);
         Ok(Box::pin(stream))
     }
+}
 
-    async fn create_or_get_claim(
-        &self,
-        _key: &str,
-        _proposed_payload: &mut ClaimPayloadFuture<'_>,
-    ) -> Result<ClaimOutcome> {
-        self.warn_claims_unsupported();
-        Ok(ClaimOutcome::Unsupported)
-    }
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    async fn close_claim(&self, _key: &str) -> Result<ClaimCloseOutcome> {
-        self.warn_claims_unsupported();
-        Ok(ClaimCloseOutcome::Unsupported)
+    #[test]
+    fn publisher_ids_must_fit_kubernetes_integer_range() {
+        assert!(validate_kubernetes_publisher_id(i64::MAX as u64).is_ok());
+        assert!(validate_kubernetes_publisher_id((i64::MAX as u64) + 1).is_err());
     }
 }

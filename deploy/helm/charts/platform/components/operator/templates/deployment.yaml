@@ -64,7 +64,7 @@ spec:
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- if .Values.upgradeCRD }}
+      {{- if and (not .Values.namespaceRestriction.enabled) .Values.upgradeCRD }}
       initContainers:
       - name: crd-apply
         image: {{ .Values.controllerManager.manager.image.repository }}:{{ .Values.controllerManager.manager.image.tag | default .Chart.AppVersion }}
@@ -81,6 +81,8 @@ spec:
       - args:
         - --config=/etc/dynamo-operator/config.yaml
         - --operator-version={{ .Chart.AppVersion }}
+        - {{ printf "--operator-image=%s:%s" .Values.controllerManager.manager.image.repository (.Values.controllerManager.manager.image.tag | default .Chart.AppVersion) | quote }}
+        - {{ printf "--operator-image-pull-policy=%s" (.Values.controllerManager.manager.image.pullPolicy | default "IfNotPresent") | quote }}
         command:
         - /manager
         env:

@@ -1,25 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Session affinity uses a process-local cache in front of immutable shared claims.
-//! Cache hits exact-route without distributed I/O. On a cache miss, the discovery
-//! backend reads the claim first and evaluates the query-only routing proposal only
-//! when no claim exists. The payload returned by claim arbitration is authoritative:
-//! distributed mode caches only `Created` or `Existing` payloads, and racing losers
-//! discard their proposal, cache the winner, and dispatch to it. Explicit worker and
-//! rank headers are proposals only while no binding exists.
-//!
-//! Shared claim deletion invalidates local caches eventually through `Delete` and
-//! `Reset` events. The configured affinity TTL evicts only local cache entries; it
-//! does not expire or replace a shared claim. Bindings are never rebound in v1. If a
-//! bound worker disappears, exact dispatch fails without fallback and the caller must
-//! use a new session ID. Explicit close requires no concurrent active requests, is
-//! terminal, and the closed session ID must not be reused.
-
 use std::{
     pin::Pin,
     sync::{
-        Arc, Weak,
+        Arc, OnceLock, Weak,
         atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     task::{Context, Poll},
@@ -28,22 +13,19 @@ use std::{
 
 use dashmap::{DashMap, mapref::entry::Entry};
 use dynamo_runtime::{
-    discovery::{ClaimEvent, ClaimOutcome, ClaimPayloadFuture, Discovery},
     engine::{AsyncEngineContext, AsyncEngineContextProvider},
     error::{DynamoError, ErrorType},
     pipeline::{Error, ManyOut, ResponseStream},
 };
 use futures::Stream;
-use serde::{Deserialize, Serialize};
-use tokio::{
-    sync::{Notify, broadcast},
-    time::Instant,
-};
+use tokio::{sync::Notify, time::Instant};
 use tokio_util::sync::CancellationToken;
 
+#[cfg(test)]
+use super::replica_sync::SessionAffinityUpdate;
 use super::{
     LlmResponse, MAX_SESSION_AFFINITY_ENTRIES, MAX_SESSION_AFFINITY_ID_BYTES,
-    MAX_SESSION_AFFINITY_TTL_SECS,
+    MAX_SESSION_AFFINITY_TTL_SECS, replica_sync::ReplicaSyncRuntime,
 };
 use crate::{
     preprocessor::PreprocessedRequest,
@@ -53,7 +35,7 @@ use crate::{
     },
 };
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AffinityTarget {
     pub worker_id: u64,
     pub dp_rank: Option<u32>,
@@ -72,85 +54,39 @@ enum AffinityEntry {
     },
 }
 
-struct AffinityCoordinatorInner {
+pub(super) struct AffinityCoordinatorInner {
     entries: DashMap<String, AffinityEntry>,
-    claims: ClaimCoordination,
     ttl: Duration,
     max_entries: usize,
     max_session_id_bytes: usize,
     entry_count: AtomicUsize,
     next_revision: AtomicU64,
     cancel: CancellationToken,
+    replica: OnceLock<ReplicaSyncRuntime>,
     #[cfg(test)]
-    probe: AffinityCoordinatorProbe,
-}
-
-#[derive(Clone)]
-struct ClaimCoordination {
-    scope: String,
-    discovery: Option<Arc<dyn Discovery>>,
-}
-
-impl ClaimCoordination {
-    fn key(&self, session_id: &SessionAffinityId) -> String {
-        format!(
-            "{}/{}",
-            self.scope,
-            blake3::hash(session_id.as_str().as_bytes()).to_hex()
-        )
-    }
-
-    fn subscribe(&self) -> Option<broadcast::Receiver<ClaimEvent>> {
-        self.discovery
-            .as_ref()
-            .and_then(|discovery| discovery.subscribe_claim_events())
-    }
-
-    async fn resolve(
-        &self,
-        key: &str,
-        proposed_payload: &mut ClaimPayloadFuture<'_>,
-    ) -> Result<(serde_json::Value, bool), Error> {
-        let Some(discovery) = self.discovery.as_ref() else {
-            return Ok((proposed_payload.as_mut().await?, true));
-        };
-
-        match discovery.create_or_get_claim(key, proposed_payload).await? {
-            ClaimOutcome::Created(payload) => Ok((payload, true)),
-            ClaimOutcome::Existing(payload) => Ok((payload, false)),
-            ClaimOutcome::Unsupported => Ok((proposed_payload.as_mut().await?, true)),
-        }
-    }
-
-    async fn close(&self, key: &str) -> anyhow::Result<()> {
-        let Some(discovery) = self.discovery.as_ref() else {
-            return Ok(());
-        };
-        discovery.close_claim(key).await?;
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-struct AffinityCoordinatorProbe {
     reaper_started: Arc<Notify>,
+    #[cfg(test)]
     waiter_observed: Arc<Notify>,
-}
-
-#[cfg(test)]
-impl AffinityCoordinatorProbe {
-    fn new() -> Self {
-        Self {
-            reaper_started: Arc::new(Notify::new()),
-            waiter_observed: Arc::new(Notify::new()),
-        }
-    }
 }
 
 impl Drop for AffinityCoordinatorInner {
     fn drop(&mut self) {
         self.cancel.cancel();
+        if let Some(replica) = self.replica.get_mut() {
+            replica.shutdown_now();
+        }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ReplicaApplyOutcome {
+    Inserted,
+    Refreshed,
+    ReplacedExpired,
+    IgnoredInitializing,
+    IgnoredConflict,
+    RejectedSessionId,
+    RejectedCapacity,
 }
 
 #[derive(Clone)]
@@ -164,22 +100,6 @@ impl AffinityCoordinator {
             ttl,
             MAX_SESSION_AFFINITY_ENTRIES,
             MAX_SESSION_AFFINITY_ID_BYTES,
-            "local".to_string(),
-            None,
-        )
-    }
-
-    pub(crate) fn new_distributed(
-        ttl: Duration,
-        claim_scope: String,
-        discovery: Arc<dyn Discovery>,
-    ) -> Result<Self, Error> {
-        Self::new_with_limits(
-            ttl,
-            MAX_SESSION_AFFINITY_ENTRIES,
-            MAX_SESSION_AFFINITY_ID_BYTES,
-            claim_scope,
-            Some(discovery),
         )
     }
 
@@ -187,8 +107,6 @@ impl AffinityCoordinator {
         ttl: Duration,
         max_entries: usize,
         max_session_id_bytes: usize,
-        claim_scope: String,
-        discovery: Option<Arc<dyn Discovery>>,
     ) -> Result<Self, Error> {
         if !(Duration::from_secs(1)..=Duration::from_secs(MAX_SESSION_AFFINITY_TTL_SECS))
             .contains(&ttl)
@@ -199,84 +117,25 @@ impl AffinityCoordinator {
         }
         let inner = Arc::new(AffinityCoordinatorInner {
             entries: DashMap::new(),
-            claims: ClaimCoordination {
-                scope: claim_scope,
-                discovery,
-            },
             ttl,
             max_entries,
             max_session_id_bytes,
             entry_count: AtomicUsize::new(0),
             next_revision: AtomicU64::new(1),
             cancel: CancellationToken::new(),
+            replica: OnceLock::new(),
             #[cfg(test)]
-            probe: AffinityCoordinatorProbe::new(),
+            reaper_started: Arc::new(Notify::new()),
+            #[cfg(test)]
+            waiter_observed: Arc::new(Notify::new()),
         });
         Self::spawn_reaper(&inner);
-        Self::spawn_claim_listener(&inner);
+        tracing::info!(
+            ttl_secs = ttl.as_secs(),
+            max_entries,
+            "session affinity enabled"
+        );
         Ok(Self { inner })
-    }
-
-    fn spawn_claim_listener(inner: &Arc<AffinityCoordinatorInner>) {
-        let Some(mut events) = inner.claims.subscribe() else {
-            return;
-        };
-        let weak = Arc::downgrade(inner);
-        let cancel = inner.cancel.clone();
-
-        tokio::spawn(async move {
-            loop {
-                let event = tokio::select! {
-                    _ = cancel.cancelled() => return,
-                    event = events.recv() => event,
-                };
-                let Some(inner) = weak.upgrade() else {
-                    return;
-                };
-                match event {
-                    Ok(ClaimEvent::Delete(key)) => Self::evict_key(&inner, &key),
-                    Ok(ClaimEvent::Reset) | Err(broadcast::error::RecvError::Lagged(_)) => {
-                        Self::clear_entries(&inner);
-                    }
-                    Err(broadcast::error::RecvError::Closed) => {
-                        Self::clear_entries(&inner);
-                        return;
-                    }
-                }
-            }
-        });
-    }
-
-    fn evict_key(inner: &AffinityCoordinatorInner, key: &str) {
-        let Some((_, entry)) = inner.entries.remove(key) else {
-            return;
-        };
-        if let AffinityEntry::Initializing { notify, .. } = entry {
-            notify.notify_waiters();
-        }
-        Self::decrement_entry_count(inner, 1);
-        tracing::debug!(claim_key = key, "evicted session affinity cache entry");
-    }
-
-    fn clear_entries(inner: &AffinityCoordinatorInner) {
-        let mut removed = 0;
-        inner.entries.retain(|_, entry| {
-            if let AffinityEntry::Initializing { notify, .. } = entry {
-                notify.notify_waiters();
-            }
-            removed += 1;
-            false
-        });
-        Self::decrement_entry_count(inner, removed);
-        tracing::debug!("cleared session affinity cache after claim watcher reset");
-    }
-
-    fn decrement_entry_count(inner: &AffinityCoordinatorInner, removed: usize) {
-        let _ = inner
-            .entry_count
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
-                Some(count.saturating_sub(removed))
-            });
     }
 
     fn spawn_reaper(inner: &Arc<AffinityCoordinatorInner>) {
@@ -284,7 +143,7 @@ impl AffinityCoordinator {
         let cancel = inner.cancel.clone();
         let period = inner.ttl.min(Duration::from_secs(30));
         #[cfg(test)]
-        let reaper_started = inner.probe.reaper_started.clone();
+        let reaper_started = inner.reaper_started.clone();
         tokio::spawn(async move {
             #[cfg(test)]
             reaper_started.notify_one();
@@ -310,48 +169,71 @@ impl AffinityCoordinator {
                     removed += usize::from(!retain);
                     retain
                 });
-                Self::decrement_entry_count(&inner, removed);
+                inner.entry_count.fetch_sub(removed, Ordering::Relaxed);
             }
         });
+    }
+
+    pub(crate) async fn enable_replica_sync(
+        &self,
+        client: dynamo_runtime::component::Client,
+    ) -> Result<(), Error> {
+        let replica =
+            ReplicaSyncRuntime::start(client, Arc::downgrade(&self.inner), &self.inner.cancel)
+                .await?;
+        self.inner
+            .replica
+            .set(replica)
+            .map_err(|_| anyhow::anyhow!("session affinity replica sync already enabled"))
     }
 
     #[cfg(test)]
     pub(crate) async fn acquire(
         &self,
         session_id: &SessionAffinityId,
+        requested_target: Option<AffinityTarget>,
     ) -> Result<AffinityAcquire, Error> {
-        self.acquire_inner(session_id, None).await
+        self.acquire_inner(session_id, requested_target, None).await
     }
 
     pub(crate) async fn acquire_with_context(
         &self,
         session_id: &SessionAffinityId,
+        requested_target: Option<AffinityTarget>,
         request_context: &dyn AsyncEngineContext,
     ) -> Result<AffinityAcquire, Error> {
-        self.acquire_inner(session_id, Some(request_context)).await
+        self.acquire_inner(session_id, requested_target, Some(request_context))
+            .await
     }
 
     async fn acquire_inner(
         &self,
         session_id: &SessionAffinityId,
+        requested_target: Option<AffinityTarget>,
         request_context: Option<&dyn AsyncEngineContext>,
     ) -> Result<AffinityAcquire, Error> {
         self.validate_session_id(session_id)?;
-        let claim_key = self.inner.claims.key(session_id);
+        let session_id = session_id.as_str().to_string();
 
         loop {
             let now = Instant::now();
-            match self.inner.entries.entry(claim_key.clone()) {
+            match self.inner.entries.entry(session_id.clone()) {
                 Entry::Vacant(entry) => {
                     self.reserve_entry()?;
-                    return Ok(AffinityAcquire::Initialize(
-                        entry.insert_initializing(&self.inner, claim_key),
-                    ));
+                    tracing::debug!(
+                        session_id = %session_id,
+                        "session affinity miss: new session, pinning after worker selection"
+                    );
+                    return Ok(AffinityAcquire::Initialize(entry.insert_initializing(
+                        &self.inner,
+                        session_id,
+                        requested_target,
+                    )));
                 }
                 Entry::Occupied(mut entry) => match entry.get_mut() {
                     AffinityEntry::Initializing { notify, .. } => {
                         #[cfg(test)]
-                        self.inner.probe.waiter_observed.notify_one();
+                        self.inner.waiter_observed.notify_one();
                         let notified = notify.clone().notified_owned();
                         tokio::pin!(notified);
                         notified.as_mut().enable();
@@ -377,6 +259,10 @@ impl AffinityCoordinator {
                         active_leases,
                         idle_deadline,
                     } if *active_leases == 0 && *idle_deadline <= now => {
+                        tracing::debug!(
+                            session_id = %session_id,
+                            "session affinity miss: pin expired (idle past TTL), re-selecting worker"
+                        );
                         let revision = self.inner.next_revision.fetch_add(1, Ordering::Relaxed);
                         let notify = Arc::new(Notify::new());
                         *entry.get_mut() = AffinityEntry::Initializing {
@@ -386,9 +272,10 @@ impl AffinityCoordinator {
                         drop(entry);
                         return Ok(AffinityAcquire::Initialize(AffinityInitialization {
                             coordinator: Arc::downgrade(&self.inner),
-                            claim_key,
+                            session_id,
                             revision,
                             notify,
+                            requested_target,
                             active: true,
                         }));
                     }
@@ -398,10 +285,18 @@ impl AffinityCoordinator {
                         active_leases,
                         ..
                     } => {
+                        validate_bound_target(&session_id, *target, requested_target)?;
+                        tracing::debug!(
+                            session_id = %session_id,
+                            worker_id = target.worker_id,
+                            dp_rank = ?target.dp_rank,
+                            active_leases = *active_leases + 1,
+                            "session affinity hit: reusing pinned worker"
+                        );
                         *active_leases += 1;
                         let lease = AffinityLease {
                             coordinator: Arc::downgrade(&self.inner),
-                            claim_key,
+                            session_id,
                             revision: *revision,
                             active: true,
                         };
@@ -418,10 +313,10 @@ impl AffinityCoordinator {
     pub fn query_target(
         &self,
         session_id: &SessionAffinityId,
+        requested_target: Option<AffinityTarget>,
     ) -> Result<Option<AffinityTarget>, Error> {
         self.validate_session_id(session_id)?;
-        let claim_key = self.inner.claims.key(session_id);
-        let Some(entry) = self.inner.entries.get(&claim_key) else {
+        let Some(entry) = self.inner.entries.get(session_id.as_str()) else {
             return Ok(None);
         };
         let AffinityEntry::Bound {
@@ -436,6 +331,14 @@ impl AffinityCoordinator {
         if *active_leases == 0 && *idle_deadline <= Instant::now() {
             return Ok(None);
         }
+        validate_bound_target(session_id.as_str(), *target, requested_target)?;
+        tracing::debug!(
+            session_id = %session_id.as_str(),
+            worker_id = target.worker_id,
+            dp_rank = ?target.dp_rank,
+            "session affinity hit: reusing pinned worker"
+        );
+
         Ok(Some(*target))
     }
 
@@ -445,29 +348,23 @@ impl AffinityCoordinator {
     }
 
     #[cfg(test)]
-    pub(super) fn claim_key_for_test(&self, session_id: &SessionAffinityId) -> String {
-        self.inner.claims.key(session_id)
-    }
-
-    #[cfg(test)]
     pub(super) fn cancellation_token(&self) -> CancellationToken {
         self.inner.cancel.clone()
     }
 
     #[cfg(test)]
     pub(super) async fn wait_for_reaper(&self) {
-        self.inner.probe.reaper_started.notified().await;
+        self.inner.reaper_started.notified().await;
     }
 
     #[cfg(test)]
     pub(super) async fn wait_for_initializing_waiter(&self) {
-        self.inner.probe.waiter_observed.notified().await;
+        self.inner.waiter_observed.notified().await;
     }
 
     #[cfg(test)]
     pub(super) fn expire_for_test(&self, session_id: &SessionAffinityId) {
-        let claim_key = self.inner.claims.key(session_id);
-        let Some(mut entry) = self.inner.entries.get_mut(&claim_key) else {
+        let Some(mut entry) = self.inner.entries.get_mut(session_id.as_str()) else {
             panic!("session affinity entry missing");
         };
         let AffinityEntry::Bound {
@@ -484,14 +381,30 @@ impl AffinityCoordinator {
 
     #[cfg(test)]
     pub(super) fn with_test_limits(max_entries: usize, max_session_id_bytes: usize) -> Self {
-        Self::new_with_limits(
-            Duration::from_secs(10),
-            max_entries,
-            max_session_id_bytes,
-            "local".to_string(),
-            None,
-        )
-        .unwrap()
+        Self::new_with_limits(Duration::from_secs(10), max_entries, max_session_id_bytes).unwrap()
+    }
+
+    #[cfg(test)]
+    pub(super) fn enable_test_replica(
+        &self,
+        router_id: u64,
+        capacity: usize,
+    ) -> tokio::sync::mpsc::Receiver<SessionAffinityUpdate> {
+        let (replica, rx) = ReplicaSyncRuntime::for_test(router_id, capacity);
+        self.inner
+            .replica
+            .set(replica)
+            .unwrap_or_else(|_| panic!("session affinity test replica already enabled"));
+        rx
+    }
+
+    #[cfg(test)]
+    pub(super) fn apply_replica_update_for_test(
+        &self,
+        session_id: impl Into<String>,
+        target: AffinityTarget,
+    ) -> ReplicaApplyOutcome {
+        self.inner.apply_replica_update(session_id.into(), target)
     }
 
     fn validate_session_id(&self, session_id: &SessionAffinityId) -> Result<(), Error> {
@@ -506,12 +419,78 @@ impl AffinityCoordinator {
 
     fn reserve_entry(&self) -> Result<(), Error> {
         self.inner
-            .entry_count
+            .reserve_entry()
+            .then_some(())
+            .ok_or_else(|| resource_exhausted("session affinity entry limit reached"))
+    }
+}
+
+impl AffinityCoordinatorInner {
+    fn reserve_entry(&self) -> bool {
+        self.entry_count
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
-                (count < self.inner.max_entries).then_some(count + 1)
+                (count < self.max_entries).then_some(count + 1)
             })
-            .map(|_| ())
-            .map_err(|_| resource_exhausted("session affinity entry limit reached"))
+            .is_ok()
+    }
+
+    fn publish_replica_update(&self, session_id: &str, target: AffinityTarget) {
+        if let Some(replica) = self.replica.get() {
+            replica.publish(session_id, target);
+        }
+    }
+
+    pub(super) fn apply_replica_update(
+        &self,
+        session_id: String,
+        target: AffinityTarget,
+    ) -> ReplicaApplyOutcome {
+        if session_id.len() > self.max_session_id_bytes {
+            return ReplicaApplyOutcome::RejectedSessionId;
+        }
+
+        let now = Instant::now();
+        match self.entries.entry(session_id) {
+            Entry::Vacant(entry) => {
+                if !self.reserve_entry() {
+                    return ReplicaApplyOutcome::RejectedCapacity;
+                }
+                let revision = self.next_revision.fetch_add(1, Ordering::Relaxed);
+                entry.insert(AffinityEntry::Bound {
+                    target,
+                    revision,
+                    active_leases: 0,
+                    idle_deadline: now + self.ttl,
+                });
+                ReplicaApplyOutcome::Inserted
+            }
+            Entry::Occupied(mut entry) => match entry.get_mut() {
+                AffinityEntry::Initializing { .. } => ReplicaApplyOutcome::IgnoredInitializing,
+                AffinityEntry::Bound {
+                    active_leases,
+                    idle_deadline,
+                    ..
+                } if *active_leases == 0 && *idle_deadline <= now => {
+                    let revision = self.next_revision.fetch_add(1, Ordering::Relaxed);
+                    *entry.get_mut() = AffinityEntry::Bound {
+                        target,
+                        revision,
+                        active_leases: 0,
+                        idle_deadline: now + self.ttl,
+                    };
+                    ReplicaApplyOutcome::ReplacedExpired
+                }
+                AffinityEntry::Bound {
+                    target: existing,
+                    idle_deadline,
+                    ..
+                } if *existing == target => {
+                    *idle_deadline = now + self.ttl;
+                    ReplicaApplyOutcome::Refreshed
+                }
+                AffinityEntry::Bound { .. } => ReplicaApplyOutcome::IgnoredConflict,
+            },
+        }
     }
 }
 
@@ -519,7 +498,8 @@ trait VacantEntryExt {
     fn insert_initializing(
         self,
         inner: &Arc<AffinityCoordinatorInner>,
-        claim_key: String,
+        session_id: String,
+        requested_target: Option<AffinityTarget>,
     ) -> AffinityInitialization;
 }
 
@@ -527,7 +507,8 @@ impl<'a> VacantEntryExt for dashmap::mapref::entry::VacantEntry<'a, String, Affi
     fn insert_initializing(
         self,
         inner: &Arc<AffinityCoordinatorInner>,
-        claim_key: String,
+        session_id: String,
+        requested_target: Option<AffinityTarget>,
     ) -> AffinityInitialization {
         let revision = inner.next_revision.fetch_add(1, Ordering::Relaxed);
         let notify = Arc::new(Notify::new());
@@ -537,9 +518,10 @@ impl<'a> VacantEntryExt for dashmap::mapref::entry::VacantEntry<'a, String, Affi
         });
         AffinityInitialization {
             coordinator: Arc::downgrade(inner),
-            claim_key,
+            session_id,
             revision,
             notify,
+            requested_target,
             active: true,
         }
     }
@@ -554,57 +536,59 @@ pub(crate) enum AffinityAcquire {
 }
 
 impl AffinityAcquire {
-    pub(crate) async fn resolve<'a, F>(self, proposed_payload: F) -> Result<ResolvedAffinity, Error>
-    where
-        F: FnOnce() -> ClaimPayloadFuture<'a> + Send,
-    {
+    pub(crate) fn target(&self) -> Option<AffinityTarget> {
         match self {
-            Self::Initialize(initialization) => initialization.resolve(proposed_payload()).await,
-            Self::Bound { target, lease } => Ok(ResolvedAffinity {
-                target,
-                lease,
-                created: false,
-            }),
+            Self::Initialize(_) => None,
+            Self::Bound { target, .. } => Some(*target),
+        }
+    }
+
+    pub(crate) fn into_stream(
+        self,
+        selected_target: AffinityTarget,
+        stream: ManyOut<LlmResponse>,
+    ) -> Result<ManyOut<LlmResponse>, Error> {
+        match self {
+            Self::Initialize(initialization) => {
+                let lease = initialization.commit(selected_target)?;
+                lease.publish(selected_target);
+                Ok(lease.into_stream(stream))
+            }
+            Self::Bound { target, mut lease } => {
+                if let Err(error) = validate_bound_target("session", target, Some(selected_target))
+                {
+                    lease.invalidate();
+                    return Err(error);
+                }
+                lease.publish(target);
+                Ok(lease.into_stream(stream))
+            }
+        }
+    }
+
+    pub(crate) fn invalidate(self) {
+        if let Self::Bound { mut lease, .. } = self {
+            lease.invalidate();
         }
     }
 }
 
 pub(crate) struct AffinityInitialization {
     coordinator: Weak<AffinityCoordinatorInner>,
-    claim_key: String,
+    session_id: String,
     revision: u64,
     notify: Arc<Notify>,
+    requested_target: Option<AffinityTarget>,
     active: bool,
 }
 
 impl AffinityInitialization {
-    async fn resolve(
-        self,
-        mut proposed_payload: ClaimPayloadFuture<'_>,
-    ) -> Result<ResolvedAffinity, Error> {
+    pub(crate) fn commit(mut self, target: AffinityTarget) -> Result<AffinityLease, Error> {
+        validate_bound_target(&self.session_id, target, self.requested_target)?;
         let Some(inner) = self.coordinator.upgrade() else {
             return Err(anyhow::anyhow!("session affinity coordinator dropped"));
         };
-
-        let (payload, created) = inner
-            .claims
-            .resolve(&self.claim_key, &mut proposed_payload)
-            .await?;
-        let target: AffinityTarget = serde_json::from_value(payload)
-            .map_err(|err| anyhow::anyhow!("invalid session affinity claim payload: {err}"))?;
-        let lease = self.commit(target)?;
-        Ok(ResolvedAffinity {
-            target,
-            lease,
-            created,
-        })
-    }
-
-    fn commit(mut self, target: AffinityTarget) -> Result<AffinityLease, Error> {
-        let Some(inner) = self.coordinator.upgrade() else {
-            return Err(anyhow::anyhow!("session affinity coordinator dropped"));
-        };
-        let Some(mut entry) = inner.entries.get_mut(&self.claim_key) else {
+        let Some(mut entry) = inner.entries.get_mut(&self.session_id) else {
             return Err(invalid_argument(
                 "session affinity initialization was cancelled",
             ));
@@ -626,7 +610,7 @@ impl AffinityInitialization {
         self.notify.notify_waiters();
         Ok(AffinityLease {
             coordinator: Arc::downgrade(&inner),
-            claim_key: self.claim_key.clone(),
+            session_id: self.session_id.clone(),
             revision: self.revision,
             active: true,
         })
@@ -641,14 +625,14 @@ impl Drop for AffinityInitialization {
         let Some(inner) = self.coordinator.upgrade() else {
             return;
         };
-        let removed = inner.entries.remove_if(&self.claim_key, |_, entry| {
+        let removed = inner.entries.remove_if(&self.session_id, |_, entry| {
             matches!(
                 entry,
                 AffinityEntry::Initializing { revision, .. } if *revision == self.revision
             )
         });
         if removed.is_some() {
-            AffinityCoordinator::decrement_entry_count(&inner, 1);
+            inner.entry_count.fetch_sub(1, Ordering::Relaxed);
         }
         self.notify.notify_waiters();
     }
@@ -656,12 +640,29 @@ impl Drop for AffinityInitialization {
 
 pub(crate) struct AffinityLease {
     coordinator: Weak<AffinityCoordinatorInner>,
-    claim_key: String,
+    session_id: String,
     revision: u64,
     active: bool,
 }
 
 impl AffinityLease {
+    fn publish(&self, target: AffinityTarget) {
+        if let Some(inner) = self.coordinator.upgrade() {
+            inner.publish_replica_update(&self.session_id, target);
+        }
+    }
+
+    pub(crate) fn into_stream(self, stream: ManyOut<LlmResponse>) -> ManyOut<LlmResponse> {
+        let context = stream.context();
+        ResponseStream::new(
+            Box::pin(AffinityTrackedStream {
+                stream,
+                lease: Some(self),
+            }),
+            context,
+        )
+    }
+
     fn release(&mut self) {
         if !self.active {
             return;
@@ -670,23 +671,46 @@ impl AffinityLease {
         let Some(inner) = self.coordinator.upgrade() else {
             return;
         };
-        let Some(mut entry) = inner.entries.get_mut(&self.claim_key) else {
-            return;
+        let target = {
+            let Some(mut entry) = inner.entries.get_mut(&self.session_id) else {
+                return;
+            };
+            let AffinityEntry::Bound {
+                target,
+                revision,
+                active_leases,
+                idle_deadline,
+            } = entry.value_mut()
+            else {
+                return;
+            };
+            if *revision != self.revision || *active_leases == 0 {
+                return;
+            }
+            *active_leases -= 1;
+            *idle_deadline = Instant::now() + inner.ttl;
+            *target
         };
-        let AffinityEntry::Bound {
-            revision,
-            active_leases,
-            idle_deadline,
-            ..
-        } = entry.value_mut()
-        else {
-            return;
-        };
-        if *revision != self.revision || *active_leases == 0 {
+        inner.publish_replica_update(&self.session_id, target);
+    }
+
+    fn invalidate(&mut self) {
+        if !self.active {
             return;
         }
-        *active_leases -= 1;
-        *idle_deadline = Instant::now() + inner.ttl;
+        self.active = false;
+        let Some(inner) = self.coordinator.upgrade() else {
+            return;
+        };
+        let removed = inner.entries.remove_if(&self.session_id, |_, entry| {
+            matches!(
+                entry,
+                AffinityEntry::Bound { revision, .. } if *revision == self.revision
+            )
+        });
+        if removed.is_some() {
+            inner.entry_count.fetch_sub(1, Ordering::Relaxed);
+        }
     }
 }
 
@@ -696,85 +720,9 @@ impl Drop for AffinityLease {
     }
 }
 
-pub(crate) struct ResolvedAffinity {
-    target: AffinityTarget,
-    lease: AffinityLease,
-    created: bool,
-}
-
-impl ResolvedAffinity {
-    pub(crate) fn target(&self) -> AffinityTarget {
-        self.target
-    }
-
-    pub(crate) fn was_created(&self) -> bool {
-        self.created
-    }
-
-    pub(crate) fn into_stream(
-        self,
-        stream: ManyOut<LlmResponse>,
-        close_on_finish: bool,
-    ) -> ManyOut<LlmResponse> {
-        let context = stream.context();
-        let close = close_on_finish.then(|| CloseAction {
-            coordinator: self.lease.coordinator.clone(),
-            claims: self
-                .lease
-                .coordinator
-                .upgrade()
-                .map(|inner| inner.claims.clone()),
-            claim_key: self.lease.claim_key.clone(),
-        });
-        ResponseStream::new(
-            Box::pin(AffinityTrackedStream {
-                stream,
-                lease: Some(self.lease),
-                close,
-            }),
-            context,
-        )
-    }
-}
-
-struct CloseAction {
-    coordinator: Weak<AffinityCoordinatorInner>,
-    claims: Option<ClaimCoordination>,
-    claim_key: String,
-}
-
-impl CloseAction {
-    fn run(self) {
-        if let Some(inner) = self.coordinator.upgrade() {
-            AffinityCoordinator::evict_key(&inner, &self.claim_key);
-        }
-        let Some(claims) = self.claims else {
-            return;
-        };
-        let claim_key = self.claim_key;
-        // TODO: Drive backend close to completion before returning stream EOF. This detached
-        // task keeps early stream drops best-effort and can be cancelled during runtime shutdown.
-        tokio::spawn(async move {
-            if let Err(error) = claims.close(&claim_key).await {
-                tracing::error!(%claim_key, %error, "failed to close session affinity claim");
-            }
-        });
-    }
-}
-
 struct AffinityTrackedStream {
     stream: ManyOut<LlmResponse>,
     lease: Option<AffinityLease>,
-    close: Option<CloseAction>,
-}
-
-impl AffinityTrackedStream {
-    fn finish(&mut self) {
-        drop(self.lease.take());
-        if let Some(close) = self.close.take() {
-            close.run();
-        }
-    }
 }
 
 impl Stream for AffinityTrackedStream {
@@ -783,18 +731,12 @@ impl Stream for AffinityTrackedStream {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match Pin::new(&mut self.stream).poll_next(cx) {
             Poll::Ready(None) => {
-                self.finish();
+                drop(self.lease.take());
                 Poll::Ready(None)
             }
             Poll::Ready(Some(item)) => Poll::Ready(Some(item)),
             poll => poll,
         }
-    }
-}
-
-impl Drop for AffinityTrackedStream {
-    fn drop(&mut self) {
-        self.finish();
     }
 }
 
@@ -804,13 +746,6 @@ pub fn affinity_id(
     request
         .get_optional::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
         .map_err(|message| invalid_argument(format!("invalid session affinity context: {message}")))
-}
-
-pub fn session_final(request: &PreprocessedRequest) -> bool {
-    request
-        .agent_context
-        .as_ref()
-        .is_some_and(|context| context.session_final == Some(true))
 }
 
 pub fn explicit_target(
@@ -840,6 +775,31 @@ pub fn explicit_target(
         ));
     }
     Ok(worker_id.map(|worker_id| AffinityTarget { worker_id, dp_rank }))
+}
+
+fn validate_bound_target(
+    session_id: &str,
+    bound: AffinityTarget,
+    requested: Option<AffinityTarget>,
+) -> Result<(), Error> {
+    let Some(requested) = requested else {
+        return Ok(());
+    };
+    if bound.worker_id != requested.worker_id {
+        return Err(invalid_argument(format!(
+            "session {session_id} is bound to worker {}, not {}",
+            bound.worker_id, requested.worker_id
+        )));
+    }
+    match (bound.dp_rank, requested.dp_rank) {
+        (Some(bound), Some(requested)) if bound != requested => Err(invalid_argument(format!(
+            "session {session_id} is bound to DP rank {bound}, not {requested}"
+        ))),
+        (None, Some(requested)) => Err(invalid_argument(format!(
+            "session {session_id} has worker-only affinity and cannot add DP rank {requested}"
+        ))),
+        _ => Ok(()),
+    }
 }
 
 pub(crate) fn invalid_argument(message: impl Into<String>) -> Error {

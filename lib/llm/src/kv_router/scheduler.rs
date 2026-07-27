@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_kv_router::protocols::{LocalBlockHash, SharedCacheHits};
+use dynamo_kv_router::scheduling::PolicyClassAdmissionPolicies;
 pub use dynamo_kv_router::scheduling::overlap_refresh::{
     NoopOverlapScoresRefresh, OverlapScoresRefresh, RefreshedOverlap,
 };
@@ -24,12 +25,13 @@ use dynamo_kv_router::{
     config::{KvRouterConfig, RouterConfigOverride},
     protocols::{RoutingConstraints, WorkerId, WorkerWithDpRank},
 };
-use dynamo_runtime::component::Component;
+use dynamo_runtime::component::Endpoint;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_tokens::SequenceHash;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
 pub struct KvScheduler<Sel = DefaultWorkerSelector, RF = NoopOverlapScoresRefresh>
 where
@@ -50,7 +52,7 @@ where
     /// long-waiting requests can be re-scored at dequeue time.
     #[expect(clippy::too_many_arguments)]
     pub async fn start(
-        component: Component,
+        endpoint: Endpoint,
         block_size: u32,
         workers_with_configs: RuntimeConfigWatch,
         selector: Sel,
@@ -60,18 +62,21 @@ where
         overloaded_worker_provider: Option<OverloadedWorkerProvider>,
         model_name: Option<&str>,
         worker_type: &'static str,
+        cancellation_token: CancellationToken,
+        admission_policies: PolicyClassAdmissionPolicies,
     ) -> Result<Self, KvSchedulerError> {
         let initial_workers: HashMap<WorkerId, ModelRuntimeConfig> =
             workers_with_configs.borrow().clone();
 
-        let router_id = component.drt().discovery().instance_id();
+        let router_id = endpoint.drt().discovery().instance_id();
         let slots = create_multi_worker_sequences(
-            component.clone(),
+            endpoint,
             block_size as usize,
             initial_workers,
             kv_router_config.router_replica_sync,
             router_id,
             worker_type,
+            cancellation_token.child_token(),
         )
         .await
         .map_err(|e| KvSchedulerError::InitFailed(e.to_string()))?;
@@ -83,6 +88,7 @@ where
         let profile = kv_router_config
             .policy_profile(model_name)
             .map_err(|error| KvSchedulerError::InitFailed(error.to_string()))?;
+        let queue_recheck_interval = kv_router_config.router_queue_recheck_interval();
         let metric_model = model_name.unwrap_or("unknown");
         let queue_metrics = profile
             .classes()
@@ -105,16 +111,17 @@ where
             prefill_load_estimator,
             overlap_scores_refresh,
             overloaded_worker_provider,
-            kv_router_config.router_queue_recheck_interval(),
+            queue_recheck_interval,
             kv_router_config.router_track_prefill_tokens,
-            component.drt().child_token(),
+            cancellation_token.child_token(),
             worker_type,
             watch_worker_configs,
-        ));
+            admission_policies,
+        )?);
 
         let metrics_scheduler = Arc::clone(&inner);
         let background_metrics = queue_metrics.clone();
-        let metrics_cancel_token = component.drt().child_token();
+        let metrics_cancel_token = cancellation_token.child_token();
         let mut queue_updates = inner.subscribe_queue_updates();
         tokio::spawn(async move {
             let mut recheck_interval = tokio::time::interval(Duration::from_secs(60));
@@ -413,6 +420,7 @@ fn update_queue_metrics(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dynamo_runtime::component::Component;
     use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
     use tokio::sync::watch;
 
@@ -471,9 +479,10 @@ mod tests {
             router_track_active_blocks: false,
             ..Default::default()
         };
+        let cancellation_token = CancellationToken::new();
 
         let scheduler = KvScheduler::start(
-            component.clone(),
+            component.endpoint("generate"),
             64,
             cfg_rx,
             DefaultWorkerSelector::new(Some(config.clone()), "decode"),
@@ -483,6 +492,8 @@ mod tests {
             None,
             Some("test-model"),
             "decode",
+            cancellation_token.clone(),
+            Default::default(),
         )
         .await
         .unwrap();
@@ -514,6 +525,6 @@ mod tests {
         .await
         .unwrap();
 
-        component.drt().primary_token().cancel();
+        cancellation_token.cancel();
     }
 }
