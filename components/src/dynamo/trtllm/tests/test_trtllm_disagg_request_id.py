@@ -4,6 +4,16 @@
 from unittest.mock import patch
 
 import pytest
+import torch
+
+# Pytest applies marker selection after importing test modules. Importing
+# disagg_utils loads TensorRT-LLM bindings, which require libcuda even though
+# these tests do not execute CUDA kernels, so skip collection on CPU runners.
+if not torch.cuda.is_available():
+    pytest.skip(
+        "CUDA/GPU not available, but tensorrt_llm import requires CUDA.",
+        allow_module_level=True,
+    )
 
 from dynamo.trtllm.utils import disagg_utils
 
