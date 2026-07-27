@@ -59,6 +59,10 @@ impl FullAttentionGroup {
         GroupedHash::new(self.group, hash)
     }
 
+    pub(crate) fn id(&self) -> KvCacheGroupId {
+        self.group
+    }
+
     pub(crate) fn holds_request(&self, request_id: Uuid) -> bool {
         self.request_blocks.contains_key(&request_id)
     }

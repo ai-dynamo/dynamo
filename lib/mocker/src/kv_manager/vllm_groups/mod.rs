@@ -21,13 +21,9 @@ use dynamo_tokens::blocks::UniqueBlock;
 use dynamo_tokens::{BlockHash, SequenceHash};
 use uuid::Uuid;
 
-use crate::cache::vllm_block_pool::{GroupedHash, KvCacheGroupId, VllmBlockPool};
+use crate::cache::vllm_block_pool::{GroupedHash, VllmBlockPool};
 
 pub(crate) use full_attention::FullAttentionGroup;
-
-/// Group 0 is the main attention group. vLLM sorts full attention first, and it
-/// is the only group whose blocks Dynamo's router indexes.
-pub(crate) const ATTENTION_GROUP: KvCacheGroupId = KvCacheGroupId(0);
 
 /// Event metadata a group retains until its block becomes cache-visible.
 pub(crate) struct PendingStore {
@@ -78,6 +74,27 @@ pub(crate) enum GroupManager {
 }
 
 impl GroupManager {
+    /// This group if it is the main attention group.
+    ///
+    /// The coordinator resolves the attention group by kind, the way vLLM's
+    /// coordinator resolves `full_attention_group_id`, so no caller depends on
+    /// where the group sits among the others.
+    pub(crate) fn as_full_attention(&self) -> Option<&FullAttentionGroup> {
+        match self {
+            Self::FullAttention(group) => Some(group),
+        }
+    }
+
+    pub(crate) fn as_full_attention_mut(&mut self) -> Option<&mut FullAttentionGroup> {
+        match self {
+            Self::FullAttention(group) => Some(group),
+        }
+    }
+
+    pub(crate) fn is_full_attention(&self) -> bool {
+        self.as_full_attention().is_some()
+    }
+
     /// Cached-prefix keys this group may pin for `alloc`.
     pub(crate) fn prefix_keys(&self, alloc: &GroupAllocation) -> Vec<GroupedHash> {
         match self {

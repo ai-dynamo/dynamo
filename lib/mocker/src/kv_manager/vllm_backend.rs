@@ -17,14 +17,15 @@ use dynamo_tokens::blocks::UniqueBlock;
 use dynamo_tokens::{BlockHash, SequenceHash};
 use uuid::Uuid;
 
-use crate::cache::vllm_block_pool::{BlockReservation, GroupedHash, ReserveOutcome, VllmBlockPool};
+use crate::cache::vllm_block_pool::{
+    BlockReservation, GroupedHash, KvCacheGroupId, ReserveOutcome, VllmBlockPool,
+};
 use crate::common::kv_cache_trace;
 use crate::common::protocols::{KvEventPublishers, PrefillCost};
 use crate::common::sequence::ActiveSequence;
 
 use super::vllm_groups::{
-    ATTENTION_GROUP, CacheHit, FullAttentionGroup, GroupAllocation, GroupManager, PendingStore,
-    StoredBlock,
+    CacheHit, FullAttentionGroup, GroupAllocation, GroupManager, PendingStore, StoredBlock,
 };
 
 struct StoreGroup {
@@ -126,8 +127,10 @@ impl VllmBlockLayout {
 
 pub(crate) struct VllmKvManager {
     pool: VllmBlockPool,
-    /// Group 0 is always the main attention group; a hybrid model's
-    /// non-attention state groups follow it.
+    /// The model's KV cache groups, in the order this coordinator visits them:
+    /// prefix pins are reserved and later activated in that order. Group ids are
+    /// assigned when the groups are built, and every lookup goes by group kind,
+    /// so nothing below `new` depends on the order.
     groups: Vec<GroupManager>,
     block_size: usize,
     enable_prefix_caching: bool,
@@ -151,7 +154,7 @@ impl VllmKvManager {
         Self {
             pool: VllmBlockPool::new(max_capacity),
             groups: vec![GroupManager::FullAttention(FullAttentionGroup::new(
-                ATTENTION_GROUP,
+                KvCacheGroupId(0),
                 block_size,
                 enable_prefix_caching,
             ))],
@@ -163,9 +166,40 @@ impl VllmKvManager {
         }
     }
 
+    /// The main attention group, which every request has a dense block table in.
+    ///
+    /// vLLM's hybrid coordinator singles this group out the same way: it is the
+    /// dense reference for cross-group cache-hit reconciliation, and the only
+    /// group whose blocks the router's single namespace can describe.
     fn attention(&self) -> &FullAttentionGroup {
-        let GroupManager::FullAttention(group) = &self.groups[0];
-        group
+        self.groups
+            .iter()
+            .find_map(|group| group.as_full_attention())
+            .expect("a model has a main attention group")
+    }
+
+    /// Disjoint borrows of the pool and the attention group, which the group
+    /// needs together to move blocks in or out of the pool.
+    fn attention_mut(&mut self) -> (&mut VllmBlockPool, &mut FullAttentionGroup) {
+        let Self { pool, groups, .. } = self;
+        let attention = groups
+            .iter_mut()
+            .find_map(|group| group.as_full_attention_mut())
+            .expect("a model has a main attention group");
+        (pool, attention)
+    }
+
+    fn attention_id(&self) -> KvCacheGroupId {
+        self.attention().id()
+    }
+
+    /// Groups that only constrain the attention group's decisions, never seed
+    /// them: they can reduce a cache hit and consume capacity, but they own no
+    /// dense table and no router-visible block.
+    fn other_groups(&self) -> impl Iterator<Item = &GroupManager> {
+        self.groups
+            .iter()
+            .filter(|group| !group.is_full_attention())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -191,8 +225,7 @@ impl VllmKvManager {
     }
 
     pub(super) fn deref_for_request(&mut self, request_id: Uuid, blocks: &[UniqueBlock]) {
-        let Self { pool, groups, .. } = self;
-        let GroupManager::FullAttention(attention) = &mut groups[0];
+        let (pool, attention) = self.attention_mut();
         attention.deref(pool, request_id, blocks);
     }
 
@@ -207,8 +240,7 @@ impl VllmKvManager {
         token_ids: Option<Vec<u32>>,
     ) {
         let materialize_store_events = self.materialize_store_events();
-        let Self { pool, groups, .. } = self;
-        let GroupManager::FullAttention(attention) = &mut groups[0];
+        let (pool, attention) = self.attention_mut();
         let stored = attention.promote(
             pool,
             request_id,
@@ -254,8 +286,7 @@ impl VllmKvManager {
 
         let materialize_store_events = self.materialize_store_events();
         let stores = {
-            let Self { pool, groups, .. } = self;
-            let GroupManager::FullAttention(attention) = &mut groups[0];
+            let (pool, attention) = self.attention_mut();
             attention.finalize_computed_prefix(
                 pool,
                 request_id,
@@ -327,16 +358,17 @@ impl VllmKvManager {
                 let alloc = Self::destination_alloc(request_id, layout, 0);
                 FullAttentionGroup::validate_use_metadata(&alloc);
                 self.attention().validate_fresh_partials(alloc.blocks);
-                let prefix = self.attention().resident_prefix(&self.pool, &layout.blocks);
-                let attention_prefix = prefix.len();
+                // No prior lookup authorized this transfer's reusable prefix, so
+                // the attention group discovers it here; every group then sizes
+                // itself against the prefix the request will keep.
+                let attention_prefix = self
+                    .attention()
+                    .resident_prefix(&self.pool, &layout.blocks)
+                    .len();
                 let alloc = Self::destination_alloc(request_id, layout, attention_prefix);
+                let (prefix, fresh) = self.group_demand(&alloc);
                 let attention_fresh = self.attention().fresh_blocks(&alloc);
-                let (mut keys, mut fresh) = (prefix, attention_fresh);
-                for group in &self.groups[1..] {
-                    keys.extend(group.prefix_keys(&alloc));
-                    fresh += group.fresh_blocks(&alloc);
-                }
-                (keys, fresh, attention_fresh, attention_prefix)
+                (prefix, fresh, attention_fresh, attention_prefix)
             }
             None => (Vec::new(), 0, 0, 0),
         };
@@ -415,12 +447,7 @@ impl VllmKvManager {
             "only a request's first allocation may reuse a prefix"
         );
 
-        let mut prefix = self.attention().prefix_keys(alloc);
-        let mut fresh = self.attention().fresh_blocks(alloc);
-        for group in &self.groups[1..] {
-            prefix.extend(group.prefix_keys(alloc));
-            fresh += group.fresh_blocks(alloc);
-        }
+        let (prefix, fresh) = self.group_demand(alloc);
 
         match reservation {
             Some(reservation) => {
@@ -447,14 +474,28 @@ impl VllmKvManager {
         VllmAcquire::Ready(alloc.blocks.len())
     }
 
+    /// Prefix pins and fresh pool blocks every group needs for `alloc`.
+    ///
+    /// Groups are visited in coordinator order, which fixes the order the pins
+    /// are reserved in and so the order [`Self::commit_groups`] activates them.
+    fn group_demand(&self, alloc: &GroupAllocation) -> (Vec<GroupedHash>, usize) {
+        let mut prefix = Vec::new();
+        let mut fresh = 0;
+        for group in &self.groups {
+            prefix.extend(group.prefix_keys(alloc));
+            fresh += group.fresh_blocks(alloc);
+        }
+        (prefix, fresh)
+    }
+
     /// Commit every group against the shared reservation, publishing only the
     /// main attention group's store events.
     fn commit_groups(&mut self, alloc: &GroupAllocation, reservation: &mut BlockReservation) {
         let materialize_store_events = self.materialize_store_events();
         let stores = {
             let Self { pool, groups, .. } = self;
-            // Prefix pins were reserved in group order, matching the order the
-            // groups are visited here.
+            // Pins come back in the order [`Self::group_demand`] reserved them,
+            // which is the order the groups are visited here.
             let prefix_copies = pool.activate_prefix(reservation);
             let mut stores = None;
             for group in groups.iter_mut() {
@@ -521,9 +562,10 @@ impl VllmKvManager {
     /// namespace, so a non-attention group's eviction must not be reported as
     /// an attention block disappearing.
     fn publish_removed(&mut self, keys: Vec<GroupedHash>) {
+        let attention = self.attention_id();
         let hashes = keys
             .into_iter()
-            .filter(|key| key.group == ATTENTION_GROUP)
+            .filter(|key| key.group == attention)
             .map(|key| key.hash)
             .collect::<Vec<_>>();
         if !hashes.is_empty() {
@@ -644,11 +686,12 @@ impl VllmKvManager {
             CacheHit::default()
         };
 
-        // vLLM's hybrid coordinator reduces the candidate hit until every group
-        // agrees on one boundary. Groups share a block size here, so a single
-        // pass converges (its `is_simple_hybrid` shortcut).
+        // vLLM's hybrid coordinator seeds the candidate with the dense
+        // full-attention hit and reduces it until every group agrees on one
+        // boundary. Groups share a block size here, so a single pass converges
+        // (its `is_simple_hybrid` shortcut).
         let mut reconciled = attention.tokens;
-        for group in &self.groups[1..] {
+        for group in self.other_groups() {
             let Some(hit) = group.longest_cache_hit(&self.pool, blocks) else {
                 continue;
             };
@@ -736,7 +779,7 @@ mod tests {
     fn attention_hit(manager: &VllmKvManager, hash: SequenceHash) -> bool {
         manager
             .pool
-            .prefix_hit(GroupedHash::new(ATTENTION_GROUP, hash))
+            .prefix_hit(GroupedHash::new(manager.attention_id(), hash))
             .is_some()
     }
 
