@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
-use dynamo_kv_router::config::{RouterConfigOverride, kv_router_config_from_dynamo_env};
+use dynamo_kv_router::config::{RouterConfigOverride, try_kv_router_config_from_dynamo_env};
 use dynamo_kv_router::protocols::{RoutingConstraints, WorkerWithDpRank};
 use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
 use dynamo_llm::kv_router::prefill_router::PrefillQueryOutcome;
@@ -121,7 +121,8 @@ impl Router {
 
         // TODO(epp-rolling-namespace): Rebind both routers when the active
         // generation-suffixed worker namespace changes during a rolling update.
-        let mut kv_router_config = kv_router_config_from_dynamo_env();
+        let mut kv_router_config =
+            try_kv_router_config_from_dynamo_env().map_err(anyhow::Error::msg)?;
         // TODO(epp-multi-replica): Provide authoritative admission across EPP
         // replicas; replica-sync alone does not close the selection-to-booking race.
         kv_router_config.skip_initial_worker_wait = true;
@@ -132,11 +133,12 @@ impl Router {
         let model_manager = Arc::new(ModelManager::new());
 
         let decode_router = model_manager
-            .kv_chooser_for(
+            .kv_chooser_for_with_worker_role(
                 &endpoint,
                 block_size,
                 Some(kv_router_config.clone()),
                 None,
+                bootstrap.card.worker_type,
                 WORKER_TYPE_DECODE,
                 Some(model_name.clone()),
                 enable_eagle,

@@ -318,10 +318,13 @@ def run_serve_deployment(
                 if hasattr(payload, "with_model"):
                     payload = payload.with_model(config.model)
 
-                # Default behavior: requests go to the frontend port, except metrics which target
-                # worker system ports (mapped from DefaultPort -> per-test ports).
+                # Default behavior: requests go to the frontend port. Metrics
+                # may target either the frontend or worker system ports; map
+                # each DefaultPort placeholder to its per-test allocation.
                 if getattr(payload, "endpoint", "") == "/metrics":
-                    if payload.port == DefaultPort.SYSTEM1.value:
+                    if payload.port == DefaultPort.FRONTEND.value:
+                        payload.port = dynamic_frontend_port
+                    elif payload.port == DefaultPort.SYSTEM1.value:
                         if len(dynamic_system_ports) < 1:
                             raise RuntimeError(
                                 "Payload targets SYSTEM_PORT1 but no system ports were provided "
@@ -362,7 +365,10 @@ def run_serve_deployment(
                             mapped_system_ports.append(p)
                     payload.system_ports = mapped_system_ports
 
-                for _ in range(payload.repeat_count):
+                for iteration in range(payload.repeat_count):
+                    # Resolve an iteration-specific body once so validation
+                    # retries resend the same request.
+                    request_body = payload.body_for_iteration(iteration)
                     # Re-issue the request (server stays up) on validation
                     # failure when payload.max_attempts > 1. See tests/README.md
                     # "Flaky Tests" for when this is appropriate. Backoff
@@ -374,7 +380,7 @@ def run_serve_deployment(
                             try:
                                 response = send_request(
                                     url=payload.url(),
-                                    payload=payload.body,
+                                    payload=request_body,
                                     timeout=payload.timeout,
                                     method=payload.method,
                                     stream=payload.http_stream,

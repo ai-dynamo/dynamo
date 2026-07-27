@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+interface:
+  display_name: "Dynamo KV Replay Parity"
+  short_description: "Validate offline KV replay parity and performance"
+  default_prompt: "Use $dynamo-kv-replay-parity to compare offline KV replay correctness and performance across two revisions."

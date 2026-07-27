@@ -922,7 +922,7 @@ fn process_mooncake_trace_expands_and_duplicates_hash_space() -> anyhow::Result<
         42,
     )?;
 
-    let mut all_hashes: Vec<Vec<u64>> = traces
+    let mut all_hashes: Vec<Vec<u32>> = traces
         .into_iter()
         .flat_map(|worker| worker.sessions.into_iter())
         .flat_map(|session| session.turns.into_iter().map(|turn| turn.hash_ids))
@@ -938,18 +938,18 @@ fn process_mooncake_trace_expands_and_duplicates_hash_space() -> anyhow::Result<
     expected.sort();
     assert_eq!(all_hashes, expected, "hash_ids mismatch");
 
-    let copy0: Vec<&Vec<u64>> = all_hashes.iter().filter(|hashes| hashes[0] == 0).collect();
-    let copy1: Vec<&Vec<u64>> = all_hashes.iter().filter(|hashes| hashes[0] == 10).collect();
+    let copy0: Vec<&Vec<u32>> = all_hashes.iter().filter(|hashes| hashes[0] == 0).collect();
+    let copy1: Vec<&Vec<u32>> = all_hashes.iter().filter(|hashes| hashes[0] == 10).collect();
     assert_eq!(copy0.len(), 2);
     assert_eq!(copy1.len(), 2);
     assert_eq!(copy0[0][..4], copy0[1][..4], "copy 0 shared prefix broken");
     assert_eq!(copy1[0][..4], copy1[1][..4], "copy 1 shared prefix broken");
 
-    let set0: HashSet<u64> = copy0
+    let set0: HashSet<u32> = copy0
         .iter()
         .flat_map(|hashes| hashes.iter().copied())
         .collect();
-    let set1: HashSet<u64> = copy1
+    let set1: HashSet<u32> = copy1
         .iter()
         .flat_map(|hashes| hashes.iter().copied())
         .collect();

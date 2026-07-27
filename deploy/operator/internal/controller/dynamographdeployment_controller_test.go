@@ -5161,7 +5161,7 @@ func TestPCSGStatusChangeIsSignificant(t *testing.T) {
 				pcsg.Status.Conditions = []metav1.Condition{{
 					Type:               groveconstants.ConditionTypeMinAvailableBreached,
 					Status:             metav1.ConditionFalse,
-					Reason:             groveconstants.ConditionReasonInsufficientScheduledPCSGReplicas,
+					Reason:             groveconstants.ConditionReasonInsufficientAvailablePCSGReplicas,
 					LastTransitionTime: metav1.Now(),
 				}}
 			},

@@ -16,6 +16,7 @@ For the routing cost model and worker-selection behavior, see
 - `--router-kv-overlap-score-credit`: Device-local prefix-overlap credit multiplier in the prefill cost calculation. It must be finite and nonnegative. Values greater than `1.0` give overlap extra credit and can make adjusted prefill cost negative. When set to `0`, the router ignores prefix caches and skips creating a local indexer. Defaults to `1.0`.
 - `--router-kv-overlap-score-credit-decay`: Decays device-local overlap credit for workers whose active prefill load exceeds the least-loaded eligible worker. `0` disables decay. Defaults to 0.
 - `--router-prefill-load-scale`: Scale applied to adjusted prompt-side prefill load after device, lower-tier, and shared-cache credits are subtracted. Defaults to 1.
+- `--router-decode-active-request-weight`: Experimental finite, nonnegative block-equivalent decode cost added for each active request on a candidate worker. Defaults to 0.
 - `--router-host-cache-hit-weight`: Credit multiplier for host-pinned (CPU offload) prefix overlap, from 0.0 to 1.0. Symmetric to `--router-kv-overlap-score-credit` but applied to the host-pinned tier when a backend exposes CPU offload via a KV connector. Defaults to 0.75.
 - `--router-disk-cache-hit-weight`: Credit multiplier for disk/lower-tier (e.g. NVMe-backed) prefix overlap, from 0.0 to 1.0. Defaults to 0.25.
 - `--load-aware`: Preset for load-aware KV routing without cache-reuse signals. On the frontend, it implies `--router-mode kv`. It sets `overlap_score_credit=0`, disables KV events and KV reuse assumptions, enables active-block and prefill-token load tracking, disables remote/shared cache indexers, and preserves `--router-prefill-load-scale`, `--router-host-cache-hit-weight`, and `--router-disk-cache-hit-weight`.
@@ -222,6 +223,41 @@ For Kubernetes deployment examples, see [Kubernetes Topology-Aware KV Transfer](
 - `--no-router-track-prefill-tokens`: Disables prompt-side prefill token accounting in the router's active load model. Use this for decode-only routing paths where prompt processing already happened elsewhere.
 - `--router-replica-sync`: Disabled by default. Enables best-effort Runtime event-plane synchronization of KV active-sequence state. Session-affinity synchronization is independent and starts when `--router-session-affinity-ttl-secs` is set.
 
+### Tracking Hash Identities
+
+**Experimental.** Set `--router-tracking-hash keyed-xxh3-v1` to make
+router-derived active-sequence identities depend on a provider key. The default
+`public-xxh3-v1` mode preserves the existing public XXH3 identities.
+
+Keyed mode requires `--router-tracking-key-file` to name a file containing
+exactly 32 raw bytes and `--router-tracking-key-id` to contain a nonempty key
+epoch. The corresponding environment variables are
+`DYN_ROUTER_TRACKING_HASH`, `DYN_ROUTER_TRACKING_KEY_FILE`, and
+`DYN_ROUTER_TRACKING_KEY_ID`. Invalid or unreadable key configuration stops
+startup instead of falling back to public hashing.
+
+The router derives independent block and chain XXH3 seeds from one keyed BLAKE3
+digest for each request scope. The scope includes the algorithm version, key ID,
+model, routing group, block size, normalized `cache_salt`, LoRA adapter, and
+Eagle mode. Multimodal identity remains part of the canonical bytes for each
+block. Seeded XXH3 is not a pseudorandom function or message authentication
+code, so keep tracking hashes and the APIs that accept them on a trusted
+internal plane.
+
+Public block hashes continue to drive primary-indexer lookups. Keyed sequence
+hashes drive active tracking, reservations, prompt membership, and projected
+load. Engine hashes, universal positional lineage hashes, KV events, and
+standalone indexer APIs do not change. `--no-router-assume-kv-reuse` continues
+to use random tracking identities while retaining public indexer hashes.
+
+Selection requests and standalone slot-tracker calls that supply precomputed
+sequence hashes remain trusted inputs. Dynamo does not attach or negotiate an
+algorithm or key epoch in HTTP requests, selection payloads, tracker lifecycle
+events, or replica messages. Initialize every producer with the same algorithm,
+key, and key ID. To rotate the key, change the key and key ID together, restart
+all producers, and flush or recreate derived tracker state before resuming
+traffic. Mixed epochs are not detected.
+
 ## KV Indexer / Approx KV Indexer
 
 - `--router-ttl-secs`: Time-to-live in seconds for blocks in the router's local cache predictions. Defaults to 120.0 seconds when `--no-router-kv-events` is used.
@@ -251,7 +287,11 @@ Deprecated: `--router-kv-overlap-score-weight`, `--kv-overlap-score-weight`, `DY
 
 When migrating the deprecated overlap score weight, use `--router-prefill-load-scale` to preserve its scaling role. Tune `--router-kv-overlap-score-credit` separately only when you intend to change device-local cache credit; values above `1.0` are supported but can produce negative adjusted prefill cost.
 
-Use `--router-prefill-load-scale` when prompt-side load should count more or less than decode-side block load after cache-hit credits are applied. The final score is `prefill_load_scale * adjusted_prefill_blocks + decode_blocks`.
+Use `--router-prefill-load-scale` when prompt-side load should count more or less than decode-side block load after cache-hit credits are applied. The final score is `prefill_load_scale * adjusted_prefill_blocks + potential_decode_blocks + decode_active_request_weight * active_requests`.
+
+Use `--router-decode-active-request-weight` when decode forward-pass time depends more on the number of active requests than on their resident KV footprint. The value is measured in block-equivalent cost per active request. For example, a weight of `32` makes four active requests contribute the same routing cost as 128 potential decode blocks. The router captures active-request count with the same worker-load snapshot used for prefill tokens and potential decode blocks, so enabling the term does not add a second slot-tracker lookup.
+
+This setting is experimental and defaults to `0`, which preserves block-only decode scoring. A positive value trades some KV locality for batch-size balance and can help model, runtime, and hardware combinations near a compute-bound roofline knee, including some MLA or MTP configurations. It can regress throughput, TTFT, and ITL when decode remains primarily memory-bound, so benchmark representative traffic and start with a small weight before increasing it.
 
 Use `--router-host-cache-hit-weight` and `--router-disk-cache-hit-weight` when the backend exposes lower-tier prefix cache via a KV connector (for example, vLLM's `OffloadingConnector` for CPU offload, or a disk-backed tier). These multipliers control how much each lower-tier hit credits against the prefill load, mirroring the role of `--router-kv-overlap-score-credit` for the device tier. A worker holding a full prefix in CPU offload gets `host_cache_hit_weight * matched_blocks` credit against its prefill cost; raising the weight makes the router more willing to route prefix-matched requests to that worker even if a different worker has a partial device-local match.
 

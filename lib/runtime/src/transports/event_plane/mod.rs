@@ -16,7 +16,10 @@ pub use dynamic_subscriber::DynamicSubscriber;
 pub use frame::{FRAME_HEADER_SIZE, FRAME_VERSION, Frame, FrameError, FrameHeader};
 pub use traits::{EventEnvelope, EventStream, TypedEventStream};
 pub use transport::{EventTransportRx, EventTransportTx, WireStream};
-pub use zmq_transport::{ZmqPubTransport, ZmqSubTransport};
+pub use zmq_transport::{
+    ValidatedEnvelope, ValidatedZmqSource, ValidatedZmqSourceError, ZmqPubTransport,
+    ZmqSubTransport,
+};
 
 // Re-export transport kind from discovery for convenience
 pub use crate::discovery::{EventScope, EventTransportKind};
@@ -256,6 +259,11 @@ impl Stream for DeduplicatingStream {
     }
 }
 
+/// Keep the shared wire, channel, and source publisher ID representable in Kubernetes metadata.
+fn discovery_safe_publisher_id(random_id: u64) -> u64 {
+    random_id & (i64::MAX as u64)
+}
+
 /// Event publisher for a specific topic.
 pub struct EventPublisher {
     transport_kind: EventTransportKind,
@@ -384,9 +392,11 @@ impl EventPublisher {
         // can host multiple publishers for the same scope/topic, each with its
         // own ZMQ endpoint and sequence space, so the process ID is not unique
         // enough here.
-        let publisher_id = rand::rngs::OsRng
-            .try_next_u64()
-            .map_err(|error| anyhow::anyhow!("failed to generate publisher ID: {error}"))?;
+        let publisher_id = discovery_safe_publisher_id(
+            rand::rngs::OsRng
+                .try_next_u64()
+                .map_err(|error| anyhow::anyhow!("failed to generate publisher ID: {error}"))?,
+        );
         let discovery = Some(drt.discovery());
         let runtime_handle = drt.runtime().secondary();
         let subject = scope.subject(&topic);
@@ -911,6 +921,12 @@ fn current_timestamp_ms() -> u64 {
 mod tests {
     use super::*;
     use crate::config::environment_names::zmq_broker as broker_env;
+
+    #[test]
+    fn publisher_ids_fit_kubernetes_discovery_integer_range() {
+        assert_eq!(discovery_safe_publisher_id(42), 42);
+        assert!(i64::try_from(discovery_safe_publisher_id(u64::MAX)).is_ok());
+    }
 
     #[test]
     fn direct_zmq_topology_selection_is_narrow() {
