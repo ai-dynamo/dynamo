@@ -15,7 +15,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-![Dynamo 横幅](./docs/assets/img/dynamo-frontpage-banner.png)
+![Dynamo 横幅](./docs/fern/assets/img/dynamo-frontpage-banner.png)
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![GitHub Release](https://img.shields.io/github/v/release/ai-dynamo/dynamo)](https://github.com/ai-dynamo/dynamo/releases/latest)
@@ -24,7 +24,7 @@ limitations under the License.
 [![Discord](https://dcbadge.limes.pink/api/server/D92uqZRjCZ?style=flat)](https://discord.gg/D92uqZRjCZ)
 ![Community Contributors](https://img.shields.io/badge/community_contributors-70%2B-brightgreen)
 
-| **[文档](https://docs.nvidia.com/dynamo/)** | **[路线图](https://github.com/ai-dynamo/dynamo/issues/5506)** | **[配方](https://github.com/ai-dynamo/dynamo/tree/main/recipes)** | **[示例](https://github.com/ai-dynamo/dynamo/tree/main/examples)** | **[预构建容器](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo)** | **[摘要](docs/digest/index.mdx)** | **[设计提案](https://github.com/ai-dynamo/dynamo/issues?q=is%3Aissue+label%3A%22dep%3Adraft%22%2C%22dep%3Aproposed%22%2C%22dep%3Aapproved%22%2C%22dep%3Aimplementing%22%2C%22dep%3Acompleted%22%2C%22dep%3Adeferred%22%2C%22dep%3Asuperseeded%22)** | **[如何贡献](#社区与贡献)** |
+| **[文档](https://docs.nvidia.com/dynamo/)** | **[路线图](https://github.com/ai-dynamo/dynamo/issues/5506)** | **[配方](https://github.com/ai-dynamo/dynamo/tree/main/recipes)** | **[示例](https://github.com/ai-dynamo/dynamo/tree/main/examples)** | **[预构建容器](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo)** | **[摘要](docs/fern/digest/index.mdx)** | **[设计提案](https://github.com/ai-dynamo/dynamo/issues?q=is%3Aissue+label%3A%22dep%3Adraft%22%2C%22dep%3Aproposed%22%2C%22dep%3Aapproved%22%2C%22dep%3Aimplementing%22%2C%22dep%3Acompleted%22%2C%22dep%3Adeferred%22%2C%22dep%3Asuperseeded%22)** | **[如何贡献](#社区与贡献)** |
 
 <!-- GitHub does not support browser-language negotiation for repository README rendering; keep explicit alternate-language links in sync. -->
 <p align="right">
@@ -80,7 +80,7 @@ limitations under the License.
 大多数推理引擎优化的是单个 GPU 或单个节点。Dynamo 是 **位于这些引擎之上的编排层**，它把一组 GPU 转化为协同工作的推理系统。
 
 <p align="center">
-  <img src="./docs/assets/img/dynamo-readme-overview.svg" alt="Dynamo 架构概览" width="600" />
+  <img src="./docs/fern/assets/img/dynamo-readme-overview.svg" alt="Dynamo 架构概览" width="600" />
 </p>
 
 **[架构深入解析 →](docs/fern/design-docs/architecture.md)**

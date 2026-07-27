@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Dynamo Local Resource Monitor
 
-[`dynamo_local_resource_monitor.py`](../../dev/observability/dynamo_local_resource_monitor.py) is a Dynamo-specific resource monitor that tracks per-process resource usage (VRAM, GPU utilization, PCIe bandwidth, CPU, disk I/O, network I/O) for Dynamo inference processes — labeled by model name, process identity, and PID. It always exposes Prometheus metrics at `/metrics`; when the dashboard dependencies are installed, the same endpoint also serves a WebSocket dashboard at `/`.
+[`dynamo_local_resource_monitor.py`](../../../dev/observability/dynamo_local_resource_monitor.py) is a Dynamo-specific resource monitor that tracks per-process resource usage (VRAM, GPU utilization, PCIe bandwidth, CPU, disk I/O, network I/O) for Dynamo inference processes — labeled by model name, process identity, and PID. It always exposes Prometheus metrics at `/metrics`; when the dashboard dependencies are installed, the same endpoint also serves a WebSocket dashboard at `/`.
 
 ## Why this and not the existing observability tools?
 

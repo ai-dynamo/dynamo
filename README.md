@@ -15,7 +15,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-![Dynamo banner](./docs/assets/img/dynamo-frontpage-banner.png)
+![Dynamo banner](./docs/fern/assets/img/dynamo-frontpage-banner.png)
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![GitHub Release](https://img.shields.io/github/v/release/ai-dynamo/dynamo)](https://github.com/ai-dynamo/dynamo/releases/latest)
@@ -24,7 +24,7 @@ limitations under the License.
 [![Discord](https://dcbadge.limes.pink/api/server/D92uqZRjCZ?style=flat)](https://discord.gg/D92uqZRjCZ)
 ![Community Contributors](https://img.shields.io/badge/community_contributors-160%2B-brightgreen)
 
-| **[Docs](https://docs.nvidia.com/dynamo/)** | **[Roadmap](https://github.com/ai-dynamo/dynamo/issues/9178)** | **[Recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes)** | **[Examples](https://github.com/ai-dynamo/dynamo/tree/main/examples)** | **[Prebuilt Containers](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo)** | **[Digest](docs/digest/index.mdx)** | **[Design Proposals](https://github.com/ai-dynamo/dynamo/issues?q=is%3Aissue+label%3A%22dep%3Adraft%22%2C%22dep%3Aproposed%22%2C%22dep%3Aapproved%22%2C%22dep%3Aimplementing%22%2C%22dep%3Acompleted%22%2C%22dep%3Adeferred%22%2C%22dep%3Asuperseeded%22)** | **[How to Contribute](#community-and-contributing)** |
+| **[Docs](https://docs.nvidia.com/dynamo/)** | **[Roadmap](https://github.com/ai-dynamo/dynamo/issues/9178)** | **[Recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes)** | **[Examples](https://github.com/ai-dynamo/dynamo/tree/main/examples)** | **[Prebuilt Containers](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo)** | **[Digest](docs/fern/digest/index.mdx)** | **[Design Proposals](https://github.com/ai-dynamo/dynamo/issues?q=is%3Aissue+label%3A%22dep%3Adraft%22%2C%22dep%3Aproposed%22%2C%22dep%3Aapproved%22%2C%22dep%3Aimplementing%22%2C%22dep%3Acompleted%22%2C%22dep%3Adeferred%22%2C%22dep%3Asuperseeded%22)** | **[How to Contribute](#community-and-contributing)** |
 
 <!-- The SVG badge uses systemLanguage so it only draws for Simplified Chinese/China browser language preferences. -->
 <p align="left">
@@ -87,7 +87,7 @@ If you're running a single model on a single GPU, your inference engine alone is
 Most inference engines optimize a single GPU or a single node. Dynamo is the **orchestration layer above them** — it turns a cluster of GPUs into a coordinated inference system.
 
 <p align="center">
-  <img src="./docs/assets/img/dynamo-readme-overview.svg" alt="Dynamo architecture overview" width="600" />
+  <img src="./docs/fern/assets/img/dynamo-readme-overview.svg" alt="Dynamo architecture overview" width="600" />
 </p>
 
 **[Architecture Deep Dive →](https://docs.nvidia.com/dynamo/design-docs/overall-architecture)**
@@ -127,7 +127,7 @@ OpenAI-compatible API and support the same backends, disaggregated serving, and 
 Request flow for the Dynamo-native path is `client → Frontend → Router → workers`. Request flow for
 the Gateway API path is `client → Gateway → EPP → Frontend sidecar (direct) → workers`.
 
-See the [Gateway API Inference Extension (GAIE) guide](docs/kubernetes/gateway-api/README.mdx) for
+See the [Gateway API Inference Extension (GAIE) guide](docs/fern/kubernetes/inference-gateway.mdx) for
 the Gateway API setup, supported features, and configuration.
 
 ## Quick Start
