@@ -19,7 +19,6 @@ fn executable_exposes_native_grpc_configuration() {
     for flag in [
         "--vllm-endpoint",
         "--grpc-connections",
-        "--model-path",
         "--disaggregation-mode",
         "--grpc-connect-attempt-timeout-secs",
         "--grpc-retry-interval-secs",
@@ -27,6 +26,10 @@ fn executable_exposes_native_grpc_configuration() {
     ] {
         assert!(stdout.contains(flag), "missing {flag} in help output");
     }
+    assert!(
+        !stdout.contains("--model-path"),
+        "model identity must be discovered through vllm.Control"
+    );
 
     for env in [
         "DYN_SIDECAR_GRPC_CONNECTIONS",

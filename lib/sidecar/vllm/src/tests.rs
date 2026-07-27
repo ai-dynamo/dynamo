@@ -19,16 +19,18 @@ use tokio::net::TcpListener;
 use tokio::sync::{Mutex, Notify, oneshot};
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{Request, Response, Status};
+use tonic_health::ServingStatus as HealthServingStatus;
+use tonic_health::server::HealthReporter;
 
-use crate::client::VllmClient;
+use crate::client::{CONTROL_SERVICE, INFERENCE_SERVICE, VllmClient};
 use crate::convert::{ResponseState, build_generate_request};
 use crate::engine::VllmSidecarEngine;
 use crate::json::{json_to_struct, struct_to_json};
-use crate::model::ConfiguredModel;
+use crate::model::DiscoveredModel;
 use crate::proto as pb;
 
 #[derive(Clone, Default)]
-struct FakeGenerate {
+struct FakeVllm {
     requests: Arc<Mutex<Vec<pb::GenerateRequest>>>,
     peers: Arc<Mutex<Vec<SocketAddr>>>,
     reject: Arc<AtomicBool>,
@@ -48,7 +50,7 @@ impl Drop for DropSignal {
 }
 
 #[tonic::async_trait]
-impl pb::generate_server::Generate for FakeGenerate {
+impl pb::inference_server::Inference for FakeVllm {
     type GenerateStreamStream =
         Pin<Box<dyn Stream<Item = Result<pb::GenerateResponse, Status>> + Send>>;
 
@@ -161,6 +163,63 @@ impl pb::generate_server::Generate for FakeGenerate {
     }
 }
 
+#[tonic::async_trait]
+impl pb::control_server::Control for FakeVllm {
+    async fn get_server_info(
+        &self,
+        _request: Request<pb::GetServerInfoRequest>,
+    ) -> Result<Response<pb::ServerInfo>, Status> {
+        Ok(Response::new(server_info()))
+    }
+
+    async fn get_model_info(
+        &self,
+        _request: Request<pb::GetModelInfoRequest>,
+    ) -> Result<Response<pb::ModelInfo>, Status> {
+        Ok(Response::new(model_info()))
+    }
+
+    async fn abort(
+        &self,
+        _request: Request<pb::AbortRequest>,
+    ) -> Result<Response<pb::AbortResponse>, Status> {
+        Ok(Response::new(pb::AbortResponse {}))
+    }
+}
+
+fn model_info() -> pb::ModelInfo {
+    pb::ModelInfo {
+        model_id: "model-source".to_string(),
+        served_model_name: "served-model".to_string(),
+        served_model_aliases: vec!["model-alias".to_string()],
+        supports_text_input: true,
+        supports_token_ids_input: true,
+        supports_multimodal: false,
+        reasoning_parser: "deepseek_r1".to_string(),
+        tool_call_parser: "hermes".to_string(),
+    }
+}
+
+fn server_info() -> pb::ServerInfo {
+    pb::ServerInfo {
+        engine_version: "test-vllm".to_string(),
+        api_version: "vllm".to_string(),
+        instance_id: "test-instance".to_string(),
+        parallelism: Some(pb::ParallelismInfo {
+            tensor_parallel_size: 2,
+            pipeline_parallel_size: 1,
+            data_parallel_size: 4,
+            data_parallel_rank: 2,
+            decode_context_parallel_size: 1,
+        }),
+        max_model_len: 8192,
+        kv_block_size: 16,
+        total_kv_blocks: 4096,
+        max_running_requests: 128,
+        max_batched_tokens: 2048,
+    }
+}
+
 fn sequence_response(
     terminal: bool,
     logprobs: bool,
@@ -189,6 +248,7 @@ fn sequence_response(
                 finish_reason: pb::finish_info::FinishReason::Stop as i32,
                 stop_reason: Some(pb::finish_info::StopReason::StopTokenId(2)),
                 kv_transfer_params,
+                ec_transfer_params: None,
             }),
         }),
     }
@@ -313,23 +373,34 @@ fn oversized_logprob_counts_are_rejected() {
 
 struct FakeServer {
     endpoint: String,
-    service: FakeGenerate,
+    service: FakeVllm,
+    health: HealthReporter,
     shutdown: Option<oneshot::Sender<()>>,
 }
 
 impl FakeServer {
-    async fn start(service: FakeGenerate) -> Self {
+    async fn start(service: FakeVllm) -> Self {
+        Self::start_with_health(service, HealthServingStatus::Serving).await
+    }
+
+    async fn start_with_health(service: FakeVllm, status: HealthServingStatus) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let address = listener.local_addr().expect("address");
         let (shutdown, shutdown_rx) = oneshot::channel();
-        let server_service = service.clone();
+        let inference_service = service.clone();
+        let control_service = service.clone();
+        let (health, health_service) = tonic_health::server::health_reporter();
+        health.set_service_status(CONTROL_SERVICE, status).await;
+        health.set_service_status(INFERENCE_SERVICE, status).await;
         tokio::spawn(async move {
             tonic::transport::Server::builder()
                 .add_service(
-                    pb::generate_server::GenerateServer::new(server_service)
+                    pb::inference_server::InferenceServer::new(inference_service)
                         .max_encoding_message_size(64 * 1024 * 1024)
                         .max_decoding_message_size(64 * 1024 * 1024),
                 )
+                .add_service(pb::control_server::ControlServer::new(control_service))
+                .add_service(health_service)
                 .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async {
                     let _ = shutdown_rx.await;
                 })
@@ -339,6 +410,7 @@ impl FakeServer {
         Self {
             endpoint: format!("http://{address}"),
             service,
+            health,
             shutdown: Some(shutdown),
         }
     }
@@ -399,15 +471,33 @@ fn request() -> PreprocessedRequest {
 fn engine(endpoint: &str, mode: DisaggregationMode, connections: usize) -> VllmSidecarEngine {
     VllmSidecarEngine::new(
         GrpcEndpoint::parse(endpoint, "--vllm-endpoint").expect("valid test endpoint"),
-        ConfiguredModel {
-            source: "model-source".to_string(),
-        },
+        DiscoveredModel::from_proto(model_info(), server_info()).expect("valid discovery"),
         mode,
         GrpcTransportConfig {
             connections: NonZeroUsize::new(connections).expect("non-zero connection count"),
             ..Default::default()
         },
     )
+}
+
+async fn engine_from_args(
+    endpoint: &str,
+) -> (VllmSidecarEngine, dynamo_backend_common::WorkerConfig) {
+    let argv = vec![
+        "dynamo-vllm-sidecar".to_string(),
+        "--vllm-endpoint".to_string(),
+        endpoint.to_string(),
+        "--grpc-connections".to_string(),
+        "2".to_string(),
+        "--grpc-startup-deadline-secs".to_string(),
+        "5".to_string(),
+        "--grpc-connect-attempt-timeout-secs".to_string(),
+        "1".to_string(),
+    ];
+    tokio::task::spawn_blocking(move || VllmSidecarEngine::from_args(Some(argv)))
+        .await
+        .expect("bootstrap task")
+        .expect("bootstrap discovery")
 }
 
 async fn collect(
@@ -426,11 +516,23 @@ async fn collect(
 
 #[tokio::test]
 async fn aggregated_generation_converts_request_stream_and_usage() {
-    let server = FakeServer::start(FakeGenerate::default()).await;
-    let engine = engine(&server.endpoint, DisaggregationMode::Aggregated, 2);
+    let server = FakeServer::start(FakeVllm::default()).await;
+    let (engine, worker) = engine_from_args(&server.endpoint).await;
+    assert_eq!(worker.model_name, "model-source");
+    assert_eq!(worker.served_model_name.as_deref(), Some("served-model"));
+    assert_eq!(worker.reasoning_parser.as_deref(), Some("deepseek_r1"));
+    assert_eq!(worker.tool_call_parser.as_deref(), Some("hermes"));
     let config = engine.start(0).await.expect("start");
     assert_eq!(config.model, "model-source");
-    assert_eq!(config.served_model_name, None);
+    assert_eq!(config.served_model_name.as_deref(), Some("served-model"));
+    let registration = config.llm.expect("LLM registration");
+    assert_eq!(registration.context_length, Some(8192));
+    assert_eq!(registration.kv_cache_block_size, Some(16));
+    assert_eq!(registration.total_kv_blocks, Some(4096));
+    assert_eq!(registration.max_num_seqs, Some(128));
+    assert_eq!(registration.max_num_batched_tokens, Some(2048));
+    assert_eq!(registration.data_parallel_size, Some(4));
+    assert_eq!(registration.data_parallel_start_rank, Some(2));
 
     let outputs = collect(&engine, request()).await;
     assert_eq!(outputs.len(), 1);
@@ -446,7 +548,7 @@ async fn aggregated_generation_converts_request_stream_and_usage() {
 
     let requests = server.service.requests.lock().await;
     let sent = requests.first().expect("recorded request");
-    assert!(sent.model.is_empty());
+    assert_eq!(sent.model, "served-model");
     assert_eq!(sent.priority, 0);
     let sampling = sent.sampling.as_ref().unwrap();
     assert_eq!(
@@ -482,8 +584,34 @@ async fn aggregated_generation_converts_request_stream_and_usage() {
 }
 
 #[tokio::test]
+async fn startup_waits_for_control_and_inference_health() {
+    let server =
+        FakeServer::start_with_health(FakeVllm::default(), HealthServingStatus::NotServing).await;
+    let endpoint = server.endpoint.clone();
+    let bootstrap = tokio::spawn(async move { engine_from_args(&endpoint).await });
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(!bootstrap.is_finished(), "bootstrap ignored Control health");
+
+    server
+        .health
+        .set_service_status(CONTROL_SERVICE, HealthServingStatus::Serving)
+        .await;
+    server
+        .health
+        .set_service_status(INFERENCE_SERVICE, HealthServingStatus::Serving)
+        .await;
+
+    let (engine, _) = tokio::time::timeout(std::time::Duration::from_secs(2), bootstrap)
+        .await
+        .expect("bootstrap did not observe SERVING")
+        .expect("bootstrap task");
+    engine.start(0).await.expect("start");
+}
+
+#[tokio::test]
 async fn grpc_request_errors_are_propagated() {
-    let service = FakeGenerate::default();
+    let service = FakeVllm::default();
     service.reject.store(true, Ordering::SeqCst);
     let server = FakeServer::start(service).await;
     let engine = engine(&server.endpoint, DisaggregationMode::Aggregated, 1);
@@ -499,7 +627,7 @@ async fn grpc_request_errors_are_propagated() {
 
 #[tokio::test]
 async fn prefill_decode_handoff_is_opaque_and_repeatable() {
-    let server = FakeServer::start(FakeGenerate::default()).await;
+    let server = FakeServer::start(FakeVllm::default()).await;
     let prefill = engine(&server.endpoint, DisaggregationMode::Prefill, 1);
     let decode = engine(&server.endpoint, DisaggregationMode::Decode, 1);
     prefill.start(0).await.expect("start prefill");
@@ -531,7 +659,7 @@ async fn prefill_decode_handoff_is_opaque_and_repeatable() {
 
 #[tokio::test]
 async fn pool_uses_each_configured_connection() {
-    let server = FakeServer::start(FakeGenerate::default()).await;
+    let server = FakeServer::start(FakeVllm::default()).await;
     let transport = GrpcTransportConfig {
         connections: NonZeroUsize::new(2).unwrap(),
         ..Default::default()
@@ -567,7 +695,7 @@ async fn pool_uses_each_configured_connection() {
 
 #[tokio::test]
 async fn cancellation_drops_the_remote_stream() {
-    let service = FakeGenerate::default();
+    let service = FakeVllm::default();
     service.hang.store(true, Ordering::SeqCst);
     let server = FakeServer::start(service).await;
     let engine = engine(&server.endpoint, DisaggregationMode::Aggregated, 1);
@@ -596,7 +724,7 @@ async fn cancellation_drops_the_remote_stream() {
 
 #[tokio::test]
 async fn cancellation_interrupts_pending_response_headers() {
-    let service = FakeGenerate::default();
+    let service = FakeVllm::default();
     service.hang_before_headers.store(true, Ordering::SeqCst);
     let server = FakeServer::start(service).await;
     let engine = engine(&server.endpoint, DisaggregationMode::Aggregated, 1);
@@ -627,7 +755,7 @@ async fn cancellation_interrupts_pending_response_headers() {
 
 #[tokio::test]
 async fn unsupported_features_fail_before_rpc_submission() {
-    let server = FakeServer::start(FakeGenerate::default()).await;
+    let server = FakeServer::start(FakeVllm::default()).await;
     let engine = engine(&server.endpoint, DisaggregationMode::Aggregated, 1);
     engine.start(0).await.expect("start");
 

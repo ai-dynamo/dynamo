@@ -290,6 +290,7 @@ impl PreparedRequest {
                 finish_reason: pb::finish_info::FinishReason::Length as i32,
                 stop_reason: None,
                 kv_transfer_params: (self.mode == ServerMode::Prefill).then(|| self.handoff()),
+                ec_transfer_params: None,
             }),
         }
     }
@@ -382,7 +383,7 @@ impl KvTransferRole {
     }
 }
 
-fn stable_uuid(seed: u64, request_id: &str) -> Uuid {
+pub(super) fn stable_uuid(seed: u64, request_id: &str) -> Uuid {
     let mut hasher = blake3::Hasher::new();
     hasher.update(&seed.to_le_bytes());
     hasher.update(request_id.as_bytes());

@@ -237,6 +237,7 @@ fn build_kv_parameters(
         bypass_prefix_cache,
         cache_salt: cache_salt.unwrap_or_default(),
         kv_transfer_params: kv_transfer_params.map(json_to_struct).transpose()?,
+        ec_transfer_params: None,
     })
 }
 

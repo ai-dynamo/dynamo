@@ -5,8 +5,11 @@ SPDX-License-Identifier: Apache-2.0
 
 # vLLM sidecar
 
-`dynamo-vllm-sidecar` connects a Dynamo worker to vLLM's native gRPC
-`Generate` service. It is a standalone Rust executable.
+`dynamo-vllm-sidecar` connects a Dynamo worker to vLLM's native gRPC services:
+
+- `vllm.Inference` for generation
+- `vllm.Control` for model and server discovery
+- Standard gRPC health for startup readiness
 
 ## Supported
 
@@ -35,12 +38,15 @@ Start the Dynamo worker explicitly:
 
 ```bash
 dynamo-vllm-sidecar \
-  --vllm-endpoint 127.0.0.1:50051 \
-  --model-path Qwen/Qwen3-0.6B
+  --vllm-endpoint 127.0.0.1:50051
 ```
 
 Use `VLLM_GRPC_ENDPOINT` instead of `--vllm-endpoint` when the endpoint is
 provided through the environment.
+
+The sidecar discovers `model_id`, the served name, parser defaults, context length, KV capacity, scheduler limits, and data-parallel layout through `vllm.Control`. `model_id` must be readable locally or fetchable by Dynamo for tokenization and chat templates.
+
+Aggregated serving is the default. Set the existing `--disaggregation-mode` to `prefill` or `decode` only for non-aggregated deployments; the current Control API does not report engine role.
 
 The sidecar opens eight gRPC connections by default. This avoided
 connection-level throttling in high-concurrency sidecar tests. Override the
@@ -57,8 +63,7 @@ deferred to a follow-up change.
 
 ## Test without vLLM or a GPU
 
-Use the CPU-only `dynamo-vllm-mocker-server` to exercise this sidecar against
-the same `Generate` gRPC contract:
+Use the CPU-only `dynamo-vllm-mocker-server` to exercise the same Inference, Control, and health contracts:
 
 ```bash
 cargo run -p dynamo-vllm-mocker --bin dynamo-vllm-mocker-server -- \
@@ -67,8 +72,7 @@ cargo run -p dynamo-vllm-mocker --bin dynamo-vllm-mocker-server -- \
   --extra-engine-args '{"speedup_ratio":1000}'
 
 cargo run -p dynamo-vllm-sidecar --bin dynamo-vllm-sidecar -- \
-  --vllm-endpoint 127.0.0.1:50051 \
-  --model-path mocker-model
+  --vllm-endpoint 127.0.0.1:50051
 ```
 
 See [`../../mocker/servers/vllm/README.md`](../../mocker/servers/vllm/README.md)
