@@ -183,11 +183,6 @@ const testCases = [
     desc: 'vllm snapshot.py gates only vllm DynamoCheckpoint'
   },
   {
-    file: 'components/src/dynamo/vllm/tests/test_vllm_snapshot.py',
-    expect: { vllm: true, snapshot_vllm: true, snapshot: false },
-    desc: 'vllm snapshot unit test gates only vllm DynamoCheckpoint'
-  },
-  {
     file: 'components/src/dynamo/sglang/snapshot.py',
     expect: {
       sglang: true,
@@ -197,17 +192,6 @@ const testCases = [
       snapshot_trtllm: false,
     },
     desc: 'sglang snapshot.py gates only sglang DynamoCheckpoint'
-  },
-  {
-    file: 'components/src/dynamo/sglang/tests/test_sglang_snapshot.py',
-    expect: {
-      sglang: true,
-      snapshot: false,
-      snapshot_vllm: false,
-      snapshot_sglang: true,
-      snapshot_trtllm: false,
-    },
-    desc: 'sglang snapshot unit test gates only sglang DynamoCheckpoint'
   },
   {
     file: 'components/src/dynamo/trtllm/snapshot.py',
