@@ -74,6 +74,11 @@ def run_trace_replay(
                 f"planner_config replay with trace_format={trace_format!r} "
                 "requires exactly one trace file"
             )
+        if trace_format == "dynamo" and not trace_files:
+            raise ValueError(
+                "planner_config replay with trace_format='dynamo' "
+                "requires at least one trace file"
+            )
         # Planner-in-the-loop: the Rust bridge owns the sim loop and calls back into
         # the Python planner adapter once per PlannerTick (main._run_planner_replay),
         # returning a ReplayPlannerReport (its .trace_report matches the static dict).
