@@ -8,13 +8,19 @@ The `dynamo-openengine-sidecar` binary is intentionally engine-neutral. The same
 
 Launch and DGD examples live under each engine's `examples/backends/<engine>` tree. In Kubernetes, mount the same tokenizer/model cache into the CPU sidecar and GPU engine containers, and mount one shared LoRA cache across P/D pods.
 
-For local development, set `OPENENGINE_PROTO_ROOT` to either the OpenEngine checkout root or its `proto` directory. The build verifies that a Git checkout is exactly at the pinned source commit. When the schema is published to the Buf Schema Registry, export its immutable BSR module commit and point the same variable at the export:
+For local development, set `OPENENGINE_PROTO_ROOT` to either the OpenEngine checkout root or its `proto` directory. The build verifies that a Git checkout is exactly at the pinned source commit and rejects dirty or untracked files under `proto`.
+
+For a metadata-free schema export, also set `OPENENGINE_SCHEMA_RELEASE` to either the pinned 40-character lowercase source commit or the corresponding immutable 32-character lowercase BSR commit. That exact identity is embedded in the sidecar. Moving labels are rejected.
 
 ```bash
 OPENENGINE_PROTO_ROOT=/home/connorc/sidecar/openengine-trtllm cargo build -p dynamo-openengine-sidecar
 
 buf export buf.build/openengine/openengine:<immutable-bsr-commit> --output /tmp/openengine-schema
-OPENENGINE_PROTO_ROOT=/tmp/openengine-schema cargo build -p dynamo-openengine-sidecar
+OPENENGINE_PROTO_ROOT=/tmp/openengine-schema \
+OPENENGINE_SCHEMA_RELEASE=<immutable-bsr-commit> \
+cargo build -p dynamo-openengine-sidecar
 ```
 
-The current sidecar worktree defaults to the requested local sibling checkout when `OPENENGINE_PROTO_ROOT` is unset. Release and CI builds should always provide an explicit immutable BSR export.
+Alternatively, if `buf` is installed, `OPENENGINE_BSR_MODULE=buf.build/openengine/openengine:<immutable-bsr-commit>` exports that exact module into Cargo's build directory before generation. The reference must contain a 32-character lowercase commit, not a label.
+
+The current sidecar worktree defaults to the requested local sibling checkout when no source variable is set. Release and CI builds should consume an immutable BSR commit.

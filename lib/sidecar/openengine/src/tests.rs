@@ -370,7 +370,7 @@ impl Default for FakeState {
                 supported_models: vec!["model".into()],
                 schema_revision: 1,
                 minimum_client_revision: 1,
-                schema_release: crate::OPENENGINE_PROTO_COMMIT.into(),
+                schema_release: crate::OPENENGINE_SCHEMA_RELEASE.into(),
                 parallelism: Some(pb::ParallelismInfo {
                     data_parallel_size: Some(2),
                     data_parallel_start_rank: Some(0),
@@ -1160,7 +1160,7 @@ async fn fake_tonic_rejects_schema_engine_and_role_mismatches() {
     assert!(build_sidecar(server.address, "vllm").await.is_err());
     state.engine.lock().schema_release = "main".into();
     assert!(build_sidecar(server.address, "tensorrt_llm").await.is_err());
-    state.engine.lock().schema_release = crate::OPENENGINE_PROTO_COMMIT.into();
+    state.engine.lock().schema_release = crate::OPENENGINE_SCHEMA_RELEASE.into();
     state.engine.lock().engine_role = pb::EngineRole::Unspecified as i32;
     assert!(build_sidecar(server.address, "tensorrt_llm").await.is_err());
     state.engine.lock().engine_role = pb::EngineRole::Aggregated as i32;

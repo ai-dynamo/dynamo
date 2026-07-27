@@ -319,7 +319,7 @@ mod tests {
         assert!(validate_schema(&engine, None).is_err());
         engine.schema_release = "7d6ac38".to_string();
         assert!(validate_schema(&engine, None).is_err());
-        engine.schema_release = env!("OPENENGINE_PROTO_COMMIT").to_string();
+        engine.schema_release = env!("OPENENGINE_SCHEMA_RELEASE").to_string();
         assert!(validate_schema(&engine, None).is_ok());
         engine.schema_revision = SCHEMA_REVISION + 1;
         assert!(
@@ -331,7 +331,7 @@ mod tests {
         assert!(validate_schema(&engine, None).is_ok());
         engine.schema_release = "0123456789abcdef0123456789abcdef".to_string();
         assert!(validate_schema(&engine, None).is_ok());
-        assert!(validate_schema(&engine, Some(env!("OPENENGINE_PROTO_COMMIT"))).is_err());
+        assert!(validate_schema(&engine, Some(env!("OPENENGINE_SCHEMA_RELEASE"))).is_err());
         engine.schema_release = "v0.2.0".to_string();
         assert!(validate_schema(&engine, None).is_err());
     }

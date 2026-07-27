@@ -11,9 +11,8 @@ mod kv;
 
 pub use engine::OpenEngineSidecar;
 
-/// Immutable OpenEngine source commit checked by build.rs for the local
-/// development dependency.
-pub const OPENENGINE_PROTO_COMMIT: &str = env!("OPENENGINE_PROTO_COMMIT");
+/// Immutable OpenEngine source or BSR commit used to generate these bindings.
+pub const OPENENGINE_SCHEMA_RELEASE: &str = env!("OPENENGINE_SCHEMA_RELEASE");
 
 pub mod proto {
     tonic::include_proto!("openengine.v1");
