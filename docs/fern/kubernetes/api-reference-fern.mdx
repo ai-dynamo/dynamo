@@ -10,12 +10,12 @@ subtitle: Full Kubernetes CRD + operator-config API reference, generated from th
 > [!WARNING]
 > **Auto-generated from source.** This page is regenerated from the Dynamo operator CRDs by `docs/fern/scripts/gen_kubernetes_api.py` and covers **every** type across all three API packages: the deprecated `nvidia.com/v1alpha1` surface, the supported `nvidia.com/v1beta1` surface, and the operator's own `operator.config.dynamo.nvidia.com/v1alpha1` configuration. The trimmed [DGD](dgd-reference.mdx), [DGDR](dgdr-reference.mdx), and [DCD](dcd-reference.mdx) references cover only user-facing `v1beta1` fields. To edit the surface, change the Go types under `deploy/operator/api/` and let CI regenerate this page.
 
-Dynamo publishes 3 Kubernetes API packages with 165 typed CRD and config sections.
+Dynamo publishes 3 Kubernetes API packages with 180 typed CRD and config sections.
 
 <CardGroup cols={3}>
-<Card title="nvidia.com/v1alpha1" href="#nvidia-com-v1alpha1">71 types</Card>
-<Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">63 types</Card>
-<Card title="operator.config.dynamo.nvidia.com/v1alpha1" href="#operator-config-dynamo-nvidia-com-v1alpha1">31 types</Card>
+<Card title="nvidia.com/v1alpha1" href="#nvidia-com-v1alpha1">83 types</Card>
+<Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">65 types</Card>
+<Card title="operator.config.dynamo.nvidia.com/v1alpha1" href="#operator-config-dynamo-nvidia-com-v1alpha1">32 types</Card>
 </CardGroup>
 
 <div id="nvidia-com-v1alpha1" />
@@ -38,6 +38,8 @@ Package v1alpha1 contains API Schema definitions for the nvidia.com v1alpha1 API
 <Card title="DynamoGraphDeploymentRequest" href="#dynamographdeploymentrequest" />
 <Card title="DynamoGraphDeploymentScalingAdapter" href="#dynamographdeploymentscalingadapter" />
 <Card title="DynamoModel" href="#dynamomodel" />
+<Card title="PodSnapshot" href="#podsnapshot" />
+<Card title="PodSnapshotContent" href="#podsnapshotcontent" />
 </CardGroup>
 
 <Accordion id="autoscaling" title="Autoscaling">
@@ -363,7 +365,7 @@ Deprecated: BackoffLimit is ignored. Checkpoint Jobs never retry.
 </ParamField>
 
 <ParamField path="ttlSecondsAfterFinished" type="integer">
-Deprecated: TTLSecondsAfterFinished is ignored. Checkpoint Jobs use a fixed&lt;br /&gt;300 second TTL.
+Deprecated: TTLSecondsAfterFinished is ignored. The operator deletes checkpoint&lt;br /&gt;Jobs after recording their terminal outcome.
 **Validation:** Minimum: 0 &lt;br /&gt;Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 </Accordion>
@@ -447,6 +449,11 @@ See [DynamoCheckpointStorageType](#dynamocheckpointstoragetype).
 
 <ParamField path="jobName" type="string">
 JobName is the name of the checkpoint creation Job
+**Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
+</ParamField>
+
+<ParamField path="podSnapshotName" type="string">
+PodSnapshotName is the name of the PodSnapshot this checkpoint created to drive capture. It is&lt;br /&gt;the authoritative pointer to the snapshot (which is otherwise located by label, not by&lt;br /&gt;reconstructing its name) and lets the controller distinguish a never-created snapshot (empty)&lt;br /&gt;from one that was created and later went missing (set, but no longer found).
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 
@@ -601,6 +608,11 @@ Replicas is the desired number of Pods for this component.&lt;br /&gt;When scali
 **Validation:** Minimum: 0 &lt;br /&gt;
 </ParamField>
 
+<ParamField path="minAvailable" type="integer">
+MinAvailable maps to Grove PodClique minAvailable for single-node and&lt;br /&gt;Grove PodCliqueScalingGroup minAvailable for multi-node components.&lt;br /&gt;This field determines 1) the minimum number of replicas guaranteed to be&lt;br /&gt;gang-scheduled, and 2) when violating minAvailable replicas triggers gang&lt;br /&gt;termination.&lt;br /&gt;For Grove-backed DynamoGraphDeployment components, minAvailable defaults to&lt;br /&gt;1 when omitted and is immutable after creation. Positive replica counts must&lt;br /&gt;be greater than or equal to minAvailable. Replicas may be scaled to 0 as a&lt;br /&gt;special scale-to-zero state; minAvailable remains configured but is not&lt;br /&gt;enforced again until replicas is scaled back to a positive value.&lt;br /&gt;For non-Grove deployments, setting this field will result in a validation error.
+**Validation:** Minimum: 1 &lt;br /&gt;Optional: \&#123;\&#125; &lt;br /&gt;
+</ParamField>
+
 <ParamField path="multinode" type="MultinodeSpec">
 Multinode is the configuration for multinode components.
 See [MultinodeSpec](#multinodespec).
@@ -750,6 +762,11 @@ See [Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/
 <ParamField path="replicas" type="integer">
 Replicas is the desired number of Pods for this component.&lt;br /&gt;When scalingAdapter is enabled, this field is managed by the&lt;br /&gt;DynamoGraphDeploymentScalingAdapter and should not be modified directly.
 **Validation:** Minimum: 0 &lt;br /&gt;
+</ParamField>
+
+<ParamField path="minAvailable" type="integer">
+MinAvailable maps to Grove PodClique minAvailable for single-node and&lt;br /&gt;Grove PodCliqueScalingGroup minAvailable for multi-node components.&lt;br /&gt;This field determines 1) the minimum number of replicas guaranteed to be&lt;br /&gt;gang-scheduled, and 2) when violating minAvailable replicas triggers gang&lt;br /&gt;termination.&lt;br /&gt;For Grove-backed DynamoGraphDeployment components, minAvailable defaults to&lt;br /&gt;1 when omitted and is immutable after creation. Positive replica counts must&lt;br /&gt;be greater than or equal to minAvailable. Replicas may be scaled to 0 as a&lt;br /&gt;special scale-to-zero state; minAvailable remains configured but is not&lt;br /&gt;enforced again until replicas is scaled back to a positive value.&lt;br /&gt;For non-Grove deployments, setting this field will result in a validation error.
+**Validation:** Minimum: 1 &lt;br /&gt;Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 
 <ParamField path="multinode" type="MultinodeSpec">
@@ -1189,6 +1206,12 @@ RollingUpdate tracks the progress of operator manged rolling updates.&lt;br /&gt
 See [RollingUpdateStatus](#rollingupdatestatus).
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
+
+<ParamField path="placement" type="PlacementStatus">
+Placement groups DGD-level scheduler placement signals (score, reporting&lt;br /&gt;state, and any future placement fields).
+See [PlacementStatus](#placementstatus).
+**Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
+</ParamField>
 </Accordion>
 
 <Accordion id="dynamomodel" title="DynamoModel">
@@ -1265,6 +1288,11 @@ See [EndpointInfo](#endpointinfo).
 ReadyEndpoints is the count of endpoints that are ready
 </ParamField>
 
+<ParamField path="loraFallbackCoveredEndpoints" type="integer">
+LoRAFallbackCoveredEndpoints is the count of legacy prefill endpoints&lt;br /&gt;covered by a capable prefill during a rolling upgrade. These endpoints are&lt;br /&gt;excluded from ReadyEndpoints because they cannot serve the adapter directly.
+**Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
+</ParamField>
+
 <ParamField path="totalEndpoints" type="integer">
 TotalEndpoints is the total count of endpoints
 </ParamField>
@@ -1313,7 +1341,12 @@ PodName is the name of the pod serving this endpoint
 </ParamField>
 
 <ParamField path="ready" type="boolean">
-Ready indicates whether the endpoint is ready to serve traffic&lt;br /&gt;For LoRA models: true if the POST /loras request succeeded with a 2xx status code&lt;br /&gt;For base models: always false (no probing performed)
+Ready indicates whether this endpoint is ready to serve traffic.&lt;br /&gt;For LoRA models: true only if this endpoint's lifecycle request succeeded.&lt;br /&gt;For base models: always false (no probing performed).
+</ParamField>
+
+<ParamField path="loraFallbackCovered" type="boolean">
+LoRAFallbackCovered indicates a legacy prefill endpoint that cannot manage&lt;br /&gt;LoRAs itself is covered by a capable prefill in the same topology during a&lt;br /&gt;rolling upgrade. It does not make this endpoint ready to serve the adapter.
+**Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 </Accordion>
 
@@ -1642,6 +1675,256 @@ See [Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.
 <ParamField path="volumeAccessMode" type="PersistentVolumeAccessMode">
 VolumeAccessMode is the volume access mode of the PVC. Required when create is true.
 See [PersistentVolumeAccessMode](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#persistentvolumeaccessmode-v1-core).
+</ParamField>
+</Accordion>
+
+<Accordion id="placementscorestate" title="PlacementScoreState">
+PlacementScoreState describes whether placement score is available and how
+complete the reported score is for a graph deployment. See the v1beta1
+PlacementScoreState for the authoritative semantics of each value.
+
+
+**Kind:** `enum`
+**Underlying type:** `string`
+**Validation:** Enum: [Reported Partial Unsupported Unknown]
+**Appears in:** [PlacementStatus](#placementstatus)
+
+**Allowed values**
+
+- <Badge intent="note" minimal>Reported</Badge>
+- <Badge intent="note" minimal>Partial</Badge>
+- <Badge intent="note" minimal>Unsupported</Badge>
+- <Badge intent="note" minimal>Unknown</Badge>
+</Accordion>
+
+<Accordion id="placementstatus" title="PlacementStatus">
+PlacementStatus groups DGD-level scheduler placement fields under a single
+status object so future placement signals can be added without a schema
+break. See the v1beta1 PlacementStatus for the authoritative field docs.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentStatus](#dynamographdeploymentstatus)
+
+<ParamField path="score" type="float">
+Score is the DGD-level scheduler placement score. Normalized to [0.0, 1.0]&lt;br /&gt;where higher is better and 1.0 is the best possible placement.
+**Validation:** Maximum: 1 &lt;br /&gt;Minimum: 0 &lt;br /&gt;Optional: \&#123;\&#125; &lt;br /&gt;
+</ParamField>
+
+<ParamField path="state" type="PlacementScoreState">
+State indicates placement score reporting state.
+See [PlacementScoreState](#placementscorestate).
+**Validation:** Enum: [Reported Partial Unsupported Unknown] &lt;br /&gt;Optional: \&#123;\&#125; &lt;br /&gt;
+</ParamField>
+</Accordion>
+
+<Accordion id="podreference" title="PodReference">
+PodReference names a pod in the same namespace as the referencing PodSnapshot.
+
+
+**Kind:** `type`
+**Appears in:** [PodSnapshotContentSource](#podsnapshotcontentsource), [PodSnapshotSource](#podsnapshotsource)
+
+<ParamField path="name" type="string" required={true}>
+Name of the source pod.
+**Validation:** MinLength: 1 &lt;br /&gt;Required: \&#123;\&#125; &lt;br /&gt;
+</ParamField>
+
+<ParamField path="uid" type="UID">
+UID of the source pod, recorded so the node agent dumps that specific&lt;br /&gt;pod and not a same-named recreation.
+See [UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#uid-types-pkg).
+**Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
+</ParamField>
+</Accordion>
+
+<Accordion id="podsnapshot" title="PodSnapshot">
+PodSnapshot is the Schema for the snapshots API. It is the namespaced binding
+for a captured container checkpoint and is consumed by restore paths.
+
+No conversion: this type exists only in v1alpha1 (no other API version), so it
+is not part of any conversion scheme.
+
+
+**Kind:** `resource`
+
+<ParamField path="apiVersion" type="string">
+`nvidia.com/v1alpha1`
+</ParamField>
+
+<ParamField path="kind" type="string">
+`PodSnapshot`
+</ParamField>
+
+<ParamField path="metadata" type="ObjectMeta">
+Refer to Kubernetes API documentation for fields of `metadata`.
+See [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta).
+</ParamField>
+
+<ParamField path="spec" type="PodSnapshotSpec">
+See [PodSnapshotSpec](#podsnapshotspec).
+</ParamField>
+
+<ParamField path="status" type="PodSnapshotStatus">
+See [PodSnapshotStatus](#podsnapshotstatus).
+</ParamField>
+</Accordion>
+
+<Accordion id="podsnapshotcontent" title="PodSnapshotContent">
+PodSnapshotContent is the Schema for the snapshotcontents API. It is the
+cluster-scoped artifact-of-record for a captured container checkpoint.
+
+No conversion: this type exists only in v1alpha1 (no other API version), so it
+is not part of any conversion scheme.
+
+
+**Kind:** `resource`
+
+<ParamField path="apiVersion" type="string">
+`nvidia.com/v1alpha1`
+</ParamField>
+
+<ParamField path="kind" type="string">
+`PodSnapshotContent`
+</ParamField>
+
+<ParamField path="metadata" type="ObjectMeta">
+Refer to Kubernetes API documentation for fields of `metadata`.
+See [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta).
+</ParamField>
+
+<ParamField path="spec" type="PodSnapshotContentSpec">
+See [PodSnapshotContentSpec](#podsnapshotcontentspec).
+</ParamField>
+
+<ParamField path="status" type="PodSnapshotContentStatus">
+See [PodSnapshotContentStatus](#podsnapshotcontentstatus).
+</ParamField>
+</Accordion>
+
+<Accordion id="podsnapshotcontentsource" title="PodSnapshotContentSource">
+PodSnapshotContentSource is the immutable source descriptor: what to dump
+(PodRef) and where it runs (NodeName).
+
+
+**Kind:** `type`
+**Appears in:** [PodSnapshotContentSpec](#podsnapshotcontentspec)
+
+<ParamField path="podRef" type="PodReference" required={true}>
+PodRef identifies the pod to dump. Its UID guards against dumping a&lt;br /&gt;same-named recreation of the pod.
+See [PodReference](#podreference).
+**Validation:** Required: \&#123;\&#125; &lt;br /&gt;
+</ParamField>
+
+<ParamField path="nodeName" type="string" required={true}>
+NodeName is the node the source pod runs on, denormalized from the live&lt;br /&gt;pod so it travels with PodRef as one immutable unit and selects the node&lt;br /&gt;agent that performs the dump.
+**Validation:** MinLength: 1 &lt;br /&gt;Required: \&#123;\&#125; &lt;br /&gt;
+</ParamField>
+</Accordion>
+
+<Accordion id="podsnapshotcontentspec" title="PodSnapshotContentSpec">
+PodSnapshotContentSpec defines the desired state of PodSnapshotContent. It is
+populated by the PodSnapshotReconciler (operator) at creation time and is
+immutable thereafter.
+
+
+**Kind:** `type`
+**Appears in:** [PodSnapshotContent](#podsnapshotcontent)
+
+<ParamField path="snapshotRef" type="PodSnapshotReference" required={true}>
+PodSnapshotRef is the back-pointer to the bound PodSnapshot. It may span&lt;br /&gt;namespaces because PodSnapshotContent is cluster-scoped.
+See [PodSnapshotReference](#podsnapshotreference).
+**Validation:** Required: \&#123;\&#125; &lt;br /&gt;
+</ParamField>
+
+<ParamField path="source" type="PodSnapshotContentSource" required={true}>
+Source describes what to capture: the source pod and the node it runs on.
+See [PodSnapshotContentSource](#podsnapshotcontentsource).
+**Validation:** Required: \&#123;\&#125; &lt;br /&gt;
+</ParamField>
+</Accordion>
+
+<Accordion id="podsnapshotcontentstatus" title="PodSnapshotContentStatus">
+PodSnapshotContentStatus defines the observed state of PodSnapshotContent.
+
+
+**Kind:** `type`
+**Appears in:** [PodSnapshotContent](#podsnapshotcontent)
+
+<ParamField path="conditions" type="Condition array">
+Conditions reflect the latest observations of the PodSnapshotContent's state.&lt;br /&gt;Standard types are Ready and Failed.
+See [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta).
+**Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
+</ParamField>
+</Accordion>
+
+<Accordion id="podsnapshotreference" title="PodSnapshotReference">
+PodSnapshotReference is a cross-namespace reference to a PodSnapshot.
+
+
+**Kind:** `type`
+**Appears in:** [PodSnapshotContentSpec](#podsnapshotcontentspec)
+
+<ParamField path="namespace" type="string" required={true}>
+Namespace of the referenced PodSnapshot.
+**Validation:** Required: \&#123;\&#125; &lt;br /&gt;
+</ParamField>
+
+<ParamField path="name" type="string" required={true}>
+Name of the referenced PodSnapshot.
+**Validation:** Required: \&#123;\&#125; &lt;br /&gt;
+</ParamField>
+
+<ParamField path="uid" type="UID">
+UID of the referenced PodSnapshot, recorded at binding time to detect a&lt;br /&gt;stale reference after a delete and recreate.
+See [UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#uid-types-pkg).
+**Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
+</ParamField>
+</Accordion>
+
+<Accordion id="podsnapshotsource" title="PodSnapshotSource">
+PodSnapshotSource identifies the workload captured by a PodSnapshot.
+
+
+**Kind:** `type`
+**Appears in:** [PodSnapshotSpec](#podsnapshotspec)
+
+<ParamField path="podRef" type="PodReference" required={true}>
+PodRef references the pod, in the PodSnapshot's namespace, that is captured.&lt;br /&gt;The operator prepares the pod (control volume, target-container annotation,&lt;br /&gt;checkpoint storage mount) before creating the PodSnapshot.
+See [PodReference](#podreference).
+**Validation:** Required: \&#123;\&#125; &lt;br /&gt;
+</ParamField>
+</Accordion>
+
+<Accordion id="podsnapshotspec" title="PodSnapshotSpec">
+PodSnapshotSpec defines the desired state of PodSnapshot.
+
+
+**Kind:** `type`
+**Appears in:** [PodSnapshot](#podsnapshot)
+
+<ParamField path="source" type="PodSnapshotSource" required={true}>
+Source identifies the captured workload. It is a struct (rather than an&lt;br /&gt;inlined reference) so future source variants can be added additively.
+See [PodSnapshotSource](#podsnapshotsource).
+**Validation:** Required: \&#123;\&#125; &lt;br /&gt;
+</ParamField>
+</Accordion>
+
+<Accordion id="podsnapshotstatus" title="PodSnapshotStatus">
+PodSnapshotStatus defines the observed state of PodSnapshot.
+
+
+**Kind:** `type`
+**Appears in:** [PodSnapshot](#podsnapshot)
+
+<ParamField path="boundSnapshotContentName" type="string">
+BoundPodSnapshotContentName is the name of the cluster-scoped PodSnapshotContent&lt;br /&gt;this PodSnapshot is bound to. It is nil until the agent has created the&lt;br /&gt;content and recorded the binding.
+**Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
+</ParamField>
+
+<ParamField path="conditions" type="Condition array">
+Conditions reflect the latest observations of the PodSnapshot's state.&lt;br /&gt;Standard types are Ready and Failed.
+See [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta).
+**Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 </Accordion>
 
@@ -2012,6 +2295,11 @@ ComponentNames is the list of underlying resource names for this service.&lt;br 
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 
+<ParamField path="runtimeNamespace" type="string">
+RuntimeNamespace is the effective Dynamo runtime namespace for this&lt;br /&gt;component. Worker components may include a generation suffix; non-workers and&lt;br /&gt;Grove-backed workers use the base namespace. During rolling updates, worker&lt;br /&gt;status keeps the old active revision namespace until cutover completes.
+**Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
+</ParamField>
+
 <ParamField path="replicas" type="integer">
 Replicas is the total number of non-terminated replicas.&lt;br /&gt;Required for all component kinds.
 **Validation:** Minimum: 0 &lt;br /&gt;
@@ -2029,6 +2317,11 @@ ReadyReplicas is the number of ready replicas.&lt;br /&gt;Populated for PodCliqu
 
 <ParamField path="availableReplicas" type="integer">
 AvailableReplicas is the number of available replicas.&lt;br /&gt;For Deployment: replicas ready for &gt;= minReadySeconds.&lt;br /&gt;For PodCliqueScalingGroup: replicas where all constituent PodCliques have &gt;= MinAvailable ready pods.&lt;br /&gt;Not available for PodClique or LeaderWorkerSet.&lt;br /&gt;When nil, the field is omitted from the API response.
+**Validation:** Minimum: 0 &lt;br /&gt;Optional: \&#123;\&#125; &lt;br /&gt;
+</ParamField>
+
+<ParamField path="scheduledReplicas" type="integer">
+ScheduledReplicas is the number of replicas the backend scheduler has&lt;br /&gt;scheduled, in Dynamo component-replica units. Optional; omitted (nil)&lt;br /&gt;when the backend cannot derive it reliably. A nil value means "not&lt;br /&gt;reported", never "zero scheduled".
 **Validation:** Minimum: 0 &lt;br /&gt;Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 </Accordion>
@@ -2356,6 +2649,11 @@ componentNames is the list of underlying Kubernetes resource names for&lt;br /&g
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 
+<ParamField path="runtimeNamespace" type="string">
+runtimeNamespace is the effective Dynamo runtime namespace for this&lt;br /&gt;component. Worker components may include a generation suffix; non-workers and&lt;br /&gt;Grove-backed workers use the base namespace. During rolling updates, worker&lt;br /&gt;status keeps the old active revision namespace until cutover completes.
+**Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
+</ParamField>
+
 <ParamField path="replicas" type="integer">
 replicas is the total number of non-terminated replicas.
 **Validation:** Minimum: 0 &lt;br /&gt;
@@ -2373,6 +2671,11 @@ readyReplicas is the number of ready replicas. Populated for&lt;br /&gt;`PodCliq
 
 <ParamField path="availableReplicas" type="integer">
 availableReplicas is the number of available replicas. Populated for&lt;br /&gt;`Deployment` and `PodCliqueScalingGroup`; not available for&lt;br /&gt;`PodClique` or `LeaderWorkerSet`.
+**Validation:** Minimum: 0 &lt;br /&gt;Optional: \&#123;\&#125; &lt;br /&gt;
+</ParamField>
+
+<ParamField path="scheduledReplicas" type="integer">
+scheduledReplicas is the number of replicas the backend scheduler has&lt;br /&gt;scheduled, expressed strictly in Dynamo component-replica units (not&lt;br /&gt;raw backend pod counts). It is a diagnostic aid for distinguishing&lt;br /&gt;capacity/scheduling shortfalls from runtime readiness.&lt;br /&gt;It is optional and omitted (nil) when the active backend cannot derive&lt;br /&gt;it reliably in component-replica units — for example before the backing&lt;br /&gt;resource's status has been observed, or for backends that do not report&lt;br /&gt;a scheduling count. A nil value therefore means "not reported", never&lt;br /&gt;"zero scheduled"; consumers must not treat absence as a scheduling&lt;br /&gt;failure.
 **Validation:** Minimum: 0 &lt;br /&gt;Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 </Accordion>
@@ -2578,6 +2881,11 @@ replicas is the desired number of Pods for this component. When&lt;br /&gt;`scal
 **Validation:** Minimum: 0 &lt;br /&gt;Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 
+<ParamField path="minAvailable" type="integer">
+minAvailable maps to Grove PodClique minAvailable for single-node and&lt;br /&gt;Grove PodCliqueScalingGroup minAvailable for multi-node components.&lt;br /&gt;This field determines 1) the minimum number of replicas guaranteed to be&lt;br /&gt;gang-scheduled, and 2) when violating minAvailable replicas triggers gang&lt;br /&gt;termination.&lt;br /&gt;For Grove-backed DynamoGraphDeployment components, minAvailable defaults to&lt;br /&gt;1 when omitted and is immutable after creation. Positive replica counts must&lt;br /&gt;be greater than or equal to minAvailable. Replicas may be scaled to 0 as a&lt;br /&gt;special scale-to-zero state; minAvailable remains configured but is not&lt;br /&gt;enforced again until replicas is scaled back to a positive value.&lt;br /&gt;For non-Grove deployments, setting this field will result in a validation error.
+**Validation:** Minimum: 1 &lt;br /&gt;Optional: \&#123;\&#125; &lt;br /&gt;
+</ParamField>
+
 <ParamField path="multinode" type="MultinodeSpec">
 multinode configures multinode components.
 See [MultinodeSpec](#v1beta1-multinodespec).
@@ -2669,6 +2977,11 @@ See [PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-
 <ParamField path="replicas" type="integer">
 replicas is the desired number of Pods for this component. When&lt;br /&gt;`scalingAdapter` is set on this component, this field is managed by&lt;br /&gt;the DynamoGraphDeploymentScalingAdapter and should not be modified&lt;br /&gt;directly.
 **Validation:** Minimum: 0 &lt;br /&gt;Optional: \&#123;\&#125; &lt;br /&gt;
+</ParamField>
+
+<ParamField path="minAvailable" type="integer">
+minAvailable maps to Grove PodClique minAvailable for single-node and&lt;br /&gt;Grove PodCliqueScalingGroup minAvailable for multi-node components.&lt;br /&gt;This field determines 1) the minimum number of replicas guaranteed to be&lt;br /&gt;gang-scheduled, and 2) when violating minAvailable replicas triggers gang&lt;br /&gt;termination.&lt;br /&gt;For Grove-backed DynamoGraphDeployment components, minAvailable defaults to&lt;br /&gt;1 when omitted and is immutable after creation. Positive replica counts must&lt;br /&gt;be greater than or equal to minAvailable. Replicas may be scaled to 0 as a&lt;br /&gt;special scale-to-zero state; minAvailable remains configured but is not&lt;br /&gt;enforced again until replicas is scaled back to a positive value.&lt;br /&gt;For non-Grove deployments, setting this field will result in a validation error.
+**Validation:** Minimum: 1 &lt;br /&gt;Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 
 <ParamField path="multinode" type="MultinodeSpec">
@@ -2947,7 +3260,7 @@ See [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1
 </ParamField>
 
 <ParamField path="profilingResults" type="ProfilingResultsStatus">
-ProfilingResults contains the output of the profiling process including&lt;br /&gt;Pareto-optimal configurations and the selected deployment configuration.
+ProfilingResults contains the selected deployment configuration produced by profiling.&lt;br /&gt;Deprecated compatibility fields may remain on objects created by older releases.
 See [ProfilingResultsStatus](#profilingresultsstatus).
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
@@ -3152,6 +3465,12 @@ rollingUpdate tracks the progress of operator-managed rolling updates.&lt;br /&g
 See [RollingUpdateStatus](#v1beta1-rollingupdatestatus).
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
+
+<ParamField path="placement" type="PlacementStatus">
+placement groups DGD-level scheduler placement signals (score, reporting&lt;br /&gt;state, and any future placement fields).
+See [PlacementStatus](#v1beta1-placementstatus).
+**Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
+</ParamField>
 </Accordion>
 
 <Accordion id="v1beta1-eppconfig" title="EPPConfig">
@@ -3238,7 +3557,7 @@ FeaturesSpec controls optional Dynamo platform features in the generated deploym
 **Appears in:** [DynamoGraphDeploymentRequestSpec](#v1beta1-dynamographdeploymentrequestspec)
 
 <ParamField path="planner" type="RawExtension">
-Planner contains the raw Planner configuration passed to the Planner service.&lt;br /&gt;Its schema is defined by dynamo.planner.config.planner_config.PlannerConfig.&lt;br /&gt;See https://docs.dynamo.nvidia.com/dynamo/components/planner/planner-guide#plannerconfig-reference.&lt;br /&gt;DGDR passes this object through without field-level validation; the Planner&lt;br /&gt;service validates it at startup.&lt;br /&gt;The presence of this field (non-null) enables the planner in the generated DGD.
+Planner contains the raw Planner configuration passed to the Planner service.&lt;br /&gt;Its schema is defined by dynamo.planner.config.planner_config.PlannerConfig.&lt;br /&gt;See https://docs.nvidia.com/dynamo/dev/components/planner/planner-guide#plannerconfig-reference.&lt;br /&gt;DGDR passes this object through without field-level validation; the Planner&lt;br /&gt;service validates it at startup.&lt;br /&gt;The presence of this field (non-null) enables the planner in the generated DGD.
 See [RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg).
 **Validation:** Type: object &lt;br /&gt;Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
@@ -3540,15 +3859,16 @@ See [JobSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.2
 </ParamField>
 
 <ParamField path="dgd" type="RawExtension">
-DGD allows providing a full or partial nvidia.com/v1alpha1 DynamoGraphDeployment&lt;br /&gt;to use as the base for the generated deployment. Fields from profiling results&lt;br /&gt;are merged on top. Use this to override backend worker images.&lt;br /&gt;The field is stored as a raw embedded resource rather than a typed&lt;br /&gt;*v1alpha1.DynamoGraphDeployment to avoid a circular import: v1alpha1 already&lt;br /&gt;imports v1beta1 as the conversion hub and Go does not allow import cycles.&lt;br /&gt;The EmbeddedResource marker tells the API server to validate that the value is a&lt;br /&gt;well-formed Kubernetes object (has apiVersion/kind), but does not enforce that it&lt;br /&gt;is specifically a DynamoGraphDeployment. Full type validation (correct apiVersion,&lt;br /&gt;kind, and field schema) is performed by the controller during reconciliation.
+DGD provides a partial, versioned DynamoGraphDeployment override for the&lt;br /&gt;profiler-generated deployment. Set apiVersion to nvidia.com/v1alpha1 or&lt;br /&gt;nvidia.com/v1beta1 and kind to DynamoGraphDeployment.&lt;br /&gt;The profiler merges the override using the schema for its declared version.&lt;br /&gt;If the generated DGD uses another supported version, the complete DGD is&lt;br /&gt;converted before the merge and converted back afterward. The final DGD&lt;br /&gt;selected or created by a DGDR is nvidia.com/v1beta1.&lt;br /&gt;The override can update DGD fields, but topology entries are limited to&lt;br /&gt;services or components already present in the generated DGD. Metadata labels&lt;br /&gt;and annotations are merged, metadata.name selects the final DGD name, and&lt;br /&gt;other identity or runtime metadata is ignored.&lt;br /&gt;V1alpha1 worker argument lists retain legacy append behavior. V1beta1 follows&lt;br /&gt;structural schema merge behavior, including map-list merging and atomic-list&lt;br /&gt;replacement.&lt;br /&gt;The raw embedded resource preserves either supported schema. The API server&lt;br /&gt;validates that it has apiVersion and kind; override processing validates the&lt;br /&gt;DGD kind, supported version, and field schema.
 See [RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg).
 **Validation:** EmbeddedResource: \&#123;\&#125; &lt;br /&gt;Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 </Accordion>
 
 <Accordion id="paretoconfig" title="ParetoConfig">
-ParetoConfig represents a single Pareto-optimal deployment configuration
-discovered during profiling.
+ParetoConfig is retained for compatibility with status objects produced by
+older profiler releases.
+Deprecated: The profiler no longer generates Pareto configurations.
 
 
 **Kind:** `type`
@@ -3558,6 +3878,58 @@ discovered during profiling.
 Config is the full deployment configuration for this Pareto point.
 See [RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg).
 **Validation:** Type: object &lt;br /&gt;
+</ParamField>
+</Accordion>
+
+<Accordion id="v1beta1-placementscorestate" title="PlacementScoreState">
+PlacementScoreState describes whether placement score is available and how
+complete the reported score is for a graph deployment.
+
+Every backend must set this field after the first reconciliation:
+  - Reported:    a score is available for every scored placement unit.
+  - Partial:     a score is available for some but not all placement units.
+  - Unsupported: the backend does not surface a placement score at all.
+  - Unknown:     the backend supports scores but the current value is
+    indeterminate (e.g. read failure, not yet populated by the
+    scheduler). When set, PlacementStatus.Score must be cleared.
+
+
+**Kind:** `enum`
+**Underlying type:** `string`
+**Validation:** Enum: [Reported Partial Unsupported Unknown]
+**Appears in:** [PlacementStatus](#v1beta1-placementstatus)
+
+**Allowed values**
+
+- <Badge intent="note" minimal>Reported</Badge>
+- <Badge intent="note" minimal>Partial</Badge>
+- <Badge intent="note" minimal>Unsupported</Badge>
+- <Badge intent="note" minimal>Unknown</Badge>
+</Accordion>
+
+<Accordion id="v1beta1-placementstatus" title="PlacementStatus">
+PlacementStatus groups DGD-level scheduler placement fields under a single
+status object so future placement signals (e.g. scheduler contract version,
+last-report timestamp, per-unit reports) can be added without a schema break.
+
+The score source is an open question in DEP #10064 (Grove mirror, typed Grove
+scheduler API, or unstructured provider). Until a source is selected and
+implemented, the DGD controller does not write this field; the schema and
+conversion are landed here so downstream consumers can rely on the shape.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentStatus](#v1beta1-dynamographdeploymentstatus)
+
+<ParamField path="score" type="float">
+score is the DGD-level scheduler placement score aggregated from&lt;br /&gt;relevant scheduler placement units. Normalized to [0.0, 1.0] where higher&lt;br /&gt;is better and 1.0 represents the best possible placement. Aggregation&lt;br /&gt;uses the minimum across placement units so the value is a worst-placement&lt;br /&gt;signal for the graph. Scores are only comparable across DGDs that share&lt;br /&gt;the same scheduler scoring contract and version.
+**Validation:** Maximum: 1 &lt;br /&gt;Minimum: 0 &lt;br /&gt;Optional: \&#123;\&#125; &lt;br /&gt;
+</ParamField>
+
+<ParamField path="state" type="PlacementScoreState">
+state indicates placement score reporting state. See PlacementScoreState&lt;br /&gt;for the semantics of each value.
+See [PlacementScoreState](#v1beta1-placementscorestate).
+**Validation:** Enum: [Reported Partial Unsupported Unknown] &lt;br /&gt;Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 </Accordion>
 
@@ -3591,7 +3963,7 @@ ProfilingResultsStatus contains the output of the profiling process.
 **Appears in:** [DynamoGraphDeploymentRequestStatus](#v1beta1-dynamographdeploymentrequeststatus)
 
 <ParamField path="pareto" type="ParetoConfig array">
-Pareto is the list of Pareto-optimal deployment configurations discovered during profiling.&lt;br /&gt;Each entry represents a different cost/performance trade-off.
+Pareto is retained for compatibility with existing status objects.&lt;br /&gt;Deprecated: The controller no longer populates this field.
 See [ParetoConfig](#paretoconfig).
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
@@ -4300,18 +4672,17 @@ NamespaceConfiguration determines operator namespace mode.
 **Appears in:** [OperatorConfiguration](#operatorconfiguration)
 
 <ParamField path="restricted" type="string">
-Deprecated: Namespace-restricted mode is deprecated and will be removed in a future release.&lt;br /&gt;Use cluster-wide mode (leave Restricted empty) instead.
+Restricted enables namespace-restricted mode for development and testing.&lt;br /&gt;Namespace-restricted mode is not supported for production.
 </ParamField>
 
 <ParamField path="scope" type="NamespaceScopeConfiguration">
-Deprecated: Scope is only used in namespace-restricted mode, which is deprecated.
+Scope configures the namespace ownership claim in namespace-restricted mode.
 See [NamespaceScopeConfiguration](#namespacescopeconfiguration).
 </ParamField>
 </Accordion>
 
 <Accordion id="namespacescopeconfiguration" title="NamespaceScopeConfiguration">
-Deprecated: NamespaceScopeConfiguration is used only by the deprecated namespace-restricted
-mode and will be removed in a future release.
+NamespaceScopeConfiguration configures the development/test namespace ownership claim.
 
 
 **Kind:** `type`
@@ -4439,6 +4810,11 @@ See [LWSConfiguration](#lwsconfiguration).
 KaiScheduler configuration
 See [KaiSchedulerConfiguration](#kaischedulerconfiguration).
 </ParamField>
+
+<ParamField path="volcanoScheduler" type="VolcanoSchedulerConfiguration">
+VolcanoScheduler configuration
+See [VolcanoSchedulerConfiguration](#volcanoschedulerconfiguration).
+</ParamField>
 </Accordion>
 
 <Accordion id="rbacconfiguration" title="RBACConfiguration">
@@ -4522,6 +4898,10 @@ correctly without double-TLS issues.
 **Kind:** `type`
 **Appears in:** [OperatorConfiguration](#operatorconfiguration)
 
+<ParamField path="enabled" type="boolean">
+Enabled overrides service mesh auto-detection. nil = auto-detect.
+</ParamField>
+
 <ParamField path="provider" type="string">
 Provider selects the service mesh implementation. Supported: "istio", "".&lt;br /&gt;Empty string disables service mesh resource generation.
 </ParamField>
@@ -4529,6 +4909,18 @@ Provider selects the service mesh implementation. Supported: "istio", "".&lt;br 
 <ParamField path="istio" type="IstioMeshConfiguration">
 Istio holds Istio-specific settings. Only used when Provider is "istio".
 See [IstioMeshConfiguration](#istiomeshconfiguration).
+</ParamField>
+</Accordion>
+
+<Accordion id="volcanoschedulerconfiguration" title="VolcanoSchedulerConfiguration">
+VolcanoSchedulerConfiguration holds Volcano scheduler settings.
+
+
+**Kind:** `type`
+**Appears in:** [OrchestratorConfiguration](#orchestratorconfiguration)
+
+<ParamField path="enabled" type="boolean">
+EXPERIMENTAL: Enabled controls Volcano scheduler integration for Grove PodCliqueSets.
 </ParamField>
 </Accordion>
 
@@ -4711,12 +5103,17 @@ For multinode deployments, the operator modifies probes based on the backend fra
 
 ##### VLLM Backend
 
-The operator automatically selects between two deployment modes based on parallelism configuration:
+The operator automatically applies distributed execution configuration based on parallelism settings:
 
-**Tensor/Pipeline Parallel Mode** (when `world_size > GPUs_per_node`):
-- Uses Ray for distributed execution (`--distributed-executor-backend ray`)
-- **Leader nodes**: Starts Ray head and runs vLLM; all probes remain active
-- **Worker nodes**: Run Ray agents only; all probes (liveness, readiness, startup) are removed
+**Tensor/Pipeline Parallel Mode (Recommended)** (when `world_size > GPUs_per_node`):
+- Uses PyTorch multiprocessing (mp) backend for distributed execution (`--distributed-executor-backend mp`)
+- Supports multi-node deployments with PyTorch's native distributed initialization
+- **All nodes**: Run vLLM with proper `--nnodes`, `--node-rank`, `--master-addr` flags injected
+- **Probes**: Worker probes adjusted; leader probes remain active
+
+**Ray Backend**:
+- Used for use cases such as Elastic EP
+- Install with `pip install "ray>=2.55.0"` and configure `--distributed-executor-backend ray`
 
 **Data Parallel Mode** (when `world_size × data_parallel_size > GPUs_per_node`):
 - **Worker nodes**: All probes (liveness, readiness, startup) are removed
@@ -4797,7 +5194,7 @@ These are injected into all components when the corresponding infrastructure ser
 | Variable | Purpose | Default | Type |
 | --- | --- | --- | --- |
 | `USE_STREAMING` | Enables streaming mode for inference request proxying | `true` | `string` (boolean) |
-| `RUST_LOG` | Rust log level and filter configuration | `debug,dynamo_llm::kv_router=trace` | `string` |
+| `RUST_LOG` | Rust log level and filter configuration | `info` | `string` |
 
 #### VLLM Backend
 
@@ -4880,7 +5277,8 @@ Default container ports are configured based on component type:
 ### Backend-Specific Configurations
 
 #### VLLM
-- **Ray Head Port**: 6379 (for Ray cluster coordination in multinode TP/PP deployments)
+- **Ray Head Port**: 6379 (for Ray-based multinode deployments)
+- **MP Master Port**: 29500 (for PyTorch distributed multinode TP/PP deployments with mp backend)
 - **Data Parallel RPC Port**: 13445 (for data parallel multinode deployments)
 
 #### SGLang

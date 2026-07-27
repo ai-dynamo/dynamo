@@ -39,9 +39,9 @@ EXPECTED_PACKAGES = (
     "operator.config.dynamo.nvidia.com/v1alpha1",
 )
 EXPECTED_TYPE_COUNTS = {
-    "nvidia.com/v1alpha1": 71,
-    "nvidia.com/v1beta1": 63,
-    "operator.config.dynamo.nvidia.com/v1alpha1": 31,
+    "nvidia.com/v1alpha1": 83,
+    "nvidia.com/v1beta1": 65,
+    "operator.config.dynamo.nvidia.com/v1alpha1": 32,
 }
 EXPECTED_OPERATOR_DEFAULT_SECTIONS = (
     "Pod Specification Defaults",
@@ -85,7 +85,7 @@ def workspace(tmp_path: Path) -> Path:
     """Clone the four generator I/O paths into ``tmp_path``.
 
     The parse input is copied from the source tree so workspace tests
-    exercise the same 3-package / 180-heading baseline as the model tests."""
+    exercise the same 3-package / 195-heading baseline as the model tests."""
     ws = tmp_path / "repo"
     dst = ws / "docs" / "fern"
     dst.mkdir(parents=True)
@@ -115,8 +115,8 @@ def test_each_package_type_count_matches_the_baseline(
     package_name: str,
     expected: int,
 ) -> None:
-    """The compact index pins the exact per-package type counts (71 / 63 /
-    31). Any drift from the tracked upstream API surface is a scope change
+    """The compact index pins the exact per-package type counts (83 / 65 /
+    32). Any drift from the tracked upstream API surface is a scope change
     and must be reviewed as one."""
     by_name = {pkg.name: pkg for pkg in reference.packages}
     package = by_name[package_name]
@@ -125,14 +125,14 @@ def test_each_package_type_count_matches_the_baseline(
     ), f"{package_name}: expected {expected} types, got {len(package.types)}"
 
 
-def test_total_type_count_is_the_baseline_one_hundred_sixty_five(
+def test_total_type_count_is_the_baseline_one_hundred_eighty(
     reference: kubernetes_api_discovery.KubernetesReference,
 ) -> None:
-    """71 + 63 + 31 = 165 typed sections in the compact index; combined
+    """83 + 65 + 32 = 180 typed sections in the compact index; combined
     with the three Resource Types pseudo-headings + twelve operator-default
-    subsections, this is the 180-heading parity the plan calls out."""
+    subsections, this is the 195-heading parity the plan calls out."""
     total = sum(len(pkg.types) for pkg in reference.packages)
-    assert total == sum(EXPECTED_TYPE_COUNTS.values()) == 165
+    assert total == sum(EXPECTED_TYPE_COUNTS.values()) == 180
 
 
 def test_operator_defaults_carries_exactly_twelve_subsections(
@@ -145,16 +145,16 @@ def test_operator_defaults_carries_exactly_twelve_subsections(
     assert titles == EXPECTED_OPERATOR_DEFAULT_SECTIONS
 
 
-def test_total_heading_parity_is_one_hundred_eighty(
+def test_total_heading_parity_is_one_hundred_ninety_five(
     reference: kubernetes_api_discovery.KubernetesReference,
 ) -> None:
-    """The compact index preserves 180 sections total: 165 typed schemas +
+    """The compact index preserves 195 sections total: 180 typed schemas +
     3 Resource Types indexes + 12 operator-default subsections. This
     guards the plan's structural invariant end-to-end."""
     typed = sum(len(pkg.types) for pkg in reference.packages)
     resource_indexes = len(reference.packages)  # one per package
     operator_defaults = len(reference.operator_defaults.subsections)
-    assert typed + resource_indexes + operator_defaults == 180
+    assert typed + resource_indexes + operator_defaults == 195
 
 
 def test_each_package_has_a_resource_types_index(
