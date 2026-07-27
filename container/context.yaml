@@ -80,7 +80,7 @@ vllm:
     base_image: ubuntu
     runtime_image: vllm/vllm-openai-cpu
     base_image_tag: 22.04
-    runtime_image_tag: v0.25.1
+    runtime_image_tag: v0.26.0
     # baseline_sbom: not yet captured for cpu — runtime build runs without subtraction
   flashinf_ref: v0.6.8.post1
   vllm_omni_ref: "v0.25.0rc1"
