@@ -955,6 +955,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to unmarshal generated deployment from annotation: %w", err)
 	}
+	applyDGDRRuntimeVersionOverride(dgdr, generatedDGD)
 
 	// Determine DGD name and namespace from generated deployment
 	dgdName := generatedDGD.Name
@@ -2052,6 +2053,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) generateDGDSpec(ctx context.Con
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to extract DGD from %s: %w", outputFile, err)
 	}
+	applyDGDRRuntimeVersionOverride(dgdr, dgd)
 
 	// Override the profiler-generated name with a DGDR-scoped unique name.
 	// The profiler emits a static topology-derived name (e.g. "vllm-agg") which
@@ -2103,6 +2105,19 @@ func (r *DynamoGraphDeploymentRequestReconciler) generateDGDSpec(ctx context.Con
 	}
 	dgdr.ResourceVersion = apply.GetResourceVersion()
 	return profilingResults, dgd.Name, nil
+}
+
+// applyDGDRRuntimeVersionOverride makes the DGDR authoritative across profiler versions.
+func applyDGDRRuntimeVersionOverride(
+	dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+) {
+	if dgdr.Spec.RuntimeVersionOverride == "" {
+		return
+	}
+	for i := range dgd.Spec.Components {
+		dgd.Spec.Components[i].RuntimeVersionOverride = dgdr.Spec.RuntimeVersionOverride
+	}
 }
 
 // encodeBetaDGDManifest returns JSON/YAML manifest bytes for a beta DGD.

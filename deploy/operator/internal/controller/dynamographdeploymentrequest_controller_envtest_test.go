@@ -963,7 +963,6 @@ spec:
   services:
     Frontend:
       replicas: 1
-      runtimeVersionOverride: 1.1.0
       extraPodSpec:
         mainContainer:
           image: registry.example/runtime:custom`
@@ -995,6 +994,8 @@ spec:
 			var updated nvidiacomv1beta1.DynamoGraphDeploymentRequest
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &updated)).Should(Succeed())
 			Expect(updated.Status.Phase).Should(Equal(nvidiacomv1beta1.DGDRPhaseDeploying))
+			Expect(updated.Annotations[AnnotationGeneratedDGDSpec]).Should(ContainSubstring("runtimeVersionOverride: 1.1.0"))
+			Expect(string(updated.Status.ProfilingResults.SelectedConfig.Raw)).Should(ContainSubstring(`"runtimeVersionOverride":"1.1.0"`))
 
 			// Reconcile again to create DGD
 			_, err = reconciler.Reconcile(ctx, reconcile.Request{
@@ -1016,6 +1017,44 @@ spec:
 			// Clean up DGD
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: expectedDGDName, Namespace: namespace}, dgd)).Should(Succeed())
 			_ = k8sClient.Delete(ctx, dgd)
+		})
+
+		It("Should apply the DGDR runtime version to a persisted legacy profiler result", func() {
+			ctx := context.Background()
+			dgdName := "legacy-profiler-result-dgd"
+			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "legacy-profiler-result",
+					Namespace: envtestNamespace,
+					Annotations: map[string]string{
+						AnnotationGeneratedDGDSpec: `apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: legacy-profiler-result-dgd
+spec:
+  services:
+    worker:
+      extraPodSpec:
+        mainContainer:
+          image: registry.example/runtime:custom`,
+					},
+				},
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+					RuntimeVersionOverride: "1.2.3",
+				},
+				Status: nvidiacomv1beta1.DynamoGraphDeploymentRequestStatus{
+					DGDName: dgdName,
+				},
+			}
+
+			_, err := reconciler.createDGD(ctx, dgdr)
+			Expect(err).NotTo(HaveOccurred())
+
+			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdName, Namespace: envtestNamespace}, dgd)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, dgd) }()
+			Expect(dgd.Spec.Components).Should(HaveLen(1))
+			Expect(dgd.Spec.Components[0].RuntimeVersionOverride).Should(Equal("1.2.3"))
 		})
 
 		It("Should create additional ConfigMaps without DGDR ownership and adopt them after DGD creation", func() {
