@@ -79,7 +79,7 @@ RUN wget --tries=3 --waitretry=5 https://raw.githubusercontent.com/intel/llm-sca
 # Install Intel GPU runtime packages
 RUN apt update -y && \
     apt-get install -y intel-opencl-icd  \
-    libze-intel-gpu-raytracing intel-ocloc intel-oneapi-compiler-dpcpp-cpp-2025.3 && \
+    intel-ocloc intel-oneapi-compiler-dpcpp-cpp-2025.3 && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 {% endif %}
 
