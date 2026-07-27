@@ -3,7 +3,7 @@
 
 //! Physical-capacity model for vLLM's GPU block pool.
 //!
-//! A cached hash may have several physical copies. Copy identity is internal;
+//! A cached key may have several physical copies. Copy identity is internal;
 //! the pool models occupancy, reference/pin state, and LRU eviction without
 //! reproducing vLLM's numeric block IDs or null block.
 
@@ -18,11 +18,35 @@ new_key_type! {
     pub(crate) struct BlockCopyId;
 }
 
+/// Index of a KV cache group within one worker's cache configuration.
+///
+/// A hybrid model splits its layers across groups (full attention, Mamba/SSM,
+/// sliding window) that share this physical pool but keep independent cache
+/// visibility.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct KvCacheGroupId(pub(crate) u8);
+
+/// vLLM's `BlockHashWithGroupId`: cache visibility is per KV cache group.
+///
+/// Groups derive their block hashes from the same tokens, so the group index
+/// is what keeps one group's cached blocks from satisfying another's lookups.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct GroupedHash {
+    pub(crate) group: KvCacheGroupId,
+    pub(crate) hash: SequenceHash,
+}
+
+impl GroupedHash {
+    pub(crate) fn new(group: KvCacheGroupId, hash: SequenceHash) -> Self {
+        Self { group, hash }
+    }
+}
+
 #[derive(Debug)]
 enum CopyState {
     Private,
     Cached {
-        hash: SequenceHash,
+        key: GroupedHash,
         refs: usize,
         pins: usize,
         inactive_at: Option<u64>,
@@ -42,7 +66,7 @@ pub(crate) struct PrefixHit {
 /// Capacity and cached-prefix pins held before a manager commits ownership.
 pub(crate) struct BlockReservation {
     /// Cached prefix copies in request order, from root/head to suffix/leaf.
-    prefix: Vec<(SequenceHash, BlockCopyId)>,
+    prefix: Vec<(GroupedHash, BlockCopyId)>,
     fresh: usize,
 }
 
@@ -58,14 +82,14 @@ impl BlockReservation {
 
 pub(crate) struct ReserveOutcome {
     pub(crate) reservation: BlockReservation,
-    /// Hashes whose final cache-visible physical copy was evicted.
-    pub(crate) removed: Vec<SequenceHash>,
+    /// Keys whose final cache-visible physical copy was evicted.
+    pub(crate) removed: Vec<GroupedHash>,
 }
 
 pub(crate) struct VllmBlockPool {
     capacity: usize,
     copies: SlotMap<BlockCopyId, BlockCopy>,
-    by_hash: FxHashMap<SequenceHash, SmallVec<[BlockCopyId; 1]>>,
+    by_key: FxHashMap<GroupedHash, SmallVec<[BlockCopyId; 1]>>,
     /// Ordinary LRU: lower timestamp is evicted first.
     inactive: BTreeMap<u64, BlockCopyId>,
     next_lru: u64,
@@ -78,18 +102,18 @@ impl VllmBlockPool {
         Self {
             capacity,
             copies: SlotMap::with_key(),
-            by_hash: FxHashMap::default(),
+            by_key: FxHashMap::default(),
             inactive: BTreeMap::new(),
             next_lru: 0,
             reserved: 0,
         }
     }
 
-    pub(crate) fn prefix_hit(&self, hash: SequenceHash) -> Option<PrefixHit> {
-        let id = self.first_copy(hash)?;
+    pub(crate) fn prefix_hit(&self, key: GroupedHash) -> Option<PrefixHit> {
+        let id = self.first_copy(key)?;
         let copy = &self.copies[id];
         let CopyState::Cached { refs, pins, .. } = &copy.state else {
-            unreachable!("hash index points to a private copy")
+            unreachable!("key index points to a private copy")
         };
         Some(PrefixHit {
             is_active: *refs > 0 || *pins > 0,
@@ -99,11 +123,11 @@ impl VllmBlockPool {
     /// Atomically pins `prefix` and reserves `fresh` additional copies.
     ///
     /// The caller obtains `prefix` from a preceding synchronous lookup. A
-    /// missing hash is therefore an invariant violation rather than capacity
+    /// missing key is therefore an invariant violation rather than capacity
     /// exhaustion.
     pub(crate) fn reserve(
         &mut self,
-        prefix: &[SequenceHash],
+        prefix: &[GroupedHash],
         fresh: usize,
     ) -> Option<ReserveOutcome> {
         if prefix.is_empty() {
@@ -112,11 +136,11 @@ impl VllmBlockPool {
 
         let hits = prefix
             .iter()
-            .map(|hash| {
-                let Some(id) = self.first_copy(*hash) else {
-                    panic!("authorized prefix hash {hash} is no longer resident")
+            .map(|key| {
+                let Some(id) = self.first_copy(*key) else {
+                    panic!("authorized prefix key {key:?} is no longer resident")
                 };
-                (*hash, id)
+                (*key, id)
             })
             .collect::<Vec<_>>();
 
@@ -140,8 +164,8 @@ impl VllmBlockPool {
 
         let mut removed = Vec::with_capacity(needed_evictions);
         for _ in 0..needed_evictions {
-            if let Some(hash) = self.evict_one() {
-                removed.push(hash);
+            if let Some(key) = self.evict_one() {
+                removed.push(key);
             }
         }
         self.reserved += fresh;
@@ -164,8 +188,8 @@ impl VllmBlockPool {
 
         let mut removed = Vec::with_capacity(needed_evictions);
         for _ in 0..needed_evictions {
-            if let Some(hash) = self.evict_one() {
-                removed.push(hash);
+            if let Some(key) = self.evict_one() {
+                removed.push(key);
             }
         }
         self.reserved += fresh;
@@ -186,8 +210,8 @@ impl VllmBlockPool {
     ) -> Vec<BlockCopyId> {
         let prefix = std::mem::take(&mut reservation.prefix);
         let mut ids = Vec::with_capacity(prefix.len());
-        for (hash, id) in prefix {
-            self.activate_pin(id, hash);
+        for (key, id) in prefix {
+            self.activate_pin(id, key);
             ids.push(id);
         }
         ids
@@ -205,21 +229,21 @@ impl VllmBlockPool {
     }
 
     /// Allocate a transferred/computed full block directly into the cache.
-    /// Returns whether the hash became router-visible (`0 -> 1`).
+    /// Returns whether the key became router-visible (`0 -> 1`).
     pub(crate) fn allocate_cached(
         &mut self,
         reservation: &mut BlockReservation,
-        hash: SequenceHash,
+        key: GroupedHash,
     ) -> (BlockCopyId, bool) {
         let id = self.allocate_private(reservation);
-        let became_visible = self.cache_private(id, hash);
+        let became_visible = self.cache_private(id, key);
         (id, became_visible)
     }
 
     /// Make a request-private computed full block available for prefix reuse.
-    /// Returns whether this is the first resident physical copy of `hash`.
-    pub(crate) fn cache_private(&mut self, id: BlockCopyId, hash: SequenceHash) -> bool {
-        let became_visible = !self.by_hash.contains_key(&hash);
+    /// Returns whether this is the first resident physical copy of `key`.
+    pub(crate) fn cache_private(&mut self, id: BlockCopyId, key: GroupedHash) -> bool {
+        let became_visible = !self.by_key.contains_key(&key);
         let Some(copy) = self.copies.get_mut(id) else {
             panic!("attempted to cache an unknown block copy")
         };
@@ -228,12 +252,12 @@ impl VllmBlockPool {
             "only a private copy can enter the prefix cache"
         );
         copy.state = CopyState::Cached {
-            hash,
+            key,
             refs: 1,
             pins: 0,
             inactive_at: None,
         };
-        self.by_hash.entry(hash).or_default().push(id);
+        self.by_key.entry(key).or_default().push(id);
         became_visible
     }
 
@@ -267,8 +291,8 @@ impl VllmBlockPool {
     /// callers to release them in eviction-priority order. Unpinning in reverse
     /// makes suffix/leaf blocks older LRU candidates than their parents.
     pub(crate) fn cancel(&mut self, reservation: BlockReservation) {
-        for (hash, id) in reservation.prefix.into_iter().rev() {
-            self.unpin(id, hash);
+        for (key, id) in reservation.prefix.into_iter().rev() {
+            self.unpin(id, key);
         }
         assert!(
             self.reserved >= reservation.fresh,
@@ -305,9 +329,9 @@ impl VllmBlockPool {
             .unwrap_or_else(|| panic!("block-pool occupancy exceeds capacity"))
     }
 
-    fn first_copy(&self, hash: SequenceHash) -> Option<BlockCopyId> {
-        self.by_hash
-            .get(&hash)
+    fn first_copy(&self, key: GroupedHash) -> Option<BlockCopyId> {
+        self.by_key
+            .get(&key)
             .and_then(|copies| copies.first())
             .copied()
     }
@@ -328,7 +352,7 @@ impl VllmBlockPool {
                 pins, inactive_at, ..
             } = &mut self.copies[id].state
             else {
-                panic!("prefix hash points to a private copy")
+                panic!("prefix key points to a private copy")
             };
             *pins = pins
                 .checked_add(1)
@@ -340,14 +364,14 @@ impl VllmBlockPool {
         }
     }
 
-    fn activate_pin(&mut self, id: BlockCopyId, expected_hash: SequenceHash) {
+    fn activate_pin(&mut self, id: BlockCopyId, expected_key: GroupedHash) {
         let CopyState::Cached {
-            hash, refs, pins, ..
+            key, refs, pins, ..
         } = &mut self.copies[id].state
         else {
             panic!("prefix reservation points to a private copy")
         };
-        assert_eq!(*hash, expected_hash, "reserved prefix hash changed");
+        assert_eq!(*key, expected_key, "reserved prefix key changed");
         assert!(*pins > 0, "prefix pin underflow");
         *pins -= 1;
         *refs = refs
@@ -355,15 +379,15 @@ impl VllmBlockPool {
             .unwrap_or_else(|| panic!("reference count overflow"));
     }
 
-    fn unpin(&mut self, id: BlockCopyId, expected_hash: SequenceHash) {
+    fn unpin(&mut self, id: BlockCopyId, expected_key: GroupedHash) {
         let should_deactivate = {
             let CopyState::Cached {
-                hash, refs, pins, ..
+                key, refs, pins, ..
             } = &mut self.copies[id].state
             else {
                 panic!("prefix reservation points to a private copy")
             };
-            assert_eq!(*hash, expected_hash, "reserved prefix hash changed");
+            assert_eq!(*key, expected_key, "reserved prefix key changed");
             assert!(*pins > 0, "prefix pin underflow");
             *pins -= 1;
             *pins == 0 && *refs == 0
@@ -386,8 +410,8 @@ impl VllmBlockPool {
         assert!(self.inactive.insert(timestamp, id).is_none());
     }
 
-    /// Evict one physical copy. A hash is returned only on its final copy.
-    fn evict_one(&mut self) -> Option<SequenceHash> {
+    /// Evict one physical copy. A key is returned only on its final copy.
+    fn evict_one(&mut self) -> Option<GroupedHash> {
         let Some((timestamp, id)) = self.inactive.pop_first() else {
             panic!("prechecked inactive capacity disappeared")
         };
@@ -395,7 +419,7 @@ impl VllmBlockPool {
             panic!("inactive LRU points to a missing copy")
         };
         let CopyState::Cached {
-            hash,
+            key,
             refs,
             pins,
             inactive_at,
@@ -407,19 +431,19 @@ impl VllmBlockPool {
         assert_eq!(pins, 0);
         assert_eq!(inactive_at, Some(timestamp));
 
-        let remove_hash = {
-            let Some(copies) = self.by_hash.get_mut(&hash) else {
-                panic!("evicted cached hash is missing from its index")
+        let remove_key = {
+            let Some(copies) = self.by_key.get_mut(&key) else {
+                panic!("evicted cached key is missing from its index")
             };
             let Some(position) = copies.iter().position(|candidate| *candidate == id) else {
-                panic!("evicted copy is missing from its hash index")
+                panic!("evicted copy is missing from its key index")
             };
             copies.remove(position);
             copies.is_empty()
         };
-        if remove_hash {
-            self.by_hash.remove(&hash);
-            Some(hash)
+        if remove_key {
+            self.by_key.remove(&key);
+            Some(key)
         } else {
             None
         }
@@ -430,7 +454,15 @@ impl VllmBlockPool {
 mod tests {
     use super::*;
 
-    fn reserve(pool: &mut VllmBlockPool, prefix: &[u64], fresh: usize) -> ReserveOutcome {
+    const ATTENTION: KvCacheGroupId = KvCacheGroupId(0);
+    const SECOND: KvCacheGroupId = KvCacheGroupId(1);
+
+    /// Attention-group key, the implicit group of every single-group test.
+    fn key(hash: SequenceHash) -> GroupedHash {
+        GroupedHash::new(ATTENTION, hash)
+    }
+
+    fn reserve(pool: &mut VllmBlockPool, prefix: &[GroupedHash], fresh: usize) -> ReserveOutcome {
         pool.reserve(prefix, fresh)
             .unwrap_or_else(|| panic!("unexpected capacity exhaustion"))
     }
@@ -440,11 +472,11 @@ mod tests {
         let mut pool = VllmBlockPool::new(2);
         let mut first = reserve(&mut pool, &[], 1).reservation;
         let first_id = pool.allocate_private(&mut first);
-        assert!(pool.cache_private(first_id, 7));
+        assert!(pool.cache_private(first_id, key(7)));
 
         let mut second = reserve(&mut pool, &[], 1).reservation;
         let second_id = pool.allocate_private(&mut second);
-        assert!(!pool.cache_private(second_id, 7));
+        assert!(!pool.cache_private(second_id, key(7)));
         assert_eq!(pool.num_active(), 2);
 
         pool.release(first_id);
@@ -457,10 +489,10 @@ mod tests {
         let mut pool = VllmBlockPool::new(1);
         let mut seed = reserve(&mut pool, &[], 1).reservation;
         let id = pool.allocate_private(&mut seed);
-        assert!(pool.cache_private(id, 9));
+        assert!(pool.cache_private(id, key(9)));
         pool.release(id);
 
-        assert!(pool.reserve(&[9], 1).is_none());
+        assert!(pool.reserve(&[key(9)], 1).is_none());
         assert_eq!(pool.num_active(), 0);
         assert_eq!(pool.num_inactive(), 1);
     }
@@ -470,10 +502,10 @@ mod tests {
         let mut pool = VllmBlockPool::new(2);
         let mut first = reserve(&mut pool, &[], 1).reservation;
         let first_id = pool.allocate_private(&mut first);
-        assert!(pool.cache_private(first_id, 3));
+        assert!(pool.cache_private(first_id, key(3)));
         let mut second = reserve(&mut pool, &[], 1).reservation;
         let second_id = pool.allocate_private(&mut second);
-        assert!(!pool.cache_private(second_id, 3));
+        assert!(!pool.cache_private(second_id, key(3)));
         pool.release(first_id);
         pool.release(second_id);
 
@@ -482,7 +514,7 @@ mod tests {
         pool.cancel(first_eviction.reservation);
 
         let second_eviction = reserve(&mut pool, &[], 2);
-        assert_eq!(second_eviction.removed, vec![3]);
+        assert_eq!(second_eviction.removed, vec![key(3)]);
         pool.cancel(second_eviction.reservation);
     }
 
@@ -492,22 +524,71 @@ mod tests {
         let mut seed = reserve(&mut pool, &[], 2).reservation;
         let parent = pool.allocate_private(&mut seed);
         let leaf = pool.allocate_private(&mut seed);
-        assert!(pool.cache_private(parent, 7));
-        assert!(pool.cache_private(leaf, 8));
+        assert!(pool.cache_private(parent, key(7)));
+        assert!(pool.cache_private(leaf, key(8)));
 
         // Match the normal request-release contract: the leaf enters the LRU
         // before its parent.
         pool.release(leaf);
         pool.release(parent);
 
-        let canceled = reserve(&mut pool, &[7, 8], 0);
+        let canceled = reserve(&mut pool, &[key(7), key(8)], 0);
         assert!(canceled.removed.is_empty());
         pool.cancel(canceled.reservation);
 
         let pressure = reserve(&mut pool, &[], 1);
-        assert_eq!(pressure.removed, vec![8]);
-        assert!(pool.prefix_hit(7).is_some());
-        assert!(pool.prefix_hit(8).is_none());
+        assert_eq!(pressure.removed, vec![key(8)]);
+        assert!(pool.prefix_hit(key(7)).is_some());
+        assert!(pool.prefix_hit(key(8)).is_none());
         pool.cancel(pressure.reservation);
+    }
+
+    /// Groups derive block hashes from the same tokens, so one group's cached
+    /// block must never satisfy another group's lookup.
+    #[test]
+    fn groups_do_not_share_cache_visibility_for_the_same_hash() {
+        let mut pool = VllmBlockPool::new(2);
+        let mut reservation = reserve(&mut pool, &[], 2).reservation;
+        let attention = pool.allocate_private(&mut reservation);
+        let second = pool.allocate_private(&mut reservation);
+
+        assert!(pool.cache_private(attention, GroupedHash::new(ATTENTION, 7)));
+        assert!(
+            pool.cache_private(second, GroupedHash::new(SECOND, 7)),
+            "the second group's copy of hash 7 is its own first resident copy"
+        );
+        assert_eq!(pool.num_active(), 2, "each group consumes its own block");
+
+        pool.release(second);
+        let pressure = reserve(&mut pool, &[], 1);
+        assert_eq!(pressure.removed, vec![GroupedHash::new(SECOND, 7)]);
+        assert!(
+            pool.prefix_hit(GroupedHash::new(ATTENTION, 7)).is_some(),
+            "evicting the second group's block must not remove the attention block"
+        );
+        assert!(pool.prefix_hit(GroupedHash::new(SECOND, 7)).is_none());
+        pool.cancel(pressure.reservation);
+    }
+
+    /// vLLM's `free_blocks` sends hashed blocks to the free-queue tail, where
+    /// they stay matchable until LRU evicts them, and unhashed blocks to the
+    /// head for immediate recycling. Groups that recycle blocks mid-request
+    /// rely on both.
+    #[test]
+    fn released_cached_copy_stays_matchable_while_private_copy_is_recycled() {
+        let mut pool = VllmBlockPool::new(2);
+        let mut reservation = reserve(&mut pool, &[], 2).reservation;
+        let cached = pool.allocate_private(&mut reservation);
+        let private = pool.allocate_private(&mut reservation);
+        assert!(pool.cache_private(cached, key(5)));
+
+        pool.release(cached);
+        pool.release(private);
+
+        assert_eq!(pool.num_inactive(), 1, "only the cached copy is retained");
+        assert!(
+            pool.prefix_hit(key(5)).is_some_and(|hit| !hit.is_active),
+            "a released cached copy remains an inactive prefix hit"
+        );
     }
 }
