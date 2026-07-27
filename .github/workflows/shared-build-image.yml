@@ -15,6 +15,11 @@ on:
         required: false
         type: string
         default: 'runtime'
+      build_target:
+        description: 'Optional Docker stage override; empty builds the rendered target'
+        required: false
+        type: string
+        default: ''
       cuda_version:
         description: 'CUDA versions to build as a JSON array'
         required: true
@@ -490,7 +495,7 @@ jobs:
           image_tag: ${{ steps.calculate-target-tag.outputs.image_uri }}
           framework: ${{ inputs.framework }}
           target: ${{ inputs.target }}
-          build_target: ${{ (inputs.make_efa && (inputs.target == 'runtime' || inputs.target == 'dev')) && 'aws' || inputs.target }}
+          build_target: ${{ inputs.build_target != '' && inputs.build_target || ((inputs.make_efa && (inputs.target == 'runtime' || inputs.target == 'dev')) && 'aws' || inputs.target) }}
           platform: ${{ inputs.platform }}
           cuda_version: ${{ matrix.cuda_version }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
