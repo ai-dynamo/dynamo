@@ -88,21 +88,30 @@ async def test_tokenizer_manager_internal_state_route_serializes_nested_dataclas
     )
 
     @dataclasses.dataclass
+    class PhaseConfig:
+        backend: str
+        max_bs: int | None
+        bs: list[int] | None
+        tc_compiler: str
+        full_prefill_max_req: int | None = None
+
+    @dataclasses.dataclass
     class CudaGraphConfig:
-        tp_size: int
-        pp_size: int
-        dp_size: int
-        max_bs: int
+        decode: PhaseConfig
+        prefill: PhaseConfig
 
     async def get_internal_state() -> list[dict[str, Any]]:
         return [
             {
                 "dp_rank": 0,
+                "tp_size": 4,
+                "pp_size": 2,
+                "dp_size": 8,
                 "cuda_graph_config": CudaGraphConfig(
-                    tp_size=4,
-                    pp_size=2,
-                    dp_size=8,
-                    max_bs=32,
+                    decode=PhaseConfig("full", 32, [1, 2, 4, 8], "eager"),
+                    prefill=PhaseConfig(
+                        "breakable", None, [1], "eager", full_prefill_max_req=4
+                    ),
                 ),
                 "tp_rank_ids": (0, 1, 2, 3),
                 "active_batch_ids": {7, 9},
@@ -139,11 +148,24 @@ async def test_tokenizer_manager_internal_state_route_serializes_nested_dataclas
 
         assert response.status_code == 200
         state = response.json()["result"][0]
+        assert state["tp_size"] == 4
+        assert state["pp_size"] == 2
+        assert state["dp_size"] == 8
         assert state["cuda_graph_config"] == {
-            "tp_size": 4,
-            "pp_size": 2,
-            "dp_size": 8,
-            "max_bs": 32,
+            "decode": {
+                "backend": "full",
+                "max_bs": 32,
+                "bs": [1, 2, 4, 8],
+                "tc_compiler": "eager",
+                "full_prefill_max_req": None,
+            },
+            "prefill": {
+                "backend": "breakable",
+                "max_bs": None,
+                "bs": [1],
+                "tc_compiler": "eager",
+                "full_prefill_max_req": 4,
+            },
         }
         assert state["tp_rank_ids"] == [0, 1, 2, 3]
         assert set(state["active_batch_ids"]) == {7, 9}

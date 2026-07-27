@@ -151,17 +151,37 @@ class RLMixin:
             return self._normalize_json_value(result)
         return {"result": self._normalize_json_value(result)}
 
-    def _normalize_json_value(self, value: Any) -> Any:
+    def _normalize_json_value(
+        self, value: Any, active_ids: set[int] | None = None
+    ) -> Any:
         """Recursively convert tokenizer_manager values to transport-safe data."""
-        if dataclasses.is_dataclass(value) and not isinstance(value, type):
-            return self._normalize_json_value(dataclasses.asdict(value))
-        if isinstance(value, dict):
-            return {
-                str(key): self._normalize_json_value(item)
-                for key, item in value.items()
-            }
-        if isinstance(value, (list, tuple, set)):
-            return [self._normalize_json_value(item) for item in value]
+        if active_ids is None:
+            active_ids = set()
+
+        is_dataclass = dataclasses.is_dataclass(value) and not isinstance(value, type)
+        is_collection = isinstance(value, (dict, list, tuple, set, frozenset))
+        if is_dataclass or is_collection:
+            value_id = id(value)
+            if value_id in active_ids:
+                return "<recursive reference>"
+
+            active_ids.add(value_id)
+            try:
+                if is_dataclass:
+                    return {
+                        field.name: self._normalize_json_value(
+                            getattr(value, field.name), active_ids
+                        )
+                        for field in dataclasses.fields(value)
+                    }
+                if isinstance(value, dict):
+                    return {
+                        str(key): self._normalize_json_value(item, active_ids)
+                        for key, item in value.items()
+                    }
+                return [self._normalize_json_value(item, active_ids) for item in value]
+            finally:
+                active_ids.remove(value_id)
         if value is None or isinstance(value, (str, int, float, bool)):
             return value
         return str(value)
