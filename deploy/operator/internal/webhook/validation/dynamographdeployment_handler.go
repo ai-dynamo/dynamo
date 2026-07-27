@@ -149,7 +149,7 @@ func (h *DynamoGraphDeploymentHandler) validateUpdate(
 	}
 
 	// Validate stateful rules (immutability + replicas protection)
-	updateWarnings, err := validator.validateUpdate(
+	updateWarnings, err := validator.ValidateUpdate(
 		ctx,
 		oldDeployment,
 		newDeployment,

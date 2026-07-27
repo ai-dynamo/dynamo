@@ -128,9 +128,7 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 	}
 
 	if v.validatesRuntimeVersionFor(runtimeVersionSourceV1Beta1) {
-		if err := runtimeVersionOverrideError(spec, fldPath); err != nil {
-			allErrs = append(allErrs, err)
-		}
+		allErrs = append(allErrs, v.validateRuntimeVersionOverride(spec, fldPath)...)
 	}
 
 	return allErrs
@@ -399,9 +397,7 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 		}
 	}
 	if v.validatesRuntimeVersionFor(runtimeVersionSourceV1Beta1) {
-		if err := runtimeVersionOverrideUpdateError(newComponent, oldComponent, fldPath); err != nil {
-			allErrs = append(allErrs, err)
-		}
+		allErrs = append(allErrs, v.validateRuntimeVersionOverrideUpdate(newComponent, oldComponent, fldPath)...)
 	}
 	return allErrs
 }
@@ -463,33 +459,38 @@ func (v *sharedValidation) validateExperimentalSpecUpdate(
 	return allErrs
 }
 
-func runtimeVersionOverrideError(
+// validateRuntimeVersionOverride validates runtime compatibility fields on create.
+// spec and fldPath must not be nil.
+func (v *sharedValidation) validateRuntimeVersionOverride(
 	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	fldPath *field.Path,
-) *field.Error {
-	image, imagePath := runtimeVersionImageAndPath(spec, fldPath)
-	return runtimeVersionError(image, spec.RuntimeVersionOverride, imagePath, fldPath.Child("runtimeVersionOverride"))
+) field.ErrorList {
+	image, imagePath := v.runtimeVersionImageAndPath(spec, fldPath)
+	return v.validateRuntimeVersion(image, spec.RuntimeVersionOverride, imagePath, fldPath.Child("runtimeVersionOverride"))
 }
 
-func runtimeVersionOverrideUpdateError(
+// validateRuntimeVersionOverrideUpdate ratchets runtime compatibility fields on update.
+// newSpec, oldSpec, and fldPath must not be nil.
+func (v *sharedValidation) validateRuntimeVersionOverrideUpdate(
 	newSpec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	oldSpec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	fldPath *field.Path,
-) *field.Error {
-	newImage, imagePath := runtimeVersionImageAndPath(newSpec, fldPath)
-	err := runtimeVersionError(newImage, newSpec.RuntimeVersionOverride, imagePath, fldPath.Child("runtimeVersionOverride"))
-	if err == nil || newImage == "" {
-		return err
-	}
-
-	oldImage, _ := runtimeVersionImageAndPath(oldSpec, fldPath)
-	if newImage == oldImage && newSpec.RuntimeVersionOverride == oldSpec.RuntimeVersionOverride {
-		return nil
-	}
-	return err
+) field.ErrorList {
+	newImage, imagePath := v.runtimeVersionImageAndPath(newSpec, fldPath)
+	oldImage, _ := v.runtimeVersionImageAndPath(oldSpec, fldPath)
+	return v.validateRuntimeVersionUpdate(
+		newImage,
+		newSpec.RuntimeVersionOverride,
+		oldImage,
+		oldSpec.RuntimeVersionOverride,
+		imagePath,
+		fldPath.Child("runtimeVersionOverride"),
+	)
 }
 
-func runtimeVersionImageAndPath(
+// runtimeVersionImageAndPath returns the main image and its v1beta1 field path.
+// spec and fldPath must not be nil.
+func (v *sharedValidation) runtimeVersionImageAndPath(
 	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	fldPath *field.Path,
 ) (string, *field.Path) {
@@ -503,20 +504,42 @@ func runtimeVersionImageAndPath(
 	return "", imagePath
 }
 
-func runtimeVersionError(
+// validateRuntimeVersionUpdate validates the new runtime fields unless an invalid old value is unchanged.
+// imagePath and overridePath must not be nil.
+func (v *sharedValidation) validateRuntimeVersionUpdate(
+	newImage string,
+	newOverride string,
+	oldImage string,
+	oldOverride string,
+	imagePath *field.Path,
+	overridePath *field.Path,
+) field.ErrorList {
+	allErrs := v.validateRuntimeVersion(newImage, newOverride, imagePath, overridePath)
+	if len(allErrs) == 0 || newImage == "" {
+		return allErrs
+	}
+	if newImage == oldImage && newOverride == oldOverride {
+		return nil
+	}
+	return allErrs
+}
+
+// validateRuntimeVersion validates a resolved image and override pair.
+// imagePath and overridePath must not be nil.
+func (v *sharedValidation) validateRuntimeVersion(
 	image string,
 	override string,
 	imagePath *field.Path,
 	overridePath *field.Path,
-) *field.Error {
+) field.ErrorList {
 	if image == "" {
-		return field.Required(imagePath, "is required")
+		return field.ErrorList{field.Required(imagePath, "is required")}
 	}
 	if override != "" {
 		return nil
 	}
 	if _, err := runtimeversion.ParseImageVersion(image); err != nil {
-		return field.Required(overridePath, "is required when the specified main container image has no parseable semantic-version tag")
+		return field.ErrorList{field.Required(overridePath, "is required when the specified main container image has no parseable semantic-version tag")}
 	}
 	return nil
 }

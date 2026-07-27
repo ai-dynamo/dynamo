@@ -99,19 +99,9 @@ func (v *DynamoGraphDeploymentValidator) validate(
 }
 
 // ValidateUpdate performs stateful validation comparing old and new v1beta1 DGD objects.
-// ctx, oldDGD, and newDGD must not be nil.
+// ctx, oldDGD, and newDGD must not be nil. runtimeVersionSource identifies the request's source API.
 // If userInfo is nil, replica changes for DGDSA-enabled components fail closed.
 func (v *DynamoGraphDeploymentValidator) ValidateUpdate(
-	ctx context.Context,
-	oldDGD *nvidiacomv1beta1.DynamoGraphDeployment,
-	newDGD *nvidiacomv1beta1.DynamoGraphDeployment,
-	userInfo *authenticationv1.UserInfo,
-	operatorPrincipal string,
-) (admission.Warnings, error) {
-	return v.validateUpdate(ctx, oldDGD, newDGD, userInfo, operatorPrincipal, runtimeVersionSourceV1Beta1)
-}
-
-func (v *DynamoGraphDeploymentValidator) validateUpdate(
 	ctx context.Context,
 	oldDGD *nvidiacomv1beta1.DynamoGraphDeployment,
 	newDGD *nvidiacomv1beta1.DynamoGraphDeployment,

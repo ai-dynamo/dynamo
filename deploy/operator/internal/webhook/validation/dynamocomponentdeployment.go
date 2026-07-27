@@ -70,16 +70,8 @@ func (v *DynamoComponentDeploymentValidator) validate(
 
 // ValidateUpdate performs complete validation of an updated v1beta1 DCD and
 // compares its state with the previous object.
-// ctx, oldDCD, and newDCD must not be nil.
+// ctx, oldDCD, and newDCD must not be nil. runtimeVersionSource identifies the request's source API.
 func (v *DynamoComponentDeploymentValidator) ValidateUpdate(
-	ctx context.Context,
-	oldDCD *nvidiacomv1beta1.DynamoComponentDeployment,
-	newDCD *nvidiacomv1beta1.DynamoComponentDeployment,
-) (admission.Warnings, error) {
-	return v.validateUpdate(ctx, oldDCD, newDCD, runtimeVersionSourceV1Beta1)
-}
-
-func (v *DynamoComponentDeploymentValidator) validateUpdate(
 	ctx context.Context,
 	oldDCD *nvidiacomv1beta1.DynamoComponentDeployment,
 	newDCD *nvidiacomv1beta1.DynamoComponentDeployment,
@@ -96,20 +88,20 @@ func (v *DynamoComponentDeploymentValidator) validateUpdate(
 	}
 	allErrs = append(allErrs, validation.validateDynamoComponentDeploymentV1alpha1(newAlpha)...)
 
+	// Re-enable source-version runtime validation for the old/new ratchet.
 	validation.runtimeVersionSource = runtimeVersionSource
 	if validation.validatesRuntimeVersionFor(runtimeVersionSourceV1Alpha1) {
 		oldAlpha, err := alphaDynamoComponentDeploymentForValidation(oldDCD)
 		if err != nil {
 			return nil, fmt.Errorf("cannot validate old preserved v1alpha1 DynamoComponentDeployment fields: %w", err)
 		}
-		if err := runtimeVersionOverrideUpdateErrorV1Alpha1(
+		allErrs = append(allErrs, validation.validateRuntimeVersionOverrideUpdateV1Alpha1(
 			&newAlpha.Spec.DynamoComponentDeploymentSharedSpec,
 			&oldAlpha.Spec.DynamoComponentDeploymentSharedSpec,
 			field.NewPath("spec"),
-		); err != nil {
-			allErrs = append(allErrs, err)
-		}
+		)...)
 	}
+
 	allErrs = append(allErrs, validation.validateDynamoComponentDeploymentUpdate(newDCD, oldDCD)...)
 	return validation.warnings, invalidDynamoComponentDeploymentError(newDCD, allErrs)
 }

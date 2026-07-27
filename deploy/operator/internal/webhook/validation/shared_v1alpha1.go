@@ -77,9 +77,7 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecV1alpha1(
 		allErrs = append(allErrs, v.validateFailoverSpecV1alpha1(spec.Failover, fldPath.Child("failover"))...)
 	}
 	if v.validatesRuntimeVersionFor(runtimeVersionSourceV1Alpha1) {
-		if err := runtimeVersionOverrideErrorV1Alpha1(spec, fldPath); err != nil {
-			allErrs = append(allErrs, err)
-		}
+		allErrs = append(allErrs, v.validateRuntimeVersionOverrideV1Alpha1(spec, fldPath)...)
 	}
 
 	return allErrs
@@ -140,33 +138,38 @@ func (v *sharedValidation) validateFailoverSpecV1alpha1(
 	)}
 }
 
-func runtimeVersionOverrideErrorV1Alpha1(
+// validateRuntimeVersionOverrideV1Alpha1 validates runtime compatibility fields on create.
+// spec and fldPath must not be nil.
+func (v *sharedValidation) validateRuntimeVersionOverrideV1Alpha1(
 	spec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec,
 	fldPath *field.Path,
-) *field.Error {
-	image, imagePath := runtimeVersionImageAndPathV1Alpha1(spec, fldPath)
-	return runtimeVersionError(image, spec.RuntimeVersionOverride, imagePath, fldPath.Child("runtimeVersionOverride"))
+) field.ErrorList {
+	image, imagePath := v.runtimeVersionImageAndPathV1Alpha1(spec, fldPath)
+	return v.validateRuntimeVersion(image, spec.RuntimeVersionOverride, imagePath, fldPath.Child("runtimeVersionOverride"))
 }
 
-func runtimeVersionOverrideUpdateErrorV1Alpha1(
+// validateRuntimeVersionOverrideUpdateV1Alpha1 ratchets runtime compatibility fields on update.
+// newSpec, oldSpec, and fldPath must not be nil.
+func (v *sharedValidation) validateRuntimeVersionOverrideUpdateV1Alpha1(
 	newSpec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec,
 	oldSpec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec,
 	fldPath *field.Path,
-) *field.Error {
-	newImage, imagePath := runtimeVersionImageAndPathV1Alpha1(newSpec, fldPath)
-	err := runtimeVersionError(newImage, newSpec.RuntimeVersionOverride, imagePath, fldPath.Child("runtimeVersionOverride"))
-	if err == nil || newImage == "" {
-		return err
-	}
-
-	oldImage, _ := runtimeVersionImageAndPathV1Alpha1(oldSpec, fldPath)
-	if newImage == oldImage && newSpec.RuntimeVersionOverride == oldSpec.RuntimeVersionOverride {
-		return nil
-	}
-	return err
+) field.ErrorList {
+	newImage, imagePath := v.runtimeVersionImageAndPathV1Alpha1(newSpec, fldPath)
+	oldImage, _ := v.runtimeVersionImageAndPathV1Alpha1(oldSpec, fldPath)
+	return v.validateRuntimeVersionUpdate(
+		newImage,
+		newSpec.RuntimeVersionOverride,
+		oldImage,
+		oldSpec.RuntimeVersionOverride,
+		imagePath,
+		fldPath.Child("runtimeVersionOverride"),
+	)
 }
 
-func runtimeVersionImageAndPathV1Alpha1(
+// runtimeVersionImageAndPathV1Alpha1 returns the main image and its source-version field path.
+// spec and fldPath must not be nil.
+func (v *sharedValidation) runtimeVersionImageAndPathV1Alpha1(
 	spec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec,
 	fldPath *field.Path,
 ) (string, *field.Path) {

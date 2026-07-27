@@ -80,13 +80,11 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecUpdat
 		if !exists {
 			continue
 		}
-		if err := runtimeVersionOverrideUpdateErrorV1Alpha1(
+		allErrs = append(allErrs, v.validateRuntimeVersionOverrideUpdateV1Alpha1(
 			newService,
 			oldService,
 			servicesPath.Key(serviceName),
-		); err != nil {
-			allErrs = append(allErrs, err)
-		}
+		)...)
 	}
 	return allErrs
 }

@@ -177,6 +177,7 @@ func dgdrRuntimeVersionOverrideRequired(spec *nvidiacomv1beta1.DynamoGraphDeploy
 	return err != nil
 }
 
+// isDGDRRuntimeVersionOverrideRepair reports whether an update only repairs a missing required override.
 func isDGDRRuntimeVersionOverrideRepair(
 	newSpec *nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec,
 	oldSpec *nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec,
