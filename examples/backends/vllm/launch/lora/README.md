@@ -1,8 +1,25 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # LoRA with vLLM Backend
 
-For the full LoRA integration guide (setup, usage, API reference, troubleshooting), see [the shared LoRA guide](../../../../common/lora.md).
+For setup, usage, API reference, and troubleshooting, see the
+[shared LoRA guide](../../../../common/lora.md).
 
 ## Quick Start
+
+Load the adapter directly from Hugging Face Hub:
+
+```bash
+./agg_lora_hf.sh
+```
+
+Set `HF_TOKEN` before running the script when the base model or adapter is private. Override
+`HF_LORA_REPO`, `LORA_NAME`, or `LORA_URI` to use another adapter or revision.
+
+To use S3-compatible storage through MinIO:
 
 ```bash
 ./setup_minio.sh    # Start MinIO, download & upload LoRA
@@ -20,4 +37,5 @@ For the full LoRA integration guide (setup, usage, API reference, troubleshootin
 ./agg_lora_router.sh
 ```
 
-Launches two vLLM workers behind a KV-aware router. Load the LoRA to both workers (ports 8081 and 8082), then requests are routed with KV cache affinity for better cache hit rates.
+The script launches two vLLM workers behind a KV-aware router. Load the LoRA to both workers on
+ports 8081 and 8082. The router then uses KV cache affinity to improve cache hit rates.

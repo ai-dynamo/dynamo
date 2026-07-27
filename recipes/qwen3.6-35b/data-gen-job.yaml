@@ -37,7 +37,7 @@ spec:
         fsGroup: 0
       containers:
         - name: generate-datasets
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
           imagePullPolicy: IfNotPresent
           # No privilege escalation, drop all Linux caps, default seccomp.
           # runAsUser:0 is set at the pod level for PVC fsGroup writes —
@@ -51,7 +51,7 @@ spec:
             seccompProfile:
               type: RuntimeDefault
           env:
-            # nvcr.io/.../vllm-runtime:1.2.1 was cut from a release branch
+            # nvcr.io/.../vllm-runtime:1.3.0 was cut from a release branch
             # that predates dynamo PR 8201 (sliding-window strategy), so the
             # baked /workspace/benchmarks/multimodal/jsonl/main.py is the
             # older single-turn-only version. Pull a pinned main SHA to get

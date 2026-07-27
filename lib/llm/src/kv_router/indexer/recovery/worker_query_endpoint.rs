@@ -9,7 +9,7 @@ use dynamo_kv_router::{
     protocols::DpRank,
 };
 use dynamo_runtime::{
-    component::Component,
+    component::{Component, StartedEndpoint},
     pipeline::{
         AsyncEngine, AsyncEngineContextProvider, ManyOut, ResponseStream, SingleIn,
         network::Ingress,
@@ -19,17 +19,14 @@ use dynamo_runtime::{
 };
 use tokio::sync::Semaphore;
 
-use crate::kv_router::{
-    worker_kv_indexer_query_endpoint, worker_kv_indexer_query_endpoint_for_worker,
-};
-
 /// Worker-side endpoint registration for Router -> LocalKvIndexer query service
 pub(crate) async fn start_worker_kv_query_endpoint(
     component: Component,
+    publisher_id: u64,
     worker_id: u64,
     dp_rank: DpRank,
     local_indexer: Arc<LocalKvIndexer>,
-) {
+) -> anyhow::Result<StartedEndpoint> {
     let engine = Arc::new(WorkerKvQueryEngine {
         worker_id,
         dp_rank,
@@ -37,39 +34,22 @@ pub(crate) async fn start_worker_kv_query_endpoint(
         processing_semaphore: Semaphore::new(1),
     });
 
-    let ingress = match Ingress::for_engine(engine) {
-        Ok(ingress) => ingress,
-        Err(e) => {
-            tracing::error!(
-                "Failed to build WorkerKvQuery endpoint handler for worker {worker_id} dp_rank {dp_rank}: {e}"
-            );
-            return;
-        }
-    };
+    let ingress = Ingress::for_engine(engine)?;
 
     let route_worker_id = component.drt().connection_id();
-    let endpoint_name = if route_worker_id == worker_id {
-        worker_kv_indexer_query_endpoint(dp_rank)
-    } else {
-        worker_kv_indexer_query_endpoint_for_worker(worker_id, dp_rank)
-    };
+    let endpoint_name = format!("worker_kv_query_source_{publisher_id:x}");
     tracing::info!(
         "WorkerKvQuery endpoint starting for worker {worker_id} dp_rank {dp_rank} \
          routed by instance {route_worker_id} on endpoint '{endpoint_name}'"
     );
 
-    if let Err(e) = component
+    component
         .endpoint(&endpoint_name)
         .endpoint_builder()
         .handler(ingress)
         .graceful_shutdown(true)
-        .start()
+        .start_with_registration()
         .await
-    {
-        tracing::error!(
-            "WorkerKvQuery endpoint failed for worker {worker_id} dp_rank {dp_rank}: {e}"
-        );
-    }
 }
 
 pub(super) struct WorkerKvQueryEngine {
@@ -165,11 +145,29 @@ impl AsyncEngine<SingleIn<WorkerKvQueryRequest>, ManyOut<WorkerKvQueryResponse>,
             .local_indexer
             .get_events_in_id_range(request.start_event_id, request.end_event_id)
             .await;
+        let response = negotiate_tree_dump_failure(response, request.supports_tree_dump_failed);
 
         Ok(ResponseStream::new(
             Box::pin(stream::iter(vec![response])),
             ctx.context(),
         ))
+    }
+}
+
+fn negotiate_tree_dump_failure(
+    response: WorkerKvQueryResponse,
+    supports_tree_dump_failed: bool,
+) -> WorkerKvQueryResponse {
+    match response {
+        WorkerKvQueryResponse::TreeDumpFailed { last_event_id, .. }
+            if !supports_tree_dump_failed =>
+        {
+            WorkerKvQueryResponse::TreeDump {
+                events: Vec::new(),
+                last_event_id,
+            }
+        }
+        response => response,
     }
 }
 
@@ -196,5 +194,33 @@ impl SlowQueryGuard {
 impl Drop for SlowQueryGuard {
     fn drop(&mut self) {
         self.0.abort();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_dump_failure_is_capability_negotiated() {
+        let failure = || WorkerKvQueryResponse::TreeDumpFailed {
+            last_event_id: 17,
+            message: "offline".to_string(),
+        };
+
+        assert!(matches!(
+            negotiate_tree_dump_failure(failure(), true),
+            WorkerKvQueryResponse::TreeDumpFailed {
+                last_event_id: 17,
+                ..
+            }
+        ));
+        assert!(matches!(
+            negotiate_tree_dump_failure(failure(), false),
+            WorkerKvQueryResponse::TreeDump {
+                events,
+                last_event_id: 17,
+            } if events.is_empty()
+        ));
     }
 }

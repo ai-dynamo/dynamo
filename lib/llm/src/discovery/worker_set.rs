@@ -1,17 +1,18 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! A WorkerSet represents a group of workers deployed from the same configuration,
-//! identified by their shared namespace. Each WorkerSet owns a complete pipeline
-//! (engines, KV router, prefill router) built from its specific ModelDeploymentCard.
+//! A WorkerSet represents a group of workers behind one serving endpoint. Each
+//! WorkerSet owns a complete pipeline (engines, KV router, prefill router) built
+//! from its specific ModelDeploymentCard.
 
 use std::sync::Arc;
 
+use dynamo_runtime::protocols::EndpointId;
 use tokio::sync::watch;
 
 use crate::{
     discovery::KvWorkerMonitor,
-    kv_router::{KvRouter, PrefillRouter},
+    kv_router::{EncoderRouter, KvRouter, PrefillRouter},
     model_card::ModelDeploymentCard,
     types::{
         RealtimeBidirectionalEngine,
@@ -30,6 +31,10 @@ use crate::{
 pub struct WorkerSet {
     /// Full namespace (e.g., "ns-abc12345")
     namespace: String,
+
+    /// Exact serving pool identity. Discovery-backed WorkerSets always set
+    /// this; in-process models have no distributed endpoint.
+    endpoint_id: Option<EndpointId>,
 
     /// MDC checksum for this set's configuration
     mdcsum: String,
@@ -58,6 +63,10 @@ pub struct WorkerSet {
     /// deactivate it when all prefill workers die, and reactivate when they rejoin.
     pub(crate) prefill_router: Option<Arc<PrefillRouter>>,
 
+    /// Optional multimodal encoder hop. Stored for discovery-driven
+    /// deactivation/reactivation when Encode workers leave or rejoin.
+    pub(crate) encoder_router: Option<Arc<EncoderRouter>>,
+
     /// Watcher for available instance IDs (from the Client's discovery watch).
     /// None for in-process models (http/grpc) which don't have a discovery client.
     instance_count_rx: Option<watch::Receiver<Vec<u64>>>,
@@ -67,6 +76,7 @@ impl WorkerSet {
     pub fn new(namespace: String, mdcsum: String, card: ModelDeploymentCard) -> Self {
         Self {
             namespace,
+            endpoint_id: None,
             mdcsum,
             card,
             chat_engine: None,
@@ -81,12 +91,21 @@ impl WorkerSet {
             kv_router: None,
             worker_monitor: None,
             prefill_router: None,
+            encoder_router: None,
             instance_count_rx: None,
         }
     }
 
     pub fn namespace(&self) -> &str {
         &self.namespace
+    }
+
+    pub fn endpoint_id(&self) -> Option<&EndpointId> {
+        self.endpoint_id.as_ref()
+    }
+
+    pub(crate) fn set_endpoint_id(&mut self, endpoint_id: EndpointId) {
+        self.endpoint_id = Some(endpoint_id);
     }
 
     pub fn mdcsum(&self) -> &str {

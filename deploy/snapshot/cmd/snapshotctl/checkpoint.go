@@ -2,18 +2,13 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
 
-	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/watch"
-	"k8s.io/client-go/kubernetes"
 
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 )
@@ -36,11 +31,13 @@ type result struct {
 	CheckpointID       string
 	CheckpointLocation string
 	CheckpointJob      string
+	PodSnapshot        string
+	BoundContent       string
 	RestorePod         string
 	Status             string
 }
 
-func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (*result, error) {
+func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (_ *result, retErr error) {
 	if strings.TrimSpace(opts.ManifestPath) == "" {
 		return nil, fmt.Errorf("missing required flags: --manifest")
 	}
@@ -48,7 +45,7 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (*result, er
 		return nil, fmt.Errorf("--timeout must be greater than zero")
 	}
 
-	pod, clientset, namespace, storage, err := loadRunContext(ctx, opts.ManifestPath, opts.Namespace, opts.KubeContext)
+	pod, clientset, crClient, namespace, storage, err := loadRunContext(ctx, opts.ManifestPath, opts.Namespace, opts.KubeContext)
 	if err != nil {
 		return nil, err
 	}
@@ -66,8 +63,6 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (*result, er
 		return nil, err
 	}
 
-	// Stamp (or validate) the required snapshot-target-containers annotation.
-	// Checkpoint contract: exactly one target container per Job.
 	targetValue, err := reconcileTargetContainers(pod.Annotations, opts.Container, 1, 1)
 	if err != nil {
 		return nil, err
@@ -96,7 +91,7 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (*result, er
 	if err != nil {
 		return nil, err
 	}
-	_, err = clientset.BatchV1().Jobs(namespace).Create(ctx, job, metav1.CreateOptions{})
+	createdJob, err := clientset.BatchV1().Jobs(namespace).Create(ctx, job, metav1.CreateOptions{})
 	if apierrors.IsAlreadyExists(err) {
 		return nil, fmt.Errorf("checkpoint job %s/%s already exists", namespace, checkpointJobName)
 	}
@@ -104,106 +99,44 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (*result, er
 		return nil, err
 	}
 
+	// Clean up the Job on any error after this point. The PodSnapshot is left in place
+	// to aid debugging when the flow fails.
+	defer func() {
+		if retErr != nil {
+			_ = clientset.BatchV1().Jobs(namespace).Delete(ctx, checkpointJobName, metav1.DeleteOptions{})
+		}
+	}()
+
 	waitCtx, cancel := context.WithTimeout(ctx, opts.Timeout)
 	defer cancel()
-	status, err := waitForCheckpoint(waitCtx, clientset, namespace, checkpointJobName)
+
+	sourcePod, err := waitForSourcePod(waitCtx, clientset, namespace, checkpointJobName, createdJob.UID)
 	if err != nil {
 		return nil, err
 	}
 
-	return &result{
+	snapName := podSnapshotName(checkpointJobName)
+	snap, err := createPodSnapshot(waitCtx, crClient, namespace, snapName, sourcePod.Name, sourcePod.UID, checkpointID)
+	if err != nil {
+		return nil, err
+	}
+
+	snap, err = waitForPodSnapshot(waitCtx, crClient, namespace, snap.Name)
+	if err != nil {
+		return nil, err
+	}
+
+	res := &result{
 		Name:               pod.Name,
 		Namespace:          namespace,
 		CheckpointID:       checkpointID,
 		CheckpointLocation: resolvedStorage.Location,
 		CheckpointJob:      checkpointJobName,
-		Status:             status,
-	}, nil
-}
-
-func waitForCheckpoint(ctx context.Context, clientset kubernetes.Interface, namespace string, jobName string) (string, error) {
-	var status string
-	err := watchNamedObject(
-		ctx,
-		jobName,
-		&batchv1.Job{},
-		func(ctx context.Context, options metav1.ListOptions) (runtime.Object, error) {
-			return clientset.BatchV1().Jobs(namespace).List(ctx, options)
-		},
-		func(ctx context.Context, options metav1.ListOptions) (watch.Interface, error) {
-			return clientset.BatchV1().Jobs(namespace).Watch(ctx, options)
-		},
-		func(event watch.Event) (bool, error) {
-			if event.Type == watch.Error {
-				return false, apierrors.FromObject(event.Object)
-			}
-
-			job, ok := event.Object.(*batchv1.Job)
-			if !ok {
-				return false, fmt.Errorf("unexpected checkpoint watch object %T", event.Object)
-			}
-
-			status = strings.TrimSpace(job.Annotations[snapshotprotocol.CheckpointStatusAnnotation])
-			if status == snapshotprotocol.CheckpointStatusCompleted {
-				return true, nil
-			}
-			if status == snapshotprotocol.CheckpointStatusFailed {
-				return false, fmt.Errorf("checkpoint job %s/%s failed", namespace, jobName)
-			}
-			if job.Status.Failed > 0 {
-				return false, fmt.Errorf("checkpoint job %s/%s failed", namespace, jobName)
-			}
-			for _, condition := range job.Status.Conditions {
-				if condition.Status != corev1.ConditionTrue {
-					continue
-				}
-				if condition.Type == batchv1.JobFailed {
-					return false, fmt.Errorf("checkpoint job %s/%s failed: %s", namespace, jobName, strings.TrimSpace(condition.Message))
-				}
-			}
-			return false, nil
-		},
-	)
-	if err != nil {
-		if !errors.Is(err, context.DeadlineExceeded) {
-			return "", err
-		}
-		return "", fmt.Errorf("checkpoint job %s/%s timed out: %s", namespace, jobName, checkpointTimeoutSummary(clientset, namespace, jobName, status))
+		PodSnapshot:        snap.Name,
+		Status:             "completed",
 	}
-	return status, nil
-}
-
-func checkpointTimeoutSummary(clientset kubernetes.Interface, namespace string, jobName string, status string) string {
-	summaryCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	pods, err := clientset.CoreV1().Pods(namespace).List(summaryCtx, metav1.ListOptions{
-		LabelSelector: "batch.kubernetes.io/job-name=" + jobName,
-	})
-	if err != nil {
-		return "unable to list checkpoint pod: " + err.Error()
+	if snap.Status.BoundPodSnapshotContentName != nil && *snap.Status.BoundPodSnapshotContentName != "" {
+		res.BoundContent = *snap.Status.BoundPodSnapshotContentName
 	}
-	if len(pods.Items) == 0 {
-		return "no checkpoint pod created yet"
-	}
-
-	pod := pods.Items[0]
-	parts := []string{
-		fmt.Sprintf("job_status=%q", status),
-		fmt.Sprintf("pod=%s phase=%s", pod.Name, pod.Status.Phase),
-	}
-	for _, condition := range pod.Status.Conditions {
-		if condition.Status == corev1.ConditionTrue || condition.Status == corev1.ConditionFalse {
-			parts = append(parts, fmt.Sprintf("%s=%s", condition.Type, condition.Status))
-		}
-	}
-	for _, containerStatus := range pod.Status.ContainerStatuses {
-		if containerStatus.State.Waiting != nil {
-			parts = append(parts, fmt.Sprintf("container=%s waiting=%s", containerStatus.Name, containerStatus.State.Waiting.Reason))
-		}
-		if containerStatus.State.Terminated != nil {
-			parts = append(parts, fmt.Sprintf("container=%s terminated=%s", containerStatus.Name, containerStatus.State.Terminated.Reason))
-		}
-	}
-	return strings.Join(parts, " ")
+	return res, nil
 }

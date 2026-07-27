@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use dynamo_kv_router::scheduling::{RequestLifecycleLease, RequestProgressUpdater};
 use dynamo_runtime::{
     metrics::frontend_perf::{STAGE_DISPATCH, StageGuard},
     protocols::annotated::Annotated,
@@ -17,30 +18,43 @@ use crate::{
     },
 };
 
-/// Post-selection owner of scheduler bookkeeping.
+/// Owns scheduler cleanup after a worker is selected.
 ///
-/// `KvPushRouter` installs this through [`RequestGuard`] before its next
-/// fallible await. At that point the scheduling response channel has completed
-/// its admission handoff and no longer represents request lifetime.
+/// `KvPushRouter` installs this through [`RequestGuard`] immediately after
+/// selection and before backend dispatch. The lifecycle lease moves directly
+/// from the scheduling response into this guard and remains responsible for
+/// cleanup until the request ends.
 struct RequestCleanup {
     chooser: Arc<KvRouter>,
     context_id: String,
     scheduler_tracked: bool,
+    lifecycle: Option<(RequestProgressUpdater, RequestLifecycleLease)>,
     freed: bool,
 }
 
 impl RequestCleanup {
-    fn new(chooser: Arc<KvRouter>, context_id: String, scheduler_tracked: bool) -> Self {
+    fn new(
+        chooser: Arc<KvRouter>,
+        context_id: String,
+        scheduler_tracked: bool,
+        lifecycle: Option<(RequestProgressUpdater, RequestLifecycleLease)>,
+    ) -> Self {
+        debug_assert!(lifecycle.is_none() || scheduler_tracked);
         Self {
             chooser,
             context_id,
             scheduler_tracked,
+            lifecycle,
             freed: false,
         }
     }
 
     async fn finish(&mut self) {
-        if self.scheduler_tracked
+        if let Some((_progress, lease)) = self.lifecycle.take() {
+            // RequestLifecycleLease reports the terminal outcome to the scheduler actor.
+            // The scheduler actor remains the sole owner of booking and queue cleanup.
+            drop(lease);
+        } else if self.scheduler_tracked
             && let Err(error) = self.chooser.free(&self.context_id).await
         {
             tracing::warn!(
@@ -55,8 +69,7 @@ impl RequestCleanup {
 
 impl Drop for RequestCleanup {
     fn drop(&mut self) {
-        let needs_free = !self.freed && self.scheduler_tracked;
-        if !needs_free {
+        if self.freed || !self.scheduler_tracked || self.lifecycle.is_some() {
             return;
         }
 
@@ -71,7 +84,8 @@ impl Drop for RequestCleanup {
         let chooser = self.chooser.clone();
         let context_id = self.context_id.clone();
         handle.spawn(async move {
-            if let Err(error) = chooser.free(&context_id).await {
+            let result = chooser.free(&context_id).await;
+            if let Err(error) = result {
                 tracing::warn!(
                     request_id = %context_id,
                     %error,
@@ -87,6 +101,7 @@ struct RequestObservability {
     tracker: Option<Arc<RequestTracker>>,
     request_metrics: Arc<RouterRequestMetrics>,
     cumulative_osl: usize,
+    authoritative_context_tokens: Option<usize>,
     metrics_recorded: bool,
     first_token_recorded: bool,
     dispatch_guard: Option<StageGuard>,
@@ -102,6 +117,7 @@ impl RequestObservability {
             tracker,
             request_metrics,
             cumulative_osl: 0,
+            authoritative_context_tokens: None,
             metrics_recorded: false,
             first_token_recorded: false,
             dispatch_guard: None,
@@ -155,6 +171,18 @@ impl RequestObservability {
         self.cumulative_osl
     }
 
+    fn observe_context_tokens(&mut self, context_tokens: usize) {
+        self.authoritative_context_tokens = Some(
+            self.authoritative_context_tokens
+                .map_or(context_tokens, |observed| observed.max(context_tokens)),
+        );
+    }
+
+    fn context_tokens(&self, initial_context_tokens: usize) -> usize {
+        self.authoritative_context_tokens
+            .unwrap_or_else(|| initial_context_tokens.saturating_add(self.cumulative_osl))
+    }
+
     fn observe_output_block_boundary(&self) {
         let Some(tracker) = &self.tracker else {
             return;
@@ -202,6 +230,7 @@ struct OutputBlockUpdate {
 /// Tracks when streamed output grows into a new scheduler accounting block.
 struct OutputBlockTracker {
     track_output_blocks: bool,
+    track_request_progress: bool,
     current_total_blocks: usize,
     isl_tokens: usize,
     block_size: usize,
@@ -211,12 +240,14 @@ struct OutputBlockTracker {
 impl OutputBlockTracker {
     fn new(
         track_output_blocks: bool,
+        track_request_progress: bool,
         isl_tokens: usize,
         block_size: usize,
         expected_output_tokens: Option<u32>,
     ) -> Self {
         Self {
             track_output_blocks,
+            track_request_progress,
             current_total_blocks: isl_tokens.div_ceil(block_size),
             isl_tokens,
             block_size,
@@ -225,7 +256,7 @@ impl OutputBlockTracker {
     }
 
     fn observe(&mut self, cumulative_osl: usize) -> Option<OutputBlockUpdate> {
-        if !self.track_output_blocks {
+        if !self.track_output_blocks && !self.track_request_progress {
             return None;
         }
 
@@ -257,9 +288,11 @@ pub(super) struct RequestGuard {
 impl RequestGuard {
     pub(super) fn new(
         chooser: Arc<KvRouter>,
+        request_metrics: Arc<RouterRequestMetrics>,
         context_id: String,
         request: &PreprocessedRequest,
         scheduler_tracked: bool,
+        lifecycle: Option<(RequestProgressUpdater, RequestLifecycleLease)>,
     ) -> Self {
         // Snapshot request-scoped inputs now so the guard can outlive the
         // PreprocessedRequest after it is moved into backend dispatch.
@@ -271,14 +304,17 @@ impl RequestGuard {
             .and_then(|routing| routing.expected_output_tokens);
         let track_output_blocks =
             scheduler_tracked && chooser.kv_router_config().router_track_output_blocks;
-        let request_metrics =
-            RouterRequestMetrics::from_component(chooser.client().endpoint.component());
+        let track_request_progress = lifecycle.is_some();
+        if scheduler_tracked {
+            request_metrics.requests_started_total().inc();
+        }
 
         Self {
-            cleanup: RequestCleanup::new(chooser, context_id, scheduler_tracked),
+            cleanup: RequestCleanup::new(chooser, context_id, scheduler_tracked, lifecycle),
             observability: RequestObservability::new(request.tracker.clone(), request_metrics),
             output_blocks: OutputBlockTracker::new(
                 track_output_blocks,
+                track_request_progress,
                 isl_tokens,
                 block_size,
                 expected_output_tokens,
@@ -299,12 +335,27 @@ impl RequestGuard {
         self.observability.record_prefill_start();
     }
 
-    pub(super) fn mark_dispatched(&mut self) {
+    pub(super) async fn mark_dispatched(&mut self) {
+        if let Some((_progress, lease)) = self.cleanup.lifecycle.as_mut() {
+            // Backend dispatch already succeeded. Record that fact synchronously so
+            // lease cleanup still reports Dispatched before the terminal event if it
+            // overtakes the actor command.
+            lease.mark_dispatched().await;
+        }
         self.observability.mark_dispatched();
     }
 
     pub(super) async fn on_item(&mut self, item: &Annotated<LLMEngineOutput>) {
         self.observability.observe_response();
+
+        if let Some(usage) = item
+            .data
+            .as_ref()
+            .and_then(|data| data.completion_usage.as_ref())
+        {
+            self.observability
+                .observe_context_tokens(usage.total_tokens as usize);
+        }
 
         if !self.prefill_marked {
             let has_tokens = item
@@ -331,12 +382,19 @@ impl RequestGuard {
 
         let new_tokens = item.data.as_ref().map_or(0, |data| data.token_ids.len());
         self.observability.observe_tokens(new_tokens);
-        let Some(update) = self
-            .output_blocks
-            .observe(self.observability.cumulative_osl())
-        else {
+        let cumulative_osl = self.observability.cumulative_osl();
+        let Some(update) = self.output_blocks.observe(cumulative_osl) else {
             return;
         };
+
+        if let Some((progress, _lease)) = &self.cleanup.lifecycle {
+            progress.update_context_tokens(
+                self.output_blocks.isl_tokens.saturating_add(cumulative_osl),
+            );
+        }
+        if !self.output_blocks.track_output_blocks {
+            return;
+        }
 
         if let Err(error) = self
             .cleanup
@@ -356,7 +414,20 @@ impl RequestGuard {
     pub(super) async fn finish(&mut self) {
         // Metrics must observe the completed request before cleanup releases its state.
         self.observability.record_metrics();
+        self.mark_completed_terminal();
         self.cleanup.finish().await;
+    }
+
+    pub(super) fn mark_completed_terminal(&mut self) {
+        let context_tokens = self
+            .observability
+            .context_tokens(self.output_blocks.isl_tokens);
+        if let Some((progress, _lease)) = &self.cleanup.lifecycle {
+            progress.update_context_tokens(context_tokens);
+        }
+        if let Some((_progress, lease)) = self.cleanup.lifecycle.as_mut() {
+            lease.mark_completed(context_tokens);
+        }
     }
 
     pub(super) async fn abort(&mut self) {
