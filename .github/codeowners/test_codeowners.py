@@ -1067,22 +1067,32 @@ class TestDiffAwareStrictGateE2E:
         # (c) full-tree strict still FAILS on that same inherited gap.
         assert _run_build(repo, areas).returncode == 1
 
-    def test_deleting_last_matched_file_requires_pruning_glob(self, tmp_path) -> None:
+    def test_deleting_last_matched_file_warns_diff_aware_blocks_full_tree(
+        self, tmp_path
+    ) -> None:
+        # A deletion PR is NOT blocked by the glob it orphans -- blocking it
+        # would force an areas.yaml edit, reclassify the PR as a policy
+        # change, and judge it full-tree (the base-churn cascade diff-aware
+        # mode exists to prevent). The stale glob still surfaces in the
+        # report, and full-tree runs (policy PRs, scheduled) block on it.
         areas = self._areas(tmp_path)
         repo, base = self._repo_with_base(tmp_path)
         (repo / "owned" / "a.txt").unlink()
         _git(repo, "add", "-A")
         _git(repo, "commit", "-q", "-m", "delete last owned file")
 
-        result = _run_build(repo, areas, "--changed-only", "--base", base)
+        diff_aware = _run_build(repo, areas, "--changed-only", "--base", base)
+        assert diff_aware.returncode == 0
+        assert "globs matching no files" in diff_aware.stdout
+        assert "/owned/" in diff_aware.stdout
 
-        assert result.returncode == 1
-        assert "glob(s) match no tracked files" in result.stdout
-        assert "/owned/" in result.stdout
+        # Full-tree still blocks (here on the coverage gap the same deletion
+        # exposes; the stale glob is surfaced in the report either way).
+        full_tree = _run_build(repo, areas)
+        assert full_tree.returncode == 1
+        assert "globs matching no files" in full_tree.stdout
 
-    def test_deleting_required_owner_target_requires_pruning_contract(
-        self, tmp_path
-    ) -> None:
+    def test_deleting_required_owner_target_warns_diff_aware(self, tmp_path) -> None:
         areas = self._areas(tmp_path)
         areas.write_text(
             areas.read_text()
@@ -1094,11 +1104,14 @@ class TestDiffAwareStrictGateE2E:
         _git(repo, "add", "-A")
         _git(repo, "commit", "-q", "-m", "delete required target")
 
-        result = _run_build(repo, areas, "--changed-only", "--base", base)
+        diff_aware = _run_build(repo, areas, "--changed-only", "--base", base)
+        assert diff_aware.returncode == 0
+        assert "globs matching no files" in diff_aware.stdout
+        assert "/base_unowned/x.txt" in diff_aware.stdout
 
-        assert result.returncode == 1
-        assert "glob(s) match no tracked files" in result.stdout
-        assert "/base_unowned/x.txt" in result.stdout
+        full_tree = _run_build(repo, areas)
+        assert full_tree.returncode == 1
+        assert "glob(s) match no tracked files" in full_tree.stdout
 
     def test_inherited_contract_only_blocks_full_tree(self, tmp_path) -> None:
         areas = tmp_path / "areas.yaml"

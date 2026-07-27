@@ -3,9 +3,9 @@
 Reads an ``areas.yaml`` (each area declares its path globs directly), asks the
 pure resolver in ``codeowners_match`` what the emitted CODEOWNERS would cover,
 and reports how much of the live tree is EXPLICITLY owned vs. falls to the
-catch-all. It also rejects stale globs and verifies that final last-match
-resolution retains every owner promised by required and blocking file-type
-declarations.
+catch-all. It also rejects stale globs (in full-tree runs) and verifies that
+final last-match resolution retains every owner promised by required and
+blocking file-type declarations.
 
 This is the ONLY place in the pipeline that reads ``git ls-files``. Emission
 is a pure function of the policy YAML; the tree only enters here, in the
@@ -144,7 +144,16 @@ def strict_failure(
     ownership_violations: list[OwnershipContractViolation],
     dead: list[str],
 ) -> str | None:
-    """Return the fail-closed message for the active strict gate."""
+    """Return the fail-closed message for the active strict gate.
+
+    Stale globs block only full-tree runs (``changed is None``: policy PRs
+    and scheduled runs). Blocking them in diff-aware mode would let base
+    churn red-X unrelated PRs: deleting the last file a glob matches would
+    force an areas.yaml edit, which reclassifies the PR as a policy change
+    and judges it full-tree -- exactly the cascade ``--changed-only`` exists
+    to prevent. Diff-aware runs surface them as a non-fatal report line;
+    the next policy PR (or scheduled run) must prune them.
+    """
     if not strict:
         return None
     if gate.blocking:
@@ -153,7 +162,7 @@ def strict_failure(
             f"!! strict: {len(gate.blocking)} {scope} file(s) fall to the "
             "catch-all -- cover them in areas.yaml"
         )
-    if dead:
+    if dead and changed is None:
         return (
             f"!! strict: {len(dead)} glob(s) match no tracked files -- "
             "remove them from areas.yaml"
@@ -279,7 +288,7 @@ def _print_dead_patterns(dead: list[str]) -> None:
         return
     print(
         f"globs matching no files: {len(dead)} "
-        "(prune from areas.yaml when the paths are gone):"
+        "(prune from areas.yaml; blocks policy PRs and full-tree runs):"
     )
     for pattern in dead[:10]:
         print(f"    {pattern}")
