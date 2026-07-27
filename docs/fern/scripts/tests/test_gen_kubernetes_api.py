@@ -15,6 +15,7 @@ runtime. Invocation::
 
 from __future__ import annotations
 
+import re
 import shutil
 from pathlib import Path
 
@@ -31,6 +32,10 @@ FERN_ROOT = REPO_ROOT / "docs" / "fern"
 K8S_DIR = FERN_ROOT / "kubernetes"
 SOURCE_MD = K8S_DIR / "api-reference.md"
 TARGET_MDX = K8S_DIR / "api-reference-fern.mdx"
+# Stops at ``&`` as well as ``<``: the shipped MDX escapes the ``<br />``
+# that follows this URL, and the entity would otherwise be read as part of
+# it and defeat the comparison against the unescaped source.
+_DEV_URL_RE = re.compile(r"[^\s<>()\[\]&\"']*/dynamo/dev/[^\s<>()\[\]&,;\"']*")
 
 # Content baseline pinned by the plan.
 EXPECTED_PACKAGES = (
@@ -392,11 +397,23 @@ def test_shipped_mdx_matches_regeneration_output() -> None:
     assert rendered == shipped
 
 
-def test_shipped_mdx_has_no_hardcoded_dev_paths() -> None:
-    """Fern serves each doc version under its own path prefix; hardcoding
-    ``/dynamo/dev/...`` links a versioned snapshot back to ``/dev`` and
-    breaks cross-version navigation."""
-    assert "/dynamo/dev" not in TARGET_MDX.read_text(encoding="utf-8")
+def test_generator_adds_no_hardcoded_dev_paths() -> None:
+    """Fern serves each doc version under its own path prefix, so a
+    ``/dynamo/dev/...`` link sends a versioned snapshot back to dev.
+
+    The generator must never author one. Operator Go comments sometimes do,
+    to give ``kubectl explain`` readers a followable URL, and rewriting
+    those is not this page's call to make: the site path carries navigation
+    tab prefixes that have no counterpart on disk, so there is no sound
+    mapping back to a relative link. Hold the generator to what it controls
+    by allowing through only the dev URLs the CRD source already carries.
+    """
+    shipped = set(_DEV_URL_RE.findall(TARGET_MDX.read_text(encoding="utf-8")))
+    upstream = set(_DEV_URL_RE.findall(SOURCE_MD.read_text(encoding="utf-8")))
+    assert not (shipped - upstream), (
+        "generator authored dev-pinned links absent from the CRD source: "
+        f"{sorted(shipped - upstream)}"
+    )
 
 
 def test_index_yml_still_registers_the_compact_mdx() -> None:

@@ -3557,7 +3557,7 @@ FeaturesSpec controls optional Dynamo platform features in the generated deploym
 **Appears in:** [DynamoGraphDeploymentRequestSpec](#v1beta1-dynamographdeploymentrequestspec)
 
 <ParamField path="planner" type="RawExtension">
-Planner contains the raw Planner configuration passed to the Planner service.&lt;br /&gt;Its schema is defined by dynamo.planner.config.planner_config.PlannerConfig.&lt;br /&gt;See https://docs.nvidia.com/dynamo/dev/components/planner/planner-guide#plannerconfig-reference.&lt;br /&gt;DGDR passes this object through without field-level validation; the Planner&lt;br /&gt;service validates it at startup.&lt;br /&gt;The presence of this field (non-null) enables the planner in the generated DGD.
+Planner contains the raw Planner configuration passed to the Planner service.&lt;br /&gt;Its schema is defined by dynamo.planner.config.planner_config.PlannerConfig.&lt;br /&gt;See https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/planner/planner-guide#plannerconfig-reference.&lt;br /&gt;DGDR passes this object through without field-level validation; the Planner&lt;br /&gt;service validates it at startup.&lt;br /&gt;The presence of this field (non-null) enables the planner in the generated DGD.
 See [RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg).
 **Validation:** Type: object &lt;br /&gt;Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
