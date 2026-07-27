@@ -6,7 +6,7 @@ metadata:
   name: qwen3-235b-a22b-disagg
 spec:
   services:
-    TRTLLMPrefillWorker:
+    PrefillWorker:
       resources:
         limits:
           gpu: "2"
@@ -18,17 +18,11 @@ spec:
             rdma/ib: "1"
             ephemeral-storage: 2Gi
       extraPodSpec:
-        tolerations:
-          - key: nvidia.com/gpu
-            operator: Exists
-            effect: NoSchedule
         mainContainer:
           env: &nscaleEnvironment
             # Compute-fabric NICs only; mlx5_6..9 are side fabric on the referenced Nscale nodes.
             - name: UCX_NET_DEVICES
               value: "mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1,mlx5_4:1,mlx5_5:1,mlx5_10:1,mlx5_11:1"
-            - name: NIXL_LOG_LEVEL
-              value: INFO
           volumeMounts:
             - name: prefill-config
               mountPath: /engine_configs
@@ -52,7 +46,7 @@ spec:
             emptyDir:
               medium: Memory
               sizeLimit: 64Gi
-    TRTLLMDecodeWorker:
+    DecodeWorker:
       resources:
         limits:
           gpu: "4"
@@ -64,10 +58,6 @@ spec:
             rdma/ib: "1"
             ephemeral-storage: 2Gi
       extraPodSpec:
-        tolerations:
-          - key: nvidia.com/gpu
-            operator: Exists
-            effect: NoSchedule
         mainContainer:
           env: *nscaleEnvironment
           volumeMounts:

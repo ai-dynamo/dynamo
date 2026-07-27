@@ -6,7 +6,7 @@ metadata:
   name: q32b-1p1d-cloud-provider
 spec:
   services:
-    VllmPrefillWorker:
+    PrefillWorker:
       extraPodSpec:
         mainContainer:
           env:
@@ -41,7 +41,7 @@ spec:
         requests:
           custom:
             rdma/ib: "1"
-    VllmDecodeWorker:
+    DecodeWorker:
       extraPodSpec:
         mainContainer:
           env:

@@ -6,7 +6,7 @@ metadata:
   name: qwen3-235b-a22b-disagg
 spec:
   services:
-    TRTLLMPrefillWorker:
+    PrefillWorker:
       extraPodMetadata: &gcpMetadata
         annotations:
           networking.gke.io/default-interface: eth0
@@ -77,7 +77,7 @@ spec:
           - name: nvidia
             hostPath:
               path: /home/kubernetes/bin/nvidia
-    TRTLLMDecodeWorker:
+    DecodeWorker:
       extraPodMetadata: *gcpMetadata
       resources:
         limits:

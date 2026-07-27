@@ -5,9 +5,9 @@ kind: Kustomization
 sortOptions:
   order: fifo
 resources:
-  - ../../base
+  - ../_rdma
 components:
-  - ../../components/rdma-worker-defaults
+  - ../../../../../../../kustomize/components/disagg-workers/nscale-ib
 patches:
   - target:
       group: nvidia.com

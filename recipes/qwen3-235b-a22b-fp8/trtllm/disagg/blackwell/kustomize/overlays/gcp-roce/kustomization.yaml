@@ -5,9 +5,7 @@ kind: Kustomization
 sortOptions:
   order: fifo
 resources:
-  - ../../base
-components:
-  - ../../components/rdma-worker-defaults
+  - ../_rdma
 patches:
   - target:
       group: nvidia.com

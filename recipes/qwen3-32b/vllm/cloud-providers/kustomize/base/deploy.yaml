@@ -36,7 +36,8 @@ spec:
           cpu: "8"
       subComponentType: null
 
-    VllmPrefillWorker:
+    # Provider Components target backend-neutral worker service keys.
+    PrefillWorker:
       componentType: worker
       subComponentType: prefill
       envFromSecret: hf-token-secret
@@ -91,27 +92,12 @@ spec:
               value: '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768},"max_position_embeddings":131072}'
             - name: MAX_MODEL_LEN
               value: "131072"
-            - name: NIXL_TELEMETRY_ENABLE
-              value: "y"
-            - name: NIXL_TELEMETRY_EXPORTER
-              value: prometheus
-            - name: NIXL_TELEMETRY_PROMETHEUS_PORT
-              value: "19090"
             - name: DYN_HEALTH_CHECK_ENABLED
               value: "false"
             - name: HF_HOME
               value: /model-cache
             - name: VLLM_LOGGING_LEVEL
               value: INFO
-            - name: NCCL_DEBUG
-              value: WARN
-          securityContext:
-            privileged: true
-            runAsUser: 0
-            capabilities:
-              add:
-                - IPC_LOCK
-                - SYS_PTRACE
           volumeMounts:
             - name: model-cache
               mountPath: /model-cache
@@ -120,7 +106,7 @@ spec:
             persistentVolumeClaim:
               claimName: model-cache
 
-    VllmDecodeWorker:
+    DecodeWorker:
       componentType: worker
       subComponentType: decode
       envFromSecret: hf-token-secret
@@ -160,13 +146,6 @@ spec:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
           workingDir: /workspace
           env: *vllmEnvironment
-          securityContext:
-            privileged: true
-            runAsUser: 0
-            capabilities:
-              add:
-                - IPC_LOCK
-                - SYS_PTRACE
           volumeMounts:
             - name: model-cache
               mountPath: /model-cache

@@ -5,11 +5,6 @@ kind: Kustomization
 sortOptions:
   order: fifo
 resources:
-  - ../_rdma
-patches:
-  - target:
-      group: nvidia.com
-      version: v1alpha1
-      kind: DynamoGraphDeployment
-      name: q32b-1p1d-cloud-provider
-    path: patch-dgd.yaml
+  - ../../base
+components:
+  - ../../../../../../../kustomize/components/disagg-workers/rdma-defaults

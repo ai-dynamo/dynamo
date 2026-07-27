@@ -10,7 +10,7 @@ spec:
       extraPodSpec:
         imagePullSecrets:
           - name: nvcr-pull-secret
-    VllmPrefillWorker:
+    PrefillWorker:
       extraPodMetadata:
         annotations: &gkeNetworkAnnotations
           networking.gke.io/default-interface: eth0
@@ -69,7 +69,7 @@ spec:
             networking.gke.io.networks/rdma-3.IP: "1"
         requests:
           custom: *gkeRdmaResources
-    VllmDecodeWorker:
+    DecodeWorker:
       extraPodMetadata:
         annotations: *gkeNetworkAnnotations
       extraPodSpec:

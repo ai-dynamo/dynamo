@@ -61,6 +61,9 @@ The render convention is:
   `recipes/kustomize/components/dynamo-openapi/` Component. Its generated
   schema is derived from every operator CRD and lets strategic merge patches
   merge CRD map lists such as `env` by name.
+- The central `recipes/kustomize/components/disagg-workers/` Components apply
+  to bases containing one DGD with backend-neutral `PrefillWorker` and
+  `DecodeWorker` service keys.
 
 Prefer resource-shaped Kustomize merge patches over JSON patches where possible.
 For other Custom Resource Definition (CRD) list fields, include the complete
