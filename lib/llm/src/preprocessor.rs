@@ -2307,6 +2307,8 @@ impl OpenAIPreprocessor {
             return Ok(Box::pin(unified_parser::apply_stream(
                 stream,
                 tool_definitions,
+                request.inner.tool_choice.clone(),
+                uses_tool_call_structural_tag,
                 prefill,
                 family,
             ))

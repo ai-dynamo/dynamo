@@ -10,13 +10,13 @@ use async_stream::stream;
 use dynamo_parsers::tool_calling::ToolDefinition;
 use dynamo_parsers_v2::{
     KIMI_K3_FAMILY, QWEN3_CODER_FAMILY, QWEN3_REASONING_FAMILY, Tool, UnifiedParser,
-    UnifiedParserEvent, UnifiedParserOutput, UnifiedParserPrefill,
+    UnifiedParserEvent, UnifiedParserOutput, UnifiedParserPrefill, UnifiedToolOutputMode,
     create_unified_parser_for_family,
 };
 use dynamo_protocols::types::{
     ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionMessageToolCall,
-    ChatCompletionMessageToolCallChunk, ChatCompletionStreamResponseDelta, FinishReason,
-    FunctionCall, FunctionCallStream, FunctionType,
+    ChatCompletionMessageToolCallChunk, ChatCompletionStreamResponseDelta,
+    ChatCompletionToolChoiceOption, FinishReason, FunctionCall, FunctionCallStream, FunctionType,
 };
 use dynamo_runtime::config::{env_is_truthy, environment_names::llm as env_llm};
 use dynamo_runtime::protocols::annotated::Annotated;
@@ -162,6 +162,27 @@ fn to_v2_tools(tools: Option<&[ToolDefinition]>) -> Vec<Tool> {
         .collect()
 }
 
+fn to_unified_tool_output_mode(
+    tool_choice: Option<&ChatCompletionToolChoiceOption>,
+    uses_tool_call_structural_tag: bool,
+) -> UnifiedToolOutputMode<'_> {
+    if uses_tool_call_structural_tag {
+        return UnifiedToolOutputMode::Native;
+    }
+
+    match tool_choice {
+        Some(ChatCompletionToolChoiceOption::Required) => {
+            UnifiedToolOutputMode::GuidedJson { named_tool: None }
+        }
+        Some(ChatCompletionToolChoiceOption::Named(named)) => UnifiedToolOutputMode::GuidedJson {
+            named_tool: Some(&named.function.name),
+        },
+        None
+        | Some(ChatCompletionToolChoiceOption::None)
+        | Some(ChatCompletionToolChoiceOption::Auto) => UnifiedToolOutputMode::Native,
+    }
+}
+
 struct ChoiceState {
     family: &'static str,
     parser: Box<dyn UnifiedParser>,
@@ -175,9 +196,14 @@ impl ChoiceState {
         family: &'static str,
         tools: &[Tool],
         prefill: UnifiedParserPrefill,
+        tool_choice: Option<&ChatCompletionToolChoiceOption>,
+        uses_tool_call_structural_tag: bool,
     ) -> anyhow::Result<Self> {
         let mut parser = create_unified_parser_for_family(family, tools)?;
-        parser.initialize(prefill)?;
+        parser.initialize_with_output_mode(
+            prefill,
+            to_unified_tool_output_mode(tool_choice, uses_tool_call_structural_tag),
+        )?;
         Ok(Self {
             family,
             parser,
@@ -379,6 +405,8 @@ fn response_with_choice(
 pub(crate) fn apply_stream<S>(
     stream_in: S,
     tool_definitions: Option<Vec<ToolDefinition>>,
+    tool_choice: Option<ChatCompletionToolChoiceOption>,
+    uses_tool_call_structural_tag: bool,
     prefill: UnifiedParserPrefill,
     family: &'static str,
 ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
@@ -432,7 +460,13 @@ where
                 let state = match states.entry(original.index) {
                     std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
                     std::collections::hash_map::Entry::Vacant(entry) => {
-                        match ChoiceState::new(family, &tools, prefill) {
+                        match ChoiceState::new(
+                            family,
+                            &tools,
+                            prefill,
+                            tool_choice.as_ref(),
+                            uses_tool_call_structural_tag,
+                        ) {
                             Ok(state) => entry.insert(state),
                             Err(error) => {
                                 tracing::warn!(
@@ -537,6 +571,18 @@ mod tests {
         })
     }
 
+    fn qwen_weather_tools() -> Vec<ToolDefinition> {
+        vec![ToolDefinition {
+            name: "get_weather".to_string(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"]
+            })),
+            strict: None,
+        }]
+    }
+
     #[tokio::test]
     async fn emits_ordered_reasoning_text_and_tool_chunks() {
         let output = concat!(
@@ -551,6 +597,8 @@ mod tests {
         let responses = apply_stream(
             stream::iter([chunk(output, true)]),
             None,
+            None,
+            false,
             UnifiedParserPrefill::None,
             KIMI_K3_FAMILY,
         )
@@ -593,6 +641,8 @@ mod tests {
                 true,
             )]),
             None,
+            None,
+            false,
             UnifiedParserPrefill::Reasoning,
             KIMI_K3_FAMILY,
         )
@@ -632,6 +682,8 @@ mod tests {
                 chunk("response<|sep|>visible<|close|>response<|sep|>", true),
             ]),
             None,
+            None,
+            false,
             UnifiedParserPrefill::None,
             KIMI_K3_FAMILY,
         )
@@ -721,18 +773,11 @@ mod tests {
             "</function>\n",
             "</tool_call>"
         );
-        let tools = vec![ToolDefinition {
-            name: "get_weather".to_string(),
-            parameters: Some(serde_json::json!({
-                "type": "object",
-                "properties": {"city": {"type": "string"}},
-                "required": ["city"]
-            })),
-            strict: None,
-        }];
         let responses = apply_stream(
             stream::iter([chunk(output, true)]),
-            Some(tools),
+            Some(qwen_weather_tools()),
+            None,
+            false,
             UnifiedParserPrefill::None,
             QWEN3_CODER_FAMILY,
         )
@@ -769,6 +814,146 @@ mod tests {
             Some(r#"{"city":"Tokyo"}"#)
         );
         assert_eq!(choices[2].finish_reason, Some(FinishReason::ToolCalls));
+    }
+
+    #[tokio::test]
+    async fn emits_qwen_named_guided_json_as_tool_call() {
+        let tool_choice = serde_json::from_value(serde_json::json!({
+            "type": "function",
+            "function": {"name": "get_weather"}
+        }))
+        .unwrap();
+        let responses = apply_stream(
+            stream::iter([chunk("reason</think>{\n  \"city\": \"Tokyo\"\n}", true)]),
+            Some(qwen_weather_tools()),
+            Some(tool_choice),
+            false,
+            UnifiedParserPrefill::Reasoning,
+            QWEN3_CODER_FAMILY,
+        )
+        .collect::<Vec<_>>()
+        .await;
+        let choices = responses
+            .iter()
+            .flat_map(|response| response.data.as_ref().unwrap().inner.choices.iter())
+            .collect::<Vec<_>>();
+
+        assert_eq!(choices.len(), 2);
+        assert_eq!(
+            choices[0].delta.reasoning_content.as_deref(),
+            Some("reason")
+        );
+        let tool = choices[1]
+            .delta
+            .tool_calls
+            .as_ref()
+            .unwrap()
+            .first()
+            .unwrap();
+        assert!(tool.id.is_some());
+        assert_eq!(
+            tool.function.as_ref().unwrap().name.as_deref(),
+            Some("get_weather")
+        );
+        assert_eq!(
+            tool.function.as_ref().unwrap().arguments.as_deref(),
+            Some("{\n  \"city\": \"Tokyo\"\n}")
+        );
+        assert_eq!(choices[1].finish_reason, Some(FinishReason::ToolCalls));
+    }
+
+    #[tokio::test]
+    async fn emits_qwen_required_guided_json_as_tool_call() {
+        let responses = apply_stream(
+            stream::iter([chunk(
+                concat!(
+                    "reason</think>",
+                    r#"[{"name":"get_weather","parameters":{"city":"Tokyo"}}]"#
+                ),
+                true,
+            )]),
+            Some(qwen_weather_tools()),
+            Some(ChatCompletionToolChoiceOption::Required),
+            false,
+            UnifiedParserPrefill::Reasoning,
+            QWEN3_CODER_FAMILY,
+        )
+        .collect::<Vec<_>>()
+        .await;
+        let choices = responses
+            .iter()
+            .flat_map(|response| response.data.as_ref().unwrap().inner.choices.iter())
+            .collect::<Vec<_>>();
+
+        assert_eq!(choices.len(), 2);
+        assert_eq!(
+            choices[0].delta.reasoning_content.as_deref(),
+            Some("reason")
+        );
+        let tool = choices[1]
+            .delta
+            .tool_calls
+            .as_ref()
+            .unwrap()
+            .first()
+            .unwrap();
+        assert_eq!(
+            tool.function.as_ref().unwrap().name.as_deref(),
+            Some("get_weather")
+        );
+        assert_eq!(
+            tool.function.as_ref().unwrap().arguments.as_deref(),
+            Some(r#"{"city":"Tokyo"}"#)
+        );
+        assert_eq!(choices[1].finish_reason, Some(FinishReason::ToolCalls));
+    }
+
+    #[tokio::test]
+    async fn qwen_required_structural_tag_keeps_native_xml_mode() {
+        let output = concat!(
+            "reason</think>",
+            "<tool_call>\n",
+            "<function=get_weather>\n",
+            "<parameter=city>Tokyo</parameter>\n",
+            "</function>\n",
+            "</tool_call>"
+        );
+        let responses = apply_stream(
+            stream::iter([chunk(output, true)]),
+            Some(qwen_weather_tools()),
+            Some(ChatCompletionToolChoiceOption::Required),
+            true,
+            UnifiedParserPrefill::Reasoning,
+            QWEN3_CODER_FAMILY,
+        )
+        .collect::<Vec<_>>()
+        .await;
+        let choices = responses
+            .iter()
+            .flat_map(|response| response.data.as_ref().unwrap().inner.choices.iter())
+            .collect::<Vec<_>>();
+
+        assert_eq!(choices.len(), 2);
+        assert_eq!(
+            choices[0].delta.reasoning_content.as_deref(),
+            Some("reason")
+        );
+        let tool = choices[1]
+            .delta
+            .tool_calls
+            .as_ref()
+            .unwrap()
+            .first()
+            .unwrap();
+        assert_eq!(
+            tool.function.as_ref().unwrap().name.as_deref(),
+            Some("get_weather")
+        );
+        assert_eq!(
+            tool.function.as_ref().unwrap().arguments.as_deref(),
+            Some(r#"{"city":"Tokyo"}"#)
+        );
+        assert_eq!(choices[1].finish_reason, Some(FinishReason::ToolCalls));
     }
 
     #[test]

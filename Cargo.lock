@@ -2727,7 +2727,7 @@ dependencies = [
 [[package]]
 name = "dynamo-parsers-v2"
 version = "0.1.23"
-source = "git+https://github.com/ai-dynamo/frontend-crates.git?branch=rmccormick%2Fqwen-unified#1513426236a673f1fb58fd62b2d674e4c3a6f145"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?branch=rmccormick%2Fqwen-unified#19c296e3945a8c7880bfe327045c2d8f6bdb4bd7"
 dependencies = [
  "anyhow",
  "num-traits",
