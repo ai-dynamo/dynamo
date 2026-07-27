@@ -370,10 +370,54 @@ func TestGroveMultinodeDeployer_GMS(t *testing.T) {
 }
 
 func TestGmsRCTName(t *testing.T) {
-	assert.Equal(t, "my-svc-gpu-rank-0", gmsRCTName("my-svc", 0))
-	assert.Equal(t, "llama-gpu-rank-2", gmsRCTName("llama", 2))
-	assert.Equal(t, "vllmworker-gpu-rank-0", gmsRCTName("VllmWorker", 0))
-	assert.Empty(t, validation.IsDNS1123Subdomain(gmsRCTName("VllmWorker", 0)))
+	tests := []struct {
+		name        string
+		serviceName string
+		rank        int32
+		expected    string
+	}{
+		{
+			name:        "already normalized",
+			serviceName: "my-svc",
+			rank:        0,
+			expected:    "my-svc-gpu-rank-0",
+		},
+		{
+			name:        "lowercase",
+			serviceName: "llama",
+			rank:        2,
+			expected:    "llama-gpu-rank-2",
+		},
+		{
+			name:        "camel case",
+			serviceName: "VllmWorker",
+			rank:        0,
+			expected:    "vllmworker-gpu-rank-0",
+		},
+		{
+			name:        "uppercase",
+			serviceName: "VLLMWorker",
+			rank:        2,
+			expected:    "vllmworker-gpu-rank-2",
+		},
+		{
+			name:        "dot",
+			serviceName: "Vllm.Worker",
+			rank:        1,
+			expected:    "vllm-worker-gpu-rank-1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Generate the ResourceClaimTemplate name")
+			name := gmsRCTName(tt.serviceName, tt.rank)
+
+			t.Log("Verify the name is normalized and RFC 1123 compliant")
+			assert.Equal(t, tt.expected, name)
+			assert.Empty(t, validation.IsDNS1123Subdomain(name))
+		})
+	}
 }
 
 func TestGmsResourceClaimTemplateConfigs_SingleNode(t *testing.T) {
@@ -398,6 +442,7 @@ func TestGmsResourceClaimTemplateConfigs_SingleNode(t *testing.T) {
 }
 
 func TestGmsResourceClaimTemplateConfigs_Multinode(t *testing.T) {
+	t.Log("Set up a two-rank inter-pod GMS service")
 	resources := corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): k8sresource.MustParse("4")}}
 	roles := []ServiceRole{
 		{Name: "svc-gms-0", Role: RoleGMS, Rank: 0, Replicas: 1},
@@ -406,13 +451,22 @@ func TestGmsResourceClaimTemplateConfigs_Multinode(t *testing.T) {
 		{Name: "svc-wkr-1", Role: RoleWorker, Rank: 1, Replicas: 3},
 	}
 
-	configs, err := gmsResourceClaimTemplateConfigs("svc", &v1beta1.GPUMemoryServiceSpec{}, resources, roles)
+	t.Log("Build ResourceClaimTemplate configs from a mixed-case service name")
+	configs, err := gmsResourceClaimTemplateConfigs("VllmDecodeWorker", &v1beta1.GPUMemoryServiceSpec{}, resources, roles)
 	require.NoError(t, err)
 
+	t.Log("Verify every rank has a normalized RFC 1123-compliant name")
 	require.Len(t, configs, 2)
-	assert.Equal(t, "svc-gpu-rank-0", configs[0].Name)
-	assert.Equal(t, "svc-gpu-rank-1", configs[1].Name)
+	expectedNames := []string{
+		"vllmdecodeworker-gpu-rank-0",
+		"vllmdecodeworker-gpu-rank-1",
+	}
+	for i, config := range configs {
+		assert.Equal(t, expectedNames[i], config.Name)
+		assert.Empty(t, validation.IsDNS1123Subdomain(config.Name))
+	}
 
+	t.Log("Verify the GPU request configuration is preserved")
 	req := configs[1].TemplateSpec.Spec.Devices.Requests[0]
 	require.NotNil(t, req.Exactly)
 	assert.Equal(t, "gpu.nvidia.com", req.Exactly.DeviceClassName)
@@ -436,6 +490,7 @@ func TestGmsResourceSharingEntries_SingleNode(t *testing.T) {
 }
 
 func TestGmsResourceSharingEntries_Multinode(t *testing.T) {
+	t.Log("Set up a two-rank inter-pod GMS service")
 	roles := []ServiceRole{
 		{Name: "svc-gms-0", Role: RoleGMS, Rank: 0, Replicas: 1},
 		{Name: "svc-ldr", Role: RoleLeader, Rank: 0, Replicas: 3},
@@ -443,16 +498,26 @@ func TestGmsResourceSharingEntries_Multinode(t *testing.T) {
 		{Name: "svc-wkr-1", Role: RoleWorker, Rank: 1, Replicas: 3},
 	}
 
-	refs := gmsResourceSharingEntries("svc", roles)
+	t.Log("Build resource-sharing entries from a mixed-case service name")
+	refs := gmsResourceSharingEntries("VllmDecodeWorker", roles)
 
+	t.Log("Verify every rank has a normalized RFC 1123-compliant name")
 	require.Len(t, refs, 2)
+	expectedNames := []string{
+		"vllmdecodeworker-gpu-rank-0",
+		"vllmdecodeworker-gpu-rank-1",
+	}
+	for i, ref := range refs {
+		assert.Equal(t, expectedNames[i], ref.Name)
+		assert.Empty(t, validation.IsDNS1123Subdomain(ref.Name))
+	}
 
-	assert.Equal(t, "svc-gpu-rank-0", refs[0].Name)
+	t.Log("Verify rank zero targets the GMS server and leader cliques")
 	assert.Equal(t, grovev1alpha1.ResourceSharingScopePerReplica, refs[0].Scope)
 	require.NotNil(t, refs[0].Filter)
 	assert.Equal(t, []string{"svc-gms-0", "svc-ldr"}, refs[0].Filter.ChildCliqueNames)
 
-	assert.Equal(t, "svc-gpu-rank-1", refs[1].Name)
+	t.Log("Verify rank one targets the GMS server and worker cliques")
 	assert.Equal(t, grovev1alpha1.ResourceSharingScopePerReplica, refs[1].Scope)
 	require.NotNil(t, refs[1].Filter)
 	assert.Equal(t, []string{"svc-gms-1", "svc-wkr-1"}, refs[1].Filter.ChildCliqueNames)
