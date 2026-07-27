@@ -281,7 +281,9 @@ env:
 | `UCX_IB_ADDR_TYPE` | Must be `eth` for cross-pod communication on Kubernetes. Without this, UCX uses LID-based addressing which does not route between pods. |
 | `UCX_RNDV_SCHEME` | `get_zcopy` enables zero-copy RDMA GET, optimal for large KV cache transfers |
 
-> **Note**: `UCX_IB_ADDR_TYPE=eth` is the most common missing setting when bringing up NIXL disagg on InfiniBand clusters. If NIXL init succeeds but transfers fail with `NIXL_ERR_REMOTE_DISCONNECT`, this is likely the cause.
+<Note>
+`UCX_IB_ADDR_TYPE=eth` is the most common missing setting when bringing up NIXL disagg on InfiniBand clusters. If NIXL init succeeds but transfers fail with `NIXL_ERR_REMOTE_DISCONNECT`, this is likely the cause.
+</Note>
 
 **Known Issue — Bonded IB devices:**
 
@@ -331,7 +333,9 @@ VllmDecodeWorker:
             topologyKey: kubernetes.io/hostname
 ```
 
-> **Note**: Anti-affinity only needs to be configured on one side (here, the decode worker). The Kubernetes scheduler enforces the constraint symmetrically—if decode cannot be placed with prefill, they will end up on different nodes regardless of which pod has the rule.
+<Note>
+Anti-affinity only needs to be configured on one side (here, the decode worker). The Kubernetes scheduler enforces the constraint symmetrically—if decode cannot be placed with prefill, they will end up on different nodes regardless of which pod has the rule.
+</Note>
 
 **EFA Resource Requests:**
 
@@ -358,7 +362,9 @@ extraPodSpec:
         vpc.amazonaws.com/efa: "4"
 ```
 
-> **Note**: NIXL/libfabric automatically stripes traffic across all allocated EFA interfaces. The 4-interface configuration achieved ~9.6 GB/s in testing, which is sufficient for Llama-3.1-8B KV cache transfers at ISL=8000. Increase the count if your workload requires higher bandwidth (e.g., larger models or higher TP).
+<Note>
+NIXL/libfabric automatically stripes traffic across all allocated EFA interfaces. The 4-interface configuration achieved ~9.6 GB/s in testing, which is sufficient for Llama-3.1-8B KV cache transfers at ISL=8000. Increase the count if your workload requires higher bandwidth (e.g., larger models or higher TP).
+</Note>
 
 **Environment Variables:**
 
@@ -586,7 +592,9 @@ kubectl exec <prefill-pod> -- ping -c 3 <decode-pod-ip>
 | Disagg + AWS EFA with UCX (without GPUDirect) | ~3x slower than aggregated | ~1 GB/s | *Measured* on AWS p5.48xlarge |
 | Disagg + TCP fallback | **+90-100s** | ~100 MB/s | *Measured* ~98s TTFT on AWS p5.48xlarge |
 
-> **Note**: For AWS EFA deployments, use libfabric with GDRCopy to enable GPUDirect RDMA. UCX on AWS EFA does not support GPUDirect on kernel ≥6.8 and results in severely degraded performance. See [AWS EFA Configuration](#aws-efa-configuration) for setup instructions.
+<Note>
+For AWS EFA deployments, use libfabric with GDRCopy to enable GPUDirect RDMA. UCX on AWS EFA does not support GPUDirect on kernel ≥6.8 and results in severely degraded performance. See [AWS EFA Configuration](#aws-efa-configuration) for setup instructions.
+</Note>
 
 ### When Disaggregated Makes Sense
 
@@ -715,7 +723,9 @@ VllmDecodeWorker:
             topologyKey: kubernetes.io/hostname
 ```
 
-> **Note**: Use `nvidia.com/dynamo-component` as the label key, not `app.kubernetes.io/component`. The Dynamo operator uses this label to identify component types.
+<Note>
+Use `nvidia.com/dynamo-component` as the label key, not `app.kubernetes.io/component`. The Dynamo operator uses this label to identify component types.
+</Note>
 
 ### Problem: NIXL_ERR_BACKEND at create_backend on InfiniBand
 
@@ -820,5 +830,5 @@ resources:
 
 - [Disaggregated Serving Architecture](../design-docs/disagg-serving.md)
 - [AIConfigurator Deployment Guide](../features/disaggregated-serving/README.md)
-- [NIXL Benchmark Deployment](../../deploy/pre-deployment/nixl/README.md)
+- [NIXL Benchmark Deployment](https://github.com/ai-dynamo/dynamo/blob/main/deploy/pre-deployment/nixl/README.md)
 - [KV Cache Transfer Methods](../backends/trtllm/trtllm-kv-cache-transfer.md)

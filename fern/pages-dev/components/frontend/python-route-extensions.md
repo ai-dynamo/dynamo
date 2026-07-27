@@ -1,22 +1,42 @@
 ---
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Python Route Extensions
+subtitle: Add trusted HTTP routes to the Dynamo Frontend from an installed Python package or importable module.
 ---
 
-Python route extensions let an external package register additional HTTP routes on the Dynamo frontend, served on the same port as the OpenAI-compatible API — without a custom binary or a from-source build.
+Python route extensions let an external package register additional HTTP routes on the Dynamo
+Frontend. The routes use the same port as the OpenAI-compatible API and do not require a custom
+binary or source build.
 
-Extensions are **opt-in**: the frontend only loads a provider you explicitly select on the command line. A selection is either a **name** registered under the `dynamo.frontend.routes` entry-point group (preferred for packaged plugins) or a direct **`module:function`** path (handy for quick/ad-hoc use). Extensions add routes; they cannot override a built-in route (a duplicate method+path is rejected at startup).
+Extensions are opt-in. The Frontend loads only the providers selected with
+`--frontend-route-extension` or `DYN_FRONTEND_ROUTE_EXTENSIONS`. A selection can be either:
 
-The initial contract is intentionally narrow: **static-path `GET` routes** with a synchronous handler. Path parameters (`/{id}`), wildcards, non-`GET` methods, and `async def` handlers are rejected at construction. This surface can grow later without breaking existing extensions.
+- A name registered under the `dynamo.frontend.routes` entry-point group, recommended for packaged
+  extensions.
+- A direct `module:function` path for development or one-off deployments.
 
-## Minimal example
+Extensions add routes but cannot override built-in routes. A duplicate method and path combination
+causes Frontend startup to fail.
 
-**1. Write a route provider.** A provider is a callable that returns a `FrontendRoute` (or an iterable of them). Each handler is synchronous, receives a `FrontendExtensionContext`, and returns a JSON-serializable body (HTTP 200) or a `FrontendResponse` to set the status code.
+<Note>
+Python route extensions currently support synchronous handlers on static-path `GET` routes only.
+Path parameters, wildcards, other HTTP methods, and asynchronous handlers are rejected.
+</Note>
+
+## Add a route extension
+
+### Define a route provider
+
+A provider is a callable that returns a `FrontendRoute` or an iterable of routes. Each synchronous
+handler receives a `FrontendExtensionContext` and returns either:
+
+- A JSON-serializable body, which produces HTTP 200.
+- A `FrontendResponse` with an explicit status code and body.
 
 ```python
 # hello_routes.py
-from dynamo.llm import FrontendRoute, FrontendExtensionContext
+from dynamo.llm import FrontendExtensionContext, FrontendRoute
 
 
 def _hello(ctx: FrontendExtensionContext):
@@ -27,7 +47,10 @@ def hello_world_routes():
     return [FrontendRoute("GET", "/hello_world", _hello)]
 ```
 
-**2. Register it as an entry point** under the `dynamo.frontend.routes` group. The entry-point name (here `hello-world`) is what you pass on the command line.
+### Register the provider
+
+For an installable package, register the provider under the `dynamo.frontend.routes` entry-point
+group. The entry-point name is the value passed to the Frontend.
 
 ```toml
 # pyproject.toml
@@ -35,55 +58,104 @@ def hello_world_routes():
 hello-world = "hello_routes:hello_world_routes"
 ```
 
-**3. Install the package** so the entry point is discoverable:
+Install the package so the entry point is discoverable:
 
 ```bash
 pip install -e .
 ```
 
-**4. Launch the frontend** with the extension selected:
+### Start the Frontend
+
+Select the registered provider by name:
 
 ```bash
 python -m dynamo.frontend --frontend-route-extension hello-world
-# equivalently: DYN_FRONTEND_ROUTE_EXTENSIONS="hello-world" python -m dynamo.frontend
 ```
 
-**5. Call the route:**
+The equivalent environment-variable form is:
+
+```bash
+DYN_FRONTEND_ROUTE_EXTENSIONS="hello-world" python -m dynamo.frontend
+```
+
+Call the added route:
 
 ```bash
 curl localhost:8000/hello_world
-# {"message":"hello world!"}
 ```
 
-## Quick / ad-hoc: `module:function`
+The response is:
 
-For development or a one-off deployment where packaging a plugin is overkill, pass a `module:function` path directly instead of a registered name — no `pyproject.toml` or install required, as long as the module is importable (e.g. on `PYTHONPATH`):
+```json
+{"message": "hello world!"}
+```
+
+## Load an importable provider directly
+
+For development or a one-off deployment, pass an importable `module:function` path. The module must
+be importable, for example by being available on `PYTHONPATH`.
 
 ```bash
-python -m dynamo.frontend --frontend-route-extension hello_routes:hello_world_routes
+python -m dynamo.frontend \
+  --frontend-route-extension hello_routes:hello_world_routes
 ```
 
-A registered entry-point name always takes precedence; the path fallback only applies when the value is not a registered name and contains `:`.
+A registered entry-point name takes precedence. The `module:function` fallback applies only when no
+registered name matches and the value contains `:`.
 
-## Handler contract
+## Return a custom status
 
-- **Route:** `GET` only, static path (no `{param}`/`*wildcard`) — enforced at `FrontendRoute` construction.
-- **Signature:** `handler(ctx: FrontendExtensionContext)` — synchronous. `async def` handlers are rejected at construction.
-- **Return:** a JSON-serializable value (implies `200`), or `FrontendResponse(status_code, body)` to set the status. Ordinary tuples serialize as JSON arrays — use `FrontendResponse` for status overrides:
+Return `FrontendResponse` when a handler needs a status other than HTTP 200:
 
-  ```python
-  from dynamo.llm import FrontendResponse
+```python
+from dynamo.llm import FrontendResponse
 
-  def _health_ready(ctx):
-      body = {"status": "ready" if ctx.has_any_ready_model() else "not ready"}
-      return body if ctx.has_any_ready_model() else FrontendResponse(503, body)
-  ```
 
-- **Live state:** `FrontendExtensionContext` exposes the current frontend state so responses reflect models registering/draining at runtime — e.g. `ctx.has_any_ready_model()`, `ctx.serving_ready_display_names()`, `ctx.is_model_ready_to_serve(name)`, `ctx.is_ready()`.
-- **Keep handlers fast and non-blocking.** Handlers run on a small, dedicated thread pool (isolated from the inference tokenization pool), so a slow handler degrades only other extension routes, not inference. Still, the pool is small and GIL-serialized: a handler that exceeds ~30s is treated as hung and its request returns `503`, and a saturated pool sheds new extension requests with `503`. Do not block on network/disk or run heavy compute inline.
+def _health_ready(ctx):
+    body = {"status": "ready" if ctx.has_any_ready_model() else "not ready"}
+    return body if ctx.has_any_ready_model() else FrontendResponse(503, body)
+```
 
-## Notes
+`FrontendExtensionContext` provides a read-only view of live Frontend state through these methods:
 
-- Select multiple extensions by repeating `--frontend-route-extension` (or via a **whitespace-separated** `DYN_FRONTEND_ROUTE_EXTENSIONS`). Names are de-duplicated.
-- Passing an unknown name fails fast and lists the available registered extensions.
-- Extensions apply to the HTTP frontend only.
+- `is_ready()`
+- `is_cancelled()`
+- `has_any_ready_model()`
+- `is_model_ready_to_serve(name)`
+- `model_display_names()`
+- `serving_ready_display_names()`
+
+## Handler limits
+
+Handlers execute in a small, dedicated thread pool, separate from inference tokenization. Keep them
+fast and non-blocking:
+
+- A handler that exceeds 30 seconds returns HTTP 503.
+- A saturated extension pool rejects new requests with the configured overload status code, HTTP
+  529 by default.
+- Handler failures return HTTP 500.
+- Network, disk, or compute-heavy operations can block other extension routes because Python
+  handlers contend for the Global Interpreter Lock (GIL).
+
+## Load multiple providers
+
+Repeat `--frontend-route-extension` to load multiple providers:
+
+```bash
+python -m dynamo.frontend \
+  --frontend-route-extension health-routes \
+  --frontend-route-extension metadata-routes
+```
+
+For the environment variable, use whitespace-separated values:
+
+```bash
+DYN_FRONTEND_ROUTE_EXTENSIONS="health-routes metadata-routes" \
+  python -m dynamo.frontend
+```
+
+Provider names are de-duplicated. An unknown name fails startup and reports the available registered
+extensions.
+
+For the complete flag and handler contract reference, see
+[Frontend Configuration Reference](frontend-config-reference.mdx#python-route-extensions).

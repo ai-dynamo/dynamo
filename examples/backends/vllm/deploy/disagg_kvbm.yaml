@@ -1,0 +1,72 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-disagg-kvbm
+spec:
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+    VllmDecodeWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          workingDir: /workspace/examples/backends/vllm
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          args:
+            - --model
+            - Qwen/Qwen3-8B
+            - --disaggregation-mode
+            - decode
+            - --kv-transfer-config
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+            - --max-model-len
+            - "32000"
+            - --enforce-eager
+    VllmPrefillWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      replicas: 1
+      resources:
+        requests:
+          gpu: "1"
+          memory: "200Gi"
+        limits:
+          gpu: "1"
+          memory: "250Gi"
+      envs:
+        - name: DYN_KVBM_CPU_CACHE_GB
+          value: "100"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          workingDir: /workspace/examples/backends/vllm
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          args:
+            - --model
+            - Qwen/Qwen3-8B
+            - --disaggregation-mode
+            - prefill
+            - --max-model-len
+            - "32000"
+            - --enforce-eager
+            - --kv-transfer-config
+            - '{"kv_connector":"PdConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"},{"kv_connector":"NixlConnector","kv_role":"kv_both"}]},"kv_connector_module_path":"kvbm.vllm_integration.connector"}'

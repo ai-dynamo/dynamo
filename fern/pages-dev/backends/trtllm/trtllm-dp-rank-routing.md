@@ -32,6 +32,4 @@ python3 -m dynamo.frontend --router-mode kv
 
 The `--enable-attention-dp` flag sets `attention_dp_size = tensor_parallel_size` and configures Dynamo to publish KV events per DP rank. The router automatically creates routing targets for each `(worker_id, dp_rank)` combination.
 
-<Note>
-Attention DP requires TRT-LLM's PyTorch backend. AutoDeploy does not support attention DP.
-</Note>
+<Note>Attention DP requires TRT-LLM's PyTorch backend. AutoDeploy does not support attention DP.</Note>

@@ -21,13 +21,13 @@ python -m dynamo.vllm --help
 
 The `--help` output is organized into the following groups:
 
-- **Dynamo Runtime Options** — Namespace, discovery backend, request/event plane, endpoint types, tool/reasoning parsers, and custom chat templates. These are common across all Dynamo backends and use `DYN_*` env vars.
-- **Dynamo vLLM Options** — Disaggregation mode, tokenizer selection, sleep mode, multimodal flags, vLLM-Omni pipeline configuration, headless mode, and ModelExpress. These use `DYN_VLLM_*` env vars.
+- **Dynamo Runtime Options** — Namespace, discovery backend, request/event plane, endpoint types, tool/reasoning parsers, and custom chat templates. These are common across all Dynamo backends and use `DYN_*` env vars. See [Runtime Configuration](../../reference/runtime-config-reference.mdx) for the full field reference.
+- **Dynamo vLLM Options** — Disaggregation mode, tokenizer selection, sleep mode, multimodal flags, vLLM-Omni pipeline configuration, headless mode, and ModelExpress. These use `DYN_VLLM_*` env vars. See [vLLM Configuration](vllm-config-reference.mdx) for the full field reference.
 - **vLLM Engine Options** — All native vLLM arguments (`--model`, `--tensor-parallel-size`, `--kv-transfer-config`, `--kv-events-config`, `--enable-prefix-caching`, etc.). See the [vLLM serve args documentation](https://docs.vllm.ai/en/stable/configuration/serve_args.html).
 
 ### Tool and Reasoning Parsers
 
-Use `--dyn-tool-call-parser` and `--dyn-reasoning-parser` to match the model's output format when the model emits tool calls and/or reasoning content. The current supported values are documented in [Tool Call Parsing (Dynamo)](../../tool-calling/README.md#supported-tool-call-parsers) and [Reasoning Parsing (Dynamo)](../../reasoning/README.md#supported-reasoning-parsers).
+Use `--dyn-tool-call-parser` and `--dyn-reasoning-parser` to match the model's output format when the model emits tool calls and/or reasoning content. The current supported values are documented in [Tool Call Parsing (Dynamo)](../../tool-calling/README.mdx#supported-tool-call-parsers) and [Reasoning Parsing (Dynamo)](../../reasoning/README.md#supported-reasoning-parsers).
 
 For reasoning models with structured output (`response_format`, JSON schema,
 or required/named tool choice), configure both reasoning parsers on the worker:
@@ -63,7 +63,7 @@ also using the router queue, configure the frontend-side
 after a request reaches the worker.
 
 For the cross-layer behavior, see
-[Priority Scheduling](../../components/router/priority-scheduling.md). For the upstream
+[Priority Scheduling](../../agents/priority-scheduling.md). For the upstream
 flag definition, see the
 [vLLM serve args documentation](https://docs.vllm.ai/en/stable/configuration/serve_args.html).
 
@@ -110,7 +110,7 @@ Each worker type has a specialized health check payload that validates the full 
 | Prefill | Same payload structure as decode, adapted for prefill request format |
 | vLLM-Omni | Short generation request via AsyncOmni with the model's BOS token |
 
-Health checks are registered with the Dynamo runtime and called by the frontend or Kubernetes liveness probes. The payload can be overridden via `DYN_HEALTH_CHECK_PAYLOAD` environment variable. See [Health Checks](../../observability/health-checks.md) for the broader health check architecture.
+Health checks are registered with the Dynamo runtime and called by the frontend or Kubernetes liveness probes. The payload can be overridden via `DYN_HEALTH_CHECK_PAYLOAD` environment variable. See [Observability Architecture](../../design-docs/observability.md#active-worker-health-checks) for the active health-check design.
 
 ## Request Cancellation
 
@@ -121,7 +121,7 @@ When a user cancels a request (e.g., by disconnecting from the frontend), the re
 | **Aggregated** | ✅ | ✅ |
 | **Disaggregated** | ✅ | ✅ |
 
-For more details, see the [Request Cancellation Architecture](../../fault-tolerance/request-cancellation.md) documentation.
+For more details, see the [Request Cancellation Architecture](../../design-docs/request-cancellation.md) documentation.
 
 ## Request Migration
 
@@ -129,7 +129,7 @@ Dynamo supports [request migration](../../fault-tolerance/request-migration.md) 
 
 ## See Also
 
-- **[Examples](vllm-examples.md)**: All deployment patterns with launch scripts
+- **[Examples](vllm-examples.mdx)**: Local deployment launch scripts
 - **[vLLM README](README.md)**: Quick start and feature overview
 - **[Observability](vllm-observability.md)**: Metrics and monitoring setup
 - **[Configuration and Tuning](../../components/router/router-configuration.md)**: KV-aware routing configuration

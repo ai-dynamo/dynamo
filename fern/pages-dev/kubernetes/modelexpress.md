@@ -7,13 +7,13 @@ subtitle: Speed up model weight distribution across Kubernetes workers
 
 ModelExpress is a model weight distribution service for faster worker startup in larger Dynamo clusters. Instead of every worker downloading the full model from storage, one worker can publish model weight availability and later workers can pull compatible tensors from that source over NIXL/RDMA. ModelExpress can also pair with ModelStreamer to stream safetensors directly from object storage into GPU memory.
 
-Use ModelExpress when model rollout time, autoscale cold start, or fleet-wide model updates matter more than the simplicity of a shared PVC. For smaller clusters, start with [Model Caching](model-caching.md).
+Use ModelExpress when model rollout time, autoscale cold start, or fleet-wide model updates matter more than the simplicity of a shared PVC. For smaller clusters, start with [Model Caching](model-caching.mdx).
 
 ## When to Use It
 
 | Scenario | Recommended path |
 | --- | --- |
-| Small cluster or first deployment | [Model Caching](model-caching.md) with PVC + download Job |
+| Small cluster or first deployment | [Model Caching](model-caching.mdx) with PVC + download Job |
 | Large cluster with many replicas | ModelExpress P2P distribution |
 | Models already on shared storage | PVC or shared filesystem path |
 | Models in S3, GCS, Azure Blob Storage, or local safetensors paths | ModelExpress + ModelStreamer |
@@ -119,6 +119,6 @@ Credentials are consumed by the storage SDKs in the worker pod. They do not flow
 
 ## See Also
 
-- [Model Caching](model-caching.md) - simple PVC-based model caching and the longer ModelExpress background.
+- [Model Caching](model-caching.mdx) - simple PVC-based model caching and the longer ModelExpress background.
 - [ModelExpress deployment guide](https://github.com/ai-dynamo/modelexpress/blob/main/docs/DEPLOYMENT.md) - server, P2P, and ModelStreamer configuration.
 - [Installation Guide](installation-guide.md) - Dynamo platform install options, including `modelExpressURL`.

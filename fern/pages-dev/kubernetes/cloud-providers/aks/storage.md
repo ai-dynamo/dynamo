@@ -11,16 +11,16 @@ For implementing tiered storage on AKS, you can take advantage of the different 
 | Storage Option | Performance | Best For |
 |----------------|-------------|----------|
 | Local CSI (Ephemeral Disk) | Very high | Fast model caching, warm restarts |
-| [Azure Managed Lustre](azure-lustre-csi.md) | Extremely high | Large multi-node models, shared cache |
+| [Azure Managed Lustre](azure-lustre-csi.mdx) | Extremely high | Large multi-node models, shared cache |
 | [Azure Disk (Managed Disk)](https://learn.microsoft.com/en-us/azure/aks/azure-csi-driver-volume-provisioning?tabs=dynamic-volume-blob%2Cnfs%2Ckubernetes-secret%2Cnfs-3%2Cgeneral%2Cgeneral2%2Cdynamic-volume-disk%2Cgeneral-disk%2Cdynamic-volume-files%2Cgeneral-files%2Cgeneral-files2%2Cdynamic-volume-files-mid%2Coptimize%2Csmb-share&pivots=csi-disk#create-azure-disk-pvs-using-built-in-storage-classes) | High | Persistent single-writer model cache |
 | [Azure Files](https://learn.microsoft.com/en-us/azure/aks/azure-csi-driver-volume-provisioning?tabs=dynamic-volume-blob%2Cnfs%2Ckubernetes-secret%2Cnfs-3%2Cgeneral%2Cgeneral2%2Cdynamic-volume-disk%2Cgeneral-disk%2Cdynamic-volume-files%2Cgeneral-files%2Cgeneral-files2%2Cdynamic-volume-files-mid%2Coptimize%2Csmb-share&pivots=csi-files#use-a-persistent-volume-for-storage) | Medium | Shared small/medium models |
 | [Azure Blob (via Fuse or init)](https://learn.microsoft.com/en-us/azure/aks/azure-csi-driver-volume-provisioning?tabs=dynamic-volume-blob%2Cnfs%2Ckubernetes-secret%2Cnfs-3%2Cgeneral%2Cgeneral2%2Cdynamic-volume-disk%2Cgeneral-disk%2Cdynamic-volume-files%2Cgeneral-files%2Cgeneral-files2%2Cdynamic-volume-files-mid%2Coptimize%2Csmb-share&pivots=csi-blob#create-a-pvc-using-built-in-storage-class) | Low-Medium | Cold model storage, bootstrap downloads |
 
 <Note>
-Azure Managed Lustre and Local CSI (ephemeral disk) are not installed by default in AKS and require additional setup before use. Azure Disk, Azure Files, and Azure Blob CSI drivers are available out of the box. See the [Azure Lustre CSI Driver](azure-lustre-csi.md) guide for Lustre setup, or the [AKS CSI storage options documentation](https://learn.microsoft.com/azure/aks/csi-storage-drivers) for a full overview of built-in drivers.
+Azure Managed Lustre and Local CSI (ephemeral disk) are not installed by default in AKS and require additional setup before use. Azure Disk, Azure Files, and Azure Blob CSI drivers are available out of the box. See the [Azure Lustre CSI Driver](azure-lustre-csi.mdx) guide for Lustre setup, or the [AKS CSI storage options documentation](https://learn.microsoft.com/azure/aks/csi-storage-drivers) for a full overview of built-in drivers.
 </Note>
 
-For Azure Managed Lustre setup, see the [Azure Lustre CSI Driver](azure-lustre-csi.md) guide.
+For Azure Managed Lustre setup, see the [Azure Lustre CSI Driver](azure-lustre-csi.mdx) guide.
 
 ## Recommendations by Cache Type
 
@@ -101,6 +101,6 @@ spec:
 
 ## See Also
 
-- [Azure Lustre CSI Driver](azure-lustre-csi.md) — Full setup guide for Azure Managed Lustre
-- [Model Caching](../../model-caching.md) — Full walkthrough for setting up model caching with Dynamo, including download Jobs and mount configuration
+- [Azure Lustre CSI Driver](azure-lustre-csi.mdx) — Full setup guide for Azure Managed Lustre
+- [Model Caching](../../model-caching.mdx) — Full walkthrough for setting up model caching with Dynamo, including download Jobs and mount configuration
 - [AKS CSI Storage Drivers](https://learn.microsoft.com/azure/aks/csi-storage-drivers) — Microsoft documentation for all built-in CSI drivers

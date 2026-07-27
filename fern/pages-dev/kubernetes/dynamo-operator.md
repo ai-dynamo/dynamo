@@ -141,7 +141,7 @@ For the complete technical API reference for Dynamo Custom Resource Definitions,
 For user-focused workflows, see:
 
 - **[Deployment Overview](./model-deployment-guide.md)** for DGD, DCD, DGDR, and recipes
-- **[DGDR Reference](./dgdr.md)** for deploy-by-intent generated deployments
+- **[DGDR Reference](./dgdr-reference.mdx)** for deploy-by-intent generated deployments
 - **[Managing Models with DynamoModel Guide](./deployment/dynamomodel-guide.md)**
 - **[Snapshotting GPU Workers](./snapshot.md)** for `DynamoCheckpoint`
 
@@ -183,7 +183,7 @@ A pre-built Grafana dashboard is available for visualizing operator metrics. The
 
 For complete setup instructions and metrics reference, see:
 
-**📖 [Operator Metrics Guide](./observability/operator-metrics.md)**
+**📖 [Operator Metrics Guide](../reference/observability/operator-metrics.mdx)**
 
 ## Installation
 

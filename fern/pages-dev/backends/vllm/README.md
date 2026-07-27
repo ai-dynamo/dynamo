@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: vLLM
-subtitle: vLLM engines run in Dynamo's distributed runtime with disaggregated serving, NIXL KV transfer, and KV-aware routing.
 ---
 
 Dynamo vLLM integrates [vLLM](https://github.com/vllm-project/vllm) engines into Dynamo's distributed runtime, enabling disaggregated serving, KV-aware routing, and request cancellation while maintaining full compatibility with vLLM's native engine arguments. Dynamo leverages vLLM's native KV cache events, NIXL-based transfer mechanisms, and metric reporting to enable KV-aware routing and P/D disaggregation.
@@ -53,41 +52,43 @@ For development, use the [devcontainer](https://github.com/ai-dynamo/dynamo/tree
 | Feature | Status | Notes |
 |---------|--------|-------|
 | [**Disaggregated Serving**](../../design-docs/disagg-serving.md) | ✅ | Prefill/decode separation with NIXL KV transfer |
-| [**KV-Aware Routing**](../../components/router/README.md) | ✅ | Requires explicit KV event publishing on workers for event-driven cache state |
+| [**KV-Aware Routing**](../../components/router/README.md) | ✅ | |
 | [**SLA-Based Planner**](../../components/planner/planner-guide.md) | ✅ | |
-| [**Native KV Offloading**](vllm-native-kv-offloading.md) | ✅ | vLLM `OffloadingConnector` CPU tier with tier-aware KV routing; validated on aggregated serving; requires vLLM v0.24.0+ and Dynamo 1.3.0+ |
 | [**KVBM**](../../components/kvbm/README.md) | ✅ | |
-| [**LMCache**](../../integrations/lmcache-integration.md) | ✅ | CUDA 12.9 and arm64/aarch64 containers may require building LMCache from source |
-| [**FlexKV**](../../integrations/flexkv-integration.md) | ✅ | |
-| [**Multimodal Support**](../../features/multimodal/multimodal-vllm.md) | ✅ | Aggregated and P/D image/video serving on legacy and unified Python backends; separate Encode workers use the legacy path |
+| [**LMCache**](../../cli/kv-cache-offloading.mdx) | ✅ | CUDA 12.9 and arm64/aarch64 containers may require building LMCache from source |
+| [**FlexKV**](../../cli/kv-cache-offloading.mdx) | ✅ | Requires a separate FlexKV build |
+| [**Multimodal Support**](../../features/diffusion/README.md) | ✅ | Via vLLM-Omni integration |
 | [**Observability**](vllm-observability.md) | ✅ | Metrics and monitoring |
 | **WideEP** | ✅ | Support for DeepEP |
 | **DP Rank Routing** | ✅ | [Hybrid load balancing](https://docs.vllm.ai/en/stable/serving/data_parallel_deployment/?h=external+dp#hybrid-load-balancing) via external DP rank control |
 | [**LoRA**](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/launch/lora/README.md) | ✅ | Dynamic loading/unloading from S3-compatible storage |
 | **GB200 Support** | ✅ | Container functional on main |
 
-## KV Routing Requirements
+## Feature Interactions
 
-<Info>
-Starting the frontend with `--router-mode kv` does not enable KV event
-publishing on vLLM workers. For event-driven cache-aware routing, enable
-publishing on every aggregated or prefill worker whose cache state the router
-should track:
+vLLM offers the broadest feature coverage in Dynamo, with full support for disaggregated serving, KV-aware routing, KV block management, LoRA adapters, and multimodal inference including video and audio. The matrix below shows which feature pairs are validated to work together.
 
-```bash
-python -m dynamo.vllm \
-  --model Qwen/Qwen3-0.6B \
-  --enable-prefix-caching \
-  --kv-events-config '{"enable_kv_cache_events":true,"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'
-```
+**Legend:** ✅ Supported &nbsp;|&nbsp; 🚧 Work in Progress / Experimental / Limited
 
-`endpoint` is the base ZMQ port, and vLLM offsets it by data-parallel rank.
-For worker processes that share a host or network namespace, reserve one port
-per rank and choose base ports whose resulting ranges do not overlap. If
-workers will not publish events, start the frontend with
-`--no-router-kv-events` for approximate cache prediction or `--load-aware` for
-load-only routing.
-</Info>
+| Feature | Disaggregated Serving | KV-Aware Routing | SLA-Based Planner | KV Block Manager | Multimodal | Request Migration | Request Cancellation | LoRA | Tool Calling | Speculative Decoding |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Disaggregated Serving** | — | | | | | | | | | |
+| **KV-Aware Routing** | ✅ | — | | | | | | | | |
+| **SLA-Based Planner** | ✅ | ✅ | — | | | | | | | |
+| **KV Block Manager** | ✅ | ✅ | ✅ | — | | | | | | |
+| **Multimodal** | ✅ | ✅<sup>1</sup> | — | ✅ | — | | | | | |
+| **Request Migration** | ✅ | ✅ | ✅ | ✅ | ✅ | — | | | | |
+| **Request Cancellation** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — | | | |
+| **LoRA** | ✅ | ✅<sup>2</sup> | — | ✅ | — | ✅ | ✅ | — | | |
+| **Tool Calling** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — | |
+| **Speculative Decoding** | ✅ | ✅ | — | ✅ | — | ✅ | ✅ | — | ✅ | — |
+
+> **Notes:**
+> 1. **Multimodal + KV-Aware Routing**: Image-aware KV routing is supported in the documented vLLM paths. The default Rust frontend path supports model families handled by `llm-multimodal`; the Python chat-processor path delegates to vLLM's multimodal processor. ([Source](../../features/multimodal/multimodal-kv-routing.md))
+> 2. **KV-Aware LoRA Routing**: vLLM supports routing requests based on LoRA adapter affinity.
+> 3. **Audio Support**: vLLM supports audio models like Qwen2-Audio (experimental). ([Source](../../features/multimodal/multimodal-vllm.md))
+> 4. **Video Support**: vLLM supports video input with frame sampling. ([Source](../../features/multimodal/multimodal-vllm.md))
+> 5. **Speculative Decoding**: Eagle3 support documented. ([Source](../../features/speculative-decoding/speculative-decoding-vllm.md))
 
 ## Quick Start
 
@@ -153,10 +154,9 @@ reaches feature and operational parity with the Python vLLM backend.
 ## Next Steps
 
 - **[Reference Guide](vllm-reference-guide.md)**: Configuration, arguments, and operational details
-- **[Examples](vllm-examples.md)**: All deployment patterns with launch scripts
+- **[Examples](vllm-examples.mdx)**: Local deployment launch scripts
 - **[KV Cache Offloading](vllm-kv-offloading.md)**: KVBM, LMCache, and FlexKV integrations
-- **[Native KV Offloading](vllm-native-kv-offloading.md)**: vLLM's `OffloadingConnector` with tier-aware KV routing
 - **[Observability](vllm-observability.md)**: Metrics and monitoring
-- **[vLLM-Omni](vllm-omni.md)**: Multimodal model serving
+- **[vLLM-Omni](../../features/diffusion/README.md)**: Multimodal model serving
 - **[Kubernetes Deployment](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/deploy/README.md)**: Kubernetes deployment guide
 - **[vLLM Documentation](https://docs.vllm.ai/en/stable/)**: Upstream vLLM serve arguments

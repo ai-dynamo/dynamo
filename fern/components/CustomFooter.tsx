@@ -1,9 +1,7 @@
-import { SiteStyles } from "./SiteStyles";
-
 /**
  * Custom footer for Dynamo docs (Fern native header/footer).
- * Site chrome CSS loads via SiteStyles (not docs.yml `css:`) so the NVIDIA
- * global theme is not overwritten at publish.
+ * Site chrome CSS loads from main.css through docs.yml. Fern custom footer
+ * components cannot import local modules.
  */
 export default function CustomFooter() {
   const currentYear = new Date().getFullYear();
@@ -11,9 +9,7 @@ export default function CustomFooter() {
     "https://fern-image-hosting.s3.us-east-1.amazonaws.com/nvidia/NVIDIA_Logo_0.svg";
 
   return (
-    <>
-      <SiteStyles />
-      <footer className="bd-footer">
+    <footer className="bd-footer">
       <div className="bd-footer__inner">
         <div className="footer-items__start">
           <div className="footer-item">
@@ -87,7 +83,6 @@ export default function CustomFooter() {
           </div>
         </div>
       </div>
-      </footer>
-    </>
+    </footer>
   );
 }

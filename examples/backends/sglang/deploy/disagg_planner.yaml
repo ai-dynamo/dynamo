@@ -1,0 +1,106 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: sglang-disagg-planner
+spec:
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: my-registry/sglang-runtime:my-tag
+    Planner:
+      envFromSecret: hf-token-secret
+      componentType: planner
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          # Planner image selection:
+          #   Dynamo >= 1.1.0: use the dedicated planner image
+          #     <registry>/dynamo-planner:<version>
+          #     (backend runtime images no longer ship planner runtime deps
+          #     such as kubernetes_asyncio, pmdarima, prophet, aiconfigurator).
+          #   Dynamo <  1.1.0: use the backend runtime image
+          #     <registry>/sglang-runtime:<version>.
+          image: my-registry/dynamo-planner:my-tag
+          command:
+          - python3
+          - -m
+          - dynamo.planner
+          args:
+            - --config
+            - '{"environment": "kubernetes", "backend": "sglang", "optimization_target": "sla", "enable_throughput_scaling": true, "enable_load_scaling": true, "pre_deployment_sweeping_mode": "none", "throughput_adjustment_interval_seconds": 60, "load_adjustment_interval_seconds": 5}'
+    decode:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: decode
+      replicas: 2
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: my-registry/sglang-runtime:my-tag
+          workingDir: /workspace/examples/backends/sglang
+          command:
+            - python3
+          args:
+            - -m
+            - dynamo.sglang
+            - --model-path
+            - Qwen/Qwen3-0.6B
+            - --served-model-name
+            - Qwen/Qwen3-0.6B
+            - --page-size
+            - "16"
+            - --tp
+            - "1"
+            - --trust-remote-code
+            - --skip-tokenizer-init
+            - --disaggregation-mode
+            - decode
+            - --disaggregation-transfer-backend
+            - nixl
+            - --disaggregation-bootstrap-port
+            - "12345"
+            - --host
+            - "0.0.0.0"
+    prefill:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: prefill
+      replicas: 2
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: my-registry/sglang-runtime:my-tag
+          workingDir: /workspace/examples/backends/sglang
+          command:
+            - python3
+          args:
+            - -m
+            - dynamo.sglang
+            - --model-path
+            - Qwen/Qwen3-0.6B
+            - --served-model-name
+            - Qwen/Qwen3-0.6B
+            - --page-size
+            - "16"
+            - --tp
+            - "1"
+            - --trust-remote-code
+            - --skip-tokenizer-init
+            - --disaggregation-mode
+            - prefill
+            - --disaggregation-transfer-backend
+            - nixl
+            - --disaggregation-bootstrap-port
+            - "12345"
+            - --host
+            - "0.0.0.0"

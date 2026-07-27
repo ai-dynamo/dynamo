@@ -290,7 +290,7 @@ require the helper.
 Use a binary from the same Dynamo release as the profiler. The profiler checks
 the binary protocol before applying an override and rejects incompatible versions.
 For supported DGD versions and merge behavior, see
-[Generated DGD Overrides](../../kubernetes/dgdr.md#generated-dgd-overrides).
+[Generated DGD Overrides](../../kubernetes/dgdr-guide.md#generated-dgd-overrides).
 
 Registry credentials are namespace-scoped. The operator chart's
 `imagePullSecrets` pull the operator Pod only. A profiling Job that needs
@@ -522,7 +522,7 @@ Provide a base DGD config via the overrides section:
 ```yaml
 overrides:
   dgd:
-    apiVersion: nvidia.com/v1alpha1
+    apiVersion: nvidia.com/v1beta1
     kind: DynamoGraphDeployment
     metadata:
       name: my-dgd

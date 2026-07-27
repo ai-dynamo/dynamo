@@ -7,11 +7,9 @@ subtitle: Per-request serving hints for agentic workloads
 
 Agent hints are optional per-request metadata that a harness sends under `nvext.agent_hints`. Dynamo parses these hints in the frontend and passes them to the router and, where supported, backend runtimes.
 
-Use hints only for serving-relevant intent. Use [session IDs](session-ids.md#session-id-inputs) for passive trace identity.
+Use hints only for serving-relevant intent. Use [session IDs](session-ids.mdx#session-id-inputs) for passive trace identity.
 
-## Request Schema
-
-```json
+```json title="Send a Dynamo request with agent hints"
 {
     "model": "my-model",
     "messages": [
@@ -30,7 +28,7 @@ Use hints only for serving-relevant intent. Use [session IDs](session-ids.md#ses
 
 | Hint | Description |
 |------|-------------|
-| `priority` | Unified request priority. Higher values mean higher priority at the Dynamo API layer; see [Priority Scheduling](../components/router/priority-scheduling.md) for router and backend requirements. |
+| `priority` | Unified request priority. Higher values mean higher priority at the Dynamo API layer; see [Priority Scheduling](priority-scheduling.md) for router and backend requirements. |
 | `strict_priority` | Router pending-queue tier. Higher values always precede lower values before the configured queue policy is applied. |
 | `osl` | Expected output sequence length in tokens. Used by the router for output block tracking and load-balancing accuracy when `--router-track-output-blocks` is enabled. |
 | `speculative_prefill` | When true, Dynamo can prefill the predicted next-turn prefix after the current turn completes to warm the KV cache for the next request. |
@@ -44,7 +42,7 @@ flowchart LR
     Router --> Worker[Backend worker]
 ```
 
-The frontend parses `nvext.agent_hints`, the router uses hints for queueing and worker selection, and supported backends use forwarded hints for engine-level scheduling and cache policy. For priority-specific semantics, see [Priority Scheduling](../components/router/priority-scheduling.md).
+The frontend parses `nvext.agent_hints`, the router uses hints for queueing and worker selection, and supported backends use forwarded hints for engine-level scheduling and cache policy. For priority-specific semantics, see [Priority Scheduling](priority-scheduling.md).
 
 ## Backend Support
 

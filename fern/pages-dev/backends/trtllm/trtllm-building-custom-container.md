@@ -8,7 +8,7 @@ For the prebuilt container, see the [TensorRT-LLM Quick Start](README.md#quick-s
 
 ## How the Image Is Composed
 
-The Dynamo TensorRT-LLM image layers Dynamo on top of the upstream NVIDIA TensorRT-LLM release container — it does **not** build TensorRT-LLM from source. The base used by the rendered Dockerfile is set in [`container/context.yaml`](../../../container/context.yaml):
+The Dynamo TensorRT-LLM image layers Dynamo on top of the upstream NVIDIA TensorRT-LLM release container — it does **not** build TensorRT-LLM from source. The base used by the rendered Dockerfile is set in [`container/context.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/container/context.yaml):
 
 ```yaml
 trtllm:
@@ -59,7 +59,7 @@ docker build --pull \
 
 `--pull` is recommended when changing only the upstream tag: without it, Docker may reuse a previously-cached layer that resolved against the old tag's manifest, producing a half-stale image that boots but breaks at NIXL init if upstream moved bundled libraries between tags.
 
-If a tag move changes where the upstream image installs `libnixl.so` or the NIXL plugin directory, the runtime stage's `test -f` / `test -d` guards fail the build instead of producing a silently broken image. Update the `LD_PRELOAD` / `NIXL_PLUGIN_DIR` paths in [`container/templates/trtllm_runtime.Dockerfile`](../../../container/templates/trtllm_runtime.Dockerfile) and re-run `render.py` (otherwise `container/rendered.Dockerfile` is stale and the build silently uses the old paths) if that happens.
+If a tag move changes where the upstream image installs `libnixl.so` or the NIXL plugin directory, the runtime stage's `test -f` / `test -d` guards fail the build instead of producing a silently broken image. Update the `LD_PRELOAD` / `NIXL_PLUGIN_DIR` paths in [`container/templates/trtllm_runtime.Dockerfile`](https://github.com/ai-dynamo/dynamo/blob/main/container/templates/trtllm_runtime.Dockerfile) and re-run `render.py` (otherwise `container/rendered.Dockerfile` is stale and the build silently uses the old paths) if that happens.
 
 ## Building TensorRT-LLM From Source
 
@@ -68,7 +68,7 @@ Dynamo no longer builds TensorRT-LLM itself. If you need a custom TRT-LLM build 
 1. Build a TensorRT-LLM container following the upstream instructions: [TensorRT-LLM — Build from Source on Linux](https://nvidia.github.io/TensorRT-LLM/installation/build-from-source-linux.html). Use the "Building a TensorRT LLM Docker Image" section (specifically `make -C docker release_build`) — this produces a container with `tensorrt_llm` in the system site-packages **and** the bundled `libnixl.so` at the canonical path. A bare `build_wheel.py` invocation only produces a wheel and won't have the NIXL bits.
 
    Three constraints the resulting image must satisfy or the Dynamo build will fail its sanity guards:
-   - **Python 3.12** in the system Python (`/usr/local/lib/python3.12/dist-packages/...`) — the `LD_PRELOAD` and `NIXL_PLUGIN_DIR` paths in the runtime Dockerfile are hardcoded to 3.12. If your custom build switches to a different Python minor version, edit those env vars in [`container/templates/trtllm_runtime.Dockerfile`](../../../container/templates/trtllm_runtime.Dockerfile) and re-render.
+   - **Python 3.12** in the system Python (`/usr/local/lib/python3.12/dist-packages/...`) — the `LD_PRELOAD` and `NIXL_PLUGIN_DIR` paths in the runtime Dockerfile are hardcoded to 3.12. If your custom build switches to a different Python minor version, edit those env vars in [`container/templates/trtllm_runtime.Dockerfile`](https://github.com/ai-dynamo/dynamo/blob/main/container/templates/trtllm_runtime.Dockerfile) and re-render.
    - `tensorrt_llm` installed into system site-packages (not a venv), matching upstream layout.
    - `libnixl.so` present at `/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so` and plugins under `nixl/plugins/`.
 2. Tag it locally, e.g. `my-registry/tensorrt-llm:<commit-sha>` (use the source commit you built so the tag carries provenance — pasting a literal `:custom` makes the image untraceable later).
@@ -84,4 +84,4 @@ Dynamo no longer builds TensorRT-LLM itself. If you need a custom TRT-LLM build 
 
    Do **not** add `--pull` here — your custom image only exists locally, and `--pull` will make Docker try to fetch it from docker.io and fail. `--pull` is only useful when the base image lives in a remote registry (see the previous section on pinning an upstream tag).
 
-If your custom build places TRT-LLM's bundled NIXL at a different path (or uses a non-3.12 Python), edit the `LD_PRELOAD` and `NIXL_PLUGIN_DIR` env vars in [`container/templates/trtllm_runtime.Dockerfile`](../../../container/templates/trtllm_runtime.Dockerfile) (and the matching `test -f`/`test -d` guards), **then re-run `python container/render.py ...` to regenerate `container/rendered.Dockerfile` before `docker build`** — otherwise the build silently uses the previously-rendered file. Those env vars exist to work around [`ai-dynamo/nixl#1668`](https://github.com/ai-dynamo/nixl/issues/1668) — `nixl-cu13`'s bundled UCX 1.20.0 hangs under multi-agent init — by forcing every process in the image to load TRT-LLM's 0.9.0 `libnixl.so` instead.
+If your custom build places TRT-LLM's bundled NIXL at a different path (or uses a non-3.12 Python), edit the `LD_PRELOAD` and `NIXL_PLUGIN_DIR` env vars in [`container/templates/trtllm_runtime.Dockerfile`](https://github.com/ai-dynamo/dynamo/blob/main/container/templates/trtllm_runtime.Dockerfile) (and the matching `test -f`/`test -d` guards), **then re-run `python container/render.py ...` to regenerate `container/rendered.Dockerfile` before `docker build`** — otherwise the build silently uses the previously-rendered file. Those env vars exist to work around [`ai-dynamo/nixl#1668`](https://github.com/ai-dynamo/nixl/issues/1668) — `nixl-cu13`'s bundled UCX 1.20.0 hangs under multi-agent init — by forcing every process in the image to load TRT-LLM's 0.9.0 `libnixl.so` instead.

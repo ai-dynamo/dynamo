@@ -51,16 +51,16 @@ navigation:
     slug: digest
     contents:
       - page: "Dynamo Day 0 support for TokenSpeed"
-        path: ../digest/tokenspeed/tokenspeed-day-0.md
+        path: ../digest/tokenspeed/tokenspeed-day-0.mdx
         slug: tokenspeed-day-0
       - page: "Multi-Turn Agentic Harnesses"
-        path: ../digest/agentic-inference/agentic-harnesses.md
+        path: ../digest/agentic-inference/agentic-harnesses.mdx
         slug: agentic-harnesses
       - page: "Full-Stack Optimizations for Agentic Inference"
-        path: ../digest/agentic-inference/agentic-inference.md
+        path: ../digest/agentic-inference/agentic-inference.mdx
         slug: agentic-inference
       - page: "Flash Indexer: Inter-Galactic KV Routing"
-        path: ../digest/flash-indexer/flash-indexer.md
+        path: ../digest/flash-indexer/flash-indexer.mdx
         slug: flash-indexer
   # ==================== Kubernetes Deployment ====================
   - section: Kubernetes Deployment

@@ -15,8 +15,6 @@ This document provides a comprehensive guide for multimodal inference using SGLa
 | **Video** | HTTP/HTTPS/`file://` URL | Yes | Yes | Vision encoder generates embeddings |
 | **Audio** | HTTP/HTTPS URL | No | No | Not supported in SGLang backend |
 
-> **MM-aware KV routing** is available for SGLang via the Rust frontend — it substitutes per-image `pad_value` tokens in the routing-side view so SGLang's RadixAttention prefix-cache key matches the router's overlap calculation. The frontend auto-detects the backend from the worker's `ModelDeploymentCard` (the SGLang worker advertises `backend_framework="sglang"`), so no deployer-side flag is required. See [Multimodal KV Routing → SGLang section](./multimodal-kv-routing.md#sglang). That path is orthogonal to the encode-worker / EPD topologies documented below; it's a frontend routing concern that works with the aggregated SGLang worker layout in `examples/backends/sglang/launch/agg_multimodal_router.sh`.
-
 ### Supported URL Formats
 
 | Format | Example | Description |
@@ -57,6 +55,66 @@ In SGLang E/P/D, keep this flag on both the decode and prefill workers. This dif
 - **Token Expansion**: Single `<|image_pad|>` token replaced with N tokens based on embedding shape
 - **NIXL Transfer**: Embeddings transferred from Encoder → PD Worker using NIXL
 - **No Rust Processing**: All tokenization and image handling happens in Python
+
+## Multimodal KV Routing
+
+Multimodal KV routing works with SGLang's aggregated worker topology. It is independent of the E/PD and E/P/D encoder-disaggregation patterns described later in this guide.
+
+SGLang RadixAttention includes a per-image `pad_value` token in its prefix-cache key. Dynamo must use that same token in the routing view:
+
+1. The Rust frontend hashes each image and calculates its expanded token count.
+2. It derives `pad_value = MM_PAD_SHIFT_VALUE + (mm_hash % 2^30)`.
+3. It substitutes that value for the image placeholder in the routing-only token view.
+4. It forwards the original hash list through `GenerateReqInput.mm_hashes`.
+5. SGLang uses the supplied hash when constructing its own `pad_value`, keeping the router and RadixAttention cache keys aligned.
+
+The frontend selects this behavior automatically when the worker's `ModelDeploymentCard` reports `backend_framework="sglang"`.
+
+Launch an aggregated deployment with multimodal KV routing:
+
+```bash
+cd $DYNAMO_HOME
+bash examples/backends/sglang/launch/agg_multimodal_router.sh
+```
+
+The launcher configures KV events on each worker and sets `--router-mode kv` with a matching frontend and worker block size.
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `MODEL` | `Qwen/Qwen3-VL-2B-Instruct` | Model to serve |
+| `NUM_WORKERS` | `2` | Number of SGLang workers |
+| `BLOCK_SIZE` | `16` | Worker page size and frontend KV block size |
+| `KV_EVENTS_PORT_BASE` | `29090` | Starting port for per-worker KV event publishers |
+| `SGLANG_EXTRA_ARGS` | unset | Additional arguments for `python -m dynamo.sglang` |
+
+### Source-Build Requirements
+
+The Dynamo SGLang image includes both routing prerequisites:
+
+- Dynamo is built with the `mm-routing` Rust feature.
+- SGLang includes `GenerateReqInput.mm_hashes` support.
+
+When using a custom SGLang installation, apply the `mm_hashes` change from [sgl-project/sglang#25300](https://github.com/sgl-project/sglang/pull/25300). Without it, requests still complete but fall back to text-prefix-only routing.
+
+To apply only the Python portion of the patch:
+
+```bash
+SITE_PACKAGES_ROOT="$(python3 -c 'import pathlib, sglang; print(pathlib.Path(sglang.__file__).resolve().parent.parent)')"
+cd "$SITE_PACKAGES_ROOT"
+curl -sL https://github.com/sgl-project/sglang/pull/25300.diff | python3 -c '
+import sys
+chunks = sys.stdin.read().split("diff --git ")
+filtered = [c for c in chunks if c.startswith("a/python/sglang/")]
+print("".join("diff --git " + c for c in filtered), end="")
+' > /tmp/sglang_pr25300_python_only.diff
+patch --dry-run -p2 < /tmp/sglang_pr25300_python_only.diff
+patch -p2 < /tmp/sglang_pr25300_python_only.diff
+cd -
+```
+
+Enable `DYN_LOG=info,mm_routing=debug` to inspect image-token counts, multimodal hashes, and the selected worker's overlap. A repeated request should select the same worker with high block overlap.
+
+For the user-facing workflow, see [Multimodal KV Routing](multimodal-kv-routing.md).
 
 ## Use the Latest Release
 

@@ -19,7 +19,7 @@ docker run --gpus all --rm -it \
   /bin/bash
 ```
 
-For installation from source or custom builds, see [Local Installation](../../getting-started/local-installation.md) and [Release Artifacts](../../reference/release-artifacts.md).
+For installation from source or custom builds, see [Local Installation](../../getting-started/local-installation.mdx) and [Release Artifacts](../../reference/release-artifacts.mdx).
 
 ## Run KVBM Standalone
 
@@ -29,7 +29,7 @@ KVBM can be used independently without using the rest of the Dynamo stack:
 pip install kvbm
 ```
 
-See the [support matrix](../../reference/support-matrix.md) for version compatibility.
+See the [compatibility page](../../reference/compatibility.mdx) for version compatibility.
 
 ### Build from Source
 
@@ -52,7 +52,7 @@ Pick one of the following to get a Dynamo vLLM container with KVBM built in. The
 docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
 ```
 
-See the [Local Installation Guide](../../getting-started/local-installation.md) for full setup instructions and [Release Artifacts](../../reference/release-artifacts.md#container-images) for available versions.
+See the [Local Installation Guide](../../getting-started/local-installation.mdx) for full setup instructions and [Release Artifacts](../../reference/release-artifacts.mdx#container-images) for available versions.
 
 **Option B: Build from source**
 
@@ -122,7 +122,7 @@ Pick one of the following to get a Dynamo TensorRT-LLM container with KVBM built
 docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.1
 ```
 
-See the [Local Installation Guide](../../getting-started/local-installation.md) for full setup instructions and [Release Artifacts](../../reference/release-artifacts.md#container-images) for available versions.
+See the [Local Installation Guide](../../getting-started/local-installation.mdx) for full setup instructions and [Release Artifacts](../../reference/release-artifacts.mdx#container-images) for available versions.
 
 **Option B: Build from source**
 
@@ -542,7 +542,7 @@ python -m dynamo.vllm --model Qwen/Qwen3-0.6B --kv-transfer-config '{"kv_connect
 ## See Also
 
 - [KVBM Overview](README.md) for a quick overview of KV Caching, KVBM and its architecture
+- [KVBM Configuration Reference](kvbm-config-reference.mdx) for the full `DYN_KVBM_*` and `KVBM_*` configuration field reference
 - [KVBM Design](../../design-docs/kvbm-design.md) for a deep dive into KVBM architecture
-- [LMCache Integration](../../integrations/lmcache-integration.md)
-- [FlexKV Integration](../../integrations/flexkv-integration.md)
+- [KV Cache Offloading](../../cli/kv-cache-offloading.mdx)
 - [SGLang HiCache](../../backends/sglang/sglang-hicache.md)

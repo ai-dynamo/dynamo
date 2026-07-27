@@ -113,7 +113,7 @@ protocol. Cache salt is an isolation key, not an authentication or authorization
 gateways must still authenticate the tenant identity they place in `x-tenant-id`.
 
 Session identity is header-only. Use the coding-agent headers or Dynamo
-session headers described in [Session IDs](../../agents/session-ids.md);
+session headers described in [Session IDs](../../agents/session-ids.mdx);
 `nvext` does not accept session identity fields.
 
 When session affinity is enabled with `--router-session-affinity-ttl-secs`, the
@@ -143,7 +143,7 @@ important" across Dynamo.
 When `--router-queue-threshold` is set and the queue is active, higher-priority requests are shifted earlier in the router queue. Once dispatched, Dynamo forwards the same semantic priority to the backend engine for queue ordering, preemption, and KV cache eviction. Dynamo normalizes backend-specific polarity internally, including vLLM's lower-is-higher convention.
 
 For layer-by-layer behavior and backend requirements, see
-[Priority Scheduling](../router/priority-scheduling.md).
+[Priority Scheduling](../../agents/priority-scheduling.md).
 
 ```json
 {
@@ -268,7 +268,7 @@ When the client requests response metadata via `extra_fields`, the response incl
 |----------|-------------|
 | [Frontend Guide](frontend-guide.md) | KServe gRPC configuration and integration |
 | [Configuration and Tuning](../router/router-configuration.md) | Full router configuration and CLI arguments |
-| [Session IDs](../../agents/session-ids.md) | Passive session identity |
+| [Session IDs](../../agents/session-ids.mdx) | Passive session identity |
 | [Agent Tracing](../../agents/agent-tracing.md) | JSONL request traces, inferred tool-call metadata, and harness tool-event ingestion |
 | [Agent Hints](../../agents/agent-hints.md) | Per-request serving hints for routing, scheduling, and cache behavior |
 | [SGLang for Agentic Workloads](../../backends/sglang/agents.md) | SGLang engine flags for priority scheduling and KV eviction policies |

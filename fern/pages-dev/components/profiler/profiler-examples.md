@@ -172,17 +172,21 @@ spec:
   ...
   overrides:
     dgd:
-      apiVersion: nvidia.com/v1alpha1
+      apiVersion: nvidia.com/v1beta1
       kind: DynamoGraphDeployment
       spec:
-        envs:
+        env:
           - name: TRITON_PTXAS_PATH
             value: "/usr/local/cuda/bin/ptxas"
-        services:
-          VllmWorker:
-            envs:
-              - name: CUSTOM_ENV
-                value: "my-value"
+        components:
+          - name: VllmWorker
+            podTemplate:
+              spec:
+                containers:
+                  - name: main
+                    env:
+                      - name: CUSTOM_ENV
+                        value: "my-value"
 ```
 
 ## SGLang Runtime Profiling

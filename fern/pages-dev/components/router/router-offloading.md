@@ -144,4 +144,4 @@ See [Configuration and Tuning](router-configuration.md) for the cache-hit weight
 - [Native KV Offloading](../../backends/vllm/vllm-native-kv-offloading.md) — vLLM detail page
 - [Using HiCache](../../backends/sglang/sglang-hicache.md) — SGLang detail page
 - [KV Cache Offloading](../../backends/vllm/vllm-kv-offloading.md) — vLLM offloading backend catalog (native, KVBM, LMCache, FlexKV)
-- [Feature Matrix](../../reference/feature-matrix.md) — per-backend feature support across Dynamo
+- [Feature Matrix](../../reference/compatibility.mdx) — per-backend feature support across Dynamo

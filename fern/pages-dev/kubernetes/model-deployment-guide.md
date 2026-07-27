@@ -20,7 +20,7 @@ local development or incremental adoption, you can still run the same frontend,
 router, and worker components outside Kubernetes.
 
 You can create a DGD directly from a known-good manifest, or you can use a
-[`DynamoGraphDeploymentRequest`](dgdr.md) (DGDR) to profile your model and
+[`DynamoGraphDeploymentRequest`](dgdr-reference.mdx) (DGDR) to profile your model and
 generate a DGD for you.
 
 Most users only need three ideas before they deploy:
@@ -52,9 +52,9 @@ flowchart LR
 
 | Resource or path | What it is | Use it when | Learn more |
 |---|---|---|---|
-| `DynamoGraphDeployment` (DGD) | The canonical live deployment for a Dynamo inference graph. | You have a known-good configuration or tuned YAML. | [Creating Deployments](deployment/create-deployment.md), [DGD API](api-reference.md#dynamographdeployment) |
+| `DynamoGraphDeployment` (DGD) | The canonical live deployment for a Dynamo inference graph. | You have a known-good configuration or tuned YAML. | [Deploy with DGD](dgd-guide.md), [DGD API](api-reference.md#dynamographdeployment) |
 | `DynamoComponentDeployment` (DCD) | The per-component deployment objects created from a DGD. | Usually not authored directly; inspect them to debug frontend/router/worker rollout. | [DCD API](api-reference.md#dynamocomponentdeployment) |
-| `DynamoGraphDeploymentRequest` (DGDR) | A deploy-by-intent request that profiles your model/hardware and generates a DGD. | You want Dynamo to size the deployment, choose parallelism, configure supported generated-deployment features such as Planner, or produce DGD YAML. | [DGDR Reference](dgdr.md) |
+| `DynamoGraphDeploymentRequest` (DGDR) | A deploy-by-intent request that profiles your model/hardware and generates a DGD. | You want Dynamo to size the deployment, choose parallelism, configure supported generated-deployment features such as Planner, or produce DGD YAML. | [DGDR Reference](dgdr-reference.mdx) |
 | Recipes | Curated `deploy.yaml` manifests that are already DGD specs. | A recipe matches your model, backend, hardware, and serving mode. | [Dynamo recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes) |
 | `DynamoModel` | Model and adapter lifecycle management layered onto an existing DGD or DCD. | You need declarative model operations such as LoRA adapter loading. | [Managing Models with DynamoModel](deployment/dynamomodel-guide.md) |
 
@@ -67,8 +67,8 @@ are reference material; you can read them as needed instead of going linearly.
 |---|---|---|
 | A recipe matches your model/backend/hardware | Apply the recipe's model cache resources, then apply its `deploy.yaml`. | [Deploy a Tuned DGD from Recipes](#deploy-a-tuned-dgd-from-recipes) |
 | You want Dynamo to generate the deployment | Create a DGDR. Use `autoApply: true` to let the operator create the DGD, or `autoApply: false` to inspect the generated DGD YAML first. | [Use DGDR to Generate a DGD](#use-dgdr-to-generate-a-dgd) |
-| You already know the exact topology | Author or edit a DGD directly, then apply it with `kubectl`. | [Creating Deployments](deployment/create-deployment.md) |
-| You are deploying vLLM on Intel XPU | Use the XPU DRA templates and an XPU runtime image. | [Creating Deployments](deployment/create-deployment.md) |
+| You already know the exact topology | Author or edit a DGD directly, then apply it with `kubectl`. | [Deploy with DGD](dgd-guide.md) |
+| You are deploying vLLM on Intel XPU | Use the XPU DRA templates and an XPU runtime image. | [vLLM Deployment Templates](../templates/vllm.mdx) |
 | You are preparing for production | Add model caching, choose backend/search strategy, and validate networking/planner needs. | [Production Details](#production-details) |
 
 ## Deploy a Tuned DGD from Recipes
@@ -136,7 +136,7 @@ details.
 ```
 
 For the DGDR spec reference, field descriptions, and lifecycle phases, see the
-[DGDR Reference](dgdr.md).
+[DGDR Reference](dgdr-reference.mdx).
 
 ## DGDR Detail: Choose a Search Strategy
 
@@ -221,7 +221,7 @@ DGDR accepts the SKU and AIC has system and generator support for it.
 
 When specifying GPU SKUs manually, use lowercase underscore format (e.g.,
 `h100_sxm`, not `H100-SXM5-80GB`). See the
-[DGDR Reference — SKU Format](dgdr.md#sku-format) for the full list.
+[DGDR Reference — SKU Format](dgdr-reference.mdx#sku-format) for the full list.
 
 ### Backends
 
@@ -292,7 +292,7 @@ the cached weights.
 that `huggingface-cli download` creates when `HF_HOME` is set to the mount
 point. Replace `<org>--<model>` by substituting `/` with `--` in the model ID,
 and replace `<commit-hash>` with the actual snapshot revision. See
-[Model Caching](model-caching.md#find-the-snapshot-path) for how to look up the
+[Model Caching](model-caching.mdx#find-the-snapshot-path) for how to look up the
 hash after downloading.
 
 ### Setup
@@ -303,7 +303,7 @@ hash after downloading.
 2. Run a one-time download Job to populate the PVC.
 3. Reference the PVC in your DGDR's `modelCache` field.
 
-See [Model Caching](model-caching.md) for the full walkthrough with YAML
+See [Model Caching](model-caching.mdx) for the full walkthrough with YAML
 examples.
 
 ### Private and Gated Models
@@ -585,11 +585,11 @@ spec:
 
 ## Further Reading
 
-- [DGDR Reference](dgdr.md) — Spec reference, lifecycle phases, monitoring commands
+- [DGDR Reference](dgdr-reference.mdx) — Spec reference, lifecycle phases, monitoring commands
 - [DGDR Examples](../components/profiler/profiler-examples.md) — Ready-to-use YAML for various scenarios
 - [Profiler Guide](../components/profiler/profiler-guide.md) — Profiling algorithms, picking modes, gate checks
 - [Planner Guide](../components/planner/planner-guide.md) — Scaling modes, PlannerConfig reference
-- [Model Caching](model-caching.md) — PVC setup, ModelExpress, and ModelStreamer
-- [Creating Deployments](deployment/create-deployment.md) — Manual DGD spec for hand-crafted configs
+- [Model Caching](model-caching.mdx) — PVC setup, ModelExpress, and ModelStreamer
+- [Deploy with DGD](dgd-guide.md) — Author and apply a DGD for a custom topology
 - [Multinode Deployments](deployment/multinode-deployment.md) — Grove, LWS, and multinode details
 - [Disaggregated Communication](disagg-communication-guide.md) — NIXL, RDMA, and networking

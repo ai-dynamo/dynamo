@@ -15,7 +15,7 @@ Dynamo SGLang integrates [SGLang](https://github.com/sgl-project/sglang) engines
 
 ## Prerequisites
 
-- **CUDA toolkit headers** for bare-metal builds (e.g. `nvcc`, `cuda_runtime.h`). See [CUDA Requirements](../../getting-started/local-installation.md#system-requirements). Not required when running the pre-built `sglang-runtime` container.
+- **CUDA toolkit headers** for bare-metal builds (e.g. `nvcc`, `cuda_runtime.h`). See [CUDA Requirements](../../getting-started/local-installation.mdx#system-requirements). Not required when running the pre-built `sglang-runtime` container.
 - **`HF_TOKEN`** for gated models. Export it on every node that pulls the model weights, and accept the model license on the Hugging Face model page before launch:
 
   ```bash
@@ -65,7 +65,7 @@ Two paths are supported. Pick the one that matches how you plan to develop.
 
 #### Pre-built Dynamo SGLang container (recommended)
 
-Pull and launch the published `sglang-runtime` image from NGC. See [release artifacts](../../reference/release-artifacts.md) for the current tag and CUDA variants.
+Pull and launch the published `sglang-runtime` image from NGC. See [release artifacts](../../reference/release-artifacts.mdx) for the current tag and CUDA variants.
 
 ```bash
 docker run --gpus all -it --rm \
@@ -127,10 +127,35 @@ pip install -e .
 | [**KV-Aware Routing**](../../components/router/README.md) | ✅ | |
 | [**SLA-Based Planner**](../../components/planner/planner-guide.md) | ✅ | |
 | [**Multimodal Support**](../../features/multimodal/multimodal-sglang.md) | ✅ | Image via EPD, E/PD, E/P/D patterns |
-| [**Diffusion Models**](sglang-diffusion.md) | ✅ | LLM diffusion, image, and video generation |
-| [**Request Cancellation**](../../fault-tolerance/request-cancellation.md) | ✅ | Aggregated full; disaggregated decode-only |
+| [**Diffusion Models**](../../features/diffusion/README.md) | ✅ | LLM diffusion, image, and video generation |
+| [**Request Cancellation**](../../design-docs/request-cancellation.md) | ✅ | Aggregated full; disaggregated decode-only |
 | [**Graceful Shutdown**](../../fault-tolerance/graceful-shutdown.md) | ✅ | Discovery unregister + grace period |
 | [**Observability**](sglang-observability.md) | ✅ | Metrics, tracing, and Grafana dashboards |
+
+## Feature Interactions
+
+SGLang is optimized for high-throughput serving with fast primitives, providing robust support for disaggregated serving, KV-aware routing, and request migration. The matrix below shows which feature pairs are validated to work together.
+
+**Legend:** ✅ Supported &nbsp;|&nbsp; 🚧 Work in Progress / Experimental / Limited
+
+| Feature | Disaggregated Serving | KV-Aware Routing | SLA-Based Planner | KV Block Manager | Multimodal | Request Migration | Request Cancellation | LoRA | Tool Calling | Speculative Decoding |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Disaggregated Serving** | — | | | | | | | | | |
+| **KV-Aware Routing** | ✅ | — | | | | | | | | |
+| **SLA-Based Planner** | ✅ | ✅ | — | | | | | | | |
+| **KV Block Manager** | 🚧 | 🚧 | 🚧 | — | | | | | | |
+| **Multimodal** | ✅<sup>2</sup> | <sup>1</sup> | — | 🚧 | — | | | | | |
+| **Request Migration** | ✅ | ✅ | ✅ | 🚧 | ✅ | — | | | | |
+| **Request Cancellation** | 🚧<sup>3</sup> | ✅ | ✅ | 🚧 | 🚧 | ✅ | — | | | |
+| **LoRA** | | | | 🚧 | | | | — | | |
+| **Tool Calling** | ✅ | ✅ | ✅ | 🚧 | ✅ | ✅ | ✅ | | — | |
+| **Speculative Decoding** | 🚧 | 🚧 | — | 🚧 | — | 🚧 | — | | 🚧 | — |
+
+> **Notes:**
+> 1. **Multimodal + KV-Aware Routing**: Not supported. ([Source](../../components/router/README.md))
+> 2. **Multimodal Patterns**: Supports simple Aggregated **EPD**, **E/PD**, and **E/P/D** patterns. Traditional Disagg **EP/D** is not supported. ([Source](../../features/multimodal/multimodal-sglang.md))
+> 3. **Request Cancellation**: Cancellation during the remote prefill phase is not supported in disaggregated mode. ([Source](../../design-docs/request-cancellation.md))
+> 4. **Speculative Decoding**: Code hooks exist (`spec_decode_stats` in publisher), but no examples or documentation yet.
 
 ## Quick Start
 
@@ -184,8 +209,8 @@ You can deploy SGLang with Dynamo on Kubernetes using a `DynamoGraphDeployment`.
 ## Next Steps
 
 - **[Reference Guide](sglang-reference-guide.md)**: Worker types, architecture, and configuration
-- **[Examples](sglang-examples.md)**: All deployment patterns with launch scripts
+- **[Examples](sglang-examples.mdx)**: Local deployment launch scripts
 - **[Disaggregation](sglang-disaggregation.md)**: P/D architecture and KV transfer details
-- **[Diffusion](sglang-diffusion.md)**: LLM, image, and video diffusion models
+- **[Diffusion](../../features/diffusion/README.md)**: LLM, image, and video diffusion models
 - **[Observability](sglang-observability.md)**: Metrics, tracing, and Grafana dashboards
 - **[Deploying SGLang with Dynamo on Kubernetes](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/deploy)**: Kubernetes deployment guide

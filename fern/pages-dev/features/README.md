@@ -23,10 +23,10 @@ Most deployments start with the core performance loop:
 | Goal | Start with |
 |---|---|
 | Make serving more resilient | [Fault Tolerance](../fault-tolerance/README.md) |
-| Monitor local deployments | [Observability (Local)](../observability/README.md) |
-| Reproduce traffic without a full engine | [Live Simulation with Mocker](../dynosim/mocker.md) |
-| Add structured model outputs | [Tool Calling](../tool-calling/README.md) and [Reasoning](../reasoning/README.md) |
+| Monitor local deployments | [Install Observability](../cli/observability.mdx) |
+| Reproduce traffic without a full engine | [Live Simulation with Mocker](../dynosim/mocker.mdx) |
+| Add structured model outputs | [Tool Calling](../tool-calling/README.mdx) and [Reasoning](../reasoning/README.md) |
 | Build agent workloads | [Agents](../agents/README.md) |
 | Serve specialized workloads | [LoRA Adapters](lora/README.md), [Multimodal](multimodal/README.md), and [Diffusion](diffusion/README.md) |
 
-For cluster deployments, pair these guides with the [Kubernetes Deployment](../kubernetes/README.md) docs. The same features can be explored locally, then expressed through Dynamo's Kubernetes-native CRDs and operator when you move to a shared GPU cluster.
+For cluster deployments, pair these guides with the [Kubernetes Deployment](../kubernetes/quickstart.mdx) docs. The same features can be explored locally, then expressed through Dynamo's Kubernetes-native CRDs and operator when you move to a shared GPU cluster.

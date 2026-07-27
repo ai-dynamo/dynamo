@@ -64,16 +64,120 @@ CORPORATION & AFFILIATES. All rights reserved.` (not a single year). The form de
 
 ## Page types
 
-Each page serves one of four needs ([Diátaxis](https://diataxis.fr/)); keep them distinct rather than
-blending:
+The refactored site uses four primary page types: **installation**, **tutorial**, **design document**,
+and **reference**. A **quickstart** is a deliberately minimal tutorial subtype. Give each page one
+primary purpose; split and cross-link content instead of blending page types.
 
-- **Tutorial**: a learning-oriented first lesson (`getting-started/`).
-- **How-to**: goal-oriented steps for one task (`backends/<engine>/`, `kubernetes/`).
-- **Reference**: dry technical description of flags, APIs, config (`reference/support-matrix.md`).
-- **Explanation**: background and rationale (`design-docs/`).
+Less is more across the site. Keep only what the reader needs for the page's purpose. Reference is the
+exception: it should exhaustively document the supported configuration surface.
 
-A `backends/` how-to that drifts into a flag reference, or a `getting-started/` tutorial that explains
-the KV router architecture, is the most common docs smell. Split it and cross-link.
+| Page type       | Reader goal                                         | Default shape                                                                                | Keep out                                                                      |
+| --------------- | --------------------------------------------------- | -------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| Installation    | Prepare a machine, cluster, dependency, or platform | Prerequisites, ordered install steps, verification, common blockers                          | Feature tutorials, architecture, duplicated deployment workflows              |
+| Tutorial        | Complete a specific user or operator task           | Outcome, prerequisites, `<Steps>`, verification, focused troubleshooting                     | Architecture diagrams, implementation detail, exhaustive configuration tables |
+| Design document | Understand how or why Dynamo works                  | Architecture, lifecycle, data or control flow, invariants, rationale, diagrams               | Production setup instructions and exhaustive field catalogs                   |
+| Reference       | Look up an exact contract or option                 | Complete fields, types, defaults, allowed values, APIs, metrics, status codes, compatibility | Narrative walkthroughs and repeated architecture background                   |
+
+### Installation pages
+
+Use an installation page when readers must install or prepare something before they can use Dynamo or
+a major integration. Keep installation canonical: link to it from tutorials instead of repeating it.
+
+- State supported environments and prerequisites first.
+- Use an ordered flow, preferably `<Steps>` in an `.mdx` page, for actions that must happen in
+  sequence.
+- Provide copyable commands with safe defaults and no shell prompt characters.
+- End with one direct verification that proves the installation works.
+- Include only common installation blockers. Move operational troubleshooting to the relevant guide.
+- Use tabs for parallel platform or environment variants when the steps remain substantially the same.
+- Do not explain a feature, create a DynamoGraphDeployment (DGD), or repeat the platform quickstart
+  unless that action is itself part of the installation. Link the canonical procedure.
+
+Most features do not need their own installation section. Add one only when the user must perform a
+distinct prerequisite or install step.
+
+### Quickstarts
+
+A quickstart is the shortest reliable path from a prepared environment to a working result. It is a
+tutorial subtype, but its admission bar is stricter. A reader should be able to copy, paste, and run it
+without understanding Dynamo internals or making unnecessary choices.
+
+- Use the fewest steps and commands that produce a useful working result.
+- Make every prerequisite explicit, but link to installation instead of repeating it.
+- Choose one safe, representative default. Do not make readers tune or compare options.
+- Provide complete copyable commands or manifests. Do not rely on unstated edits, placeholders that
+  are not defined, or knowledge from another page.
+- Show the expected success signal: a response, status, pod state, or one verification command.
+- Make failure-prone details explicit so the path is hard to misuse.
+- Do not include architecture diagrams, design rationale, long explanations, exhaustive alternatives,
+  performance tuning, or broad troubleshooting. Link to tutorials, design documents, and Reference.
+- Remove any paragraph or option that is not required to reach the working result.
+
+### Tutorials
+
+Use a tutorial for a concrete task that requires several user actions, such as enabling a deployment
+mode, configuring a backend, or validating an operational behavior. Tutorials in the refactored site
+are task-oriented how-to guides, not conceptual lessons.
+
+- Open with the outcome and only the prerequisites specific to the task.
+- Use `<Steps>` and `<Step>` in `.mdx` for a meaningful sequence. Keep one primary action per step.
+- Make step titles imperative and specific, such as “Enable KV routing” or “Verify the workers.”
+- Put the condition immediately before the action that depends on it.
+- Include enough explanation to make the action safe, then stop.
+- End with verification. Add troubleshooting only for likely failures of this exact workflow.
+- Do not include architecture diagrams unless the task cannot be completed safely without one. In
+  general, link to the Developer Guide design document instead.
+- Do not reproduce exhaustive flag, environment-variable, API, or metric definitions. Link to
+  Reference.
+- If a capability works out of the box, it probably does not need a tutorial. If enabling it requires
+  one simple flag or field, prefer a short section on an existing page plus a Reference entry.
+
+Consolidate parallel variants with `<Tabs>` when they follow the same step flow and the combined page
+stays easy to scan. Common tab sets include **vLLM / SGLang / TensorRT-LLM** and
+**Aggregated / Disaggregated**. Keep shared actions outside the tabs and put only the differing
+commands or configuration inside them. Split variants into separate pages when their prerequisites,
+sequence, or troubleshooting diverge substantially, or when tabs make the page too long.
+
+### Design documents
+
+Use design documents in the Developer Guide knowledge base for architecture and implementation
+knowledge. Length is acceptable when the detail helps a developer understand the system, but organize
+it so readers can find the relevant subsystem or flow.
+
+- Explain component responsibilities, lifecycle, data flow, control flow, invariants, tradeoffs, and
+  failure behavior.
+- Use architecture and sequence diagrams here rather than in quickstarts or tutorials.
+- Distinguish current behavior from proposals or historical context.
+- Name implementation concepts and source locations when they help contributors navigate the code.
+- Do not turn a design document into a deployment guide. Link to the User Guide for actions.
+- Do not catalog every supported option. Link to Reference for exact configuration.
+
+### Reference pages
+
+Use Reference for lookup, not instruction. Reference is the one page type where completeness is more
+important than brevity. It should describe the entire supported surface accurately and consistently.
+
+- Document every supported flag, environment variable, configuration field, API endpoint, status
+  code, metric, allowed value, default, validation constraint, and compatibility condition in scope.
+- Prefer structured fields, concise tables, and generated sources over narrative prose.
+- State interactions and precedence when one option changes another.
+- Mark deprecated, experimental, backend-specific, and version-specific behavior explicitly.
+- Keep examples small and illustrative. Link to a tutorial for an end-to-end workflow.
+- Verify runtime-sensitive defaults and behavior against current code or generated schemas.
+
+### Choosing whether to add a page
+
+Do not create a page because an old page existed or because a feature has a name. Create one only when
+it serves a distinct reader goal that an existing page cannot serve cleanly. Prefer, in order:
+
+1. No new content when the behavior is automatic and needs no user decision.
+2. A Reference entry for an exact option or contract.
+3. A short section on an existing tutorial or installation page.
+4. A new page only for a substantial, discoverable workflow or a distinct body of design knowledge.
+
+A tutorial that drifts into architecture, a design document that becomes a setup guide, or a
+quickstart that asks readers to make several configuration decisions is a page-type failure. Split and
+cross-link it.
 
 ## Headings and structure
 
@@ -87,12 +191,22 @@ the KV router architecture, is the most common docs smell. Split it and cross-li
 - No end punctuation on headings, or on short (≤3-word) list items; save periods for body copy.
 - Renaming a heading changes its anchor and breaks inbound links, so rename deliberately.
 
-## Procedures
+## Procedures and variants
 
-- Put the **condition before the instruction**: "To enable KV-aware routing, set `--router-mode kv`",
-  not "Set `--router-mode kv` to enable KV-aware routing". A reader who doesn't need it can then skip
-  the step.
-- One action per numbered step.
+- Put the **condition before the instruction**: “To enable KV-aware routing, set
+  `--router-mode kv`,” not “Set `--router-mode kv` to enable KV-aware routing.” Readers who do not
+  need the condition can skip the action.
+- Use one primary action per step. Keep setup, action, and verification in that order.
+- Use `<Steps>` and `<Step>` for meaningful tutorial and installation sequences. Use a plain ordered
+  list for two trivial actions that do not benefit from named steps.
+- Use `<Tabs>` and `<Tab>` to consolidate parallel backends, deployment modes, operating systems, or
+  providers when the surrounding workflow is shared. Do not duplicate shared prose inside every tab.
+- Keep tab labels short and consistent: `vLLM`, `SGLang`, `TensorRT-LLM`, `Aggregated`, and
+  `Disaggregated`.
+- Do not hide materially different workflows in tabs. Split them when the sequence or prerequisites
+  differ enough that a shared flow becomes confusing.
+- Author pages that use Steps or Tabs as `.mdx`. Prefer plain Markdown for pages that do not need
+  interactive structure.
 
 ## Writing for humans
 
@@ -127,9 +241,9 @@ Much of this prose is now drafted by agents. Edit it so it does not read that wa
 - **Inclusive terms**: "denylist"/"allowlist", not "blacklist"/"whitelist"; "primary"/"replica", not
   "master"/"slave".
 - **No needless jargon**: don't use a term when a more familiar one exists; cut marketing-speak.
-- Mark feature lifecycle inline: **Experimental.** for preview features; **Deprecated.** (with a
-  `> [!WARNING]`) for removed or legacy ones. Note availability for new features ("Available since
-  v0.X").
+- Mark feature lifecycle inline: **Experimental.** for preview features; **Deprecated.** (with
+  `<Warning>` in `.mdx` or `> [!WARNING]` in `.md`) for removed or legacy ones. Note availability
+  for new features ("Available since v0.X").
 
 ## Formatting
 
@@ -156,7 +270,7 @@ python3 -m dynamo.frontend --router-mode kv
 Link targets are handled differently depending on whether they live inside `docs/`:
 
 - **Within `docs/`** (doc → doc): a **relative path with the file extension**, such as
-  `[Routing Concepts](router-concepts.md)` or `[Deployment](../kubernetes/README.md)`. Fern resolves
+  `[Routing Concepts](router-concepts.md)` or `[Deployment](../kubernetes/quickstart.mdx)`. Fern resolves
   these to published-site URLs. Don't hardcode `https://docs.nvidia.com/...` links to pages in this
   repo.
 - **Outside `docs/`** (examples, recipes, source, `container/`, sibling repos): an **absolute GitHub
@@ -176,8 +290,33 @@ tracker references in commits and pull requests, not in shipped docs.
 
 ## Admonitions
 
-Write admonitions GitHub-style in `docs/` source. They render on GitHub, and the Fern build converts
-them to Fern callouts when publishing:
+Match the admonition syntax to the source file extension. In `.mdx` pages, use Fern callout
+components:
+
+```jsx
+<Note>
+Additional context users should know.
+</Note>
+
+<Tip>
+A helpful suggestion.
+</Tip>
+
+<Info>
+Key information.
+</Info>
+
+<Warning>
+Something to watch out for.
+</Warning>
+
+<Error>
+A risk or negative outcome.
+</Error>
+```
+
+In `.md` pages, use GitHub-style blockquote admonitions. They render on GitHub, and the Fern build
+converts them to Fern callouts when publishing:
 
 ```markdown
 <Note>Additional context users should know.</Note>
@@ -191,25 +330,30 @@ them to Fern callouts when publishing:
 <Error>A risk or negative outcome.</Error>
 ```
 
-The build maps `[!NOTE]→<Note>`, `[!TIP]→<Tip>`, `[!IMPORTANT]→<Info>`, `[!WARNING]→<Warning>`,
-`[!CAUTION]→<Error>`. Don't use bold-text pseudo-admonitions (`> **Note:**`); they aren't converted.
+For `.md` pages, the build maps `[!NOTE]→<Note>`, `[!TIP]→<Tip>`, `[!IMPORTANT]→<Info>`,
+`[!WARNING]→<Warning>`, `[!CAUTION]→<Error>`. Don't use bold-text pseudo-admonitions
+(`> **Note:**`); they aren't converted.
 
-## Fern build transforms
+## Fern components and build behavior
 
-Author against `docs/` on `main`; the publish step applies transforms, so you don't hand-write
-Fern-specific output:
+Author source pages under `docs/fern/`. Use the lightest format that supports the page:
 
-- **Callouts:** `fern/convert_callouts.py` converts GitHub admonitions to Fern components.
-- **Versioned paths:** the release workflow builds `pages-vX.Y.Z/` from the tagged `docs/` tree and
-  rewrites the tagged `docs/index.yml` paths for the versioned snapshot.
-
-Write portable GitHub-flavored Markdown; don't pre-bake Fern components or version-specific paths.
+- Use `.mdx` when a tutorial or installation page needs `<Steps>`, `<Tabs>`, cards, or another Fern
+  component.
+- Use `.md` for straightforward prose that works as portable GitHub-flavored Markdown.
+- In `.mdx`, write admonitions with Fern callout components.
+- In `.md`, write admonitions with GitHub syntax; `fern/convert_callouts.py` converts them during the
+  build.
+- Do not add components as decoration. Components must improve sequencing, branching, disclosure, or
+  scanning.
+- The release workflow builds versioned page trees from the tagged documentation and rewrites the
+  navigation paths for each snapshot. Do not hardcode version-specific paths.
 
 ## Navigation and placement
 
-- Add every new `docs/` page to `docs/index.yml` under the right `section`, as a `- page:` + `path:`
+- Add every new `docs/fern/` page to `docs/fern/index.yml` under the right `section`, as a `- page:` + `path:`
   entry. A page that isn't in the nav is unreachable.
-- Match the topic directory: `getting-started`, `reference`, `kubernetes`, `backends/<engine>`,
+- Match the topic directory under `docs/fern/`: `getting-started`, `reference`, `kubernetes`, `backends/<engine>`,
   `features`, `components/<component>`, `observability`, `design-docs`, `tool-calling`, `benchmarks`,
   `agents`, `integrations`, `performance`.
 - Don't duplicate content across pages; link the canonical page. Prefer extending an existing page
@@ -230,13 +374,17 @@ merge:
 
 - [ ] SPDX header present, correct form for the file type, `2025-2026` range
 - [ ] No body `# H1` (Fern renders the title from the nav `page:`); frontmatter has SPDX + at least one key (`title`/`subtitle`/`sidebar-title`)
-- [ ] New, moved, or deleted page reflected in the right index (`docs/index.yml`, `*-examples.md`, or
+- [ ] New, moved, or deleted page reflected in the right index (`docs/fern/index.yml`, `*-examples.md`, or
       `recipes/README.md`)
 - [ ] Links: relative + extension within docs, absolute GitHub URL outside docs (no `../` escapes);
       link text describes the destination; every internal link and `#anchor` resolves
-- [ ] Code fences language-tagged, no shell prompts, output in `text`; admonitions GitHub-style
+- [ ] Code fences language-tagged, no shell prompts, output in `text`; admonitions match the source
+      file extension
 - [ ] Lists typed by purpose; images have alt text and live under `assets/img/`
-- [ ] Heading case is consistent within the page (Title Case for short labels, sentence case for full phrases); no end punctuation; one page type (tutorial/how-to/reference/explanation)
+- [ ] Heading case is consistent within the page (Title Case for short labels, sentence case for full phrases); no end punctuation; one page type (installation/tutorial/design/reference; quickstart is a tutorial subtype)
+- [ ] Quickstarts are copy-paste-ready and minimal: no architecture diagrams, tuning, or optional branches
+- [ ] Tutorials use Steps for meaningful sequences, Tabs only for genuinely parallel variants, and link rather than duplicate Reference or design detail
+- [ ] Reference pages cover the complete supported configuration surface in scope
 - [ ] No internal or sensitive references (NVBug/JIRA/Linear IDs, internal hosts, secrets, TODO/FIXME)
 - [ ] Terminology: correct casing (vLLM / SGLang / TensorRT-LLM / Dynamo / Kubernetes), inclusive
       terms, acronyms expanded on first use, no needless jargon

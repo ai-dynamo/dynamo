@@ -1,5 +1,9 @@
 **/.preview
 **/.definition
 
+# dev.sh dev-mode bookkeeping: records which docs/ paths were skip-worktree'd so
+# `disable` can clear exactly those. Transient; created/removed by the script.
+.git-skip-worktree-list
+
 # Include logos
 !*.svg

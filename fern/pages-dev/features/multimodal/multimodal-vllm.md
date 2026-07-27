@@ -51,6 +51,74 @@ embeddings into the language-model prompt. See [Custom Vision
 Encoders](custom-vision-encoder.md) for the backend contract, launch instructions,
 batch sizing guidance, and current limitations.
 
+## Multimodal KV Routing
+
+vLLM supports two multimodal KV-routing paths. Both give the router and vLLM the same image identity so requests can be placed on workers that already cache the image's KV blocks.
+
+### Choose a Routing Path
+
+| Consideration | Default Rust Frontend | Python Chat Processor |
+|---------------|-----------------------|-----------------------|
+| Frontend work | Hashes media and calculates the routing token layout | Runs vLLM's full Hugging Face multimodal processor |
+| Worker work | Processes the original multimodal input | Consumes processed `mm_kwargs` when transfer succeeds |
+| Model coverage | Models registered in Dynamo's `llm-multimodal` registry | Models supported by vLLM's multimodal processor |
+| Data sent to worker | Original media reference plus `mm_hashes` | Processed inputs over shared memory or NIXL, with media fallback when available |
+| Best fit | Lowest frontend overhead for a registered model | Broader model coverage or centralized preprocessing |
+
+Start with the default path when the model is in Dynamo's Rust registry. It avoids running the full Hugging Face processor in the frontend and does not require a processed-input transfer channel.
+
+Use the Python chat processor when the Rust registry does not recognize the model, when processor behavior must exactly match vLLM, or when moving preprocessing off workers is worth the added frontend CPU, memory, and transfer cost. Use shared memory for same-node deployments and NIXL for cross-node deployments.
+
+### Default Rust Frontend
+
+The default path keeps multimodal processing on the worker:
+
+1. The frontend computes an `mm_hash` for each image.
+2. A model-specific processor specification resolves the image placeholder and calculates its expanded token count.
+3. The frontend expands the placeholder in a routing-only token view and builds per-block multimodal metadata.
+4. The KV router selects the worker with the highest overlap.
+5. The frontend forwards `mm_hashes`, which the worker passes to vLLM as `multi_modal_uuids`.
+
+For `data:` URIs, the frontend hashes the decoded bytes. For HTTP URLs, it hashes the full URL by default. Set `--frontend-decoding` on the worker to register frontend media decoding and use decoded image content as the hash input. Content-addressed hashing lets different URLs for identical image bytes share a routing key.
+
+Launch the default path:
+
+```bash
+cd $DYNAMO_HOME
+bash examples/backends/vllm/launch/agg_multimodal_router.sh
+```
+
+Key settings:
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `MODEL` | `Qwen/Qwen3-VL-2B-Instruct` | Model to serve |
+| `NUM_WORKERS` | `2` | Number of backend workers |
+| `BLOCK_SIZE` | `16` | Shared frontend and worker KV block size |
+| `GPU_MEMORY_UTILIZATION` | `0.20` | Per-worker GPU memory fraction |
+| `VLLM_EXTRA_ARGS` | unset | Additional worker flags; set `--frontend-decoding` for content-addressed image hashes |
+
+### Python Chat Processor
+
+Use the Python path when the model is supported by vLLM but not by the Rust model registry, or when the frontend should preprocess images:
+
+```bash
+cd $DYNAMO_HOME
+bash examples/backends/vllm/launch/agg_multimodal_router_chat_processor.sh
+```
+
+This launcher sets `--dyn-chat-processor vllm`. The frontend runs vLLM's Hugging Face processor, extracts hashes and expanded multimodal inputs, builds routing metadata, and transfers processed `mm_kwargs` to the selected worker. This path supports any VLM handled by vLLM's multimodal processor.
+
+`DYNAMO_MM_TRANSFER` selects the transfer mechanism:
+
+- `shm` (default) uses shared memory for same-node frontend and worker deployments.
+- `nixl` uses NIXL for cross-node transfer.
+- `DYNAMO_DISABLE_NIXL_MM=1` disables processed-input transfer and makes the worker process the original media.
+
+If a client supplies opaque multimodal UUIDs, Dynamo cannot derive a matching content hash. Those requests use text-prefix routing.
+
+For the user-facing workflow, see [Multimodal KV Routing](multimodal-kv-routing.md).
+
 ## Image/Video Serving
 
 Dynamo supports multimodal image and video requests for Vision Language Models (VLMs). `Qwen/Qwen3-VL-2B-Instruct` is a good example because the same model can handle both `image_url` and `video_url` requests through the standard OpenAI chat endpoint.
