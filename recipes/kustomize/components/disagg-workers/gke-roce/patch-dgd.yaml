@@ -6,7 +6,7 @@ metadata:
   name: disagg-workers
 spec:
   services:
-    PrefillWorker:
+    PrefillWorker: &gkeRoceWorker
       extraPodMetadata:
         annotations: &gkeNetworkAnnotations
           networking.gke.io/default-interface: eth0
@@ -44,7 +44,7 @@ spec:
             hostPath:
               path: /home/kubernetes/bin/nvidia
       resources:
-        limits:
+        limits: &gkeRdmaResourceRequirements
           custom: &gkeRdmaResources
             networking.gke.io.networks/rdma-0: "1"
             networking.gke.io.networks/rdma-1: "1"
@@ -54,19 +54,5 @@ spec:
             networking.gke.io.networks/rdma-1.IP: "1"
             networking.gke.io.networks/rdma-2.IP: "1"
             networking.gke.io.networks/rdma-3.IP: "1"
-        requests:
-          custom: *gkeRdmaResources
-    DecodeWorker:
-      extraPodMetadata:
-        annotations: *gkeNetworkAnnotations
-      extraPodSpec:
-        tolerations: *gkeTolerations
-        mainContainer:
-          env: *gkeEnvironment
-          volumeMounts: *gkeVolumeMounts
-        volumes: *gkeVolumes
-      resources:
-        limits:
-          custom: *gkeRdmaResources
-        requests:
-          custom: *gkeRdmaResources
+        requests: *gkeRdmaResourceRequirements
+    DecodeWorker: *gkeRoceWorker
