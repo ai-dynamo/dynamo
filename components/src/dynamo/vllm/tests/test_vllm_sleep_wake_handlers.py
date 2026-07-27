@@ -112,8 +112,8 @@ async def test_snapshot_pause_prepares_and_restores_checkpoint_state_in_order():
     assert engine_client.mock_calls == [
         call.pause_generation(),
         call.checkpoint_prepare(),
-        call.sleep(),
-        call.wake_up(),
+        call.collective_rpc("sleep"),
+        call.collective_rpc("wake_up"),
         call.checkpoint_restore(),
         call.resume_generation(),
     ]
@@ -122,7 +122,7 @@ async def test_snapshot_pause_prepares_and_restores_checkpoint_state_in_order():
 @pytest.mark.asyncio
 async def test_snapshot_sleep_failure_is_terminal():
     engine_client = AsyncMock()
-    engine_client.sleep.side_effect = RuntimeError("sleep failed")
+    engine_client.collective_rpc.side_effect = RuntimeError("sleep failed")
     controller = VllmEnginePauseController(
         engine_client,
         prepare_for_process_checkpoint=True,
@@ -134,7 +134,7 @@ async def test_snapshot_sleep_failure_is_terminal():
     assert engine_client.mock_calls == [
         call.pause_generation(),
         call.checkpoint_prepare(),
-        call.sleep(),
+        call.collective_rpc("sleep"),
     ]
     assert controller.is_paused is False
     assert controller.needs_resume_recovery is True
@@ -144,7 +144,7 @@ async def test_snapshot_sleep_failure_is_terminal():
     assert engine_client.mock_calls == [
         call.pause_generation(),
         call.checkpoint_prepare(),
-        call.sleep(),
+        call.collective_rpc("sleep"),
     ]
 
 
@@ -172,7 +172,10 @@ async def test_snapshot_prepare_failure_is_terminal():
 @pytest.mark.asyncio
 async def test_snapshot_wake_failure_is_terminal():
     engine_client = AsyncMock()
-    engine_client.wake_up.side_effect = RuntimeError("wake failed")
+    engine_client.collective_rpc.side_effect = [
+        None,
+        RuntimeError("wake failed"),
+    ]
     controller = VllmEnginePauseController(
         engine_client,
         prepare_for_process_checkpoint=True,
@@ -185,8 +188,8 @@ async def test_snapshot_wake_failure_is_terminal():
     expected_calls = [
         call.pause_generation(),
         call.checkpoint_prepare(),
-        call.sleep(),
-        call.wake_up(),
+        call.collective_rpc("sleep"),
+        call.collective_rpc("wake_up"),
     ]
     assert engine_client.mock_calls == expected_calls
     with pytest.raises(RuntimeError, match="worker restart required"):
@@ -210,8 +213,8 @@ async def test_snapshot_checkpoint_restore_failure_is_terminal():
     expected_calls = [
         call.pause_generation(),
         call.checkpoint_prepare(),
-        call.sleep(),
-        call.wake_up(),
+        call.collective_rpc("sleep"),
+        call.collective_rpc("wake_up"),
         call.checkpoint_restore(),
     ]
     assert engine_client.mock_calls == expected_calls
@@ -241,8 +244,8 @@ async def test_snapshot_resume_generation_retry_does_not_replay_restore():
     assert engine_client.mock_calls == [
         call.pause_generation(),
         call.checkpoint_prepare(),
-        call.sleep(),
-        call.wake_up(),
+        call.collective_rpc("sleep"),
+        call.collective_rpc("wake_up"),
         call.checkpoint_restore(),
         call.resume_generation(),
         call.resume_generation(),

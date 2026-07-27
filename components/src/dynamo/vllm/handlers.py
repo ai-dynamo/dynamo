@@ -375,7 +375,13 @@ class VllmEnginePauseController:
                 await self._engine_client.checkpoint_prepare()
                 self._checkpoint_state = _ProcessCheckpointState.PREPARED
                 self._checkpoint_state = _ProcessCheckpointState.SLEEPING
-            if level is None:
+                if level is None:
+                    await self._engine_client.collective_rpc("sleep")
+                else:
+                    await self._engine_client.collective_rpc(
+                        "sleep", kwargs={"level": level}
+                    )
+            elif level is None:
                 await self._engine_client.sleep()
             else:
                 await self._engine_client.sleep(level)
@@ -413,9 +419,11 @@ class VllmEnginePauseController:
                 self._checkpoint_state = _ProcessCheckpointState.WAKING
                 try:
                     if tags is None:
-                        await self._engine_client.wake_up()
+                        await self._engine_client.collective_rpc("wake_up")
                     else:
-                        await self._engine_client.wake_up(tags)
+                        await self._engine_client.collective_rpc(
+                            "wake_up", kwargs={"tags": tags}
+                        )
                 except Exception:
                     self._checkpoint_state = _ProcessCheckpointState.TERMINAL
                     logger.exception(
