@@ -34,7 +34,7 @@ use futures::{Stream, StreamExt};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::http::service::error::SanitizedError;
+use crate::http::service::error::{PropagatedStreamError, SanitizedError};
 use crate::http::service::metrics::{CancellationLabels, ErrorType, InflightGuard, Metrics};
 
 use dynamo_runtime::config::environment_names::llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS as BACKEND_STREAM_TIMEOUT_ENV;
@@ -236,13 +236,47 @@ fn monitor_for_disconnects_with_timeout(
                             yield event;
                         }
                         Some(Err(err)) => {
-                            // Mark error as internal since it's a streaming error
-                            inflight_guard.mark_error(ErrorType::Internal);
                             // We're terminating the stream intentionally here with a
                             // structured error + [DONE]; disarm so the stream handle
                             // doesn't later record this as ClosedUnexpectedly (which
                             // would mis-attribute the fault as a client disconnect).
                             stream_handle.disarm();
+                            // The SSE converter propagates classified backend errors
+                            // as JSON (PropagatedStreamError). Backend 4xx (non-499)
+                            // is the protocol contract — forward message + code
+                            // as-is, matching the unary check_for_backend_error
+                            // path. Anything else stays sanitized below.
+                            let client_error = serde_json::from_str::<PropagatedStreamError>(
+                                &err.to_string(),
+                            )
+                            .ok()
+                            .filter(|p| {
+                                axum::http::StatusCode::from_u16(p.code).is_ok_and(|s| {
+                                    s.is_client_error() && s.as_u16() != 499
+                                })
+                            });
+                            if let Some(client_error) = client_error {
+                                inflight_guard.mark_error(ErrorType::Validation);
+                                tracing::debug!(
+                                    code = client_error.code,
+                                    "Streaming backend client error: {}",
+                                    client_error.message
+                                );
+                                let err_json = serde_json::json!({
+                                    "error": {
+                                        "message": client_error.message,
+                                        "type": "invalid_request_error",
+                                        "code": client_error.code,
+                                    }
+                                });
+                                yield Event::default().data(err_json.to_string());
+                                yield Event::default().data("[DONE]");
+                                // Break to prevent any subsequent mark_ok() from
+                                // overwriting the error
+                                break;
+                            }
+                            // Mark error as internal since it's a streaming error
+                            inflight_guard.mark_error(ErrorType::Internal);
                             tracing::error!("Streaming error: {err}");
                             // Emit a structured OpenAI-style error frame + `data: [DONE]`
                             // so naive `data:`-line parsers see both the error and a
@@ -757,6 +791,77 @@ mod tests {
         let monitored = monitor_for_disconnects_with_timeout(stream, ctx, guard, handle, None);
         let body = collect_sse_body(monitored).await;
         assert_fault_contract("python_consumer_drop", &body, backend_detail);
+    }
+
+    /// A classified backend 4xx (PropagatedStreamError from the SSE converter,
+    /// e.g. a worker ValueError mapped to InvalidArgument) MUST reach the
+    /// streaming client with its real message and status — matching the unary
+    /// check_for_backend_error contract — instead of being coerced to the
+    /// sanitized 500 frame.
+    #[tokio::test]
+    async fn test_mid_stream_propagated_client_error_forwards_message_and_code() {
+        let (_metrics, guard, ctx, handle) = setup_test("client-err-model", "req-4xx");
+        let backend_message =
+            "ValueError: Received multimodal data but multimodal processing is not enabled.";
+        let propagated = serde_json::to_string(&PropagatedStreamError {
+            message: backend_message.to_string(),
+            code: 400,
+        })
+        .unwrap();
+        let propagated: &'static str = Box::leak(propagated.into_boxed_str());
+        let stream = simulate_mid_stream_error(2, propagated);
+        let monitored = monitor_for_disconnects_with_timeout(stream, ctx, guard, handle, None);
+        let body = collect_sse_body(monitored).await;
+
+        let done_pos = body.find("data: [DONE]").expect("missing [DONE]");
+        let (error_line, error_frame) = body
+            .lines()
+            .find_map(|line| {
+                let payload = line.strip_prefix("data: ")?;
+                serde_json::from_str::<serde_json::Value>(payload)
+                    .ok()
+                    .filter(|v| v.get("error").is_some())
+                    .map(|v| (line, v))
+            })
+            .expect("missing structured error frame");
+        assert!(body.find(error_line).unwrap() < done_pos);
+
+        let error = error_frame
+            .get("error")
+            .and_then(|v| v.as_object())
+            .unwrap();
+        assert_eq!(
+            error.get("message").and_then(|v| v.as_str()),
+            Some(backend_message),
+            "4xx backend message must be forwarded as-is. Body:\n{body}"
+        );
+        assert_eq!(
+            error.get("code").and_then(|v| v.as_i64()),
+            Some(400),
+            "4xx backend status must be preserved. Body:\n{body}"
+        );
+        assert_eq!(
+            error.get("type").and_then(|v| v.as_str()),
+            Some("invalid_request_error"),
+        );
+    }
+
+    /// A propagated backend 5xx must NOT be forwarded — it takes the sanitized
+    /// Internal path exactly like an unclassified stream fault.
+    #[tokio::test]
+    async fn test_mid_stream_propagated_server_error_stays_sanitized() {
+        let (_metrics, guard, ctx, handle) = setup_test("server-err-model", "req-5xx");
+        let backend_message = "engine core died: cuda OOM in layer 17";
+        let propagated = serde_json::to_string(&PropagatedStreamError {
+            message: backend_message.to_string(),
+            code: 500,
+        })
+        .unwrap();
+        let propagated: &'static str = Box::leak(propagated.into_boxed_str());
+        let stream = simulate_mid_stream_error(2, propagated);
+        let monitored = monitor_for_disconnects_with_timeout(stream, ctx, guard, handle, None);
+        let body = collect_sse_body(monitored).await;
+        assert_fault_contract("propagated_5xx", &body, backend_message);
     }
 
     /// A backend error carrying sensitive internals (file paths, panic text,

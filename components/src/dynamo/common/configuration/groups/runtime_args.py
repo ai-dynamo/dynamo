@@ -37,6 +37,10 @@ class DynamoRuntimeConfig(ConfigBase):
 
     dyn_tool_call_parser: Optional[str] = None
     dyn_reasoning_parser: Optional[str] = None
+    # Tri-state ("on"/"off"/None): deployment default for the chat-template
+    # `thinking` flag when the request sets neither thinking nor
+    # enable_thinking. None keeps the model family's built-in default.
+    dyn_default_thinking: Optional[str] = None
     exclude_tools_when_tool_choice_none: bool = True
     dyn_enable_structural_tag: bool = False
     dyn_structural_tag_scope: str = "auto"
@@ -195,6 +199,17 @@ class DynamoRuntimeArgGroup(ArgGroup):
             default=None,
             help="Reasoning parser name for the model. If not specified, no reasoning parsing is performed.",
             choices=get_reasoning_parser_names(),
+        )
+        add_argument(
+            g,
+            flag_name="--dyn-default-thinking",
+            env_var="DYN_DEFAULT_THINKING",
+            default=None,
+            help="Deployment default for the chat-template 'thinking' flag when the "
+            "request sets neither thinking nor enable_thinking. 'off' enforces a "
+            "default-off reasoning contract (e.g. DeepSeek-V4 catalog behavior); "
+            "'on' forces thinking on by default; unset keeps the model family default.",
+            choices=["on", "off"],
         )
         # NOTE: This flag also exists in FrontendArgGroup (frontend_args.py).
         # Both definitions are needed: this one controls the Rust-native chat

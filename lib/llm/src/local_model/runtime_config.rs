@@ -159,6 +159,13 @@ pub struct ModelRuntimeConfig {
     #[serde(default = "default_exclude_tools_when_tool_choice_none")]
     pub exclude_tools_when_tool_choice_none: bool,
 
+    /// Deployment-level default for the chat-template `thinking` flag, applied
+    /// when the request sets neither `thinking` nor `enable_thinking`.
+    /// `None` keeps the model family's built-in default (e.g. deepseek_v4
+    /// renders thinking ON); `Some(false)` enforces a default-off contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_thinking: Option<bool>,
+
     /// Starting rank of data parallel ranks for this worker (0 if DP not enabled)
     #[serde(default = "default_data_parallel_start_rank")]
     pub data_parallel_start_rank: u32,
@@ -279,6 +286,7 @@ impl Default for ModelRuntimeConfig {
             structural_tag_scope: StructuralTagScope::Auto,
             structural_tag_schema: StructuralTagSchemaMode::Auto,
             exclude_tools_when_tool_choice_none: default_exclude_tools_when_tool_choice_none(),
+            default_thinking: None,
             data_parallel_start_rank: default_data_parallel_start_rank(),
             data_parallel_size: default_data_parallel_size(),
             enable_local_indexer: true,

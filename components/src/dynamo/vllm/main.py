@@ -700,6 +700,12 @@ async def register_vllm_model(
     if worker_type != WorkerType.Prefill:
         runtime_config.tool_call_parser = config.dyn_tool_call_parser
         runtime_config.reasoning_parser = config.dyn_reasoning_parser
+        # Deployment default for the chat-template `thinking` flag; the
+        # frontend preprocessor seeds it when the request is silent. CLI
+        # surface is tri-state ("on"/"off"/unset) -> Option<bool>.
+        runtime_config.default_thinking = {"on": True, "off": False}.get(
+            getattr(config, "dyn_default_thinking", None) or ""
+        )
     runtime_config.exclude_tools_when_tool_choice_none = (
         config.exclude_tools_when_tool_choice_none
     )

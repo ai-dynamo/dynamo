@@ -2040,6 +2040,26 @@ fn annotated_to_sse_event<T: Serialize>(
 
     if let Some(ref msg) = annotated.event {
         if msg == "error" {
+            // Classify exactly like the unary path (check_for_backend_error)
+            // so backend 4xx errors keep their status across the SSE
+            // boundary. axum::Error only carries a string, so the
+            // classification travels JSON-encoded (PropagatedStreamError)
+            // for the disconnect monitor to recover. Scoped to 4xx
+            // (non-499): 5xx and unclassified faults keep the legacy plain
+            // message and get sanitized downstream regardless.
+            if let Some((message, status)) =
+                super::openai::extract_backend_error_if_present(&annotated)
+                && status.is_client_error()
+                && status.as_u16() != 499
+            {
+                let propagated = super::error::PropagatedStreamError {
+                    message,
+                    code: status.as_u16(),
+                };
+                if let Ok(encoded) = serde_json::to_string(&propagated) {
+                    return Err(axum::Error::new(encoded));
+                }
+            }
             let error_message = if let Some(ref dynamo_err) = annotated.error
                 && !dynamo_err.message().is_empty()
             {

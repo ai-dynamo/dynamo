@@ -40,6 +40,18 @@ pub struct HttpError {
 /// `Display` impl that produces the user-safe message all live on this
 /// enum — clients see exactly what the enum says, never a backend error
 /// chain, file path, or panic stack.
+/// Classified backend error carried from the SSE event converter to the
+/// disconnect monitor. `axum::Error` can only transport a string, so the
+/// converter JSON-encodes this struct into the error message and the
+/// monitor decodes it to recover the HTTP status that the unary path
+/// (`check_for_backend_error`) would have returned. Only 4xx (non-499)
+/// statuses are forwarded to clients; everything else stays sanitized.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) struct PropagatedStreamError {
+    pub message: String,
+    pub code: u16,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum SanitizedError {
     /// 499 Client Closed Request.

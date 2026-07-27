@@ -148,6 +148,10 @@ pub struct WorkerConfig {
     pub reasoning_parser: Option<String>,
     /// Whether templates should omit tools when `tool_choice` is `none`.
     pub exclude_tools_when_tool_choice_none: bool,
+    /// Deployment default for the chat-template `thinking` flag when the
+    /// request does not set thinking/enable_thinking. `None` keeps the model
+    /// family default.
+    pub default_thinking: Option<bool>,
     /// Whether this worker should keep an in-process KV indexer.
     pub enable_local_indexer: bool,
     /// Kill switch for KV-aware-routing publishers. When `false`, skip
@@ -219,6 +223,7 @@ impl Default for WorkerConfig {
             tool_call_parser: None,
             reasoning_parser: None,
             exclude_tools_when_tool_choice_none: true,
+            default_thinking: None,
             enable_local_indexer: true,
             enable_kv_routing: true,
             metrics_labels: Vec::new(),
@@ -1659,6 +1664,7 @@ async fn build_local_model(
         tool_call_parser: config.tool_call_parser.clone(),
         reasoning_parser: config.reasoning_parser.clone(),
         exclude_tools_when_tool_choice_none: config.exclude_tools_when_tool_choice_none,
+        default_thinking: config.default_thinking,
         structural_tag_mode: config.structural_tag_mode,
         structural_tag_scope: config.structural_tag_scope,
         structural_tag_schema: config.structural_tag_schema,

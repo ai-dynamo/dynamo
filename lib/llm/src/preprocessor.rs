@@ -689,9 +689,16 @@ impl OpenAIPreprocessor {
         default_enabled
     }
 
+    /// Normalize the request's thinking/enable_thinking chat-template args.
+    /// Precedence: explicit request value > deployment `default_thinking`
+    /// (runtime config, e.g. `--dyn-default-thinking off`) > parser-specific
+    /// forced default (kimi_k25). When a value is resolved it is written back
+    /// to both aliases so the renderer, the guided-decoding gate, and the
+    /// postprocessor all see the same decision.
     fn normalize_thinking_arg(
         request: &mut NvCreateChatCompletionRequest,
         reasoning_parser: Option<&str>,
+        default_thinking: Option<bool>,
     ) {
         let normalized = request
             .chat_template_args
@@ -718,6 +725,7 @@ impl OpenAIPreprocessor {
                 }
                 None
             })
+            .or(default_thinking)
             .or_else(|| matches!(reasoning_parser, Some("kimi_k25")).then_some(true));
 
         let Some(normalized) = normalized else {
@@ -3633,6 +3641,7 @@ impl
         Self::normalize_thinking_arg(
             &mut request,
             self.runtime_config.reasoning_parser.as_deref(),
+            self.runtime_config.default_thinking,
         );
 
         // create a response generator
@@ -4979,7 +4988,7 @@ mod tests {
                     )]));
                 }
 
-                OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("kimi_k25"));
+                OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("kimi_k25"), None);
                 let args = request.chat_template_args.as_ref();
                 assert_eq!(
                     dynamo_renderer::thinking_bool_from_args(args),
@@ -5026,7 +5035,11 @@ mod tests {
                 }
             }))
             .unwrap();
-        OpenAIPreprocessor::normalize_thinking_arg(&mut conflicting_request, Some("kimi_k25"));
+        OpenAIPreprocessor::normalize_thinking_arg(
+            &mut conflicting_request,
+            Some("kimi_k25"),
+            None,
+        );
         let args = conflicting_request.chat_template_args.as_ref().unwrap();
         assert_eq!(args.get("thinking"), Some(&serde_json::Value::Bool(true)));
         assert_eq!(
@@ -5039,6 +5052,59 @@ mod tests {
             }
         };
         assert_eq!(rendered, "<think>");
+    }
+
+    /// Deployment-level `default_thinking` (e.g. `--dyn-default-thinking off`)
+    /// seeds the thinking args when the request is silent, is overridden by an
+    /// explicit request value, and leaves args untouched when unset — so
+    /// deepseek_v4 deployments can enforce a default-off reasoning contract
+    /// against the renderer's built-in default-on.
+    #[test]
+    fn test_normalize_thinking_arg_deployment_default() {
+        let make_request = |kwargs: Option<serde_json::Value>| {
+            let mut body = serde_json::json!({
+                "messages": [{"role": "user", "content": "hello"}],
+                "model": "deepseek-ai/DeepSeek-V4-Flash",
+            });
+            if let Some(kwargs) = kwargs {
+                body["chat_template_kwargs"] = kwargs;
+            }
+            serde_json::from_value::<NvCreateChatCompletionRequest>(body).unwrap()
+        };
+
+        // Silent request + default off → both aliases seeded false; the
+        // renderer gate and postprocessor gate agree.
+        let mut request = make_request(None);
+        OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("deepseek_v4"), Some(false));
+        let args = request.chat_template_args.as_ref();
+        assert_eq!(dynamo_renderer::thinking_bool_from_args(args), Some(false));
+        assert!(OpenAIPreprocessor::is_reasoning_disabled_by_request(
+            Some("deepseek_v4"),
+            args
+        ));
+        assert!(!OpenAIPreprocessor::sglang_effective_reasoning_enabled(
+            Some("deepseek_v4"),
+            args
+        ));
+
+        // Explicit request value beats the deployment default.
+        let mut request = make_request(Some(serde_json::json!({"thinking": true})));
+        OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("deepseek_v4"), Some(false));
+        let args = request.chat_template_args.as_ref();
+        assert_eq!(dynamo_renderer::thinking_bool_from_args(args), Some(true));
+
+        // No deployment default → silent request stays untouched (model
+        // family default applies downstream).
+        let mut request = make_request(None);
+        OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("deepseek_v4"), None);
+        assert!(request.chat_template_args.is_none());
+
+        // Deployment default must not override kimi's forced default when
+        // unset, and must win over it when set.
+        let mut request = make_request(None);
+        OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("kimi_k25"), Some(false));
+        let args = request.chat_template_args.as_ref();
+        assert_eq!(dynamo_renderer::thinking_bool_from_args(args), Some(false));
     }
 
     /// PRE.2 — Per-request reasoning gate. See `lib/llm/PREPROCESSOR_CASES.md`.

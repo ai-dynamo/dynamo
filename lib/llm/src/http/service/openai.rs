@@ -1551,7 +1551,7 @@ fn escape_json_string_control_chars(body: &[u8]) -> Option<Vec<u8>> {
 
 /// Checks if an Annotated event represents a backend error and extracts error information.
 /// Returns Some((message, status_code)) if it's an error, None otherwise.
-fn extract_backend_error_if_present<T: serde::Serialize>(
+pub(super) fn extract_backend_error_if_present<T: serde::Serialize>(
     event: &Annotated<T>,
 ) -> Option<(String, StatusCode)> {
     #[derive(serde::Deserialize)]

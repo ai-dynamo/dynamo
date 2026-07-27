@@ -118,6 +118,10 @@ class WorkerConfig:
     tool_call_parser: Optional[str] = None
     reasoning_parser: Optional[str] = None
     exclude_tools_when_tool_choice_none: bool = True
+    # Deployment default for the chat-template `thinking` flag when the
+    # request does not set thinking/enable_thinking. None keeps the model
+    # family default (e.g. deepseek_v4 defaults thinking ON).
+    default_thinking: Optional[bool] = None
     enable_local_indexer: bool = True
     # Operator-level kill switch for KV-aware-routing publishers. When False,
     # Worker skips engine.kv_event_sources() and SnapshotPublisher setup so
@@ -182,6 +186,11 @@ class WorkerConfig:
             "reasoning_parser": getattr(runtime_cfg, "dyn_reasoning_parser", None),
             "exclude_tools_when_tool_choice_none": getattr(
                 runtime_cfg, "exclude_tools_when_tool_choice_none", True
+            ),
+            # CLI surface is a tri-state string ("on"/"off"/unset); map to
+            # Optional[bool] here so the Rust side sees Option<bool>.
+            "default_thinking": {"on": True, "off": False}.get(
+                getattr(runtime_cfg, "dyn_default_thinking", None) or ""
             ),
             "enable_local_indexer": getattr(runtime_cfg, "enable_local_indexer", True),
             "enable_kv_routing": getattr(runtime_cfg, "enable_kv_routing", True),
@@ -269,6 +278,7 @@ class Worker:
             exclude_tools_when_tool_choice_none=(
                 self.config.exclude_tools_when_tool_choice_none
             ),
+            default_thinking=self.config.default_thinking,
             enable_local_indexer=self.config.enable_local_indexer,
             enable_kv_routing=self.config.enable_kv_routing,
             metrics_labels=list(self.config.metrics_labels),
