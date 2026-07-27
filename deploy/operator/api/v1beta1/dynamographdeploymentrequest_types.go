@@ -342,7 +342,7 @@ type KVRouterSpec struct {
 type FeaturesSpec struct {
 	// Planner contains the raw Planner configuration passed to the Planner service.
 	// Its schema is defined by dynamo.planner.config.planner_config.PlannerConfig.
-	// See https://docs.dynamo.nvidia.com/dynamo/components/planner/planner-guide#plannerconfig-reference.
+	// See https://docs.nvidia.com/dynamo/dev/components/planner/planner-guide#plannerconfig-reference.
 	// DGDR passes this object through without field-level validation; the Planner
 	// service validates it at startup.
 	// The presence of this field (non-null) enables the planner in the generated DGD.
