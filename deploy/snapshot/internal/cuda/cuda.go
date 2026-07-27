@@ -122,6 +122,46 @@ func DiscoverGPUUUIDs(ctx context.Context, clientset kubernetes.Interface, podNa
 	)
 }
 
+// DiscoverGPUUUIDsWithVisibleOrder resolves DRA UUIDs in a runtime order
+// recorded by the workload before it entered checkpoint sleep.
+func DiscoverGPUUUIDsWithVisibleOrder(
+	ctx context.Context,
+	clientset kubernetes.Interface,
+	podName,
+	podNamespace,
+	containerName string,
+	visibleGPUUUIDs []string,
+	log logr.Logger,
+) ([]string, error) {
+	if len(visibleGPUUUIDs) == 0 {
+		return nil, errors.New("recorded container GPU order is empty")
+	}
+	seen := make(map[string]struct{}, len(visibleGPUUUIDs))
+	for _, uuid := range visibleGPUUUIDs {
+		if !gpuUUIDPattern.MatchString(uuid) {
+			return nil, fmt.Errorf("recorded container GPU order contains invalid UUID %q", uuid)
+		}
+		if _, duplicate := seen[uuid]; duplicate {
+			return nil, fmt.Errorf("recorded container GPU order contains duplicate UUID %q", uuid)
+		}
+		seen[uuid] = struct{}{}
+	}
+
+	return discoverGPUUUIDs(
+		ctx,
+		clientset,
+		podName,
+		podNamespace,
+		containerName,
+		"",
+		0,
+		func(context.Context, string, int) ([]string, error) {
+			return append([]string(nil), visibleGPUUUIDs...), nil
+		},
+		log,
+	)
+}
+
 func discoverGPUUUIDs(
 	ctx context.Context,
 	clientset kubernetes.Interface,

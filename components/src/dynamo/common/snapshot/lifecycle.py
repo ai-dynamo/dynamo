@@ -6,11 +6,14 @@
 import asyncio
 import logging
 import os
+import re
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Generic, TypeVar
 
 from dynamo.common.snapshot.constants import (
+    GPU_UUIDS_FILE,
     READY_FOR_SNAPSHOT_FILE,
     RESTORE_COMPLETE_FILE,
     SNAPSHOT_COMPLETE_FILE,
@@ -23,6 +26,11 @@ EngineT = TypeVar("EngineT")
 # Poll interval for the snapshot-control directory. Snapshot and restore
 # latencies are seconds, so 100ms is negligible overhead.
 SENTINEL_POLL_INTERVAL_SEC = 0.1
+NVIDIA_SMI_TIMEOUT_SEC = 30
+GPU_UUID_PATTERN = re.compile(
+    r"^GPU-[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-"
+    r"[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$"
+)
 
 
 def is_snapshot_enabled() -> bool:
@@ -43,6 +51,52 @@ class SnapshotConfig:
             return None
 
         return cls(control_dir=control_dir)
+
+    def record_visible_gpu_order(self) -> None:
+        """Record container-visible GPU UUIDs before checkpoint sleep."""
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=gpu_uuid",
+                "--format=csv,noheader",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=NVIDIA_SMI_TIMEOUT_SEC,
+        )
+        gpu_uuids = [
+            line.strip() for line in result.stdout.splitlines() if line.strip()
+        ]
+        if not gpu_uuids:
+            raise RuntimeError("nvidia-smi reported no container-visible GPUs")
+        if len(set(gpu_uuids)) != len(gpu_uuids):
+            raise RuntimeError(
+                f"nvidia-smi reported duplicate container-visible GPUs: {gpu_uuids}"
+            )
+        invalid = [uuid for uuid in gpu_uuids if not GPU_UUID_PATTERN.fullmatch(uuid)]
+        if invalid:
+            raise RuntimeError(
+                f"nvidia-smi reported invalid container-visible GPU UUIDs: {invalid}"
+            )
+
+        final_path = os.path.join(self.control_dir, GPU_UUIDS_FILE)
+        tmp_path = os.path.join(self.control_dir, f".{GPU_UUIDS_FILE}.tmp")
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as gpu_file:
+                gpu_file.write("\n".join(gpu_uuids))
+                gpu_file.write("\n")
+            os.replace(tmp_path, final_path)
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except FileNotFoundError:
+                pass
+
+        logger.info(
+            "Recorded pre-sleep container GPU order for snapshot: %s",
+            gpu_uuids,
+        )
 
     async def run_lifecycle(
         self,
@@ -94,6 +148,7 @@ class SnapshotConfig:
             READY_FOR_SNAPSHOT_FILE,
             SNAPSHOT_COMPLETE_FILE,
             RESTORE_COMPLETE_FILE,
+            GPU_UUIDS_FILE,
         ):
             path = os.path.join(self.control_dir, name)
             try:

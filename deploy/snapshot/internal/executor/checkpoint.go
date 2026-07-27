@@ -4,6 +4,7 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -191,16 +192,36 @@ func inspectContainer(ctx context.Context, rt snapshotruntime.Runtime, log logr.
 	}
 	var gpuUUIDs []string
 	if len(cudaHostPIDs) > 0 {
-		gpuUUIDs, err = cuda.DiscoverGPUUUIDs(
-			ctx,
-			req.Clientset,
-			req.PodName,
-			req.PodNamespace,
-			req.ContainerName,
-			snapshotruntime.HostProcPath,
-			pid,
-			log,
-		)
+		recordedOrder, readErr := snapshotruntime.ReadGPUUUIDOrderFile(pid)
+		switch {
+		case readErr == nil:
+			visibleGPUUUIDs := strings.Fields(string(recordedOrder))
+			gpuUUIDs, err = cuda.DiscoverGPUUUIDsWithVisibleOrder(
+				ctx,
+				req.Clientset,
+				req.PodName,
+				req.PodNamespace,
+				req.ContainerName,
+				visibleGPUUUIDs,
+				log,
+			)
+		case errors.Is(readErr, os.ErrNotExist):
+			gpuUUIDs, err = cuda.DiscoverGPUUUIDs(
+				ctx,
+				req.Clientset,
+				req.PodName,
+				req.PodNamespace,
+				req.ContainerName,
+				snapshotruntime.HostProcPath,
+				pid,
+				log,
+			)
+		default:
+			err = fmt.Errorf(
+				"read pre-sleep GPU UUID order: %w",
+				readErr,
+			)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("failed to discover source GPU UUIDs: %w", err)
 		}

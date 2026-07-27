@@ -41,6 +41,10 @@ const (
 	// checkpoint. Observed by the checkpoint job's kubelet readiness probe
 	// on the worker container.
 	ReadyForSnapshotFile = "ready-for-snapshot"
+
+	// GPUUUIDsFile optionally carries the workload's container-visible GPU
+	// UUIDs in runtime ordinal order, recorded before checkpoint sleep.
+	GPUUUIDsFile = "gpu-uuids"
 )
 
 // EnsureControlVolume adds the snapshot-control emptyDir to the pod spec,
