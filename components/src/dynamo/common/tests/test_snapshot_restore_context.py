@@ -15,8 +15,10 @@ from dynamo.common.snapshot.constants import (
     SNAPSHOT_RESTORE_CONTEXT_FILE,
     SNAPSHOT_RESTORE_STANDBY_ENV,
 )
+from dynamo.common.snapshot.lifecycle import SnapshotConfig
 from dynamo.common.snapshot.restore_context import (
     apply_snapshot_restore_env,
+    maybe_run_restore_standby_mode,
     refresh_snapshot_restore_config,
 )
 
@@ -67,6 +69,36 @@ def test_apply_snapshot_restore_env_applies_and_clears_values(monkeypatch, tmp_p
     assert os.environ["DYN_DISCOVERY_BACKEND"] == "etcd"
     assert "DYN_REQUEST_PLANE" not in os.environ
     assert "UNSUPPORTED_ENV" not in os.environ
+
+
+def test_restore_standby_publishes_context_before_gpu_order(monkeypatch, tmp_path):
+    events = []
+    monkeypatch.setenv(SNAPSHOT_RESTORE_STANDBY_ENV, "1")
+    monkeypatch.setenv(SNAPSHOT_CONTROL_DIR_ENV, str(tmp_path))
+    monkeypatch.setattr(
+        SnapshotConfig,
+        "record_visible_gpu_order",
+        lambda _self: events.append("gpu-order"),
+    )
+    monkeypatch.setattr(
+        "dynamo.common.snapshot.restore_context.write_snapshot_restore_context",
+        lambda: events.append("restore-context"),
+    )
+
+    def execvp(file, args):
+        events.append((file, args))
+        raise RuntimeError("exec intercepted")
+
+    monkeypatch.setattr(os, "execvp", execvp)
+
+    with pytest.raises(RuntimeError, match="exec intercepted"):
+        maybe_run_restore_standby_mode()
+
+    assert events == [
+        "restore-context",
+        "gpu-order",
+        ("sleep", ["sleep", "infinity"]),
+    ]
 
 
 async def test_refresh_snapshot_restore_config_reparses_runtime_fields(

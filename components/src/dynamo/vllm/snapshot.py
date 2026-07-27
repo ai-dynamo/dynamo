@@ -35,6 +35,7 @@ async def prepare_snapshot_engine(
 
     configure_snapshot_capture_env()
     logger.info("Snapshot mode enabled (watcher-driven signals)")
+    snapshot_config.record_visible_gpu_order()
     config.engine_args.enable_sleep_mode = True
 
     engine = setup_vllm_engine(config)

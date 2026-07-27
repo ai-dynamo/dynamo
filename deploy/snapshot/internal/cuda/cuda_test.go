@@ -212,6 +212,25 @@ func TestGetPodGPUUUIDs(t *testing.T) {
 			t.Fatalf("got %v, want %v", got, want)
 		}
 	}
+
+	validUUID := "GPU-aaaaaaaa-1111-2222-3333-444444444444"
+	for _, recordedOrder := range [][]string{
+		nil,
+		{"not-a-gpu-uuid"},
+		{validUUID, validUUID},
+	} {
+		if got, err := DiscoverGPUUUIDsWithVisibleOrder(
+			ctx,
+			nil,
+			"test-pod",
+			"default",
+			"main",
+			recordedOrder,
+			logr.Discard(),
+		); err == nil {
+			t.Fatalf("expected malformed recorded order %v to fail, got %v", recordedOrder, got)
+		}
+	}
 }
 
 func TestDiscoverGPUUUIDsUsesPodResourcesForClassicPod(t *testing.T) {
@@ -305,7 +324,7 @@ func TestDiscoverGPUUUIDsFallsBackToPodResourcesAfterDRAAPILookupError(t *testin
 	}
 }
 
-func TestDiscoverGPUUUIDsOrdersDRAPodByContainerOrdinal(t *testing.T) {
+func TestDiscoverGPUUUIDsUsesRecordedVisibleOrderForDRAPod(t *testing.T) {
 	previousSocketPath := podResourcesSocketPath
 	podResourcesSocketPath = filepath.Join(t.TempDir(), "missing-kubelet.sock")
 	t.Cleanup(func() {
@@ -381,21 +400,17 @@ func TestDiscoverGPUUUIDsOrdersDRAPodByContainerOrdinal(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	got, err := discoverGPUUUIDs(
+	got, err := DiscoverGPUUUIDsWithVisibleOrder(
 		ctx,
 		client,
 		podName,
 		namespace,
 		"main",
-		"/proc",
-		123,
-		func(context.Context, string, int) ([]string, error) {
-			return []string{uuid0, uuid1}, nil
-		},
+		[]string{uuid0, uuid1},
 		logr.Discard(),
 	)
 	if err != nil {
-		t.Fatalf("DiscoverGPUUUIDs: %v", err)
+		t.Fatalf("DiscoverGPUUUIDsWithVisibleOrder: %v", err)
 	}
 	want := []string{uuid0, uuid1}
 	if len(got) != len(want) {

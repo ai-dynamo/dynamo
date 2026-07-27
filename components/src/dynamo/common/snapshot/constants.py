@@ -19,10 +19,11 @@ SNAPSHOT_RESTORE_CONTEXT_FILE = "restore-context.json"
 SNAPSHOT_RESTORE_STANDBY_ENV = "DYN_SNAPSHOT_RESTORE_STANDBY"
 
 # Must match snapshotprotocol.{SnapshotCompleteFile,RestoreCompleteFile,
-# ReadyForSnapshotFile}.
+# ReadyForSnapshotFile,GPUUUIDsFile}.
 SNAPSHOT_COMPLETE_FILE = "snapshot-complete"
 RESTORE_COMPLETE_FILE = "restore-complete"
 READY_FOR_SNAPSHOT_FILE = "ready-for-snapshot"
+GPU_UUIDS_FILE = "gpu-uuids"
 
 RESTORE_RUNTIME_ENV_NAMES = {
     # Parsed Python runtime config that must also refresh the in-memory config
