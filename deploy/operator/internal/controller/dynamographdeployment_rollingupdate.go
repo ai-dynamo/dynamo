@@ -393,24 +393,24 @@ func (r *DynamoGraphDeploymentReconciler) setLegacyWorkerHash(
 
 // getOrCreateRollingUpdateStatus returns the existing rolling update status or creates a new one.
 func (r *DynamoGraphDeploymentReconciler) getOrCreateRollingUpdateStatus(
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	status *nvidiacomv1beta1.DynamoGraphDeploymentStatus,
 ) *nvidiacomv1beta1.RollingUpdateStatus {
-	if dgd.Status.RollingUpdate == nil {
-		dgd.Status.RollingUpdate = &nvidiacomv1beta1.RollingUpdateStatus{
+	if status.RollingUpdate == nil {
+		status.RollingUpdate = &nvidiacomv1beta1.RollingUpdateStatus{
 			Phase: nvidiacomv1beta1.RollingUpdatePhaseNone,
 		}
 	}
-	return dgd.Status.RollingUpdate
+	return status.RollingUpdate
 }
 
 // isRollingUpdateInProgress returns true if a rolling update is currently active.
 func (r *DynamoGraphDeploymentReconciler) isRollingUpdateInProgress(
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	status *nvidiacomv1beta1.DynamoGraphDeploymentStatus,
 ) bool {
-	if dgd.Status.RollingUpdate == nil {
+	if status.RollingUpdate == nil {
 		return false
 	}
-	phase := dgd.Status.RollingUpdate.Phase
+	phase := status.RollingUpdate.Phase
 	return phase == nvidiacomv1beta1.RollingUpdatePhasePending ||
 		phase == nvidiacomv1beta1.RollingUpdatePhaseInProgress
 }
@@ -419,10 +419,11 @@ func (r *DynamoGraphDeploymentReconciler) isRollingUpdateInProgress(
 func (r *DynamoGraphDeploymentReconciler) reconcileRollingUpdate(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	status *nvidiacomv1beta1.DynamoGraphDeploymentStatus,
 ) error {
 	logger := log.FromContext(ctx)
 
-	rollingUpdateStatus := r.getOrCreateRollingUpdateStatus(dgd)
+	rollingUpdateStatus := r.getOrCreateRollingUpdateStatus(status)
 
 	desired, err := r.desiredWorkerHashes(dgd)
 	if err != nil {
@@ -488,19 +489,19 @@ func (r *DynamoGraphDeploymentReconciler) reconcileRollingUpdate(
 		logger.Info("Detected stuck rolling update: hashes match but phase is InProgress",
 			"hash", newWorkerHash,
 			"phase", rollingUpdateStatus.Phase)
-		return r.completeRollingUpdate(ctx, dgd, newWorkerHash)
+		return r.completeRollingUpdate(ctx, dgd, status, newWorkerHash)
 	}
 
 	switch rollingUpdateStatus.Phase {
 	case nvidiacomv1beta1.RollingUpdatePhaseNone:
-		return r.startRollingUpdate(ctx, dgd, newWorkerHash)
+		return r.startRollingUpdate(ctx, dgd, status, newWorkerHash)
 
 	case nvidiacomv1beta1.RollingUpdatePhasePending:
 		rollingUpdateStatus.Phase = nvidiacomv1beta1.RollingUpdatePhaseInProgress
-		return nil // deferred function in Reconcile() persists status
+		return nil // the workload program returns this status to the outer reconciler
 
 	case nvidiacomv1beta1.RollingUpdatePhaseInProgress:
-		return r.continueRollingUpdate(ctx, dgd, newWorkerHash)
+		return r.continueRollingUpdate(ctx, dgd, status, newWorkerHash)
 
 	case nvidiacomv1beta1.RollingUpdatePhaseCompleted:
 		logger.Info("Rolling update already completed")
@@ -514,6 +515,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileRollingUpdate(
 func (r *DynamoGraphDeploymentReconciler) startRollingUpdate(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	status *nvidiacomv1beta1.DynamoGraphDeploymentStatus,
 	newWorkerHash string,
 ) error {
 	logger := log.FromContext(ctx)
@@ -526,7 +528,7 @@ func (r *DynamoGraphDeploymentReconciler) startRollingUpdate(
 		"newHash", newWorkerHash)
 
 	now := metav1.Now()
-	rollingUpdateStatus := r.getOrCreateRollingUpdateStatus(dgd)
+	rollingUpdateStatus := r.getOrCreateRollingUpdateStatus(status)
 	rollingUpdateStatus.Phase = nvidiacomv1beta1.RollingUpdatePhasePending
 	rollingUpdateStatus.StartTime = &now
 	rollingUpdateStatus.UpdatedComponents = nil
@@ -534,13 +536,14 @@ func (r *DynamoGraphDeploymentReconciler) startRollingUpdate(
 	r.Recorder.Eventf(dgd, corev1.EventTypeNormal, "RollingUpdateStarted",
 		"Starting rolling update to worker hash %s", newWorkerHash)
 
-	return nil // deferred function in Reconcile() persists status
+	return nil // the workload program returns this status to the outer reconciler
 }
 
 // continueRollingUpdate handles the in-progress phase of a rolling update.
 func (r *DynamoGraphDeploymentReconciler) continueRollingUpdate(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	status *nvidiacomv1beta1.DynamoGraphDeploymentStatus,
 	newWorkerHash string,
 ) error {
 	logger := log.FromContext(ctx)
@@ -566,15 +569,15 @@ func (r *DynamoGraphDeploymentReconciler) continueRollingUpdate(
 		"newWorkerHash", newWorkerHash)
 
 	updatedComponents, totalWorkerComponents := completedWorkerComponents(dgd, oldInfo, newInfo)
-	rollingUpdateStatus := r.getOrCreateRollingUpdateStatus(dgd)
+	rollingUpdateStatus := r.getOrCreateRollingUpdateStatus(status)
 	rollingUpdateStatus.UpdatedComponents = updatedComponents
 
 	// Rolling update is complete when every worker component is individually updated.
 	if len(updatedComponents) == totalWorkerComponents && totalWorkerComponents > 0 {
-		return r.completeRollingUpdate(ctx, dgd, newWorkerHash)
+		return r.completeRollingUpdate(ctx, dgd, status, newWorkerHash)
 	}
 
-	return nil // deferred function in Reconcile() persists UpdatedComponents
+	return nil // the workload program returns UpdatedComponents to the outer reconciler
 }
 
 func completedWorkerComponents(
@@ -632,6 +635,7 @@ func workerGenerationComplete(
 func (r *DynamoGraphDeploymentReconciler) completeRollingUpdate(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	status *nvidiacomv1beta1.DynamoGraphDeploymentStatus,
 	newWorkerHash string,
 ) error {
 	logger := log.FromContext(ctx)
@@ -661,7 +665,7 @@ func (r *DynamoGraphDeploymentReconciler) completeRollingUpdate(
 		return fmt.Errorf("failed to update current worker hash: %w", err)
 	}
 
-	rollingUpdateStatus := r.getOrCreateRollingUpdateStatus(dgd)
+	rollingUpdateStatus := r.getOrCreateRollingUpdateStatus(status)
 	rollingUpdateStatus.Phase = nvidiacomv1beta1.RollingUpdatePhaseCompleted
 	now := metav1.Now()
 	rollingUpdateStatus.EndTime = &now

@@ -69,11 +69,9 @@ func TestDynamoGraphDeploymentReconciler_selectWorkloadProgram(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Log("Build the ephemeral state and reconciler selection inputs")
-			state := &graphReconcileState{
-				DGD: &nvidiacomv1beta1.DynamoGraphDeployment{
-					ObjectMeta: metav1.ObjectMeta{Annotations: tt.annotations},
-				},
+			t.Log("Build the reconciler selection inputs")
+			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{Annotations: tt.annotations},
 			}
 			reconciler := &DynamoGraphDeploymentReconciler{
 				RuntimeConfig: &commonController.RuntimeConfig{
@@ -82,7 +80,7 @@ func TestDynamoGraphDeploymentReconciler_selectWorkloadProgram(t *testing.T) {
 			}
 
 			t.Log("Select one complete workload program")
-			got := reconciler.selectWorkloadProgram(state)
+			got := reconciler.selectWorkloadProgram(dgd)
 
 			assert.IsType(t, tt.wantProgram, got)
 			if component, ok := got.(*componentProgram); ok {
@@ -95,13 +93,36 @@ func TestDynamoGraphDeploymentReconciler_selectWorkloadProgram(t *testing.T) {
 	}
 }
 
+func TestNewWorkloadProgramResultCopiesStatus(t *testing.T) {
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+		Status: nvidiacomv1beta1.DynamoGraphDeploymentStatus{
+			Checkpoints: map[string]nvidiacomv1beta1.ComponentCheckpointStatus{
+				"worker": {},
+			},
+			RollingUpdate: &nvidiacomv1beta1.RollingUpdateStatus{
+				Phase: nvidiacomv1beta1.RollingUpdatePhaseInProgress,
+			},
+		},
+	}
+
+	t.Log("Create a status accumulator independent from request.DGD.Status")
+	result := newWorkloadProgramResult(dgd)
+	require.NotNil(t, result.Status)
+	result.Status.Checkpoints["decode"] = nvidiacomv1beta1.ComponentCheckpointStatus{}
+	result.Status.RollingUpdate.Phase = nvidiacomv1beta1.RollingUpdatePhaseCompleted
+
+	t.Log("Verify status accumulation does not mutate the request object")
+	assert.NotContains(t, dgd.Status.Checkpoints, "decode")
+	assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhaseInProgress, dgd.Status.RollingUpdate.Phase)
+}
+
 func TestGroveProgram_ReconcileWorkloadsAdapter(t *testing.T) {
 	reconcileErr := errors.New("reconcile failed")
 	tests := []struct {
 		name         string
 		returned     ReconcileResult
 		reconcileErr error
-		wantState    ReconcileResult
+		wantResult   ReconcileResult
 		wantErr      error
 	}{
 		{
@@ -110,7 +131,7 @@ func TestGroveProgram_ReconcileWorkloadsAdapter(t *testing.T) {
 				State:  nvidiacomv1beta1.DGDStatePending,
 				Reason: "grove_pending",
 			},
-			wantState: ReconcileResult{
+			wantResult: ReconcileResult{
 				State:  nvidiacomv1beta1.DGDStatePending,
 				Reason: "grove_pending",
 			},
@@ -122,31 +143,22 @@ func TestGroveProgram_ReconcileWorkloadsAdapter(t *testing.T) {
 				Reason: "must_not_be_committed",
 			},
 			reconcileErr: reconcileErr,
-			wantState: ReconcileResult{
-				State:  nvidiacomv1beta1.DGDStatePending,
-				Reason: "existing",
-			},
-			wantErr: reconcileErr,
+			wantErr:      reconcileErr,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Log("Build ephemeral inputs that must be passed unchanged to the program")
+			t.Log("Build typed workload inputs that must be passed unchanged")
 			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{}
 			restartState := &dynamo.RestartState{Timestamp: "restart"}
 			checkpointInfos := map[string]*checkpoint.CheckpointInfo{
 				"worker": {CheckpointName: "checkpoint"},
 			}
-			state := &graphReconcileState{
+			req := workloadReconcileRequest{
 				DGD:             dgd,
-				HasMultinode:    true,
 				RestartState:    restartState,
 				CheckpointInfos: checkpointInfos,
-				Result: ReconcileResult{
-					State:  nvidiacomv1beta1.DGDStatePending,
-					Reason: "existing",
-				},
 			}
 			called := false
 			reconcile := func(
@@ -162,21 +174,21 @@ func TestGroveProgram_ReconcileWorkloadsAdapter(t *testing.T) {
 				return tt.returned, tt.reconcileErr
 			}
 
-			t.Log("Run the selected complete workload program")
-			result, err := (&groveProgram{reconcile: reconcile}).reconcileWorkloads(context.Background(), state)
+			t.Log("Run the temporary Grove workload adapter")
+			result, err := (&groveProgram{reconcile: reconcile}).reconcileWorkloads(context.Background(), req)
 
 			t.Log("Verify the adapter forwards inputs and outputs unchanged")
 			require.True(t, called)
 			require.ErrorIs(t, err, tt.wantErr)
 			if tt.reconcileErr == nil {
-				assert.Equal(t, tt.wantState, result)
+				assert.Equal(t, tt.wantResult, result)
 			}
 		})
 	}
 }
 
 func TestComponentProgram_ReconcilePreservesResultOnError(t *testing.T) {
-	t.Log("Inject a component-path API failure before a result can be committed")
+	t.Log("Inject a component-path API failure before new status is produced")
 	reconcileErr := errors.New("reconcile failed")
 	kubeClient := fake.NewClientBuilder().
 		WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
@@ -189,22 +201,24 @@ func TestComponentProgram_ReconcilePreservesResultOnError(t *testing.T) {
 	program := &componentProgram{
 		reconciler: &DynamoGraphDeploymentReconciler{Client: kubeClient},
 	}
-	previous := ReconcileResult{
-		State:  nvidiacomv1beta1.DGDStatePending,
-		Reason: "existing",
-	}
-	state := &graphReconcileState{
-		DGD: &nvidiacomv1beta1.DynamoGraphDeployment{
-			ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default"},
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default"},
+		Status: nvidiacomv1beta1.DynamoGraphDeploymentStatus{
+			State: nvidiacomv1beta1.DGDStatePending,
+			Components: map[string]nvidiacomv1beta1.ComponentReplicaStatus{
+				"worker": {Replicas: 1},
+			},
 		},
-		Result: previous,
 	}
+	previous := dgd.DeepCopy().Status
 
-	err := program.Reconcile(context.Background(), state)
+	result, err := program.Reconcile(context.Background(), workloadProgramRequest{DGD: dgd})
 
-	t.Log("Verify failed reconciliation cannot publish a partial result")
+	t.Log("Verify the error result preserves prior status without mutating request.DGD.Status")
 	require.ErrorIs(t, err, reconcileErr)
-	assert.Equal(t, previous, state.Result)
+	require.NotNil(t, result.Status)
+	assert.Equal(t, previous, *result.Status)
+	assert.Equal(t, previous, dgd.Status)
 	reason, ok := workloadProgramFailureReason(err)
 	require.True(t, ok)
 	assert.Equal(t, reasonFailedToInitializeWorkerHash, reason)
@@ -240,20 +254,48 @@ func TestGroveProgram_ReconcilePreservesResultOnError(t *testing.T) {
 			return ReconcileResult{}, nil
 		},
 	}
-	previous := ReconcileResult{
-		State:  nvidiacomv1beta1.DGDStatePending,
-		Reason: "existing",
+	dgd.Status = nvidiacomv1beta1.DynamoGraphDeploymentStatus{
+		State: nvidiacomv1beta1.DGDStatePending,
+		Components: map[string]nvidiacomv1beta1.ComponentReplicaStatus{
+			"worker": {Replicas: 1},
+		},
 	}
-	state := &graphReconcileState{DGD: dgd, Result: previous}
+	previous := dgd.DeepCopy().Status
 
-	err := program.Reconcile(context.Background(), state)
+	result, err := program.Reconcile(context.Background(), workloadProgramRequest{DGD: dgd})
 
-	t.Log("Verify failed reconciliation cannot publish a partial result")
+	t.Log("Verify failed primary mutation does not mutate request.DGD.Status")
 	require.ErrorIs(t, err, reconcileErr)
-	assert.Equal(t, previous, state.Result)
+	require.NotNil(t, result.Status)
+	assert.Equal(t, previous, *result.Status)
+	assert.Equal(t, previous, dgd.Status)
 	reason, ok := workloadProgramFailureReason(err)
 	require.True(t, ok)
 	assert.Equal(t, reasonFailedToInitializeWorkerHash, reason)
+}
+
+func TestComponentProgram_ReconcileReturnsPartialRolloutStatusOnLaterError(t *testing.T) {
+	t.Log("Build a worker change that starts rollout before shared input reconciliation")
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {
+			ComponentType: commonconsts.ComponentTypeWorker,
+			Envs:          []corev1.EnvVar{{Name: "WORKER_VERSION", Value: "new"}},
+		},
+	})
+	dgd.Annotations = map[string]string{
+		commonconsts.AnnotationCurrentWorkerHash: "old-worker-hash",
+	}
+	reconciler := createTestReconcilerWithStatus(dgd)
+	program := &componentProgram{reconciler: reconciler}
+
+	result, err := program.Reconcile(context.Background(), workloadProgramRequest{DGD: dgd})
+
+	t.Log("Verify rollout status is returned on the later shared-input failure")
+	require.ErrorContains(t, err, "RBAC manager not initialized")
+	require.NotNil(t, result.Status)
+	require.NotNil(t, result.Status.RollingUpdate)
+	assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhasePending, result.Status.RollingUpdate.Phase)
+	assert.Nil(t, dgd.Status.RollingUpdate)
 }
 
 func TestComponentProgram_ReconcileWorkerRollout(t *testing.T) {
@@ -269,11 +311,13 @@ func TestComponentProgram_ReconcileWorkerRollout(t *testing.T) {
 		}
 		reconciler := createTestReconcilerWithStatus(dgd)
 		program := &componentProgram{reconciler: reconciler}
+		status := dgd.DeepCopy().Status
 
-		require.NoError(t, program.reconcileWorkerRollout(context.Background(), dgd))
+		require.NoError(t, program.reconcileWorkerRollout(context.Background(), dgd, &status))
 
-		require.NotNil(t, dgd.Status.RollingUpdate)
-		assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhasePending, dgd.Status.RollingUpdate.Phase)
+		require.NotNil(t, status.RollingUpdate)
+		assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhasePending, status.RollingUpdate.Phase)
+		assert.Nil(t, dgd.Status.RollingUpdate)
 		assert.Equal(t, "old-worker-hash", dgd.Annotations[commonconsts.AnnotationCurrentWorkerHash])
 	})
 
@@ -290,9 +334,11 @@ func TestComponentProgram_ReconcileWorkerRollout(t *testing.T) {
 		}
 		reconciler := createTestReconcilerWithStatus(dgd)
 		program := &componentProgram{reconciler: reconciler}
+		status := dgd.DeepCopy().Status
 
-		require.NoError(t, program.reconcileWorkerRollout(context.Background(), dgd))
+		require.NoError(t, program.reconcileWorkerRollout(context.Background(), dgd, &status))
 
+		assert.Nil(t, status.RollingUpdate)
 		assert.Nil(t, dgd.Status.RollingUpdate)
 		desired, err := reconciler.desiredWorkerHashes(dgd)
 		require.NoError(t, err)

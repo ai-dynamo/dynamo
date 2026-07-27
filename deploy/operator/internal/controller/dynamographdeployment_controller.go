@@ -199,28 +199,27 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, nil
 	}
 
-	reconcileState := &graphReconcileState{DGD: dynamoDeployment}
-	program := r.selectWorkloadProgram(reconcileState)
-	if err = program.Reconcile(ctx, reconcileState); err != nil {
+	program := r.selectWorkloadProgram(dynamoDeployment)
+	programResult, programErr := program.Reconcile(ctx, workloadProgramRequest{
+		DGD:   dynamoDeployment,
+		Facts: resolvedFacts{},
+	})
+	result = programResult.Result
+	if programResult.Status != nil {
+		dynamoDeployment.Status = *programResult.Status
+	}
+	if err = programErr; err != nil {
 		logger.Error(err, "failed to reconcile the workload program")
 		reason = reasonFailedToReconcileResources
 		if programReason, ok := workloadProgramFailureReason(err); ok {
 			reason = programReason
 		}
-		return ctrl.Result{}, err
+		return result, err
 	}
-	reconcileResult := reconcileState.Result
 
-	// Assign status only after confirming the reconcile succeeded. On error,
-	// the selected program does not publish a new ReconcileResult; assigning a
-	// zero value here would wipe Components/Restart, which the deferred status
-	// update would then persist. Deferring the assignment past the error check
-	// preserves the last-known-good status on a transient failure.
-	state = reconcileResult.State
-	reason = reconcileResult.Reason
-	message = reconcileResult.Message
-	dynamoDeployment.Status.Components = reconcileResult.ComponentStatus
-	dynamoDeployment.Status.Restart = reconcileResult.RestartStatus
+	state = dynamoDeployment.Status.State
+	reason = programResult.ReadyReason
+	message = programResult.ReadyMessage
 
 	// Override state based on rolling update status if a rolling update is in progress
 	if dynamoDeployment.Status.RollingUpdate != nil {
@@ -237,7 +236,7 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		}
 	}
 
-	return ctrl.Result{}, nil
+	return result, nil
 }
 
 type Resource interface {
@@ -258,18 +257,18 @@ type ReconcileResult struct {
 // complete before a selected workload program realizes its workload graph.
 func (r *DynamoGraphDeploymentReconciler) reconcileProgramInputs(
 	ctx context.Context,
-	state *graphReconcileState,
-) error {
+	dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment,
+) (programInputs, error) {
 	logger := log.FromContext(ctx)
-	dynamoDeployment := state.DGD
+	inputs := programInputs{}
 
 	// Ensure planner RBAC exists in cluster-wide mode
 	if r.Config.Namespace.Restricted == "" {
 		if r.RBACManager == nil {
-			return fmt.Errorf("RBAC manager not initialized in cluster-wide mode")
+			return inputs, fmt.Errorf("RBAC manager not initialized in cluster-wide mode")
 		}
 		if r.Config.RBAC.PlannerClusterRoleName == "" {
-			return fmt.Errorf("planner ClusterRole name is required in cluster-wide mode")
+			return inputs, fmt.Errorf("planner ClusterRole name is required in cluster-wide mode")
 		}
 		if err := r.RBACManager.EnsureServiceAccountWithRBAC(
 			ctx,
@@ -278,13 +277,13 @@ func (r *DynamoGraphDeploymentReconciler) reconcileProgramInputs(
 			r.Config.RBAC.PlannerClusterRoleName,
 		); err != nil {
 			logger.Error(err, "Failed to ensure planner RBAC")
-			return fmt.Errorf("failed to ensure planner RBAC: %w", err)
+			return inputs, fmt.Errorf("failed to ensure planner RBAC: %w", err)
 		}
 
 		// Ensure EPP RBAC exists in cluster-wide mode if EPP service is present
 		if dynamoDeployment.HasEPPComponent() {
 			if r.Config.RBAC.EPPClusterRoleName == "" {
-				return fmt.Errorf("EPP ClusterRole name is required in cluster-wide mode when EPP service is present")
+				return inputs, fmt.Errorf("EPP ClusterRole name is required in cluster-wide mode when EPP service is present")
 			}
 			if err := r.RBACManager.EnsureServiceAccountWithRBAC(
 				ctx,
@@ -293,7 +292,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileProgramInputs(
 				r.Config.RBAC.EPPClusterRoleName,
 			); err != nil {
 				logger.Error(err, "Failed to ensure EPP RBAC")
-				return fmt.Errorf("failed to ensure EPP RBAC: %w", err)
+				return inputs, fmt.Errorf("failed to ensure EPP RBAC: %w", err)
 			}
 		}
 	}
@@ -302,7 +301,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileProgramInputs(
 	err := r.reconcilePVCs(ctx, dynamoDeployment)
 	if err != nil {
 		logger.Error(err, "Failed to reconcile top-level PVCs")
-		return fmt.Errorf("failed to reconcile top-level PVCs: %w", err)
+		return inputs, fmt.Errorf("failed to reconcile top-level PVCs: %w", err)
 	}
 
 	// Reconcile discovery RBAC before checkpoints so auto-created checkpoint
@@ -311,77 +310,84 @@ func (r *DynamoGraphDeploymentReconciler) reconcileProgramInputs(
 	err = r.reconcileK8sDiscoveryResources(ctx, dynamoDeployment)
 	if err != nil {
 		logger.Error(err, "Failed to reconcile K8s discovery resources")
-		return fmt.Errorf("failed to reconcile K8s discovery resources: %w", err)
+		return inputs, fmt.Errorf("failed to reconcile K8s discovery resources: %w", err)
 	}
 
 	if err := r.reconcileGMSResourceClaimTemplates(ctx, dynamoDeployment); err != nil {
-		return err
+		return inputs, err
 	}
 
 	// Reconcile checkpoints for components with checkpointing enabled.
 	checkpointStatuses, checkpointInfos, err := r.reconcileCheckpoints(ctx, dynamoDeployment)
 	if err != nil {
 		logger.Error(err, "Failed to reconcile checkpoints")
-		return fmt.Errorf("failed to reconcile checkpoints: %w", err)
+		return inputs, fmt.Errorf("failed to reconcile checkpoints: %w", err)
 	}
-	dynamoDeployment.Status.Checkpoints = checkpointStatuses
+	inputs.CheckpointStatuses = checkpointStatuses
+	inputs.CheckpointInfos = checkpointInfos
 
 	// Reconcile EPP resources (ConfigMaps, Services, InferencePools) if EPP service exists
 	err = r.reconcileEPPResources(ctx, dynamoDeployment)
 	if err != nil {
 		logger.Error(err, "Failed to reconcile EPP resources")
-		return fmt.Errorf("failed to reconcile EPP resources: %w", err)
+		return inputs, fmt.Errorf("failed to reconcile EPP resources: %w", err)
 	}
 
 	// Reconcile the wait-for-leader ConfigMap for multinode mp deployments
 	err = r.reconcileWaitLeaderConfigMap(ctx, dynamoDeployment)
 	if err != nil {
 		logger.Error(err, "Failed to reconcile wait-leader ConfigMap")
-		return fmt.Errorf("failed to reconcile wait-leader ConfigMap: %w", err)
+		return inputs, fmt.Errorf("failed to reconcile wait-leader ConfigMap: %w", err)
 	}
 
 	// Determine if any component is multinode.
-	hasMultinode := dynamoDeployment.HasAnyMultinodeComponent()
+	inputs.HasMultinode = dynamoDeployment.HasAnyMultinodeComponent()
 
-	if r.SSHKeyManager != nil && hasMultinode {
+	if r.SSHKeyManager != nil && inputs.HasMultinode {
 		if err := r.SSHKeyManager.EnsureAndReplicate(ctx, dynamoDeployment.Namespace); err != nil {
 			logger.Error(err, "Failed to ensure MPI SSH key secret", "namespace", dynamoDeployment.Namespace)
-			return fmt.Errorf("failed to ensure MPI SSH key secret: %w", err)
+			return inputs, fmt.Errorf("failed to ensure MPI SSH key secret: %w", err)
 		}
 	}
 
-	state.HasMultinode = hasMultinode
-	state.CheckpointInfos = checkpointInfos
-	return nil
+	return inputs, nil
 }
 
-// resolveProgramRestartState enriches the ephemeral state after shared
-// resources and pathway-specific input validation have completed.
+// resolveProgramRestartState derives restart state after shared resources and
+// pathway-specific input validation have completed.
 func (r *DynamoGraphDeploymentReconciler) resolveProgramRestartState(
 	ctx context.Context,
-	state *graphReconcileState,
-) {
-	state.RestartStatus = r.computeRestartStatus(ctx, state.DGD)
-	state.RestartState = dynamo.DetermineRestartState(state.DGD, state.RestartStatus)
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	status *nvidiacomv1beta1.DynamoGraphDeploymentStatus,
+) programRestart {
+	statusView := dgd.DeepCopy()
+	statusView.Status = *status
+	restartStatus := r.computeRestartStatus(ctx, statusView)
+	return programRestart{
+		State:  dynamo.DetermineRestartState(statusView, restartStatus),
+		Status: restartStatus,
+	}
 }
 
 // reconcileProgramResult applies the shared post-workload policies after the
 // selected program has produced a successful workload result.
 func (r *DynamoGraphDeploymentReconciler) reconcileProgramResult(
 	ctx context.Context,
-	state *graphReconcileState,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	inputs programInputs,
+	restart programRestart,
 	result ReconcileResult,
 ) (ReconcileResult, error) {
 	logger := log.FromContext(ctx)
-	result.RestartStatus = state.RestartStatus
-	result = applyCheckpointStartupReadiness(result, state.CheckpointInfos)
+	result.RestartStatus = restart.Status
+	result = applyCheckpointStartupReadiness(result, inputs.CheckpointInfos)
 
 	// Reconcile DynamoGraphDeploymentScalingAdapters after applying checkpoint
 	// startup readiness. In WaitForCheckpoint, the DGD deliberately reports
 	// pending before regular workers exist; letting a scaling adapter write
 	// replicas while gated would create an avoidable update loop.
 	if result.State != nvidiacomv1beta1.DGDStatePending || result.Reason != "waiting_for_checkpoint" {
-		if err := r.reconcileScalingAdapters(ctx, state.DGD); err != nil {
+		if err := r.reconcileScalingAdapters(ctx, dgd); err != nil {
 			logger.Error(err, "Failed to reconcile scaling adapters")
 			return ReconcileResult{}, fmt.Errorf("failed to reconcile scaling adapters: %w", err)
 		}
@@ -1406,7 +1412,7 @@ func (r *DynamoGraphDeploymentReconciler) computeRestartStatus(ctx context.Conte
 	}
 
 	// Supersede restart if a rolling update is in progress
-	if r.isRollingUpdateInProgress(dgd) {
+	if r.isRollingUpdateInProgress(&dgd.Status) {
 		r.Recorder.Eventf(dgd, corev1.EventTypeWarning, "RestartSuperseded",
 			"Restart %s superseded by rolling update", dgd.Spec.Restart.ID)
 		return &nvidiacomv1beta1.RestartStatus{

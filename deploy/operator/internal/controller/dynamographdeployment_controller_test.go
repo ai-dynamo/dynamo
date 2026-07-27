@@ -537,7 +537,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileProgramInputs_ValidatesGMSReso
 		RuntimeConfig: &controller_common.RuntimeConfig{},
 	}
 
-	err := reconciler.reconcileProgramInputs(ctx, &graphReconcileState{DGD: dgd})
+	_, err := reconciler.reconcileProgramInputs(ctx, dgd)
 	g.Expect(err).To(gomega.HaveOccurred())
 	g.Expect(err.Error()).To(gomega.ContainSubstring("requires DRA"))
 	g.Expect(err.Error()).To(gomega.ContainSubstring("explicitly disabled"))
@@ -4577,8 +4577,10 @@ func TestComponentProgram_ReconcileWorkloads(t *testing.T) {
 				RuntimeConfig: &controller_common.RuntimeConfig{},
 			}
 
-			state := &graphReconcileState{DGD: dgd}
-			result, err := (&componentProgram{reconciler: reconciler}).reconcileWorkloads(ctx, state)
+			result, err := (&componentProgram{reconciler: reconciler}).reconcileWorkloads(
+				ctx,
+				workloadReconcileRequest{DGD: dgd},
+			)
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 
 			g.Expect(result).To(gomega.Equal(tt.wantReconcileResult))

@@ -32,20 +32,45 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-// graphReconcileState is ephemeral state shared by the common DGD flow and the
-// selected workload program during one reconciliation. It is intentionally
-// small: dependencies belong to concrete programs, and provider-native API
-// objects must not be added here.
-type graphReconcileState struct {
+// resolvedFacts contains immutable observations resolved independently of the
+// selected workload program. It is intentionally empty until such a fact is
+// demonstrated; program-derived values remain typed locals.
+type resolvedFacts struct{}
+
+type workloadProgramRequest struct {
+	// DGD is the mutable primary object. Programs may mutate and directly
+	// persist non-status fields; status is returned through workloadProgramResult.
+	DGD *nvidiacomv1beta1.DynamoGraphDeployment
+
+	Facts resolvedFacts
+}
+
+type workloadProgramResult struct {
+	ctrl.Result
+	Status       *nvidiacomv1beta1.DynamoGraphDeploymentStatus
+	ReadyReason  Reason
+	ReadyMessage Message
+}
+
+type programInputs struct {
+	HasMultinode       bool
+	CheckpointInfos    map[string]*checkpoint.CheckpointInfo
+	CheckpointStatuses map[string]nvidiacomv1beta1.ComponentCheckpointStatus
+}
+
+type programRestart struct {
+	State  *dynamo.RestartState
+	Status *nvidiacomv1beta1.RestartStatus
+}
+
+type workloadReconcileRequest struct {
 	DGD             *nvidiacomv1beta1.DynamoGraphDeployment
-	HasMultinode    bool
 	RestartState    *dynamo.RestartState
-	RestartStatus   *nvidiacomv1beta1.RestartStatus
 	CheckpointInfos map[string]*checkpoint.CheckpointInfo
-	Result          ReconcileResult
 }
 
 // workloadProgram owns the complete graph-workload state machine for one
@@ -53,7 +78,22 @@ type graphReconcileState struct {
 // it does not drive provider rendering, rollout, readiness, or cleanup through
 // lifecycle callbacks.
 type workloadProgram interface {
-	Reconcile(context.Context, *graphReconcileState) error
+	Reconcile(context.Context, workloadProgramRequest) (workloadProgramResult, error)
+}
+
+func newWorkloadProgramResult(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+) workloadProgramResult {
+	status := dgd.DeepCopy().Status
+	return workloadProgramResult{Status: &status}
+}
+
+func (r *workloadProgramResult) applyReconcileResult(result ReconcileResult) {
+	r.Status.State = result.State
+	r.Status.Components = result.ComponentStatus
+	r.Status.Restart = result.RestartStatus
+	r.ReadyReason = result.Reason
+	r.ReadyMessage = result.Message
 }
 
 type workloadProgramFailure struct {
@@ -99,44 +139,56 @@ type componentProgram struct {
 }
 
 // Reconcile composes the complete component pathway. Each earlier operation
-// enriches the ephemeral state consumed by the later workload and result
-// operations; only the final successful result is published back to state.
-func (p *componentProgram) Reconcile(ctx context.Context, state *graphReconcileState) error {
+// returns a typed value consumed by later operations. Non-status DGD changes
+// are persisted through req.DGD; status accumulates in the returned result.
+func (p *componentProgram) Reconcile(
+	ctx context.Context,
+	req workloadProgramRequest,
+) (workloadProgramResult, error) {
+	programResult := newWorkloadProgramResult(req.DGD)
 	log.FromContext(ctx).Info(
 		"Reconciling Dynamo components deployments",
-		"hasMultinode", state.DGD.HasAnyMultinodeComponent(),
+		"hasMultinode", req.DGD.HasAnyMultinodeComponent(),
 		"lwsEnabled", p.lwsEnabled,
 	)
 
-	if err := p.reconcileWorkerRollout(ctx, state.DGD); err != nil {
-		return err
+	if err := p.reconcileWorkerRollout(ctx, req.DGD, programResult.Status); err != nil {
+		return programResult, err
 	}
-	if err := p.reconciler.reconcileProgramInputs(ctx, state); err != nil {
-		return err
+	inputs, err := p.reconciler.reconcileProgramInputs(ctx, req.DGD)
+	if inputs.CheckpointStatuses != nil {
+		programResult.Status.Checkpoints = inputs.CheckpointStatuses
 	}
-	if state.HasMultinode && !p.lwsEnabled {
+	if err != nil {
+		return programResult, err
+	}
+	if inputs.HasMultinode && !p.lwsEnabled {
 		err := fmt.Errorf("no multinode orchestrator available")
 		log.FromContext(ctx).Error(
 			err,
 			err.Error(),
-			"hasMultinode", state.HasMultinode,
+			"hasMultinode", inputs.HasMultinode,
 			"lwsEnabled", p.lwsEnabled,
 		)
-		return fmt.Errorf("failed to reconcile Dynamo components deployments: %w", err)
+		return programResult, fmt.Errorf("failed to reconcile Dynamo components deployments: %w", err)
 	}
-	p.reconciler.resolveProgramRestartState(ctx, state)
+	restart := p.reconciler.resolveProgramRestartState(ctx, req.DGD, programResult.Status)
 
-	result, err := p.reconcileWorkloads(ctx, state)
+	result, err := p.reconcileWorkloads(ctx, workloadReconcileRequest{
+		DGD:             req.DGD,
+		RestartState:    restart.State,
+		CheckpointInfos: inputs.CheckpointInfos,
+	})
 	if err != nil {
-		return fmt.Errorf("failed to reconcile Dynamo components deployments: %w", err)
+		return programResult, fmt.Errorf("failed to reconcile Dynamo components deployments: %w", err)
 	}
-	result, err = p.reconciler.reconcileProgramResult(ctx, state, result)
+	result, err = p.reconciler.reconcileProgramResult(ctx, req.DGD, inputs, restart, result)
 	if err != nil {
-		return err
+		return programResult, err
 	}
 
-	state.Result = result
-	return nil
+	programResult.applyReconcileResult(result)
+	return programResult, nil
 }
 
 // reconcileWorkloads owns the component pathway's complete DCD graph
@@ -145,10 +197,10 @@ func (p *componentProgram) Reconcile(ctx context.Context, state *graphReconcileS
 // dedicated extraction; this program owns when they participate in the flow.
 func (p *componentProgram) reconcileWorkloads(
 	ctx context.Context,
-	state *graphReconcileState,
+	req workloadReconcileRequest,
 ) (ReconcileResult, error) {
 	r := p.reconciler
-	dynamoDeployment := state.DGD
+	dynamoDeployment := req.DGD
 	resources := []Resource{}
 	logger := log.FromContext(ctx)
 
@@ -172,7 +224,7 @@ func (p *componentProgram) reconcileWorkloads(
 	// rolling update.
 	dynamoComponentsDeployments, err := dynamo.GenerateDynamoComponentsDeployments(
 		dynamoDeployment,
-		state.RestartState,
+		req.RestartState,
 		existingRestartAnnotations,
 		rollingUpdateCtx,
 	)
@@ -183,7 +235,7 @@ func (p *componentProgram) reconcileWorkloads(
 
 	// Apply resolved checkpoint policy and synchronize every desired DCD.
 	for key, dcd := range dynamoComponentsDeployments {
-		if err := p.applyCheckpointStartupPolicy(dcd, state.CheckpointInfos[key]); err != nil {
+		if err := p.applyCheckpointStartupPolicy(dcd, req.CheckpointInfos[key]); err != nil {
 			return ReconcileResult{}, fmt.Errorf("failed to apply checkpoint startup policy for %s: %w", key, err)
 		}
 		logger.Info("Reconciling DynamoComponentDeployment", "key", key, "name", dcd.Name)
@@ -230,6 +282,7 @@ func (p *componentProgram) reconcileWorkloads(
 func (p *componentProgram) reconcileWorkerRollout(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	status *nvidiacomv1beta1.DynamoGraphDeploymentStatus,
 ) error {
 	if err := p.reconciler.migrateCurrentWorkerHashIfNeeded(ctx, dgd); err != nil {
 		log.FromContext(ctx).Error(err, "Failed to migrate worker hash")
@@ -237,7 +290,7 @@ func (p *componentProgram) reconcileWorkerRollout(
 	}
 
 	if p.supportsManagedRollingUpdate(dgd) {
-		return p.reconcileManagedWorkerRollout(ctx, dgd)
+		return p.reconcileManagedWorkerRollout(ctx, dgd, status)
 	}
 	return reconcileUnsupportedWorkerRollout(ctx, p.reconciler, dgd, false)
 }
@@ -245,6 +298,7 @@ func (p *componentProgram) reconcileWorkerRollout(
 func (p *componentProgram) reconcileManagedWorkerRollout(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	status *nvidiacomv1beta1.DynamoGraphDeploymentStatus,
 ) error {
 	r := p.reconciler
 	logger := log.FromContext(ctx)
@@ -254,7 +308,7 @@ func (p *componentProgram) reconcileManagedWorkerRollout(
 		return failWorkloadProgram(reasonFailedToInitializeWorkerHash, err)
 	}
 
-	rollingUpdateInProgress := r.isRollingUpdateInProgress(dgd)
+	rollingUpdateInProgress := r.isRollingUpdateInProgress(status)
 	triggerRollingUpdate := false
 	if !rollingUpdateInProgress {
 		var err error
@@ -265,7 +319,7 @@ func (p *componentProgram) reconcileManagedWorkerRollout(
 		}
 	}
 	if rollingUpdateInProgress || triggerRollingUpdate {
-		if err := r.reconcileRollingUpdate(ctx, dgd); err != nil {
+		if err := r.reconcileRollingUpdate(ctx, dgd, status); err != nil {
 			logger.Error(err, "Failed to reconcile rolling update")
 			return failWorkloadProgram(reasonRollingUpdateFailed, err)
 		}
@@ -427,57 +481,66 @@ type groveProgram struct {
 // Reconcile composes the current Grove pathway around its temporary workload
 // adapter while keeping shared resource ordering and result publication
 // identical to the component program.
-func (p *groveProgram) Reconcile(ctx context.Context, state *graphReconcileState) error {
+func (p *groveProgram) Reconcile(
+	ctx context.Context,
+	req workloadProgramRequest,
+) (workloadProgramResult, error) {
+	programResult := newWorkloadProgramResult(req.DGD)
 	log.FromContext(ctx).Info(
 		"Reconciling Grove resources",
-		"hasMultinode", state.DGD.HasAnyMultinodeComponent(),
+		"hasMultinode", req.DGD.HasAnyMultinodeComponent(),
 		"lwsEnabled", p.lwsEnabled,
 	)
 
-	if err := p.reconciler.migrateCurrentWorkerHashIfNeeded(ctx, state.DGD); err != nil {
+	if err := p.reconciler.migrateCurrentWorkerHashIfNeeded(ctx, req.DGD); err != nil {
 		log.FromContext(ctx).Error(err, "Failed to migrate worker hash")
-		return failWorkloadProgram(reasonFailedToMigrateWorkerHash, err)
+		return programResult, failWorkloadProgram(reasonFailedToMigrateWorkerHash, err)
 	}
-	if err := reconcileUnsupportedWorkerRollout(ctx, p.reconciler, state.DGD, true); err != nil {
-		return err
+	if err := reconcileUnsupportedWorkerRollout(ctx, p.reconciler, req.DGD, true); err != nil {
+		return programResult, err
 	}
-	if err := p.reconciler.reconcileProgramInputs(ctx, state); err != nil {
-		return err
+	inputs, err := p.reconciler.reconcileProgramInputs(ctx, req.DGD)
+	if inputs.CheckpointStatuses != nil {
+		programResult.Status.Checkpoints = inputs.CheckpointStatuses
 	}
-	p.reconciler.resolveProgramRestartState(ctx, state)
-
-	result, err := p.reconcileWorkloads(
-		ctx,
-		state,
-	)
 	if err != nil {
-		return fmt.Errorf("failed to reconcile Dynamo components deployments: %w", err)
+		return programResult, err
 	}
-	result, err = p.reconciler.reconcileProgramResult(ctx, state, result)
+	restart := p.reconciler.resolveProgramRestartState(ctx, req.DGD, programResult.Status)
+
+	result, err := p.reconcileWorkloads(ctx, workloadReconcileRequest{
+		DGD:             req.DGD,
+		RestartState:    restart.State,
+		CheckpointInfos: inputs.CheckpointInfos,
+	})
 	if err != nil {
-		return err
+		return programResult, fmt.Errorf("failed to reconcile Dynamo components deployments: %w", err)
+	}
+	result, err = p.reconciler.reconcileProgramResult(ctx, req.DGD, inputs, restart, result)
+	if err != nil {
+		return programResult, err
 	}
 
-	state.Result = result
-	return nil
+	programResult.applyReconcileResult(result)
+	return programResult, nil
 }
 
 func (p *groveProgram) reconcileWorkloads(
 	ctx context.Context,
-	state *graphReconcileState,
+	req workloadReconcileRequest,
 ) (ReconcileResult, error) {
 	return p.reconcile(
 		ctx,
-		state.DGD,
-		state.RestartState,
-		state.CheckpointInfos,
+		req.DGD,
+		req.RestartState,
+		req.CheckpointInfos,
 	)
 }
 
 func (r *DynamoGraphDeploymentReconciler) selectWorkloadProgram(
-	state *graphReconcileState,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) workloadProgram {
-	if r.isGrovePathway(state.DGD) {
+	if r.isGrovePathway(dgd) {
 		return &groveProgram{
 			reconciler: r,
 			reconcile:  r.reconcileGroveResources,
