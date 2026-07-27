@@ -60,10 +60,8 @@ dynamo-mocker = { path = "lib/mocker", version = "1.4.0" }
 dynamo-kv-router = { path = "lib/kv-router", version = "1.4.0" }
 dynamo-protocols = { version = "=4.0.0" }
 dynamo-parsers = { version = "5.1.3" }
-# Published on crates.io. To see all available versions:
-#   web:          https://crates.io/crates/dynamo-parsers-v2/versions
-#   sparse index: curl https://index.crates.io/dy/na/dynamo-parsers-v2   (one JSON line per release; read the "vers" field)
-dynamo-parsers-v2 = { path = "../frontend-crates-kimi-k3-unified-parser/parsers/v2" }
+# Unified-parser branch; Cargo.lock pins the resolved commit.
+dynamo-parsers-v2 = { git = "https://github.com/ai-dynamo/frontend-crates.git", branch = "rmccormick/qwen-unified" }
 dynamo-backend-common = { path = "lib/backend-common", version = "1.4.0" }
 dynamo-sidecar-common = { path = "lib/sidecar/common", version = "1.4.0" }
 fastokens = { version = "0.2.0" }
