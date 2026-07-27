@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import dataclasses
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -70,5 +72,79 @@ async def test_engine_control_route_invokes_registered_callback(
             "body": {"level": 1},
         }
         assert calls == [{"level": 1}]
+    finally:
+        runtime.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.sglang
+async def test_tokenizer_manager_internal_state_route_serializes_nested_dataclass(
+    monkeypatch: pytest.MonkeyPatch, dynamo_dynamic_ports
+):
+    handler_base = pytest.importorskip(
+        "dynamo.sglang.request_handlers.handler_base",
+        reason="SGLang is required for the tokenizer manager route",
+    )
+
+    @dataclasses.dataclass
+    class CudaGraphConfig:
+        tp_size: int
+        pp_size: int
+        dp_size: int
+        max_bs: int
+
+    async def get_internal_state() -> list[dict[str, Any]]:
+        return [
+            {
+                "dp_rank": 0,
+                "cuda_graph_config": CudaGraphConfig(
+                    tp_size=4,
+                    pp_size=2,
+                    dp_size=8,
+                    max_bs=32,
+                ),
+                "tp_rank_ids": (0, 1, 2, 3),
+                "active_batch_ids": {7, 9},
+            }
+        ]
+
+    handler = handler_base.RLMixin()
+    handler.engine = SimpleNamespace(
+        tokenizer_manager=SimpleNamespace(
+            auto_create_handle_loop=lambda: None,
+            get_internal_state=get_internal_state,
+        )
+    )
+
+    system_port = dynamo_dynamic_ports.system_ports[0]
+    monkeypatch.setenv("DYN_SYSTEM_PORT", str(system_port))
+    runtime = DistributedRuntime(
+        asyncio.get_running_loop(),
+        "mem",
+        "tcp",
+        event_plane="zmq",
+    )
+    runtime.register_engine_route(
+        "call_tokenizer_manager", handler.call_tokenizer_manager
+    )
+
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await _post_with_retry(
+                client,
+                f"http://127.0.0.1:{system_port}/engine/call_tokenizer_manager",
+                {"method": "get_internal_state"},
+            )
+
+        assert response.status_code == 200
+        state = response.json()["result"][0]
+        assert state["cuda_graph_config"] == {
+            "tp_size": 4,
+            "pp_size": 2,
+            "dp_size": 8,
+            "max_bs": 32,
+        }
+        assert state["tp_rank_ids"] == [0, 1, 2, 3]
+        assert set(state["active_batch_ids"]) == {7, 9}
     finally:
         runtime.shutdown()
