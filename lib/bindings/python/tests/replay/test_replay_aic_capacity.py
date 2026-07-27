@@ -45,6 +45,7 @@ def _run_direct_aic_replay():
         extra_engine_args=_direct_aic_replay_args(),
         num_workers=1,
         replay_mode="offline",
+        replay_concurrency=1,
     )
 
 
