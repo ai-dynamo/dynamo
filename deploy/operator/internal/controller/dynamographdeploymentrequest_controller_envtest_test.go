@@ -1409,7 +1409,7 @@ spec:
 				NamespacedName: types.NamespacedName{Name: dgdrName, Namespace: namespace},
 			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(result.IsZero()).Should(BeFalse())
+			Expect(result.IsZero()).Should(BeTrue())
 
 			t.Log("Read the initialized generation and fingerprint")
 			var current nvidiacomv1beta1.DynamoGraphDeploymentRequest
@@ -2848,7 +2848,7 @@ spec:
 
 			// Transition to Profiling
 			dgdr.Status.Phase = nvidiacomv1beta1.DGDRPhaseProfiling
-			dgdr.Status.ObservedGeneration = dgdr.Generation
+			Expect(observeCurrentDGDRSpec(dgdr)).Should(Succeed())
 			Expect(k8sClient.Status().Update(ctx, dgdr)).Should(Succeed())
 
 			// Create completed job
