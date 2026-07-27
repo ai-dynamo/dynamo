@@ -45,6 +45,8 @@ A program is created on its first turn, keyed by `session_id`. Public session id
 
 Pause/resume is driven by per-worker utilization — the program working set as a fraction of the worker's retention budget. vLLM publishes its initialized, hybrid-aware `kv_cache_size_tokens` value as `runtime_config.runtime_data.kv_cache_capacity.total_tokens`; ThunderAgent prefers that capacity over multiplying the physical block count and block size. Workers that do not publish the optional token capacity continue to use `kv_cache_block_size × total_kv_blocks`. Native offloading capacity is added to either device-capacity source.
 
+Workers serving the same model deployment are expected to publish the same `kv_cache_block_size`. vLLM derives this value from the initialized main-attention cache group, so it is also the granularity used by ThunderAgent's aggregate resume feasibility check.
+
 ThunderAgent accounts for the worker's allocation granularity on every placement and utilization decision:
 
 - A REASONING program, a new admission, or a resume reserves `ceil((token_total + buffer_per_program) / block_size) × block_size` tokens. The reservation includes the current partial block, which is important when hybrid models use blocks containing thousands of tokens.

@@ -723,6 +723,8 @@ async def register_vllm_model(
         )
         num_gpu_blocks = 0
     runtime_config.total_kv_blocks = per_rank_kv_blocks(num_gpu_blocks, dp_range[1])
+    # vLLM reports this separately as a per-DP-engine capacity; unlike
+    # num_gpu_blocks, core_client deliberately does not aggregate it across DP.
     _publish_kv_cache_capacity(runtime_config, runtime_values["kv_cache_size_tokens"])
     runtime_config.max_num_seqs = runtime_values["max_num_seqs"]
     runtime_config.max_num_batched_tokens = runtime_values["max_num_batched_tokens"]
@@ -779,6 +781,8 @@ async def register_vllm_model(
         generate_endpoint,
         _register_model_source_path(config, vllm_config),
         config.served_model_name,
+        # Engine setup populates this from the initialized main-attention cache
+        # group, which is also ThunderAgent's block-accounting granularity.
         kv_cache_block_size=runtime_values["kv_event_block_size"],
         runtime_config=runtime_config,
         custom_template_path=config.custom_jinja_template,
@@ -805,16 +809,19 @@ def _base_model_lora_capacity(config: Config, model_type: ModelType) -> int | No
 
 def _publish_kv_cache_capacity(
     runtime_config: ModelRuntimeConfig, total_tokens: object
-) -> bool:
+) -> None:
     """Publish vLLM's initialized hybrid-aware KV capacity when available."""
     capacity = kv_cache_capacity(total_tokens)
     if capacity is None:
-        return False
+        logging.warning(
+            "vLLM did not report an authoritative KV cache token capacity; "
+            "ThunderAgent will use the legacy block-count fallback"
+        )
+        return
     runtime_config.set_engine_specific(
         KV_CACHE_CAPACITY_RUNTIME_KEY, json.dumps(capacity)
     )
     logging.info("Published vLLM KV cache capacity metadata: %s", capacity)
-    return True
 
 
 def get_engine_cache_info(engine: AsyncLLM) -> dict[str, Any]:
@@ -827,11 +834,7 @@ def get_engine_cache_info(engine: AsyncLLM) -> dict[str, Any]:
             "num_gpu_blocks": engine.vllm_config.cache_config.num_gpu_blocks,
             "block_size": engine.vllm_config.cache_config.block_size,
             "kv_event_block_size": kv_event_block_size,
-            "kv_cache_size_tokens": getattr(
-                engine.vllm_config.cache_config,
-                "kv_cache_size_tokens",
-                None,
-            ),
+            "kv_cache_size_tokens": engine.vllm_config.cache_config.kv_cache_size_tokens,
         }
 
         scheduler_values = {

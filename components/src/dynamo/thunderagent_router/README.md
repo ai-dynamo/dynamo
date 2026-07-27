@@ -82,6 +82,8 @@ vLLM publishes its initialized, hybrid-aware `kv_cache_size_tokens` value as
 prefers that authoritative capacity and falls back to
 `kv_cache_block_size × total_kv_blocks` for workers without the optional
 metadata. Native offloading capacity is added to either device-capacity source.
+Workers serving the same model deployment are expected to publish the same
+`kv_cache_block_size`.
 
 Every in-flight REASONING program, new admission, and resume reserves
 `ceil((token_total + buffer_per_program) / block_size)` blocks. ACTING programs

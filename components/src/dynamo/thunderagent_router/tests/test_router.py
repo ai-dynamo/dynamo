@@ -285,6 +285,42 @@ async def test_pause_until_safe_pauses_smallest_acting_first():
 
 
 @pytest.mark.asyncio
+async def test_pause_until_safe_skips_zero_footprint_acting_program():
+    block_size = 4160
+    cfg = ThunderAgentConfig(
+        buffer_per_program=0,
+        pause_threshold=0.95,
+        pause_target=0.80,
+        acting_token_weight=1.0,
+        scheduler_interval_seconds=10.0,
+    )
+    router, capacity = make_router(config=cfg)
+
+    for program_id, prompt_tokens in [
+        ("sub-block", block_size - 1),
+        ("full-block", block_size),
+    ]:
+        await router.before_request(program_id)
+        await router.assign_worker(program_id, 1)
+        await router.after_request(
+            program_id,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=0,
+        )
+
+    await router.before_request("reasoning", estimated_prompt_tokens=2 * block_size)
+    await router.assign_worker("reasoning", 1)
+    capacity.workers = {1: 3 * block_size}
+    capacity.block_sizes = {1: block_size}
+
+    await router._pause_until_safe(router._capacity.snapshot())
+
+    assert router._table.programs["sub-block"].lifecycle == ProgramLifecycle.ACTIVE
+    assert router._table.programs["full-block"].lifecycle == ProgramLifecycle.PAUSED
+    assert router._table.programs["reasoning"].marked_for_pause is False
+
+
+@pytest.mark.asyncio
 async def test_pause_until_safe_is_scoped_to_overloaded_worker():
     cfg = ThunderAgentConfig(
         pause_threshold=0.95,
@@ -482,3 +518,38 @@ async def test_resume_placement_reserves_partial_program_as_whole_block(block_si
     assert router._table.programs["paused-1"].lifecycle == ProgramLifecycle.ACTIVE
     assert router._table.programs["paused-2"].lifecycle == ProgramLifecycle.PAUSED
     assert router._worker_used(1, block_size) == 2 * required
+
+
+@pytest.mark.asyncio
+async def test_resume_preserves_selection_and_placement_with_shared_block_size():
+    block_size = 64
+    cfg = ThunderAgentConfig(
+        buffer_per_program=0,
+        pause_threshold=1.0,
+        resume_hysteresis=0.0,
+        scheduler_interval_seconds=10.0,
+    )
+    router, _ = make_router(
+        capacity_workers={1: 2 * block_size, 2: 2 * block_size},
+        config=cfg,
+        block_size=block_size,
+    )
+
+    for program_id, tokens in [
+        ("small-1", 1),
+        ("large", block_size + 1),
+        ("small-2", 1),
+    ]:
+        program = router._table.begin_request(
+            program_id,
+            estimated_prompt_tokens=tokens,
+        )
+        program.lifecycle = ProgramLifecycle.PAUSED
+        router._table.paused[program_id] = None
+
+    await router._greedy_resume(router._capacity.snapshot())
+
+    assert router._table.programs["large"].assigned_worker_id == 1
+    assert router._table.programs["small-1"].assigned_worker_id == 2
+    assert router._table.programs["small-2"].assigned_worker_id == 2
+    assert not router._table.paused

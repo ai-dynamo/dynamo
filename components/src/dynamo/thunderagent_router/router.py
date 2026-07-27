@@ -293,6 +293,8 @@ class ThunderAgentScheduler:
                 block_size,
             )
 
+        # At a completed tool turn, only full vLLM cache blocks remain reusable;
+        # the trailing partial attention/Mamba-aligned block is released.
         reusable_tokens = self._complete_block_tokens(program.token_total, block_size)
         if not decayed:
             return int(reusable_tokens * self._cfg.acting_token_weight)
@@ -408,7 +410,10 @@ class ThunderAgentScheduler:
                         <= target_limit
                     ):
                         break
-                    acting, reasoning = self._smallest_candidates(worker_id)
+                    acting, reasoning = self._smallest_candidates(
+                        worker_id,
+                        capacity.block_size,
+                    )
                     if acting is not None:
                         if self._pause_acting_locked(acting.program_id):
                             paused_this_tick += 1
@@ -438,7 +443,9 @@ class ThunderAgentScheduler:
                 )
 
     def _smallest_candidates(
-        self, worker_id: int
+        self,
+        worker_id: int,
+        block_size: int,
     ) -> tuple[Optional[Program], Optional[Program]]:
         smallest_acting: Optional[Program] = None
         smallest_reasoning: Optional[Program] = None
@@ -450,6 +457,10 @@ class ThunderAgentScheduler:
             if program.marked_for_pause:
                 continue
             if program.status == ProgramStatus.ACTING:
+                if self._program_tokens(program, block_size) == 0:
+                    # Pausing a sub-block ACTING program releases no accounted
+                    # capacity, so it cannot make this pause cycle progress.
+                    continue
                 if (
                     smallest_acting is None
                     or program.token_total < smallest_acting.token_total
@@ -560,14 +571,14 @@ class ThunderAgentScheduler:
 
             backend_caps.sort(key=lambda x: -x[1])
 
+            # Workers serving one model deployment use the same KV allocation
+            # granularity, so the aggregate feasibility pass has one cost.
+            block_size = backend_caps[0][2]
             total_capacity = sum(remaining for _, remaining, _ in backend_caps)
             resumable_programs: list[Program] = []
             cumulative = 0
             for program in paused_programs:
-                required = min(
-                    self._resume_tokens(program, block_size)
-                    for _, _, block_size in backend_caps
-                )
+                required = self._resume_tokens(program, block_size)
                 if cumulative + required <= total_capacity:
                     resumable_programs.append(program)
                     cumulative += required
@@ -582,24 +593,24 @@ class ThunderAgentScheduler:
                 if not backend_caps:
                     break
                 target = None
+                required = self._resume_tokens(program, block_size)
                 for index, (
                     worker_id,
                     remaining,
-                    block_size,
+                    worker_block_size,
                 ) in enumerate(backend_caps):
-                    required = self._resume_tokens(program, block_size)
                     if required <= remaining:
                         target = (
                             index,
                             worker_id,
                             remaining,
-                            block_size,
+                            worker_block_size,
                             required,
                         )
                         break
                 if target is None:
                     continue
-                index, worker_id, remaining, block_size, required = target
+                index, worker_id, remaining, worker_block_size, required = target
                 self._resume_program(program, worker_id)
                 resumed_this_tick += 1
                 updated_remaining = remaining - required
@@ -607,7 +618,7 @@ class ThunderAgentScheduler:
                     backend_caps[index] = (
                         worker_id,
                         updated_remaining,
-                        block_size,
+                        worker_block_size,
                     )
                     backend_caps.sort(key=lambda x: -x[1])
                 else:

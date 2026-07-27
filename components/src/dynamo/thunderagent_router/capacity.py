@@ -13,25 +13,16 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 from dataclasses import dataclass
 from typing import Optional
 
 from dynamo.common.kv_cache_capacity import get_kv_cache_capacity_tokens
 from dynamo.common.native_offloading import get_native_offloading_capacity_tokens
+from dynamo.common.token_capacity import positive_int
 from dynamo.llm import FpmEventSubscriber
 from dynamo.runtime import Endpoint
 
 logger = logging.getLogger(__name__)
-
-
-def _positive_int(value: object) -> Optional[int]:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    if isinstance(value, float) and not math.isfinite(value):
-        return None
-    value = int(value)
-    return value if value > 0 else None
 
 
 @dataclass(frozen=True)
@@ -40,6 +31,14 @@ class WorkerCapacity:
 
     retention_tokens: int
     block_size: int
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("retention_tokens", self.retention_tokens),
+            ("block_size", self.block_size),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
 
 
 class WorkerCapacityProvider:
@@ -97,13 +96,13 @@ class WorkerCapacityProvider:
         except (json.JSONDecodeError, TypeError):
             card = None
         if isinstance(card, dict):
-            block_size = _positive_int(card.get("kv_cache_block_size"))
+            block_size = positive_int(card.get("kv_cache_block_size"))
             runtime_config = card.get("runtime_config") or {}
             if block_size is not None and isinstance(runtime_config, dict):
                 runtime_data = runtime_config.get("runtime_data", {})
                 retention_tokens = get_kv_cache_capacity_tokens(runtime_data)
                 if retention_tokens is None:
-                    total_blocks = _positive_int(runtime_config.get("total_kv_blocks"))
+                    total_blocks = positive_int(runtime_config.get("total_kv_blocks"))
                     if total_blocks is not None:
                         retention_tokens = block_size * total_blocks
                 offloaded_tokens = get_native_offloading_capacity_tokens(runtime_data)
