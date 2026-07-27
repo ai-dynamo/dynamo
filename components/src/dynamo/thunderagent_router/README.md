@@ -75,6 +75,21 @@ Requests without session identity are passed through as one-off (no program
 admission, no pause/resume). This is the safe fallback for non-agentic traffic
 sharing the same workers.
 
+### KV capacity and block accounting
+
+vLLM publishes its initialized, hybrid-aware `kv_cache_size_tokens` value as
+`runtime_config.runtime_data.kv_cache_capacity.total_tokens`. ThunderAgent
+prefers that authoritative capacity and falls back to
+`kv_cache_block_size × total_kv_blocks` for workers without the optional
+metadata. Native offloading capacity is added to either device-capacity source.
+
+Every in-flight REASONING program, new admission, and resume reserves
+`ceil((token_total + buffer_per_program) / block_size)` blocks. ACTING programs
+retain only `floor(token_total / block_size)` complete reusable blocks before
+the acting weight or idle decay is applied. This prevents concurrent partial
+blocks from disappearing from utilization when a hybrid model uses large KV
+blocks.
+
 ### SGLang HiCache retention budget
 
 `dynamo.sglang` publishes the authoritative GPU KV and HiCache host capacities in each worker's model deployment card. The scheduler automatically uses their sum as its retention budget, so `--pause-threshold 0.95` means 95% of the combined GPU + host pool; there is no ThunderAgent HiCache flag to set. This lets SGLang spill from GPU to its native host tier before ThunderAgent starts holding programs at tool boundaries.

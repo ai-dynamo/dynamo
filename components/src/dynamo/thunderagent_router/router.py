@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from dynamo.thunderagent_router.capacity import WorkerCapacityProvider
+from dynamo.thunderagent_router.capacity import WorkerCapacity, WorkerCapacityProvider
 from dynamo.thunderagent_router.program_state import (
     Program,
     ProgramLifecycle,
@@ -271,18 +271,44 @@ class ThunderAgentScheduler:
         await self._greedy_resume(capacities)
         await self._pause_until_safe(capacities)
 
-    def _program_tokens(self, program: Program, *, decayed: bool = False) -> int:
+    @staticmethod
+    def _round_up_tokens(tokens: int, block_size: int) -> int:
+        tokens = max(0, tokens)
+        return ((tokens + block_size - 1) // block_size) * block_size
+
+    @staticmethod
+    def _complete_block_tokens(tokens: int, block_size: int) -> int:
+        return (max(0, tokens) // block_size) * block_size
+
+    def _program_tokens(
+        self,
+        program: Program,
+        block_size: int,
+        *,
+        decayed: bool = False,
+    ) -> int:
         if program.status != ProgramStatus.ACTING:
-            return program.token_total
+            return self._round_up_tokens(
+                program.token_total + self._cfg.buffer_per_program,
+                block_size,
+            )
+
+        reusable_tokens = self._complete_block_tokens(program.token_total, block_size)
         if not decayed:
-            return int(program.token_total * self._cfg.acting_token_weight)
+            return int(reusable_tokens * self._cfg.acting_token_weight)
         tau = max(self._cfg.acting_decay_tau_seconds, 1e-3)
         idle = (
             max(0.0, time.monotonic() - program.acting_since)
             if program.acting_since > 0
             else 0.0
         )
-        return int(program.token_total * (2.0 ** (-(idle / tau))))
+        return int(reusable_tokens * (2.0 ** (-(idle / tau))))
+
+    def _resume_tokens(self, program: Program, block_size: int) -> int:
+        return self._round_up_tokens(
+            program.token_total + self._cfg.buffer_per_program,
+            block_size,
+        )
 
     def _active_programs_for_worker(self, worker_id: int) -> list[Program]:
         return [
@@ -292,42 +318,61 @@ class ThunderAgentScheduler:
             and p.assigned_worker_id == worker_id
         ]
 
-    def _worker_used(self, worker_id: int, *, decayed: bool = False) -> int:
+    def _worker_used(
+        self,
+        worker_id: int,
+        block_size: int,
+        *,
+        decayed: bool = False,
+    ) -> int:
         programs = self._active_programs_for_worker(worker_id)
-        tokens = sum(self._program_tokens(p, decayed=decayed) for p in programs)
-        return tokens + len(programs) * self._cfg.buffer_per_program
+        return sum(
+            self._program_tokens(p, block_size, decayed=decayed) for p in programs
+        )
 
-    def _least_loaded_worker_locked(self, capacities: dict[int, int]) -> Optional[int]:
+    def _least_loaded_worker_locked(
+        self, capacities: dict[int, WorkerCapacity]
+    ) -> Optional[int]:
         if not capacities:
             return None
         return max(
             capacities,
-            key=lambda w: capacities[w] - self._worker_used(w, decayed=True),
+            key=lambda w: capacities[w].retention_tokens
+            - self._worker_used(
+                w,
+                capacities[w].block_size,
+                decayed=True,
+            ),
         )
 
     def _select_worker_for_new_program_locked(
         self,
-        capacities: dict[int, int],
+        capacities: dict[int, WorkerCapacity],
         estimated_tokens: int,
     ) -> Optional[int]:
         # Fairness: new programs queue behind any existing paused program.
         if self._table.paused:
             return None
-        buffer = self._cfg.buffer_per_program
-        required = estimated_tokens + buffer
-        candidates = [
-            (w, self._worker_used(w))
-            for w, c in capacities.items()
-            if c - self._worker_used(w) >= required
-        ]
+        candidates = []
+        for worker_id, capacity in capacities.items():
+            used = self._worker_used(worker_id, capacity.block_size)
+            required = self._round_up_tokens(
+                estimated_tokens + self._cfg.buffer_per_program,
+                capacity.block_size,
+            )
+            if capacity.retention_tokens - used >= required:
+                candidates.append((worker_id, used))
         if not candidates:
             return None
         return min(candidates, key=lambda item: item[1])[0]
 
-    def _apply_soft_demotes(self, capacities: dict[int, int]) -> None:
+    def _apply_soft_demotes(self, capacities: dict[int, WorkerCapacity]) -> None:
         soft_until = time.monotonic() + self._cfg.scheduler_interval_seconds * 1.5
         for worker_id, capacity in capacities.items():
-            util = self._worker_used(worker_id) / capacity
+            util = (
+                self._worker_used(worker_id, capacity.block_size)
+                / capacity.retention_tokens
+            )
             if not (
                 self._cfg.soft_demote_threshold <= util < self._cfg.pause_threshold
             ):
@@ -339,7 +384,7 @@ class ThunderAgentScheduler:
                 ):
                     program.soft_demoted_until = soft_until
 
-    async def _pause_until_safe(self, capacities: dict[int, int]) -> None:
+    async def _pause_until_safe(self, capacities: dict[int, WorkerCapacity]) -> None:
         threshold = self._cfg.pause_threshold
         pause_target = min(self._cfg.pause_target, threshold)
 
@@ -348,17 +393,20 @@ class ThunderAgentScheduler:
             # of program state used by _smallest_candidates / _worker_used
             # cannot race with concurrent before_request admissions.
             async with self._lock:
-                base_used = self._worker_used(worker_id)
-                if base_used <= capacity * threshold:
+                base_used = self._worker_used(worker_id, capacity.block_size)
+                if base_used <= capacity.retention_tokens * threshold:
                     continue
 
-                target_limit = capacity * pause_target
+                target_limit = capacity.retention_tokens * pause_target
                 paused_this_tick = 0
                 marked_this_tick = 0
                 # Bound the inner loop by total program count so a candidate
                 # transitioning out from under us can't spin the tick.
                 for _ in range(len(self._table.programs) + 1):
-                    if self._worker_used(worker_id) <= target_limit:
+                    if (
+                        self._worker_used(worker_id, capacity.block_size)
+                        <= target_limit
+                    ):
                         break
                     acting, reasoning = self._smallest_candidates(worker_id)
                     if acting is not None:
@@ -377,7 +425,7 @@ class ThunderAgentScheduler:
                         continue
                     break
 
-                final_used = self._worker_used(worker_id)
+                final_used = self._worker_used(worker_id, capacity.block_size)
 
             if paused_this_tick or marked_this_tick:
                 logger.info(
@@ -385,8 +433,8 @@ class ThunderAgentScheduler:
                     worker_id,
                     paused_this_tick,
                     marked_this_tick,
-                    base_used / capacity,
-                    final_used / capacity,
+                    base_used / capacity.retention_tokens,
+                    final_used / capacity.retention_tokens,
                 )
 
     def _smallest_candidates(
@@ -468,7 +516,7 @@ class ThunderAgentScheduler:
             )
             return True
 
-    async def _greedy_resume(self, capacities: dict[int, int]) -> None:
+    async def _greedy_resume(self, capacities: dict[int, WorkerCapacity]) -> None:
         if not self._table.paused:
             return
 
@@ -494,22 +542,32 @@ class ThunderAgentScheduler:
                 0.0, self._cfg.pause_threshold - self._cfg.resume_hysteresis
             )
             backend_caps = [
-                (w, int(c * resume_ceiling) - self._worker_used(w, decayed=False))
-                for w, c in capacities.items()
+                (
+                    worker_id,
+                    int(capacity.retention_tokens * resume_ceiling)
+                    - self._worker_used(
+                        worker_id,
+                        capacity.block_size,
+                        decayed=False,
+                    ),
+                    capacity.block_size,
+                )
+                for worker_id, capacity in capacities.items()
             ]
-            backend_caps = [
-                (w, r) for w, r in backend_caps if r > self._cfg.buffer_per_program
-            ]
+            backend_caps = [(w, r, b) for w, r, b in backend_caps if r > 0]
             if not backend_caps:
                 return
 
             backend_caps.sort(key=lambda x: -x[1])
 
-            total_capacity = sum(r for _, r in backend_caps)
+            total_capacity = sum(remaining for _, remaining, _ in backend_caps)
             resumable_programs: list[Program] = []
             cumulative = 0
             for program in paused_programs:
-                required = program.token_total + self._cfg.buffer_per_program
+                required = min(
+                    self._resume_tokens(program, block_size)
+                    for _, _, block_size in backend_caps
+                )
                 if cumulative + required <= total_capacity:
                     resumable_programs.append(program)
                     cumulative += required
@@ -518,29 +576,42 @@ class ThunderAgentScheduler:
                 return
 
             resumable_programs.sort(key=lambda p: -p.token_total)
-            min_required = (
-                min(p.token_total for p in resumable_programs)
-                + self._cfg.buffer_per_program
-            )
 
             resumed_this_tick = 0
             for program in resumable_programs:
                 if not backend_caps:
                     break
-                worker_id, remaining = backend_caps[0]
-                if min_required > remaining:
-                    break
-                required = program.token_total + self._cfg.buffer_per_program
-                if required > remaining:
+                target = None
+                for index, (
+                    worker_id,
+                    remaining,
+                    block_size,
+                ) in enumerate(backend_caps):
+                    required = self._resume_tokens(program, block_size)
+                    if required <= remaining:
+                        target = (
+                            index,
+                            worker_id,
+                            remaining,
+                            block_size,
+                            required,
+                        )
+                        break
+                if target is None:
                     continue
+                index, worker_id, remaining, block_size, required = target
                 self._resume_program(program, worker_id)
                 resumed_this_tick += 1
                 updated_remaining = remaining - required
-                if updated_remaining > self._cfg.buffer_per_program:
-                    backend_caps[0] = (worker_id, updated_remaining)
+                if updated_remaining > 0:
+                    backend_caps[index] = (
+                        worker_id,
+                        updated_remaining,
+                        block_size,
+                    )
                     backend_caps.sort(key=lambda x: -x[1])
                 else:
-                    backend_caps.pop(0)
+                    backend_caps.pop(index)
 
             if resumed_this_tick:
                 logger.info(

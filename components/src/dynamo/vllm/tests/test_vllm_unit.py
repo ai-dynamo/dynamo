@@ -553,6 +553,54 @@ def test_setup_vllm_engine_reuses_engine_config_model_config(monkeypatch):
     assert default_sampling_params == {"temperature": 0.7}
 
 
+def test_engine_cache_info_includes_authoritative_capacity_and_physical_blocks():
+    vllm_main = _load_vllm_main()
+    engine = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            additional_config={},
+            cache_config=SimpleNamespace(
+                block_size=4160,
+                num_gpu_blocks=123,
+                kv_cache_size_tokens=456_789,
+            ),
+            scheduler_config=SimpleNamespace(
+                max_num_seqs=32,
+                max_num_batched_tokens=8192,
+            ),
+        )
+    )
+
+    assert vllm_main.get_engine_cache_info(engine) == {
+        "num_gpu_blocks": 123,
+        "block_size": 4160,
+        "kv_event_block_size": 4160,
+        "kv_cache_size_tokens": 456_789,
+        "max_num_seqs": 32,
+        "max_num_batched_tokens": 8192,
+    }
+
+
+def test_publish_kv_cache_capacity_preserves_physical_block_metadata():
+    vllm_main = _load_vllm_main()
+
+    class FakeRuntimeConfig:
+        total_kv_blocks = 123
+
+        def __init__(self):
+            self.runtime_data = {}
+
+        def set_engine_specific(self, key, value):
+            self.runtime_data[key] = json.loads(value)
+
+    runtime_config = FakeRuntimeConfig()
+
+    assert vllm_main._publish_kv_cache_capacity(runtime_config, 456_789) is True
+    assert runtime_config.runtime_data == {
+        "kv_cache_capacity": {"total_tokens": 456_789}
+    }
+    assert runtime_config.total_kv_blocks == 123
+
+
 # --disaggregation-mode tests
 
 

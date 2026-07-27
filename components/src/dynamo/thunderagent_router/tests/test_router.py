@@ -12,6 +12,7 @@ from typing import Optional
 
 import pytest
 
+from dynamo.thunderagent_router.capacity import WorkerCapacity
 from dynamo.thunderagent_router.program_state import ProgramLifecycle, ProgramStatus
 from dynamo.thunderagent_router.router import ThunderAgentConfig, ThunderAgentScheduler
 
@@ -23,16 +24,28 @@ class FakeCapacity:
     """Stand-in for WorkerCapacityProvider that returns a fixed snapshot."""
 
     workers: dict[int, int] = field(default_factory=dict)
+    block_sizes: dict[int, int] = field(default_factory=dict)
 
-    def snapshot(self) -> dict[int, int]:
-        return dict(self.workers)
+    def snapshot(self) -> dict[int, WorkerCapacity]:
+        return {
+            worker_id: WorkerCapacity(
+                retention_tokens=tokens,
+                block_size=self.block_sizes.get(worker_id, 1),
+            )
+            for worker_id, tokens in self.workers.items()
+        }
 
 
 def make_router(
     capacity_workers: Optional[dict[int, int]] = None,
     config: Optional[ThunderAgentConfig] = None,
+    block_size: int = 1,
 ) -> tuple[ThunderAgentScheduler, FakeCapacity]:
-    capacity = FakeCapacity(workers=capacity_workers or {})
+    workers = capacity_workers or {}
+    capacity = FakeCapacity(
+        workers=workers,
+        block_sizes={worker_id: block_size for worker_id in workers},
+    )
     cfg = config or ThunderAgentConfig(
         scheduler_interval_seconds=0.05,
         resume_timeout_seconds=2.0,
@@ -188,7 +201,7 @@ async def test_new_program_queues_before_first_request_when_capacity_full():
         1: 1000,
     }
     router, _ = make_router(capacity_workers=workers, config=cfg)
-    await router.before_request("existing", estimated_prompt_tokens=950)
+    await router.before_request("existing", estimated_prompt_tokens=850)
     await router.assign_worker("existing", 1)
 
     waiter = asyncio.create_task(
@@ -257,8 +270,8 @@ async def test_pause_until_safe_pauses_smallest_acting_first():
     }
     router, _ = make_router(capacity_workers=workers, config=cfg)
 
-    # Used = 600 + 100 + 2*100 = 900; pausing small leaves 700 <= target.
-    for pid, prompt_tokens in [("big", 600), ("small", 100)]:
+    # Used = 700 + 200 = 900; pausing small leaves 700 <= target.
+    for pid, prompt_tokens in [("big", 700), ("small", 200)]:
         await router.before_request(pid)
         await router.assign_worker(pid, 1)
         await router.after_request(
@@ -287,7 +300,7 @@ async def test_pause_until_safe_is_scoped_to_overloaded_worker():
 
     for pid, worker_id, prompt_tokens in [
         ("hot_big", 1, 700),
-        ("hot_small", 1, 200),
+        ("hot_small", 1, 300),
         ("cold", 2, 700),
     ]:
         await router.before_request(pid)
@@ -329,10 +342,9 @@ async def test_pause_drives_util_to_pause_target_not_threshold():
         for p in router._table.programs.values()
         if p.lifecycle == ProgramLifecycle.PAUSED
     )
-    # 10 programs * (100k tokens + 100 buffer) = 1.0010M; target 0.80M.
-    # Each pause releases (100k + 100). Pause 2 -> 0.8008M (still over),
-    # pause 3 -> 0.7007M (under). Anything else means over- or under-shoot.
-    assert paused == 3, f"paused={paused}"
+    # ACTING programs retain complete reusable blocks without an in-flight
+    # buffer. Ten 100k-token programs use 1M; pausing two reaches 0.80M.
+    assert paused == 2, f"paused={paused}"
 
 
 @pytest.mark.asyncio
@@ -357,7 +369,7 @@ async def test_scheduler_tick_resumes_before_pausing_new_overload():
         pid = f"p{i}"
         await router.before_request(pid)
         await router.assign_worker(pid, 1)
-        await router.after_request(pid, prompt_tokens=100, completion_tokens=0)
+        await router.after_request(pid, prompt_tokens=200, completion_tokens=0)
         router._table.programs[pid].acting_since = time.monotonic() - 10.0
 
     capacity.workers = workers
@@ -369,3 +381,104 @@ async def test_scheduler_tick_resumes_before_pausing_new_overload():
         if p.lifecycle == ProgramLifecycle.PAUSED
     )
     assert paused == 6
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("block_size", [1, 64, 4160])
+async def test_concurrent_partial_reasoning_requests_reserve_whole_blocks(block_size):
+    buffer_per_program = 1
+    required = ((1 + buffer_per_program + block_size - 1) // block_size) * block_size
+    cfg = ThunderAgentConfig(
+        buffer_per_program=buffer_per_program,
+        scheduler_interval_seconds=10.0,
+        resume_timeout_seconds=2.0,
+    )
+    router, _ = make_router(
+        capacity_workers={1: 2 * required},
+        config=cfg,
+        block_size=block_size,
+    )
+
+    await router.before_request("p1", estimated_prompt_tokens=1)
+    await router.before_request("p2", estimated_prompt_tokens=1)
+
+    async with router._lock:
+        wait_event, was_paused = router._admit_locked("p3", estimated_prompt_tokens=1)
+
+    assert router._worker_used(1, block_size) == 2 * required
+    assert wait_event is not None
+    assert was_paused is True
+    assert router._table.programs["p3"].lifecycle == ProgramLifecycle.PAUSED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("block_size", [1, 64, 4160])
+async def test_acting_transition_counts_only_complete_reusable_blocks(block_size):
+    cfg = ThunderAgentConfig(
+        buffer_per_program=0,
+        scheduler_interval_seconds=10.0,
+    )
+    tokens = block_size + 1
+    router, _ = make_router(
+        capacity_workers={1: 3 * block_size},
+        config=cfg,
+        block_size=block_size,
+    )
+
+    await router.before_request("p1", estimated_prompt_tokens=tokens)
+    assert router._worker_used(1, block_size) == 2 * block_size
+
+    await router.after_request("p1", prompt_tokens=tokens, completion_tokens=0)
+    complete_tokens = (tokens // block_size) * block_size
+    assert router._worker_used(1, block_size) == complete_tokens
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("block_size", [1, 64, 4160])
+async def test_acting_weight_applies_after_complete_block_accounting(block_size):
+    cfg = ThunderAgentConfig(
+        acting_token_weight=0.5,
+        buffer_per_program=0,
+        scheduler_interval_seconds=10.0,
+    )
+    router, _ = make_router(
+        capacity_workers={1: 3 * block_size},
+        config=cfg,
+        block_size=block_size,
+    )
+
+    await router.before_request("p1", estimated_prompt_tokens=block_size + 1)
+    await router.after_request("p1", prompt_tokens=block_size + 1, completion_tokens=0)
+
+    complete_tokens = ((block_size + 1) // block_size) * block_size
+    assert router._worker_used(1, block_size) == int(complete_tokens * 0.5)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("block_size", [1, 64, 4160])
+async def test_resume_placement_reserves_partial_program_as_whole_block(block_size):
+    buffer_per_program = 1
+    required = ((1 + buffer_per_program + block_size - 1) // block_size) * block_size
+    cfg = ThunderAgentConfig(
+        buffer_per_program=buffer_per_program,
+        pause_threshold=1.0,
+        resume_hysteresis=0.0,
+        scheduler_interval_seconds=10.0,
+    )
+    router, _ = make_router(
+        capacity_workers={1: 2 * required},
+        config=cfg,
+        block_size=block_size,
+    )
+    await router.before_request("active", estimated_prompt_tokens=1)
+
+    for program_id in ("paused-1", "paused-2"):
+        program = router._table.begin_request(program_id, estimated_prompt_tokens=1)
+        program.lifecycle = ProgramLifecycle.PAUSED
+        router._table.paused[program_id] = None
+
+    await router._greedy_resume(router._capacity.snapshot())
+
+    assert router._table.programs["paused-1"].lifecycle == ProgramLifecycle.ACTIVE
+    assert router._table.programs["paused-2"].lifecycle == ProgramLifecycle.PAUSED
+    assert router._worker_used(1, block_size) == 2 * required

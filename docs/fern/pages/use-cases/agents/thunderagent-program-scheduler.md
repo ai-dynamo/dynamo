@@ -43,7 +43,14 @@ A program is created on its first turn, keyed by `session_id`. Public session id
 
 ## Utilization-Driven Control Loop
 
-Pause/resume is driven by per-worker utilization — the program working set as a fraction of the worker's retention budget. With SGLang HiCache enabled, Dynamo reads the worker's published GPU KV and host HiCache capacities and uses their sum. The host tier is included so native GPU-to-host spill can happen before this scheduler pauses programs. Mooncake is excluded: it is conditional content-addressed storage, not guaranteed per-program retention. The loop has three bands:
+Pause/resume is driven by per-worker utilization — the program working set as a fraction of the worker's retention budget. vLLM publishes its initialized, hybrid-aware `kv_cache_size_tokens` value as `runtime_config.runtime_data.kv_cache_capacity.total_tokens`; ThunderAgent prefers that capacity over multiplying the physical block count and block size. Workers that do not publish the optional token capacity continue to use `kv_cache_block_size × total_kv_blocks`. Native offloading capacity is added to either device-capacity source.
+
+ThunderAgent accounts for the worker's allocation granularity on every placement and utilization decision:
+
+- A REASONING program, a new admission, or a resume reserves `ceil((token_total + buffer_per_program) / block_size) × block_size` tokens. The reservation includes the current partial block, which is important when hybrid models use blocks containing thousands of tokens.
+- An ACTING program retains only complete, reusable blocks: `floor(token_total / block_size) × block_size`. The acting weight or idle-time decay is applied after this block calculation.
+
+With SGLang HiCache enabled, Dynamo reads the worker's published GPU KV and host HiCache capacities and uses their sum. The host tier is included so native GPU-to-host spill can happen before this scheduler pauses programs. Mooncake is excluded: it is conditional content-addressed storage, not guaranteed per-program retention. The loop has three bands:
 
 - At or above `pause-threshold`, the worker is over-subscribed; the tick pauses ACTING programs until utilization falls back to `pause-target`.
 - In the `[soft-demote-threshold, pause-threshold)` band, programs are soft-demoted (a negative priority jump) but not paused — early backpressure before a hard pause is needed.
