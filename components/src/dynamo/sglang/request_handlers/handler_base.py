@@ -135,31 +135,36 @@ class RLMixin:
             return {"status": "ok"}
         if isinstance(result, tuple):
             if len(result) == 2:
-                return {"success": result[0], "message": result[1]}
+                return {
+                    "success": self._normalize_json_value(result[0]),
+                    "message": self._normalize_json_value(result[1]),
+                }
             if len(result) == 3:
                 return {
-                    "success": result[0],
-                    "message": result[1],
-                    "num_paused_requests": result[2],
+                    "success": self._normalize_json_value(result[0]),
+                    "message": self._normalize_json_value(result[1]),
+                    "num_paused_requests": self._normalize_json_value(result[2]),
                 }
-        if isinstance(result, list):
-            return {
-                "result": [
-                    (
-                        dataclasses.asdict(item)
-                        if dataclasses.is_dataclass(item) and not isinstance(item, type)
-                        else item
-                    )
-                    for item in result
-                ]
-            }
         if dataclasses.is_dataclass(result) and not isinstance(result, type):
-            return dataclasses.asdict(result)
+            return self._normalize_json_value(result)
         if isinstance(result, dict):
-            return result
-        if isinstance(result, (str, int, float, bool)):
-            return {"result": result}
-        return {"result": str(result)}
+            return self._normalize_json_value(result)
+        return {"result": self._normalize_json_value(result)}
+
+    def _normalize_json_value(self, value: Any) -> Any:
+        """Recursively convert tokenizer_manager values to transport-safe data."""
+        if dataclasses.is_dataclass(value) and not isinstance(value, type):
+            return self._normalize_json_value(dataclasses.asdict(value))
+        if isinstance(value, dict):
+            return {
+                str(key): self._normalize_json_value(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, (list, tuple, set)):
+            return [self._normalize_json_value(item) for item in value]
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        return str(value)
 
     async def call_tokenizer_manager(self, body: dict) -> dict:
         """Generic passthrough to any tokenizer_manager method.

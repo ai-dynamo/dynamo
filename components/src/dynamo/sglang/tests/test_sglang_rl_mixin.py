@@ -4,6 +4,7 @@
 """Unit tests for RLMixin generic tokenizer_manager passthrough."""
 
 import dataclasses
+import json
 import sys
 import types
 from types import SimpleNamespace
@@ -144,9 +145,9 @@ class TestNormalizeResult:
             "num_paused_requests": 5,
         }
 
-    def test_dict_passthrough(self):
+    def test_dict_normalized(self):
         d = {"foo": "bar", "count": 3}
-        assert self.handler._normalize_result(d) is d
+        assert self.handler._normalize_result(d) == d
 
     def test_dataclass(self):
         @dataclasses.dataclass
@@ -188,6 +189,41 @@ class TestNormalizeResult:
         assert self.handler._normalize_result(items) == {
             "result": [{"val": 1}, "plain", 42]
         }
+
+    def test_get_internal_state_normalizes_nested_cuda_graph_config(self):
+        @dataclasses.dataclass
+        class CudaGraphConfig:
+            tp_size: int
+            pp_size: int
+            dp_size: int
+            max_bs: int
+
+        internal_state = [
+            {
+                "dp_rank": 0,
+                "cuda_graph_config": CudaGraphConfig(
+                    tp_size=4,
+                    pp_size=2,
+                    dp_size=8,
+                    max_bs=32,
+                ),
+                "tp_rank_ids": (0, 1, 2, 3),
+                "active_batch_ids": {7, 9},
+            }
+        ]
+
+        result = self.handler._normalize_result(internal_state)
+
+        state = result["result"][0]
+        assert state["cuda_graph_config"] == {
+            "tp_size": 4,
+            "pp_size": 2,
+            "dp_size": 8,
+            "max_bs": 32,
+        }
+        assert state["tp_rank_ids"] == [0, 1, 2, 3]
+        assert set(state["active_batch_ids"]) == {7, 9}
+        json.dumps(result)
 
     def test_other_value(self):
         assert self.handler._normalize_result(42) == {"result": 42}
