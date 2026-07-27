@@ -342,10 +342,17 @@ class KubernetesAPI:
 
     @staticmethod
     def _worker_hash_candidates(deployment: dict) -> list[str]:
-        """Active worker-hash suffixes to probe, mirroring operator precedence."""
+        """Active worker-hash suffixes to probe, mirroring operator precedence.
+
+        During a v1/v2 compatibility generation both annotations are present and
+        the operator keeps the v1 DCD active, probing it first
+        (``activeWorkerHashCandidates`` -> ``workerHashForDCDGeneration``). Probe
+        v1 first too: a stale-but-ready v2 DCD must not short-circuit
+        settlement while the active v1 DCD still lags.
+        """
         annotations = deployment.get("metadata", {}).get("annotations") or {}
         candidates: list[str] = []
-        for key in (WORKER_HASH_V2_ANNOTATION, WORKER_HASH_V1_ANNOTATION):
+        for key in (WORKER_HASH_V1_ANNOTATION, WORKER_HASH_V2_ANNOTATION):
             value = annotations.get(key)
             if value:
                 candidates.append(value)

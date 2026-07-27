@@ -734,6 +734,85 @@ def test_worker_backing_rejects_lagging_hash_derived_dcd_despite_workload_names(
     ]
 
 
+def test_worker_backing_prefers_v1_dcd_over_stale_ready_v2_dcd(
+    k8s_api, mock_custom_api
+):
+    """Dual-hash bridge generation: the v1 DCD is authoritative, not v2.
+
+    The operator keeps the v1 DCD active while both annotations are present
+    (``workerHashForDCDGeneration`` returns the v1 hash). A stale-but-ready v2
+    DCD must not short-circuit settlement while the active v1 DCD lags —
+    otherwise Planner caches the new power value before the live workload
+    adopted it.
+    """
+    v1_dcd = "test-deployment-vllmdecodeworker-v1hash"
+    v2_dcd = "test-deployment-vllmdecodeworker-v2hash"
+    dgd = _stable_worker_dgd(generation=2, observed_generation=2, decode_watts="300")
+    dgd["metadata"]["annotations"] = {
+        "nvidia.com/current-worker-hash": "v1hash",
+        "nvidia.com/current-worker-hash-v2": "v2hash",
+    }
+    dgd["status"]["components"]["VllmDecodeWorker"] = {
+        "componentKind": "Deployment",
+        "componentNames": [f"{v1_dcd}-deployment"],
+        "readyReplicas": 2,
+        "updatedReplicas": 2,
+        "availableReplicas": 2,
+    }
+
+    def _lookup(*args, **kwargs):
+        if kwargs.get("plural") != "dynamocomponentdeployments":
+            raise client.ApiException(status=404)
+        name = kwargs.get("name")
+        if name == v1_dcd:
+            return _ready_dcd(generation=2, observed_generation=1)
+        if name == v2_dcd:
+            return _ready_dcd(generation=2, observed_generation=2)
+        raise client.ApiException(status=404)
+
+    mock_custom_api.get_namespaced_custom_object.side_effect = _lookup
+    settled, pending = k8s_api.worker_backing_resources_settled(
+        dgd, ["VllmDecodeWorker"]
+    )
+    assert settled is False
+    assert pending == [
+        f"VllmDecodeWorker: DCD {v1_dcd} not ready "
+        "(generation=2, observedGeneration=1)"
+    ]
+
+
+def test_worker_backing_falls_back_to_v2_dcd_when_only_v2_annotated(
+    k8s_api, mock_custom_api
+):
+    """Converged v2-only generation still resolves through the v2 hash."""
+    v2_dcd = "test-deployment-vllmdecodeworker-v2hash"
+    dgd = _stable_worker_dgd(generation=2, observed_generation=2, decode_watts="300")
+    dgd["metadata"]["annotations"] = {
+        "nvidia.com/current-worker-hash-v2": "v2hash",
+    }
+    dgd["status"]["components"]["VllmDecodeWorker"] = {
+        "componentKind": "Deployment",
+        "componentNames": [f"{v2_dcd}-deployment"],
+        "readyReplicas": 2,
+        "updatedReplicas": 2,
+        "availableReplicas": 2,
+    }
+
+    def _lookup(*args, **kwargs):
+        if kwargs.get("plural") != "dynamocomponentdeployments":
+            raise client.ApiException(status=404)
+        if kwargs.get("name") == v2_dcd:
+            return _ready_dcd(generation=2, observed_generation=2)
+        raise client.ApiException(status=404)
+
+    mock_custom_api.get_namespaced_custom_object.side_effect = _lookup
+    settled, pending = k8s_api.worker_backing_resources_settled(
+        dgd, ["VllmDecodeWorker"]
+    )
+    assert settled is True
+    assert pending == []
+
+
 def test_worker_backing_ignores_deployment_workload_component_names(
     k8s_api, mock_custom_api
 ):
