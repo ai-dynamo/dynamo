@@ -130,6 +130,16 @@
       "platform": "linux/amd64"
     },
     {
+      "baseline_digest": "sha256:e2ab50957fc309d3fb110e6331ab8bfb7dd4f0074df41cbbf0bc3c64c8bc0e52",
+      "baseline_image": "vllm/vllm-openai-xpu",
+      "baseline_sbom": "vllm-openai-xpu@e2ab5095-amd64.cdx.json",
+      "baseline_tag": "v0.26.0",
+      "from_digest": "sha256:e2ab50957fc309d3fb110e6331ab8bfb7dd4f0074df41cbbf0bc3c64c8bc0e52",
+      "from_image": "vllm/vllm-openai-xpu",
+      "from_tag": "v0.26.0",
+      "platform": "linux/amd64"
+    },
+    {
       "baseline_digest": "sha256:36d6146dfb19084f7098852991b0da67565cba1e5a9bb5980b1c1a7edae3bf1b",
       "baseline_image": "nvcr.io/nvidia/tensorrt-llm/release",
       "baseline_sbom": "release@36d6146d-amd64.cdx.json",
@@ -162,6 +172,6 @@
     "platform": "platform pinned for layer-prefix verification, e.g. linux/amd64"
   },
   "format": "CycloneDX 1.6 JSON, slim filter (drop properties/hashes/dependencies; keep evidence). Hard cap 5 MB per file.",
-  "generated_at": "2026-07-23T15:35:15+00:00",
+  "generated_at": "2026-07-27T16:42:16+00:00",
   "schema_version": 2
 }
