@@ -124,6 +124,8 @@ redirects:
     destination: "/dynamo/dev/knowledge-base/modular-components/planner/planner-examples"
   - source: "/dynamo/components/planner/planner-guide"
     destination: "/dynamo/dev/knowledge-base/modular-components/planner/planner-guide"
+  - source: "/dynamo/dev/components/planner/planner-guide"
+    destination: "/dynamo/dev/knowledge-base/modular-components/planner/planner-guide"
   - source: "/dynamo/components/profiler"
     destination: "/dynamo/dev/knowledge-base/modular-components/profiler/overview"
   - source: "/dynamo/components/profiler/profiler-examples"

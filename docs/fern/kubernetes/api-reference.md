@@ -2502,7 +2502,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `planner` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | Planner contains the raw Planner configuration passed to the Planner service.<br />Its schema is defined by dynamo.planner.config.planner_config.PlannerConfig.<br />See https://docs.nvidia.com/dynamo/dev/components/planner/planner-guide#plannerconfig-reference.<br />DGDR passes this object through without field-level validation; the Planner<br />service validates it at startup.<br />The presence of this field (non-null) enables the planner in the generated DGD. |  | Type: object <br />Optional: \{\} <br /> |
+| `planner` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | Planner contains the raw Planner configuration passed to the Planner service.<br />Its schema is defined by dynamo.planner.config.planner_config.PlannerConfig.<br />See https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/planner/planner-guide#plannerconfig-reference.<br />DGDR passes this object through without field-level validation; the Planner<br />service validates it at startup.<br />The presence of this field (non-null) enables the planner in the generated DGD. |  | Type: object <br />Optional: \{\} <br /> |
 | `mocker` _[MockerSpec](#mockerspec)_ | Mocker configures the simulated (mocker) backend for testing without GPUs. |  | Optional: \{\} <br /> |
 
 
