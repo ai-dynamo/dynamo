@@ -21,7 +21,6 @@ from gpu_memory_service.core.client.memory_manager import (
     unmap_mapping,
 )
 from gpu_memory_service.core.client.session import _GMSClientSession
-from gpu_memory_service.core.errors import GMSError
 
 _SessionFactory = Callable[
     [str, RequestedLockType, tuple[str, str] | None],
@@ -55,7 +54,7 @@ class GMSClientMemoryManager:
         self._identity: tuple[str, str] | None = None
         self._mappings: dict[int, _InstalledMapping] = {}
         self._lock = threading.RLock()
-        self._failure: GMSError | None = None
+        self._failure: RuntimeError | None = None
         self._vmm.ensure_initialized()
         self._granularity = int(self._vmm.get_allocation_granularity(device))
         if self._granularity <= 0:
@@ -74,7 +73,7 @@ class GMSClientMemoryManager:
         with self._lock:
             self._check()
             if self._session is not None:
-                raise GMSError("GMS memory manager is already connected")
+                raise RuntimeError("GMS memory manager is already connected")
             try:
                 session = self._session_factory(
                     self._socket_path,
@@ -83,7 +82,7 @@ class GMSClientMemoryManager:
                 )
                 if session.identity[1] != self._gpu_identity():
                     session.close()
-                    raise GMSError("GMS sidecar is on another physical GPU")
+                    raise RuntimeError("GMS sidecar is on another physical GPU")
                 if self._identity is None:
                     self._identity = session.identity
                 self._session = session
@@ -131,9 +130,9 @@ class GMSClientMemoryManager:
             try:
                 mapping = self._mappings[va]
             except KeyError:
-                raise GMSError(f"GMS does not own VA 0x{va:x}") from None
+                raise RuntimeError(f"GMS does not own VA 0x{va:x}") from None
             if size is not None and size != mapping.requested_size:
-                raise GMSError("allocator free does not match the GMS mapping")
+                raise RuntimeError("allocator free does not match the GMS mapping")
             try:
                 self._select_device()
                 if mapping.handle:
@@ -153,7 +152,7 @@ class GMSClientMemoryManager:
             self._check()
             session = self._require_rw()
             if not self._mappings:
-                raise GMSError("cannot commit an empty GMS allocation set")
+                raise RuntimeError("cannot commit an empty GMS allocation set")
             try:
                 self._select_device()
                 self._vmm.synchronize()
@@ -201,7 +200,7 @@ class GMSClientMemoryManager:
                 self._select_device()
                 for mapping in self._ordered_mappings():
                     if mapping.handle:
-                        raise GMSError("GMS mapping is already installed")
+                        raise RuntimeError("GMS mapping is already installed")
                     handle = install_mapping(
                         self._vmm,
                         mapping,
@@ -242,13 +241,13 @@ class GMSClientMemoryManager:
 
     def _require_session(self) -> _GMSClientSession:
         if self._session is None:
-            raise GMSError("GMS memory manager is disconnected")
+            raise RuntimeError("GMS memory manager is disconnected")
         return self._session
 
     def _require_rw(self) -> _GMSClientSession:
         session = self._require_session()
         if session.lock_type is not GrantedLockType.RW:
-            raise GMSError("operation requires an RW session")
+            raise RuntimeError("operation requires an RW session")
         return session
 
     def _align(self, size: int) -> int:
@@ -258,8 +257,8 @@ class GMSClientMemoryManager:
         if self._failure is not None:
             raise self._failure
 
-    def _latch(self, message: str, cause: Exception) -> GMSError:
+    def _latch(self, message: str, cause: Exception) -> RuntimeError:
         self.disconnect()
         if self._failure is None:
-            self._failure = GMSError(f"{message}: {cause}")
+            self._failure = RuntimeError(f"{message}: {cause}")
         return self._failure

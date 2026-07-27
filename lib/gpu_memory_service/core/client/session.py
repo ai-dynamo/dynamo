@@ -12,7 +12,6 @@ from typing import TypeVar
 
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 
-from ..errors import GMSError
 from ..protocol import (
     AllocateRequest,
     CommitRequest,
@@ -106,7 +105,7 @@ class _GMSClientSession:
         operation = type(request).__name__
         with self._lock:
             if self._socket is None:
-                raise GMSError("GMS session is disconnected")
+                raise RuntimeError("GMS session is disconnected")
             try:
                 send_message(self._socket, request)
                 response, received_fd = receive_message(self._socket)
@@ -138,16 +137,16 @@ class _GMSClientSession:
             if isinstance(response, ErrorResponse):
                 if response.out_of_memory:
                     raise MemoryError(response.message)
-                raise GMSError(response.message)
+                raise RuntimeError(response.message)
             if not isinstance(response, response_type):
-                raise GMSError(
+                raise RuntimeError(
                     f"GMS {operation} returned {type(response).__name__}, "
                     f"expected {response_type.__name__}"
                 )
             if expect_fd and received_fd < 0:
-                raise GMSError(f"GMS {operation} did not return an FD")
+                raise RuntimeError(f"GMS {operation} did not return an FD")
             if not expect_fd and received_fd >= 0:
-                raise GMSError(f"GMS {operation} returned an unexpected FD")
+                raise RuntimeError(f"GMS {operation} returned an unexpected FD")
             return response
         except Exception:
             if received_fd >= 0:

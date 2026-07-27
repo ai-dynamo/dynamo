@@ -47,8 +47,8 @@ GMSV1Worker
               kv      -> kv_cache.sock
 
 sidecar per rank:
-  weights.sock  -> GMSServerMemoryManager + independent allocations + shared FSM
-  kv_cache.sock -> GMSServerMemoryManager + independent allocations + same FSM
+  weights.sock  -> GMSServerMemoryManager + independent allocations and sessions
+  kv_cache.sock -> GMSServerMemoryManager + independent allocations and sessions
 ```
 
 The pluggable allocator outlives both MemPools. Allocation callbacks route by

@@ -1,7 +1,21 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Socket-session admission and allocation epoch state machine."""
+"""Socket-session admission and allocation epoch state machine.
+
+Connected socket is the lease:
+
+    EMPTY ----- acquire(RW), clear epoch -----> RW
+    RW -------- commit(same socket) ----------> RO
+    RW -------- close/abort, clear epoch -----> EMPTY
+    RO -------- acquire(RO) ------------------> RO
+    RO -------- close(last reader) -----------> COMMITTED
+    COMMITTED - acquire(RO) ------------------> RO
+    COMMITTED - acquire(RW), clear old epoch -> RW
+
+RO remains RO while readers remain. A waiting writer blocks late readers. Writer
+reservation is a transient admission state while epoch clear occurs.
+"""
 
 from __future__ import annotations
 
@@ -11,8 +25,6 @@ from dataclasses import dataclass
 from time import monotonic
 
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
-
-from ..errors import GMSError
 
 _CANCELLATION_POLL_SECONDS = 0.01
 
@@ -63,7 +75,7 @@ class GMSSessionManager:
                     return None
                 return self._start_reader()
             if requested is not RequestedLockType.RW_OR_RO:
-                raise GMSError(f"unsupported GMS lock type {requested.value}")
+                raise RuntimeError(f"unsupported GMS lock type {requested.value}")
             if not self._wait_for(self._can_grant_rw_or_ro, deadline, is_cancelled):
                 return None
             if self._can_grant_ro():
@@ -76,7 +88,7 @@ class GMSSessionManager:
     def commit(self, session: ServerSession) -> None:
         with self._condition:
             if session is not self._rw_session:
-                raise GMSError("operation requires an RW session")
+                raise RuntimeError("operation requires an RW session")
             self._rw_session = None
             session.mode = GrantedLockType.RO
             self._ro_sessions.add(session)

@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import gc
-import logging
 import threading
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -17,7 +16,6 @@ from gpu_memory_service.common.locks import RequestedLockType
 from gpu_memory_service.common.utils import get_socket_path
 from gpu_memory_service.common.vmm import get_vmm
 from gpu_memory_service.core.client.torch.extensions import _allocator_ext
-from gpu_memory_service.core.errors import GMSError
 from gpu_memory_service.v1.memory_manager import GMSClientMemoryManager
 from gpu_memory_service.v1.parameter_storage import (
     copy_non_parameter_tensors_to_default_allocator,
@@ -26,12 +24,13 @@ from vllm.device_allocator.sleep_mode_backend import (
     SleepModeBackend,
     SleepModeBackendFactory,
 )
+from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
 BACKEND_NAME = "gms-v1"
-logger = logging.getLogger(__name__)
+logger = init_logger("vllm.gpu_memory_service.v1")
 _WEIGHTS = "weights"
 _KV_CACHE = "kv_cache"
 
@@ -178,13 +177,15 @@ class GMSV1SleepModeBackend(SleepModeBackend):
     def _malloc(self, size: int, device: int, _stream: int) -> int:
         try:
             if device != self._device:
-                raise GMSError(f"allocator callback device {device} != {self._device}")
+                raise RuntimeError(
+                    f"allocator callback device {device} != {self._device}"
+                )
             domain = self._active_domain.get()
             if domain == _WEIGHTS:
                 return self._weights.create_mapping(size)
             if domain == _KV_CACHE:
                 return self._kv_cache.create_mapping(size)
-            raise GMSError("GMS allocator callback has no active domain")
+            raise RuntimeError("GMS allocator callback has no active domain")
         except Exception as exc:
             self._record_allocator_failure(exc)
             raise
@@ -192,14 +193,16 @@ class GMSV1SleepModeBackend(SleepModeBackend):
     def _free(self, va: int, size: int, device: int, _stream: int) -> None:
         try:
             if device != self._device:
-                raise GMSError(f"allocator callback device {device} != {self._device}")
+                raise RuntimeError(
+                    f"allocator callback device {device} != {self._device}"
+                )
             if self._weights.owns(va):
                 self._weights.destroy_mapping(va, size)
                 return
             if self._kv_cache.owns(va):
                 self._kv_cache.destroy_mapping(va, size)
                 return
-            raise GMSError(f"GMS allocator does not own VA 0x{va:x}")
+            raise RuntimeError(f"GMS allocator does not own VA 0x{va:x}")
         except Exception as exc:
             self._record_allocator_failure(exc)
 
@@ -212,7 +215,7 @@ class GMSV1SleepModeBackend(SleepModeBackend):
         with self._allocator_failure_lock:
             failure = self._allocator_failure
         if failure is not None:
-            raise GMSError("allocator callback failed") from failure
+            raise RuntimeError("allocator callback failed") from failure
 
 
 SleepModeBackendFactory.register_backend(

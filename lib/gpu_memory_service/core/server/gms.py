@@ -11,7 +11,6 @@ from uuid import uuid4
 from gpu_memory_service.common.locks import RequestedLockType
 from gpu_memory_service.common.vmm import VMMDevice
 
-from ..errors import GMSError
 from ..protocol import (
     AllocateRequest,
     CommitRequest,
@@ -64,15 +63,15 @@ class GMSServerMemoryManager:
             self._require_rw(session)
             self._sessions.commit(session)
             return SuccessResponse(), -1
-        raise GMSError(f"unsupported GMS request {type(request).__name__}")
+        raise RuntimeError(f"unsupported GMS request {type(request).__name__}")
 
     def close(self, session: ServerSession) -> None:
         self._sessions.close(session)
 
     def _require_rw(self, session: ServerSession) -> None:
         if not self._sessions.is_writer(session):
-            raise GMSError("operation requires an RW session")
+            raise RuntimeError("operation requires an RW session")
 
     def _require_active(self, session: ServerSession) -> None:
         if not self._sessions.is_active(session):
-            raise GMSError("operation requires an active GMS session")
+            raise RuntimeError("operation requires an active GMS session")
