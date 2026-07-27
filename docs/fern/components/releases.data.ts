@@ -1036,7 +1036,17 @@ export interface ReleaseStats {
    - knownIssues: one per named issue — the per-issue heading where the body
      gives each issue its own, otherwise the top-level bullets.
    Known exception: v1.0.0 breaking is published as 41, but its body holds 40
-   top-level entries and no rule reproduces 41. Left as published. */
+   top-level entries and no rule reproduces 41. Left as published.
+
+   The absent prs and contributors cells are absent for cause, not for want of
+   looking. Neither the release bodies, the TPM release archive, nor the git
+   history yields a figure comparable to the stated ones: the archive's own
+   numbers disagree with each other (v0.9.0 is written up as both 217 and 935
+   PRs for the identical window, and v1.0.0's 708 is quoted as commits in one
+   place and as merged PRs in another), and no tag-to-tag count reproduces the
+   three published anchors — the closest method returns 910/572/899 against a
+   published 930/603/896, missing in both directions, so it cannot be trusted
+   to fill the rest. Leave them absent unless a method reproduces all three. */
 export const RELEASE_STATS: Record<string, ReleaseStats> = {
   "v1.3.0": { prs: 930, contributors: 125, firstTimers: 23, breaking: 24, knownIssues: 10 },
   "v1.2.0": { prs: 603, contributors: 82, breaking: 5, knownIssues: 11 },
