@@ -493,6 +493,11 @@ func (r *DynamoGraphDeploymentRequestReconciler) Reconcile(ctx context.Context, 
 					"observedGeneration", dgdr.Status.ObservedGeneration,
 					"currentGeneration", dgdr.Generation)
 
+				// Repair generated manifests before acknowledging the new generation.
+				if err := r.repairGeneratedDGDArtifacts(ctx, dgdr); err != nil {
+					return ctrl.Result{}, err
+				}
+
 				dgdr.Status.ObservedGeneration = dgdr.Generation
 				dgdr.Status.ObservedSpecFingerprint = currentSpecFingerprint
 				if err := r.Status().Update(ctx, dgdr); err != nil {
@@ -2148,6 +2153,66 @@ func applyDGDRRuntimeVersionOverride(
 	for i := range dgd.Spec.Components {
 		dgd.Spec.Components[i].RuntimeVersionOverride = dgdr.Spec.RuntimeVersionOverride
 	}
+}
+
+// repairGeneratedDGDArtifacts applies a repaired override to every persisted generated manifest.
+func (r *DynamoGraphDeploymentRequestReconciler) repairGeneratedDGDArtifacts(
+	ctx context.Context,
+	dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
+) error {
+	// Repair the manifest exposed for manual application.
+	if dgdr.Status.ProfilingResults != nil &&
+		dgdr.Status.ProfilingResults.SelectedConfig != nil &&
+		len(dgdr.Status.ProfilingResults.SelectedConfig.Raw) > 0 {
+		dgd, err := r.extractDGDFromYAML(dgdr.Status.ProfilingResults.SelectedConfig.Raw)
+		if err != nil {
+			return fmt.Errorf("failed to decode selected DGD config for runtime version repair: %w", err)
+		}
+		applyDGDRRuntimeVersionOverride(dgdr, dgd)
+		dgdJSON, _, err := r.encodeBetaDGDManifest(dgd)
+		if err != nil {
+			return fmt.Errorf("failed to encode selected DGD config after runtime version repair: %w", err)
+		}
+		dgdr.Status.ProfilingResults.SelectedConfig.Raw = dgdJSON
+	}
+
+	// Repair the manifest retained for automatic DGD creation.
+	generatedDGDYAML := dgdr.Annotations[AnnotationGeneratedDGDSpec]
+	if generatedDGDYAML == "" {
+		return nil
+	}
+
+	dgd, err := r.extractDGDFromYAML([]byte(generatedDGDYAML))
+	if err != nil {
+		return fmt.Errorf("failed to decode generated DGD annotation for runtime version repair: %w", err)
+	}
+	applyDGDRRuntimeVersionOverride(dgdr, dgd)
+	_, dgdYAML, err := r.encodeBetaDGDManifest(dgd)
+	if err != nil {
+		return fmt.Errorf("failed to encode generated DGD annotation after runtime version repair: %w", err)
+	}
+
+	// Persist the repaired annotation without taking ownership of unrelated metadata.
+	annotations := map[string]any{AnnotationGeneratedDGDSpec: string(dgdYAML)}
+	if additionalResources := dgdr.Annotations[AnnotationAdditionalResources]; additionalResources != "" {
+		annotations[AnnotationAdditionalResources] = additionalResources
+	}
+	apply := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": nvidiacomv1beta1.GroupVersion.String(),
+		"kind":       "DynamoGraphDeploymentRequest",
+		"metadata": map[string]any{
+			"name":            dgdr.Name,
+			"namespace":       dgdr.Namespace,
+			"resourceVersion": dgdr.ResourceVersion,
+			"annotations":     annotations,
+		},
+	}}
+	if err := r.Apply(ctx, client.ApplyConfigurationFromUnstructured(apply), client.FieldOwner("dynamo-operator-dgdr"), client.ForceOwnership); err != nil {
+		return fmt.Errorf("failed to persist repaired generated DGD annotation: %w", err)
+	}
+	dgdr.Annotations[AnnotationGeneratedDGDSpec] = string(dgdYAML)
+	dgdr.ResourceVersion = apply.GetResourceVersion()
+	return nil
 }
 
 // encodeBetaDGDManifest returns JSON/YAML manifest bytes for a beta DGD.

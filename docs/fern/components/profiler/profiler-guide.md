@@ -215,6 +215,9 @@ spec:
 > 1.3.0 or earlier discards the field while parsing the DGDR. Set the override
 > when the effective generated runtime images do not use tags that identify
 > their Dynamo runtime versions.
+> The profiler also applies the field when its output is consumed directly,
+> outside the operator-managed DGDR workflow. The operator remains authoritative
+> for DGDR-managed deployments and reapplies the value after all DGD overrides.
 >
 > [Profiler Image Version Compatibility](../../kubernetes/dgdr-reference.mdx#profiler-image-version-compatibility)
 > for details.

@@ -1417,8 +1417,33 @@ spec:
 			initialGeneration := current.Generation
 			Expect(current.Status.ObservedSpecFingerprint).ShouldNot(BeEmpty())
 
-			t.Log("Move the request into the profiling phase")
-			current.Status.Phase = nvidiacomv1beta1.DGDRPhaseProfiling
+			t.Log("Store legacy generated manifests and move the request into the ready phase")
+			generatedDGD := &nvidiacomv1beta1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      dgdrName + "-generated",
+					Namespace: namespace,
+				},
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
+					BackendFramework: "vllm",
+					Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{
+						ComponentName: "worker",
+						ComponentType: nvidiacomv1beta1.ComponentTypeWorker,
+						Replicas:      ptr.To[int32](1),
+						PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/runtime:custom"}},
+						}},
+					}},
+				},
+			}
+			dgdJSON, dgdYAML, err := reconciler.encodeBetaDGDManifest(generatedDGD)
+			Expect(err).NotTo(HaveOccurred())
+			current.Annotations = map[string]string{AnnotationGeneratedDGDSpec: string(dgdYAML)}
+			Expect(k8sClient.Update(ctx, &current)).Should(Succeed())
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &current)).Should(Succeed())
+			current.Status.Phase = nvidiacomv1beta1.DGDRPhaseReady
+			current.Status.ProfilingResults = &nvidiacomv1beta1.ProfilingResultsStatus{
+				SelectedConfig: &runtime.RawExtension{Raw: dgdJSON},
+			}
 			Expect(k8sClient.Status().Update(ctx, &current)).Should(Succeed())
 
 			t.Log("Repair the missing runtime version override")
@@ -1437,7 +1462,21 @@ spec:
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &current)).Should(Succeed())
 			Expect(current.Generation).Should(BeNumerically(">", initialGeneration))
 			Expect(current.Status.ObservedGeneration).Should(Equal(current.Generation))
-			Expect(current.Status.Phase).Should(Equal(nvidiacomv1beta1.DGDRPhaseProfiling))
+			Expect(current.Status.Phase).Should(Equal(nvidiacomv1beta1.DGDRPhaseReady))
+
+			t.Log("Verify that both persisted generated manifests contain the repaired override")
+			selectedDGD, err := reconciler.extractDGDFromYAML(current.Status.ProfilingResults.SelectedConfig.Raw)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(selectedDGD.Spec.Components).Should(HaveLen(1))
+			Expect(selectedDGD.Spec.Components[0].RuntimeVersionOverride).Should(Equal("1.1.0"))
+			annotatedDGD, err := reconciler.extractDGDFromYAML([]byte(current.Annotations[AnnotationGeneratedDGDSpec]))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(annotatedDGD.Spec.Components).Should(HaveLen(1))
+			Expect(annotatedDGD.Spec.Components[0].RuntimeVersionOverride).Should(Equal("1.1.0"))
+
+			t.Log("Apply the repaired selected config through admission")
+			Expect(k8sClient.Create(ctx, selectedDGD)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, selectedDGD) }()
 
 			t.Log("Bypass admission with an unrelated spec change")
 			repairedGeneration := current.Status.ObservedGeneration
