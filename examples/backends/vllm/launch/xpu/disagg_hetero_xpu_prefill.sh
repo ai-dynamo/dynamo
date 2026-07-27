@@ -30,8 +30,7 @@ export UCX_TLS=tcp
 # Edit --router-mode to random / round-robin / kv.
 python -m dynamo.frontend \
     --router-mode kv \
-    --http-port "${DYN_HTTP_PORT:-8000}" \
-    --router-reset-states &
+    --http-port "${DYN_HTTP_PORT:-8000}" &
 
 # One prefill worker on XPU.
 # When registered with --disaggregation-mode prefill, this worker is automatically detected
