@@ -55,7 +55,6 @@ from .capacity import (
     get_spec_decode_runtime_data,
     per_rank_kv_blocks,
 )
-from .constants import DisaggregationMode
 from .engine_generate import EXACT_MM_ROUTING_CAPABILITY, GENERATE_CAPABILITY
 from .handlers import get_dp_range_for_worker
 from .headless import run_dynamo_headless
