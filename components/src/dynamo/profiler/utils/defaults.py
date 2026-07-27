@@ -46,6 +46,16 @@ AIPERF_PREFILL_ATTN_DP_NUM_REQ_RATIO = 4
 DEFAULT_GPU_COST_PER_HOUR = 3.0  # Cost per GPU per hour in dollars
 
 
+class DeviceLabel(str, Enum):
+    """Display labels for device types in the WebUI."""
+
+    GPU = "GPU"
+    XPU = "XPU"
+
+    def __str__(self) -> str:
+        return self.value
+
+
 class EngineType(str, Enum):
     PREFILL = "prefill"
     DECODE = "decode"

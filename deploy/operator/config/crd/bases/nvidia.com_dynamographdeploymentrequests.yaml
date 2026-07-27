@@ -578,6 +578,15 @@ spec:
                     Hardware describes the hardware resources available for profiling and deployment.
                     Typically auto-filled by the operator from cluster discovery.
                   properties:
+                    deviceType:
+                      default: cuda
+                      description: |-
+                        DeviceType is the accelerator device category.
+                        Supported values: 'cuda' (NVIDIA GPU), 'xpu' (Intel XPU). Defaults to 'cuda'.
+                      enum:
+                        - cuda
+                        - xpu
+                      type: string
                     gpuSku:
                       allOf:
                         - enum:

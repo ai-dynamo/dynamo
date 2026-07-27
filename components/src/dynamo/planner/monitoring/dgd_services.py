@@ -146,40 +146,58 @@ class Service(BaseModel):
             return None
 
     def get_gpu_count(self) -> int:
-        """Get the GPU count from the component's resource specification.
+        """Get the accelerator count for this component.
 
-        GPU count is read from the v1beta1 main container resources
-        (``nvidia.com/gpu``).
+        Resolution order:
+        1. ``resources.limits["nvidia.com/gpu"]`` or the matching request
+           (NVIDIA device-plugin style)
+        2. ``--tensor-parallel-size`` / ``--tp`` from the main container args
+           (Intel DRA deployments omit GPU resources and use resource claims instead;
+           TP size equals the number of devices per worker)
 
         Returns:
-            The number of GPUs configured for this component
+            The number of GPUs/XPUs configured for this component
 
         Raises:
-            ValueError: If GPU count is not specified or invalid
+            ValueError: If GPU count cannot be determined
         """
-        resources = get_main_container(self.service).get("resources", {})
+        main_container = get_main_container(self.service)
+        resources = main_container.get("resources", {})
         limits = resources.get("limits", {})
         requests = resources.get("requests", {})
 
-        # Prefer limits, fall back to requests. For GPUs, Kubernetes device plugins
+        # 1. Prefer limits, fall back to requests. For GPUs, Kubernetes device plugins
         # typically treat requests and limits as equivalent since GPUs are
         # non-compressible and allocated exclusively (no fractional sharing).
         gpu_str = limits.get(GPU_RESOURCE_KEY) or requests.get(GPU_RESOURCE_KEY)
+        if gpu_str is not None:
+            try:
+                return int(gpu_str)
+            except (ValueError, TypeError) as err:
+                raise ValueError(
+                    f"Invalid GPU count '{gpu_str}' for component '{self.name}'. "
+                    f"GPU count must be an integer."
+                ) from err
 
-        if gpu_str is None:
-            raise ValueError(
-                f"No GPU count specified for component '{self.name}'. "
-                f"Please set main container resources.limits.{GPU_RESOURCE_KEY} "
-                f"or resources.requests.{GPU_RESOURCE_KEY} in the DGD."
-            )
+        # 2. DRA fallback: Intel XPU deployments use resourceClaims and do not set
+        # nvidia.com/gpu. Infer device count from --tensor-parallel-size / --tp in
+        # the container args (TP size == number of devices per worker).
+        args = break_arguments(main_container.get("args", []))
+        for i, arg in enumerate(args):
+            if arg in ("--tensor-parallel-size", "--tp") and i + 1 < len(args):
+                try:
+                    return int(args[i + 1])
+                except (ValueError, TypeError) as err:
+                    raise ValueError(
+                        f"Invalid --tensor-parallel-size value '{args[i + 1]}' "
+                        f"for component '{self.name}'."
+                    ) from err
 
-        try:
-            return int(gpu_str)
-        except (ValueError, TypeError) as err:
-            raise ValueError(
-                f"Invalid GPU count '{gpu_str}' for component '{self.name}'. "
-                f"GPU count must be an integer."
-            ) from err
+        raise ValueError(
+            f"No GPU/XPU count specified for component '{self.name}'. "
+            f"Set main container resources.limits.{GPU_RESOURCE_KEY}, "
+            f"resources.requests.{GPU_RESOURCE_KEY}, or --tensor-parallel-size/--tp."
+        )
 
 
 def get_component_from_type_or_name(
