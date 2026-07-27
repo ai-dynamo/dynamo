@@ -78,6 +78,7 @@ async def test_engine_control_route_invokes_registered_callback(
 
 @pytest.mark.asyncio
 @pytest.mark.sglang
+@pytest.mark.timeout(30)
 async def test_tokenizer_manager_internal_state_route_serializes_nested_dataclass(
     monkeypatch: pytest.MonkeyPatch, dynamo_dynamic_ports
 ):
