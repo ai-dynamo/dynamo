@@ -137,6 +137,7 @@ def test_real_cuda_allocator_and_dual_domain_lifecycle() -> None:
     """Use a subprocess because Torch allocator callbacks are process-global."""
     code = textwrap.dedent(
         """
+        import logging
         import os
         import sys
         import tempfile
@@ -166,6 +167,9 @@ def test_real_cuda_allocator_and_dual_domain_lifecycle() -> None:
         device_allocator = types.ModuleType("vllm.device_allocator")
         device_allocator.__path__ = []
         sys.modules["vllm"] = vllm
+        logger = types.ModuleType("vllm.logger")
+        logger.init_logger = logging.getLogger
+        sys.modules["vllm.logger"] = logger
         sys.modules["vllm.device_allocator"] = device_allocator
         sys.modules[
             "vllm.device_allocator.sleep_mode_backend"

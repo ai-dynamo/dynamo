@@ -10,7 +10,6 @@ import socket
 import socketserver
 from pathlib import Path
 
-from ..errors import GMSError
 from ..protocol import (
     ErrorResponse,
     HandshakeRequest,
@@ -33,7 +32,7 @@ class _GMSRequestHandler(socketserver.BaseRequestHandler):
         try:
             request = self._receive()
             if not isinstance(request, HandshakeRequest):
-                raise GMSError("expected GMS handshake")
+                raise RuntimeError("expected GMS handshake")
             manager = self.server.manager
             if (
                 request.expected_identity is not None
@@ -64,7 +63,9 @@ class _GMSRequestHandler(socketserver.BaseRequestHandler):
                 export_fd = -1
                 try:
                     if not isinstance(request, REQUEST_TYPES):
-                        raise GMSError("handshake is valid only as the first message")
+                        raise RuntimeError(
+                            "handshake is valid only as the first message"
+                        )
                     response, export_fd = manager.handle_request(session, request)
                     send_message(self.request, response, export_fd)
                 except Exception as exc:
@@ -91,7 +92,7 @@ class _GMSRequestHandler(socketserver.BaseRequestHandler):
         request, received_fd = receive_message(self.request)
         if received_fd >= 0:
             os.close(received_fd)
-            raise GMSError("GMS clients must not send file descriptors")
+            raise RuntimeError("GMS clients must not send file descriptors")
         return request
 
 
