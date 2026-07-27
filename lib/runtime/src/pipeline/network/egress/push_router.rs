@@ -78,7 +78,15 @@ pub fn resolve_non_cpu_to_cpu_ratio(configured: Option<usize>, env_value: Option
         .unwrap_or(DEFAULT_NON_CPU_TO_CPU_RATIO)
 }
 
-fn non_cpu_to_cpu_ratio_from_env() -> usize {
+/// Resolve the ratio from the legacy environment variable alone, for call
+/// sites that carry no router configuration to consult.
+///
+/// Public so that workspace callers outside this crate - the C bindings and
+/// the inference-gateway ext-proc - keep the environment-variable behaviour
+/// they had before the ratio became an explicit parameter, without each
+/// re-reading `DYN_ENCODER_CUDA_TO_CPU_RATIO` itself. Reinstating that
+/// duplication is exactly what this change set removes.
+pub fn non_cpu_to_cpu_ratio_from_env() -> usize {
     use crate::config::environment_names::router::DYN_ENCODER_CUDA_TO_CPU_RATIO;
     resolve_non_cpu_to_cpu_ratio(
         None,

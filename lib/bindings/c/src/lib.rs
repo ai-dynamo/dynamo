@@ -31,7 +31,7 @@ use dynamo_runtime::Runtime;
 use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
 use dynamo_llm::kv_router::prefill_router::PrefillQueryOutcome;
 use dynamo_llm::kv_router::{KvRouter, PrefillRouter};
-use dynamo_runtime::pipeline::RouterMode;
+use dynamo_runtime::pipeline::{RouterMode, non_cpu_to_cpu_ratio_from_env};
 
 use std::collections::HashSet;
 
@@ -864,6 +864,10 @@ pub unsafe extern "C" fn create_routers(
             // C bindings construct no KvWorkerMonitor; overload publishing is
             // unused on this path (matches the prior namespace-lookup miss).
             None,
+            // The C bindings carry no RouterConfig, so the ratio resolves from
+            // the legacy environment variable exactly as it did before the
+            // ratio became an explicit parameter.
+            non_cpu_to_cpu_ratio_from_env(),
         );
 
         // Spawn background discovery watcher for prefill workers.
