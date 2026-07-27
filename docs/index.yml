@@ -53,6 +53,10 @@ navigation:
             path: reference/feature-matrix.md
           - page: Release Artifacts
             path: reference/release-artifacts.md
+          - page: Nightly Release Info
+            path: reference/nightly-release-info.md
+          - page: Model Early Access Builds
+            path: reference/model-early-access-builds.md
           - page: Examples
             path: getting-started/examples.md
           - page: Glossary
@@ -296,6 +300,9 @@ navigation:
               - page: Live Simulation with Mocker
                 path: dynosim/mocker.md
                 slug: mocker
+              - page: Simulation Model
+                path: dynosim/modeling.md
+                slug: modeling
               - page: Simulation Runs
                 path: dynosim/runs.md
                 slug: runs
@@ -330,6 +337,8 @@ navigation:
                 path: features/multimodal/embedding-cache.md
               - page: Encoder Disaggregation
                 path: features/multimodal/encoder-disaggregation.md
+              - page: Custom Vision Encoders
+                path: features/multimodal/custom-vision-encoder.md
               - page: Multimodal KV Routing
                 path: features/multimodal/multimodal-kv-routing.md
               - page: SGLang Multimodal
@@ -396,6 +405,8 @@ navigation:
                 path: backends/vllm/vllm-examples.md
               - page: KV Cache Offloading
                 path: backends/vllm/vllm-kv-offloading.md
+              - page: Native KV Offloading
+                path: backends/vllm/vllm-native-kv-offloading.md
               - page: Observability
                 path: backends/vllm/vllm-observability.md
               - page: vLLM-Omni
@@ -421,6 +432,8 @@ navigation:
                 path: components/frontend/frontend-guide.md
               - page: Configuration Reference
                 path: components/frontend/configuration.md
+              - page: Python Route Extensions
+                path: components/frontend/python-route-extensions.md
               - page: Tokenizer
                 path: components/frontend/Tokenizer.md
           - section: Router
@@ -428,6 +441,8 @@ navigation:
             contents:
               - page: Routing Concepts
                 path: components/router/router-concepts.md
+              - page: Multi-DC KV Routing and the DC Relay
+                path: components/router/multi-dc-kv-routing.md
               - page: Configuration and Tuning
                 path: components/router/router-configuration.md
               - page: Deficit Round Robin Queue Scheduling
@@ -438,6 +453,8 @@ navigation:
                 path: components/router/router-disaggregated-serving.md
               - page: Topology-Aware KV Transfer
                 path: components/router/topology-aware-kv-transfer.md
+              - page: Offloading Support Matrix
+                path: components/router/router-offloading.md
               - page: Router Operations
                 path: components/router/router-operations.md
               - page: Router Examples
@@ -633,6 +650,12 @@ navigation:
       - page: Browse All Recipes
         path: recipes/README.mdx
         slug: browse
+      - page: GLM-5.2
+        path: recipes/glm-5-2.mdx
+        slug: glm-5-2
+      - page: Inkling NVFP4
+        path: recipes/inkling.mdx
+        slug: inkling
       - page: Kimi-K2.6
         path: recipes/kimi-k2-6.mdx
         slug: kimi-k2-6
@@ -645,6 +668,12 @@ navigation:
       - page: GLM-5 NVFP4
         path: recipes/glm-5-nvfp4.mdx
         slug: glm-5-nvfp4
+      - page: DeepSeek-V4-Pro
+        path: recipes/deepseek-v4-pro.mdx
+        slug: deepseek-v4-pro
+      - page: DeepSeek-V4-Flash
+        path: recipes/deepseek-v4-flash.mdx
+        slug: deepseek-v4-flash
       - page: DeepSeek V3.2 NVFP4
         path: recipes/deepseek-v3-2-nvfp4.mdx
         slug: deepseek-v3-2-nvfp4

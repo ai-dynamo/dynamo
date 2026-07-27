@@ -3,7 +3,10 @@
 
 # Dependencies required by the planner, profiler, and global_planner services.
 
-aiconfigurator>=0.9.0
+# Cap below 0.10: the 0.10 SDK renamed/removed APIs (sdk.task, cli.main
+# helpers) and changed the AIC Rust engine wire-format, breaking the
+# profiler until the 0.10 migration lands. Remove the cap with that port.
+aiconfigurator>=0.9.0,<0.10.0
 aiofiles<=25.1.0
 aiohttp>=3.9.0,<4.0
 filterpy==1.4.5

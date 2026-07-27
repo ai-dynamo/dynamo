@@ -67,8 +67,7 @@ For multi-worker deployments with KV-aware routing to maximize cache reuse:
 ```bash
 # Terminal 1: Start frontend with KV router
 python -m dynamo.frontend \
-    --router-mode kv \
-    --router-reset-states &
+    --router-mode kv &
 
 # Terminal 2: Worker 1
 DYNAMO_USE_FLEXKV=1 \
@@ -122,7 +121,7 @@ FLEXKV_CPU_CACHE_GB=32 \
 CUDA_VISIBLE_DEVICES=1 \
   python -m dynamo.vllm \
   --model Qwen/Qwen3-0.6B \
-  --is-prefill-worker \
+  --disaggregation-mode prefill \
   --kv-transfer-config '{"kv_connector":"PdConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"FlexKVConnectorV1","kv_role":"kv_both"},{"kv_connector":"NixlConnector","kv_role":"kv_both"}]},"kv_connector_module_path":"kvbm.vllm_integration.connector"}' \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}'
 ```

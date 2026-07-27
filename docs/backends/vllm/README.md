@@ -55,6 +55,7 @@ For development, use the [devcontainer](https://github.com/ai-dynamo/dynamo/tree
 | [**Disaggregated Serving**](../../design-docs/disagg-serving.md) | ✅ | Prefill/decode separation with NIXL KV transfer |
 | [**KV-Aware Routing**](../../components/router/README.md) | ✅ | Requires explicit KV event publishing on workers for event-driven cache state |
 | [**SLA-Based Planner**](../../components/planner/planner-guide.md) | ✅ | |
+| [**Native KV Offloading**](vllm-native-kv-offloading.md) | ✅ | vLLM `OffloadingConnector` CPU tier with tier-aware KV routing; validated on aggregated serving; requires vLLM v0.24.0+ and Dynamo 1.3.0+ |
 | [**KVBM**](../../components/kvbm/README.md) | ✅ | |
 | [**LMCache**](../../integrations/lmcache-integration.md) | ✅ | CUDA 12.9 and arm64/aarch64 containers may require building LMCache from source |
 | [**FlexKV**](../../integrations/flexkv-integration.md) | ✅ | |
@@ -152,6 +153,7 @@ reaches feature and operational parity with the Python vLLM backend.
 - **[Reference Guide](vllm-reference-guide.md)**: Configuration, arguments, and operational details
 - **[Examples](vllm-examples.md)**: All deployment patterns with launch scripts
 - **[KV Cache Offloading](vllm-kv-offloading.md)**: KVBM, LMCache, and FlexKV integrations
+- **[Native KV Offloading](vllm-native-kv-offloading.md)**: vLLM's `OffloadingConnector` with tier-aware KV routing
 - **[Observability](vllm-observability.md)**: Metrics and monitoring
 - **[vLLM-Omni](vllm-omni.md)**: Multimodal model serving
 - **[Kubernetes Deployment](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/deploy/README.md)**: Kubernetes deployment guide

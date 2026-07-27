@@ -531,7 +531,7 @@ AIConfigurator's default predictions assume no prefix caching. Enable it post-de
 
 ### Backends and Versions
 
-For a comprehensive breakdown of which model/system/backend/version combinations are supported in both aggregated and disaggregated modes, refer to the [**support matrix**](https://ai-dynamo.github.io/aiconfigurator/support-matrix/). The raw data is available as [per-system CSV files](https://github.com/ai-dynamo/aiconfigurator/tree/main/src/aiconfigurator/systems/support_matrix), which are automatically generated and tested to ensure accuracy across all supported configurations.
+For a comprehensive breakdown of which model/system/backend/version combinations are supported in both aggregated and disaggregated modes, refer to the [**support matrix**](https://ai-dynamo.github.io/aiconfigurator/support-matrix/). The raw data is available as [per-system CSV files](https://github.com/ai-dynamo/aiconfigurator/tree/main/aic-core/src/aiconfigurator_core/systems/support_matrix), which are automatically generated and tested to ensure accuracy across all supported configurations.
 
 You can also check if a system / framework version is supported via the `aiconfigurator cli support` command. For example:
 ```bash

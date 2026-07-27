@@ -17,10 +17,8 @@
 
 // Conversion between v1alpha1 and v1beta1 DynamoGraphDeploymentRequest (DGDR).
 //
-// v1beta1 is the hub. DGDR conversion predates the structural DGD/DCD cleanup,
-// so this file still reads legacy Dynamo 1.0/1.1 annotations for forward upgrade
-// compatibility. New writes use sparse nvidia.com/dgdr-spec and
-// nvidia.com/dgdr-status annotations exclusively.
+// v1beta1 is the hub. Sparse nvidia.com/dgdr-spec and nvidia.com/dgdr-status
+// annotations preserve fields that the target version cannot represent.
 //
 // Live source fields are authoritative. Preservation annotations are old-value
 // caches only for fields the live source version cannot represent.
@@ -62,24 +60,20 @@ import (
 const (
 	annDGDRSpec   = "nvidia.com/dgdr-spec"
 	annDGDRStatus = "nvidia.com/dgdr-status"
-
-	// Read-only compatibility for objects written by Dynamo 1.0/1.1. Do not
-	// emit these keys; current preservation uses annDGDRSpec and annDGDRStatus.
-	legacyAnnDGDRConfigMapRef     = "nvidia.com/dgdr-config-map-ref"
-	legacyAnnDGDROutputPVC        = "nvidia.com/dgdr-output-pvc"
-	legacyAnnDGDREnableGPUDisc    = "nvidia.com/dgdr-enable-gpu-discovery"
-	legacyAnnDGDRDeployOverrides  = "nvidia.com/dgdr-deployment-overrides"
-	legacyAnnDGDRProfilingConfig  = "nvidia.com/dgdr-profiling-config"
-	legacyAnnDGDRStatusBackend    = "nvidia.com/dgdr-status-backend"
-	legacyAnnDGDRProfilingResults = "nvidia.com/dgdr-profiling-results"
-	legacyAnnDGDRDeploymentStatus = "nvidia.com/dgdr-deployment-status"
-	legacyAnnDGDRProfilingJobName = "nvidia.com/dgdr-profiling-job-name"
 )
 
-// dgdrDeploymentStatusAnnotation preserves alpha deployment status with its source request state.
-type dgdrDeploymentStatusAnnotation struct {
-	DeploymentStatus
-	RequestState DGDRState `json:"requestState,omitempty"`
+// Retired per-field annotations are no longer decoded, but must still be
+// scrubbed so stale internal conversion metadata is not re-emitted.
+var retiredDGDRAnnotationKeys = []string{
+	"nvidia.com/dgdr-config-map-ref",
+	"nvidia.com/dgdr-output-pvc",
+	"nvidia.com/dgdr-enable-gpu-discovery",
+	"nvidia.com/dgdr-deployment-overrides",
+	"nvidia.com/dgdr-profiling-config",
+	"nvidia.com/dgdr-status-backend",
+	"nvidia.com/dgdr-profiling-results",
+	"nvidia.com/dgdr-deployment-status",
+	"nvidia.com/dgdr-profiling-job-name",
 }
 
 type dgdrProfilingConfigBlob = map[string]any
@@ -147,12 +141,6 @@ func restoreDGDRHubAnnotations(obj metav1.Object) (*v1beta1.DynamoGraphDeploymen
 			restoredStatus = &status
 		}
 	}
-	if raw, ok := getAnnFromObj(obj, legacyAnnDGDRProfilingJobName); ok && raw != "" {
-		if restoredStatus == nil {
-			restoredStatus = &v1beta1.DynamoGraphDeploymentRequestStatus{}
-			restoredStatus.ProfilingJobName = raw
-		}
-	}
 	return restoredSpec, restoredStatus
 }
 
@@ -164,39 +152,19 @@ func restoreDGDRSpokeAnnotations(obj metav1.Object) (*DynamoGraphDeploymentReque
 			restoredSpec = &spec
 		}
 	}
-	if restoredSpec == nil {
-		if spec := restoreDGDRLegacySpokeSpec(obj); !dgdrAlphaSpecSaveIsZero(spec) {
-			restoredSpec = spec
-		}
-	}
 	if raw, ok := getAnnFromObj(obj, annDGDRStatus); ok && raw != "" {
 		if status, ok := restoreDGDRSpokeStatus(raw); ok {
 			restoredStatus = &status
-		}
-	}
-	if restoredStatus == nil {
-		status := restoreDGDRLegacySpokeStatus(obj)
-		if !dgdrAlphaStatusSaveIsZero(status) {
-			restoredStatus = status
 		}
 	}
 	return restoredSpec, restoredStatus
 }
 
 func scrubDGDRInternalAnnotations(obj metav1.Object) {
-	for _, key := range []string{
-		annDGDRSpec,
-		annDGDRStatus,
-		legacyAnnDGDRConfigMapRef,
-		legacyAnnDGDROutputPVC,
-		legacyAnnDGDREnableGPUDisc,
-		legacyAnnDGDRDeployOverrides,
-		legacyAnnDGDRProfilingConfig,
-		legacyAnnDGDRStatusBackend,
-		legacyAnnDGDRProfilingResults,
-		legacyAnnDGDRDeploymentStatus,
-		legacyAnnDGDRProfilingJobName,
-	} {
+	for _, key := range []string{annDGDRSpec, annDGDRStatus} {
+		delAnnFromObj(obj, key)
+	}
+	for _, key := range retiredDGDRAnnotationKeys {
 		delAnnFromObj(obj, key)
 	}
 }
@@ -929,90 +897,6 @@ func projectPlannerFromProfilingConfigBlob(blob map[string]interface{}, dst *v1b
 	dst.Features.Planner = &runtime.RawExtension{Raw: raw}
 }
 
-func restoreDGDRLegacySpokeSpec(obj metav1.Object) *DynamoGraphDeploymentRequestSpec {
-	restored := &DynamoGraphDeploymentRequestSpec{}
-	if raw, ok := getAnnFromObj(obj, legacyAnnDGDRProfilingConfig); ok && raw != "" {
-		var blob dgdrProfilingConfigBlob
-		if err := json.Unmarshal([]byte(raw), &blob); err == nil {
-			blob = stripDGDRTypedProfilingConfig(blob)
-			if blob != nil {
-				if data, err := json.Marshal(blob); err == nil {
-					restored.ProfilingConfig.Config = &apiextensionsv1.JSON{Raw: data}
-				}
-			}
-		}
-	}
-	if raw, ok := getAnnFromObj(obj, legacyAnnDGDREnableGPUDisc); ok && raw == annotationTrue {
-		v := true
-		restored.EnableGPUDiscovery = &v
-	}
-	if v, ok := getAnnFromObj(obj, legacyAnnDGDRConfigMapRef); ok && v != "" {
-		var ref ConfigMapKeySelector
-		if err := json.Unmarshal([]byte(v), &ref); err == nil {
-			restored.ProfilingConfig.ConfigMapRef = &ref
-		}
-	}
-	if v, ok := getAnnFromObj(obj, legacyAnnDGDROutputPVC); ok {
-		restored.ProfilingConfig.OutputPVC = v
-	}
-	if v, ok := getAnnFromObj(obj, legacyAnnDGDRDeployOverrides); ok && v != "" {
-		var overrides struct {
-			Name        string            `json:"name,omitempty"`
-			Namespace   string            `json:"namespace,omitempty"`
-			Labels      map[string]string `json:"labels,omitempty"`
-			Annotations map[string]string `json:"annotations,omitempty"`
-		}
-		if err := json.Unmarshal([]byte(v), &overrides); err == nil {
-			restored.DeploymentOverrides = &DeploymentOverridesSpec{
-				Name:        overrides.Name,
-				Namespace:   overrides.Namespace,
-				Labels:      overrides.Labels,
-				Annotations: overrides.Annotations,
-			}
-		}
-	}
-	return restored
-}
-
-func restoreDGDRLegacySpokeStatus(obj metav1.Object) *DynamoGraphDeploymentRequestStatus {
-	restored := &DynamoGraphDeploymentRequestStatus{}
-	if v, ok := getAnnFromObj(obj, legacyAnnDGDRStatusBackend); ok {
-		restored.Backend = v
-	}
-	if v, ok := getAnnFromObj(obj, legacyAnnDGDRProfilingResults); ok {
-		restored.ProfilingResults = v
-	}
-	if raw, ok := getAnnFromObj(obj, legacyAnnDGDRDeploymentStatus); ok && raw != "" {
-		deployment, state, ok := restoreDGDRLegacyDeploymentStatus(raw)
-		if ok {
-			restored.Deployment = &deployment
-			restored.State = state
-		}
-	}
-	return restored
-}
-
-func restoreDGDRLegacyDeploymentStatus(raw string) (DeploymentStatus, DGDRState, bool) {
-	var payload dgdrDeploymentStatusAnnotation
-	if err := json.Unmarshal([]byte(raw), &payload); err == nil && payload.Name != "" {
-		if payload.RequestState == "" || isValidDGDRRequestState(payload.RequestState) {
-			return payload.DeploymentStatus, payload.RequestState, true
-		}
-		return DeploymentStatus{}, "", false
-	}
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(raw), &obj); err == nil {
-		if _, hasRequestState := obj["requestState"]; hasRequestState {
-			return DeploymentStatus{}, "", false
-		}
-	}
-	var legacy DeploymentStatus
-	if err := json.Unmarshal([]byte(raw), &legacy); err != nil || legacy.Name == "" {
-		return DeploymentStatus{}, "", false
-	}
-	return legacy, "", true
-}
-
 // projectProfilingJobToProfilingConfig maps alpha-representable profiling pod
 // fields from v1beta1 Overrides.ProfilingJob back into v1alpha1 ProfilingConfig.
 func projectProfilingJobToProfilingConfig(src *v1beta1.DynamoGraphDeploymentRequestSpec, dst *DynamoGraphDeploymentRequestSpec) {
@@ -1199,21 +1083,6 @@ func dgdrAlphaRestoredStateMatchesLiveDGD(state DGDRState, deployment *Deploymen
 		return dgdName == ""
 	}
 	return deployment.Name == dgdName
-}
-
-func isValidDGDRRequestState(state DGDRState) bool {
-	switch state {
-	case DGDRStateInitializing,
-		DGDRStatePending,
-		DGDRStateProfiling,
-		DGDRStateDeploying,
-		DGDRStateReady,
-		DGDRStateDeploymentDeleted,
-		DGDRStateFailed:
-		return true
-	default:
-		return false
-	}
 }
 
 // dgdrStateToPhase maps v1alpha1 state strings to v1beta1 DGDRPhase.

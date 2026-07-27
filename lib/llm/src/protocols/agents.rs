@@ -96,14 +96,23 @@ pub(crate) fn agent_context_header_values(headers: &HeaderMap) -> Option<AgentCo
 }
 
 pub(crate) fn session_affinity_header_value(headers: &HeaderMap) -> Option<String> {
-    header_value(headers, HEADER_DYNAMO_SESSION_ID)
+    if let Some(session_id) = header_value(headers, HEADER_DYNAMO_SESSION_ID) {
+        return Some(session_id);
+    }
+    for mapping in AGENT_HEADER_MAPPINGS {
+        let Some(root_session_id) = header_value(headers, mapping.root_session_header) else {
+            continue;
+        };
+        let session_id = mapping
+            .child_session_header
+            .and_then(|child_session_header| header_value(headers, child_session_header))
+            .unwrap_or_else(|| root_session_id.clone());
+        return Some(session_id);
+    }
+    None
 }
 
 fn header_bool(headers: &HeaderMap, header_name: &str) -> Option<bool> {
     let value = header_value(headers, header_name)?;
-    match value.to_ascii_lowercase().as_str() {
-        "true" | "1" | "yes" => Some(true),
-        "false" | "0" | "no" => Some(false),
-        _ => None,
-    }
+    dynamo_runtime::config::parse_bool_opt(&value)
 }

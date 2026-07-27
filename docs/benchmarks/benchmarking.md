@@ -418,18 +418,15 @@ kubectl get endpoints <service-name> -n $NAMESPACE
 
 ---
 
-## Testing with DynoSim / Mocker
+## Test with DynoSim and Mocker
 
-For development and testing purposes, Dynamo provides DynoSim and the [mocker backend](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker) to simulate LLM inference without requiring actual GPU resources. This is useful for:
+Use [offline DynoSim replay](../dynosim/runs.md) to compare routing algorithms, scheduling
+policies, worker topologies, and Planner decisions under a deterministic virtual clock.
 
-- **Testing deployments** without expensive GPU infrastructure
-- **Developing and debugging** router, planner, or frontend logic
-- **CI/CD pipelines** that need to validate infrastructure without model execution
-- **Benchmarking framework validation** to ensure your setup works before using real backends
-
-Mocker is the live simulated engine in DynoSim: it mimics the API and behavior of real backends (SGLang, TensorRT-LLM, vLLM) but generates mock responses instead of running actual inference. Use [DynoSim Runs](../dynosim/runs.md) for one simulated workload/config trial and [DynoSim Sweeps](../dynosim/sweeps.md) when you want to search across many candidate configurations.
-
-See [Live Simulation with Mocker](../dynosim/mocker.md) for usage examples and configuration options.
+Use [live Mocker](../dynosim/mocker.md) with AIPerf to exercise the real frontend, router, discovery,
+transport, event, and metrics paths before allocating GPUs. These measurements include the
+distributed-system path plus configured simulated engine time; they do not measure GPU or
+inference-engine performance.
 
 ---
 

@@ -22,6 +22,7 @@ import logging
 from collections.abc import Sequence
 
 import uvloop
+from gpu_memory_service.common.vmm import init_vmm
 from gpu_memory_service.server.rpc import GMSRPCServer
 
 from .args import Config, parse_args
@@ -53,11 +54,13 @@ async def serve_configs(configs: Sequence[Config]) -> None:
         logging.getLogger().setLevel(logging.DEBUG)
         logging.getLogger("gpu_memory_service").setLevel(logging.DEBUG)
 
+    init_vmm(configs[0].device_type)
     servers = []
     for config in configs:
         logger.info("Starting GPU Memory Service Server for device %d", config.device)
         logger.info("GMS tag: %s", config.tag)
         logger.info("Socket path: %s", config.socket_path)
+        logger.info("VMM device type: %s", config.device_type.value)
         logger.info(
             "Allocation retry config: interval=%ss timeout=%s",
             config.alloc_retry_interval,

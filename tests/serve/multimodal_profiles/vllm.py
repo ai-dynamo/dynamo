@@ -15,9 +15,14 @@ from tests.utils.multimodal import (
     make_image_payload,
     make_image_payload_b64,
     make_image_payload_cached_tokens,
+    make_image_payload_uuid_passthrough,
     make_video_payload,
 )
-from tests.utils.payload_builder import chat_payload, chat_payload_default
+from tests.utils.payload_builder import (
+    chat_payload,
+    chat_payload_default,
+    image_token_metrics_payload,
+)
 
 # LLaVA 1.5 color-identification reference set: the model legitimately
 # emits these colors (though the order/subset varies across CUDA backends
@@ -44,8 +49,6 @@ _LLAVA_EXPECTED_COLORS = [
 VLLM_TOPOLOGY_SCRIPTS: dict[str, str] = {
     "agg": "agg_multimodal.sh",
     "agg_video": "agg_multimodal.sh",
-    "agg_unified": "agg_multimodal.sh",
-    "agg_unified_video": "agg_multimodal.sh",
     # Aggregated MM-aware router. Default uses the Rust frontend with the
     # `mm-routing` feature; the `_chat_processor` variant uses the vLLM
     # Python preprocessor (`--dyn-chat-processor=vllm`) to enable the
@@ -59,7 +62,6 @@ VLLM_TOPOLOGY_SCRIPTS: dict[str, str] = {
     "epd": "disagg_multimodal_epd.sh",
     "epd_video": "disagg_multimodal_epd.sh",
     "p_d": "disagg_multimodal_p_d.sh",
-    "p_d_unified": "disagg_multimodal_p_d.sh",
     # CustomEncoder: a custom in-process vision encoder on a text-only LM
     # (no separate encode worker, no NIXL). Lives in examples/custom_encoder,
     # not examples/backends/vllm — the TopologyConfig sets `directory` to match.
@@ -110,67 +112,6 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 profiled_vram_gib=8.2,
                 requested_vllm_kv_cache_bytes=1_719_075_000,
                 tests=[MmCase(payload=make_video_payload(["red", "static", "still"]))],
-            ),
-            "agg_unified": TopologyConfig(
-                marks=[pytest.mark.pre_merge],
-                timeout_s=400,
-                profiled_vram_gib=9.6,
-                requested_vllm_kv_cache_bytes=922_354_000,
-                tests=[
-                    MmCase(
-                        suffix="image",
-                        payload=make_image_payload(["green"]),
-                        extra_script_args=["--unified"],
-                    ),
-                    MmCase(
-                        suffix="embedding_cache",
-                        payload=make_image_payload(
-                            ["green"],
-                            repeat_count=2,
-                            expected_log=[
-                                r"DynamoMultimodalEmbeddingCacheConnector "
-                                r"initialized: capacity_gb=1\.00"
-                            ],
-                        ),
-                        extra_script_args=[
-                            "--unified",
-                            "--multimodal-embedding-cache-capacity-gb",
-                            "1",
-                        ],
-                    ),
-                    MmCase(
-                        suffix="shm_transfer",
-                        payload=make_image_payload(["green"]),
-                        extra_script_args=["--unified"],
-                        env={
-                            "DYN_CHAT_PROCESSOR": "vllm",
-                            "DYNAMO_MM_TRANSFER": "shm",
-                        },
-                    ),
-                    MmCase(
-                        suffix="nixl_transfer",
-                        payload=make_image_payload(["green"]),
-                        extra_script_args=["--unified"],
-                        marks=[pytest.mark.post_merge],
-                        env={
-                            "DYN_CHAT_PROCESSOR": "vllm",
-                            "DYNAMO_MM_TRANSFER": "nixl",
-                        },
-                    ),
-                ],
-            ),
-            "agg_unified_video": TopologyConfig(
-                marks=[pytest.mark.post_merge],
-                timeout_s=600,
-                delayed_start=60,
-                profiled_vram_gib=8.2,
-                requested_vllm_kv_cache_bytes=1_719_075_000,
-                tests=[
-                    MmCase(
-                        payload=make_video_payload(["red", "static", "still"]),
-                        extra_script_args=["--unified"],
-                    )
-                ],
             ),
             # Post_merge MM-routing coverage for the Qwen3-VL family — the
             # smaller Qwen3.5-0.8B (`agg_router` below) is the pre_merge gater.
@@ -259,19 +200,6 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 requested_vllm_kv_cache_bytes=1_714_881_000,
                 tests=[MmCase(payload=make_image_payload(["green"]))],
             ),
-            "p_d_unified": TopologyConfig(
-                marks=[pytest.mark.post_merge],
-                timeout_s=300,
-                single_gpu=True,
-                profiled_vram_gib=15.7,
-                requested_vllm_kv_cache_bytes=1_714_881_000,
-                tests=[
-                    MmCase(
-                        payload=make_image_payload(["green"]),
-                        extra_script_args=["--unified"],
-                    )
-                ],
-            ),
         },
     ),
     # Rust-frontend VLM coverage on `agg_router` (
@@ -345,7 +273,10 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 requested_vllm_kv_cache_bytes=920_126_000,  # 2x safety over min=460_062_720
                 tests=[
                     # HTTP-URL color test on hybrid Mamba/full-attention VL.
-                    MmCase(payload=make_image_payload(["green"])),
+                    MmCase(
+                        payload=make_image_payload(["green"]),
+                        followup_payloads=[image_token_metrics_payload()],
+                    ),
                     # Inline-base64 + --frontend-decoding (NIXL RDMA path).
                     # post_merge for the NIXL-stub reason — local pre-merge
                     # builds outside Docker ship a NIXL stub that errors on
@@ -415,7 +346,31 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 timeout_s=670,
                 profiled_vram_gib=12.0,
                 requested_vllm_kv_cache_bytes=922_354_000,
-                tests=[MmCase(payload=make_image_payload(["green"]))],
+                tests=[
+                    MmCase(payload=make_image_payload(["green"])),
+                    MmCase(
+                        suffix="uuid_passthrough",
+                        payload=make_image_payload_uuid_passthrough(
+                            ["green"], exercise_embedding_cache=True
+                        ),
+                        extra_script_args=[
+                            "--mm-processor-cache-gb",
+                            "4",
+                            "--multimodal-embedding-cache-capacity-gb",
+                            "1",
+                            # Gemma 4 budgets 280 embeddings per image; the
+                            # 512x512 fixture emits 256. A 280-slot GPU cache can
+                            # retain only one, so the second fill evicts the first.
+                            "--max-num-batched-tokens",
+                            "280",
+                            "--limit-mm-per-prompt",
+                            '{"image": 1, "video": 0, "audio": 0}',
+                        ],
+                        # The connector runs in vLLM's spawned EngineCore, so
+                        # its debug hit diagnostic uses vLLM's logger level.
+                        env={"VLLM_LOGGING_LEVEL": "DEBUG"},
+                    ),
+                ],
             ),
         },
         extra_vllm_args=["--dtype", "bfloat16"],

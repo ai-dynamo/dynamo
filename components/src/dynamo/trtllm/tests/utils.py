@@ -32,5 +32,6 @@ def create_mock_request_handler_config(
     config.runtime = None
     config.kv_block_size = 32
     config.shutdown_event = None
+    config.conversation_affinity = False
     config.encoder_cache_capacity_gb = encoder_cache_capacity_gb
     return config

@@ -79,9 +79,7 @@ const WRITE_VECTORED_CHUNKS: usize = 64;
 
 /// Check if latency tracing is enabled via environment
 fn latency_trace_enabled() -> bool {
-    std::env::var("DYN_TCP_LATENCY_TRACE")
-        .ok()
-        .is_some_and(|v| v == "1" || v == "true")
+    crate::config::env_is_truthy("DYN_TCP_LATENCY_TRACE")
 }
 
 /// TCP request plane configuration

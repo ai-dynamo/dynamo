@@ -288,7 +288,6 @@ def frontend_server(test_directory, runtime_services):
         str(FRONTEND_PORT),
         "--router-mode",
         "kv",
-        "--router-reset-states",
     ]
 
     # Environment
@@ -741,7 +740,6 @@ class TestConsolidatorRouterE2E:
             str(FRONTEND_PORT),
             "--router-mode",
             "kv",
-            "--router-reset-states",
         ]
 
         frontend_env = os.environ.copy()

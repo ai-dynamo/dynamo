@@ -47,8 +47,10 @@ indexer recovery, replica synchronization, and shutdown. It exposes the same
 worker, selection, bookkeeping, inspection, peer-membership, and recovery
 operations as the standalone HTTP service.
 
-`SelectionCore::new_local` creates an intentionally unsynchronized core for
-tests and local-only use. Production integrations should use
+`SelectionCore::try_new_local` creates an intentionally unsynchronized core for
+tests and local-only use while reporting invalid tracking-hash configuration.
+`SelectionCore::new_local` remains available for compatibility and panics on
+invalid configuration. Production integrations should use
 `SelectionServiceBuilder` so startup recovery, readiness, and background-task
 lifecycle remain consistent with the standalone service.
 
@@ -66,6 +68,12 @@ APIs. Those bindings should wrap `SelectionService` rather than construct
 | `--indexer-peers` | none | Comma-separated HTTP URLs used for startup KV recovery through `/dump`. |
 | `--replica-sync-port` | none | Local ZMQ PUB port for active-load lifecycle events. The selector binds `tcp://*:<port>` internally. |
 | `--replica-sync-peers` | none | Comma-separated ZMQ PUB endpoints for selector peers. Requires `--replica-sync-port`. |
+| `--selection-cache-ttl-secs` | `120` | Seconds an unclaimed pending selection lives before eviction. |
+| `--selection-cache-max-entries` | `4096` | Maximum resident pending selections, evicting oldest first. |
+| `--selection-cache-max-bytes` | `268435456` | Approximate byte budget across resident pending selections. |
+| `--router-tracking-hash` | environment/default | Override the tracking algorithm with `public-xxh3-v1` or experimental `keyed-xxh3-v1`. |
+| `--router-tracking-key-file` | environment/none | Override the path to the 32-byte provider key file. |
+| `--router-tracking-key-id` | environment/none | Override the provider-managed key epoch. |
 
 Router scheduling behavior continues to use the standard Dynamo router
 environment configuration.
@@ -174,16 +182,74 @@ snapshot.
 The previous public fields `cached_tokens` and `effective_overlap_blocks` have
 been removed. Their values remain internal scheduler inputs.
 
+When a request supplies `token_ids`, the selector derives tracking hashes with
+its configured tracking-hash context while retaining public hashes for indexer
+lookups. Requests that instead supply `block_hashes`, `sequence_hashes`, and
+`isl_tokens` remain trusted precomputed inputs. The service does not reject,
+rewrite, or label those identities in keyed mode. Configure every precomputed
+hash producer with the same algorithm, key, and key ID as the selector.
+
 ## Ray Select-Then-Reserve Flow
 
 Ray can keep model invocation separate from selector admission:
 
-1. Call `POST /select`.
+1. Call `POST /select` with a `selection_id`.
 2. Send the request to the returned `endpoint` and `dp_rank`.
-3. Call `POST /reservations` with a `selection_id` (globally unique; reuse the
-   one from `/select`), the selected worker identity, the same prompt
-   representation, and the returned `effective_prefill_tokens`.
+3. Call `POST /reservations` using the cached selection replay form, or the
+   explicit form with the full worker identity and prompt.
 4. Report prefill completion and request completion through the lifecycle API.
+
+### Cached selection replay form
+
+A `/select` that carries a `selection_id` caches its booking inputs (the
+chosen worker, the normalized prompt, `effective_prefill_tokens`,
+`expected_output_tokens`, and the prefill-tracking decision) on the selector
+that served it. A reservation that passes the same `selection_id`,
+`model_name`, and `routing_group` replays the cached selection, booked under
+that `selection_id`, without re-sending the prompt:
+
+```http
+POST /reservations
+Content-Type: application/json
+
+{
+  "selection_id": "select-123",
+  "model_name": "model",
+  "routing_group": "default"
+}
+```
+
+- **Id namespace**: `selection_id` is client-chosen and scoped per
+  `(model_name, routing_group)`; use a distinct id per in-flight select. A new
+  `select` reusing a pending id replaces it (latest wins), and an explicit
+  booking discards the cached selection for its `selection_id`.
+- **Required id**: `selection_id` is always required (the replay key and the
+  booking id); a request without it is rejected.
+- **Single-use**: The first successful booking consumes the entry; a repeat
+  replay returns `404` (`no pending selection`). Concurrent replays of the same
+  id collide at the scheduler, so only one books.
+- **Retryable on failure**: A booking that fails before landing (worker no
+  longer schedulable, service not ready) leaves the entry in place, so the same
+  call can be retried once the condition clears.
+- **Bounded window**: By default, entries expire after 120 seconds and each
+  selector retains at most 4096 pending selections within a 256 MiB budget,
+  evicting oldest first. All three limits are configurable.
+- **Replica-local**: The cache lives in the selector process that served the
+  `/select`. With multiple selector replicas, route the reservation to the
+  same replica or use the explicit form.
+- **Pure replay**: The booking uses exactly what `select` captured; other
+  request fields are ignored. Supplying `worker_id` switches to the explicit
+  form.
+
+On any miss (expired, already consumed, wrong model or routing group, or a
+different replica) the call returns `404`; fall back to the explicit form.
+
+### Explicit form
+
+The self-contained form carries the worker identity and prompt and needs no
+cached selection; it wins whenever `worker_id` is present. It discards the
+cached selection for its `selection_id`, so a later replay of the same id
+cannot book stale state:
 
 ```http
 POST /reservations
@@ -268,6 +334,10 @@ replica-sync peers. They do not alter the HTTP indexer-recovery peers.
   resynchronization for replica lifecycle events.
 - Unknown worker, model, routing-group, DP-rank, and block-size events are dropped.
   Register the same worker catalog on every selector before routing traffic.
+- Replica messages carry opaque tracking hashes and do not negotiate the
+  tracking algorithm or key epoch. Configure all hash producers consistently.
+  For key rotation, stop traffic, change the key and key ID together, restart
+  all producers, and recreate derived tracker state before resuming traffic.
 - The v1 replica envelope uses `routing_group` and is incompatible with binaries that
   send `tenant_id`. Drain active reservations and lifecycle traffic, upgrade all connected
   selectors together, re-register worker catalogs, and then resume traffic. Active advisory
@@ -278,9 +348,12 @@ replica-sync peers. They do not alter the HTTP indexer-recovery peers.
   not for complete processing. Early selections may temporarily miss recovered
   KV state.
 - `/select` followed by `/reservations` provides eventual, not atomic,
-  cross-replica admission. Use `/select_and_reserve` for atomic local booking.
-- Reservation IDs must be globally unique. Existing conflict and retry
-  semantics are unchanged; no idempotency ledger is added.
+  cross-replica admission, and the pending-selection cache behind the minimal
+  reservation form is local to the selector that served the `/select`. Use
+  `/select_and_reserve` for atomic local booking.
+- Reservation IDs must be globally unique. Duplicate bookings for the same ID
+  conflict (`409`); no idempotency ledger is added. An explicit booking that
+  carries a `selection_id` also discards that cached selection.
 
 ## Inspection APIs
 
