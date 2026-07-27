@@ -245,12 +245,30 @@ export const RELEASES: Release[] = [
     delta: "First publish of dynamo-tokens crate. Deprecated dynamo-graph Helm chart dropped from the publish stream.",
   },
   {
+    version: "v0.8.1.post3",
+    kind: "patch",
+    pins: { sglang: "0.5.6.post2", trtllm: "1.2.0rc6.post3", vllm: "0.12.0", nixlSglang: "0.8.0", nixlTrtllm: "0.8.0", nixlVllm: "0.8.0" },
+    note: "Post-train of v0.8.1: republished the TensorRT-LLM runtime image and PyPI wheels only, with TRT-LLM pinned to 1.2.0rc6.post3. Same CUDA support as v0.8.1.",
+  },
+  {
+    version: "v0.8.1.post2",
+    kind: "patch",
+    pins: { sglang: "0.5.6.post2", trtllm: "1.2.0rc6.post2", vllm: "0.12.0", nixlSglang: "0.8.0", nixlTrtllm: "0.8.0", nixlVllm: "0.8.0" },
+    note: "Post-train of v0.8.1: republished the TensorRT-LLM runtime image and PyPI wheels only, with TRT-LLM pinned to 1.2.0rc6.post2. Same CUDA support as v0.8.1.",
+  },
+  {
+    version: "v0.8.1.post1",
+    kind: "patch",
+    pins: { sglang: "0.5.6.post2", trtllm: "1.2.0rc6.post1", vllm: "0.12.0", nixlSglang: "0.8.0", nixlTrtllm: "0.8.0", nixlVllm: "0.8.0" },
+    note: "Post-train of v0.8.1: republished the TensorRT-LLM runtime image and PyPI wheels only, with TRT-LLM pinned to 1.2.0rc6.post1. Same CUDA support as v0.8.1.",
+  },
+  {
     version: "v0.8.1",
     date: "Jan 23, 2026",
     kind: "patch",
     github: `${GH}v0.8.1`,
     pins: { sglang: "0.5.6.post2", trtllm: "1.2.0rc6.post1", vllm: "0.12.0", nixlSglang: "0.8.0", nixlTrtllm: "0.8.0", nixlVllm: "0.8.0" },
-    delta: "Post trains .post1/.post2/.post3 republished the TRT-LLM runtime image and PyPI wheels only.",
+    delta: "Post trains .post1/.post2/.post3 republished the TRT-LLM runtime image and PyPI wheels only; each carried a distinct TRT-LLM pin (see the v0.8.1.post1/.post2/.post3 rows).",
   },
   {
     version: "v0.8.0",
@@ -268,11 +286,23 @@ export const RELEASES: Release[] = [
     pins: { sglang: "0.5.4.post3", trtllm: "1.2.0rc3", vllm: "0.11.0", nixlSglang: "0.8.0", nixlTrtllm: "0.8.0", nixlVllm: "0.8.0" },
   },
   {
+    version: "v0.7.0.post1",
+    kind: "patch",
+    pins: { sglang: "0.5.4.post3", trtllm: "1.2.0rc3", vllm: "0.11.0", nixlSglang: "0.8.0", nixlTrtllm: "0.8.0", nixlVllm: "0.8.0" },
+    note: "Post-train of v0.7.0: TensorRT-LLM pin advanced to 1.2.0rc3 (v0.7.0 shipped 1.2.0rc2). Same CUDA support as v0.7.0.",
+  },
+  {
     version: "v0.7.0",
     date: "Nov 26, 2025",
     kind: "stable",
     github: `${GH}v0.7.0`,
     pins: { sglang: "0.5.4.post3", trtllm: "1.2.0rc2", vllm: "0.11.0", nixlSglang: "0.8.0", nixlTrtllm: "0.8.0", nixlVllm: "0.8.0" },
+  },
+  {
+    version: "v0.6.1.post1",
+    kind: "patch",
+    pins: { sglang: "0.5.3.post2", trtllm: "1.1.0rc5", vllm: "0.11.0", nixlSglang: "0.6.0", nixlTrtllm: "0.6.0", nixlVllm: "0.6.0" },
+    note: "Post-train of v0.6.1: same backend pins as v0.6.1. Same CUDA support as v0.6.1.",
   },
   {
     version: "v0.6.1",
