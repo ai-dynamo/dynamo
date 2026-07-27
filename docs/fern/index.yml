@@ -410,6 +410,9 @@ navigation:
           - page: Overview
             path: recipes/README.mdx
             slug: browse
+          - page: Kimi-K3
+            path: recipes/kimi-k3.mdx
+            slug: kimi-k3
           - page: GLM-5.2
             path: recipes/glm-5-2.mdx
             slug: glm-5-2
