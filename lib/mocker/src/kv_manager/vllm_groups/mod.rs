@@ -95,6 +95,24 @@ impl GroupManager {
         self.as_full_attention().is_some()
     }
 
+    /// Release everything this group holds for `request_id`.
+    ///
+    /// `blocks` is the attention table's release order, leaf first, so that the
+    /// pool ages a leaf ahead of the parent it descends from. A group whose own
+    /// table is not parallel to the attention table ignores the list and drops
+    /// the request's whole state, which the coordinator's `deref_for_request`
+    /// guarantees is what a release means.
+    pub(crate) fn release(
+        &mut self,
+        pool: &mut VllmBlockPool,
+        request_id: Uuid,
+        blocks: &[UniqueBlock],
+    ) {
+        match self {
+            Self::FullAttention(group) => group.deref(pool, request_id, blocks),
+        }
+    }
+
     /// Cached-prefix keys this group may pin for `alloc`.
     pub(crate) fn prefix_keys(&self, alloc: &GroupAllocation) -> Vec<GroupedHash> {
         match self {

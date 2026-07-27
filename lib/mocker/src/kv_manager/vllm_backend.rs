@@ -224,9 +224,23 @@ impl VllmKvManager {
         self.process_use(&alloc, None)
     }
 
+    /// Release a request's blocks from every group.
+    ///
+    /// A release always covers the request's whole footprint: each `Deref` signal
+    /// derives its block list from the sequence's allocated tokens. Groups whose
+    /// table is not parallel to the attention table lean on that, dropping all of
+    /// a request's state rather than trimming it. Trimming a live request is a
+    /// real vLLM operation — `remove_skipped_blocks` — that this mocker does not
+    /// model yet, so a partial release stops here rather than guessing.
     pub(super) fn deref_for_request(&mut self, request_id: Uuid, blocks: &[UniqueBlock]) {
-        let (pool, attention) = self.attention_mut();
-        attention.deref(pool, request_id, blocks);
+        let Self { pool, groups, .. } = self;
+        for group in groups.iter_mut() {
+            group.release(pool, request_id, blocks);
+        }
+        assert!(
+            !self.attention().holds_request(request_id),
+            "releasing part of a request's table is not modeled yet"
+        );
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -781,6 +795,20 @@ mod tests {
             .pool
             .prefix_hit(GroupedHash::new(manager.attention_id(), hash))
             .is_some()
+    }
+
+    /// Groups other than attention drop a request's whole state on release, so a
+    /// release that leaves the request holding blocks has to stop rather than
+    /// half-apply. Trimming a live request is vLLM's `remove_skipped_blocks`,
+    /// which the mocker does not model.
+    #[test]
+    #[should_panic(expected = "not modeled")]
+    fn releasing_part_of_a_request_table_is_rejected() {
+        let mut manager = attention_manager(4);
+        let owner = Uuid::from_u128(1);
+        ready(use_full(&mut manager, owner, &[7, 8], 0));
+
+        manager.deref_for_request(owner, &[UniqueBlock::FullBlock(8)]);
     }
 
     #[test]
