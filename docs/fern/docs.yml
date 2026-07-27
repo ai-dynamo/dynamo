@@ -833,6 +833,4 @@ js:
     strategy: beforeInteractive
   - path: ./custom.js
     strategy: beforeInteractive
-css:
-  - ./main.css
 
