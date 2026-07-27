@@ -302,7 +302,11 @@ ENV DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA}
 
 # Reset the upstream "vllm serve" entrypoint so the derived runtime behaves
 # like other Dynamo images and can execute arbitrary commands directly.
+{% if device == "xpu" %}
+ENTRYPOINT ["/bin/bash", "-lc", "source /opt/intel/oneapi/setvars.sh --force >/dev/null 2>&1 || true; exec \"$0\" \"$@\"", "--"]
+{% else %}
 ENTRYPOINT []
+{% endif %}
 
 
 {# Compliance is skipped for dev/local-dev: those images are not shipped (release
