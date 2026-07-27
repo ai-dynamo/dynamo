@@ -8,3 +8,10 @@ resources:
   - ../../base
 components:
   - ../../../../../../../kustomize/components/disagg-workers/rdma-defaults
+patches:
+  - target:
+      group: nvidia.com
+      version: v1alpha1
+      kind: DynamoGraphDeployment
+      name: qwen3-235b-a22b-disagg
+    path: patch-dgd.yaml

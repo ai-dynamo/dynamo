@@ -6,7 +6,7 @@ metadata:
   name: disagg-workers
 spec:
   services:
-    PrefillWorker:
+    PrefillWorker: &nscaleWorker
       extraPodSpec:
         tolerations: &gpuTolerations
           - key: nvidia.com/gpu
@@ -16,8 +16,9 @@ spec:
           env: &nscaleEnvironment
             - name: NIXL_LOG_LEVEL
               value: INFO
-    DecodeWorker:
-      extraPodSpec:
-        tolerations: *gpuTolerations
-        mainContainer:
-          env: *nscaleEnvironment
+      resources:
+        limits: &nscaleRdmaResources
+          custom:
+            rdma/ib: "1"
+        requests: *nscaleRdmaResources
+    DecodeWorker: *nscaleWorker

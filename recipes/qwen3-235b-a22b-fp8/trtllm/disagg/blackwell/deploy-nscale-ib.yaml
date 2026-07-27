@@ -131,26 +131,20 @@ spec:
             privileged: true
             runAsUser: 0
           volumeMounts:
-          - mountPath: /engine_configs
-            name: decode-config
-          - mountPath: /mnt/model-cache
-            name: model-cache
           - mountPath: /dev/infiniband
             name: ib
           - mountPath: /dev/shm
             name: shm
+          - mountPath: /engine_configs
+            name: decode-config
+          - mountPath: /mnt/model-cache
+            name: model-cache
           workingDir: /workspace/components/backends/trtllm
         tolerations:
         - effect: NoSchedule
           key: nvidia.com/gpu
           operator: Exists
         volumes:
-        - configMap:
-            name: decode-config
-          name: decode-config
-        - name: model-cache
-          persistentVolumeClaim:
-            claimName: model-cache
         - hostPath:
             path: /dev/infiniband
           name: ib
@@ -158,6 +152,12 @@ spec:
             medium: Memory
             sizeLimit: 64Gi
           name: shm
+        - configMap:
+            name: decode-config
+          name: decode-config
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
       replicas: 1
       resources:
         limits:
@@ -252,26 +252,20 @@ spec:
             privileged: true
             runAsUser: 0
           volumeMounts:
-          - mountPath: /engine_configs
-            name: prefill-config
-          - mountPath: /mnt/model-cache
-            name: model-cache
           - mountPath: /dev/infiniband
             name: ib
           - mountPath: /dev/shm
             name: shm
+          - mountPath: /engine_configs
+            name: prefill-config
+          - mountPath: /mnt/model-cache
+            name: model-cache
           workingDir: /workspace/components/backends/trtllm
         tolerations:
         - effect: NoSchedule
           key: nvidia.com/gpu
           operator: Exists
         volumes:
-        - configMap:
-            name: prefill-config
-          name: prefill-config
-        - name: model-cache
-          persistentVolumeClaim:
-            claimName: model-cache
         - hostPath:
             path: /dev/infiniband
           name: ib
@@ -279,6 +273,12 @@ spec:
             medium: Memory
             sizeLimit: 64Gi
           name: shm
+        - configMap:
+            name: prefill-config
+          name: prefill-config
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
       replicas: 6
       resources:
         limits:

@@ -140,14 +140,14 @@ spec:
             privileged: true
             runAsUser: 0
           volumeMounts:
-          - mountPath: /engine_configs
-            name: decode-config
-          - mountPath: /mnt/model-cache
-            name: model-cache
           - mountPath: /usr/local/gib
             name: gib
           - mountPath: /usr/local/nvidia
             name: nvidia
+          - mountPath: /engine_configs
+            name: decode-config
+          - mountPath: /mnt/model-cache
+            name: model-cache
           workingDir: /workspace/components/backends/trtllm
         tolerations:
         - effect: NoSchedule
@@ -158,18 +158,18 @@ spec:
           operator: Equal
           value: arm64
         volumes:
-        - configMap:
-            name: decode-config
-          name: decode-config
-        - name: model-cache
-          persistentVolumeClaim:
-            claimName: model-cache
         - hostPath:
             path: /home/kubernetes/bin/gib
           name: gib
         - hostPath:
             path: /home/kubernetes/bin/nvidia
           name: nvidia
+        - configMap:
+            name: decode-config
+          name: decode-config
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
       replicas: 1
       resources:
         limits:
@@ -286,14 +286,14 @@ spec:
             privileged: true
             runAsUser: 0
           volumeMounts:
-          - mountPath: /engine_configs
-            name: prefill-config
-          - mountPath: /mnt/model-cache
-            name: model-cache
           - mountPath: /usr/local/gib
             name: gib
           - mountPath: /usr/local/nvidia
             name: nvidia
+          - mountPath: /engine_configs
+            name: prefill-config
+          - mountPath: /mnt/model-cache
+            name: model-cache
           workingDir: /workspace/components/backends/trtllm
         tolerations:
         - effect: NoSchedule
@@ -304,18 +304,18 @@ spec:
           operator: Equal
           value: arm64
         volumes:
-        - configMap:
-            name: prefill-config
-          name: prefill-config
-        - name: model-cache
-          persistentVolumeClaim:
-            claimName: model-cache
         - hostPath:
             path: /home/kubernetes/bin/gib
           name: gib
         - hostPath:
             path: /home/kubernetes/bin/nvidia
           name: nvidia
+        - configMap:
+            name: prefill-config
+          name: prefill-config
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
       replicas: 6
       resources:
         limits:

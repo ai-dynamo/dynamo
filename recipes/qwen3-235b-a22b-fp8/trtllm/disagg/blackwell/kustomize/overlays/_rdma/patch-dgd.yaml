@@ -8,17 +8,12 @@ spec:
   services:
     PrefillWorker:
       resources:
-        limits:
-          custom:
-            vpc.amazonaws.com/efa: "8"
         requests:
-          custom:
-            vpc.amazonaws.com/efa: "8"
+          gpu: "2"
+          custom: &ephemeralStorage
+            ephemeral-storage: 2Gi
     DecodeWorker:
       resources:
-        limits:
-          custom:
-            vpc.amazonaws.com/efa: "16"
         requests:
-          custom:
-            vpc.amazonaws.com/efa: "16"
+          gpu: "4"
+          custom: *ephemeralStorage
