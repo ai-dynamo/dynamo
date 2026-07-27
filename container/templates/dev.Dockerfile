@@ -133,6 +133,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     (command -v awk >/dev/null 2>&1 && echo "awk available: $(command -v awk)" || echo "awk not available")
 
 # Add external repos (NVIDIA devtools, GitHub CLI) and install in one pass.
+# Download Nsight directly so transient CDN errors use curl's retry policy.
 # Cache apt downloads; sharing=locked avoids apt/dpkg races with concurrent builds.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     wget -qO - "https://developer.download.nvidia.com/devtools/repos/ubuntu2404/${TARGETARCH}/nvidia.pub" \
@@ -143,8 +144,13 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg && \
     echo "deb [arch=${TARGETARCH} signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
         | tee /etc/apt/sources.list.d/github-cli.list > /dev/null && \
+    NSIGHT_DEB="/tmp/nsight-systems-2025.5.1.deb" && \
+    curl --retry 5 --retry-delay 5 --retry-all-errors -fsSL \
+        "https://developer.download.nvidia.com/devtools/repos/ubuntu2404/${TARGETARCH}/nsight-systems-2025.5.1_2025.5.1.121-1_${TARGETARCH}.deb" \
+        -o "${NSIGHT_DEB}" && \
     apt-get update && \
-    apt-get install -y --no-install-recommends nsight-systems-2025.5.1 gh && \
+    apt-get install -y --no-install-recommends "${NSIGHT_DEB}" gh && \
+    rm -f "${NSIGHT_DEB}" && \
     rm -rf /var/lib/apt/lists/*
 
 # ======================================================================
