@@ -417,6 +417,7 @@ models:
             replay_port: None,
             total_kv_blocks: None,
             max_num_batched_tokens: Some(8192),
+            max_inflight_requests: 1024,
         }
     }
 

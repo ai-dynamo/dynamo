@@ -24,6 +24,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
+use tokio::sync::Semaphore;
+
 use dynamo_llm::protocols::common::extensions::{
     AgentHints, HEADER_REQUEST_PRIORITY, HEADER_REQUEST_STRICT_PRIORITY, resolve_request_priority,
 };
@@ -45,11 +47,22 @@ pub struct EppRouter {
     _adapter: TopologyAdapter,
     reflector_ready: Arc<AtomicBool>,
     /// Peer-discovery readiness (replicated mode only): `None` when replication
-    /// is off, else a flag that latches `true` after the initial peer-set sync.
-    /// ANDed with `reflector_ready` to form the health signal, so a replicated
-    /// pod is not marked SERVING with a local-only load view.
+    /// is off, else a flag that latches `true` after the initial peer-set sync
+    /// (EndpointSlice LIST + reconcile). ANDed with `reflector_ready` to form the
+    /// health signal, so a replica does not serve before its peers are discovered
+    /// and its replica-sync sockets are connected. Note: this proves only that
+    /// future load deltas will flow — it does NOT bootstrap the load already in
+    /// flight on peers; that converges from live deltas as pre-existing requests
+    /// drain (same warm-up shape as the KV index).
     peer_ready: Option<Arc<AtomicBool>>,
     model_name: String,
+    /// Bounds total concurrent in-flight `pick()`s. HTTP/2 stream multiplexing
+    /// means the TCP-connection cap (`MAX_CONCURRENT_CONNECTIONS`) does NOT bound
+    /// requests, so without this a burst could fan out unbounded tokenizer/render
+    /// calls and buffer unbounded request bodies. A permit is taken per `pick()`
+    /// and released (RAII) when it returns or is dropped/cancelled; when none are
+    /// available the request is shed with `PickError::Overloaded` (not queued).
+    inflight: Arc<Semaphore>,
 }
 
 impl EppRouter {
@@ -82,6 +95,7 @@ impl EppRouter {
             reflector_ready,
             peer_ready,
             model_name: cfg.model_name,
+            inflight: Arc::new(Semaphore::new(cfg.max_inflight_requests)),
         })
     }
 
@@ -200,6 +214,19 @@ impl EndpointPicker for EppRouter {
         if !self.reflector.has_ready_workers() {
             return Err(PickError::NoEndpoints);
         }
+
+        // Bound total in-flight picks. This caps the tokenizer/render fan-out,
+        // `select_and_reserve`, and the buffered request bodies held for the
+        // duration of the pick — the connection cap does NOT, because HTTP/2 stream
+        // multiplexing lets one connection carry unbounded concurrent requests.
+        // `try_acquire_owned` sheds (never blocks/awaits) so we don't grow an
+        // unbounded wait queue; the permit is held until `pick()` returns or the
+        // future is dropped/cancelled, releasing it (RAII).
+        let _inflight_permit = self
+            .inflight
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| PickError::Overloaded)?;
 
         // Ordinary path: pass `None` so the SelectionService schedules over its
         // own catalog ("selector owns eligibility") — no O(worker-count) id set is
@@ -409,22 +436,26 @@ impl TokenizeError {
                 PickError::TokenizationFailed(format!("invalid request body: {e}"))
             }
             TokenizeError::Render(e) => {
-                tracing::warn!(request_id, error = %e, "vLLM render failed");
+                tracing::warn!(request_id, error = %e, "Tokenization Render failed");
                 match e {
                     VllmRenderError::Unavailable { .. } => PickError::TokenizerUnavailable,
                     VllmRenderError::Timeout { .. } => PickError::TokenizerTimeout,
-                    // A 4xx from the renderer means the client's payload was
-                    // rejected (client error → 400); a 5xx is the renderer's
-                    // fault (→ 502), as is a response that breaks its contract.
-                    VllmRenderError::UpstreamStatus { status, .. } if status.is_client_error() => {
-                        PickError::TokenizationFailed(
+                    // Only the renderer's payload-validation statuses (400/422)
+                    // mean the client's request was bad → surface as a client 400.
+                    // Auth/misconfig (401/403/404), overload (429/503), any other
+                    // 4xx, and 5xx are the renderer's or our own fault — never blame
+                    // the client's payload for those (`is_client_error()` would).
+                    VllmRenderError::UpstreamStatus { status, .. } => match status.as_u16() {
+                        400 | 422 => PickError::TokenizationFailed(
                             "request rejected by tokenization service".to_string(),
-                        )
-                    }
+                        ),
+                        // Renderer overloaded / temporarily unavailable → retryable.
+                        429 | 503 => PickError::TokenizerUnavailable,
+                        _ => PickError::TokenizerUpstreamError,
+                    },
                     // A too-large or contract-breaking success is the renderer's
-                    // fault (→ 502), same as a 5xx.
-                    VllmRenderError::UpstreamStatus { .. }
-                    | VllmRenderError::InvalidResponse { .. }
+                    // fault (→ 502).
+                    VllmRenderError::InvalidResponse { .. }
                     | VllmRenderError::ResponseTooLarge { .. } => PickError::TokenizerUpstreamError,
                 }
             }
@@ -435,6 +466,55 @@ impl TokenizeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn render_upstream_status_maps_to_correct_pick_error() {
+        use crate::vllm_render_client::VllmRenderError;
+        use reqwest::StatusCode;
+
+        let map = |status: StatusCode| {
+            TokenizeError::Render(VllmRenderError::UpstreamStatus {
+                status,
+                body: String::new(),
+            })
+            .into_pick_error("req-1")
+        };
+
+        // Renderer validated the client's payload and rejected it → client 400.
+        assert!(matches!(
+            map(StatusCode::BAD_REQUEST),
+            PickError::TokenizationFailed(_)
+        ));
+        assert!(matches!(
+            map(StatusCode::UNPROCESSABLE_ENTITY),
+            PickError::TokenizationFailed(_)
+        ));
+
+        // Auth / misconfiguration is NOT an invalid client payload → upstream 502,
+        // not a misleading 400.
+        for status in [
+            StatusCode::UNAUTHORIZED,
+            StatusCode::FORBIDDEN,
+            StatusCode::NOT_FOUND,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::BAD_GATEWAY,
+        ] {
+            assert!(
+                matches!(map(status), PickError::TokenizerUpstreamError),
+                "{status} should map to an upstream error, not a client 400"
+            );
+        }
+
+        // Overloaded / temporarily unavailable → retryable 503.
+        assert!(matches!(
+            map(StatusCode::TOO_MANY_REQUESTS),
+            PickError::TokenizerUnavailable
+        ));
+        assert!(matches!(
+            map(StatusCode::SERVICE_UNAVAILABLE),
+            PickError::TokenizerUnavailable
+        ));
+    }
 
     #[test]
     fn compute_ready_gates_on_pod_and_peer() {

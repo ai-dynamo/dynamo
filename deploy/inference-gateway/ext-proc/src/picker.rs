@@ -125,4 +125,9 @@ pub enum PickError {
     /// The upstream tokenization service returned a 5xx or invalid response → 502.
     #[error("tokenization service error")]
     TokenizerUpstreamError,
+    /// The in-flight-request limit is saturated: the request is shed (not queued)
+    /// as retryable backpressure → 503. A load-shed guardrail, since HTTP/2 stream
+    /// multiplexing means the connection cap does not bound concurrent requests.
+    #[error("endpoint picker overloaded")]
+    Overloaded,
 }

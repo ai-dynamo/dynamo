@@ -543,7 +543,17 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                                     .booking_id
                                     .clone()
                                     .unwrap_or_else(|| ctx.request_id.clone());
-                                picker.on_prefill_complete(&booking_id).await;
+                                // Detach: prefill-completion is idempotent,
+                                // best-effort load bookkeeping. Awaiting it inline
+                                // would gate first-token forwarding on the router's
+                                // admission actor (an unbounded, untimed send+ack
+                                // when queueing is enabled) — a TTFT stall. Spawn it
+                                // so the token forwards immediately; the callback
+                                // logs its own errors.
+                                let picker = picker.clone();
+                                tokio::spawn(async move {
+                                    picker.on_prefill_complete(&booking_id).await;
+                                });
                             }
 
                             // TODO(epp-output-tracking): Parse generated-token progress and
@@ -802,6 +812,12 @@ impl ExtProcError {
             },
             PickError::TokenizerUpstreamError => Self {
                 status_code: StatusCode::BadGateway,
+                message: e.to_string(),
+            },
+            // In-flight limit saturated: shed as retryable backpressure. The
+            // variant message ("endpoint picker overloaded") is client-safe.
+            PickError::Overloaded => Self {
+                status_code: StatusCode::ServiceUnavailable,
                 message: e.to_string(),
             },
         }
@@ -1104,6 +1120,15 @@ mod tests {
         for tracker in [Tracker::agg(), Tracker::disagg()] {
             let tracker = Arc::new(tracker);
             run(&mut connect(tracker.clone()).await).await;
+            // `on_prefill_complete` is dispatched off-path (a detached task) so it
+            // can't stall first-token forwarding, so wait for it to land.
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while tracker.prefill_complete.load(Ordering::SeqCst) == 0 {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("on_prefill_complete should fire");
             assert_eq!(tracker.prefill_complete.load(Ordering::SeqCst), 1);
         }
     }
@@ -1216,5 +1241,14 @@ mod tests {
         assert_eq!(prefilled.len(), 2);
         let unique_prefilled: HashSet<&String> = prefilled.iter().collect();
         assert_eq!(unique_prefilled, unique);
+    }
+
+    /// A shed `PickError::Overloaded` maps to a retryable 503 (not a 4xx), so
+    /// clients back off and retry rather than treating the load-shed as their
+    /// own error.
+    #[test]
+    fn overloaded_pick_error_maps_to_503() {
+        let err = ExtProcError::from_pick_error(PickError::Overloaded);
+        assert_eq!(err.status_code, StatusCode::ServiceUnavailable);
     }
 }
