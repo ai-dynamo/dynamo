@@ -40,6 +40,7 @@ def _make_prefill_handler():
         dyn_tool_call_parser=None,
         dyn_reasoning_parser=None,
         engine_args=SimpleNamespace(block_size=16, max_loras=4, model="/models/base"),
+        use_kv_events=True,
     )
     handler.engine_client = SimpleNamespace(
         add_lora=AsyncMock(),
@@ -99,6 +100,7 @@ async def test_prefill_load_records_and_publishes_without_eager_engine_add(
     assert str(kwargs["model_type"]) == str(ModelType.Prefill)
     assert kwargs["worker_type"] == WorkerType.Prefill
     assert kwargs["needs"] == [[WorkerType.Decode]]
+    assert kwargs["runtime_config"].kv_event_publishing_enabled is True
     # The adapter card must carry the engine-actual main-attention block size,
     # not engine_args.block_size (16) — see #11866.
     assert kwargs["kv_cache_block_size"] == 1056

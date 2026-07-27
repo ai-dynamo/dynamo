@@ -43,18 +43,11 @@ pub(super) fn get_new_batch_prefill(
             remaining_output as f64 * new_token_ratio
         })
         .sum();
-    let reserved_page_overhead = waiting
-        .iter()
-        .map(SglangRequest::extra_reserved_tokens)
-        .sum::<usize>()
-        + running
-            .iter()
-            .map(SglangRequest::extra_reserved_tokens)
-            .sum::<usize>();
-
-    let mut rem_total_tokens = (cache.available_tokens() + cache.evictable_size)
-        .saturating_sub(reserved_page_overhead) as f64
-        - reserved_decode_output;
+    // PagePool already removes the full physical footprint of every active
+    // partial page from available capacity, so page slack must not be charged
+    // a second time here.
+    let mut rem_total_tokens =
+        (cache.available_tokens() + cache.evictable_size) as f64 - reserved_decode_output;
     let mut rem_input_tokens = config.max_prefill_tokens as f64;
     let mut rem_chunk_tokens = config.chunked_prefill_size as f64;
 
@@ -107,10 +100,13 @@ pub(super) fn get_new_batch_prefill(
         let old_allocated_tokens = req.allocated_tokens;
         let mut lease = std::mem::take(&mut req.kv_lease);
         let alloc_tokens = req.sequence_prefix(chunk_end);
-        let actual_new_tokens = alloc_tokens.len().saturating_sub(req.materialized_tokens);
-        let available = kv_manager.cache().token_pool.available();
-        if available < actual_new_tokens {
-            kv_manager.evict(actual_new_tokens - available);
+        if req.materialized_tokens > 0 {
+            let target_allocated_tokens = ceil_to_block(chunk_end, config.block_size);
+            let required_capacity = target_allocated_tokens.saturating_sub(old_allocated_tokens);
+            let available = kv_manager.cache().available_tokens();
+            if available < required_capacity {
+                kv_manager.evict(required_capacity - available);
+            }
         }
 
         let prefix_len = if req.materialized_tokens > 0 {

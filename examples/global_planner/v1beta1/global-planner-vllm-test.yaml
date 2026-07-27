@@ -220,7 +220,8 @@ spec:
           - ${MODEL_NAME}
           - --tensor-parallel-size
           - "1"
-          - --is-prefill-worker
+          - --disaggregation-mode
+          - prefill
           command:
           - python3
           - -m
@@ -301,7 +302,8 @@ spec:
           - ${MODEL_NAME}
           - --tensor-parallel-size
           - "2"
-          - --is-prefill-worker
+          - --disaggregation-mode
+          - prefill
           command:
           - python3
           - -m

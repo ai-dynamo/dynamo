@@ -171,6 +171,7 @@ class DynamoSglangPublisher:
 
         self._running = True
         self.kv_publishers: List[KvEventPublisher] = []
+        self.kv_publisher: Optional[KvEventPublisher] = None
         self.fpm_relays: list = []
 
         # ZMQ setup for receiving scheduler metrics (leader node only)
@@ -292,10 +293,10 @@ class DynamoSglangPublisher:
         - NATS handles cross-node event distribution
 
         Returns:
-            List of KvEventPublisher instances if kv_events_config is set,
+            List of KvEventPublisher instances if KV event publishing is enabled,
             empty list otherwise.
         """
-        if self.server_args.kv_events_config:
+        if self.dynamo_args.use_kv_events:
             kv_events = json.loads(self.server_args.kv_events_config)
             base_ep = kv_events.get("endpoint")
             if not base_ep:
@@ -535,7 +536,7 @@ async def setup_sgl_metrics(
 
     publisher.init_engine_metrics_publish()
     node_rank = getattr(config.server_args, "node_rank", 0) or 0
-    if node_rank <= 0:
+    if node_rank <= 0 and config.dynamo_args.use_kv_events:
         publisher.init_kv_event_publish()
     publisher.init_fpm_relay()
 
@@ -564,7 +565,7 @@ async def handle_non_leader_node(
     )
 
     try:
-        if publisher.server_args.kv_events_config:
+        if publisher.dynamo_args.use_kv_events:
             kv_worker_id = await _resolve_multinode_leader_worker_id(
                 publisher.generate_endpoint,
                 publisher.server_args,

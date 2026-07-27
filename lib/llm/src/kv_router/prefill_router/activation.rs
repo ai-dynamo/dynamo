@@ -160,11 +160,12 @@ impl PrefillRouter {
 
             // Create KV chooser using the endpoint (this is a prefill router)
             let kv_chooser = model_manager
-                .kv_chooser_for(
+                .kv_chooser_for_with_worker_role(
                     &endpoint,
                     kv_cache_block_size,
                     kv_router_config,
                     prefill_load_estimator,
+                    Some(crate::worker_type::WorkerType::Prefill),
                     WORKER_TYPE_PREFILL,
                     Some(self.model_name.clone()),
                     is_eagle,

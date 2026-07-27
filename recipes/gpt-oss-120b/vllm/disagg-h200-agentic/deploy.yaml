@@ -1,78 +1,153 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# gpt-oss-120b — DISAGGREGATED (single-node in-pod), H200, agentic — Dynamo 1.3.0 / vLLM 0.23.
-# 4 prefill + 4 decode co-located in ONE pod (hostIPC), NIXL KV cuda_ipc over NVLink, HMA-on, EAGLE3 spec on both workers.
-# 4P4D is the best usable H200 split on the agentic trace (2P6D prefill-starves: TTFT 3-37s) — 2026-07-09 sweep, see perf/README.md.
-# Single-node only: the multi-pod DGD disagg + LMCache/MultiConnector break the NIXL handshake — see README.
-apiVersion: v1
-kind: Service
+# gpt-oss-120b -- DISAGGREGATED (DGD, single-node colocated), H200, agentic -- Dynamo 1.3.0 / vLLM 0.23.
+# 4 prefill + 4 decode as an operator-managed DynamoGraphDeployment. The operator injects kubernetes-native
+# discovery (durable watch + resync) + NATS, so NO discovery env is hardcoded -- deploys on any
+# operator cluster and has none of the raw-Pod file-KV timing fragility.
+# podAffinity packs all 8 TP1 workers onto ONE node so NIXL P->D KV transfer stays on the NVLink
+# fast path; EAGLE3 spec on both P and D. 4P4D is the best H200 split on the agentic trace -- see perf/README.md.
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
 metadata:
   name: turbo-gptoss-120b-disagg-h200-agentic
   labels: {app.kubernetes.io/name: turbo-gptoss-120b-disagg-h200-agentic, app.kubernetes.io/part-of: nim-turbo-dynamo}
 spec:
-  selector: {app: turbo-gptoss-120b-disagg-h200-agentic}
-  ports: [{name: http, port: 8000, targetPort: 8000}]
----
-apiVersion: v1
-kind: Pod
-metadata:
-  name: turbo-gptoss-120b-disagg-h200-agentic
-  # nvidia.com/* labels match the perf Job's podAffinity (same labels the operator puts on DGD frontends),
-  # so one perf.yaml co-locates with both agg and disagg targets. This pod does run dynamo.frontend.
-  labels: {app: turbo-gptoss-120b-disagg-h200-agentic, app.kubernetes.io/name: turbo-gptoss-120b-disagg-h200-agentic, app.kubernetes.io/part-of: nim-turbo-dynamo, nvidia.com/dynamo-component-type: frontend, nvidia.com/dynamo-graph-deployment-name: turbo-gptoss-120b-disagg-h200-agentic}
-spec:
-  restartPolicy: Never
-  imagePullSecrets: [{name: dynamo-ngc-token}]
-  hostIPC: true
-  affinity:
-    nodeAffinity:
-      requiredDuringSchedulingIgnoredDuringExecution:
-        nodeSelectorTerms: [{matchExpressions: [{key: nvidia.com/gpu.product, operator: In, values: [NVIDIA-H200]}]}]
-  tolerations:
-    - {key: nvidia.com/gpu, operator: Equal, value: "true", effect: NoSchedule}
-  containers:
-    - name: main
-      image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
-      securityContext: {runAsUser: 0, capabilities: {add: ["SYS_PTRACE", "IPC_LOCK"]}}
-      resources: {requests: {nvidia.com/gpu: "8", memory: "1200Gi"}, limits: {nvidia.com/gpu: "8"}}
-      env:
-        - {name: HF_HOME, value: /model-cache}
-        - {name: TORCH_CUDA_ARCH_LIST, value: "9.0"}
-        - {name: VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE, value: "1"}
-        - {name: VLLM_WORKER_MULTIPROC_METHOD, value: spawn}
-        - {name: TRITON_CACHE_DIR, value: /model-cache/.cache/triton}
-        - {name: VLLM_CACHE_ROOT, value: /model-cache/.cache/vllm}
-        - {name: HF_MODULES_CACHE, value: /model-cache/.cache/hfmods}
-        - {name: KV_JSON, value: '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'}
-        - {name: SPEC_JSON, value: '{"method":"eagle3","model":"nvidia/gpt-oss-120b-Eagle3-v3","num_speculative_tokens":3}'}
-        - {name: ETCD_ENDPOINTS, value: "dynamo-platform-etcd.dynamo-system.svc.cluster.local:2379"}
-        - {name: NATS_SERVER, value: "nats://dynamo-platform-nats.dynamo-system.svc.cluster.local:4222"}
-        - {name: DYN_DISCOVERY_BACKEND, value: etcd}
-        - {name: DYN_NAMESPACE, value: gptoss-disagg-h200}
-        - {name: NCCL_IB_DISABLE, value: "1"}
-        - {name: NCCL_NET_PLUGIN, value: "none"}
-        - {name: NCCL_P2P_LEVEL, value: "NVL"}
-      command: ["bash","-lc"]
-      args:
-        - |
-          set -x
-          M="--model openai/gpt-oss-120b --served-model-name openai/gpt-oss-120b --trust-remote-code --quantization mxfp4 --moe-backend flashinfer_cutlass --kv-cache-dtype fp8 --max-model-len 131072 --gpu-memory-utilization 0.9 --block-size 64 --tensor-parallel-size 1 --enable-chunked-prefill --enable-prefix-caching --async-scheduling --no-disable-hybrid-kv-cache-manager --enable-flashinfer-autotune --max-num-batched-tokens 32768 --dyn-reasoning-parser gpt_oss --dyn-tool-call-parser harmony"
-          cvd(){ local o=$1 r=""; for g in 0 1 2 3 4 5 6 7; do [ "$g" != "$o" ] && r="$r,$g"; done; echo "${o}${r}"; }
-          DYN_HTTP_PORT=8000 DYN_SYSTEM_PORT=9090 python3 -m dynamo.frontend --router-mode kv --router-kv-events --kv-cache-block-size 64 --http-host 0.0.0.0 --http-port 8000 >/tmp/fe.log 2>&1 &
-          s=9091; c=5601
-          for g in 0 1 2 3; do       # 4 prefill (EAGLE3 spec on BOTH so draft-layer KV layout matches for NIXL)
-            CUDA_VISIBLE_DEVICES=$(cvd $g) DYN_COMPONENT=prefill DYN_SYSTEM_PORT=$s VLLM_NIXL_SIDE_CHANNEL_PORT=$c \
-              python3 -m dynamo.vllm $M --kv-transfer-config "$KV_JSON" --disaggregation-mode prefill --speculative-config "$SPEC_JSON" >/tmp/pf$g.log 2>&1 &
-            s=$((s+2)); c=$((c+2))
-          done
-          for g in 4 5 6 7; do       # 4 decode + EAGLE3 spec
-            CUDA_VISIBLE_DEVICES=$(cvd $g) DYN_COMPONENT=decode DYN_SYSTEM_PORT=$s VLLM_NIXL_SIDE_CHANNEL_PORT=$c \
-              python3 -m dynamo.vllm $M --kv-transfer-config "$KV_JSON" --disaggregation-mode decode --speculative-config "$SPEC_JSON" >/tmp/dc$g.log 2>&1 &
-            s=$((s+2)); c=$((c+2))
-          done
-          wait
-      readinessProbe: {httpGet: {path: /v1/models, port: 8000}, initialDelaySeconds: 120, periodSeconds: 30, failureThreshold: 40}
-      volumeMounts: [{mountPath: /model-cache, name: model-cache}, {mountPath: /dev/shm, name: dshm}]
-  volumes:
-    - {name: model-cache, persistentVolumeClaim: {claimName: model-cache}}
-    - {name: dshm, emptyDir: {medium: Memory, sizeLimit: 64Gi}}
+  backendFramework: vllm
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+              command: [python3]
+              args: [-m, dynamo.frontend, --router-mode, kv, --router-kv-events, --kv-cache-block-size, "64", --trust-remote-code]
+              resources: {requests: {cpu: "8", memory: "16Gi"}}
+    - name: prefill
+      type: prefill
+      replicas: 4
+      podTemplate:
+        spec:
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms: [{matchExpressions: [{key: nvidia.com/gpu.product, operator: In, values: [NVIDIA-H200]}]}]
+            podAffinity:     # colocate all P+D workers on ONE node so NIXL P->D stays on the NVLink fast path
+              preferredDuringSchedulingIgnoredDuringExecution:
+                - weight: 100
+                  podAffinityTerm:
+                    labelSelector:
+                      matchExpressions:
+                        - {key: nvidia.com/dynamo-graph-deployment-name, operator: In, values: [turbo-gptoss-120b-disagg-h200-agentic]}
+                    topologyKey: kubernetes.io/hostname
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+              command: [python3, -m, dynamo.vllm]
+              args:
+                - --model=openai/gpt-oss-120b
+                - --served-model-name=openai/gpt-oss-120b
+                - --trust-remote-code
+                - --quantization=mxfp4
+                - --moe-backend=flashinfer_cutlass
+                - --kv-cache-dtype=fp8
+                - --max-model-len=131072
+                - --gpu-memory-utilization=0.9
+                - --block-size=64
+                - --tensor-parallel-size=1          # TP1 worker (1 GPU); scale P:D via replicas
+                - --max-num-batched-tokens=32768
+                - --enable-chunked-prefill
+                - --enable-prefix-caching
+                - --async-scheduling
+                - --no-disable-hybrid-kv-cache-manager
+                - --enable-flashinfer-autotune
+                - '--speculative-config={"method":"eagle3","model":"nvidia/gpt-oss-120b-Eagle3-v3","num_speculative_tokens":3}'   # EAGLE3 on BOTH P+D so draft-layer KV layout matches for NIXL
+                - '--kv-transfer-config={"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"cuda"}'
+                - --disaggregation-mode=prefill
+                - --dyn-reasoning-parser
+                - gpt_oss
+                - --dyn-tool-call-parser        # harmony tool-call parser: required for tool_calls to populate
+                - harmony
+              env:
+                - {name: HF_HOME, value: /model-cache}
+                - {name: TORCH_CUDA_ARCH_LIST, value: "9.0"}
+                - {name: VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE, value: "1"}
+                - {name: TRITON_CACHE_DIR, value: /tmp/.triton-cache}
+                - {name: VLLM_CACHE_ROOT, value: /tmp/vllm-cache}
+                - {name: HF_MODULES_CACHE, value: /tmp/hf_modules}
+              envFrom: [{secretRef: {name: hf-token-secret}}]
+              resources: {requests: {nvidia.com/gpu: "1", memory: "200Gi"}, limits: {nvidia.com/gpu: "1"}}
+              securityContext: {runAsUser: 0, capabilities: {add: ["SYS_PTRACE", "IPC_LOCK"]}}
+              startupProbe: {failureThreshold: 60, httpGet: {path: /live, port: 9090}, periodSeconds: 60, timeoutSeconds: 20}
+              volumeMounts: [{mountPath: /model-cache, name: model-cache}, {mountPath: /dev/shm, name: dshm}]
+              workingDir: /workspace/
+          volumes:
+            - {name: model-cache, persistentVolumeClaim: {claimName: model-cache}}
+            - {name: dshm, emptyDir: {medium: Memory, sizeLimit: 64Gi}}
+          tolerations:
+            - {key: nvidia.com/gpu, operator: Equal, value: "true", effect: NoSchedule}
+    - name: decode
+      type: decode
+      replicas: 4
+      podTemplate:
+        spec:
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms: [{matchExpressions: [{key: nvidia.com/gpu.product, operator: In, values: [NVIDIA-H200]}]}]
+            podAffinity:     # colocate all P+D workers on ONE node so NIXL P->D stays on the NVLink fast path
+              preferredDuringSchedulingIgnoredDuringExecution:
+                - weight: 100
+                  podAffinityTerm:
+                    labelSelector:
+                      matchExpressions:
+                        - {key: nvidia.com/dynamo-graph-deployment-name, operator: In, values: [turbo-gptoss-120b-disagg-h200-agentic]}
+                    topologyKey: kubernetes.io/hostname
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+              command: [python3, -m, dynamo.vllm]
+              args:
+                - --model=openai/gpt-oss-120b
+                - --served-model-name=openai/gpt-oss-120b
+                - --trust-remote-code
+                - --quantization=mxfp4
+                - --moe-backend=flashinfer_cutlass
+                - --kv-cache-dtype=fp8
+                - --max-model-len=131072
+                - --gpu-memory-utilization=0.9
+                - --block-size=64
+                - --tensor-parallel-size=1          # TP1 worker (1 GPU); scale P:D via replicas
+                - --max-num-batched-tokens=32768
+                - --enable-chunked-prefill
+                - --enable-prefix-caching
+                - --async-scheduling
+                - --no-disable-hybrid-kv-cache-manager
+                - --enable-flashinfer-autotune
+                - '--speculative-config={"method":"eagle3","model":"nvidia/gpt-oss-120b-Eagle3-v3","num_speculative_tokens":3}'   # EAGLE3 on BOTH P+D so draft-layer KV layout matches for NIXL
+                - '--kv-transfer-config={"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"cuda"}'
+                - --disaggregation-mode=decode
+                - --dyn-reasoning-parser
+                - gpt_oss
+                - --dyn-tool-call-parser        # harmony tool-call parser: required for tool_calls to populate
+                - harmony
+              env:
+                - {name: HF_HOME, value: /model-cache}
+                - {name: TORCH_CUDA_ARCH_LIST, value: "9.0"}
+                - {name: VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE, value: "1"}
+                - {name: TRITON_CACHE_DIR, value: /tmp/.triton-cache}
+                - {name: VLLM_CACHE_ROOT, value: /tmp/vllm-cache}
+                - {name: HF_MODULES_CACHE, value: /tmp/hf_modules}
+              envFrom: [{secretRef: {name: hf-token-secret}}]
+              resources: {requests: {nvidia.com/gpu: "1", memory: "200Gi"}, limits: {nvidia.com/gpu: "1"}}
+              securityContext: {runAsUser: 0, capabilities: {add: ["SYS_PTRACE", "IPC_LOCK"]}}
+              startupProbe: {failureThreshold: 60, httpGet: {path: /live, port: 9090}, periodSeconds: 60, timeoutSeconds: 20}
+              volumeMounts: [{mountPath: /model-cache, name: model-cache}, {mountPath: /dev/shm, name: dshm}]
+              workingDir: /workspace/
+          volumes:
+            - {name: model-cache, persistentVolumeClaim: {claimName: model-cache}}
+            - {name: dshm, emptyDir: {medium: Memory, sizeLimit: 64Gi}}
+          tolerations:
+            - {key: nvidia.com/gpu, operator: Equal, value: "true", effect: NoSchedule}

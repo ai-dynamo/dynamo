@@ -379,6 +379,32 @@ jobs:
       image_tag_suffix: '-nightly'
     secrets: inherit
 
+  vllm-h100-test:
+    name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
+    needs: [vllm-build, resolve-source-sha, compute-release-mode]
+    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      dd_env: nightly
+      dd_flaky_retry_enabled: 'false'
+      test_suite_name: vllm
+      test_type: H100 Test
+      # 2x 80 GiB H100 lane; runs vllm single- and dual-GPU tests, incl. h100-only cases.
+      amd_runner: aws-dev-02-tester-amd-gpu-v2
+      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
+      cuda_version: '["13.0"]'
+      platform: '["amd64"]'
+      enable_coverage: true
+      run_sanity_check: false
+      gpu_test_markers: vllm and (gpu_1 or gpu_2)
+      gpu_test_timeout_minutes: 240
+      # 80 GiB H100 admits more of the profiled pool per slot than the 24 GiB lanes.
+      run_gpu_parallel_tests: true
+      gpu_parallel_max_vram_gib: '80'
+      source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      image_tag_suffix: '-nightly'
+    secrets: inherit
+
   sglang-test:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
     needs: [sglang-build, resolve-source-sha, compute-release-mode]
@@ -440,15 +466,18 @@ jobs:
       dd_flaky_retry_enabled: 'false'
       test_suite_name: sglang
       test_type: H100 Test
-      # 80 GiB H100 (aws-dev-02): sglang tests that exceed the 24 GiB gpu_1 lane.
+      # 2x 80 GiB H100 lane; runs sglang single- and dual-GPU tests, incl. h100-only cases.
       amd_runner: aws-dev-02-tester-amd-gpu-v2
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]'
       enable_coverage: true
       run_sanity_check: false
-      gpu_test_markers: sglang and h100 and gpu_1
-      gpu_test_timeout_minutes: 60
+      gpu_test_markers: sglang and (gpu_1 or gpu_2)
+      gpu_test_timeout_minutes: 240
+      # 80 GiB H100 admits more of the profiled pool per slot than the 24 GiB lanes.
+      run_gpu_parallel_tests: true
+      gpu_parallel_max_vram_gib: '80'
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
       image_tag_suffix: '-nightly'
     secrets: inherit
@@ -499,6 +528,32 @@ jobs:
       run_sanity_check: false
       gpu_test_markers: trtllm and (gpu_2 or gpu_4)
       gpu_test_timeout_minutes: 45
+      source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      image_tag_suffix: '-nightly'
+    secrets: inherit
+
+  trtllm-h100-test:
+    name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
+    needs: [trtllm-build, resolve-source-sha, compute-release-mode]
+    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      dd_env: nightly
+      dd_flaky_retry_enabled: 'false'
+      test_suite_name: trtllm
+      test_type: H100 Test
+      # 2x 80 GiB H100 lane; runs trtllm single- and dual-GPU tests, incl. h100-only cases.
+      amd_runner: aws-dev-02-tester-amd-gpu-v2
+      target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
+      cuda_version: '["13.1"]'
+      platform: '["amd64"]'
+      enable_coverage: true
+      run_sanity_check: false
+      gpu_test_markers: trtllm and (gpu_1 or gpu_2)
+      gpu_test_timeout_minutes: 240
+      # 80 GiB H100 admits more of the profiled pool per slot than the 24 GiB lanes.
+      run_gpu_parallel_tests: true
+      gpu_parallel_max_vram_gib: '80'
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
       image_tag_suffix: '-nightly'
     secrets: inherit
@@ -658,7 +713,7 @@ jobs:
   coverage-report:
     name: Generate Coverage Report
     runs-on: ubuntu-latest
-    needs: [vllm-test, vllm-multi-gpu-test, sglang-test, sglang-multi-gpu-test, sglang-h100-test, trtllm-test, trtllm-multi-gpu-test, rust-tests]
+    needs: [vllm-test, vllm-multi-gpu-test, vllm-h100-test, sglang-test, sglang-multi-gpu-test, sglang-h100-test, trtllm-test, trtllm-multi-gpu-test, trtllm-h100-test, rust-tests]
     if: always()
     permissions:
       contents: read
@@ -884,7 +939,7 @@ jobs:
   ############################## SLACK NOTIFICATION ##############################
   notify-slack:
     if: always()
-    needs: [vllm-test, vllm-multi-gpu-test, sglang-test, sglang-multi-gpu-test, sglang-h100-test, trtllm-test, trtllm-multi-gpu-test, rust-tests]
+    needs: [vllm-test, vllm-multi-gpu-test, vllm-h100-test, sglang-test, sglang-multi-gpu-test, sglang-h100-test, trtllm-test, trtllm-multi-gpu-test, trtllm-h100-test, rust-tests]
     permissions:
       contents: read
       actions: read   # grant the reusable notifier read access to list this run's jobs

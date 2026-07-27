@@ -1,0 +1,37 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-vllm-mocker"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Mocker-backed implementation of vLLM's native Generate gRPC API"
+readme = "README.md"
+
+[[bin]]
+name = "dynamo-vllm-mocker-server"
+path = "src/main.rs"
+
+[dependencies]
+dynamo-mocker = { workspace = true }
+dynamo-vllm-sidecar = { path = "../../../sidecar/vllm" }
+
+anyhow = { workspace = true }
+async-stream = { workspace = true }
+blake3 = { workspace = true }
+clap = { version = "4", features = ["derive", "env"] }
+futures = { workspace = true }
+prost-types = { workspace = true }
+tokio = { workspace = true }
+tonic = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+dynamo-backend-common = { workspace = true, features = ["testing"] }
+tokio-stream = { workspace = true, features = ["net"] }

@@ -1009,7 +1009,7 @@ pub fn chat_completion_to_response(
             && !reasoning_text.is_empty()
         {
             output.push(OutputItem::Reasoning(ReasoningItem {
-                id: format!("rs_{}", Uuid::new_v4().simple()),
+                id: Some(format!("rs_{}", Uuid::new_v4().simple())),
                 summary: vec![SummaryPart::SummaryText(SummaryTextContent {
                     text: reasoning_text,
                 })],
@@ -2609,7 +2609,7 @@ thinking
         let schema = ResponseFormatJsonSchema {
             name: "city".into(),
             description: None,
-            schema: Some(serde_json::json!({"type": "object"})),
+            schema: serde_json::json!({"type": "object"}),
             strict: Some(true),
         };
         let mut req = make_response_with_input("structured");

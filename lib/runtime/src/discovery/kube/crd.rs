@@ -176,12 +176,19 @@ mod tests {
                 endpoint: endpoint.clone(),
             },
             topic: "kv-events".to_string(),
-            publisher_id: 205,
+            publisher_id: i64::MAX as u64,
             metadata: serde_json::json!({"worker_id": 7, "dp_rank": 0}),
         };
         metadata.register_event_source(source.clone()).unwrap();
 
         let cr = build_cr("test-pod", "test-pod", "pod-uid", &metadata).unwrap();
+        let publisher_id = cr.spec.data["event_sources"]
+            .as_object()
+            .and_then(|sources| sources.values().next())
+            .and_then(|source| source.get("publisher_id"))
+            .expect("serialized event source publisher ID");
+        assert!(publisher_id.is_i64());
+
         let round_trip: DiscoveryMetadata = serde_json::from_value(cr.spec.data).unwrap();
 
         assert_eq!(
