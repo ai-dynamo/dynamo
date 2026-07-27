@@ -3544,17 +3544,26 @@ async fn responses(
                         )) => parts.is_empty(),
                     }
             });
-            let reasoning_tokens = if counter.total() > 0 {
-                counter.total()
-            } else if reasoning_only {
-                response
-                    .inner
-                    .usage
-                    .as_ref()
-                    .map_or(0, |usage| usage.completion_tokens)
-            } else {
-                0
-            };
+            let backend_reasoning_tokens = response
+                .inner
+                .usage
+                .as_ref()
+                .and_then(|usage| usage.completion_tokens_details.as_ref())
+                .and_then(|details| details.reasoning_tokens)
+                .filter(|count| *count > 0);
+            let reasoning_tokens = backend_reasoning_tokens.unwrap_or_else(|| {
+                if counter.total() > 0 {
+                    counter.total()
+                } else if reasoning_only {
+                    response
+                        .inner
+                        .usage
+                        .as_ref()
+                        .map_or(0, |usage| usage.completion_tokens)
+                } else {
+                    0
+                }
+            });
             if reasoning_tokens > 0
                 && let Some(usage) = response.inner.usage.as_mut()
             {
