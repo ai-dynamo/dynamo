@@ -2059,14 +2059,16 @@ mod tests {
     fn test_multi_worker_trace_kv_router_debug_snapshot_tracks_queue_and_cached_dispatch() {
         let policy = RouterQueuePolicy::Fcfs;
         let args = queueing_router_args(policy);
+        let mut router_config = queueing_router_config(policy);
+        router_config.router_queue_threshold = Some(0.0);
         let mut runtime = AggRuntime::new(
             &args,
-            Some(queueing_router_config(policy)),
+            Some(router_config),
             None,
             normalize_trace_requests(
                 vec![
                     DirectRequest {
-                        tokens: vec![11; 64],
+                        tokens: vec![11; 128],
                         max_output_tokens: 8,
                         output_token_ids: None,
                         uuid: Some(Uuid::from_u128(11)),
@@ -2075,7 +2077,7 @@ mod tests {
                         ..Default::default()
                     },
                     DirectRequest {
-                        tokens: vec![22; 64],
+                        tokens: vec![22; 192],
                         max_output_tokens: 8,
                         output_token_ids: None,
                         uuid: Some(Uuid::from_u128(22)),
@@ -2089,7 +2091,7 @@ mod tests {
                         output_token_ids: None,
                         uuid: Some(Uuid::from_u128(33)),
                         dp_rank: 0,
-                        arrival_timestamp_ms: Some(0.1),
+                        arrival_timestamp_ms: Some(15.0),
                         ..Default::default()
                     },
                 ],
@@ -2117,13 +2119,19 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 1]
         );
-        assert!(initial_router.indexer.total_cached_blocks > 0);
+        assert_eq!(
+            initial_router.indexer.total_cached_blocks, 0,
+            "native G1 publishes blocks only after their tokens are computed"
+        );
 
-        assert!(runtime.advance_one_timestamp().unwrap());
+        while runtime.now_ms < 15.0 {
+            assert!(runtime.advance_one_timestamp().unwrap());
+        }
         let queued = runtime.debug_snapshot();
         let queued_router = queued.router.as_ref().unwrap();
 
-        assert_eq!(queued.now_ms, 0.1);
+        assert_eq!(queued.now_ms, 15.0);
+        assert!(queued_router.indexer.total_cached_blocks > 0);
         assert_eq!(queued.router_pending_request_ids, vec![Uuid::from_u128(33)]);
         assert_eq!(queued_router.pending.len(), 1);
         assert_eq!(queued_router.pending[0].uuid, Uuid::from_u128(33));

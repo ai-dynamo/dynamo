@@ -16,6 +16,9 @@ use std::sync::Arc;
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
 use dynamo_kv_router::PrefillLoadEstimator;
 
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub use artifacts::native_g1_parent_chain_artifact;
 pub use artifacts::{
     ReplayTimedKvEvent, ReplayTimedOutputSignal, ReplayTimedRequest, ReplayWorkerArtifacts,
 };

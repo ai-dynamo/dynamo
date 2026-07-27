@@ -257,9 +257,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--g1-backend",
         choices=["kvbm", "native"],
-        default="kvbm",
-        help="G1 manager for the shared vLLM/TRT-LLM scheduler (default: "
-        "kvbm). Use 'native' for the self-contained physical block-pool model.",
+        default=None,
+        help="G1 manager for the shared vLLM/TRT-LLM scheduler. When unset, "
+        "native is used unless KVBM G2/G3/G4 offloading selects KVBM. An "
+        "explicit native selection is also overridden when offloading requires "
+        "KVBM. Ignored for SGLang.",
     )
     parser.add_argument(
         "--enable-chunked-prefill",
@@ -605,7 +607,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=non_negative_int,
         default=None,
         help="Enable KVBM mock offload with this many per-worker G2 host blocks. "
-        "Set to 0 to disable.",
+        "This automatically selects the KVBM G1 backend. Set to 0 to disable.",
     )
     parser.add_argument(
         "--num-g3-blocks",

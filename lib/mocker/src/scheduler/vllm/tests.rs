@@ -1373,6 +1373,10 @@ mod core_behavior {
     #[test]
     fn test_running_request_catches_up_decode_tail_before_promote() {
         let args = MockEngineArgs::builder()
+            // This test exercises the compatibility `G1Manager::process`
+            // entrypoint, which is intentionally KVBM-only. Production
+            // scheduler paths use the owner-aware entrypoint for native G1.
+            .g1_backend(G1Backend::Kvbm)
             .block_size(4)
             .num_gpu_blocks(8)
             .max_num_batched_tokens(Some(8))
