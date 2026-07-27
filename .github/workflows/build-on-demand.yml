@@ -136,7 +136,7 @@ jobs:
     runs-on: prod-builder-v3
     timeout-minutes: 60
     env:
-      PRODUCT_SHA: 5059457bbadb75ebfd0dc240b25d94c3480c9b83
+      PRODUCT_SHA: 52459a6938e069c04ec91928fad5ea2a4cc55211
       ACR_IMAGE_BASE: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo
     steps:
       - name: Checkout build ref
