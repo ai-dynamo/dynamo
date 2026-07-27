@@ -2042,9 +2042,9 @@ fn annotated_to_sse_event<T: Serialize>(
         if msg == "error" {
             // Classify exactly like the unary path (check_for_backend_error)
             // so backend 4xx errors keep their status across the SSE
-            // boundary. axum::Error only carries a string, so the
-            // classification travels JSON-encoded (PropagatedStreamError)
-            // for the disconnect monitor to recover. Scoped to 4xx
+            // boundary. The classification travels as a typed
+            // PropagatedStreamError in axum::Error's source chain for the
+            // disconnect monitor to downcast back out. Scoped to 4xx
             // (non-499): 5xx and unclassified faults keep the legacy plain
             // message and get sanitized downstream regardless.
             if let Some((message, status)) =
@@ -2056,9 +2056,7 @@ fn annotated_to_sse_event<T: Serialize>(
                     message,
                     code: status.as_u16(),
                 };
-                if let Ok(encoded) = serde_json::to_string(&propagated) {
-                    return Err(axum::Error::new(encoded));
-                }
+                return Err(axum::Error::new(propagated));
             }
             let error_message = if let Some(ref dynamo_err) = annotated.error
                 && !dynamo_err.message().is_empty()

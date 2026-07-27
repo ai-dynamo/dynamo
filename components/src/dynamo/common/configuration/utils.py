@@ -89,6 +89,15 @@ def nullable_int(value: str) -> Optional[int]:
     return int(value)
 
 
+def resolve_tri_state_bool(value: Optional[str]) -> Optional[bool]:
+    """Map a tri-state ``"on"``/``"off"``/unset CLI string to ``Optional[bool]``.
+
+    Any value other than ``"on"`` or ``"off"`` (including ``None``) maps to
+    ``None``, preserving "unset" as distinct from an explicit choice.
+    """
+    return {"on": True, "off": False}.get(value or "")
+
+
 def add_argument(
     parser: argparse.ArgumentParser | argparse._ArgumentGroup,
     *,

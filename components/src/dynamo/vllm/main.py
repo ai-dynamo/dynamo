@@ -24,6 +24,7 @@ from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 
 from dynamo.common.config_dump import dump_config
+from dynamo.common.configuration.utils import resolve_tri_state_bool
 from dynamo.common.model_fetch import fetch_model
 from dynamo.common.snapshot.restore_context import (
     parse_snapshot_restore_runtime_config,
@@ -703,8 +704,8 @@ async def register_vllm_model(
         # Deployment default for the chat-template `thinking` flag; the
         # frontend preprocessor seeds it when the request is silent. CLI
         # surface is tri-state ("on"/"off"/unset) -> Option<bool>.
-        runtime_config.default_thinking = {"on": True, "off": False}.get(
-            getattr(config, "dyn_default_thinking", None) or ""
+        runtime_config.default_thinking = resolve_tri_state_bool(
+            getattr(config, "dyn_default_thinking", None)
         )
     runtime_config.exclude_tools_when_tool_choice_none = (
         config.exclude_tools_when_tool_choice_none

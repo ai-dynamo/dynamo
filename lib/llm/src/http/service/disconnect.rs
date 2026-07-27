@@ -242,19 +242,20 @@ fn monitor_for_disconnects_with_timeout(
                             // would mis-attribute the fault as a client disconnect).
                             stream_handle.disarm();
                             // The SSE converter propagates classified backend errors
-                            // as JSON (PropagatedStreamError). Backend 4xx (non-499)
-                            // is the protocol contract — forward message + code
-                            // as-is, matching the unary check_for_backend_error
-                            // path. Anything else stays sanitized below.
-                            let client_error = serde_json::from_str::<PropagatedStreamError>(
-                                &err.to_string(),
-                            )
-                            .ok()
-                            .filter(|p| {
-                                axum::http::StatusCode::from_u16(p.code).is_ok_and(|s| {
-                                    s.is_client_error() && s.as_u16() != 499
-                                })
-                            });
+                            // as a typed PropagatedStreamError in axum::Error's source
+                            // chain. Downcast by identity (not by re-parsing Display
+                            // text) so an unrelated error can't be mistaken for a
+                            // classified one. Backend 4xx (non-499) is the protocol
+                            // contract — forward message + code as-is, matching the
+                            // unary check_for_backend_error path. Anything else stays
+                            // sanitized below.
+                            let client_error = std::error::Error::source(&err)
+                                .and_then(|src| src.downcast_ref::<PropagatedStreamError>())
+                                .filter(|p| {
+                                    axum::http::StatusCode::from_u16(p.code).is_ok_and(|s| {
+                                        s.is_client_error() && s.as_u16() != 499
+                                    })
+                                });
                             if let Some(client_error) = client_error {
                                 inflight_guard.mark_error(ErrorType::Validation);
                                 tracing::debug!(
@@ -686,11 +687,22 @@ mod tests {
         data_chunks: usize,
         err_msg: &'static str,
     ) -> impl futures::Stream<Item = Result<axum::response::sse::Event, axum::Error>> {
+        simulate_mid_stream_typed_error(data_chunks, err_msg)
+    }
+
+    /// Like [`simulate_mid_stream_error`], but boxes a typed error (e.g.
+    /// `PropagatedStreamError`) instead of a plain string, mirroring how the
+    /// SSE converter classifies backend errors via `axum::Error`'s source chain.
+    fn simulate_mid_stream_typed_error(
+        data_chunks: usize,
+        err: impl Into<axum::BoxError>,
+    ) -> impl futures::Stream<Item = Result<axum::response::sse::Event, axum::Error>> {
+        let err = axum::Error::new(err);
         async_stream::try_stream! {
             for i in 0..data_chunks {
                 yield axum::response::sse::Event::default().data(format!("chunk-{i}"));
             }
-            Err(axum::Error::new(err_msg))?;
+            Err(err)?;
         }
     }
 
@@ -803,13 +815,11 @@ mod tests {
         let (_metrics, guard, ctx, handle) = setup_test("client-err-model", "req-4xx");
         let backend_message =
             "ValueError: Received multimodal data but multimodal processing is not enabled.";
-        let propagated = serde_json::to_string(&PropagatedStreamError {
+        let propagated = PropagatedStreamError {
             message: backend_message.to_string(),
             code: 400,
-        })
-        .unwrap();
-        let propagated: &'static str = Box::leak(propagated.into_boxed_str());
-        let stream = simulate_mid_stream_error(2, propagated);
+        };
+        let stream = simulate_mid_stream_typed_error(2, propagated);
         let monitored = monitor_for_disconnects_with_timeout(stream, ctx, guard, handle, None);
         let body = collect_sse_body(monitored).await;
 
@@ -852,13 +862,11 @@ mod tests {
     async fn test_mid_stream_propagated_server_error_stays_sanitized() {
         let (_metrics, guard, ctx, handle) = setup_test("server-err-model", "req-5xx");
         let backend_message = "engine core died: cuda OOM in layer 17";
-        let propagated = serde_json::to_string(&PropagatedStreamError {
+        let propagated = PropagatedStreamError {
             message: backend_message.to_string(),
             code: 500,
-        })
-        .unwrap();
-        let propagated: &'static str = Box::leak(propagated.into_boxed_str());
-        let stream = simulate_mid_stream_error(2, propagated);
+        };
+        let stream = simulate_mid_stream_typed_error(2, propagated);
         let monitored = monitor_for_disconnects_with_timeout(stream, ctx, guard, handle, None);
         let body = collect_sse_body(monitored).await;
         assert_fault_contract("propagated_5xx", &body, backend_message);

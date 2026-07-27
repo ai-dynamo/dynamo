@@ -26,6 +26,7 @@ from enum import Enum
 from typing import Optional
 
 from dynamo._core import backend as _backend
+from dynamo.common.configuration.utils import resolve_tri_state_bool
 from dynamo.common.constants import DisaggregationMode
 from dynamo.llm import MediaDecoder, MediaFetcher, ModelInput
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -189,8 +190,8 @@ class WorkerConfig:
             ),
             # CLI surface is a tri-state string ("on"/"off"/unset); map to
             # Optional[bool] here so the Rust side sees Option<bool>.
-            "default_thinking": {"on": True, "off": False}.get(
-                getattr(runtime_cfg, "dyn_default_thinking", None) or ""
+            "default_thinking": resolve_tri_state_bool(
+                getattr(runtime_cfg, "dyn_default_thinking", None)
             ),
             "enable_local_indexer": getattr(runtime_cfg, "enable_local_indexer", True),
             "enable_kv_routing": getattr(runtime_cfg, "enable_kv_routing", True),

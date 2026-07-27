@@ -32,6 +32,22 @@ pub struct HttpError {
     pub message: String,
 }
 
+/// Classified backend error carried from the SSE event converter to the
+/// disconnect monitor via `axum::Error`'s source chain. The monitor
+/// downcasts `err.source()` back to this concrete type to recover the
+/// HTTP status that the unary path (`check_for_backend_error`) would have
+/// returned. Only 4xx (non-499) statuses are forwarded to clients;
+/// everything else stays sanitized. Kept a distinct type (rather than a
+/// string) so classification is by identity, not by re-parsing a
+/// `Display`-formatted message that an unrelated error could coincidentally
+/// match.
+#[derive(Debug, Error)]
+#[error("{message}")]
+pub(crate) struct PropagatedStreamError {
+    pub message: String,
+    pub code: u16,
+}
+
 /// Canonical sanitized error responses returned at the HTTP boundary.
 ///
 /// Each variant fixes the `(status, public message, protocol error_type)`
@@ -40,18 +56,6 @@ pub struct HttpError {
 /// `Display` impl that produces the user-safe message all live on this
 /// enum — clients see exactly what the enum says, never a backend error
 /// chain, file path, or panic stack.
-/// Classified backend error carried from the SSE event converter to the
-/// disconnect monitor. `axum::Error` can only transport a string, so the
-/// converter JSON-encodes this struct into the error message and the
-/// monitor decodes it to recover the HTTP status that the unary path
-/// (`check_for_backend_error`) would have returned. Only 4xx (non-499)
-/// statuses are forwarded to clients; everything else stays sanitized.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub(crate) struct PropagatedStreamError {
-    pub message: String,
-    pub code: u16,
-}
-
 #[derive(Debug, Clone, Copy)]
 pub enum SanitizedError {
     /// 499 Client Closed Request.
