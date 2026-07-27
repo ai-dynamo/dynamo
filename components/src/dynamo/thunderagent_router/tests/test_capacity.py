@@ -10,6 +10,16 @@ from typing import Optional
 
 import pytest
 
+from dynamo.common.kv_cache_capacity import (
+    KV_CACHE_CAPACITY_RUNTIME_KEY,
+    get_kv_cache_capacity_tokens,
+    kv_cache_capacity,
+)
+from dynamo.common.native_offloading import (
+    NATIVE_OFFLOADING_CAPACITY_RUNTIME_KEY,
+    get_native_offloading_capacity_tokens,
+    native_offloading_capacity,
+)
 from dynamo.thunderagent_router.capacity import WorkerCapacity, WorkerCapacityProvider
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
@@ -67,6 +77,16 @@ def test_snapshot_falls_back_to_physical_kv_pool_tokens():
 def test_snapshot_prefers_authoritative_token_capacity():
     provider, _ = _make_provider(
         {"1": _card(4160, 1000, capacity_total_tokens=1_234_567)}
+    )
+    assert provider.snapshot() == {
+        1: WorkerCapacity(retention_tokens=1_234_567, block_size=4160)
+    }
+
+
+@pytest.mark.parametrize("total_blocks", [None, 0])
+def test_snapshot_uses_authoritative_capacity_without_physical_blocks(total_blocks):
+    provider, _ = _make_provider(
+        {"1": _card(4160, total_blocks, capacity_total_tokens=1_234_567)}
     )
     assert provider.snapshot() == {
         1: WorkerCapacity(retention_tokens=1_234_567, block_size=4160)
@@ -153,3 +173,48 @@ def test_parsed_cards_cache_hits_on_repeat_snapshot():
 def test_snapshot_returns_empty_when_subscriber_unset():
     provider = WorkerCapacityProvider(endpoint=None)  # type: ignore[arg-type]
     assert provider.snapshot() == {}
+
+
+@pytest.mark.parametrize(
+    ("builder", "reader", "key"),
+    [
+        (
+            kv_cache_capacity,
+            get_kv_cache_capacity_tokens,
+            KV_CACHE_CAPACITY_RUNTIME_KEY,
+        ),
+        (
+            native_offloading_capacity,
+            get_native_offloading_capacity_tokens,
+            NATIVE_OFFLOADING_CAPACITY_RUNTIME_KEY,
+        ),
+    ],
+)
+def test_capacity_metadata_wrappers_share_validation(builder, reader, key):
+    assert builder(123.9) == {"total_tokens": 123}
+    assert reader({key: {"total_tokens": 123.9}}) == 123
+    assert builder(True) is None
+    assert reader({key: {"total_tokens": float("inf")}}) is None
+
+
+@pytest.mark.parametrize(
+    ("retention_tokens", "block_size", "field"),
+    [
+        (0, 16, "retention_tokens"),
+        (-1, 16, "retention_tokens"),
+        (True, 16, "retention_tokens"),
+        (1.5, 16, "retention_tokens"),
+        (100, 0, "block_size"),
+        (100, -1, "block_size"),
+        (100, False, "block_size"),
+        (100, 1.5, "block_size"),
+    ],
+)
+def test_worker_capacity_requires_positive_integers(
+    retention_tokens, block_size, field
+):
+    with pytest.raises(ValueError, match=field):
+        WorkerCapacity(
+            retention_tokens=retention_tokens,
+            block_size=block_size,
+        )
