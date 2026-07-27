@@ -16,7 +16,7 @@ use dynamo_kv_router::{
         ROUTER_HINT_RUNTIME_CAPABILITY_KEY, ROUTER_HINT_SOURCE_CONTROL_ENDPOINT_RUNTIME_KEY,
     },
 };
-use dynamo_runtime::protocols::EndpointId;
+use dynamo_runtime::{config::is_truthy, protocols::EndpointId};
 
 /// Re-export from parsers crate so that `ModelRuntimeConfig` can use it
 /// directly without type duplication.
@@ -325,7 +325,7 @@ impl dynamo_kv_router::WorkerConfigLike for ModelRuntimeConfig {
             Some(serde_json::Value::Bool(true)) => true,
             // Python ModelRuntimeConfig.set_engine_specific currently stores
             // engine-specific values as strings.
-            Some(serde_json::Value::String(value)) => value == "true",
+            Some(serde_json::Value::String(value)) => is_truthy(value),
             _ => false,
         }
     }
