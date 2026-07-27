@@ -47,14 +47,15 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 	tooLongComponentName := boundaryComponentName + "x"
 
 	tests := []struct {
-		name            string
-		deployment      runtime.Object
-		oldDeployment   runtime.Object
-		mutateRequest   func(*testing.T, map[string]any) // mutates the source-version request map
-		withoutTopology bool                             // omits the default cluster topology fixture
-		groveDisabled   bool                             // disables the configured Grove pathway
-		checkpointOff   bool                             // disables checkpoint creation and restore
-		username        string                           // supplies the admission request identity
+		name               string
+		deployment         runtime.Object
+		oldDeployment      runtime.Object
+		mutateRequest      func(*testing.T, map[string]any) // mutates the source-version request map
+		withoutTopology    bool                             // omits the default cluster topology fixture
+		groveDisabled      bool                             // disables the configured Grove pathway
+		checkpointOff      bool                             // disables checkpoint creation and restore
+		seedWithoutWebhook bool                             // seeds oldDeployment without validating it
+		username           string                           // supplies the admission request identity
 
 		wantSchemaErr     string
 		wantCELErr        string
@@ -85,6 +86,64 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				worker := dgd.Spec.Services["worker"]
 				worker.RuntimeVersionOverride = ""
 				worker.ExtraPodSpec.MainContainer.Image = "registry.example/runtime:custom"
+			}),
+			wantWebhookErrs: []string{"spec.services[worker].runtimeVersionOverride: Required value: is required when the specified main container image has no parseable semantic-version tag"},
+		},
+		{
+			name:               "unchanged legacy beta component runtime version is ratcheted on update",
+			seedWithoutWebhook: true,
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.RuntimeVersionOverride = ""
+				worker.PodTemplate.Spec.Containers[0].Image = "registry.example/runtime:custom"
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.RuntimeVersionOverride = ""
+				worker.PodTemplate.Spec.Containers[0].Image = "registry.example/runtime:custom"
+				dgd.Labels = map[string]string{"updated": "true"}
+			}),
+		},
+		{
+			name:               "unchanged legacy alpha service runtime version is ratcheted on update",
+			seedWithoutWebhook: true,
+			oldDeployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				worker := dgd.Spec.Services["worker"]
+				worker.RuntimeVersionOverride = ""
+				worker.ExtraPodSpec.MainContainer.Image = "registry.example/runtime:custom"
+			}),
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				worker := dgd.Spec.Services["worker"]
+				worker.RuntimeVersionOverride = ""
+				worker.ExtraPodSpec.MainContainer.Image = "registry.example/runtime:custom"
+				dgd.Labels = map[string]string{"updated": "true"}
+			}),
+		},
+		{
+			name: "beta component image change to custom requires runtime version override",
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.RuntimeVersionOverride = ""
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.RuntimeVersionOverride = ""
+				worker.PodTemplate.Spec.Containers[0].Image = "registry.example/runtime:custom"
+			}),
+			wantWebhookErrs: []string{"spec.components[1].runtimeVersionOverride: Required value: is required when the specified main container image has no parseable semantic-version tag"},
+		},
+		{
+			name:               "changing a legacy alpha custom image requires runtime version override",
+			seedWithoutWebhook: true,
+			oldDeployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				worker := dgd.Spec.Services["worker"]
+				worker.RuntimeVersionOverride = ""
+				worker.ExtraPodSpec.MainContainer.Image = "registry.example/runtime:custom"
+			}),
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				worker := dgd.Spec.Services["worker"]
+				worker.RuntimeVersionOverride = ""
+				worker.ExtraPodSpec.MainContainer.Image = "registry.example/runtime:other-custom"
 			}),
 			wantWebhookErrs: []string{"spec.services[worker].runtimeVersionOverride: Required value: is required when the specified main container image has no parseable semantic-version tag"},
 		},
@@ -1666,18 +1725,19 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			gates := features.Gates{Checkpoint: !tt.checkpointOff, Grove: !tt.groveDisabled}
 			test := admissionTestCase{
-				object:            tt.deployment,
-				oldObject:         tt.oldDeployment,
-				mutateObject:      tt.mutateRequest,
-				gates:             gates,
-				withoutTopology:   tt.withoutTopology,
-				username:          tt.username,
-				wantSchemaError:   tt.wantSchemaErr,
-				wantCELError:      tt.wantCELErr,
-				wantAdmissionErrs: tt.wantAdmissionErrs,
-				wantWebhookErrors: tt.wantWebhookErrs,
-				wantWarnings:      tt.wantWarnings,
-				notWantError:      tt.notWantErr,
+				object:             tt.deployment,
+				oldObject:          tt.oldDeployment,
+				mutateObject:       tt.mutateRequest,
+				gates:              gates,
+				withoutTopology:    tt.withoutTopology,
+				seedWithoutWebhook: tt.seedWithoutWebhook,
+				username:           tt.username,
+				wantSchemaError:    tt.wantSchemaErr,
+				wantCELError:       tt.wantCELErr,
+				wantAdmissionErrs:  tt.wantAdmissionErrs,
+				wantWebhookErrors:  tt.wantWebhookErrs,
+				wantWarnings:       tt.wantWarnings,
+				notWantError:       tt.notWantErr,
 			}
 			if tt.oldDeployment != nil {
 				test.oldBeforeUpdate = dgdBeforeRestart(t, tt.oldDeployment)

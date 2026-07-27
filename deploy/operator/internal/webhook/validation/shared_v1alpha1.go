@@ -22,7 +22,6 @@ import (
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
@@ -145,19 +144,35 @@ func runtimeVersionOverrideErrorV1Alpha1(
 	spec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec,
 	fldPath *field.Path,
 ) *field.Error {
-	overridePath := fldPath.Child("runtimeVersionOverride")
-	image := ""
-	if spec.ExtraPodSpec != nil && spec.ExtraPodSpec.MainContainer != nil {
-		image = spec.ExtraPodSpec.MainContainer.Image
+	image, imagePath := runtimeVersionImageAndPathV1Alpha1(spec, fldPath)
+	return runtimeVersionError(image, spec.RuntimeVersionOverride, imagePath, fldPath.Child("runtimeVersionOverride"))
+}
+
+func runtimeVersionOverrideUpdateErrorV1Alpha1(
+	newSpec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec,
+	oldSpec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec,
+	fldPath *field.Path,
+) *field.Error {
+	newImage, imagePath := runtimeVersionImageAndPathV1Alpha1(newSpec, fldPath)
+	err := runtimeVersionError(newImage, newSpec.RuntimeVersionOverride, imagePath, fldPath.Child("runtimeVersionOverride"))
+	if err == nil || newImage == "" {
+		return err
 	}
-	if image == "" {
-		return field.Required(fldPath.Child("extraPodSpec", "mainContainer", "image"), "is required")
-	}
-	if spec.RuntimeVersionOverride != "" {
+
+	oldImage, _ := runtimeVersionImageAndPathV1Alpha1(oldSpec, fldPath)
+	if newImage == oldImage && newSpec.RuntimeVersionOverride == oldSpec.RuntimeVersionOverride {
 		return nil
 	}
-	if _, err := runtimeversion.ParseImageVersion(image); err != nil {
-		return field.Required(overridePath, "is required when the specified main container image has no parseable semantic-version tag")
+	return err
+}
+
+func runtimeVersionImageAndPathV1Alpha1(
+	spec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec,
+	fldPath *field.Path,
+) (string, *field.Path) {
+	imagePath := fldPath.Child("extraPodSpec", "mainContainer", "image")
+	if spec.ExtraPodSpec != nil && spec.ExtraPodSpec.MainContainer != nil {
+		return spec.ExtraPodSpec.MainContainer.Image, imagePath
 	}
-	return nil
+	return "", imagePath
 }

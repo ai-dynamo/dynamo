@@ -225,27 +225,28 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			gpuDiscovery: true,
 		},
 		{
-			name:               "legacy custom image without override must be repaired on update",
+			name:               "unchanged legacy custom image without override is ratcheted on update",
 			seedWithoutWebhook: true,
 			oldRequest: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
 				request.Spec.RuntimeVersionOverride = ""
+				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseDeployed
 			}),
 			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
 				request.Spec.RuntimeVersionOverride = ""
+				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseDeployed
 				request.Labels = map[string]string{"updated": "true"}
 			}),
 			gpuDiscovery: true,
-			wantWebhook: []string{
-				"spec.runtimeVersionOverride: Required value: is required when spec.image has no parseable semantic-version tag",
-			},
 		},
 		{
-			name:               "adding runtime version override repairs legacy custom image",
+			name:               "adding runtime version override repairs legacy custom image in immutable phase",
 			seedWithoutWebhook: true,
 			oldRequest: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
 				request.Spec.RuntimeVersionOverride = ""
+				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseDeployed
 			}),
 			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseDeployed
 				request.Labels = map[string]string{"updated": "true"}
 			}),
 			gpuDiscovery: true,
@@ -257,6 +258,21 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				request.Spec.RuntimeVersionOverride = ""
 			}),
 			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.RuntimeVersionOverride = ""
+			}),
+			gpuDiscovery: true,
+			wantWebhook: []string{
+				"spec.runtimeVersionOverride: Required value: is required when spec.image has no parseable semantic-version tag",
+			},
+		},
+		{
+			name:               "changing a legacy custom image without override is rejected on update",
+			seedWithoutWebhook: true,
+			oldRequest: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.RuntimeVersionOverride = ""
+			}),
+			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.Image = "test-profiler:other-custom"
 				request.Spec.RuntimeVersionOverride = ""
 			}),
 			gpuDiscovery: true,

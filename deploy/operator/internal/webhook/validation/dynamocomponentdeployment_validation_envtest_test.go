@@ -97,6 +97,56 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			wantWebhookErrs: []string{"spec.runtimeVersionOverride: Required value: is required when the specified main container image has no parseable semantic-version tag"},
 		},
 		{
+			name:               "unchanged legacy v1beta1 runtime version is ratcheted on update",
+			seedWithoutWebhook: true,
+			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.RuntimeVersionOverride = ""
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = "registry.example/runtime:custom"
+			}),
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.RuntimeVersionOverride = ""
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = "registry.example/runtime:custom"
+				dcd.Labels = map[string]string{"updated": "true"}
+			}),
+		},
+		{
+			name:               "unchanged legacy v1alpha1 runtime version is ratcheted on update",
+			seedWithoutWebhook: true,
+			oldDeployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.RuntimeVersionOverride = ""
+				dcd.Spec.ExtraPodSpec.MainContainer.Image = "registry.example/runtime:custom"
+			}),
+			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.RuntimeVersionOverride = ""
+				dcd.Spec.ExtraPodSpec.MainContainer.Image = "registry.example/runtime:custom"
+				dcd.Labels = map[string]string{"updated": "true"}
+			}),
+		},
+		{
+			name: "v1beta1 image change to custom requires runtime version override",
+			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.RuntimeVersionOverride = ""
+			}),
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.RuntimeVersionOverride = ""
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = "registry.example/runtime:custom"
+			}),
+			wantWebhookErrs: []string{"spec.runtimeVersionOverride: Required value: is required when the specified main container image has no parseable semantic-version tag"},
+		},
+		{
+			name:               "changing a legacy v1alpha1 custom image requires runtime version override",
+			seedWithoutWebhook: true,
+			oldDeployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.RuntimeVersionOverride = ""
+				dcd.Spec.ExtraPodSpec.MainContainer.Image = "registry.example/runtime:custom"
+			}),
+			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.RuntimeVersionOverride = ""
+				dcd.Spec.ExtraPodSpec.MainContainer.Image = "registry.example/runtime:other-custom"
+			}),
+			wantWebhookErrs: []string{"spec.runtimeVersionOverride: Required value: is required when the specified main container image has no parseable semantic-version tag"},
+		},
+		{
 			name: "v1alpha1 compatibility validation does not duplicate runtime version errors",
 			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
 				dcd.Spec.RuntimeVersionOverride = ""

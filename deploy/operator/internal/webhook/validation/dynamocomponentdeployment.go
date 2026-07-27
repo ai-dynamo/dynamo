@@ -86,15 +86,30 @@ func (v *DynamoComponentDeploymentValidator) validateUpdate(
 	runtimeVersionSource runtimeVersionValidationSource,
 ) (admission.Warnings, error) {
 	validation := &dynamoComponentDeploymentValidation{
-		sharedValidation: sharedValidation{ctx: ctx, runtimeVersionSource: runtimeVersionSource},
+		sharedValidation: sharedValidation{ctx: ctx, runtimeVersionSource: runtimeVersionSourceDisabled},
 	}
 
 	allErrs := validation.validateDynamoComponentDeployment(newDCD)
-	alpha, err := alphaDynamoComponentDeploymentForValidation(newDCD)
+	newAlpha, err := alphaDynamoComponentDeploymentForValidation(newDCD)
 	if err != nil {
 		return nil, fmt.Errorf("cannot validate preserved v1alpha1 DynamoComponentDeployment fields: %w", err)
 	}
-	allErrs = append(allErrs, validation.validateDynamoComponentDeploymentV1alpha1(alpha)...)
+	allErrs = append(allErrs, validation.validateDynamoComponentDeploymentV1alpha1(newAlpha)...)
+
+	validation.runtimeVersionSource = runtimeVersionSource
+	if validation.validatesRuntimeVersionFor(runtimeVersionSourceV1Alpha1) {
+		oldAlpha, err := alphaDynamoComponentDeploymentForValidation(oldDCD)
+		if err != nil {
+			return nil, fmt.Errorf("cannot validate old preserved v1alpha1 DynamoComponentDeployment fields: %w", err)
+		}
+		if err := runtimeVersionOverrideUpdateErrorV1Alpha1(
+			&newAlpha.Spec.DynamoComponentDeploymentSharedSpec,
+			&oldAlpha.Spec.DynamoComponentDeploymentSharedSpec,
+			field.NewPath("spec"),
+		); err != nil {
+			allErrs = append(allErrs, err)
+		}
+	}
 	allErrs = append(allErrs, validation.validateDynamoComponentDeploymentUpdate(newDCD, oldDCD)...)
 	return validation.warnings, invalidDynamoComponentDeploymentError(newDCD, allErrs)
 }

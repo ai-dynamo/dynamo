@@ -398,6 +398,11 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 			))
 		}
 	}
+	if v.validatesRuntimeVersionFor(runtimeVersionSourceV1Beta1) {
+		if err := runtimeVersionOverrideUpdateError(newComponent, oldComponent, fldPath); err != nil {
+			allErrs = append(allErrs, err)
+		}
+	}
 	return allErrs
 }
 
@@ -462,19 +467,52 @@ func runtimeVersionOverrideError(
 	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	fldPath *field.Path,
 ) *field.Error {
-	overridePath := fldPath.Child("runtimeVersionOverride")
-	image := ""
+	image, imagePath := runtimeVersionImageAndPath(spec, fldPath)
+	return runtimeVersionError(image, spec.RuntimeVersionOverride, imagePath, fldPath.Child("runtimeVersionOverride"))
+}
+
+func runtimeVersionOverrideUpdateError(
+	newSpec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	oldSpec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	fldPath *field.Path,
+) *field.Error {
+	newImage, imagePath := runtimeVersionImageAndPath(newSpec, fldPath)
+	err := runtimeVersionError(newImage, newSpec.RuntimeVersionOverride, imagePath, fldPath.Child("runtimeVersionOverride"))
+	if err == nil || newImage == "" {
+		return err
+	}
+
+	oldImage, _ := runtimeVersionImageAndPath(oldSpec, fldPath)
+	if newImage == oldImage && newSpec.RuntimeVersionOverride == oldSpec.RuntimeVersionOverride {
+		return nil
+	}
+	return err
+}
+
+func runtimeVersionImageAndPath(
+	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	fldPath *field.Path,
+) (string, *field.Path) {
 	imagePath := fldPath.Child("podTemplate", "spec", "containers")
 	if spec.PodTemplate != nil {
 		if index := containerIndexByName(spec.PodTemplate.Spec.Containers, consts.MainContainerName); index >= 0 {
-			image = spec.PodTemplate.Spec.Containers[index].Image
 			imagePath = imagePath.Index(index).Child("image")
+			return spec.PodTemplate.Spec.Containers[index].Image, imagePath
 		}
 	}
+	return "", imagePath
+}
+
+func runtimeVersionError(
+	image string,
+	override string,
+	imagePath *field.Path,
+	overridePath *field.Path,
+) *field.Error {
 	if image == "" {
 		return field.Required(imagePath, "is required")
 	}
-	if spec.RuntimeVersionOverride != "" {
+	if override != "" {
 		return nil
 	}
 	if _, err := runtimeversion.ParseImageVersion(image); err != nil {

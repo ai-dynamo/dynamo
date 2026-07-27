@@ -149,14 +149,17 @@ func (v *dynamoGraphDeploymentRequestValidation) validateDynamoGraphDeploymentRe
 		))
 	}
 
-	if dgdrRuntimeVersionOverrideRequired(newSpec) {
+	if dgdrRuntimeVersionOverrideRequired(newSpec) &&
+		(newSpec.Image != oldSpec.Image || newSpec.RuntimeVersionOverride != oldSpec.RuntimeVersionOverride) {
 		allErrs = append(allErrs, field.Required(
 			fldPath.Child("runtimeVersionOverride"),
 			"is required when spec.image has no parseable semantic-version tag",
 		))
 	}
 
-	if isImmutableDGDRPhase(oldPhase) && !apiequality.Semantic.DeepEqual(newSpec, oldSpec) {
+	if isImmutableDGDRPhase(oldPhase) &&
+		!apiequality.Semantic.DeepEqual(newSpec, oldSpec) &&
+		!isDGDRRuntimeVersionOverrideRepair(newSpec, oldSpec) {
 		allErrs = append(allErrs, field.Forbidden(
 			fldPath,
 			fmt.Sprintf("updates are forbidden while the resource is in phase %q; delete and recreate the resource to change its spec", oldPhase),
@@ -172,4 +175,19 @@ func dgdrRuntimeVersionOverrideRequired(spec *nvidiacomv1beta1.DynamoGraphDeploy
 	}
 	_, err := runtimeversion.ParseImageVersion(spec.Image)
 	return err != nil
+}
+
+func isDGDRRuntimeVersionOverrideRepair(
+	newSpec *nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec,
+	oldSpec *nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec,
+) bool {
+	if !dgdrRuntimeVersionOverrideRequired(oldSpec) ||
+		newSpec.RuntimeVersionOverride == oldSpec.RuntimeVersionOverride ||
+		dgdrRuntimeVersionOverrideRequired(newSpec) {
+		return false
+	}
+
+	newWithoutRepair := newSpec.DeepCopy()
+	newWithoutRepair.RuntimeVersionOverride = oldSpec.RuntimeVersionOverride
+	return apiequality.Semantic.DeepEqual(newWithoutRepair, oldSpec)
 }

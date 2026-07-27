@@ -47,6 +47,7 @@ type runtimeVersionValidationSource uint8
 const (
 	runtimeVersionSourceV1Beta1 runtimeVersionValidationSource = iota
 	runtimeVersionSourceV1Alpha1
+	runtimeVersionSourceDisabled
 )
 
 // runtimeVersionValidationSourceForRequest uses RequestKind because it preserves
