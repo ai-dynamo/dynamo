@@ -3,32 +3,29 @@
 
 //! SGLang-compatible Mocker gRPC service.
 
-use std::collections::HashMap;
 use std::fmt;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use clap::ValueEnum;
-use dynamo_mocker::common::protocols::{
-    DirectRequest, EngineType, MockEngineArgs, OutputSignal, WorkerType,
-};
-use dynamo_mocker::live::{
-    LiveEngine, LiveRequest, deterministic_output_tokens, stable_request_uuid,
-};
+use dynamo_mocker::common::protocols::{EngineType, MockEngineArgs, OutputSignal, WorkerType};
+use dynamo_mocker::live::{LiveEngine, LiveRequest, stable_request_uuid};
 use dynamo_mocker::scheduler::MockerMetrics;
 use dynamo_sglang_sidecar::proto as pb;
 use futures::Stream;
-use serde_json::{Value, json};
+use serde_json::json;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tonic::{Request, Response, Status};
-use uuid::Uuid;
 
-const DP_RANK: u32 = 0;
-const DEFAULT_MAX_NEW_TOKENS: i32 = 20;
-const MAX_NEW_TOKENS: i32 = 1_000_000;
-const MAX_TOP_LOGPROBS: usize = 20;
+#[path = "server_request.rs"]
+mod request;
 
+use request::PreparedRequest;
+
+const DEFAULT_MAX_CONCURRENT_REQUESTS: usize = 256;
+pub(super) const DP_RANK: u32 = 0;
 type BoxStream<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send + 'static>>;
-type BoxedStatusResult<T> = Result<T, Box<Status>>;
+pub(super) type BoxedStatusResult<T> = Result<T, Box<Status>>;
 
 /// Wire-level SGLang role exposed by one mock server process.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -65,6 +62,7 @@ pub struct MockerServerConfig {
     pub mode: ServerMode,
     pub seed: u64,
     pub context_length: u32,
+    pub max_concurrent_requests: usize,
     pub bootstrap_host: String,
     pub bootstrap_port: u16,
 }
@@ -76,6 +74,7 @@ impl Default for MockerServerConfig {
             mode: ServerMode::Aggregated,
             seed: 42,
             context_length: 32_768,
+            max_concurrent_requests: DEFAULT_MAX_CONCURRENT_REQUESTS,
             bootstrap_host: "127.0.0.1".to_string(),
             bootstrap_port: 8_998,
         }
@@ -96,15 +95,23 @@ pub struct SglangMockerService {
     config: Arc<MockerServerConfig>,
     discovery: Arc<DiscoveryMetadata>,
     engine: LiveEngine,
-    last_disaggregated_params: Arc<Mutex<Option<pb::DisaggregatedParams>>>,
+    request_permits: Arc<Semaphore>,
 }
 
 impl SglangMockerService {
     pub fn new(config: MockerServerConfig, engine_args: MockEngineArgs) -> anyhow::Result<Self> {
         anyhow::ensure!(!config.model.trim().is_empty(), "model must not be empty");
         anyhow::ensure!(
+            config.context_length > 0,
+            "context_length must be greater than 0"
+        );
+        anyhow::ensure!(
             config.context_length <= i32::MAX as u32,
             "context_length must fit SGLang's int32 ModelCard field"
+        );
+        anyhow::ensure!(
+            config.max_concurrent_requests > 0,
+            "max_concurrent_requests must be greater than 0"
         );
         if config.mode == ServerMode::Prefill {
             anyhow::ensure!(
@@ -141,11 +148,12 @@ impl SglangMockerService {
             max_prefill_tokens: engine_args.max_num_batched_tokens.unwrap_or(8_192),
         };
         let engine = LiveEngine::start(engine_args, DP_RANK)?;
+        let max_concurrent_requests = config.max_concurrent_requests;
         Ok(Self {
             config: Arc::new(config),
             discovery: Arc::new(discovery),
             engine,
-            last_disaggregated_params: Arc::new(Mutex::new(None)),
+            request_permits: Arc::new(Semaphore::new(max_concurrent_requests)),
         })
     }
 
@@ -161,19 +169,15 @@ impl SglangMockerService {
         self.engine.metrics_receiver()
     }
 
-    /// Most recent rendezvous metadata accepted by `Generate`.
-    pub fn last_disaggregated_params(&self) -> Option<pb::DisaggregatedParams> {
-        self.last_disaggregated_params
-            .lock()
-            .expect("last disaggregated parameters mutex poisoned")
-            .clone()
-    }
-
     async fn start_generation(
         &self,
         request: pb::GenerateRequest,
-    ) -> Result<(PreparedRequest, LiveRequest), Status> {
-        let disaggregated_params = request.disaggregated_params.clone();
+    ) -> Result<(PreparedRequest, LiveRequest, OwnedSemaphorePermit), Status> {
+        let permit = self
+            .request_permits
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| Status::resource_exhausted("Mocker concurrent request limit reached"))?;
         let prepared = PreparedRequest::new(request, &self.config).map_err(|status| *status)?;
         let live = self
             .engine
@@ -186,11 +190,7 @@ impl SglangMockerService {
                     Status::internal(format!("Mocker request submission failed: {error}"))
                 }
             })?;
-        *self
-            .last_disaggregated_params
-            .lock()
-            .expect("last disaggregated parameters mutex poisoned") = disaggregated_params;
-        Ok((prepared, live))
+        Ok((prepared, live, permit))
     }
 
     fn model_info(&self) -> pb::GetModelInfoResponse {
@@ -244,10 +244,31 @@ impl pb::sglang_service_server::SglangService for SglangMockerService {
         &self,
         request: Request<pb::GenerateRequest>,
     ) -> Result<Response<Self::GenerateStream>, Status> {
-        let (prepared, mut live) = self.start_generation(request.into_inner()).await?;
+        let (prepared, mut live, permit) = self.start_generation(request.into_inner()).await?;
+        // Keep LiveEngine's fixed delivery queue independent of client and
+        // transport pacing. This request-owned buffer cannot exceed the
+        // validated output-token budget, and dropping the client stream closes
+        // the receiver so the pump drops `live` and cancels unfinished work.
+        let (signal_tx, mut signal_rx) = tokio::sync::mpsc::channel(prepared.max_output_tokens);
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = signal_tx.closed() => break,
+                    signal = live.recv() => {
+                        let Some(signal) = signal else { break };
+                        let completed = signal.completed;
+                        if signal_tx.send(signal).await.is_err() || completed {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
         let stream = async_stream::try_stream! {
+            let _permit = permit;
             let mut output_tokens = Vec::with_capacity(prepared.max_output_tokens);
-            while let Some(signal) = live.recv().await {
+            while let Some(signal) = signal_rx.recv().await {
                 let token_id = checked_token(&signal).map_err(|status| *status)?;
                 output_tokens.push(token_id);
                 let output_id = i32::try_from(token_id)
@@ -471,330 +492,6 @@ fn checked_token(signal: &OutputSignal) -> BoxedStatusResult<u32> {
         .map_err(Into::into)
 }
 
-#[derive(Debug)]
-struct PreparedRequest {
-    uuid: Uuid,
-    request_id: String,
-    prompt_tokens: Vec<u32>,
-    max_output_tokens: usize,
-    output_token_ids: Vec<u32>,
-    return_logprob: bool,
-    top_logprobs_num: usize,
-    logprob_start_len: i32,
-}
-
-impl PreparedRequest {
-    fn new(request: pb::GenerateRequest, config: &MockerServerConfig) -> BoxedStatusResult<Self> {
-        if request.input_ids.is_empty() {
-            return Err(Status::invalid_argument("input_ids must not be empty").into());
-        }
-        let prompt_tokens = request
-            .input_ids
-            .iter()
-            .map(|token| {
-                u32::try_from(*token).map_err(|_| {
-                    Box::new(Status::invalid_argument(format!(
-                        "input_ids contains a negative token ID: {token}"
-                    )))
-                })
-            })
-            .collect::<BoxedStatusResult<Vec<_>>>()?;
-
-        if let Some(n) = request.sampling_params.as_ref().and_then(|params| params.n)
-            && n != 1
-        {
-            return Err(Status::invalid_argument("sampling_params.n must be 1").into());
-        }
-
-        let requested_max = request
-            .sampling_params
-            .as_ref()
-            .and_then(|params| params.max_new_tokens)
-            .unwrap_or(DEFAULT_MAX_NEW_TOKENS);
-        if requested_max <= 0 || requested_max > MAX_NEW_TOKENS {
-            return Err(Status::invalid_argument(format!(
-                "max_new_tokens must be between 1 and {MAX_NEW_TOKENS}"
-            ))
-            .into());
-        }
-        let max_output_tokens = if config.mode == ServerMode::Prefill {
-            1
-        } else {
-            requested_max as usize
-        };
-
-        validate_role(config, request.disaggregated_params.as_ref())?;
-
-        let top_logprobs_num = request.top_logprobs_num.unwrap_or(0);
-        if top_logprobs_num < 0 {
-            return Err(Status::invalid_argument("top_logprobs_num must not be negative").into());
-        }
-        let logprob_start_len = request.logprob_start_len.unwrap_or(-1);
-        if logprob_start_len < -1 {
-            return Err(Status::invalid_argument("logprob_start_len must be -1 or greater").into());
-        }
-
-        let request_id = request
-            .rid
-            .filter(|request_id| !request_id.trim().is_empty())
-            .unwrap_or_else(|| Uuid::new_v4().to_string());
-        let uuid = stable_request_uuid(config.seed, &request_id);
-        let output_token_ids =
-            deterministic_output_tokens(config.seed, &request_id, max_output_tokens);
-        Ok(Self {
-            uuid,
-            request_id,
-            prompt_tokens,
-            max_output_tokens,
-            output_token_ids,
-            return_logprob: request.return_logprob.unwrap_or(false),
-            top_logprobs_num: (top_logprobs_num as usize).min(MAX_TOP_LOGPROBS),
-            logprob_start_len,
-        })
-    }
-
-    fn direct_request(&self) -> DirectRequest {
-        DirectRequest {
-            tokens: self.prompt_tokens.clone(),
-            max_output_tokens: self.max_output_tokens,
-            output_token_ids: Some(self.output_token_ids.clone()),
-            uuid: Some(self.uuid),
-            dp_rank: DP_RANK,
-            ..Default::default()
-        }
-    }
-
-    fn meta_info(&self, output_tokens: &[u32], terminal: bool) -> HashMap<String, String> {
-        let mut meta = HashMap::from([
-            (
-                "prompt_tokens".to_string(),
-                Value::from(self.prompt_tokens.len()).to_string(),
-            ),
-            (
-                "mocker_request_id".to_string(),
-                Value::String(self.request_id.clone()).to_string(),
-            ),
-        ]);
-        if self.return_logprob {
-            insert_json(
-                &mut meta,
-                "output_token_logprobs",
-                Value::Array(
-                    output_tokens
-                        .iter()
-                        .map(|token| logprob_entry(*token))
-                        .collect(),
-                ),
-            );
-            insert_json(
-                &mut meta,
-                "output_top_logprobs",
-                Value::Array(
-                    output_tokens
-                        .iter()
-                        .map(|token| top_logprob_entries(*token, self.top_logprobs_num))
-                        .collect(),
-                ),
-            );
-        }
-        if terminal {
-            insert_json(&mut meta, "finish_reason", json!({"type": "length"}));
-            if self.return_logprob && self.logprob_start_len >= 0 {
-                let start = (self.logprob_start_len as usize)
-                    .saturating_add(1)
-                    .min(self.prompt_tokens.len());
-                insert_json(
-                    &mut meta,
-                    "input_token_logprobs",
-                    Value::Array(
-                        self.prompt_tokens[start..]
-                            .iter()
-                            .map(|token| logprob_entry(*token))
-                            .collect(),
-                    ),
-                );
-                insert_json(
-                    &mut meta,
-                    "input_top_logprobs",
-                    Value::Array(
-                        self.prompt_tokens[start..]
-                            .iter()
-                            .map(|token| top_logprob_entries(*token, self.top_logprobs_num))
-                            .collect(),
-                    ),
-                );
-            }
-        }
-        meta
-    }
-}
-
-fn validate_role(
-    config: &MockerServerConfig,
-    params: Option<&pb::DisaggregatedParams>,
-) -> BoxedStatusResult<()> {
-    match (config.mode, params) {
-        (ServerMode::Aggregated, None) => Ok(()),
-        (ServerMode::Aggregated, Some(_)) => Err(Status::failed_precondition(
-            "aggregated mock server received disaggregated parameters",
-        )
-        .into()),
-        (ServerMode::Prefill | ServerMode::Decode, None) => Err(Status::failed_precondition(
-            "disaggregated mock server requires bootstrap_host, bootstrap_port, and bootstrap_room",
-        )
-        .into()),
-        (ServerMode::Prefill | ServerMode::Decode, Some(params)) => {
-            if params.bootstrap_host.trim().is_empty()
-                || params.bootstrap_port <= 0
-                || params.bootstrap_room < 0
-            {
-                return Err(
-                    Status::invalid_argument(
-                        "disaggregated parameters must contain a host, positive port, and non-negative room",
-                    )
-                    .into(),
-                );
-            }
-            if config.mode == ServerMode::Prefill
-                && i32::from(config.bootstrap_port) != params.bootstrap_port
-            {
-                return Err(Status::failed_precondition(format!(
-                    "prefill bootstrap_port {} does not match discovered port {}",
-                    params.bootstrap_port, config.bootstrap_port
-                ))
-                .into());
-            }
-            Ok(())
-        }
-    }
-}
-
-fn selected_logprob(token_id: u32) -> f64 {
-    -0.1 * f64::from((token_id % 10) + 1)
-}
-
-fn logprob_entry(token_id: u32) -> Value {
-    json!([
-        selected_logprob(token_id),
-        token_id,
-        format!("<token:{token_id}>")
-    ])
-}
-
-fn top_logprob_entries(token_id: u32, count: usize) -> Value {
-    Value::Array(
-        (0..count)
-            .map(|offset| {
-                let candidate = token_id.saturating_add(offset as u32);
-                json!([
-                    selected_logprob(candidate) - (offset as f64 * 0.01),
-                    candidate,
-                    format!("<token:{candidate}>")
-                ])
-            })
-            .collect(),
-    )
-}
-
-fn insert_json(meta: &mut HashMap<String, String>, key: &str, value: Value) {
-    meta.insert(key.to_string(), value.to_string());
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use dynamo_sglang_sidecar::proto::sglang_service_server::SglangService;
-
-    fn engine_args() -> MockEngineArgs {
-        MockEngineArgs::builder()
-            .engine_type(EngineType::Sglang)
-            .block_size(4)
-            .num_gpu_blocks(128)
-            .max_num_seqs(Some(8))
-            .max_num_batched_tokens(Some(64))
-            .speedup_ratio(0.0)
-            .build()
-            .unwrap()
-    }
-
-    fn request(request_id: &str) -> pb::GenerateRequest {
-        pb::GenerateRequest {
-            input_ids: vec![1, 2, 3],
-            sampling_params: Some(pb::SamplingParams {
-                max_new_tokens: Some(2),
-                n: Some(1),
-                ..Default::default()
-            }),
-            stream: Some(true),
-            return_logprob: Some(true),
-            top_logprobs_num: Some(2),
-            logprob_start_len: Some(0),
-            rid: Some(request_id.to_string()),
-            ..Default::default()
-        }
-    }
-
-    #[tokio::test]
-    async fn generate_rejects_invalid_requests() {
-        let service =
-            SglangMockerService::new(MockerServerConfig::default(), engine_args()).unwrap();
-        let mut negative = request("negative");
-        negative.input_ids = vec![-1];
-        assert_eq!(
-            service
-                .generate(Request::new(negative))
-                .await
-                .err()
-                .expect("negative token ID should be rejected")
-                .code(),
-            tonic::Code::InvalidArgument
-        );
-
-        let mut bad_n = request("bad-n");
-        bad_n.sampling_params.as_mut().unwrap().n = Some(2);
-        assert_eq!(
-            service
-                .generate(Request::new(bad_n))
-                .await
-                .err()
-                .expect("multiple sequences should be rejected")
-                .code(),
-            tonic::Code::InvalidArgument
-        );
-
-        let prefill_service = SglangMockerService::new(
-            MockerServerConfig {
-                mode: ServerMode::Prefill,
-                ..Default::default()
-            },
-            engine_args(),
-        )
-        .unwrap();
-        assert_eq!(
-            prefill_service
-                .generate(Request::new(request("missing-handoff")))
-                .await
-                .err()
-                .expect("missing rendezvous metadata should be rejected")
-                .code(),
-            tonic::Code::FailedPrecondition
-        );
-    }
-
-    #[tokio::test]
-    async fn missing_abort_is_idempotent() {
-        let service =
-            SglangMockerService::new(MockerServerConfig::default(), engine_args()).unwrap();
-        for _ in 0..2 {
-            let response = service
-                .abort(Request::new(pb::AbortRequest {
-                    rid: "missing-or-finished".to_string(),
-                    abort_all: false,
-                }))
-                .await
-                .unwrap()
-                .into_inner();
-            assert!(response.success);
-        }
-    }
-}
+#[path = "server_tests.rs"]
+mod tests;

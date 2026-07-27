@@ -18,5 +18,4 @@ The upstream file's SHA-256 is
 The local file adds SPDX and temporary-copy comments and applies Dynamo's
 `clang-format` style; these changes do not alter the protobuf descriptor. The
 SGLang sidecar generates both client and server types and temporarily exposes
-them to the Mocker server. The formatted local source is pinned by the test
-checksum `f3d5bf6c18dd95248c311f1368a77631862d9c9f0febe748d19964b7e1154f07`.
+them to the Mocker server.

@@ -94,6 +94,7 @@ areas:
   - components/src/dynamo/sglang/request_handlers/
   - components/src/dynamo/sglang/tests/
   - examples/backends/sglang/
+  - lib/mocker/servers/sglang/
   - lib/sidecar/sglang/
 - label: kv-memory
   github_team: '@ai-dynamo/dynamo-kv-memory-codeowners'
@@ -1039,6 +1040,10 @@ shared:
   owners:
   - performance
   - kv-memory
+- glob: lib/mocker/servers/sglang/
+  owners:
+  - performance
+  - backend-sglang
 - glob: lib/mocker/src/replay/planner_handle.rs
   owners:
   - performance

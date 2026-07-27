@@ -39,6 +39,10 @@ struct Args {
     #[arg(long, default_value_t = 32_768)]
     context_length: u32,
 
+    /// Maximum number of admitted RPCs, including requests queued by Mocker.
+    #[arg(long, default_value_t = 256)]
+    max_concurrent_requests: usize,
+
     /// Host published for the metadata-only disaggregation rendezvous.
     #[arg(long, default_value = "127.0.0.1")]
     bootstrap_host: String,
@@ -106,6 +110,7 @@ async fn main() -> anyhow::Result<()> {
             mode: args.disaggregation_mode,
             seed: args.seed,
             context_length: args.context_length,
+            max_concurrent_requests: args.max_concurrent_requests,
             bootstrap_host: args.bootstrap_host,
             bootstrap_port: args.bootstrap_port,
         },

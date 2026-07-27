@@ -37,6 +37,8 @@ cargo run -p dynamo-sglang-sidecar --bin dynamo-sglang-sidecar -- \
 `engine_type=sglang` when it is omitted; an explicitly different engine type,
 `dp_size` other than one, or a non-aggregated Mocker worker type is rejected.
 The wire-level role remains controlled by `--disaggregation-mode`.
+`--max-concurrent-requests` bounds admitted RPCs, including requests waiting
+inside the Mocker scheduler.
 
 ## Disaggregated wire flow
 
