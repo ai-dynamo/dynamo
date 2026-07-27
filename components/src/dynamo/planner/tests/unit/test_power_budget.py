@@ -9,6 +9,7 @@ final-boundary ordering guarantee in ``OrchestratorEngineAdapter``: GPU budget
 first, then power budget (non-commutative; power wins over the GPU floor).
 """
 
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -180,8 +181,6 @@ def test_gpu_budget_then_power_budget_order_is_not_commutative(caplog):
     """The GPU floor raises decode to 8, then the power ceiling lowers it to fit
     1200 W — power wins. Applying power first would fit the proposal, then the
     GPU floor would raise it back above budget: the two orders disagree."""
-    import logging
-
     caps = WorkerCapabilities(
         prefill=None,
         decode=EngineCapabilities(num_gpu=1, power_watts_per_replica=400),
@@ -339,8 +338,6 @@ def test_scale_up_held_while_deployment_is_rolling(caplog):
     The hold warning fires once per continuous mid-rollout stretch, not every
     tick, so long rollouts do not flood logs.
     """
-    import logging
-
     caps = WorkerCapabilities(
         prefill=EngineCapabilities(num_gpu=2, power_watts_per_replica=700),
         decode=EngineCapabilities(num_gpu=4, power_watts_per_replica=1200),

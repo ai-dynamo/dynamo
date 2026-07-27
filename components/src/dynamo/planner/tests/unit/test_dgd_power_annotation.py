@@ -22,6 +22,7 @@ from dynamo.planner.monitoring.dgd_services import (
     ComponentPowerConfig,
     Service,
     resolve_component_power_configs,
+    resolve_power_component_names,
 )
 
 pytestmark = [
@@ -226,8 +227,6 @@ def test_explicit_name_resolution_when_type_absent():
 
 
 def test_resolve_power_component_names_includes_untyped_named_worker():
-    from dynamo.planner.monitoring.dgd_services import resolve_power_component_names
-
     dgd = _dgd(_worker("CustomDecode", comp_type=None, watts="300", gpus="2"))
     names = resolve_power_component_names(
         dgd,

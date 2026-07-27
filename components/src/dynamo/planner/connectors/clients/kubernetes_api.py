@@ -667,9 +667,12 @@ class KubernetesAPI:
                 generation = graph_deployment.get("metadata", {}).get("generation")
                 observed = graph_deployment.get("status", {}).get("observedGeneration")
                 logger.info(
-                    f"[Attempt {attempt + 1}/{max_attempts}] "
-                    f"Waiting for DGD generation to be observed: "
-                    f"generation={generation}, observedGeneration={observed}"
+                    "[Attempt %d/%d] Waiting for DGD generation to be observed: "
+                    "generation=%s, observedGeneration=%s",
+                    attempt + 1,
+                    max_attempts,
+                    generation,
+                    observed,
                 )
                 continue
 
@@ -683,8 +686,10 @@ class KubernetesAPI:
                 )
             except (SubComponentNotFoundError, DuplicateSubComponentError) as exc:
                 logger.info(
-                    f"[Attempt {attempt + 1}/{max_attempts}] "
-                    f"Waiting for power-relevant workers to be resolvable: {exc}"
+                    "[Attempt %d/%d] Waiting for power-relevant workers to be resolvable: %s",
+                    attempt + 1,
+                    max_attempts,
+                    exc,
                 )
                 continue
 
@@ -693,8 +698,10 @@ class KubernetesAPI:
             )
             if not backing_ok:
                 logger.info(
-                    f"[Attempt {attempt + 1}/{max_attempts}] "
-                    f"Waiting for worker backing resources: {backing_pending}"
+                    "[Attempt %d/%d] Waiting for worker backing resources: %s",
+                    attempt + 1,
+                    max_attempts,
+                    backing_pending,
                 )
                 continue
 
