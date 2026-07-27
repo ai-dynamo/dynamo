@@ -239,11 +239,12 @@ class TestDiffusionFormatterVideo:
         import numpy as np
 
         f = _make_diffusion_formatter()
-        float_frames = np.zeros((4, 8, 8, 3), dtype=np.float32)
+        float_frames = np.full((4, 8, 8, 3), 0.5, dtype=np.float32)
         captured = {}
 
         def fake_encode(frames, fps, output_format):
             captured["dtype"] = frames.dtype
+            captured["max"] = int(frames.max())
             captured["output_format"] = output_format
             return b"webm-bytes"
 
@@ -257,8 +258,9 @@ class TestDiffusionFormatterVideo:
             chunk = await f._encode_video(
                 [MagicMock()], "req-1", fps=16, response_format="b64_json"
             )
-        # imageio needs uint8; float pipeline frames must be coerced.
+        # imageio needs uint8; float [0,1] pipeline frames must be scaled to [0,255].
         assert captured["dtype"] == np.uint8
+        assert captured["max"] == 128  # 0.5 * 255 = 127.5 -> round -> 128
         assert captured["output_format"] == "webm"
         assert chunk["status"] == "completed"
         assert chunk["data"][0]["output_format"] == "webm"
@@ -266,10 +268,11 @@ class TestDiffusionFormatterVideo:
     @pytest.mark.asyncio
     async def test_non_webm_output_format_rejected(self):
         f = _make_diffusion_formatter()
-        with pytest.raises(ValueError, match="webm"):
-            await f._encode_video(
-                [MagicMock()], "req-1", fps=16, output_format="mp4"
-            )
+        chunk = await f._encode_video(
+            [MagicMock()], "req-1", fps=16, output_format="mp4"
+        )
+        assert chunk["status"] == "failed"
+        assert "webm" in chunk["error"]
 
 
 class TestBuildCompletionUsage:
@@ -563,8 +566,9 @@ class TestDiffusionFormatterVideoOutputFormat:
     """_encode_video always sets VideoData.output_format='webm'."""
 
     def _patches(self):
-        import numpy as np
         from unittest.mock import patch as _patch
+
+        import numpy as np
 
         return (
             _patch(

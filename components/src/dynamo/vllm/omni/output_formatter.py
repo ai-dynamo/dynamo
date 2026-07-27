@@ -135,20 +135,25 @@ class DiffusionFormatter:
         # on GPUs without NVENC (A100/H100).
         output_format = output_format or "webm"
         response_format = response_format or "url"
-        if response_format not in ("url", "b64_json"):
-            raise ValueError(
-                f"Unsupported response_format: {response_format!r}; expected 'url' or 'b64_json'"
-            )
-        if output_format != "webm":
-            raise ValueError(
-                f"Unsupported output_format: {output_format!r}; only 'webm' is supported"
-            )
         try:
+            if response_format not in ("url", "b64_json"):
+                raise ValueError(
+                    f"Unsupported response_format: {response_format!r}; expected 'url' or 'b64_json'"
+                )
+            if output_format != "webm":
+                raise ValueError(
+                    f"Unsupported output_format: {output_format!r}; only 'webm' is supported"
+                )
             start_time = time.time()
             frames = normalize_video_frames(images)
             # imageio requires uint8; the diffusion pipeline emits float frames.
             if np.issubdtype(frames.dtype, np.floating):
-                frames = (frames * 255.0).round().clip(0, 255).astype(np.uint8)
+                # One float copy (never in place — normalize_video_frames may
+                # return the pipeline's own array), then round/clip on that copy.
+                scaled = frames * 255.0
+                np.rint(scaled, out=scaled)
+                np.clip(scaled, 0, 255, out=scaled)
+                frames = scaled.astype(np.uint8)
             video_bytes = await asyncio.to_thread(
                 encode_to_video_bytes, frames, fps, output_format
             )
