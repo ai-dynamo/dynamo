@@ -1,19 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Shared Torch allocator construction and tensor-isolation primitives."""
+"""Torch storage rebinding primitives used by GMS integrations."""
 
-from .allocator import (
-    TorchAllocatorCallbacks,
-    create_torch_allocator,
-    create_torch_mem_pool,
+from .storage_rebinding import (
+    clone_storage_spans_and_rebind_tensors,
+    tensor_storage_byte_bounds,
 )
-from .tensor import isolate_tensors, tensor_span
 
 __all__ = [
-    "TorchAllocatorCallbacks",
-    "create_torch_allocator",
-    "create_torch_mem_pool",
-    "isolate_tensors",
-    "tensor_span",
+    "clone_storage_spans_and_rebind_tensors",
+    "tensor_storage_byte_bounds",
 ]

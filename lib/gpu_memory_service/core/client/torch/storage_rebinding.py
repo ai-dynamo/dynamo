@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Alias-preserving isolation of tensors from shared allocator storage."""
+"""Alias-preserving storage copies and TensorImpl rebinding."""
 
 from __future__ import annotations
 
@@ -13,8 +13,8 @@ if TYPE_CHECKING:
     import torch
 
 
-def tensor_span(tensor: "torch.Tensor") -> tuple[int, int]:
-    """Return the tensor's storage-relative byte span."""
+def tensor_storage_byte_bounds(tensor: "torch.Tensor") -> tuple[int, int]:
+    """Return the bounding storage-relative byte range touched by a tensor."""
     element_size = int(tensor.element_size())
     start = int(tensor.storage_offset())
     end = start
@@ -45,11 +45,10 @@ def _rebind(
             )
 
 
-def isolate_tensors(
+def clone_storage_spans_and_rebind_tensors(
     tensors: Iterable["torch.Tensor"],
-    retain_sources: list["torch.Tensor"] | None = None,
 ) -> int:
-    """Copy tensor spans to private storage while preserving objects and aliases."""
+    """Copy overlapping storage spans while preserving TensorImpls and aliases."""
     import torch
 
     by_storage: dict[int, tuple[torch.UntypedStorage, dict[int, torch.Tensor]]] = {}
@@ -61,16 +60,6 @@ def isolate_tensors(
     copied_bytes = 0
     for storage, objects_by_id in by_storage.values():
         objects = list(objects_by_id.values())
-        if retain_sources is not None:
-            retain_sources.append(
-                torch.empty(0, dtype=torch.uint8, device=storage.device).set_(
-                    storage,
-                    0,
-                    (int(storage.nbytes()),),
-                    (1,),
-                )
-            )
-
         zero_elements = [tensor for tensor in objects if not tensor.numel()]
         if zero_elements:
             target = torch.empty(
@@ -81,7 +70,11 @@ def isolate_tensors(
             _rebind(zero_elements, target, 0)
 
         groups: list[tuple[int, int, list[torch.Tensor]]] = []
-        spans = [(*tensor_span(tensor), tensor) for tensor in objects if tensor.numel()]
+        spans = [
+            (*tensor_storage_byte_bounds(tensor), tensor)
+            for tensor in objects
+            if tensor.numel()
+        ]
         for start, end, tensor in sorted(spans, key=lambda item: (item[0], item[1])):
             if groups and start < groups[-1][1]:
                 group_start, group_end, group_tensors = groups[-1]

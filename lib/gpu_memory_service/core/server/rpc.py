@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unix-domain RPC server for baseline GMS sessions."""
+"""Unix-domain transport for the typed GMS V1 protocol."""
 
 from __future__ import annotations
 
@@ -10,57 +10,50 @@ import socket
 import socketserver
 from pathlib import Path
 
-from gpu_memory_service.common.locks import RequestedLockType
-
 from ..errors import GMSError
-from ..protocol import receive_message, send_message
-from .gms import GMS
+from ..protocol import (
+    ErrorResponse,
+    HandshakeRequest,
+    HandshakeResponse,
+    Message,
+    REQUEST_TYPES,
+    receive_message,
+    send_message,
+)
+from .gms import GMSServerMemoryManager
 from .lease import socket_is_alive
 from .sessions import ServerSession
 
 
 class _GMSRequestHandler(socketserver.BaseRequestHandler):
+    server: GMSRPCServer
+
     def handle(self) -> None:
         session: ServerSession | None = None
         try:
             request = self._receive()
-            method, params = self._parse(request)
-            if method != "handshake" or len(params) != 2:
+            if not isinstance(request, HandshakeRequest):
                 raise GMSError("expected GMS handshake")
-            try:
-                requested = RequestedLockType(params[0])
-            except (TypeError, ValueError):
-                raise GMSError("invalid requested lock type") from None
-            expected_identity = params[1]
-            if expected_identity is not None:
-                if (
-                    not isinstance(expected_identity, list)
-                    or len(expected_identity) != 2
-                    or not all(
-                        isinstance(item, str) and item for item in expected_identity
-                    )
-                ):
-                    raise GMSError("invalid expected server identity")
-                if tuple(expected_identity) != self.server.gms.identity:  # type: ignore[attr-defined]
-                    send_message(
-                        self.request,
-                        [
-                            False,
-                            "FatalGMSError",
-                            "GMS server incarnation or physical GPU changed",
-                        ],
-                    )
-                    return
-            session = self.server.gms.acquire(  # type: ignore[attr-defined]
-                requested,
+            manager = self.server.manager
+            if (
+                request.expected_identity is not None
+                and request.expected_identity != manager.identity
+            ):
+                send_message(
+                    self.request,
+                    ErrorResponse("GMS server incarnation or physical GPU changed"),
+                )
+                return
+            session = manager.acquire(
+                request.lock_type,
                 lambda: not socket_is_alive(self.request),
             )
             if session is None:
                 return
-            nonce, gpu_uuid = self.server.gms.identity  # type: ignore[attr-defined]
+            nonce, gpu_uuid = manager.identity
             send_message(
                 self.request,
-                [True, [session.mode.value, nonce, gpu_uuid]],
+                HandshakeResponse(session.mode, nonce, gpu_uuid),
             )
 
             while True:
@@ -70,16 +63,18 @@ class _GMSRequestHandler(socketserver.BaseRequestHandler):
                     return
                 export_fd = -1
                 try:
-                    method, params = self._parse(request)
-                    result, export_fd = self.server.gms.dispatch(  # type: ignore[attr-defined]
-                        session, method, params
-                    )
-                    send_message(self.request, [True, result], export_fd)
+                    if not isinstance(request, REQUEST_TYPES):
+                        raise GMSError("handshake is valid only as the first message")
+                    response, export_fd = manager.handle_request(session, request)
+                    send_message(self.request, response, export_fd)
                 except Exception as exc:
                     try:
                         send_message(
                             self.request,
-                            [False, type(exc).__name__, str(exc)],
+                            ErrorResponse(
+                                str(exc),
+                                out_of_memory=isinstance(exc, MemoryError),
+                            ),
                         )
                     except Exception:
                         return
@@ -90,31 +85,22 @@ class _GMSRequestHandler(socketserver.BaseRequestHandler):
             return
         finally:
             if session is not None:
-                self.server.gms.close(session)  # type: ignore[attr-defined]
+                self.server.manager.close(session)
 
-    def _receive(self) -> object:
+    def _receive(self) -> Message:
         request, received_fd = receive_message(self.request)
         if received_fd >= 0:
             os.close(received_fd)
             raise GMSError("GMS clients must not send file descriptors")
         return request
 
-    @staticmethod
-    def _parse(request: object) -> tuple[str, list[object]]:
-        if not isinstance(request, list) or len(request) != 2:
-            raise GMSError("invalid GMS RPC request")
-        method, params = request
-        if not isinstance(method, str) or not isinstance(params, list):
-            raise GMSError("invalid GMS RPC request")
-        return method, params
-
 
 class GMSRPCServer(socketserver.ThreadingUnixStreamServer):
     daemon_threads = True
 
-    def __init__(self, path: str, gms: GMS):
+    def __init__(self, path: str, manager: GMSServerMemoryManager):
         self.path = path
-        self.gms = gms
+        self.manager = manager
         self._prepare_socket_path()
         super().__init__(path, _GMSRequestHandler)
         os.chmod(path, 0o600)
