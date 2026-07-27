@@ -462,22 +462,20 @@ func (r *DynamoGraphDeploymentRequestReconciler) Reconcile(ctx context.Context, 
 		return ctrl.Result{}, nil
 	}
 
-	// Check for spec changes (immutability enforcement)
+	// Observe spec changes admitted by the validation webhook before resuming the phase machine.
 	if dgdr.Status.ObservedGeneration > 0 && dgdr.Status.ObservedGeneration != dgdr.Generation {
-		// Spec changed after initial processing
 		if dgdr.Status.Phase == nvidiacomv1beta1.DGDRPhaseProfiling || dgdr.Status.Phase == nvidiacomv1beta1.DGDRPhaseDeploying ||
 			dgdr.Status.Phase == nvidiacomv1beta1.DGDRPhaseReady || dgdr.Status.Phase == nvidiacomv1beta1.DGDRPhaseDeployed {
-			logger.Info("Spec change detected in immutable phase",
+			logger.Info("Observing admitted spec repair in immutable phase",
 				"phase", dgdr.Status.Phase,
 				"observedGeneration", dgdr.Status.ObservedGeneration,
 				"currentGeneration", dgdr.Generation)
 
-			r.Recorder.Event(dgdr, corev1.EventTypeWarning, nvidiacomv1beta1.EventReasonSpecChangeRejected,
-				fmt.Sprintf(MessageSpecChangeRejected, dgdr.Status.Phase))
-
-			// Keep the old observedGeneration to continue rejecting changes
-			// No phase transition - stay in current phase with old spec
-			return ctrl.Result{}, nil
+			dgdr.Status.ObservedGeneration = dgdr.Generation
+			if err := r.Status().Update(ctx, dgdr); err != nil {
+				return ctrl.Result{}, fmt.Errorf("failed to observe admitted DGDR spec repair: %w", err)
+			}
+			return ctrl.Result{Requeue: true}, nil
 		}
 	}
 	// Phase machine: handle different phases

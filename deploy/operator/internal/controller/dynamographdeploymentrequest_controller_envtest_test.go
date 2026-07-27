@@ -1367,11 +1367,11 @@ spec:
 		})
 	})
 
-	Context("When enforcing spec immutability", func() {
-		It("Should reject spec changes after profiling starts", func() {
+	Context("When observing admitted spec repairs", func() {
+		It("Should continue reconciliation after a runtime version override repair", func() {
 			t := GinkgoT()
 			ctx := context.Background()
-			dgdrName := "test-dgdr-immutable"
+			dgdrName := "test-dgdr-runtime-version-repair"
 			namespace := envtestNamespace
 
 			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
@@ -1382,7 +1382,7 @@ spec:
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
 					Model:   "test-model",
 					Backend: "vllm",
-					Image:   "test-profiler:1.1.0",
+					Image:   "test-profiler:custom",
 					Hardware: &nvidiacomv1beta1.HardwareSpec{
 						NumGPUsPerNode: ptr.To[int32](8),
 						GPUSKU:         nvidiacomv1beta1.GPUSKUTypeH100SXM,
@@ -1396,8 +1396,8 @@ spec:
 				},
 			}
 
-			t.Log("Create and reconcile the initial request")
-			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
+			t.Log("Seed and reconcile the legacy request")
+			Expect(admissionBypassClient.Create(ctx, dgdr)).Should(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: types.NamespacedName{Name: dgdrName, Namespace: namespace},
@@ -1408,38 +1408,28 @@ spec:
 			var current nvidiacomv1beta1.DynamoGraphDeploymentRequest
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &current)).Should(Succeed())
 			initialGeneration := current.Generation
-			observedGeneration := current.Status.ObservedGeneration
 
 			t.Log("Move the request into the profiling phase")
 			current.Status.Phase = nvidiacomv1beta1.DGDRPhaseProfiling
 			Expect(k8sClient.Status().Update(ctx, &current)).Should(Succeed())
 
-			t.Log("Seed a spec change that validating admission normally rejects")
+			t.Log("Repair the missing runtime version override")
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &current)).Should(Succeed())
-			current.Spec.Model = "modified-model"
-			Expect(admissionBypassClient.Update(ctx, &current)).Should(Succeed())
+			current.Spec.RuntimeVersionOverride = "1.1.0"
+			Expect(k8sClient.Update(ctx, &current)).Should(Succeed())
 
-			t.Log("Reconcile the legacy invalid state")
-			_, err = reconciler.Reconcile(ctx, reconcile.Request{
+			t.Log("Observe the admitted repair")
+			result, err := reconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: types.NamespacedName{Name: dgdrName, Namespace: namespace},
 			})
 			Expect(err).NotTo(HaveOccurred())
+			Expect(result.Requeue).Should(BeTrue())
 
-			t.Log("Verify that reconciliation preserves the previously observed state")
+			t.Log("Verify that reconciliation advances the observed generation")
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &current)).Should(Succeed())
 			Expect(current.Generation).Should(BeNumerically(">", initialGeneration))
-			Expect(current.Status.ObservedGeneration).Should(Equal(observedGeneration))
+			Expect(current.Status.ObservedGeneration).Should(Equal(current.Generation))
 			Expect(current.Status.Phase).Should(Equal(nvidiacomv1beta1.DGDRPhaseProfiling))
-
-			t.Log("Verify that reconciliation reports the rejected change")
-			Eventually(func() bool {
-				select {
-				case event := <-recorder.Events:
-					return strings.Contains(event, "DynamoGraphDeploymentRequest is immutable once profiling starts")
-				default:
-					return false
-				}
-			}, timeout, interval).Should(BeTrue())
 		})
 	})
 
