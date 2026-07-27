@@ -515,6 +515,40 @@ async def test_init_llm_worker_engine_args_with_extra_engine_args(
         assert config.max_batch_size == 512
 
 
+@pytest.mark.core
+@pytest.mark.asyncio
+async def test_publish_events_does_not_materialize_unset_kv_cache_defaults(monkeypatch):
+    """Event setup must not turn an omitted TRT-LLM field into an override."""
+    monkeypatch.delenv("DYN_TRTLLM_PUBLISH_KV_EVENTS", raising=False)
+    # Keep extra_engine_args unset so kv_cache_config reaches event setup as the
+    # typed model whose serialization caused this regression.
+    config = parse_args(["--model", "fake-model", "--publish-kv-events"])
+
+    with (
+        mock.patch("dynamo.trtllm.workers.llm_worker.tokenizer_factory"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.nixl_connect.Connector"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.dump_config"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.LLMBackendMetrics"),
+        mock.patch(
+            "dynamo.trtllm.workers.llm_worker.get_llm_engine",
+            side_effect=_mock_get_llm_engine,
+        ),
+    ):
+        with pytest.raises(EngineArgsCaptured) as exc_info:
+            await init_llm_worker(
+                runtime=mock.MagicMock(),
+                config=config,
+                shutdown_event=asyncio.Event(),
+            )
+
+    kv_cache_config = exc_info.value.engine_args["kv_cache_config"]
+    assert (
+        kv_cache_config["free_gpu_memory_fraction"] == config.free_gpu_memory_fraction
+    )
+    assert kv_cache_config["event_buffer_max_size"] > 0
+    assert "enable_swa_scratch_reuse" not in kv_cache_config
+
+
 class MultimodalProcessorInstantiated(Exception):
     """Custom exception for testing MultimodalRequestProcessor."""
 

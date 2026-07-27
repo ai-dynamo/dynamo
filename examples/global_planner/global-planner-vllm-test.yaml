@@ -214,7 +214,8 @@ spec:
             - ${MODEL_NAME}
             - --tensor-parallel-size
             - "1"
-            - --is-prefill-worker
+            - --disaggregation-mode
+            - prefill
           volumeMounts:
             - name: hf-model-cache
               mountPath: /home/dynamo/.cache/huggingface/hub
@@ -289,7 +290,8 @@ spec:
             - ${MODEL_NAME}
             - --tensor-parallel-size
             - "2"
-            - --is-prefill-worker
+            - --disaggregation-mode
+            - prefill
           volumeMounts:
             - name: hf-model-cache
               mountPath: /home/dynamo/.cache/huggingface/hub

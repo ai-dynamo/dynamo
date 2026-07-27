@@ -8,13 +8,15 @@ This document describes the internal architecture of the Dynamo KV Router, inclu
 
 ## KV Router Architecture
 
-The KV Router tracks two key metrics for each worker:
+The KV Router tracks three key metrics for each worker:
 
-1. **Potential Active Blocks**: The number of blocks that would be used for decoding if a request is routed to a worker. This includes both existing active blocks and new blocks from the incoming request.
+1. **Potential Decode Blocks**: The number of blocks that would be used for decoding if a request is routed to a worker. This includes both existing active blocks and new blocks from the incoming request.
 
 2. **Potential New Prefill Blocks**: The number of tokens that need to be computed from scratch on a worker, calculated as:
    - New prefill tokens = Total input tokens - (Overlap blocks × Block size)
    - Potential prefill blocks = New prefill tokens / Block size
+
+3. **Active Requests**: The number of requests already assigned to the worker. An optional block-equivalent weight can include this count in the routing cost.
 
 ### Block Tracking Mechanisms
 
@@ -50,36 +52,43 @@ graph TD
     linkStyle 0,1,2,3 stroke:#8b4513,stroke-width:2px
 ```
 
-The router uses a cost function that considers both the prefill cost (influenced by cached blocks) and the decode load to make optimal routing decisions.
+The router uses a cost function that combines cache-aware prefill cost, potential decode blocks, and an optional active-request cost.
 
 #### Cost Calculation
 
 1. **Prefill blocks**: Calculated from active prompt-side token load plus the incoming request's input tokens, divided by the block size. The system updates active prompt load when the first output token signals prefill completion.
 
-2. **Decode blocks**: Estimated from the request's input tokens and each worker's active sequences. The count updates when requests complete and their blocks are freed.
+2. **Potential decode blocks**: Estimated from the request's input tokens and each worker's active sequences. The count updates when requests complete and their blocks are freed.
 
-3. **Cost formula**:
+3. **Active requests**: Read from the same worker-load snapshot as prefill and decode load. Set `decode_active_request_weight` above `0` to charge a block-equivalent cost for each active request.
+
+4. **Cost formula**:
    ```text
-   adjusted_prefill_blocks = max(
+   adjusted_prefill_blocks = (
        prefill_blocks
        - overlap_score_credit * device_overlap_blocks
        - host_cache_hit_weight * host_overlap_blocks
        - disk_cache_hit_weight * disk_overlap_blocks
-       - shared_cache_multiplier * shared_beyond_blocks,
-       0,
+       - shared_cache_multiplier * shared_beyond_blocks
    )
-   cost = prefill_load_scale * adjusted_prefill_blocks + decode_blocks
+   active_request_blocks = decode_active_request_weight * active_requests
+   cost = (
+       prefill_load_scale * adjusted_prefill_blocks
+       + potential_decode_blocks
+       + active_request_blocks
+   )
    ```
    - Lower costs indicate better routing choices
-   - `overlap_score_credit` is the device-local prefix-overlap credit multiplier, from 0.0 to 1.0
-   - `prefill_load_scale` controls adjusted prompt-side load relative to decode blocks
+   - `overlap_score_credit` is a finite, nonnegative device-local prefix-overlap credit multiplier
+   - `prefill_load_scale` controls adjusted prompt-side load relative to potential decode blocks
+   - `decode_active_request_weight` defaults to `0`; use a positive value only when decode step latency depends materially on active batch size
    - Higher overlap credits favor cache reuse (improving TTFT), while lower credits prioritize even load distribution (improving ITL)
 
 #### Worker Selection
 
 The router selects the worker with the lowest cost. When `router_temperature` is set to a non-zero value, the router uses softmax sampling on the normalized cost logits to introduce randomness in the selection, which can help with load distribution.
 
-Example calculation with `overlap_score_credit = 1.0`:
+Example calculation with `overlap_score_credit = 1.0` and the default `decode_active_request_weight = 0`:
 - Worker 1: raw prefill 10 blocks, device overlap 2 blocks, decode 10 blocks => cost = 8 + 10 = 18
 - **Worker 2: raw prefill 10 blocks, device overlap 5 blocks, decode 5 blocks => cost = 5 + 5 = 10** (selected - lowest cost)
 - Worker 3: raw prefill 10 blocks, device overlap 8 blocks, decode 9 blocks => cost = 2 + 9 = 11
