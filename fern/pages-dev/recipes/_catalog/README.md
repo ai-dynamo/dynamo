@@ -12,7 +12,7 @@ CSS-coupled vocabulary. For the machine-readable catalog contract, see the
 
 <Info>
 The picker is **pure CSS** (no JavaScript). Every allowed dimension value is
-hardcoded in `fern/main.css`. A page that uses a value not listed below will
+hardcoded in `fern/main.css`. A page that uses a value not listed below will After editing `main.css`, run `python3 docs/fern/scripts/sync_site_css.py` so the footer's SITE_CSS mirror stays in sync (pre-commit enforces this).
 render the picker but **filter nothing** — adding a new value requires a
 `fern/main.css` edit (see [Adding a new axis value](#adding-a-new-axis-value)).
 </Info>
