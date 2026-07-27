@@ -29,10 +29,12 @@ The DynamoGraphDeployment (DGD) manifests use `nvidia.com/v1beta1`. `DynamoModel
 |------|-------------|
 | `agg_lora.yaml` | DynamoGraphDeployment for vLLM with LoRA support |
 | `agg_lora_hf.yaml` | DynamoGraphDeployment and DynamoModel for direct Hugging Face Hub loading |
-| `agg_lora_xpu_dra.yaml` | Intel XPU DRA DynamoGraphDeployment for vLLM with LoRA support |
 | `minio-secret.yaml` | Kubernetes secret for MinIO credentials |
 | `sync-lora-job.yaml` | Job to download a LoRA from Hugging Face Hub and upload it to MinIO |
 | `lora-model.yaml` | DynamoModel CRD for registering LoRA adapters |
+
+The Intel XPU deployment manifest is
+[`../xpu/agg_lora_xpu_dra.yaml`](../xpu/agg_lora_xpu_dra.yaml).
 
 ## Deploy from Hugging Face Hub
 
@@ -201,7 +203,28 @@ yq '.spec.components[].podTemplate.spec.containers[] |= (if .name == "main" then
 #### Deploy the LoRA-Enabled vLLM Graph
 
 ```bash
+export DEPLOYMENT_NAME=vllm-agg-lora
 kubectl apply -f agg_lora_updated.yaml -n ${NAMESPACE}
+```
+
+#### Deploy on Intel XPU with DRA
+
+Use `../xpu/agg_lora_xpu_dra.yaml` instead of
+`agg_lora_updated.yaml` to deploy on Intel XPU. Before applying the
+manifest, complete Steps 1-4 above to create `hf-token-secret` and
+`minio-secret`, deploy MinIO, and upload the adapter.
+
+Use Kubernetes v1.34 or newer with DRA API v1 and the Intel resource drivers
+for Kubernetes installed. Replace the Frontend
+`nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag` image and the worker
+`nvcr.io/nvidia/ai-dynamo/vllm-runtime-xpu:my-tag` image with images available
+to the cluster. See the
+[Intel XPU Deployment Examples](../xpu/README.md) for the XPU image build
+commands and additional requirements.
+
+```bash
+export DEPLOYMENT_NAME=vllm-agg-lora-xpu-dra
+kubectl apply -f ../xpu/agg_lora_xpu_dra.yaml -n ${NAMESPACE}
 ```
 
 #### Verify the Deployment
@@ -211,7 +234,7 @@ kubectl apply -f agg_lora_updated.yaml -n ${NAMESPACE}
 kubectl get pods -n ${NAMESPACE}
 
 # Watch worker logs
-kubectl logs -f deployment/vllm-agg-lora-vllmdecode-worker -n ${NAMESPACE}
+kubectl logs -f deployment/${DEPLOYMENT_NAME}-vllmdecode-worker -n ${NAMESPACE}
 ```
 
 Wait for the worker to show "Application startup complete".
@@ -228,17 +251,6 @@ kubectl apply -f lora-model.yaml -n ${NAMESPACE}
 This creates a declarative way to manage LoRA adapters in your cluster.
 
 ---
-
-## Deploy on Intel XPU with DRA
-
-To use `agg_lora_xpu_dra.yaml`, install Kubernetes DRA v1 and the Intel
-resource drivers for Kubernetes with the `gpu.intel.com` DeviceClass. Build and
-push the `vllm-runtime-xpu:my-tag` worker image before deployment. See the
-[Intel XPU Deployment Examples](../xpu/README.md) for the image build commands.
-
-```bash
-kubectl apply -f agg_lora_xpu_dra.yaml -n ${NAMESPACE}
-```
 
 ## Configuration Reference
 
@@ -281,8 +293,20 @@ kubectl delete -f agg_lora_hf.yaml -n ${NAMESPACE}
 
 ### Remove vLLM Deployment
 
+Delete the manifest that you applied:
+
 ```bash
-kubectl delete -f agg_lora.yaml -n ${NAMESPACE}
+# Standard v1beta1 deployment
+kubectl delete -f agg_lora_updated.yaml -n ${NAMESPACE}
+
+# Intel XPU deployment
+kubectl delete -f ../xpu/agg_lora_xpu_dra.yaml -n ${NAMESPACE}
+```
+
+### Remove DynamoModel CRD
+
+```bash
+kubectl delete -f lora-model.yaml -n ${NAMESPACE}
 ```
 
 ### Remove Sync Job
@@ -308,11 +332,15 @@ kubectl delete secret hf-token-secret -n ${NAMESPACE}
 
 ## Troubleshooting
 
+Set `DEPLOYMENT_NAME` to `vllm-agg-lora` for the standard deployment or
+`vllm-agg-lora-xpu-dra` for the Intel XPU deployment before running these
+commands.
+
 ### LoRA Fails to Load
 
 1. **Check MinIO connectivity from worker**:
    ```bash
-   kubectl exec -it deployment/vllm-agg-lora-vllmdecode-worker -n ${NAMESPACE} -- \
+   kubectl exec -it deployment/${DEPLOYMENT_NAME}-vllmdecode-worker -n ${NAMESPACE} -- \
      curl http://minio:9000/minio/health/live
    ```
 
@@ -324,7 +352,7 @@ kubectl delete secret hf-token-secret -n ${NAMESPACE}
 
 3. **Check worker logs**:
    ```bash
-   kubectl logs deployment/vllm-agg-lora-vllmdecode-worker -n ${NAMESPACE}
+   kubectl logs deployment/${DEPLOYMENT_NAME}-vllmdecode-worker -n ${NAMESPACE}
    ```
 
 ### Sync Job Fails
