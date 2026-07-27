@@ -53,6 +53,7 @@ Platform-specific manifests and templates for production environments. Deploymen
 Low-level runtime examples for developers using Python<>Rust bindings:
 
 - **[Hello World](/examples/custom_backend/hello_world/README.md)** - Minimal Dynamo runtime service demonstrating basic concepts
+- **[Hello Engine](/examples/custom_backend/hello_engine/README.md)** - Complete custom engine on the unified backend contract: OpenAI-compatible serving through the standard frontend plus KV-aware routing with synthetic KV events — no GPU, no model, no downloads
 
 ## Getting Started
 
@@ -70,7 +71,7 @@ Low-level runtime examples for developers using Python<>Rust bindings:
 Before running any examples, ensure you have:
 
 - **Docker & Docker Compose** - For containerized services
-- **CUDA-compatible GPU** - For LLM inference (except hello_world, which is non-GPU aware)
+- **CUDA-compatible GPU** - For LLM inference (except hello_world and hello_engine, which are non-GPU aware)
 - **Python 3.9+** - For client scripts and utilities
 
 ### For Kubernetes Deployments
