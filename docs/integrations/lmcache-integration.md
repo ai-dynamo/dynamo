@@ -13,19 +13,30 @@ This document describes how LMCache is integrated into Dynamo's vLLM backend to 
 
 ## Installation Notes
 
-Dynamo's vLLM runtime expects LMCache to be present in the same Python environment. On supported environments (x86_64, Python 3.10-3.13, PyTorch built against CUDA 12.x), the published wheel installs directly:
+Dynamo's vLLM runtime expects LMCache to be present in the same Python environment. Installation depends on the accelerator backend.
+
+For CUDA environments (x86_64, Python 3.10-3.13, PyTorch built against CUDA 12.x), the published wheel installs directly:
 
 ```bash
 uv pip install lmcache
 ```
 
-LMCache only publishes x86_64 manylinux wheels linked against CUDA 12. For aarch64 hosts, or hosts running PyTorch built against a different CUDA major version, build LMCache from source against your matching torch + CUDA stack — see the official [LMCache installation guide](https://docs.lmcache.ai/getting_started/installation.html).
+LMCache only publishes x86_64 manylinux wheels linked against CUDA 12. For aarch64 hosts or hosts running PyTorch built against a different CUDA major version, build LMCache from source against your matching torch + CUDA stack — see the official [LMCache installation guide](https://docs.lmcache.ai/getting_started/installation.html).
 
 > **Compatibility note**
 >
 > `LMCacheMPConnector` needs the fix from [LMCache#3282](https://github.com/LMCache/LMCache/pull/3282), which is on LMCache `main` but not yet released. Without it, the MP path fails on vLLM ≥ 0.20.0 (including the `vllm==0.21.0` Dynamo currently pins) with `RuntimeError: Unsupported GPUKVFormat: 7` — vLLM 0.20+ uses GPU KV formats 6 / 7 that the MP path doesn't yet handle.
 >
 > Until the next LMCache release, build LMCache from source against that PR.
+
+For XPU environments, build LMCache from source with the SYCL backend against the torch stack already installed in the runtime:
+
+```bash
+git clone https://github.com/LMCache/LMCache.git
+cd LMCache
+uv pip install -r requirements/build.txt
+BUILD_WITH_SYCL=1 uv pip install --no-build-isolation -e .
+```
 
 ## Aggregated Serving
 
