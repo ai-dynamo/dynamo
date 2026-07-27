@@ -909,14 +909,19 @@ navigation:
           # Each per-module page is a visible sibling of the Python landing so
           # the sidebar exposes every published module. The section's path is
           # the landing (/reference/api/python); children get their own slugs.
+          # Sections here set 'collapsed: false': Fern collapses by default,
+          # which hid the whole published surface behind a click on the tab
+          # readers open specifically to look a symbol up.
           - section: API Reference
             slug: api
+            collapsed: false
             contents:
               - page: Overview
                 path: reference/api/README.mdx
               - section: Python API
                 path: reference/api/python/README.mdx
                 slug: python
+                collapsed: false
                 contents:
                   - page: dynamo._core
                     path: reference/api/python/_core.mdx
@@ -963,6 +968,7 @@ navigation:
               - section: Kubernetes API
                 path: kubernetes/api-reference-fern.mdx
                 slug: kubernetes
+                collapsed: false
                 contents:
                   - page: DynamoGraphDeployment
                     path: kubernetes/dgd-reference.mdx
@@ -985,6 +991,7 @@ navigation:
           - page: Release Artifacts
             path: reference/release-artifacts.mdx
           - section: Releases
+            collapsed: false
             contents:
               - page: Release History
                 path: reference/release-notes/README.mdx

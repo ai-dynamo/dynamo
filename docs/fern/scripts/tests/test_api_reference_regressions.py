@@ -113,6 +113,78 @@ EXPECTED_PYTHON_MODULE_SLUGS = (
 )
 
 
+def _iter_sections(node: Any) -> Iterator[dict[str, Any]]:
+    """Every ``section`` node anywhere below ``node``."""
+    if isinstance(node, list):
+        for item in node:
+            yield from _iter_sections(item)
+    elif isinstance(node, dict):
+        if "section" in node:
+            yield node
+        for value in node.values():
+            yield from _iter_sections(value)
+
+
+def test_reference_sidebar_sections_are_expanded_by_default() -> None:
+    """The reference tab must open with its contents on screen.
+
+    Fern collapses a section unless told otherwise, so the tab a reader
+    lands on to look something up shipped with the Python modules, the
+    Kubernetes types, and the release list all shut. Every visible section
+    in this tab therefore has to opt out explicitly.
+    """
+    still_collapsed = sorted(
+        section["section"]
+        for section in _iter_sections(_reference_general_layout())
+        if not section.get("hidden") and section.get("collapsed") is not False
+    )
+
+    assert still_collapsed == [], (
+        "reference sections must set 'collapsed: false' so the sidebar opens "
+        f"expanded; still collapsed: {still_collapsed}"
+    )
+
+
+def test_legacy_kubernetes_full_reference_stays_hidden() -> None:
+    """The legacy K8s page is a duplicate, not a missing page.
+
+    ``kubernetes/api-reference.md`` is the raw generated Markdown twin of
+    ``kubernetes/api-reference-fern.mdx`` -- the same generator, the same
+    CRDs, and the MDX page cites the ``.md`` as its own source. Surfacing it
+    would put a second, untitled Kubernetes full reference directly beneath
+    the colocated one.
+    """
+    legacy = [
+        section
+        for section in _iter_sections(_reference_general_layout())
+        if section["section"] == "Additional Resources"
+    ]
+    assert len(legacy) == 1
+    assert legacy[0].get("hidden") is True, (
+        "Additional Resources duplicates the colocated Kubernetes API section; "
+        "it stays hidden while both are generated from the same CRDs"
+    )
+
+
+def test_machine_readable_releases_page_stays_hidden() -> None:
+    """The agent-facing releases mirror is not a sidebar entry.
+
+    ``reference/releases-data.mdx`` is a generated plain-markdown mirror of
+    ``releases.data.ts`` for agents, and it says so in its own subtitle. Its
+    human-facing content -- the CUDA toolkit and minimum driver history --
+    belongs on Compatibility, which carries that table directly. Unhiding
+    this page too would publish the same matrix twice under a name that
+    means nothing to a reader.
+    """
+    entries = [
+        entry
+        for entry in _reference_general_layout()
+        if entry.get("path") == "reference/releases-data.mdx"
+    ]
+    assert len(entries) == 1
+    assert entries[0].get("hidden") is True
+
+
 def test_python_module_pages_are_visible_in_sidebar() -> None:
     """Every generated Python module page must be a visible sidebar entry."""
     python_section = _python_api_section()
