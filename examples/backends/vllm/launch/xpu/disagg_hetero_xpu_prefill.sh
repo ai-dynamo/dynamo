@@ -30,7 +30,7 @@ export UCX_TLS=tcp
 # Edit --router-mode to random / round-robin / kv.
 python -m dynamo.frontend \
     --router-mode kv \
-    --http-port 8000 \
+    --http-port "${DYN_HTTP_PORT:-8000}" \
     --router-reset-states &
 
 # One prefill worker on XPU.
