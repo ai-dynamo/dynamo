@@ -86,12 +86,16 @@ kubectl create secret generic hf-token-secret \
 ```
 
 <Warning>
-Edit `storageClassName` in `model-cache/model-cache.yaml` to a ReadWriteMany storage class on your cluster (`kubectl get storageclass`) before applying it. Review namespace, image tags, node selectors, and resource claims in the manifests as well.
+If you use the `model-cache` PVC (required on GB300, optional on GB200), edit `storageClassName` in `model-cache/model-cache.yaml` to a ReadWriteMany storage class on your cluster (`kubectl get storageclass`) before applying it. Review namespace, image tags, node selectors, and resource claims in the manifests as well.
 </Warning>
 
 ## Deploy
 
-Create the shared model cache, then download the checkpoint:
+The two SKUs source the checkpoint differently, so follow the block for your target.
+
+<div data-sku="gb300">
+
+The GB300 manifests read the checkpoint from a `model-cache` PVC (`HF_HOME=/model-cache`, `--model moonshotai/Kimi-K3`). Create the cache and download the weights:
 
 ```bash
 # Edit storageClassName in model-cache/model-cache.yaml first.
@@ -100,13 +104,23 @@ kubectl apply -f recipes/kimi-k3/model-cache/model-download.yaml -n ${NAMESPACE}
 kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=14400s
 ```
 
-<div data-sku="gb200">
-
-> [!NOTE]
-> The GB200 manifests mount weights from a node-local `hostPath` (a GKE pattern) rather than the `model-cache` PVC. Edit the `models` volume in the deploy manifest to match your cluster, or point it at the PVC.
-
 </div>
 
+<div data-sku="gb200">
+
+The GB200 manifests read the checkpoint from node-local storage, not the `model-cache` PVC: they mount the host path `/mnt/stateful_partition/kube-ephemeral-ssd/models` (a GKE layout) at `/models` and serve `--model /models/model_weight` with `HF_HUB_OFFLINE=1`. Pick one of:
+
+- **Pre-stage the weights on every GB200 node** in the deployment at `<host-path>/model_weight`, then edit the `models` `hostPath` in the deploy manifest to match your cluster's path.
+- **Switch the manifest to the PVC flow** used by the GB300 recipes: create the cache and run the download job below, then in the deploy manifest replace the `models` `hostPath` volume with a `persistentVolumeClaim` (`claimName: model-cache`) mounted at `/model-cache`, add `HF_HOME=/model-cache`, and set `MODEL_PATH` to `moonshotai/Kimi-K3`.
+
+```bash
+# PVC flow only. Edit storageClassName in model-cache/model-cache.yaml first.
+kubectl apply -f recipes/kimi-k3/model-cache/model-cache.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/kimi-k3/model-cache/model-download.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=14400s
+```
+
+</div>
 
 Then deploy the target DGD:
 
