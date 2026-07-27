@@ -179,7 +179,7 @@ repos:
       language: python
       additional_dependencies:
         - pyyaml==6.0.3
-      files: ^(deploy/operator/config/crd/bases/nvidia\.com_dynamographdeployment(request)?s\.yaml|recipes/(kustomize/components/dynamo-openapi/.*|.*/(kustomize/.*\.(ya?ml|json)|deploy(-[^/]+)?\.yaml))|scripts/(generate_kustomize_openapi|render_recipe_kustomize)\.py)$
+      files: ^(deploy/operator/config/crd/bases/nvidia\.com_dynamographdeployment(request)?s\.yaml|recipes/(kustomize/components/.*|.*/(kustomize/.*\.(ya?ml|json)|deploy(-[^/]+)?\.yaml))|scripts/(generate_kustomize_openapi|render_recipe_kustomize)\.py)$
     - id: pytest-marker-report
       name: Report pytest markers (static + inherited)
       entry: python3 tests/report_pytest_markers.py

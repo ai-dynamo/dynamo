@@ -6,12 +6,8 @@ metadata:
   name: q32b-1p1d-cloud-provider
 spec:
   services:
-    VllmPrefillWorker:
+    PrefillWorker:
       extraPodSpec:
-        tolerations: &gpuTolerations
-          - key: nvidia.com/gpu
-            operator: Exists
-            effect: NoSchedule
         mainContainer:
           env: &nscaleEnvironment
             - name: GPU_MEMORY_UTILIZATION
@@ -19,8 +15,6 @@ spec:
             # Compute-fabric NICs only; mlx5_6..9 are side fabric on the referenced Nscale nodes.
             - name: UCX_NET_DEVICES
               value: mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1,mlx5_4:1,mlx5_5:1,mlx5_10:1,mlx5_11:1
-            - name: NIXL_LOG_LEVEL
-              value: INFO
           volumeMounts: &ibVolumeMounts
             - name: model-cache
               mountPath: /model-cache
@@ -46,9 +40,8 @@ spec:
         requests:
           custom:
             rdma/ib: "1"
-    VllmDecodeWorker:
+    DecodeWorker:
       extraPodSpec:
-        tolerations: *gpuTolerations
         mainContainer:
           env: *nscaleEnvironment
           volumeMounts: *ibVolumeMounts

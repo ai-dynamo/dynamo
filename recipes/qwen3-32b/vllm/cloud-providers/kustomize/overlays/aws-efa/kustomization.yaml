@@ -5,7 +5,9 @@ kind: Kustomization
 sortOptions:
   order: fifo
 resources:
-  - ../../base
+  - ../_rdma
+components:
+  - ../../../../../../kustomize/components/disagg-workers/aws-efa
 patches:
   - target:
       group: nvidia.com

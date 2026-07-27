@@ -3,10 +3,10 @@
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: qwen3-235b-a22b-disagg
+  name: disagg-workers
 spec:
   services:
-    TRTLLMPrefillWorker:
+    PrefillWorker:
       extraPodSpec:
         mainContainer:
           env: &rdmaEnvironment
@@ -25,7 +25,7 @@ spec:
               add:
                 - IPC_LOCK
                 - SYS_PTRACE
-    TRTLLMDecodeWorker:
+    DecodeWorker:
       extraPodSpec:
         mainContainer:
           env: *rdmaEnvironment

@@ -76,29 +76,7 @@ spec:
   - create: false
     name: model-cache
   services:
-    Frontend:
-      componentType: frontend
-      extraPodSpec:
-        affinity:
-          podAntiAffinity:
-            requiredDuringSchedulingIgnoredDuringExecution:
-            - labelSelector:
-                matchExpressions:
-                - key: nvidia.com/dynamo-graph-deployment-name
-                  operator: In
-                  values:
-                  - qwen3-235b-a22b-disagg-frontend
-              topologyKey: kubernetes.io/hostname
-        mainContainer:
-          args:
-          - python3 -m dynamo.frontend --router-mode kv --http-port 8000
-          command:
-          - /bin/sh
-          - -c
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.1
-        tolerations: []
-      replicas: 1
-    TRTLLMDecodeWorker:
+    DecodeWorker:
       componentType: worker
       envFromSecret: hf-token-secret
       extraPodSpec:
@@ -155,7 +133,30 @@ spec:
       sharedMemory:
         size: 256Gi
       subComponentType: decode
-    TRTLLMPrefillWorker:
+    Frontend:
+      componentType: frontend
+      extraPodSpec:
+        affinity:
+          podAntiAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                - key: nvidia.com/dynamo-graph-deployment-name
+                  operator: In
+                  values:
+                  - qwen3-235b-a22b-disagg-frontend
+              topologyKey: kubernetes.io/hostname
+        mainContainer:
+          args:
+          - python3 -m dynamo.frontend --router-mode kv --http-port 8000
+          command:
+          - /bin/sh
+          - -c
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.1
+        tolerations: []
+      replicas: 1
+    # Provider Components target backend-neutral worker service keys.
+    PrefillWorker:
       componentType: worker
       envFromSecret: hf-token-secret
       extraPodSpec:

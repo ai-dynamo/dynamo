@@ -11,7 +11,7 @@ spec:
         requests:
           custom:
             ephemeral-storage: 30Gi
-    VllmPrefillWorker:
+    PrefillWorker:
       extraPodSpec:
         tolerations: &gpuTolerations
           - key: nvidia.com/gpu
@@ -44,7 +44,7 @@ spec:
         requests:
           custom:
             rdma/shared_ib: "1"
-    VllmDecodeWorker:
+    DecodeWorker:
       extraPodSpec:
         tolerations: *gpuTolerations
         mainContainer:

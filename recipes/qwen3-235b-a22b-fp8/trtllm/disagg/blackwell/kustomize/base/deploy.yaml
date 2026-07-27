@@ -93,7 +93,8 @@ spec:
           command:
             - /bin/sh
             - -c
-    TRTLLMPrefillWorker:
+    # Provider Components target backend-neutral worker service keys.
+    PrefillWorker:
       componentType: worker
       subComponentType: prefill
       envFromSecret: hf-token-secret
@@ -150,7 +151,7 @@ spec:
           - name: model-cache
             persistentVolumeClaim:
               claimName: model-cache
-    TRTLLMDecodeWorker:
+    DecodeWorker:
       componentType: worker
       subComponentType: decode
       envFromSecret: hf-token-secret

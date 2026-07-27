@@ -6,7 +6,7 @@ metadata:
   name: qwen3-235b-a22b-disagg
 spec:
   services:
-    TRTLLMPrefillWorker:
+    PrefillWorker:
       resources:
         limits:
           gpu: "2"
@@ -17,28 +17,7 @@ spec:
           custom:
             vpc.amazonaws.com/efa: "8"
             ephemeral-storage: 2Gi
-      extraPodSpec:
-        mainContainer:
-          env: &efaEnvironment
-            - name: DYN_KVBM_NIXL_BACKEND_LIBFABRIC
-              value: "true"
-            - name: DYN_KVBM_NIXL_BACKEND_UCX
-              value: "false"
-            - name: NIXL_TELEMETRY_ENABLE
-              value: "y"
-            - name: NIXL_TELEMETRY_EXPORTER
-              value: prometheus
-            - name: NIXL_TELEMETRY_PROMETHEUS_PORT
-              value: "19090"
-            - name: FI_PROVIDER
-              value: efa
-            - name: FI_EFA_USE_DEVICE_RDMA
-              value: "1"
-            - name: FI_EFA_ENABLE_SHM_TRANSFER
-              value: "0"
-            - name: FI_LOG_LEVEL
-              value: warn
-    TRTLLMDecodeWorker:
+    DecodeWorker:
       resources:
         limits:
           gpu: "4"
@@ -49,6 +28,3 @@ spec:
           custom:
             vpc.amazonaws.com/efa: "16"
             ephemeral-storage: 2Gi
-      extraPodSpec:
-        mainContainer:
-          env: *efaEnvironment

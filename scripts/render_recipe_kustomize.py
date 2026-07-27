@@ -90,6 +90,8 @@ def select_recipe_roots(paths: list[str]) -> list[Path]:
 
         if rel_changed.parts[:1] != ("recipes",):
             return recipe_roots
+        if rel_changed.parts[:3] == ("recipes", "kustomize", "components"):
+            return recipe_roots
 
         for recipe_root in recipe_roots:
             try:

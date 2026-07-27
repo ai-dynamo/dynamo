@@ -14,8 +14,13 @@ The base keeps the common Qwen3-32B 1P1D vLLM deployment in one
 fabric: RDMA resources, annotations, host mounts, image selection, and runtime
 environment.
 
-The vLLM command line intentionally reads the noisy provider-specific flag
-values from ConfigMaps:
+Shared provider Components apply to the backend-neutral `PrefillWorker` and
+`DecodeWorker` service keys. Model-specific resource counts, images, mounts,
+and command configuration remain in the local recipe overlays.
+
+The vLLM command line reads provider-specific values from environment variables
+so overlays can patch individual values without replacing the shared argument
+list:
 
 - `KV_TRANSFER_CONFIG`
 - `GPU_MEMORY_UTILIZATION`

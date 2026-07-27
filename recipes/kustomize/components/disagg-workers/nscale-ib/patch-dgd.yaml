@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: disagg-workers
+spec:
+  services:
+    PrefillWorker:
+      extraPodSpec:
+        tolerations: &gpuTolerations
+          - key: nvidia.com/gpu
+            operator: Exists
+            effect: NoSchedule
+        mainContainer:
+          env: &nscaleEnvironment
+            - name: NIXL_LOG_LEVEL
+              value: INFO
+    DecodeWorker:
+      extraPodSpec:
+        tolerations: *gpuTolerations
+        mainContainer:
+          env: *nscaleEnvironment

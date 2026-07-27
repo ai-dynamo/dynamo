@@ -76,29 +76,7 @@ spec:
   - create: false
     name: model-cache
   services:
-    Frontend:
-      componentType: frontend
-      extraPodSpec:
-        affinity:
-          podAntiAffinity:
-            requiredDuringSchedulingIgnoredDuringExecution:
-            - labelSelector:
-                matchExpressions:
-                - key: nvidia.com/dynamo-graph-deployment-name
-                  operator: In
-                  values:
-                  - qwen3-235b-a22b-disagg-frontend
-              topologyKey: kubernetes.io/hostname
-        mainContainer:
-          args:
-          - python3 -m dynamo.frontend --router-mode kv --http-port 8000
-          command:
-          - /bin/sh
-          - -c
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.1
-        tolerations: []
-      replicas: 1
-    TRTLLMDecodeWorker:
+    DecodeWorker:
       componentType: worker
       envFromSecret: hf-token-secret
       extraPodSpec:
@@ -130,12 +108,6 @@ spec:
             value: "true"
           - name: DYN_KVBM_NIXL_BACKEND_UCX
             value: "false"
-          - name: NIXL_TELEMETRY_ENABLE
-            value: "y"
-          - name: NIXL_TELEMETRY_EXPORTER
-            value: prometheus
-          - name: NIXL_TELEMETRY_PROMETHEUS_PORT
-            value: "19090"
           - name: FI_PROVIDER
             value: efa
           - name: FI_EFA_USE_DEVICE_RDMA
@@ -144,6 +116,12 @@ spec:
             value: "0"
           - name: FI_LOG_LEVEL
             value: warn
+          - name: NIXL_TELEMETRY_ENABLE
+            value: "y"
+          - name: NIXL_TELEMETRY_EXPORTER
+            value: prometheus
+          - name: NIXL_TELEMETRY_PROMETHEUS_PORT
+            value: "19090"
           - name: NCCL_DEBUG
             value: WARN
           - name: MODEL_PATH
@@ -189,7 +167,30 @@ spec:
       sharedMemory:
         size: 256Gi
       subComponentType: decode
-    TRTLLMPrefillWorker:
+    Frontend:
+      componentType: frontend
+      extraPodSpec:
+        affinity:
+          podAntiAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                - key: nvidia.com/dynamo-graph-deployment-name
+                  operator: In
+                  values:
+                  - qwen3-235b-a22b-disagg-frontend
+              topologyKey: kubernetes.io/hostname
+        mainContainer:
+          args:
+          - python3 -m dynamo.frontend --router-mode kv --http-port 8000
+          command:
+          - /bin/sh
+          - -c
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.1
+        tolerations: []
+      replicas: 1
+    # Provider Components target backend-neutral worker service keys.
+    PrefillWorker:
       componentType: worker
       envFromSecret: hf-token-secret
       extraPodSpec:
@@ -221,12 +222,6 @@ spec:
             value: "true"
           - name: DYN_KVBM_NIXL_BACKEND_UCX
             value: "false"
-          - name: NIXL_TELEMETRY_ENABLE
-            value: "y"
-          - name: NIXL_TELEMETRY_EXPORTER
-            value: prometheus
-          - name: NIXL_TELEMETRY_PROMETHEUS_PORT
-            value: "19090"
           - name: FI_PROVIDER
             value: efa
           - name: FI_EFA_USE_DEVICE_RDMA
@@ -235,6 +230,12 @@ spec:
             value: "0"
           - name: FI_LOG_LEVEL
             value: warn
+          - name: NIXL_TELEMETRY_ENABLE
+            value: "y"
+          - name: NIXL_TELEMETRY_EXPORTER
+            value: prometheus
+          - name: NIXL_TELEMETRY_PROMETHEUS_PORT
+            value: "19090"
           - name: NCCL_DEBUG
             value: WARN
           - name: MODEL_PATH

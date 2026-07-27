@@ -140,9 +140,11 @@ cargo fmt --all && cargo clippy --workspace
   blocks belong under `kustomize/components/`. Prefer resource-shaped Kustomize
   merge patches over JSON patches where possible. Kustomize bases that patch
   Dynamo CRDs include the central `recipes/kustomize/components/dynamo-openapi/`
-  Component; its schema is generated from every operator CRD. Edit the Kustomize
-  source, then run `python3 scripts/render_recipe_kustomize.py`; do not hand-edit
-  generated `deploy-*.yaml` files or the central generated schema.
+  Component; its schema is generated from every operator CRD. The central
+  `recipes/kustomize/components/disagg-workers/` Components require one DGD per
+  base with backend-neutral `PrefillWorker` and `DecodeWorker` service keys.
+  Edit the Kustomize source, then run `python3 scripts/render_recipe_kustomize.py`;
+  do not hand-edit generated `deploy-*.yaml` files or the central generated schema.
 - Use Conventional Commit PR titles: `type(scope): summary`. Accepted types:
   `feat`, `fix`, `docs`, `test`, `ci`, `refactor`, `perf`, `chore`, `revert`,
   `style`, and `build`.
