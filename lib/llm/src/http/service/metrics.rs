@@ -3258,20 +3258,14 @@ mod tests {
     fn test_error_event_unspecified_when_no_message() {
         let result = run_event_converter(error_annotated(None, None));
         assert!(result.is_err());
-        assert_eq!(
-            result.unwrap_err().to_string(),
-            "unspecified error"
-        );
+        assert_eq!(result.unwrap_err().to_string(), "unspecified error");
     }
 
     #[test]
     fn test_error_event_empty_comment_falls_through() {
         let result = run_event_converter(error_annotated(None, Some(vec!["".into()])));
         assert!(result.is_err());
-        assert_eq!(
-            result.unwrap_err().to_string(),
-            "unspecified error"
-        );
+        assert_eq!(result.unwrap_err().to_string(), "unspecified error");
     }
 
     #[test]
