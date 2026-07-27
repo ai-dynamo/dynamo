@@ -578,7 +578,9 @@ runs:
           local version="$1"
           local output
           local origin_version
-          local deadline=$((SECONDS + 120))
+          # vCluster service endpoint propagation can lag host pod readiness under load.
+          local timeout_seconds=300
+          local deadline=$((SECONDS + timeout_seconds))
           local attempt=1
           shift
 
@@ -602,7 +604,7 @@ runs:
             fi
 
             if [ "${SECONDS}" -ge "${deadline}" ]; then
-              echo "::error::${version} admission smoke test did not become reachable within 120s"
+              echo "::error::${version} admission smoke test did not become reachable within ${timeout_seconds}s"
               printf '%s\n' "${output}" >&2
               return 1
             fi
