@@ -43,6 +43,7 @@ def _make_config(**overrides) -> Mock:
         "route_to_encoder": False,
         "disaggregation_mode": DisaggregationMode.AGGREGATED,
         "embedding_worker": False,
+        "gms_shadow_mode": False,
     }
     defaults.update(overrides)
     return Mock(**defaults)
