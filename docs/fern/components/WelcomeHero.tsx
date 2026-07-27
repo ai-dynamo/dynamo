@@ -121,7 +121,7 @@ function CommunityRail() {
     {
       app: "CNCF Slack",
       message: "Join the #ai-dynamo channel",
-      href: "https://communityinviter.com/apps/cloud-native/cncf",
+      href: "https://slack.cncf.io",
       icon: <SlackIcon />,
       tone: "slack",
     },

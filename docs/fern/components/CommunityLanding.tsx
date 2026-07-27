@@ -65,7 +65,7 @@ const CHANNELS = [
   {
     name: "CNCF Slack",
     label: "Find us in #ai-dynamo",
-    href: "https://communityinviter.com/apps/cloud-native/cncf",
+    href: "https://slack.cncf.io",
     tone: "slack",
     icon: "slack",
   },

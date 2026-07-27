@@ -52,7 +52,7 @@ The contributor guides separate the end-to-end process from reference material:
 
 ## Join the Community
 
-- [CNCF Slack (`#ai-dynamo`)](https://communityinviter.com/apps/cloud-native/cncf)
+- [CNCF Slack (`#ai-dynamo`)](https://slack.cncf.io)
 - [Discord](https://discord.gg/D92uqZRjCZ)
 - [GitHub Discussions](https://github.com/ai-dynamo/dynamo/discussions)
 - [Office Hours](https://www.youtube.com/playlist?list=PL5B692fm6--tgryKu94h2Zb7jTFM3Go4X)
