@@ -231,16 +231,21 @@ impl VllmKvManager {
     /// table is not parallel to the attention table lean on that, dropping all of
     /// a request's state rather than trimming it. Trimming a live request is a
     /// real vLLM operation — `remove_skipped_blocks` — that this mocker does not
-    /// model yet, so a partial release stops here rather than guessing.
+    /// model yet, so a partial release is rejected before any group mutates,
+    /// because releases run group by group and cannot be rolled back.
     pub(super) fn deref_for_request(&mut self, request_id: Uuid, blocks: &[UniqueBlock]) {
+        // A request the attention group does not hold falls through to it, which
+        // reports that more precisely than a totality check can.
+        let held = self.attention().block_count(request_id);
+        assert!(
+            held == 0 || blocks.len() == held,
+            "releasing {} of a request's {held} blocks is not modeled yet",
+            blocks.len()
+        );
         let Self { pool, groups, .. } = self;
         for group in groups.iter_mut() {
             group.release(pool, request_id, blocks);
         }
-        assert!(
-            !self.attention().holds_request(request_id),
-            "releasing part of a request's table is not modeled yet"
-        );
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -810,17 +815,24 @@ mod tests {
     }
 
     /// Groups other than attention drop a request's whole state on release, so a
-    /// release that leaves the request holding blocks has to stop rather than
-    /// half-apply. Trimming a live request is vLLM's `remove_skipped_blocks`,
-    /// which the mocker does not model.
+    /// release that would leave the request holding blocks has to be rejected
+    /// before any group runs: the groups release one at a time, so a half-applied
+    /// release cannot be undone. Trimming a live request is vLLM's
+    /// `remove_skipped_blocks`, which the mocker does not model.
     #[test]
-    #[should_panic(expected = "not modeled")]
-    fn releasing_part_of_a_request_table_is_rejected() {
+    fn deref_rejects_a_partial_release_before_mutating() {
         let mut manager = attention_manager(4);
         let owner = Uuid::from_u128(1);
         ready(use_full(&mut manager, owner, &[7, 8], 0));
+        let active_before = manager.num_active_blocks();
 
-        manager.deref_for_request(owner, &[UniqueBlock::FullBlock(8)]);
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            manager.deref_for_request(owner, &[UniqueBlock::FullBlock(8)])
+        }));
+
+        assert!(outcome.is_err(), "partial release must be rejected");
+        assert_eq!(manager.request_block_count(owner), 2);
+        assert_eq!(manager.num_active_blocks(), active_before);
     }
 
     #[test]
