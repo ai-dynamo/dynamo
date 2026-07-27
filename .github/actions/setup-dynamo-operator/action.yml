@@ -579,7 +579,7 @@ runs:
           local output
           local origin_version
           # vCluster service endpoint propagation can lag host pod readiness under load.
-          local timeout_seconds=300
+          local timeout_seconds=600
           local deadline=$((SECONDS + timeout_seconds))
           local attempt=1
           shift
