@@ -205,6 +205,45 @@ The `dynamo_component_errors_total` counter is labeled with `error_type`, identi
 | `publish_response` | Streaming | The engine produced response chunks but the worker could not push one of them back to the frontend (write failed mid-stream). **Also fires on client cancellation** — the frontend disconnecting before the stream finishes — so this counter can be inflated by user-aborted requests. |
 | `publish_final` | Teardown | All response chunks were sent, but the worker could not deliver the final stream-complete marker. The connection died right at the end. |
 
+### QUIC Response Transport Metrics
+
+**Experimental.** Frontends and workers expose process-level `dynamo_quic_response_*` metrics. The
+series have no peer or stream labels, except `dynamo_quic_response_resets_total`, whose `reason`
+label uses a fixed set of transport reasons.
+
+| Metric | Meaning |
+|---|---|
+| `dynamo_quic_response_active_connections` | Open QUIC response connections. |
+| `dynamo_quic_response_active_streams` | Open logical response streams. |
+| `dynamo_quic_response_handshakes_total` | Completed client or server handshakes. |
+| `dynamo_quic_response_handshake_failures_total` | QUIC handshakes rejected or failed. |
+| `dynamo_quic_response_reconnects_total` | Cached connections replaced after failure. |
+| `dynamo_quic_response_connection_failures_total` | Established connections that closed. This must not increase during a locked measurement window. |
+| `dynamo_quic_response_stream_open_stalls_total` | Stream opens that exceeded the five-second timeout. |
+| `dynamo_quic_response_payloads_total` | Logical payload frames completed by response senders. |
+| `dynamo_quic_response_udp_tx_bytes_total` | UDP bytes transmitted by active worker connections. |
+| `dynamo_quic_response_udp_tx_datagrams_total` | UDP datagrams transmitted by active worker connections. |
+| `dynamo_quic_response_udp_tx_ios_total` | UDP transmit I/O operations. This can be lower than datagrams when GSO or syscall batching is active. |
+| `dynamo_quic_response_stream_frames_tx_total` | QUIC `STREAM` frames transmitted. |
+| `dynamo_quic_response_connection_blocked_frames_tx_total` | Connection-level flow-control blocked frames. |
+| `dynamo_quic_response_stream_blocked_frames_tx_total` | Stream-level flow-control blocked frames. |
+| `dynamo_quic_response_lost_packets_total` | Packets Quinn reports lost. |
+| `dynamo_quic_response_lost_bytes_total` | Bytes Quinn reports lost. |
+| `dynamo_quic_response_rtt_microseconds` | Highest current round-trip time across response connections. |
+| `dynamo_quic_response_mtu_bytes` | Lowest current path maximum transmission unit across response connections. |
+
+Calculate packet density over the same steady-state interval for both counters:
+
+```promql
+sum(rate(dynamo_quic_response_payloads_total[1m]))
+/
+sum(rate(dynamo_quic_response_udp_tx_datagrams_total[1m]))
+```
+
+Use `dynamo_quic_response_stream_frames_tx_total` over UDP datagrams as supporting packetization
+evidence. Report UDP datagrams over UDP I/O operations separately as GSO or syscall-batching
+evidence; it does not measure how many response streams share one QUIC packet.
+
 ### Specialized Component Metrics
 
 Some components expose additional metrics specific to their functionality:

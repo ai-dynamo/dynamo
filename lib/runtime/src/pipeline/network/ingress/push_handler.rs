@@ -147,7 +147,7 @@ where
     Adapter: Send + Sync + 'static,
 {
     /// Pump every chunk from the engine's response stream out to the
-    /// upstream-side `StreamSender`, plus the terminal complete-final
+    /// upstream-side QUIC response sender, plus the terminal complete-final
     /// frame. Captures the per-frame metrics, the publish-failure error
     /// classification (client-side disconnect vs. real failure), and the
     /// health-check notifier policy (notify only on non-error chunks and
@@ -155,7 +155,7 @@ where
     async fn pump_response_stream<U>(
         &self,
         mut stream: ManyOut<U>,
-        publisher: &StreamSender,
+        publisher: &mut crate::pipeline::network::quic::ResponseStreamSender,
         payload_codec: RequestPlanePayloadCodec,
     ) where
         U: Data + std::fmt::Debug,
@@ -596,10 +596,8 @@ where
             WORK_HANDLER_NETWORK_TRANSIT_SECONDS.observe(transit_ns as f64 / 1_000_000_000.0);
         }
 
-        // todo - eventually have a handler class which will returned an abstracted object, but for now,
-        // we only support tcp here, so we can just unwrap the connection info
-        tracing::trace!("creating tcp response stream");
-        let mut publisher = tcp::client::TcpClient::create_response_stream(
+        tracing::trace!("creating QUIC response stream");
+        let mut publisher = crate::pipeline::network::quic::create_response_stream(
             request.context(),
             response_connection_info,
             self.metrics().map(|m| m.cancellation_total.clone()),
@@ -656,12 +654,16 @@ where
                 }
 
                 let _result = publisher.send_prologue(Some(error_string)).await;
+                let _ = publisher.finish();
                 Err(e)?
             }
         };
 
-        self.pump_response_stream(stream, &publisher, payload_codec)
+        self.pump_response_stream(stream, &mut publisher, payload_codec)
             .await;
+        publisher.finish().map_err(|error| {
+            PipelineError::Generic(format!("Failed to finish QUIC response stream: {error:#}"))
+        })?;
 
         // Ensure the metrics guard is not dropped until the end of the function.
         // Drop fires "request completed" log via RAII.

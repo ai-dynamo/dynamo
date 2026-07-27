@@ -38,6 +38,47 @@ For example, a deployment with TCP request plane can use different KV event plan
 - **ZMQ KV events (local indexer)**: requests use TCP, KV events use direct ZMQ pub/sub, and persistence lives on workers.
 - **No KV events**: requests use TCP and KV routing predicts cache state from routing decisions.
 
+## Response Transport
+
+**Experimental.** Dynamo sends worker-to-frontend streaming responses over QUIC. Request dispatch
+continues to use the configured request plane, and bidirectional request bodies continue to use a
+TCP stream. A worker reuses one QUIC connection to each frontend and opens one QUIC stream for each
+logical response. Dynamo does not fall back to TCP when the QUIC response connection fails.
+
+Configure the shared TCP request-stream and QUIC response listener with these environment variables:
+
+- `DYN_RESPONSE_STREAM_HOST`: Network interface to advertise. When unset, Dynamo detects a routable
+  local address.
+- `DYN_RESPONSE_STREAM_PORT`: Numeric port for both protocols. TCP and User Datagram Protocol (UDP)
+  bind the same port number independently. When unset or set to `0`, Dynamo selects an available
+  port.
+
+`DYN_TCP_RESPONSE_STREAM_HOST` and `DYN_TCP_RESPONSE_STREAM_PORT` remain compatibility fallbacks.
+The canonical `DYN_RESPONSE_STREAM_*` variables take precedence.
+
+Allow pod-to-pod UDP traffic from workers to frontends on the response-stream port. For
+bidirectional requests, also allow pod-to-pod TCP traffic on that port. If a Kubernetes
+`NetworkPolicy` or firewall requires a fixed port, set `DYN_RESPONSE_STREAM_PORT` explicitly and
+permit both protocols.
+
+Use Linux networking with Generic Segmentation Offload (GSO) support when available. GSO can reduce
+UDP transmit CPU use, but it does not increase the number of logical response streams carried in an
+individual QUIC packet. Validate response packet density and end-to-end performance on the target
+cluster.
+
+When transport metrics report flow-control stalls during a benchmark, set
+`DYN_RESPONSE_STREAM_HIGH_WINDOW=1` on frontends and workers for a diagnostic comparison. This
+changes the per-stream receive window from 256 KiB to 1 MiB and the connection receive and send
+windows from 8 MiB to 32 MiB. Keep the default configuration unless the comparison removes stalls
+and improves the locked workload.
+
+Set `DYN_RESPONSE_QLOG_PATH` to a writable path prefix only for a short diagnostic capture, and
+unset it for performance measurements. Quinn 0.11's built-in `packet_sent` qlog events do not
+include frame lists. For exact distinct-streams-per-packet qualification, capture worker logs with
+`DYN_LOGGING_JSONL=1` and `DYN_LOG=quinn_proto=trace` during the same short run, then pass those logs
+to the included qlog analyzer with `--quinn-trace-log`. The fallback groups `STREAM` frame IDs by
+Quinn's per-packet `send` span. It fails closed if neither capture contains frame details.
+
 ## Configuration
 
 ### Environment Variable

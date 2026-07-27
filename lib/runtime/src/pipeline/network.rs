@@ -12,6 +12,7 @@ pub mod codec;
 pub mod egress;
 pub mod ingress;
 pub mod manager;
+pub mod quic;
 pub mod tcp;
 
 use crate::SystemHealth;

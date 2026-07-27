@@ -32,6 +32,7 @@ use crate::pipeline::network::StreamReceiver;
 use crate::pipeline::network::StreamSender;
 use crate::pipeline::network::TwoPartCodec;
 use crate::pipeline::network::codec::TwoPartMessage;
+use crate::pipeline::network::quic;
 use crate::pipeline::network::tcp;
 use crate::pipeline::{ManyIn, ManyOut, PipelineError, ResponseStream, SingleIn};
 use crate::protocols::maybe_error::MaybeError;
@@ -338,6 +339,10 @@ fn subject_of(conn_info: &ConnectionInfo) -> Option<String> {
         .map(|ci| ci.subject)
 }
 
+fn response_registration_of(conn_info: &ConnectionInfo) -> Result<uuid::Uuid> {
+    Ok(quic::QuicResponseConnectionInfo::try_from(conn_info.clone())?.response_registration_id)
+}
+
 pub struct AddressedRequest<T> {
     request: T,
     address: String,
@@ -377,8 +382,11 @@ pub struct AddressedPushRouter {
     // Request transport (unified trait object - works with all transports)
     req_client: Arc<dyn RequestPlaneClient>,
 
-    // Response transport (TCP streaming - unchanged)
-    resp_transport: Arc<tcp::server::TcpStreamServer>,
+    // TCP remains only for upstream-to-worker request streams.
+    request_stream_transport: Arc<tcp::server::TcpStreamServer>,
+
+    // Worker-to-frontend responses use QUIC.
+    response_transport: Arc<quic::QuicStreamServer>,
 }
 
 impl AddressedPushRouter {
@@ -388,11 +396,13 @@ impl AddressedPushRouter {
     /// The client is provided as a trait object, hiding the specific implementation.
     pub fn new(
         req_client: Arc<dyn RequestPlaneClient>,
-        resp_transport: Arc<tcp::server::TcpStreamServer>,
+        request_stream_transport: Arc<tcp::server::TcpStreamServer>,
+        response_transport: Arc<quic::QuicStreamServer>,
     ) -> Result<Arc<Self>> {
         Ok(Arc::new(Self {
             req_client,
-            resp_transport,
+            request_stream_transport,
+            response_transport,
         }))
     }
 
@@ -401,28 +411,35 @@ impl AddressedPushRouter {
     ) -> Result<Arc<Self>> {
         let manager = provider.drt().network_manager();
         let req_client = manager.create_client()?;
-        let resp_transport = provider.drt().tcp_server().await?;
+        let request_stream_transport = provider.drt().tcp_server().await?;
+        let response_transport = provider.drt().quic_server().await?;
 
         tracing::debug!(
             transport = req_client.transport_name(),
             "Creating AddressedPushRouter with request plane client"
         );
 
-        Self::new(req_client, resp_transport)
+        Self::new(req_client, request_stream_transport, response_transport)
     }
 
     /// Cancel all pending response-stream registrations for an instance.
     pub async fn cancel_instance_streams(&self, instance_id: &EndpointInstanceId) -> usize {
-        self.resp_transport
-            .cancel_instance_streams(instance_id)
-            .await
+        let (request_streams, responses) = tokio::join!(
+            self.request_stream_transport
+                .cancel_instance_streams(instance_id),
+            self.response_transport.cancel_instance_streams(instance_id),
+        );
+        request_streams + responses
     }
 
     /// Clear the tombstone after an instance reappears in discovery.
     pub async fn clear_instance_tombstone(&self, instance_id: &EndpointInstanceId) {
-        self.resp_transport
-            .clear_instance_tombstone(instance_id)
-            .await
+        tokio::join!(
+            self.request_stream_transport
+                .clear_instance_tombstone(instance_id),
+            self.response_transport
+                .clear_instance_tombstone(instance_id),
+        );
     }
 
     /// Bidirectional generation. Note that it doesn't implement the AsyncEngine trait directly
@@ -498,26 +515,34 @@ impl AddressedPushRouter {
         // Tombstone check: if discovery already removed the worker, fail fast
         // with a migratable error rather than writing to the request plane.
         // Dropping the held registrations on this return runs their cleanup.
-        let recv_subject = subject_of(&recv_registered.connection_info);
+        let recv_registration = response_registration_of(&recv_registered.connection_info)?;
         let send_subject = send_registered
             .as_ref()
             .and_then(|r| subject_of(&r.connection_info));
-        if let (Some(subject), Some(inst)) = (&recv_subject, instance)
-            && !self
-                .resp_transport
-                .associate_instance(
-                    subject,
-                    send_subject.as_deref(),
-                    &inst.endpoint_instance_id(),
-                )
-                .await
-        {
-            return Err(anyhow::anyhow!(
-                DynamoError::builder()
-                    .error_type(ErrorType::Disconnected)
-                    .message("Worker removed before request could be sent (tombstoned instance)")
-                    .build()
-            ));
+        if let Some(inst) = instance {
+            let instance_id = inst.endpoint_instance_id();
+            let response_ok = self
+                .response_transport
+                .associate_instance(recv_registration, &instance_id)
+                .await;
+            let request_ok = match send_subject.as_deref() {
+                Some(subject) => {
+                    self.request_stream_transport
+                        .associate_request_instance(subject, &instance_id)
+                        .await
+                }
+                None => true,
+            };
+            if !response_ok || !request_ok {
+                return Err(anyhow::anyhow!(
+                    DynamoError::builder()
+                        .error_type(ErrorType::Disconnected)
+                        .message(
+                            "Worker removed before request could be sent (tombstoned instance)"
+                        )
+                        .build()
+                ));
+            }
         }
 
         let buffer = build_request_envelope(
@@ -637,8 +662,27 @@ impl AddressedPushRouter {
             .enable_response_stream(enable_response_stream)
             .build()?;
 
-        let pending: PendingConnections = self.resp_transport.register(options).await;
-        let (send_stream, recv_stream) = pending.into_parts();
+        let send_stream = if enable_request_stream {
+            let request_options = StreamOptions::builder()
+                .context(options.context.clone())
+                .enable_request_stream(true)
+                .enable_response_stream(false)
+                .send_buffer_count(options.send_buffer_count)
+                .recv_buffer_count(options.recv_buffer_count)
+                .build()?;
+            let pending: PendingConnections = self
+                .request_stream_transport
+                .register(request_options)
+                .await;
+            pending.send_stream
+        } else {
+            None
+        };
+        let recv_stream = if enable_response_stream {
+            Some(self.response_transport.register_response(options).await)
+        } else {
+            None
+        };
 
         // Transport-layer invariant: the data plane produces exactly the halves
         // we requested. A mismatch is a bug in the transport, not a runtime
