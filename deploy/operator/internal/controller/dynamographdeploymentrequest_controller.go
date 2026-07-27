@@ -54,6 +54,7 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdrutil"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
@@ -462,20 +463,51 @@ func (r *DynamoGraphDeploymentRequestReconciler) Reconcile(ctx context.Context, 
 		return ctrl.Result{}, nil
 	}
 
-	// Observe spec changes admitted by the validation webhook before resuming the phase machine.
+	currentSpecFingerprint, err := dgdrutil.SpecFingerprint(&dgdr.Spec)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Record the fingerprint for the spec associated with the observed generation.
+	if dgdr.Status.ObservedGeneration > 0 &&
+		dgdr.Status.ObservedGeneration == dgdr.Generation &&
+		dgdr.Status.ObservedSpecFingerprint != currentSpecFingerprint {
+		dgdr.Status.ObservedSpecFingerprint = currentSpecFingerprint
+		if err := r.Status().Update(ctx, dgdr); err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to record observed DGDR spec fingerprint: %w", err)
+		}
+		return ctrl.Result{Requeue: true}, nil
+	}
+
+	// Verify immutable-phase repairs against the last observed spec before resuming the phase machine.
 	if dgdr.Status.ObservedGeneration > 0 && dgdr.Status.ObservedGeneration != dgdr.Generation {
 		if dgdr.Status.Phase == nvidiacomv1beta1.DGDRPhaseProfiling || dgdr.Status.Phase == nvidiacomv1beta1.DGDRPhaseDeploying ||
 			dgdr.Status.Phase == nvidiacomv1beta1.DGDRPhaseReady || dgdr.Status.Phase == nvidiacomv1beta1.DGDRPhaseDeployed {
-			logger.Info("Observing admitted spec repair in immutable phase",
+			repair, err := dgdrutil.IsRuntimeVersionOverrideRepair(&dgdr.Spec, dgdr.Status.ObservedSpecFingerprint)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			if repair {
+				logger.Info("Observing verified runtime version override repair in immutable phase",
+					"phase", dgdr.Status.Phase,
+					"observedGeneration", dgdr.Status.ObservedGeneration,
+					"currentGeneration", dgdr.Generation)
+
+				dgdr.Status.ObservedGeneration = dgdr.Generation
+				dgdr.Status.ObservedSpecFingerprint = currentSpecFingerprint
+				if err := r.Status().Update(ctx, dgdr); err != nil {
+					return ctrl.Result{}, fmt.Errorf("failed to observe DGDR runtime version override repair: %w", err)
+				}
+				return ctrl.Result{Requeue: true}, nil
+			}
+
+			logger.Info("Spec change detected in immutable phase",
 				"phase", dgdr.Status.Phase,
 				"observedGeneration", dgdr.Status.ObservedGeneration,
 				"currentGeneration", dgdr.Generation)
-
-			dgdr.Status.ObservedGeneration = dgdr.Generation
-			if err := r.Status().Update(ctx, dgdr); err != nil {
-				return ctrl.Result{}, fmt.Errorf("failed to observe admitted DGDR spec repair: %w", err)
-			}
-			return ctrl.Result{Requeue: true}, nil
+			r.Recorder.Event(dgdr, corev1.EventTypeWarning, nvidiacomv1beta1.EventReasonSpecChangeRejected,
+				fmt.Sprintf(MessageSpecChangeRejected, dgdr.Status.Phase))
+			return ctrl.Result{}, nil
 		}
 	}
 	// Phase machine: handle different phases

@@ -1404,10 +1404,18 @@ spec:
 			})
 			Expect(err).NotTo(HaveOccurred())
 
-			t.Log("Read the initialized generation")
+			t.Log("Backfill the observed spec fingerprint")
+			result, err := reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: dgdrName, Namespace: namespace},
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.Requeue).Should(BeTrue())
+
+			t.Log("Read the initialized generation and fingerprint")
 			var current nvidiacomv1beta1.DynamoGraphDeploymentRequest
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &current)).Should(Succeed())
 			initialGeneration := current.Generation
+			Expect(current.Status.ObservedSpecFingerprint).ShouldNot(BeEmpty())
 
 			t.Log("Move the request into the profiling phase")
 			current.Status.Phase = nvidiacomv1beta1.DGDRPhaseProfiling
@@ -1419,7 +1427,7 @@ spec:
 			Expect(k8sClient.Update(ctx, &current)).Should(Succeed())
 
 			t.Log("Observe the admitted repair")
-			result, err := reconciler.Reconcile(ctx, reconcile.Request{
+			result, err = reconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: types.NamespacedName{Name: dgdrName, Namespace: namespace},
 			})
 			Expect(err).NotTo(HaveOccurred())
@@ -1430,6 +1438,21 @@ spec:
 			Expect(current.Generation).Should(BeNumerically(">", initialGeneration))
 			Expect(current.Status.ObservedGeneration).Should(Equal(current.Generation))
 			Expect(current.Status.Phase).Should(Equal(nvidiacomv1beta1.DGDRPhaseProfiling))
+
+			t.Log("Bypass admission with an unrelated spec change")
+			repairedGeneration := current.Status.ObservedGeneration
+			current.Spec.Model = "modified-model"
+			Expect(admissionBypassClient.Update(ctx, &current)).Should(Succeed())
+
+			t.Log("Verify that the fingerprint prevents observing the unrelated change")
+			result, err = reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: dgdrName, Namespace: namespace},
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.Requeue).Should(BeFalse())
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &current)).Should(Succeed())
+			Expect(current.Status.ObservedGeneration).Should(Equal(repairedGeneration))
+			Expect(current.Generation).Should(BeNumerically(">", repairedGeneration))
 		})
 	})
 

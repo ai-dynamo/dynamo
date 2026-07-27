@@ -22,6 +22,7 @@ import (
 	"fmt"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdrutil"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
@@ -114,16 +115,18 @@ func (v *dynamoGraphDeploymentRequestValidation) validateDynamoGraphDeploymentRe
 		&oldRequest.Spec,
 		field.NewPath("spec"),
 		oldRequest.Status.Phase,
+		oldRequest.Status.ObservedSpecFingerprint,
 	)
 }
 
 // validateDynamoGraphDeploymentRequestSpecUpdate validates a spec update.
-// newSpec, oldSpec, and fldPath must not be nil; oldPhase comes from the owning old resource status.
+// newSpec, oldSpec, and fldPath must not be nil; status values come from the owning old resource.
 func (v *dynamoGraphDeploymentRequestValidation) validateDynamoGraphDeploymentRequestSpecUpdate(
 	newSpec *nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec,
 	oldSpec *nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec,
 	fldPath *field.Path,
 	oldPhase nvidiacomv1beta1.DGDRPhase,
+	observedSpecFingerprint string,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 
@@ -159,7 +162,7 @@ func (v *dynamoGraphDeploymentRequestValidation) validateDynamoGraphDeploymentRe
 
 	if isImmutableDGDRPhase(oldPhase) &&
 		!apiequality.Semantic.DeepEqual(newSpec, oldSpec) &&
-		!isDGDRRuntimeVersionOverrideRepair(newSpec, oldSpec) {
+		!isDGDRRuntimeVersionOverrideRepair(newSpec, oldSpec, observedSpecFingerprint) {
 		allErrs = append(allErrs, field.Forbidden(
 			fldPath,
 			fmt.Sprintf("updates are forbidden while the resource is in phase %q; delete and recreate the resource to change its spec", oldPhase),
@@ -181,6 +184,7 @@ func dgdrRuntimeVersionOverrideRequired(spec *nvidiacomv1beta1.DynamoGraphDeploy
 func isDGDRRuntimeVersionOverrideRepair(
 	newSpec *nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec,
 	oldSpec *nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec,
+	observedSpecFingerprint string,
 ) bool {
 	if !dgdrRuntimeVersionOverrideRequired(oldSpec) ||
 		newSpec.RuntimeVersionOverride == oldSpec.RuntimeVersionOverride ||
@@ -190,5 +194,10 @@ func isDGDRRuntimeVersionOverrideRepair(
 
 	newWithoutRepair := newSpec.DeepCopy()
 	newWithoutRepair.RuntimeVersionOverride = oldSpec.RuntimeVersionOverride
-	return apiequality.Semantic.DeepEqual(newWithoutRepair, oldSpec)
+	if !apiequality.Semantic.DeepEqual(newWithoutRepair, oldSpec) {
+		return false
+	}
+
+	fingerprint, err := dgdrutil.SpecFingerprint(oldSpec)
+	return err == nil && fingerprint == observedSpecFingerprint
 }

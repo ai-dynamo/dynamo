@@ -358,6 +358,10 @@ class DynamoGraphDeploymentRequestStatus(BaseModel):
         default=None,
         description="ObservedGeneration is the most recent generation observed by the controller.",
     )
+    observedSpecFingerprint: Optional[str] = Field(
+        default=None,
+        description="ObservedSpecFingerprint identifies the spec associated with ObservedGeneration. The controller uses it to verify runtimeVersionOverride-only repairs.",
+    )
 
 
 class DynamoGraphDeploymentRequest(BaseModel):
