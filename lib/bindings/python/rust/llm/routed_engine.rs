@@ -8,6 +8,7 @@ use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use dynamo_llm::entrypoint::PrefillRoutedEngine;
+use dynamo_llm::protocols::common::extensions::SESSION_AFFINITY_CONTEXT_KEY;
 use dynamo_llm::protocols::common::preprocessor::PreprocessedRequest;
 use dynamo_runtime::logging::{DistributedTraceContext, otel_parent_context_from_distributed};
 use dynamo_runtime::pipeline::{AsyncEngineContextProvider, SingleIn};
@@ -26,6 +27,15 @@ impl RoutedEngine {
     }
 }
 
+fn copy_session_affinity(
+    parent_context: &crate::context::Context,
+    child_context: &mut SingleIn<PreprocessedRequest>,
+) {
+    if let Some(session_affinity) = parent_context.session_affinity() {
+        child_context.insert(SESSION_AFFINITY_CONTEXT_KEY, session_affinity.clone());
+    }
+}
+
 #[pymethods]
 impl RoutedEngine {
     /// Send a preprocessed request through the Rust prefill-routed pipeline.
@@ -39,17 +49,18 @@ impl RoutedEngine {
         let request: PreprocessedRequest = depythonize(preprocessed.bind(py)).map_err(to_pyerr)?;
         let request_context = if let Some(parent_context) = context.as_ref() {
             let parent_metadata = parent_context.metadata_snapshot();
-            let parent_context = parent_context.inner();
-            let child_context = SingleIn::with_id_and_metadata(
+            let parent_controller = parent_context.inner();
+            let mut child_context = SingleIn::with_id_and_metadata(
                 request,
-                parent_context.id().to_string(),
+                parent_controller.id().to_string(),
                 parent_metadata,
             );
+            copy_session_affinity(parent_context, &mut child_context);
             let child_controller = child_context.context();
-            parent_context.link_child(child_controller.clone());
-            if parent_context.is_killed() {
+            parent_controller.link_child(child_controller.clone());
+            if parent_controller.is_killed() {
                 child_controller.kill();
-            } else if parent_context.is_stopped() {
+            } else if parent_controller.is_stopped() {
                 child_controller.stop_generating();
             }
             child_context
@@ -136,9 +147,40 @@ fn dispatch_span(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dynamo_llm::protocols::common::extensions::{
+        SessionAffinityId, session_affinity_from_headers,
+    };
     use dynamo_runtime::logging::{DistributedTraceIdLayer, inject_trace_headers_into_map};
     use opentelemetry::trace::{TraceContextExt, TraceId, TracerProvider as _};
     use tracing_subscriber::layer::SubscriberExt;
+
+    fn preprocessed_request() -> PreprocessedRequest {
+        serde_json::from_value(serde_json::json!({
+            "token_ids": []
+        }))
+        .expect("minimal preprocessed request")
+    }
+
+    #[test]
+    fn request_context_preserves_session_affinity_across_python_boundary() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert("x-dynamo-session-id", "session-123".parse().unwrap());
+        let session_affinity =
+            session_affinity_from_headers(&headers).expect("session affinity header");
+        let mut source = SingleIn::new(());
+        source.insert(SESSION_AFFINITY_CONTEXT_KEY, session_affinity);
+        let python_context =
+            crate::context::Context::new(source.context(), None, None, Default::default())
+                .with_session_affinity_from(&source)
+                .expect("pipeline context converts to Python binding context");
+        let mut routed_context = SingleIn::new(preprocessed_request());
+        copy_session_affinity(&python_context, &mut routed_context);
+
+        let session_affinity = routed_context
+            .get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
+            .expect("session affinity restored after Python boundary");
+        assert_eq!(session_affinity.as_str(), "session-123");
+    }
 
     fn make_trace_context(
         trace_id: &str,
