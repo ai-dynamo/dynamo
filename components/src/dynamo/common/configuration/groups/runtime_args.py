@@ -214,7 +214,9 @@ class DynamoRuntimeArgGroup(ArgGroup):
             flag_name="--dyn-enable-structural-tag",
             env_var="DYN_ENABLE_STRUCTURAL_TAG",
             default=False,
-            help="Enable structural tag guided decoding for tool calls.",
+            help="Enable structural tag guided decoding for tool calls. "
+            "Named Kimi K3 tool_choice requests always activate their required "
+            "XTML structural tag even when this flag is off.",
         )
         add_argument(
             g,

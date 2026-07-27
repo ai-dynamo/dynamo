@@ -30,7 +30,14 @@ ARG BASE_IMAGE={{ context[framework][device_key].base_image }}
 ARG BASE_IMAGE_TAG={{ context[framework][device_key].base_image_tag }}
 {% if framework in ["sglang", "trtllm", "vllm"] -%}
 ARG RUNTIME_IMAGE={{ context[framework][device_key].runtime_image }}
+{# Prefer a per-arch runtime_image_tag_<platform> when the base publishes separate
+   per-arch tags (e.g. the Kimi-K3 vLLM / SGLang bases); fall back to the
+   shared runtime_image_tag for multi-arch bases (stock upstream) and --platform=multi. -#}
+{% if platform in ["amd64", "arm64"] and ("runtime_image_tag_" ~ platform) in context[framework][device_key] -%}
+ARG RUNTIME_IMAGE_TAG={{ context[framework][device_key]["runtime_image_tag_" ~ platform] }}
+{%- else -%}
 ARG RUNTIME_IMAGE_TAG={{ context[framework][device_key].runtime_image_tag }}
+{%- endif %}
 {%- endif %}
 
 # wheel builder image selection

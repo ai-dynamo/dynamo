@@ -32,6 +32,7 @@ from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang._compat import (
     enable_disjoint_streaming_output,
     ensure_sglang_tensor_image_size,
+    set_resolved_server_arg,
 )
 from dynamo.sglang.backend_args import DynamoSGLangArgGroup, DynamoSGLangConfig
 
@@ -600,7 +601,7 @@ async def parse_args(
         fpm_trace_relay_supported=fpm_trace_relay_supported,
     )
     if fpm_source and not getattr(server_args, "enable_forward_pass_metrics", False):
-        server_args.enable_forward_pass_metrics = True
+        set_resolved_server_arg(server_args, enable_forward_pass_metrics=True)
         logging.info("Enabled forward_pass_metrics from %s", fpm_source)
 
     # Auto-detect diffusion worker mode if dllm_algorithm
@@ -616,7 +617,7 @@ async def parse_args(
         server_args.dllm_algorithm
         and getattr(server_args, "max_running_requests", None) is None
     ):
-        server_args.max_running_requests = 8
+        set_resolved_server_arg(server_args, max_running_requests=8)
         logging.info("Defaulting max_running_requests to 8 for diffusion worker")
 
     dynamo_config.namespace = parsed_namespace

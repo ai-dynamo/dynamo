@@ -7,8 +7,9 @@ import numpy as np
 import pytest
 
 import dynamo.common.multimodal.video_loader as video_loader_module
-from dynamo.common.http.url_validator import UrlValidationPolicy
-from dynamo.common.multimodal.video_loader import VideoLoader
+from dynamo.common.http import HttpStatusError
+from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
+from dynamo.common.multimodal.video_loader import URL_VARIANT_KEY, VideoLoader
 
 pytestmark = [
     pytest.mark.unit,
@@ -109,3 +110,42 @@ async def test_load_video_batch_reads_decoded_variant_with_metadata(monkeypatch)
         decoded_item,
         return_metadata=True,
     )
+
+
+@pytest.mark.asyncio
+async def test_load_video_preserves_url_validation_error():
+    """A rejected URL keeps its type so the frontend can map it to a 4xx.
+
+    Flattening it into a plain ValueError (or, in the batch path, a bare
+    Exception) is what forces the frontend back to a 500.
+    """
+    loader = VideoLoader(url_policy=UrlValidationPolicy())
+    loader._load_video_with_vllm = AsyncMock(
+        side_effect=UrlValidationError("Could not resolve host 'nonexistent.invalid'")
+    )
+
+    with pytest.raises(UrlValidationError):
+        await loader.load_video("https://nonexistent.invalid/x.mp4")
+
+
+@pytest.mark.asyncio
+async def test_load_video_batch_preserves_url_validation_error():
+    loader = VideoLoader(url_policy=UrlValidationPolicy())
+    loader.load_video = AsyncMock(
+        side_effect=UrlValidationError("Could not resolve host 'nonexistent.invalid'")
+    )
+
+    with pytest.raises(UrlValidationError):
+        await loader.load_video_batch([{URL_VARIANT_KEY: "https://nonexistent.invalid/x.mp4"}])
+
+
+@pytest.mark.asyncio
+async def test_load_video_batch_preserves_http_status_error():
+    loader = VideoLoader(url_policy=UrlValidationPolicy())
+    loader.load_video = AsyncMock(
+        side_effect=HttpStatusError(415, "Unsupported Media Type", "https://x/y.mp4")
+    )
+
+    with pytest.raises(HttpStatusError) as exc_info:
+        await loader.load_video_batch([{URL_VARIANT_KEY: "https://x/y.mp4"}])
+    assert exc_info.value.status == 415

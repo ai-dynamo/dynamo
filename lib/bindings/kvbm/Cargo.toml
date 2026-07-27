@@ -60,3 +60,12 @@ dlpark = { version = "0.5", features = ["pyo3", "half"], optional = true }
 cudarc = { version = "=0.19.8", features = ["cuda-version-from-build-system", "fallback-latest"], optional = true }
 
 [dev-dependencies]
+
+# Separate cargo workspace, same reason as lib/bindings/python: the frontend
+# crates arrive transitively via dynamo-llm and must resolve to the same
+# sources as the root workspace.
+[patch.crates-io]
+dynamo-parsers = { git = "https://github.com/ai-dynamo/frontend-crates.git", branch = "feat/Kimi-K3" }
+dynamo-protocols = { git = "https://github.com/ai-dynamo/frontend-crates.git", branch = "feat/Kimi-K3" }
+dynamo-renderer = { git = "https://github.com/ai-dynamo/frontend-crates.git", branch = "feat/Kimi-K3" }
+dynamo-tokenizers = { git = "https://github.com/ai-dynamo/frontend-crates.git", branch = "feat/Kimi-K3" }

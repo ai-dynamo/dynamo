@@ -158,6 +158,11 @@ impl ModelRuntimeConfig {
     }
 
     #[setter]
+    fn set_expands_image_pad_token(&mut self, expands_image_pad_token: bool) {
+        self.inner.expands_image_pad_token = expands_image_pad_token;
+    }
+
+    #[setter]
     fn set_kv_state_endpoint(&mut self, kv_state_endpoint: Option<String>) {
         self.inner.kv_state_endpoint = kv_state_endpoint.as_deref().map(EndpointId::from);
     }
@@ -238,6 +243,11 @@ impl ModelRuntimeConfig {
     #[getter]
     fn enable_local_indexer(&self) -> bool {
         self.inner.enable_local_indexer
+    }
+
+    #[getter]
+    fn expands_image_pad_token(&self) -> bool {
+        self.inner.expands_image_pad_token
     }
 
     #[getter]

@@ -249,13 +249,25 @@ class StreamingPostProcessor:
         tool_parser: ToolParser | None,
         reasoning_parser_class: type[ReasoningParser] | None,
         chat_template_kwargs: dict[str, Any],
+        delegating_parser: Any | None = None,
+        enable_auto_tool_choice: bool = False,
         stream_response: bool = True,
     ) -> None:
         self.tokenizer = tokenizer
         self.request_for_sampling = request_for_sampling
         self.sampling_params = sampling_params
         self.tool_parser = tool_parser
+        self.delegating_parser = delegating_parser
+        self.enable_auto_tool_choice = enable_auto_tool_choice
         self.stream_response = stream_response
+        self._delegating_request = request_for_sampling
+        if delegating_parser is not None and request_for_sampling.tool_choice == "none":
+            # K3's streaming tool parser owns response-channel boundaries. Let
+            # it unwrap the channel while suppressing any parsed tool calls
+            # below, preserving the externally requested "none" semantics.
+            self._delegating_request = request_for_sampling.model_copy(
+                update={"tool_choice": None}
+            )
         # See https://github.com/ai-dynamo/dynamo/issues/8636 —
         # when the chat template runs with enable_thinking=False,
         # the reasoning open/close tags live in the prompt and the generated
@@ -271,11 +283,17 @@ class StreamingPostProcessor:
                 tokenizer,
                 chat_template_kwargs=chat_template_kwargs,
             )
-            if reasoning_parser_class and not thinking_disabled
+            if (
+                delegating_parser is None
+                and reasoning_parser_class
+                and not thinking_disabled
+            )
             else None
         )
         self._fast_plain_text = (
-            self.tool_parser is None and self.reasoning_parser is None
+            delegating_parser is None
+            and self.tool_parser is None
+            and self.reasoning_parser is None
         )
 
         self._control_markers = tuple(
@@ -296,6 +314,107 @@ class StreamingPostProcessor:
         # this correctly, so we accumulate text here and fall back to the
         # non-streaming extract_tool_calls() once the buffer is complete.
         self._tool_text_buffer: str | None = None
+        self._delegating_text = ""
+        self._delegating_token_ids: list[int] = []
+
+    @staticmethod
+    def _serialize_delegating_tool_calls(
+        tool_calls: Sequence[Any],
+    ) -> list[dict[str, Any]]:
+        serialized: list[dict[str, Any]] = []
+        for index, tool_call in enumerate(tool_calls):
+            if isinstance(tool_call, DeltaToolCall):
+                serialized.append(tool_call.model_dump(exclude_none=True))
+                continue
+
+            serialized.append(
+                {
+                    "index": index,
+                    "type": "function",
+                    "id": tool_call.id or make_tool_call_id(),
+                    "function": {
+                        "name": tool_call.name,
+                        "arguments": tool_call.arguments,
+                    },
+                }
+            )
+        return serialized
+
+    def _delegating_choice(
+        self,
+        output: Any,
+        *,
+        reasoning: str | None = None,
+        content: str | None = None,
+        tool_calls: Sequence[Any] | None = None,
+    ) -> dict[str, Any] | None:
+        delta: dict[str, Any] = {"role": "assistant"}
+        if content:
+            delta["content"] = content
+        if reasoning and self.request_for_sampling.include_reasoning:
+            delta["reasoning_content"] = reasoning
+        if tool_calls and self.request_for_sampling.tool_choice != "none":
+            delta["tool_calls"] = self._serialize_delegating_tool_calls(tool_calls)
+
+        if len(delta) == 1:
+            if not output.finish_reason:
+                return None
+            delta = {}
+
+        choice = self._build_choice(output, delta)
+        if not self.request_for_sampling.include_reasoning:
+            choice["logprobs"] = None
+        return choice
+
+    def _process_delegating_output(self, output: Any) -> dict[str, Any] | None:
+        if self.delegating_parser is None:
+            raise RuntimeError(
+                "_process_delegating_output requires a delegating_parser"
+            )
+
+        delta_text = output.text or ""
+        delta_token_ids = list(output.token_ids or [])
+        finished = output.finish_reason is not None
+
+        if self.stream_response:
+            delta_message = self.delegating_parser.parse_delta(
+                delta_text=delta_text,
+                delta_token_ids=delta_token_ids,
+                request=self._delegating_request,
+                # A full multi-turn K3 prompt can contain closed historical
+                # think channels before the new open generation prefix. The K3
+                # parser already receives the current thinking mode through its
+                # constructor; treating any historical close as current would
+                # incorrectly skip reasoning for this assistant turn.
+                prompt_token_ids=None,
+                finished=finished,
+            )
+            if delta_message is None:
+                return self._delegating_choice(output)
+            return self._delegating_choice(
+                output,
+                reasoning=delta_message.reasoning,
+                content=delta_message.content,
+                tool_calls=delta_message.tool_calls,
+            )
+
+        self._delegating_text += delta_text
+        self._delegating_token_ids.extend(delta_token_ids)
+        if not finished:
+            return None
+
+        reasoning, content, tool_calls = self.delegating_parser.parse(
+            self._delegating_text,
+            self._delegating_request,
+            enable_auto_tools=self.enable_auto_tool_choice,
+            model_output_token_ids=self._delegating_token_ids,
+        )
+        return self._delegating_choice(
+            output,
+            reasoning=reasoning,
+            content=content,
+            tool_calls=tool_calls,
+        )
 
     def _should_buffer_for_non_streaming_tool_parse(self) -> bool:
         return (
@@ -536,6 +655,9 @@ class StreamingPostProcessor:
         return self._build_choice(output, delta)
 
     def process_output(self, output: Any) -> dict[str, Any] | None:
+        if self.delegating_parser is not None:
+            return self._process_delegating_output(output)
+
         if self._should_buffer_for_non_streaming_tool_parse():
             return self._process_non_streaming_tool_output(output)
 

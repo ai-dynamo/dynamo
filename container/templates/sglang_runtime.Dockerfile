@@ -206,6 +206,13 @@ RUN chmod 755 /opt/dynamo/.launch_screen && \
 {% endif %}
 
 {%- if device != "xpu" %}
+# Private SGLang development bases may leave their editable source tree
+# root-only. The runtime switches to the non-root `dynamo` user below, so make
+# the Python package traversable/readable before precompiling and launching.
+RUN if [ -d /sgl-workspace/sglang/python ]; then \
+        chmod -R a+rX /sgl-workspace/sglang/python; \
+    fi
+
 # Precompile Python bytecode into the image while still root. CI runs tests as
 # the non-root `dynamo` user, which cannot write .pyc back to site-packages, and
 # the test harness forks a fresh process per test. Without baked .pyc, every test

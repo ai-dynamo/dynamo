@@ -196,13 +196,18 @@ fn convert_user_blocks(
                 let data_uri = format!("data:{};base64,{}", source.media_type, source.data);
                 let url = url::Url::parse(&data_uri)
                     .map_err(|e| anyhow::anyhow!("invalid image data URI: {e}"))?;
+                // ImageUrl::uuid is deprecated in favour of the content-part
+                // `uuid`, but remains a required field of the struct literal.
+                #[allow(deprecated)]
+                let image_url = ImageUrl {
+                    url,
+                    detail: None,
+                    uuid: None,
+                };
                 content_parts.push(ChatCompletionRequestUserMessageContentPart::ImageUrl(
                     ChatCompletionRequestMessageContentPartImage {
-                        image_url: ImageUrl {
-                            url,
-                            detail: None,
-                            uuid: None,
-                        },
+                        image_url: Some(image_url),
+                        uuid: None,
                     },
                 ));
             }
@@ -1913,7 +1918,12 @@ mod tests {
                     // Second part: image with data URI
                     match &parts[1] {
                         ChatCompletionRequestUserMessageContentPart::ImageUrl(img) => {
-                            let url_str = img.image_url.url.to_string();
+                            let url_str = img
+                                .image_url
+                                .as_ref()
+                                .expect("image_url must be present")
+                                .url
+                                .to_string();
                             assert!(
                                 url_str.starts_with("data:image/png;base64,"),
                                 "expected data URI, got: {url_str}"

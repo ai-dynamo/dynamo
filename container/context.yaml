@@ -59,16 +59,18 @@ dynamo:
 vllm:
   cuda13.0:
     base_image: nvcr.io/nvidia/cuda-dl-base
+    # Kimi-K3 1.4.0 release: layer the Dynamo runtime on the vLLM-team Kimi-K3
+    # base pinned below instead of stock vllm/vllm-openai.
+    #
+    # vllm/vllm-openai:kimi-k3 is a MULTI-ARCH manifest covering both amd64 and
+    # arm64, so a single runtime_image_tag builds either architecture.
     runtime_image: vllm/vllm-openai
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
-    runtime_image_tag: v0.25.1-ubuntu2404
-    # Baseline is vllm-openai's TRUE base, nvidia/cuda:13.0.2-base-ubuntu24.04
-    # (Docker Hub), NOT a self-baseline of the third-party vllm/vllm-openai image.
-    # vllm-openai is built FROM nvidia/cuda, so this attributes everything vLLM
-    # adds over the clean NVIDIA CUDA floor (uv/rust stack, framework, codecs)
-    # rather than hiding it. Per-arch stem; the licenses stage appends
-    # -${TARGETARCH}.cdx.json. (GPL media codecs from vllm-openai are purged in
-    # the runtime image — see the codec-purge follow-up.)
+    runtime_image_tag: kimi-k3
+    # TODO(osrb): baseline_sbom is for stock vllm/vllm-openai and no longer matches
+    # the Kimi-K3 base. Kimi-K3 images build the pre_runtime target (no /legal), so
+    # it is unused today; re-capture it against the Kimi-K3 base before a
+    # compliance build.
     baseline_sbom: cuda@2ab6381d
   xpu:
     base_image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo
@@ -97,18 +99,18 @@ vllm:
 sglang:
   cuda13.0:
     base_image: nvcr.io/nvidia/cuda-dl-base
+    # Kimi-K3 1.4.0 release: layer the Dynamo runtime on the Kimi-K3 SGLang base
+    # instead of stock lmsysorg/sglang.
+    #
+    # lmsysorg/sglang:kimi-k3 is a MULTI-ARCH manifest covering both amd64 and
+    # arm64, so a single runtime_image_tag builds either architecture.
     runtime_image: lmsysorg/sglang
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
-    runtime_image_tag: v0.5.15-cu130-runtime
-    # Baseline is the TRUE base of the third-party lmsysorg/sglang image,
-    # nvidia/cuda:13.0.1-cudnn-devel-ubuntu24.04 (Docker Hub; CUDA_VERSION=13.0.1,
-    # cuDNN 9.13.0.50, ubuntu24.04), NOT a self-baseline of lmsysorg/sglang.
-    # lmsysorg/sglang is built FROM this nvidia/cuda cudnn-devel base, so this
-    # attributes everything sglang adds over the clean NVIDIA CUDA+cuDNN floor
-    # (framework, python stack, system libs) rather than hiding it. Per-arch stem;
-    # the licenses stage appends -${TARGETARCH}.cdx.json. (sglang ships no system
-    # GPL ffmpeg/codec dpkgs; the GPL imageio-ffmpeg pip binary is replaced by an
-    # in-tree LGPL ffmpeg in sglang_runtime.Dockerfile — no dpkg purge needed.)
+    runtime_image_tag: kimi-k3
+    # TODO(osrb): baseline_sbom is for stock lmsysorg/sglang and no longer matches
+    # the Kimi-K3 SGLang base. Kimi-K3 images build the pre_runtime target (no
+    # /legal), so it is unused today; re-capture it against the Kimi-K3 SGLang base
+    # before a compliance build.
     baseline_sbom: cuda@8b2705ea
   xpu:
     base_image: intel/deep-learning-essentials

@@ -376,6 +376,12 @@ async def _get_runtime_config(
     runtime_config.enable_local_indexer = (
         dynamo_args.enable_local_indexer and not is_decode_worker
     )
+    # SGLang's multimodal processors expand a single image pad token to the
+    # image's feature count and never rebuild the model's native media
+    # sequence, so the frontend must send the pad rather than the placeholder
+    # marker. Engines that re-derive the sequence from the marker leave this
+    # false.
+    runtime_config.expands_image_pad_token = True
 
     start_dp_rank, end_dp_rank = model_card_dp_rank_bounds(server_args)
     registered_dp_size = end_dp_rank - start_dp_rank

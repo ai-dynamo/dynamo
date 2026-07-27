@@ -19,7 +19,8 @@ use minijinja::value::Value;
 
 use dynamo_renderer::{
     ChatTemplate, ChatTemplateValue, ContextMixins, OAIChatLikeRequest, PromptFormatter,
-    PromptInput, TextInput, TokenInput, deepseek_formatter_for, may_be_fix_tool_schema,
+    PromptInput, TextInput, TokenInput, deepseek_formatter_for, kimi_k3_formatter_for,
+    may_be_fix_tool_schema,
 };
 
 use crate::model_card::{ModelDeploymentCard, PromptFormatterArtifact};
@@ -170,8 +171,8 @@ impl MediaRequestExt for NvCreateCompletionRequest {
 
 /// Build a [`PromptFormatter`] from a [`ModelDeploymentCard`].
 ///
-/// DeepSeek families whose HF repos ship no Jinja `chat_template` get a native
-/// Rust formatter (via [`deepseek_formatter_for`]); everything else loads the
+/// Model families whose HF repos ship no Jinja `chat_template` get a native
+/// Rust formatter; everything else loads the
 /// HF `tokenizer_config.json` template (and any separate chat-template file)
 /// and builds via [`PromptFormatter::from_parts`].
 pub fn prompt_formatter_from_mdc(mdc: &ModelDeploymentCard) -> Result<PromptFormatter> {
@@ -186,6 +187,14 @@ pub fn prompt_formatter_from_mdc(mdc: &ModelDeploymentCard) -> Result<PromptForm
         .map(|info| info.model_type().to_lowercase())
         .filter(|s| !s.is_empty());
     let display_name_lower = mdc.display_name.to_lowercase();
+
+    if let Some(formatter) = kimi_k3_formatter_for(
+        &model_type_lower,
+        &display_name_lower,
+        mdc.runtime_config.exclude_tools_when_tool_choice_none,
+    ) {
+        return Ok(formatter);
+    }
 
     if let Some(formatter) = deepseek_formatter_for(&model_type_lower, &display_name_lower) {
         return Ok(formatter);

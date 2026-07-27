@@ -7,8 +7,9 @@ import numpy as np
 import pytest
 
 import dynamo.common.multimodal.audio_loader as audio_loader_module
-from dynamo.common.http.url_validator import UrlValidationPolicy
-from dynamo.common.multimodal.audio_loader import AudioLoader
+from dynamo.common.http import HttpStatusError
+from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
+from dynamo.common.multimodal.audio_loader import URL_VARIANT_KEY, AudioLoader
 
 pytestmark = [
     pytest.mark.unit,
@@ -136,3 +137,42 @@ async def test_load_audio_batch_reads_decoded_variant(monkeypatch):
         decoded_item,
         return_metadata=True,
     )
+
+
+@pytest.mark.asyncio
+async def test_load_audio_preserves_url_validation_error():
+    """A rejected URL keeps its type so the frontend can map it to a 4xx.
+
+    Flattening it into a plain ValueError (or, in the batch path, a bare
+    Exception) is what forces the frontend back to a 500.
+    """
+    loader = AudioLoader(url_policy=UrlValidationPolicy())
+    loader._load_audio_with_vllm = AsyncMock(
+        side_effect=UrlValidationError("Could not resolve host 'nonexistent.invalid'")
+    )
+
+    with pytest.raises(UrlValidationError):
+        await loader.load_audio("https://nonexistent.invalid/x.wav")
+
+
+@pytest.mark.asyncio
+async def test_load_audio_batch_preserves_url_validation_error():
+    loader = AudioLoader(url_policy=UrlValidationPolicy())
+    loader.load_audio = AsyncMock(
+        side_effect=UrlValidationError("Could not resolve host 'nonexistent.invalid'")
+    )
+
+    with pytest.raises(UrlValidationError):
+        await loader.load_audio_batch([{URL_VARIANT_KEY: "https://nonexistent.invalid/x.wav"}])
+
+
+@pytest.mark.asyncio
+async def test_load_audio_batch_preserves_http_status_error():
+    loader = AudioLoader(url_policy=UrlValidationPolicy())
+    loader.load_audio = AsyncMock(
+        side_effect=HttpStatusError(415, "Unsupported Media Type", "https://x/y.wav")
+    )
+
+    with pytest.raises(HttpStatusError) as exc_info:
+        await loader.load_audio_batch([{URL_VARIANT_KEY: "https://x/y.wav"}])
+    assert exc_info.value.status == 415

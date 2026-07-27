@@ -15,7 +15,7 @@ import pytest
 from _routed_engine_fakes import FakeRoutedEngine as _FakeRoutedEngine
 from transformers import AutoTokenizer
 
-from dynamo.frontend.prepost import _prepare_request
+from dynamo.frontend.prepost import StreamingPostProcessor, _prepare_request
 
 # NOTE: dynamo.frontend.vllm_processor is imported lazily inside the tests that
 # need it (and via the vllm_processor_module fixture). Importing it at module
@@ -58,6 +58,11 @@ pytestmark = [
 
 MODEL = "Qwen/Qwen3-0.6B"
 _DEFAULT_MM_DATA = object()
+_KIMI_OPEN = "<|open|>"
+_KIMI_CLOSE = "<|close|>"
+_KIMI_SEP = "<|sep|>"
+_KIMI_THINK_OPEN = f"{_KIMI_OPEN}think{_KIMI_SEP}"
+_KIMI_THINK_CLOSE = f"{_KIMI_CLOSE}think{_KIMI_SEP}"
 
 TOOL_REQUEST = {
     "model": MODEL,
@@ -522,6 +527,419 @@ class TestReasoningParserMetadata:
                 "chat_template_kwargs": {"reasoning_effort": "high"}
             },
         }
+
+
+class _KimiK3DummyTokenizer:
+    all_special_tokens = [_KIMI_OPEN, _KIMI_CLOSE, _KIMI_SEP]
+
+    def get_vocab(self) -> dict[str, int]:
+        return {}
+
+    def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
+        if text == _KIMI_OPEN:
+            return [1]
+        if text == _KIMI_CLOSE:
+            return [4]
+        if text == _KIMI_SEP:
+            return [3]
+        if text == _KIMI_THINK_OPEN:
+            return [1, 2, 3]
+        if text == _KIMI_THINK_CLOSE:
+            return [4, 2, 3]
+        return [ord(character) for character in text]
+
+
+def _kimi_k3_request(*, include_reasoning: bool = True):
+    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+
+    return ChatCompletionRequest(
+        model="test-model",
+        messages=[],
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "calc",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ],
+        tool_choice="auto",
+        include_reasoning=include_reasoning,
+    )
+
+
+def _kimi_k3_postprocessor(
+    vllm_processor_module,
+    *,
+    stream_response: bool,
+    include_reasoning: bool = True,
+    request=None,
+    chat_template_kwargs: dict | None = None,
+) -> StreamingPostProcessor:
+    from vllm.reasoning.kimi_k3_reasoning_parser import KimiK3ReasoningParser
+    from vllm.tool_parsers.kimi_k3_tool_parser import KimiK3ToolParser
+
+    parser_class = vllm_processor_module._resolve_kimi_k3_delegating_parser_class(
+        tool_parser_name="kimi_k3",
+        reasoning_parser_name="kimi_k3",
+        tool_parser_class=KimiK3ToolParser,
+        reasoning_parser_class=KimiK3ReasoningParser,
+    )
+    assert parser_class is not None
+
+    tokenizer = _KimiK3DummyTokenizer()
+    request = request or _kimi_k3_request(include_reasoning=include_reasoning)
+    chat_template_kwargs = chat_template_kwargs or {}
+    return StreamingPostProcessor(
+        tokenizer=tokenizer,
+        request_for_sampling=request,
+        sampling_params=SimpleNamespace(),
+        prompt_token_ids=[99],
+        tool_parser=None,
+        reasoning_parser_class=None,
+        chat_template_kwargs=chat_template_kwargs,
+        delegating_parser=parser_class(
+            tokenizer,
+            request.tools,
+            chat_template_kwargs=chat_template_kwargs,
+            model_config=None,
+        ),
+        enable_auto_tool_choice=True,
+        stream_response=stream_response,
+    )
+
+
+def _kimi_arg(key: str, value: str) -> str:
+    return (
+        f'{_KIMI_OPEN}argument key="{key}" type="number"{_KIMI_SEP}'
+        f"{value}{_KIMI_CLOSE}argument{_KIMI_SEP}"
+    )
+
+
+def _kimi_output(content: str) -> str:
+    response = (
+        f"{_KIMI_OPEN}response{_KIMI_SEP}{content}" f"{_KIMI_CLOSE}response{_KIMI_SEP}"
+    )
+    tool_call = (
+        f'{_KIMI_OPEN}call tool="calc" index="1"{_KIMI_SEP}'
+        f"{_kimi_arg('x', '1')}{_KIMI_CLOSE}call{_KIMI_SEP}"
+    )
+    tools = f"{_KIMI_OPEN}tools{_KIMI_SEP}{tool_call}{_KIMI_CLOSE}tools{_KIMI_SEP}"
+    return f"{_KIMI_THINK_OPEN}step{_KIMI_THINK_CLOSE}{response}{tools}"
+
+
+class TestKimiK3DelegatingParser:
+    def test_selection_is_limited_to_kimi_k3(self, vllm_processor_module):
+        from vllm.parser import DelegatingParser
+        from vllm.reasoning.kimi_k3_reasoning_parser import KimiK3ReasoningParser
+        from vllm.tool_parsers.kimi_k3_tool_parser import KimiK3ToolParser
+
+        parser_class = vllm_processor_module._resolve_kimi_k3_delegating_parser_class(
+            tool_parser_name="kimi_k3",
+            reasoning_parser_name="kimi_k3",
+            tool_parser_class=KimiK3ToolParser,
+            reasoning_parser_class=KimiK3ReasoningParser,
+        )
+
+        assert parser_class is not None
+        assert issubclass(parser_class, DelegatingParser)
+        assert parser_class.tool_parser_cls is KimiK3ToolParser
+        assert parser_class.reasoning_parser_cls is KimiK3ReasoningParser
+        assert (
+            vllm_processor_module._resolve_kimi_k3_delegating_parser_class(
+                tool_parser_name="hermes",
+                reasoning_parser_name="qwen3",
+                tool_parser_class=KimiK3ToolParser,
+                reasoning_parser_class=KimiK3ReasoningParser,
+            )
+            is None
+        )
+
+    def test_request_adjustment_applies_when_tool_choice_is_none(
+        self, vllm_processor_module
+    ):
+        from vllm.entrypoints.openai.chat_completion.protocol import (
+            ChatCompletionRequest,
+        )
+        from vllm.reasoning.kimi_k3_reasoning_parser import KimiK3ReasoningParser
+        from vllm.tool_parsers.kimi_k3_tool_parser import KimiK3ToolParser
+
+        parser_class = vllm_processor_module._resolve_kimi_k3_delegating_parser_class(
+            tool_parser_name="kimi_k3",
+            reasoning_parser_name="kimi_k3",
+            tool_parser_class=KimiK3ToolParser,
+            reasoning_parser_class=KimiK3ReasoningParser,
+        )
+        request = ChatCompletionRequest(
+            model="test-model",
+            messages=[],
+            tool_choice="none",
+        )
+
+        adjusted = vllm_processor_module._adjust_request_with_delegating_parser(
+            parser_class,
+            tokenizer=_KimiK3DummyTokenizer(),
+            request=request,
+            chat_template_kwargs={"thinking": False},
+            model_config=None,
+        )
+
+        assert adjusted.skip_special_tokens is False
+        assert adjusted.spaces_between_special_tokens is False
+
+    @pytest.mark.parametrize(
+        ("tool_choice", "thinking", "expected_stop"),
+        [
+            ("none", False, True),
+            ("none", True, False),
+            ("auto", False, False),
+        ],
+    )
+    def test_instruct_no_tool_requests_stop_at_first_channel_close(
+        self,
+        vllm_processor_module,
+        tool_choice,
+        thinking,
+        expected_stop,
+    ):
+        parser_class = vllm_processor_module._resolve_kimi_k3_delegating_parser_class(
+            tool_parser_name="kimi_k3",
+            reasoning_parser_name="kimi_k3",
+            tool_parser_class=object,
+            reasoning_parser_class=object,
+        )
+        sampling_params = SimpleNamespace(
+            stop=["client-stop"],
+            stop_token_ids=[99],
+            _all_stop_token_ids={99},
+            include_stop_str_in_output=True,
+            output_text_buffer_length=0,
+        )
+
+        vllm_processor_module._apply_kimi_k3_no_tool_stop(
+            parser_class,
+            tokenizer=_KimiK3DummyTokenizer(),
+            request=SimpleNamespace(tool_choice=tool_choice),
+            chat_template_kwargs={"thinking": thinking},
+            sampling_params=sampling_params,
+        )
+
+        assert (4 in sampling_params.stop_token_ids) is expected_stop
+        assert (4 in sampling_params._all_stop_token_ids) is expected_stop
+        assert sampling_params.stop == ["client-stop"]
+        assert sampling_params.include_stop_str_in_output is True
+        assert sampling_params.output_text_buffer_length == 0
+
+    def test_non_streaming_reasoning_and_tool_output(self, vllm_processor_module):
+        processor = _kimi_k3_postprocessor(
+            vllm_processor_module,
+            stream_response=False,
+        )
+
+        assert (
+            processor.process_output(
+                SimpleNamespace(
+                    index=0,
+                    text=_kimi_output("answer"),
+                    token_ids=[1, 2, 3],
+                    finish_reason=None,
+                    logprobs=None,
+                )
+            )
+            is None
+        )
+        choice = processor.process_output(
+            SimpleNamespace(
+                index=0,
+                text="",
+                token_ids=[],
+                finish_reason="stop",
+                logprobs=None,
+            )
+        )
+
+        assert choice is not None
+        assert choice["delta"]["reasoning_content"] == "step"
+        assert choice["delta"]["content"] == "answer"
+        assert choice["finish_reason"] == "tool_calls"
+        tool_call = choice["delta"]["tool_calls"][0]
+        assert tool_call["function"]["name"] == "calc"
+        assert json.loads(tool_call["function"]["arguments"]) == {"x": 1}
+        serialized = json.dumps(choice)
+        assert _KIMI_OPEN not in serialized
+        assert _KIMI_CLOSE not in serialized
+        assert _KIMI_SEP not in serialized
+
+    def test_streaming_split_markers_do_not_leak(self, vllm_processor_module):
+        processor = _kimi_k3_postprocessor(
+            vllm_processor_module,
+            stream_response=True,
+        )
+        chunks = [
+            (_KIMI_OPEN, [1]),
+            ("think", [2]),
+            (f"{_KIMI_SEP}step", [3, 9]),
+            (_KIMI_CLOSE, [4]),
+            (f"think{_KIMI_SEP}", [2, 3]),
+            (_KIMI_OPEN, [10]),
+            ("response", [11]),
+            (f"{_KIMI_SEP}answer", [12]),
+            (f"{_KIMI_CLOSE}response{_KIMI_SEP}", [13]),
+            (_KIMI_OPEN, [14]),
+            ("tools", [15]),
+            (_KIMI_SEP, [16]),
+            (f'{_KIMI_OPEN}call tool="calc" index="1"{_KIMI_SEP}', [17]),
+            (_kimi_arg("x", "1"), [18]),
+            (f"{_KIMI_CLOSE}call{_KIMI_SEP}", [19]),
+            (f"{_KIMI_CLOSE}tools{_KIMI_SEP}", [20]),
+        ]
+
+        choices = []
+        for index, (text, token_ids) in enumerate(chunks):
+            choice = processor.process_output(
+                SimpleNamespace(
+                    index=0,
+                    text=text,
+                    token_ids=token_ids,
+                    finish_reason="stop" if index == len(chunks) - 1 else None,
+                    logprobs=None,
+                )
+            )
+            if choice is not None:
+                choices.append(choice)
+
+        reasoning = "".join(
+            choice["delta"].get("reasoning_content", "") for choice in choices
+        )
+        content = "".join(choice["delta"].get("content", "") for choice in choices)
+        tool_calls = [
+            tool_call
+            for choice in choices
+            for tool_call in choice["delta"].get("tool_calls", [])
+        ]
+        arguments = "".join(
+            tool_call.get("function", {}).get("arguments", "")
+            for tool_call in tool_calls
+        )
+
+        assert reasoning == "step"
+        assert content == "answer"
+        assert any(
+            tool_call.get("function", {}).get("name") == "calc"
+            for tool_call in tool_calls
+        )
+        assert json.loads(arguments) == {"x": 1}
+        assert choices[-1]["finish_reason"] == "tool_calls"
+        serialized = json.dumps(choices)
+        assert _KIMI_OPEN not in serialized
+        assert _KIMI_CLOSE not in serialized
+        assert _KIMI_SEP not in serialized
+
+    def test_streaming_multiturn_prompt_starts_new_reasoning_phase(
+        self, vllm_processor_module
+    ):
+        processor = _kimi_k3_postprocessor(
+            vllm_processor_module,
+            stream_response=True,
+        )
+        chunks = [
+            ("new step", [9]),
+            (_KIMI_THINK_CLOSE, [4, 2, 3]),
+            (f"{_KIMI_OPEN}response{_KIMI_SEP}answer", [10]),
+            (f"{_KIMI_CLOSE}response{_KIMI_SEP}", [11]),
+        ]
+
+        choices = []
+        for index, (text, token_ids) in enumerate(chunks):
+            choice = processor.process_output(
+                SimpleNamespace(
+                    index=0,
+                    text=text,
+                    token_ids=token_ids,
+                    finish_reason="stop" if index == len(chunks) - 1 else None,
+                    logprobs=None,
+                )
+            )
+            if choice is not None:
+                choices.append(choice)
+
+        reasoning = "".join(
+            choice["delta"].get("reasoning_content", "") for choice in choices
+        )
+        content = "".join(choice["delta"].get("content", "") for choice in choices)
+
+        assert reasoning == "new step"
+        assert content == "answer"
+        assert _KIMI_CLOSE not in json.dumps(choices)
+
+    def test_streaming_tool_choice_none_stops_at_response_boundary(
+        self, vllm_processor_module
+    ):
+        from vllm.entrypoints.openai.chat_completion.protocol import (
+            ChatCompletionRequest,
+        )
+
+        request = ChatCompletionRequest(
+            model="test-model",
+            messages=[],
+            tool_choice="none",
+        )
+        processor = _kimi_k3_postprocessor(
+            vllm_processor_module,
+            stream_response=True,
+            request=request,
+            chat_template_kwargs={"thinking": False},
+        )
+        chunks = [
+            ("answer", [9]),
+            (f"{_KIMI_CLOSE}response{_KIMI_SEP}", [10]),
+            (f"{_KIMI_OPEN}tools{_KIMI_SEP}", [11]),
+        ]
+
+        choices = []
+        for index, (text, token_ids) in enumerate(chunks):
+            choice = processor.process_output(
+                SimpleNamespace(
+                    index=0,
+                    text=text,
+                    token_ids=token_ids,
+                    finish_reason="stop" if index == len(chunks) - 1 else None,
+                    logprobs=None,
+                )
+            )
+            if choice is not None:
+                choices.append(choice)
+
+        content = "".join(choice["delta"].get("content", "") for choice in choices)
+        assert content == "answer"
+        assert not any(choice["delta"].get("tool_calls") for choice in choices)
+        serialized = json.dumps(choices)
+        assert _KIMI_OPEN not in serialized
+        assert _KIMI_CLOSE not in serialized
+        assert _KIMI_SEP not in serialized
+
+    def test_hidden_reasoning_suppresses_metadata(self, vllm_processor_module):
+        processor = _kimi_k3_postprocessor(
+            vllm_processor_module,
+            stream_response=False,
+            include_reasoning=False,
+        )
+
+        choice = processor.process_output(
+            SimpleNamespace(
+                index=0,
+                text=_kimi_output("answer"),
+                token_ids=[1, 2, 3],
+                finish_reason="stop",
+                logprobs=[{"token": "private"}],
+            )
+        )
+
+        assert choice is not None
+        assert "reasoning_content" not in choice["delta"]
+        assert choice["delta"]["content"] == "answer"
+        assert choice["logprobs"] is None
 
 
 class _FakeOutputProcessor:

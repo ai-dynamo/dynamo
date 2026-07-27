@@ -24,9 +24,14 @@ from dynamo.common.utils.prometheus import (
 )
 from dynamo.llm import KvEventPublisher, WorkerMetricsPublisher
 from dynamo.runtime import Endpoint
+from dynamo.sglang._compat import set_resolved_server_arg
 from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
 from dynamo.sglang.args import Config
-from dynamo.sglang.capacity import kv_metrics_block_values, local_dp_rank_bounds
+from dynamo.sglang.capacity import (
+    kv_metrics_block_values,
+    local_dp_rank_bounds,
+    publishes_kv_events,
+)
 
 
 def get_local_dp_rank_range(server_args) -> range:
@@ -44,9 +49,12 @@ def set_forward_pass_metrics_worker_id(
 
     import tempfile
 
-    server_args.forward_pass_metrics_worker_id = str(generate_endpoint.connection_id())
     ipc_path = tempfile.NamedTemporaryFile(delete=False).name
-    server_args.forward_pass_metrics_ipc_name = f"ipc://{ipc_path}"
+    set_resolved_server_arg(
+        server_args,
+        forward_pass_metrics_worker_id=str(generate_endpoint.connection_id()),
+        forward_pass_metrics_ipc_name=f"ipc://{ipc_path}",
+    )
 
 
 async def _resolve_multinode_leader_worker_id(
@@ -295,7 +303,19 @@ class DynamoSglangPublisher:
             List of KvEventPublisher instances if kv_events_config is set,
             empty list otherwise.
         """
-        if self.server_args.kv_events_config:
+        if self.server_args.kv_events_config and not publishes_kv_events(
+            self.server_args
+        ):
+            # Every node of a multinode gang would otherwise advertise the same
+            # (leader_worker_id, dp_rank) source, which the frontend rejects as
+            # Ambiguous and silently drops -- see publishes_kv_events().
+            logging.info(
+                "Non-leader node (node_rank=%s) shares the leader's single KV "
+                "rank slice; skipping KV event publishing so the router sees "
+                "exactly one source per (worker_id, dp_rank).",
+                getattr(self.server_args, "node_rank", 0) or 0,
+            )
+        elif self.server_args.kv_events_config:
             kv_events = json.loads(self.server_args.kv_events_config)
             base_ep = kv_events.get("endpoint")
             if not base_ep:

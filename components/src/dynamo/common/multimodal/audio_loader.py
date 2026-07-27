@@ -8,8 +8,12 @@ from urllib.parse import urlparse
 
 import numpy as np
 
-from dynamo.common.http import fetch_bytes
-from dynamo.common.http.url_validator import UrlValidationPolicy, validate_media_url
+from dynamo.common.http import HttpStatusError, fetch_bytes
+from dynamo.common.http.url_validator import (
+    UrlValidationError,
+    UrlValidationPolicy,
+    validate_media_url,
+)
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.runtime import run_async
 
@@ -145,6 +149,13 @@ class AudioLoader:
             return waveform, sr
         except FileNotFoundError:
             raise
+        except (UrlValidationError, HttpStatusError):
+            # A deliberate client-error verdict. Must precede the generic
+            # handler, since UrlValidationError subclasses ValueError and
+            # would otherwise be flattened. Mirrors
+            # ImageLoader._fetch_and_process.
+            logger.error("URL rejected loading audio: '%s'", audio_url)
+            raise
         except Exception as exc:
             logger.error("Error loading audio from %s: %s", audio_url, exc)
             raise ValueError(f"Failed to load audio from {audio_url}: {exc}") from exc
@@ -206,6 +217,8 @@ class AudioLoader:
         results = await asyncio.gather(*audio_futures, return_exceptions=True)
         loaded_audio: list[tuple[np.ndarray, float]] = []
         collective_exceptions: list[str] = []
+        status_error: HttpStatusError | None = None
+        url_error: UrlValidationError | None = None
         for media_item, result in zip(audio_mm_items, results, strict=True):
             if isinstance(result, BaseException):
                 if isinstance(result, asyncio.CancelledError):
@@ -215,8 +228,23 @@ class AudioLoader:
                 collective_exceptions.append(
                     f"Failed to load audio from {source[:80]}...: {result}\n"
                 )
+                # Keep the first typed client error. gather() has already
+                # awaited everything, so deferring the raise costs nothing and
+                # lets a typed error win over a generic one that happened to
+                # come first in the batch. Folding these into the bare
+                # Exception below would discard the status they carry.
+                if status_error is None and isinstance(result, HttpStatusError):
+                    status_error = result
+                elif url_error is None and isinstance(result, UrlValidationError):
+                    url_error = result
                 continue
             loaded_audio.append(result)
+
+        if status_error is not None:
+            raise status_error
+
+        if url_error is not None:
+            raise url_error
 
         if collective_exceptions:
             raise Exception("".join(collective_exceptions))

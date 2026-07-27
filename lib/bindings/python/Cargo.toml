@@ -51,7 +51,7 @@ mm-routing = ["dynamo-llm/mm-routing"]
 aiconfigurator-core = { git = "https://github.com/ai-dynamo/aiconfigurator.git", rev = "ffbab15797d3a3f14c382e937c0ab0c1c5cbc530", package = "aiconfigurator-core", optional = true }
 dynamo-runtime = { path = "../../runtime" }
 dynamo-mocker = { path = "../../mocker" }
-dynamo-parsers = { version = "5.0.0" }
+dynamo-parsers = { version = "=5.1.2" }
 dynamo-backend-common = { path = "../../backend-common" }
 dynamo-sglang-sidecar = { path = "../../sidecar/sglang" }
 
@@ -120,3 +120,12 @@ tracing-subscriber = { version = "0.3", features = ["registry"] }
 inherits = "release"
 debug = true
 strip = false
+
+# This crate is its own cargo workspace (excluded from the root one), so it
+# needs its own copy of the root Cargo.toml patch. maturin builds from here,
+# so without it the wheel would link the crates.io versions instead.
+[patch.crates-io]
+dynamo-parsers = { git = "https://github.com/ai-dynamo/frontend-crates.git", branch = "feat/Kimi-K3" }
+dynamo-protocols = { git = "https://github.com/ai-dynamo/frontend-crates.git", branch = "feat/Kimi-K3" }
+dynamo-renderer = { git = "https://github.com/ai-dynamo/frontend-crates.git", branch = "feat/Kimi-K3" }
+dynamo-tokenizers = { git = "https://github.com/ai-dynamo/frontend-crates.git", branch = "feat/Kimi-K3" }

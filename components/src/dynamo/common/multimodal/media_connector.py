@@ -19,6 +19,8 @@ import logging
 
 from PIL import Image
 
+from dynamo.common.http import HttpStatusError
+from dynamo.common.http.url_validator import UrlValidationError
 from dynamo.common.multimodal.image_loader import ImageLoader
 
 logger = logging.getLogger(__name__)
@@ -68,6 +70,11 @@ try:
             """Async image fetch via dynamo's ImageLoader with LRU cache."""
             try:
                 img = await self._image_loader.load_image(image_url)
+            except (UrlValidationError, HttpStatusError):
+                # A deliberate client-error verdict: SSRF policy rejection,
+                # DNS failure, or unsupported media type. Must precede the
+                # ValueError branch, since UrlValidationError subclasses it.
+                raise
             except (ValueError, FileNotFoundError, OSError) as exc:
                 # Fall back to parent for unsupported URL schemes or local
                 # file paths that ImageLoader doesn't handle.

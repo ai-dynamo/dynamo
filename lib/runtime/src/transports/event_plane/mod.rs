@@ -387,9 +387,25 @@ impl EventPublisher {
         // can host multiple publishers for the same scope/topic, each with its
         // own ZMQ endpoint and sequence space, so the process ID is not unique
         // enough here.
+        // Keep the id inside the range a JSON number represents exactly.
+        //
+        // Discovery records round-trip through the Kubernetes apiserver as
+        // unstructured JSON (the DynamoWorkerMetadata CRD stores a raw blob with
+        // `schema = "disabled"`), and the apiserver normalizes numbers through
+        // float64. Any integer above 2^53 comes back rounded -- observed in the
+        // field as publisher 13584172880116487724 read back as
+        // 13584172880116488000.
+        //
+        // Every ZMQ envelope carries its publisher id and the consumer compares
+        // it against the discovered one, so a rounded id fails attribution on
+        // *every* event: they are dropped as `identity_mismatch` and the KV
+        // indexer silently never learns the worker's blocks. 53 bits of entropy
+        // is ample for the handful of publishers a process hosts.
+        const PUBLISHER_ID_BITS: u32 = 53;
         let publisher_id = rand::rngs::OsRng
             .try_next_u64()
-            .map_err(|error| anyhow::anyhow!("failed to generate publisher ID: {error}"))?;
+            .map_err(|error| anyhow::anyhow!("failed to generate publisher ID: {error}"))?
+            >> (u64::BITS - PUBLISHER_ID_BITS);
         let discovery = Some(drt.discovery());
         let runtime_handle = drt.runtime().secondary();
         let subject = scope.subject(&topic);
@@ -1106,6 +1122,21 @@ mod tests {
                             publisher_b.publisher_id(),
                         ])
                     );
+                    // Discovery round-trips these through the apiserver's JSON,
+                    // which is float64-backed; see the generator comment.
+                    //
+                    // Assert the generator's actual contract (< 2^53) rather than
+                    // just an f64 round-trip: plenty of values above 2^53 are still
+                    // exactly representable, so a round-trip check would let a
+                    // regression to full-range ids pass whenever the draw happened
+                    // to land on one.
+                    for id in [publisher_a.publisher_id(), publisher_b.publisher_id()] {
+                        assert!(
+                            id < (1u64 << 53),
+                            "publisher id {id} must stay below 2^53 to survive the \
+                             apiserver's float64-backed JSON"
+                        );
+                    }
                 };
                 tokio::time::timeout(std::time::Duration::from_secs(5), receive)
                     .await
@@ -1113,6 +1144,30 @@ mod tests {
             },
         )
         .await;
+    }
+
+    /// The publisher id is compared byte-for-byte against the id in every ZMQ
+    /// envelope, but it reaches the consumer via a Kubernetes CRD whose numbers
+    /// are normalized through float64. An id above 2^53 comes back rounded, so
+    /// every event fails attribution and is dropped as `identity_mismatch`.
+    #[test]
+    fn publisher_ids_survive_a_json_number_round_trip() {
+        const MAX: u64 = 1 << 53;
+
+        // The historical full-u64 id is NOT safe -- this is the regression.
+        // Observed in the field: read back as 13584172880116488000.
+        let unsafe_id: u64 = 13_584_172_880_116_487_724;
+        assert!(unsafe_id > MAX);
+        assert_ne!(unsafe_id as f64 as u64, unsafe_id);
+
+        // Everything the generator can now produce is exactly representable.
+        for id in [0u64, 1, MAX - 1, MAX / 3, 6_633_287_539_119_378] {
+            assert!(id < MAX, "generator must stay below 2^53");
+            assert_eq!(
+                id as f64 as u64, id,
+                "id {id} must survive an f64 round trip"
+            );
+        }
     }
 
     #[tokio::test]

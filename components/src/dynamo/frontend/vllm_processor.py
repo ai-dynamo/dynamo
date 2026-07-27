@@ -17,6 +17,7 @@ from typing import Any
 from msgspec.structs import replace as msgspec_replace
 from vllm.config import CacheConfig, LoadConfig, ModelConfig, VllmConfig
 from vllm.entrypoints.chat_utils import load_chat_template
+from vllm.parser import DelegatingParser
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tasks import GENERATION_TASKS
@@ -167,6 +168,77 @@ def _build_reasoning_parser_metadata(
     return reasoning_parser.is_reasoning_end(prompt_token_ids), parser_kwargs
 
 
+def _resolve_kimi_k3_delegating_parser_class(
+    *,
+    tool_parser_name: str | None,
+    reasoning_parser_name: str | None,
+    tool_parser_class: type[ToolParser] | None,
+    reasoning_parser_class: type[ReasoningParser] | None,
+) -> type[DelegatingParser] | None:
+    if (
+        tool_parser_name != "kimi_k3"
+        or reasoning_parser_name != "kimi_k3"
+        or tool_parser_class is None
+        or reasoning_parser_class is None
+    ):
+        return None
+
+    class KimiK3DelegatingParser(DelegatingParser):
+        tool_parser_cls = tool_parser_class
+        reasoning_parser_cls = reasoning_parser_class
+
+    return KimiK3DelegatingParser
+
+
+def _adjust_request_with_delegating_parser(
+    parser_class: type[DelegatingParser] | None,
+    *,
+    tokenizer: TokenizerLike,
+    request: Any,
+    chat_template_kwargs: dict[str, Any],
+    model_config: ModelConfig | None,
+) -> Any:
+    if parser_class is None:
+        return request
+
+    parser = parser_class(
+        tokenizer,
+        request.tools,
+        chat_template_kwargs=chat_template_kwargs,
+        model_config=model_config,
+    )
+    return parser.adjust_request(request)
+
+
+def _apply_kimi_k3_no_tool_stop(
+    parser_class: type[DelegatingParser] | None,
+    *,
+    tokenizer: TokenizerLike,
+    request: Any,
+    chat_template_kwargs: dict[str, Any],
+    sampling_params: SamplingParams,
+) -> None:
+    if parser_class is None or request.tool_choice != "none":
+        return
+
+    thinking = chat_template_kwargs.get("thinking")
+    if thinking is None:
+        thinking = chat_template_kwargs.get("enable_thinking", True)
+    if thinking is not False:
+        return
+
+    close_token_ids = tokenizer.encode("<|close|>", add_special_tokens=False)
+    if len(close_token_ids) != 1:
+        raise ValueError("Kimi K3 close marker must encode to one token")
+    close_token_id = close_token_ids[0]
+
+    stop_token_ids = list(sampling_params.stop_token_ids or [])
+    if close_token_id not in stop_token_ids:
+        stop_token_ids.append(close_token_id)
+    sampling_params.stop_token_ids = stop_token_ids
+    sampling_params._all_stop_token_ids.add(close_token_id)
+
+
 def _inject_routing_metadata(
     dynamo_preproc: dict[str, Any],
     target: dict[str, Any],
@@ -202,6 +274,8 @@ class VllmProcessor:
         block_size: int = 16,
         enable_auto_tool_choice: bool = False,
         default_chat_template_kwargs: dict[str, Any] | None = None,
+        delegating_parser_class: type[DelegatingParser] | None = None,
+        model_config: ModelConfig | None = None,
     ):
         self.tokenizer = tokenizer
         self.input_processor = input_processor
@@ -213,6 +287,8 @@ class VllmProcessor:
         self.block_size = block_size
         self.enable_auto_tool_choice = enable_auto_tool_choice
         self.default_chat_template_kwargs = default_chat_template_kwargs
+        self.delegating_parser_class = delegating_parser_class
+        self.model_config = model_config
         # Sender for mm_kwargs transfer — instantiated lazily on first MM request.
         # MmKwargsShmSender for same-node transfers (default), MmKwargsNixlSender
         # for cross-node RDMA. Controlled by DYNAMO_MM_TRANSFER env var.
@@ -423,6 +499,16 @@ class VllmProcessor:
         engine_prompt = pre.engine_prompt
         tokens = pre.prompt_token_ids
 
+        # Kimi K3's parser keeps its XTML control tokens contiguous and visible
+        # to postprocessing, including requests whose tool_choice is "none".
+        request_for_sampling = _adjust_request_with_delegating_parser(
+            self.delegating_parser_class,
+            tokenizer=self.tokenizer,
+            request=request_for_sampling,
+            chat_template_kwargs=chat_template_kwargs,
+            model_config=self.model_config,
+        )
+
         if request_for_sampling.max_completion_tokens is not None:
             max_tokens = request_for_sampling.max_completion_tokens
         elif request_for_sampling.max_tokens is not None:
@@ -454,6 +540,17 @@ class VllmProcessor:
             v = getattr(request_for_sampling, k, None)
             if v is not None:
                 setattr(sampling_params, k, v)
+        # In K3 instruct mode no downstream channel is valid after the first
+        # close marker. Stop there so a malformed stale think/tools continuation
+        # cannot escape as content; reasoning and tool-bearing requests retain
+        # their normal multi-channel generation.
+        _apply_kimi_k3_no_tool_stop(
+            self.delegating_parser_class,
+            tokenizer=self.tokenizer,
+            request=request_for_sampling,
+            chat_template_kwargs=chat_template_kwargs,
+            sampling_params=sampling_params,
+        )
         # nvext.max_thinking_tokens is enforced on the worker, not here. The
         # frontend's InputProcessor is built without reasoning_config (it only
         # tokenizes), so setting sampling_params.thinking_token_budget would
@@ -579,6 +676,16 @@ class VllmProcessor:
                 ] = request_for_sampling.mm_processor_kwargs
 
             def new_post_processor() -> StreamingPostProcessor:
+                delegating_parser = (
+                    self.delegating_parser_class(
+                        self.tokenizer,
+                        request_for_sampling.tools,
+                        chat_template_kwargs=chat_template_kwargs,
+                        model_config=self.model_config,
+                    )
+                    if self.delegating_parser_class is not None
+                    else None
+                )
                 return StreamingPostProcessor(
                     tokenizer=self.tokenizer,
                     request_for_sampling=request_for_sampling,
@@ -587,6 +694,8 @@ class VllmProcessor:
                     tool_parser=tool_parser,
                     reasoning_parser_class=self.reasoning_parser_class,
                     chat_template_kwargs=chat_template_kwargs,
+                    delegating_parser=delegating_parser,
+                    enable_auto_tool_choice=self.enable_auto_tool_choice,
                     stream_response=bool(request.get("stream", False)),
                 )
 
@@ -978,6 +1087,13 @@ class EngineFactory:
         else:
             reasoning_parser_class = None
 
+        delegating_parser_class = _resolve_kimi_k3_delegating_parser_class(
+            tool_parser_name=tool_parser_name,
+            reasoning_parser_name=reasoning_parser_name,
+            tool_parser_class=tool_parser_class,
+            reasoning_parser_class=reasoning_parser_class,
+        )
+
         block_size = self.config.kv_cache_block_size or 16
 
         gen = VllmProcessor(
@@ -992,6 +1108,8 @@ class EngineFactory:
             default_chat_template_kwargs=getattr(
                 self.flags, "default_chat_template_kwargs", None
             ),
+            delegating_parser_class=delegating_parser_class,
+            model_config=model_config,
         )
         gen.exclude_tools_when_tool_choice_none = (
             self.config.exclude_tools_when_tool_choice_none

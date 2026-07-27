@@ -472,8 +472,10 @@ impl MediaLoader {
             // output (resize, normalisation). When it's set we skip the
             // cache to stay correct; in practice it's None on the common
             // path so the hit rate is unaffected.
-            if media_io_kwargs.is_none() {
-                let key = Self::cache_key(image_part.image_url.url.as_str());
+            if media_io_kwargs.is_none()
+                && let Some(image_url) = image_part.image_url.as_ref()
+            {
+                let key = Self::cache_key(image_url.url.as_str());
                 if let Some(hit) = cache.lock().get(&key) {
                     tracing::debug!(url_hash = key, "[mm-cache] hit");
                     return Ok(hit);
@@ -490,7 +492,10 @@ impl MediaLoader {
                     .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("Model does not support image inputs"))?;
 
-                let url = &image_part.image_url.url;
+                let image_url = image_part.image_url.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("image_url content part is missing its `image_url` field")
+                })?;
+                let url = &image_url.url;
                 self.media_fetcher
                     .check_if_url_allowed_with_dns(url)
                     .await?;
@@ -513,7 +518,10 @@ impl MediaLoader {
                             anyhow::anyhow!("Model does not support video inputs")
                         })?;
 
-                    let url = &video_part.video_url.url;
+                    let video_url = video_part.video_url.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!("video_url content part is missing its `video_url` field")
+                    })?;
+                    let url = &video_url.url;
                     self.media_fetcher
                         .check_if_url_allowed_with_dns(url)
                         .await?;
@@ -542,8 +550,9 @@ impl MediaLoader {
         if let (Some(cache), ChatCompletionRequestUserMessageContentPart::ImageUrl(image_part)) =
             (self.cache.as_ref(), oai_content_part)
             && media_io_kwargs.is_none()
+            && let Some(image_url) = image_part.image_url.as_ref()
         {
-            let key = Self::cache_key(image_part.image_url.url.as_str());
+            let key = Self::cache_key(image_url.url.as_str());
             let bytes = descriptor_bytes(&rdma_descriptor);
             cache.lock().put(key, rdma_descriptor.clone());
             tracing::debug!(url_hash = key, bytes, "[mm-cache] insert");

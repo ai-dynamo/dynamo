@@ -290,16 +290,25 @@ SHELL ["/bin/bash", "-l", "-o", "pipefail", "-c"]
 # We stash the pre-tools python3 (which may be a real binary or a symlink we created earlier for vLLM/TRTLLM)
 # and restore it after copying toolchains from dynamo_tools.
 RUN if [ -e /usr/bin/python3 ]; then cp -a /usr/bin/python3 /tmp/python3.pretools; fi
-# Pull the developer toolchain from dynamo_tools in as few COPY layers as
-# possible (overlay2 caps a downstream image at ~128 layers). The six /usr/*
-# subtrees collapse into one COPY; --exclude=local skips the multi-GB /usr/local
-# (CUDA, etc.) the dev image already inherits from its own base.
-COPY --from=dynamo_tools --exclude=local /usr/ /usr/
-COPY --from=dynamo_tools /opt/nvidia/ /opt/nvidia/
-COPY --from=dynamo_tools /etc/alternatives/ /etc/alternatives/
-COPY --from=dynamo_tools /etc/bash_completion.d/ /etc/bash_completion.d/
-COPY --from=dynamo_tools /etc/sudoers /etc/sudoers
-COPY --from=dynamo_tools /etc/sudoers.d/ /etc/sudoers.d/
+# Pull the developer toolchain from dynamo_tools in one layer (overlay2 caps a
+# downstream image at ~128 layers). A cross-stage COPY cannot checksum dangling
+# links or links into virtual filesystems found in some framework base images.
+# Mounting the stage and using cp -a preserves those links without dereferencing
+# them. Skip the multi-GB /usr/local tree already inherited from the dev base.
+RUN --mount=from=dynamo_tools,source=/usr,target=/tmp/dynamo-tools-usr \
+    --mount=from=dynamo_tools,source=/opt/nvidia,target=/tmp/dynamo-tools-nvidia \
+    --mount=from=dynamo_tools,source=/etc,target=/tmp/dynamo-tools-etc \
+    set -eux; \
+    for src in /tmp/dynamo-tools-usr/*; do \
+        [ "$(basename "$src")" = "local" ] && continue; \
+        cp -a --remove-destination "$src" /usr/; \
+    done; \
+    mkdir -p /opt/nvidia /etc/alternatives /etc/bash_completion.d /etc/sudoers.d; \
+    cp -a /tmp/dynamo-tools-nvidia/. /opt/nvidia/; \
+    cp -a /tmp/dynamo-tools-etc/alternatives/. /etc/alternatives/; \
+    cp -a /tmp/dynamo-tools-etc/bash_completion.d/. /etc/bash_completion.d/; \
+    cp -a /tmp/dynamo-tools-etc/sudoers /etc/sudoers; \
+    cp -a /tmp/dynamo-tools-etc/sudoers.d/. /etc/sudoers.d/
 
 # Restore the pre-tools python3 (keeps SGLang system python intact and avoids venv symlink loops).
 RUN if [ -e /tmp/python3.pretools ]; then cp -af /tmp/python3.pretools /usr/bin/python3; fi

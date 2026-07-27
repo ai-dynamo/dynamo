@@ -87,9 +87,11 @@ fn instrumented_tokenizer_cache(
     cache_bytes: usize,
     cache_extend: bool,
     model: &str,
-) -> Arc<dyn crate::tokenizers::traits::Tokenizer> {
-    Arc::new(
-        crate::tokenizers::CachedTokenizer::new(raw, special_tokens, cache_bytes)
+) -> anyhow::Result<Arc<dyn crate::tokenizers::traits::Tokenizer>> {
+    // CachedTokenizer::new validates that the inner tokenizer supports prefix
+    // caching, so it is fallible as of dynamo-tokenizers 1.5.3.
+    Ok(Arc::new(
+        crate::tokenizers::CachedTokenizer::new(raw, special_tokens, cache_bytes)?
             .with_extend(cache_extend)
             .with_observer(
                 Arc::new(|| {
@@ -100,7 +102,7 @@ fn instrumented_tokenizer_cache(
                 }),
             )
             .with_token_observer(tokenizer_cache_token_observer(model)),
-    )
+    ))
 }
 
 /// Identify model deployment cards in the key-value store
@@ -1296,7 +1298,7 @@ impl ModelDeploymentCard {
                         cache_bytes,
                         cache_extend,
                         self.name(),
-                    )
+                    )?
                 } else {
                     raw
                 }
@@ -1328,7 +1330,7 @@ impl ModelDeploymentCard {
                         cache_bytes,
                         cache_extend,
                         self.name(),
-                    )
+                    )?
                 } else {
                     raw
                 }
