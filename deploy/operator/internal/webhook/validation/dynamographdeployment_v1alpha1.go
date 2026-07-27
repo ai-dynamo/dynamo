@@ -80,7 +80,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecUpdat
 		if !exists {
 			continue
 		}
-		allErrs = append(allErrs, v.validateRuntimeVersionOverrideUpdateV1Alpha1(
+		allErrs = append(allErrs, v.validateDynamoComponentDeploymentSharedSpecUpdateV1alpha1(
 			newService,
 			oldService,
 			servicesPath.Key(serviceName),

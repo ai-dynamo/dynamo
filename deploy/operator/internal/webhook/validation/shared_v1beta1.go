@@ -26,7 +26,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -127,8 +126,17 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 		)...)
 	}
 
+	// Validate runtime compatibility against the source-version fields.
 	if v.validatesRuntimeVersionFor(runtimeVersionSourceV1Beta1) {
-		allErrs = append(allErrs, v.validateRuntimeVersionOverride(spec, fldPath)...)
+		image, imagePath := runtimeVersionImageAndPath(spec, fldPath)
+		if image == "" {
+			allErrs = append(allErrs, field.Required(imagePath, "is required"))
+		} else if runtimeVersionOverrideRequired(image, spec.RuntimeVersionOverride) {
+			allErrs = append(allErrs, field.Required(
+				fldPath.Child("runtimeVersionOverride"),
+				runtimeVersionOverrideRequiredMessage,
+			))
+		}
 	}
 
 	return allErrs
@@ -396,8 +404,20 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 			))
 		}
 	}
+
+	// Ratchet an unchanged legacy tuple but reject a missing image or newly invalid tuple.
 	if v.validatesRuntimeVersionFor(runtimeVersionSourceV1Beta1) {
-		allErrs = append(allErrs, v.validateRuntimeVersionOverrideUpdate(newComponent, oldComponent, fldPath)...)
+		newImage, imagePath := runtimeVersionImageAndPath(newComponent, fldPath)
+		oldImage, _ := runtimeVersionImageAndPath(oldComponent, fldPath)
+		if newImage == "" {
+			allErrs = append(allErrs, field.Required(imagePath, "is required"))
+		} else if runtimeVersionOverrideRequired(newImage, newComponent.RuntimeVersionOverride) &&
+			(newImage != oldImage || newComponent.RuntimeVersionOverride != oldComponent.RuntimeVersionOverride) {
+			allErrs = append(allErrs, field.Required(
+				fldPath.Child("runtimeVersionOverride"),
+				runtimeVersionOverrideRequiredMessage,
+			))
+		}
 	}
 	return allErrs
 }
@@ -457,89 +477,4 @@ func (v *sharedValidation) validateExperimentalSpecUpdate(
 		))
 	}
 	return allErrs
-}
-
-// validateRuntimeVersionOverride validates runtime compatibility fields on create.
-// spec and fldPath must not be nil.
-func (v *sharedValidation) validateRuntimeVersionOverride(
-	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
-	fldPath *field.Path,
-) field.ErrorList {
-	image, imagePath := v.runtimeVersionImageAndPath(spec, fldPath)
-	return v.validateRuntimeVersion(image, spec.RuntimeVersionOverride, imagePath, fldPath.Child("runtimeVersionOverride"))
-}
-
-// validateRuntimeVersionOverrideUpdate ratchets runtime compatibility fields on update.
-// newSpec, oldSpec, and fldPath must not be nil.
-func (v *sharedValidation) validateRuntimeVersionOverrideUpdate(
-	newSpec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
-	oldSpec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
-	fldPath *field.Path,
-) field.ErrorList {
-	newImage, imagePath := v.runtimeVersionImageAndPath(newSpec, fldPath)
-	oldImage, _ := v.runtimeVersionImageAndPath(oldSpec, fldPath)
-	return v.validateRuntimeVersionUpdate(
-		newImage,
-		newSpec.RuntimeVersionOverride,
-		oldImage,
-		oldSpec.RuntimeVersionOverride,
-		imagePath,
-		fldPath.Child("runtimeVersionOverride"),
-	)
-}
-
-// runtimeVersionImageAndPath returns the main image and its v1beta1 field path.
-// spec and fldPath must not be nil.
-func (v *sharedValidation) runtimeVersionImageAndPath(
-	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
-	fldPath *field.Path,
-) (string, *field.Path) {
-	imagePath := fldPath.Child("podTemplate", "spec", "containers")
-	if spec.PodTemplate != nil {
-		if index := containerIndexByName(spec.PodTemplate.Spec.Containers, consts.MainContainerName); index >= 0 {
-			imagePath = imagePath.Index(index).Child("image")
-			return spec.PodTemplate.Spec.Containers[index].Image, imagePath
-		}
-	}
-	return "", imagePath
-}
-
-// validateRuntimeVersionUpdate validates the new runtime fields unless an invalid old value is unchanged.
-// imagePath and overridePath must not be nil.
-func (v *sharedValidation) validateRuntimeVersionUpdate(
-	newImage string,
-	newOverride string,
-	oldImage string,
-	oldOverride string,
-	imagePath *field.Path,
-	overridePath *field.Path,
-) field.ErrorList {
-	allErrs := v.validateRuntimeVersion(newImage, newOverride, imagePath, overridePath)
-	if len(allErrs) == 0 || newImage == "" {
-		return allErrs
-	}
-	if newImage == oldImage && newOverride == oldOverride {
-		return nil
-	}
-	return allErrs
-}
-
-// validateRuntimeVersion validates a resolved image and override pair.
-// imagePath and overridePath must not be nil.
-func (v *sharedValidation) validateRuntimeVersion(
-	image string,
-	override string,
-	imagePath *field.Path,
-	overridePath *field.Path,
-) field.ErrorList {
-	if image == "" {
-		return field.ErrorList{field.Required(imagePath, "is required")}
-	}
-	if override != "" {
-		return nil
-	}
-	if _, err := runtimeversion.ParseImageVersion(image); err != nil {
-		return field.ErrorList{field.Required(overridePath, "is required when the specified main container image has no parseable semantic-version tag")}
-	}
-	return nil
 }

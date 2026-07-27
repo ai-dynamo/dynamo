@@ -95,7 +95,7 @@ func (v *DynamoComponentDeploymentValidator) ValidateUpdate(
 		if err != nil {
 			return nil, fmt.Errorf("cannot validate old preserved v1alpha1 DynamoComponentDeployment fields: %w", err)
 		}
-		allErrs = append(allErrs, validation.validateRuntimeVersionOverrideUpdateV1Alpha1(
+		allErrs = append(allErrs, validation.validateDynamoComponentDeploymentSharedSpecUpdateV1alpha1(
 			&newAlpha.Spec.DynamoComponentDeploymentSharedSpec,
 			&oldAlpha.Spec.DynamoComponentDeploymentSharedSpec,
 			field.NewPath("spec"),

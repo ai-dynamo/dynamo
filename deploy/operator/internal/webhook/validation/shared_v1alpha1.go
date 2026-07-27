@@ -76,8 +76,45 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecV1alpha1(
 	if spec.Failover != nil {
 		allErrs = append(allErrs, v.validateFailoverSpecV1alpha1(spec.Failover, fldPath.Child("failover"))...)
 	}
+
+	// Validate runtime compatibility against the source-version fields.
 	if v.validatesRuntimeVersionFor(runtimeVersionSourceV1Alpha1) {
-		allErrs = append(allErrs, v.validateRuntimeVersionOverrideV1Alpha1(spec, fldPath)...)
+		image, imagePath := runtimeVersionImageAndPathV1Alpha1(spec, fldPath)
+		if image == "" {
+			allErrs = append(allErrs, field.Required(imagePath, "is required"))
+		} else if runtimeVersionOverrideRequired(image, spec.RuntimeVersionOverride) {
+			allErrs = append(allErrs, field.Required(
+				fldPath.Child("runtimeVersionOverride"),
+				runtimeVersionOverrideRequiredMessage,
+			))
+		}
+	}
+
+	return allErrs
+}
+
+// validateDynamoComponentDeploymentSharedSpecUpdateV1alpha1 validates a preserved v1alpha1 shared spec update.
+// newSpec, oldSpec, and fldPath must not be nil.
+func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdateV1alpha1(
+	newSpec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec,
+	oldSpec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec,
+	fldPath *field.Path,
+) field.ErrorList {
+	allErrs := field.ErrorList{}
+
+	// Ratchet an unchanged legacy tuple but reject a missing image or newly invalid tuple.
+	if v.validatesRuntimeVersionFor(runtimeVersionSourceV1Alpha1) {
+		newImage, imagePath := runtimeVersionImageAndPathV1Alpha1(newSpec, fldPath)
+		oldImage, _ := runtimeVersionImageAndPathV1Alpha1(oldSpec, fldPath)
+		if newImage == "" {
+			allErrs = append(allErrs, field.Required(imagePath, "is required"))
+		} else if runtimeVersionOverrideRequired(newImage, newSpec.RuntimeVersionOverride) &&
+			(newImage != oldImage || newSpec.RuntimeVersionOverride != oldSpec.RuntimeVersionOverride) {
+			allErrs = append(allErrs, field.Required(
+				fldPath.Child("runtimeVersionOverride"),
+				runtimeVersionOverrideRequiredMessage,
+			))
+		}
 	}
 
 	return allErrs
@@ -136,46 +173,4 @@ func (v *sharedValidation) validateFailoverSpecV1alpha1(
 		failover.NumShadows,
 		fmt.Sprintf("is invalid for mode=%q: intraPod uses a fixed 1 primary + 1 shadow sidecar; use failover.mode=%q to configure numShadows", nvidiacomv1alpha1.GMSModeIntraPod, nvidiacomv1alpha1.GMSModeInterPod),
 	)}
-}
-
-// validateRuntimeVersionOverrideV1Alpha1 validates runtime compatibility fields on create.
-// spec and fldPath must not be nil.
-func (v *sharedValidation) validateRuntimeVersionOverrideV1Alpha1(
-	spec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec,
-	fldPath *field.Path,
-) field.ErrorList {
-	image, imagePath := v.runtimeVersionImageAndPathV1Alpha1(spec, fldPath)
-	return v.validateRuntimeVersion(image, spec.RuntimeVersionOverride, imagePath, fldPath.Child("runtimeVersionOverride"))
-}
-
-// validateRuntimeVersionOverrideUpdateV1Alpha1 ratchets runtime compatibility fields on update.
-// newSpec, oldSpec, and fldPath must not be nil.
-func (v *sharedValidation) validateRuntimeVersionOverrideUpdateV1Alpha1(
-	newSpec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec,
-	oldSpec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec,
-	fldPath *field.Path,
-) field.ErrorList {
-	newImage, imagePath := v.runtimeVersionImageAndPathV1Alpha1(newSpec, fldPath)
-	oldImage, _ := v.runtimeVersionImageAndPathV1Alpha1(oldSpec, fldPath)
-	return v.validateRuntimeVersionUpdate(
-		newImage,
-		newSpec.RuntimeVersionOverride,
-		oldImage,
-		oldSpec.RuntimeVersionOverride,
-		imagePath,
-		fldPath.Child("runtimeVersionOverride"),
-	)
-}
-
-// runtimeVersionImageAndPathV1Alpha1 returns the main image and its source-version field path.
-// spec and fldPath must not be nil.
-func (v *sharedValidation) runtimeVersionImageAndPathV1Alpha1(
-	spec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec,
-	fldPath *field.Path,
-) (string, *field.Path) {
-	imagePath := fldPath.Child("extraPodSpec", "mainContainer", "image")
-	if spec.ExtraPodSpec != nil && spec.ExtraPodSpec.MainContainer != nil {
-		return spec.ExtraPodSpec.MainContainer.Image, imagePath
-	}
-	return "", imagePath
 }
