@@ -1,0 +1,214 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# EXPERIMENTAL. Disaggregated SGLang deployment using the Rust sidecar.
+#
+# Prefill and decode run as separate worker pods. Each pod has two containers:
+#   - main: the Dynamo worker (dynamo-sglang-sidecar). No GPU. It auto-discovers
+#     its prefill/decode role from the engine's gRPC metadata. Must be named
+#     "main" (operator injects discovery env + probes).
+#   - sglang-engine: the stock SGLang image running its native gRPC server in
+#     --disaggregation-mode prefill|decode with the NIXL transfer backend. Holds
+#     the GPU. KV cache moves prefill -> decode over NIXL/RDMA. Native sidecar.
+#
+# Unlike aggregated, the engine binds 0.0.0.0 so its disaggregation bootstrap
+# server (port 8998) is reachable across pods; the decode worker connects to the
+# prefill worker's advertised bootstrap. The prefill sidecar advertises its pod
+# IP as the bootstrap host (SGLANG_DISAGGREGATION_BOOTSTRAP_HOST). SGLang's single
+# --host binds ALL its listeners, so the unauthenticated native gRPC (30001), not
+# just the bootstrap server, is exposed on the pod network here — rely on
+# NetworkPolicy / a trusted pod network rather than loopback isolation.
+#
+# PREREQUISITES / CAVEATS (authored from the SGLang disagg recipes + the sidecar
+# contract; NOT validated here — needs a multi-GPU RDMA cluster and an SGLang
+# build with the experimental gRPC + --sidecar + disaggregation support):
+#   - RDMA/NIXL: engines need rdma/ib devices, IPC_LOCK, and shared memory; tune
+#     for your fabric (UCX_NET_DEVICES etc.). NIXL/UCX ship in sglang-runtime.
+#   - Model / served-model-name / TP must match between prefill and decode.
+#   - `main` runs the standalone dynamo-sglang-sidecar image (no GPU); build it
+#     from lib/sidecar/sglang/Dockerfile (see README).
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: sglang-sidecar-disagg
+spec:
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.3.0
+
+  - name: SGLangPrefillWorker
+    type: worker
+    replicas: 1
+    podTemplate:
+      spec:
+        volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 10Gi
+        initContainers:
+        - name: sglang-engine
+          image: lmsysorg/sglang:v0.5.16
+          restartPolicy: Always
+          securityContext:
+            capabilities:
+              add: ["IPC_LOCK"]
+          # Real gRPC HealthCheck (see agg.yaml). startupProbe gates `main`;
+          # readinessProbe drops the worker if the engine dies at runtime.
+          startupProbe:
+            exec:
+              command:
+              - python3
+              - -c
+              - import grpc; grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'', timeout=3)
+            periodSeconds: 5
+            timeoutSeconds: 10
+            failureThreshold: 60
+          readinessProbe:
+            exec:
+              command:
+              - python3
+              - -c
+              - import grpc; grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'', timeout=3)
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 3
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+              rdma/ib: "1"
+            requests:
+              nvidia.com/gpu: "1"
+              rdma/ib: "1"
+              ephemeral-storage: 2Gi
+          volumeMounts:
+          - name: dshm
+            mountPath: /dev/shm
+          command:
+          - python3
+          - -m
+          - sglang.launch_server
+          args:
+          - --model-path
+          - Qwen/Qwen3-0.6B
+          - --host
+          - 0.0.0.0
+          - --port
+          - "30000"
+          - --grpc-port
+          - "30001"
+          - --disaggregation-mode
+          - prefill
+          - --disaggregation-bootstrap-port
+          - "8998"
+          - --disaggregation-transfer-backend
+          - nixl
+        containers:
+        - name: main
+          image: <your-registry>/dynamo-sglang-sidecar:1.3.0
+          command:
+          - dynamo-sglang-sidecar
+          args:
+          - --sglang-endpoint
+          - 127.0.0.1:30001
+          env:
+          # Advertise this pod's IP as the bootstrap host decode workers dial.
+          - name: SGLANG_DISAGGREGATION_BOOTSTRAP_HOST
+            valueFrom:
+              fieldRef:
+                fieldPath: status.podIP
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+
+  - name: SGLangDecodeWorker
+    type: worker
+    replicas: 1
+    podTemplate:
+      spec:
+        volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 10Gi
+        initContainers:
+        - name: sglang-engine
+          image: lmsysorg/sglang:v0.5.16
+          restartPolicy: Always
+          securityContext:
+            capabilities:
+              add: ["IPC_LOCK"]
+          # Real gRPC HealthCheck (see agg.yaml). startupProbe gates `main`;
+          # readinessProbe drops the worker if the engine dies at runtime.
+          startupProbe:
+            exec:
+              command:
+              - python3
+              - -c
+              - import grpc; grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'', timeout=3)
+            periodSeconds: 5
+            timeoutSeconds: 10
+            failureThreshold: 60
+          readinessProbe:
+            exec:
+              command:
+              - python3
+              - -c
+              - import grpc; grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'', timeout=3)
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 3
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+              rdma/ib: "1"
+            requests:
+              nvidia.com/gpu: "1"
+              rdma/ib: "1"
+              ephemeral-storage: 2Gi
+          volumeMounts:
+          - name: dshm
+            mountPath: /dev/shm
+          command:
+          - python3
+          - -m
+          - sglang.launch_server
+          args:
+          - --model-path
+          - Qwen/Qwen3-0.6B
+          - --host
+          - 0.0.0.0
+          - --port
+          - "30000"
+          - --grpc-port
+          - "30001"
+          - --disaggregation-mode
+          - decode
+          - --disaggregation-bootstrap-port
+          - "8998"
+          - --disaggregation-transfer-backend
+          - nixl
+        containers:
+        - name: main
+          image: <your-registry>/dynamo-sglang-sidecar:1.3.0
+          command:
+          - dynamo-sglang-sidecar
+          args:
+          - --sglang-endpoint
+          - 127.0.0.1:30001
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
