@@ -125,11 +125,13 @@ class GMSV1SleepModeBackend(SleepModeBackend):
             raise RuntimeError(f"cannot suspend GMS V1 from {self._state}")
 
         try:
+            gc.collect()
             self._raise_if_allocator_failed()
             self._weights.unmap_all_vas()
             self._weights.disconnect()
             self._kv_cache.unmap_all_vas()
             self._kv_cache.disconnect()
+            torch.cuda.empty_cache()
             self._state = "SUSPENDED"
         except Exception as cause:
             logger.exception("GMS V1 suspend failed; terminating the worker process")

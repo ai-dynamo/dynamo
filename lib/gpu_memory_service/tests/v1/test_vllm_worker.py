@@ -83,6 +83,12 @@ def test_worker_routes_managed_scopes_and_backend_orders_lifecycle(
 
     backend = object.__new__(backend_module.GMSV1SleepModeBackend)
     backend_module.SleepModeBackend.__init__(backend)
+    monkeypatch.setattr(backend_module.gc, "collect", lambda: events.append("gc"))
+    monkeypatch.setattr(
+        backend_module.torch.cuda,
+        "empty_cache",
+        lambda: events.append("empty_cache"),
+    )
     backend._raise_if_allocator_failed = lambda: events.append("allocator_ok")
     backend._weights = SimpleNamespace(
         unmap_all_vas=lambda: events.append("weights_unmap"),
@@ -110,11 +116,13 @@ def test_worker_routes_managed_scopes_and_backend_orders_lifecycle(
         "kv_enter",
         "kv_exit",
         ("super", "activation"),
+        "gc",
         "allocator_ok",
         "weights_unmap",
         "weights_disconnect",
         "kv_unmap",
         "kv_disconnect",
+        "empty_cache",
         ("kv_connect", "rw"),
         "kv_reallocate",
         "kv_remap",
