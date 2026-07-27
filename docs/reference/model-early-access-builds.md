@@ -43,7 +43,7 @@ docker pull nvcr.io/nvidia/ai-dynamo/<runtime>:<tag>
 
 | Model | Tag | Runtime | Shipped | Recipe | GA path |
 |-------|-----|---------|---------|--------|---------|
-| GLM-5.2 | `1.3.0-glm-5.2-dev.1` | sglang-runtime | Jul 20, 2026 (with v1.3.0) | [GLM-5 NVFP4 recipe](../recipes/glm-5-nvfp4.mdx) | **Dev-only** — SGLang cherry-picks not upstream |
+| GLM-5.2 | `1.3.0-glm-5.2-dev.1` | sglang-runtime | Jul 20, 2026 (with v1.3.0) | [GLM-5.2 recipe](../recipes/glm-5-2.mdx) | **Dev-only** — SGLang cherry-picks not upstream |
 | MiniMax-M3 | `1.3.0-minimax-m3-dev.1` | vllm + sglang + tensorrtllm | Jun 12, 2026 | [recipes/minimax-m3 (branch)](https://github.com/ai-dynamo/dynamo/tree/release/1.3.0-minimax-m3-dev.1/recipes/minimax-m3) | **Promoted → `:1.3.0`** |
 | DeepSeek-V4 | `1.3.0-deepseek-v4-dev.1` | tensorrtllm-runtime | Jun 6, 2026 | [recipes/deepseek-v4](https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v4) | Recipe in v1.3.0 |
 | Nemotron-3-Ultra | `1.3.0-nemotron-ultra-dev.1` | vllm-runtime | Jun 5, 2026 | [Nemotron-3-Ultra recipe](../recipes/nemotron-3-ultra.mdx) | **Dev-only** — patches not upstream; pinned flags required |

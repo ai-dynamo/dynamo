@@ -141,50 +141,6 @@ Feature Benchmarks evaluate Dynamo features, topologies, and feature stacks unde
 </div>
 <div className="dynamo-benchmark-row">
 <div className="dynamo-benchmark-main">
-<span className="dynamo-benchmark-kind">Feature composition</span>
-<h2>Agentic coding throughput stack</h2>
-<p>How much do KV routing, speculative decoding, P/D split, and KV offload gain when composed?</p>
-</div>
-<div className="dynamo-benchmark-features">
-<span className="dynamo-feature-pair"><span className="dynamo-feature-symbol feature-kv" aria-hidden="true"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-kv" /></svg></span><span>KV routing</span></span>
-<span className="dynamo-feature-pair"><span className="dynamo-feature-symbol feature-sp" aria-hidden="true"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-sp" /></svg></span><span>Spec decoding</span></span>
-<span className="dynamo-feature-pair"><span className="dynamo-feature-symbol feature-pd" aria-hidden="true"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-pd" /></svg></span><span>P/D split</span></span>
-<span className="dynamo-feature-pair"><span className="dynamo-feature-symbol feature-of" aria-hidden="true"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-of" /></svg></span><span>KV offload</span></span>
-</div>
-<div className="dynamo-benchmark-model">
-<img className="dynamo-model-logo" src="../assets/img/recipes/providers/moonshotai.webp" alt="" />
-<div><strong>Kimi-K2.5 NVFP4</strong></div>
-</div>
-<div className="dynamo-benchmark-target">
-<span><b>Traffic</b><strong>Agentic coding trace</strong></span>
-<span><b>Hardware</b><strong>24x GB200</strong></span>
-</div>
-<span className="dynamo-benchmark-open">Open</span>
-<a className="dynamo-card-link" href="./kimi-k2-5-feature-stack.mdx" aria-label="Open the Agentic coding throughput stack benchmark">Open</a>
-</div>
-<div className="dynamo-benchmark-row">
-<div className="dynamo-benchmark-main">
-<span className="dynamo-benchmark-kind">Feature composition</span>
-<h2>Frontend decoding plus embedding cache</h2>
-<p>How do Dynamo frontend decoding and embedding cache change a single-GPU multimodal benchmark versus vanilla vLLM serve?</p>
-</div>
-<div className="dynamo-benchmark-features">
-<span className="dynamo-feature-pair"><span className="dynamo-feature-symbol feature-fd" aria-hidden="true"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-fd" /></svg></span><span>Frontend decoding</span></span>
-<span className="dynamo-feature-pair"><span className="dynamo-feature-symbol feature-ec" aria-hidden="true"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-ec" /></svg></span><span>Embedding cache</span></span>
-</div>
-<div className="dynamo-benchmark-model">
-<img className="dynamo-model-logo" src="../assets/img/recipes/providers/qwen.webp" alt="" />
-<div><strong>Qwen3.6-35B-A3B FP8</strong></div>
-</div>
-<div className="dynamo-benchmark-target">
-<span><b>Traffic</b><strong>Multimodal sliding window</strong></span>
-<span><b>Hardware</b><strong>1x H100 or GB200</strong></span>
-</div>
-<span className="dynamo-benchmark-open">Open</span>
-<a className="dynamo-card-link" href="./qwen3-6-35b-feature-stack.mdx" aria-label="Open the Frontend decoding plus embedding cache benchmark">Open</a>
-</div>
-<div className="dynamo-benchmark-row">
-<div className="dynamo-benchmark-main">
 <span className="dynamo-benchmark-kind">A/B test</span>
 <h2>Multimodal embedding cache</h2>
 <p>How much does enabling the vLLM multimodal embedding cache improve repeated-image traffic on one GB200 worker?</p>
@@ -202,69 +158,5 @@ Feature Benchmarks evaluate Dynamo features, topologies, and feature stacks unde
 </div>
 <span className="dynamo-benchmark-open">Open</span>
 <a className="dynamo-card-link" href="./qwen3-vl-embedding-cache.mdx" aria-label="Open the Multimodal embedding cache benchmark">Open</a>
-</div>
-<div className="dynamo-benchmark-row">
-<div className="dynamo-benchmark-main">
-<span className="dynamo-benchmark-kind">A/B test</span>
-<h2>KV-aware routing + WideEP + P/D split</h2>
-<p>Does disaggregated KV-aware routing with WideEP improve latency and goodput against a GB200 control?</p>
-</div>
-<div className="dynamo-benchmark-features">
-<span className="dynamo-feature-pair"><span className="dynamo-feature-symbol feature-kv" aria-hidden="true"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-kv" /></svg></span><span>KV routing</span></span>
-<span className="dynamo-feature-pair"><span className="dynamo-feature-symbol feature-ep" aria-hidden="true"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-ep" /></svg></span><span>WideEP</span></span>
-<span className="dynamo-feature-pair"><span className="dynamo-feature-symbol feature-pd" aria-hidden="true"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-pd" /></svg></span><span>P/D split</span></span>
-</div>
-<div className="dynamo-benchmark-model">
-<img className="dynamo-model-logo" src="../assets/img/recipes/providers/deepseek-ai.webp" alt="" />
-<div><strong>DeepSeek V3.2 NVFP4</strong></div>
-</div>
-<div className="dynamo-benchmark-target">
-<span><b>Traffic</b><strong>Long-context coding trace</strong></span>
-<span><b>Hardware</b><strong>32x GB200</strong></span>
-</div>
-<span className="dynamo-benchmark-open">Open</span>
-<a className="dynamo-card-link" href="./deepseek-v3-2-wideep-routing.mdx" aria-label="Open the KV-aware routing + WideEP + P/D split benchmark">Open</a>
-</div>
-<div className="dynamo-benchmark-row">
-<div className="dynamo-benchmark-main">
-<span className="dynamo-benchmark-kind">A/B test</span>
-<h2>KV-aware routing + prefill/decode split</h2>
-<p>Does disaggregated KV-aware routing reduce TTFT and ITL compared with aggregated round-robin routing?</p>
-</div>
-<div className="dynamo-benchmark-features">
-<span className="dynamo-feature-pair"><span className="dynamo-feature-symbol feature-kv" aria-hidden="true"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-kv" /></svg></span><span>KV routing</span></span>
-<span className="dynamo-feature-pair"><span className="dynamo-feature-symbol feature-pd" aria-hidden="true"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-pd" /></svg></span><span>P/D split</span></span>
-</div>
-<div className="dynamo-benchmark-model">
-<img className="dynamo-model-logo" src="../assets/img/recipes/providers/qwen.webp" alt="" />
-<div><strong>Qwen3-32B</strong></div>
-</div>
-<div className="dynamo-benchmark-target">
-<span><b>Traffic</b><strong>Mooncake prefix reuse</strong></span>
-<span><b>Hardware</b><strong>16x H200</strong></span>
-</div>
-<span className="dynamo-benchmark-open">Open</span>
-<a className="dynamo-card-link" href="./qwen3-32b-kv-routing.mdx" aria-label="Open the KV-aware routing + prefill/decode split benchmark">Open</a>
-</div>
-<div className="dynamo-benchmark-row">
-<div className="dynamo-benchmark-main">
-<span className="dynamo-benchmark-kind">Topology benchmark</span>
-<h2>Aggregate vs single-node P/D vs multi-node P/D</h2>
-<p>How do vLLM topologies compare when normalized by GPU?</p>
-</div>
-<div className="dynamo-benchmark-features">
-<span className="dynamo-feature-pair"><span className="dynamo-feature-symbol feature-pd" aria-hidden="true"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-pd" /></svg></span><span>P/D split</span></span>
-<span className="dynamo-feature-pair"><span className="dynamo-feature-symbol feature-mn" aria-hidden="true"><svg className="dynamo-feature-icon"><use href="#dynamo-icon-mn" /></svg></span><span>Multi-node</span></span>
-</div>
-<div className="dynamo-benchmark-model">
-<img className="dynamo-model-logo" src="../assets/img/recipes/providers/meta-llama.webp" alt="" />
-<div><strong>Llama-3.3-70B FP8</strong></div>
-</div>
-<div className="dynamo-benchmark-target">
-<span><b>Traffic</b><strong>8K ISL / 1K OSL</strong></span>
-<span><b>Hardware</b><strong>4-16 GPUs</strong></span>
-</div>
-<span className="dynamo-benchmark-open">Open</span>
-<a className="dynamo-card-link" href="./llama-3-70b-topology.mdx" aria-label="Open the Aggregate vs single-node P/D vs multi-node P/D benchmark">Open</a>
 </div>
 </div>

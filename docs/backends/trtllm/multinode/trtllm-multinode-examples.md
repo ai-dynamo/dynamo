@@ -16,13 +16,10 @@ and related routing components.
 
 The main TRT-LLM recipe entrypoints are:
 
-- [DeepSeek-R1 WideEP on GB200](../../../../recipes/deepseek-r1/trtllm/disagg/wide_ep/gb200/deploy.yaml)
 - [Qwen3-235B-A22B-FP8 aggregated, Hopper](../../../../recipes/qwen3-235b-a22b-fp8/trtllm/agg/hopper/deploy.yaml)
 - [Qwen3-235B-A22B-FP8 aggregated, Blackwell](../../../../recipes/qwen3-235b-a22b-fp8/trtllm/agg/blackwell/deploy.yaml)
 - [Qwen3-235B-A22B-FP8 disaggregated, Hopper](../../../../recipes/qwen3-235b-a22b-fp8/trtllm/disagg/hopper/deploy.yaml)
 - [Qwen3-235B-A22B-FP8 disaggregated, Blackwell](../../../../recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/deploy.yaml)
-- [Qwen3-32B-FP8 aggregated](../../../../recipes/qwen3-32b-fp8/trtllm/agg/deploy.yaml)
-- [Qwen3-32B-FP8 disaggregated](../../../../recipes/qwen3-32b-fp8/trtllm/disagg/deploy.yaml)
 - [GPT-OSS-120B aggregated](../../../../recipes/gpt-oss-120b/trtllm/agg/deploy.yaml)
 - [GPT-OSS-120B disaggregated](../../../../recipes/gpt-oss-120b/trtllm/disagg/deploy.yaml)
 - [Nemotron-3-Super-FP8 disaggregated](../../../../recipes/nemotron-3-super-fp8/trtllm/disagg/deploy.yaml)
@@ -30,11 +27,8 @@ The main TRT-LLM recipe entrypoints are:
 For model-level setup, prerequisites, and hardware notes, use the recipe
 README files:
 
-- [DeepSeek-R1 recipes](../../../../recipes/deepseek-r1/README.md)
 - [Qwen3-235B-A22B-FP8 recipes](../../../../recipes/qwen3-235b-a22b-fp8/README.md)
-- [Qwen3-32B-FP8 recipes](../../../../recipes/qwen3-32b-fp8/README.md)
 - [GPT-OSS-120B recipes](../../../../recipes/gpt-oss-120b/README.md)
-- [Kimi-K2.5 recipes](../../../../recipes/kimi-k2.5/README.md)
 
 ## Quick Start
 
@@ -59,11 +53,11 @@ kubectl create secret generic hf-token-secret \
   --from-literal=HF_TOKEN="your-token-here" \
   -n ${NAMESPACE}
 
-# Example: deploy DeepSeek-R1 TRT-LLM WideEP on GB200.
-kubectl apply -f recipes/deepseek-r1/model-cache/model-cache.yaml -n ${NAMESPACE}
-kubectl apply -f recipes/deepseek-r1/model-cache/model-download.yaml -n ${NAMESPACE}
+# Example: deploy Qwen3-235B-A22B-FP8 TRT-LLM on Blackwell.
+kubectl apply -f recipes/qwen3-235b-a22b-fp8/model-cache/model-cache.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/qwen3-235b-a22b-fp8/model-cache/model-download.yaml -n ${NAMESPACE}
 kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=7200s
-kubectl apply -f recipes/deepseek-r1/trtllm/disagg/wide_ep/gb200/deploy.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/deploy.yaml -n ${NAMESPACE}
 ```
 
 After the deployment is ready, port-forward the frontend service named by the
