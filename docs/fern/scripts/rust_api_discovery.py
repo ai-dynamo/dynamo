@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import re
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,6 +13,8 @@ from typing import Literal
 from gen_llms_tables import parse_data_module
 
 RustCrateGroup = Literal["core", "supporting", "development", "deprecated"]
+
+VERSION_PATTERN = re.compile(r"^(\d+)\.(\d+)\.(\d+)")
 
 SOURCE_BASE = "https://github.com/ai-dynamo/dynamo/tree/main"
 CORE_CRATES = frozenset(
@@ -66,6 +69,7 @@ class RustReference:
     """Complete generated model for the Rust API landing page."""
 
     workspace_version: str
+    release_tag: str
     crates: tuple[RustCrate, ...]
     bindings: tuple[RustBinding, ...]
 
@@ -76,7 +80,7 @@ def discover_rust_reference(repo_root: Path, data_path: Path) -> RustReference:
     version = str(workspace["workspace"]["package"]["version"])
     members = _workspace_member_paths(repo_root, workspace)
     release_data = parse_data_module(data_path)
-    _validate_release_version(release_data, version)
+    release_tag = validate_release_tag(release_data, version)
     crates = [
         _crate_from_artifact(item, members)
         for item in release_data["ARTIFACTS"]
@@ -85,6 +89,7 @@ def discover_rust_reference(repo_root: Path, data_path: Path) -> RustReference:
     crates.sort(key=lambda crate: (GROUP_ORDER[crate.group], crate.name))
     return RustReference(
         workspace_version=version,
+        release_tag=release_tag,
         crates=tuple(crates),
         bindings=_bindings(),
     )
@@ -124,14 +129,32 @@ def _member_name_map(repo_root: Path, members: list[str]) -> dict[str, str]:
     return names
 
 
-def _validate_release_version(data: dict[str, object], workspace_version: str) -> None:
-    """Fail closed when release artifacts lag the workspace release."""
+def validate_release_tag(data: dict[str, object], workspace_version: str) -> str:
+    """Return the shipped release tag that crate links are pinned to.
+
+    Crate versions follow the newest release that actually shipped, not the
+    workspace version: main carries the next development version for months
+    before any crate is published under it, so the tag normally lags. A tag
+    ahead of the workspace is fail-closed -- it would pin docs.rs links at
+    crates that were never published.
+    """
     current_tag = data.get("CURRENT_TAG")
-    if current_tag != workspace_version:
+    if not isinstance(current_tag, str):
+        raise ValueError("release data is missing a string CURRENT_TAG")
+    if _version_key(current_tag) > _version_key(workspace_version):
         raise ValueError(
-            f"release artifact tag {current_tag!r} does not match "
-            f"workspace version {workspace_version!r}"
+            f"release artifact tag {current_tag!r} is ahead of workspace "
+            f"version {workspace_version!r}"
         )
+    return current_tag
+
+
+def _version_key(version: str) -> tuple[int, ...]:
+    """Order X.Y.Z versions, ignoring any prerelease suffix."""
+    match = VERSION_PATTERN.match(version)
+    if match is None:
+        raise ValueError(f"cannot parse release version {version!r}")
+    return tuple(int(part) for part in match.groups())
 
 
 def _crate_from_artifact(

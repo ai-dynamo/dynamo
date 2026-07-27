@@ -36,7 +36,7 @@ def _body_markdown(reference: RustReference) -> str:
     """Crate cards followed by grouped crate and binding tables."""
     parts = [
         f"Dynamo publishes {len(reference.crates)} Rust crates for "
-        f"release `{reference.workspace_version}`.",
+        f"release `{reference.release_tag}`.",
         _crate_cards(reference.crates),
     ]
     for group, label in GROUP_LABELS.items():

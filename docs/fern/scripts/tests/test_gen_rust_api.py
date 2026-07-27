@@ -83,17 +83,42 @@ def test_discovery_matches_the_published_crate_inventory(
 def test_workspace_version_matches_current_release(
     reference: rust_api_discovery.RustReference,
 ) -> None:
-    assert reference.workspace_version == "1.3.0"
+    assert reference.release_tag == "1.3.0"
+    assert (
+        rust_api_discovery.validate_release_tag(
+            {"CURRENT_TAG": reference.release_tag}, reference.workspace_version
+        )
+        == reference.release_tag
+    )
     current = [
         crate
         for crate in reference.crates
         if crate.badge != "Deprecated" and crate.name not in LAGGING_CRATE_VERSIONS
     ]
-    assert {crate.version for crate in current} == {reference.workspace_version}
+    assert {crate.version for crate in current} == {reference.release_tag}
     by_name = {crate.name: crate for crate in reference.crates}
     for name, version in LAGGING_CRATE_VERSIONS.items():
         assert by_name[name].version == version
         assert by_name[name].docs_href == f"https://docs.rs/{name}/{version}"
+
+
+def test_release_tag_may_lag_a_development_workspace() -> None:
+    """main carries the next development version long before its crates ship,
+    so the shipped release tag is allowed to sit behind the workspace."""
+    rust_api_discovery.validate_release_tag({"CURRENT_TAG": "1.3.0"}, "1.4.0")
+    rust_api_discovery.validate_release_tag({"CURRENT_TAG": "1.3.0"}, "1.3.0")
+
+
+def test_release_tag_ahead_of_workspace_is_rejected() -> None:
+    """Release data claiming a version the workspace has not reached would pin
+    docs.rs links at crates that were never published."""
+    with pytest.raises(ValueError, match="ahead of workspace version"):
+        rust_api_discovery.validate_release_tag({"CURRENT_TAG": "1.5.0"}, "1.4.0")
+
+
+def test_release_tag_must_be_present_and_parsable() -> None:
+    with pytest.raises(ValueError, match="CURRENT_TAG"):
+        rust_api_discovery.validate_release_tag({}, "1.4.0")
 
 
 def test_crates_have_pinned_docs_rs_links(
