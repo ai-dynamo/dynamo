@@ -144,7 +144,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     echo "deb [arch=${TARGETARCH} signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
         | tee /etc/apt/sources.list.d/github-cli.list > /dev/null && \
     apt-get update && \
-    apt-get install -y --no-install-recommends nsight-systems-2025.5.1 gh && \
+    apt-get install -y --no-install-recommends nsight-systems-2025.6.1 gh && \
     rm -rf /var/lib/apt/lists/*
 
 # ======================================================================
