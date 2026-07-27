@@ -37,7 +37,6 @@ pub struct WorkerRegistration {
     pub replay_endpoint: Option<String>,
     pub total_kv_blocks: Option<u64>,
     pub max_num_batched_tokens: Option<u64>,
-    pub stable_routing_id: Option<String>,
 }
 
 /// A worker-selection request.
@@ -203,7 +202,6 @@ impl Selector {
             replay_endpoint: reg.replay_endpoint.clone(),
             total_kv_blocks: reg.total_kv_blocks,
             max_num_batched_tokens: reg.max_num_batched_tokens,
-            stable_routing_id: reg.stable_routing_id.clone(),
             ..Default::default()
         }
     }
@@ -403,7 +401,6 @@ models:
             replay_endpoint: None,
             total_kv_blocks: None,
             max_num_batched_tokens: None,
-            stable_routing_id: None,
         }
     }
 
