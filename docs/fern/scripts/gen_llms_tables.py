@@ -563,6 +563,12 @@ def render_compatibility(data: dict) -> str:
         )
     )
 
+    # Deliberately restates the support-matrix accordion's table. The
+    # accordion covers the same rows, but it is <Accordion> markup and this
+    # twin exists precisely because component output may be dropped from the
+    # agent-facing exports. Losing the matrix for agents is a worse failure
+    # than repeating it, so keep both until the deployed .md export is
+    # confirmed to carry Accordion children.
     parts.append("**CUDA toolkit and minimum driver per Dynamo release**")
     parts.append(cuda_table(data))
     cuda_notes = data.get("CUDA_NOTES") or []
@@ -579,35 +585,40 @@ def render_compatibility(data: dict) -> str:
     return "\n\n".join(parts)
 
 
-def mainline_versions(data: dict) -> set[str]:
-    """Bare versions of the mainline releases -- the stable minor lines.
+# Release kinds the human-facing support matrix covers: the lines a reader
+# can actually pull and run. Platform previews (-dev.N) and model-specific
+# builds are deliberately excluded -- CUDA_NOTES covers their toolkit support
+# in prose. CUDA_HISTORY happens to carry no preview or model-build rows
+# today, so this filter is currently a no-op; it is expressed on kind anyway
+# so a future preview entry cannot leak into the matrix unnoticed.
+SUPPORT_MATRIX_KINDS = ("stable", "patch")
 
-    Patch, platform-preview, and model-build lines are excluded: CUDA_NOTES
-    records that patches carry the CUDA support of their base version, so
-    their CUDA_HISTORY rows restate the mainline row they hang off.
-    """
+
+def released_versions(data: dict) -> set[str]:
+    """Bare versions of the released lines -- stable releases and patches."""
     return {
         rel["version"].removeprefix("v")
         for rel in data["RELEASES"]
-        if rel.get("kind") == "stable"
+        if rel.get("kind") in SUPPORT_MATRIX_KINDS
     }
 
 
 def render_support_matrix(data: dict) -> str:
-    """Human-facing collapsed CUDA/driver matrix for the mainline releases."""
-    versions = mainline_versions(data)
-    matched = {r["version"] for r in data["CUDA_HISTORY"]} & versions
-    if not matched:
+    """Human-facing collapsed CUDA/driver matrix for the released lines."""
+    versions = released_versions(data)
+    if not {r["version"] for r in data["CUDA_HISTORY"]} & versions:
         raise TSParseError(
-            "no CUDA_HISTORY row matches a stable RELEASES version -- the "
+            "no CUDA_HISTORY row matches a released RELEASES version -- the "
             "support-matrix accordion would render an empty table"
         )
 
     parts = [
         '<Accordion title="CUDA toolkit and minimum driver by release">',
-        "Mainline releases — the stable minor lines. Every release line, "
-        "including patches, platform previews, and model builds, is listed on "
-        "the [Releases (machine-readable)](releases-data.mdx) page.",
+        "Every released line — stable releases and their patches. Platform "
+        "previews and model-specific builds are not listed individually; the "
+        "notes below cover their toolkit support, and "
+        "[Releases (machine-readable)](releases-data.mdx) has the full "
+        "release inventory.",
         cuda_table(data, versions),
     ]
     cuda_notes = data.get("CUDA_NOTES") or []
