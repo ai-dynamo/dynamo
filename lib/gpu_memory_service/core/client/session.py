@@ -14,6 +14,7 @@ from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 
 from ..protocol import (
     AllocateRequest,
+    AllocationRecord,
     CommitRequest,
     ErrorResponse,
     ExportRequest,
@@ -21,6 +22,8 @@ from ..protocol import (
     FreeRequest,
     HandshakeRequest,
     HandshakeResponse,
+    ListAllocationsRequest,
+    ListAllocationsResponse,
     Message,
     SuccessResponse,
     receive_message,
@@ -84,6 +87,13 @@ class _GMSClientSession:
 
     def free(self, allocation_id: str) -> None:
         self._call(FreeRequest(allocation_id), SuccessResponse)
+
+    def list_allocations(self) -> tuple[AllocationRecord, ...]:
+        response = self._call(
+            ListAllocationsRequest(),
+            ListAllocationsResponse,
+        )
+        return response.allocations
 
     def commit(self) -> None:
         self._call(CommitRequest(), SuccessResponse)
