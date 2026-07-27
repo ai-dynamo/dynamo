@@ -104,6 +104,9 @@ navigation:
         path: digest/index.mdx
         slug: digest
         contents:
+          - page: "From Kubernetes to Datacenter-Scale Inference with NVIDIA Dynamo and AICR"
+            path: digest/deploying-dynamo-with-aicr.md
+            slug: deploying-dynamo-with-aicr
           - page: "NVIDIA Dynamo Snapshot: Fast Startup for Inference Workloads on Kubernetes"
             path: digest/snapshot/dynamo-snapshot-fast-startup.md
             slug: dynamo-snapshot-fast-startup
