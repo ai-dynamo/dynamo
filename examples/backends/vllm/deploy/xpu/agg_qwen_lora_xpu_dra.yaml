@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Aggregated Intel XPU deployment for Qwen3 with dynamic LoRA adapters.
-# Complete the MinIO setup, adapter upload, and DynamoModel registration in
-# this directory before applying.
+# Aggregated Intel XPU deployment for Qwen3-VL with dynamic LoRA adapters.
+# Complete the MinIO setup and adapter upload in ../lora/multimodal/README.md
+# before applying this manifest, then register the adapter with
+# ../lora/multimodal/lora-model.yaml.
 
 apiVersion: resource.k8s.io/v1
 kind: ResourceClaimTemplate
@@ -21,26 +22,27 @@ spec:
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: vllm-agg-lora-xpu-dra
+  name: agg-qwen-multimodal-lora-xpu-dra
 spec:
   services:
     Frontend:
+      envFromSecret: hf-token-secret
       componentType: frontend
       replicas: 1
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
-    VllmDecodeWorker:
+          env:
+            - name: DYN_REQUEST_PLANE
+              value: tcp
+            - name: MODEL_PATH
+              value: Qwen/Qwen3-VL-2B-Instruct
+    VllmWorker:
       envFromSecret: hf-token-secret
       componentType: worker
-      subComponentType: decode
       replicas: 1
-      resources:
-        requests:
-          custom:
-            ephemeral-storage: "2Gi"
       modelRef:
-        name: Qwen/Qwen3-0.6B
+        name: Qwen/Qwen3-VL-2B-Instruct
       extraPodSpec:
         resourceClaims:
           - name: gpu
@@ -61,10 +63,12 @@ spec:
           env:
             - name: VLLM_TARGET_DEVICE
               value: xpu
+            - name: DYN_REQUEST_PLANE
+              value: tcp
             - name: DYN_LORA_ENABLED
               value: "true"
             - name: DYN_LORA_PATH
-              value: /tmp/dynamo_loras_minio
+              value: /tmp/dynamo_loras_multimodal
             - name: DYN_SYSTEM_ENABLED
               value: "true"
             - name: DYN_SYSTEM_PORT
@@ -93,10 +97,12 @@ spec:
             - dynamo.vllm
           args:
             - --model
-            - Qwen/Qwen3-0.6B
-            - --max-model-len
-            - "4096"
+            - Qwen/Qwen3-VL-2B-Instruct
+            - --enable-multimodal
             - --enable-lora
             - --max-lora-rank
             - "64"
-            - --enforce-eager
+            - --max-model-len
+            - "8192"
+            - --max-num-batched-tokens
+            - "8192"
