@@ -35,7 +35,6 @@ jobs:
     timeout-minutes: 120
     strategy:
       fail-fast: false
-      max-parallel: 2
       matrix:
         suite:
           - validation
@@ -43,6 +42,7 @@ jobs:
           - lifecycle
     env:
       DGDR_NAMESPACE: dgdr-${{ matrix.suite }}-${{ github.run_id }}-${{ github.run_attempt }}
+      KUBECONFIG: ${{ github.workspace }}/.kubeconfig-vcluster
     permissions:
       contents: read
     steps:
@@ -76,17 +76,6 @@ jobs:
         with:
           vcluster_name: ${{ inputs.vcluster_name }}
           vcluster_namespace: ${{ inputs.namespace }}
-
-      - name: Set up vCluster kubeconfig
-        id: kubeconfig
-        shell: bash
-        env:
-          KUBECONFIG_BASE64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
-        run: |
-          set -euo pipefail
-          echo "${KUBECONFIG_BASE64}" | base64 -d > "${RUNNER_TEMP}/dgdr-test-kubeconfig"
-          chmod 600 "${RUNNER_TEMP}/dgdr-test-kubeconfig"
-          echo "KUBECONFIG=${RUNNER_TEMP}/dgdr-test-kubeconfig" >> "${GITHUB_ENV}"
 
       - name: Prepare DGDR test namespace
         shell: bash
@@ -128,7 +117,7 @@ jobs:
           cleanup_deployment: 'false'
 
       - name: Clean up DGDR test namespace
-        if: always() && steps.kubeconfig.outcome == 'success'
+        if: always() && steps.connect-vcluster.outcome == 'success'
         shell: bash
         run: |
           kubectl delete namespace "${DGDR_NAMESPACE}" \
