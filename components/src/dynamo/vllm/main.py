@@ -705,7 +705,7 @@ async def register_vllm_model(
         # frontend preprocessor seeds it when the request is silent. CLI
         # surface is tri-state ("on"/"off"/unset) -> Option<bool>.
         runtime_config.default_thinking = resolve_tri_state_bool(
-            getattr(config, "dyn_default_thinking", None)
+            config.dyn_default_thinking
         )
     runtime_config.exclude_tools_when_tool_choice_none = (
         config.exclude_tools_when_tool_choice_none
