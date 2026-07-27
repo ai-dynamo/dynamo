@@ -50,7 +50,7 @@ Dynamo + vLLM deployment profiles for the GB300 and GB200 agentic workload:
 
 ## Prerequisites
 
-1. **Dynamo Platform installed** — see [Kubernetes Deployment Guide](../../docs/kubernetes/README.md).
+1. **Dynamo Platform installed** — see [Kubernetes Deployment Guide](../../docs/fern/kubernetes/quickstart.mdx).
 2. **DRA / ComputeDomain controller** for the cross-node NVLink channel:
    ```bash
    kubectl get crd | grep computedomain
@@ -144,10 +144,20 @@ kubectl apply -f model-cache/model-download.yaml -n ${NAMESPACE}
 kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=14400s
 ```
 
-The Job sets `HF_HOME=/model-cache`, so the checkpoint lands in the PVC's Hugging Face cache. Each
-worker pod mounts that PVC at `/model-cache` with `HF_HOME=/model-cache` and passes the repo id
-(`moonshotai/Kimi-K3`) to `--model`, so the weights resolve straight out of the cache. The frontend
-does not mount the PVC — see [Configuration notes](#configuration-notes).
+The Job sets `HF_HOME=/model-cache`, so the checkpoint lands in the PVC's Hugging Face cache.
+
+**This flow applies to the GB300 profiles.** Their worker pods mount the PVC at `/model-cache` with
+`HF_HOME=/model-cache` and pass the repo id (`moonshotai/Kimi-K3`) to `--model`, so the weights
+resolve straight out of the cache. The frontend does not mount the PVC — see
+[Configuration notes](#configuration-notes).
+
+**The GB200 profiles do not use the PVC.** They mount the host path
+`/mnt/stateful_partition/kube-ephemeral-ssd/models` at `/models` and serve
+`--model /models/model_weight` with `HF_HUB_OFFLINE=1`, so steps 2-3 do not make them deployable.
+For GB200, either pre-stage the checkpoint at `<host-path>/model_weight` on every node in the
+deployment and adjust the `models` `hostPath` to match your cluster, or convert the manifest to the
+PVC flow: replace the `models` `hostPath` volume with `claimName: model-cache` mounted at
+`/model-cache`, add `HF_HOME=/model-cache`, and set `MODEL_PATH` to `moonshotai/Kimi-K3`.
 
 > [!NOTE]
 > The containers run as `runAsUser: 0` because the cached weight files are root-owned while the

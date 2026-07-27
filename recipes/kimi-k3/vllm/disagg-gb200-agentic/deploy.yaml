@@ -46,8 +46,6 @@ spec:
           - 0.0.0.0
           - --http-port
           - '8000'
-          - --model-path
-          - $(MODEL_PATH)
           - --dyn-chat-processor
           - dynamo
           - --router-mode
