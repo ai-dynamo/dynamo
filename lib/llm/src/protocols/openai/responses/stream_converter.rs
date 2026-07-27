@@ -508,10 +508,13 @@ impl ResponseStreamConverter {
     }
 
     fn append_reasoning_done_events(&mut self, events: &mut Vec<Result<Event, anyhow::Error>>) {
-        if !self.reasoning_started || self.reasoning_done {
+        if self.reasoning_done {
             return;
         }
         self.reasoning_done = true;
+        if !self.reasoning_started {
+            return;
+        }
 
         let text_done = ResponseStreamEvent::ResponseReasoningSummaryTextDone(
             ResponseReasoningSummaryTextDoneEvent {
@@ -1379,6 +1382,60 @@ mod tests {
             vec![SummaryPart::SummaryText(SummaryTextContent {
                 text: "summary".to_string(),
             })]
+        );
+    }
+
+    #[test]
+    fn test_reasoning_summary_finishes_before_tool_call() {
+        use dynamo_protocols::types::responses::{Reasoning, ReasoningSummary};
+
+        let params = ResponseParams {
+            reasoning: Some(Reasoning {
+                effort: None,
+                summary: Some(ReasoningSummary::Auto),
+            }),
+            ..default_params()
+        };
+        let mut conv = ResponseStreamConverter::new("test-model".into(), params);
+
+        let _ = conv.process_chunk(&reasoning_chunk("summary"));
+        let tool_events =
+            conv.process_chunk(&tool_call_chunk(0, Some("call-1"), Some("get_time"), None));
+        assert_eq!(
+            event_types(&tool_events),
+            vec![
+                "response.reasoning_summary_text.done".to_string(),
+                "response.reasoning_summary_part.done".to_string(),
+                "response.output_item.done".to_string(),
+                "response.output_item.added".to_string(),
+            ]
+        );
+
+        let late_events = conv.process_chunk(&reasoning_chunk(" must not be appended"));
+        assert!(late_events.is_empty());
+    }
+
+    #[test]
+    fn test_reasoning_summary_does_not_start_after_visible_output() {
+        use dynamo_protocols::types::responses::{Reasoning, ReasoningSummary};
+
+        let params = ResponseParams {
+            reasoning: Some(Reasoning {
+                effort: None,
+                summary: Some(ReasoningSummary::Auto),
+            }),
+            ..default_params()
+        };
+        let mut conv = ResponseStreamConverter::new("test-model".into(), params);
+
+        let _ = conv.process_chunk(&text_chunk("answer"));
+        let late_events = conv.process_chunk(&reasoning_chunk("out of order"));
+
+        assert!(late_events.is_empty());
+        assert!(
+            conv.completed_output()
+                .iter()
+                .all(|item| !matches!(item, OutputItem::Reasoning(_)))
         );
     }
 
