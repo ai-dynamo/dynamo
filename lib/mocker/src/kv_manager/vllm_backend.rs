@@ -292,22 +292,27 @@ impl VllmKvManager {
             computed_before <= computed_after,
             "computed token count cannot move backwards during one scheduling decision"
         );
-        let first_new_block = computed_before / self.block_size;
-        let completed_blocks = computed_after / self.block_size;
-        if first_new_block == completed_blocks {
-            return;
-        }
 
         let materialize_store_events = self.materialize_store_events();
         let stores = {
-            let (pool, attention) = self.attention_mut();
-            attention.finalize_computed_prefix(
-                pool,
-                request_id,
-                first_new_block,
-                completed_blocks,
-                materialize_store_events,
-            )
+            let Self { pool, groups, .. } = self;
+            let mut stores = None;
+            for group in groups.iter_mut() {
+                let group_stores = group.finalize_computed_prefix(
+                    pool,
+                    request_id,
+                    computed_before,
+                    computed_after,
+                    materialize_store_events,
+                );
+                if let Some(group_stores) = group_stores {
+                    assert!(
+                        stores.replace(group_stores).is_none(),
+                        "only one group's blocks can be reported"
+                    );
+                }
+            }
+            stores
         };
         if let Some(stores) = stores {
             self.publish_store_sequence(stores);
@@ -370,7 +375,7 @@ impl VllmKvManager {
         let (prefix, fresh, attention_fresh, attention_prefix) = match layout.as_ref() {
             Some(layout) => {
                 let alloc = Self::destination_alloc(request_id, layout, 0);
-                FullAttentionGroup::validate_use_metadata(&alloc);
+                alloc.validate();
                 self.attention().validate_fresh_partials(alloc.blocks);
                 // No prior lookup authorized this transfer's reusable prefix, so
                 // the attention group discovers it here; every group then sizes
@@ -435,7 +440,7 @@ impl VllmKvManager {
         };
         let mut alloc = Self::destination_alloc(request_id, &layout, attention_prefix);
         alloc.cache_fresh = self.enable_prefix_caching;
-        FullAttentionGroup::validate_use_metadata(&alloc);
+        alloc.validate();
         self.attention().validate_fresh_partials(alloc.blocks);
         self.commit_groups(&alloc, &mut pool);
         assert_eq!(pool.len(), 0, "destination reservation was not consumed");
@@ -451,7 +456,7 @@ impl VllmKvManager {
         alloc: &GroupAllocation,
         reservation: Option<&mut BlockReservation>,
     ) -> VllmAcquire<usize> {
-        FullAttentionGroup::validate_use_metadata(alloc);
+        alloc.validate();
         self.attention().validate_fresh_partials(alloc.blocks);
         assert!(alloc.reusable_prefix_blocks <= alloc.blocks.len());
         assert!(self.enable_prefix_caching || alloc.reusable_prefix_blocks == 0);
@@ -509,22 +514,29 @@ impl VllmKvManager {
         let stores = {
             let Self { pool, groups, .. } = self;
             // Pins come back in the order [`Self::group_demand`] reserved them,
-            // which is the order the groups are visited here.
-            let prefix_copies = pool.activate_prefix(reservation);
+            // which is the order the groups drain them here.
+            let activated = pool.activate_prefix(reservation);
+            let mut prefix_copies = activated.iter().copied();
             let mut stores = None;
             for group in groups.iter_mut() {
-                match group {
-                    GroupManager::FullAttention(attention) => {
-                        stores = attention.commit(
-                            pool,
-                            reservation,
-                            alloc,
-                            &prefix_copies,
-                            materialize_store_events,
-                        );
-                    }
+                let group_stores = group.commit(
+                    pool,
+                    reservation,
+                    alloc,
+                    &mut prefix_copies,
+                    materialize_store_events,
+                );
+                if let Some(group_stores) = group_stores {
+                    assert!(
+                        stores.replace(group_stores).is_none(),
+                        "only one group's blocks can be reported"
+                    );
                 }
             }
+            assert!(
+                prefix_copies.next().is_none(),
+                "prefix reservation was not consumed"
+            );
             stores
         };
         if let Some(stores) = stores {

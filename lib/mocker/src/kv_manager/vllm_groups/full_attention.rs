@@ -141,12 +141,10 @@ impl FullAttentionGroup {
         pool: &mut VllmBlockPool,
         reservation: &mut BlockReservation,
         alloc: &GroupAllocation,
-        prefix_copies: &[BlockCopyId],
+        prefix_copies: &mut impl Iterator<Item = BlockCopyId>,
         materialize_store_events: bool,
     ) -> Option<Vec<Option<StoredBlock>>> {
         let prefix_len = alloc.reusable_prefix_blocks;
-        assert_eq!(prefix_copies.len(), prefix_len);
-        let mut prefix_copies = prefix_copies.iter().copied();
         let mut cursor = match alloc.parent {
             None => None,
             Some(UniqueBlock::FullBlock(hash)) => Some(*hash),
@@ -233,19 +231,26 @@ impl FullAttentionGroup {
                 }
             }
         }
-        assert!(prefix_copies.next().is_none());
         stores
     }
 
     /// Make blocks completed by this scheduling decision cache-visible.
+    ///
+    /// The watermarks are token counts, which this group quantizes with its own
+    /// block size the way each of vLLM's managers does.
     pub(crate) fn finalize_computed_prefix(
         &mut self,
         pool: &mut VllmBlockPool,
         request_id: Uuid,
-        first_new_block: usize,
-        completed_blocks: usize,
+        computed_before: usize,
+        computed_after: usize,
         materialize_store_events: bool,
     ) -> Option<Vec<Option<StoredBlock>>> {
+        let first_new_block = computed_before / self.block_size;
+        let completed_blocks = computed_after / self.block_size;
+        if first_new_block == completed_blocks {
+            return None;
+        }
         let Some(blocks) = self.request_blocks.get_mut(&request_id) else {
             panic!("request {request_id} owns no block table")
         };
@@ -368,23 +373,6 @@ impl FullAttentionGroup {
             pending_store: None,
         });
         (became_visible && materialize_store_events).then_some(StoredBlock { hash, metadata })
-    }
-
-    pub(crate) fn validate_use_metadata(alloc: &GroupAllocation) {
-        let full_blocks = alloc
-            .blocks
-            .iter()
-            .filter(|block| matches!(block, UniqueBlock::FullBlock(_)))
-            .count();
-        assert!(
-            alloc.local_hashes.is_empty() || alloc.local_hashes.len() == full_blocks,
-            "local hashes must be empty or align with full blocks"
-        );
-        assert!(
-            alloc.token_ids.is_none_or(|ids| ids.len() == full_blocks),
-            "token IDs must align with full blocks"
-        );
-        assert!(!matches!(alloc.parent, Some(UniqueBlock::PartialBlock(_))));
     }
 
     pub(crate) fn validate_fresh_partials(&self, blocks: &[UniqueBlock]) {

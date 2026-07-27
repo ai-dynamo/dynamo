@@ -21,7 +21,7 @@ use dynamo_tokens::blocks::UniqueBlock;
 use dynamo_tokens::{BlockHash, SequenceHash};
 use uuid::Uuid;
 
-use crate::cache::vllm_block_pool::{GroupedHash, VllmBlockPool};
+use crate::cache::vllm_block_pool::{BlockCopyId, BlockReservation, GroupedHash, VllmBlockPool};
 
 pub(crate) use full_attention::FullAttentionGroup;
 
@@ -62,6 +62,26 @@ pub(crate) struct GroupAllocation<'a> {
     /// enter the prefix cache immediately instead of waiting for a compute
     /// watermark.
     pub(crate) cache_fresh: bool,
+}
+
+impl GroupAllocation<'_> {
+    /// Check that the step's metadata describes its own blocks.
+    pub(crate) fn validate(&self) {
+        let full_blocks = self
+            .blocks
+            .iter()
+            .filter(|block| matches!(block, UniqueBlock::FullBlock(_)))
+            .count();
+        assert!(
+            self.local_hashes.is_empty() || self.local_hashes.len() == full_blocks,
+            "local hashes must be empty or align with full blocks"
+        );
+        assert!(
+            self.token_ids.is_none_or(|ids| ids.len() == full_blocks),
+            "token IDs must align with full blocks"
+        );
+        assert!(!matches!(self.parent, Some(UniqueBlock::PartialBlock(_))));
+    }
 }
 
 /// A KV cache group sharing the coordinator's physical pool.
@@ -110,6 +130,55 @@ impl GroupManager {
     ) {
         match self {
             Self::FullAttention(group) => group.deref(pool, request_id, blocks),
+        }
+    }
+
+    /// Take this group's share of `alloc` out of the shared reservation.
+    ///
+    /// `prefix_copies` yields the activated pins in the order the groups asked
+    /// for them, so each group drains exactly the ones it requested through
+    /// [`Self::prefix_keys`] and leaves the rest for the groups behind it.
+    ///
+    /// Returns the blocks that became cache-visible, for the coordinator to
+    /// report. Only the main attention group returns them: the router indexes a
+    /// single block namespace with no group identity.
+    pub(crate) fn commit(
+        &mut self,
+        pool: &mut VllmBlockPool,
+        reservation: &mut BlockReservation,
+        alloc: &GroupAllocation,
+        prefix_copies: &mut impl Iterator<Item = BlockCopyId>,
+        materialize_store_events: bool,
+    ) -> Option<Vec<Option<StoredBlock>>> {
+        match self {
+            Self::FullAttention(group) => group.commit(
+                pool,
+                reservation,
+                alloc,
+                prefix_copies,
+                materialize_store_events,
+            ),
+        }
+    }
+
+    /// Make everything this group completed between the two token watermarks
+    /// cache-visible, returning the blocks the coordinator may report.
+    pub(crate) fn finalize_computed_prefix(
+        &mut self,
+        pool: &mut VllmBlockPool,
+        request_id: Uuid,
+        computed_before: usize,
+        computed_after: usize,
+        materialize_store_events: bool,
+    ) -> Option<Vec<Option<StoredBlock>>> {
+        match self {
+            Self::FullAttention(group) => group.finalize_computed_prefix(
+                pool,
+                request_id,
+                computed_before,
+                computed_after,
+                materialize_store_events,
+            ),
         }
     }
 
