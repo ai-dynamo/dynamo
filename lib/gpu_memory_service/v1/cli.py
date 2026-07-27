@@ -13,8 +13,7 @@ from threading import Event
 import torch
 from gpu_memory_service.common.utils import get_socket_path
 from gpu_memory_service.common.vmm import get_vmm
-from gpu_memory_service.core.server.allocations import GMSAllocationManager
-from gpu_memory_service.core.server.gms import GMS
+from gpu_memory_service.core.server.gms import GMSServerMemoryManager
 from gpu_memory_service.core.server.rpc import GMSRPCServer
 
 _DOMAINS = ("weights", "kv_cache")
@@ -63,10 +62,7 @@ def main() -> None:
             stack.enter_context(
                 GMSRPCServer(
                     get_socket_path(args.device, domain),
-                    GMS(
-                        gpu_uuid,
-                        GMSAllocationManager(vmm, args.device),
-                    ),
+                    GMSServerMemoryManager(gpu_uuid, vmm, args.device),
                 )
             )
             for domain in _DOMAINS

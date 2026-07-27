@@ -22,15 +22,6 @@ class LocalMapping:
     base: int
     reservation_size: int
 
-    def __post_init__(self) -> None:
-        if (
-            self.requested_size <= 0
-            or self.aligned_size < self.requested_size
-            or self.base <= 0
-            or self.reservation_size < self.aligned_size
-        ):
-            raise ValueError("invalid local allocation mapping")
-
     @property
     def end(self) -> int:
         return self.base + self.aligned_size
@@ -45,12 +36,18 @@ def install_mapping(
 ) -> int:
     """Consume an export FD and import, map, and protect it."""
     handle = int(vmm.import_shareable_handle_close_fd(fd))
+    mapped = False
     try:
         vmm.map(mapping.base, mapping.aligned_size, handle)
+        mapped = True
+        vmm.set_access(mapping.base, mapping.aligned_size, device, access)
     except Exception:
-        vmm.release(handle)
+        try:
+            if mapped:
+                vmm.unmap(mapping.base, mapping.aligned_size)
+        finally:
+            vmm.release(handle)
         raise
-    vmm.set_access(mapping.base, mapping.aligned_size, device, access)
     return handle
 
 
@@ -88,4 +85,14 @@ def reserve_and_install_mapping(
         base,
         reservation_size,
     )
-    return mapping, install_mapping(vmm, mapping, fd, device, access)
+    try:
+        handle = install_mapping(vmm, mapping, fd, device, access)
+    except Exception:
+        vmm.address_free(mapping.base, mapping.reservation_size)
+        raise
+    return mapping, handle
+
+
+def release_mapping(vmm: VMMDevice, mapping: LocalMapping) -> None:
+    """Release a preserved local VA reservation."""
+    vmm.address_free(mapping.base, mapping.reservation_size)

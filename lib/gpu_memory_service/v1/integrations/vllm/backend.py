@@ -1,32 +1,39 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""GMS-owned vLLM sleep lifecycle for Parameters and KV cache."""
+"""vLLM routing, Torch allocation, and GMS V1 lifecycle ownership."""
 
 from __future__ import annotations
 
+import gc
 import logging
+import threading
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import TYPE_CHECKING
 
 import torch
+from gpu_memory_service.common.locks import RequestedLockType
 from gpu_memory_service.common.utils import get_socket_path
 from gpu_memory_service.common.vmm import get_vmm
-from gpu_memory_service.v1.memory_manager import (
-    EphemeralKVCacheMemoryManager,
-    PersistentParameterMemoryManager,
+from gpu_memory_service.core.client.torch.extensions import _allocator_ext
+from gpu_memory_service.core.errors import GMSError
+from gpu_memory_service.v1.memory_manager import GMSClientMemoryManager
+from gpu_memory_service.v1.parameter_storage import (
+    copy_non_parameter_tensors_to_default_allocator,
 )
-from gpu_memory_service.v1.torch import V1TorchPools
 from vllm.device_allocator.sleep_mode_backend import (
     SleepModeBackend,
     SleepModeBackendFactory,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-    from contextlib import AbstractContextManager
+    from collections.abc import Callable, Iterator
 
 BACKEND_NAME = "gms-v1"
 logger = logging.getLogger(__name__)
+_WEIGHTS = "weights"
+_KV_CACHE = "kv_cache"
 
 
 class GMSV1SleepModeBackend(SleepModeBackend):
@@ -34,27 +41,83 @@ class GMSV1SleepModeBackend(SleepModeBackend):
 
     def __init__(self) -> None:
         super().__init__()
-        device = torch.cuda.current_device()
+        self._device = torch.cuda.current_device()
         vmm = get_vmm()
-        weights = PersistentParameterMemoryManager(
-            get_socket_path(device, "weights"),
+        self._weights = GMSClientMemoryManager(
+            get_socket_path(self._device, _WEIGHTS),
             vmm,
-            device,
+            self._device,
         )
-        kv_cache = EphemeralKVCacheMemoryManager(
-            get_socket_path(device, "kv_cache"),
+        self._kv_cache = GMSClientMemoryManager(
+            get_socket_path(self._device, _KV_CACHE),
             vmm,
-            device,
+            self._device,
         )
-        self._pools = V1TorchPools(weights, kv_cache)
+        self._weights.connect(RequestedLockType.RW)
+        self._kv_cache.connect(RequestedLockType.RW)
+        self._active_domain: ContextVar[str | None] = ContextVar(
+            "gms_v1_active_domain",
+            default=None,
+        )
+        self._allocator_failure: Exception | None = None
+        self._allocator_failure_lock = threading.Lock()
+        if _allocator_ext is None:
+            raise RuntimeError("GPU Memory Service allocator extension is not built")
+        _allocator_ext.init_module(self._malloc, self._free)
+        self._pluggable_allocator = torch.cuda.CUDAPluggableAllocator(
+            _allocator_ext.__file__,
+            "my_malloc",
+            "my_free",
+        )
+        with torch.cuda.device(self._device):
+            self._weights_pool = torch.cuda.MemPool(
+                allocator=self._pluggable_allocator.allocator()
+            )
+            self._kv_cache_pool = torch.cuda.MemPool(
+                allocator=self._pluggable_allocator.allocator()
+            )
 
-    def capture_weights(
-        self, model: "Callable[[], object]"
-    ) -> "AbstractContextManager[None]":
-        return self._pools.capture_weights(model)
+    @contextmanager
+    def capture_weights(self, model: "Callable[[], object]") -> "Iterator[None]":
+        with self._use_pool(_WEIGHTS, self._weights_pool):
+            yield
 
-    def capture_kv_cache(self) -> "AbstractContextManager[None]":
-        return self._pools.capture_kv_cache()
+        parameter_span_bytes, copied_out_bytes = (
+            copy_non_parameter_tensors_to_default_allocator(
+                model(),
+                self._weights.mappings,
+            )
+        )
+        torch.cuda.synchronize(self._device)
+        self._destroy_weights_pool()
+        self._raise_if_allocator_failed()
+        self._weights.commit()
+
+        retained_aligned_gms_bytes = sum(
+            mapping.aligned_size for mapping in self._weights.mappings
+        )
+        uncovered_retained_gms_bytes = retained_aligned_gms_bytes - parameter_span_bytes
+        logger.info(
+            "GMS weights committed device=%d parameter_span_bytes=%d "
+            "retained_aligned_gms_bytes=%d "
+            "parameter_span_to_retained_ratio=%.6f "
+            "uncovered_retained_gms_bytes=%d uncovered_retained_gms_percent=%.2f "
+            "copied_out_bytes=%d retained_gms_allocation_count=%d",
+            self._device,
+            parameter_span_bytes,
+            retained_aligned_gms_bytes,
+            parameter_span_bytes / retained_aligned_gms_bytes,
+            uncovered_retained_gms_bytes,
+            uncovered_retained_gms_bytes / retained_aligned_gms_bytes * 100,
+            copied_out_bytes,
+            len(self._weights.mappings),
+        )
+
+    @contextmanager
+    def capture_kv_cache(self) -> "Iterator[None]":
+        with self._use_pool(_KV_CACHE, self._kv_cache_pool):
+            yield
+        self._raise_if_allocator_failed()
 
     def suspend(self, level: int = 1) -> None:
         if level != 1:
@@ -63,9 +126,11 @@ class GMSV1SleepModeBackend(SleepModeBackend):
             raise RuntimeError(f"cannot suspend GMS V1 from {self._state}")
 
         try:
-            self._pools.raise_if_allocator_failed()
-            self._pools.weights.sleep()
-            self._pools.kv_cache.sleep()
+            self._raise_if_allocator_failed()
+            self._weights.unmap_all_vas()
+            self._weights.disconnect()
+            self._kv_cache.unmap_all_vas()
+            self._kv_cache.disconnect()
             self._state = "SUSPENDED"
         except Exception as cause:
             logger.exception("GMS V1 suspend failed; terminating the worker process")
@@ -79,8 +144,11 @@ class GMSV1SleepModeBackend(SleepModeBackend):
 
         try:
             self._state = "RESUMING"
-            self._pools.kv_cache.wake()
-            self._pools.weights.wake()
+            self._kv_cache.connect(RequestedLockType.RW)
+            self._kv_cache.reallocate_all_handles()
+            self._kv_cache.remap_all_vas()
+            self._weights.connect(RequestedLockType.RO)
+            self._weights.remap_all_vas()
             self._state = "RUNNING"
         except Exception as cause:
             logger.exception("GMS V1 resume failed; terminating the worker process")
@@ -89,6 +157,62 @@ class GMSV1SleepModeBackend(SleepModeBackend):
     @classmethod
     def preserves_communicators(cls) -> bool:
         return True
+
+    @contextmanager
+    def _use_pool(self, domain: str, pool: object) -> "Iterator[None]":
+        token = self._active_domain.set(domain)
+        try:
+            with torch.cuda.device(self._device):
+                with torch.cuda.use_mem_pool(pool, device=self._device):
+                    yield
+        finally:
+            self._active_domain.reset(token)
+
+    def _destroy_weights_pool(self) -> None:
+        gc.collect()
+        weights_pool = self._weights_pool
+        self._weights_pool = None
+        del weights_pool
+        gc.collect()
+
+    def _malloc(self, size: int, device: int, _stream: int) -> int:
+        try:
+            if device != self._device:
+                raise GMSError(f"allocator callback device {device} != {self._device}")
+            domain = self._active_domain.get()
+            if domain == _WEIGHTS:
+                return self._weights.create_mapping(size)
+            if domain == _KV_CACHE:
+                return self._kv_cache.create_mapping(size)
+            raise GMSError("GMS allocator callback has no active domain")
+        except Exception as exc:
+            self._record_allocator_failure(exc)
+            raise
+
+    def _free(self, va: int, size: int, device: int, _stream: int) -> None:
+        try:
+            if device != self._device:
+                raise GMSError(f"allocator callback device {device} != {self._device}")
+            if self._weights.owns(va):
+                self._weights.destroy_mapping(va, size)
+                return
+            if self._kv_cache.owns(va):
+                self._kv_cache.destroy_mapping(va, size)
+                return
+            raise GMSError(f"GMS allocator does not own VA 0x{va:x}")
+        except Exception as exc:
+            self._record_allocator_failure(exc)
+
+    def _record_allocator_failure(self, failure: Exception) -> None:
+        with self._allocator_failure_lock:
+            if self._allocator_failure is None:
+                self._allocator_failure = failure
+
+    def _raise_if_allocator_failed(self) -> None:
+        with self._allocator_failure_lock:
+            failure = self._allocator_failure
+        if failure is not None:
+            raise GMSError("allocator callback failed") from failure
 
 
 SleepModeBackendFactory.register_backend(
