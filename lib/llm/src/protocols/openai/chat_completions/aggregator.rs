@@ -893,7 +893,12 @@ mod tests {
                 None,
                 Some(dynamo_protocols::types::Role::Assistant),
             ),
-            create_test_delta_with_tool_chunks(0, vec![make_name(1, "tc1", "get_time")], None, None),
+            create_test_delta_with_tool_chunks(
+                0,
+                vec![make_name(1, "tc1", "get_time")],
+                None,
+                None,
+            ),
             create_test_delta_with_tool_chunks(
                 0,
                 vec![make_args(0, "{\"city\":\"Tokyo\"}")],
