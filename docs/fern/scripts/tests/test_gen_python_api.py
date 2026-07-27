@@ -71,6 +71,10 @@ SELECTED_DOCSTRING_SUMMARIES = {
         "Decorator that can parse a request payload into a Pydantic model "
         "before the endpoint runs."
     ),
+    "dynamo.planner.connectors.base.PlannerConnector": (
+        "Deployment-control interface the planner uses to inspect and scale "
+        "one deployment."
+    ),
 }
 
 
