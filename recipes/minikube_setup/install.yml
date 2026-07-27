@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+---
+- name: Install Minikube
+  hosts: all
+  become: yes
+  gather_facts: yes
+  vars:
+    minikube_version: "v1.38.1"
+    minikube_download_url: "https://github.com/kubernetes/minikube/releases/download/{{ minikube_version }}/minikube-linux-amd64"
+    minikube_checksum: "sha256:099477eaf248bcb5bcea8ce78a2898e93ac01461c35189da1848c3de82ecd22e"
+    system_bin_dir: "/usr/local/bin"
+  tasks:
+    - name: Check if Minikube is already installed
+      command: minikube version
+      register: minikube_version_check
+      failed_when: false
+      changed_when: false
+      become: no
+
+    - name: Download and install Minikube binary
+      get_url:
+        url: "{{ minikube_download_url }}"
+        dest: "{{ system_bin_dir }}/minikube"
+        checksum: "{{ minikube_checksum }}"
+        mode: '0755'
+        owner: root
+        group: root
+      when: minikube_version_check.rc != 0
+
+    - name: Verify Minikube installation
+      command: minikube version
+      register: minikube_verify
+      changed_when: false
+      become: no
+
+    - name: Display Minikube version
+      debug:
+        msg: "Minikube installed successfully: {{ minikube_verify.stdout }}"
+      become: no
