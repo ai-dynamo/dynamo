@@ -3,6 +3,7 @@ package executor
 import (
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 
@@ -88,5 +89,66 @@ func TestInspectRestoreUsesContainerIDWhenProvided(t *testing.T) {
 	}
 	if rt.resolveByPodHit {
 		t.Fatal("ResolveContainerByPod should not be used when ContainerID is provided")
+	}
+}
+
+func TestReadTargetGPUUUIDOrderWaitsForCapablePlaceholder(t *testing.T) {
+	calls := 0
+	got, err := readTargetGPUUUIDOrder(
+		context.Background(),
+		123,
+		true,
+		func(pid int) ([]byte, error) {
+			if pid != 123 {
+				t.Fatalf("PID = %d, want 123", pid)
+			}
+			calls++
+			if calls == 1 {
+				return nil, os.ErrNotExist
+			}
+			return []byte("GPU-aaaaaaaa-1111-2222-3333-444444444444\n"), nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("readTargetGPUUUIDOrder: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("read calls = %d, want 2", calls)
+	}
+	if string(got) != "GPU-aaaaaaaa-1111-2222-3333-444444444444\n" {
+		t.Fatalf("unexpected GPU order %q", got)
+	}
+}
+
+func TestReadTargetGPUUUIDOrderKeepsLegacyFallbackImmediate(t *testing.T) {
+	calls := 0
+	_, err := readTargetGPUUUIDOrder(
+		context.Background(),
+		123,
+		false,
+		func(int) ([]byte, error) {
+			calls++
+			return nil, os.ErrNotExist
+		},
+	)
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("error = %v, want os.ErrNotExist", err)
+	}
+	if calls != 1 {
+		t.Fatalf("read calls = %d, want 1", calls)
+	}
+}
+
+func TestHasProcessEnv(t *testing.T) {
+	spec := &specs.Spec{
+		Process: &specs.Process{
+			Env: []string{"OTHER=value", "DYN_SNAPSHOT_GPU_ORDER_HANDSHAKE=1"},
+		},
+	}
+	if !hasProcessEnv(spec, "DYN_SNAPSHOT_GPU_ORDER_HANDSHAKE", "1") {
+		t.Fatal("expected capability env to be found")
+	}
+	if hasProcessEnv(spec, "DYN_SNAPSHOT_GPU_ORDER_HANDSHAKE", "0") {
+		t.Fatal("unexpected capability value match")
 	}
 }

@@ -329,6 +329,7 @@ USER dynamo
 
 ARG DYNAMO_COMMIT_SHA
 ENV DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA}
+ENV DYN_SNAPSHOT_GPU_ORDER_HANDSHAKE=1
 
 # Reset the upstream "vllm serve" entrypoint so the derived runtime behaves
 # like other Dynamo images and can execute arbitrary commands directly.

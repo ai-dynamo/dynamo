@@ -45,6 +45,10 @@ const (
 	// GPUUUIDsFile optionally carries the workload's container-visible GPU
 	// UUIDs in runtime ordinal order, recorded before checkpoint sleep.
 	GPUUUIDsFile = "gpu-uuids"
+
+	// GPUOrderHandshakeEnv advertises that a restore placeholder records
+	// GPUUUIDsFile before entering standby.
+	GPUOrderHandshakeEnv = "DYN_SNAPSHOT_GPU_ORDER_HANDSHAKE"
 )
 
 // EnsureControlVolume adds the snapshot-control emptyDir to the pod spec,

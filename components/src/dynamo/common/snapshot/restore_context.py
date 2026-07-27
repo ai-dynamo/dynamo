@@ -19,6 +19,7 @@ from dynamo.common.snapshot.constants import (
     SNAPSHOT_RESTORE_CONTEXT_FILE,
     SNAPSHOT_RESTORE_STANDBY_ENV,
 )
+from dynamo.common.snapshot.lifecycle import SnapshotConfig
 
 logger = logging.getLogger(__name__)
 ConfigT = TypeVar("ConfigT")
@@ -239,5 +240,11 @@ def maybe_run_restore_standby_mode() -> None:
     if os.environ.get(SNAPSHOT_RESTORE_STANDBY_ENV) != "1":
         return
 
+    snapshot_config = SnapshotConfig.from_env()
+    if snapshot_config is None:
+        raise RuntimeError(
+            f"{SNAPSHOT_CONTROL_DIR_ENV} is required in snapshot restore standby mode"
+        )
     write_snapshot_restore_context()
+    snapshot_config.record_visible_gpu_order()
     os.execvp("sleep", ["sleep", "infinity"])

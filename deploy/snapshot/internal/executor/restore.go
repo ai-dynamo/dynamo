@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/criu"
@@ -20,6 +22,12 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/logging"
 	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/runtime"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
+)
+
+const (
+	targetGPUOrderWaitTimeout  = 60 * time.Second
+	targetGPUOrderPollInterval = 100 * time.Millisecond
 )
 
 // RestoreRequest holds the parameters for a restore operation.
@@ -132,11 +140,14 @@ func inspectRestore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Lo
 		containerName = "main"
 	}
 
-	var placeholderPID int
+	var (
+		placeholderPID int
+		ociSpec        *specs.Spec
+	)
 	if req.ContainerID != "" {
-		placeholderPID, _, err = rt.ResolveContainer(ctx, req.ContainerID)
+		placeholderPID, ociSpec, err = rt.ResolveContainer(ctx, req.ContainerID)
 	} else {
-		placeholderPID, _, err = rt.ResolveContainerByPod(ctx, req.PodName, req.PodNamespace, containerName)
+		placeholderPID, ociSpec, err = rt.ResolveContainerByPod(ctx, req.PodName, req.PodNamespace, containerName)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve placeholder container: %w", err)
@@ -154,16 +165,43 @@ func inspectRestore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Lo
 		if len(m.CUDA.SourceGPUUUIDs) == 0 {
 			return nil, fmt.Errorf("missing source GPU UUIDs in checkpoint manifest")
 		}
-		targetGPUUUIDs, err := cuda.DiscoverGPUUUIDs(
-			ctx,
-			req.Clientset,
-			req.PodName,
-			req.PodNamespace,
-			containerName,
-			snapshotruntime.HostProcPath,
-			placeholderPID,
-			log,
+		supportsGPUOrderHandshake := hasProcessEnv(
+			ociSpec,
+			snapshotprotocol.GPUOrderHandshakeEnv,
+			"1",
 		)
+		recordedOrder, readErr := readTargetGPUUUIDOrder(
+			ctx,
+			placeholderPID,
+			supportsGPUOrderHandshake,
+			snapshotruntime.ReadGPUUUIDOrderFile,
+		)
+		var targetGPUUUIDs []string
+		switch {
+		case readErr == nil:
+			targetGPUUUIDs, err = cuda.DiscoverGPUUUIDsWithVisibleOrder(
+				ctx,
+				req.Clientset,
+				req.PodName,
+				req.PodNamespace,
+				containerName,
+				strings.Fields(string(recordedOrder)),
+				log,
+			)
+		case !supportsGPUOrderHandshake && errors.Is(readErr, os.ErrNotExist):
+			targetGPUUUIDs, err = cuda.DiscoverGPUUUIDs(
+				ctx,
+				req.Clientset,
+				req.PodName,
+				req.PodNamespace,
+				containerName,
+				snapshotruntime.HostProcPath,
+				placeholderPID,
+				log,
+			)
+		default:
+			err = fmt.Errorf("read target GPU UUID order: %w", readErr)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("failed to get target GPU UUIDs: %w", err)
 		}
@@ -188,6 +226,57 @@ func inspectRestore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Lo
 		CgroupRoot:     cgroupRoot,
 		CUDADeviceMap:  cudaDeviceMap,
 	}, nil
+}
+
+func hasProcessEnv(spec *specs.Spec, name, value string) bool {
+	if spec == nil || spec.Process == nil {
+		return false
+	}
+	want := name + "=" + value
+	for _, env := range spec.Process.Env {
+		if env == want {
+			return true
+		}
+	}
+	return false
+}
+
+func readTargetGPUUUIDOrder(
+	ctx context.Context,
+	placeholderPID int,
+	wait bool,
+	read func(int) ([]byte, error),
+) ([]byte, error) {
+	if !wait {
+		return read(placeholderPID)
+	}
+
+	deadline := time.NewTimer(targetGPUOrderWaitTimeout)
+	ticker := time.NewTicker(targetGPUOrderPollInterval)
+	defer deadline.Stop()
+	defer ticker.Stop()
+
+	for {
+		data, err := read(placeholderPID)
+		if err == nil {
+			return data, nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-deadline.C:
+			return nil, fmt.Errorf(
+				"timed out waiting for target GPU UUID order after %s: %w",
+				targetGPUOrderWaitTimeout,
+				err,
+			)
+		case <-ticker.C:
+		}
+	}
 }
 
 // execNSRestore launches the nsrestore binary inside the placeholder container's
