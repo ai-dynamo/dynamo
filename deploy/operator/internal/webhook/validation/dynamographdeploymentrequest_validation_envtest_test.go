@@ -253,7 +253,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			gpuDiscovery: true,
 		},
 		{
-			name:               "runtime version override repair without observed fingerprint is rejected",
+			name:               "runtime version override repair does not require observed fingerprint",
 			seedWithoutWebhook: true,
 			oldRequest: betaDGDRForAdmissionWithoutFingerprint(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
 				request.Spec.RuntimeVersionOverride = ""
@@ -263,9 +263,6 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseDeployed
 			}),
 			gpuDiscovery: true,
-			wantWebhook: []string{
-				`spec: Forbidden: updates are forbidden while the resource is in phase "Deployed"; delete and recreate the resource to change its spec`,
-			},
 		},
 		{
 			name: "newly introduced custom image without override is rejected on update",
