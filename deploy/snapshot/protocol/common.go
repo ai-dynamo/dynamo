@@ -57,6 +57,11 @@ const (
 	RestoreStatusInProgress   = "in_progress"
 	RestoreStatusCompleted    = "completed"
 	RestoreStatusFailed       = "failed"
+
+	linkerdInjectAnnotation      = "linkerd.io/inject"
+	linkerdInjectDisabled        = "disabled"
+	istioSidecarInjectAnnotation = "sidecar.istio.io/inject"
+	istioSidecarInjectDisabled   = "false"
 )
 
 type Storage struct {

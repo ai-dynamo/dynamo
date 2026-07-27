@@ -266,12 +266,12 @@ impl SglangCore {
                 let Some((_, reservation)) = self.destination_holds.remove(handoff_id) else {
                     return Ok(SchedulerCommandEffects::new(SchedulerCommandResult::Noop));
                 };
-                let available_before = self.kv_manager.cache().token_pool.available();
+                let available_before = self.kv_manager.cache().available_tokens();
                 let request = reservation.activate(&mut self.kv_manager, self.config.block_size);
                 self.active_destination_handoffs
                     .insert(handoff_id, request.uuid);
                 self.prebuilt_ready.push_back(request);
-                if self.kv_manager.cache().token_pool.available() > available_before {
+                if self.kv_manager.cache().available_tokens() > available_before {
                     self.bump_capacity_generation();
                 }
                 Ok(self.effects_after_capacity_change(SchedulerCommandResult::Applied))
@@ -752,24 +752,9 @@ impl SglangCore {
     }
 
     fn active_kv_blocks(&self) -> u64 {
-        let active_reserved = self
-            .waiting
-            .iter()
-            .map(SglangRequest::extra_reserved_tokens)
-            .sum::<usize>()
-            + self
-                .prebuilt_ready
-                .iter()
-                .map(SglangRequest::extra_reserved_tokens)
-                .sum::<usize>()
-            + self
-                .running
-                .iter()
-                .map(SglangRequest::extra_reserved_tokens)
-                .sum::<usize>();
         let actual_used =
             self.kv_manager.cache().total_tokens() - self.kv_manager.cache().available_tokens();
-        (actual_used + active_reserved).div_ceil(self.config.block_size) as u64
+        actual_used.div_ceil(self.config.block_size) as u64
     }
 
     fn promote_prebuilt_ready(&mut self) -> Vec<crate::scheduler::AdmissionEvent> {

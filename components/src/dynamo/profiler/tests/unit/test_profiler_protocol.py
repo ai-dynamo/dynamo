@@ -131,7 +131,7 @@ def test_build_dgd_config_vllm_disagg_preserves_explicit_kv_config() -> None:
 
 
 def test_build_dgd_config_vllm_disagg_removes_legacy_role_flags() -> None:
-    """Canonical worker roles must replace deprecated vLLM role flags."""
+    """AIC legacy role flags must not reach the vLLM backend CLI."""
     modifier = CONFIG_MODIFIERS["vllm"]
     dgd_config = modifier.build_dgd_config(
         mode="disagg",
