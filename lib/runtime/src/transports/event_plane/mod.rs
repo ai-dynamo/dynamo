@@ -43,6 +43,7 @@ use crate::DistributedRuntime;
 use crate::component::{Component, Endpoint, Namespace};
 use crate::discovery::{
     Discovery, DiscoveryInstance, DiscoveryQuery, DiscoverySpec, EventChannelQuery, EventTransport,
+    MAX_JSON_SAFE_PUBLISHER_ID,
 };
 use crate::protocols::EndpointId;
 use crate::traits::DistributedRuntimeProvider;
@@ -259,11 +260,9 @@ impl Stream for DeduplicatingStream {
     }
 }
 
-const PUBLISHER_ID_BITS: u32 = 53;
-
 /// Keep publisher IDs exactly representable in float64-backed JSON metadata.
 fn discovery_safe_publisher_id(random_id: u64) -> u64 {
-    random_id >> (u64::BITS - PUBLISHER_ID_BITS)
+    random_id & MAX_JSON_SAFE_PUBLISHER_ID
 }
 
 /// Event publisher for a specific topic.
@@ -926,19 +925,17 @@ mod tests {
 
     #[test]
     fn publisher_ids_survive_a_json_number_round_trip() {
-        const MAX: u64 = 1 << PUBLISHER_ID_BITS;
-
         // This historical full-range ID is not JSON-safe. It was observed
         // rounding to 13584172880116488000 after a discovery round trip.
         let unsafe_id: u64 = 13_584_172_880_116_487_724;
-        assert!(unsafe_id > MAX);
+        assert!(unsafe_id > MAX_JSON_SAFE_PUBLISHER_ID);
         assert_ne!(unsafe_id as f64 as u64, unsafe_id);
 
         for random_id in [0, 1, u64::MAX, unsafe_id, 6_633_287_539_119_378] {
             let publisher_id = discovery_safe_publisher_id(random_id);
             assert!(
-                publisher_id < MAX,
-                "publisher ID {publisher_id} must stay below 2^53"
+                publisher_id <= MAX_JSON_SAFE_PUBLISHER_ID,
+                "publisher ID {publisher_id} exceeds the JSON-safe integer range"
             );
             assert_eq!(
                 publisher_id as f64 as u64, publisher_id,
@@ -1140,8 +1137,8 @@ mod tests {
                     );
                     for publisher_id in [publisher_a.publisher_id(), publisher_b.publisher_id()] {
                         assert!(
-                            publisher_id < (1u64 << PUBLISHER_ID_BITS),
-                            "publisher ID {publisher_id} must stay below 2^53"
+                            publisher_id <= MAX_JSON_SAFE_PUBLISHER_ID,
+                            "publisher ID {publisher_id} exceeds the JSON-safe integer range"
                         );
                     }
                 };
