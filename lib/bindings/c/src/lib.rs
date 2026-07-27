@@ -506,6 +506,7 @@ impl RouterHandles {
                 strict_priority,
                 allowed_worker_ids,
                 routing_constraints,
+                false,
             )
             .await
             .map_err(|e| {

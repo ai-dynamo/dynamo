@@ -1,18 +1,16 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashSet;
-
 use dynamo_kv_router::{
     RouterConfigOverride,
     indexer::RoutingDecisionHashes,
-    protocols::{BlockExtraInfo, RoutingConstraints, WorkerId, WorkerWithDpRank},
+    protocols::{BlockExtraInfo, WorkerId, WorkerWithDpRank},
     scheduling::{RequestLifecycleLease, RequestProgressUpdater, RoutingEligibility},
 };
 use dynamo_runtime::{dynamo_nvtx_range, pipeline::Error};
 
 use crate::{
-    kv_router::{FindBestMatchOutcome, push_router::KvPushRouter},
+    kv_router::{FindBestMatchOutcome, RoutingOptions, push_router::KvPushRouter},
     preprocessor::PreprocessedRequest,
     protocols::{
         TokenIdType,
@@ -58,16 +56,7 @@ struct BestMatchArgs<'a> {
     router_config_override: Option<&'a RouterConfigOverride>,
     update_states: bool,
     return_routing_hashes: bool,
-    lora_name: Option<String>,
-    cache_namespace: Option<String>,
-    priority_jump: f64,
-    strict_priority: u32,
-    policy_class: Option<String>,
-    session_id: Option<String>,
-    expected_output_tokens: Option<u32>,
-    pinned_worker: Option<WorkerWithDpRank>,
-    allowed_worker_ids: Option<HashSet<WorkerId>>,
-    routing_constraints: RoutingConstraints,
+    routing_options: RoutingOptions,
 }
 
 impl KvPushRouter {
@@ -81,16 +70,7 @@ impl KvPushRouter {
                 args.router_config_override,
                 args.update_states,
                 args.return_routing_hashes,
-                args.lora_name,
-                args.cache_namespace,
-                args.priority_jump,
-                args.strict_priority,
-                args.policy_class,
-                args.session_id,
-                args.expected_output_tokens,
-                args.pinned_worker,
-                args.allowed_worker_ids,
-                args.routing_constraints,
+                args.routing_options,
                 true,
             )
             .await?;
@@ -126,21 +106,29 @@ impl KvPushRouter {
     ) -> Result<WorkerSelection, Error> {
         let _nvtx_select = dynamo_nvtx_range!("route.select_worker");
         let routing = request.routing.as_ref();
-        let lora_name = routing.and_then(|routing| routing.lora_name.clone());
-        let cache_namespace = routing.and_then(|routing| routing.cache_namespace.clone());
-        let priority_jump = routing
-            .and_then(|routing| routing.priority_jump)
-            .unwrap_or(0.0);
-        let strict_priority = routing
-            .and_then(|routing| routing.strict_priority)
-            .unwrap_or(0);
-        let expected_output_tokens = routing.and_then(|routing| routing.expected_output_tokens);
         let allowed_worker_ids = routing.and_then(|routing| routing.allowed_worker_ids.clone());
         let return_routing_hashes =
             !is_query_only && self.chooser.indexer().records_routing_decisions();
         let routing_constraints = routing
             .and_then(|routing| routing.routing_constraints.clone())
             .unwrap_or_default();
+        let routing_options = RoutingOptions {
+            lora_name: routing.and_then(|routing| routing.lora_name.clone()),
+            cache_namespace: routing.and_then(|routing| routing.cache_namespace.clone()),
+            priority_jump: routing
+                .and_then(|routing| routing.priority_jump)
+                .unwrap_or(0.0),
+            strict_priority: routing
+                .and_then(|routing| routing.strict_priority)
+                .unwrap_or(0),
+            expected_output_tokens: routing.and_then(|routing| routing.expected_output_tokens),
+            allowed_worker_ids,
+            routing_constraints,
+            do_not_queue: routing
+                .and_then(|routing| routing.do_not_queue)
+                .unwrap_or(false),
+            ..Default::default()
+        };
         let explicit_pin = pinned_worker_hint(phase, routing);
         let SelectionOptions {
             affinity_worker,
@@ -159,16 +147,12 @@ impl KvPushRouter {
                     router_config_override: request.router_config_override.as_ref(),
                     update_states: !is_query_only,
                     return_routing_hashes,
-                    lora_name,
-                    cache_namespace,
-                    priority_jump,
-                    strict_priority,
-                    policy_class,
-                    session_id,
-                    expected_output_tokens,
-                    pinned_worker: None,
-                    allowed_worker_ids,
-                    routing_constraints: routing_constraints.clone(),
+                    routing_options: RoutingOptions {
+                        policy_class,
+                        session_id,
+                        pinned_worker: None,
+                        ..routing_options
+                    },
                 })
                 .await?;
 
@@ -194,8 +178,6 @@ impl KvPushRouter {
 
             return Ok(selection);
         };
-        let cache_namespace = routing.and_then(|routing| routing.cache_namespace.clone());
-
         let pinned_worker = resolve_pinned_worker_rank(
             pinned_worker_id,
             requested_dp_rank,
@@ -204,10 +186,10 @@ impl KvPushRouter {
         {
             let configs = self.chooser.workers_with_configs.borrow();
             let eligibility = RoutingEligibility::new(
-                allowed_worker_ids.as_ref(),
+                routing_options.allowed_worker_ids.as_ref(),
                 None,
                 Some(pinned_worker),
-                &routing_constraints,
+                &routing_options.routing_constraints,
             );
             if let Err(error) = eligibility.validate_worker_rank(&configs, pinned_worker) {
                 return Err(anyhow::anyhow!(
@@ -231,16 +213,12 @@ impl KvPushRouter {
             router_config_override: request.router_config_override.as_ref(),
             update_states: !is_query_only,
             return_routing_hashes,
-            lora_name,
-            cache_namespace,
-            priority_jump,
-            strict_priority,
-            policy_class,
-            session_id,
-            expected_output_tokens,
-            pinned_worker: Some(pinned_worker),
-            allowed_worker_ids,
-            routing_constraints,
+            routing_options: RoutingOptions {
+                policy_class,
+                session_id,
+                pinned_worker: Some(pinned_worker),
+                ..routing_options
+            },
         })
         .await
     }

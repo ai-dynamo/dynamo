@@ -196,6 +196,10 @@ pub struct NvExt {
 
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub do_not_queue: Option<bool>,
+
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub router: Option<RouterParams>,
 }
 

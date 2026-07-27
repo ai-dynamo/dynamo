@@ -801,6 +801,7 @@ mod tests {
                     strict_priority: 0,
                     policy_class: None,
                     session_id: None,
+                    do_not_queue: false,
                     overlap: OverlapSignals::default(),
                     shared_cache_hits: None,
                 })
