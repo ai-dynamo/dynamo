@@ -14,6 +14,12 @@ from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 
 from dynamo._core import Endpoint
 from dynamo.common.native_offloading import NATIVE_OFFLOADING_CAPACITY_RUNTIME_KEY
+from dynamo.common.token_budget import (
+    OutputOverflow,
+    PromptOverflow,
+    TokenBudget,
+    publish_token_budget,
+)
 from dynamo.common.utils.output_modalities import get_output_modalities
 from dynamo.common.utils.topology import apply_topology_config
 from dynamo.llm import (
@@ -36,9 +42,6 @@ from dynamo.sglang.capacity import (
 
 SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"
 SPEC_DECODE_RUNTIME_KEY = "spec_decode"
-# Must match `STRICT_REQUEST_TOKEN_LIMIT_RUNTIME_KEY` in
-# `lib/llm/src/local_model/runtime_config.rs`.
-STRICT_REQUEST_TOKEN_LIMIT_RUNTIME_KEY = "strict_request_token_limit"
 
 
 def _register_model_source_path(
@@ -124,7 +127,7 @@ async def _register_model_with_runtime_config(
     Returns:
         True if registration succeeded, False otherwise.
     """
-    runtime_config = await _get_runtime_config(engine, server_args, dynamo_args)
+    runtime_config = await get_runtime_config(engine, server_args, dynamo_args)
 
     if dynamo_args.use_sglang_tokenizer:
         logging.warning(
@@ -353,29 +356,41 @@ def _eagle_enabled_for(speculative_algorithm: Optional[str]) -> bool:
         return False
 
 
-def _get_strict_request_token_limit(
+def _get_token_budget(
     engine: Optional[sgl.Engine], server_args: ServerArgs
-) -> Optional[int]:
-    """Return SGLang's strict input-plus-output limit, if it has one.
+) -> Optional[TokenBudget]:
+    """Describe SGLang's request-overflow behavior.
 
-    SGLang can instead auto-truncate over-budget requests, and some modes
-    disable total-token validation. In either case the frontend must defer to
-    the engine. Multimodal encode workers do not own a tokenizer manager, so
-    they cannot publish this text-request policy. ``num_reserved_tokens``
-    covers speculative draft-token space.
+    Multimodal encode workers do not own a tokenizer manager, so they cannot
+    publish this text-generation policy. ``num_reserved_tokens`` covers
+    speculative draft-token space.
     """
     if engine is None:
         return None
     tokenizer_manager = engine.tokenizer_manager
-    if server_args.allow_auto_truncate:
-        return None
+
+    prompt_overflow = (
+        PromptOverflow.TRUNCATE
+        if server_args.allow_auto_truncate
+        else PromptOverflow.REJECT
+    )
     if not tokenizer_manager.validate_total_tokens:
-        return None
+        output_overflow = OutputOverflow.BACKEND
+    elif server_args.allow_auto_truncate:
+        output_overflow = OutputOverflow.CLAMP
+    else:
+        output_overflow = OutputOverflow.REJECT
 
-    return max(0, tokenizer_manager.context_len - tokenizer_manager.num_reserved_tokens)
+    return TokenBudget(
+        combined_limit=max(
+            0, tokenizer_manager.context_len - tokenizer_manager.num_reserved_tokens
+        ),
+        output_overflow=output_overflow,
+        prompt_overflow=prompt_overflow,
+    )
 
 
-async def _get_runtime_config(
+async def get_runtime_config(
     engine: Optional[sgl.Engine],
     server_args: ServerArgs,
     dynamo_args: DynamoConfig,
@@ -393,12 +408,9 @@ async def _get_runtime_config(
     runtime_config = ModelRuntimeConfig()
     runtime_config.kv_state_endpoint = dynamo_args.kv_state_endpoint
     runtime_config.context_length = server_args.context_length
-    strict_request_token_limit = _get_strict_request_token_limit(engine, server_args)
-    if strict_request_token_limit is not None:
-        runtime_config.set_engine_specific(
-            STRICT_REQUEST_TOKEN_LIMIT_RUNTIME_KEY,
-            json.dumps(strict_request_token_limit),
-        )
+    token_budget = _get_token_budget(engine, server_args)
+    if token_budget is not None:
+        publish_token_budget(runtime_config, token_budget)
     # set reasoning parser and tool call parser
     runtime_config.reasoning_parser = dynamo_args.dyn_reasoning_parser
     runtime_config.tool_call_parser = dynamo_args.dyn_tool_call_parser

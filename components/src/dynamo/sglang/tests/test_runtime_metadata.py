@@ -2,10 +2,17 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
 from types import SimpleNamespace
 
 import pytest
 
+from dynamo.common.token_budget import (
+    TOKEN_BUDGET_RUNTIME_KEY,
+    OutputOverflow,
+    PromptOverflow,
+    TokenBudget,
+)
 from dynamo.sglang.capacity import (
     get_hicache_native_offloading_capacity,
     get_spec_decode_runtime_data,
@@ -79,17 +86,42 @@ def test_eagle_enabled_for_speculative_algorithm(speculative_algorithm, expected
 @pytest.mark.parametrize(
     "allow_auto_truncate, validate_total_tokens, reserved_tokens, expected",
     [
-        (False, True, 0, 256),
-        (False, True, 4, 252),
-        (False, True, 300, 0),
-        (True, True, 0, None),
-        (False, False, 0, None),
+        (
+            False,
+            True,
+            0,
+            TokenBudget(256, OutputOverflow.REJECT, PromptOverflow.REJECT),
+        ),
+        (
+            False,
+            True,
+            4,
+            TokenBudget(252, OutputOverflow.REJECT, PromptOverflow.REJECT),
+        ),
+        (
+            True,
+            True,
+            0,
+            TokenBudget(256, OutputOverflow.CLAMP, PromptOverflow.TRUNCATE),
+        ),
+        (
+            False,
+            False,
+            0,
+            TokenBudget(256, OutputOverflow.BACKEND, PromptOverflow.REJECT),
+        ),
+        (
+            True,
+            False,
+            300,
+            TokenBudget(0, OutputOverflow.BACKEND, PromptOverflow.TRUNCATE),
+        ),
     ],
 )
-def test_strict_request_token_limit_matches_sglang_policy(
+def test_token_budget_matches_sglang_policy(
     allow_auto_truncate, validate_total_tokens, reserved_tokens, expected
 ):
-    from dynamo.sglang.register import _get_strict_request_token_limit
+    from dynamo.sglang.register import _get_token_budget
 
     engine = SimpleNamespace(
         tokenizer_manager=SimpleNamespace(
@@ -103,10 +135,10 @@ def test_strict_request_token_limit_matches_sglang_policy(
         allow_auto_truncate=allow_auto_truncate,
     )
 
-    assert _get_strict_request_token_limit(engine, server_args) == expected
+    assert _get_token_budget(engine, server_args) == expected
 
 
-def test_runtime_config_without_engine_omits_strict_request_limit(monkeypatch, caplog):
+def test_runtime_config_without_engine_omits_token_budget(monkeypatch, caplog):
     from dynamo.sglang import register
 
     server_args = SimpleNamespace(
@@ -137,12 +169,10 @@ def test_runtime_config_without_engine_omits_strict_request_limit(monkeypatch, c
     monkeypatch.setattr(register, "runtime_capacity", lambda *_: capacity)
 
     runtime_config = asyncio.run(
-        register._get_runtime_config(None, server_args, dynamo_args)
+        register.get_runtime_config(None, server_args, dynamo_args)
     )
 
-    assert register.STRICT_REQUEST_TOKEN_LIMIT_RUNTIME_KEY not in (
-        runtime_config.runtime_data
-    )
+    assert TOKEN_BUDGET_RUNTIME_KEY not in runtime_config.runtime_data
     assert "Failed to get runtime config" not in caplog.text
 
 
@@ -258,16 +288,15 @@ async def test_hicache_publish_failure_preserves_core_capacity(monkeypatch, capl
         register.ModelRuntimeConfig, "set_engine_specific", fail_hicache_publish
     )
 
-    runtime_config = await register._get_runtime_config(
-        engine, server_args, dynamo_args
-    )
+    runtime_config = await register.get_runtime_config(engine, server_args, dynamo_args)
 
     assert runtime_config.total_kv_blocks == 64
     assert runtime_config.max_num_batched_tokens == 1024
-    assert (
-        runtime_config.runtime_data[register.STRICT_REQUEST_TOKEN_LIMIT_RUNTIME_KEY]
-        == "4092"
-    )
+    assert json.loads(runtime_config.runtime_data[TOKEN_BUDGET_RUNTIME_KEY]) == {
+        "combined_limit": 4092,
+        "output_overflow": "reject",
+        "prompt_overflow": "reject",
+    }
     assert (
         "Failed to attach native offloading capacity from SGLang HiCache" in caplog.text
     )

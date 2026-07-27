@@ -4,6 +4,7 @@
 """vLLM worker-factory LoRA lifecycle tests."""
 
 import asyncio
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -93,7 +94,11 @@ async def test_prefill_load_records_and_publishes_without_eager_engine_add(
     assert kwargs["needs"] == [[WorkerType.Decode]]
     runtime_config = kwargs["runtime_config"]
     assert runtime_config.context_length == 8192
-    assert runtime_config.runtime_data["strict_request_token_limit"] == "8192"
+    assert json.loads(runtime_config.runtime_data["token_budget"]) == {
+        "combined_limit": 8192,
+        "output_overflow": "reject",
+        "prompt_overflow": "reject",
+    }
     assert runtime_config.kv_event_publishing_enabled is True
     # The adapter card must carry the engine-actual main-attention block size,
     # not engine_args.block_size (16) — see #11866.

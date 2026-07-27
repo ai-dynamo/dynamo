@@ -20,12 +20,36 @@ pub use dynamo_parsers::tool_calling::StructuralTagSchemaMode;
 // Reserve a topology namespace so generated taints can be rebuilt without touching caller taints.
 pub const TOPOLOGY_TAINT_PREFIX: &str = "dynamo.topology/";
 
-/// Runtime-data key for an engine-published strict input-plus-output token limit.
+/// Runtime-data key for an engine-published token-overflow contract.
+pub const TOKEN_BUDGET_RUNTIME_KEY: &str = "token_budget";
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputOverflow {
+    Reject,
+    Clamp,
+    Backend,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptOverflow {
+    Reject,
+    Truncate,
+    Backend,
+}
+
+/// Describes the request-token limit enforced by an engine and how that engine
+/// handles each kind of overflow.
 ///
-/// A backend must publish this only when requests above the limit are rejected,
-/// rather than truncated or otherwise accepted. The value already accounts for
-/// backend-reserved tokens.
-pub const STRICT_REQUEST_TOKEN_LIMIT_RUNTIME_KEY: &str = "strict_request_token_limit";
+/// The combined limit already accounts for engine-reserved tokens. `Backend`
+/// means the frontend cannot safely reproduce the behavior and must defer.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TokenBudget {
+    pub combined_limit: u32,
+    pub output_overflow: OutputOverflow,
+    pub prompt_overflow: PromptOverflow,
+}
 
 /// Canonical worker-taint form for topology metadata.
 ///

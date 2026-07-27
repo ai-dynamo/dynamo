@@ -411,6 +411,20 @@ class LoraMixin:
                                 else:
                                     lora_worker_type = WorkerType.Aggregated
                                     lora_needs = []
+
+                            # Reuse the base-model metadata builder so LoRA
+                            # cards advertise the same token-overflow policy,
+                            # parser configuration, and routing capabilities.
+                            # Keep this import lazy because the repository's
+                            # static test-collection environment intentionally
+                            # lacks parts of SGLang imported by register.py.
+                            from dynamo.sglang.register import get_runtime_config
+
+                            runtime_config = await get_runtime_config(
+                                self.engine,
+                                self.config.server_args,
+                                self.config.dynamo_args,
+                            )
                             await register_llm(
                                 model_input=ModelInput.Tokens,
                                 model_type=lora_model_type,
@@ -422,6 +436,7 @@ class LoraMixin:
                                 base_model_path=self.config.server_args.model_path,
                                 worker_type=lora_worker_type,
                                 needs=lora_needs,
+                                runtime_config=runtime_config,
                                 # Publish the worker's per-worker LoRA slot budget so the frontend
                                 # allocator sizes placement against real capacity instead of the
                                 # hard-coded default.

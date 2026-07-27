@@ -1,17 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 
+from dynamo.common.token_budget import TOKEN_BUDGET_RUNTIME_KEY
 from dynamo.llm import ModelType
-from dynamo.vllm.capacity import (
-    STRICT_REQUEST_TOKEN_LIMIT_RUNTIME_KEY,
-    get_metrics_model_name,
-    get_spec_decode_runtime_data,
-)
+from dynamo.vllm.capacity import get_metrics_model_name, get_spec_decode_runtime_data
 
 pytestmark = [
     pytest.mark.unit,
@@ -51,22 +49,27 @@ def test_metrics_model_name_falls_back_to_model():
 
 
 @pytest.mark.parametrize(
-    ("model_type", "expected_limit"),
-    [(ModelType.Chat, "4096"), (ModelType.Embedding, None)],
+    ("model_type", "should_publish"),
+    [(ModelType.Chat, True), (ModelType.Embedding, False)],
 )
-def test_vllm_request_token_limit_is_generation_only(model_type, expected_limit):
-    from dynamo.vllm.main import _set_vllm_request_token_limit
+def test_vllm_token_budget_is_generation_only(model_type, should_publish):
+    from dynamo.vllm.main import _set_vllm_token_budget
 
     runtime_config = SimpleNamespace(set_engine_specific=Mock())
 
-    _set_vllm_request_token_limit(runtime_config, model_type, 4096)
+    _set_vllm_token_budget(runtime_config, model_type, 4096)
 
-    if expected_limit is None:
+    if not should_publish:
         runtime_config.set_engine_specific.assert_not_called()
     else:
-        runtime_config.set_engine_specific.assert_called_once_with(
-            STRICT_REQUEST_TOKEN_LIMIT_RUNTIME_KEY, expected_limit
-        )
+        runtime_config.set_engine_specific.assert_called_once()
+        key, value = runtime_config.set_engine_specific.call_args.args
+        assert key == TOKEN_BUDGET_RUNTIME_KEY
+        assert json.loads(value) == {
+            "combined_limit": 4096,
+            "output_overflow": "reject",
+            "prompt_overflow": "reject",
+        }
 
 
 def test_spec_decode_runtime_data_falls_back_to_engine_args_json():

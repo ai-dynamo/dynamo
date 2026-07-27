@@ -7,6 +7,25 @@ import logging
 from collections.abc import Mapping
 from typing import Any
 
+from dynamo.common.token_budget import (
+    OutputOverflow,
+    PromptOverflow,
+    TokenBudget,
+    publish_token_budget,
+)
+
+
+def publish_trtllm_token_budget(runtime_config: Any, max_seq_len: int) -> None:
+    """Publish TensorRT-LLM's request-overflow contract."""
+    publish_token_budget(
+        runtime_config,
+        TokenBudget(
+            combined_limit=max_seq_len,
+            output_overflow=OutputOverflow.CLAMP,
+            prompt_overflow=PromptOverflow.REJECT,
+        ),
+    )
+
 
 def deep_update(target: dict[str, Any], source: Mapping[str, Any]) -> None:
     """Recursively update nested dictionaries.
