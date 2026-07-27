@@ -91,8 +91,10 @@ def main() -> int:
             None,
         )
         if not (tot_start < idx < tot_end):
-            fail(f"changed line {idx} is outside the MAIN_TOT block "
-                 f"({tot_start}..{tot_end})")
+            fail(
+                f"changed line {idx} is outside the MAIN_TOT block "
+                f"({tot_start}..{tot_end})"
+            )
 
         # Synthetic version must appear exactly once (no accidental spillover).
         if after.count(SYNTH) != 1:
@@ -101,7 +103,9 @@ def main() -> int:
         # Per-release pins must be untouched: parse and cross-check.
         env = gen.parse_data_module(data_path)
         if env["MAIN_TOT"].get("trtllm") != SYNTH:
-            fail(f"parsed MAIN_TOT.trtllm != {SYNTH}: {env['MAIN_TOT'].get('trtllm')!r}")
+            fail(
+                f"parsed MAIN_TOT.trtllm != {SYNTH}: {env['MAIN_TOT'].get('trtllm')!r}"
+            )
         rel_pins = [
             r.get("pins", {}).get("trtllm")
             for r in env["RELEASES"]
