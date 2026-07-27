@@ -12,6 +12,7 @@ from gpu_memory_service.common.locks import RequestedLockType
 from gpu_memory_service.common.vmm import VMMDevice
 
 from ..protocol import (
+    AbortRequest,
     AllocateRequest,
     AllocationRecord,
     CommitRequest,
@@ -75,6 +76,10 @@ class GMSServerMemoryManager:
         if isinstance(request, CommitRequest):
             self._require_rw(session)
             self._sessions.commit(session)
+            return SuccessResponse(), -1
+        if isinstance(request, AbortRequest):
+            self._require_rw(session)
+            self._sessions.close(session)
             return SuccessResponse(), -1
         raise RuntimeError(f"unsupported GMS request {type(request).__name__}")
 
