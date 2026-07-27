@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Benchmark — Qwen3.5-122B-A10B-FP8 tp1 + MTP, KV routing
 
 Benchmarks the recipe with AIPerf against the deployed DGD: an agentic Mooncake
