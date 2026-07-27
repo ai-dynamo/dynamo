@@ -134,6 +134,13 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 
 # Add external repos (NVIDIA devtools, GitHub CLI) and install in one pass.
 # Cache apt downloads; sharing=locked avoids apt/dpkg races with concurrent builds.
+#
+# ==================== TEMPORARY WORKAROUND ====================
+# The devtools repo index lists "Filename: ./nsight-systems-...deb", so apt
+# requests the "/./" literally and that bucket 404s on it (the CUDA repo
+# normalizes fine). Fetch the normalized URL directly instead of by name.
+# Revert to a plain apt-get install once NVIDIA fixes the bucket.
+# ==============================================================
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     wget -qO - "https://developer.download.nvidia.com/devtools/repos/ubuntu2404/${TARGETARCH}/nvidia.pub" \
         | gpg --dearmor -o /etc/apt/keyrings/nvidia-devtools.gpg && \
@@ -144,7 +151,10 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     echo "deb [arch=${TARGETARCH} signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
         | tee /etc/apt/sources.list.d/github-cli.list > /dev/null && \
     apt-get update && \
-    apt-get install -y --no-install-recommends nsight-systems-2025.5.1 gh && \
+    curl --retry 3 --retry-delay 5 -fsSL -o /tmp/nsys.deb \
+        "https://developer.download.nvidia.com/devtools/repos/ubuntu2404/${TARGETARCH}/nsight-systems-2025.5.1_2025.5.1.121-1_${TARGETARCH}.deb" && \
+    apt-get install -y --no-install-recommends /tmp/nsys.deb gh && \
+    rm -f /tmp/nsys.deb && \
     rm -rf /var/lib/apt/lists/*
 
 # ======================================================================

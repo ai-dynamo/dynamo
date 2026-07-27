@@ -352,8 +352,6 @@ areas:
   - docs/
   - examples/README.md
   - examples/__init__.py
-  - fern/
-  - fern/components/
 - label: process
   github_team: '@ai-dynamo/dynamo-process-codeowners'
   path_globs:
@@ -568,15 +566,15 @@ shared:
   owners:
   - frontend
   - agents
-- glob: docs/agents/
+- glob: docs/fern/agents/
   owners:
   - docs
   - agents
-- glob: docs/digest/agentic-inference/
+- glob: docs/fern/digest/agentic-inference/
   owners:
   - docs
   - agents
-- glob: docs/backends/sglang/agents.md
+- glob: docs/fern/backends/sglang/agents.md
   owners:
   - docs
   - agents
