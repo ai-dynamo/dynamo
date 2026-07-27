@@ -576,7 +576,9 @@ async def handle_non_leader_node(
     )
 
     try:
-        if publisher.dynamo_args.use_kv_events:
+        if publisher.dynamo_args.use_kv_events and publishes_kv_events(
+            publisher.server_args
+        ):
             kv_worker_id = await _resolve_multinode_leader_worker_id(
                 publisher.generate_endpoint,
                 publisher.server_args,
