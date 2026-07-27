@@ -156,6 +156,41 @@ def _rl_init_weights_timeout_s() -> float:
     )
 
 
+# Externally reachable control-plane base URL for this engine, advertised through
+# RL discovery. It is deliberately NOT derived from a bind address: the worker is
+# headless (no vLLM API server), and a guessed URL breaks under Kubernetes, NAT,
+# and split listeners. Deployment supplies it; when unset the field is omitted so
+# consumers fail loudly instead of dialing a wrong endpoint.
+_RL_ADMIN_BASE_URL_ENV = "DYN_RL_ADMIN_BASE_URL"
+
+
+def _rl_engine_metadata(engine: Any, config: Any) -> dict[str, Any]:
+    """Authoritative engine facts carried verbatim by RL discovery.
+
+    ``world_size`` is this engine's communicator size (TP x PP x DP), read from
+    the initialized vLLM runtime rather than recomputed from launch flags.
+    """
+    metadata: dict[str, Any] = {}
+
+    admin_base_url = os.environ.get(_RL_ADMIN_BASE_URL_ENV, "").strip()
+    if admin_base_url:
+        metadata["admin_base_url"] = admin_base_url
+
+    vllm_config = getattr(engine, "vllm_config", None)
+    parallel = getattr(vllm_config, "parallel_config", None)
+    if parallel is not None:
+        world_size = getattr(parallel, "world_size", None)
+        dp_size = getattr(parallel, "data_parallel_size", 1) or 1
+        if isinstance(world_size, int) and world_size > 0:
+            metadata["world_size"] = world_size * dp_size
+
+    model = getattr(config, "model", None) or getattr(config, "served_model_name", None)
+    if isinstance(model, str) and model.strip():
+        metadata["model"] = model.strip()
+
+    return metadata
+
+
 class _DeferredAbort:
     """Defers engine_client.abort(request_id) until the first engine output.
 
@@ -1132,7 +1167,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self.shutdown_event = shutdown_event
         # Request-plane RL method map served by rl_dispatch on
         # dyn://<namespace>.<component>.rl when --enable-rl / DYN_ENABLE_RL is set.
-        self.rl_route_registry = RLRouteRegistry(self.runtime, logger_=logger)
+        self.rl_route_registry = RLRouteRegistry(
+            self.runtime,
+            logger_=logger,
+            engine_metadata=_rl_engine_metadata(engine, config),
+        )
 
         # Load the custom encoder last. If a later init step raised, executor
         # GC would eventually reap the idle actor thread — but only once the
