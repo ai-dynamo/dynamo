@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 /**
  * Custom footer for Dynamo docs (Fern native header/footer).
  *
@@ -7,7 +12,13 @@
  * after the docs restructure moved styles back to main.css and production
  * rendered unstyled). Inlined rather than imported because Fern custom
  * footer components cannot import local modules.
+ *
+ * SITE_CSS mirrors docs/fern/main.css, which stays canonical and served via
+ * docs.yml `css:` (the server-rendered / no-JS baseline). Do not edit the
+ * block by hand: run `python3 docs/fern/scripts/sync_site_css.py` after
+ * changing main.css. Pre-commit enforces the mirror with `--check`.
  */
+// sync-site-css:begin (generated from ../main.css)
 const SITE_CSS = `
 /*!
  * SPDX-FileCopyrightText: Copyright (c) 2023-2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
@@ -4134,8 +4145,8 @@ body:has(.dynamo-blog-article) #fern-sidebar a[href*="/digest/"] .fern-sidebar-l
   letter-spacing: 0.11em;
   line-height: 1;
 }
-
 `;
+// sync-site-css:end
 
 export default function CustomFooter() {
   const currentYear = new Date().getFullYear();

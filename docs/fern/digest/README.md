@@ -85,7 +85,7 @@ Use an existing `art` treatment unless the post needs a deliberately new visual 
 
 ## Step 4: Add the Sidebar Date Label
 
-Add the post date to the Blog archive selectors in `docs/fern/main.css`. Scope the selector to the post slug so the label appears only in the Blog sidebar.
+Add the post date to the Blog archive selectors in `docs/fern/main.css`. Scope the selector to the post slug so the label appears only in the Blog sidebar. After editing `main.css`, run `python3 docs/fern/scripts/sync_site_css.py` so the footer's SITE_CSS mirror stays in sync (pre-commit enforces this).
 
 ## Quick Checklist
 
