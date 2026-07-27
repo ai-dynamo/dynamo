@@ -57,6 +57,9 @@ import { useEffect, useRef, useState } from "react";
 const PLAYER_VERSION = "3.17.0";
 const PLAYER_JS = `https://cdn.jsdelivr.net/npm/asciinema-player@${PLAYER_VERSION}/dist/bundle/asciinema-player.min.js`;
 const PLAYER_CSS = `https://cdn.jsdelivr.net/npm/asciinema-player@${PLAYER_VERSION}/dist/bundle/asciinema-player.css`;
+// Subresource-integrity pins for the exact 3.17.0 bundle files (recompute if PLAYER_VERSION changes).
+const PLAYER_JS_SRI = "sha384-s55nTYAdrPwGWmKKQ1lCnoB8H9LbqmsXsqqqPAHK2+T5h9IfI2dTXTDXJcZnySJD";
+const PLAYER_CSS_SRI = "sha384-05cmIVRzN7mR7nmqajPpGPUPqJ5VyTAGHL1xJuiGWfhpWDp5hEfBk50kr21f3ILM";
 
 const CSS_ELEMENT_ID = "asciinema-player-css";
 const JS_ELEMENT_ID = "asciinema-player-js";
@@ -107,6 +110,8 @@ function ensureStylesheet(): void {
   link.id = CSS_ELEMENT_ID;
   link.rel = "stylesheet";
   link.href = PLAYER_CSS;
+  link.integrity = PLAYER_CSS_SRI;
+  link.crossOrigin = "anonymous";
   document.head.appendChild(link);
 }
 
@@ -131,6 +136,8 @@ function ensureScript(): Promise<void> {
     const script = document.createElement("script");
     script.id = JS_ELEMENT_ID;
     script.src = PLAYER_JS;
+    script.integrity = PLAYER_JS_SRI;
+    script.crossOrigin = "anonymous";
     script.async = true;
     script.addEventListener("load", () => resolve());
     script.addEventListener("error", () => reject(new Error("asciinema-player failed to load")));
