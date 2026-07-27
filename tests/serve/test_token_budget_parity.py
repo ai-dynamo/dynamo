@@ -32,6 +32,7 @@ class BackendParitySpec:
     mode: str
     output_overflow: OutputOverflow
     prompt_overflow: PromptOverflow
+    prompt_reject_after_headers: bool = False
 
     @property
     def name(self) -> str:
@@ -52,6 +53,7 @@ class RequestOutcome:
     body: dict | None
     stream_finished: bool
     usage: TokenUsage | None
+    stream_error: dict | None
 
 
 @dataclass(frozen=True)
@@ -110,6 +112,7 @@ PARITY_SPECS = (
             "default",
             OutputOverflow.CLAMP,
             PromptOverflow.REJECT,
+            prompt_reject_after_headers=True,
         ),
         id="trtllm-default",
         marks=[
@@ -317,11 +320,13 @@ def _send_case(port: int, case: RequestCase) -> RequestOutcome:
                 body,
                 False,
                 _parse_usage(body),
+                None,
             )
 
         stream_finished = False
         saw_data = False
         usage = None
+        stream_error = None
         for line in response.iter_lines(decode_unicode=True):
             if not line or not line.startswith("data:"):
                 continue
@@ -331,13 +336,19 @@ def _send_case(port: int, case: RequestCase) -> RequestOutcome:
                 stream_finished = True
                 continue
             event = json.loads(data)
-            assert (
-                "error" not in event
-            ), f"Streaming response contained an error: {event}"
+            if event.get("error"):
+                stream_error = event["error"]
+                continue
             usage = _parse_usage(event) or usage
 
         assert saw_data, "Successful streaming response did not contain SSE data"
-        return RequestOutcome(response.status_code, None, stream_finished, usage)
+        return RequestOutcome(
+            response.status_code,
+            None,
+            stream_finished,
+            usage,
+            stream_error,
+        )
     finally:
         response.close()
 
@@ -353,30 +364,63 @@ def _parse_usage(body: dict | None) -> TokenUsage | None:
     )
 
 
-def _expected_status(spec: BackendParitySpec, case: RequestCase) -> int:
+def _is_rejected(spec: BackendParitySpec, case: RequestCase) -> bool:
+    if case.name == "output-overflow":
+        return spec.output_overflow is OutputOverflow.REJECT
+    if case.name == "prompt-overflow":
+        return spec.prompt_overflow is PromptOverflow.REJECT
+    return False
+
+
+def _expected_status(
+    spec: BackendParitySpec,
+    case: RequestCase,
+    *,
+    dynamo: bool,
+) -> int:
     if case.name == "within-budget":
         return 200
-    if case.name == "output-overflow":
-        return 400 if spec.output_overflow is OutputOverflow.REJECT else 200
-    if case.name == "prompt-overflow":
-        return 400 if spec.prompt_overflow is PromptOverflow.REJECT else 200
-    raise AssertionError(f"Unknown request case: {case.name}")
+    if (
+        not dynamo
+        and case.name == "prompt-overflow"
+        and spec.prompt_reject_after_headers
+    ):
+        return 200
+    return 400 if _is_rejected(spec, case) else 200
 
 
 def _assert_outcome_semantics(
     spec: BackendParitySpec,
     case: RequestCase,
     outcome: RequestOutcome,
+    *,
+    dynamo: bool,
 ) -> None:
-    if outcome.status_code == 400:
-        assert outcome.body is not None, "400 response was not JSON"
-        error = (
-            outcome.body.get("error")
-            or outcome.body.get("message")
-            or outcome.body.get("detail")
-        )
-        assert error, f"400 response lacked an error message: {outcome.body}"
+    if _is_rejected(spec, case):
+        if outcome.status_code == 400:
+            assert outcome.stream_error is None
+            assert outcome.body is not None, "400 response was not JSON"
+            error = (
+                outcome.body.get("error")
+                or outcome.body.get("message")
+                or outcome.body.get("detail")
+            )
+        else:
+            # TRT-LLM currently discovers prompt overflow after committing
+            # streaming headers. Dynamo deliberately moves that same rejection
+            # to request time using the engine-published Reject policy.
+            assert not dynamo
+            assert spec.prompt_reject_after_headers
+            assert outcome.stream_finished
+            error = outcome.stream_error
+        assert error, f"Rejected response lacked an error message: {outcome}"
         return
+
+    assert outcome.status_code == 200
+    assert outcome.stream_error is None, (
+        f"Accepted response contained an inline stream error: "
+        f"{outcome.stream_error}"
+    )
 
     if case.stream:
         assert (
@@ -444,23 +488,24 @@ def test_native_and_dynamo_token_budget_parity(
             }
 
     for case in REQUEST_CASES:
-        expected = _expected_status(spec, case)
+        expected_native = _expected_status(spec, case, dynamo=False)
+        expected_dynamo = _expected_status(spec, case, dynamo=True)
         native_outcome = native[case.name]
         dynamo_outcome = dynamo[case.name]
 
-        assert native_outcome.status_code == expected, (
+        assert native_outcome.status_code == expected_native, (
             f"{spec.name} native behavior changed for {case.name}: "
-            f"expected HTTP {expected}, got {native_outcome.status_code}"
+            f"expected HTTP {expected_native}, got {native_outcome.status_code}"
         )
-        assert dynamo_outcome.status_code == native_outcome.status_code, (
-            f"Dynamo diverged from native {spec.name} for {case.name}: "
-            f"native HTTP {native_outcome.status_code}, "
-            f"Dynamo HTTP {dynamo_outcome.status_code}"
+        assert dynamo_outcome.status_code == expected_dynamo, (
+            f"Dynamo behavior changed for {spec.name} {case.name}: "
+            f"expected HTTP {expected_dynamo}, got {dynamo_outcome.status_code}"
         )
-        _assert_outcome_semantics(spec, case, native_outcome)
-        _assert_outcome_semantics(spec, case, dynamo_outcome)
-        assert dynamo_outcome.usage == native_outcome.usage, (
-            f"Dynamo token accounting diverged from native {spec.name} for "
-            f"{case.name}: native={native_outcome.usage}, "
-            f"Dynamo={dynamo_outcome.usage}"
-        )
+        _assert_outcome_semantics(spec, case, native_outcome, dynamo=False)
+        _assert_outcome_semantics(spec, case, dynamo_outcome, dynamo=True)
+        if not _is_rejected(spec, case):
+            assert dynamo_outcome.usage == native_outcome.usage, (
+                f"Dynamo token accounting diverged from native {spec.name} for "
+                f"{case.name}: native={native_outcome.usage}, "
+                f"Dynamo={dynamo_outcome.usage}"
+            )
