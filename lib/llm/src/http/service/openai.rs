@@ -1451,7 +1451,7 @@ fn parse_chat_completion_request(
 
 /// Treat the empty URL emitted by UUID-cache clients as a cache-only image.
 fn normalize_empty_uuid_image_urls(body: &[u8]) -> Option<serde_json::Value> {
-    let mut request: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let mut request: serde_json::Value = parse_json_request("chat completions", body).ok()?;
     let mut changed = false;
 
     for part in request
@@ -3834,11 +3834,29 @@ mod tests {
         let body = br#"{"model":"test-model","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":""},"uuid":"image-42"}]}]}"#;
 
         let request = parse_chat_completion_request(body).expect("request should parse");
+        let request = serde_json::to_value(request).expect("request should serialize");
+        assert_eq!(request["messages"][0]["content"][0]["uuid"], "image-42");
         assert_eq!(
-            serde_json::to_value(request).expect("request should serialize")["messages"][0]["content"]
-                [0]["uuid"],
-            "image-42"
+            request["messages"][0]["content"][0]["image_url"],
+            serde_json::Value::Null
         );
+    }
+
+    #[test]
+    fn test_parse_chat_completion_request_normalizes_empty_uuid_url_after_tolerant_parse() {
+        let body = b"{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"raw \xff \x1b data\"},{\"type\":\"image_url\",\"image_url\":{\"url\":\"\"},\"uuid\":\"image-42\"}]}]}";
+
+        let request = parse_chat_completion_request(body).expect("request should parse");
+        let request = serde_json::to_value(request).expect("request should serialize");
+        assert_eq!(
+            request["messages"][0]["content"][0]["text"],
+            "raw \u{fffd} \u{1b} data"
+        );
+        assert_eq!(
+            request["messages"][0]["content"][1]["image_url"],
+            serde_json::Value::Null
+        );
+        assert_eq!(request["messages"][0]["content"][1]["uuid"], "image-42");
     }
 
     #[test]
