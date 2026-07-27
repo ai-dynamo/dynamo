@@ -156,25 +156,18 @@ def _rl_init_weights_timeout_s() -> float:
     )
 
 
-# Externally reachable control-plane base URL for this engine, advertised through
-# RL discovery. It is deliberately NOT derived from a bind address: the worker is
-# headless (no vLLM API server), and a guessed URL breaks under Kubernetes, NAT,
-# and split listeners. Deployment supplies it; when unset the field is omitted so
-# consumers fail loudly instead of dialing a wrong endpoint.
-_RL_ADMIN_BASE_URL_ENV = "DYN_RL_ADMIN_BASE_URL"
-
-
 def _rl_engine_metadata(engine: Any, config: Any) -> dict[str, Any]:
-    """Authoritative engine facts carried verbatim by RL discovery.
+    """Framework-neutral engine facts carried verbatim by RL discovery.
 
     ``world_size`` is this engine's communicator size (TP x PP x DP), read from
     the initialized vLLM runtime rather than recomputed from launch flags.
+
+    Deliberately excludes any engine control URL: the worker is headless, and an
+    ``admin_base_url``-style field encodes one RL framework's topology (an engine
+    that exposes its own HTTP admin) into a contract that must serve any of them.
+    Control endpoints are advertised through ``system_url``/``system_routes``.
     """
     metadata: dict[str, Any] = {}
-
-    admin_base_url = os.environ.get(_RL_ADMIN_BASE_URL_ENV, "").strip()
-    if admin_base_url:
-        metadata["admin_base_url"] = admin_base_url
 
     vllm_config = getattr(engine, "vllm_config", None)
     parallel = getattr(vllm_config, "parallel_config", None)
@@ -1624,6 +1617,20 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         # re-enable generation while an update's collective_rpc is still
         # mutating weights (dynamo-ops).
         async with self._pause_lock:
+            # A dirty worker has an unknown weight/cache state: weights may be
+            # installed while stale KV survives. Resuming would silently serve a
+            # mixed state, so the caller must reconcile or restart it first.
+            if getattr(self, "_weight_state", "committed") == "dirty" and not body.get(
+                "force", False
+            ):
+                return {
+                    "status": "error",
+                    "state": "dirty",
+                    "message": (
+                        "worker is dirty after a failed weight update and cannot "
+                        "resume; reconcile or restart it, or pass force=true"
+                    ),
+                }
             try:
                 await self.engine_client.resume_generation()
                 self._paused = False
@@ -1709,7 +1716,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 "status": "error",
                 "message": "request body must be a JSON object",
             }
-        return {"status": "ok", "version": getattr(self, "_weight_version", "initial")}
+        return {
+            "status": "ok",
+            "version": getattr(self, "_weight_version", "initial"),
+            # Lets a caller that lost an update response learn the real outcome
+            # instead of assuming success and resuming a dirty worker.
+            "state": getattr(self, "_weight_state", "committed"),
+        }
 
     async def update_weights_from_disk(self, body: dict) -> dict:
         """Load weights from a shared filesystem checkpoint."""
@@ -1807,21 +1820,38 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             }
             try:
                 await self.engine_client.collective_rpc(rpc, kwargs=rpc_kwargs)
-                if reset_prefix_cache:
-                    # Weights changed: stale prefix/KV cache must be invalidated
-                    # before resume so it is not reused under the new weights.
-                    await self.engine_client.reset_prefix_cache()
-                self._weight_version = version
-                logger.info(
-                    f"[RL] Weights received via distributed "
-                    f"(version={version}, rpc={rpc})"
-                )
-                return {"status": "ok", "version": version}
             except EngineDeadError as e:
                 self._shutdown_on_engine_dead(e)
             except Exception as e:
+                # Weights may or may not have landed. Treat the worker as dirty:
+                # the caller must reconcile or restart it, never just resume.
+                self._weight_state = "dirty"
                 logger.error(f"[RL] update_weights_from_distributed failed: {e}")
-                return {"status": "error", "message": str(e)}
+                return {"status": "error", "state": "dirty", "message": str(e)}
+
+            # Weights are installed from here on. The version must not advance
+            # until stale prefix/KV cache is invalidated too, otherwise the worker
+            # serves old cache under new weights while reporting the old version.
+            try:
+                if reset_prefix_cache:
+                    await self.engine_client.reset_prefix_cache()
+            except EngineDeadError as e:
+                self._shutdown_on_engine_dead(e)
+            except Exception as e:
+                self._weight_state = "dirty"
+                logger.error(
+                    f"[RL] weights installed (version={version}) but prefix-cache "
+                    f"invalidation failed; worker is dirty and must not resume: {e}"
+                )
+                return {"status": "error", "state": "dirty", "message": str(e)}
+
+            self._weight_version = version
+            self._weight_state = "committed"
+            logger.info(
+                f"[RL] Weights received via distributed "
+                f"(version={version}, rpc={rpc})"
+            )
+            return {"status": "ok", "state": "committed", "version": version}
 
     async def update_weights_from_tensor(self, body: dict) -> dict:
         """Not implemented: in-process tensor transfer is not yet supported."""

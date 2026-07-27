@@ -88,9 +88,11 @@ def require_lora_unload_request(request: Mapping[str, Any] | None) -> str:
 class RLRouteRegistry:
     """Registry for worker RL admin route descriptors."""
 
-    # Engine metadata the RL discovery contract carries verbatim. These values are
-    # supplied by the engine that owns them; the registry never derives them.
-    ENGINE_METADATA_KEYS = ("admin_base_url", "world_size", "model")
+    # Framework-neutral engine metadata the RL discovery contract carries verbatim.
+    # Supplied by the engine that owns them; the registry never derives them. Any
+    # RL framework driving collective weight transfer needs these facts, so they
+    # stay engine-descriptive and free of framework-specific topology assumptions.
+    ENGINE_METADATA_KEYS = ("world_size", "model")
 
     def __init__(
         self,
