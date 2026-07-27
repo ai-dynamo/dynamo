@@ -27,6 +27,7 @@ use crate::source::EventSource;
 use crate::tracker::{StoreInput, Tracker};
 use crate::wire::vllm_in::{KvEventBatch, RawKvEvent};
 use crate::zmq_util::{connect_sub_socket, multipart_message};
+use dynamo_kv_router::protocols::StorageTier;
 
 /// Spawn the ZMQ listener. Returns immediately with a [`JoinHandle`] for the task.
 pub async fn spawn(
@@ -89,6 +90,18 @@ pub async fn spawn(
 }
 
 fn process_event(tracker: &mut Tracker, event: RawKvEvent, engine_source: EventSource) {
+    // G1-only ingress: this source is the engine's device (G1) cache. Native
+    // lower-tier media (CPU offload, vLLM STORAGE) belong to other systems —
+    // KVBM offload arrives via its own source — so they must not be tracked as
+    // G1 here.
+    if event
+        .medium()
+        .and_then(StorageTier::from_kv_medium)
+        .is_some_and(|tier| !tier.is_gpu())
+    {
+        return;
+    }
+
     match event {
         RawKvEvent::BlockStored {
             block_hashes,
@@ -180,5 +193,52 @@ fn process_event(tracker: &mut Tracker, event: RawKvEvent, engine_source: EventS
         }
 
         RawKvEvent::Ignored => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tracker::ConsolidatedEvent;
+    use crate::wire::vllm_in::BlockHashValue;
+
+    fn stored_event(medium: Option<&str>) -> RawKvEvent {
+        RawKvEvent::BlockStored {
+            block_hashes: vec![BlockHashValue::Unsigned(1)],
+            parent_block_hash: None,
+            token_ids: vec![10, 11],
+            block_size: 2,
+            medium: medium.map(str::to_owned),
+            lora_name: None,
+            cache_namespace: None,
+            block_mm_infos: None,
+            is_eagle: Some(false),
+            group_idx: None,
+            kv_cache_spec_kind: None,
+            kv_cache_spec_sliding_window: None,
+            locality: None,
+        }
+    }
+
+    /// G1-only ingress contract: native lower-tier media (vLLM STORAGE, CPU
+    /// offload) are dropped; only device (G1) events reach the tracker.
+    #[test]
+    fn process_event_tracks_only_g1_device_events() {
+        let mut tracker = Tracker::new(None);
+
+        process_event(
+            &mut tracker,
+            stored_event(Some("STORAGE")),
+            EventSource::Vllm,
+        );
+        process_event(&mut tracker, stored_event(Some("CPU")), EventSource::Vllm);
+        assert_eq!(tracker.num_blocks(), 0);
+
+        process_event(&mut tracker, stored_event(None), EventSource::Vllm);
+        assert_eq!(tracker.num_blocks(), 1);
+        assert!(matches!(
+            tracker.drain_events().as_slice(),
+            [ConsolidatedEvent::Store { .. }]
+        ));
     }
 }

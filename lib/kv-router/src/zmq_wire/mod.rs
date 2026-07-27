@@ -13,7 +13,7 @@ use std::sync::atomic::AtomicU32;
 use rmp_serde as rmps;
 use rustc_hash::FxHashMap;
 
-use crate::protocols::{DpRank, PlacementEvent, WorkerWithDpRank};
+use crate::protocols::{DpRank, PlacementEvent, StorageTier, WorkerWithDpRank};
 
 mod convert;
 mod deserialize;
@@ -30,7 +30,7 @@ pub use extra_keys::{
     extra_keys_to_block_mm_infos, extra_keys_to_cache_namespace, parse_mm_hash_from_extra_key,
 };
 pub use filter::KvCacheSpecKind;
-pub use types::{BlockHashValue, ExtraKeyItem, KvEventBatch, KvTokenIds, RawKvEvent};
+pub use types::{BlockHashValue, ExtraKeyItem, KvEventBatch, KvTokenIds, Locality, RawKvEvent};
 
 use filter::KvCacheEventMetadata;
 
@@ -125,6 +125,19 @@ impl ZmqEventNormalizer {
     ) -> Result<RawKvEvent, ZmqEventFilterReason> {
         if raw.is_ignored() {
             return Err(ZmqEventFilterReason::IgnoredEvent);
+        }
+
+        // Lower-tier events (any recognized non-device medium) carry no
+        // extra_keys/cache_namespace and must not mutate per-group metadata or
+        // the salted-namespace propagation chain; they are also outside the
+        // SW/SSM group filter's semantics. Route them straight to conversion,
+        // which applies the tier/locality gating.
+        if raw
+            .medium()
+            .and_then(StorageTier::from_kv_medium)
+            .is_some_and(|tier| !tier.is_gpu())
+        {
+            return Ok(raw);
         }
 
         let metadata = raw.metadata();
