@@ -87,7 +87,7 @@ python3 -m dynamo.mocker --help
 | Control prefix and prefill behavior | `--enable-prefix-caching`, `--enable-chunked-prefill`, `--preemption-mode` |
 | Scale the worker topology | `--num-workers`, `--data-parallel-size`, `--stagger-delay` |
 | Choose timing | `--planner-profile-data`, `--aic-perf-model`, `--aic-*`, `--speedup-ratio`, `--decode-speedup-ratio` |
-| Configure direct or coordinated P/D handoff | `--disaggregation-mode`, `--bootstrap-ports`, `--kv-transfer-bandwidth`, `--kv-transfer-timing-mode` |
+| Configure direct or coordinated P/D handoff | `--disaggregation-mode`, `--bootstrap-ports`, `--kv-transfer-bandwidth`, `--kv-transfer-bandwidth-model`, `--kv-transfer-timing-mode` |
 | Configure KVBM lower tiers | `--num-g2-blocks`, `--num-g3-blocks`, `--enable-g4-storage`, `--offload-batch-size`, `--bandwidth-*-gbps` |
 | Select runtime integration | `--discovery-backend`, `--request-plane`, `--event-plane`, `--endpoint` |
 | Replay exact outputs | `--response-replay-trace-path` |
@@ -196,6 +196,12 @@ activation, cancellation, and source release.
 from the model configuration and `--kv-cache-dtype`; use `--kv-bytes-per-token` to override it. Set
 `--kv-transfer-bandwidth 0` to disable the delay. TensorRT-LLM disaggregation is not supported. See
 [Prefill/Decode Handoff](modeling.md#prefilldecode-handoff) for the semantic differences.
+
+By default, `--kv-transfer-bandwidth-model fifo` allows one full-bandwidth transfer at a time per
+logical prefill worker. Transfers from data-parallel ranks of the same prefill worker wait in
+first-in, first-out order; transfers from different prefill workers can overlap. Set
+`--kv-transfer-bandwidth-model independent` to retain the prior behavior, in which concurrent
+transfers each use the configured bandwidth.
 
 ## Scale Workers and Observe Overhead
 

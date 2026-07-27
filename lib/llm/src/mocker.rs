@@ -26,8 +26,8 @@ use dashmap::DashMap;
 use dynamo_kv_router::protocols::{KvCacheEvent, StorageTier};
 use dynamo_mocker::common::handoff::HandoffId;
 use dynamo_mocker::common::protocols::{
-    DirectRequest, KvCacheEventSink, KvEventPublishers, MockEngineArgs, OutputSignal,
-    RawKvEventSink,
+    DirectRequest, KvCacheEventSink, KvEventPublishers, KvTransferBandwidthModel, MockEngineArgs,
+    OutputSignal, RawKvEventSink,
 };
 use dynamo_mocker::engine::create_engine;
 use dynamo_mocker::loadgen::{OUTPUT_REPLAY_ID_ANNOTATION_KEY, effective_replay_key};
@@ -199,13 +199,64 @@ fn generate_random_token() -> TokenIdType {
     rng.random_range(1000..2000)
 }
 
-async fn wait_for_no_bootstrap_handoff_delay(
-    is_prefill: bool,
-    has_handoff_session: bool,
-    delay_ms: Option<f64>,
-) {
-    if let Some(delay) = no_bootstrap_handoff_delay(is_prefill, has_handoff_session, delay_ms) {
+#[derive(Clone)]
+struct KvTransferGate {
+    model: KvTransferBandwidthModel,
+    permit: Arc<Semaphore>,
+}
+
+impl KvTransferGate {
+    fn new(model: KvTransferBandwidthModel) -> Self {
+        Self {
+            model,
+            permit: Arc::new(Semaphore::new(1)),
+        }
+    }
+
+    async fn wait(&self, delay: Duration) {
+        if delay.is_zero() {
+            return;
+        }
+        let _permit = match self.model {
+            KvTransferBandwidthModel::Fifo => Some(
+                self.permit
+                    .acquire()
+                    .await
+                    .expect("KV transfer gate must remain open"),
+            ),
+            KvTransferBandwidthModel::Independent => None,
+        };
         tokio::time::sleep(delay).await;
+    }
+
+    async fn wait_with_queue_deadline(
+        &self,
+        delay: Duration,
+        queue_deadline: tokio::time::Instant,
+    ) -> bool {
+        if delay.is_zero() {
+            return true;
+        }
+        let _permit = match self.model {
+            KvTransferBandwidthModel::Fifo => {
+                let permit = tokio::select! {
+                    biased;
+                    permit = self.permit.acquire() => permit
+                        .expect("KV transfer gate must remain open"),
+                    _ = tokio::time::sleep_until(queue_deadline) => return false,
+                };
+                Some(permit)
+            }
+            KvTransferBandwidthModel::Independent => None,
+        };
+        tokio::time::sleep(delay).await;
+        true
+    }
+}
+
+impl Default for KvTransferGate {
+    fn default() -> Self {
+        Self::new(KvTransferBandwidthModel::Fifo)
     }
 }
 
@@ -230,6 +281,7 @@ pub struct MockEngine {
     // context stop/response-stream drop path to targeted cancellation. Until then, lib/mocker
     // cancellation is not wired end to end through MockEngine.
     handoff_session_permits: OnceCell<Vec<Arc<Semaphore>>>,
+    kv_transfer_gate: KvTransferGate,
     senders_ready: Notify,
     engine_args: MockEngineArgs,
     response_replay_table: Option<ResponseReplayTable>,
@@ -257,6 +309,7 @@ struct PreparedBootstrap {
 impl MockEngine {
     /// Create a new MockEngine with the given parameters
     pub fn new(engine_args: MockEngineArgs) -> Self {
+        let kv_transfer_gate = KvTransferGate::new(engine_args.kv_transfer_bandwidth_model);
         let native_metrics = NativeMockerMetrics::new(engine_args.engine_type, engine_args.dp_size)
             .expect("mocker native metrics collectors should be valid");
         let response_replay_table = engine_args
@@ -281,6 +334,7 @@ impl MockEngine {
             request_senders: OnceCell::new(),
             command_senders: OnceCell::new(),
             handoff_session_permits: OnceCell::new(),
+            kv_transfer_gate,
             senders_ready: Notify::new(),
             engine_args,
             response_replay_table,
@@ -341,10 +395,11 @@ impl MockEngine {
         let incoming_rx = server
             .take_incoming_receiver()
             .expect("new bootstrap server must own its incoming receiver");
-        let manager = SourceHandoffManager::start(
+        let manager = SourceHandoffManager::start_with_transfer_gate(
             incoming_rx,
             max_sessions,
             Duration::from_millis(self.engine_args.handoff_session_timeout_ms),
+            self.kv_transfer_gate.clone(),
             self.handoff_shutdown.clone(),
         );
         assert!(
@@ -972,6 +1027,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
         let reasoning = self.engine_args.reasoning.clone();
         let handoff_session_timeout =
             Duration::from_millis(self.engine_args.handoff_session_timeout_ms);
+        let kv_transfer_gate = self.kv_transfer_gate.clone();
         let mut native_timing = native_timing;
         let response_task_tracker = (source_completion_rx.is_some()
             || destination_cleanup.is_some())
@@ -1074,12 +1130,21 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                             }
                             native_timing.record_tokens(1);
 
-                            wait_for_no_bootstrap_handoff_delay(
+                            if let Some(delay) = no_bootstrap_handoff_delay(
                                 is_prefill,
                                 has_handoff_session,
                                 signal.handoff_delay_ms,
-                            )
-                            .await;
+                            ) {
+                                tokio::select! {
+                                    biased;
+                                    _ = async_context.stopped() => {
+                                        handoff_cancel.cancel();
+                                        let _ = stream_tx.send(LLMEngineOutput::cancelled());
+                                        break;
+                                    }
+                                    _ = kv_transfer_gate.wait(delay) => {}
+                                }
+                            }
 
                             if !source_handoff_complete
                                 && let Some(completion_rx) = source_completion_rx.take()
@@ -1318,6 +1383,164 @@ mod tests {
         assert!(finish.token_ids.is_empty());
         assert!(finish.finish_reason.is_some());
         assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fifo_transfer_gate_serializes_one_prefill_worker() {
+        let gate = KvTransferGate::default();
+        let first_gate = gate.clone();
+        let first = tokio::spawn(async move {
+            first_gate.wait(Duration::from_millis(100)).await;
+        });
+        tokio::task::yield_now().await;
+        let second_gate = gate.clone();
+        let second = tokio::spawn(async move {
+            second_gate.wait(Duration::from_millis(100)).await;
+        });
+        tokio::task::yield_now().await;
+
+        tokio::time::advance(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
+        assert!(first.is_finished());
+        assert!(!second.is_finished());
+
+        tokio::time::advance(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
+        assert!(second.is_finished());
+        first.await.unwrap();
+        second.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn independent_transfer_gate_allows_overlap() {
+        let independent = KvTransferGate::new(KvTransferBandwidthModel::Independent);
+        let first_gate = independent.clone();
+        let first = tokio::spawn(async move {
+            first_gate.wait(Duration::from_millis(100)).await;
+        });
+        let second_gate = independent.clone();
+        let second = tokio::spawn(async move {
+            second_gate.wait(Duration::from_millis(100)).await;
+        });
+        tokio::task::yield_now().await;
+
+        tokio::time::advance(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
+        assert!(first.is_finished());
+        assert!(second.is_finished());
+        first.await.unwrap();
+        second.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn separate_prefill_worker_transfer_gates_overlap() {
+        let first_worker = KvTransferGate::default();
+        let second_worker = KvTransferGate::default();
+        let first = tokio::spawn(async move {
+            first_worker.wait(Duration::from_millis(100)).await;
+        });
+        let second = tokio::spawn(async move {
+            second_worker.wait(Duration::from_millis(100)).await;
+        });
+        tokio::task::yield_now().await;
+
+        tokio::time::advance(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
+        assert!(first.is_finished());
+        assert!(second.is_finished());
+        first.await.unwrap();
+        second.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn canceling_fifo_transfer_releases_the_next_waiter() {
+        let gate = KvTransferGate::default();
+        let active_gate = gate.clone();
+        let active = tokio::spawn(async move {
+            active_gate.wait(Duration::from_secs(1)).await;
+        });
+        tokio::task::yield_now().await;
+        let queued_gate = gate.clone();
+        let queued = tokio::spawn(async move {
+            queued_gate.wait(Duration::from_millis(100)).await;
+        });
+        tokio::task::yield_now().await;
+
+        active.abort();
+        let _ = active.await;
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
+        assert!(queued.is_finished());
+        queued.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn canceling_queued_fifo_transfer_preserves_the_next_waiter() {
+        let gate = KvTransferGate::default();
+        let active_gate = gate.clone();
+        let active = tokio::spawn(async move {
+            active_gate.wait(Duration::from_secs(1)).await;
+        });
+        tokio::task::yield_now().await;
+        let canceled_gate = gate.clone();
+        let canceled = tokio::spawn(async move {
+            canceled_gate.wait(Duration::from_millis(100)).await;
+        });
+        tokio::task::yield_now().await;
+        let next_gate = gate.clone();
+        let next = tokio::spawn(async move {
+            next_gate.wait(Duration::from_millis(100)).await;
+        });
+        tokio::task::yield_now().await;
+
+        canceled.abort();
+        let _ = canceled.await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert!(active.is_finished());
+        assert!(!next.is_finished());
+
+        tokio::time::advance(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
+        assert!(next.is_finished());
+        active.await.unwrap();
+        next.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn timing_out_queued_fifo_transfer_preserves_the_next_waiter() {
+        let gate = KvTransferGate::default();
+        let active_gate = gate.clone();
+        let active = tokio::spawn(async move {
+            active_gate.wait(Duration::from_secs(1)).await;
+        });
+        tokio::task::yield_now().await;
+        let timed_out_gate = gate.clone();
+        let queue_deadline = tokio::time::Instant::now() + Duration::from_millis(50);
+        let timed_out = tokio::spawn(async move {
+            timed_out_gate
+                .wait_with_queue_deadline(Duration::from_millis(100), queue_deadline)
+                .await
+        });
+        tokio::task::yield_now().await;
+        let next_gate = gate.clone();
+        let next = tokio::spawn(async move {
+            next_gate.wait(Duration::from_millis(100)).await;
+        });
+        tokio::task::yield_now().await;
+
+        tokio::time::advance(Duration::from_millis(50)).await;
+        tokio::task::yield_now().await;
+        assert!(!timed_out.await.unwrap());
+
+        active.abort();
+        let _ = active.await;
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
+        assert!(next.is_finished());
+        next.await.unwrap();
     }
 
     #[tokio::test]

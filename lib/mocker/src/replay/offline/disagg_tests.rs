@@ -13,7 +13,8 @@ use super::super::extensions::kv_events::HandoffDisaggRuntime;
 use super::super::planner_hook::PlannerTickDecision;
 use super::*;
 use crate::common::protocols::{
-    EngineType, KvTransferTimingMode, MockEngineArgs, SglangArgs, WorkerType,
+    EngineType, KvTransferBandwidthModel, KvTransferTimingMode, MockEngineArgs, SglangArgs,
+    WorkerType,
 };
 use crate::loadgen::{SessionTrace, Trace, TurnTrace};
 use crate::replay::TraceSimulationReport;
@@ -1078,6 +1079,172 @@ fn source_only_reuse_does_not_reduce_destination_missing_transfer() {
         assert_eq!(measured.decode_reused_input_tokens, Some(0));
         assert!(transfer_span >= 128.0 && transfer_span - 128.0 < 1.0);
     }
+}
+
+#[rstest::rstest]
+#[case(EngineType::Vllm)]
+#[case(EngineType::Sglang)]
+fn fifo_transfer_bandwidth_serializes_handoffs_from_one_prefill(#[case] engine_type: EngineType) {
+    let report = run_trace_with_details(
+        &transfer_timing_config(engine_type, KvTransferTimingMode::FullPrompt, 2),
+        vec![request(1, 64, 1, 0.0), request(2, 64, 1, 0.0)],
+        None,
+        ReplayRouterMode::RoundRobin,
+    );
+    let mut transfer_spans = report
+        .per_request
+        .iter()
+        .map(|record| {
+            record.destination_activated_ms.unwrap() - record.destination_reserved_ms.unwrap()
+        })
+        .collect::<Vec<_>>();
+    transfer_spans.sort_by(f64::total_cmp);
+
+    assert_eq!(transfer_spans.len(), 2);
+    assert!(
+        (transfer_spans[0] - 64.0).abs() < 0.1,
+        "{engine_type:?}: first transfer span was {}ms",
+        transfer_spans[0]
+    );
+    assert!(
+        (transfer_spans[1] - 128.0).abs() < 0.1,
+        "{engine_type:?}: queued transfer span was {}ms",
+        transfer_spans[1]
+    );
+}
+
+#[test]
+fn independent_transfer_bandwidth_preserves_overlapping_handoffs() {
+    let mut config = transfer_timing_config(EngineType::Vllm, KvTransferTimingMode::FullPrompt, 2);
+    config.prefill_args.kv_transfer_bandwidth_model = KvTransferBandwidthModel::Independent;
+    let report = run_trace_with_details(
+        &config,
+        vec![request(1, 64, 1, 0.0), request(2, 64, 1, 0.0)],
+        None,
+        ReplayRouterMode::RoundRobin,
+    );
+
+    for record in &report.per_request {
+        let transfer_span =
+            record.destination_activated_ms.unwrap() - record.destination_reserved_ms.unwrap();
+        assert!(
+            (transfer_span - 64.0).abs() < 1e-6,
+            "independent transfer span was {transfer_span}ms"
+        );
+    }
+}
+
+#[test]
+fn fifo_transfer_bandwidth_is_independent_across_prefill_workers() {
+    let mut config = transfer_timing_config(EngineType::Vllm, KvTransferTimingMode::FullPrompt, 2);
+    config.num_prefill_workers = 2;
+    let report = run_trace_with_details(
+        &config,
+        vec![request(1, 64, 1, 0.0), request(2, 64, 1, 0.0)],
+        None,
+        ReplayRouterMode::RoundRobin,
+    );
+    let worker_ids = report
+        .per_request
+        .iter()
+        .map(|record| record.prefill_worker_idx.unwrap())
+        .collect::<std::collections::HashSet<_>>();
+
+    assert_eq!(worker_ids.len(), 2);
+    for record in &report.per_request {
+        let transfer_span =
+            record.destination_activated_ms.unwrap() - record.destination_reserved_ms.unwrap();
+        assert!(
+            (transfer_span - 64.0).abs() < 1e-6,
+            "worker {} transfer span was {transfer_span}ms",
+            record.prefill_worker_idx.unwrap()
+        );
+    }
+}
+
+#[rstest::rstest]
+#[case(false)]
+#[case(true)]
+fn canceling_fifo_transfer_keeps_the_next_completion_wakeup(#[case] cancel_active: bool) {
+    let config = transfer_timing_config(EngineType::Vllm, KvTransferTimingMode::FullPrompt, 2);
+    let mut runtime = DisaggRuntime::new(
+        &config,
+        None,
+        None,
+        VecDeque::from([request(1, 64, 1, 0.0), request(2, 64, 1, 0.0)]),
+        ReplayMode::Trace,
+        ReplayRouterMode::RoundRobin,
+    )
+    .unwrap()
+    .with_per_request_records(true);
+
+    runtime.drain_current_timestamp().unwrap();
+    for _ in 0..32 {
+        let pending = [Uuid::from_u128(1), Uuid::from_u128(2)]
+            .into_iter()
+            .filter(|uuid| runtime.state(*uuid).unwrap().phase == DisaggPhase::TransferPending)
+            .count();
+        if pending == 2 {
+            break;
+        }
+        let next = runtime.next_timestamp().unwrap();
+        runtime.advance_now_ms(next);
+        runtime.drain_current_timestamp().unwrap();
+    }
+
+    let active_handoff = runtime
+        .events
+        .iter()
+        .find_map(|event| match &event.kind {
+            crate::replay::offline::events::SimulationEventKind::TransferComplete {
+                handoff_id,
+            } => Some(*handoff_id),
+            _ => None,
+        })
+        .expect("FIFO queue must retain an active completion event");
+    let active_uuid = runtime.flow.requests_by_handoff[&active_handoff];
+    let canceled_uuid = if cancel_active {
+        active_uuid
+    } else {
+        [Uuid::from_u128(1), Uuid::from_u128(2)]
+            .into_iter()
+            .find(|uuid| *uuid != active_uuid)
+            .unwrap()
+    };
+    let canceled_handoff = runtime.state(canceled_uuid).unwrap().handoff_id;
+    runtime
+        .apply_handoff_fact(
+            canceled_uuid,
+            HandoffFact::Canceled {
+                handoff_id: canceled_handoff,
+            },
+        )
+        .unwrap();
+    runtime.drain_current_timestamp().unwrap();
+
+    assert!(runtime.events.iter().any(|event| matches!(
+        &event.kind,
+        crate::replay::offline::events::SimulationEventKind::TransferComplete { .. }
+    )));
+    let (collector, _) = runtime.run().unwrap();
+    let records = collector.per_request_records();
+    assert_eq!(records.len(), 2);
+    assert_eq!(
+        records
+            .iter()
+            .find(|record| record.uuid == canceled_uuid.to_string())
+            .unwrap()
+            .terminal_status,
+        ReplayTerminalStatus::Canceled
+    );
+    assert_eq!(
+        records
+            .iter()
+            .find(|record| record.uuid != canceled_uuid.to_string())
+            .unwrap()
+            .terminal_status,
+        ReplayTerminalStatus::Completed
+    );
 }
 
 #[test]

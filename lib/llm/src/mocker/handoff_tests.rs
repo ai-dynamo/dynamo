@@ -619,6 +619,7 @@ async fn source_held_waits_for_submit_outcome_before_progressing() {
         source,
         source_connection,
         Duration::from_secs(2),
+        KvTransferGate::default(),
         shutdown.clone(),
     ));
 
@@ -808,6 +809,7 @@ async fn run_source_terminal_trigger(trigger: SourceTerminalTrigger, id: u128) -
         source,
         source_connection,
         Duration::from_secs(2),
+        KvTransferGate::default(),
         shutdown.clone(),
     ));
     assert!(matches!(
@@ -1930,6 +1932,7 @@ async fn expired_source_session_deadline_still_cleans_held_ownership() {
         source,
         source_connection,
         Duration::from_millis(100),
+        KvTransferGate::default(),
         transport_shutdown.clone(),
     ));
 

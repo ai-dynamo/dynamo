@@ -41,7 +41,9 @@ use crate::common::handoff::{
 };
 #[cfg(test)]
 use crate::common::protocols::ForwardPassSnapshot;
-use crate::common::protocols::{DirectRequest, EngineType, MockEngineArgs, OutputSignal};
+use crate::common::protocols::{
+    DirectRequest, EngineType, KvTransferBandwidthModel, MockEngineArgs, OutputSignal,
+};
 use crate::loadgen::{ReplayRequestHashes, ReplayRequestPayload, WorkloadDriver};
 #[cfg(test)]
 use crate::replay::ReplayRouterMode;
@@ -279,9 +281,110 @@ enum PrefillSignalDisposition {
     Completed,
 }
 
+#[derive(Clone, Copy)]
 struct ScheduledTransfer {
-    at_ms: f64,
+    delay_ms: f64,
     handoff_id: HandoffId,
+}
+
+#[derive(Default)]
+struct WorkerTransferQueue {
+    active: Option<HandoffId>,
+    pending: VecDeque<ScheduledTransfer>,
+}
+
+#[derive(Default)]
+struct FifoTransferQueues {
+    by_worker: HashMap<usize, WorkerTransferQueue>,
+    worker_by_handoff: HashMap<HandoffId, usize>,
+}
+
+struct CanceledTransfer {
+    was_active: bool,
+    next: Option<ScheduledTransfer>,
+}
+
+impl FifoTransferQueues {
+    fn enqueue(
+        &mut self,
+        worker_id: usize,
+        transfer: ScheduledTransfer,
+    ) -> Result<Option<ScheduledTransfer>> {
+        if self
+            .worker_by_handoff
+            .insert(transfer.handoff_id, worker_id)
+            .is_some()
+        {
+            bail!(
+                "offline disagg replay queued transfer {:?} more than once",
+                transfer.handoff_id
+            );
+        }
+        let queue = self.by_worker.entry(worker_id).or_default();
+        if queue.active.is_none() {
+            queue.active = Some(transfer.handoff_id);
+            Ok(Some(transfer))
+        } else {
+            queue.pending.push_back(transfer);
+            Ok(None)
+        }
+    }
+
+    fn complete(&mut self, handoff_id: HandoffId) -> Result<Option<ScheduledTransfer>> {
+        let worker_id = self
+            .worker_by_handoff
+            .remove(&handoff_id)
+            .ok_or_else(|| anyhow!("offline disagg replay completed an unknown FIFO transfer"))?;
+        let (next, empty) = {
+            let queue = self
+                .by_worker
+                .get_mut(&worker_id)
+                .expect("FIFO transfer must retain its worker queue");
+            if queue.active != Some(handoff_id) {
+                bail!("offline disagg replay completed a queued FIFO transfer out of order");
+            }
+            let next = queue.pending.pop_front();
+            queue.active = next.map(|transfer| transfer.handoff_id);
+            (next, queue.active.is_none())
+        };
+        if empty {
+            self.by_worker.remove(&worker_id);
+        }
+        Ok(next)
+    }
+
+    fn cancel(&mut self, handoff_id: HandoffId) -> Result<Option<CanceledTransfer>> {
+        let Some(worker_id) = self.worker_by_handoff.remove(&handoff_id) else {
+            return Ok(None);
+        };
+        let (was_active, next, empty) = {
+            let queue = self
+                .by_worker
+                .get_mut(&worker_id)
+                .expect("FIFO transfer must retain its worker queue");
+            if queue.active == Some(handoff_id) {
+                let next = queue.pending.pop_front();
+                queue.active = next.map(|transfer| transfer.handoff_id);
+                (true, next, queue.active.is_none())
+            } else {
+                let position = queue
+                    .pending
+                    .iter()
+                    .position(|transfer| transfer.handoff_id == handoff_id)
+                    .ok_or_else(|| anyhow!("offline disagg replay lost a queued FIFO transfer"))?;
+                queue.pending.remove(position);
+                (
+                    false,
+                    None,
+                    queue.active.is_none() && queue.pending.is_empty(),
+                )
+            }
+        };
+        if empty {
+            self.by_worker.remove(&worker_id);
+        }
+        Ok(Some(CanceledTransfer { was_active, next }))
+    }
 }
 
 impl DisaggFlowState {
@@ -682,7 +785,7 @@ impl DisaggFlowState {
         let handoff_id = self.state(uuid)?.handoff_id;
         if delay_ms > 0.0 {
             return Ok(Some(ScheduledTransfer {
-                at_ms: now_ms + delay_ms,
+                delay_ms,
                 handoff_id,
             }));
         }
@@ -811,7 +914,12 @@ impl DisaggFlowState {
     }
 
     #[inline(never)]
-    fn prepare_logical_finish(&mut self, uuid: Uuid, remove_actions: bool) -> Result<()> {
+    fn prepare_logical_finish(
+        &mut self,
+        uuid: Uuid,
+        remove_actions: bool,
+        count_stale_transfer_event: bool,
+    ) -> Result<()> {
         let transfer_was_pending = {
             let state = self.state_mut(uuid)?;
             if !state.counted_in_flight || state.phase == DisaggPhase::Done {
@@ -826,7 +934,7 @@ impl DisaggFlowState {
             .logical_in_flight
             .checked_sub(1)
             .expect("logical in-flight request count underflow");
-        if transfer_was_pending {
+        if transfer_was_pending && count_stale_transfer_event {
             self.stale_transfer_events = self
                 .stale_transfer_events
                 .checked_add(1)
@@ -894,6 +1002,8 @@ where
     prefill_placement: PlacementPolicyImpl,
     decode_placement: PlacementPolicyImpl,
     flow: DisaggFlowState,
+    transfer_bandwidth_model: KvTransferBandwidthModel,
+    fifo_transfers: FifoTransferQueues,
     collector: TraceCollector,
     events: BinaryHeap<SimulationEvent<Observation::Batch>>,
     progress: ReplayProgress,
@@ -1039,6 +1149,8 @@ where
             prefill_placement,
             decode_placement,
             flow: DisaggFlowState::new(handoff_order, capture_conformance),
+            transfer_bandwidth_model: config.prefill_args.kv_transfer_bandwidth_model,
+            fifo_transfers: FifoTransferQueues::default(),
             collector,
             events: BinaryHeap::new(),
             progress,
@@ -1370,6 +1482,53 @@ where
         self.flow.action_queues.wake_deferred(stage, worker_idx);
     }
 
+    fn schedule_transfer_completion(&mut self, transfer: ScheduledTransfer) {
+        push_transfer_complete(
+            &mut self.events,
+            &mut self.next_event_seq,
+            self.now_ms + transfer.delay_ms,
+            transfer.handoff_id,
+        );
+    }
+
+    fn enqueue_fifo_transfer(
+        &mut self,
+        worker_id: usize,
+        transfer: ScheduledTransfer,
+    ) -> Result<()> {
+        if let Some(active) = self.fifo_transfers.enqueue(worker_id, transfer)? {
+            self.schedule_transfer_completion(active);
+        }
+        Ok(())
+    }
+
+    fn complete_fifo_transfer(&mut self, handoff_id: HandoffId) -> Result<()> {
+        if let Some(next) = self.fifo_transfers.complete(handoff_id)? {
+            self.schedule_transfer_completion(next);
+        }
+        Ok(())
+    }
+
+    fn cancel_fifo_transfer(&mut self, handoff_id: HandoffId) -> Result<()> {
+        let Some(canceled) = self.fifo_transfers.cancel(handoff_id)? else {
+            return Ok(());
+        };
+        if canceled.was_active {
+            self.events.retain(|event| {
+                !matches!(
+                    &event.kind,
+                    super::events::SimulationEventKind::TransferComplete {
+                        handoff_id: scheduled,
+                    } if *scheduled == handoff_id
+                )
+            });
+            if let Some(next) = canceled.next {
+                self.schedule_transfer_completion(next);
+            }
+        }
+        Ok(())
+    }
+
     fn execute_action(
         &mut self,
         uuid: Uuid,
@@ -1402,12 +1561,26 @@ where
                     self.now_ms,
                     &mut self.collector,
                 )? {
-                    push_transfer_complete(
-                        &mut self.events,
-                        &mut self.next_event_seq,
-                        transfer.at_ms,
-                        transfer.handoff_id,
-                    );
+                    match self.transfer_bandwidth_model {
+                        KvTransferBandwidthModel::Independent => {
+                            self.schedule_transfer_completion(transfer);
+                        }
+                        KvTransferBandwidthModel::Fifo => {
+                            let rank_id =
+                                self.state(uuid)?.prefill_worker_idx().ok_or_else(|| {
+                                    anyhow!(
+                                        "offline disagg transfer has no prefill worker for {uuid}"
+                                    )
+                                })?;
+                            let (worker_id, _) =
+                                self.prefill_engine.rank_identity(rank_id).ok_or_else(|| {
+                                    anyhow!(
+                                        "offline disagg transfer has unknown prefill rank {rank_id}"
+                                    )
+                                })?;
+                            self.enqueue_fifo_transfer(worker_id, transfer)?;
+                        }
+                    }
                     #[cfg(test)]
                     self.stats
                         .transition_log
@@ -1611,7 +1784,17 @@ where
     }
 
     fn finish_logical_request(&mut self, uuid: Uuid, remove_actions: bool) -> Result<()> {
-        self.flow.prepare_logical_finish(uuid, remove_actions)?;
+        let transfer_was_pending = self.state(uuid)?.phase == DisaggPhase::TransferPending;
+        if transfer_was_pending && self.transfer_bandwidth_model == KvTransferBandwidthModel::Fifo {
+            let handoff_id = self.state(uuid)?.handoff_id;
+            self.cancel_fifo_transfer(handoff_id)?;
+        }
+        self.flow.prepare_logical_finish(
+            uuid,
+            remove_actions,
+            transfer_was_pending
+                && self.transfer_bandwidth_model == KvTransferBandwidthModel::Independent,
+        )?;
         CoreAdmissionSource::on_terminal(&mut self.admission, uuid, self.now_ms, false)?;
         self.progress.inc_completed();
         #[cfg(test)]
@@ -1882,7 +2065,11 @@ where
     fn apply_transfer_completions(&mut self) -> Result<bool> {
         let mut changed = false;
         while let Some(handoff_id) = pop_ready_transfer_complete(&mut self.events, self.now_ms) {
+            if self.transfer_bandwidth_model == KvTransferBandwidthModel::Fifo {
+                self.complete_fifo_transfer(handoff_id)?;
+            }
             let Some(uuid) = self.flow.requests_by_handoff.get(&handoff_id).copied() else {
+                changed = true;
                 continue;
             };
             self.apply_handoff_fact(uuid, HandoffFact::TransferCompleted { handoff_id })?;
@@ -2161,6 +2348,9 @@ where
     }
 
     fn prune_stale_transfer_events(&mut self) -> bool {
+        if self.transfer_bandwidth_model == KvTransferBandwidthModel::Fifo {
+            return false;
+        }
         let mut removed = false;
         while self.events.peek().is_some_and(|event| {
             matches!(

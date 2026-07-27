@@ -47,6 +47,7 @@ def make_args(**overrides):
         "dp_size": 1,
         "startup_time": None,
         "kv_transfer_bandwidth": 64.0,
+        "kv_transfer_bandwidth_model": "fifo",
         "kv_transfer_timing_mode": "full_prompt",
         "reasoning": None,
         "response_replay_trace_path": None,
@@ -258,6 +259,7 @@ def test_runtime_config_disables_local_indexer_for_decode_worker():
 
 def test_entrypoint_args_accept_typed_mocker_engine_args():
     engine_args = CONFIG.build_mocker_engine_args(make_args())
+    assert engine_args.kv_transfer_bandwidth_model == "fifo"
 
     entrypoint_args = EntrypointArgs(
         engine_type=EngineType.Mocker,
@@ -297,6 +299,7 @@ def test_build_mocker_engine_args_preserves_cli_mapped_fields(tmp_path):
         is_decode_worker=False,
         kv_bytes_per_token=131072,
         kv_transfer_bandwidth=123.0,
+        kv_transfer_bandwidth_model="independent",
         kv_transfer_timing_mode="destination_missing",
         response_replay_trace_path=None,
         num_g2_blocks=8192,
@@ -348,6 +351,7 @@ def test_build_mocker_engine_args_preserves_cli_mapped_fields(tmp_path):
     assert engine_args.aic_moe_ep_size is None
     assert engine_args.aic_attention_dp_size is None
     assert engine_args.bootstrap_port is None
+    assert engine_args.kv_transfer_bandwidth_model == "independent"
     assert engine_args.kv_transfer_timing_mode == "destination_missing"
     assert engine_args.num_g2_blocks == 8192
     assert engine_args.num_g3_blocks == 16384
@@ -423,6 +427,16 @@ def test_mocker_cli_accepts_native_g1_for_trtllm():
 
     assert args.engine_type == "trtllm"
     assert args.g1_backend == "native"
+
+
+def test_mocker_cli_defaults_to_fifo_transfer_bandwidth_model():
+    assert parse_args([]).kv_transfer_bandwidth_model == "fifo"
+    assert (
+        parse_args(
+            ["--kv-transfer-bandwidth-model", "independent"]
+        ).kv_transfer_bandwidth_model
+        == "independent"
+    )
 
 
 def test_mocker_cli_accepts_max_model_len():
