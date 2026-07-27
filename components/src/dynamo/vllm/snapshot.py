@@ -42,7 +42,10 @@ async def prepare_snapshot_engine(
     gc.collect()
     snapshot_controller = EngineSnapshotController(
         engine=engine,
-        pause_controller=VllmEnginePauseController(engine[0]),
+        pause_controller=VllmEnginePauseController(
+            engine[0],
+            prepare_for_process_checkpoint=True,
+        ),
         snapshot_config=snapshot_config,
         pause_args=(None,),
     )
