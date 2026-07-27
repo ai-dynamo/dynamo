@@ -1,0 +1,23 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Driver Check (preview)
+subtitle: Unpublished proposal — not linked from the Compatibility page
+---
+
+import { ReferenceStyles } from "@/components/ReferenceStyles";
+import { DriverCheck } from "@/components/DriverCheck";
+
+<ReferenceStyles />
+
+<Warning>
+This page exists to preview a proposed component. It is hidden from the sidebar and is not part of the published Reference navigation. Nothing here is mounted on [Compatibility](compatibility.mdx).
+</Warning>
+
+`DriverCheck` is a sketch of a replacement for the removed `RunsWhereWizard`. It asks for the driver version the reader can read off `nvidia-smi` and reports the newest release each backend supports on it, rather than asking the reader to name a CUDA driver generation before showing anything.
+
+<DriverCheck />
+
+## Why This Shape
+
+The collapsed support matrix on the Compatibility page already answers "what does release X require". The one question it cannot answer without the reader doing the work by hand is the inverse: "given the driver I actually have, what can I run?" — a comparison across every row of the matrix. This component does only that, and adds nothing the table already covers.

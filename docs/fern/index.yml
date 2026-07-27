@@ -908,6 +908,13 @@ navigation:
             path: reference/releases-data.mdx
             slug: releases-data
             hidden: true
+          # Unpublished proposal preview (replacement sketch for the removed
+          # compatibility picker). Hidden pending review; delete this entry
+          # and the page together if the proposal is not taken up.
+          - page: Driver Check (preview)
+            path: reference/driver-check-preview.mdx
+            slug: driver-check-preview
+            hidden: true
 
       # ==================== Kubernetes API variant ====================
       - title: Kubernetes API
