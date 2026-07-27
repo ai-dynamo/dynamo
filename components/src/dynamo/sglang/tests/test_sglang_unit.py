@@ -14,6 +14,7 @@ import pytest
 import torch
 import yaml
 from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
+from sglang.srt.managers.io_struct import ProfileReq
 
 import dynamo.sglang._compat as sglang_compat
 from dynamo.common.constants import DisaggregationMode, EmbeddingTransferMode
@@ -36,6 +37,7 @@ from dynamo.sglang.health_check import (
     SglangDisaggHealthCheckPayload,
     SglangPrefillHealthCheckPayload,
 )
+from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
 from dynamo.sglang.tests.conftest import make_cli_args_fixture
 
@@ -218,6 +220,32 @@ async def test_tensor_image_size_compat_uses_resolved_model_capability(
     assert install_calls == ([True] if is_multimodal else [])
 
 
+@pytest.mark.asyncio
+async def test_parse_args_enables_incremental_streaming_before_resolution(
+    monkeypatch, mock_sglang_cli
+):
+    server_args = SimpleNamespace(
+        disaggregation_mode="null",
+        dllm_algorithm=None,
+        kv_events_config=None,
+        get_model_config=lambda: SimpleNamespace(is_multimodal=False),
+    )
+
+    def resolve(parsed_args):
+        assert parsed_args.incremental_streaming_output is True
+        server_args.incremental_streaming_output = (
+            parsed_args.incremental_streaming_output
+        )
+        return server_args
+
+    monkeypatch.setattr("dynamo.sglang.args.ServerArgs.from_cli_args", resolve)
+    mock_sglang_cli(model="/tmp")
+
+    config = await parse_args(sys.argv[1:])
+
+    assert config.server_args.incremental_streaming_output is True
+
+
 def test_compat_filters_async_generate_kwargs_for_older_engines():
     class OldEngine:
         async def async_generate(self, input_ids=None, sampling_params=None):
@@ -386,6 +414,29 @@ def test_compat_caches_async_generate_signature_inspection(monkeypatch):
     assert calls == 1
 
     sglang_compat._get_async_generate_supported_kwarg_names.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_start_profile_forwards_profile_request():
+    class TokenizerManager:
+        request = None
+
+        async def start_profile(self, request):
+            self.request = request
+
+    tokenizer_manager = TokenizerManager()
+    handler = SimpleNamespace(
+        engine=SimpleNamespace(tokenizer_manager=tokenizer_manager)
+    )
+    body = {"output_dir": "/tmp/profile", "start_step": 10, "num_steps": 5}
+
+    response = await BaseWorkerHandler.start_profile(handler, body)
+
+    assert isinstance(tokenizer_manager.request, ProfileReq)
+    assert tokenizer_manager.request.output_dir == body["output_dir"]
+    assert tokenizer_manager.request.start_step == body["start_step"]
+    assert tokenizer_manager.request.num_steps == body["num_steps"]
+    assert response == {"status": "ok", "message": "Profiling started"}
 
 
 @pytest.mark.asyncio
