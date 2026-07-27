@@ -7,6 +7,7 @@ runs in a separate process.
 ```text
 common/  Shared gRPC arguments, transport, and errors
 sglang/  SGLang sidecar
+trtllm/  TensorRT-LLM sidecar
 vllm/    vLLM sidecar
 ```
 

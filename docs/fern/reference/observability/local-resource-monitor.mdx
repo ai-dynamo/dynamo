@@ -1,0 +1,111 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Local Resource Monitor (Local)
+subtitle: Host-side per-process VRAM / PCIe / CPU exporter for engine-startup profiling — metrics and CLI flags.
+---
+
+<Note>
+  This tool is **local-only**. [`dynamo_local_resource_monitor.py`](https://github.com/ai-dynamo/dynamo/blob/main/dev/observability/dynamo_local_resource_monitor.py) runs on the host machine (not inside a container) and attributes GPU/CPU/IO usage to individual Dynamo processes by PID. It is not part of a Kubernetes deployment. For the setup walkthrough and design rationale, see the [Local Resource Monitor guide](../../observability/local-resource-monitor.md).
+</Note>
+
+The monitor samples per-process resource usage (VRAM, GPU utilization, PCIe bandwidth, CPU, disk I/O, network I/O) for Dynamo inference processes, labeled by GPU, PID, and process name. It always exposes Prometheus metrics at `/metrics`; when the dashboard dependencies are installed, the same endpoint also serves a WebSocket dashboard at `/`.
+
+Run it on the host:
+
+```bash
+pip install psutil nvidia-ml-py prometheus-client
+python3 dev/observability/dynamo_local_resource_monitor.py --host 0.0.0.0 --port 8051
+```
+
+## Metrics
+
+All metrics use the `dynamo_` prefix. Unlike the runtime's `dynamo_component_*` families, these are host-side gauges labeled by physical GPU and OS process.
+
+### GPU metrics
+
+<ParamField path="dynamo_gpu_memory_used_gib" type="gauge">
+  GPU memory used by a process, in GiB. Labeled by `gpu`, `pid`, and `process_name`.
+</ParamField>
+
+<ParamField path="dynamo_gpu_memory_total_gib" type="gauge">
+  Total GPU memory, in GiB. Labeled by `gpu`.
+</ParamField>
+
+<ParamField path="dynamo_gpu_utilization_percent" type="gauge">
+  GPU utilization, as a percentage. Labeled by `gpu`.
+</ParamField>
+
+<ParamField path="dynamo_gpu_temperature_celsius" type="gauge">
+  GPU temperature, in degrees Celsius. Labeled by `gpu`.
+</ParamField>
+
+<ParamField path="dynamo_gpu_pcie_tx_gbps" type="gauge">
+  GPU PCIe transmit throughput, in GB/s. Labeled by `gpu`.
+</ParamField>
+
+<ParamField path="dynamo_gpu_pcie_rx_gbps" type="gauge">
+  GPU PCIe receive throughput, in GB/s. Labeled by `gpu`.
+</ParamField>
+
+### CPU metrics
+
+<ParamField path="dynamo_cpu_utilization_percent" type="gauge">
+  Overall CPU utilization, as a percentage.
+</ParamField>
+
+<ParamField path="dynamo_cpu_process_percent" type="gauge">
+  CPU usage by process-name group, as a percentage. Labeled by `process_name`.
+</ParamField>
+
+### Network metrics
+
+<ParamField path="dynamo_network_sent_mbps" type="gauge">
+  Network bytes sent, in MB/s.
+</ParamField>
+
+<ParamField path="dynamo_network_recv_mbps" type="gauge">
+  Network bytes received, in MB/s.
+</ParamField>
+
+### Disk metrics
+
+<ParamField path="dynamo_disk_read_mbps" type="gauge">
+  Disk read throughput, in MB/s.
+</ParamField>
+
+<ParamField path="dynamo_disk_write_mbps" type="gauge">
+  Disk write throughput, in MB/s.
+</ParamField>
+
+## CLI flags
+
+<ParamField path="--port" type="integer" default="8051">
+  Port for the `/metrics` exporter (and the dashboard at `/` when dependencies are installed).
+</ParamField>
+
+<ParamField path="--host" type="string" default="0.0.0.0">
+  Host address to bind.
+</ParamField>
+
+<ParamField path="--main-interval" type="integer (ms)" default="200">
+  Main collection interval in milliseconds, covering CPU, GPU memory/utilization/temperature, and network (5 samples/s).
+</ParamField>
+
+<ParamField path="--disk-interval" type="integer (ms)" default="1000">
+  Disk I/O collection interval in milliseconds (1 sample/s).
+</ParamField>
+
+<ParamField path="--window" type="integer (s)" default="900">
+  Dashboard rolling window in seconds (default 900 = 15 minutes).
+</ParamField>
+
+<ParamField path="--top-n" type="integer" default="12">
+  Dashboard process-series limit per chart.
+</ParamField>
+
+## Related
+
+- [Local Resource Monitor guide](../../observability/local-resource-monitor.md) — setup, Prometheus profile gating, and the WebSocket dashboard.
+- [Metrics Catalog](metrics-catalog.mdx) — the runtime's `dynamo_*` metrics.
+- [Environment Variables](environment-variables.mdx) — runtime observability configuration.

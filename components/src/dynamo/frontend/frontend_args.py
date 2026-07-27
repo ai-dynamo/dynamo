@@ -86,6 +86,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
     preprocess_workers: int
     tokenizer_backend: str
     trust_remote_code: bool
+    frontend_route_extensions: list[str]
 
     _VALID_TOKENIZER_BACKENDS = {"default", "fastokens"}
 
@@ -343,6 +344,21 @@ class FrontendArgGroup(ArgGroup):
             env_var="DYN_DUMP_CONFIG_TO",
             default=None,
             help="Dump config to the specified file path.",
+        )
+
+        add_argument(
+            g,
+            flag_name="--frontend-route-extension",
+            env_var="DYN_FRONTEND_ROUTE_EXTENSIONS",
+            default=[],
+            dest="frontend_route_extensions",
+            action="append",
+            help=(
+                "Trusted frontend route extension: a name registered under the "
+                "'dynamo.frontend.routes' entry-point group, or a 'module:function' "
+                "path. May be repeated. DYN_FRONTEND_ROUTE_EXTENSIONS accepts "
+                "whitespace-separated values."
+            ),
         )
 
         add_argument(

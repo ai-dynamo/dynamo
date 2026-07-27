@@ -1,10 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Compact identities for logical KV indexers and DC-local producer pools.
+//! Shared identities for routing partitions, logical KV indexers, and DC-local producer pools.
 //!
-//! Identity material is resolved on control paths. Mutation and query paths carry only these
-//! fixed-size values or physical lane indices.
+//! Hashed indexer identity material is resolved on control paths. Mutation and query paths carry
+//! only those fixed-size values or physical lane indices.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -17,10 +17,90 @@ pub const MAX_EXPLICIT_IDENTITY_ENTRIES: usize = 32;
 pub const MAX_EXPLICIT_IDENTITY_KEY_BYTES: usize = 128;
 pub const MAX_EXPLICIT_IDENTITY_VALUE_BYTES: usize = 1024;
 
+/// Routing group used when a request does not specify one.
+pub const DEFAULT_ROUTING_GROUP: &str = "default";
+
 const CACHE_SEMANTICS_DEFAULT_V1: &[u8] = b"dynamo/indexer-cache-semantics/default/v1";
 const CACHE_SEMANTICS_EXPLICIT_V1: &[u8] = b"dynamo/indexer-cache-semantics/explicit/v1";
 const ROUTING_SCOPE_DEFAULT_V1: &[u8] = b"dynamo/indexer-routing-scope/default/v1";
 const ROUTING_SCOPE_EXPLICIT_V1: &[u8] = b"dynamo/indexer-routing-scope/explicit/v1";
+
+#[cfg(any(
+    feature = "standalone-indexer",
+    feature = "standalone-selection",
+    feature = "standalone-slot-tracker"
+))]
+pub(crate) fn default_routing_group() -> String {
+    DEFAULT_ROUTING_GROUP.to_string()
+}
+
+/// Logical routing partition shared by selection, indexing, and active-sequence tracking.
+#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoutingPartitionId {
+    pub model_name: String,
+    pub routing_group: String,
+}
+
+impl RoutingPartitionId {
+    pub fn new(model_name: impl Into<String>, routing_group: impl Into<String>) -> Self {
+        Self {
+            model_name: model_name.into(),
+            routing_group: routing_group.into(),
+        }
+    }
+
+    pub fn as_ref(&self) -> RoutingPartitionRef<'_> {
+        RoutingPartitionRef::new(&self.model_name, &self.routing_group)
+    }
+}
+
+impl fmt::Display for RoutingPartitionId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.as_ref().fmt(formatter)
+    }
+}
+
+/// Borrowed view of a [`RoutingPartitionId`].
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+pub struct RoutingPartitionRef<'a> {
+    pub model_name: &'a str,
+    pub routing_group: &'a str,
+}
+
+impl<'a> RoutingPartitionRef<'a> {
+    pub const fn new(model_name: &'a str, routing_group: &'a str) -> Self {
+        Self {
+            model_name,
+            routing_group,
+        }
+    }
+
+    pub fn into_owned(self) -> RoutingPartitionId {
+        RoutingPartitionId::new(self.model_name, self.routing_group)
+    }
+}
+
+impl fmt::Display for RoutingPartitionRef<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "model={} routing_group={}",
+            self.model_name, self.routing_group
+        )
+    }
+}
+
+impl<'a> From<&'a RoutingPartitionId> for RoutingPartitionRef<'a> {
+    fn from(partition: &'a RoutingPartitionId) -> Self {
+        partition.as_ref()
+    }
+}
+
+impl From<RoutingPartitionRef<'_>> for RoutingPartitionId {
+    fn from(partition: RoutingPartitionRef<'_>) -> Self {
+        partition.into_owned()
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -390,7 +470,28 @@ fn write_digest(formatter: &mut fmt::Formatter<'_>, digest: &[u8; 16]) -> fmt::R
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
+
+    #[test]
+    fn routing_partition_identity_matches_registry_key_semantics() {
+        let partition = RoutingPartitionId::new("model-a", "group-a");
+        let equivalent = RoutingPartitionId::new("model-a", "group-a");
+        let other_group = RoutingPartitionId::new("model-a", "group-b");
+        let other_model = RoutingPartitionId::new("model-b", "group-a");
+        let mut registry_keys = HashSet::new();
+
+        assert!(registry_keys.insert(partition.clone()));
+        assert!(!registry_keys.insert(equivalent));
+        assert!(registry_keys.insert(other_group));
+        assert!(registry_keys.insert(other_model));
+        assert_eq!(registry_keys.len(), 3);
+
+        let borrowed = partition.as_ref();
+        assert_eq!(borrowed, RoutingPartitionRef::new("model-a", "group-a"));
+        assert_eq!(borrowed.into_owned(), partition);
+    }
 
     #[test]
     fn explicit_identity_map_rejects_duplicate_json_keys() {

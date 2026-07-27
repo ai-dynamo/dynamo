@@ -8,6 +8,8 @@ Patches:
   - request_memory: bypasses the free>=requested check during deferred-KV init.
   - NixlConnector.register_kv_caches: defers registration during the scratch
     phase and stashes the dict for replay at wake.
+  - init_kv_cache: scopes the scratch mem-pool to the raw KV tensors only, so
+    BlockTables / workspace / pointer tensors keep real (un-aliased) memory.
 
 The torch.cuda.empty_cache patch lives in integrations/common/patches.py.
 """
@@ -25,6 +27,7 @@ logger = logging.getLogger(__name__)
 _memory_snapshot_patched = False
 _request_memory_patched = False
 _register_kv_caches_patched = False
+_kv_cache_pool_scope_patched = False
 
 
 # =============================================================================
@@ -177,6 +180,44 @@ def patch_register_kv_caches() -> None:
 # =============================================================================
 
 
+def patch_kv_cache_pool_scope() -> None:
+    """Scope the scratch mem-pool to init_kv_cache (the raw KV tensors) only.
+
+    Keeps BlockTables / workspace / the block-table pointer tensor on real memory.
+    Single-block scratch aliases everything in the pool onto one granule, so a KV
+    write over that pointer tensor would corrupt the block-table gather kernel
+    (-> illegal memory access).
+    """
+    global _kv_cache_pool_scope_patched
+
+    if _kv_cache_pool_scope_patched:
+        return
+
+    try:
+        import torch
+        from gpu_memory_service.client.torch.allocator import gms_use_mem_pool
+        from vllm.v1.worker.gpu import model_runner as gpu_model_runner
+
+        original_init_kv_cache = gpu_model_runner.init_kv_cache
+    except (ImportError, AttributeError) as exc:
+        logger.debug("[GMS Patch] init_kv_cache pool-scope not available: %s", exc)
+        return
+
+    def patched_init_kv_cache(*args, **kwargs):
+        # Installed only in shadow mode, so always scope to the pool. init_kv_cache
+        # allocates on the worker's current device.
+        assert torch.cuda.is_available(), "GMS scratch KV requires CUDA"
+        device = torch.device("cuda", torch.cuda.current_device())
+        with gms_use_mem_pool("kv_cache", device):
+            return original_init_kv_cache(*args, **kwargs)
+
+    gpu_model_runner.init_kv_cache = patched_init_kv_cache
+    _kv_cache_pool_scope_patched = True
+    logger.info(
+        "[GMS Patch] Scoped scratch mem-pool to init_kv_cache (KV tensors only)"
+    )
+
+
 def apply_scratch_kv_patches() -> None:
     """Apply scratch-KV monkey-patches. No-ops when scratch KV is disabled."""
     if not is_scratch_kv_enabled():
@@ -184,4 +225,5 @@ def apply_scratch_kv_patches() -> None:
 
     patch_request_memory()
     patch_register_kv_caches()
+    patch_kv_cache_pool_scope()
     logger.info("[GMS Patch] applied")

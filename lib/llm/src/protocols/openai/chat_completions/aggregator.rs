@@ -388,6 +388,25 @@ impl DeltaAggregator {
                 // (tool_choice=required/named or structural-tag, gated by
                 // experimental_v2_batch_eligible — see tool_parser_v2::batch_tool_choice_eligible)
                 // keep the v1 finalize path.
+                // Extract the truncated tail BEFORE parsing so a second <tool_call>
+                // truncated after a complete first one is not silently dropped.
+                let glm47_truncated_tail = if parser == "glm47"
+                    && matches!(
+                        choice.finish_reason,
+                        Some(dynamo_protocols::types::FinishReason::Length)
+                    ) {
+                    choice.text.rfind("<tool_call>").and_then(|start| {
+                        let tail = &choice.text[start..];
+                        if !tail.contains("</tool_call>") {
+                            Some(tail.to_string())
+                        } else {
+                            None
+                        }
+                    })
+                } else {
+                    None
+                };
+
                 let parse_result = if super::tool_parser_v2::enabled()
                     && super::tool_parser_v2::supports_family(parser)
                     && parsing_options.experimental_v2_batch_eligible
@@ -416,9 +435,40 @@ impl DeltaAggregator {
                             .map(super::tool_call_response_to_protocol)
                             .collect(),
                     );
+                    // Start with prose before tool calls (may be empty).
                     choice.text = content.unwrap_or_default();
                 } else if is_harmony_parser(parser) && contains_harmony_protocol(&choice.text) {
                     choice.text = content.unwrap_or_default();
+                } else if parser == "glm47"
+                    && matches!(
+                        choice.finish_reason,
+                        Some(dynamo_protocols::types::FinishReason::Length)
+                    )
+                    && choice.text.contains("<tool_call>")
+                {
+                    tracing::warn!(
+                        parser,
+                        "glm47: partial <tool_call> returned as content on length finish \
+                         (TRT-LLM parity; raw markup in content)"
+                    );
+                }
+
+                // Recover any tail saved before parsing — the parser drops a truncated
+                // second block silently when an earlier complete block was already parsed.
+                if let Some(tail) = glm47_truncated_tail
+                    && !choice.text.contains(&tail)
+                {
+                    tracing::warn!(
+                        parser,
+                        tail_bytes = tail.len(),
+                        "glm47: truncated later <tool_call> appended as content \
+                         (TRT-LLM parity; raw markup in content)"
+                    );
+                    if choice.text.is_empty() {
+                        choice.text = tail;
+                    } else {
+                        choice.text.push_str(&tail);
+                    }
                 }
             }
         }

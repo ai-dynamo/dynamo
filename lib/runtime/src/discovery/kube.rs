@@ -25,6 +25,14 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+fn validate_kubernetes_publisher_id(publisher_id: u64) -> Result<()> {
+    if i64::try_from(publisher_id).is_err() {
+        anyhow::bail!("Kubernetes discovery publisher ID {publisher_id} exceeds i64::MAX");
+    }
+
+    Ok(())
+}
+
 /// Kubernetes-based discovery client
 #[derive(Clone)]
 pub struct KubeDiscoveryClient {
@@ -115,6 +123,13 @@ impl Discovery for KubeDiscoveryClient {
     }
 
     async fn register_internal(&self, spec: DiscoverySpec) -> Result<DiscoveryInstance> {
+        match &spec {
+            DiscoverySpec::EventChannel { publisher_id, .. }
+            | DiscoverySpec::EventSource { publisher_id, .. } => {
+                validate_kubernetes_publisher_id(*publisher_id)?;
+            }
+            _ => {}
+        }
         let instance = spec.into_instance(self.instance_id());
         let instance_id = instance.instance_id();
 
@@ -501,5 +516,16 @@ impl Discovery for KubeDiscoveryClient {
         // Convert receiver to stream
         let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(event_rx);
         Ok(Box::pin(stream))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn publisher_ids_must_fit_kubernetes_integer_range() {
+        assert!(validate_kubernetes_publisher_id(i64::MAX as u64).is_ok());
+        assert!(validate_kubernetes_publisher_id((i64::MAX as u64) + 1).is_err());
     }
 }
