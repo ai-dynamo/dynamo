@@ -864,6 +864,7 @@ class ModelRuntimeConfig:
     reasoning_parser: str | None
     tokenizer_backend: str | None
     exclude_tools_when_tool_choice_none: bool
+    default_thinking: bool | None
     data_parallel_start_rank: int
     data_parallel_size: int
     enable_local_indexer: bool
@@ -3515,6 +3516,7 @@ class backend:
             tool_call_parser: Optional[str] = None,
             reasoning_parser: Optional[str] = None,
             exclude_tools_when_tool_choice_none: bool = ...,
+            default_thinking: Optional[bool] = None,
             enable_local_indexer: bool = ...,
             enable_kv_routing: bool = ...,
             metrics_labels: List[Tuple[str, str]] = ...,

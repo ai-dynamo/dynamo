@@ -200,6 +200,11 @@ class DynamoRuntimeArgGroup(ArgGroup):
             help="Reasoning parser name for the model. If not specified, no reasoning parsing is performed.",
             choices=get_reasoning_parser_names(),
         )
+        # NOTE: Unlike --exclude-tools-when-tool-choice-none below, this flag is
+        # NOT duplicated in FrontendArgGroup. It only reaches the Rust-native
+        # chat template path (oai.rs / OpenAIPreprocessor::normalize_thinking_arg)
+        # via the MDC's runtime_config. Deployments running the experimental
+        # --dyn-chat-processor=vllm|sglang Python processors do not honor it.
         add_argument(
             g,
             flag_name="--dyn-default-thinking",
@@ -208,7 +213,10 @@ class DynamoRuntimeArgGroup(ArgGroup):
             help="Deployment default for the chat-template 'thinking' flag when the "
             "request sets neither thinking nor enable_thinking. 'off' enforces a "
             "default-off reasoning contract (e.g. DeepSeek-V4 catalog behavior); "
-            "'on' forces thinking on by default; unset keeps the model family default.",
+            "'on' forces thinking on by default; unset keeps the model family default. "
+            "Only honored by the default Rust-native chat processor "
+            "(--dyn-chat-processor=dynamo); not applied by the experimental "
+            "vllm/sglang chat-processor modes.",
             choices=["on", "off"],
         )
         # NOTE: This flag also exists in FrontendArgGroup (frontend_args.py).

@@ -695,11 +695,25 @@ impl OpenAIPreprocessor {
     /// forced default (kimi_k25). When a value is resolved it is written back
     /// to both aliases so the renderer, the guided-decoding gate, and the
     /// postprocessor all see the same decision.
+    ///
+    /// A request-supplied `thinking_mode` (DeepSeek/MiniMax's "chat"/"thinking"/
+    /// "disabled" string) also counts as an explicit request value: it is left
+    /// untouched here (no `thinking`/`enable_thinking` bool is seeded from
+    /// `default_thinking` or the kimi forced default) so the mode-string
+    /// consumers downstream (`deepseek_renderer_reasoning_enabled`,
+    /// `is_reasoning_disabled_by_request`) resolve it themselves instead of
+    /// being pre-empted by a freshly written bool that would otherwise take
+    /// higher precedence than `thinking_mode` in their own gates.
     fn normalize_thinking_arg(
         request: &mut NvCreateChatCompletionRequest,
         reasoning_parser: Option<&str>,
         default_thinking: Option<bool>,
     ) {
+        let has_explicit_thinking_mode = request
+            .chat_template_args
+            .as_ref()
+            .is_some_and(|args| args.contains_key("thinking_mode"));
+
         let normalized = request
             .chat_template_args
             .as_ref()
@@ -725,8 +739,15 @@ impl OpenAIPreprocessor {
                 }
                 None
             })
-            .or(default_thinking)
-            .or_else(|| matches!(reasoning_parser, Some("kimi_k25")).then_some(true));
+            .or(if has_explicit_thinking_mode {
+                None
+            } else {
+                default_thinking
+            })
+            .or_else(|| {
+                (!has_explicit_thinking_mode && matches!(reasoning_parser, Some("kimi_k25")))
+                    .then_some(true)
+            });
 
         let Some(normalized) = normalized else {
             return;
@@ -5105,6 +5126,49 @@ mod tests {
         OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("kimi_k25"), Some(false));
         let args = request.chat_template_args.as_ref();
         assert_eq!(dynamo_renderer::thinking_bool_from_args(args), Some(false));
+    }
+
+    /// A request-supplied `thinking_mode` is an explicit request value too:
+    /// the deployment default must not seed a `thinking`/`enable_thinking`
+    /// bool that would pre-empt it in the downstream mode-string gates.
+    #[test]
+    fn test_normalize_thinking_arg_thinking_mode_beats_deployment_default() {
+        let make_request = |thinking_mode: &str| {
+            serde_json::from_value::<NvCreateChatCompletionRequest>(serde_json::json!({
+                "messages": [{"role": "user", "content": "hello"}],
+                "model": "deepseek-ai/DeepSeek-V4-Flash",
+                "chat_template_kwargs": {"thinking_mode": thinking_mode},
+            }))
+            .unwrap()
+        };
+
+        // Deployment default is "off", but the request explicitly asked for
+        // thinking via `thinking_mode` — the default must not flip it off.
+        let mut request = make_request("thinking");
+        OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("deepseek_v4"), Some(false));
+        let args = request.chat_template_args.as_ref();
+        assert!(
+            !args.is_some_and(|args| args.contains_key("thinking")),
+            "default_thinking must not seed a bool over an explicit thinking_mode"
+        );
+        assert!(!OpenAIPreprocessor::is_reasoning_disabled_by_request(
+            Some("deepseek_v4"),
+            args
+        ));
+
+        // Deployment default is "on", but the request explicitly asked to
+        // stay in chat mode — the default must not flip it on.
+        let mut request = make_request("chat");
+        OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("deepseek_v4"), Some(true));
+        let args = request.chat_template_args.as_ref();
+        assert!(
+            !args.is_some_and(|args| args.contains_key("thinking")),
+            "default_thinking must not seed a bool over an explicit thinking_mode"
+        );
+        assert!(OpenAIPreprocessor::is_reasoning_disabled_by_request(
+            Some("deepseek_v4"),
+            args
+        ));
     }
 
     /// PRE.2 — Per-request reasoning gate. See `lib/llm/PREPROCESSOR_CASES.md`.
