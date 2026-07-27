@@ -370,7 +370,53 @@ impl DeltaAggregator {
             }
         }
 
-        if let Some(parser) = parsing_options.tool_call_parser.as_deref() {
+        let use_kimi_k3_unified_parser = super::unified_parser::enabled()
+            && super::unified_parser::configured(
+                parsing_options.tool_call_parser.as_deref(),
+                parsing_options.reasoning_parser.as_deref(),
+            );
+        if use_kimi_k3_unified_parser {
+            for choice in aggregator.choices.values_mut() {
+                if choice.text.is_empty()
+                    || choice
+                        .tool_calls
+                        .as_ref()
+                        .is_some_and(|calls| !calls.is_empty())
+                {
+                    continue;
+                }
+                match super::unified_parser::parse_complete(&choice.text) {
+                    Ok(parsed) => {
+                        choice.text = parsed.text;
+                        if !parsed.reasoning.is_empty() {
+                            choice
+                                .reasoning_content
+                                .get_or_insert_with(String::new)
+                                .push_str(&parsed.reasoning);
+                        }
+                        if !parsed.tool_calls.is_empty() {
+                            choice.tool_calls = Some(parsed.tool_calls);
+                            if choice.finish_reason
+                                == Some(dynamo_protocols::types::FinishReason::Stop)
+                            {
+                                choice.finish_reason =
+                                    Some(dynamo_protocols::types::FinishReason::ToolCalls);
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        tracing::debug!(
+                            error = %error,
+                            "failed to parse aggregated Kimi K3 unified output"
+                        );
+                    }
+                }
+            }
+        }
+
+        if !use_kimi_k3_unified_parser
+            && let Some(parser) = parsing_options.tool_call_parser.as_deref()
+        {
             for choice in aggregator.choices.values_mut() {
                 if choice
                     .tool_calls

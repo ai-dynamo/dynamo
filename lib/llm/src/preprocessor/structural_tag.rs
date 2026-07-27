@@ -7,6 +7,10 @@ use crate::local_model::runtime_config::{StructuralTagMode, StructuralTagScope};
 use crate::preprocessor::{OpenAIPreprocessor, PreprocessedRequest};
 
 use dynamo_parsers::tool_calling::{ToolChoice, ToolDefinition};
+use dynamo_parsers_v2::{
+    KimiK3StructuralTagBuilder, Tool as UnifiedTool, UnifiedStructuralTagBuilder,
+    UnifiedToolCallFormatContext, UnifiedToolChoice,
+};
 use dynamo_runtime::error::{DynamoError, ErrorType};
 
 impl OpenAIPreprocessor {
@@ -30,6 +34,21 @@ impl OpenAIPreprocessor {
             );
             return Ok(false);
         };
+
+        if crate::protocols::openai::chat_completions::unified_parser::enabled()
+            && crate::protocols::openai::chat_completions::unified_parser::configured(
+                Some(parser_name),
+                self.runtime_config.reasoning_parser.as_deref(),
+            )
+        {
+            return self.apply_kimi_k3_structural_tag(
+                tool_choice,
+                tools,
+                parallel_tool_calls,
+                prompt_injected_reasoning,
+                preprocessed_request,
+            );
+        }
 
         let Some(builder) = Self::structural_tag_builder_for_parser(parser_name) else {
             return Ok(false);
@@ -60,6 +79,74 @@ impl OpenAIPreprocessor {
         };
 
         Self::apply_tool_call_format(parser_name, builder, &ctx, preprocessed_request)
+    }
+
+    fn apply_kimi_k3_structural_tag(
+        &self,
+        tool_choice: &ToolChoice,
+        tools: &[ToolDefinition],
+        parallel_tool_calls: Option<bool>,
+        prompt_injected_reasoning: bool,
+        preprocessed_request: &mut PreprocessedRequest,
+    ) -> Result<bool, DynamoError> {
+        if matches!(tool_choice, ToolChoice::None) {
+            return Ok(false);
+        }
+        if !Self::should_apply_tool_call_format(
+            self.runtime_config.structural_tag_scope,
+            tool_choice,
+            tools,
+            parallel_tool_calls,
+        ) {
+            return Ok(false);
+        }
+
+        let tools = tools
+            .iter()
+            .map(|tool| UnifiedTool {
+                name: tool.name.clone(),
+                description: None,
+                parameters: tool.parameters.clone().unwrap_or(serde_json::Value::Null),
+                strict: tool.strict,
+            })
+            .collect::<Vec<_>>();
+        let tool_choice = match tool_choice {
+            ToolChoice::None => UnifiedToolChoice::None,
+            ToolChoice::Auto => UnifiedToolChoice::Auto,
+            ToolChoice::Required => UnifiedToolChoice::Required,
+            ToolChoice::Named(name) => UnifiedToolChoice::Named(name),
+        };
+        let ctx = UnifiedToolCallFormatContext {
+            tool_choice,
+            tools: &tools,
+            parallel_tool_calls,
+            strict_schema: self.runtime_config.structural_tag_schema
+                == crate::local_model::runtime_config::StructuralTagSchemaMode::Strict,
+            starts_in_reasoning: prompt_injected_reasoning,
+        };
+        let structural_tag = KimiK3StructuralTagBuilder
+            .build_tool_call_format(&ctx)
+            .map_err(|error| {
+                DynamoError::builder()
+                    .error_type(ErrorType::Unknown)
+                    .message(format!(
+                        "failed to build structural_tag for parser 'kimi_k3': {error}"
+                    ))
+                    .build()
+            })?
+            .ok_or_else(|| {
+                DynamoError::builder()
+                    .error_type(ErrorType::Unknown)
+                    .message("Kimi K3 structural-tag builder returned no format")
+                    .build()
+            })?;
+
+        preprocessed_request
+            .sampling_options
+            .guided_decoding
+            .get_or_insert_default()
+            .structural_tag = Some(structural_tag);
+        Ok(true)
     }
 
     /// Find the structural tag builder for a parser, if supported.

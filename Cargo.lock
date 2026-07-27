@@ -2726,18 +2726,18 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers-v2"
-version = "0.1.19"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b5a8fca0f27b610454cd33858b5eb01c78c24d3ace7af2728d0723713775a939"
+version = "0.1.23"
 dependencies = [
  "anyhow",
- "dynamo-parsers",
+ "num-traits",
  "openai-harmony",
  "regex",
  "serde",
  "serde_json",
  "serde_yaml",
  "tracing",
+ "uuid",
+ "winnow 1.0.3",
 ]
 
 [[package]]

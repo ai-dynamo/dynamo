@@ -2279,6 +2279,41 @@ impl OpenAIPreprocessor {
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     {
+        use crate::protocols::openai::chat_completions::unified_parser;
+
+        if unified_parser::enabled()
+            && unified_parser::configured(
+                self.tool_call_parser.as_deref(),
+                self.runtime_config.reasoning_parser.as_deref(),
+            )
+        {
+            let tool_definitions = request.inner.tools.as_ref().map(|tools| {
+                tools
+                    .iter()
+                    .map(|tool| dynamo_parsers::tool_calling::ToolDefinition {
+                        name: tool.function.name.clone(),
+                        parameters: tool.function.parameters.clone(),
+                        strict: tool.function.strict,
+                    })
+                    .collect()
+            });
+            let prefill = if prompt_injected_reasoning {
+                dynamo_parsers_v2::UnifiedParserPrefill::Reasoning
+            } else {
+                // K3's non-thinking generation prompt ends inside the response
+                // channel, so the model does not repeat its opening marker.
+                dynamo_parsers_v2::UnifiedParserPrefill::Response
+            };
+            return Ok(Box::pin(unified_parser::apply_stream(
+                stream,
+                tool_definitions,
+                prefill,
+            ))
+                as Pin<
+                    Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>,
+                >);
+        }
+
         // Guided output may be bare JSON or `reasoning</think>JSON`. Supported
         // parsers inspect the stream shape before deciding whether to parse it.
         let is_guided_tool_choice = matches!(
@@ -3009,6 +3044,7 @@ impl OpenAIPreprocessor {
         // - harmony / gpt_oss: `<|channel|>analysis<|message|>...<|end|>`.
         // - kimi_k2: `<|tool_calls_section_begin|>` / `<|tool_calls_section_end|>`.
         // - kimi_k25: `</think>` (special token id 163607).
+        // - kimi_k3: `<|open|>` / `<|close|>` / `<|sep|>` channel markers.
         // - mistral: `[THINK]` / `[/THINK]` reasoning markers.
         // - minimax_m3: `]<]minimax[>[` tool-call namespace tokens and
         //   `<mm:think>` reasoning markers.
@@ -3021,6 +3057,7 @@ impl OpenAIPreprocessor {
                 | Some("gemma-4")
                 | Some("harmony")
                 | Some("kimi_k2")
+                | Some("kimi_k3")
                 | Some("minimax_m3")
                 | Some("minimax-m3")
                 | Some("minimax_m3_nom")
@@ -3032,6 +3069,7 @@ impl OpenAIPreprocessor {
                 | Some("gemma-4")
                 | Some("gpt_oss")
                 | Some("kimi_k25")
+                | Some("kimi_k3")
                 | Some("mistral")
                 | Some("minimax_m3")
                 | Some("minimax-m3")
@@ -3143,6 +3181,7 @@ impl OpenAIPreprocessor {
         };
 
         match reasoning_parser {
+            Some("kimi_k3") => prompt.ends_with("<|open|>think<|sep|>"),
             Some("minimax_m3") | Some("minimax-m3") => prompt.ends_with("<mm:think>"),
             _ => prompt.ends_with("<think>"),
         }
@@ -4209,6 +4248,24 @@ mod tests {
                   the default skip_special_tokens=true)",
             ),
             (
+                Some("kimi_k3"),
+                Some("kimi_k3"),
+                true,
+                "kimi_k3 paired unified parser → required",
+            ),
+            (
+                Some("kimi_k3"),
+                None,
+                true,
+                "kimi_k3 tool-call only → required",
+            ),
+            (
+                None,
+                Some("kimi_k3"),
+                true,
+                "kimi_k3 reasoning only → required",
+            ),
+            (
                 None,
                 Some("kimi_k25"),
                 true,
@@ -4262,6 +4319,7 @@ mod tests {
         assert!(f(Some(true), Some("harmony"), None));
         assert!(f(Some(true), None, Some("gpt_oss")));
         assert!(f(Some(true), Some("kimi_k2"), None));
+        assert!(f(Some(true), Some("kimi_k3"), Some("kimi_k3")));
         assert!(f(Some(true), None, Some("mistral")));
         // false / unset → never (default path keeps the markers)
         assert!(!f(Some(false), Some("harmony"), None));
@@ -4317,6 +4375,18 @@ mod tests {
     #[test]
     fn test_prompt_injected_reasoning_start_by_parser() {
         let cases = [
+            (
+                Some("kimi_k3"),
+                Some("...<|open|>think<|sep|>"),
+                true,
+                "Kimi K3 starts from its think channel opener",
+            ),
+            (
+                Some("kimi_k3"),
+                Some("...<think>\n"),
+                false,
+                "Kimi K3 must not use generic <think>",
+            ),
             (
                 Some("minimax_m3"),
                 Some("...<mm:think>\n"),

@@ -361,6 +361,12 @@ pub mod llm {
     /// v2 parser owns incremental tool-call emission and drops values truncated at EOF.
     pub const DYN_ENABLE_EXPERIMENTAL_PARSERS_V2: &str = "DYN_ENABLE_EXPERIMENTAL_PARSERS_V2";
 
+    /// \[EXPERIMENTAL\] Enable the ordered Kimi K3 unified parser when both the
+    /// configured reasoning and tool-call parser names are `kimi_k3`. The unified
+    /// path owns reasoning, visible text, and tool-call parsing and bypasses the
+    /// split reasoning parser plus v1 tool-call jail.
+    pub const DYN_ENABLE_KIMI_K3_UNIFIED_PARSER: &str = "DYN_ENABLE_KIMI_K3_UNIFIED_PARSER";
+
     /// Backend stream inactivity timeout in seconds.
     ///
     /// When set to a positive integer, the frontend will kill the engine context
@@ -821,6 +827,7 @@ mod tests {
             llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH,
             llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH,
             llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2,
+            llm::DYN_ENABLE_KIMI_K3_UNIFIED_PARSER,
             llm::DYN_LORA_ALLOCATION_ENABLED,
             llm::DYN_LORA_ALLOCATION_ALGORITHM,
             llm::DYN_LORA_ALLOCATION_TIMESTEP_SECS,
