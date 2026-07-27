@@ -1,12 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""V1 policies for persistent Parameters and ephemeral KV cache."""
+"""VA-stable client memory ownership for one GMS V1 socket domain."""
 
 from __future__ import annotations
 
 import threading
 from collections.abc import Callable
+from dataclasses import dataclass, replace
 from uuid import uuid4
 
 import torch
@@ -15,20 +16,28 @@ from gpu_memory_service.common.vmm import VMMDevice
 from gpu_memory_service.core.client.memory_manager import (
     LocalMapping,
     install_mapping,
+    release_mapping,
     reserve_and_install_mapping,
     unmap_mapping,
 )
-from gpu_memory_service.core.client.session import GMSClientSession
-from gpu_memory_service.core.errors import FatalGMSError, GMSError
+from gpu_memory_service.core.client.session import _GMSClientSession
+from gpu_memory_service.core.errors import GMSError
 
-SessionFactory = Callable[
+_SessionFactory = Callable[
     [str, RequestedLockType, tuple[str, str] | None],
-    GMSClientSession,
+    _GMSClientSession,
 ]
 
 
-class PersistentParameterMemoryManager:
-    """Own persistent, committed Parameter mappings."""
+@dataclass(frozen=True)
+class _InstalledMapping(LocalMapping):
+    """One local reservation with its currently imported CUDA handle."""
+
+    handle: int
+
+
+class GMSClientMemoryManager:
+    """Own one GMS socket session, allocation table, and local VA table."""
 
     def __init__(
         self,
@@ -36,303 +45,55 @@ class PersistentParameterMemoryManager:
         vmm: VMMDevice,
         device: int,
         *,
-        session_factory: SessionFactory = GMSClientSession,
+        session_factory: _SessionFactory = _GMSClientSession,
     ):
-        self.socket_path = socket_path
-        self.vmm = vmm
-        self.device = device
+        self._socket_path = socket_path
+        self._vmm = vmm
+        self._device = device
         self._session_factory = session_factory
-        self._session: GMSClientSession | None = None
-        self._mappings: dict[int, LocalMapping] = {}
-        self._imports: dict[int, int] = {}
+        self._session: _GMSClientSession | None = None
+        self._identity: tuple[str, str] | None = None
+        self._mappings: dict[int, _InstalledMapping] = {}
         self._lock = threading.RLock()
-        self._fatal: FatalGMSError | None = None
-        self._retired = False
-        self.vmm.ensure_initialized()
-        self._granularity = int(self.vmm.get_allocation_granularity(device))
+        self._failure: GMSError | None = None
+        self._vmm.ensure_initialized()
+        self._granularity = int(self._vmm.get_allocation_granularity(device))
         if self._granularity <= 0:
             raise ValueError("allocation granularity must be positive")
-
-        session = self._session_factory(socket_path, RequestedLockType.RW, None)
-        self._session = session
-        try:
-            self._server_nonce, self._gpu_uuid = session.identity
-            local_gpu = self._gpu_identity()
-        except Exception:
-            session.close()
-            self._session = None
-            raise
-        if local_gpu != self._gpu_uuid:
-            session.close()
-            self._session = None
-            raise self._latch("weights sidecar is on another physical GPU")
 
     @property
     def mappings(self) -> tuple[LocalMapping, ...]:
         with self._lock:
-            return tuple(self._mappings[base] for base in sorted(self._mappings))
+            return self._ordered_mappings()
 
-    @property
-    def retained_gms_allocation_count(self) -> int:
+    def owns(self, va: int) -> bool:
         with self._lock:
-            return len(self._mappings)
+            return va in self._mappings
 
-    def owns(self, base: int) -> bool:
-        with self._lock:
-            return base in self._mappings
-
-    def allocate(self, size: int) -> int:
-        with self._lock:
-            self._check_constructing()
-            if size <= 0:
-                raise ValueError("allocation size must be positive")
-            aligned_size = self._align(size)
-            allocation_id = f"allocation-{uuid4()}"
-            try:
-                self._require_session().allocate(allocation_id, aligned_size)
-                self._select_device()
-                mapping, handle = reserve_and_install_mapping(
-                    self.vmm,
-                    self._require_session().export(allocation_id),
-                    allocation_id,
-                    size,
-                    aligned_size,
-                    aligned_size,
-                    self._granularity,
-                    self.device,
-                    GrantedLockType.RW,
-                )
-                base = mapping.base
-            except Exception as cause:
-                self._close_session()
-                raise self._latch("Parameter allocation failed", cause) from cause
-            self._mappings[base] = mapping
-            self._imports[base] = handle
-            return base
-
-    def free_from_allocator(self, base: int, size: int) -> None:
-        """Release one exact local segment and its uncommitted backing, if any."""
+    def connect(self, lock_type: RequestedLockType) -> None:
         with self._lock:
             self._check()
-            mapping = self._mappings.get(base)
-            if mapping is None or mapping.requested_size != size:
-                self._close_session()
-                raise self._latch("allocator free does not match an exact mapping")
-            session = self._session
-            constructing = (
-                session is not None and session.lock_type is GrantedLockType.RW
-            )
-            if session is not None and base not in self._imports:
-                self._close_session()
-                raise self._latch("allocator freed a mapping without an import")
-            try:
-                self._select_device()
-                if base in self._imports:
-                    self._drop_import(mapping)
-                if constructing:
-                    self._require_session().free(mapping.allocation_id)
-                self.vmm.address_free(mapping.base, mapping.reservation_size)
-            except Exception as cause:
-                self._close_session()
-                raise self._latch("allocator free failed", cause) from cause
-            del self._mappings[base]
-            if not constructing and not self._mappings:
-                self._close_session()
-                self._retired = True
-
-    def commit(self) -> None:
-        """Make every mapping RO and atomically downgrade the RW socket session."""
-        with self._lock:
-            self._check_constructing()
-            mappings = self.mappings
-            if not mappings:
-                self._close_session()
-                raise self._latch("weights have no Parameter allocations")
-
-            try:
-                self._select_device()
-                self.vmm.synchronize()
-                for mapping in mappings:
-                    self.vmm.set_access(
-                        mapping.base,
-                        mapping.aligned_size,
-                        self.device,
-                        GrantedLockType.RO,
-                    )
-                self._require_session().commit()
-            except Exception as cause:
-                self._close_session()
-                raise self._latch("read-only Parameter commit failed", cause) from cause
-
-    def sleep(self) -> None:
-        """Drop RO imports, then close RO while preserving IDs and VAs."""
-        with self._lock:
-            self._check()
-            if (
-                self._session is None
-                or self._session.lock_type is not GrantedLockType.RO
-            ):
-                raise GMSError("weights have not been committed")
-            try:
-                self._select_device()
-                self.vmm.synchronize()
-                for mapping in reversed(self.mappings):
-                    self._drop_import(mapping)
-            except Exception as cause:
-                raise self._latch("Parameter sleep failed", cause) from cause
-            self._close_session()
-
-    def wake(self) -> None:
-        """Acquire RO and reinstall checkpointed IDs at their exact VAs."""
-        with self._lock:
-            self._check()
-            if self._session is not None or self._imports:
-                raise GMSError("Parameter memory manager is not fully asleep")
-
+            if self._session is not None:
+                raise GMSError("GMS memory manager is already connected")
             try:
                 session = self._session_factory(
-                    self.socket_path,
-                    RequestedLockType.RO,
-                    (self._server_nonce, self._gpu_uuid),
+                    self._socket_path,
+                    lock_type,
+                    self._identity,
                 )
+                if session.identity[1] != self._gpu_identity():
+                    session.close()
+                    raise GMSError("GMS sidecar is on another physical GPU")
+                if self._identity is None:
+                    self._identity = session.identity
                 self._session = session
-                if self._gpu_identity() != self._gpu_uuid:
-                    raise GMSError("restored process is on another physical GPU")
-                self._select_device()
-                for mapping in self.mappings:
-                    handle = install_mapping(
-                        self.vmm,
-                        mapping,
-                        session.export(mapping.allocation_id),
-                        self.device,
-                        GrantedLockType.RO,
-                    )
-                    self._imports[mapping.base] = handle
-            except Exception as cause:
-                self._close_session()
-                raise self._latch(f"Parameter wake failed: {cause}") from cause
+            except Exception as exc:
+                raise self._latch("GMS connect failed", exc) from exc
 
-    def retire(self) -> None:
-        """Release local imports/reservations and the session, not sidecar backing."""
-        with self._lock:
-            if self._retired:
-                return
-            self._check()
-            try:
-                self._select_device()
-                if self._imports:
-                    self.vmm.synchronize()
-                for mapping in reversed(self.mappings):
-                    if mapping.base in self._imports:
-                        self._drop_import(mapping)
-                    self.vmm.address_free(mapping.base, mapping.reservation_size)
-            except Exception as cause:
-                self._close_session()
-                raise self._latch("Parameter retirement failed", cause) from cause
-            self._close_session()
-            self._mappings.clear()
-            self._retired = True
-
-    def abort(self, cause: Exception) -> None:
-        """Fail-stop model preparation and close RW to abort its epoch."""
-        with self._lock:
-            self._close_session()
-            raise self._latch("Parameter preparation failed", cause) from cause
-
-    def _gpu_identity(self) -> str:
-        return str(torch.cuda.get_device_properties(self.device).uuid)
-
-    def _drop_import(self, mapping: LocalMapping) -> None:
-        base = mapping.base
-        unmap_mapping(self.vmm, mapping, self._imports[base])
-        del self._imports[base]
-
-    def _select_device(self) -> None:
-        self.vmm.runtime_set_device(self.device)
-
-    def _close_session(self) -> None:
-        if self._session is not None:
-            self._session.close()
-            self._session = None
-
-    def _require_session(self) -> GMSClientSession:
-        if self._session is None:
-            raise GMSError("weights session is disconnected")
-        return self._session
-
-    def _align(self, size: int) -> int:
-        return (size + self._granularity - 1) // self._granularity * self._granularity
-
-    def _check_constructing(self) -> None:
-        self._check()
-        if self._session is None or self._session.lock_type is not GrantedLockType.RW:
-            raise GMSError("weights are no longer under construction")
-
-    def _check(self) -> None:
-        if self._fatal is not None:
-            raise self._fatal
-        if self._retired:
-            raise GMSError("Parameter memory manager is retired")
-
-    def _latch(self, message: str, cause: Exception | None = None) -> FatalGMSError:
-        if self._fatal is None:
-            suffix = f": {cause}" if cause is not None else ""
-            self._fatal = FatalGMSError(message + suffix)
-        return self._fatal
-
-
-class EphemeralKVCacheMemoryManager:
-    """Own one exclusive RW KV allocation epoch at preserved VAs."""
-
-    def __init__(
-        self,
-        socket_path: str,
-        vmm: VMMDevice,
-        device: int,
-        *,
-        session_factory: SessionFactory = GMSClientSession,
-    ):
-        self.socket_path = socket_path
-        self.vmm = vmm
-        self.device = device
-        self._session_factory = session_factory
-        self._session: GMSClientSession | None = None
-        self._mappings: dict[int, LocalMapping] = {}
-        self._imports: dict[int, int] = {}
-        self._lock = threading.RLock()
-        self._fatal: FatalGMSError | None = None
-        self.vmm.ensure_initialized()
-        self._granularity = int(self.vmm.get_allocation_granularity(device))
-        if self._granularity <= 0:
-            raise ValueError("allocation granularity must be positive")
-
-        session = self._session_factory(socket_path, RequestedLockType.RW, None)
-        self._session = session
-        try:
-            self._server_nonce, self._gpu_uuid = session.identity
-            local_gpu = self._gpu_identity()
-        except Exception:
-            session.close()
-            self._session = None
-            raise
-        if local_gpu != self._gpu_uuid:
-            session.close()
-            self._session = None
-            raise self._latch("KV cache sidecar is on another physical GPU")
-
-    @property
-    def mappings(self) -> tuple[LocalMapping, ...]:
-        with self._lock:
-            return tuple(self._mappings[base] for base in sorted(self._mappings))
-
-    def owns(self, base: int) -> bool:
-        with self._lock:
-            return base in self._mappings
-
-    def allocate(self, size: int) -> int:
+    def create_mapping(self, size: int) -> int:
         with self._lock:
             self._check()
-            session = self._require_active_session()
+            session = self._require_rw()
             if size <= 0:
                 raise ValueError("allocation size must be positive")
             aligned_size = self._align(size)
@@ -341,116 +102,164 @@ class EphemeralKVCacheMemoryManager:
                 session.allocate(allocation_id, aligned_size)
                 self._select_device()
                 mapping, handle = reserve_and_install_mapping(
-                    self.vmm,
+                    self._vmm,
                     session.export(allocation_id),
                     allocation_id,
                     size,
                     aligned_size,
                     aligned_size,
                     self._granularity,
-                    self.device,
+                    self._device,
                     GrantedLockType.RW,
                 )
-                base = mapping.base
-            except Exception as cause:
-                raise self._latch("KV cache allocation failed", cause) from cause
-            self._mappings[base] = mapping
-            self._imports[base] = handle
-            return base
-
-    def free_from_allocator(self, base: int, size: int) -> None:
-        """Release one exact KV allocation and its VA reservation."""
-        with self._lock:
-            self._check()
-            mapping = self._mappings.get(base)
-            if mapping is None or mapping.requested_size != size:
-                raise self._latch("allocator free does not match an exact KV mapping")
-            try:
-                self._select_device()
-                if base in self._imports:
-                    self._drop_import(mapping)
-                if self._session is not None:
-                    self._require_active_session().free(mapping.allocation_id)
-                self.vmm.address_free(mapping.base, mapping.reservation_size)
-            except Exception as cause:
-                raise self._latch("KV allocator free failed", cause) from cause
-            del self._mappings[base]
-
-    def sleep(self) -> None:
-        """Unmap all KV imports, then close RW so the server clears the epoch."""
-        with self._lock:
-            self._check()
-            self._require_active_session()
-            try:
-                self._select_device()
-                self.vmm.synchronize()
-                for mapping in reversed(self.mappings):
-                    self._drop_import(mapping)
-            except Exception as cause:
-                raise self._latch("KV cache sleep failed", cause) from cause
-            self._close_session()
-
-    def wake(self) -> None:
-        """Acquire RW, recreate saved IDs, and map fresh backing at saved VAs."""
-        with self._lock:
-            self._check()
-            if self._session is not None or self._imports:
-                raise GMSError("KV cache memory manager is not fully asleep")
-
-            try:
-                session = self._session_factory(
-                    self.socket_path,
-                    RequestedLockType.RW,
-                    (self._server_nonce, self._gpu_uuid),
+                installed = _InstalledMapping(
+                    mapping.allocation_id,
+                    mapping.requested_size,
+                    mapping.aligned_size,
+                    mapping.base,
+                    mapping.reservation_size,
+                    handle,
                 )
-                self._session = session
-                if self._gpu_identity() != self._gpu_uuid:
-                    raise GMSError("restored process is on another physical GPU")
+                self._mappings[mapping.base] = installed
+                return mapping.base
+            except Exception as exc:
+                raise self._latch("GMS mapping creation failed", exc) from exc
+
+    def destroy_mapping(self, va: int, size: int | None = None) -> None:
+        with self._lock:
+            self._check()
+            try:
+                mapping = self._mappings[va]
+            except KeyError:
+                raise GMSError(f"GMS does not own VA 0x{va:x}") from None
+            if size is not None and size != mapping.requested_size:
+                raise GMSError("allocator free does not match the GMS mapping")
+            try:
                 self._select_device()
-                for mapping in self.mappings:
+                if mapping.handle:
+                    self._unmap(mapping)
+                if self._session is not None and (
+                    self._session.lock_type is GrantedLockType.RW
+                ):
+                    self._session.free(mapping.allocation_id)
+                release_mapping(self._vmm, mapping)
+                del self._mappings[va]
+            except Exception as exc:
+                raise self._latch("GMS mapping destruction failed", exc) from exc
+
+    def commit(self) -> None:
+        """Publish current mappings and downgrade the same socket from RW to RO."""
+        with self._lock:
+            self._check()
+            session = self._require_rw()
+            if not self._mappings:
+                raise GMSError("cannot commit an empty GMS allocation set")
+            try:
+                self._select_device()
+                self._vmm.synchronize()
+                for mapping in self._ordered_mappings():
+                    self._vmm.set_access(
+                        mapping.base,
+                        mapping.aligned_size,
+                        self._device,
+                        GrantedLockType.RO,
+                    )
+                session.commit()
+            except Exception as exc:
+                raise self._latch("GMS commit failed", exc) from exc
+
+    def unmap_all_vas(self) -> None:
+        """Drop imported handles while preserving allocation records and VAs."""
+        with self._lock:
+            self._check()
+            try:
+                self._select_device()
+                self._vmm.synchronize()
+                for mapping in reversed(self._ordered_mappings()):
+                    if mapping.handle:
+                        self._unmap(mapping)
+            except Exception as exc:
+                raise self._latch("GMS unmap failed", exc) from exc
+
+    def reallocate_all_handles(self) -> None:
+        """Create fresh server backing under every saved allocation ID."""
+        with self._lock:
+            self._check()
+            session = self._require_rw()
+            try:
+                for mapping in self._ordered_mappings():
                     session.allocate(mapping.allocation_id, mapping.aligned_size)
-                    self._imports[mapping.base] = install_mapping(
-                        self.vmm,
+            except Exception as exc:
+                raise self._latch("GMS backing reallocation failed", exc) from exc
+
+    def remap_all_vas(self) -> None:
+        """Install saved allocation IDs at their existing VAs."""
+        with self._lock:
+            self._check()
+            session = self._require_session()
+            try:
+                self._select_device()
+                for mapping in self._ordered_mappings():
+                    if mapping.handle:
+                        raise GMSError("GMS mapping is already installed")
+                    handle = install_mapping(
+                        self._vmm,
                         mapping,
                         session.export(mapping.allocation_id),
-                        self.device,
-                        GrantedLockType.RW,
+                        self._device,
+                        session.lock_type,
                     )
-            except Exception as cause:
-                raise self._latch(f"KV cache wake failed: {cause}") from cause
+                    self._mappings[mapping.base] = replace(mapping, handle=handle)
+            except Exception as exc:
+                raise self._latch("GMS remap failed", exc) from exc
+
+    def disconnect(self) -> None:
+        with self._lock:
+            if self._session is not None:
+                self._session.close()
+                self._session = None
+
+    def close(self) -> None:
+        """Release local mappings and VAs, then disconnect the socket lease."""
+        with self._lock:
+            self._check()
+            for mapping in reversed(self._ordered_mappings()):
+                self.destroy_mapping(mapping.base)
+            self.disconnect()
+
+    def _ordered_mappings(self) -> tuple[_InstalledMapping, ...]:
+        return tuple(self._mappings[va] for va in sorted(self._mappings))
+
+    def _unmap(self, mapping: _InstalledMapping) -> None:
+        unmap_mapping(self._vmm, mapping, mapping.handle)
+        self._mappings[mapping.base] = replace(mapping, handle=0)
 
     def _gpu_identity(self) -> str:
-        return str(torch.cuda.get_device_properties(self.device).uuid)
-
-    def _drop_import(self, mapping: LocalMapping) -> None:
-        base = mapping.base
-        unmap_mapping(self.vmm, mapping, self._imports[base])
-        del self._imports[base]
+        return str(torch.cuda.get_device_properties(self._device).uuid)
 
     def _select_device(self) -> None:
-        self.vmm.runtime_set_device(self.device)
+        self._vmm.runtime_set_device(self._device)
 
-    def _close_session(self) -> None:
-        if self._session is not None:
-            self._session.close()
-            self._session = None
-
-    def _require_active_session(self) -> GMSClientSession:
+    def _require_session(self) -> _GMSClientSession:
         if self._session is None:
-            raise GMSError("KV cache session is disconnected")
-        if self._session.lock_type is not GrantedLockType.RW:
-            raise GMSError("KV cache session is not RW")
+            raise GMSError("GMS memory manager is disconnected")
         return self._session
+
+    def _require_rw(self) -> _GMSClientSession:
+        session = self._require_session()
+        if session.lock_type is not GrantedLockType.RW:
+            raise GMSError("operation requires an RW session")
+        return session
 
     def _align(self, size: int) -> int:
         return (size + self._granularity - 1) // self._granularity * self._granularity
 
     def _check(self) -> None:
-        if self._fatal is not None:
-            raise self._fatal
+        if self._failure is not None:
+            raise self._failure
 
-    def _latch(self, message: str, cause: Exception | None = None) -> FatalGMSError:
-        if self._fatal is None:
-            suffix = f": {cause}" if cause is not None else ""
-            self._fatal = FatalGMSError(message + suffix)
-        return self._fatal
+    def _latch(self, message: str, cause: Exception) -> GMSError:
+        self.disconnect()
+        if self._failure is None:
+            self._failure = GMSError(f"{message}: {cause}")
+        return self._failure
