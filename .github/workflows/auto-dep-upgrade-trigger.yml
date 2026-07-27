@@ -73,6 +73,9 @@ jobs:
       - name: Apply bump
         if: steps.detect.outputs.upgrade_needed == 'true' && steps.branch.outputs.exists == 'false'
         run: |
+          # Pre-flight: prove the bump tooling still edits exactly the
+          # MAIN_TOT pin in releases.data.ts before touching the real tree.
+          python3 .github/scripts/dep_upgrade/check_bump_dependency.py
           python3 .github/scripts/dep_upgrade/bump_dependency.py \
             --framework ${{ matrix.framework }} \
             --version ${{ steps.detect.outputs.latest }}
