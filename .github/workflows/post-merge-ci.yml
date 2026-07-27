@@ -73,6 +73,7 @@ jobs:
   # ============================================================================
   operator:
     name: Operator
+    if: github.event_name != 'workflow_dispatch'
     runs-on: prod-default-v2
     outputs:
       operator_default_tag: ${{ steps.build.outputs.image_tag }}
