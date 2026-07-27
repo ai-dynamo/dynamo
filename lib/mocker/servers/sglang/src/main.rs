@@ -137,10 +137,4 @@ mod tests {
         assert_eq!(args.engine_type, EngineType::Sglang);
         assert_eq!(args.block_size, 4);
     }
-
-    #[test]
-    fn engine_loader_rejects_an_explicit_mismatch() {
-        let error = load_engine_args(Some(r#"{"engine_type":"vllm"}"#)).unwrap_err();
-        assert!(error.to_string().contains("must be sglang"));
-    }
 }

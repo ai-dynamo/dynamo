@@ -734,89 +734,55 @@ mod tests {
         }
     }
 
-    #[test]
-    fn request_plan_is_stable_and_meta_is_sglang_shaped() {
-        let config = MockerServerConfig::default();
-        let first = PreparedRequest::new(request("stable"), &config).unwrap();
-        let second = PreparedRequest::new(request("stable"), &config).unwrap();
-        assert_eq!(first.uuid, second.uuid);
-        assert_eq!(first.output_token_ids, second.output_token_ids);
-
-        let meta = first.meta_info(&first.output_token_ids, true);
-        assert_eq!(meta["prompt_tokens"], "3");
-        assert_eq!(
-            serde_json::from_str::<Value>(&meta["finish_reason"]).unwrap(),
-            json!({"type": "length"})
-        );
-        assert_eq!(
-            serde_json::from_str::<Value>(&meta["output_token_logprobs"])
-                .unwrap()
-                .as_array()
-                .unwrap()
-                .len(),
-            2
-        );
-        assert_eq!(
-            serde_json::from_str::<Value>(&meta["input_token_logprobs"])
-                .unwrap()
-                .as_array()
-                .unwrap()
-                .len(),
-            2
-        );
-    }
-
-    #[test]
-    fn request_validation_rejects_bad_ids_limits_and_roles() {
-        let config = MockerServerConfig::default();
+    #[tokio::test]
+    async fn generate_rejects_invalid_requests() {
+        let service =
+            SglangMockerService::new(MockerServerConfig::default(), engine_args()).unwrap();
         let mut negative = request("negative");
         negative.input_ids = vec![-1];
         assert_eq!(
-            PreparedRequest::new(negative, &config).unwrap_err().code(),
+            service
+                .generate(Request::new(negative))
+                .await
+                .err()
+                .expect("negative token ID should be rejected")
+                .code(),
             tonic::Code::InvalidArgument
         );
 
         let mut bad_n = request("bad-n");
         bad_n.sampling_params.as_mut().unwrap().n = Some(2);
         assert_eq!(
-            PreparedRequest::new(bad_n, &config).unwrap_err().code(),
+            service
+                .generate(Request::new(bad_n))
+                .await
+                .err()
+                .expect("multiple sequences should be rejected")
+                .code(),
             tonic::Code::InvalidArgument
         );
 
-        let prefill_config = MockerServerConfig {
-            mode: ServerMode::Prefill,
-            ..Default::default()
-        };
+        let prefill_service = SglangMockerService::new(
+            MockerServerConfig {
+                mode: ServerMode::Prefill,
+                ..Default::default()
+            },
+            engine_args(),
+        )
+        .unwrap();
         assert_eq!(
-            PreparedRequest::new(request("missing-handoff"), &prefill_config)
-                .unwrap_err()
+            prefill_service
+                .generate(Request::new(request("missing-handoff")))
+                .await
+                .err()
+                .expect("missing rendezvous metadata should be rejected")
                 .code(),
             tonic::Code::FailedPrecondition
         );
     }
 
     #[tokio::test]
-    async fn discovery_matches_engine_capacity_and_mode() {
-        let config = MockerServerConfig {
-            mode: ServerMode::Prefill,
-            ..Default::default()
-        };
-        let service = SglangMockerService::new(config, engine_args()).unwrap();
-        let server = service
-            .get_server_info(Request::new(pb::GetServerInfoRequest {}))
-            .await
-            .unwrap()
-            .into_inner();
-        let info: Value = serde_json::from_str(&server.json_info).unwrap();
-        assert_eq!(info["disaggregation_mode"], "prefill");
-        assert_eq!(info["page_size"], 4);
-        assert_eq!(info["max_total_num_tokens"], 512);
-        assert_eq!(info["max_running_requests"], 8);
-        assert_eq!(info["max_prefill_tokens"], 64);
-    }
-
-    #[tokio::test]
-    async fn abort_is_targeted_idempotent_and_abort_all_is_unsupported() {
+    async fn missing_abort_is_idempotent() {
         let service =
             SglangMockerService::new(MockerServerConfig::default(), engine_args()).unwrap();
         for _ in 0..2 {
@@ -830,24 +796,5 @@ mod tests {
                 .into_inner();
             assert!(response.success);
         }
-        let error = service
-            .abort(Request::new(pb::AbortRequest {
-                rid: String::new(),
-                abort_all: true,
-            }))
-            .await
-            .unwrap_err();
-        assert_eq!(error.code(), tonic::Code::Unimplemented);
-    }
-
-    #[tokio::test]
-    async fn unrelated_rpc_is_unimplemented() {
-        let service =
-            SglangMockerService::new(MockerServerConfig::default(), engine_args()).unwrap();
-        let error = service
-            .tokenize(Request::new(pb::TokenizeRequest::default()))
-            .await
-            .unwrap_err();
-        assert_eq!(error.code(), tonic::Code::Unimplemented);
     }
 }

@@ -43,4 +43,3 @@ tonic-build = { workspace = true }
 
 [dev-dependencies]
 dynamo-backend-common = { workspace = true, features = ["testing"] }
-sha2 = "0.10"

@@ -4,8 +4,8 @@
 use std::sync::Arc;
 
 use dynamo_backend_common::{
-    DisaggregationMode, FinishReason, GenerateContext, LLMEngine, OutputOptions, PrefillResult,
-    PreprocessedRequest, SamplingOptions, StopConditions,
+    AsyncEngineContext, DisaggregationMode, FinishReason, GenerateContext, LLMEngine,
+    OutputOptions, PrefillResult, PreprocessedRequest, SamplingOptions, StopConditions,
 };
 use dynamo_mocker::common::protocols::{EngineType, MockEngineArgs};
 use dynamo_sglang_mocker::{MockerServerConfig, ServerMode, SglangMockerService};
@@ -123,7 +123,19 @@ async fn collect(
     engine: &SglangSidecarEngine,
     request: PreprocessedRequest,
 ) -> Vec<dynamo_backend_common::LLMEngineOutput> {
-    let context = dynamo_backend_common::testing::mock_context();
+    collect_with_context(
+        engine,
+        request,
+        dynamo_backend_common::testing::mock_context(),
+    )
+    .await
+}
+
+async fn collect_with_context(
+    engine: &SglangSidecarEngine,
+    request: PreprocessedRequest,
+    context: Arc<dyn AsyncEngineContext>,
+) -> Vec<dynamo_backend_common::LLMEngineOutput> {
     engine
         .generate(request, GenerateContext::new(context, None))
         .await
@@ -142,8 +154,11 @@ async fn sidecar_discovers_and_streams_mocker_tokens_logprobs_and_usage() {
     assert_eq!(registration.context_length, Some(32_768));
     assert_eq!(registration.kv_cache_block_size, Some(4));
     assert_eq!(registration.total_kv_blocks, Some(4_096));
+    assert_eq!(registration.max_num_seqs, Some(64));
+    assert_eq!(registration.max_num_batched_tokens, Some(1_024));
 
-    let outputs = collect(&engine, request(3)).await;
+    let context = dynamo_backend_common::testing::mock_context();
+    let outputs = collect_with_context(&engine, request(3), Arc::clone(&context)).await;
     assert_eq!(outputs.len(), 3);
     assert!(outputs.iter().all(|output| output.token_ids.len() == 1));
     assert!(
@@ -161,6 +176,18 @@ async fn sidecar_discovers_and_streams_mocker_tokens_logprobs_and_usage() {
     let usage = terminal.completion_usage.as_ref().unwrap();
     assert_eq!((usage.prompt_tokens, usage.completion_tokens), (4, 3));
     assert!(terminal.engine_data.as_ref().unwrap()["prompt_logprobs"].is_array());
+
+    let repeated = collect_with_context(&engine, request(3), context).await;
+    assert_eq!(
+        outputs
+            .iter()
+            .flat_map(|output| output.token_ids.iter())
+            .collect::<Vec<_>>(),
+        repeated
+            .iter()
+            .flat_map(|output| output.token_ids.iter())
+            .collect::<Vec<_>>()
+    );
     assert_eq!(server.service.active_request_count(), 0);
 }
 
