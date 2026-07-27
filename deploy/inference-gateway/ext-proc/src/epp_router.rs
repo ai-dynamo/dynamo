@@ -18,6 +18,7 @@
 //! the request via routing headers.
 
 use std::collections::HashSet;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -129,9 +130,14 @@ impl EppRouter {
     /// bare `ip`; empty means nothing matched.
     fn subset_worker_ids(&self, candidate_subset: &[String]) -> HashSet<u64> {
         let candidates: HashSet<&str> = candidate_subset.iter().map(String::as_str).collect();
+        let candidate_ips: HashSet<IpAddr> = candidate_subset
+            .iter()
+            .filter_map(|candidate| candidate.parse().ok())
+            .collect();
         // Single index pass; the predicate borrows each endpoint (no clone).
-        self.reflector
-            .ready_worker_ids_matching(|endpoint| endpoint_in_subset(endpoint, &candidates))
+        self.reflector.ready_worker_ids_matching(|endpoint| {
+            endpoint_in_subset(endpoint, &candidates, &candidate_ips)
+        })
     }
 }
 
@@ -143,9 +149,15 @@ fn compute_ready(pod_ready: bool, peer_ready: Option<bool>) -> bool {
 
 /// True if a scheme-less `ip:port` endpoint is covered by an Envoy subset,
 /// matching either the full `ip:port` or the bare `ip`.
-fn endpoint_in_subset(endpoint: &str, candidates: &HashSet<&str>) -> bool {
-    let ip = endpoint.split(':').next().unwrap_or("");
-    candidates.contains(endpoint) || candidates.contains(ip)
+fn endpoint_in_subset(
+    endpoint: &str,
+    candidates: &HashSet<&str>,
+    candidate_ips: &HashSet<IpAddr>,
+) -> bool {
+    candidates.contains(endpoint)
+        || endpoint
+            .parse::<SocketAddr>()
+            .is_ok_and(|address| candidate_ips.contains(&address.ip()))
 }
 
 /// Minimal deserialize target for the routing hot path: only `nvext.agent_hints`
@@ -438,15 +450,30 @@ mod tests {
 
     #[test]
     fn endpoint_in_subset_matches_ip_port_or_bare_ip() {
-        let candidates: HashSet<&str> = ["10.0.0.1:8000", "10.0.0.2"].into_iter().collect();
+        fn matches(endpoint: &str, values: &[&str]) -> bool {
+            let candidates: HashSet<&str> = values.iter().copied().collect();
+            let candidate_ips: HashSet<IpAddr> = values
+                .iter()
+                .filter_map(|candidate| candidate.parse().ok())
+                .collect();
+            endpoint_in_subset(endpoint, &candidates, &candidate_ips)
+        }
+
         // Full ip:port match.
-        assert!(endpoint_in_subset("10.0.0.1:8000", &candidates));
+        assert!(matches("10.0.0.1:8000", &["10.0.0.1:8000"]));
         // Bare-ip match (subset lists just the IP).
-        assert!(endpoint_in_subset("10.0.0.2:8000", &candidates));
+        assert!(matches("10.0.0.2:8000", &["10.0.0.2"]));
         // Subset pinned a full ip:port, so a different port on that IP does NOT match.
-        assert!(!endpoint_in_subset("10.0.0.1:9999", &candidates));
+        assert!(!matches("10.0.0.1:9999", &["10.0.0.1:8000"]));
         // Unrelated endpoint does not match.
-        assert!(!endpoint_in_subset("10.0.0.3:8000", &candidates));
+        assert!(!matches("10.0.0.3:8000", &["10.0.0.2"]));
+
+        // Full bracketed IPv6 endpoint match.
+        assert!(matches("[fd00::1]:8000", &["[fd00::1]:8000"]));
+        // Bare IPv6 match uses the normalized address, without brackets.
+        assert!(matches("[fd00::2]:8000", &["fd00::2"]));
+        // A different port does not match a full-endpoint-only candidate.
+        assert!(!matches("[fd00::1]:9999", &["[fd00::1]:8000"]));
     }
 
     #[test]
