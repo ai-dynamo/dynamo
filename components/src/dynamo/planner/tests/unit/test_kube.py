@@ -659,9 +659,12 @@ def test_worker_backing_rejects_inprogress_rollout_with_ready_old_dcd(
     DGD observedGeneration and replica counters can look settled while the
     annotation points at the old revision and the new DCD is missing. The
     wait must not treat the old DCD as proof the desired revision rolled.
+
+    Deployment componentNames use the real workload shape (``…-deployment``);
+    settlement never treats those strings as DCD names.
     """
-    old_name = "test-deployment-vllmdecodeworker-oldhash1"
-    new_name = "test-deployment-vllmdecodeworker-newhash2"
+    old_dcd = "test-deployment-vllmdecodeworker-oldhash1"
+    new_dcd = "test-deployment-vllmdecodeworker-newhash2"
     dgd = _stable_worker_dgd(generation=2, observed_generation=2, decode_watts="300")
     dgd["metadata"]["annotations"] = {
         "nvidia.com/current-worker-hash-v2": "oldhash1",
@@ -669,7 +672,7 @@ def test_worker_backing_rejects_inprogress_rollout_with_ready_old_dcd(
     dgd["status"]["rollingUpdate"] = {"phase": "InProgress"}
     dgd["status"]["components"]["VllmDecodeWorker"] = {
         "componentKind": "Deployment",
-        "componentNames": [new_name, old_name],
+        "componentNames": [f"{new_dcd}-deployment", f"{old_dcd}-deployment"],
         "readyReplicas": 2,
         "updatedReplicas": 2,
         "availableReplicas": 2,
@@ -678,7 +681,7 @@ def test_worker_backing_rejects_inprogress_rollout_with_ready_old_dcd(
     def _lookup(*args, **kwargs):
         if kwargs.get("plural") != "dynamocomponentdeployments":
             raise client.ApiException(status=404)
-        if kwargs.get("name") == old_name:
+        if kwargs.get("name") == old_dcd:
             return _ready_dcd(generation=1, observed_generation=1)
         raise client.ApiException(status=404)
 
@@ -690,19 +693,24 @@ def test_worker_backing_rejects_inprogress_rollout_with_ready_old_dcd(
     assert pending == ["rollingUpdate.phase=InProgress"]
 
 
-def test_worker_backing_rejects_when_component_names_include_lagging_new_dcd(
+def test_worker_backing_rejects_lagging_hash_derived_dcd_despite_workload_names(
     k8s_api, mock_custom_api
 ):
-    """Even without an InProgress phase, every named DCD must be ready."""
-    old_name = "test-deployment-vllmdecodeworker-oldhash1"
-    new_name = "test-deployment-vllmdecodeworker-newhash2"
+    """Deployment componentNames are workload names; settlement uses hash-derived DCD.
+
+    Real operator status puts ``…-deployment`` into componentNames. A lagging
+    hash-derived DCD must still block settlement even when those workload
+    names are present (and even if they would 404 as DCD lookups).
+    """
+    old_dcd = "test-deployment-vllmdecodeworker-oldhash1"
+    new_dcd = "test-deployment-vllmdecodeworker-newhash2"
     dgd = _stable_worker_dgd(generation=2, observed_generation=2, decode_watts="300")
     dgd["metadata"]["annotations"] = {
         "nvidia.com/current-worker-hash-v2": "oldhash1",
     }
     dgd["status"]["components"]["VllmDecodeWorker"] = {
         "componentKind": "Deployment",
-        "componentNames": [new_name, old_name],
+        "componentNames": [f"{new_dcd}-deployment", f"{old_dcd}-deployment"],
         "readyReplicas": 2,
         "updatedReplicas": 2,
         "availableReplicas": 2,
@@ -711,10 +719,7 @@ def test_worker_backing_rejects_when_component_names_include_lagging_new_dcd(
     def _lookup(*args, **kwargs):
         if kwargs.get("plural") != "dynamocomponentdeployments":
             raise client.ApiException(status=404)
-        name = kwargs.get("name")
-        if name == old_name:
-            return _ready_dcd(generation=1, observed_generation=1)
-        if name == new_name:
+        if kwargs.get("name") == old_dcd:
             return _ready_dcd(generation=2, observed_generation=1)
         raise client.ApiException(status=404)
 
@@ -724,9 +729,50 @@ def test_worker_backing_rejects_when_component_names_include_lagging_new_dcd(
     )
     assert settled is False
     assert pending == [
-        f"VllmDecodeWorker: DCD {new_name} not ready "
+        f"VllmDecodeWorker: DCD {old_dcd} not ready "
         "(generation=2, observedGeneration=1)"
     ]
+
+
+def test_worker_backing_ignores_deployment_workload_component_names(
+    k8s_api, mock_custom_api
+):
+    """Regression: Deployment componentNames must not be used as DCD names.
+
+    Operator status for a DCD-backed worker looks like
+    ``componentNames: [<dcd>-deployment]`` while the DCD itself is ``<dcd>``.
+    Settlement must GET the derived DCD, never the workload name.
+    """
+    dcd_name = "test-deployment-vllmdecodeworker"
+    workload_name = f"{dcd_name}-deployment"
+    dgd = _stable_worker_dgd(generation=2, observed_generation=2, decode_watts="300")
+    dgd["status"]["components"]["VllmDecodeWorker"] = {
+        "componentKind": "Deployment",
+        "componentNames": [workload_name],
+        "readyReplicas": 2,
+        "updatedReplicas": 2,
+        "availableReplicas": 2,
+    }
+
+    queried: list[str] = []
+
+    def _lookup(*args, **kwargs):
+        if kwargs.get("plural") != "dynamocomponentdeployments":
+            raise client.ApiException(status=404)
+        name = kwargs.get("name")
+        queried.append(name)
+        if name == dcd_name:
+            return _ready_dcd(generation=2, observed_generation=2)
+        raise client.ApiException(status=404)
+
+    mock_custom_api.get_namespaced_custom_object.side_effect = _lookup
+    settled, pending = k8s_api.worker_backing_resources_settled(
+        dgd, ["VllmDecodeWorker"]
+    )
+    assert settled is True
+    assert pending == []
+    assert dcd_name in queried
+    assert workload_name not in queried
 
 
 @pytest.mark.asyncio
@@ -734,8 +780,8 @@ async def test_wait_exclude_planner_rejects_inprogress_rollout_ready_old_dcd(
     k8s_api, mock_custom_api
 ):
     """End-to-end wait: InProgress + ready old DCD must not settle."""
-    old_name = "test-deployment-vllmdecodeworker-oldhash1"
-    new_name = "test-deployment-vllmdecodeworker-newhash2"
+    old_dcd = "test-deployment-vllmdecodeworker-oldhash1"
+    new_dcd = "test-deployment-vllmdecodeworker-newhash2"
     dgd = _stable_worker_dgd(generation=2, observed_generation=2, decode_watts="300")
     dgd["metadata"]["annotations"] = {
         "nvidia.com/current-worker-hash-v2": "oldhash1",
@@ -743,7 +789,7 @@ async def test_wait_exclude_planner_rejects_inprogress_rollout_ready_old_dcd(
     dgd["status"]["rollingUpdate"] = {"phase": "InProgress"}
     dgd["status"]["components"]["VllmDecodeWorker"] = {
         "componentKind": "Deployment",
-        "componentNames": [new_name, old_name],
+        "componentNames": [f"{new_dcd}-deployment", f"{old_dcd}-deployment"],
         "readyReplicas": 2,
         "updatedReplicas": 2,
         "availableReplicas": 2,
@@ -752,7 +798,7 @@ async def test_wait_exclude_planner_rejects_inprogress_rollout_ready_old_dcd(
     def _lookup(*args, **kwargs):
         if (
             kwargs.get("plural") == "dynamocomponentdeployments"
-            and kwargs.get("name") == old_name
+            and kwargs.get("name") == old_dcd
         ):
             return _ready_dcd(generation=1, observed_generation=1)
         raise client.ApiException(status=404)

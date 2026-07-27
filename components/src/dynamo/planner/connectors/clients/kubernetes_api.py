@@ -499,19 +499,12 @@ class KubernetesAPI:
         deployment: dict,
         component_name: str,
         component_spec: dict,
-        component_names: list[str],
     ) -> tuple[bool, str]:
-        # Prefer status.components[*].componentNames (same source Grove uses).
-        # During a rolling update that list includes both old and new DCDs, so
-        # accepting "first ready hash from current-worker-hash" would wrongly
-        # settle on the still-annotated old revision.
-        if component_names:
-            for dcd_name in component_names:
-                ready, reason = self._dcd_ready_or_reason(dcd_name)
-                if not ready:
-                    return False, reason
-            return True, ""
-
+        # Deployment/LWS status.componentNames are underlying workload names
+        # (e.g. <dcd>-deployment), not DCD names. Derive the DCD from
+        # DGD + component + current-worker-hash. Rolling updates are already
+        # gated by is_rolling_update_blocking_settlement() before this runs.
+        # Grove kinds keep using componentNames in is_worker_backing_settled.
         dgd_name = deployment.get("metadata", {}).get("name", "")
         last_reason = "resource not found"
         for suffix in self._worker_hash_candidates(deployment):
@@ -559,9 +552,7 @@ class KubernetesAPI:
                     raise
             return True, ""
 
-        return self._is_dcd_backing_ready(
-            deployment, component_name, component_spec, component_names
-        )
+        return self._is_dcd_backing_ready(deployment, component_name, component_spec)
 
     def worker_backing_resources_settled(
         self,
