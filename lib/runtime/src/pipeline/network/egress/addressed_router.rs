@@ -41,7 +41,7 @@ use anyhow::{Error, Result};
 use futures::stream::Stream;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use tokio_stream::{StreamExt, StreamNotifyClose, wrappers::ReceiverStream};
+use tokio_stream::{StreamExt, StreamNotifyClose};
 use tracing::Instrument;
 
 /// Stream transformation helper that:
@@ -50,7 +50,7 @@ use tracing::Instrument;
 /// - hands off the `InflightGuard` to a stream-lifetime `InflightDecStream` so
 ///   the inflight gauge stays accurate for the whole response lifetime.
 fn decode_response_stream<U>(
-    response_rx: tokio::sync::mpsc::Receiver<bytes::Bytes>,
+    response_rx: crate::pipeline::network::StreamReceiver,
     engine_ctx: Arc<dyn crate::engine::AsyncEngineContext>,
     queue_start: Instant,
     tx_start: Instant,
@@ -63,7 +63,7 @@ where
     let engine_ctx_for_stream = engine_ctx.clone();
     let mut is_complete_final = false;
     let mut first_response = true;
-    let stream = StreamNotifyClose::new(ReceiverStream::new(response_rx)).filter_map(move |res| {
+    let stream = StreamNotifyClose::new(response_rx).filter_map(move |res| {
         if let Some(res_bytes) = res {
             if first_response {
                 first_response = false;
@@ -604,7 +604,7 @@ impl AddressedPushRouter {
         drop(_nvtx_wait);
 
         Ok(decode_response_stream(
-            response_stream.rx,
+            response_stream,
             engine_ctx,
             queue_start,
             tx_start,

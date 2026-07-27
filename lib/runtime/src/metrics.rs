@@ -9,6 +9,7 @@
 pub mod frontend_perf;
 pub mod prometheus_names;
 pub mod request_plane;
+pub mod response_mux;
 pub mod tokio_perf;
 pub mod transport_metrics;
 pub mod work_handler_perf;

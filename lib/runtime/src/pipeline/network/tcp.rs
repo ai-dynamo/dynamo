@@ -12,43 +12,41 @@
 //! The request plane (TCP, NATS, etc.) carries a two-part message whose header is a
 //! `RequestControlMessage` — embedding the [`ConnectionInfo`] that tells the worker where to call home
 //! — and whose data half is the serialized request body if request streaming is not needed.
-//! All subsequent streaming bytes (responses, and request-stream) flow over the TCP socket established afterwards.
+//! Subsequent request-stream bytes use a dedicated TCP socket. Responses use
+//! persistent multiplexed TCP connections shared by logical response streams.
 //!
 //! For simplicity, if request streaming is needed, the `RequestControlMessage` should not contain
 //! the request body. Instead, all requests of the stream should be sent over the TCP socket.
 //!
 //! The TCP transport is the implementation that produces and consumes [`ConnectionInfo`] and
-//! carries the streaming response (and, optionally, request-stream) bytes between two peers
-//! on separate sockets from the initial request.
+//! carries response and optional request-stream bytes between two peers on
+//! sockets separate from the initial request.
 //!
 //! # Roles
 //!
 //! The TCP transport has two sides:
 //!
 //! - Request sender: The upstream that **initiates the transfer** runs [`server::TcpStreamServer`],
-//!   registers what it expects to receive, and listens. It publishes its address + a per-stream
-//!   subject UUID via [`TcpStreamConnectionInfo`], which is serialized into a [`ConnectionInfo`].
+//!   registers what it expects to receive, and listens. It publishes dedicated
+//!   request-stream information or versioned response-mux information through [`ConnectionInfo`].
 //! - Request receiver: The downstream that **acknowledges the transfer** runs [`client::TcpClient`],
 //!   reads the connection info out of the request, dials the listener, and identifies itself with
 //!   a `CallHomeHandshake` to the request sender.
 //!
-//! Although TCP is bidirectional, we keep separate sockets for the request stream and the response
-//! stream to match Dynamo's design principles. To establish both, the request receiver must receive
-//! two [`ConnectionInfo`] objects and run two handshakes — each [`StreamType`] is its own TCP
-//! connection with its own subject UUID.
+//! Request streams retain one dedicated socket per logical stream. Response
+//! streams are mandatory mux-v1 streams: each worker/frontend pair warms four
+//! persistent connections and identifies logical responses by UUID.
 //!
 //! # Server-Client Interaction
 //!
-//! See the test cases below for detailed examples. Note that the response stream expects the client
-//! to send a [`ResponseStreamPrologue`] in order to properly establish the stream.
+//! See the test cases below for detailed examples. A response `Prologue` activates
+//! the logical stream before any `Data` frames are sent.
 //!
 //! # Stream Types
 //!
-//! [`StreamType::Response`] — worker pushes engine output back to the upstream. Server side is
-//! `process_response_stream` (delivers a [`StreamReceiver`] to the awaiting registrant once the
-//! client has sent its [`ResponseStreamPrologue`]). Client side is
-//! [`client::TcpClient::create_response_stream`] (returns a [`StreamSender`]; spawns reader/writer
-//! tasks plus a connection monitor that waits for the server's FIN).
+//! [`StreamType::Response`] — worker pushes engine output through the response
+//! mux pool. A `Prologue` activates the pending stream, `Data` carries output,
+//! and `End` completes only that logical stream.
 //!
 //! [`StreamType::Request`] — upstream pushes the request body (or a stream of follow-up frames)
 //! into a downstream worker. Server side is `process_request_stream` (delivers a [`StreamSender`]
@@ -69,27 +67,27 @@
 //! 1. The returned [`RegisteredStream`] is RAII — dropping it without `into_parts()` removes the
 //!    pending entry from the server's subject tables. This is typically used by the request sender
 //!    up until the `RequestControlMessage` is sent and the stream is established.
-//! 2. The server tracks `subject UUID → oneshot` in `tx_subjects` / `rx_subjects`.
+//! 2. The server tracks dedicated request subjects and pending response-mux UUIDs.
 //!    [`server::TcpStreamServer::associate_instance`] links one or both
 //!    subjects to a discovery instance so [`server::TcpStreamServer::cancel_instance_streams`] can
 //!    drop both halves' oneshots together when a worker disappears. Tombstones (`TOMBSTONE_TTL`)
 //!    are the safety net that closes the cancel-vs-register race.
 //!
-//! # CallHome Handshake
+//! # Handshakes
 //!
-//! The first message a [`client::TcpClient`] sends on a freshly-opened socket is a
-//! `CallHomeHandshake` header-only frame carrying `{ subject, stream_type }`. The server pops
-//! the matching entry out of `tx_subjects` (for [`StreamType::Request`]) or `rx_subjects` (for
-//! [`StreamType::Response`]) and resolves the registrant's oneshot. After that the socket carries
-//! framed [`TwoPartCodec`] messages: data frames in the natural direction, control frames
-//! (and, for response streams, the prologue) interleaved.
+//! A dedicated request socket starts with a `CallHomeHandshake` carrying its
+//! subject and [`StreamType::Request`]. A response-mux connection instead uses
+//! [`mux::MuxCodec`] from the first byte: `ConnectionHello` carries the protocol
+//! version and frontend UUID, and the frontend returns an empty
+//! `ConnectionReady`. Incompatible response versions are rejected without a
+//! legacy fallback.
 //!
 //! # Control / Shutdown Protocol
 //!
-//! [`ControlMessage`] frames are header-only frames interleaved with data on either socket:
+//! Dedicated request sockets use header-only [`ControlMessage`] frames:
 //!
 //! - [`ControlMessage::Sentinel`] — per-direction clean end-of-stream; the producing side emits
-//!   it before closing the socket. Used on both the request and response sockets.
+//!   it before closing the request socket.
 //! - [`ControlMessage::Stop`] — sender asks the receiver to cancel; the receiving side calls
 //!   `context.stop()`.
 //! - [`ControlMessage::Kill`] — hard cancel; `context.kill()` and break out.
@@ -103,10 +101,10 @@
 //! The cancellation direction is fixed, but the two streams carry **data** in opposite
 //! directions, so the practical handling differs per stream:
 //!
-//! ## Response stream (downstream → upstream) — bidirectional
+//! ## Response mux (downstream → upstream) — bidirectional
 //!
-//! - Upstream writes: `Stop` / `Kill` (any time, to cancel).
-//! - Downstream writes: data frames, then `Sentinel` on clean close (skipped on kill/stop).
+//! - Upstream writes: mux `Stop`, `Kill`, `WindowUpdate`, and `Reset` frames.
+//! - Downstream writes: mux `Prologue`, `Data`, `End`, and `Reset` frames.
 //!
 //! ## Request stream (upstream → downstream) — unidirectional after the handshake
 //!
@@ -115,6 +113,7 @@
 //! - Downstream writes: nothing. Its TCP write half is closed right after the CallHome handshake.
 
 pub mod client;
+pub mod mux;
 pub mod server;
 
 pub mod test_utils;
@@ -124,11 +123,65 @@ use serde::{Deserialize, Serialize};
 
 #[allow(unused_imports)]
 use super::{
-    ConnectionInfo, PendingConnections, RegisteredStream, ResponseService, ResponseStreamPrologue,
-    StreamOptions, StreamReceiver, StreamSender, StreamType, codec::TwoPartCodec,
+    ConnectionInfo, PendingConnections, RegisteredStream, ResponseService, StreamOptions,
+    StreamReceiver, StreamSender, StreamType, codec::TwoPartCodec,
 };
 
 const TCP_TRANSPORT: &str = "tcp_server";
+pub const TCP_RESPONSE_MUX_TRANSPORT: &str = "tcp_response_mux_v1";
+
+/// Read Linux's kernel-maintained count of data-bearing TCP segments for one
+/// socket. This is used only by opt-in benchmark diagnostics; keeping the
+/// query here avoids coupling the transport to packet-capture privileges.
+#[cfg(target_os = "linux")]
+pub(crate) fn tcp_data_segments_out(stream: &tokio::net::TcpStream) -> Option<u64> {
+    use std::os::fd::AsRawFd;
+
+    tcp_data_segments_out_fd(stream.as_raw_fd())
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn tcp_data_segments_out_fd(fd: std::os::fd::RawFd) -> Option<u64> {
+    #[repr(C)]
+    // Layout through tcpi_data_segs_out from Linux uapi/linux/tcp.h::tcp_info.
+    struct LinuxTcpInfoThroughDataSegments {
+        _header: [u8; 8],
+        _metrics: [u32; 24],
+        _rates_and_bytes: [u64; 4],
+        _segments_out: u32,
+        _segments_in: u32,
+        _notsent_bytes: u32,
+        _min_rtt: u32,
+        _data_segments_in: u32,
+        data_segments_out: u32,
+    }
+
+    let mut info = std::mem::MaybeUninit::<LinuxTcpInfoThroughDataSegments>::zeroed();
+    let mut len = std::mem::size_of::<LinuxTcpInfoThroughDataSegments>() as libc::socklen_t;
+    let result = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::IPPROTO_TCP,
+            libc::TCP_INFO,
+            info.as_mut_ptr().cast(),
+            &mut len,
+        )
+    };
+    if result != 0 || len < std::mem::size_of::<LinuxTcpInfoThroughDataSegments>() as _ {
+        return None;
+    }
+    Some(unsafe { info.assume_init() }.data_segments_out as u64)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn tcp_data_segments_out(_stream: &tokio::net::TcpStream) -> Option<u64> {
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn tcp_data_segments_out_fd(_fd: std::os::fd::RawFd) -> Option<u64> {
+    None
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TcpStreamConnectionInfo {
@@ -166,6 +219,41 @@ impl TryFrom<ConnectionInfo> for TcpStreamConnectionInfo {
 
         serde_json::from_str(&info.info)
             .map_err(|e| anyhow::anyhow!("Failed parse ConnectionInfo: {:?}", e))
+    }
+}
+
+/// Connection information for one logical response stream carried by the
+/// frontend's persistent response-mux listener.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResponseMuxConnectionInfo {
+    pub address: String,
+    pub frontend_server_id: uuid::Uuid,
+    pub stream_id: uuid::Uuid,
+    pub context: String,
+}
+
+impl From<ResponseMuxConnectionInfo> for ConnectionInfo {
+    fn from(info: ResponseMuxConnectionInfo) -> Self {
+        Self {
+            transport: TCP_RESPONSE_MUX_TRANSPORT.to_string(),
+            info: serde_json::to_string(&info)
+                .expect("Failed to serialize ResponseMuxConnectionInfo"),
+        }
+    }
+}
+
+impl TryFrom<ConnectionInfo> for ResponseMuxConnectionInfo {
+    type Error = anyhow::Error;
+
+    fn try_from(info: ConnectionInfo) -> Result<Self, Self::Error> {
+        if info.transport != TCP_RESPONSE_MUX_TRANSPORT {
+            return Err(anyhow::anyhow!(
+                "Invalid transport; response mux requires `{TCP_RESPONSE_MUX_TRANSPORT}`; got {}",
+                info.transport
+            ));
+        }
+        serde_json::from_str(&info.info)
+            .map_err(|e| anyhow::anyhow!("Failed to parse response mux connection info: {e}"))
     }
 }
 
@@ -247,88 +335,13 @@ mod tests {
         send_stream.send(payload.into()).await.unwrap();
 
         // [client] The client can now receive the response from the server
-        let data = recv_stream.rx.recv().await.unwrap();
+        let data = recv_stream.recv().await.unwrap();
         let recv_msg = serde_json::from_slice::<TestMessage>(&data).unwrap();
         assert_eq!(msg.foo, recv_msg.foo);
 
         // Dropping the upstream `StreamSender` should cleanly close the request
         // stream — the downstream receiver should observe `None`.
         drop(send_stream);
-        assert!(recv_stream.rx.recv().await.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_tcp_stream_client_server() {
-        // [server] start the server and register the response stream
-        let options = server::ServerOptions::builder().port(9124).build().unwrap();
-        let server = server::TcpStreamServer::new(options).await.unwrap();
-
-        let context_rank0 = Context::new(());
-
-        let options = StreamOptions::builder()
-            .context(context_rank0.context())
-            .enable_request_stream(false)
-            .enable_response_stream(true)
-            .build()
-            .unwrap();
-
-        let pending_connection = server.register(options).await;
-
-        let connection_info = pending_connection
-            .recv_stream
-            .as_ref()
-            .unwrap()
-            .connection_info
-            .clone();
-
-        // [client] set up the other rank and create the response stream
-        let context_rank1 =
-            Context::with_id_and_metadata((), context_rank0.id().to_string(), Default::default());
-
-        let mut send_stream = client::TcpClient::create_response_stream(
-            context_rank1.context(),
-            connection_info,
-            None,
-        )
-        .await
-        .unwrap();
-
-        // the client can now setup it's end of the stream and if it errors, it can send a message
-        // to the server to stop the stream
-        //
-        // this step must be done before the next step on the server can complete, i.e.
-        // the server's stream is now blocked on receiving the prologue message
-        //
-        // let's improve this and use an enum like Ok/Err; currently, None means good-to-go, and
-        // Some(String) means an error happened on this downstream node and we need to alert the
-        // upstream node that an error occurred
-        send_stream.send_prologue(None).await.unwrap();
-
-        // [server] After client sends the prologue, the server can pick up its `StreamReceiver` half.
-        let (_conn_info, stream_provider) = pending_connection.recv_stream.unwrap().into_parts();
-        let recv_stream = stream_provider.await.unwrap();
-
-        // [client] The client can now send the response message to the server
-        let msg = TestMessage {
-            foo: "bar".to_string(),
-        };
-
-        let payload = serde_json::to_vec(&msg).unwrap();
-
-        send_stream.send(payload.into()).await.unwrap();
-
-        // [server] The server can now receive the response message from the client
-
-        let data = recv_stream.unwrap().rx.recv().await.unwrap();
-
-        let recv_msg = serde_json::from_slice::<TestMessage>(&data).unwrap();
-
-        assert_eq!(msg.foo, recv_msg.foo);
-
-        drop(send_stream);
-
-        // let data = recv_stream.rx.recv().await;
-
-        // assert!(data.is_none());
+        assert!(recv_stream.recv().await.is_none());
     }
 }

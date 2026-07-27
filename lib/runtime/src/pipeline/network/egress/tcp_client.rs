@@ -158,7 +158,7 @@ struct PendingRequest {
 /// chunks in `write_buf`. This preserves the large-payload zero-copy path
 /// without turning deep drains into a heap-allocated iovec list or an
 /// unbounded all-available-request batch.
-struct TcpWriteBuffer {
+pub(crate) struct TcpWriteBuffer {
     // Moving or relocating these Bytes handles does not copy their backing buffers.
     write_buf: VecDeque<Bytes>,
     flattened_writes: BytesMut,
@@ -166,7 +166,7 @@ struct TcpWriteBuffer {
 }
 
 impl TcpWriteBuffer {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             write_buf: VecDeque::with_capacity(WRITE_VECTORED_CHUNKS),
             flattened_writes: BytesMut::new(),
@@ -197,7 +197,7 @@ impl TcpWriteBuffer {
         self.write(frame.payload);
     }
 
-    fn write(&mut self, buf: Bytes) {
+    pub(crate) fn write(&mut self, buf: Bytes) {
         if buf.is_empty() {
             return;
         }
@@ -223,9 +223,17 @@ impl TcpWriteBuffer {
     where
         W: AsyncWrite + Unpin,
     {
+        self.write_all_counted(writer).await.map(|(bytes, _)| bytes)
+    }
+
+    pub(crate) async fn write_all_counted<W>(&mut self, writer: &mut W) -> io::Result<(usize, u64)>
+    where
+        W: AsyncWrite + Unpin,
+    {
         self.flush_flattened();
 
         let mut total_written = 0usize;
+        let mut write_calls = 0_u64;
         while !self.write_buf.is_empty() {
             let n = {
                 let mut writes = [IoSlice::new(b""); WRITE_VECTORED_CHUNKS];
@@ -247,10 +255,11 @@ impl TcpWriteBuffer {
             }
 
             total_written += n;
+            write_calls += 1;
             self.advance(n);
         }
 
-        Ok(total_written)
+        Ok((total_written, write_calls))
     }
 
     fn advance(&mut self, mut n: usize) {
