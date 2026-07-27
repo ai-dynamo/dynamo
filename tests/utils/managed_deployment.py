@@ -45,6 +45,13 @@ _CARGO_PACKAGE_VERSION_RE = re.compile(
 _SEMVER_CORE_RE = re.compile(
     r"^(?P<core>(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))(?:[-+].*)?$"
 )
+_TRANSIENT_WEBHOOK_ERRORS = (
+    "connection refused",
+    "connection reset by peer",
+    "no endpoints available",
+    "service unavailable",
+    "tls handshake timeout",
+)
 
 
 @cache
@@ -1319,21 +1326,40 @@ class ManagedDeployment:
             f"Starting Deployment {self._deployment_name} with spec {self.deployment_spec}"
         )
 
-        try:
-            assert self._custom_api is not None, "Kubernetes API not initialized"
-            await self._custom_api.create_namespaced_custom_object(
-                group="nvidia.com",
-                version=self.deployment_spec.api_version,
-                namespace=self.namespace,
-                plural="dynamographdeployments",
-                body=self.deployment_spec.spec(),
-            )
-            self._logger.info(self.deployment_spec.spec())
-            self._logger.info(f"Deployment Started {self._deployment_name}")
-        except exceptions.ApiException as e:
-            if e.status == 409:  # Already exists
-                self._logger.info(f"Deployment {self._deployment_name} already exists")
-            else:
+        deadline = time.monotonic() + 600
+        while True:
+            try:
+                assert self._custom_api is not None, "Kubernetes API not initialized"
+                await self._custom_api.create_namespaced_custom_object(
+                    group="nvidia.com",
+                    version=self.deployment_spec.api_version,
+                    namespace=self.namespace,
+                    plural="dynamographdeployments",
+                    body=self.deployment_spec.spec(),
+                )
+                self._logger.info(self.deployment_spec.spec())
+                self._logger.info(f"Deployment Started {self._deployment_name}")
+                return
+            except exceptions.ApiException as e:
+                if e.status == 409:  # Already exists
+                    self._logger.info(
+                        f"Deployment {self._deployment_name} already exists"
+                    )
+                    return
+
+                error = f"{e.reason} {e.body}".lower()
+                transient_webhook_error = e.status == 500 and (
+                    "webhook" in error
+                    and any(message in error for message in _TRANSIENT_WEBHOOK_ERRORS)
+                )
+                if transient_webhook_error and time.monotonic() < deadline:
+                    self._logger.warning(
+                        f"Admission webhook unavailable while creating "
+                        f"{self._deployment_name}; retrying in 5 seconds"
+                    )
+                    await asyncio.sleep(5)
+                    continue
+
                 self._logger.info(
                     f"Failed to create deployment {self._deployment_name}: {e}"
                 )
