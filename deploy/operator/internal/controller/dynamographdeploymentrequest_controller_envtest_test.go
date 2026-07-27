@@ -1409,7 +1409,7 @@ spec:
 				NamespacedName: types.NamespacedName{Name: dgdrName, Namespace: namespace},
 			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(result.Requeue).Should(BeTrue())
+			Expect(result.IsZero()).Should(BeFalse())
 
 			t.Log("Read the initialized generation and fingerprint")
 			var current nvidiacomv1beta1.DynamoGraphDeploymentRequest
@@ -1456,7 +1456,7 @@ spec:
 				NamespacedName: types.NamespacedName{Name: dgdrName, Namespace: namespace},
 			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(result.Requeue).Should(BeTrue())
+			Expect(result.IsZero()).Should(BeFalse())
 
 			t.Log("Verify that reconciliation advances the observed generation")
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &current)).Should(Succeed())
@@ -1488,7 +1488,7 @@ spec:
 				NamespacedName: types.NamespacedName{Name: dgdrName, Namespace: namespace},
 			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(result.Requeue).Should(BeFalse())
+			Expect(result.IsZero()).Should(BeTrue())
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &current)).Should(Succeed())
 			Expect(current.Status.ObservedGeneration).Should(Equal(repairedGeneration))
 			Expect(current.Generation).Should(BeNumerically(">", repairedGeneration))
