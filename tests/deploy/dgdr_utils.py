@@ -188,6 +188,24 @@ def parse_final_dgd(content: str) -> dict[str, Any]:
     return result
 
 
+def parse_served_model_ids(content: str) -> set[str]:
+    """Return exact model IDs from an OpenAI-compatible model-list response."""
+
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError as error:
+        raise AssertionError("model-list response must be valid JSON") from error
+
+    data = payload.get("data")
+    if not isinstance(data, list):
+        raise AssertionError("model-list response must contain a data list")
+    return {
+        model["id"]
+        for model in data
+        if isinstance(model, dict) and isinstance(model.get("id"), str)
+    }
+
+
 def total_worker_gpus(dgd: dict[str, Any]) -> int:
     """Compute requested GPUs across v1alpha1 services or v1beta1 components."""
 
@@ -764,8 +782,13 @@ def verify_inference_endpoints(namespace: str, dgd_name: str, model: str) -> Non
         "10",
         f"{url}/v1/models",
     )
-    assert models.returncode == 0, models.stderr
-    assert model in models.stdout
+    if models.returncode != 0:
+        raise AssertionError(models.stderr)
+    served_models = parse_served_model_ids(models.stdout)
+    if model not in served_models:
+        raise AssertionError(
+            f"expected model {model!r}, served model IDs: {sorted(served_models)}"
+        )
 
     body = json.dumps(
         {

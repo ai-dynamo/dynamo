@@ -15,6 +15,7 @@ from tests.deploy.dgdr_utils import (
     DGDRTestConfig,
     ManagedDGDR,
     parse_final_dgd,
+    parse_served_model_ids,
     run_lifecycle,
     unique_name,
 )
@@ -107,6 +108,18 @@ def test_parse_final_dgd_rejects_invalid_external_data(
 ) -> None:
     with pytest.raises(AssertionError, match=message):
         parse_final_dgd(content)
+
+
+def test_parse_served_model_ids_matches_exact_ids() -> None:
+    content = '{"data": [{"id": "Qwen/Qwen3-0.6B"}, {"id": "Qwen3"}]}'
+
+    assert parse_served_model_ids(content) == {"Qwen/Qwen3-0.6B", "Qwen3"}
+
+
+@pytest.mark.parametrize("content", ["not-json", '{"object": "list"}'])
+def test_parse_served_model_ids_rejects_invalid_responses(content: str) -> None:
+    with pytest.raises(AssertionError, match="model-list response"):
+        parse_served_model_ids(content)
 
 
 async def test_lifecycle_preserves_combined_deployment_timeout() -> None:
