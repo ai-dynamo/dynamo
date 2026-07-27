@@ -118,20 +118,19 @@ ENV VIRTUAL_ENV=/opt/dynamo/venv \
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 
 {% if target not in ("dev", "local-dev") %}
+# Install TRT-LLM third-party deps before the Dynamo wheels. Dev targets install
+# the same requirements later, after the shared dev stage creates its venv.
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     --mount=type=bind,source=./container/deps/requirements.trtllm.txt,target=/tmp/requirements.trtllm.txt \
     export UV_CACHE_DIR=/root/.cache/uv && \
-    \
-    # Dynamo's own wheels — --no-deps preserves upstream's solve.
+    uv pip install --no-deps --requirement /tmp/requirements.trtllm.txt
+
+# Dynamo's own wheels — built from source in dev/local-dev, so install only for
+# runtime targets. --no-deps preserves upstream's solve.
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    export UV_CACHE_DIR=/root/.cache/uv && \
     uv pip install --no-deps /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl && \
     uv pip install --no-deps /opt/dynamo/wheelhouse/ai_dynamo*any.whl && \
-    \
-    # Third-party deps Dynamo wheels declare but upstream lacks, plus the
-    # huggingface-hub pin and KVBM-matching nixl-cu13. See the file for context.
-    # The requirements.trtllm.txt file itself carries a `--no-binary imageio-ffmpeg`
-    # directive that keeps the GPL-encumbered prebuilt ffmpeg off disk; IMAGEIO_FFMPEG_EXE
-    # below points imageio at the in-tree LGPL CLI.
-    uv pip install --no-deps --requirement /tmp/requirements.trtllm.txt && \
     \
     if [ "${ENABLE_KVBM}" = "true" ]; then \
         KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1); \
