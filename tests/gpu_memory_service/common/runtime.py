@@ -10,6 +10,7 @@ import logging
 import os
 import sys
 from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 
 import requests
@@ -24,6 +25,11 @@ from tests.utils.port_utils import allocate_ports, deallocate_ports
 logger = logging.getLogger(__name__)
 
 
+def _http_ok(response) -> bool:
+    """Readiness predicate: the endpoint answered with HTTP 200."""
+    return response.status_code == 200
+
+
 class GMSProcessManager:
     """Start the shared GMS daemons and frontend for one test scenario."""
 
@@ -34,29 +40,50 @@ class GMSProcessManager:
         *,
         read_only_weights: bool = False,
         tags: tuple[str, ...] = ("weights", "kv_cache"),
+        tp: int = 1,
+        model: str = FAULT_TOLERANCE_MODEL_NAME,
+        shadow: bool = False,
+        lock_path: str | None = None,
     ):
         self._request = request
         self._engine_cls = engine_cls
         self._read_only_weights = read_only_weights
         self._tags = tags
+        self._tp = tp
+        self._model = model
+        self._shadow = shadow
+        # Shadow engines coordinate active/standby through one shared flock.
+        self._lock_path = lock_path
         self._stack: ExitStack | None = None
         self.frontend_port: int | None = None
+        # Per-device GMS daemons. `weights_gms`/`kv_cache_gms` expose device 0
+        # as the representative server for single-GPU assertions; the *_by_device
+        # dicts hold every rank's server for TP>1.
         self.weights_gms = None
         self.kv_cache_gms = None
+        self.weights_gms_by_device: dict[int, GMSServer] = {}
+        self.kv_cache_gms_by_device: dict[int, GMSServer] = {}
         self._engine_ids: set[str] = set()
         self.engines: dict[str, GMSEngineProcess] = {}
+
+    @property
+    def lock_path(self) -> str | None:
+        return self._lock_path
 
     def __enter__(self):
         stack = ExitStack()
         try:
-            if "weights" in self._tags:
-                self.weights_gms = stack.enter_context(
-                    GMSServer(device=0, tag="weights")
-                )
-            if "kv_cache" in self._tags:
-                self.kv_cache_gms = stack.enter_context(
-                    GMSServer(device=0, tag="kv_cache")
-                )
+            for device in range(self._tp):
+                if "weights" in self._tags:
+                    self.weights_gms_by_device[device] = stack.enter_context(
+                        GMSServer(device=device, tag="weights")
+                    )
+                if "kv_cache" in self._tags:
+                    self.kv_cache_gms_by_device[device] = stack.enter_context(
+                        GMSServer(device=device, tag="kv_cache")
+                    )
+            self.weights_gms = self.weights_gms_by_device.get(0)
+            self.kv_cache_gms = self.kv_cache_gms_by_device.get(0)
             frontend = stack.enter_context(
                 DynamoFrontendProcess(
                     self._request,
@@ -78,6 +105,8 @@ class GMSProcessManager:
         self.frontend_port = None
         self.weights_gms = None
         self.kv_cache_gms = None
+        self.weights_gms_by_device.clear()
+        self.kv_cache_gms_by_device.clear()
         self._engine_ids.clear()
         self.engines.clear()
         if stack is None:
@@ -105,6 +134,10 @@ class GMSProcessManager:
             self.frontend_port,
             engine_id=engine_id,
             read_only_weights=read_only_weights,
+            tp=self._tp,
+            model=self._model,
+            shadow=self._shadow,
+            lock_path=self._lock_path,
         )
         self._engine_ids.add(engine_id)
         return engine
@@ -125,6 +158,52 @@ class GMSProcessManager:
         self.engines[engine_id] = engine
         return engine
 
+    def start_engines_concurrently(
+        self,
+        engine_ids: list[str],
+        *,
+        read_only_weights: bool | None = None,
+    ) -> dict[str, GMSEngineProcess]:
+        """Start several engines at once and block until all are ready.
+
+        Shadow engines race for the flock during startup, so they must come up
+        concurrently (sequential start would let the first always win the lock).
+        Each engine's context is still registered on the manager's ExitStack for
+        teardown. Re-raises the first startup failure after cleaning up.
+        """
+        if self._stack is None:
+            raise RuntimeError(
+                "GMSProcessManager must be entered before starting engines"
+            )
+        created = {
+            engine_id: self.create_engine(
+                engine_id, read_only_weights=read_only_weights
+            )
+            for engine_id in engine_ids
+        }
+        # Enter (start + health-gate) each engine in its own thread, but DON'T
+        # touch the shared ExitStack from those threads — ExitStack isn't
+        # thread-safe. Register cleanup single-threaded after the join.
+        with ThreadPoolExecutor(max_workers=len(created)) as executor:
+            futures = {
+                engine_id: executor.submit(engine.__enter__)
+                for engine_id, engine in created.items()
+            }
+            started: dict[str, GMSEngineProcess] = {}
+            errors = []
+            for engine_id, future in futures.items():
+                try:
+                    started[engine_id] = future.result()
+                except Exception as exc:  # noqa: BLE001 — surface after joining all
+                    errors.append((engine_id, exc))
+        for engine_id, engine in started.items():
+            self._stack.push(engine)
+            self.engines[engine_id] = engine
+        if errors:
+            engine_id, exc = errors[0]
+            raise RuntimeError(f"engine {engine_id!r} failed to start: {exc}") from exc
+        return {engine_id: self.engines[engine_id] for engine_id in engine_ids}
+
 
 class GMSEngineProcess(EngineProcess, ABC):
     """Backend process wrapper with a common pause/resume surface."""
@@ -141,11 +220,19 @@ class GMSEngineProcess(EngineProcess, ABC):
         reserved_ports: list[int],
         *,
         read_only_weights: bool = False,
+        tp: int = 1,
+        model: str = FAULT_TOLERANCE_MODEL_NAME,
+        shadow: bool = False,
+        lock_path: str | None = None,
     ):
         self.engine_id = engine_id
         self.system_port = system_port
         self._reserved_ports = reserved_ports
         self.read_only_weights = read_only_weights
+        self.tp = tp
+        self.model = model
+        self.shadow = shadow
+        self.lock_path = lock_path
 
         super().__init__(
             command=self.command(),
@@ -155,11 +242,20 @@ class GMSEngineProcess(EngineProcess, ABC):
                 "DYN_SYSTEM_PORT": str(system_port),
                 **self.env_updates(),
             },
-            health_check_urls=[
-                (f"http://localhost:{system_port}/health", self._is_ready),
-                (f"http://localhost:{frontend_port}/v1/models", check_models_api),
-                (f"http://localhost:{frontend_port}/health", check_health_generate),
-            ],
+            # Shadow engines auto-pause into STANDBY and never register a
+            # `generate` endpoint until they win the flock, so we can't gate on
+            # the frontend discovering them. Readiness = the engine's own system
+            # probe answering 200 (passes in both ACTIVE and STANDBY); the test
+            # then asserts active/standby via GMS state and frontend inference.
+            health_check_urls=(
+                [(f"http://localhost:{system_port}/health", _http_ok)]
+                if shadow
+                else [
+                    (f"http://localhost:{system_port}/health", self._is_ready),
+                    (f"http://localhost:{frontend_port}/v1/models", check_models_api),
+                    (f"http://localhost:{frontend_port}/health", check_health_generate),
+                ]
+            ),
             timeout=300,
             display_output=True,
             terminate_all_matching_process_names=False,
@@ -244,6 +340,10 @@ class VLLMWithGMSProcess(GMSEngineProcess):
         *,
         engine_id: str,
         read_only_weights: bool = False,
+        tp: int = 1,
+        model: str = FAULT_TOLERANCE_MODEL_NAME,
+        shadow: bool = False,
+        lock_path: str | None = None,
     ):
         reserved_ports = allocate_ports(3, DefaultPort.SYSTEM1.value)
         self.kv_event_port = reserved_ports[1]
@@ -256,13 +356,24 @@ class VLLMWithGMSProcess(GMSEngineProcess):
                 frontend_port,
                 reserved_ports,
                 read_only_weights=read_only_weights,
+                tp=tp,
+                model=model,
+                shadow=shadow,
+                lock_path=lock_path,
             )
         except Exception:
             deallocate_ports(reserved_ports)
             raise
 
     def env_updates(self) -> dict[str, str]:
-        return {"VLLM_NIXL_SIDE_CHANNEL_PORT": str(self.nixl_port)}
+        env = {"VLLM_NIXL_SIDE_CHANNEL_PORT": str(self.nixl_port)}
+        if self.shadow:
+            # ENGINE_ID=0 loads + commits weights (RW); others import (RO).
+            # The numeric suffix of "engine-N" drives RW/RO and the MX port offset.
+            env["ENGINE_ID"] = self.engine_id.rsplit("-", 1)[-1]
+            if self.lock_path is not None:
+                env["FAILOVER_LOCK_PATH"] = self.lock_path
+        return env
 
     def command(self) -> list[str]:
         kv_events_cfg = json.dumps(
@@ -278,18 +389,24 @@ class VLLMWithGMSProcess(GMSEngineProcess):
             "-m",
             "dynamo.vllm",
             "--model",
-            FAULT_TOLERANCE_MODEL_NAME,
+            self.model,
+            "--tensor-parallel-size",
+            str(self.tp),
             "--load-format",
             "gms",
             "--enforce-eager",
-            "--enable-sleep-mode",
-            "--max-num-seqs",
-            "1",
             "--gpu-memory-utilization",
             "0.8",
             "--kv-events-config",
             kv_events_cfg,
         ]
+        if self.shadow:
+            # Shadow engines auto-pause and auto-wake via the flock; sleep mode
+            # is implied by GMS shadow mode, so --enable-sleep-mode is omitted.
+            command.append("--gms-shadow-mode")
+        else:
+            command.append("--enable-sleep-mode")
+            command.extend(["--max-num-seqs", "1"])
         extra_config = self.model_loader_extra_config()
         if extra_config is not None:
             command.extend(
@@ -330,6 +447,10 @@ class TRTLLMWithGMSProcess(GMSEngineProcess):
         *,
         engine_id: str,
         read_only_weights: bool = False,
+        tp: int = 1,
+        model: str = FAULT_TOLERANCE_MODEL_NAME,
+        shadow: bool = False,
+        lock_path: str | None = None,
         override_engine_args: str | None = None,
     ):
         reserved_ports = allocate_ports(1, DefaultPort.SYSTEM1.value)
@@ -342,6 +463,10 @@ class TRTLLMWithGMSProcess(GMSEngineProcess):
                 frontend_port,
                 reserved_ports,
                 read_only_weights=read_only_weights,
+                tp=tp,
+                model=model,
+                shadow=shadow,
+                lock_path=lock_path,
             )
         except Exception:
             deallocate_ports(reserved_ports)
@@ -405,6 +530,10 @@ class SGLangWithGMSProcess(GMSEngineProcess):
         *,
         engine_id: str,
         read_only_weights: bool = False,
+        tp: int = 1,
+        model: str = FAULT_TOLERANCE_MODEL_NAME,
+        shadow: bool = False,
+        lock_path: str | None = None,
     ):
         reserved_ports = allocate_ports(2, DefaultPort.SYSTEM1.value)
         self.serve_port = reserved_ports[1]
@@ -416,6 +545,10 @@ class SGLangWithGMSProcess(GMSEngineProcess):
                 frontend_port,
                 reserved_ports,
                 read_only_weights=read_only_weights,
+                tp=tp,
+                model=model,
+                shadow=shadow,
+                lock_path=lock_path,
             )
         except Exception:
             deallocate_ports(reserved_ports)
@@ -427,7 +560,7 @@ class SGLangWithGMSProcess(GMSEngineProcess):
             "-m",
             "dynamo.sglang",
             "--model-path",
-            FAULT_TOLERANCE_MODEL_NAME,
+            self.model,
             "--load-format",
             "gms",
             "--enable-memory-saver",

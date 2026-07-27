@@ -1,6 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""Orchestrated shadow-engine failover (gpu_1).
+
+The primary is SIGKILLed, then the standby shadow is resumed via an explicit
+HTTP ``wake_up`` call — the test drives the handoff and asserts the GMS KV-cache
+RW layout transfers cleanly. For the autonomous, flock-driven variant (no HTTP
+resume; the standby wakes itself on lock release, TP>1), see
+``test_shadow_failover_autonomous.py``.
+"""
+
 from __future__ import annotations
 
 import logging
