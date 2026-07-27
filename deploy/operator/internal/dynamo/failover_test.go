@@ -493,6 +493,8 @@ func intraPodFailoverPodSpec() corev1.PodSpec {
 					{Name: "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", Value: "true"},
 					{Name: "DYN_HEALTH_CHECK_ENABLED", Value: "true"},
 					{Name: commonconsts.DynamoDiscoveryBackendEnvVar, Value: "kubernetes"},
+					{Name: "CONTAINER_NAME", Value: commonconsts.MainContainerName},
+					{Name: "DYN_KUBE_DISCOVERY_MODE", Value: "container"},
 					{Name: "TMPDIR", Value: gms.SharedMountPath},
 				},
 				Ports: []corev1.ContainerPort{
@@ -555,15 +557,18 @@ func TestBuildFailoverPod_RejectsNonVLLM(t *testing.T) {
 }
 
 func TestBuildFailoverPod_EngineEnvVars(t *testing.T) {
+	t.Log("Build the active-passive engine containers from a container-discovery base")
 	ps := intraPodFailoverPodSpec()
 	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM)
 	require.NoError(t, err)
 
+	t.Log("Verify each engine keeps container discovery and receives its own container identity")
 	for i := range 2 {
 		engine := ps.Containers[i]
 		env := envToMap(engine.Env)
 		assert.Equal(t, strconv.Itoa(i), env["ENGINE_ID"], "engine-%d ENGINE_ID", i)
 		assert.Equal(t, fmt.Sprintf("engine-%d", i), env["CONTAINER_NAME"], "engine-%d CONTAINER_NAME", i)
+		assert.Equal(t, "container", env["DYN_KUBE_DISCOVERY_MODE"], "engine-%d discovery mode", i)
 		assert.Equal(t, intraPodFailoverLockFile, env["FAILOVER_LOCK_PATH"], "engine-%d FAILOVER_LOCK_PATH", i)
 		assert.Equal(t, "notready", env["DYN_SYSTEM_STARTING_HEALTH_STATUS"], "engine-%d starting health", i)
 		assert.Equal(t, "true", env["DYN_SYSTEM_ENABLED"], "engine-%d system enabled", i)
