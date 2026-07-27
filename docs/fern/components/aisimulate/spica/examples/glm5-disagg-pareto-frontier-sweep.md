@@ -159,6 +159,6 @@ python -m aisimulate.spica \
   --config examples/aisimulate/spica/configs/glm5-disagg-pareto-frontier.yaml
 ```
 
-The AI Configurator performance model needs the `aic-forward-pass` binding. Dynamo must include the
+The AIConfigurator performance model needs the `aic-forward-pass` binding. Dynamo must include the
 attention-DP KV-capacity fix so replay sees engine capacity as per-rank capacity multiplied by
 attention DP and replicas.
