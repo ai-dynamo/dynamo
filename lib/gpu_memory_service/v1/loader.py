@@ -1,14 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""GMS V1 cold-storage loader sidecar CLI."""
+"""GMS V1 one-shot cold-storage loader CLI."""
 
 from __future__ import annotations
 
 import argparse
 import logging
 import os
-import time
 
 from gpu_memory_service.common.utils import get_socket_path
 from gpu_memory_service.v1.snapshot import hydrate_weights
@@ -17,6 +16,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
+logger = logging.getLogger(__name__)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -28,14 +28,13 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--max-workers", type=int, default=16)
     args = parser.parse_args(argv)
 
-    _session = hydrate_weights(
+    hydrate_weights(
         os.path.join(args.checkpoint_dir, f"device-{args.device}"),
         get_socket_path(args.device, "weights"),
         args.device,
         max_workers=args.max_workers,
     )
-    while True:
-        time.sleep(3600)
+    logger.info("GMS V1 loader complete; exiting")
 
 
 if __name__ == "__main__":

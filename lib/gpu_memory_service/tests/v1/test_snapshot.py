@@ -14,7 +14,7 @@ from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.core.client.session import _GMSClientSession
 from gpu_memory_service.core.server.gms import GMSServerMemoryManager
 from gpu_memory_service.core.server.rpc import GMSRPCServer
-from gpu_memory_service.v1 import snapshot
+from gpu_memory_service.v1 import loader, snapshot
 from gpu_memory_service.v1.memory_manager import GMSClientMemoryManager
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.integration, pytest.mark.gpu_0]
@@ -85,14 +85,15 @@ class _Writer:
 
 
 @pytest.mark.timeout(10)
-def test_exact_ids_roundtrip_through_fresh_server_hydration(
+def test_exact_ids_roundtrip_after_fresh_server_loader_returns(
     tmp_path,
     monkeypatch,
     caplog,
 ) -> None:
     source_path = str(tmp_path / "source.sock")
     source_vmm = FakeVMM(granularity=64)
-    artifact_dir = str(tmp_path / "artifact")
+    checkpoint_dir = tmp_path / "checkpoint"
+    artifact_dir = str(checkpoint_dir / "device-0")
     caplog.set_level("INFO")
     monkeypatch.setattr(
         GMSClientMemoryManager,
@@ -140,14 +141,20 @@ def test_exact_ids_roundtrip_through_fresh_server_hydration(
         "create_transfer_backend",
         lambda *_args, **_kwargs: _Backend(events),
     )
+    monkeypatch.setattr(loader, "get_socket_path", lambda *_args: source_path)
 
     with _server(source_path, target_vmm):
-        loader = snapshot.hydrate_weights(
-            artifact_dir,
-            source_path,
-            0,
+        assert (
+            loader.main(
+                [
+                    "--checkpoint-dir",
+                    str(checkpoint_dir),
+                    "--device",
+                    "0",
+                ]
+            )
+            is None
         )
-        assert loader.lock_type is GrantedLockType.RO
         assert not target_vmm.imports
         assert not target_vmm.reservations
 
@@ -182,7 +189,6 @@ def test_exact_ids_roundtrip_through_fresh_server_hydration(
         restored.close()
         restored_engine.unmap_all_vas()
         restored_engine.disconnect()
-        loader.close()
 
     assert events == [
         "start_restore",
@@ -191,8 +197,18 @@ def test_exact_ids_roundtrip_through_fresh_server_hydration(
         "backend_close",
     ]
     messages = [record.message for record in caplog.records]
-    assert any("GMS V1 saver total" in message for message in messages)
+    for phase in (
+        "enumerate/map/import setup",
+        "device-to-file shard write",
+        "release",
+        "total",
+    ):
+        assert any(
+            f"GMS V1 saver {phase} device=0 allocations=2 bytes=192 elapsed=" in message
+            for message in messages
+        )
     assert any("GMS V1 loader target allocation" in message for message in messages)
     assert any("GMS V1 loader NIXL transfer" in message for message in messages)
     assert any("GMS V1 loader commit/publish" in message for message in messages)
     assert any("GMS V1 loader total" in message for message in messages)
+    assert any("GMS V1 loader complete; exiting" in message for message in messages)

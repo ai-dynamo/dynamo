@@ -96,9 +96,10 @@ allocation, its exact ID, aligned size, shard path, and shard offset.
 On restore, `gms-v1-loader` connects RW to a fresh `weights` socket, recreates
 the exact IDs and sizes, temporarily imports them, and restores the shard bytes
 through the existing NIXL transfer backend. It synchronizes and releases its
-temporary mappings, commits the same socket RW to RO, and remains alive while
-the restored worker acquires another RO lease and remaps its preserved VAs.
-Neither path uses V0 tensor metadata or the V0 memory manager.
+temporary mappings, commits the same socket RW to RO, closes its lease, and
+exits. The server retains the committed backing while the restored worker
+acquires a new RO lease and remaps its preserved VAs. Neither path uses V0
+tensor metadata or the V0 memory manager.
 
 ## Weight construction
 
@@ -146,6 +147,7 @@ sequenceDiagram
 
     L->>WS: connect RW, allocate saved IDs
     L->>WS: NIXL hydrate, commit RW to RO
+    L->>WS: close RO lease and exit
     W->>KM: connect RW
     W->>KM: reallocate_all_handles, remap_all_vas
     Note over KS: fresh KV backing at preserved VAs
@@ -175,12 +177,15 @@ Save or hydrate that rank's weight artifact under
 
 ```text
 gms-v1-saver --checkpoint-dir /checkpoints/run/versions/1 --device 0
-gms-v1-loader --checkpoint-dir /checkpoints/run/versions/1 --device 0
+/bin/sh -c 'set -eu; gms-v1-loader --checkpoint-dir /checkpoints/run/versions/1 --device 0; exec sleep infinity'
 ```
 
-The loader is a long-running sidecar. Start one server and one loader per
-rank/device, and give both the same `GMS_SOCKET_DIR` as the restored worker.
-Only the V1 `weights` socket is used for the artifact.
+The loader is a one-shot Python child. For a long-running loader container, the
+shell remains PID 1 and replaces itself with `sleep infinity` after hydration
+succeeds. The Python process has exited by then, so the sleeping process has no
+CUDA context. Start one server and one loader container per rank/device, and
+give both the same `GMS_SOCKET_DIR` as the restored worker. Only the V1
+`weights` socket is used for the artifact.
 
 Select the worker while retaining vLLM's normal load format:
 
