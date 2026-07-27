@@ -1050,6 +1050,65 @@ mod tests {
     }
 
     #[test]
+    fn destination_without_prefix_caching_reserves_every_block_fresh() {
+        let mut manager =
+            VllmKvManager::new_with_event_sink(2, 4, false, KvEventPublishers::default(), 0);
+        let owner = Uuid::from_u128(1);
+        let layout = VllmBlockLayout::new(
+            vec![UniqueBlock::FullBlock(7), UniqueBlock::FullBlock(8)],
+            vec![107, 108],
+            None,
+            None,
+        );
+
+        let reservation = ready(manager.reserve_destination_at(owner, Some(layout), None));
+        assert_eq!(reservation.len(), 2);
+        assert_eq!(reservation.transferable_prompt_tokens(4), 8);
+
+        manager.activate_destination(reservation);
+        assert_eq!(manager.request_block_count(owner), 2);
+        assert_eq!(manager.num_active_blocks(), 2);
+        assert!(manager.pool.prefix_hit(7).is_none());
+        assert!(manager.pool.prefix_hit(8).is_none());
+    }
+
+    #[test]
+    fn destination_partial_block_stops_prefix_reuse() {
+        let mut manager =
+            VllmKvManager::new_with_event_sink(4, 4, true, KvEventPublishers::default(), 0);
+        let seed = Uuid::from_u128(1);
+        ready(use_full(&mut manager, seed, &[7, 9], 0));
+        manager.finalize_computed_prefix(seed, 0, 8);
+        manager.deref_for_request(
+            seed,
+            &[UniqueBlock::FullBlock(9), UniqueBlock::FullBlock(7)],
+        );
+
+        let owner = Uuid::from_u128(2);
+        let layout = VllmBlockLayout::new(
+            vec![
+                UniqueBlock::FullBlock(7),
+                UniqueBlock::PartialBlock(Uuid::from_u128(3)),
+                UniqueBlock::FullBlock(9),
+            ],
+            vec![107, 109],
+            None,
+            None,
+        );
+
+        let reservation = ready(manager.reserve_destination_at(owner, Some(layout), None));
+        assert_eq!(reservation.len(), 3);
+        assert_eq!(reservation.transferable_prompt_tokens(4), 8);
+
+        manager.activate_destination(reservation);
+        assert_eq!(manager.request_block_count(owner), 3);
+        assert_eq!(manager.num_active_blocks(), 3);
+        assert_eq!(manager.num_inactive_blocks(), 1);
+        assert!(manager.pool.prefix_hit(7).unwrap().is_active);
+        assert!(!manager.pool.prefix_hit(9).unwrap().is_active);
+    }
+
+    #[test]
     fn request_release_evicts_leaf_before_parent() {
         let mut manager =
             VllmKvManager::new_with_event_sink(2, 4, true, KvEventPublishers::default(), 0);

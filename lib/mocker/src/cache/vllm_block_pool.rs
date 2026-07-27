@@ -16,7 +16,7 @@ new_key_type! {
     pub(crate) struct BlockCopyId;
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct InactiveLinks {
     previous: Option<BlockCopyId>,
     next: Option<BlockCopyId>,
@@ -29,7 +29,7 @@ enum CopyState {
         hash: SequenceHash,
         refs: usize,
         pins: usize,
-        inactive: Option<InactiveLinks>,
+        inactive: InactiveLinks,
     },
 }
 
@@ -136,9 +136,9 @@ impl VllmBlockPool {
         candidates: impl IntoIterator<Item = SequenceHash>,
         total: usize,
     ) -> Option<ReserveOutcome> {
-        let mut hits = Vec::new();
+        let mut hits = Vec::with_capacity(total);
         for hash in candidates {
-            assert!(hits.len() < total, "prefix candidates exceed layout");
+            debug_assert!(hits.len() < total, "prefix candidates exceed layout");
             let Some(id) = self.first_copy(hash) else {
                 break;
             };
@@ -232,16 +232,20 @@ impl VllmBlockPool {
     }
 
     pub(crate) fn allocate_private(&mut self, reservation: &mut BlockReservation) -> BlockCopyId {
+        let id = self.allocate_private_unchecked(reservation);
+        self.debug_assert_invariants();
+        id
+    }
+
+    fn allocate_private_unchecked(&mut self, reservation: &mut BlockReservation) -> BlockCopyId {
         assert!(reservation.fresh > 0, "reservation has no fresh capacity");
         assert!(self.reserved > 0, "pool reserved-capacity underflow");
         reservation.fresh -= 1;
         self.reserved -= 1;
 
-        let id = self.copies.insert(BlockCopy {
+        self.copies.insert(BlockCopy {
             state: CopyState::Private,
-        });
-        self.debug_assert_invariants();
-        id
+        })
     }
 
     /// Allocate a transferred/computed full block directly into the cache.
@@ -251,14 +255,21 @@ impl VllmBlockPool {
         reservation: &mut BlockReservation,
         hash: SequenceHash,
     ) -> (BlockCopyId, bool) {
-        let id = self.allocate_private(reservation);
-        let became_visible = self.cache_private(id, hash);
+        let id = self.allocate_private_unchecked(reservation);
+        let became_visible = self.cache_private_unchecked(id, hash);
+        self.debug_assert_invariants();
         (id, became_visible)
     }
 
     /// Make a request-private computed full block available for prefix reuse.
     /// Returns whether this is the first resident physical copy of `hash`.
     pub(crate) fn cache_private(&mut self, id: BlockCopyId, hash: SequenceHash) -> bool {
+        let became_visible = self.cache_private_unchecked(id, hash);
+        self.debug_assert_invariants();
+        became_visible
+    }
+
+    fn cache_private_unchecked(&mut self, id: BlockCopyId, hash: SequenceHash) -> bool {
         let became_visible = !self.by_hash.contains_key(&hash);
         let Some(copy) = self.copies.get_mut(id) else {
             panic!("attempted to cache an unknown block copy")
@@ -271,10 +282,9 @@ impl VllmBlockPool {
             hash,
             refs: 1,
             pins: 0,
-            inactive: None,
+            inactive: InactiveLinks::default(),
         };
         self.by_hash.entry(hash).or_default().push(id);
-        self.debug_assert_invariants();
         became_visible
     }
 
@@ -360,25 +370,31 @@ impl VllmBlockPool {
         matches!(
             &self.copies[id].state,
             CopyState::Cached {
-                inactive: Some(_),
+                refs: 0,
+                pins: 0,
                 ..
             }
         )
     }
 
     fn pin(&mut self, id: BlockCopyId) {
-        let was_inactive = {
-            let CopyState::Cached { pins, inactive, .. } = &mut self.copies[id].state else {
+        let (was_inactive, new_pins) = {
+            let CopyState::Cached { refs, pins, .. } = &self.copies[id].state else {
                 panic!("prefix hash points to a private copy")
             };
-            *pins = pins
-                .checked_add(1)
-                .unwrap_or_else(|| panic!("pin count overflow"));
-            inactive.is_some()
+            (
+                *refs == 0 && *pins == 0,
+                pins.checked_add(1)
+                    .unwrap_or_else(|| panic!("pin count overflow")),
+            )
         };
         if was_inactive {
             self.remove_inactive(id);
         }
+        let CopyState::Cached { pins, .. } = &mut self.copies[id].state else {
+            unreachable!()
+        };
+        *pins = new_pins;
     }
 
     fn activate_pin(&mut self, id: BlockCopyId, expected_hash: SequenceHash) {
@@ -416,92 +432,156 @@ impl VllmBlockPool {
 
     fn insert_inactive(&mut self, id: BlockCopyId) {
         let previous = self.inactive_tail;
-        if let Some(previous) = previous {
-            let CopyState::Cached {
-                inactive: Some(links),
-                ..
-            } = &mut self.copies[previous].state
-            else {
-                panic!("inactive tail is not linked")
-            };
-            assert!(links.next.replace(id).is_none());
-        } else {
-            assert!(self.inactive_head.replace(id).is_none());
-        }
-
-        let CopyState::Cached { inactive, .. } = &mut self.copies[id].state else {
-            panic!("private copy cannot enter inactive LRU")
-        };
-        assert!(
-            inactive
-                .replace(InactiveLinks {
-                    previous,
-                    next: None,
-                })
-                .is_none()
-        );
-        self.inactive_tail = Some(id);
-        self.inactive_len = self
+        let new_len = self
             .inactive_len
             .checked_add(1)
             .unwrap_or_else(|| panic!("inactive LRU length overflow"));
-    }
 
-    fn remove_inactive(&mut self, id: BlockCopyId) {
-        let links = match &self.copies[id].state {
-            CopyState::Cached {
-                inactive: Some(links),
-                ..
-            } => *links,
-            _ => panic!("copy is not in the inactive LRU"),
+        let Some(copy) = self.copies.get(id) else {
+            panic!("unknown copy cannot enter inactive LRU")
         };
+        let CopyState::Cached {
+            refs,
+            pins,
+            inactive,
+            ..
+        } = &copy.state
+        else {
+            panic!("private copy cannot enter inactive LRU")
+        };
+        assert_eq!(*refs, 0, "inactive copy retains request references");
+        assert_eq!(*pins, 0, "inactive copy retains reservation pins");
+        assert_eq!(*inactive, InactiveLinks::default());
+        assert_ne!(self.inactive_head, Some(id), "copy is already LRU head");
+        assert_ne!(self.inactive_tail, Some(id), "copy is already LRU tail");
 
-        if let Some(previous) = links.previous {
-            let CopyState::Cached {
-                inactive: Some(previous_links),
-                ..
-            } = &mut self.copies[previous].state
-            else {
-                panic!("inactive predecessor is not linked")
-            };
-            assert_eq!(
-                std::mem::replace(&mut previous_links.next, links.next),
-                Some(id)
+        if let Some(previous) = previous {
+            assert!(
+                self.inactive_head.is_some(),
+                "inactive LRU tail exists without a head"
             );
+            let Some(previous_copy) = self.copies.get(previous) else {
+                panic!("inactive LRU tail points to a missing copy")
+            };
+            let CopyState::Cached {
+                refs,
+                pins,
+                inactive,
+                ..
+            } = &previous_copy.state
+            else {
+                panic!("inactive tail is not linked")
+            };
+            assert_eq!(*refs, 0, "inactive tail retains request references");
+            assert_eq!(*pins, 0, "inactive tail retains reservation pins");
+            assert_eq!(inactive.next, None, "inactive tail has a successor");
         } else {
-            assert_eq!(
-                std::mem::replace(&mut self.inactive_head, links.next),
-                Some(id)
+            assert!(
+                self.inactive_head.is_none(),
+                "inactive LRU endpoints disagree"
             );
         }
 
-        if let Some(next) = links.next {
-            let CopyState::Cached {
-                inactive: Some(next_links),
-                ..
-            } = &mut self.copies[next].state
-            else {
-                panic!("inactive successor is not linked")
+        if let Some(previous) = previous {
+            let CopyState::Cached { inactive, .. } = &mut self.copies[previous].state else {
+                unreachable!()
             };
-            assert_eq!(
-                std::mem::replace(&mut next_links.previous, links.previous),
-                Some(id)
-            );
+            inactive.next = Some(id);
         } else {
-            assert_eq!(
-                std::mem::replace(&mut self.inactive_tail, links.previous),
-                Some(id)
-            );
+            self.inactive_head = Some(id);
         }
-
         let CopyState::Cached { inactive, .. } = &mut self.copies[id].state else {
             unreachable!()
         };
-        assert_eq!(inactive.take(), Some(links));
-        self.inactive_len = self
+        *inactive = InactiveLinks {
+            previous,
+            next: None,
+        };
+        self.inactive_tail = Some(id);
+        self.inactive_len = new_len;
+    }
+
+    fn remove_inactive(&mut self, id: BlockCopyId) {
+        let new_len = self
             .inactive_len
             .checked_sub(1)
             .unwrap_or_else(|| panic!("inactive LRU length underflow"));
+        let Some(copy) = self.copies.get(id) else {
+            panic!("inactive LRU points to a missing copy")
+        };
+        let links = match &copy.state {
+            CopyState::Cached {
+                refs: 0,
+                pins: 0,
+                inactive,
+                ..
+            } => *inactive,
+            _ => panic!("copy is not in the inactive LRU"),
+        };
+        assert_ne!(
+            links.previous,
+            Some(id),
+            "inactive copy is its own predecessor"
+        );
+        assert_ne!(links.next, Some(id), "inactive copy is its own successor");
+
+        if let Some(previous) = links.previous {
+            let Some(previous_copy) = self.copies.get(previous) else {
+                panic!("inactive predecessor points to a missing copy")
+            };
+            let CopyState::Cached {
+                refs: 0,
+                pins: 0,
+                inactive: previous_links,
+                ..
+            } = &previous_copy.state
+            else {
+                panic!("inactive predecessor is not linked")
+            };
+            assert_eq!(previous_links.next, Some(id));
+        } else {
+            assert_eq!(self.inactive_head, Some(id));
+        }
+
+        if let Some(next) = links.next {
+            let Some(next_copy) = self.copies.get(next) else {
+                panic!("inactive successor points to a missing copy")
+            };
+            let CopyState::Cached {
+                refs: 0,
+                pins: 0,
+                inactive: next_links,
+                ..
+            } = &next_copy.state
+            else {
+                panic!("inactive successor is not linked")
+            };
+            assert_eq!(next_links.previous, Some(id));
+        } else {
+            assert_eq!(self.inactive_tail, Some(id));
+        }
+
+        if let Some(previous) = links.previous {
+            let CopyState::Cached { inactive, .. } = &mut self.copies[previous].state else {
+                unreachable!()
+            };
+            inactive.next = links.next;
+        } else {
+            self.inactive_head = links.next;
+        }
+        if let Some(next) = links.next {
+            let CopyState::Cached { inactive, .. } = &mut self.copies[next].state else {
+                unreachable!()
+            };
+            inactive.previous = links.previous;
+        } else {
+            self.inactive_tail = links.previous;
+        }
+        let CopyState::Cached { inactive, .. } = &mut self.copies[id].state else {
+            unreachable!()
+        };
+        *inactive = InactiveLinks::default();
+        self.inactive_len = new_len;
     }
 
     /// Evict one physical copy. A hash is returned only on its final copy.
@@ -514,17 +594,13 @@ impl VllmBlockPool {
             panic!("inactive LRU points to a missing copy")
         };
         let CopyState::Cached {
-            hash,
-            refs,
-            pins,
-            inactive,
+            hash, refs, pins, ..
         } = copy.state
         else {
             panic!("inactive LRU points to a private copy")
         };
         assert_eq!(refs, 0);
         assert_eq!(pins, 0);
-        assert_eq!(inactive, None);
 
         let remove_hash = {
             let Some(copies) = self.by_hash.get_mut(&hash) else {
@@ -538,16 +614,32 @@ impl VllmBlockPool {
         };
         if remove_hash {
             self.by_hash.remove(&hash);
-            self.debug_assert_invariants();
-            Some(hash)
-        } else {
-            self.debug_assert_invariants();
-            None
         }
+        remove_hash.then_some(hash)
     }
 
-    #[cfg(debug_assertions)]
     fn debug_assert_invariants(&self) {
+        debug_assert!(
+            self.copies.len() + self.reserved <= self.capacity,
+            "block-pool occupancy exceeds capacity"
+        );
+        debug_assert_eq!(
+            self.inactive_head.is_none(),
+            self.inactive_tail.is_none(),
+            "inactive LRU endpoints disagree"
+        );
+        debug_assert_eq!(
+            self.inactive_len == 0,
+            self.inactive_head.is_none(),
+            "inactive LRU length disagrees with its endpoints"
+        );
+
+        #[cfg(test)]
+        self.assert_full_invariants();
+    }
+
+    #[cfg(test)]
+    fn assert_full_invariants(&self) {
         assert!(
             self.copies.len() + self.reserved <= self.capacity,
             "block-pool occupancy exceeds capacity"
@@ -556,6 +648,11 @@ impl VllmBlockPool {
             self.inactive_head.is_none(),
             self.inactive_tail.is_none(),
             "inactive LRU endpoints disagree"
+        );
+        assert_eq!(
+            self.inactive_len == 0,
+            self.inactive_head.is_none(),
+            "inactive LRU length disagrees with its endpoints"
         );
 
         let mut seen = FxHashSet::default();
@@ -569,11 +666,11 @@ impl VllmBlockPool {
             let CopyState::Cached {
                 refs,
                 pins,
-                inactive: Some(links),
+                inactive: links,
                 ..
             } = &copy.state
             else {
-                panic!("inactive LRU points to an active or private copy")
+                panic!("inactive LRU points to a private copy")
             };
             assert_eq!(*refs, 0, "inactive copy retains request references");
             assert_eq!(*pins, 0, "inactive copy retains reservation pins");
@@ -598,15 +695,14 @@ impl VllmBlockPool {
                         .get(hash)
                         .is_some_and(|copies| copies.contains(&id));
                     assert!(indexed, "cached copy is missing from its hash index");
-                    if inactive.is_some() {
+                    if *refs == 0 && *pins == 0 {
                         assert!(seen.contains(&id), "inactive copy is missing from the LRU");
-                        assert_eq!(*refs, 0);
-                        assert_eq!(*pins, 0);
                     } else {
                         assert!(
-                            *refs > 0 || *pins > 0,
-                            "unreferenced cached copy is missing from the inactive LRU"
+                            !seen.contains(&id),
+                            "active cached copy is present in the inactive LRU"
                         );
+                        assert_eq!(*inactive, InactiveLinks::default());
                     }
                 }
             }
@@ -635,10 +731,6 @@ impl VllmBlockPool {
             "hash index does not cover every cached copy"
         );
     }
-
-    #[cfg(not(debug_assertions))]
-    #[inline(always)]
-    fn debug_assert_invariants(&self) {}
 }
 
 #[cfg(test)]
