@@ -8,9 +8,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from dynamo.global_planner.scale_handler import PoolIntent, ScaleRequestHandler
-from dynamo.planner import SubComponentType, TargetReplica
+from dynamo.global_planner.orchestrator import PoolIntent
+from dynamo.global_planner.scale_handler import ScaleRequestHandler
+from dynamo.planner import KubernetesConnector, SubComponentType, TargetReplica
 from dynamo.planner.connectors.protocol import ScaleRequest
+from dynamo.planner.errors import DynamoGraphDeploymentNotReadyError
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -19,6 +21,12 @@ pytestmark = [
     pytest.mark.planner,
     pytest.mark.filterwarnings("ignore::pydantic.warnings.PydanticDeprecatedSince20"),
 ]
+
+# TODO(global-planner): Add invariant coverage for HA/shared state, cancellation
+# and intermediate PATCH failure, out-of-bound recovery, selected-only tolerance,
+# and duplicate-target execution; patch discovery by default in handler unit
+# tests and repair the concurrent-insert test so its _read_pools monkeypatch
+# accepts role_hints and actually runs instead of having TypeError swallowed.
 
 
 @pytest.fixture
@@ -47,7 +55,7 @@ async def test_handler_authorization_success(mock_runtime):
 
     # Mock KubernetesConnector
     with patch(
-        "dynamo.global_planner.scale_handler.KubernetesConnector"
+        "dynamo.global_planner.kubernetes_capacity_manager.KubernetesConnector"
     ) as mock_connector_cls:
         mock_connector = AsyncMock()
         mock_connector_cls.return_value = mock_connector
@@ -55,14 +63,7 @@ async def test_handler_authorization_success(mock_runtime):
         mock_connector.set_component_replicas = AsyncMock()
         mock_connector.kube_api = MagicMock()
         mock_connector.kube_api.get_graph_deployment = MagicMock(
-            return_value={
-                "spec": {
-                    "services": {
-                        "prefill-svc": {"subComponentType": "prefill", "replicas": 3},
-                        "decode-svc": {"subComponentType": "decode", "replicas": 5},
-                    }
-                }
-            }
+            return_value=_dgd_spec(prefill_replicas=3, decode_replicas=5)
         )
 
         # Process request (pass as dict to match endpoint behavior)
@@ -140,7 +141,7 @@ async def test_handler_multiple_dgds(mock_runtime):
     )
 
     with patch(
-        "dynamo.global_planner.scale_handler.KubernetesConnector"
+        "dynamo.global_planner.kubernetes_capacity_manager.KubernetesConnector"
     ) as mock_connector_cls:
         mock_connector = AsyncMock()
         mock_connector_cls.return_value = mock_connector
@@ -148,7 +149,7 @@ async def test_handler_multiple_dgds(mock_runtime):
         mock_connector.set_component_replicas = AsyncMock()
         mock_connector.kube_api = MagicMock()
         mock_connector.kube_api.get_graph_deployment = MagicMock(
-            return_value={"spec": {"services": {}}}
+            return_value={"spec": {"components": []}}
         )
 
         # Process both requests
@@ -158,8 +159,8 @@ async def test_handler_multiple_dgds(mock_runtime):
             pass
 
         # Verify two connectors were created
-        assert "default/dgd-1" in handler.connectors
-        assert "default/dgd-2" in handler.connectors
+        assert "default/dgd-1" in handler.orchestrator.capacity_manager.connectors
+        assert "default/dgd-2" in handler.orchestrator.capacity_manager.connectors
         assert mock_connector_cls.call_count == 2
 
 
@@ -182,7 +183,7 @@ async def test_handler_error_handling(mock_runtime):
     )
 
     with patch(
-        "dynamo.global_planner.scale_handler.KubernetesConnector"
+        "dynamo.global_planner.kubernetes_capacity_manager.KubernetesConnector"
     ) as mock_connector_cls:
         mock_connector = AsyncMock()
         mock_connector_cls.return_value = mock_connector
@@ -203,39 +204,6 @@ async def test_handler_error_handling(mock_runtime):
         assert "Scaling failed" in response["message"]
 
 
-def test_managed_dgd_names_explicit(mock_runtime):
-    """Test _managed_dgd_names derives DGD names from Dynamo namespaces."""
-    handler = ScaleRequestHandler(
-        runtime=mock_runtime,
-        managed_namespaces=["my-ns-model-a", "my-ns-model-b"],
-        k8s_namespace="my-ns",
-    )
-    names = handler._managed_dgd_names()
-    assert names == {"model-a", "model-b"}
-
-
-def test_managed_dgd_names_implicit(mock_runtime):
-    """Test _managed_dgd_names returns None when no managed namespaces set."""
-    handler = ScaleRequestHandler(
-        runtime=mock_runtime,
-        managed_namespaces=None,
-        k8s_namespace="my-ns",
-    )
-    assert handler._managed_dgd_names() is None
-
-
-def test_managed_dgd_names_mismatched_prefix(mock_runtime):
-    """Test _managed_dgd_names warns for namespaces that don't match the k8s prefix."""
-    handler = ScaleRequestHandler(
-        runtime=mock_runtime,
-        managed_namespaces=["other-ns-model-a", "my-ns-model-b"],
-        k8s_namespace="my-ns",
-    )
-    names = handler._managed_dgd_names()
-    # Only the matching namespace is included
-    assert names == {"model-b"}
-
-
 @pytest.mark.asyncio
 async def test_populate_connectors_explicit_mode(mock_runtime):
     """Test _populate_k8s_connectors only creates connectors for managed DGDs."""
@@ -247,9 +215,11 @@ async def test_populate_connectors_explicit_mode(mock_runtime):
     )
 
     with (
-        patch("dynamo.global_planner.scale_handler.KubernetesAPI") as mock_kube_cls,
         patch(
-            "dynamo.global_planner.scale_handler.KubernetesConnector"
+            "dynamo.global_planner.kubernetes_capacity_manager.KubernetesAPI"
+        ) as mock_kube_cls,
+        patch(
+            "dynamo.global_planner.kubernetes_capacity_manager.KubernetesConnector"
         ) as mock_connector_cls,
     ):
         mock_kube = MagicMock()
@@ -261,12 +231,14 @@ async def test_populate_connectors_explicit_mode(mock_runtime):
         ]
         mock_connector_cls.return_value = MagicMock()
 
-        handler._populate_k8s_connectors()
+        handler.orchestrator.capacity_manager.discover(
+            handler.orchestrator.managed_deployments
+        )
 
         # Only model-a should be discovered
-        assert "default/model-a" in handler.connectors
-        assert "default/model-b" not in handler.connectors
-        assert "default/gp-ctrl" not in handler.connectors
+        assert "default/model-a" in handler.orchestrator.capacity_manager.connectors
+        assert "default/model-b" not in handler.orchestrator.capacity_manager.connectors
+        assert "default/gp-ctrl" not in handler.orchestrator.capacity_manager.connectors
         assert mock_connector_cls.call_count == 1
 
 
@@ -281,9 +253,11 @@ async def test_populate_connectors_implicit_mode(mock_runtime):
     )
 
     with (
-        patch("dynamo.global_planner.scale_handler.KubernetesAPI") as mock_kube_cls,
         patch(
-            "dynamo.global_planner.scale_handler.KubernetesConnector"
+            "dynamo.global_planner.kubernetes_capacity_manager.KubernetesAPI"
+        ) as mock_kube_cls,
+        patch(
+            "dynamo.global_planner.kubernetes_capacity_manager.KubernetesConnector"
         ) as mock_connector_cls,
     ):
         mock_kube = MagicMock()
@@ -294,11 +268,13 @@ async def test_populate_connectors_implicit_mode(mock_runtime):
         ]
         mock_connector_cls.return_value = MagicMock()
 
-        handler._populate_k8s_connectors()
+        handler.orchestrator.capacity_manager.discover(
+            handler.orchestrator.managed_deployments
+        )
 
         # All DGDs should be discovered
-        assert "default/model-a" in handler.connectors
-        assert "default/model-b" in handler.connectors
+        assert "default/model-a" in handler.orchestrator.capacity_manager.connectors
+        assert "default/model-b" in handler.orchestrator.capacity_manager.connectors
         assert mock_connector_cls.call_count == 2
 
 
@@ -322,7 +298,7 @@ async def test_handler_blocking_mode(mock_runtime):
     )
 
     with patch(
-        "dynamo.global_planner.scale_handler.KubernetesConnector"
+        "dynamo.global_planner.kubernetes_capacity_manager.KubernetesConnector"
     ) as mock_connector_cls:
         mock_connector = AsyncMock()
         mock_connector_cls.return_value = mock_connector
@@ -330,7 +306,7 @@ async def test_handler_blocking_mode(mock_runtime):
         mock_connector.set_component_replicas = AsyncMock()
         mock_connector.kube_api = MagicMock()
         mock_connector.kube_api.get_graph_deployment = MagicMock(
-            return_value={"spec": {"services": {}}}
+            return_value={"spec": {"components": []}}
         )
 
         # Process request (pass as dict to match endpoint behavior)
@@ -348,24 +324,84 @@ async def test_handler_blocking_mode(mock_runtime):
 # ---------------------------------------------------------------------------- #
 
 
-def _dgd_spec(prefill_replicas, decode_replicas, prefill_gpu=1, decode_gpu=1):
-    """Build a DGD deployment spec with prefill + decode services."""
+def _component(name, replicas, gpu, ctype, node_count=None):
+    component = {
+        "name": name,
+        "type": ctype,
+        "replicas": replicas,
+        "podTemplate": {
+            "spec": {
+                "containers": [
+                    {"name": "main", "resources": {"limits": {"nvidia.com/gpu": gpu}}}
+                ]
+            }
+        },
+    }
+    if node_count is not None:
+        component["multinode"] = {"nodeCount": node_count}
+    return component
+
+
+def _dgd_spec(
+    prefill_replicas,
+    decode_replicas,
+    prefill_gpu=1,
+    decode_gpu=1,
+    prefill_node_count=None,
+    decode_node_count=None,
+):
+    """Build a v1beta1 DGD spec with prefill and decode components."""
     return {
         "spec": {
-            "services": {
-                "prefill-svc": {
-                    "subComponentType": "prefill",
-                    "replicas": prefill_replicas,
-                    "resources": {"limits": {"gpu": prefill_gpu}},
-                },
-                "decode-svc": {
-                    "subComponentType": "decode",
-                    "replicas": decode_replicas,
-                    "resources": {"limits": {"gpu": decode_gpu}},
-                },
-            }
+            "components": [
+                _component(
+                    "prefill-svc",
+                    prefill_replicas,
+                    prefill_gpu,
+                    "prefill",
+                    prefill_node_count,
+                ),
+                _component(
+                    "decode-svc",
+                    decode_replicas,
+                    decode_gpu,
+                    "decode",
+                    decode_node_count,
+                ),
+            ]
         }
     }
+
+
+def _worker_dgd_spec(
+    replicas, gpu=1, component_name="worker-svc", component_type="worker"
+):
+    """Build a v1beta1 DGD spec with one generic worker component."""
+    component = {
+        "name": component_name,
+        "replicas": replicas,
+        "podTemplate": {
+            "spec": {
+                "containers": [
+                    {"name": "main", "resources": {"limits": {"nvidia.com/gpu": gpu}}}
+                ]
+            }
+        },
+    }
+    if component_type is not None:
+        component["type"] = component_type
+    return {"spec": {"components": [component]}}
+
+
+def _two_worker_dgd_spec(replicas=1, gpu=1):
+    """Build a DGD with two generic workers that can resolve to one role."""
+    deployment = _worker_dgd_spec(replicas=replicas, gpu=gpu, component_name="worker-a")
+    deployment["spec"]["components"].extend(
+        _worker_dgd_spec(replicas=replicas, gpu=gpu, component_name="worker-b")["spec"][
+            "components"
+        ]
+    )
+    return deployment
 
 
 def _install_connector(handler, dgd_key, dgd_spec_dict, parent_dgd_name="my-dgd"):
@@ -376,7 +412,21 @@ def _install_connector(handler, dgd_key, dgd_spec_dict, parent_dgd_name="my-dgd"
     connector.parent_dgd_name = parent_dgd_name
     connector.kube_api = MagicMock()
     connector.kube_api.get_graph_deployment = MagicMock(return_value=dgd_spec_dict)
-    handler.connectors[dgd_key] = connector
+    handler.orchestrator.capacity_manager.connectors[dgd_key] = connector
+    return connector
+
+
+def _install_real_connector(handler, dgd_key, dgd_spec_dict, parent_dgd_name="my-dgd"):
+    """Attach a real KubernetesConnector backed by a mocked Kubernetes API."""
+    connector = KubernetesConnector.__new__(KubernetesConnector)
+    connector.parent_dgd_name = parent_dgd_name
+    connector.graph_deployment_name = parent_dgd_name
+    connector.raise_not_ready = True
+    connector.kube_api = MagicMock()
+    connector.kube_api.get_graph_deployment.return_value = dgd_spec_dict
+    connector.kube_api.is_deployment_ready.return_value = True
+    connector.kube_api.wait_for_graph_deployment_ready = AsyncMock()
+    handler.orchestrator.capacity_manager.connectors[dgd_key] = connector
     return connector
 
 
@@ -386,6 +436,8 @@ def _scale_req(
     caller_ns="app-ns",
     prefill=None,
     decode=None,
+    prefill_component_name=None,
+    decode_component_name=None,
 ):
     """Build a ScaleRequest with one or both pool targets set."""
     targets = []
@@ -393,6 +445,7 @@ def _scale_req(
         targets.append(
             TargetReplica(
                 sub_component_type=SubComponentType.PREFILL,
+                component_name=prefill_component_name,
                 desired_replicas=prefill,
             )
         )
@@ -400,6 +453,7 @@ def _scale_req(
         targets.append(
             TargetReplica(
                 sub_component_type=SubComponentType.DECODE,
+                component_name=decode_component_name,
                 desired_replicas=decode,
             )
         )
@@ -482,7 +536,7 @@ async def test_scale_down_paired_with_pending_scale_up_in_same_dgd(mock_runtime)
     )
 
     # Pre-seed cache: decode wants to go to 4 (scale up by 1)
-    handler._intent_cache["default/my-dgd/decode"] = PoolIntent(
+    handler.orchestrator._intent_cache["default/my-dgd/decode"] = PoolIntent(
         last_desired=4, last_seen_at=time.time()
     )
 
@@ -523,7 +577,7 @@ async def test_scale_down_paired_across_different_dgd(mock_runtime):
     )
 
     # Decode in DGD-B wants to scale up — should pair across DGDs with DGD-A's scale-down
-    handler._intent_cache["default/dgd-b/decode"] = PoolIntent(
+    handler.orchestrator._intent_cache["default/dgd-b/decode"] = PoolIntent(
         last_desired=4, last_seen_at=time.time()
     )
 
@@ -578,10 +632,10 @@ async def test_pair_packs_both_partners_when_both_fit(mock_runtime):
     # Both DGD-A's decode and DGD-B's decode have pending scale-up intents
     # (each +1 GPU). Cluster baseline = 12; standalone request lands at 11
     # (at floor). Pack both partners → 11+1+1 = 13 (at ceiling, strict).
-    handler._intent_cache["default/dgd-a/decode"] = PoolIntent(
+    handler.orchestrator._intent_cache["default/dgd-a/decode"] = PoolIntent(
         last_desired=4, last_seen_at=time.time()
     )
-    handler._intent_cache["default/dgd-b/decode"] = PoolIntent(
+    handler.orchestrator._intent_cache["default/dgd-b/decode"] = PoolIntent(
         last_desired=4, last_seen_at=time.time()
     )
     req = _scale_req(dgd="dgd-a", caller_ns="default-dgd-a", prefill=2)
@@ -630,7 +684,7 @@ async def test_cross_dgd_pair_second_patch_failure_self_corrects(mock_runtime, c
         parent_dgd_name="dgd-b",
     )
     # DGD-B's decode is a pending partner
-    handler._intent_cache["default/dgd-b/decode"] = PoolIntent(
+    handler.orchestrator._intent_cache["default/dgd-b/decode"] = PoolIntent(
         last_desired=4, last_seen_at=time.time()
     )
     # DGD-B's K8s patch fails
@@ -651,6 +705,55 @@ async def test_cross_dgd_pair_second_patch_failure_self_corrects(mock_runtime, c
     )
     # Request response still reports success for the request side
     assert results[0]["status"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_cross_dgd_pair_second_patch_not_ready_self_corrects(
+    mock_runtime, caplog
+):
+    """If a later cross-DGD patch is skipped because the DGD is not ready,
+    the first patch stays applied and the request side still reports success."""
+    import logging as _logging
+
+    handler = ScaleRequestHandler(
+        runtime=mock_runtime,
+        managed_namespaces=["default-dgd-a", "default-dgd-b"],
+        k8s_namespace="default",
+        min_total_gpus=12,
+        max_total_gpus=12,
+    )
+    connector_a = _install_connector(
+        handler,
+        "default/dgd-a",
+        _dgd_spec(prefill_replicas=3, decode_replicas=3),
+        parent_dgd_name="dgd-a",
+    )
+    connector_b = _install_connector(
+        handler,
+        "default/dgd-b",
+        _dgd_spec(prefill_replicas=3, decode_replicas=3),
+        parent_dgd_name="dgd-b",
+    )
+    handler.orchestrator._intent_cache["default/dgd-b/decode"] = PoolIntent(
+        last_desired=4, last_seen_at=time.time()
+    )
+    connector_b.set_component_replicas.side_effect = DynamoGraphDeploymentNotReadyError(
+        "dgd-b", "default"
+    )
+
+    req = _scale_req(dgd="dgd-a", caller_ns="default-dgd-a", prefill=2)
+    with caplog.at_level(
+        _logging.WARNING, logger="dynamo.global_planner.scale_handler"
+    ):
+        results = await _run(handler, req)
+
+    connector_a.set_component_replicas.assert_called_once()
+    connector_b.set_component_replicas.assert_called_once()
+    assert results[0]["status"] == "success"
+    assert any(
+        "not ready" in rec.message and "will self-correct" in rec.message
+        for rec in caplog.records
+    )
 
 
 @pytest.mark.asyncio
@@ -677,7 +780,7 @@ async def test_cross_dgd_pair_first_patch_failure_yields_error(mock_runtime):
         _dgd_spec(prefill_replicas=3, decode_replicas=3),
         parent_dgd_name="dgd-b",
     )
-    handler._intent_cache["default/dgd-b/decode"] = PoolIntent(
+    handler.orchestrator._intent_cache["default/dgd-b/decode"] = PoolIntent(
         last_desired=4, last_seen_at=time.time()
     )
     # Request is DGD-A prefill 3 → 2 (net_delta < 0), so the scale-down
@@ -727,14 +830,18 @@ async def test_cross_dgd_asymmetric_pair_rejected_above_ceiling(mock_runtime):
     # DGD-B decode wants +1 (+2 GPUs); DGD-A prefill request wants -1 (-1 GPU).
     # Paired total = 10 - 1 + 2 = 11 > max=10. Decode's 2 GPU/worker step can't
     # be partially applied to land at exactly 10, so the pair is denied.
-    handler._intent_cache["default/dgd-b/decode"] = PoolIntent(
+    handler.orchestrator._intent_cache["default/dgd-b/decode"] = PoolIntent(
         last_desired=4, last_seen_at=time.time()
     )
     req = _scale_req(dgd="dgd-a", caller_ns="default-dgd-a", prefill=3)
     results = await _run(handler, req)
     assert results[0]["status"] == "rejected"
-    handler.connectors["default/dgd-a"].set_component_replicas.assert_not_called()
-    handler.connectors["default/dgd-b"].set_component_replicas.assert_not_called()
+    handler.orchestrator.capacity_manager.connectors[
+        "default/dgd-a"
+    ].set_component_replicas.assert_not_called()
+    handler.orchestrator.capacity_manager.connectors[
+        "default/dgd-b"
+    ].set_component_replicas.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -752,7 +859,7 @@ async def test_intent_cache_respects_ttl(mock_runtime):
         handler, "default/my-dgd", _dgd_spec(prefill_replicas=3, decode_replicas=3)
     )
     # Cache a decode scale-up intent that is too old
-    handler._intent_cache["default/my-dgd/decode"] = PoolIntent(
+    handler.orchestrator._intent_cache["default/my-dgd/decode"] = PoolIntent(
         last_desired=4, last_seen_at=time.time() - 60
     )
 
@@ -778,7 +885,7 @@ async def test_scale_up_paired_with_pending_scale_down_when_ceiling_breached(
         handler, "default/my-dgd", _dgd_spec(prefill_replicas=3, decode_replicas=3)
     )
     # Prefill wants to drop by 1; cache it
-    handler._intent_cache["default/my-dgd/prefill"] = PoolIntent(
+    handler.orchestrator._intent_cache["default/my-dgd/prefill"] = PoolIntent(
         last_desired=2, last_seen_at=time.time()
     )
 
@@ -815,7 +922,7 @@ async def test_asymmetric_per_worker_gpu_pair_rejected_above_ceiling(mock_runtim
     # Paired total = 10 + 2 - 1 = 11 > max=10. No partial works (decode step
     # is 2 GPUs — partial-K can only be 3=current or 4=full, neither lands at
     # 10 with the -1 prefill applied).
-    handler._intent_cache["default/my-dgd/prefill"] = PoolIntent(
+    handler.orchestrator._intent_cache["default/my-dgd/prefill"] = PoolIntent(
         last_desired=3, last_seen_at=time.time()
     )
     req = _scale_req(caller_ns="default-my-dgd", decode=4)
@@ -843,7 +950,7 @@ async def test_asymmetric_pair_denied_if_above_ceiling(mock_runtime):
     )
     # Decode wants +2 (=+4 GPUs), prefill cached intent -1 (=-1 GPU).
     # Paired total = 10 + 4 - 1 = 13 > max=10. Deny.
-    handler._intent_cache["default/my-dgd/prefill"] = PoolIntent(
+    handler.orchestrator._intent_cache["default/my-dgd/prefill"] = PoolIntent(
         last_desired=3, last_seen_at=time.time()
     )
     req = _scale_req(caller_ns="default-my-dgd", decode=5)
@@ -872,7 +979,7 @@ async def test_asymmetric_pair_denied_if_below_tolerance(mock_runtime):
     )
     # Decode wants +1 (+1 GPU); request prefill wants -3 (-3 GPUs). Paired
     # total = 10 - 3 + 1 = 8. min - tolerance = 10 - 1 = 9. 8 < 9 → deny.
-    handler._intent_cache["default/my-dgd/decode"] = PoolIntent(
+    handler.orchestrator._intent_cache["default/my-dgd/decode"] = PoolIntent(
         last_desired=6, last_seen_at=time.time()
     )
     req = _scale_req(caller_ns="default-my-dgd", prefill=2)
@@ -889,9 +996,11 @@ async def test_initial_below_floor_logs_warning(mock_runtime):
     semantics — and the floor only blocks explicit scale-downs going forward
     (covered by the standalone-deny tests above)."""
     with (
-        patch("dynamo.global_planner.scale_handler.KubernetesAPI") as mock_kube_cls,
         patch(
-            "dynamo.global_planner.scale_handler.KubernetesConnector"
+            "dynamo.global_planner.kubernetes_capacity_manager.KubernetesAPI"
+        ) as mock_kube_cls,
+        patch(
+            "dynamo.global_planner.kubernetes_capacity_manager.KubernetesConnector"
         ) as mock_connector_cls,
     ):
         mock_kube = MagicMock()
@@ -907,7 +1016,7 @@ async def test_initial_below_floor_logs_warning(mock_runtime):
         )
         mock_connector_cls.return_value = mock_connector
 
-        with patch("dynamo.global_planner.scale_handler.logger") as mock_logger:
+        with patch("dynamo.global_planner.orchestrator.logger") as mock_logger:
             ScaleRequestHandler(
                 runtime=mock_runtime,
                 managed_namespaces=["default-my-dgd"],
@@ -945,8 +1054,10 @@ async def test_out_of_order_requests_pair_via_cache(mock_runtime):
     assert results_1[0]["status"] == "rejected"
     connector.set_component_replicas.assert_not_called()
     # Verify the intent was still cached
-    assert "default/my-dgd/prefill" in handler._intent_cache
-    assert handler._intent_cache["default/my-dgd/prefill"].last_desired == 2
+    assert "default/my-dgd/prefill" in handler.orchestrator._intent_cache
+    assert (
+        handler.orchestrator._intent_cache["default/my-dgd/prefill"].last_desired == 2
+    )
 
     # Second request: decode wants to go up to 4. Now prefill's intent pairs.
     req_decode = _scale_req(caller_ns="default-my-dgd", decode=4)
@@ -956,6 +1067,32 @@ async def test_out_of_order_requests_pair_via_cache(mock_runtime):
     call_targets = connector.set_component_replicas.call_args[0][0]
     sub_types = {t.sub_component_type.value: t.desired_replicas for t in call_targets}
     assert sub_types == {"decode": 4, "prefill": 2}
+
+
+@pytest.mark.asyncio
+async def test_target_dgd_not_ready_yields_rejected(mock_runtime):
+    """A not-ready target DGD is a retryable no-op, not a successful scale."""
+    handler = ScaleRequestHandler(
+        runtime=mock_runtime,
+        managed_namespaces=["app-ns"],
+        k8s_namespace="default",
+    )
+    connector = _install_connector(
+        handler,
+        "default/my-dgd",
+        _dgd_spec(prefill_replicas=1, decode_replicas=1),
+    )
+    connector.set_component_replicas.side_effect = DynamoGraphDeploymentNotReadyError(
+        "my-dgd", "default"
+    )
+
+    req = _scale_req(caller_ns="app-ns", prefill=2)
+    results = await _run(handler, req)
+
+    connector.set_component_replicas.assert_called_once()
+    assert results[0]["status"] == "rejected"
+    assert "not ready" in results[0]["message"]
+    assert results[0]["current_replicas"] == {}
 
 
 @pytest.mark.asyncio
@@ -974,7 +1111,7 @@ async def test_pair_preferred_over_standalone_when_both_feasible(mock_runtime):
     )
 
     # Decode has a fresh intent to scale up
-    handler._intent_cache["default/my-dgd/decode"] = PoolIntent(
+    handler.orchestrator._intent_cache["default/my-dgd/decode"] = PoolIntent(
         last_desired=4, last_seen_at=time.time()
     )
 
@@ -1007,7 +1144,9 @@ async def test_cache_entry_persists_after_standalone_apply(mock_runtime):
     req = _scale_req(caller_ns="default-my-dgd", prefill=4)
     await _run(handler, req)
 
-    assert handler._intent_cache["default/my-dgd/prefill"].last_desired == 4
+    assert (
+        handler.orchestrator._intent_cache["default/my-dgd/prefill"].last_desired == 4
+    )
 
 
 @pytest.mark.asyncio
@@ -1027,7 +1166,7 @@ async def test_satisfied_cached_intent_does_not_pair(mock_runtime):
     _install_connector(handler, "default/my-dgd", dgd_state)
 
     # Seed prefill's cache entry as satisfied (last_desired == current).
-    handler._intent_cache["default/my-dgd/prefill"] = PoolIntent(
+    handler.orchestrator._intent_cache["default/my-dgd/prefill"] = PoolIntent(
         last_desired=4, last_seen_at=time.time()
     )
 
@@ -1074,10 +1213,10 @@ async def test_pair_packing_continues_past_too_small_candidate(mock_runtime):
     # decode +4 full would push to 13 — over the strict ceiling (max=12, no
     # upper tolerance). So decode is partially consumed to land at exactly 12.
     # Both partners are applied; decode's cached intent (7) is NOT mutated.
-    handler._intent_cache["default/dgd-b/prefill"] = PoolIntent(
+    handler.orchestrator._intent_cache["default/dgd-b/prefill"] = PoolIntent(
         last_desired=2, last_seen_at=time.time()
     )
-    handler._intent_cache["default/dgd-b/decode"] = PoolIntent(
+    handler.orchestrator._intent_cache["default/dgd-b/decode"] = PoolIntent(
         last_desired=7, last_seen_at=time.time()
     )
 
@@ -1102,7 +1241,7 @@ async def test_pair_packing_continues_past_too_small_candidate(mock_runtime):
         3 < b_targets["decode"] < 7
     )  # partial: between current(3) and last_desired(7)
     # Cached intent for decode NOT mutated — planner still wants 7.
-    assert handler._intent_cache["default/dgd-b/decode"].last_desired == 7
+    assert handler.orchestrator._intent_cache["default/dgd-b/decode"].last_desired == 7
 
 
 def test_read_all_pools_tolerates_concurrent_connector_insert(mock_runtime):
@@ -1121,7 +1260,7 @@ def test_read_all_pools_tolerates_concurrent_connector_insert(mock_runtime):
 
     # _read_dgd_pools is called per item; mutate self.connectors during
     # the iteration to simulate a concurrent first-time request.
-    original = handler._read_dgd_pools
+    original = handler.orchestrator.capacity_manager._read_pools
 
     def _mutating_read(connector):
         # Inject a new connector mid-iteration. Without the list() snapshot
@@ -1132,13 +1271,15 @@ def test_read_all_pools_tolerates_concurrent_connector_insert(mock_runtime):
         new_conn.kube_api.get_graph_deployment = MagicMock(
             return_value=_dgd_spec(prefill_replicas=1, decode_replicas=1)
         )
-        handler.connectors.setdefault("default/racy-dgd", new_conn)
+        handler.orchestrator.capacity_manager.connectors.setdefault(
+            "default/racy-dgd", new_conn
+        )
         return original(connector)
 
-    handler._read_dgd_pools = _mutating_read  # type: ignore[method-assign]
+    handler.orchestrator.capacity_manager._read_pools = _mutating_read  # type: ignore[method-assign]
 
     # Should not raise.
-    snapshot = handler._read_all_pools()
+    snapshot = handler.orchestrator.capacity_manager.observe()
     # The pre-existing key is in the snapshot; the mid-iteration insert
     # may or may not appear (depends on snapshot timing) but the call
     # must complete cleanly.
@@ -1161,14 +1302,16 @@ async def test_intent_cache_clears_on_stable_signal(mock_runtime):
     )
 
     # Prefill has prior intent to scale down to 2
-    handler._intent_cache["default/my-dgd/prefill"] = PoolIntent(
+    handler.orchestrator._intent_cache["default/my-dgd/prefill"] = PoolIntent(
         last_desired=2, last_seen_at=time.time()
     )
     # Now prefill sends a stable signal (desired == current)
     req_stable = _scale_req(caller_ns="default-my-dgd", prefill=3)
     await _run(handler, req_stable)
     # Prefill's cached intent is now 3 (== current), i.e., satisfied
-    assert handler._intent_cache["default/my-dgd/prefill"].last_desired == 3
+    assert (
+        handler.orchestrator._intent_cache["default/my-dgd/prefill"].last_desired == 3
+    )
 
     # Decode scale-up that would breach ceiling should no longer find a
     # partner (prefill's intent is now stable/satisfied)
@@ -1217,10 +1360,10 @@ async def test_pair_packing_three_pools_full_consumption(mock_runtime):
     )
     # P0 cached: last_desired=1 → delta -2.
     # P1 cached: last_desired=1 → delta -4.
-    handler._intent_cache["default/p0/decode"] = PoolIntent(
+    handler.orchestrator._intent_cache["default/p0/decode"] = PoolIntent(
         last_desired=1, last_seen_at=time.time()
     )
-    handler._intent_cache["default/p1/decode"] = PoolIntent(
+    handler.orchestrator._intent_cache["default/p1/decode"] = PoolIntent(
         last_desired=1, last_seen_at=time.time()
     )
     # P2 request +6 (decode 2 → 8). Standalone cluster total 3+5+8 = 16.
@@ -1286,10 +1429,10 @@ async def test_pair_packing_partial_consumption_leaves_residual(mock_runtime):
     )
     # P0 cached: last_desired=4 → delta -2.
     # P1 cached: last_desired=2 → delta -8. (Way more than needed.)
-    handler._intent_cache["default/p0/decode"] = PoolIntent(
+    handler.orchestrator._intent_cache["default/p0/decode"] = PoolIntent(
         last_desired=4, last_seen_at=time.time()
     )
-    handler._intent_cache["default/p1/decode"] = PoolIntent(
+    handler.orchestrator._intent_cache["default/p1/decode"] = PoolIntent(
         last_desired=2, last_seen_at=time.time()
     )
     # Cluster total = 6+10+2 = 18. P2 request +4 → standalone total = 22.
@@ -1316,7 +1459,7 @@ async def test_pair_packing_partial_consumption_leaves_residual(mock_runtime):
     # P1 was partially consumed — applied K is between current(10) and last_desired(2)
     assert 2 < p1_targets["decode"] < 10
     # The cached intent must NOT have been mutated — planner still wants 2.
-    assert handler._intent_cache["default/p1/decode"].last_desired == 2
+    assert handler.orchestrator._intent_cache["default/p1/decode"].last_desired == 2
 
 
 @pytest.mark.asyncio
@@ -1334,7 +1477,7 @@ async def test_pair_packing_single_partner_regression(mock_runtime):
     connector = _install_connector(
         handler, "default/my-dgd", _dgd_spec(prefill_replicas=3, decode_replicas=3)
     )
-    handler._intent_cache["default/my-dgd/decode"] = PoolIntent(
+    handler.orchestrator._intent_cache["default/my-dgd/decode"] = PoolIntent(
         last_desired=4, last_seen_at=time.time()
     )
     req = _scale_req(caller_ns="default-my-dgd", prefill=2)
@@ -1385,10 +1528,10 @@ async def test_pair_packing_overshooting_partner_is_partially_consumed(mock_runt
     # Pack P1 (-1) → total 12 (in band [11, 13]). Continue.
     # Try P2 full (-4) → would push to 8 (below floor-tol=11). Crosses band.
     # Partial of P2: K=3 lands at total 11 (lower band edge). Apply partial.
-    handler._intent_cache["default/p1/decode"] = PoolIntent(
+    handler.orchestrator._intent_cache["default/p1/decode"] = PoolIntent(
         last_desired=3, last_seen_at=time.time()
     )
-    handler._intent_cache["default/p2/decode"] = PoolIntent(
+    handler.orchestrator._intent_cache["default/p2/decode"] = PoolIntent(
         last_desired=0, last_seen_at=time.time()
     )
     req = _scale_req(dgd="p0", caller_ns="default-p0", decode=5)
@@ -1410,7 +1553,7 @@ async def test_pair_packing_overshooting_partner_is_partially_consumed(mock_runt
     }
     assert 0 < p2_targets["decode"] < 4
     # Cached intent for P2 is NOT mutated — planner still wants 0.
-    assert handler._intent_cache["default/p2/decode"].last_desired == 0
+    assert handler.orchestrator._intent_cache["default/p2/decode"].last_desired == 0
 
 
 @pytest.mark.asyncio
@@ -1436,7 +1579,7 @@ async def test_pair_packing_direction_aware_order_multi_dgd(mock_runtime):
         _dgd_spec(prefill_replicas=0, decode_replicas=5),
         parent_dgd_name="down-dgd",
     )
-    handler._intent_cache["default/down-dgd/decode"] = PoolIntent(
+    handler.orchestrator._intent_cache["default/down-dgd/decode"] = PoolIntent(
         last_desired=3, last_seen_at=time.time()
     )
     # Track call order
@@ -1450,3 +1593,198 @@ async def test_pair_packing_direction_aware_order_multi_dgd(mock_runtime):
     assert results[0]["status"] == "success"
     # Down DGD must apply before up DGD.
     assert call_order == ["down", "up"]
+
+
+# ---------------------------------------------------------------------------- #
+# v1beta1 component reading + generic-worker role hints (ported from #11990)   #
+# ---------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_generic_worker_role_used_for_budget_and_readback(mock_runtime):
+    handler = ScaleRequestHandler(
+        runtime=mock_runtime,
+        managed_namespaces=["default-my-dgd"],
+        k8s_namespace="default",
+        max_total_gpus=4,
+    )
+    connector = _install_connector(
+        handler, "default/my-dgd", _worker_dgd_spec(replicas=1, gpu=2)
+    )
+    req = _scale_req(
+        caller_ns="default-my-dgd", decode=2, decode_component_name="worker-svc"
+    )
+    results = await _run(handler, req)
+    assert results[0]["status"] == "success"
+    assert results[0]["current_replicas"] == {"decode": 1}
+    connector.set_component_replicas.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_generic_worker_scale_rejected_above_budget(mock_runtime):
+    handler = ScaleRequestHandler(
+        runtime=mock_runtime,
+        managed_namespaces=["default-my-dgd"],
+        k8s_namespace="default",
+        max_total_gpus=2,
+    )
+    connector = _install_connector(
+        handler, "default/my-dgd", _worker_dgd_spec(replicas=1, gpu=2)
+    )
+    req = _scale_req(
+        caller_ns="default-my-dgd", decode=2, decode_component_name="worker-svc"
+    )
+    results = await _run(handler, req)
+    assert results[0]["status"] == "rejected"
+    connector.set_component_replicas.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_generic_worker_partner_keeps_component_name(mock_runtime):
+    handler = ScaleRequestHandler(
+        runtime=mock_runtime,
+        managed_namespaces=["default-dgd-a", "default-dgd-b"],
+        k8s_namespace="default",
+        min_total_gpus=9,
+        max_total_gpus=9,
+    )
+    connector_a = _install_connector(
+        handler,
+        "default/dgd-a",
+        _dgd_spec(prefill_replicas=3, decode_replicas=3),
+        parent_dgd_name="dgd-a",
+    )
+    connector_b = _install_real_connector(
+        handler,
+        "default/dgd-b",
+        _worker_dgd_spec(replicas=3),
+        parent_dgd_name="dgd-b",
+    )
+    cm = handler.orchestrator.capacity_manager
+    cm._component_roles["default/dgd-b"] = {"worker-svc": "decode"}
+    handler.orchestrator._intent_cache["default/dgd-b/decode"] = PoolIntent(
+        last_desired=4, last_seen_at=time.time()
+    )
+
+    results = await _run(
+        handler, _scale_req(dgd="dgd-a", caller_ns="default-dgd-a", prefill=2)
+    )
+
+    assert results[0]["status"] == "success"
+    connector_a.set_component_replicas.assert_called_once()
+    # The partner's component name rides through to the actual scale call.
+    connector_b.kube_api.update_graph_replicas.assert_called_once_with(
+        "dgd-b", "worker-svc", 4
+    )
+
+
+@pytest.mark.asyncio
+async def test_duplicate_resolved_pool_rejected_in_budget_snapshot(mock_runtime):
+    handler = ScaleRequestHandler(
+        runtime=mock_runtime,
+        managed_namespaces=["default-my-dgd"],
+        k8s_namespace="default",
+        max_total_gpus=4,
+    )
+    connector = _install_connector(handler, "default/my-dgd", _two_worker_dgd_spec())
+    handler.orchestrator.capacity_manager._component_roles["default/my-dgd"] = {
+        "worker-a": "decode",
+        "worker-b": "decode",
+    }
+
+    results = await _run(
+        handler,
+        _scale_req(
+            caller_ns="default-my-dgd", decode=2, decode_component_name="worker-a"
+        ),
+    )
+
+    assert results[0]["status"] == "error"
+    assert "'worker-a' and 'worker-b'" in results[0]["message"]
+    assert "planner pool 'decode'" in results[0]["message"]
+    connector.set_component_replicas.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_resolved_pool_rejected_during_readback(mock_runtime):
+    handler = ScaleRequestHandler(
+        runtime=mock_runtime,
+        managed_namespaces=["default-my-dgd"],
+        k8s_namespace="default",
+    )
+    connector = _install_connector(
+        handler,
+        "default/my-dgd",
+        _worker_dgd_spec(replicas=1, component_name="worker-a"),
+    )
+    # Clean read for the budget snapshot, duplicate roles for the read-back.
+    connector.kube_api.get_graph_deployment.side_effect = [
+        _worker_dgd_spec(replicas=1, component_name="worker-a"),
+        _two_worker_dgd_spec(),
+    ]
+    handler.orchestrator.capacity_manager._component_roles["default/my-dgd"] = {
+        "worker-a": "decode",
+        "worker-b": "decode",
+    }
+
+    results = await _run(
+        handler,
+        _scale_req(
+            caller_ns="default-my-dgd", decode=2, decode_component_name="worker-a"
+        ),
+    )
+
+    assert results[0]["status"] == "error"
+    assert "'worker-a' and 'worker-b'" in results[0]["message"]
+    assert "planner pool 'decode'" in results[0]["message"]
+    connector.set_component_replicas.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_multinode_gpu_count_enforces_budget(mock_runtime):
+    handler = ScaleRequestHandler(
+        runtime=mock_runtime,
+        managed_namespaces=["default-my-dgd"],
+        k8s_namespace="default",
+        max_total_gpus=12,
+    )
+    connector = _install_connector(
+        handler,
+        "default/my-dgd",
+        _dgd_spec(
+            prefill_replicas=1,
+            decode_replicas=0,
+            prefill_gpu=4,
+            prefill_node_count=2,
+        ),
+    )
+    results = await _run(handler, _scale_req(caller_ns="default-my-dgd", prefill=2))
+    assert results[0]["status"] == "rejected"
+    connector.set_component_replicas.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_untyped_worker_in_other_dgd_counts_toward_budget(mock_runtime):
+    handler = ScaleRequestHandler(
+        runtime=mock_runtime,
+        managed_namespaces=["default-dgd-a", "default-dgd-b"],
+        k8s_namespace="default",
+        max_total_gpus=6,
+    )
+    connector_a = _install_connector(
+        handler,
+        "default/dgd-a",
+        _dgd_spec(prefill_replicas=1, decode_replicas=1),
+        parent_dgd_name="dgd-a",
+    )
+    _install_connector(
+        handler,
+        "default/dgd-b",
+        _worker_dgd_spec(replicas=2, gpu=2, component_type=None),
+        parent_dgd_name="dgd-b",
+    )
+    results = await _run(
+        handler, _scale_req(dgd="dgd-a", caller_ns="default-dgd-a", prefill=2)
+    )
+    assert results[0]["status"] == "rejected"
+    connector_a.set_component_replicas.assert_not_called()

@@ -18,7 +18,7 @@ Dynamo supports multinode deployments through the `multinode` section in resourc
 
 ## Basic requirements
 
-- **Kubernetes Cluster**: Version 1.24 or later
+- **Kubernetes Cluster**: Version 1.30 or later
 - **GPU Nodes**: Multiple nodes with NVIDIA GPUs
 - **High-Speed Networking**: InfiniBand, RoCE, or high-bandwidth Ethernet (recommended for optimal performance)
 
@@ -85,17 +85,29 @@ Dynamo automatically selects the best available orchestrator for multinode deplo
 - The installed orchestrator (Grove or LWS) is automatically selected
 
 #### Scheduler Integration:
-- **With Grove**: Automatically integrates with [KAI-Scheduler](https://github.com/NVIDIA/KAI-Scheduler) when available, providing:
-  - Advanced queue management via `nvidia.com/kai-scheduler-queue` annotation
-  - AI-optimized scheduling policies
-  - Resource-aware workload placement
+- **With Grove**: Dynamo uses Grove for multinode orchestration when the Grove API is available, unless you set `nvidia.com/enable-grove: "false"` on the DGD resource. Scheduler integration is configured separately:
+  - KAI-Scheduler: set `global.kai-scheduler.install=true` to install the bundled KAI-Scheduler chart and enable integration, or set `global.kai-scheduler.enabled=true` when KAI-Scheduler is already installed externally and its API is available. Select queues with `nvidia.com/kai-scheduler-queue`.
+  - **EXPERIMENTAL:** Volcano: Dynamo does not install Volcano. Set `global.volcano-scheduler.enabled=true` only when Volcano is already installed and the Volcano API is available. Select queues with `nvidia.com/volcano-queue`.
+  - KAI-Scheduler and Volcano scheduler integration are mutually exclusive for a single Dynamo operator configuration because both set pod `schedulerName`. Helm rejects configurations that enable both integrations.
 - **With LWS**: Uses Volcano scheduler for gang scheduling and resource coordination
+
+> **EXPERIMENTAL:** The Dynamo/Grove Volcano scheduler integration is newly introduced and opt-in. Volcano itself is a mature CNCF scheduler, but this integration is intended for clusters where Volcano is already installed and understood by the platform operator.
+>
+> Changing `global.volcano-scheduler.enabled` affects how the Dynamo operator reconciles Grove-backed DGD resources. When enabled, Dynamo generates Grove resources that use `schedulerName: volcano` and propagates the Volcano queue annotation. Treat this Helm value as a scheduling-mode change for existing Grove-backed DGDs, not as a metadata-only toggle.
 
 #### Configuration Examples:
 
-**Default (Grove with KAI-Scheduler):**
+**Grove with KAI-Scheduler:**
 ```yaml
-apiVersion: nvidia.com/v1alpha1
+global:
+  grove:
+    enabled: true
+  kai-scheduler:
+    enabled: true
+```
+
+```yaml
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: my-multinode-deployment
@@ -107,9 +119,31 @@ spec:
 
 > **Note:** The `nvidia.com/kai-scheduler-queue` annotation defaults to `"dynamo"`. If you specify a custom queue name, ensure the queue exists in your cluster before deploying. You can verify available queues with `kubectl get queues`.
 
+**Grove with Volcano:**
+```yaml
+global:
+  grove:
+    enabled: true
+  volcano-scheduler:
+    enabled: true
+```
+
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: my-multinode-deployment
+  annotations:
+    nvidia.com/volcano-queue: "gpu-training"
+spec:
+  # ... your deployment spec
+```
+
+> **Note:** The `nvidia.com/volcano-queue` annotation is propagated to Grove as `scheduling.grove.io/volcano-queue`. If you specify a custom queue name, ensure the Volcano queue exists and is open before deploying. You can verify available queues with `kubectl get queues`.
+
 **Force LWS usage:**
 ```yaml
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: my-multinode-deployment
@@ -192,33 +226,25 @@ When you deploy a multinode workload, the Dynamo operator automatically applies 
 
 For vLLM multinode deployments, the operator automatically selects and configures the appropriate distributed execution mode based on your parallelism settings:
 
-#### Deployment Modes
+#### Recommended Approach: PyTorch Distributed (mp)
 
-The operator automatically determines the deployment mode based on your parallelism configuration:
+For multi-node tensor/pipeline parallelism, **the `mp` (multiprocessing) backend is the recommended approach**.
 
-**1. Tensor/Pipeline Parallelism Mode (Single model across nodes)**
-- **When used**: When `world_size > GPUs_per_node` where `world_size = tensor_parallel_size × pipeline_parallel_size`
-- **Use case**: Distributing a single model instance across multiple nodes using tensor or pipeline parallelism
+**When used**: Multi-node TP/PP deployments (`world_size > GPUs_per_node`) where `world_size = tensor_parallel_size × pipeline_parallel_size`. DGDs created by operator ≥ 1.0.0 use `mp` by default; pre-upgrade DGDs without an origin annotation remain on `ray`. Override with the `nvidia.com/vllm-distributed-executor-backend` annotation.
 
-The operator uses Ray for multi-node tensor/pipeline parallel deployments. Ray provides automatic placement group management and worker spawning across nodes.
+**All Nodes (Leader and Workers):**
+- **Injected Flags**:
+  - `--nnodes <total-nodes>` - Total number of nodes in the deployment
+  - `--node-rank <rank>` - Rank of this node (automatically determined)
+  - `--master-addr <leader-hostname>` - Address of the leader node
+  - `--master-port 29500` - Port for synchronization
+  - `--distributed-executor-backend mp` - Use PyTorch multiprocessing backend
+- **Behavior**: Each node runs its own vLLM process with PyTorch's native distributed initialization
+- **Probes**: Worker probes are automatically adjusted; leader probes remain active
 
-**Leader Node:**
-- **Command**: `ray start --head --port=6379 && <original-vllm-command> --distributed-executor-backend ray`
-- **Behavior**: Starts Ray head node, then runs vLLM which creates a placement group spanning all Ray workers
-- **Probes**: All health probes remain active (liveness, readiness, startup)
+#### Data Parallel Mode (Multiple model instances across nodes)
 
-**Worker Nodes:**
-- **Command**: `ray start --address=<leader-hostname>:6379 --block`
-- **Behavior**: Joins Ray cluster and blocks; vLLM on leader spawns Ray actors to these workers
-- **Probes**: All probes (liveness, readiness, startup) are automatically removed
-
-<Note>
-vLLM's Ray executor automatically creates a placement group and spawns workers across the cluster. The `--nnodes` flag is NOT used with Ray - it's only compatible with the `mp` backend.
-</Note>
-
-**2. Data Parallel Mode (Multiple model instances across nodes)**
-- **When used**: When `world_size × data_parallel_size > GPUs_per_node`
-- **Use case**: Running multiple independent model instances across nodes with data parallelism (e.g., MoE models with expert parallelism)
+**When used**: When running multiple independent model instances across nodes with data parallelism (e.g., MoE models with expert parallelism)
 
 **All Nodes (Leader and Workers):**
 - **Injected Flags**:
@@ -230,17 +256,17 @@ vLLM's Ray executor automatically creates a placement group and spawns workers a
 
 **Note**: The operator intelligently injects these flags into your command regardless of command structure (direct Python commands or shell wrappers)
 
-#### Why Ray for Multi-Node TP/PP?
+#### Ray Backend
 
-vLLM supports two distributed executor backends: `ray` and `mp`. For multi-node deployments:
+**For Tensor/Pipeline Parallelism (TP/PP) with Ray:**
+- To request Ray for a DGD, set the annotation: `nvidia.com/vllm-distributed-executor-backend: ray`
 
-- **Ray executor**: vLLM creates a placement group and spawns Ray actors across the cluster. Workers don't run vLLM directly - the leader's vLLM process manages everything.
-- **mp executor**: Each node must run its own vLLM process with `--nnodes`, `--node-rank`, `--master-addr`, `--master-port`. This approach is more complex to orchestrate.
+**For Elastic EP (Data Parallel with Ray):**
+1. Ensure Ray is installed in your container: `pip install "ray>=2.55.0"`
+2. Add `--data-parallel-backend ray` to your vLLM launch command.
 
-The Dynamo operator uses Ray because:
-1. It aligns with vLLM's official multi-node documentation (see `multi-node-serving.sh`)
-2. Simpler orchestration - only the leader runs vLLM, workers just need Ray agents
-3. vLLM automatically handles placement group creation and worker management
+
+The `mp` backend is the official recommendation and should be used for all new deployments.
 
 #### Compilation Cache Support
 When a volume mount is configured with `useAsCompilationCache: true`, the operator automatically sets:

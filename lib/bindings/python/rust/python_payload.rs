@@ -10,7 +10,7 @@ use dynamo_runtime::pipeline::network::{
 use dynamo_runtime::protocols::annotated::Annotated;
 use dynamo_runtime::protocols::maybe_error::MaybeError;
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyString};
 use pythonize::{Depythonizer, Pythonizer, depythonize};
 use serde::de::Error as _;
 use serde::ser::Error as _;
@@ -211,7 +211,7 @@ fn parse_python_response(
         return Ok(Annotated::from_data(PythonPayload(item)));
     };
     let is_envelope = dict
-        .get_item("_dynamo_annotated")
+        .get_item(pyo3::intern!(py, "_dynamo_annotated"))
         .map_err(|error| error.to_string())?
         .and_then(|value| value.is_truthy().ok())
         .unwrap_or(false);
@@ -222,11 +222,14 @@ fn parse_python_response(
     // Keep the payload itself as the original Python object. Fully
     // depythonizing `Annotated<PythonPayload>` would rebuild the nested data
     // subtree and defeat the direct request-plane path's ownership reuse.
-    let data = optional_item(dict, "data")?.map(|value| PythonPayload(value.unbind()));
-    let id = extract_optional(dict, "id")?;
-    let event = extract_optional(dict, "event")?;
-    let comment = extract_optional(dict, "comment")?;
-    let error = optional_item(dict, "error")?
+    // Intern the fixed envelope keys: converting an `&str` for every lookup
+    // otherwise creates and hashes a temporary Python string for every frame.
+    let data =
+        optional_item(dict, pyo3::intern!(py, "data"))?.map(|value| PythonPayload(value.unbind()));
+    let id = extract_optional(dict, pyo3::intern!(py, "id"))?;
+    let event = extract_optional(dict, pyo3::intern!(py, "event"))?;
+    let comment = extract_optional(dict, pyo3::intern!(py, "comment"))?;
+    let error = optional_item(dict, pyo3::intern!(py, "error"))?
         .map(|value| depythonize(&value).map_err(|error| error.to_string()))
         .transpose()?;
 
@@ -241,14 +244,17 @@ fn parse_python_response(
 
 fn optional_item<'py>(
     dict: &Bound<'py, PyDict>,
-    name: &str,
+    name: &Bound<'py, PyString>,
 ) -> Result<Option<Bound<'py, PyAny>>, String> {
     dict.get_item(name)
         .map_err(|error| error.to_string())
         .map(|value| value.filter(|value| !value.is_none()))
 }
 
-fn extract_optional<'py, T>(dict: &Bound<'py, PyDict>, name: &str) -> Result<Option<T>, String>
+fn extract_optional<'py, T>(
+    dict: &Bound<'py, PyDict>,
+    name: &Bound<'py, PyString>,
+) -> Result<Option<T>, String>
 where
     T: FromPyObject<'py>,
 {

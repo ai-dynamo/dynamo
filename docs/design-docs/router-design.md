@@ -8,13 +8,15 @@ This document describes the internal architecture of the Dynamo KV Router, inclu
 
 ## KV Router Architecture
 
-The KV Router tracks two key metrics for each worker:
+The KV Router tracks three key metrics for each worker:
 
-1. **Potential Active Blocks**: The number of blocks that would be used for decoding if a request is routed to a worker. This includes both existing active blocks and new blocks from the incoming request.
+1. **Potential Decode Blocks**: The number of blocks that would be used for decoding if a request is routed to a worker. This includes both existing active blocks and new blocks from the incoming request.
 
 2. **Potential New Prefill Blocks**: The number of tokens that need to be computed from scratch on a worker, calculated as:
    - New prefill tokens = Total input tokens - (Overlap blocks × Block size)
    - Potential prefill blocks = New prefill tokens / Block size
+
+3. **Active Requests**: The number of requests already assigned to the worker. An optional block-equivalent weight can include this count in the routing cost.
 
 ### Block Tracking Mechanisms
 
@@ -29,7 +31,7 @@ The router maintains block information through two complementary systems:
 
 ## KV Cache Router
 
-The leading Large Language Models (LLMs) today are auto-regressive and based off of the [transformer architecture](https://proceedings.neurips.cc/paper_files/paper/2017/file/3f5ee243547dee91fbd053c1c4a845aa-Paper.pdf). One key inference optimization technique is to cache the already computed keys and values and to reuse them for the future tokens. This is called the [KV Cache](https://developer.nvidia.com/blog/mastering-llm-techniques-inference-optimization/#key-value_caching).
+The leading Large Language Models (LLMs) today are auto-regressive and based off of the [transformer architecture](https://arxiv.org/abs/1706.03762). One key inference optimization technique is to cache the already computed keys and values and to reuse them for the future tokens. This is called the [KV Cache](https://developer.nvidia.com/blog/mastering-llm-techniques-inference-optimization/#key-value_caching).
 
 ### KV Cache Routing and Load Balancing
 
@@ -50,36 +52,43 @@ graph TD
     linkStyle 0,1,2,3 stroke:#8b4513,stroke-width:2px
 ```
 
-The router uses a cost function that considers both the prefill cost (influenced by cached blocks) and the decode load to make optimal routing decisions.
+The router uses a cost function that combines cache-aware prefill cost, potential decode blocks, and an optional active-request cost.
 
 #### Cost Calculation
 
 1. **Prefill blocks**: Calculated from active prompt-side token load plus the incoming request's input tokens, divided by the block size. The system updates active prompt load when the first output token signals prefill completion.
 
-2. **Decode blocks**: Estimated from the request's input tokens and each worker's active sequences. The count updates when requests complete and their blocks are freed.
+2. **Potential decode blocks**: Estimated from the request's input tokens and each worker's active sequences. The count updates when requests complete and their blocks are freed.
 
-3. **Cost formula**:
+3. **Active requests**: Read from the same worker-load snapshot as prefill and decode load. Set `decode_active_request_weight` above `0` to charge a block-equivalent cost for each active request.
+
+4. **Cost formula**:
    ```text
-   adjusted_prefill_blocks = max(
+   adjusted_prefill_blocks = (
        prefill_blocks
        - overlap_score_credit * device_overlap_blocks
        - host_cache_hit_weight * host_overlap_blocks
        - disk_cache_hit_weight * disk_overlap_blocks
-       - shared_cache_multiplier * shared_beyond_blocks,
-       0,
+       - shared_cache_multiplier * shared_beyond_blocks
    )
-   cost = prefill_load_scale * adjusted_prefill_blocks + decode_blocks
+   active_request_blocks = decode_active_request_weight * active_requests
+   cost = (
+       prefill_load_scale * adjusted_prefill_blocks
+       + potential_decode_blocks
+       + active_request_blocks
+   )
    ```
    - Lower costs indicate better routing choices
-   - `overlap_score_credit` is the device-local prefix-overlap credit multiplier, from 0.0 to 1.0
-   - `prefill_load_scale` controls adjusted prompt-side load relative to decode blocks
+   - `overlap_score_credit` is a finite, nonnegative device-local prefix-overlap credit multiplier
+   - `prefill_load_scale` controls adjusted prompt-side load relative to potential decode blocks
+   - `decode_active_request_weight` defaults to `0`; use a positive value only when decode step latency depends materially on active batch size
    - Higher overlap credits favor cache reuse (improving TTFT), while lower credits prioritize even load distribution (improving ITL)
 
 #### Worker Selection
 
 The router selects the worker with the lowest cost. When `router_temperature` is set to a non-zero value, the router uses softmax sampling on the normalized cost logits to introduce randomness in the selection, which can help with load distribution.
 
-Example calculation with `overlap_score_credit = 1.0`:
+Example calculation with `overlap_score_credit = 1.0` and the default `decode_active_request_weight = 0`:
 - Worker 1: raw prefill 10 blocks, device overlap 2 blocks, decode 10 blocks => cost = 8 + 10 = 18
 - **Worker 2: raw prefill 10 blocks, device overlap 5 blocks, decode 5 blocks => cost = 5 + 5 = 10** (selected - lowest cost)
 - Worker 3: raw prefill 10 blocks, device overlap 8 blocks, decode 9 blocks => cost = 2 + 9 = 11
@@ -161,70 +170,14 @@ Each event carries a unique router ID to prevent self-event processing. This asy
 
 ## Event Transport Modes
 
-The router supports two event transport modes for KV cache state synchronization:
+KV cache events use fire-and-forget pub/sub through the configured event plane. Workers maintain local radix trees, and routers rebuild state by querying workers on startup. The event plane supports both NATS Core and ZMQ.
 
-- **NATS Core / Event Plane with Local Indexer (default)**: Fire-and-forget pub/sub where workers maintain local radix trees (enabled by default). Router rebuilds state by querying workers on startup. Lower latency, simpler setup. Works with both NATS Core and ZMQ event planes.
-
-- **JetStream** (`--durable-kv-events` on **both** frontend **and** workers): Persistent event stream with durable consumers. State persists across router restarts via snapshots in NATS object store. Best for production with multi-replica consistency. **Important:** Both the frontend and all workers must specify `--durable-kv-events` for JetStream mode to work correctly.
-
-### JetStream Mode (Opt-in)
-
-KV events are sent to a persistent NATS JetStream. Each KV router/indexer replica acts as a durable consumer, pulling messages from this shared stream. This architecture ensures consistency across router replicas and persistence across restarts.
-
-- **Best for**: Production deployments requiring durability and multi-replica router consistency
-- **Tradeoffs**: Requires JetStream setup; slightly higher latency due to persistence guarantees
-- **Enable with**: `--durable-kv-events` flag on **both** the frontend **and** all workers
-
-> [!Note]
-> **Both frontend and workers must specify `--durable-kv-events`** for JetStream mode to work correctly. The frontend uses this flag to consume from JetStream, while workers use it to publish to JetStream instead of the local indexer.
-
-```mermaid
-graph TD
-    subgraph Engines
-        E1[Engine 1<br/>KVPublisher]
-        E2[Engine 2<br/>KVPublisher]
-        E3[Engine 3<br/>KVPublisher]
-    end
-
-    subgraph "NATS JetStream"
-        JS[(Persistent KV Events Stream<br/>- Block created<br/>- Block removed)]
-    end
-
-    subgraph "NATS Object Store"
-        OS[(Radix Tree<br/>State Snapshot)]
-    end
-
-    subgraph "Router Replicas"
-        R1[Router 1<br/>KVIndexer]
-        R2[Router 2<br/>KVIndexer]
-    end
-
-    E1 -->|Publish Events| JS
-    E2 -->|Publish Events| JS
-    E3 -->|Publish Events| JS
-
-    JS -->|Consume as Durable Consumer| R1
-    JS -->|Consume as Durable Consumer| R2
-    JS -->|Periodic Snapshot| OS
-
-    style JS fill:#e1f5fe,stroke:#333,color:#333
-    style OS fill:#e1f5fe,stroke:#333,color:#333
-    style E1 fill:#f3e5f5,stroke:#333,color:#333
-    style E2 fill:#f3e5f5,stroke:#333,color:#333
-    style E3 fill:#f3e5f5,stroke:#333,color:#333
-    style R1 fill:#2e8b57,stroke:#333,color:#fff
-    style R2 fill:#2e8b57,stroke:#333,color:#fff
-
-    linkStyle 0,1,2,3,4,5 stroke:#2196f3,stroke-width:2px
-```
-
-### NATS Core / Event Plane with Local Indexer (Default)
+### Event Plane with Local Indexers
 
 By default, workers have local indexer enabled. Each worker maintains its own local radix tree (local indexer) and publishes events over the generic event plane (NATS Core or ZMQ, depending on `--event-plane`). Each worker assigns monotonically increasing event IDs to its events. The router detects gaps in event sequences and recovers missed events by querying the worker's local indexer directly.
 
-- **Best for**: Lower-latency setups; simpler deployments without JetStream; single-router scenarios; deployments without NATS (using ZMQ event plane)
+- **Best for**: Low-latency event delivery, multi-router deployments, and deployments without NATS (using the ZMQ event plane)
 - **Tradeoffs**: State persists on workers (not centralized); recovery depends on workers being available
-- **Switch to JetStream**: Use `--durable-kv-events` flag on **both** workers (SGLang, TRT-LLM, vLLM, mocker) **and** frontend
 
 ```mermaid
 graph TD
@@ -271,8 +224,8 @@ graph TD
 - When a worker is discovered, the router queries and ingests its full local indexer state
 - When a worker is removed, the router removes all its blocks from the global radix tree
 
->[!Note]
-> By default, all workers have `enable_local_indexer=true`, so the router uses NATS Core / Event Plane mode with local indexer. To use JetStream mode instead, specify `--durable-kv-events` on **both** the frontend and all workers.
+> [!NOTE]
+> Workers enable their local indexer by default so routers can recover missed events and rebuild state after a restart.
 
 ### Local Active Block Management with Replica Sync
 
@@ -321,7 +274,7 @@ sequenceDiagram
     Note over R1,R2: Both routers have consistent<br/>view of active blocks
 ```
 
-This dual-layer approach—persistent global KV cache state via JetStream and ephemeral active block synchronization via router replicas—enables the system to make optimal routing decisions that balance cache reuse with load distribution.
+This dual-layer approach—worker-recoverable KV cache state and ephemeral active-block synchronization across router replicas—balances cache reuse with current load.
 
 ## See Also
 

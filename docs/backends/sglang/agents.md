@@ -5,7 +5,7 @@ title: SGLang for Agentic Workloads
 subtitle: Priority scheduling and KV cache tuning for agentic serving
 ---
 
-This guide covers SGLang-specific configuration for agentic serving with Dynamo. It explains which SGLang engine flags to enable, how Dynamo's [agent hints](../../components/frontend/nvext.md#agent-hints) map to SGLang behavior, and how session headers interact with SGLang 0.5.14.
+This guide covers SGLang-specific configuration for agentic serving with Dynamo. It explains which SGLang engine flags to enable, how Dynamo's [agent hints](../../components/frontend/nvext.md#agent-hints) map to SGLang behavior, and how session headers interact with SGLang 0.5.15.
 
 ## Overview
 
@@ -113,10 +113,10 @@ for chunk in response:
 
 ## Session Identity
 
-Dynamo normalizes agent headers such as `X-Dynamo-Session-ID` for request tracing and router affinity. SGLang 0.5.14 does not support passive session-aware radix ownership, so the Dynamo worker does not attach this ID to SGLang generate requests.
+Dynamo normalizes agent headers such as `X-Dynamo-Session-ID` for request tracing and router affinity. SGLang 0.5.15 supports passive session-aware radix ownership through a top-level `session_id` request field, but the Dynamo worker does not attach this ID to SGLang generate requests yet.
 
 > [!NOTE]
-> SGLang 0.5.14's `session_params` belongs to its explicit session lifecycle and requires a session created through `open_session`. It is not a passive KV ownership tag.
+> SGLang's `session_params` belongs to its explicit session lifecycle and requires a session created through `open_session`. It is not a passive KV ownership tag. Passive session ownership also requires SGLang's `--enable-session-radix-cache` flag.
 
 The `--radix-eviction-policy priority` flag controls priority-based KV eviction only; it does not tag radix entries by session. `X-Dynamo-Session-Final: true` is normalized into an internal KV eviction hint, but the SGLang backend does not act on that hint in this release.
 

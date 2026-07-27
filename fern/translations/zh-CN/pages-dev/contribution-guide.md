@@ -8,14 +8,14 @@ max-toc-depth: 3
 
 Dynamo 是一个开源分布式推理平台，由不断壮大的贡献者社区共同构建。该项目采用 [Apache 2.0](https://github.com/ai-dynamo/dynamo/blob/main/LICENSE) 许可证，欢迎各种规模的贡献 -- 从修正错别字到开发重要功能都包括在内。社区贡献已经塑造了 Dynamo 的核心领域，包括后端集成、文档、部署工具和性能改进。
 
-Dynamo 拥有 200 多位外部贡献者、220 多个已合并的社区 PR，并且每月都有新贡献者加入，是增长最快的开源推理项目之一。欢迎查看我们的[提交活动](https://github.com/ai-dynamo/dynamo/graphs/commit-activity)和 [GitHub stars](https://github.com/ai-dynamo/dynamo/stargazers)。本指南将帮助你开始贡献。
+Dynamo 拥有 200 多位外部贡献者、220 多个已合并的社区 PR，并且每月都有新贡献者加入，是增长最快的开源推理项目之一。欢迎查看我们的[提交活动](https://github.com/ai-dynamo/dynamo/graphs/commit-activity)和 [GitHub stars](https://github.com/ai-dynamo/dynamo)。本指南将帮助你开始贡献。
 
 加入社区：
 
 - [CNCF Slack (`#ai-dynamo`)](https://communityinviter.com/apps/cloud-native/cncf) -- 加入 CNCF Slack，并在 `#ai-dynamo` 中找到我们
 - [Discord](https://discord.gg/D92uqZRjCZ)
 - [GitHub Discussions](https://github.com/ai-dynamo/dynamo/discussions)
-- [设计提案](https://github.com/ai-dynamo/enhancements) -- 重大功能的 RFC
+- [设计提案](https://github.com/ai-dynamo/dynamo/issues?q=is%3Aissue+label%3A%22dep%3Adraft%22%2C%22dep%3Aproposed%22%2C%22dep%3Aapproved%22%2C%22dep%3Aimplementing%22%2C%22dep%3Acompleted%22%2C%22dep%3Adeferred%22%2C%22dep%3Asuperseeded%22) -- 重大功能的 RFC，以带 `dep:*` 标签的 GitHub issue 形式跟踪
 - [Office Hours](https://www.youtube.com/playlist?list=PL5B692fm6--tgryKu94h2Zb7jTFM3Go4X) -- 双周会议
 - [社区会议](https://docs.google.com/document/d/1uR8xD_hlYGwV6QspvSc36k1H-wo1BUcVmFbHH9xlXd8/view) ([Youtube](https://www.youtube.com/@ai-dynamo-community)) -- 每周（Wed 10:30 AM PT）开发者社区会议
 - [Dynamo Day 录像](https://nvevents.nvidia.com/dynamoday) -- 来自生产用户的深入分享
@@ -206,13 +206,13 @@ pre-commit install
 | **M** | 100–200 | 添加功能、中等规模重构 | 先[创建 issue](https://github.com/ai-dynamo/dynamo/issues/new?template=contribution_request.yml) |
 | **L** | 200–500 | 多文件功能、新组件 | 先[创建 issue](https://github.com/ai-dynamo/dynamo/issues/new?template=contribution_request.yml) |
 | **XL** | 500–1000 | 重要功能、跨组件变更 | 先[创建 issue](https://github.com/ai-dynamo/dynamo/issues/new?template=contribution_request.yml) |
-| **XXL** | 1000+ | 架构变更 | 需要一个 [DEP](https://github.com/ai-dynamo/enhancements) |
+| **XXL** | 1000+ | 架构变更 | 需要一个 [DEP](https://github.com/ai-dynamo/dynamo/issues/new?template=dep.yml) |
 
 **小型变更（少于 100 行）：** 直接提交 PR -- 不需要 issue。这包括错别字、简单 bug 修复和格式调整。如果你的 PR 处理的是已有且已批准的 issue，请使用 "Fixes #123" 链接它。
 
 **较大变更（≥100 行）：** 请先[创建 Contribution Request](https://github.com/ai-dynamo/dynamo/issues/new?template=contribution_request.yml) issue，并等待 `approved-for-pr` 标签后再提交 PR。
 
-**架构变更：** 影响多个组件、引入或修改公共 API、改变通信平面架构，或影响后端集成契约的变更，都需要一个 [Dynamo Enhancement Proposal (DEP)](https://github.com/ai-dynamo/enhancements)。在开始实现前，请在 [`ai-dynamo/enhancements`](https://github.com/ai-dynamo/enhancements) 仓库中创建 DEP。
+**架构变更：** 影响多个组件、引入或修改公共 API、改变通信平面架构，或影响后端集成契约的变更，都需要一个 Dynamo Enhancement Proposal (DEP)。DEP 以 `ai-dynamo/dynamo` 仓库中[带 `dep:*` 标签的 GitHub issue](https://github.com/ai-dynamo/dynamo/issues?q=is%3Aissue+label%3A%22dep%3Adraft%22%2C%22dep%3Aproposed%22%2C%22dep%3Aapproved%22%2C%22dep%3Aimplementing%22%2C%22dep%3Acompleted%22%2C%22dep%3Adeferred%22%2C%22dep%3Asuperseeded%22) 形式跟踪 -- 在开始实现前，请先[创建 DEP issue](https://github.com/ai-dynamo/dynamo/issues/new?template=dep.yml)。
 
 ### 提交 Pull Request
 
@@ -425,7 +425,7 @@ git commit -s -m "fix: your descriptive message"
 - **CNCF Slack**: [加入 CNCF Slack](https://communityinviter.com/apps/cloud-native/cncf)，并在 `#ai-dynamo` 中找到我们
 - **Discord**: [加入我们的社区](https://discord.gg/D92uqZRjCZ)
 - **Discussions**: [GitHub Discussions](https://github.com/ai-dynamo/dynamo/discussions)
-- **设计提案**: [重大功能的 RFC](https://github.com/ai-dynamo/enhancements)
+- **设计提案**: [重大功能的 RFC，以带 `dep:*` 标签的 GitHub issue 形式跟踪](https://github.com/ai-dynamo/dynamo/issues?q=is%3Aissue+label%3A%22dep%3Adraft%22%2C%22dep%3Aproposed%22%2C%22dep%3Aapproved%22%2C%22dep%3Aimplementing%22%2C%22dep%3Acompleted%22%2C%22dep%3Adeferred%22%2C%22dep%3Asuperseeded%22)
 - **Office Hours**: [双周会议](https://www.youtube.com/playlist?list=PL5B692fm6--tgryKu94h2Zb7jTFM3Go4X)
 - **社区会议**: [每周（Wed 10:30 AM PT）开发者社区会议](https://docs.google.com/document/d/1uR8xD_hlYGwV6QspvSc36k1H-wo1BUcVmFbHH9xlXd8/view) ([Youtube](https://www.youtube.com/@ai-dynamo-community))
 - **Dynamo Day 录像**: [来自生产用户的深入分享](https://nvevents.nvidia.com/dynamoday)

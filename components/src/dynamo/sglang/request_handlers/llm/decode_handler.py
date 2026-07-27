@@ -15,11 +15,15 @@ from dynamo.common.constants import DisaggregationMode
 from dynamo.common.metadata_upload import MetadataUploader
 from dynamo.common.multimodal.image_loader import ImageLoader
 from dynamo.common.utils.engine_response import normalize_finish_reason
-from dynamo.sglang._compat import filter_supported_async_generate_kwargs
+from dynamo.sglang._compat import (
+    filter_supported_async_generate_kwargs,
+    require_reasoning_kwargs,
+)
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
+    AUDIO_URL_KEY,
     IMAGE_URL_KEY,
     VIDEO_URL_KEY,
     build_disagg_mm_kwargs,
@@ -388,6 +392,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 **decode_mm_kwargs,
                 sampling_params=sampling_params,
                 stream=True,
+                **require_reasoning_kwargs(self.engine, request),
                 **self._routed_experts_kwargs,
                 bootstrap_host=bootstrap_info["bootstrap_host"],
                 bootstrap_port=bootstrap_info["bootstrap_port"],
@@ -420,9 +425,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         else:
             raise_if_unextracted_multimodal(request)
 
-            # Extract image/video URLs for multimodal requests. SGLang's mm_data_processor
+            # Extract media URLs for multimodal requests. SGLang's mm_data_processor
             # handles loading/preprocessing, and the scheduler does vision encoding.
             mm_data = request.get("multi_modal_data", {})
+            audio_data = extract_media_urls(mm_data, AUDIO_URL_KEY)
             video_data = extract_media_urls(mm_data, VIDEO_URL_KEY)
 
             image_data: list[str] | list[PILImage] | None
@@ -454,9 +460,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             agg = await self.engine.async_generate(
                 **input_param,
                 image_data=image_data,
+                audio_data=audio_data,
                 video_data=video_data,
                 sampling_params=sampling_params,
                 stream=True,
+                **require_reasoning_kwargs(self.engine, request),
                 **self._routed_experts_kwargs,
                 **mm_hashes_kwargs,
                 external_trace_header=trace_header,

@@ -28,6 +28,7 @@ try:
         run_thorough,
     )
     from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
+    from dynamo.profiler.utils.dgd_materialization import DGDMaterializationPurpose
     from dynamo.profiler.utils.dgdr_v1beta1_types import (
         DynamoGraphDeploymentRequestSpec,
         HardwareSpec,
@@ -407,6 +408,69 @@ class TestThoroughResolvesModelPath:
 
         assert mock_enumerate.call_args.kwargs["model_path"] == _HF_ID
 
+    async def test_materializes_each_candidate_once_with_resolved_model_path(
+        self, tmp_path
+    ):
+        dgdr = _make_dgdr()
+        prefill = MagicMock(dgd_config={"candidate": "prefill"})
+        decode = MagicMock(dgd_config={"candidate": "decode"})
+
+        def _materialize(config, **_kwargs):
+            return {"materialized": config["candidate"]}
+
+        with (
+            patch(
+                "dynamo.profiler.thorough.enumerate_profiling_configs",
+                return_value=([prefill], [decode]),
+            ),
+            patch(
+                "dynamo.profiler.thorough.materialize_dgd",
+                side_effect=_materialize,
+            ) as materialize,
+            patch(
+                "dynamo.profiler.thorough._benchmark_prefill_candidates",
+                new=AsyncMock(return_value=pd.DataFrame()),
+            ),
+            patch(
+                "dynamo.profiler.thorough._benchmark_decode_candidates",
+                new=AsyncMock(return_value=pd.DataFrame()),
+            ),
+        ):
+            await run_thorough(
+                dgdr,
+                ProfilerOperationalConfig(output_dir=str(tmp_path)),
+                "default",
+                _HF_ID,
+                "h200_sxm",
+                "trtllm",
+                8,
+                4000,
+                1000,
+                2000.0,
+                50.0,
+                None,
+                [],
+            )
+
+        assert materialize.call_count == 2
+        assert [call.args[0] for call in materialize.call_args_list] == [
+            {"candidate": "prefill"},
+            {"candidate": "decode"},
+        ]
+        assert all(
+            call.kwargs
+            == {
+                "purpose": DGDMaterializationPurpose.BENCHMARK_CANDIDATE,
+                "override": None,
+                "tolerations": [],
+                "runtime_backend": "trtllm",
+                "model_name_or_path": _HF_ID,
+            }
+            for call in materialize.call_args_list
+        )
+        assert prefill.dgd_config == {"materialized": "prefill"}
+        assert decode.dgd_config == {"materialized": "decode"}
+
     def test_cache_only_pvc_does_not_rewrite_candidate_model(self):
         """A PVC without pvcModelPath remains an HF_HOME-style cache mount."""
         dgdr = _make_dgdr(
@@ -475,11 +539,27 @@ class TestThoroughResolvesModelPath:
         decode = MagicMock(dgd_config=copy.deepcopy(candidate_config))
         ops = ProfilerOperationalConfig(output_dir=str(tmp_path))
 
+        def _apply_override(config, _override):
+            result = copy.deepcopy(config)
+            main_container = result["spec"]["services"][worker_name]["extraPodSpec"][
+                "mainContainer"
+            ]
+            main_container["image"] = "example/vllm:override"
+            main_container["args"] = [
+                "--model=/stale/path",
+                "--served-model-name=stale/model",
+            ]
+            return result
+
         with (
             patch(
                 "dynamo.profiler.thorough.enumerate_profiling_configs",
                 return_value=([prefill], [decode], True, 1),
             ),
+            patch(
+                "dynamo.profiler.utils.dgd_materialization.apply_dgd_overrides",
+                side_effect=_apply_override,
+            ) as apply_override,
             patch(
                 "dynamo.profiler.thorough._benchmark_prefill_candidates",
                 new=AsyncMock(return_value=pd.DataFrame()),
@@ -505,6 +585,10 @@ class TestThoroughResolvesModelPath:
                 [],
             )
 
+        assert apply_override.call_count == 2
+        assert all(
+            call.args[1] == dgdr.overrides.dgd for call in apply_override.call_args_list
+        )
         for candidate in (prefill, decode):
             assert modifier.get_model_name(candidate.dgd_config) == (
                 _HF_ID,

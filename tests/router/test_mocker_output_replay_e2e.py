@@ -12,7 +12,7 @@ import pytest
 
 from dynamo.llm import KvRouter, KvRouterConfig
 from tests.router.common import _create_kv_router_with_timeout
-from tests.router.helper import get_runtime, wait_for_workers_ready
+from tests.router.helper import managed_runtime, wait_for_workers_ready
 from tests.router.mocker_process import MockerProcess
 from tests.utils.constants import ROUTER_MODEL_NAME
 
@@ -171,15 +171,11 @@ async def _run_multi_turn_replay(
 
 @pytest.mark.timeout(120)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
-@pytest.mark.parametrize(
-    "durable_kv_events", [False], ids=["nondurable"], indirect=True
-)
 def test_mocker_output_replay_generate_from_request_multi_turn(
     request,
     runtime_services_dynamic_ports,
     predownload_tokenizers,
     request_plane,
-    durable_kv_events,
     tmp_path,
 ):
     replay_trace_path = tmp_path / "response-replay.jsonl"
@@ -206,18 +202,19 @@ def test_mocker_output_replay_generate_from_request_multi_turn(
     mocker_args = {
         "speedup_ratio": SPEEDUP_RATIO,
         "block_size": BLOCK_SIZE,
-        "durable_kv_events": durable_kv_events,
         "response_replay_trace_path": replay_trace_path,
     }
 
-    with MockerProcess(
-        request,
-        mocker_args=mocker_args,
-        num_mockers=NUM_MOCKERS,
-        request_plane=request_plane,
-    ) as mockers:
+    with (
+        MockerProcess(
+            request,
+            mocker_args=mocker_args,
+            num_mockers=NUM_MOCKERS,
+            request_plane=request_plane,
+        ) as mockers,
+        managed_runtime(request_plane=request_plane) as runtime,
+    ):
         logger.info("Started mocker replay test endpoint: %s", mockers.endpoint)
-        runtime = get_runtime(request_plane=request_plane)
         endpoint = runtime.endpoint(
             f"{mockers.namespace}.{mockers.component_name}.generate"
         )

@@ -32,6 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 )
@@ -55,14 +56,25 @@ func (h workerGenerationHashes) contains(hash string) bool {
 func (r *DynamoGraphDeploymentReconciler) desiredWorkerHashes(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) (workerGenerationHashes, error) {
-	v1Hash, err := dynamo.ComputeLegacyAlphaDGDWorkersSpecHash(dgd)
-	if err != nil {
-		return workerGenerationHashes{}, fmt.Errorf("failed to compute v1 worker hash: %w", err)
-	}
-
 	v2Hash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
 	if err != nil {
 		return workerGenerationHashes{}, fmt.Errorf("failed to compute v2 worker hash: %w", err)
+	}
+
+	current := r.currentWorkerHashes(dgd)
+	v1Hash := v2Hash
+	if current.v2 != "" {
+		v1Hash = current.v1
+	}
+	if current.v2 == "" && current.v1 != "" && current.v1 != v2Hash {
+		// Keep v1 only when its value proves a pre-dual generation or is the explicit sentinel.
+		legacyHash, err := dynamo.ComputeLegacyAlphaDGDWorkersSpecHash(dgd)
+		if err != nil {
+			return workerGenerationHashes{}, fmt.Errorf("failed to compute v1 worker hash: %w", err)
+		}
+		if current.v1 == consts.LegacyWorkerHash || current.v1 == legacyHash {
+			v1Hash = legacyHash
+		}
 	}
 
 	return workerGenerationHashes{v1: v1Hash, v2: v2Hash}, nil
@@ -107,7 +119,7 @@ func workerHashForDCDGeneration(current, desired workerGenerationHashes) string 
 }
 
 func workerHashesForCompletedGeneration(newWorkerHash string, desired workerGenerationHashes) workerGenerationHashes {
-	if newWorkerHash == desired.v2 && desired.v2 != desired.v1 {
+	if newWorkerHash == desired.v2 {
 		return workerGenerationHashes{v2: desired.v2}
 	}
 	return desired
@@ -141,7 +153,7 @@ func (r *DynamoGraphDeploymentReconciler) shouldTriggerRollingUpdate(
 }
 
 // initializeWorkerHashIfNeeded establishes the DGD's active worker generation.
-// New DGDs store the current v1 and v2 worker hashes immediately. DGDs created before
+// New DGDs store only the canonical v2 worker hash. DGDs created before
 // managed rolling updates may already have worker DCDs without a hash label; in
 // that case we label those DCDs with the legacy sentinel and let the normal
 // rolling update path migrate from that sentinel to the desired compatibility hash.
@@ -191,12 +203,12 @@ func (r *DynamoGraphDeploymentReconciler) initializeWorkerHashIfNeeded(
 		return nil
 	}
 
-	// Normal first deploy — set the actual computed compatibility hashes
+	// Normal first deploy — set the canonical v2 hash.
 	hashes, err := r.desiredWorkerHashes(dgd)
 	if err != nil {
 		return err
 	}
-	r.setCurrentWorkerHashes(dgd, hashes)
+	r.setCurrentWorkerHashes(dgd, workerHashesForCompletedGeneration(hashes.v2, hashes))
 
 	if err := r.Update(ctx, dgd); err != nil {
 		return fmt.Errorf("failed to initialize worker hash: %w", err)
@@ -208,9 +220,7 @@ func (r *DynamoGraphDeploymentReconciler) initializeWorkerHashIfNeeded(
 }
 
 // migrateCurrentWorkerHashIfNeeded fills in additive v2 worker-hash state while
-// the v1 hash still represents the active worker generation. If v2 changes
-// without a v1 change, v1 compatibility no longer proves current pod contents,
-// so the v1 annotation is removed before rolling to a v2-labeled DCD.
+// the v1 hash still represents the active worker generation.
 func (r *DynamoGraphDeploymentReconciler) migrateCurrentWorkerHashIfNeeded(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
@@ -233,13 +243,10 @@ func (r *DynamoGraphDeploymentReconciler) migrateCurrentWorkerHashIfNeeded(
 	var next workerGenerationHashes
 	var eventMessage string
 	switch {
-	case current.v1 == desired.v1 && current.v2 == "":
+	case current.v1 == desired.v1 && current.v2 == "" && current.v1 != desired.v2:
 		next = current
 		next.v2 = desired.v2
 		eventMessage = "Recorded compatible v1 and v2 worker hash annotations without rolling workers"
-	case current.v1 == desired.v1 && current.v2 != desired.v2:
-		next = workerGenerationHashes{v2: current.v2}
-		eventMessage = "Removed v1 worker hash annotation before rolling a v2-only worker change"
 	default:
 		return nil
 	}
@@ -260,10 +267,9 @@ func (r *DynamoGraphDeploymentReconciler) migrateCurrentWorkerHashIfNeeded(
 }
 
 // activeWorkerHashForDCDGeneration returns the hash used for generated worker
-// DCD names and worker-hash labels in this reconcile. While v1 compatibility is
-// required, new DCDs continue to use the v1 hash. If the active generation is
-// already v2-labeled, preserve that value so future v2-only transitions do not
-// create a v1-labeled replacement.
+// DCD names and worker-hash labels in this reconcile. Existing bridge generations
+// keep their v1 identity until a worker change selects v2. Already v2-labeled
+// generations preserve that value.
 func (r *DynamoGraphDeploymentReconciler) activeWorkerHashForDCDGeneration(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	desired workerGenerationHashes,
@@ -330,10 +336,8 @@ func (r *DynamoGraphDeploymentReconciler) supportsManagedRollingUpdate(
 	return !r.isGrovePathway(dgd) && !dgd.HasAnyMultinodeComponent()
 }
 
-// getCurrentWorkerHash returns the active worker generation stored on the DGD.
-// During a rolling update this is the previous serving hash; it is not advanced
-// to the desired hash until the new generation is ready and the old generation
-// has drained. Empty means this DGD has not initialized rolling-update state.
+// getCurrentWorkerHash returns the v1 worker generation stored on the DGD.
+// It is empty after the DGD has converged to a v2-only generation.
 func (r *DynamoGraphDeploymentReconciler) getCurrentWorkerHash(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) string {
@@ -436,28 +440,47 @@ func (r *DynamoGraphDeploymentReconciler) reconcileRollingUpdate(
 		"desiredV2WorkerHash", desired.v2)
 
 	if rollingUpdateStatus.Phase == nvidiacomv1beta1.RollingUpdatePhaseCompleted && !current.contains(newWorkerHash) {
-		// Check if DCDs with the new hash already exist and are serving.
-		// If so, this is just a stale annotation — update it without starting a new rollout.
+		// Check whether DCDs with the new hash already represent a completed
+		// generation. Recreate also requires its old generation to be fully
+		// drained before a stale annotation can be accepted.
 		newInfo, err := r.getWorkerInfoForWorkerHash(ctx, dgd, newWorkerHash)
 		oldInfo, oldErr := r.getOldWorkerInfo(ctx, dgd, newWorkerHash)
 		if err == nil && oldErr == nil && workerGenerationComplete(dgd, oldInfo, newInfo) {
-			logger.Info("Updating stale worker hash annotation",
+			recreateDrained, err := r.recreateComponentsDrained(ctx, dgd, newWorkerHash)
+			if err != nil {
+				return fmt.Errorf("check Recreate stale-annotation barrier: %w", err)
+			}
+			if recreateDrained {
+				logger.Info("Updating stale worker hash annotation",
+					"currentV1WorkerHash", current.v1,
+					"currentV2WorkerHash", current.v2,
+					"newHash", newWorkerHash)
+				r.setCurrentWorkerHashes(dgd, workerHashesForCompletedGeneration(newWorkerHash, desired))
+				return r.Update(ctx, dgd)
+			}
+			logger.Info("Resuming rolling update while the old Recreate generation drains",
 				"currentV1WorkerHash", current.v1,
 				"currentV2WorkerHash", current.v2,
 				"newHash", newWorkerHash)
-			r.setCurrentWorkerHashes(dgd, workerHashesForCompletedGeneration(newWorkerHash, desired))
-			return r.Update(ctx, dgd)
+			rollingUpdateStatus.Phase = nvidiacomv1beta1.RollingUpdatePhaseInProgress
+			rollingUpdateStatus.EndTime = nil
+			if rollingUpdateStatus.StartTime == nil {
+				now := metav1.Now()
+				rollingUpdateStatus.StartTime = &now
+			}
 		}
-		// New spec change: reset to start a proper rolling update cycle with surge/drain.
-		logger.Info("New worker spec change detected, starting new rolling update cycle",
-			"currentV1WorkerHash", current.v1,
-			"currentV2WorkerHash", current.v2,
-			"newHash", newWorkerHash,
-			"previousPhase", rollingUpdateStatus.Phase)
-		rollingUpdateStatus.Phase = nvidiacomv1beta1.RollingUpdatePhaseNone
-		rollingUpdateStatus.StartTime = nil
-		rollingUpdateStatus.EndTime = nil
-		rollingUpdateStatus.UpdatedComponents = nil
+		if rollingUpdateStatus.Phase == nvidiacomv1beta1.RollingUpdatePhaseCompleted {
+			// New spec change: reset to start a proper rolling update cycle with surge/drain.
+			logger.Info("New worker spec change detected, starting new rolling update cycle",
+				"currentV1WorkerHash", current.v1,
+				"currentV2WorkerHash", current.v2,
+				"newHash", newWorkerHash,
+				"previousPhase", rollingUpdateStatus.Phase)
+			rollingUpdateStatus.Phase = nvidiacomv1beta1.RollingUpdatePhaseNone
+			rollingUpdateStatus.StartTime = nil
+			rollingUpdateStatus.EndTime = nil
+			rollingUpdateStatus.UpdatedComponents = nil
+		}
 	}
 
 	if current.contains(newWorkerHash) &&
@@ -612,6 +635,16 @@ func (r *DynamoGraphDeploymentReconciler) completeRollingUpdate(
 	newWorkerHash string,
 ) error {
 	logger := log.FromContext(ctx)
+
+	recreateDrained, err := r.recreateComponentsDrained(ctx, dgd, newWorkerHash)
+	if err != nil {
+		return fmt.Errorf("check Recreate completion barrier: %w", err)
+	}
+	if !recreateDrained {
+		logger.V(1).Info("Waiting for old Recreate pods to terminate before completing rolling update",
+			"newWorkerHash", newWorkerHash)
+		return nil
+	}
 
 	desired, err := r.desiredWorkerHashes(dgd)
 	if err != nil {
@@ -807,6 +840,129 @@ func (r *DynamoGraphDeploymentReconciler) getOldWorkerDCDsByComponent(
 	}
 
 	return dcdsByComponent, states, nil
+}
+
+// oldWorkerDCDsAtZero reports whether every old DCD has observed its desired
+// scale-to-zero state and reports no non-terminated replicas. This is the
+// controller-status half of the Recreate barrier. Callers must also inspect
+// the old workload pods because Deployment status excludes terminating pods.
+func oldWorkerDCDsAtZero(dcds []*nvidiacomv1beta1.DynamoComponentDeployment) bool {
+	for _, dcd := range dcds {
+		if dcd == nil || dcd.Spec.Replicas == nil || *dcd.Spec.Replicas != 0 {
+			return false
+		}
+		if dcd.Status.ObservedGeneration < dcd.Generation {
+			return false
+		}
+		if dcd.Status.Component == nil || dcd.Status.Component.Replicas != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// oldWorkerPodsTerminated reports whether every pod belonging to an old DCD
+// is in a terminal phase. A deletion timestamp does not make a pod terminal:
+// Pending, Running, and Unknown pods continue to block Recreate until they
+// reach Failed or Succeeded, or disappear from the informer cache.
+func oldWorkerPodsTerminated(dcds []*nvidiacomv1beta1.DynamoComponentDeployment, pods []corev1.Pod) bool {
+	oldDCDNames := make(map[string]struct{}, len(dcds))
+	for _, dcd := range dcds {
+		if dcd != nil && dcd.Name != "" {
+			oldDCDNames[dcd.Name] = struct{}{}
+		}
+	}
+
+	for i := range pods {
+		pod := &pods[i]
+		if _, old := oldDCDNames[pod.Labels[consts.KubeLabelDynamoSelector]]; !old {
+			continue
+		}
+		if !isTerminalPhase(pod.Status.Phase) {
+			return false
+		}
+	}
+	return true
+}
+
+func (r *DynamoGraphDeploymentReconciler) oldWorkerComponentDrained(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	componentName string,
+	oldDCDs []*nvidiacomv1beta1.DynamoComponentDeployment,
+) (bool, error) {
+	if !oldWorkerDCDsAtZero(oldDCDs) {
+		return false, nil
+	}
+	pods, err := r.listDGDComponentPods(ctx, dgd, componentName)
+	if err != nil {
+		return false, err
+	}
+	return oldWorkerPodsTerminated(oldDCDs, pods), nil
+}
+
+// recreateComponentsDrained reports whether every Recreate worker component
+// has fully shut down its old generation. Callers use this before accepting a
+// generation as complete, preventing a later scale-up from bypassing the
+// shutdown barrier after the new worker hash has been recorded.
+func (r *DynamoGraphDeploymentReconciler) recreateComponentsDrained(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	newWorkerHash string,
+) (bool, error) {
+	recreateComponents := make([]string, 0)
+	for i := range dgd.Spec.Components {
+		spec := &dgd.Spec.Components[i]
+		if !dynamo.IsWorkerComponent(string(spec.ComponentType)) {
+			continue
+		}
+		annotations := dynamo.GetDGDComponentResourceAnnotations(dgd, spec.ComponentName, spec)
+		if deploymentStrategyFromAnnotations(annotations) == common.DeploymentStrategyRecreate {
+			recreateComponents = append(recreateComponents, spec.ComponentName)
+		}
+	}
+	if len(recreateComponents) == 0 {
+		return true, nil
+	}
+
+	oldDCDsByComponent, _, err := r.getOldWorkerDCDsByComponent(ctx, dgd, newWorkerHash)
+	if err != nil {
+		return false, err
+	}
+	for _, componentName := range recreateComponents {
+		drained, err := r.oldWorkerComponentDrained(
+			ctx,
+			dgd,
+			componentName,
+			oldDCDsByComponent[componentName],
+		)
+		if err != nil {
+			return false, err
+		}
+		if !drained {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func (r *DynamoGraphDeploymentReconciler) listDGDComponentPods(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	componentName string,
+) ([]corev1.Pod, error) {
+	podList := &corev1.PodList{}
+	if err := r.List(
+		ctx,
+		podList,
+		client.InNamespace(dgd.Namespace),
+		client.MatchingFields{
+			dgdComponentPodIndex: dgdComponentPodIndexValue(dgd.Name, componentName),
+		},
+	); err != nil {
+		return nil, fmt.Errorf("failed to list pods for DGD %s component %s: %w", dgd.Name, componentName, err)
+	}
+	return podList.Items, nil
 }
 
 // getDesiredWorkerReplicas returns the total desired replicas across all worker components.
@@ -1058,6 +1214,7 @@ func (r *DynamoGraphDeploymentReconciler) aggregateOldWorkerComponentStatuses(
 	rollingUpdateCtx dynamo.RollingUpdateContext,
 ) (map[string]nvidiacomv1beta1.ComponentReplicaStatus, error) {
 	oldStatuses := make(map[string]nvidiacomv1beta1.ComponentReplicaStatus)
+	oldDCDsByComponent := make(map[string][]nvidiacomv1beta1.DynamoComponentDeployment)
 
 	oldDCDs, err := r.listOldWorkerDCDs(ctx, dgd, rollingUpdateCtx.NewWorkerHash)
 	if err != nil {
@@ -1072,28 +1229,79 @@ func (r *DynamoGraphDeploymentReconciler) aggregateOldWorkerComponentStatuses(
 		if dcd.Status.Component == nil {
 			continue
 		}
-		existing, found := oldStatuses[componentName]
-		if !found {
-			status := *dcd.Status.Component
-			status.ComponentNames = componentReplicaResourceNames(dcd.Status.Component, dcd.Name)
-			oldStatuses[componentName] = status
-		} else {
-			// Accumulate across multiple old DCDs
-			existing.Replicas += dcd.Status.Component.Replicas
-			existing.ReadyReplicas = addOptionalInt32(existing.ReadyReplicas, dcd.Status.Component.ReadyReplicas)
-			existing.AvailableReplicas = addOptionalInt32(existing.AvailableReplicas, dcd.Status.Component.AvailableReplicas)
-			existing.ComponentNames = append(existing.ComponentNames, componentReplicaResourceNames(dcd.Status.Component, dcd.Name)...)
-			oldStatuses[componentName] = existing
-		}
+		oldDCDsByComponent[componentName] = append(oldDCDsByComponent[componentName], dcd)
+	}
+
+	for componentName, dcds := range oldDCDsByComponent {
+		sortOldWorkerDCDsNewestFirst(dcds)
+		status := aggregateOldWorkerDCDStatuses(dcds)
+		status.RuntimeNamespace = selectOldWorkerRuntimeNamespace(
+			dcds,
+			rollingUpdateCtx.OldWorkerReplicaTargetsByDCD,
+		)
+		oldStatuses[componentName] = status
 	}
 
 	return oldStatuses, nil
 }
 
-// resolveRollingUpdateParams reads the deployment strategy annotations from a component spec
-// and resolves maxSurge and maxUnavailable to concrete replica counts.
+func sortOldWorkerDCDsNewestFirst(dcds []nvidiacomv1beta1.DynamoComponentDeployment) {
+	sort.Slice(dcds, func(i, j int) bool {
+		if dcds[i].CreationTimestamp.Time.Equal(dcds[j].CreationTimestamp.Time) {
+			return dcds[i].Name > dcds[j].Name
+		}
+		return dcds[i].CreationTimestamp.Time.After(dcds[j].CreationTimestamp.Time)
+	})
+}
+
+func aggregateOldWorkerDCDStatuses(
+	dcds []nvidiacomv1beta1.DynamoComponentDeployment,
+) nvidiacomv1beta1.ComponentReplicaStatus {
+	var status nvidiacomv1beta1.ComponentReplicaStatus
+	for i, dcd := range dcds {
+		componentStatus := dcd.Status.Component
+		if i == 0 {
+			status = *componentStatus
+			status.ComponentNames = componentReplicaResourceNames(componentStatus, dcd.Name)
+			status.RuntimeNamespace = ""
+			continue
+		}
+
+		status.Replicas += componentStatus.Replicas
+		status.ReadyReplicas = addOptionalInt32(status.ReadyReplicas, componentStatus.ReadyReplicas)
+		status.AvailableReplicas = addOptionalInt32(status.AvailableReplicas, componentStatus.AvailableReplicas)
+		status.ComponentNames = append(status.ComponentNames, componentReplicaResourceNames(componentStatus, dcd.Name)...)
+	}
+	return status
+}
+
+func selectOldWorkerRuntimeNamespace(
+	dcds []nvidiacomv1beta1.DynamoComponentDeployment,
+	replicaTargets map[string]int32,
+) string {
+	for _, dcd := range dcds {
+		if replicaTargets[dcd.Name] > 0 {
+			return oldWorkerRuntimeNamespace(dcd)
+		}
+	}
+
+	if len(dcds) == 0 {
+		return ""
+	}
+	return oldWorkerRuntimeNamespace(dcds[0])
+}
+
+func oldWorkerRuntimeNamespace(dcd nvidiacomv1beta1.DynamoComponentDeployment) string {
+	if dcd.Status.Component != nil && dcd.Status.Component.RuntimeNamespace != "" {
+		return dcd.Status.Component.RuntimeNamespace
+	}
+	return dynamo.GetDCDRuntimeNamespace(&dcd)
+}
+
+// resolveRollingUpdateParams resolves maxSurge and maxUnavailable to concrete
+// replica counts for a RollingUpdate component. Recreate components bypass
+// this calculation.
 // Defaults: maxSurge=25%, maxUnavailable=25% (matches Kubernetes Deployment defaults).
-// TODO: support the recreate strategy
 func resolveRollingUpdateParams(annotations map[string]string, desiredReplicas int32) (maxSurge int32, maxUnavailable int32) {
 	surgeValue := intstr.FromString("25%")
 	unavailValue := intstr.FromString("25%")
@@ -1163,9 +1371,6 @@ func (r *DynamoGraphDeploymentReconciler) buildRollingUpdateContext(
 			desired = *spec.Replicas
 		}
 
-		maxSurge, maxUnavailable := resolveRollingUpdateParams(dynamo.GetPodTemplateAnnotations(spec), desired)
-		minAvailable := desired - maxUnavailable
-
 		var newState dcdComponentState
 		newDCDName := dynamo.GetDCDResourceName(dgd, componentName, newWorkerHash)
 		newDCD := &nvidiacomv1beta1.DynamoComponentDeployment{}
@@ -1176,18 +1381,41 @@ func (r *DynamoGraphDeploymentReconciler) buildRollingUpdateContext(
 		}
 
 		oldState := oldStates[componentName]
+		annotations := dynamo.GetDGDComponentResourceAnnotations(dgd, componentName, spec)
+		strategy := deploymentStrategyFromAnnotations(annotations)
 
-		newUnavailable := max(int32(0), newState.Spec-newState.Available)
-		// maxScaledDown is the maximum number of old replicas that can be scaled down
-		maxScaledDown := max(int32(0), (oldState.Spec+newState.Spec)-minAvailable-newUnavailable)
-		oldUnhealthy := max(int32(0), oldState.Spec-oldState.Available)
-		// availableSurplus is how many extra available replicas we have above minAvailable (min 0)
-		availableSurplus := max(int32(0), (oldState.Available+newState.Available)-minAvailable)
-		oldTarget := max(int32(0), oldState.Spec-min(maxScaledDown, oldUnhealthy+availableSurplus))
+		var oldTarget, newTarget, maxSurge, maxUnavailable, minAvailable int32
+		switch strategy {
+		case common.DeploymentStrategyRecreate:
+			// Recreate deliberately permits the full component to be unavailable.
+			// Keep declaring every old generation at zero until their controllers
+			// have observed the drain and every old workload pod is terminal; only
+			// then start the replacement generation.
+			maxUnavailable = desired
+			oldDCDs := oldDCDsByComponent[componentName]
+			drained, err := r.oldWorkerComponentDrained(ctx, dgd, componentName, oldDCDs)
+			if err != nil {
+				return dynamo.RollingUpdateContext{}, err
+			}
+			if drained {
+				newTarget = desired
+			}
+		default:
+			maxSurge, maxUnavailable = resolveRollingUpdateParams(annotations, desired)
+			minAvailable = desired - maxUnavailable
 
-		// Surge budget uses Spec (declared intent) like K8s Deployment controller; scheduler enforces actual resource constraints.
-		scaleUpBudget := max(int32(0), desired+maxSurge-oldState.Spec-newState.Spec)
-		newTarget := min(desired, newState.Spec+scaleUpBudget)
+			newUnavailable := max(int32(0), newState.Spec-newState.Available)
+			// maxScaledDown is the maximum number of old replicas that can be scaled down
+			maxScaledDown := max(int32(0), (oldState.Spec+newState.Spec)-minAvailable-newUnavailable)
+			oldUnhealthy := max(int32(0), oldState.Spec-oldState.Available)
+			// availableSurplus is how many extra available replicas we have above minAvailable (min 0)
+			availableSurplus := max(int32(0), (oldState.Available+newState.Available)-minAvailable)
+			oldTarget = max(int32(0), oldState.Spec-min(maxScaledDown, oldUnhealthy+availableSurplus))
+
+			// Surge budget uses Spec (declared intent) like K8s Deployment controller; scheduler enforces actual resource constraints.
+			scaleUpBudget := max(int32(0), desired+maxSurge-oldState.Spec-newState.Spec)
+			newTarget = min(desired, newState.Spec+scaleUpBudget)
+		}
 
 		oldWorkerComponentReplicas[componentName] = oldTarget
 		newWorkerReplicas[componentName] = newTarget
@@ -1196,8 +1424,9 @@ func (r *DynamoGraphDeploymentReconciler) buildRollingUpdateContext(
 			oldWorkerDCDReplicas[dcdName] = target
 		}
 
-		logger.V(1).Info("Rolling update replica calculation",
+		logger.V(1).Info("Worker update replica calculation",
 			"component", componentName,
+			"strategy", strategy,
 			"desired", desired,
 			"maxSurge", maxSurge,
 			"maxUnavailable", maxUnavailable,
@@ -1226,7 +1455,14 @@ func mergeWorkerComponentStatuses(
 	for componentName, oldStatus := range oldWorkerStatuses {
 		newStatus, exists := componentStatuses[componentName]
 		if !exists {
+			oldStatus.UpdatedReplicas = 0
+			componentStatuses[componentName] = oldStatus
 			continue
+		}
+
+		if oldStatus.RuntimeNamespace != "" {
+			// Keep routing consumers on the old active worker namespace until rollout cutover.
+			newStatus.RuntimeNamespace = oldStatus.RuntimeNamespace
 		}
 
 		// Build sorted ComponentNames from old and new DCD names.

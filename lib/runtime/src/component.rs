@@ -68,7 +68,7 @@ pub(crate) use client::RoutingInstances;
 pub(crate) use client::RoutingOccupancyState;
 pub(crate) use client::get_or_create_routing_occupancy_state;
 pub use client::{Client, RoutingInstanceCounts};
-pub use endpoint::build_transport_type;
+pub use endpoint::{StartedEndpoint, build_transport_type};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
 #[serde(rename_all = "snake_case")]

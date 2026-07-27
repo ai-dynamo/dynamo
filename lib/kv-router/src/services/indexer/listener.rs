@@ -312,8 +312,7 @@ impl ListenerLoop {
             }
             CursorObservation::Initial { .. }
             | CursorObservation::Contiguous { .. }
-            | CursorObservation::Stale { .. }
-            | CursorObservation::FreshAfterBarrier { .. } => {}
+            | CursorObservation::Stale { .. } => {}
         }
     }
 

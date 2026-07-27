@@ -152,15 +152,14 @@ type LeaderElectionConfiguration struct {
 
 // NamespaceConfiguration determines operator namespace mode.
 type NamespaceConfiguration struct {
-	// Deprecated: Namespace-restricted mode is deprecated and will be removed in a future release.
-	// Use cluster-wide mode (leave Restricted empty) instead.
+	// Restricted enables namespace-restricted mode for development and testing.
+	// Namespace-restricted mode is not supported for production.
 	Restricted string `json:"restricted"`
-	// Deprecated: Scope is only used in namespace-restricted mode, which is deprecated.
+	// Scope configures the namespace ownership claim in namespace-restricted mode.
 	Scope NamespaceScopeConfiguration `json:"scope"`
 }
 
-// Deprecated: NamespaceScopeConfiguration is used only by the deprecated namespace-restricted
-// mode and will be removed in a future release.
+// NamespaceScopeConfiguration configures the development/test namespace ownership claim.
 type NamespaceScopeConfiguration struct {
 	// LeaseDuration is the duration of namespace scope marker lease before expiration
 	// +kubebuilder:default="30s"
@@ -178,6 +177,8 @@ type OrchestratorConfiguration struct {
 	LWS LWSConfiguration `json:"lws"`
 	// KaiScheduler configuration
 	KaiScheduler KaiSchedulerConfiguration `json:"kaiScheduler"`
+	// VolcanoScheduler configuration
+	VolcanoScheduler VolcanoSchedulerConfiguration `json:"volcanoScheduler"`
 }
 
 // GroveConfiguration holds Grove orchestrator settings.
@@ -198,6 +199,12 @@ type LWSConfiguration struct {
 // KaiSchedulerConfiguration holds Kai-scheduler settings.
 type KaiSchedulerConfiguration struct {
 	// Enabled overrides auto-detection. nil = auto-detect.
+	Enabled *bool `json:"enabled,omitempty"`
+}
+
+// VolcanoSchedulerConfiguration holds Volcano scheduler settings.
+type VolcanoSchedulerConfiguration struct {
+	// EXPERIMENTAL: Enabled controls Volcano scheduler integration for Grove PodCliqueSets.
 	Enabled *bool `json:"enabled,omitempty"`
 }
 

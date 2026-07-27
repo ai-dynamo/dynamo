@@ -6,6 +6,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -16,18 +17,22 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdoverride"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"sigs.k8s.io/yaml"
 )
 
 type options struct {
-	blueprintPath string
-	overridePath  string
-	outputPath    string
-	installPath   string
+	installPath          string
+	printProtocolVersion bool
 }
 
+type applyRequest struct {
+	Blueprint json.RawMessage `json:"blueprint"`
+	Override  json.RawMessage `json:"override"`
+}
+
+const protocolVersion = "1"
+
 func main() {
-	if err := run(os.Args[1:], os.Stderr); err != nil {
+	if err := run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return
 		}
@@ -36,9 +41,13 @@ func main() {
 	}
 }
 
-func run(args []string, stderr io.Writer) error {
+func run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer) error {
 	opts, err := parseOptions(args, stderr)
 	if err != nil {
+		return err
+	}
+	if opts.printProtocolVersion {
+		_, err := fmt.Fprintln(stdout, protocolVersion)
 		return err
 	}
 	if opts.installPath != "" {
@@ -48,11 +57,15 @@ func run(args []string, stderr io.Writer) error {
 		return nil
 	}
 
-	blueprint, err := readDGD(opts.blueprintPath, "blueprint")
+	request, err := readApplyRequest(stdin)
 	if err != nil {
 		return err
 	}
-	override, err := readDGD(opts.overridePath, "override")
+	blueprint, err := decodeDGD(request.Blueprint, "request blueprint")
+	if err != nil {
+		return err
+	}
+	override, err := decodeDGD(request.Override, "request override")
 	if err != nil {
 		return err
 	}
@@ -67,12 +80,8 @@ func run(args []string, stderr io.Writer) error {
 		}
 	}
 
-	manifest, err := yaml.Marshal(effective.Object)
-	if err != nil {
-		return fmt.Errorf("encode effective DGD: %w", err)
-	}
-	if err := writeFileAtomically(opts.outputPath, manifest, 0o644); err != nil {
-		return fmt.Errorf("write effective DGD %q: %w", opts.outputPath, err)
+	if err := json.NewEncoder(stdout).Encode(effective.Object); err != nil {
+		return fmt.Errorf("encode effective DGD response: %w", err)
 	}
 	return nil
 }
@@ -81,53 +90,47 @@ func parseOptions(args []string, stderr io.Writer) (options, error) {
 	opts := options{}
 	flags := flag.NewFlagSet("dgd-apply-overrides", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	flags.StringVar(&opts.blueprintPath, "blueprint", "", "Path to the complete DGD blueprint YAML")
-	flags.StringVar(&opts.overridePath, "override", "", "Path to the partial DGD override JSON or YAML")
-	flags.StringVar(&opts.outputPath, "output", "", "Path for the effective DGD YAML")
 	flags.StringVar(&opts.installPath, "install-to", "", "Copy this executable to the given path and exit")
+	flags.BoolVar(&opts.printProtocolVersion, "protocol-version", false, "Print the CLI protocol version and exit")
 	if err := flags.Parse(args); err != nil {
 		return options{}, err
 	}
 	if flags.NArg() != 0 {
 		return options{}, fmt.Errorf("unexpected positional arguments: %s", strings.Join(flags.Args(), " "))
 	}
-	if opts.installPath != "" {
-		if opts.blueprintPath != "" || opts.overridePath != "" || opts.outputPath != "" {
-			return options{}, fmt.Errorf("--install-to cannot be combined with --blueprint, --override, or --output")
+	if opts.installPath != "" || opts.printProtocolVersion {
+		if opts.installPath != "" && opts.printProtocolVersion {
+			return options{}, fmt.Errorf("--install-to and --protocol-version are mutually exclusive")
 		}
-		return opts, nil
-	}
-
-	missing := make([]string, 0, 3)
-	if opts.blueprintPath == "" {
-		missing = append(missing, "--blueprint")
-	}
-	if opts.overridePath == "" {
-		missing = append(missing, "--override")
-	}
-	if opts.outputPath == "" {
-		missing = append(missing, "--output")
-	}
-	if len(missing) != 0 {
-		return options{}, fmt.Errorf("required flags missing: %s", strings.Join(missing, ", "))
 	}
 	return opts, nil
 }
 
-func readDGD(path string, role string) (*unstructured.Unstructured, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("read %s %q: %w", role, path, err)
+func readApplyRequest(reader io.Reader) (applyRequest, error) {
+	decoder := json.NewDecoder(reader)
+	decoder.DisallowUnknownFields()
+
+	request := applyRequest{}
+	if err := decoder.Decode(&request); err != nil {
+		return applyRequest{}, fmt.Errorf("decode request JSON: %w", err)
 	}
-	return decodeDGD(data, role)
+	if len(request.Blueprint) == 0 || string(request.Blueprint) == "null" {
+		return applyRequest{}, errors.New("request blueprint is required")
+	}
+	if len(request.Override) == 0 || string(request.Override) == "null" {
+		return applyRequest{}, errors.New("request override is required")
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return applyRequest{}, errors.New("decode request JSON: multiple JSON values are not allowed")
+		}
+		return applyRequest{}, fmt.Errorf("decode request JSON: %w", err)
+	}
+	return request, nil
 }
 
 func decodeDGD(data []byte, role string) (*unstructured.Unstructured, error) {
-	jsonData, err := yaml.YAMLToJSON(data)
-	if err != nil {
-		return nil, fmt.Errorf("decode %s YAML: %w", role, err)
-	}
-	object, _, err := unstructured.UnstructuredJSONScheme.Decode(jsonData, nil, nil)
+	object, _, err := unstructured.UnstructuredJSONScheme.Decode(data, nil, nil)
 	if err != nil {
 		return nil, fmt.Errorf("decode %s object: %w", role, err)
 	}
@@ -153,13 +156,6 @@ func installSelf(path string) error {
 
 	return writeAtomically(path, 0o755, func(destination io.Writer) error {
 		_, err := io.Copy(destination, executable)
-		return err
-	})
-}
-
-func writeFileAtomically(path string, data []byte, mode os.FileMode) error {
-	return writeAtomically(path, mode, func(destination io.Writer) error {
-		_, err := destination.Write(data)
 		return err
 	})
 }

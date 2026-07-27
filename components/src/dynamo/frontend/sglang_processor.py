@@ -20,15 +20,18 @@ from sglang.srt.parser.conversation import chat_template_exists
 from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 
 from dynamo._internal import ModelDeploymentCard
+from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
 from dynamo.llm.exceptions import InvalidArgument, Unknown
 
 from .sglang_prepost import (
+    ReasoningParser,
     SglangStreamingPostProcessor,
     ToolCallParserType,
     _client_wants_separate_reasoning,
     _get_history_tool_calls_count,
+    _guided_tool_choice_requires_reasoning,
     convert_tools,
     create_parsers,
     detect_force_reasoning_from_template,
@@ -230,6 +233,10 @@ def _preprocess_worker(
         eos_token_ids,
         pre.guided_decoding,
         pre.tool_call_parser,
+        pre.reasoning_parser,
+        require_reasoning=_guided_tool_choice_requires_reasoning(
+            request, pre.force_reasoning
+        ),
     )
 
     effective_reasoning_parser_name = (
@@ -252,6 +259,8 @@ def _build_dynamo_preproc(
     eos_token_ids: int | list[int] | None,
     guided_decoding: dict[str, Any] | None = None,
     tool_call_parser: ToolCallParserType | None = None,
+    reasoning_parser: ReasoningParser | None = None,
+    require_reasoning: bool = False,
 ) -> dict[str, Any]:
     """Build the Dynamo preprocessed request dict from request fields."""
     max_tokens = request.get("max_completion_tokens") or request.get("max_tokens")
@@ -282,6 +291,7 @@ def _build_dynamo_preproc(
     preproc = {
         "model": model_name,
         "token_ids": prompt_token_ids,
+        "require_reasoning": require_reasoning,
         "stop_conditions": {
             "max_tokens": max_tokens,
             "stop": stop,
@@ -305,11 +315,11 @@ def _build_dynamo_preproc(
         "output_options": {
             "logprobs": logprobs_val,
             "prompt_logprobs": None,
-            # Preserve special tokens only when a tool-call parser is
-            # actually active — the parser needs delimiter tokens
-            # (e.g. <|tool_call|>) to detect calls. Mirrors the
-            # post-processor's _skip_special_tokens logic.
-            "skip_special_tokens": tool_call_parser is None,
+            # Preserve special tokens when a parser is active so delimiters
+            # remain visible. Mirrors the post-processor's decode behavior.
+            "skip_special_tokens": (
+                tool_call_parser is None and reasoning_parser is None
+            ),
             "return_tokens_as_token_ids": request.get("return_tokens_as_token_ids"),
         },
         "eos_token_ids": _normalize_eos_token_ids(eos_token_ids),
@@ -317,8 +327,12 @@ def _build_dynamo_preproc(
         "routing": request.get("routing"),
     }
 
-    # Forward multimodal URLs so the backend handler can load the media.
-    mm_data = extract_mm_urls(request.get("messages", []))
+    try:
+        # Forward multimodal URLs so the backend handler can load the media.
+        mm_data, mm_uuids = extract_mm_urls(request.get("messages", []))
+        reject_unsupported_multimodal_uuids(mm_uuids)
+    except ValueError as exc:
+        raise PreprocessError(str(exc)) from exc
     if mm_data:
         preproc["multi_modal_data"] = mm_data
 
@@ -447,6 +461,10 @@ class SglangProcessor:
                 self.eos_token_ids,
                 pre.guided_decoding,
                 pre.tool_call_parser,
+                pre.reasoning_parser,
+                require_reasoning=_guided_tool_choice_requires_reasoning(
+                    request, pre.force_reasoning
+                ),
             )
         except PreprocessError as exc:
             raise InvalidArgument(str(exc)) from exc
@@ -564,6 +582,13 @@ class SglangProcessor:
             first_chunk = True
             input_tokens = len(tokens)
             cumulative_output_tokens = 0
+            # Rust postprocessor is bypassed on this path, so emit the multimodal
+            # content-part counts here too (else frontend metrics report zero media).
+            _mm_counts, _ = extract_mm_urls(request.get("messages", []))
+            _mm_counts = _mm_counts or {}
+            image_count = len(_mm_counts.get("image_url", []))
+            video_count = len(_mm_counts.get("video_url", []))
+            audio_count = len(_mm_counts.get("audio_url", []))
 
             async for dynamo_response in dynamo_stream:
                 if dynamo_response.is_error():
@@ -654,6 +679,13 @@ class SglangProcessor:
                         "output_tokens": cumulative_output_tokens,
                         "chunk_tokens": len(pending_token_ids),
                     }
+                    # Include nonzero counts on every frame (text-only carries nothing).
+                    if image_count:
+                        metrics["image_count"] = image_count
+                    if video_count:
+                        metrics["video_count"] = video_count
+                    if audio_count:
+                        metrics["audio_count"] = audio_count
                     cached_tokens = _cached_tokens_from_usage(usage_for_metrics)
                     if cached_tokens is not None:
                         metrics["cached_tokens"] = cached_tokens

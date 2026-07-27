@@ -3,6 +3,7 @@
 
 """Unit tests for AudioGenerationHandler."""
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -10,6 +11,7 @@ import pytest
 try:
     from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
     from dynamo.common.utils.output_modalities import RequestType
+    from dynamo.vllm.omni import audio_handler as audio_handler_module
     from dynamo.vllm.omni.audio_handler import AudioGenerationHandler
 except ImportError:
     pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
@@ -156,6 +158,58 @@ class TestIsTtsModel:
         handler = _make_audio_handler()
         handler.engine_client.stage_list = None
         assert handler._is_tts_model() is False
+
+
+def test_tts_prompt_len_uses_prompt_embeds_builder(monkeypatch):
+    estimator = MagicMock(return_value=37)
+    monkeypatch.setattr(
+        audio_handler_module,
+        "Qwen3TTSPromptEmbedsBuilder",
+        SimpleNamespace(estimate_prompt_len_from_additional_information=estimator),
+    )
+
+    handler = _make_audio_handler()
+    tokenizer = MagicMock(return_value={"input_ids": [1, 2]})
+    handler._tts_tokenizer = tokenizer
+    codec_language_id = {"english": 1}
+    spk_is_dialect = {"vivian": "english"}
+    handler.engine_client.model_config.hf_config = SimpleNamespace(
+        talker_config=SimpleNamespace(
+            codec_language_id=codec_language_id,
+            spk_is_dialect=spk_is_dialect,
+        )
+    )
+    tts_params = {"task_type": ["CustomVoice"], "input": "hello"}
+
+    assert handler._estimate_tts_prompt_len(tts_params) == 37
+
+    kwargs = estimator.call_args.kwargs
+    assert kwargs["additional_information"] is tts_params
+    assert kwargs["task_type"] == "CustomVoice"
+    assert kwargs["codec_language_id"] is codec_language_id
+    assert kwargs["spk_is_dialect"] is spk_is_dialect
+    assert kwargs["tokenize_prompt"]("hello") == [1, 2]
+    tokenizer.assert_called_once_with("hello", padding=False)
+
+
+def test_tts_prompt_len_falls_back_when_builder_is_unavailable(monkeypatch):
+    monkeypatch.setattr(audio_handler_module, "Qwen3TTSPromptEmbedsBuilder", None)
+
+    assert _make_audio_handler()._estimate_tts_prompt_len({}) == 2048
+
+
+def test_tts_prompt_len_propagates_estimator_errors(monkeypatch):
+    estimator = MagicMock(side_effect=RuntimeError("estimator failed"))
+    monkeypatch.setattr(
+        audio_handler_module,
+        "Qwen3TTSPromptEmbedsBuilder",
+        SimpleNamespace(estimate_prompt_len_from_additional_information=estimator),
+    )
+    handler = _make_audio_handler()
+    handler._tts_tokenizer = MagicMock(return_value={"input_ids": [1, 2]})
+
+    with pytest.raises(RuntimeError, match="estimator failed"):
+        handler._estimate_tts_prompt_len({})
 
 
 class TestEngineInputsFromAudio:
