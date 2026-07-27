@@ -440,8 +440,6 @@ impl StorageTier {
         match medium {
             "GPU" | "DEVICE" => Some(Self::Device),
             "CPU" | "CPU_PINNED" | "CPU_TIER1" => Some(Self::HostPinned),
-            // vLLM unifies its native FS/OBJ offload behind the single `STORAGE`
-            // medium (vLLM #48123); it maps to the Disk lower tier.
             "CPU_TIER2" | "DISK" | "NVME" | "STORAGE" => Some(Self::Disk),
             "EXTERNAL" | "NETWORK" | "REMOTE" | "SHARED" => Some(Self::External),
             _ => None,
