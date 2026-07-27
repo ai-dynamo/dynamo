@@ -66,7 +66,7 @@ The router selects the worker with the lowest cost. When `router_temperature` is
 Before scoring, the router filters candidates by request allow-lists, exact pins, DP-rank bounds, required taints, and busy-threshold overload state. For those hard eligibility rules, see [Router Filtering](router-filtering.md).
 
 When requests wait in policy-class queues, weighted
-[Deficit Round Robin Queue Scheduling](router-configuration.md#policy-class-queues) selects the
+[Deficit Round Robin Queue Scheduling](deficit-round-robin.md) selects the
 physical class to dispatch before worker scoring runs.
 
 ## Using the KV Cache Router

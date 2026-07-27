@@ -10,7 +10,12 @@ A **DynamoGraphDeploymentRequest (DGDR)** is Dynamo's deploy-by-intent path. Ins
 This guide walks through authoring that request, starting from the smallest possible DGDR and layering on workload targets, search strategy, hardware sizing, model caching, runtime autoscaling, and review-before-deploy as you need them. Each step builds on the previous one. For the full field table and lifecycle reference, see the [DGDR Reference](dgdr-reference.mdx); for ready-to-copy manifests, see [DGDR Examples](dgdr-examples.md).
 
 > [!NOTE]
-> **TODO (author):** Confirm the image-tag convention this guide should teach. The DGDR examples in the repo pin a concrete tag (`nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1`, with `dynamo-frontend` for Dynamo < 1.1.0). The sibling [DGD Guide](dgd-guide.md) uses a `<release-version>` placeholder instead. Pick one convention across both guides and link the release notes.
+> In a release installation, when you omit `spec.image`, the DGDR webhook selects
+> `nvcr.io/nvidia/ai-dynamo/dynamo-planner:<operator-version>`. For a local
+> operator build without a known version, set `spec.image` explicitly. Use the
+> `dynamo-planner` image from the same release as the operator. For Dynamo
+> releases earlier than 1.1.0, use the matching `dynamo-frontend` image. The
+> generated Planner and backend images retain that registry and tag.
 
 ## When to use DGDR
 
@@ -65,7 +70,7 @@ The steps below fill in these fields for progressively more demanding deployment
 
 <Step title="Submit a minimal DGDR">
 
-Start with the smallest request: a model and an image. With `searchStrategy` and `autoApply` at their defaults, the profiler uses rapid simulation (~30 seconds, no GPUs consumed during profiling) and the operator deploys the result.
+Start with the smallest request: a model. With `searchStrategy` and `autoApply` at their defaults, the profiler uses rapid simulation (~30 seconds, no GPUs consumed during profiling) and the operator deploys the result. In a release installation, the webhook selects the matching versioned Planner image.
 
 ```yaml
 apiVersion: nvidia.com/v1beta1
@@ -74,7 +79,6 @@ metadata:
   name: qwen-small
 spec:
   model: Qwen/Qwen3-0.6B
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"  # dynamo-frontend for Dynamo < 1.1.0
 ```
 
 Apply it and watch the request progress through its phases:
@@ -176,7 +180,12 @@ GPU SKUs use **lowercase underscore format** (`h100_sxm`, not `H100-SXM5-80GB`).
 For **Mixture-of-Experts (MoE)** models (DeepSeek-R1, Qwen3-MoE), use **SGLang** for full support — vLLM and TensorRT-LLM have partial MoE support still under development. The profiler sweeps MoE models across up to **4 nodes**; beyond that, it selects the best config within range and you may need to adjust replica counts manually. See [Backend Selection](model-deployment-guide.md#production-detail-backend-selection).
 
 > [!NOTE]
-> **TODO (author):** Confirm whether DGDR exposes a multinode/`nodeCount` knob directly or whether node spanning is derived from `totalGpus` ÷ `numGpusPerNode` and the selected parallelism. The [DGD Guide](dgd-guide.md) sets `multinode.nodeCount` explicitly; clarify the DGDR equivalent.
+> DGDR does not expose `multinode.nodeCount`. `hardware.totalGpus` sets the
+> overall profiling and deployment budget, while `hardware.numGpusPerNode`
+> describes per-node capacity. After selecting each worker's parallelism, the
+> profiler sets the generated DGD's `multinode.nodeCount` to the per-instance GPU
+> count divided by `numGpusPerNode`, rounded up. It omits multinode configuration
+> when the worker fits on one node.
 
 </Step>
 
@@ -240,7 +249,15 @@ spec:
 The Planner's `sla` optimization target reads live TTFT/ITL from Prometheus, so install [Prometheus](installation-guide.md#kube-prometheus-stack) before creating the DGDR if you want SLA-driven scaling. The `throughput` and `latency` modes use internal queue-depth signals and work without Prometheus. For scaling modes and the full PlannerConfig field reference, see the [Planner Guide](../components/planner/planner-guide.md).
 
 > [!NOTE]
-> **TODO (author):** Reconcile the PlannerConfig form. This guide and the [DGDR Reference](dgdr-reference.mdx#planner) use `features.planner.mode`/`backend`/`advisory`; the [Deployment Overview](model-deployment-guide.md#production-detail-planner) shows `features.planner.enabled: true`. Confirm which is current and align both pages (DGDR passes this object through without field-level validation, so the Planner service is the source of truth).
+> `features.planner` is the PlannerConfig object itself; it does not use an
+> `enabled` wrapper. The DGDR API passes the object through without field-level
+> validation. The profiler copies it, adds GPU counts from the selected
+> configuration, and propagates explicit DGDR latency targets unless
+> `features.planner.ttft_ms` or `features.planner.itl_ms` overrides them. It then
+> writes the reconciled object to `planner_config.json` in a ConfigMap, mounts the
+> file into the generated Planner service, and starts the service with `--config`.
+> For non-advisory operation, it also enables scaling adapters on the worker
+> services selected by `mode`.
 
 </Step>
 
@@ -314,11 +331,14 @@ Deleting the DGDR does **not** delete the DGD it created — the DGD persists so
 
 ```bash
 kubectl delete dgdr my-model -n <namespace>
-kubectl delete dgd <generated-dgd-name> -n <namespace>
+kubectl delete dgd my-model-dgd -n <namespace>
 ```
 
 > [!NOTE]
-> **TODO (author):** Confirm the generated DGD's name pattern (the [Deployment Overview](model-deployment-guide.md#dgd-persists-after-dgdr-deletion) example uses `my-model-dgd`) and how to look it up via the `dgdr.nvidia.com/name` label.
+> By default, the generated DGD is named `<dgdr-name>-dgd`. An explicit
+> `spec.overrides.dgd.metadata.name` replaces that default. To look up the DGD, run
+> `kubectl get dgd -n <namespace> -l dgdr.nvidia.com/name=my-model`. The selected
+> name is also recorded in `.status.dgdName`.
 
 ## Optional: Customize the generated DGD
 
