@@ -11,7 +11,6 @@ import pytest
 from _fake_vmm import FakeVMM
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.core.client.session import _GMSClientSession
-from gpu_memory_service.core.errors import GMSError
 from gpu_memory_service.core.protocol import HandshakeRequest, send_message
 from gpu_memory_service.core.server.gms import GMSServerMemoryManager
 from gpu_memory_service.core.server.rpc import GMSRPCServer
@@ -75,7 +74,7 @@ def test_socket_sessions_commit_share_prioritize_writer_and_release_on_disconnec
     first_writer.close()
     assert replacement_connected.wait(5)
     replacement = replacement_result.pop()
-    with pytest.raises(GMSError, match="unknown allocation ID"):
+    with pytest.raises(RuntimeError, match="unknown allocation ID"):
         replacement.export("aborted")
 
     replacement.allocate("committed", 64)

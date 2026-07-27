@@ -13,8 +13,6 @@ from typing import TypeAlias
 import msgspec
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 
-from .errors import GMSError
-
 MAX_FRAME = 1 << 20
 _INT_SIZE = struct.calcsize("i")
 _ANCILLARY_SIZE = socket.CMSG_SPACE(16 * _INT_SIZE)
@@ -77,7 +75,7 @@ _decoder = msgspec.msgpack.Decoder(Message)
 def send_message(sock: socket.socket, message: Message, fd: int = -1) -> None:
     payload = _encoder.encode(message)
     if len(payload) > MAX_FRAME:
-        raise GMSError("GMS RPC frame is too large")
+        raise RuntimeError("GMS RPC frame is too large")
     frame = struct.pack("!I", len(payload)) + payload
     if fd < 0:
         sock.sendall(frame)
@@ -103,13 +101,13 @@ def receive_message(sock: socket.socket) -> tuple[Message, int]:
                 if level != socket.SOL_SOCKET or kind != socket.SCM_RIGHTS:
                     continue
                 if len(raw) % _INT_SIZE:
-                    raise GMSError("malformed GMS RPC file descriptor data")
+                    raise RuntimeError("malformed GMS RPC file descriptor data")
                 count = len(raw) // _INT_SIZE
                 received_fds.extend(
                     struct.unpack(f"{count}i", raw[: count * _INT_SIZE])
                 )
             if flags & socket.MSG_CTRUNC:
-                raise GMSError("GMS RPC ancillary data was truncated")
+                raise RuntimeError("GMS RPC ancillary data was truncated")
             if not chunk:
                 raise EOFError
             data.extend(chunk)
@@ -118,13 +116,13 @@ def receive_message(sock: socket.socket) -> tuple[Message, int]:
     try:
         (length,) = struct.unpack("!I", read_exact(4))
         if length > MAX_FRAME:
-            raise GMSError("GMS RPC frame is too large")
+            raise RuntimeError("GMS RPC frame is too large")
         try:
             message = _decoder.decode(read_exact(length))
         except msgspec.DecodeError as exc:
-            raise GMSError("invalid GMS RPC message") from exc
+            raise RuntimeError("invalid GMS RPC message") from exc
         if len(received_fds) > 1:
-            raise GMSError("GMS RPC received multiple file descriptors")
+            raise RuntimeError("GMS RPC received multiple file descriptors")
         return message, received_fds.pop() if received_fds else -1
     except Exception:
         for fd in received_fds:
