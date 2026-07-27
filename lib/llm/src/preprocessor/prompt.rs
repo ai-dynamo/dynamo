@@ -130,10 +130,10 @@ pub fn mdc_jinja_template_text(mdc: &ModelDeploymentCard) -> Option<String> {
     if let Some(artifact) = mdc.chat_template_file.as_ref() {
         match artifact {
             PromptFormatterArtifact::HfChatTemplateJinja { file, .. } => {
-                if let Some(path) = file.path() {
-                    if let Ok(s) = std::fs::read_to_string(path) {
-                        return Some(s);
-                    }
+                if let Some(path) = file.path()
+                    && let Ok(s) = std::fs::read_to_string(path)
+                {
+                    return Some(s);
                 }
             }
             // HfChatTemplateJson and HfTokenizerConfigJson both embed the template
@@ -149,158 +149,13 @@ pub fn mdc_jinja_template_text(mdc: &ModelDeploymentCard) -> Option<String> {
 
     // Fallback: normal HF layout stores tokenizer_config.json in mdc.prompt_formatter;
     // chat_template_file is None unless a separate template file was present.
-    if let Some(PromptFormatterArtifact::HfTokenizerConfigJson(f)) = mdc.prompt_formatter.as_ref() {
-        if let Some(s) = read_embedded(f) {
-            return Some(s);
-        }
+    if let Some(PromptFormatterArtifact::HfTokenizerConfigJson(f)) = mdc.prompt_formatter.as_ref()
+        && let Some(s) = read_embedded(f)
+    {
+        return Some(s);
     }
 
     None
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn detect_mode_glm_items_pattern() {
-        let glm_snippet = r#"
-            {%- set _args = tc.arguments -%}
-            {%- for k, v in _args.items() -%}
-        "#;
-        assert_eq!(
-            detect_tool_arguments_mode(glm_snippet),
-            ToolArgumentsMode::ParsedObject
-        );
-    }
-
-    #[test]
-    fn detect_mode_direct_arguments_items() {
-        assert_eq!(
-            detect_tool_arguments_mode("{% for k, v in arguments.items() %}"),
-            ToolArgumentsMode::ParsedObject
-        );
-    }
-
-    #[test]
-    fn detect_mode_standard_template_no_items() {
-        let standard = r#"{% for tc in tool_calls %}{{ tc.function.arguments }}{% endfor %}"#;
-        assert_eq!(
-            detect_tool_arguments_mode(standard),
-            ToolArgumentsMode::JsonString
-        );
-    }
-
-    #[test]
-    fn normalize_parses_json_string_to_object() {
-        let mut msgs = serde_json::json!([{
-            "role": "assistant",
-            "tool_calls": [{
-                "function": {
-                    "name": "read",
-                    "arguments": r#"{"path": "/tmp/foo"}"#
-                }
-            }]
-        }]);
-        normalize_tool_call_arguments(&mut msgs);
-        let args = &msgs[0]["tool_calls"][0]["function"]["arguments"];
-        assert!(
-            args.is_object(),
-            "arguments should be an object after normalization"
-        );
-        assert_eq!(args["path"], "/tmp/foo");
-    }
-
-    #[test]
-    fn normalize_ignores_non_assistant_messages() {
-        let mut msgs = serde_json::json!([{
-            "role": "user",
-            "content": "hello"
-        }]);
-        let original = msgs.clone();
-        normalize_tool_call_arguments(&mut msgs);
-        assert_eq!(msgs, original);
-    }
-
-    #[test]
-    fn normalize_skips_already_object_arguments() {
-        // If somehow arguments is already an object, it should remain unchanged.
-        let mut msgs = serde_json::json!([{
-            "role": "assistant",
-            "tool_calls": [{
-                "function": {
-                    "name": "f",
-                    "arguments": {"key": "val"}
-                }
-            }]
-        }]);
-        normalize_tool_call_arguments(&mut msgs);
-        let args = &msgs[0]["tool_calls"][0]["function"]["arguments"];
-        assert!(args.is_object());
-        assert_eq!(args["key"], "val");
-    }
-
-    /// Test that mdc_jinja_template_text reads the embedded chat_template
-    /// from mdc.prompt_formatter (the HfTokenizerConfigJson / normal HF layout).
-    #[test]
-    fn mdc_template_text_reads_prompt_formatter_embedded() {
-        use crate::model_card::{ModelDeploymentCard, PromptFormatterArtifact};
-
-        // Write a minimal tokenizer_config.json with a chat_template that uses .items()
-        let dir = tempfile::tempdir().expect("tempdir");
-        let tc_path = dir.path().join("tokenizer_config.json");
-        std::fs::write(
-            &tc_path,
-            r#"{"tokenizer_class":"PreTrainedTokenizer","chat_template":"{% for k, v in _args.items() %}"}"#,
-        )
-        .expect("write");
-
-        let checked =
-            crate::common::checked_file::CheckedFile::from_disk(&tc_path).expect("CheckedFile");
-
-        // Build a minimal MDC with only prompt_formatter set.
-        let mut mdc = ModelDeploymentCard::default();
-        mdc.prompt_formatter = Some(PromptFormatterArtifact::HfTokenizerConfigJson(checked));
-
-        let text = mdc_jinja_template_text(&mdc).expect("should find template");
-        assert!(
-            text.contains("_args.items()"),
-            "extracted template should contain .items() pattern"
-        );
-        assert_eq!(
-            detect_tool_arguments_mode(&text),
-            ToolArgumentsMode::ParsedObject
-        );
-    }
-
-    /// Test that chat_template.json (HfChatTemplateJson) is also detected.
-    #[test]
-    fn mdc_template_text_reads_chat_template_json() {
-        use crate::model_card::{ModelDeploymentCard, PromptFormatterArtifact};
-
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("chat_template.json");
-        std::fs::write(
-            &path,
-            r#"{"chat_template":"{% for k, v in arguments.items() %}"}"#,
-        )
-        .expect("write");
-
-        let checked =
-            crate::common::checked_file::CheckedFile::from_disk(&path).expect("CheckedFile");
-
-        let mut mdc = ModelDeploymentCard::default();
-        mdc.chat_template_file = Some(PromptFormatterArtifact::HfChatTemplateJson {
-            file: checked,
-            is_custom: false,
-        });
-
-        let text = mdc_jinja_template_text(&mdc).expect("template");
-        assert_eq!(
-            detect_tool_arguments_mode(&text),
-            ToolArgumentsMode::ParsedObject
-        );
-    }
 }
 
 /// Parse `tool_calls[*].function.arguments` from JSON string to object in a
@@ -593,5 +448,150 @@ pub fn prompt_formatter_from_mdc(mdc: &ModelDeploymentCard) -> Result<PromptForm
         | PromptFormatterArtifact::HfChatTemplateJson { .. } => Err(anyhow::anyhow!(
             "prompt_formatter should not have type HfChatTemplate*"
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detect_mode_glm_items_pattern() {
+        let glm_snippet = r#"
+            {%- set _args = tc.arguments -%}
+            {%- for k, v in _args.items() -%}
+        "#;
+        assert_eq!(
+            detect_tool_arguments_mode(glm_snippet),
+            ToolArgumentsMode::ParsedObject
+        );
+    }
+
+    #[test]
+    fn detect_mode_direct_arguments_items() {
+        assert_eq!(
+            detect_tool_arguments_mode("{% for k, v in arguments.items() %}"),
+            ToolArgumentsMode::ParsedObject
+        );
+    }
+
+    #[test]
+    fn detect_mode_standard_template_no_items() {
+        let standard = r#"{% for tc in tool_calls %}{{ tc.function.arguments }}{% endfor %}"#;
+        assert_eq!(
+            detect_tool_arguments_mode(standard),
+            ToolArgumentsMode::JsonString
+        );
+    }
+
+    #[test]
+    fn normalize_parses_json_string_to_object() {
+        let mut msgs = serde_json::json!([{
+            "role": "assistant",
+            "tool_calls": [{
+                "function": {
+                    "name": "read",
+                    "arguments": r#"{"path": "/tmp/foo"}"#
+                }
+            }]
+        }]);
+        normalize_tool_call_arguments(&mut msgs);
+        let args = &msgs[0]["tool_calls"][0]["function"]["arguments"];
+        assert!(
+            args.is_object(),
+            "arguments should be an object after normalization"
+        );
+        assert_eq!(args["path"], "/tmp/foo");
+    }
+
+    #[test]
+    fn normalize_ignores_non_assistant_messages() {
+        let mut msgs = serde_json::json!([{
+            "role": "user",
+            "content": "hello"
+        }]);
+        let original = msgs.clone();
+        normalize_tool_call_arguments(&mut msgs);
+        assert_eq!(msgs, original);
+    }
+
+    #[test]
+    fn normalize_skips_already_object_arguments() {
+        // If somehow arguments is already an object, it should remain unchanged.
+        let mut msgs = serde_json::json!([{
+            "role": "assistant",
+            "tool_calls": [{
+                "function": {
+                    "name": "f",
+                    "arguments": {"key": "val"}
+                }
+            }]
+        }]);
+        normalize_tool_call_arguments(&mut msgs);
+        let args = &msgs[0]["tool_calls"][0]["function"]["arguments"];
+        assert!(args.is_object());
+        assert_eq!(args["key"], "val");
+    }
+
+    /// Test that mdc_jinja_template_text reads the embedded chat_template
+    /// from mdc.prompt_formatter (the HfTokenizerConfigJson / normal HF layout).
+    #[test]
+    fn mdc_template_text_reads_prompt_formatter_embedded() {
+        use crate::model_card::{ModelDeploymentCard, PromptFormatterArtifact};
+
+        // Write a minimal tokenizer_config.json with a chat_template that uses .items()
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tc_path = dir.path().join("tokenizer_config.json");
+        std::fs::write(
+            &tc_path,
+            r#"{"tokenizer_class":"PreTrainedTokenizer","chat_template":"{% for k, v in _args.items() %}"}"#,
+        )
+        .expect("write");
+
+        let checked =
+            crate::common::checked_file::CheckedFile::from_disk(&tc_path).expect("CheckedFile");
+
+        // Build a minimal MDC with only prompt_formatter set.
+        let mut mdc = ModelDeploymentCard::default();
+        mdc.prompt_formatter = Some(PromptFormatterArtifact::HfTokenizerConfigJson(checked));
+
+        let text = mdc_jinja_template_text(&mdc).expect("should find template");
+        assert!(
+            text.contains("_args.items()"),
+            "extracted template should contain .items() pattern"
+        );
+        assert_eq!(
+            detect_tool_arguments_mode(&text),
+            ToolArgumentsMode::ParsedObject
+        );
+    }
+
+    /// Test that chat_template.json (HfChatTemplateJson) is also detected.
+    #[test]
+    fn mdc_template_text_reads_chat_template_json() {
+        use crate::model_card::{ModelDeploymentCard, PromptFormatterArtifact};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("chat_template.json");
+        std::fs::write(
+            &path,
+            r#"{"chat_template":"{% for k, v in arguments.items() %}"}"#,
+        )
+        .expect("write");
+
+        let checked =
+            crate::common::checked_file::CheckedFile::from_disk(&path).expect("CheckedFile");
+
+        let mut mdc = ModelDeploymentCard::default();
+        mdc.chat_template_file = Some(PromptFormatterArtifact::HfChatTemplateJson {
+            file: checked,
+            is_custom: false,
+        });
+
+        let text = mdc_jinja_template_text(&mdc).expect("template");
+        assert_eq!(
+            detect_tool_arguments_mode(&text),
+            ToolArgumentsMode::ParsedObject
+        );
     }
 }

@@ -455,19 +455,19 @@ impl DeltaAggregator {
 
                 // Recover any tail saved before parsing — the parser drops a truncated
                 // second block silently when an earlier complete block was already parsed.
-                if let Some(tail) = glm47_truncated_tail {
-                    if !choice.text.contains(&tail) {
-                        tracing::warn!(
-                            parser,
-                            tail_bytes = tail.len(),
-                            "glm47: truncated later <tool_call> appended as content \
+                if let Some(tail) = glm47_truncated_tail
+                    && !choice.text.contains(&tail)
+                {
+                    tracing::warn!(
+                        parser,
+                        tail_bytes = tail.len(),
+                        "glm47: truncated later <tool_call> appended as content \
                          (TRT-LLM parity; raw markup in content)"
-                        );
-                        if choice.text.is_empty() {
-                            choice.text = tail;
-                        } else {
-                            choice.text.push_str(&tail);
-                        }
+                    );
+                    if choice.text.is_empty() {
+                        choice.text = tail;
+                    } else {
+                        choice.text.push_str(&tail);
                     }
                 }
             }
