@@ -443,7 +443,12 @@ impl VllmKvManager {
             self.pool.cancel(pool);
             return;
         };
-        let alloc = Self::destination_alloc(request_id, &layout, attention_prefix, self.enable_prefix_caching);
+        let alloc = Self::destination_alloc(
+            request_id,
+            &layout,
+            attention_prefix,
+            self.enable_prefix_caching,
+        );
         alloc.validate();
         self.attention().validate_fresh_partials(alloc.blocks);
         self.commit_groups(&alloc, &mut pool);

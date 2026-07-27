@@ -290,7 +290,15 @@ impl FullAttentionGroup {
         stores
     }
 
-    /// Release request blocks in caller-provided eviction-priority order.
+    /// Release the request's whole table, in caller-provided eviction-priority
+    /// order.
+    ///
+    /// Totality is the caller's precondition, checked once against
+    /// [`Self::block_count`] before any group mutates: a group whose table is not
+    /// parallel to this one drops a request's state wholesale, so a release that
+    /// covered only part of the table could not be honored here anyway. What this
+    /// checks instead is agreement — that `blocks` names the table it claims to,
+    /// block for block.
     ///
     /// Like vLLM's `BlockPool::free_blocks`, the physical pool is lineage-agnostic:
     /// reversing the request-owned table here makes suffix/leaf blocks older LRU
@@ -301,31 +309,31 @@ impl FullAttentionGroup {
         request_id: Uuid,
         blocks: &[UniqueBlock],
     ) {
-        let released = {
-            let Some(owned) = self.request_blocks.get_mut(&request_id) else {
-                panic!("request {request_id} owns no block table")
-            };
-            assert!(
-                blocks.len() <= owned.len(),
-                "request releases too many blocks"
-            );
-            let start = owned.len() - blocks.len();
-            for (expected, actual) in blocks.iter().zip(owned[start..].iter().rev()) {
-                match (expected, actual) {
-                    (UniqueBlock::FullBlock(expected), OwnedBlock::Full(full)) => {
-                        assert_eq!(*expected, full.hash, "full-block Deref mismatch");
-                    }
-                    (UniqueBlock::PartialBlock(expected), OwnedBlock::Partial { uuid, .. }) => {
-                        assert_eq!(expected, uuid, "partial Deref mismatch")
-                    }
-                    _ => panic!("Deref block kind disagrees with request table"),
-                }
-            }
-            owned.split_off(start)
+        let Some(table) = self.request_blocks.get_mut(&request_id) else {
+            panic!("request {request_id} owns no block table")
         };
-        if self.request_blocks[&request_id].is_empty() {
-            self.request_blocks.remove(&request_id);
+        // `zip` below would quietly stop at the shorter side, so keep the
+        // precondition falsifiable in tests rather than duplicating the
+        // coordinator's check at run time.
+        debug_assert_eq!(
+            blocks.len(),
+            table.len(),
+            "release must cover the request's whole table"
+        );
+        for (expected, actual) in blocks.iter().zip(table.iter().rev()) {
+            match (expected, actual) {
+                (UniqueBlock::FullBlock(expected), OwnedBlock::Full(full)) => {
+                    assert_eq!(*expected, full.hash, "full-block Deref mismatch");
+                }
+                (UniqueBlock::PartialBlock(expected), OwnedBlock::Partial { uuid, .. }) => {
+                    assert_eq!(expected, uuid, "partial Deref mismatch")
+                }
+                _ => panic!("Deref block kind disagrees with request table"),
+            }
         }
+
+        let released = std::mem::take(table);
+        self.request_blocks.remove(&request_id);
 
         for block in released.into_iter().rev() {
             match block {
