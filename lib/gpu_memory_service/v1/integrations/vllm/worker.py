@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from contextlib import AbstractContextManager
 
+import torch
 from vllm.v1.worker.gpu_worker import Worker
 
 from .backend import BACKEND_NAME
@@ -36,3 +37,9 @@ class GMSV1Worker(Worker):
         if tag == "kv_cache":
             return backend.capture_kv_cache()
         return super()._maybe_get_memory_pool_context(tag)
+
+    def sleep(self, level: int = 1) -> None:
+        # Device-global free memory includes the rank-local GMS server process.
+        torch.accelerator.synchronize()
+        self._get_sleep_mode_backend().suspend(level)
+        torch.accelerator.synchronize()

@@ -45,6 +45,9 @@ def test_worker_routes_managed_scopes_and_backend_orders_lifecycle(
             yield
             events.append("kv_exit")
 
+        def suspend(self, level):
+            events.append(("suspend", level))
+
     routed_backend = RoutedBackend()
 
     def init_device(instance):
@@ -65,6 +68,11 @@ def test_worker_routes_managed_scopes_and_backend_orders_lifecycle(
         "_maybe_get_memory_pool_context",
         lambda _instance, tag: events.append(("super", tag)) or nullcontext(),
     )
+    monkeypatch.setattr(
+        worker_module.torch.accelerator,
+        "synchronize",
+        lambda: events.append("synchronize"),
+    )
 
     worker = object.__new__(worker_module.GMSV1Worker)
     worker.vllm_config = SimpleNamespace(
@@ -80,6 +88,7 @@ def test_worker_routes_managed_scopes_and_backend_orders_lifecycle(
         pass
     with worker._maybe_get_memory_pool_context("activation"):
         pass
+    worker.sleep()
 
     backend = object.__new__(backend_module.GMSV1SleepModeBackend)
     backend_module.SleepModeBackend.__init__(backend)
@@ -123,6 +132,9 @@ def test_worker_routes_managed_scopes_and_backend_orders_lifecycle(
         "kv_enter",
         "kv_exit",
         ("super", "activation"),
+        "synchronize",
+        ("suspend", 1),
+        "synchronize",
         "gc",
         "allocator_ok",
         "weights_unmap",
