@@ -92,7 +92,7 @@ enum PrefillOutcome {
         worker_link: Option<TraceLink>,
     },
     Terminal {
-        output: Annotated<LLMEngineOutput>,
+        output: Box<Annotated<LLMEngineOutput>>,
     },
 }
 
@@ -131,8 +131,17 @@ enum PrefillCompletion {
         worker_link: Option<TraceLink>,
     },
     Terminal {
-        output: Annotated<LLMEngineOutput>,
+        output: Box<Annotated<LLMEngineOutput>>,
     },
+}
+
+fn strip_terminal_disaggregated_params(
+    mut output: Annotated<LLMEngineOutput>,
+) -> Annotated<LLMEngineOutput> {
+    if let Some(data) = output.data.as_mut() {
+        data.disaggregated_params = None;
+    }
+    output
 }
 
 /// PrefillRouter is a forward-only operator that sits between Migration and the decode router.
@@ -304,10 +313,8 @@ impl
         // disaggregated backends return that context response directly instead
         // of launching a generation-only request with missing handoff IDs.
         let outcome = match outcome {
-            PrefillOutcome::Terminal { mut output } => {
-                if let Some(data) = output.data.as_mut() {
-                    data.disaggregated_params = None;
-                }
+            PrefillOutcome::Terminal { output } => {
+                let output = strip_terminal_disaggregated_params(*output);
                 return Ok(dynamo_runtime::pipeline::ResponseStream::new(
                     Box::pin(stream::once(async move { output })),
                     engine_ctx,
@@ -485,7 +492,10 @@ mod tests {
     use dynamo_kv_router::config::RouterConfigOverride;
     use std::collections::{HashMap, HashSet};
 
-    use crate::protocols::common::preprocessor::{PreprocessedRequest, RoutingHints};
+    use crate::protocols::common::{
+        FinishReason,
+        preprocessor::{PreprocessedRequest, RoutingHints},
+    };
 
     const MAX_ROOM: u64 = i64::MAX as u64;
 
@@ -500,6 +510,27 @@ mod tests {
         assert_eq!(override_config.assume_kv_reuse, Some(false));
         assert_eq!(override_config.track_prefill_tokens, Some(false));
         assert_eq!(override_config.router_temperature, Some(0.7));
+    }
+
+    #[test]
+    fn terminal_response_strips_disaggregated_params() {
+        let output = Annotated::from_data(LLMEngineOutput {
+            token_ids: vec![2],
+            finish_reason: Some(FinishReason::EoS),
+            disaggregated_params: Some(serde_json::json!({
+                "ctx_request_id": null,
+                "request_type": "context_only",
+            })),
+            ..Default::default()
+        });
+
+        let output = strip_terminal_disaggregated_params(output);
+        let data = output
+            .data
+            .expect("terminal response should retain its data");
+        assert_eq!(data.token_ids, vec![2]);
+        assert_eq!(data.finish_reason, Some(FinishReason::EoS));
+        assert!(data.disaggregated_params.is_none());
     }
 
     #[test]

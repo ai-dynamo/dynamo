@@ -111,9 +111,11 @@ impl PrefillRouter {
         }
 
         // A CTX request that reaches EOS/stop during its one-token prefill step
-        // is already complete and does not establish a KV-cache handoff. A
-        // missing finish reason is equivalent to TRT-LLM's "not_finished";
-        // Length also requires the normal GEN handoff.
+        // is already complete and does not establish a KV-cache handoff. The
+        // prefill protocol carries this classification on the first output's
+        // data; a data-less first output is rejected below. A missing finish
+        // reason is equivalent to TRT-LLM's "not_finished", while Length still
+        // requires the normal GEN handoff.
         let is_terminal = first_output
             .data
             .as_ref()
@@ -121,7 +123,7 @@ impl PrefillRouter {
             .is_some_and(|reason| !matches!(reason, FinishReason::Length));
         if is_terminal {
             return Ok(PrefillCompletion::Terminal {
-                output: first_output,
+                output: Box::new(first_output),
             });
         }
 
@@ -135,6 +137,25 @@ impl PrefillRouter {
                 "Prefill router output missing disaggregated_params".to_string(),
             ));
         };
+        // TRT-LLM serializes ctx_request_id as null for a terminal context
+        // response. Terminal responses returned above do not need a handoff;
+        // any non-terminal response that explicitly carries a null ID cannot
+        // be decoded safely. Refuse it here instead of dispatching GEN and
+        // failing later inside the backend. Other backends do not expose this
+        // TRT-LLM-specific field and are unaffected.
+        let ctx_request_id = disaggregated_params.get("ctx_request_id");
+        let is_trtllm_context_handoff = disaggregated_params
+            .get("request_type")
+            .and_then(serde_json::Value::as_str)
+            == Some("context_only");
+        if ctx_request_id.is_some_and(serde_json::Value::is_null)
+            || (is_trtllm_context_handoff && ctx_request_id.is_none())
+        {
+            return Err(PrefillError::NoDisaggregatedParams(
+                "Prefill router output has no usable ctx_request_id for a non-terminal handoff"
+                    .to_string(),
+            ));
+        }
 
         Ok(PrefillCompletion::Handoff {
             result: crate::protocols::common::preprocessor::PrefillResult {
@@ -220,26 +241,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn terminal_prefill_without_handoff_is_returned_to_caller() {
-        let output = LLMEngineOutput {
-            token_ids: vec![2],
-            finish_reason: Some(FinishReason::EoS),
-            ..Default::default()
-        };
-        let result = PrefillRouter::consume_prefill_stream(
-            prefill_stream(vec![Annotated::from_data(output)]),
-            None,
-        )
-        .await
-        .unwrap();
+    async fn terminal_finish_reasons_without_handoff_are_returned_to_caller() {
+        for finish_reason in [
+            FinishReason::EoS,
+            FinishReason::Stop,
+            FinishReason::Cancelled,
+            FinishReason::Error("prefill failed".to_string()),
+            FinishReason::ContentFilter,
+        ] {
+            let output = LLMEngineOutput {
+                token_ids: vec![2],
+                finish_reason: Some(finish_reason.clone()),
+                ..Default::default()
+            };
+            let result = PrefillRouter::consume_prefill_stream(
+                prefill_stream(vec![Annotated::from_data(output)]),
+                None,
+            )
+            .await
+            .unwrap();
 
-        let PrefillCompletion::Terminal { output } = result else {
-            panic!("expected terminal prefill completion");
-        };
-        assert_eq!(
-            output.data.and_then(|data| data.finish_reason),
-            Some(FinishReason::EoS)
-        );
+            let PrefillCompletion::Terminal { output } = result else {
+                panic!("expected terminal prefill completion for {finish_reason:?}");
+            };
+            let output = *output;
+            assert_eq!(
+                output.data.and_then(|data| data.finish_reason),
+                Some(finish_reason)
+            );
+        }
     }
 
     #[tokio::test]
@@ -280,5 +310,33 @@ mod tests {
             panic!("expected prefill handoff");
         };
         assert_eq!(result.disaggregated_params, json!({"ctx_request_id": 42}));
+    }
+
+    #[tokio::test]
+    async fn non_terminal_prefill_without_usable_ctx_request_id_fails_before_decode() {
+        for disaggregated_params in [
+            json!({"ctx_request_id": null}),
+            json!({"request_type": "context_only"}),
+        ] {
+            let output = LLMEngineOutput {
+                finish_reason: None,
+                disaggregated_params: Some(disaggregated_params),
+                ..Default::default()
+            };
+            let result = PrefillRouter::consume_prefill_stream(
+                prefill_stream(vec![Annotated::from_data(output)]),
+                None,
+            )
+            .await;
+            let Err(error) = result else {
+                panic!("expected a missing ctx_request_id to reject the handoff");
+            };
+
+            assert!(matches!(
+                error,
+                PrefillError::NoDisaggregatedParams(message)
+                    if message.contains("no usable ctx_request_id")
+            ));
+        }
     }
 }

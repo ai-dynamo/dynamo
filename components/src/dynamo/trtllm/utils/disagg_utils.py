@@ -23,6 +23,9 @@ from tensorrt_llm.llmapi.disagg_utils import (
     get_global_disagg_request_id as _trtllm_get_global_disagg_request_id,
 )
 
+# This compatibility shim intentionally relies on the public helper retaining
+# its name while TRT-LLM distinguishes the two known APIs by the ``process_id``
+# parameter added in rc22.
 # Dynamo maps its distributed-runtime connection ID into TRT-LLM's historical
 # 10-bit machine-ID space with ``connection_id % 1021``. TRT-LLM rc22 split
 # that field into an 8-bit node ID and a 6-bit process ID. Preserve Dynamo's
@@ -31,6 +34,7 @@ _TRTLLM_DISAGG_ID_HAS_PROCESS_ID = (
     "process_id" in inspect.signature(_trtllm_get_global_disagg_request_id).parameters
 )
 _TRTLLM_PROCESS_ID_SPACE = 1 << 6
+_TRTLLM_NODE_ID_SPACE = 1 << 8
 _DYNAMO_DISAGG_MACHINE_ID_SPACE = 1021
 
 
@@ -52,6 +56,11 @@ def get_compatible_global_disagg_request_id(machine_id: int) -> int:
 
     if _TRTLLM_DISAGG_ID_HAS_PROCESS_ID:
         node_id, process_id = divmod(machine_id, _TRTLLM_PROCESS_ID_SPACE)
+        if node_id >= _TRTLLM_NODE_ID_SPACE:
+            raise ValueError(
+                "Dynamo disagg machine_id maps outside TRT-LLM's 8-bit "
+                f"node_id space: machine_id={machine_id}, node_id={node_id}"
+            )
         return _trtllm_get_global_disagg_request_id(node_id, process_id)
 
     return _trtllm_get_global_disagg_request_id(machine_id)

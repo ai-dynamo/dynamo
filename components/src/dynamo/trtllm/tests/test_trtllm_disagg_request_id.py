@@ -38,8 +38,13 @@ def test_rc22_all_dynamo_machine_ids_are_in_range_and_unique():
     }
 
     assert len(pairs) == disagg_utils._DYNAMO_DISAGG_MACHINE_ID_SPACE
-    assert all(0 <= node_id < 256 for node_id, _ in pairs)
-    assert all(0 <= process_id < 64 for _, process_id in pairs)
+    assert all(
+        0 <= node_id < disagg_utils._TRTLLM_NODE_ID_SPACE for node_id, _ in pairs
+    )
+    assert all(
+        0 <= process_id < disagg_utils._TRTLLM_PROCESS_ID_SPACE
+        for _, process_id in pairs
+    )
 
 
 def test_rc21_keeps_legacy_machine_id():
