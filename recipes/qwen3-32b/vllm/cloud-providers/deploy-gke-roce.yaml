@@ -96,12 +96,12 @@ spec:
             privileged: true
             runAsUser: 0
           volumeMounts:
-          - mountPath: /model-cache
-            name: model-cache
           - mountPath: /usr/local/gib
             name: gib
           - mountPath: /usr/local/nvidia
             name: nvidia
+          - mountPath: /model-cache
+            name: model-cache
           workingDir: /workspace
         tolerations:
         - effect: NoSchedule
@@ -112,15 +112,15 @@ spec:
           operator: Equal
           value: arm64
         volumes:
-        - name: model-cache
-          persistentVolumeClaim:
-            claimName: model-cache
         - hostPath:
             path: /home/kubernetes/bin/gib
           name: gib
         - hostPath:
             path: /home/kubernetes/bin/nvidia
           name: nvidia
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
       replicas: 1
       resources:
         limits:
@@ -255,12 +255,12 @@ spec:
             privileged: true
             runAsUser: 0
           volumeMounts:
-          - mountPath: /model-cache
-            name: model-cache
           - mountPath: /usr/local/gib
             name: gib
           - mountPath: /usr/local/nvidia
             name: nvidia
+          - mountPath: /model-cache
+            name: model-cache
           workingDir: /workspace
         tolerations:
         - effect: NoSchedule
@@ -271,15 +271,15 @@ spec:
           operator: Equal
           value: arm64
         volumes:
-        - name: model-cache
-          persistentVolumeClaim:
-            claimName: model-cache
         - hostPath:
             path: /home/kubernetes/bin/gib
           name: gib
         - hostPath:
             path: /home/kubernetes/bin/nvidia
           name: nvidia
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
       replicas: 1
       resources:
         limits:

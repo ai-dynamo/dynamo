@@ -18,18 +18,9 @@ spec:
           env: &vllmEnvironment
             - name: KV_TRANSFER_CONFIG
               value: '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
-          volumeMounts: &modelCacheVolumeMounts
-            - name: model-cache
-              mountPath: /model-cache
-        volumes: &modelCacheVolumes
-          - name: model-cache
-            persistentVolumeClaim:
-              claimName: model-cache
     DecodeWorker:
       extraPodSpec:
         imagePullSecrets:
           - name: nvcr-pull-secret
         mainContainer:
           env: *vllmEnvironment
-          volumeMounts: *modelCacheVolumeMounts
-        volumes: *modelCacheVolumes
