@@ -1,56 +1,59 @@
 ---
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: DynoSim
-subtitle: Simulate Dynamo deployment choices before spending GPU time
+subtitle: Choose an offline or live simulation loop before validating on GPUs
 ---
 
-DynoSim is Dynamo's simulation stack for exploring serving configurations before validating them on real clusters. It is not a separate service; it is the product surface that connects workload-driven simulation runs, configuration sweeps, the mocker engine, Planner simulation, Router simulation, and AIC-backed timing models into one workflow.
+DynoSim is NVIDIA Dynamo's simulation stack for studying serving behavior without running model
+inference on GPUs. Start with the simulation loop that matches the question you want to answer.
 
-Use DynoSim when you want to answer questions such as:
+## Two Simulation Loops
 
-- Which aggregated or disaggregated topology should this workload use?
-- How many prefill and decode workers fit within my GPU budget?
-- How sensitive is the deployment to startup time, queue pressure, prefix reuse, or router tuning?
-- Which candidates should I validate with AIPerf on real GPUs?
-
-## Components
-
-| Component | Entry Point | Role |
+| Loop | Use It For | What It Runs |
 |---|---|---|
-| DynoSim run | `python -m dynamo.replay` | Runs one workload against one simulated Dynamo configuration and emits metrics plus a report |
-| DynoSim sweep | `dynamo.profiler.utils.replay_optimize` | Sweeps many simulation trials across TP shape, worker split, router knobs, SLA constraints, and GPU budget |
-| Live simulation with Mocker | `python -m dynamo.mocker` | Runs simulated workers inside a live Dynamo deployment path, including worker registration and KV event publishing |
-| Mocker core | `lib/mocker` | Models engine scheduling, KV allocation, prefix caching, preemption, and timing |
-| AIC | AI Configurator SDK | Supplies calibrated timing and candidate-shape data for supported model/backend/GPU tuples |
-| Planner simulation | `--planner-config` on DynoSim runs | Runs Planner decisions in the simulation loop to study scaling behavior and SLA compliance |
+| [Offline replay](runs.md) | Develop routing algorithms, compare scheduling policies, evaluate Planner decisions, and sweep configurations | A deterministic virtual-time harness around Mocker engine cores and in-process models of the KV router, Planner, transfer, and offload |
+| [Live Mocker](mocker.md) | Test a distributed deployment, probe component behavior, and measure frontend, router, transport, event, and control-plane overhead | Simulated workers inside the live Dynamo runtime path |
 
-## Workflow
+Offline replay removes wall-clock waits and external services. This makes algorithm and policy
+experiments fast and repeatable. Live Mocker preserves the distributed path around the worker. Use
+it when the behavior or overhead of that path is part of the experiment.
 
 ```mermaid
 flowchart LR
-    W["Workload trace or synthetic workload"] --> R["Single DynoSim run"]
-    R --> S["DynoSim sweep"]
-    S --> C["Candidate configs"]
-    C --> M["Live Mocker deployment"]
-    C --> G["Real-GPU validation"]
-    M --> G
+    W["Trace or synthetic workload"] --> O["Offline replay<br/>virtual time"]
+    W --> L["Live Mocker<br/>wall clock"]
+    O --> A["Algorithm and policy candidates"]
+    L --> D["Distributed-system observations"]
+    A --> G["Focused GPU validation"]
+    D --> G
 ```
 
-Start with a single DynoSim run to verify the workload shape and engine arguments. Use DynoSim sweeps when you want to search the design space. Use live Mocker deployments when you need to exercise the real Dynamo frontend, router, worker registration, KV events, and planner paths without running model inference. Validate the shortlist on real GPUs before production rollout.
+## Build Fidelity Bottom-Up
 
-## Where AIC Fits
+DynoSim separates three layers of fidelity:
 
-AIC provides performance models and candidate-shape information. DynoSim uses those models as one timing source inside the mocker engine and sweep optimizer. Mocker still owns the scheduler and KV-memory simulation: batching, prefix-cache hits, preemption, block allocation, and request lifecycle are simulated by Dynamo's mocker core, while AIC-backed timing predicts how long prefill and decode work should take for supported model/backend/GPU combinations.
+1. **Timing** predicts the duration of prefill and decode work. Choose a built-in heuristic,
+   profile-derived interpolation, or
+   [AIConfigurator](https://github.com/ai-dynamo/aiconfigurator) model.
+2. **Scheduler and KV state** model batching, admission, prefix reuse, memory pressure, preemption or
+   retraction, and token emission for vLLM, SGLang, and TensorRT-LLM.
+3. **Distributed system** composes workers with routing, Planner decisions, prefill/decode handoff,
+   multi-tier KV movement, workload arrivals, and reporting.
 
-## Choosing an Entry Point
+See [Simulation Model](modeling.md) for the engine-specific behavior and fidelity boundaries at
+each layer.
 
-| Goal | Start Here |
+## Choose an Entry Point
+
+| Goal | Start With |
 |---|---|
-| Run one trace or synthetic workload through one config | [DynoSim Runs](runs.md) |
-| Sweep topology and router choices under SLA/GPU constraints | [DynoSim Sweeps](sweeps.md) |
-| Exercise a live frontend/router setup without GPUs | [Live Simulation with Mocker](mocker.md) |
-| Study Planner scaling decisions against a trace | [Planner DynoSim Benchmarking](planner-benchmarking.md) |
-| Generate a deployable Kubernetes config from model/SLA intent | [Model Deployment Guide](../kubernetes/model-deployment-guide.md) |
+| Test a new routing or queueing algorithm | [DynoSim Runs](runs.md) |
+| Compare one workload across worker counts or topologies | [DynoSim Runs](runs.md) |
+| Search a larger configuration space | [DynoSim Sweeps](sweeps.md) |
+| Exercise a live frontend, router, Planner, and worker topology | [Live Simulation with Mocker](mocker.md) |
+| Study Planner scaling decisions against a trace | [Planner Simulation Benchmarking](planner-benchmarking.md) |
+| Validate endpoint behavior and performance on GPUs | [Dynamo Benchmarking](../benchmarks/benchmarking.md) |
 
-DynoSim narrows the search space; it does not replace real-hardware validation. Use it to move quickly, find promising candidates, and understand failure modes before spending cluster time.
+DynoSim narrows the configurations and hypotheses that need GPU time. Validate the selected
+candidates on representative hardware before using simulation results for production sizing.
