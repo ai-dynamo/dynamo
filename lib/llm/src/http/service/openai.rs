@@ -1707,10 +1707,7 @@ const MAX_LEADING_ANNOTATIONS: usize = 16;
 pub(super) async fn check_for_backend_error<T>(
     mut stream: impl futures::Stream<Item = Annotated<T>> + Send + Unpin + 'static,
     timeout: Option<std::time::Duration>,
-) -> Result<
-    std::pin::Pin<Box<dyn futures::Stream<Item = Annotated<T>> + Send>>,
-    ErrorResponse,
->
+) -> Result<std::pin::Pin<Box<dyn futures::Stream<Item = Annotated<T>> + Send>>, ErrorResponse>
 where
     T: Serialize + Send + 'static,
 {
@@ -3750,9 +3747,8 @@ async fn audio_speech(
     let ctx = stream.context();
     let stream = check_for_backend_error(stream, None)
         .await
-        .map_err(|error_response| {
-            inflight.mark_error(extract_error_type_from_response(&error_response));
-            error_response
+        .inspect_err(|error_response| {
+            inflight.mark_error(extract_error_type_from_response(error_response));
         })?;
 
     let mut http_queue_guard = Some(http_queue_guard);
