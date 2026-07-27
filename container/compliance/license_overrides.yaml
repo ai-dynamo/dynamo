@@ -345,6 +345,8 @@ overrides:
   - { ecosystem: python, name: blobfile,                  license: "MIT",       source: "blobfile upstream — https://github.com/christopher-hesse/blobfile/blob/master/LICENSE" }
   - { ecosystem: python, name: cache-dit,                 license: "Apache-2.0",  source: "cache-dit upstream — https://github.com/vipshop/cache-dit/blob/main/LICENSE" }
   - { ecosystem: python, name: deep-ep,                   license: "MIT",       source: "deep-ep upstream — https://github.com/deepseek-ai/DeepEP/blob/main/LICENSE" }
+  - { ecosystem: python, name: fla-core,                  license: "MIT",       source: "FLA upstream — https://github.com/fla-org/flash-linear-attention/blob/main/LICENSE" }
+  - { ecosystem: python, name: flash-linear-attention,    license: "MIT",       source: "FLA upstream — https://github.com/fla-org/flash-linear-attention/blob/main/LICENSE" }
   - { ecosystem: python, name: gguf,                      license: "MIT",       source: "gguf (llama.cpp Python binding) — https://github.com/ggerganov/llama.cpp/blob/master/LICENSE" }
   - { ecosystem: python, name: google-crc32c,             license: "Apache-2.0",  source: "google-crc32c upstream — https://github.com/googleapis/python-crc32c/blob/main/LICENSE" }
   - { ecosystem: python, name: icdiff,                    license: "BSD-3-Clause",  source: "icdiff upstream — https://github.com/jeffkaufman/icdiff/blob/master/LICENSE" }
@@ -360,6 +362,8 @@ overrides:
   - { ecosystem: python, name: ninja,                     license: "Apache-2.0",  source: "Ninja upstream — https://github.com/ninja-build/ninja/blob/master/COPYING" }
   - { ecosystem: python, name: nvidia-cutlass-dsl,        license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUTLASS DSL — proprietary distribution wrapper around the BSD CUTLASS library" }
   - { ecosystem: python, name: nvidia-cutlass-dsl-libs-base, license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUTLASS DSL libs" }
+  - { ecosystem: python, name: nvidia-cutlass-dsl-libs-core, license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUTLASS Python DSL license — https://docs.nvidia.com/cutlass/latest/media/docs/pythonDSL/license.html" }
+  - { ecosystem: python, name: nvidia-cutlass-dsl-libs-cu12, license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUTLASS Python DSL license — https://docs.nvidia.com/cutlass/latest/media/docs/pythonDSL/license.html" }
   - { ecosystem: python, name: nvidia-mathdx,             license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA MathDx SDK license — https://docs.nvidia.com/cuda/mathdx/license.html" }
   - { ecosystem: python, name: openai-harmony,            license: "MIT",       source: "openai-harmony upstream — https://github.com/openai/harmony/blob/main/LICENSE" }
   - { ecosystem: python, name: pandas,                    license: "BSD-3-Clause",  source: "pandas upstream — https://github.com/pandas-dev/pandas/blob/main/LICENSE" }

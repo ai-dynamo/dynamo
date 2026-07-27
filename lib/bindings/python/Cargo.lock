@@ -2407,7 +2407,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-py3"
-version = "1.3.0"
+version = "1.4.0-dev1"
 dependencies = [
  "aiconfigurator-core",
  "anyhow",
