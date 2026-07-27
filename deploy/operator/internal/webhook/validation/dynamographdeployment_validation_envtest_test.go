@@ -75,7 +75,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				worker := betaWorkerComponent(dgd)
 				worker.RuntimeVersionOverride = ""
 				worker.PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
-					Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/runtime:custom"}},
+					Containers: []corev1.Container{{Name: consts.MainContainerName, Image: customRuntimeImage}},
 				}}
 			}),
 			wantWebhookErrs: []string{"spec.components[1].runtimeVersionOverride: Required value: is required when the specified main container image has no parseable semantic-version tag"},
@@ -85,7 +85,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				worker := dgd.Spec.Services["worker"]
 				worker.RuntimeVersionOverride = ""
-				worker.ExtraPodSpec.MainContainer.Image = "registry.example/runtime:custom"
+				worker.ExtraPodSpec.MainContainer.Image = customRuntimeImage
 			}),
 			wantWebhookErrs: []string{"spec.services[worker].runtimeVersionOverride: Required value: is required when the specified main container image has no parseable semantic-version tag"},
 		},
@@ -95,12 +95,12 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				worker := betaWorkerComponent(dgd)
 				worker.RuntimeVersionOverride = ""
-				worker.PodTemplate.Spec.Containers[0].Image = "registry.example/runtime:custom"
+				worker.PodTemplate.Spec.Containers[0].Image = customRuntimeImage
 			}),
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				worker := betaWorkerComponent(dgd)
 				worker.RuntimeVersionOverride = ""
-				worker.PodTemplate.Spec.Containers[0].Image = "registry.example/runtime:custom"
+				worker.PodTemplate.Spec.Containers[0].Image = customRuntimeImage
 				dgd.Labels = map[string]string{"updated": "true"}
 			}),
 		},
@@ -110,12 +110,12 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			oldDeployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				worker := dgd.Spec.Services["worker"]
 				worker.RuntimeVersionOverride = ""
-				worker.ExtraPodSpec.MainContainer.Image = "registry.example/runtime:custom"
+				worker.ExtraPodSpec.MainContainer.Image = customRuntimeImage
 			}),
 			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				worker := dgd.Spec.Services["worker"]
 				worker.RuntimeVersionOverride = ""
-				worker.ExtraPodSpec.MainContainer.Image = "registry.example/runtime:custom"
+				worker.ExtraPodSpec.MainContainer.Image = customRuntimeImage
 				dgd.Labels = map[string]string{"updated": "true"}
 			}),
 		},
@@ -128,7 +128,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				worker := betaWorkerComponent(dgd)
 				worker.RuntimeVersionOverride = ""
-				worker.PodTemplate.Spec.Containers[0].Image = "registry.example/runtime:custom"
+				worker.PodTemplate.Spec.Containers[0].Image = customRuntimeImage
 			}),
 			wantWebhookErrs: []string{"spec.components[1].runtimeVersionOverride: Required value: is required when the specified main container image has no parseable semantic-version tag"},
 		},
@@ -138,7 +138,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			oldDeployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				worker := dgd.Spec.Services["worker"]
 				worker.RuntimeVersionOverride = ""
-				worker.ExtraPodSpec.MainContainer.Image = "registry.example/runtime:custom"
+				worker.ExtraPodSpec.MainContainer.Image = customRuntimeImage
 			}),
 			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				worker := dgd.Spec.Services["worker"]
