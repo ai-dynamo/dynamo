@@ -13,6 +13,7 @@ from typing import TypeVar
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 
 from ..protocol import (
+    AbortRequest,
     AllocateRequest,
     AllocationRecord,
     CommitRequest,
@@ -42,7 +43,7 @@ class _GMSClientSession:
         lock_type: RequestedLockType,
         expected_identity: tuple[str, str] | None = None,
     ):
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._socket: socket.socket | None = socket.socket(
             socket.AF_UNIX, socket.SOCK_STREAM
         )
@@ -101,9 +102,16 @@ class _GMSClientSession:
 
     def close(self) -> None:
         with self._lock:
-            if self._socket is not None:
-                self._socket.close()
-                self._socket = None
+            try:
+                if (
+                    self._socket is not None
+                    and self._granted_lock_type is GrantedLockType.RW
+                ):
+                    self._call(AbortRequest(), SuccessResponse)
+            finally:
+                if self._socket is not None:
+                    self._socket.close()
+                    self._socket = None
 
     def _call(
         self,

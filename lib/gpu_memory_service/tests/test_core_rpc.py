@@ -47,6 +47,42 @@ def _connect_in_thread(path: str, lock_type: RequestedLockType):
 
 
 @pytest.mark.timeout(10)
+def test_rw_close_waits_for_epoch_release(tmp_path, monkeypatch) -> None:
+    path = str(tmp_path / "gms.sock")
+    vmm = FakeVMM(granularity=64)
+    _manager, server, server_thread = _serve(path, vmm)
+    writer = _GMSClientSession(path, RequestedLockType.RW)
+    writer.allocate("ephemeral", 64)
+
+    release_started = threading.Event()
+    release_allowed = threading.Event()
+    close_returned = threading.Event()
+    original_release = vmm.release
+
+    def blocked_release(handle: int) -> None:
+        release_started.set()
+        assert release_allowed.wait(5)
+        original_release(handle)
+
+    def close_writer() -> None:
+        writer.close()
+        close_returned.set()
+
+    monkeypatch.setattr(vmm, "release", blocked_release)
+    close_thread = threading.Thread(target=close_writer, daemon=True)
+    close_thread.start()
+
+    assert release_started.wait(5)
+    assert not close_returned.is_set()
+    release_allowed.set()
+    assert close_returned.wait(5)
+    close_thread.join(timeout=5)
+    assert not close_thread.is_alive()
+    assert not vmm.server_handles
+    _stop(server, server_thread)
+
+
+@pytest.mark.timeout(10)
 def test_socket_sessions_commit_share_prioritize_writer_and_release_on_disconnect(
     tmp_path,
     monkeypatch,
@@ -90,9 +126,11 @@ def test_socket_sessions_commit_share_prioritize_writer_and_release_on_disconnec
     send_message(dead_writer, HandshakeRequest(RequestedLockType.RW))
     assert writer_waiting.wait(5)
     dead_writer.close()
-    cancellation_reader_result, cancellation_reader_connected, cancellation_thread = (
-        _connect_in_thread(path, RequestedLockType.RO)
-    )
+    (
+        cancellation_reader_result,
+        cancellation_reader_connected,
+        cancellation_thread,
+    ) = _connect_in_thread(path, RequestedLockType.RO)
     assert cancellation_reader_connected.wait(5)
     cancellation_reader_result.pop().close()
 

@@ -50,6 +50,10 @@ class CommitRequest(msgspec.Struct, tag="commit_request"):
     pass
 
 
+class AbortRequest(msgspec.Struct, tag="abort_request"):
+    pass
+
+
 class AllocationRecord(msgspec.Struct, frozen=True):
     allocation_id: str
     aligned_size: int
@@ -78,6 +82,7 @@ Request: TypeAlias = (
     | FreeRequest
     | ListAllocationsRequest
     | CommitRequest
+    | AbortRequest
 )
 Response: TypeAlias = (
     SuccessResponse | ExportResponse | ListAllocationsResponse | ErrorResponse
@@ -89,6 +94,7 @@ REQUEST_TYPES = (
     FreeRequest,
     ListAllocationsRequest,
     CommitRequest,
+    AbortRequest,
 )
 
 _encoder = msgspec.msgpack.Encoder()
