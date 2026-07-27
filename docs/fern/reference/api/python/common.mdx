@@ -68,6 +68,13 @@ from dynamo.common.multimodal import AsyncEncoderCache
 AsyncEncoderCache(cache: MultimodalEmbeddingCacheManager)
 ```
 
+Provides async get_or_compute that deduplicates concurrent requests
+for the same key, ensuring only one encoding runs at a time per key.
+
+Thread Safety:
+This class is NOT thread-safe. It is designed to run within a single
+asyncio event loop. All access must be from the same thread.
+
 [`components/src/dynamo/common/multimodal/async_encoder_cache.py#L45`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/async_encoder_cache.py#L45)
 
 **Public methods**
@@ -88,6 +95,16 @@ from dynamo.common.multimodal import AudioLoader
 AudioLoader(http_timeout: float = 30.0, enable_frontend_decoding: bool = False, url_policy: UrlValidationPolicy | None = None) -> None
 ```
 
+Delegates URL fetching and decoding to vLLM's ``MediaConnector`` +
+``AudioMediaIO`` so that the exact same loading logic runs whether the
+request arrives via ``vllm serve`` or through Dynamo.  Returns
+``(waveform, sample_rate)`` tuples at the native sample rate — vLLM's
+model-specific ``MultiModalDataParser`` handles resampling and channel
+normalization downstream.
+
+Also supports the NIXL decoded variant for frontend-decoded audio
+transferred via RDMA.
+
 [`components/src/dynamo/common/multimodal/audio_loader.py#L66`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/audio_loader.py#L66)
 
 **Public methods**
@@ -103,6 +120,22 @@ Abstract base for all engines — the modality-agnostic lifecycle.
 ```python
 from dynamo.common.backend import BaseEngine
 ```
+
+``Worker`` drives every engine through the same lifecycle regardless of
+modality; only the request/response shape of :meth:`generate` differs.
+That method is therefore declared on the modality-specific subclasses
+(:class:`LLMEngine` for token-based inference, :class:`RawEngine` for
+raw non-token media generation), not here.
+
+Lifecycle:
+1. from_args(argv) -- parse CLI args, return (engine, WorkerConfig)
+2. start()         -- start the engine, return EngineConfig metadata.
+After start() returns, generate() MUST be ready
+to accept calls. Worker begins serving
+immediately after start().
+3. generate()      -- called for each request (concurrent calls expected)
+4. abort()         -- called when a request is cancelled (optional, default no-op)
+5. cleanup()       -- called once on shutdown, release all resources
 
 [`components/src/dynamo/common/backend/engine.py#L153`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L153)
 
@@ -125,7 +158,7 @@ from dynamo.common.backend import BaseEngine
 </Accordion>
 
 <Accordion id="api-dynamo-common-backend-engine-diffusionengine" title="DiffusionEngine (class)">
-A :class:`RawEngine` for diffusion-family generation (image/video via
+A :class:`RawEngine` for diffusion-family generation (image/video via VisualGen, DiffGenerator). Names the family only — non-diffusion raw modalities (e.g. TTS audio) subclass :class:`RawEngine` directly. Routing keys off :class:`RawEngine`, so any subclass uses the raw adapter.
 
 ```python
 from dynamo.common.backend import DiffusionEngine
@@ -165,6 +198,10 @@ from dynamo.common.backend import EngineConfig
 EngineConfig(model: str, served_model_name: Optional[str] = None, runtime_data: Optional[dict[str, Any]] = None, llm: Optional[LlmRegistration] = None) -> None
 ```
 
+The neutral fields (``model``, ``served_model_name``, ``runtime_data``)
+apply to every modality; token-pipeline metadata lives in the optional
+:attr:`llm` sub-record, which raw media engines leave ``None``.
+
 [`components/src/dynamo/common/backend/engine.py#L136`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L136)
 
 **Public methods**
@@ -198,6 +235,10 @@ Per-iteration metrics emitted by InstrumentedScheduler.
 from dynamo.common.forward_pass_metrics import ForwardPassMetrics
 ```
 
+One message is emitted per scheduler iteration (one per forward pass).
+An idle heartbeat (all zeros, wall_time=0) is emitted once when the
+engine transitions from active to idle.
+
 [`components/src/dynamo/common/forward_pass_metrics.py#L153`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/forward_pass_metrics.py#L153)
 </Accordion>
 
@@ -208,6 +249,24 @@ Single chunk yielded by ``LLMEngine.generate()``.
 from dynamo.common.backend import GenerateChunk
 ```
 
+Every chunk must include ``token_ids`` and ``index``.
+Use ``index=0`` for single-choice responses. The final chunk must
+additionally include ``finish_reason``; ``completion_usage`` is
+optional (the OpenAI frontend aggregates it when present, and
+matches the Rust ``Option<CompletionUsage>`` /
+``skip_serializing_if = "Option::is_none"`` semantics).
+
+Prefill terminals carry ``disaggregated_params`` for the
+PrefillRouter to forward to the decode peer. When the caller
+requested logprobs, chunks may also carry ``log_probs`` and
+``top_logprobs`` aligned to ``token_ids`` — see
+:mod:`dynamo.common.backend.logprobs`.
+
+Encode terminals carry ``encoder_result`` (an opaque object the
+frontend forwards onto the downstream
+``PreprocessedRequest.encoder_result``). Construct with
+:func:`dynamo.common.backend.multimodal.encoder_terminal_chunk`.
+
 [`components/src/dynamo/common/backend/engine.py#L74`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L74)
 </Accordion>
 
@@ -217,6 +276,26 @@ Inbound request dict passed to ``LLMEngine.generate()``.
 ```python
 from dynamo.common.backend import GenerateRequest
 ```
+
+``token_ids`` is always present (set by the Rust preprocessor).
+The remaining groups are optional — engines should access them
+defensively with ``.get(key, {})``.
+
+Disaggregated-serving keys (``prefill_result``, ``bootstrap_info``)
+are set by the frontend's PrefillRouter on decode requests; engines
+read them via ``dynamo.common.backend.disagg`` helpers.
+
+Multimodal keys (``multi_modal_data``, ``mm_processor_kwargs``,
+``mm_routing_info``) are populated by the frontend preprocessor when
+the request carries media. ``encoder_result`` is set by the
+frontend when forwarding a request from an Encode worker
+to a downstream Prefill/Aggregated peer; engines read it via
+:func:`dynamo.common.backend.multimodal.require_encoder_result`. All
+four are object-shaped (``dict``) by contract.
+
+``model`` carries the requested model name (set by the Rust
+preprocessor). Engines that support dynamic LoRA read it to route a
+request to a loaded adapter.
 
 [`components/src/dynamo/common/backend/engine.py#L35`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L35)
 </Accordion>
@@ -231,6 +310,11 @@ from dynamo.common.http import HttpClient
 ```python
 HttpClient(config: Optional[HttpConfigBase] = None) -> None
 ```
+
+Subclasses own a backend-specific session/client singleton on the
+instance. Callers reach the public surface via :meth:`fetch_bytes`
+and the unified exception classes above; the concrete backend type
+is invisible past instantiation.
 
 [`components/src/dynamo/common/http/base.py#L50`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/base.py#L50)
 
@@ -335,6 +419,11 @@ Abstract base for token-based inference engines (vLLM, SGLang, TRT-LLM).
 from dynamo.common.backend import LLMEngine
 ```
 
+The token pipeline: the Rust preprocessor tokenizes the prompt and sets
+``token_ids`` on the request; :meth:`generate` yields token chunks that
+the Rust postprocessor detokenizes. Registered with
+``ModelInput.Tokens`` and served through the token request adapter.
+
 [`components/src/dynamo/common/backend/engine.py#L347`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L347)
 
 **Public methods**
@@ -345,7 +434,7 @@ from dynamo.common.backend import LLMEngine
 </Accordion>
 
 <Accordion id="api-dynamo-common-backend-engine-llmregistration" title="LlmRegistration (class)">
-Token-pipeline registration metadata (KV cache, data-parallel layout,
+Token-pipeline registration metadata (KV cache, data-parallel layout, disaggregation bootstrap). Set by :class:`LLMEngine`s; :class:`RawEngine`s leave :attr:`EngineConfig.llm` ``None``. A ``None`` field isn't advertised (the router falls back to its defaults).
 
 ```python
 from dynamo.common.backend import LlmRegistration
@@ -391,6 +480,9 @@ from dynamo.common.lora import LoRAManager
 LoRAManager(cache_path: Optional[Path] = None)
 ```
 
+The manager uses the Rust-based LoRADownloader for local, S3, and Hugging Face
+sources, and allows registering custom Python sources for other protocols.
+
 [`components/src/dynamo/common/lora/manager.py#L36`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/lora/manager.py#L36)
 
 **Public methods**
@@ -402,7 +494,7 @@ LoRAManager(cache_path: Optional[Path] = None)
 </Accordion>
 
 <Accordion id="api-dynamo-common-lora-manager-lorasourceprotocol" title="LoRASourceProtocol (class)">
-Protocol for custom Python LoRA sources.
+Protocol for custom Python LoRA sources. Users can implement this to add custom sources.
 
 ```python
 from dynamo.common.lora import LoRASourceProtocol
@@ -488,6 +580,15 @@ from dynamo.common.memory import MultimodalEmbeddingCacheManager
 MultimodalEmbeddingCacheManager(capacity_bytes: int)
 ```
 
+Stores tensors keyed by content hash with automatic eviction
+when capacity is exceeded.
+
+Thread Safety:
+This class is NOT thread-safe. It is designed to run within a single
+thread (e.g., an asyncio event loop). All access must be from the same
+thread to avoid race conditions. This is intentional to keep the
+implementation simple and avoid locking overhead.
+
 [`components/src/dynamo/common/memory/multimodal_embedding_cache_manager.py#L43`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/memory/multimodal_embedding_cache_manager.py#L43)
 
 **Public methods**
@@ -510,6 +611,9 @@ from dynamo.common.multimodal import NixlReadEmbeddingReceiver
 NixlReadEmbeddingReceiver(embedding_hidden_size: int = 8 * 1024, max_item_mm_token: int = 1024, max_items: int = 1024) -> None
 ```
 
+Uses nixl_connect.Connector which now natively provides a shared singleton
+Connection (NIXL agent) and reference-counted Remote agent lifecycle.
+
 [`components/src/dynamo/common/multimodal/embedding_transfer.py#L852`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L852)
 
 **Public methods**
@@ -530,6 +634,9 @@ from dynamo.common.multimodal import NixlReadEmbeddingSender
 NixlReadEmbeddingSender()
 ```
 
+Uses nixl_connect.Connector which now natively provides a shared singleton
+Connection (NIXL agent) and reference-counted Remote agent lifecycle.
+
 [`components/src/dynamo/common/multimodal/embedding_transfer.py#L795`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L795)
 
 **Public methods**
@@ -539,7 +646,7 @@ NixlReadEmbeddingSender()
 </Accordion>
 
 <Accordion id="api-dynamo-common-multimodal-embedding-transfer-nixlwriteembeddingreceiver" title="NixlWriteEmbeddingReceiver (class)">
-Counter part of 'NixlWriteEmbeddingSender', see 'NixlWriteEmbeddingSender' for details.
+Counter part of 'NixlWriteEmbeddingSender', see 'NixlWriteEmbeddingSender' for details. The receiver manages a ring buffer for sender to write the embeddings into, and respond to the sender's transfer request with the buffer information for the WRITE transfer.
 
 ```python
 from dynamo.common.multimodal import NixlWriteEmbeddingReceiver
@@ -569,6 +676,28 @@ from dynamo.common.multimodal import NixlWriteEmbeddingSender
 NixlWriteEmbeddingSender()
 ```
 
+Designed for scenarios where the sender transmits dynamically allocated
+tensors. Because these tensors allocation is external to the sender,
+NIXL memory registration will perform on each send request. The receiver
+will manage a pre-allocated buffer, so its NIXL metadata is consistent once
+initialized. In such acenarios, let sender initiate the WRITE operations requires
+minimal metadata exchange.
+
+Protocol:
+1. Record the receiver NIXL metadata, this is done:
+* Implicitly through the first transfer request as fallback if the metadata
+hasn't been recorded.
+* [REMOVED] Explicitly through add_agent() API before calling send_embeddings().
+The receiver provides get_agent_metadata() API to return its NIXL metadata.
+This complicates the implementation and add extra responsiblity on the caller side,
+will revisit the necessity if metadata exchange overhead is significant.
+2. The sender prepares the embeddings and produces a TransferRequest
+containing sender contact and tensor metadata (shape, dtype, size, etc).
+3. The receiver responds with (optional) receiver contact, target tensor
+metadata (buffer address, device, etc) and done signal through NIXL notification.
+4. The sender performs a NIXL WRITE to push the data into the
+receiver's buffer.
+
 [`components/src/dynamo/common/multimodal/embedding_transfer.py#L376`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L376)
 
 **Public methods**
@@ -584,6 +713,8 @@ Request for video generation (/v1/videos endpoint).
 from dynamo.common.protocols import NvCreateVideoRequest
 ```
 
+Matches Rust NvCreateVideoRequest in lib/llm/src/protocols/openai/videos.rs.
+
 [`components/src/dynamo/common/protocols/video_protocol.py#L50`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/protocols/video_protocol.py#L50)
 </Accordion>
 
@@ -593,6 +724,8 @@ Response structure for video generation.
 ```python
 from dynamo.common.protocols import NvVideosResponse
 ```
+
+Matches Rust NvVideosResponse in lib/llm/src/protocols/openai/videos.rs.
 
 [`components/src/dynamo/common/protocols/video_protocol.py#L107`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/protocols/video_protocol.py#L107)
 </Accordion>
@@ -623,6 +756,9 @@ Metrics for requests waiting in the queue (not scheduled this iteration).
 ```python
 from dynamo.common.forward_pass_metrics import QueuedRequestMetrics
 ```
+
+All token counts here are raw totals -- prefix cache effects are unknown
+until a request is actually scheduled.
 
 [`components/src/dynamo/common/forward_pass_metrics.py#L122`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/forward_pass_metrics.py#L122)
 </Accordion>
@@ -666,6 +802,16 @@ Engines for raw, non-token generation (image, video, audio).
 ```python
 from dynamo.common.backend import RawEngine
 ```
+
+Named for the *contract*, not a use case: unlike :class:`LLMEngine` there
+is no token pipeline — the frontend forwards the OpenAI-shaped request as a
+JSON object and :meth:`generate` yields the response object(s) directly.
+Registered with ``ModelInput.Text`` and served through the raw request
+adapter (no tokenization or KV cache). The ``dict`` contract is
+modality-neutral, so a new media modality is a new engine, not a new
+framework path; one engine may serve several modalities. Yield one
+(terminal) object, or intermediate progress objects ending with a terminal
+one. Subclasses like :class:`DiffusionEngine` add no contract.
 
 [`components/src/dynamo/common/backend/engine.py#L405`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L405)
 
@@ -711,6 +857,8 @@ Video data in response.
 from dynamo.common.protocols import VideoData
 ```
 
+Matches Rust VideoData in lib/llm/src/protocols/openai/videos.rs.
+
 [`components/src/dynamo/common/protocols/video_protocol.py#L91`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/protocols/video_protocol.py#L91)
 </Accordion>
 
@@ -745,6 +893,16 @@ from dynamo.common.forward_pass_metrics import WelfordAccumulator
 WelfordAccumulator() -> None
 ```
 
+Numerically stable single-pass computation -- avoids catastrophic
+cancellation that sum-of-squares can suffer with large values.
+
+Usage::
+
+acc = WelfordAccumulator()
+for v in values:
+acc.add(v)
+print(acc.n, acc.s, acc.variance())
+
 [`components/src/dynamo/common/forward_pass_metrics.py#L48`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/forward_pass_metrics.py#L48)
 
 **Public methods**
@@ -764,6 +922,11 @@ from dynamo.common.backend import Worker
 ```python
 Worker(engine: BaseEngine, config: WorkerConfig)
 ```
+
+Accepts any :class:`BaseEngine` — an :class:`LLMEngine` (token pipeline)
+or a :class:`DiffusionEngine` (raw media pipeline). The request adapter is
+selected from the engine kind (``raw=isinstance(engine, RawEngine)``);
+``WorkerConfig.model_input`` is validated against that kind.
 
 [`components/src/dynamo/common/backend/worker.py#L224`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/worker.py#L224)
 
@@ -803,6 +966,12 @@ from dynamo.common.config_dump import add_config_dump_args
 add_config_dump_args(parser: argparse.ArgumentParser) -> None
 ```
 
+**Parameters**
+
+<ParamField path="parser" type="argparse.ArgumentParser">
+The parser to add the arguments to
+</ParamField>
+
 [`components/src/dynamo/common/config_dump/config_dumper.py#L159`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/config_dump/config_dumper.py#L159)
 </Accordion>
 
@@ -816,6 +985,10 @@ from dynamo.common.http import close_http_client
 ```python
 close_http_client() -> None
 ```
+
+Clears the resolved client so a fresh env-var reading happens on
+the next call (primarily useful in tests that vary
+``DYN_HTTP_BACKEND``).
 
 [`components/src/dynamo/common/http/__init__.py#L87`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/__init__.py#L87)
 </Accordion>
@@ -831,6 +1004,10 @@ from dynamo.common.forward_pass_metrics import decode
 decode(data: bytes) -> ForwardPassMetrics | None
 ```
 
+Returns None (and logs a warning) if the message cannot be decoded or
+carries a version this code does not understand, so callers can simply
+skip unsupported messages without crashing.
+
 [`components/src/dynamo/common/forward_pass_metrics.py#L204`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/forward_pass_metrics.py#L204)
 </Accordion>
 
@@ -844,6 +1021,17 @@ from dynamo.common.config_dump import dump_config
 ```python
 dump_config(dump_config_to: Optional[str], config: Any) -> None
 ```
+
+If dump_config_to is not provided, the config will be logged to stdout at VERBOSE level.
+
+**Parameters**
+
+<ParamField path="dump_config_to" type="Optional[str]">
+Optional path to dump the config to. If None, logs to stdout.
+</ParamField>
+<ParamField path="config" type="Any">
+The configuration object to dump (must be JSON-serializable).
+</ParamField>
 
 [`components/src/dynamo/common/config_dump/config_dumper.py#L72`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/config_dump/config_dumper.py#L72)
 </Accordion>
@@ -929,6 +1117,10 @@ from dynamo.common.rl import first_endpoint_response
 first_endpoint_response(endpoint_handler: EndpointGenerator, body: dict[str, Any]) -> dict[str, Any]
 ```
 
+The generator is explicitly closed before returning so handlers that hold
+resources across their yield (e.g. load_lora/unload_lora holding a per-LoRA
+lock) release them promptly rather than waiting for garbage collection.
+
 [`components/src/dynamo/common/rl/admin.py#L33`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/rl/admin.py#L33)
 </Accordion>
 
@@ -942,6 +1134,23 @@ from dynamo.common.config_dump import get_config_dump
 ```python
 get_config_dump(config: Any, extra_info: Optional[Dict[str, Any]] = None) -> str
 ```
+
+**Parameters**
+
+<ParamField path="config" type="Any">
+Any JSON-serializable object containing the backend configuration.
+</ParamField>
+<ParamField path="extra_info" type="Optional[Dict[str, Any]]">
+Optional dict of additional information to include in the dump.
+</ParamField>
+
+**Returns**
+
+- `str` — JSON string containing comprehensive information.
+
+<Note>
+Returns error information if collection fails, ensuring some diagnostic data is always available.
+</Note>
 
 [`components/src/dynamo/common/config_dump/config_dumper.py#L108`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/config_dump/config_dumper.py#L108)
 </Accordion>
@@ -971,6 +1180,33 @@ from dynamo.common.config_dump import get_environment_vars
 get_environment_vars(prefixes: Optional[List[str]] = None, include_sensitive: bool = False, additional_vars: Optional[Set[str]] = None) -> Dict[str, str]
 ```
 
+**Parameters**
+
+<ParamField path="prefixes" type="Optional[List[str]]">
+List of environment variable prefixes to capture.
+If None, uses DEFAULT_ENV_PREFIXES.
+</ParamField>
+<ParamField path="include_sensitive" type="bool">
+If False, redacts values of potentially sensitive variables.
+Default is False for security.
+</ParamField>
+<ParamField path="additional_vars" type="Optional[Set[str]]">
+Set of specific variable names to include regardless of prefix.
+</ParamField>
+
+**Returns**
+
+- `Dict[str, str]` — Dictionary of environment variable names to values.
+- `Dict[str, str]` — Sensitive values are replaced with "&lt;REDACTED&gt;" unless include_sensitive is True.
+
+**Examples**
+
+```python
+>>> get_environment_vars()  # Uses default prefixes
+>>> get_environment_vars(prefixes=["MY_APP_"])  # Custom prefixes only
+>>> get_environment_vars(additional_vars={"PATH", "HOME"})  # Include specific vars
+```
+
 [`components/src/dynamo/common/config_dump/environment.py#L51`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/config_dump/environment.py#L51)
 </Accordion>
 
@@ -984,6 +1220,19 @@ from dynamo.common.storage import get_fs
 ```python
 get_fs(fs_url: str) -> DirFileSystem
 ```
+
+**Parameters**
+
+<ParamField path="fs_url" type="str">
+The URL of the filesystem to initialize. e.g. s3://bucket, gs://bucket, file:///local/path
+</ParamField>
+
+**Returns**
+
+- `DirFileSystem` — The initialized DirFileSystem wrapper for the filesystem.
+- `DirFileSystem` — fs.fs.protocol to get the protocol of the filesystem
+- `DirFileSystem` — fs.path to get the bucket or root path
+- `DirFileSystem` — path to the object in the filesystem - f"&#123;fs.fs.protocol&#125;://&#123;fs.path&#125;/&#123;path&#125;"
 
 [`components/src/dynamo/common/storage.py#L42`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/storage.py#L42)
 </Accordion>
@@ -999,6 +1248,15 @@ from dynamo.common.config_dump import get_gpu_info
 get_gpu_info() -> Optional[Dict[str, Any]]
 ```
 
+**Returns**
+
+- `Optional[Dict[str, Any]]` — Dictionary containing GPU details if available, None otherwise.
+- `Optional[Dict[str, Any]]` — Attempts to use nvidia-smi via subprocess with XML output format.
+
+<Note>
+This is a best-effort function and returns None if GPU info cannot be obtained.
+</Note>
+
 [`components/src/dynamo/common/config_dump/system_info.py#L98`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/config_dump/system_info.py#L98)
 </Accordion>
 
@@ -1013,6 +1271,9 @@ from dynamo.common.lora import get_lora_manager
 get_lora_manager() -> Optional[LoRAManager]
 ```
 
+Initializes on first call. Initialization errors propagate to the caller —
+OnceLock does not cache failures, so subsequent calls will retry.
+
 [`components/src/dynamo/common/lora/manager.py#L145`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/lora/manager.py#L145)
 </Accordion>
 
@@ -1026,6 +1287,24 @@ from dynamo.common.storage import get_media_url
 ```python
 get_media_url(fs: DirFileSystem, storage_path: str, base_url: Optional[str] = None) -> str
 ```
+
+**Parameters**
+
+<ParamField path="fs" type="DirFileSystem">
+The DirFileSystem returned by ``get_fs()``.
+</ParamField>
+<ParamField path="storage_path" type="str">
+Relative path within the filesystem (e.g. "videos/req-id.mp4").
+</ParamField>
+<ParamField path="base_url" type="Optional[str]">
+Optional CDN / proxy base URL.  When set, the returned URL is
+``{base_url}/{storage_path}``.  When *None*, the URL is constructed
+from the filesystem's protocol and root path.
+</ParamField>
+
+**Returns**
+
+- `str` — Public URL string for the uploaded file.
 
 [`components/src/dynamo/common/storage.py#L72`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/storage.py#L72)
 </Accordion>
@@ -1055,6 +1334,14 @@ from dynamo.common.config_dump import get_runtime_info
 get_runtime_info() -> Dict[str, Any]
 ```
 
+**Returns**
+
+- `Dict[str, Any]` — Dictionary containing Python version, executable path, and command-line arguments.
+
+<Note>
+Gracefully handles errors by returning partial information.
+</Note>
+
 [`components/src/dynamo/common/config_dump/system_info.py#L60`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/config_dump/system_info.py#L60)
 </Accordion>
 
@@ -1068,6 +1355,15 @@ from dynamo.common.config_dump import get_system_info
 ```python
 get_system_info() -> Dict[str, Any]
 ```
+
+**Returns**
+
+- `Dict[str, Any]` — Dictionary containing platform, architecture, processor, hostname,
+- `Dict[str, Any]` — and operating system details.
+
+<Note>
+Gracefully handles errors by returning partial information.
+</Note>
 
 [`components/src/dynamo/common/config_dump/system_info.py#L13`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/config_dump/system_info.py#L13)
 </Accordion>
@@ -1110,6 +1406,11 @@ from dynamo.common.config_dump import register_encoder
 ```python
 register_encoder(type_class: type) -> Any
 ```
+
+Usage:
+@register_encoder(MyClass)
+def encode_my_class(obj: MyClass):
+return &#123;"field": obj.field&#125;
 
 [`components/src/dynamo/common/config_dump/config_dumper.py#L209`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/config_dump/config_dumper.py#L209)
 </Accordion>
@@ -1180,6 +1481,28 @@ from dynamo.common.storage import upload_to_fs
 ```python
 upload_to_fs(fs: DirFileSystem, storage_path: str, data: bytes, base_url: Optional[str] = None) -> str
 ```
+
+This is the canonical helper for all backends (vLLM, SGLang, TRT-LLM)
+to store generated images/videos and produce a response URL.
+
+**Parameters**
+
+<ParamField path="fs" type="DirFileSystem">
+The DirFileSystem returned by ``get_fs()``.
+</ParamField>
+<ParamField path="storage_path" type="str">
+Relative path within the filesystem (e.g. "images/req-id/file.png").
+</ParamField>
+<ParamField path="data" type="bytes">
+Raw bytes to upload.
+</ParamField>
+<ParamField path="base_url" type="Optional[str]">
+Optional CDN / proxy base URL for URL rewriting.
+</ParamField>
+
+**Returns**
+
+- `str` — Public URL string for the uploaded file.
 
 [`components/src/dynamo/common/storage.py#L96`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/storage.py#L96)
 </Accordion>

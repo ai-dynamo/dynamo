@@ -67,6 +67,10 @@ from dynamo.frontend.utils import PreprocessError
 PreprocessError(message: str)
 ```
 
+Carries a plain message because the worker→main-process boundary
+pickles the exception; the main process re-raises a Dynamo-typed
+exception so PyO3 can route it through the proper backend-error path.
+
 [`components/src/dynamo/frontend/utils.py#L83`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/utils.py#L83)
 
 **Public methods**
@@ -177,6 +181,11 @@ from dynamo.frontend.sglang_prepost import SglangStreamingPostProcessor
 SglangStreamingPostProcessor(*, tokenizer, tool_call_parser: ToolCallParserType | None, reasoning_parser: ReasoningParser | None, history_tool_calls_count: int = 0, sglang_tools: list[SglangTool] | None = None, tool_call_parser_name: str | None = None, eos_token_ids: list[int] | None = None) -> None
 ```
 
+Handles:
+- Incremental detokenization via sliding-window decode (6-token lookback)
+- Reasoning content extraction via SGLang ReasoningParser
+- Tool call parsing via SGLang FunctionCallParser or JsonArrayParser
+
 [`components/src/dynamo/frontend/sglang_prepost.py#L918`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L918)
 
 **Public methods**
@@ -234,6 +243,9 @@ from dynamo.frontend.main import async_main
 async_main()
 ```
 
+Initializes the distributed runtime, configures routing, and starts
+the HTTP server or interactive mode based on command-line arguments.
+
 [`components/src/dynamo/frontend/main.py#L280`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/main.py#L280)
 </Accordion>
 
@@ -290,6 +302,17 @@ from dynamo.frontend.sglang_prepost import create_parsers
 create_parsers(request: dict[str, Any], *, tool_call_parser_name: str | None, reasoning_parser_name: str | None, sglang_tools: list[SglangTool] | None = None, force_reasoning: bool = False) -> tuple[ToolCallParserType | None, ReasoningParser | None]
 ```
 
+Shared by both the single-process preprocessing path and the pool path
+(which must recreate non-picklable parsers in the main process).
+
+If ``sglang_tools`` is provided, reuses them; otherwise converts from
+the request's ``tools`` field.
+
+For ``tool_choice="required"`` or a named function, uses
+:class:`JsonArrayParser` (matching native SGLang) since guided decoding
+constrains the output to a JSON array.  Otherwise uses the model-specific
+:class:`FunctionCallParser`.
+
 [`components/src/dynamo/frontend/sglang_prepost.py#L265`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L265)
 </Accordion>
 
@@ -303,6 +326,9 @@ from dynamo.frontend.sglang_prepost import detect_force_reasoning_from_template
 ```python
 detect_force_reasoning_from_template(chat_template: str | None) -> bool
 ```
+
+Intended to be called once at processor startup with
+``tokenizer.chat_template`` and cached on the processor.
 
 [`components/src/dynamo/frontend/sglang_prepost.py#L78`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L78)
 </Accordion>
@@ -318,6 +344,17 @@ from dynamo.frontend.utils import extract_mm_urls
 extract_mm_urls(messages: list[dict[str, Any]]) -> tuple[dict[str, list[dict[str, str]]] | None, dict[str, list[str | None]] | None]
 ```
 
+URL-backed parts become ``Url`` variants. Image parts with no URL and an
+opaque ``uuid`` become ``UuidOnly`` variants for vLLM's multimodal
+processor cache. Cache UUIDs on audio and video are rejected. Image UUID
+lists preserve slot order::
+
+(&#123;"image_url": [&#123;"Url": "https://..."&#125;, &#123;"UuidOnly": "image-1"&#125;]&#125;,
+&#123;"image_url": ["image-1", "image-1"]&#125;)
+
+The UUID map is ``None`` when no user UUID is present. A media content part
+with neither a URL nor UUID is rejected instead of being silently dropped.
+
 [`components/src/dynamo/frontend/utils.py#L100`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/utils.py#L100)
 </Accordion>
 
@@ -331,6 +368,12 @@ from dynamo.frontend.main import graceful_shutdown
 ```python
 graceful_shutdown(runtime: DistributedRuntime) -> None
 ```
+
+**Parameters**
+
+<ParamField path="runtime" type="DistributedRuntime">
+The DistributedRuntime instance to shut down.
+</ParamField>
 
 [`components/src/dynamo/frontend/main.py#L433`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/main.py#L433)
 </Accordion>
@@ -346,6 +389,8 @@ from dynamo.frontend.utils import handle_engine_error
 handle_engine_error(engine_response: Any, request_id: str, logger: logging.Logger) -> dict[str, Any]
 ```
 
+Called when engine_response is None or missing 'token_ids'.
+
 [`components/src/dynamo/frontend/utils.py#L184`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/utils.py#L184)
 </Accordion>
 
@@ -359,6 +404,9 @@ from dynamo.frontend.main import load_frontend_route_extensions
 ```python
 load_frontend_route_extensions(extension_names: list[str]) -> list[FrontendRoute]
 ```
+
+Each value is either a name registered under the ``dynamo.frontend.routes``
+entry-point group (preferred) or a direct ``module:function`` path.
 
 [`components/src/dynamo/frontend/main.py#L175`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/main.py#L175)
 </Accordion>
@@ -444,6 +492,10 @@ from dynamo.frontend.main import parse_args
 parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespace]]
 ```
 
+**Returns**
+
+- `tuple[FrontendConfig, Optional[Namespace], Optional[Namespace]]` — Tuple of (FrontendConfig, vllm_flags, sglang_flags).
+
 [`components/src/dynamo/frontend/main.py#L203`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/main.py#L203)
 </Accordion>
 
@@ -457,6 +509,13 @@ from dynamo.frontend.sglang_prepost import preprocess_chat_request
 ```python
 preprocess_chat_request(request: dict[str, Any], *, tokenizer, tool_call_parser_name: str | None, reasoning_parser_name: str | None, exclude_tools_when_tool_choice_none: bool = True, template_force_reasoning: bool = False) -> SglangPreprocessResult
 ```
+
+``template_force_reasoning`` is the static per-server flag derived from
+the chat template (see :func:`detect_force_reasoning_from_template`);
+the effective per-request value combines it with the configured parser and
+request-level thinking controls.
+
+Synchronous -- suitable for both main-process and worker-process execution.
 
 [`components/src/dynamo/frontend/sglang_prepost.py#L698`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L698)
 </Accordion>
@@ -528,6 +587,10 @@ from dynamo.frontend.utils import resolve_chat_template
 resolve_chat_template(source_path: str, *, backend: ChatProcessorBackend = 'vllm') -> str | None
 ```
 
+Covers models (e.g. Qwen3-Omni) whose template lives in chat_template.json
+or chat_template.jinja rather than tokenizer_config.json, which the HF
+tokenizer does not merge. The backend selects native .jinja file semantics.
+
 [`components/src/dynamo/frontend/utils.py#L33`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/utils.py#L33)
 </Accordion>
 
@@ -542,11 +605,26 @@ from dynamo.frontend.sglang_prepost import resolve_request_force_reasoning
 resolve_request_force_reasoning(request: dict[str, Any], reasoning_parser_name: str | None, template_default: bool) -> bool
 ```
 
+Mirrors sglang.srt.entrypoints.openai.serving_chat._get_reasoning_from_request
+combined with template_manager.force_reasoning:
+
+* opt-out families (``glm45``/``qwen3``/``kimi_k2``/...): on by
+default, ``chat_template_kwargs.enable_thinking=False`` (or
+``thinking=False`` for ``kimi_k2``) disables it.
+* MiniMax-M3 defaults to adaptive, but SGLang still enables the
+reasoning parser unless ``chat_template_kwargs.thinking_mode`` is
+explicitly ``"disabled"``.
+* Mistral is enabled only when ``reasoning_effort`` is present and not
+``"none"``.
+* opt-in families (``deepseek-v3``/``gemma4``): off by default,
+enabled by ``chat_template_kwargs.{thinking,enable_thinking}=True``.
+* anything else: follow the statically-detected template default.
+
 [`components/src/dynamo/frontend/sglang_prepost.py#L119`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L119)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-main-setup-engine-factory" title="setup_engine_factory (function)">
-When using vllm pre and post processor, create the EngineFactory that
+When using vllm pre and post processor, create the EngineFactory that creates the engines that run requests.
 
 ```python
 from dynamo.frontend.main import setup_engine_factory
@@ -560,7 +638,7 @@ setup_engine_factory(config: FrontendConfig, vllm_flags: Namespace) -> EngineFac
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-main-setup-sglang-engine-factory" title="setup_sglang_engine_factory (function)">
-When using sglang pre and post processor, create the SglangEngineFactory
+When using sglang pre and post processor, create the SglangEngineFactory that creates the engines that run requests.
 
 ```python
 from dynamo.frontend.main import setup_sglang_engine_factory

@@ -46,7 +46,7 @@ AicPerfConfig(aic_backend: str, aic_system: str, aic_model_path: str, aic_tp_siz
 </Accordion>
 
 <Accordion id="api-dynamo-core-approxkvindexer" title="ApproxKvIndexer (class)">
-An approximate KV Indexer that doesn't receive KV cache events from workers.
+An approximate KV Indexer that doesn't receive KV cache events from workers. Instead, it relies on routing decisions with TTL-based expiration and pruning to estimate which blocks are cached on which workers.
 
 ```python
 from dynamo._core import ApproxKvIndexer
@@ -55,6 +55,11 @@ from dynamo._core import ApproxKvIndexer
 ```python
 ApproxKvIndexer(endpoint: Endpoint, kv_block_size: int, router_ttl_secs: float = 120.0) -> None
 ```
+
+This is useful when:
+- Backend engines don't emit KV events
+- You want to reduce event processing overhead
+- Lower routing accuracy is acceptable
 
 [`lib/bindings/python/src/dynamo/_core.pyi#L1067`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1067)
 
@@ -168,7 +173,7 @@ from dynamo._core import ConnectionTimeout
 </Accordion>
 
 <Accordion id="api-dynamo-core-context" title="Context (class)">
-Context wrapper around AsyncEngineContext for Python bindings.
+Context wrapper around AsyncEngineContext for Python bindings. Provides tracing and cancellation capabilities for request handling.
 
 ```python
 from dynamo._core import Context
@@ -348,7 +353,7 @@ from dynamo._core import EngineType
 </Accordion>
 
 <Accordion id="api-dynamo-core-entrypointargs" title="EntrypointArgs (class)">
-Settings to connect an input to a worker and run them.
+Settings to connect an input to a worker and run them. Use by `dynamo run`.
 
 ```python
 from dynamo._core import EntrypointArgs
@@ -366,7 +371,7 @@ EntrypointArgs(engine_type: EngineType, model_path: Optional[str] = None, model_
 </Accordion>
 
 <Accordion id="api-dynamo-core-fpmdirectpublisher" title="FpmDirectPublisher (class)">
-Direct Forward Pass Metrics publisher used by in-process producers such
+Direct Forward Pass Metrics publisher used by in-process producers such as the TRT-LLM adapter. The underlying Rust publisher owns per-DP-rank serialization tasks (each with its own 1s idle heartbeat timer) and a single event-plane publisher task. Python callers do not manage heartbeat: when ``publish`` is not called for ``IDLE_HEARTBEAT_INTERVAL`` (1.0s, matching vLLM's ``HEARTBEAT_INTERVAL``), the Rust side emits a zeroed snapshot on that rank's channel.
 
 ```python
 from dynamo._core import FpmDirectPublisher
@@ -386,7 +391,7 @@ FpmDirectPublisher(endpoint: Endpoint, worker_id: str, dp_size: int = 1) -> None
 </Accordion>
 
 <Accordion id="api-dynamo-core-fpmeventrelay" title="FpmEventRelay (class)">
-Relay that bridges ForwardPassMetrics from a local raw ZMQ PUB socket
+Relay that bridges ForwardPassMetrics from a local raw ZMQ PUB socket (InstrumentedScheduler in EngineCore child process) to the Dynamo event plane with automatic discovery registration.
 
 ```python
 from dynamo._core import FpmEventRelay
@@ -405,7 +410,7 @@ FpmEventRelay(endpoint: Endpoint, zmq_endpoint: str) -> None
 </Accordion>
 
 <Accordion id="api-dynamo-core-fpmeventsubscriber" title="FpmEventSubscriber (class)">
-Subscriber for ForwardPassMetrics from the Dynamo event plane.
+Subscriber for ForwardPassMetrics from the Dynamo event plane. Auto-discovers engine publishers via the discovery plane.
 
 ```python
 from dynamo._core import FpmEventSubscriber
@@ -414,6 +419,14 @@ from dynamo._core import FpmEventSubscriber
 ```python
 FpmEventSubscriber(endpoint: Endpoint) -> None
 ```
+
+Two mutually exclusive usage modes:
+
+1. **recv mode** (default): call ``recv()`` to pull individual messages.
+2. **tracking mode**: call ``start_tracking()`` once, then poll
+``get_recent_stats()`` to retrieve the latest FPM bytes keyed by
+``(worker_id, dp_rank)``.  Stale entries are cleaned up when
+workers are removed (via discovery watch).
 
 [`lib/bindings/python/src/dynamo/_core.pyi#L1347`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1347)
 
@@ -433,6 +446,10 @@ Read-only, live view of frontend state passed to extension route handlers.
 ```python
 from dynamo._core import FrontendExtensionContext
 ```
+
+Handlers receive this and answer from current state. The surface is
+intentionally narrow (typed read-only accessors only); it does not expose
+the internal service state.
 
 [`lib/bindings/python/src/dynamo/_core.pyi#L2480`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2480)
 
@@ -457,6 +474,9 @@ from dynamo._core import FrontendResponse
 FrontendResponse(status_code: int, body: object) -> None
 ```
 
+Return this to set a non-200 status (e.g. ``FrontendResponse(503, body)``);
+return a plain JSON-serializable value for the default 200.
+
 [`lib/bindings/python/src/dynamo/_core.pyi#L2533`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2533)
 
 **Public methods**
@@ -475,6 +495,12 @@ from dynamo._core import FrontendRoute
 FrontendRoute(method: str, path: str, handler: Callable[[FrontendExtensionContext], object]) -> None
 ```
 
+Currently restricted to static-path ``GET`` routes. ``handler`` is a
+synchronous callable that receives a ``FrontendExtensionContext`` and
+returns a JSON-serializable body (implies HTTP 200) or a ``FrontendResponse``
+to set the status code. Async handlers and path parameters are rejected at
+construction.
+
 [`lib/bindings/python/src/dynamo/_core.pyi#L2512`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2512)
 
 **Public methods**
@@ -483,7 +509,7 @@ FrontendRoute(method: str, path: str, handler: Callable[[FrontendExtensionContex
 </Accordion>
 
 <Accordion id="api-dynamo-core-httpasyncengine" title="HttpAsyncEngine (class)">
-An async engine for a distributed Dynamo http service. This is an extension of the
+An async engine for a distributed Dynamo http service. This is an extension of the python based AsyncEngine that handles HttpError exceptions from Python and converts them to the Rust version of HttpError
 
 ```python
 from dynamo._core import HttpAsyncEngine
@@ -493,7 +519,7 @@ from dynamo._core import HttpAsyncEngine
 </Accordion>
 
 <Accordion id="api-dynamo-core-httpservice" title="HttpService (class)">
-A HTTP service for dynamo applications.
+A HTTP service for dynamo applications. It is a OpenAI compatible http ingress into the Dynamo Distributed Runtime.
 
 ```python
 from dynamo._core import HttpService
@@ -513,7 +539,7 @@ HttpService(port: Optional[int] = None) -> None
 </Accordion>
 
 <Accordion id="api-dynamo-core-instance" title="Instance (class)">
-A read-only view of a single registered instance of an endpoint, wrapping a
+A read-only view of a single registered instance of an endpoint, wrapping a snapshot of the runtime ``Instance``. ``str(instance)`` yields ``"namespace/component/endpoint/instance_id"``.
 
 ```python
 from dynamo._core import Instance
@@ -533,7 +559,7 @@ from dynamo._core import InvalidArgument
 </Accordion>
 
 <Accordion id="api-dynamo-core-kservegrpcservice" title="KserveGrpcService (class)">
-A gRPC service implementing the KServe protocol for dynamo applications.
+A gRPC service implementing the KServe protocol for dynamo applications. Provides model management for completions, chat completions, and tensor-based models.
 
 ```python
 from dynamo._core import KserveGrpcService
@@ -810,7 +836,7 @@ MockEngineArgs(engine_type: str = 'vllm', num_gpu_blocks: Optional[int] = None, 
 </Accordion>
 
 <Accordion id="api-dynamo-core-modelcardinstanceid" title="ModelCardInstanceId (class)">
-Unique identifier for a worker instance: namespace, component, endpoint and instance_id.
+Unique identifier for a worker instance: namespace, component, endpoint and instance_id. The instance_id is not currently exposed in the Python bindings.
 
 ```python
 from dynamo._core import ModelCardInstanceId
@@ -922,7 +948,7 @@ from dynamo._core import OptimizationTarget
 </Accordion>
 
 <Accordion id="api-dynamo-core-overlapscores" title="OverlapScores (class)">
-A collection of prefix matching scores of workers for a given token ids.
+A collection of prefix matching scores of workers for a given token ids. 'scores' is a map of worker id to the score which is the number of matching blocks.
 
 ```python
 from dynamo._core import OverlapScores
@@ -932,7 +958,7 @@ from dynamo._core import OverlapScores
 </Accordion>
 
 <Accordion id="api-dynamo-core-plannerdecision" title="PlannerDecision (class)">
-A request from planner to client to perform a scaling action.
+A request from planner to client to perform a scaling action. Fields: num_prefill_workers, num_decode_workers, decision_id. -1 in any of those fields mean not set, usually because planner hasn't decided anything yet. Call VirtualConnectorClient.complete(event) when action is completed.
 
 ```python
 from dynamo._core import PlannerDecision
@@ -942,7 +968,7 @@ from dynamo._core import PlannerDecision
 </Accordion>
 
 <Accordion id="api-dynamo-core-plannerreplaybridge" title="PlannerReplayBridge (class)">
-Drives an offline replay to completion with a Python planner. The Rust
+Drives an offline replay to completion with a Python planner. The Rust simulation owns the drive loop and calls back into ``planner`` once per ``PlannerTick`` via ``run(planner)`` (``planner`` exposes ``initial_tick_ms() -> float`` and ``on_tick(metrics: dict) -> dict``).
 
 ```python
 from dynamo._core import PlannerReplayBridge
@@ -964,11 +990,16 @@ PlannerReplayBridge(trace_file: str | os.PathLike[str], extra_engine_args: MockE
 </Accordion>
 
 <Accordion id="api-dynamo-core-pyasyncrequeststream" title="PyAsyncRequestStream (class)">
-Python-visible inbound iterator handed to bidirectional engine
+Python-visible inbound iterator handed to bidirectional engine handlers as the first positional argument. Yields request frames as JSON-like Python objects.
 
 ```python
 from dynamo._core import PyAsyncRequestStream
 ```
+
+Request-stream end is not a cancellation signal: when this iterator
+raises `StopAsyncIteration`, the caller has merely stopped sending
+input. The engine should keep yielding response chunks until it
+chooses to return or observes `context.is_stopped()`.
 
 [`lib/bindings/python/src/dynamo/_core.pyi#L237`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L237)
 </Accordion>
@@ -979,6 +1010,8 @@ Helper class for registering Prometheus metrics callbacks on an Endpoint.
 ```python
 from dynamo._core import PyRuntimeMetrics
 ```
+
+Provides utilities for integrating external metrics (e.g., from vLLM, SGLang, TensorRT-LLM).
 
 [`lib/bindings/python/src/dynamo/prometheus_metrics.pyi#L12`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/prometheus_metrics.pyi#L12)
 
@@ -1015,6 +1048,9 @@ from dynamo._core import RadixTree
 ```python
 RadixTree() -> None
 ```
+
+Thread-safe: operations route to a dedicated background thread and long calls
+release the Python GIL.
 
 [`lib/bindings/python/src/dynamo/_core.pyi#L960`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L960)
 
@@ -1095,6 +1131,13 @@ from dynamo._core import RoutingConstraints
 RoutingConstraints(required_taints: Optional[Set[str]] = None, preferred_taints: Optional[Dict[str, float]] = None) -> None
 ```
 
+``required_taints`` is a hard eligibility filter.
+``preferred_taints`` maps taint -&gt; signed weight.
+Positive weights prefer matching workers, negative weights avoid them,
+and ``0.0`` is neutral. Matching weights are summed and squashed with
+``tanh``, so opposite preferences cancel before Dynamo converts the
+bounded bias into a strictly positive score multiplier.
+
 [`lib/bindings/python/src/dynamo/_core.pyi#L913`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L913)
 
 **Public methods**
@@ -1146,7 +1189,7 @@ RustEnginePerfOptions(max_observations: int = 64, min_observations: int = 5, buc
 </Accordion>
 
 <Accordion id="api-dynamo-core-selectioncacheconfig" title="SelectionCacheConfig (class)">
-Bounds for the in-flight selection cache. Each field defaults to the
+Bounds for the in-flight selection cache. Each field defaults to the service default when omitted.
 
 ```python
 from dynamo._core import SelectionCacheConfig
@@ -1196,7 +1239,7 @@ SelectionService(*, indexer_threads: int = 4, indexer_peers: Optional[list[str]]
 </Accordion>
 
 <Accordion id="api-dynamo-core-selectionserviceerror" title="SelectionServiceError (class)">
-Raised by `SelectionService` for selector failures that are not malformed
+Raised by `SelectionService` for selector failures that are not malformed input.
 
 ```python
 from dynamo._core import SelectionServiceError
@@ -1224,7 +1267,7 @@ SglangArgs(schedule_policy: Optional[str] = None, page_size: Optional[int] = Non
 </Accordion>
 
 <Accordion id="api-dynamo-core-spanproxy" title="SpanProxy (class)">
-Unified span handle returned by ``Context.current_span()`` (the
+Unified span handle returned by ``Context.current_span()`` (the framework auto-span) and ``Context.start_span()`` (child spans). Mirrors the OTel ``Span`` API: ``set_attribute`` / ``add_event`` / ``set_status``. Usable as a Python context manager (closes on ``__exit__``). All methods are silent no-ops when the underlying span is absent.
 
 ```python
 from dynamo._core import SpanProxy
@@ -1251,7 +1294,7 @@ from dynamo._core import StreamIncomplete
 </Accordion>
 
 <Accordion id="api-dynamo-core-transporttype" title="TransportType (class)">
-A read-only view of an instance's transport, wrapping the runtime
+A read-only view of an instance's transport, wrapping the runtime ``TransportType``. ``kind`` is the transport variant ("tcp" / "nats_tcp") and ``address`` is its (transport-specific) address. The address format is not a stable parse target.
 
 ```python
 from dynamo._core import TransportType
@@ -1359,6 +1402,12 @@ Processing stage a worker handles.
 from dynamo._core import WorkerType
 ```
 
+Each worker has exactly one role; values are not combinable. Use the
+`needs` argument on register_model to express dependencies in DNF form
+(a list of alternative AND-sets) — for example, an encode worker that
+needs (Prefill AND Decode) OR a single Aggregated peer is expressed as
+`[[WorkerType.Prefill, WorkerType.Decode], [WorkerType.Aggregated]]`.
+
 [`lib/bindings/python/src/dynamo/_core.pyi#L2340`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2340)
 </Accordion>
 
@@ -1383,11 +1432,56 @@ from dynamo._core import compute_block_hash_for_seq
 compute_block_hash_for_seq(tokens: List[int], kv_block_size: int, block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None, lora_name: Optional[str] = None, is_eagle: Optional[bool] = None, cache_namespace: Optional[str] = None) -> List[int]
 ```
 
+When block_mm_infos is provided, the mm_hashes are included in the hash computation
+to ensure that blocks with identical tokens but different multimodal objects produce
+different hashes.
+
+**Parameters**
+
+<ParamField path="tokens" type="List[int]">
+List of token IDs
+</ParamField>
+<ParamField path="kv_block_size" type="int">
+Size of each block in tokens
+</ParamField>
+<ParamField path="block_mm_infos" type="Optional[List[Optional[Dict[str, Any]]]]">
+Optional per-block multimodal metadata. Each element corresponds to a block
+and should be None or a dict with structure:
+&#123;
+"mm_objects": [
+&#123;
+"mm_hash": int,  # Hash of the MM object
+&#125;
+]
+&#125;
+</ParamField>
+<ParamField path="lora_name" type="Optional[str]">
+Optional LoRA adapter name for adapter-aware block hashing.
+</ParamField>
+<ParamField path="is_eagle" type="Optional[bool]">
+Optional Eagle mode flag. When true, hashes use overlapping
+`kv_block_size + 1` token windows with `kv_block_size` stride.
+</ParamField>
+
+**Returns**
+
+- `List[int]` — List of block hashes (one per block)
+
+<Note>
+&gt;&gt;&gt; tokens = [1, 2, 3, 4] * 8  # 32 tokens = 1 block
+&gt;&gt;&gt; mm_info = &#123;
+...     "mm_objects": [&#123;
+...         "mm_hash": 0xDEADBEEF,
+...     &#125;]
+... &#125;
+&gt;&gt;&gt; hashes = compute_block_hash_for_seq(tokens, 32, [mm_info])
+</Note>
+
 [`lib/bindings/python/src/dynamo/_core.pyi#L395`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L395)
 </Accordion>
 
 <Accordion id="api-dynamo-core-fetch-model" title="fetch_model (function)">
-Download a model from Hugging Face, returning its local path.
+Download a model from Hugging Face, returning its local path. If `ignore_weights` is True, only fetches tokenizer and config files. Example: `model_path = await fetch_model("Qwen/Qwen3-0.6B")`
 
 ```python
 from dynamo._core import fetch_model
@@ -1471,7 +1565,7 @@ make_engine(distributed_runtime: DistributedRuntime, args: EntrypointArgs) -> En
 </Accordion>
 
 <Accordion id="api-dynamo-core-register-model" title="register_model (function)">
-Attach the model at path to the given endpoint, and advertise it as model_type.
+Attach the model at path to the given endpoint, and advertise it as model_type. LoRA Registration: The `lora_name` and `base_model_path` parameters must be provided together or not at all. Providing only one of these parameters will raise a ValueError. - `lora_name`: The served model name for the LoRA model - `base_model_path`: Path to the base model that the LoRA extends
 
 ```python
 from dynamo._core import register_model
@@ -1481,11 +1575,24 @@ from dynamo._core import register_model
 register_model(model_input: ModelInput, model_type: ModelType, endpoint: Endpoint, model_path: str, model_name: Optional[str] = None, *, worker_type: WorkerType, kv_cache_block_size: Optional[int] = None, router_mode: Optional[RouterMode] = None, runtime_config: Optional[ModelRuntimeConfig] = None, tensor_model_config: Optional[Dict[str, Any]] = None, user_data: Optional[Dict[str, Any]] = None, custom_template_path: Optional[str] = None, media_decoder: Optional[MediaDecoder] = None, media_fetcher: Optional[MediaFetcher] = None, lora_name: Optional[str] = None, base_model_path: Optional[str] = None, needs: Optional[List[List[WorkerType]]] = None, self_host_metadata: Optional[bool] = None, ignore_weights: bool = False, max_gpu_lora_count: Optional[int] = None, model_aliases: Optional[List[str]] = None) -> None
 ```
 
+For TensorBased models (using ModelInput.Tensor), HuggingFace downloads are skipped
+and a minimal model card is registered directly. Use model_path as the display name
+for these models. Pass tensor protocol metadata through `tensor_model_config`.
+
+Model serving readiness:
+`worker_type` and `needs` describe the worker's processing stage and
+peer dependencies. `needs` is a DNF list — each inner list is an
+AND-set, the outer list is OR. `worker_type` is required; backends
+declare it literally at each call site.
+
+When `ignore_weights` is true, remote HuggingFace model resolution skips
+weight files and downloads only the metadata needed for registration.
+
 [`lib/bindings/python/src/dynamo/_core.pyi#L2359`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2359)
 </Accordion>
 
 <Accordion id="api-dynamo-core-resolve-routing-image-token-id" title="resolve_routing_image_token_id (function)">
-Routing-side image-placeholder token id for a model, resolved with the
+Routing-side image-placeholder token id for a model, resolved with the same per-family logic the frontend's MM-aware KV routing uses. Returns None when the model isn't in the MM-routing registry or its config can't be read. Only present when the bindings are built with the ``mm-routing`` feature.
 
 ```python
 from dynamo._core import resolve_routing_image_token_id
@@ -1508,6 +1615,9 @@ from dynamo._core import run_input
 ```python
 run_input(distributed_runtime: DistributedRuntime, input: str, engine_config: EngineConfig, frontend_route_extensions: Optional[Sequence[FrontendRoute]] = None) -> None
 ```
+
+``frontend_route_extensions`` supplies additional HTTP routes to the
+frontend (HTTP input only); see ``FrontendRoute``.
 
 [`lib/bindings/python/src/dynamo/_core.pyi#L2542`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2542)
 </Accordion>
@@ -1537,6 +1647,10 @@ from dynamo._core import run_mocker_synthetic_trace_replay
 run_mocker_synthetic_trace_replay(input_tokens: int, output_tokens: int, request_count: int, extra_engine_args: Optional[MockEngineArgs] = None, prefill_engine_args: Optional[MockEngineArgs] = None, decode_engine_args: Optional[MockEngineArgs] = None, router_config: Optional[KvRouterConfig] = None, aic_perf_config: Optional[AicPerfConfig] = None, num_workers: int = 1, num_prefill_workers: int = 1, num_decode_workers: int = 1, replay_concurrency: Optional[int] = None, replay_mode: Literal['offline', 'online'] = 'offline', router_mode: Literal['round_robin', 'kv_router'] = 'round_robin', arrival_speedup_ratio: float = 1.0, request_rate: Optional[float] = None, arrival_interval_ms: Optional[float] = None, arrival_seed: int = 42, turns_per_session: int = 1, shared_prefix_ratio: float = 0.0, num_prefix_groups: int = 0, inter_turn_delay_ms: float = 0.0, model_name: Optional[str] = None, sla_ttft_ms: Optional[float] = None, sla_itl_ms: Optional[float] = None, sla_e2e_ms: Optional[float] = None) -> Dict[str, Any]
 ```
 
+``sla_ttft_ms`` / ``sla_itl_ms`` / ``sla_e2e_ms`` are the goodput SLA bounds
+(offline replay only); when any is set the report carries ``goodput_*`` keys
+classifying SLA-satisfying requests.
+
 [`lib/bindings/python/src/dynamo/_core.pyi#L2603`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2603)
 </Accordion>
 
@@ -1550,6 +1664,17 @@ from dynamo._core import run_mocker_trace_replay
 ```python
 run_mocker_trace_replay(trace_files: Sequence[str | os.PathLike[str]], extra_engine_args: Optional[MockEngineArgs] = None, prefill_engine_args: Optional[MockEngineArgs] = None, decode_engine_args: Optional[MockEngineArgs] = None, router_config: Optional[KvRouterConfig] = None, aic_perf_config: Optional[AicPerfConfig] = None, num_workers: int = 1, num_prefill_workers: int = 1, num_decode_workers: int = 1, replay_concurrency: Optional[int] = None, replay_mode: Literal['offline', 'online'] = 'offline', router_mode: Literal['round_robin', 'kv_router'] = 'round_robin', arrival_speedup_ratio: float = 1.0, trace_block_size: Optional[int] = None, trace_format: Literal['mooncake', 'mooncake-delta', 'mooncake_delta', 'agentic_mooncake', 'agentic-mooncake', 'applied_compute_agentic', 'dynamo'] = 'mooncake', trace_shared_prefix_ratio: float = 0.0, trace_num_prefix_groups: int = 0, report_jsonl_path: Optional[str | os.PathLike[str]] = None, max_sim_time_ms: Optional[float] = None, model_name: Optional[str] = None, sla_ttft_ms: Optional[float] = None, sla_itl_ms: Optional[float] = None, sla_e2e_ms: Optional[float] = None) -> Dict[str, Any]
 ```
+
+Supports aggregated or disaggregated engine configurations.
+
+When ``report_jsonl_path`` is provided (offline disagg replay only), one
+JSON object per request is written to that path. Each line includes
+arrival/admit/token timestamps, input/output lengths, the full per-token
+ITL series, and prefill/decode worker indices.
+
+``sla_ttft_ms`` / ``sla_itl_ms`` / ``sla_e2e_ms`` are the goodput SLA bounds
+(offline replay only). When any is set, the report carries ``goodput_*`` keys
+classifying SLA-satisfying requests; with none set, goodput is omitted.
 
 [`lib/bindings/python/src/dynamo/_core.pyi#L2555`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2555)
 </Accordion>
@@ -1592,6 +1717,8 @@ from dynamo._core import unregister_model
 ```python
 unregister_model(endpoint: Endpoint, lora_name: Optional[str] = None) -> None
 ```
+
+If lora_name is provided, unregisters a LoRA adapter instead of a base model.
 
 [`lib/bindings/python/src/dynamo/_core.pyi#L2406`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2406)
 </Accordion>

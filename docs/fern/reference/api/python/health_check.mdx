@@ -20,6 +20,11 @@ from dynamo.health_check import HealthCheckPayload
 HealthCheckPayload()
 ```
 
+Each backend should extend this class and set self.default_payload
+in their __init__ method.
+
+Environment variable DYN_HEALTH_CHECK_PAYLOAD can override the default.
+
 [`lib/bindings/python/src/dynamo/health_check.py#L75`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/health_check.py#L75)
 
 **Public methods**
@@ -38,6 +43,20 @@ from dynamo.health_check import load_health_check_from_env
 ```python
 load_health_check_from_env(env_var: str = 'DYN_HEALTH_CHECK_PAYLOAD') -> Optional[Dict[str, Any]]
 ```
+
+Supports two formats:
+1. JSON string: export DYN_HEALTH_CHECK_PAYLOAD='&#123;"prompt": "test", "max_tokens": 1&#125;'
+2. File path: export DYN_HEALTH_CHECK_PAYLOAD='@/path/to/health_check.json'
+
+**Parameters**
+
+<ParamField path="env_var" type="str">
+Name of the environment variable to check (default: DYN_HEALTH_CHECK_PAYLOAD)
+</ParamField>
+
+**Returns**
+
+- `Optional[Dict[str, Any]]` — Dict containing the health check payload, or None if not set.
 
 [`lib/bindings/python/src/dynamo/health_check.py#L33`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/health_check.py#L33)
 </Accordion>

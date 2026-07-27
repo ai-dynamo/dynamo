@@ -29,7 +29,7 @@ AbstractOperation(connection: Connection, operation_kind: OperationKind, local_d
 </Accordion>
 
 <Accordion id="api-dynamo-nixl-connect-activeoperation" title="ActiveOperation (class)">
-Abstract class for active operations that initiates a NIXL based RDMA transfer based `RdmaMetadata`
+Abstract class for active operations that initiates a NIXL based RDMA transfer based `RdmaMetadata` provided by the remote worker's corresponding `PassiveOperation`.
 
 ```python
 from dynamo.nixl_connect import ActiveOperation
@@ -69,7 +69,7 @@ Connection(connector: Connector, number: int)
 </Accordion>
 
 <Accordion id="api-dynamo-nixl-connect-connector" title="Connector (class)">
-Core class for managing the connection between workers in a distributed environment.
+Core class for managing the connection between workers in a distributed environment. Use this class to create readable and writable operations, or read and write data to remote workers.
 
 ```python
 from dynamo.nixl_connect import Connector
@@ -196,7 +196,7 @@ from dynamo.nixl_connect import RdmaMetadata
 </Accordion>
 
 <Accordion id="api-dynamo-nixl-connect-readoperation" title="ReadOperation (class)">
-Operation that initiates an RDMA read operation to transfer data from a remote worker's `ReadableOperation`,
+Operation that initiates an RDMA read operation to transfer data from a remote worker's `ReadableOperation`, as described by `remote_metadata`, to local buffers.
 
 ```python
 from dynamo.nixl_connect import ReadOperation
@@ -290,7 +290,7 @@ WritableOperation(connection: Connection, local_descriptors: Descriptor | list[D
 </Accordion>
 
 <Accordion id="api-dynamo-nixl-connect-writeoperation" title="WriteOperation (class)">
-Awaitable write operation which initiates an RDMA write operation to a remote worker
+Awaitable write operation which initiates an RDMA write operation to a remote worker which provided a `RdmaMetadata` object from a `WritableOperation`.
 
 ```python
 from dynamo.nixl_connect import WriteOperation

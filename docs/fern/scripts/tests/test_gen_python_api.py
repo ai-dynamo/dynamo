@@ -130,6 +130,265 @@ def workspace(tmp_path: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
+# Docstring bodies
+# ---------------------------------------------------------------------------
+
+
+DOCSTRING_FIXTURE = '''\
+"""Fixture package exercising every docstring section the renderer maps."""
+
+
+def documented(request_model: str, response_model: int) -> None:
+    """Decorator that parses a request payload before the endpoint runs.
+
+    Parsing applies only when ``request_model`` is a ``BaseModel`` subclass;
+    otherwise the wrapper forwards the raw value untouched. Generic types
+    such as Dict<K, V> and placeholders like {braces} appear in prose here
+    and must not reach the page unescaped, while ``Mapping<K, V>`` sits in a
+    reST literal and must survive verbatim.
+
+    Args:
+        request_model: Request class used to parse ``str`` payloads.
+        response_model: Expected response class. Not enforced today.
+
+    Returns:
+        Callable: A decorator that wraps an async generator.
+
+    Raises:
+        ValueError: On the first ``__anext__()`` of the returned generator.
+
+    Examples:
+        >>> from dynamo.docfixture import documented
+        >>> documented("Request", 1)
+
+    Note:
+        A clean return is not proof of the outcome.
+    """
+
+
+def summary_only() -> None:
+    """Just one line and nothing else."""
+
+
+def wrapped_summary() -> None:
+    """Direct publisher for engines that own their own metrics, such
+    as the adapter. The opening sentence wraps across source lines.
+
+    A second paragraph belongs in the body.
+    """
+'''
+
+FIXTURE_BODY_SENTENCE = "otherwise the wrapper forwards the raw value untouched"
+
+
+@pytest.fixture()
+def docstring_module(tmp_path: Path) -> api_discovery.Module:
+    """Discover a synthetic package that carries every docstring section.
+
+    Hermetic on purpose: the rendering contract for docstring bodies must
+    hold regardless of which docstrings the Dynamo tree happens to carry
+    today, so the fixture owns its own source rather than pinning a real
+    symbol that a later branch may reword.
+    """
+    pkg = tmp_path / "components" / "src" / "dynamo" / "docfixture"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text(DOCSTRING_FIXTURE, encoding="utf-8")
+    loader = api_discovery.build_loader(tmp_path)
+    return api_discovery.discover_module(
+        loader, ("dynamo.docfixture", "docfixture", "Fixture module.")
+    )
+
+
+def _fixture_symbol(module: api_discovery.Module, name: str) -> api_discovery.Symbol:
+    symbol = next((s for s in module.symbols if s.name == name), None)
+    assert symbol is not None, f"{name} missing from the fixture module"
+    return symbol
+
+
+def _strip_code_fences(text: str) -> str:
+    """Drop fenced code blocks so prose-only assertions ignore code.
+
+    Code fences legitimately carry raw ``<`` and ``{``; MDX does not parse
+    JSX inside them, so escaping there would surface literal entities.
+    """
+    out: list[str] = []
+    in_fence = False
+    for line in text.splitlines():
+        if line.startswith("```"):
+            in_fence = not in_fence
+            continue
+        if not in_fence:
+            out.append(line)
+    return "\n".join(out)
+
+
+def test_symbol_keeps_the_summary_as_the_first_docstring_line(
+    docstring_module: api_discovery.Module,
+) -> None:
+    """``summary`` still means "the one-line synopsis".
+
+    The landing cards and the module index render it verbatim, so widening
+    it to the full docstring would blow up those surfaces. Body content is
+    additive.
+    """
+    symbol = _fixture_symbol(docstring_module, "documented")
+    assert (
+        symbol.summary
+        == "Decorator that parses a request payload before the endpoint runs."
+    )
+
+
+def test_symbol_captures_docstring_sections_beyond_the_summary(
+    docstring_module: api_discovery.Module,
+) -> None:
+    """Everything after the first line used to be discarded at discovery."""
+    symbol = _fixture_symbol(docstring_module, "documented")
+    kinds = [section.kind for section in symbol.docs]
+    assert "text" in kinds, "prose body was dropped"
+    assert "parameters" in kinds
+    assert "returns" in kinds
+    assert "raises" in kinds
+    assert "examples" in kinds
+    assert "admonition" in kinds
+
+
+def test_captured_text_section_keeps_the_whole_lead_paragraph(
+    docstring_module: api_discovery.Module,
+) -> None:
+    """Discovery keeps the opening paragraph intact.
+
+    ``summary`` truncates at the first newline; dropping the remainder here
+    would lose the tail of any summary sentence that wraps.
+    """
+    symbol = _fixture_symbol(docstring_module, "documented")
+    body = next(s.text for s in symbol.docs if s.kind == "text")
+    assert body.startswith("Decorator that parses")
+    assert FIXTURE_BODY_SENTENCE in body
+
+
+def test_summary_renders_exactly_once_in_the_accordion(
+    docstring_module: api_discovery.Module,
+) -> None:
+    """The lead paragraph must not be repeated as body prose."""
+    text = api_rendering.render_module_page(docstring_module)
+    assert text.count("Decorator that parses a request payload") == 1
+
+
+def test_wrapped_summary_sentence_renders_whole_and_unbroken(
+    docstring_module: api_discovery.Module,
+) -> None:
+    """A summary sentence that wraps must not strand its own tail.
+
+    ``summary`` stops at the first newline, so leading the accordion with it
+    would print a clause ending in "such" and then open the body mid-sentence
+    with "as the adapter".
+    """
+    symbol = _fixture_symbol(docstring_module, "wrapped_summary")
+    assert symbol.summary.endswith("such"), "fixture no longer wraps its summary"
+
+    text = api_rendering.render_module_page(docstring_module)
+    assert (
+        "Direct publisher for engines that own their own metrics, such as the "
+        "adapter. The opening sentence wraps across source lines." in text
+    )
+    assert "as the adapter. The opening sentence" not in text.replace(
+        "such as the adapter. The opening sentence", ""
+    )
+    assert "A second paragraph belongs in the body." in text
+
+
+def test_summary_only_docstring_adds_no_extra_prose(
+    docstring_module: api_discovery.Module,
+) -> None:
+    """A one-line docstring must not grow a duplicate prose block."""
+    symbol = _fixture_symbol(docstring_module, "summary_only")
+    assert symbol.summary == "Just one line and nothing else."
+
+    text = api_rendering.render_module_page(docstring_module)
+    assert text.count("Just one line and nothing else.") == 1
+
+
+def test_module_page_renders_the_docstring_body_prose(
+    docstring_module: api_discovery.Module,
+) -> None:
+    """The whole point: body text has to reach the rendered page."""
+    text = api_rendering.render_module_page(docstring_module)
+    assert FIXTURE_BODY_SENTENCE in text
+
+
+def test_module_page_renders_args_as_param_fields(
+    docstring_module: api_discovery.Module,
+) -> None:
+    """Args map onto the same native ParamField the Kubernetes page uses."""
+    text = api_rendering.render_module_page(docstring_module)
+    assert '<ParamField path="request_model" type="str">' in text
+    assert '<ParamField path="response_model" type="int">' in text
+    assert "Request class used to parse ``str`` payloads." in text
+
+
+def test_module_page_renders_returns_and_raises(
+    docstring_module: api_discovery.Module,
+) -> None:
+    """Returns and Raises land as labelled prose, not silently dropped."""
+    text = api_rendering.render_module_page(docstring_module)
+    assert "**Returns**" in text
+    assert "A decorator that wraps an async generator." in text
+    assert "**Raises**" in text
+    assert "`ValueError`" in text
+    assert "On the first ``__anext__()`` of the returned generator." in text
+
+
+def test_module_page_renders_examples_as_a_python_fence(
+    docstring_module: api_discovery.Module,
+) -> None:
+    """Doctest blocks get Fern's syntax highlighting and copy button."""
+    text = api_rendering.render_module_page(docstring_module)
+    assert "**Examples**" in text
+    assert ">>> from dynamo.docfixture import documented" in text
+    fenced = re.findall(r"```python\n(.*?)```", text, flags=re.DOTALL)
+    assert any(
+        ">>> from dynamo.docfixture import documented" in block for block in fenced
+    ), "the doctest example must sit inside a python code fence"
+
+
+def test_module_page_renders_admonitions_as_native_callouts(
+    docstring_module: api_discovery.Module,
+) -> None:
+    """Fern ships Note/Warning callouts; no bespoke component is needed."""
+    text = api_rendering.render_module_page(docstring_module)
+    assert "<Note>" in text
+    assert "A clean return is not proof of the outcome." in text
+
+
+def test_docstring_body_escapes_jsx_significant_characters(
+    docstring_module: api_discovery.Module,
+) -> None:
+    """Docstring prose is JSX source once it lands in MDX.
+
+    A bare ``<K,`` reads as an unclosed JSX tag and fails the Fern build,
+    so angle brackets and braces outside code spans must be entities.
+    """
+    prose = _strip_code_fences(api_rendering.render_module_page(docstring_module))
+    assert "Dict&lt;K, V&gt;" in prose
+    assert "&#123;braces&#125;" in prose
+    assert "Dict<K, V>" not in prose
+    assert "{braces}" not in prose
+
+
+def test_rest_literal_spans_are_not_entity_escaped(
+    docstring_module: api_discovery.Module,
+) -> None:
+    """Double-backtick reST literals are Markdown code spans.
+
+    MDX does not parse JSX inside a code span and does not decode entities
+    there, so escaping one surfaces a literal ``&lt;`` to the reader.
+    """
+    text = api_rendering.render_module_page(docstring_module)
+    assert "``Mapping<K, V>``" in text
+    assert "Mapping&lt;K, V&gt;" not in text
+
+
+# ---------------------------------------------------------------------------
 # Curated module list + discovery
 # ---------------------------------------------------------------------------
 

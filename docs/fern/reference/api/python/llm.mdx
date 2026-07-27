@@ -38,7 +38,7 @@ from dynamo.llm import EngineType
 </Accordion>
 
 <Accordion id="api-dynamo-core-entrypointargs" title="EntrypointArgs (class)">
-Settings to connect an input to a worker and run them.
+Settings to connect an input to a worker and run them. Use by `dynamo run`.
 
 ```python
 from dynamo.llm import EntrypointArgs
@@ -56,7 +56,7 @@ EntrypointArgs(engine_type: EngineType, model_path: Optional[str] = None, model_
 </Accordion>
 
 <Accordion id="api-dynamo-core-fpmdirectpublisher" title="FpmDirectPublisher (class)">
-Direct Forward Pass Metrics publisher used by in-process producers such
+Direct Forward Pass Metrics publisher used by in-process producers such as the TRT-LLM adapter. The underlying Rust publisher owns per-DP-rank serialization tasks (each with its own 1s idle heartbeat timer) and a single event-plane publisher task. Python callers do not manage heartbeat: when ``publish`` is not called for ``IDLE_HEARTBEAT_INTERVAL`` (1.0s, matching vLLM's ``HEARTBEAT_INTERVAL``), the Rust side emits a zeroed snapshot on that rank's channel.
 
 ```python
 from dynamo.llm import FpmDirectPublisher
@@ -76,7 +76,7 @@ FpmDirectPublisher(endpoint: Endpoint, worker_id: str, dp_size: int = 1) -> None
 </Accordion>
 
 <Accordion id="api-dynamo-core-fpmeventrelay" title="FpmEventRelay (class)">
-Relay that bridges ForwardPassMetrics from a local raw ZMQ PUB socket
+Relay that bridges ForwardPassMetrics from a local raw ZMQ PUB socket (InstrumentedScheduler in EngineCore child process) to the Dynamo event plane with automatic discovery registration.
 
 ```python
 from dynamo.llm import FpmEventRelay
@@ -95,7 +95,7 @@ FpmEventRelay(endpoint: Endpoint, zmq_endpoint: str) -> None
 </Accordion>
 
 <Accordion id="api-dynamo-core-fpmeventsubscriber" title="FpmEventSubscriber (class)">
-Subscriber for ForwardPassMetrics from the Dynamo event plane.
+Subscriber for ForwardPassMetrics from the Dynamo event plane. Auto-discovers engine publishers via the discovery plane.
 
 ```python
 from dynamo.llm import FpmEventSubscriber
@@ -104,6 +104,14 @@ from dynamo.llm import FpmEventSubscriber
 ```python
 FpmEventSubscriber(endpoint: Endpoint) -> None
 ```
+
+Two mutually exclusive usage modes:
+
+1. **recv mode** (default): call ``recv()`` to pull individual messages.
+2. **tracking mode**: call ``start_tracking()`` once, then poll
+``get_recent_stats()`` to retrieve the latest FPM bytes keyed by
+``(worker_id, dp_rank)``.  Stale entries are cleaned up when
+workers are removed (via discovery watch).
 
 [`lib/bindings/python/src/dynamo/_core.pyi#L1347`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1347)
 
@@ -123,6 +131,10 @@ Read-only, live view of frontend state passed to extension route handlers.
 ```python
 from dynamo.llm import FrontendExtensionContext
 ```
+
+Handlers receive this and answer from current state. The surface is
+intentionally narrow (typed read-only accessors only); it does not expose
+the internal service state.
 
 [`lib/bindings/python/src/dynamo/_core.pyi#L2480`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2480)
 
@@ -147,6 +159,9 @@ from dynamo.llm import FrontendResponse
 FrontendResponse(status_code: int, body: object) -> None
 ```
 
+Return this to set a non-200 status (e.g. ``FrontendResponse(503, body)``);
+return a plain JSON-serializable value for the default 200.
+
 [`lib/bindings/python/src/dynamo/_core.pyi#L2533`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2533)
 
 **Public methods**
@@ -165,6 +180,12 @@ from dynamo.llm import FrontendRoute
 FrontendRoute(method: str, path: str, handler: Callable[[FrontendExtensionContext], object]) -> None
 ```
 
+Currently restricted to static-path ``GET`` routes. ``handler`` is a
+synchronous callable that receives a ``FrontendExtensionContext`` and
+returns a JSON-serializable body (implies HTTP 200) or a ``FrontendResponse``
+to set the status code. Async handlers and path parameters are rejected at
+construction.
+
 [`lib/bindings/python/src/dynamo/_core.pyi#L2512`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2512)
 
 **Public methods**
@@ -173,7 +194,7 @@ FrontendRoute(method: str, path: str, handler: Callable[[FrontendExtensionContex
 </Accordion>
 
 <Accordion id="api-dynamo-core-httpasyncengine" title="HttpAsyncEngine (class)">
-An async engine for a distributed Dynamo http service. This is an extension of the
+An async engine for a distributed Dynamo http service. This is an extension of the python based AsyncEngine that handles HttpError exceptions from Python and converts them to the Rust version of HttpError
 
 ```python
 from dynamo.llm import HttpAsyncEngine
@@ -201,7 +222,7 @@ HttpError(code: int, message: str)
 </Accordion>
 
 <Accordion id="api-dynamo-core-httpservice" title="HttpService (class)">
-A HTTP service for dynamo applications.
+A HTTP service for dynamo applications. It is a OpenAI compatible http ingress into the Dynamo Distributed Runtime.
 
 ```python
 from dynamo.llm import HttpService
@@ -221,7 +242,7 @@ HttpService(port: Optional[int] = None) -> None
 </Accordion>
 
 <Accordion id="api-dynamo-core-kservegrpcservice" title="KserveGrpcService (class)">
-A gRPC service implementing the KServe protocol for dynamo applications.
+A gRPC service implementing the KServe protocol for dynamo applications. Provides model management for completions, chat completions, and tensor-based models.
 
 ```python
 from dynamo.llm import KserveGrpcService
@@ -406,7 +427,7 @@ MediaFetcher() -> None
 </Accordion>
 
 <Accordion id="api-dynamo-core-modelcardinstanceid" title="ModelCardInstanceId (class)">
-Unique identifier for a worker instance: namespace, component, endpoint and instance_id.
+Unique identifier for a worker instance: namespace, component, endpoint and instance_id. The instance_id is not currently exposed in the Python bindings.
 
 ```python
 from dynamo.llm import ModelCardInstanceId
@@ -488,7 +509,7 @@ MultimodalEmbeddingCachePublisher() -> None
 </Accordion>
 
 <Accordion id="api-dynamo-core-overlapscores" title="OverlapScores (class)">
-A collection of prefix matching scores of workers for a given token ids.
+A collection of prefix matching scores of workers for a given token ids. 'scores' is a map of worker id to the score which is the number of matching blocks.
 
 ```python
 from dynamo.llm import OverlapScores
@@ -525,6 +546,9 @@ from dynamo.llm import RadixTree
 ```python
 RadixTree() -> None
 ```
+
+Thread-safe: operations route to a dedicated background thread and long calls
+release the Python GIL.
 
 [`lib/bindings/python/src/dynamo/_core.pyi#L960`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L960)
 
@@ -601,6 +625,13 @@ from dynamo.llm import RoutingConstraints
 RoutingConstraints(required_taints: Optional[Set[str]] = None, preferred_taints: Optional[Dict[str, float]] = None) -> None
 ```
 
+``required_taints`` is a hard eligibility filter.
+``preferred_taints`` maps taint -&gt; signed weight.
+Positive weights prefer matching workers, negative weights avoid them,
+and ``0.0`` is neutral. Matching weights are summed and squashed with
+``tanh``, so opposite preferences cancel before Dynamo converts the
+bounded bias into a strictly positive score multiplier.
+
 [`lib/bindings/python/src/dynamo/_core.pyi#L913`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L913)
 
 **Public methods**
@@ -667,6 +698,12 @@ Processing stage a worker handles.
 from dynamo.llm import WorkerType
 ```
 
+Each worker has exactly one role; values are not combinable. Use the
+`needs` argument on register_model to express dependencies in DNF form
+(a list of alternative AND-sets) — for example, an encode worker that
+needs (Prefill AND Decode) OR a single Aggregated peer is expressed as
+`[[WorkerType.Prefill, WorkerType.Decode], [WorkerType.Aggregated]]`.
+
 [`lib/bindings/python/src/dynamo/_core.pyi#L2340`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2340)
 </Accordion>
 
@@ -681,11 +718,56 @@ from dynamo.llm import compute_block_hash_for_seq
 compute_block_hash_for_seq(tokens: List[int], kv_block_size: int, block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None, lora_name: Optional[str] = None, is_eagle: Optional[bool] = None, cache_namespace: Optional[str] = None) -> List[int]
 ```
 
+When block_mm_infos is provided, the mm_hashes are included in the hash computation
+to ensure that blocks with identical tokens but different multimodal objects produce
+different hashes.
+
+**Parameters**
+
+<ParamField path="tokens" type="List[int]">
+List of token IDs
+</ParamField>
+<ParamField path="kv_block_size" type="int">
+Size of each block in tokens
+</ParamField>
+<ParamField path="block_mm_infos" type="Optional[List[Optional[Dict[str, Any]]]]">
+Optional per-block multimodal metadata. Each element corresponds to a block
+and should be None or a dict with structure:
+&#123;
+"mm_objects": [
+&#123;
+"mm_hash": int,  # Hash of the MM object
+&#125;
+]
+&#125;
+</ParamField>
+<ParamField path="lora_name" type="Optional[str]">
+Optional LoRA adapter name for adapter-aware block hashing.
+</ParamField>
+<ParamField path="is_eagle" type="Optional[bool]">
+Optional Eagle mode flag. When true, hashes use overlapping
+`kv_block_size + 1` token windows with `kv_block_size` stride.
+</ParamField>
+
+**Returns**
+
+- `List[int]` — List of block hashes (one per block)
+
+<Note>
+&gt;&gt;&gt; tokens = [1, 2, 3, 4] * 8  # 32 tokens = 1 block
+&gt;&gt;&gt; mm_info = &#123;
+...     "mm_objects": [&#123;
+...         "mm_hash": 0xDEADBEEF,
+...     &#125;]
+... &#125;
+&gt;&gt;&gt; hashes = compute_block_hash_for_seq(tokens, 32, [mm_info])
+</Note>
+
 [`lib/bindings/python/src/dynamo/_core.pyi#L395`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L395)
 </Accordion>
 
 <Accordion id="api-dynamo-core-fetch-model" title="fetch_model (function)">
-Download a model from Hugging Face, returning its local path.
+Download a model from Hugging Face, returning its local path. If `ignore_weights` is True, only fetches tokenizer and config files. Example: `model_path = await fetch_model("Qwen/Qwen3-0.6B")`
 
 ```python
 from dynamo.llm import fetch_model
@@ -727,7 +809,7 @@ make_engine(distributed_runtime: DistributedRuntime, args: EntrypointArgs) -> En
 </Accordion>
 
 <Accordion id="api-dynamo-core-register-model" title="register_model (function)">
-Attach the model at path to the given endpoint, and advertise it as model_type.
+Attach the model at path to the given endpoint, and advertise it as model_type. LoRA Registration: The `lora_name` and `base_model_path` parameters must be provided together or not at all. Providing only one of these parameters will raise a ValueError. - `lora_name`: The served model name for the LoRA model - `base_model_path`: Path to the base model that the LoRA extends
 
 ```python
 from dynamo.llm import register_model
@@ -736,6 +818,19 @@ from dynamo.llm import register_model
 ```python
 register_model(model_input: ModelInput, model_type: ModelType, endpoint: Endpoint, model_path: str, model_name: Optional[str] = None, *, worker_type: WorkerType, kv_cache_block_size: Optional[int] = None, router_mode: Optional[RouterMode] = None, runtime_config: Optional[ModelRuntimeConfig] = None, tensor_model_config: Optional[Dict[str, Any]] = None, user_data: Optional[Dict[str, Any]] = None, custom_template_path: Optional[str] = None, media_decoder: Optional[MediaDecoder] = None, media_fetcher: Optional[MediaFetcher] = None, lora_name: Optional[str] = None, base_model_path: Optional[str] = None, needs: Optional[List[List[WorkerType]]] = None, self_host_metadata: Optional[bool] = None, ignore_weights: bool = False, max_gpu_lora_count: Optional[int] = None, model_aliases: Optional[List[str]] = None) -> None
 ```
+
+For TensorBased models (using ModelInput.Tensor), HuggingFace downloads are skipped
+and a minimal model card is registered directly. Use model_path as the display name
+for these models. Pass tensor protocol metadata through `tensor_model_config`.
+
+Model serving readiness:
+`worker_type` and `needs` describe the worker's processing stage and
+peer dependencies. `needs` is a DNF list — each inner list is an
+AND-set, the outer list is OR. `worker_type` is required; backends
+declare it literally at each call site.
+
+When `ignore_weights` is true, remote HuggingFace model resolution skips
+weight files and downloads only the metadata needed for registration.
 
 [`lib/bindings/python/src/dynamo/_core.pyi#L2359`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2359)
 </Accordion>
@@ -750,6 +845,9 @@ from dynamo.llm import run_input
 ```python
 run_input(distributed_runtime: DistributedRuntime, input: str, engine_config: EngineConfig, frontend_route_extensions: Optional[Sequence[FrontendRoute]] = None) -> None
 ```
+
+``frontend_route_extensions`` supplies additional HTTP routes to the
+frontend (HTTP input only); see ``FrontendRoute``.
 
 [`lib/bindings/python/src/dynamo/_core.pyi#L2542`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2542)
 </Accordion>
@@ -806,6 +904,8 @@ from dynamo.llm import unregister_model
 ```python
 unregister_model(endpoint: Endpoint, lora_name: Optional[str] = None) -> None
 ```
+
+If lora_name is provided, unregisters a LoRA adapter instead of a base model.
 
 [`lib/bindings/python/src/dynamo/_core.pyi#L2406`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2406)
 </Accordion>

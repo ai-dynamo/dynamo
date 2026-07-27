@@ -6,8 +6,11 @@ from __future__ import annotations
 
 import re
 
-# Capturing group so re.split keeps code spans as odd-indexed segments.
-_CODE_SPAN_RE = re.compile(r"(`[^`]*`)")
+# Capturing group so re.split keeps code spans as odd-indexed segments. The
+# backtick runs are quantified because reST-style docstrings delimit literals
+# with a double backtick, and matching only single ones would treat the empty
+# span between them as the code and escape the literal text itself.
+_CODE_SPAN_RE = re.compile(r"(`+[^`]*`+)")
 
 
 def escape_mdx_prose(text: str) -> str:
@@ -17,6 +20,8 @@ def escape_mdx_prose(text: str) -> str:
     placeholders) that MDX would otherwise parse as JSX. Inline code spans are
     left alone: MDX does not parse JSX inside them, and HTML entities are not
     decoded there, so escaping would surface a literal ``&lt;`` to the reader.
+    Both single-backtick Markdown spans and double-backtick reST literals
+    count as code.
     """
     parts = _CODE_SPAN_RE.split(text)
     return "".join(

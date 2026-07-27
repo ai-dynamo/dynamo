@@ -20,6 +20,8 @@ from dynamo.planner.errors import BackendFrameworkInvalidError
 BackendFrameworkInvalidError(backend_framework: str)
 ```
 
+This occurs when the DynamoGraphDeployment contains an unsupported backend framework.
+
 [`components/src/dynamo/planner/errors.py#L152`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/errors.py#L152)
 
 **Public methods**
@@ -38,6 +40,8 @@ from dynamo.planner.errors import BackendFrameworkNotFoundError
 BackendFrameworkNotFoundError()
 ```
 
+This occurs when the DynamoGraphDeployment contains an unsupported backend framework.
+
 [`components/src/dynamo/planner/errors.py#L141`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/errors.py#L141)
 
 **Public methods**
@@ -51,6 +55,9 @@ Base class for component type configuration issues.
 ```python
 from dynamo.planner.errors import ComponentError
 ```
+
+This serves as a parent class for all exceptions related to
+component type configuration problems in DynamoGraphDeployments.
 
 [`components/src/dynamo/planner/errors.py#L96`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/errors.py#L96)
 </Accordion>
@@ -84,6 +91,9 @@ from dynamo.planner.errors import DeploymentValidationError
 DeploymentValidationError(errors: List[str])
 ```
 
+This is used to aggregate multiple validation errors into a single exception,
+providing a comprehensive view of all validation issues.
+
 [`components/src/dynamo/planner/errors.py#L211`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/errors.py#L211)
 
 **Public methods**
@@ -102,6 +112,9 @@ from dynamo.planner.errors import DuplicateSubComponentError
 DuplicateSubComponentError(sub_component_type: str, service_names: List[str])
 ```
 
+This occurs when the DynamoGraphDeployment contains more than one component
+with the same role, which violates the expected uniqueness constraint.
+
 [`components/src/dynamo/planner/errors.py#L188`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/errors.py#L188)
 
 **Public methods**
@@ -119,6 +132,10 @@ from dynamo.planner.errors import DynamoGraphDeploymentNotFoundError
 ```python
 DynamoGraphDeploymentNotFoundError(deployment_name: str, namespace: str)
 ```
+
+This typically occurs when:
+- The DYN_PARENT_DGD_K8S_NAME environment variable is not set
+- The referenced DynamoGraphDeployment doesn't exist in the namespace
 
 [`components/src/dynamo/planner/errors.py#L52`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/errors.py#L52)
 
@@ -155,6 +172,9 @@ from dynamo.planner.errors import EmptyTargetReplicasError
 ```python
 EmptyTargetReplicasError()
 ```
+
+This occurs when attempting to set component replicas with an empty
+or invalid target_replicas dictionary.
 
 [`components/src/dynamo/planner/errors.py#L224`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/errors.py#L224)
 
@@ -209,6 +229,10 @@ from dynamo.planner import GlobalPlannerConnector
 ```python
 GlobalPlannerConnector(runtime: DistributedRuntime, dynamo_namespace: str, global_planner_namespace: str, global_planner_component: str = 'GlobalPlanner', model_name: Optional[str] = None)
 ```
+
+This connector wraps RemotePlannerClient and implements the InfraScaler
+interface, allowing planner_core.py to treat global-planner environment mode
+consistently with kubernetes and virtual modes.
 
 [`components/src/dynamo/planner/connectors/global_planner.py#L37`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/global_planner.py#L37)
 
@@ -322,6 +346,9 @@ Base exception for all planner-related errors.
 from dynamo.planner.errors import PlannerError
 ```
 
+This serves as the root exception class for all custom exceptions
+in the planner module, allowing for broad exception catching when needed.
+
 [`components/src/dynamo/planner/errors.py#L42`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/errors.py#L42)
 </Accordion>
 
@@ -335,6 +362,15 @@ from dynamo.planner.core import PlannerScalingState
 ```python
 PlannerScalingState(config: PlannerConfig, capabilities: Optional[WorkerCapabilities] = None) -> None
 ```
+
+Owns perf models, throughput lower bounds, worker inventory,
+last-value runtime metadata, and all scaling decision logic. It
+deliberately has no runtime dependencies. Load prediction state
+lives in the builtin PREDICT plugin and is passed in explicitly.
+
+Builtin orchestrator plugins use this class directly as their private
+shared core while the remaining cross-plugin state is being split into
+explicit pipeline artifacts.
 
 [`components/src/dynamo/planner/core/state_machine.py#L48`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L48)
 
@@ -364,7 +400,7 @@ from dynamo.planner import SLAPlannerDefaults
 </Accordion>
 
 <Accordion id="api-dynamo-planner-core-types-scalingdecision" title="ScalingDecision (class)">
-Desired replica counts.  ``None`` means the core has no opinion
+Desired replica counts. ``None`` means the core has no opinion on that component (e.g. prefill-only planner leaves decode as None).
 
 ```python
 from dynamo.planner.core import ScalingDecision
@@ -382,7 +418,7 @@ ScalingDecision(num_prefill: Optional[int] = None, num_decode: Optional[int] = N
 </Accordion>
 
 <Accordion id="api-dynamo-planner-core-types-scheduledtick" title="ScheduledTick (class)">
-Declares when the core next needs to be called, what data it needs,
+Declares when the core next needs to be called, what data it needs, and what decisions to make.
 
 ```python
 from dynamo.planner.core import ScheduledTick
@@ -391,6 +427,11 @@ from dynamo.planner.core import ScheduledTick
 ```python
 ScheduledTick(at_s: float, run_load_scaling: bool = False, run_throughput_scaling: bool = False, need_traffic_metrics: bool = False, use_full_traffic_metrics: bool = False, traffic_metrics_duration_s: float = 0.0, need_worker_states: bool = False, need_worker_fpm: bool = False, at_monotonic_s: Optional[float] = None) -> None
 ```
+
+``at_s`` is an absolute wall-clock time for the native adapter and a
+simulated time for replay. ``at_monotonic_s`` is the matching scheduler
+timestamp used to make observation-prefetch and plugin-dispatch cadence
+decisions against the same clock value.
 
 [`components/src/dynamo/planner/core/types.py#L21`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/types.py#L21)
 
@@ -409,6 +450,9 @@ from dynamo.planner.errors import SubComponentNotFoundError
 ```python
 SubComponentNotFoundError(sub_component_type: str)
 ```
+
+This occurs when the DynamoGraphDeployment doesn't contain any component
+with the requested role (e.g., 'prefill', 'decode').
 
 [`components/src/dynamo/planner/errors.py#L165`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/errors.py#L165)
 
@@ -447,6 +491,9 @@ from dynamo.planner.core import TickInput
 ```python
 TickInput(now_s: float, traffic: Optional[TrafficObservation] = None, worker_counts: Optional[WorkerCounts] = None, fpm_observations: Optional[FpmObservations] = None) -> None
 ```
+
+Fields are filled according to the previous ``ScheduledTick``'s
+declared requirements.
 
 [`components/src/dynamo/planner/core/types.py#L82`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/types.py#L82)
 
@@ -502,6 +549,17 @@ from dynamo.planner import VirtualConnector
 VirtualConnector(runtime: DistributedRuntime, dynamo_namespace: str, worker_info_provider: WorkerInfoProvider, model_name: Optional[str] = None)
 ```
 
+The connector does not scale a deployment directly. It publishes decisions
+through the Dynamo runtime's ``VirtualConnectorCoordinator``; the deployment
+environment consumes them with ``VirtualConnectorClient`` and reports scaling
+status back to the coordinator.
+
+Virtual deployments do not have a Kubernetes API from which to derive worker
+component and endpoint metadata. They therefore require a
+``worker_info_provider`` that resolves ``WorkerInfo`` from runtime MDC. The
+planner factory normally supplies its ``RuntimeFpmProvider``, sharing the same
+runtime discovery source used for forward-pass metrics.
+
 [`components/src/dynamo/planner/connectors/virtual.py#L30`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/virtual.py#L30)
 
 **Public methods**
@@ -530,6 +588,12 @@ from dynamo.planner.core import WorkerCapabilities
 ```python
 WorkerCapabilities(prefill: Optional[EngineCapabilities] = None, decode: Optional[EngineCapabilities] = None) -> None
 ```
+
+Provided once when constructing the planner core.  In native mode
+these come from ``WorkerInfo`` (resolved via MDC / DGD); in replay
+they come from the simulated engine args.
+
+For agg mode, only ``decode`` is populated (single engine type).
 
 [`components/src/dynamo/planner/core/types.py#L210`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/types.py#L210)
 
@@ -566,6 +630,9 @@ from dynamo.planner import WorkerInfo
 ```python
 WorkerInfo(k8s_name: Optional[str] = None, component_name: Optional[str] = None, endpoint: Optional[str] = None, model_name: Optional[str] = None, total_kv_blocks: Optional[int] = None, kv_cache_block_size: Optional[int] = None, max_num_seqs: Optional[int] = None, max_num_batched_tokens: Optional[int] = None, context_length: Optional[int] = None, speculative_nextn: Optional[int] = None) -> None
 ```
+
+Populated from MDC (DynamoWorkerMetadata CRs) in Kubernetes mode,
+with fallback to DGD container-arg parsing, then hard-coded defaults.
 
 [`components/src/dynamo/planner/monitoring/worker_info.py#L26`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/monitoring/worker_info.py#L26)
 

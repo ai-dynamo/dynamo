@@ -31,7 +31,7 @@ from dynamo.runtime import Client
 </Accordion>
 
 <Accordion id="api-dynamo-core-context" title="Context (class)">
-Context wrapper around AsyncEngineContext for Python bindings.
+Context wrapper around AsyncEngineContext for Python bindings. Provides tracing and cancellation capabilities for request handling.
 
 ```python
 from dynamo.runtime import Context
@@ -109,11 +109,16 @@ from dynamo.runtime.logging import LogHandler
 </Accordion>
 
 <Accordion id="api-dynamo-core-pyasyncrequeststream" title="PyAsyncRequestStream (class)">
-Python-visible inbound iterator handed to bidirectional engine
+Python-visible inbound iterator handed to bidirectional engine handlers as the first positional argument. Yields request frames as JSON-like Python objects.
 
 ```python
 from dynamo.runtime import PyAsyncRequestStream
 ```
+
+Request-stream end is not a cancellation signal: when this iterator
+raises `StopAsyncIteration`, the caller has merely stopped sending
+input. The engine should keep yielding response chunks until it
+chooses to return or observes `context.is_stopped()`.
 
 [`lib/bindings/python/src/dynamo/_core.pyi#L237`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L237)
 </Accordion>
@@ -124,6 +129,10 @@ Formatter that matches Rust tracing's compact colored output style.
 ```python
 from dynamo.runtime.logging import VllmColorFormatter
 ```
+
+Used for vLLM logs routed through a StreamHandler (bypassing the Rust
+bridge) so that VLLM_LOGGING_LEVEL is respected independently of DYN_LOG
+while still producing visually consistent colored output.
 
 [`lib/bindings/python/src/dynamo/runtime/logging.py#L65`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/runtime/logging.py#L65)
 
@@ -185,6 +194,19 @@ from dynamo.runtime.logging import configure_vllm_logging
 configure_vllm_logging(dyn_level: int) -> None
 ```
 
+Main process: replaces vLLM's StreamHandler with a new StreamHandler that
+uses VllmColorFormatter and writes directly to stderr.  This bypasses the
+Rust LogHandler bridge so that VLLM_LOGGING_LEVEL is respected independently
+of DYN_LOG (the Rust bridge filters based on DYN_LOG).
+
+Subprocesses (EngineCore, workers): use vLLM's DEFAULT_LOGGING_CONFIG
+(StreamHandler to stderr) since the Rust runtime is not initialized there.
+Setting VLLM_CONFIGURE_LOGGING=1 without VLLM_LOGGING_CONFIG_PATH causes
+vLLM to use its built-in default config in spawned subprocesses.
+
+The dyn_level param is kept for signature compatibility but does not control
+the vLLM logger level. Use VLLM_LOGGING_LEVEL env var instead.
+
 [`lib/bindings/python/src/dynamo/runtime/logging.py#L255`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/runtime/logging.py#L255)
 </Accordion>
 
@@ -227,6 +249,14 @@ from dynamo.runtime import dynamo_worker
 dynamo_worker(enable_nats: Optional[bool] = None)
 ```
 
+**Parameters**
+
+<ParamField path="enable_nats" type="Optional[bool]">
+Deprecated. NATS enablement is now determined automatically
+from the event-plane configuration. This parameter is accepted for
+backwards compatibility but will be removed in a future release.
+</ParamField>
+
 [`lib/bindings/python/src/dynamo/runtime/__init__.py#L21`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/runtime/__init__.py#L21)
 </Accordion>
 
@@ -245,7 +275,7 @@ get_bool_env_var(name: str, default: str = 'false') -> bool
 </Accordion>
 
 <Accordion id="api-dynamo-runtime-logging-log-level-mapping" title="log_level_mapping (function)">
-The DYN_LOG variable is set using "debug" or "trace" or "info.
+The DYN_LOG variable is set using "debug" or "trace" or "info. This function maps those to the appropriate logging level and defaults to INFO if the variable is not set or a bad value.
 
 ```python
 from dynamo.runtime.logging import log_level_mapping

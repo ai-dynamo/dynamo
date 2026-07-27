@@ -27,7 +27,7 @@ from pathlib import Path
 
 from griffe import Alias, AliasResolutionError, Class, Function, GriffeLoader, Kind
 from griffe import Module as GriffeModule
-from griffe import Parameter, ParameterKind
+from griffe import Parameter, ParameterKind, Parser
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent.parent.parent
@@ -100,10 +100,62 @@ SKIP_SUBMODULES: frozenset[str] = frozenset({"tests", "proto", "plugins"})
 SOURCE_BRANCH = "main"
 SOURCE_BASE = f"https://github.com/ai-dynamo/dynamo/blob/{SOURCE_BRANCH}"
 
+# Dynamo mixes docstring styles -- most packages are Google-style while
+# ``dynamo.nixl_connect`` is NumPy-style -- so the style is detected per
+# docstring rather than pinned. Griffe logs a warning for every parameter it
+# cannot reconcile with the signature, which is noise for a docs build, so
+# warnings are disabled for whichever style wins detection.
+DOCSTRING_PARSER_OPTIONS: dict[Parser, dict[str, bool]] = {
+    parser: {"warnings": False}
+    for parser in (Parser.google, Parser.numpy, Parser.sphinx)
+}
+
+# Griffe section kinds carrying named entries the renderer turns into terms.
+_TERM_SECTION_KINDS: frozenset[str] = frozenset(
+    {"parameters", "other parameters", "attributes", "returns", "yields", "raises"}
+)
+
 
 # ---------------------------------------------------------------------------
 # Data model
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DocTerm:
+    """One named entry inside a docstring section.
+
+    Covers parameters, attributes, returns, and raises alike: griffe models
+    each as a name and/or annotation plus a description, and the renderer
+    only needs to know which of the two to use as the label.
+    """
+
+    name: str
+    annotation: str
+    description: str
+
+
+@dataclass(frozen=True)
+class DocSection:
+    """One parsed docstring section, normalized off griffe's own types.
+
+    A single flat shape beats a class per section kind: the renderer just
+    dispatches on ``kind`` and reads whichever field that kind populates.
+
+    ``kind`` is griffe's section kind (``text``, ``parameters``,
+    ``attributes``, ``returns``, ``yields``, ``raises``, ``examples``,
+    ``admonition``). ``label`` carries griffe's normalized admonition kind
+    (``note``, ``warning``) and is empty otherwise. ``text`` holds prose,
+    ``terms`` holds named entries, and ``blocks`` holds the ordered
+    ``(kind, text)`` pairs of an examples section, where an ``examples`` kind
+    is a code sample and a ``text`` kind is prose between samples.
+    """
+
+    kind: str
+    label: str = ""
+    text: str = ""
+    terms: tuple[DocTerm, ...] = ()
+    blocks: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -132,6 +184,7 @@ class Symbol:
     source_line: int
     source_href: str
     methods: tuple[Method, ...] = field(default_factory=tuple)
+    docs: tuple[DocSection, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
@@ -310,6 +363,7 @@ def _build_symbol(name: str, target: Class | Function, *, import_path: str) -> S
         source_line=source_line,
         source_href=_source_href(source_path, source_line),
         methods=tuple(methods),
+        docs=_docstring_sections(target),
     )
 
 
@@ -323,6 +377,60 @@ def _first_docstring_line(target: Class | Function) -> str:
         if stripped:
             return stripped
     return ""
+
+
+def _docstring_sections(target: Class | Function) -> tuple[DocSection, ...]:
+    """Every structured docstring section, in authored order.
+
+    The leading text section is kept whole, including the opening sentence
+    that :func:`_first_docstring_line` truncates at the first newline. The
+    renderer decides how to split lead from body; discarding the remainder
+    here would lose the tail of any summary sentence that wraps. Sections
+    griffe recognizes but this generator has no placement for are skipped
+    rather than dumped as raw text.
+    """
+    doc = getattr(target, "docstring", None)
+    if not doc or not doc.value:
+        return ()
+    parsed = doc.parse(Parser.auto, per_style_options=DOCSTRING_PARSER_OPTIONS)
+    sections = (_convert_section(s.kind.value, s) for s in parsed)
+    return tuple(section for section in sections if section is not None)
+
+
+def _convert_section(kind: str, section: object) -> DocSection | None:
+    """Adapt one griffe section, or return None when it has no placement."""
+    value = getattr(section, "value", None)
+    if kind == "text":
+        text = str(value).strip()
+        return DocSection(kind="text", text=text) if text else None
+    if kind in _TERM_SECTION_KINDS:
+        terms = tuple(_doc_term(entry) for entry in value or ())
+        normalized = "parameters" if kind == "other parameters" else kind
+        return DocSection(kind=normalized, terms=terms) if terms else None
+    if kind == "examples":
+        blocks = tuple(
+            (block_kind.value, str(block_text).strip())
+            for block_kind, block_text in value or ()
+            if str(block_text).strip()
+        )
+        return DocSection(kind="examples", blocks=blocks) if blocks else None
+    if kind == "admonition":
+        contents = str(getattr(value, "contents", "")).strip()
+        label = str(getattr(value, "kind", "") or "").strip().lower()
+        if not contents:
+            return None
+        return DocSection(kind="admonition", label=label, text=contents)
+    return None
+
+
+def _doc_term(entry: object) -> DocTerm:
+    """One named docstring entry, with griffe expressions flattened to text."""
+    annotation = getattr(entry, "annotation", None)
+    return DocTerm(
+        name=str(getattr(entry, "name", "") or ""),
+        annotation="" if annotation is None else str(annotation),
+        description=str(getattr(entry, "description", "") or "").strip(),
+    )
 
 
 def _class_signature(cls: Class) -> str:
