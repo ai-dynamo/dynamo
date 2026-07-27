@@ -127,15 +127,16 @@ impl ZmqEventNormalizer {
             return Err(ZmqEventFilterReason::IgnoredEvent);
         }
 
-        // Lower-tier events (any recognized non-device medium) carry no
+        // Hash-only lower-tier events (STORAGE -> Disk, and External) carry no
         // extra_keys/cache_namespace and must not mutate per-group metadata or
         // the salted-namespace propagation chain; they are also outside the
-        // SW/SSM group filter's semantics. Route them straight to conversion,
-        // which applies the tier/locality gating.
+        // SW/SSM group filter's semantics, so route them straight to conversion.
+        // Device and host-pinned events (CPU offload, #10368) stay on the
+        // normalizer path so their salted namespaces still propagate.
         if raw
             .medium()
             .and_then(StorageTier::from_kv_medium)
-            .is_some_and(|tier| !tier.is_gpu())
+            .is_some_and(|tier| matches!(tier, StorageTier::Disk | StorageTier::External))
         {
             return Ok(raw);
         }

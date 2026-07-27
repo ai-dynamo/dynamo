@@ -147,6 +147,15 @@ impl RawKvEvent {
         }
     }
 
+    /// Per-event locality, if present. Absent or `Local` is worker-local;
+    /// `Remote` or an unrecognized value is treated as non-local.
+    pub fn locality(&self) -> Option<Locality> {
+        match self {
+            Self::BlockStored { locality, .. } | Self::BlockRemoved { locality, .. } => *locality,
+            Self::AllBlocksCleared | Self::Ignored => None,
+        }
+    }
+
     pub(crate) fn metadata(&self) -> KvCacheEventMetadata {
         match self {
             Self::BlockStored {

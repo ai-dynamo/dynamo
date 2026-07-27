@@ -13,7 +13,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use dynamo_kv_router::protocols::StorageTier as RouterStorageTier;
-use dynamo_kv_router::zmq_wire::RawKvEvent;
+use dynamo_kv_router::zmq_wire::{Locality, RawKvEvent};
 
 use super::SharedCacheStatusTracker;
 use super::tracker::{
@@ -153,14 +153,15 @@ fn process_event(
     data_parallel_rank: Option<i32>,
     engine_source: EventSource,
 ) {
-    // G1-only ingress: this source is the engine's device (G1) cache. Native
-    // lower-tier media (CPU offload, vLLM STORAGE) belong to other systems —
-    // KVBM offload arrives via its own source — so they must not be tracked as
-    // G1 here.
-    if event
-        .medium()
-        .and_then(RouterStorageTier::from_kv_medium)
-        .is_some_and(|tier| !tier.is_gpu())
+    // G1-only ingress: this source is the engine's local device (G1) cache.
+    // Non-local events (REMOTE / unknown locality) and native lower-tier media
+    // (CPU offload, vLLM STORAGE) belong to other systems — KVBM offload arrives
+    // via its own source — so they must not be tracked as G1 here.
+    if matches!(event.locality(), Some(Locality::Remote | Locality::Unknown))
+        || event
+            .medium()
+            .and_then(RouterStorageTier::from_kv_medium)
+            .is_some_and(|tier| !tier.is_gpu())
     {
         return;
     }
@@ -274,7 +275,7 @@ mod tests {
     use super::*;
     use dynamo_kv_router::zmq_wire::BlockHashValue;
 
-    fn stored_event(medium: Option<&str>) -> RawKvEvent {
+    fn stored_event(medium: Option<&str>, locality: Option<Locality>) -> RawKvEvent {
         RawKvEvent::BlockStored {
             block_hashes: vec![BlockHashValue::Unsigned(1)],
             parent_block_hash: None,
@@ -288,31 +289,49 @@ mod tests {
             group_idx: None,
             kv_cache_spec_kind: None,
             kv_cache_spec_sliding_window: None,
-            locality: None,
+            locality,
         }
     }
 
-    /// G1-only ingress contract: native lower-tier media (vLLM STORAGE, CPU
-    /// offload) are dropped; only device (G1) events reach the tracker.
+    /// G1-only ingress contract: only local device (G1) events reach the
+    /// tracker. Native lower-tier media (vLLM STORAGE, CPU offload) and non-local
+    /// (REMOTE / unknown locality) events are dropped.
     #[test]
     fn process_event_tracks_only_g1_device_events() {
         let mut tracker = PassthroughCacheStatusTracker::new();
 
         process_event(
             &mut tracker,
-            stored_event(Some("STORAGE")),
+            stored_event(Some("STORAGE"), None),
             None,
             EventSource::Vllm,
         );
         process_event(
             &mut tracker,
-            stored_event(Some("CPU")),
+            stored_event(Some("CPU"), None),
+            None,
+            EventSource::Vllm,
+        );
+        process_event(
+            &mut tracker,
+            stored_event(Some("GPU"), Some(Locality::Remote)),
+            None,
+            EventSource::Vllm,
+        );
+        process_event(
+            &mut tracker,
+            stored_event(None, Some(Locality::Unknown)),
             None,
             EventSource::Vllm,
         );
         assert!(tracker.drain_events().is_empty());
 
-        process_event(&mut tracker, stored_event(None), None, EventSource::Vllm);
+        process_event(
+            &mut tracker,
+            stored_event(None, None),
+            None,
+            EventSource::Vllm,
+        );
         assert!(matches!(
             tracker.drain_events().as_slice(),
             [ConsolidatedEvent::Store {
