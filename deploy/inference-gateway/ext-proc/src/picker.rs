@@ -98,6 +98,8 @@ pub enum PickError {
     NoEndpoints,
     #[error("routing failed: {0}")]
     RoutingFailed(String),
+    #[error("backpressure: {0}")]
+    Backpressure(String),
     #[error("tokenization failed: {0}")]
     TokenizationFailed(String),
 }
