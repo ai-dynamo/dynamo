@@ -12,7 +12,7 @@ With 200+ external contributors, 220+ merged community PRs, and new contributors
 
 Join the community:
 
-- [CNCF Slack (`#ai-dynamo`)](https://communityinviter.com/apps/cloud-native/cncf) -- join CNCF Slack and find us in `#ai-dynamo`
+- [CNCF Slack (`#ai-dynamo`)](https://slack.cncf.io) -- join CNCF Slack and find us in `#ai-dynamo`
 - [Discord](https://discord.gg/D92uqZRjCZ)
 - [GitHub Discussions](https://github.com/ai-dynamo/dynamo/discussions)
 - [Design Proposals](https://github.com/ai-dynamo/dynamo/issues?q=is%3Aissue+label%3A%22dep%3Adraft%22%2C%22dep%3Aproposed%22%2C%22dep%3Aapproved%22%2C%22dep%3Aimplementing%22%2C%22dep%3Acompleted%22%2C%22dep%3Adeferred%22%2C%22dep%3Asuperseeded%22) -- RFCs for major features, tracked as `dep:*` labeled GitHub issues
@@ -65,7 +65,7 @@ Ready to write code? See the [Contribution Workflow](#contribution-workflow) sec
 
 Not all contributions are code. You can also:
 
-- Answer questions on [Discord](https://discord.gg/D92uqZRjCZ) or in the `#ai-dynamo` channel on [CNCF Slack](https://communityinviter.com/apps/cloud-native/cncf)
+- Answer questions on [Discord](https://discord.gg/D92uqZRjCZ) or in the `#ai-dynamo` channel on [CNCF Slack](https://slack.cncf.io)
 - Review pull requests
 - Share how you're using Dynamo -- blog posts, talks, or social media
 - Star the [repository](https://github.com/ai-dynamo/dynamo)
@@ -422,7 +422,7 @@ If you discover a security vulnerability, please follow the instructions in our 
 
 ## Getting Help
 
-- **CNCF Slack**: [Join CNCF Slack](https://communityinviter.com/apps/cloud-native/cncf) and find us in `#ai-dynamo`
+- **CNCF Slack**: [Join CNCF Slack](https://slack.cncf.io) and find us in `#ai-dynamo`
 - **Discord**: [Join our community](https://discord.gg/D92uqZRjCZ)
 - **Discussions**: [GitHub Discussions](https://github.com/ai-dynamo/dynamo/discussions)
 - **Design Proposals**: [RFCs for major features, tracked as `dep:*` labeled GitHub issues](https://github.com/ai-dynamo/dynamo/issues?q=is%3Aissue+label%3A%22dep%3Adraft%22%2C%22dep%3Aproposed%22%2C%22dep%3Aapproved%22%2C%22dep%3Aimplementing%22%2C%22dep%3Acompleted%22%2C%22dep%3Adeferred%22%2C%22dep%3Asuperseeded%22)
