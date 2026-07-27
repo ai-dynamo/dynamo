@@ -57,8 +57,9 @@ Each field is both a CLI flag and an environment variable. The CLI flag takes pr
 
 `--kv-events-config` and `--enable-prefix-caching` are native vLLM engine arguments rather than `DynamoVllmConfig` fields, but they determine whether a worker publishes the cache events used by event-driven KV-aware routing.
 
-> [!IMPORTANT]
-> Starting the frontend with `--router-mode kv` does not configure event publishing on vLLM workers. Enable publishing explicitly on every aggregated or prefill worker whose cache state the router should track.
+<Info>
+Starting the frontend with `--router-mode kv` does not configure event publishing on vLLM workers. Enable publishing explicitly on every aggregated or prefill worker whose cache state the router should track.
+</Info>
 
 ```bash
 python -m dynamo.vllm \

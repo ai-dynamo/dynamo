@@ -5,8 +5,9 @@ title: ThunderAgent Scheduler Reference
 subtitle: Control-loop flags, constraints, capacity behavior, and scheduler log records
 ---
 
-> [!WARNING]
-> `dynamo.thunderagent_router` is experimental. The command-line interface and lifecycle contract can change.
+<Warning>
+`dynamo.thunderagent_router` is experimental. The command-line interface and lifecycle contract can change.
+</Warning>
 
 The ThunderAgent scheduler uses the program working set as a fraction of each worker's retention budget. With SGLang HiCache enabled, the budget is the sum of published GPU KV capacity and host HiCache capacity. Mooncake capacity is excluded because it is conditional content-addressed storage rather than guaranteed per-program retention.
 

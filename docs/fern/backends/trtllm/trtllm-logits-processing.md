@@ -31,10 +31,9 @@ export DYN_ENABLE_TEST_LOGITS_PROCESSOR=1
 ./launch/agg.sh --unified
 ```
 
-<Note>
-- When enabled, Dynamo initializes the tokenizer so the HelloWorld processor can map text to token IDs.
-- Expected chat response contains "Hello world".
-</Note>
+> [!NOTE]
+> - When enabled, Dynamo initializes the tokenizer so the HelloWorld processor can map text to token IDs.
+> - Expected chat response contains "Hello world".
 
 #### Disaggregated caveat
 

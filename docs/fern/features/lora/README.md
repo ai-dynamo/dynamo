@@ -141,9 +141,8 @@ LoRA (Low-Rank Adaptation) serves specialized model variants without duplicating
     | `--max-lora-rank` | Maximum LoRA rank (must be >= your adapter's rank) |
     | `--max-loras` | Maximum number of LoRAs loaded simultaneously |
 
-    <Warning>
-    Set `--max-lora-rank` to at least your adapter's rank. A lower value causes load failures.
-    </Warning>
+    > [!WARNING]
+    > Set `--max-lora-rank` to at least your adapter's rank. A lower value causes load failures.
 
     <AccordionGroup>
       <Accordion title="S3 or MinIO credentials on the worker">
@@ -242,9 +241,8 @@ LoRA (Low-Rank Adaptation) serves specialized model variants without duplicating
       }'
     ```
 
-    <Warning>
-    The `model` field is case-sensitive and must match the loaded adapter name exactly. For disaggregated serving, load the adapter on both prefill and decode workers.
-    </Warning>
+    > [!WARNING]
+    > The `model` field is case-sensitive and must match the loaded adapter name exactly. For disaggregated serving, load the adapter on both prefill and decode workers.
   </Step>
 </Steps>
 
@@ -322,9 +320,8 @@ LoRA (Low-Rank Adaptation) serves specialized model variants without duplicating
       }'
     ```
 
-    <Warning>
-    The `model` field is case-sensitive and must match `lora_name` exactly. For disaggregated serving, load the adapter on both prefill and decode workers.
-    </Warning>
+    > [!WARNING]
+    > The `model` field is case-sensitive and must match `lora_name` exactly. For disaggregated serving, load the adapter on both prefill and decode workers.
   </Step>
 </Steps>
 

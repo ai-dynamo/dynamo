@@ -59,12 +59,11 @@ The launcher supplies the required multimodal and prompt-embedding flags. If the
 language model's chat template does not render an image-placeholder token, also
 provide `DYN_CUSTOM_JINJA_TEMPLATE` or `--custom-jinja-template`.
 
-<Warning>
-The backend owns any media retrieval performed by `preprocess()`. Apply Dynamo's
-[media URL policy](README.md#security-url-validation), finite network timeouts,
-response-size limits, and image decode limits rather than fetching arbitrary
-request URLs directly.
-</Warning>
+> [!WARNING]
+> The backend owns any media retrieval performed by `preprocess()`. Apply Dynamo's
+> [media URL policy](README.md#security-url-validation), finite network timeouts,
+> response-size limits, and image decode limits rather than fetching arbitrary
+> request URLs directly.
 
 ## Implement `VisionEncoderBackend`
 

@@ -12,16 +12,14 @@ docs **system** works: the branch model, sync workflow, and publishing pipeline.
 docs content (page types, structure, prose, terminology, and links), see the
 [Documentation Style Guide](documentation-style-guide.md).
 
-<Note>
-The documentation website is published at [https://docs.nvidia.com/dynamo](https://docs.nvidia.com/dynamo). CI handles publishing, including hosting, CDN, and versioned URL routing.
-</Note>
+> [!NOTE]
+> The documentation website is published at [https://docs.nvidia.com/dynamo](https://docs.nvidia.com/dynamo). CI handles publishing, including hosting, CDN, and versioned URL routing.
 
-<Error>
-The `docs-website` branch is **CI-managed and must never be edited by
-hand**. All documentation authoring happens on `main` (or a feature
-branch based on `main`). The sync workflow copies changes to
-`docs-website` automatically.
-</Error>
+> [!CAUTION]
+> The `docs-website` branch is **CI-managed and must never be edited by
+> hand**. All documentation authoring happens on `main` (or a feature
+> branch based on `main`). The sync workflow copies changes to
+> `docs-website` automatically.
 
 ---
 

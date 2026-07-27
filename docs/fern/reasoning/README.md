@@ -43,9 +43,8 @@ Some models emit reasoning separately from their final response. Dynamo can spli
     - MiniMax M2 style outputs: `--dyn-tool-call-parser minimax_m2 --dyn-reasoning-parser minimax_m2`
     - MiniMax M3 style outputs: `--dyn-tool-call-parser minimax_m3 --dyn-reasoning-parser minimax_m3`
 
-    <Warning>
-    `minimax_append_think` is deprecated for MiniMax M2 tool-calling deployments. Use `--dyn-reasoning-parser minimax_m2` with `--dyn-tool-call-parser minimax_m2` so Dynamo can separate reasoning and pass MiniMax XML tool calls to the tool parser.
-    </Warning>
+    > [!WARNING]
+    > `minimax_append_think` is deprecated for MiniMax M2 tool-calling deployments. Use `--dyn-reasoning-parser minimax_m2` with `--dyn-tool-call-parser minimax_m2` so Dynamo can separate reasoning and pass MiniMax XML tool calls to the tool parser.
 
     </details>
 
@@ -139,9 +138,8 @@ Parsers marked **Force-reasoning: Yes** emit reasoning content from token one wi
       </Accordion>
     </AccordionGroup>
 
-    <Warning>
-    Kimi K2.7 may ignore `chat_template_kwargs.thinking=false` and continue to generate reasoning. Dynamo can separate emitted reasoning when a compatible parser is configured, but it cannot force the model to disable reasoning. Treat the request flag as best-effort for Kimi K2.7.
-    </Warning>
+    > [!WARNING]
+    > Kimi K2.7 may ignore `chat_template_kwargs.thinking=false` and continue to generate reasoning. Dynamo can separate emitted reasoning when a compatible parser is configured, but it cannot force the model to disable reasoning. Treat the request flag as best-effort for Kimi K2.7.
   </Accordion>
 
   <Accordion title="MiniMax">

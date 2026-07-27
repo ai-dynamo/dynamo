@@ -26,9 +26,8 @@ curl http://localhost:8000/v1/chat/completions \
   }'
 ```
 
-<Info>
-Session IDs identify work for tracing and opt-in consumers. Agent hints influence serving behavior. Neither enables sticky placement unless a separate routing policy is configured.
-</Info>
+> [!IMPORTANT]
+> Session IDs identify work for tracing and opt-in consumers. Agent hints influence serving behavior. Neither enables sticky placement unless a separate routing policy is configured.
 
 ## Choose Your Metadata
 

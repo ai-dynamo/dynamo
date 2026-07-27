@@ -41,10 +41,11 @@ separate features that can operate alongside the selected backend.
 | **HiCache** | SGLang | Host and optional external storage | Included with SGLang | Included with `ai-dynamo[sglang]` |
 | **FlexKV** | vLLM in this tutorial | Host, SSD, cloud storage | Requires a custom image or a source build inside the container | Build FlexKV from source |
 
-> [!NOTE]
-> The Dynamo Operator does not install these packages. Local containers and Kubernetes deployments
-> get them from the selected runtime image. The Python environment path installs packages on the
-> host instead.
+<Note>
+The Dynamo Operator does not install these packages. Local containers and Kubernetes deployments
+get them from the selected runtime image. The Python environment path installs packages on the
+host instead.
+</Note>
 
   </Step>
   <Step title="Start Offloading">
@@ -96,10 +97,11 @@ LMCache publishes x86_64 wheels built for specific CUDA versions. For Arm64 or a
 PyTorch/CUDA stack, build LMCache from source by following the
 [LMCache installation guide](https://docs.lmcache.ai/getting_started/installation.html).
 
-> [!WARNING]
-> Some Dynamo vLLM image tags include an LMCache build that is incompatible with
-> `LMCacheMPConnector`. If startup fails with `RuntimeError: Unsupported GPUKVFormat`, build LMCache
-> from a version containing [LMCache pull request #3282](https://github.com/LMCache/LMCache/pull/3282).
+<Warning>
+Some Dynamo vLLM image tags include an LMCache build that is incompatible with
+`LMCacheMPConnector`. If startup fails with `RuntimeError: Unsupported GPUKVFormat`, build LMCache
+from a version containing [LMCache pull request #3282](https://github.com/LMCache/LMCache/pull/3282).
+</Warning>
 
 Start the out-of-process LMCache server and an aggregated vLLM worker:
 

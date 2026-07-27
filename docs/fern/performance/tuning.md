@@ -32,7 +32,7 @@ Typically, the number of GPUs vs the performance follows the following pattern:
 | Maximum number limited by communication scalability | Worst overall throughput/GPU, best latency/user                                           |
 | More than maximum                                   | Communication overhead dominates, poor performance                                        |
 
-> [!Note]
+> [!NOTE]
 > for decode-only engines, sometimes larger number of GPUs has to larger KV cache per GPU and more decoding requests running in parallel, which leads to both better throughput/GPU and better latency/user.
 >
 > For example, for Llama-3.3-70b NVFP4 quantization on B200 in vLLM with 0.9 free GPU memory fraction:
@@ -46,7 +46,7 @@ Typically, the number of GPUs vs the performance follows the following pattern:
 The best number of GPUs to use in the prefill and decode engines can be determined by running a few fixed ISL/OSL/concurrency test using [AIPerf](https://github.com/ai-dynamo/aiperf/tree/main) and compare with the SLA.
 AIPerf is pre-installed in the dynamo container.
 
-> [!Tip]
+> [!TIP]
 > If you are unfamiliar with AIPerf, please see this helpful [tutorial](https://github.com/ai-dynamo/aiperf/blob/main/docs/tutorial.md) to get you started.
 
 Besides the parallelization mapping, other common knobs to tune are maximum batch size, maximum number of tokens, and block size.
@@ -74,7 +74,7 @@ Dynamo launch scripts use absolute KV cache overrides for deterministic, paralle
 
 Setting a lower memory fraction leaves more headroom for other CUDA allocations (e.g. activation buffers, NCCL buffers) at the cost of a smaller KV cache. Setting it higher allows more concurrent requests but risks OOM from non-KV-cache allocations. Typical production values are 0.85-0.95.
 
-> [!Important]
+> [!IMPORTANT]
 > In vLLM, when `--kv-cache-memory-bytes` is set to an explicit value (not None), it **overrides and ignores** `--gpu-memory-utilization` for KV cache sizing ([vLLM CacheConfig docs](https://docs.vllm.ai/en/stable/api/vllm/config/cache/)). This is exactly why we use `--kv-cache-memory-bytes` for parallel-safe allocation: it provides a deterministic, absolute KV cache cap that is immune to profiling races.
 
 
@@ -94,7 +94,7 @@ Preload the library for the frontend by setting `LD_PRELOAD` (in a Kubernetes de
 export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2
 ```
 
-> [!Note]
+> [!NOTE]
 > The path is architecture-dependent. On arm64 it is `/usr/lib/aarch64-linux-gnu/libjemalloc.so.2`. If unsure, locate it with `dpkg -L libjemalloc2 | grep 'libjemalloc.so'`.
 
 ### Tuning jemalloc

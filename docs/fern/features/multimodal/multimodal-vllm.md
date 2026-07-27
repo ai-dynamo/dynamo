@@ -6,15 +6,14 @@ title: vLLM Multimodal
 
 This document provides a comprehensive guide for multimodal inference using the vLLM backend in Dynamo.
 
-<Warning>
-**Security Requirement**: All multimodal workers require the
-`--enable-multimodal` flag to be explicitly set at startup. This prevents
-unintended processing of multimodal data from untrusted sources. Media requests
-are rejected when the flag is absent, and workers configured with a multimodal
-role fail at startup. This flag is analogous to `--enable-mm-embeds` in vLLM
-serve but also extends it to all multimodal content (URL, embeddings, and
-base64 data).
-</Warning>
+> [!WARNING]
+> **Security Requirement**: All multimodal workers require the
+> `--enable-multimodal` flag to be explicitly set at startup. This prevents
+> unintended processing of multimodal data from untrusted sources. Media requests
+> are rejected when the flag is absent, and workers configured with a multimodal
+> role fail at startup. This flag is analogous to `--enable-mm-embeds` in vLLM
+> serve but also extends it to all multimodal content (URL, embeddings, and
+> base64 data).
 
 ## Support Matrix
 
@@ -280,12 +279,11 @@ For Qwen-VL images, prefill sends grid and embedding-shape metadata so decode
 can construct schema-valid placeholder embeddings and initialize mRoPE. Other
 model families use the expanded prompt token IDs produced during prefill.
 
-<Warning>
-The P/D handoff does not carry video embeddings. Video and audio inputs are
-loaded again on the decode worker. This preserves current behavior but adds
-media download and processing work. Mixed image-and-video P/D requests retain
-the same model-specific limitations as the legacy vLLM path.
-</Warning>
+> [!WARNING]
+> The P/D handoff does not carry video embeddings. Video and audio inputs are
+> loaded again on the decode worker. This preserves current behavior but adds
+> media download and processing work. Mixed image-and-video P/D requests retain
+> the same model-specific limitations as the legacy vLLM path.
 
 ### Unified vLLM Backend
 
@@ -318,19 +316,17 @@ failure after a full transfer does not currently have a raw-media fallback.
 P/D prefill deliberately uses the original media because it still needs
 raw-media-derived metadata for the decode handoff.
 
-<Warning>
-The unified vLLM entry point does not provide a separate Encode worker and
-rejects both `--disaggregation-mode encode` and `--route-to-encoder`. Use the
-legacy E/PD or E/P/D launchers when a dedicated encoder is required.
-</Warning>
+> [!WARNING]
+> The unified vLLM entry point does not provide a separate Encode worker and
+> rejects both `--disaggregation-mode encode` and `--route-to-encoder`. Use the
+> legacy E/PD or E/P/D launchers when a dedicated encoder is required.
 
 ### E/PD Serving (Encode + PD)
 
 Use `disagg_multimodal_e_pd.sh` when you want a separate encode worker and a combined prefill/decode worker. This path is primarily useful for image-centric workloads and embedding-cache experiments.
 
-<Warning>
-When a separate encode worker is deployed with the current vLLM path, only `image_url` inputs are routed to it. `video_url` inputs are still processed on the combined PD worker.
-</Warning>
+> [!WARNING]
+> When a separate encode worker is deployed with the current vLLM path, only `image_url` inputs are routed to it. `video_url` inputs are still processed on the combined PD worker.
 
 ```bash
 cd $DYNAMO_HOME/examples/backends/vllm
@@ -347,9 +343,8 @@ bash launch/disagg_multimodal_e_pd.sh --model Qwen/Qwen3-VL-2B-Instruct --single
 
 Use `disagg_multimodal_epd.sh` when you want separate encode, prefill, and decode workers for multimodal workloads.
 
-<Warning>
-In the current vLLM implementation, the separate encode worker is only used for `image_url` inputs. `video_url` inputs are still processed on the prefill worker, not on the encode worker.
-</Warning>
+> [!WARNING]
+> In the current vLLM implementation, the separate encode worker is only used for `image_url` inputs. `video_url` inputs are still processed on the prefill worker, not on the encode worker.
 
 ```bash
 cd $DYNAMO_HOME/examples/backends/vllm

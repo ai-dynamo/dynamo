@@ -19,7 +19,8 @@ Dynamo provides support for improving latency and throughput for multimodal work
 | Workload where media encoding is a bottleneck. | [EPD disaggregation](encoder-disaggregation.md) | Scale encoders independently of LLM workers. |
 
 
-<Info> These features currently support image and video inputs only. Support for audio modalities will be added in upcoming releases. </Info>
+> [!IMPORTANT]
+> These features currently support image and video inputs only. Support for audio modalities will be added in upcoming releases.
 
 ## Multimodal Performance Optimization Features
 

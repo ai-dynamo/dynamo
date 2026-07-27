@@ -6,11 +6,12 @@ sidebar-title: Gateway API Routing
 subtitle: Install Gateway API, the Inference Extension, and a compatible Gateway implementation for Dynamo EPP routing.
 ---
 
-> [!NOTE]
-> Complete this installation only if you plan to use the Gateway API routing topology. The default
-> Dynamo Frontend topology works without Gateway API, the Gateway API Inference Extension (GAIE), or
-> an Endpoint Picker Plugin (EPP). To use the default topology, continue to
-> [KV-Aware Routing with the Dynamo Frontend](dgd-kv-routing.md).
+<Note>
+Complete this installation only if you plan to use the Gateway API routing topology. The default
+Dynamo Frontend topology works without Gateway API, the Gateway API Inference Extension (GAIE), or
+an Endpoint Picker Plugin (EPP). To use the default topology, continue to
+[KV-Aware Routing with the Dynamo Frontend](dgd-kv-routing.md).
+</Note>
 
 Install this integration after the [Dynamo platform](installation-guide.md). The Dynamo operator needs
 the GAIE `InferencePool` API before it can reconcile a `DynamoGraphDeployment` with an EPP component.

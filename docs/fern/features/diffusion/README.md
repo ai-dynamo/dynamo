@@ -12,9 +12,8 @@ Dynamo serves diffusion models for text-to-image, text-to-video, image-to-video,
 
 The built-in backends expose OpenAI-compatible endpoints for images (`/v1/images/generations`), videos (`/v1/videos`), audio (`/v1/audio/speech`), and text generation.
 
-<Info>
-Built-in diffusion backends currently use Dynamo CLI launch scripts and `python -m dynamo.*` entrypoints. Dynamo does not yet ship prebuilt Kubernetes recipes for these backends. FastVideo is the exception and includes a Kubernetes deployment path.
-</Info>
+> [!IMPORTANT]
+> Built-in diffusion backends currently use Dynamo CLI launch scripts and `python -m dynamo.*` entrypoints. Dynamo does not yet ship prebuilt Kubernetes recipes for these backends. FastVideo is the exception and includes a Kubernetes deployment path.
 
 <Steps toc={true} tocDepth={2}>
   <Step title="Choose a Workflow" id="choose-a-workflow">

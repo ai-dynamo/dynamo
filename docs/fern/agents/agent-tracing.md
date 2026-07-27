@@ -7,7 +7,8 @@ subtitle: Export Dynamo request traces, tool-call metadata, and Perfetto timelin
 
 Agent tracing captures request timing, token counts, worker placement, finish metadata, and replay hashes for eligible LLM requests. Requests with [session identity](session-ids.mdx) also carry agent context, which lets analysis tools group LLM turns and tool activity into the same run.
 
-<Info>Request traces contain metadata, not payloads. Dynamo does not store prompts, responses, or tool-call arguments in these traces.</Info>
+> [!IMPORTANT]
+> Request traces contain metadata, not payloads. Dynamo does not store prompts, responses, or tool-call arguments in these traces.
 
 <a id="enable-output"></a>
 
@@ -81,7 +82,8 @@ The Perfetto converter infers a tool span from the end of a tool-call response t
 tool_wait(turn N) ~= next.request_received_ms - this.event_time_unix_ms
 ```
 
-<Info>This interval includes tool execution and agent overhead. It cannot separate parallel tools or attribute time to one tool.</Info>
+> [!IMPORTANT]
+> This interval includes tool execution and agent overhead. It cannot separate parallel tools or attribute time to one tool.
 
 ### Record Precise Tool Timing
 
@@ -178,6 +180,6 @@ Dynamo emits `request_end` after an eligible response stream finishes or is drop
 
 For chat streams, Dynamo records finish metadata after parser and jail rewrites. Completion streams record the final OpenAI-compatible completion finish reason.
 
-<Warning>Request tracing currently covers eligible Rust OpenAI chat-completions and completions requests. It skips unsupported replay shapes, including `n > 1`, `best_of > 1`, `prompt_embeds`, multimodal inputs, and requests without a tracker or usable KV cache block size. Sinks use best-effort delivery and can drop records when they lag, so check warnings and validate row counts before treating a capture as complete.</Warning>
-
+> [!WARNING]
+> Request tracing currently covers eligible Rust OpenAI chat-completions and completions requests. It skips unsupported replay shapes, including `n > 1`, `best_of > 1`, `prompt_embeds`, multimodal inputs, and requests without a tracker or usable KV cache block size. Sinks use best-effort delivery and can drop records when they lag, so check warnings and validate row counts before treating a capture as complete.
 

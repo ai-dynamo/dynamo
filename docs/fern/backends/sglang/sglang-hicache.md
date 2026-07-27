@@ -42,9 +42,8 @@ Then start the frontend:
 python -m dynamo.frontend --http-port 8000
 ```
 
-<Note>
-The HiCache flags (`--enable-hierarchical-cache`, `--hicache-ratio`, `--hicache-write-policy`, `--hicache-storage-backend`, `--hicache-mem-layout`, etc.) are SGLang-native — Dynamo passes them through unchanged. See [SGLang's best-practices doc](https://docs.sglang.ai/advanced_features/hicache_best_practices.html) for the complete flag reference and tuning guidance.
-</Note>
+> [!NOTE]
+> The HiCache flags (`--enable-hierarchical-cache`, `--hicache-ratio`, `--hicache-write-policy`, `--hicache-storage-backend`, `--hicache-mem-layout`, etc.) are SGLang-native — Dynamo passes them through unchanged. See [SGLang's best-practices doc](https://docs.sglang.ai/advanced_features/hicache_best_practices.html) for the complete flag reference and tuning guidance.
 
 ## Tier-Aware Shared KV Cache Routing
 

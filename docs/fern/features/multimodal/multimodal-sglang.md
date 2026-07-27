@@ -43,11 +43,10 @@ SGLang supports EPD, EP/D, E/PD, and E/P/D patterns. See [Multimodal Model Servi
 | Internal Decode Worker | `--enable-multimodal --dedicated-mm-encoder --disaggregation-mode decode` | Entry point for E/P/D after the encode worker has produced embeddings |
 | Internal Prefill Worker | `--enable-multimodal --dedicated-mm-encoder --disaggregation-mode prefill` | Called by internal decode, bootstrap coordination with precomputed embeddings |
 
-<Warning>
-`--dedicated-mm-encoder` is intentionally explicit. Do not infer the internal E/PD or E/P/D worker path from `--enable-multimodal --disaggregation-mode prefill/decode`. Native EP/D or P/D uses those same two disaggregation modes, but it stays on the normal SGLang handlers: prefill processes raw image/video inputs to build vision context, while decode reprocesses the same raw media metadata so token layout matches the transferred KV cache. If the dedicated encoder flag is removed or made implicit, native disaggregated deployments can register only internal topology workers and lose the public OpenAI chat/completions surface.
-
-In SGLang E/P/D, keep this flag on both the decode and prefill workers. This differs from vLLM: SGLang's encode worker delegates generation to `backend.generate`, which is the decode worker, and that decode worker forwards the precomputed multimodal payload to prefill. With this flag, the internal workers consume transferred embeddings instead of raw image/video URLs, avoiding the duplicate raw-media preprocessing used by native EP/D or P/D.
-</Warning>
+> [!WARNING]
+> `--dedicated-mm-encoder` is intentionally explicit. Do not infer the internal E/PD or E/P/D worker path from `--enable-multimodal --disaggregation-mode prefill/decode`. Native EP/D or P/D uses those same two disaggregation modes, but it stays on the normal SGLang handlers: prefill processes raw image/video inputs to build vision context, while decode reprocesses the same raw media metadata so token layout matches the transferred KV cache. If the dedicated encoder flag is removed or made implicit, native disaggregated deployments can register only internal topology workers and lose the public OpenAI chat/completions surface.
+>
+> In SGLang E/P/D, keep this flag on both the decode and prefill workers. This differs from vLLM: SGLang's encode worker delegates generation to `backend.generate`, which is the decode worker, and that decode worker forwards the precomputed multimodal payload to prefill. With this flag, the internal workers consume transferred embeddings instead of raw image/video URLs, avoiding the duplicate raw-media preprocessing used by native EP/D or P/D.
 
 ### SGLang-Specific Characteristics
 

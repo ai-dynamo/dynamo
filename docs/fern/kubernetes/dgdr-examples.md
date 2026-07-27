@@ -58,7 +58,8 @@ Deploy:
 kubectl apply -f sla-online.yaml -n $NAMESPACE
 ```
 
-> **Note**: Starting with Dynamo 1.0.0 (DGDR API version v1beta1), DGDR fields use structured spec fields (e.g., `spec.workload`, `spec.sla`, `spec.hardware`) instead of the nested `profilingConfig.config` blob used in v1alpha1.
+> [!NOTE]
+> Starting with Dynamo 1.0.0 (DGDR API version v1beta1), DGDR fields use structured spec fields (e.g., `spec.workload`, `spec.sla`, `spec.hardware`) instead of the nested `profilingConfig.config` blob used in v1alpha1.
 
 ### Planner-Enabled DGDR
 

@@ -45,9 +45,10 @@ helm upgrade --install gpu-operator nvidia/gpu-operator \
   --timeout=10m
 ```
 
-> [!TIP]
-> If your cluster provider installs the NVIDIA driver, add `--set driver.enabled=false`.
-> Add `--set toolkit.enabled=false` only when the provider also configures the GPU container runtime.
+<Tip>
+If your cluster provider installs the NVIDIA driver, add `--set driver.enabled=false`.
+Add `--set toolkit.enabled=false` only when the provider also configures the GPU container runtime.
+</Tip>
       </Tab>
       <Tab title="Intel GPU">
         Install the [Intel resource drivers for Kubernetes](https://github.com/intel/intel-resource-drivers-for-kubernetes),

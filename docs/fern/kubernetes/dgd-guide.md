@@ -204,9 +204,8 @@ spec:
 
 Substitute `Qwen/Qwen3-32B` with your model, `hf-token-secret` with your Secret name if you changed it. Keeping the namespace, image, and token in the environment means the same YAML file works across clusters — you change the exports, not the spec.
 
-<Tip>
-**Large model?** By default every worker pod downloads the weights from HuggingFace on startup — slow for big models and prone to rate limits across many replicas. Cache the weights once on a shared volume and mount them into each worker. See [Model Caching](model-caching.mdx) (and [ModelExpress](modelexpress.md) for fleet-scale distribution).
-</Tip>
+> [!TIP]
+> **Large model?** By default every worker pod downloads the weights from HuggingFace on startup — slow for big models and prone to rate limits across many replicas. Cache the weights once on a shared volume and mount them into each worker. See [Model Caching](model-caching.mdx) (and [ModelExpress](modelexpress.md) for fleet-scale distribution).
 
 </Step>
 
@@ -249,17 +248,15 @@ The launch module and the way each engine takes the model differ, which is why t
 
 vLLM and SGLang take tensor/pipeline/data parallelism as CLI flags (covered in the topology step). TensorRT-LLM is the exception: it reads **all** parallelism from the engine-config YAML referenced by `--extra-engine-args`, not from worker flags.
 
-<Info>
-**Check the model works on your hardware and backend before you deploy.** Not every model, GPU, and backend combination is valid — a quantization can be unsupported on your GPU architecture (for example, FP8 needs Hopper/Ada or newer; some FP4/NVFP4 paths need Blackwell), or an engine may not yet implement a model's architecture. Confirm against the backend's supported-models list ([vLLM](../backends/vllm/README.md), [SGLang](../backends/sglang/README.md), [TensorRT-LLM](../backends/trtllm/README.md)) and, for sizing, the [AIConfigurator support matrix](../features/disaggregated-serving/aiconfigurator.md).
-</Info>
+> [!IMPORTANT]
+> **Check the model works on your hardware and backend before you deploy.** Not every model, GPU, and backend combination is valid — a quantization can be unsupported on your GPU architecture (for example, FP8 needs Hopper/Ada or newer; some FP4/NVFP4 paths need Blackwell), or an engine may not yet implement a model's architecture. Confirm against the backend's supported-models list ([vLLM](../backends/vllm/README.md), [SGLang](../backends/sglang/README.md), [TensorRT-LLM](../backends/trtllm/README.md)) and, for sizing, the [AIConfigurator support matrix](../features/disaggregated-serving/aiconfigurator.md).
 
 You normally do not need to set the top-level `spec.backendFramework` field — the operator infers the backend from the worker command. Set it explicitly (`vllm`, `sglang`, or `trtllm`) only when a feature needs the framework known up front, such as GMS failover or multinode TensorRT-LLM.
 
 For per-backend setup and tuning, see [vLLM](../backends/vllm/README.md), [SGLang](../backends/sglang/README.md), and [TensorRT-LLM](../backends/trtllm/README.md).
 
-<Note>
-**Private registry?** The operator **auto-discovers and injects** image pull secrets by matching Docker config Secrets in the namespace against your image's registry host, so private registries usually work with no extra config. To take manual control for a component, set the `nvidia.com/disable-image-pull-secret-discovery: "true"` annotation on it and list your own `imagePullSecrets` under `podTemplate.spec`.
-</Note>
+> [!NOTE]
+> **Private registry?** The operator **auto-discovers and injects** image pull secrets by matching Docker config Secrets in the namespace against your image's registry host, so private registries usually work with no extra config. To take manual control for a component, set the `nvidia.com/disable-image-pull-secret-discovery: "true"` annotation on it and list your own `imagePullSecrets` under `podTemplate.spec`.
 
 </Step>
 
@@ -339,9 +336,8 @@ The fastest way to start is to copy a ready-to-apply Kubernetes template rather 
 
 For disaggregation-specific configuration — RDMA resources, UCX environment variables, and prefill/decode scaling — see [Disaggregated Serving](../features/disaggregated-serving/README.md).
 
-<Info>
-Disaggregated serving moves KV cache between workers over the network. For acceptable performance the cluster needs RDMA — see the [Disaggregated Communication Guide](disagg-communication-guide.md). Without it, transfers fall back to TCP with severe latency penalties.
-</Info>
+> [!IMPORTANT]
+> Disaggregated serving moves KV cache between workers over the network. For acceptable performance the cluster needs RDMA — see the [Disaggregated Communication Guide](disagg-communication-guide.md). Without it, transfers fall back to TCP with severe latency penalties.
 
 </Step>
 
@@ -452,9 +448,8 @@ To pick actual numbers, start from a **[recipe](https://github.com/ai-dynamo/dyn
 </Tab>
 </Tabs>
 
-<Info>
-**TensorRT-LLM sets parallelism in the engine config, not on the CLI.** TP, PP, and MoE parallelism are keys in the engine-config YAML referenced by `--extra-engine-args` — `tensor_parallel_size`, `pipeline_parallel_size`, `moe_tensor_parallel_size`, and `moe_expert_parallel_size` — not worker flags. Edit them there. Start from a per-model config under [`examples/backends/trtllm/engine_configs/`](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/engine_configs/README.md) (it ships `agg.yaml`, `prefill.yaml`, and `decode.yaml` variants), and keep the worker's `nvidia.com/gpu` limit equal to the product of those sizes.
-</Info>
+> [!IMPORTANT]
+> **TensorRT-LLM sets parallelism in the engine config, not on the CLI.** TP, PP, and MoE parallelism are keys in the engine-config YAML referenced by `--extra-engine-args` — `tensor_parallel_size`, `pipeline_parallel_size`, `moe_tensor_parallel_size`, and `moe_expert_parallel_size` — not worker flags. Edit them there. Start from a per-model config under [`examples/backends/trtllm/engine_configs/`](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/engine_configs/README.md) (it ships `agg.yaml`, `prefill.yaml`, and `decode.yaml` variants), and keep the worker's `nvidia.com/gpu` limit equal to the product of those sizes.
 
 **Context length.** There is no uniform DGD field for maximum context length — it is an engine flag: `--max-model-len` (vLLM), `--context-length` (SGLang), or `max_seq_len` in the engine config (TensorRT-LLM). Longer context needs more free GPU memory for the KV cache, so it trades off against parallel size and concurrency. Set it when the default does not match your workload, for example `--max-model-len 32000`.
 
@@ -462,9 +457,8 @@ To pick actual numbers, start from a **[recipe](https://github.com/ai-dynamo/dyn
 
 **Multinode.** When TP × PP exceeds the GPUs on one node, set `multinode.nodeCount` on the worker so it spans machines; the operator schedules the pods and wires the engine's cross-node communication (Ray for vLLM, `--dist-init-addr`/`--nnodes` for SGLang, MPI for TensorRT-LLM). This needs Grove or LWS installed. See [Multinode Deployments](deployment/multinode-deployment.md) and the `disagg-multinode.yaml` templates under each backend's `deploy/` folder.
 
-<Warning>
-**Leave room for the KV cache.** The weights are only part of GPU memory — the KV cache grows with context length and concurrency, and if it has no room the worker OOMs at load or under traffic. Each engine caps the fraction of GPU memory it will use: `--gpu-memory-utilization` (vLLM, default 0.90), `--mem-fraction-static` (SGLang), or `free_gpu_memory_fraction` in the engine config (TensorRT-LLM). If you hit OOM, lower the fraction, add a GPU (raise TP), or reduce max context length.
-</Warning>
+> [!WARNING]
+> **Leave room for the KV cache.** The weights are only part of GPU memory — the KV cache grows with context length and concurrency, and if it has no room the worker OOMs at load or under traffic. Each engine caps the fraction of GPU memory it will use: `--gpu-memory-utilization` (vLLM, default 0.90), `--mem-fraction-static` (SGLang), or `free_gpu_memory_fraction` in the engine config (TensorRT-LLM). If you hit OOM, lower the fraction, add a GPU (raise TP), or reduce max context length.
 
 </Step>
 
@@ -477,9 +471,8 @@ envsubst < qwen3-32b-agg.yaml | kubectl apply -f - -n ${NAMESPACE} --dry-run=ser
 envsubst < qwen3-32b-agg.yaml | kubectl apply -f - -n ${NAMESPACE}
 ```
 
-<Note>
-`envsubst` only substitutes `${VAR}` tokens. Confirm the exports are set (`echo ${NAMESPACE} ${RUNTIME_IMAGE}`) before applying, or the placeholders expand to empty strings. To see the fully rendered spec first, run `envsubst < qwen3-32b-agg.yaml | less`.
-</Note>
+> [!NOTE]
+> `envsubst` only substitutes `${VAR}` tokens. Confirm the exports are set (`echo ${NAMESPACE} ${RUNTIME_IMAGE}`) before applying, or the placeholders expand to empty strings. To see the fully rendered spec first, run `envsubst < qwen3-32b-agg.yaml | less`.
 
 The DGD is the live serving resource. It becomes ready once the Frontend and workers are up — the `Ready` condition reports `True`. Watch it reconcile:
 
@@ -757,6 +750,5 @@ These are independent capabilities you opt into per workload. None are required 
   </Card>
 </CardGroup>
 
-<Info>
-**The Planner is not part of the DGD spec.** SLA-driven autoscaling with the [Planner](../components/planner/README.md) is configured through a **DynamoGraphDeploymentRequest (DGDR)** — see [Auto Deploy with DGDR](dgdr-guide.md). For HPA/KEDA scaling of a DGD service, see [Autoscaling](autoscaling.md). For the full field reference, see the [API Reference](api-reference.md).
-</Info>
+> [!IMPORTANT]
+> **The Planner is not part of the DGD spec.** SLA-driven autoscaling with the [Planner](../components/planner/README.md) is configured through a **DynamoGraphDeploymentRequest (DGDR)** — see [Auto Deploy with DGDR](dgdr-guide.md). For HPA/KEDA scaling of a DGD service, see [Autoscaling](autoscaling.md). For the full field reference, see the [API Reference](api-reference.md).

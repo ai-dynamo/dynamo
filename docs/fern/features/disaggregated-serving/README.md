@@ -194,12 +194,11 @@ rather than prompt load.
             - decode
 ```
 
-<Warning>
-Prefill and decode workers must pass the **same `--model`** (and, if you set
-them, the same dtype, block size, and KV layout). A mismatch means the KV cache
-prefill produces cannot be consumed by decode — you get transfer errors or
-silently corrupt output.
-</Warning>
+> [!WARNING]
+> Prefill and decode workers must pass the **same `--model`** (and, if you set
+> them, the same dtype, block size, and KV layout). A mismatch means the KV cache
+> prefill produces cannot be consumed by decode — you get transfer errors or
+> silently corrupt output.
 
 </Step>
 

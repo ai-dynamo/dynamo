@@ -11,7 +11,7 @@ For quick start instructions, see the [Router README](README.md). This document 
 
 Instead of launching the KV Router via command line, you can create a `KvRouter` object directly in Python. This allows per-request routing configuration overrides.
 
->[!Warning]
+> [!WARNING]
 > **Multiple Routers from the Same Runtime**: Do not create multiple independently managed `KvRouter` instances from the same `DistributedRuntime`. Routers created from endpoints owned by the same runtime share that runtime's primary cancellation token, so dropping one router can cancel background work used by the others. For one in-process frontend, use a single `KvRouter`; for independent router lifetimes, use separate frontend processes or create each router from a separate `DistributedRuntime`.
 
 With the event loop available as `loop`, independent in-process router lifetimes require separate runtimes:

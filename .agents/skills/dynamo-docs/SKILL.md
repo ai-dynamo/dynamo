@@ -291,7 +291,7 @@ docs link to them with absolute GitHub URLs.
 
 ## Callouts
 
-Write admonitions GitHub-style; the Fern build auto-converts them (don't hand-write `<Note>`). Put
+Match admonition syntax to the extension: use Fern callout components in `.mdx`, and GitHub-style blockquotes in `.md`. Put
 images under `docs/assets/img/` with descriptive alt text.
 
 | GitHub Syntax | Fern Component |

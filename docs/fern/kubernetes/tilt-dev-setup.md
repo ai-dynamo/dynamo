@@ -134,10 +134,9 @@ The operator image needs to be pullable by your cluster's nodes. The registry is
 
 The image is pushed as `{registry}/controller:tilt-dev`.
 
-<Warning>
-If no registry is configured, the image is only available locally. This works
-with kind using a local registry but will fail on remote clusters.
-</Warning>
+> [!WARNING]
+> If no registry is configured, the image is only available locally. This works
+> with kind using a local registry but will fail on remote clusters.
 
 ## How It Works
 

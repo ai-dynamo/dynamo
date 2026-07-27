@@ -109,9 +109,8 @@ curl http://localhost:8000/v1/images/generations \
   }'
 ```
 
-<Note>
-This happens with diffusers models (FLUX.1-dev, Wan2.1, etc.) that use `model_index.json` instead of `config.json`. Ensure you are using the `--image-diffusion-worker` flag rather than the standard LLM worker mode. These flags use a registration path that does not require `config.json`.
-</Note>
+> [!NOTE]
+> This happens with diffusers models (FLUX.1-dev, Wan2.1, etc.) that use `model_index.json` instead of `config.json`. Ensure you are using the `--image-diffusion-worker` flag rather than the standard LLM worker mode. These flags use a registration path that does not require `config.json`.
 
 ## See Also
 

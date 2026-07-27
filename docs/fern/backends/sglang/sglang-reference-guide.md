@@ -46,9 +46,8 @@ These arguments are added by Dynamo on top of SGLang's native arguments. For the
 | `--disagg-config` | `DYN_SGL_DISAGG_CONFIG` | `None` | Path to YAML disaggregation config file |
 | `--disagg-config-key` | `DYN_SGL_DISAGG_CONFIG_KEY` | `None` | Key to select from disaggregation config (e.g., `prefill`, `decode`) |
 
-<Note>
-`--disagg-config` and `--disagg-config-key` must be provided together. The selected section is written to a temp YAML file and passed to SGLang's `--config` flag.
-</Note>
+> [!NOTE]
+> `--disagg-config` and `--disagg-config-key` must be provided together. The selected section is written to a temp YAML file and passed to SGLang's `--config` flag.
 
 The current supported parser names for both flags are documented in [Tool Call Parsing (Dynamo)](../../tool-calling/README.mdx#supported-tool-call-parsers) and [Reasoning Parsing (Dynamo)](../../reasoning/README.md#supported-reasoning-parsers).
 
@@ -58,9 +57,8 @@ By default, Dynamo handles tokenization and detokenization through its Rust-base
 
 For SGLang-native preprocessing (tool calling, reasoning parsing, chat templates), use `--dyn-chat-processor sglang` on the frontend. See [SGLang Chat Processor](sglang-chat-processor.md) for architecture and usage.
 
-<Warning>
-`--use-sglang-tokenizer` is deprecated. Use `--dyn-chat-processor sglang` on the frontend instead, which provides the same SGLang-native processing with KV router support and the completions endpoint.
-</Warning>
+> [!WARNING]
+> `--use-sglang-tokenizer` is deprecated. Use `--dyn-chat-processor sglang` on the frontend instead, which provides the same SGLang-native processing with KV router support and the completions endpoint.
 
 ## Request Cancellation
 
@@ -71,7 +69,8 @@ When a client disconnects, Dynamo automatically cancels the in-flight request ac
 | **Aggregated** | ✅ | ✅ |
 | **Disaggregated** | ⚠️ | ✅ |
 
-<Warning>Cancellation during remote prefill in disaggregated mode is not currently supported.</Warning>
+> [!WARNING]
+> Cancellation during remote prefill in disaggregated mode is not currently supported.
 
 For details on the cancellation architecture, see [Request Cancellation](../../design-docs/request-cancellation.md).
 

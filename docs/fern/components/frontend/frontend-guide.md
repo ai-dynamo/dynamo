@@ -50,9 +50,8 @@ python -m dynamo.frontend --kserve-grpc-server
 
 If these variables are not set, the server uses tonic's default values.
 
-<Note>
-Tune these values based on your workload. Connection window should accommodate `concurrent_requests x request_size`. Memory overhead equals the connection window size (shared across all streams). See [gRPC performance best practices](https://grpc.io/docs/guides/performance/) and [gRPC channel arguments](https://grpc.github.io/grpc/core/group__grpc__arg__keys.html) for more details.
-</Note>
+> [!NOTE]
+> Tune these values based on your workload. Connection window should accommodate `concurrent_requests x request_size`. Memory overhead equals the connection window size (shared across all streams). See [gRPC performance best practices](https://grpc.io/docs/guides/performance/) and [gRPC channel arguments](https://grpc.github.io/grpc/core/group__grpc__arg__keys.html) for more details.
 
 ## Registering a Backend
 

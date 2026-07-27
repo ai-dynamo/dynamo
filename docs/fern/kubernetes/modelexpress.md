@@ -61,9 +61,8 @@ services:
             value: modelexpress
 ```
 
-<Note>
-Use the load format supported by your runtime image. ModelExpress v0.3 and newer document the unified `mx` loader. Some older Dynamo images expose `mx-source` and `mx-target` loader names instead.
-</Note>
+> [!NOTE]
+> Use the load format supported by your runtime image. ModelExpress v0.3 and newer document the unified `mx` loader. Some older Dynamo images expose `mx-source` and `mx-target` loader names instead.
 
 ## Stream Without Shared Storage
 

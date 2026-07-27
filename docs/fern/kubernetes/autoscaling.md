@@ -197,9 +197,8 @@ The Horizontal Pod Autoscaler (HPA) is Kubernetes' native autoscaling solution.
 - You want to use standard Kubernetes tooling
 - You need CPU or memory-based scaling
 
-<Note>
-For custom metrics (like TTFT or queue depth), consider using [KEDA](#autoscaling-with-keda-recommended) instead - it's simpler to configure.
-</Note>
+> [!NOTE]
+> For custom metrics (like TTFT or queue depth), consider using [KEDA](#autoscaling-with-keda-recommended) instead - it's simpler to configure.
 
 ### Basic HPA (CPU-based)
 
@@ -262,9 +261,8 @@ Dynamo metrics include these labels for filtering:
 | `dynamo_namespace` | Unique DGD identifier (`{k8s-namespace}-{dgd-name}`) | `default-sglang-agg` |
 | `model` | Model being served | `Qwen/Qwen3-0.6B` |
 
-<Note>
-When you have multiple DGDs in the same namespace, use `dynamo_namespace` to filter metrics for a specific DGD.
-</Note>
+> [!NOTE]
+> When you have multiple DGDs in the same namespace, use `dynamo_namespace` to filter metrics for a specific DGD.
 
 #### Example: Scale Decode Service Based on TTFT
 
@@ -438,9 +436,8 @@ helm install keda kedacore/keda \
 kubectl get pods -n keda
 ```
 
-<Note>
-If you have Prometheus Adapter installed, either uninstall it first (`helm uninstall prometheus-adapter -n monitoring`) or install KEDA with `--set metricsServer.enabled=false` to avoid API conflicts.
-</Note>
+> [!NOTE]
+> If you have Prometheus Adapter installed, either uninstall it first (`helm uninstall prometheus-adapter -n monitoring`) or install KEDA with `--set metricsServer.enabled=false` to avoid API conflicts.
 
 ### Example: Scale Decode Based on TTFT
 
@@ -631,9 +628,8 @@ kubectl get dgdsa sglang-agg-decode -n default
 # sglang-agg-decode   sglang-agg  decode    3          10m
 ```
 
-<Note>
-If an autoscaler (KEDA, HPA, Planner) is managing the adapter, your change will be overwritten on the next evaluation cycle.
-</Note>
+> [!NOTE]
+> If an autoscaler (KEDA, HPA, Planner) is managing the adapter, your change will be overwritten on the next evaluation cycle.
 
 ### With DGDSA Disabled (default)
 

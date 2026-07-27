@@ -11,7 +11,7 @@ For general TensorRT-LLM features and configuration, see the [Reference Guide](t
 This guide demonstrates how to deploy google/gemma-3-1b-it with Variable Sliding Window Attention (VSWA) using Dynamo. Since google/gemma-3-1b-it is a small model, each aggregated, decode, or prefill worker only requires one H100 GPU or one GB200 GPU.
 VSWA is a mechanism in which a model’s layers alternate between multiple sliding window sizes. An example of this is Gemma 3, which incorporates both global attention layers and sliding window layers.
 
-> [!Note]
+> [!NOTE]
 > - Ensure that required services such as `nats` and `etcd` are running before starting.
 > - Request access to `google/gemma-3-1b-it` on Hugging Face and set your `HF_TOKEN` environment variable for authentication.
 

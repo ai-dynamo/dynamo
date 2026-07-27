@@ -63,7 +63,7 @@ await register_model(
 await prefill_endpoint.serve_endpoint(prefill_handler.generate)
 ```
 
->[!Note]
+> [!NOTE]
 > The automatic disaggregated routing setup described here is currently supported by the integrated `dynamo.frontend` path. It is not provided as a single turnkey mode by the standalone Python router (`python -m dynamo.router`). If you build this topology with standalone routers, you must launch and connect the prefill and decode routing stages yourself and handle request handoff, including the `disaggregated_params` returned by prefill. For an advanced reference, see the [Global Router](https://github.com/ai-dynamo/dynamo/tree/main/components/src/dynamo/global_router), which composes local prefill and decode router pools explicitly.
 
 ## Request Flow

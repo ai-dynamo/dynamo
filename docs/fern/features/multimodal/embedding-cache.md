@@ -9,7 +9,8 @@ subtitle: Cache vision encoder embeddings to skip re-encoding repeated multimoda
 
 The embedding cache (or encoder cache) is a CPU-side LRU cache that stores vision encoder outputs. When the same multimodal content, such as an image or video, appears in multiple requests, the cached embedding is reused instead of running the vision encoder again. This reduces GPU load on the encoder and lowers latency for repeated content.
 
-<Info> Embedding cache is separate from the KV cache, which reuses attention key/value state after prefill to skip prefill and go straight to decode. For KV cache reuse and routing, see [Multimodal KV Routing](multimodal-kv-routing.md). </Info>
+> [!IMPORTANT]
+> Embedding cache is separate from the KV cache, which reuses attention key/value state after prefill to skip prefill and go straight to decode. For KV cache reuse and routing, see [Multimodal KV Routing](multimodal-kv-routing.md).
 
 ## When to Use
 

@@ -108,9 +108,8 @@ The `/v1/audio/speech` endpoint follows the [vLLM-Omni](https://docs.vllm.ai/pro
 
 Available voices and languages are loaded dynamically from the model's `config.json` at startup. Non-Qwen3-TTS audio models (e.g., MiMo-Audio) use a generic text prompt and ignore TTS-specific parameters.
 
-<Note>
-Audio streaming (`stream: true`) and the Base task (voice cloning) are not yet supported.
-</Note>
+> [!NOTE]
+> Audio streaming (`stream: true`) and the Base task (voice cloning) are not yet supported.
 
 ## See Also
 

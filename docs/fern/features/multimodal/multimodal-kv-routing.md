@@ -11,9 +11,8 @@ Multimodal KV routing extends Dynamo's KV-aware router to account for image cont
 
 When an image appears again, the KV router sends the request to the worker with the most matching KV cache blocks. This increases prefix-cache reuse and avoids repeating prefill work for cached multimodal content.
 
-<Info>
-The KV cache stores attention key/value state so a worker can skip repeated prefill work. The embedding cache stores vision encoder outputs so the encoder can skip repeated image processing. You can use both features together. See [Embedding Cache](embedding-cache.md).
-</Info>
+> [!IMPORTANT]
+> The KV cache stores attention key/value state so a worker can skip repeated prefill work. The embedding cache stores vision encoder outputs so the encoder can skip repeated image processing. You can use both features together. See [Embedding Cache](embedding-cache.md).
 
 ## When to Use
 

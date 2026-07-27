@@ -430,12 +430,11 @@ kubectl logs -f -l job-name=aiperf-benchmark
 | Throughput (req/s) | ~6.3 | 6.9 | Within 10% |
 | Total Output TPS | ~3,178 | 3,462 | Within 10% |
 
-<Note>
-The table above is a validation example, not a universal guarantee. Expect
-variance across clusters, backend versions, model cache settings, and network
-fabric. Run multiple benchmark passes and compare against the generated
-concurrency and sequence-length assumptions.
-</Note>
+> [!NOTE]
+> The table above is a validation example, not a universal guarantee. Expect
+> variance across clusters, backend versions, model cache settings, and network
+> fabric. Run multiple benchmark passes and compare against the generated
+> concurrency and sequence-length assumptions.
 
 ## Fine-Tuning Your Deployment
 

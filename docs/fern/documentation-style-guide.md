@@ -242,9 +242,9 @@ Much of this prose is now drafted by agents. Edit it so it does not read that wa
 - **Inclusive terms**: "denylist"/"allowlist", not "blacklist"/"whitelist"; "primary"/"replica", not
   "master"/"slave".
 - **No needless jargon**: don't use a term when a more familiar one exists; cut marketing-speak.
-- Mark feature lifecycle inline: **Experimental.** for preview features; **Deprecated.** (with a
-  `> [!WARNING]`) for removed or legacy ones. Note availability for new features ("Available since
-  v0.X").
+- Mark feature lifecycle inline: **Experimental.** for preview features; **Deprecated.** (with
+  `<Warning>` in `.mdx` or `> [!WARNING]` in `.md`) for removed or legacy ones. Note availability
+  for new features ("Available since v0.X").
 
 ## Formatting
 
@@ -291,8 +291,33 @@ tracker references in commits and pull requests, not in shipped docs.
 
 ## Admonitions
 
-Write admonitions GitHub-style in `docs/` source. They render on GitHub, and the Fern build converts
-them to Fern callouts when publishing:
+Match the admonition syntax to the source file extension. In `.mdx` pages, use Fern callout
+components:
+
+```jsx
+<Note>
+Additional context users should know.
+</Note>
+
+<Tip>
+A helpful suggestion.
+</Tip>
+
+<Info>
+Key information.
+</Info>
+
+<Warning>
+Something to watch out for.
+</Warning>
+
+<Error>
+A risk or negative outcome.
+</Error>
+```
+
+In `.md` pages, use GitHub-style blockquote admonitions. They render on GitHub, and the Fern build
+converts them to Fern callouts when publishing:
 
 ```markdown
 > [!NOTE]
@@ -311,8 +336,9 @@ them to Fern callouts when publishing:
 > A risk or negative outcome.
 ```
 
-The build maps `[!NOTE]→<Note>`, `[!TIP]→<Tip>`, `[!IMPORTANT]→<Info>`, `[!WARNING]→<Warning>`,
-`[!CAUTION]→<Error>`. Don't use bold-text pseudo-admonitions (`> **Note:**`); they aren't converted.
+For `.md` pages, the build maps `[!NOTE]→<Note>`, `[!TIP]→<Tip>`, `[!IMPORTANT]→<Info>`,
+`[!WARNING]→<Warning>`, `[!CAUTION]→<Error>`. Don't use bold-text pseudo-admonitions
+(`> **Note:**`); they aren't converted.
 
 ## Fern components and build behavior
 
@@ -321,6 +347,7 @@ Author source pages under `docs/fern/`. Use the lightest format that supports th
 - Use `.mdx` when a tutorial or installation page needs `<Steps>`, `<Tabs>`, cards, or another Fern
   component.
 - Use `.md` for straightforward prose that works as portable GitHub-flavored Markdown.
+- In `.mdx`, write admonitions with Fern callout components.
 - In `.md`, write admonitions with GitHub syntax; `fern/convert_callouts.py` converts them during the
   build.
 - Do not add components as decoration. Components must improve sequencing, branching, disclosure, or
@@ -357,7 +384,8 @@ merge:
       `recipes/README.md`)
 - [ ] Links: relative + extension within docs, absolute GitHub URL outside docs (no `../` escapes);
       link text describes the destination; every internal link and `#anchor` resolves
-- [ ] Code fences language-tagged, no shell prompts, output in `text`; admonitions GitHub-style
+- [ ] Code fences language-tagged, no shell prompts, output in `text`; admonitions match the source
+      file extension
 - [ ] Lists typed by purpose; images have alt text and live under `assets/img/`
 - [ ] Heading case is consistent within the page (Title Case for short labels, sentence case for full phrases); no end punctuation; one page type (installation/tutorial/design/reference; quickstart is a tutorial subtype)
 - [ ] Quickstarts are copy-paste-ready and minimal: no architecture diagrams, tuning, or optional branches

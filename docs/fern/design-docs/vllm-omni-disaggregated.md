@@ -80,9 +80,8 @@ These flags are specific to disaggregated mode. For the full flag surface, see t
   Path to vLLM-Omni stage configuration YAML.
 </ParamField>
 
-<Note>
-Disaggregated mode: `async_chunk=true` (streaming between stages) is not yet supported.
-</Note>
+> [!NOTE]
+> Disaggregated mode: `async_chunk=true` (streaming between stages) is not yet supported.
 
 ## See Also
 

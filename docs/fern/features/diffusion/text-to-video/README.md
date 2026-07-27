@@ -76,9 +76,8 @@ The `/v1/videos` endpoint also accepts NVIDIA extensions via the `nvext` field f
   Random seed for reproducibility.
 </ParamField>
 
-<Note>
-The `nvext.boundary_ratio` and `nvext.guidance_scale_2` fields apply to the dual-expert MoE schedule used in image-to-video. See [Image-to-Video with vLLM-Omni](../image-to-video/README.md#vllm-omni).
-</Note>
+> [!NOTE]
+> The `nvext.boundary_ratio` and `nvext.guidance_scale_2` fields apply to the dual-expert MoE schedule used in image-to-video. See [Image-to-Video with vLLM-Omni](../image-to-video/README.md#vllm-omni).
 
 ## See Also
 
@@ -196,9 +195,8 @@ For the full flag surface (quantization, TeaCache, torch.compile, attention back
 
 This guide covers deploying [FastVideo](https://github.com/hao-ai-lab/FastVideo) text-to-video generation on Dynamo using a custom worker (`worker.py`) exposed through the `/v1/videos` endpoint.
 
-<Note>
-Dynamo also supports text-to-video through built-in backends: [vLLM-Omni](README.md#vllm-omni), [SGLang](README.md#sglang), and [TensorRT-LLM](README.md#tensorrt-llm). See the [Diffusion Overview](../README.md) for the full support matrix across all modalities.
-</Note>
+> [!NOTE]
+> Dynamo also supports text-to-video through built-in backends: [vLLM-Omni](README.md#vllm-omni), [SGLang](README.md#sglang), and [TensorRT-LLM](README.md#tensorrt-llm). See the [Diffusion Overview](../README.md) for the full support matrix across all modalities.
 
 ## Overview
 
@@ -208,9 +206,8 @@ Dynamo also supports text-to-video through built-in backends: [vLLM-Omni](README
 - **Response format:** Returns one complete MP4 payload per request as `data[0].b64_json` (non-streaming).
 - **Concurrency:** One request at a time per worker (VideoGenerator is not re-entrant). Scale throughput by running multiple workers.
 
-<Warning>
-`worker.py` defaults to `--attention-backend TORCH_SDPA` for broader compatibility across GPUs, including systems such as H100. For the B200/B300-oriented path, enable FP4/compile with `--enable-optimizations` and, if desired, opt into flash-attention explicitly with `--attention-backend FLASH_ATTN`.
-</Warning>
+> [!WARNING]
+> `worker.py` defaults to `--attention-backend TORCH_SDPA` for broader compatibility across GPUs, including systems such as H100. For the B200/B300-oriented path, enable FP4/compile with `--enable-optimizations` and, if desired, opt into flash-attention explicitly with `--attention-backend FLASH_ATTN`.
 
 ## Kubernetes Deployment
 
@@ -258,9 +255,8 @@ docker build examples/diffusers/ \
 docker push <my-registry/fastvideo-runtime:my-tag>
 ```
 
-<Warning>
-The first image build can take **20–40+ minutes** because FastVideo and CUDA-dependent components are compiled during the build. Subsequent builds are much faster if Docker layer cache is preserved. Compiling `flash-attention` can use significant RAM — low-memory builders may hit out-of-memory failures. If that happens, lower `MAX_JOBS`. The [flash-attn install notes](https://pypi.org/project/flash-attn/) specifically recommend this on machines with less than 96 GB RAM and many CPU cores.
-</Warning>
+> [!WARNING]
+> The first image build can take **20–40+ minutes** because FastVideo and CUDA-dependent components are compiled during the build. Subsequent builds are much faster if Docker layer cache is preserved. Compiling `flash-attention` can use significant RAM — low-memory builders may hit out-of-memory failures. If that happens, lower `MAX_JOBS`. The [flash-attn install notes](https://pypi.org/project/flash-attn/) specifically recommend this on machines with less than 96 GB RAM and many CPU cores.
 
 </Step>
 
@@ -329,9 +325,8 @@ kubectl port-forward -n ${NAMESPACE} svc/fastvideo-agg-frontend 8000:8000
 
 <Step title="Send a test request">
 
-<Note>
-If this is the first request after startup, expect it to take longer while warmup completes. See [Warmup Time](#warmup-time) for details.
-</Note>
+> [!NOTE]
+> If this is the first request after startup, expect it to take longer while warmup completes. See [Warmup Time](#warmup-time) for details.
 
 ```bash
 curl -s -X POST http://localhost:8000/v1/videos \
@@ -365,9 +360,8 @@ jq -r '.data[0].b64_json' response.json | base64 -D > output.mp4
 
 On first start, workers download model weights. When `--enable-optimizations` is enabled, compile/warmup steps can push the first ready time to roughly **10–20 minutes** (hardware-dependent). After the first successful optimized response, the second request can still take around **35 seconds** while runtime caches finish warming up; steady-state performance is typically reached from the third request onward.
 
-<Tip>
-The shared Hugging Face cache PVC applied in the [Kubernetes Deployment](#kubernetes-deployment) steps means weights are downloaded once and reused across pod restarts, so warmup is only paid in full on the very first start.
-</Tip>
+> [!TIP]
+> The shared Hugging Face cache PVC applied in the [Kubernetes Deployment](#kubernetes-deployment) steps means weights are downloaded once and reused across pod restarts, so warmup is only paid in full on the very first start.
 
 ## Worker Configuration Reference
 
@@ -505,9 +499,8 @@ WORKER_EXTRA_ARGS="--enable-optimizations --attention-backend FLASH_ATTN" \
 ./run_local.sh
 ```
 
-<Note>
-`--enable-optimizations` and `--attention-backend` are `worker.py` flags, not `dynamo.frontend` flags, so pass them through `WORKER_EXTRA_ARGS` when you want a non-default worker configuration.
-</Note>
+> [!NOTE]
+> `--enable-optimizations` and `--attention-backend` are `worker.py` flags, not `dynamo.frontend` flags, so pass them through `WORKER_EXTRA_ARGS` when you want a non-default worker configuration.
 
 The script writes logs to:
 
