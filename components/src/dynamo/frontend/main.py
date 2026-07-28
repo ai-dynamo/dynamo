@@ -18,6 +18,7 @@
 
 import argparse
 import asyncio
+import importlib.metadata
 import logging
 import os
 import signal
@@ -32,6 +33,7 @@ from dynamo.llm import (
     AicPerfConfig,
     EngineType,
     EntrypointArgs,
+    FrontendRoute,
     KvRouterConfig,
     RouterConfig,
     RouterMode,
@@ -50,6 +52,7 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 MIN_INITIAL_WORKERS_ENV = "DYN_ROUTER_MIN_INITIAL_WORKERS"
+FRONTEND_ROUTE_ENTRYPOINT_GROUP = "dynamo.frontend.routes"
 
 
 def setup_engine_factory(
@@ -86,6 +89,115 @@ def setup_sglang_engine_factory(
         reasoning_parser_name=reasoning_parser,
         chat_template=chat_template,
     )
+
+
+def _frontend_route_extension_entry_points() -> list[importlib.metadata.EntryPoint]:
+    """Return the entry points registered under the frontend-route group."""
+    # `EntryPoints.select` is the supported API on the Python >= 3.10 floor.
+    return list(
+        importlib.metadata.entry_points().select(group=FRONTEND_ROUTE_ENTRYPOINT_GROUP)
+    )
+
+
+def _normalize_frontend_routes(
+    extension_name: str, provided: Any
+) -> list[FrontendRoute]:
+    """Coerce a provider's return value into a list of ``FrontendRoute``.
+
+    Accepts a single ``FrontendRoute`` or any iterable of them, and raises
+    ``TypeError`` if the provider returns anything else.
+    """
+    if provided is None:
+        return []
+    if isinstance(provided, FrontendRoute):
+        return [provided]
+    try:
+        routes = list(provided)
+    except TypeError as exc:
+        raise TypeError(
+            f"Frontend route extension '{extension_name}' must return a FrontendRoute "
+            "or an iterable of FrontendRoute objects"
+        ) from exc
+    for route in routes:
+        if not isinstance(route, FrontendRoute):
+            raise TypeError(
+                f"Frontend route extension '{extension_name}' returned unsupported route "
+                f"object {route!r}; expected dynamo.llm.FrontendRoute"
+            )
+    return routes
+
+
+def _resolve_frontend_route_provider(extension_name: str, entry_points: list) -> Any:
+    """Resolve a ``--frontend-route-extension`` value to its provider callable.
+
+    A registered entry-point name (in the ``dynamo.frontend.routes`` group)
+    takes precedence. If the value is not a registered name and is unambiguously
+    a ``module:function`` path (contains ``:``), it is imported directly. Gating
+    the fallback on ``:`` keeps a mistyped name from silently turning into an
+    import attempt, and still surfaces the ``Available: ...`` list otherwise.
+    """
+    matches = [ep for ep in entry_points if ep.name == extension_name]
+    if len(matches) > 1:
+        raise ValueError(
+            f"Ambiguous frontend route extension '{extension_name}' in entry point "
+            f"group '{FRONTEND_ROUTE_ENTRYPOINT_GROUP}'"
+        )
+    if matches:
+        return matches[0].load()
+
+    if ":" in extension_name:
+        module_path, _, attr = extension_name.partition(":")
+        try:
+            obj: Any = importlib.import_module(module_path)
+        except ImportError as exc:
+            raise ValueError(
+                f"Could not import module '{module_path}' for frontend route "
+                f"extension '{extension_name}'"
+            ) from exc
+        try:
+            for part in attr.split("."):
+                obj = getattr(obj, part)
+        except AttributeError as exc:
+            raise ValueError(
+                f"Module '{module_path}' has no attribute '{attr}' for frontend "
+                f"route extension '{extension_name}'"
+            ) from exc
+        return obj
+
+    available = ", ".join(sorted(ep.name for ep in entry_points)) or "<none>"
+    raise ValueError(
+        f"Unknown frontend route extension '{extension_name}' in entry point "
+        f"group '{FRONTEND_ROUTE_ENTRYPOINT_GROUP}'. Available: {available}. "
+        f"Pass a registered name or a 'module:function' path."
+    )
+
+
+def load_frontend_route_extensions(extension_names: list[str]) -> list[FrontendRoute]:
+    """Load trusted frontend route extensions.
+
+    Each value is either a name registered under the ``dynamo.frontend.routes``
+    entry-point group (preferred) or a direct ``module:function`` path.
+    """
+
+    if not extension_names:
+        return []
+
+    # Deduplicate names (repeated --frontend-route-extension, or a flag that
+    # overlaps DYN_FRONTEND_ROUTE_EXTENSIONS) so a provider is loaded and its
+    # routes appended only once, preserving first-seen order.
+    unique_names = list(dict.fromkeys(extension_names))
+
+    entry_points = _frontend_route_extension_entry_points()
+    routes: list[FrontendRoute] = []
+    for extension_name in unique_names:
+        provider = _resolve_frontend_route_provider(extension_name, entry_points)
+        if not callable(provider):
+            raise TypeError(
+                f"Frontend route extension '{extension_name}' must resolve to a callable"
+            )
+        routes.extend(_normalize_frontend_routes(extension_name, provider()))
+
+    return routes
 
 
 def parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespace]]:
@@ -295,6 +407,17 @@ async def async_main():
 
     e = EntrypointArgs(EngineType.Dynamic, **kwargs)
     engine = await make_engine(runtime, e)
+    # Validate mode compatibility before loading extensions, so an incompatible
+    # mode fails fast without importing/executing third-party provider code.
+    if config.frontend_route_extensions and (
+        config.interactive or config.kserve_grpc_server
+    ):
+        raise ValueError(
+            "frontend route extensions are only supported by HTTP frontend mode"
+        )
+    frontend_route_extensions = load_frontend_route_extensions(
+        config.frontend_route_extensions
+    )
 
     try:
         if config.interactive:
@@ -302,7 +425,7 @@ async def async_main():
         elif config.kserve_grpc_server:
             await run_input(runtime, "grpc", engine)
         else:
-            await run_input(runtime, "http", engine)
+            await run_input(runtime, "http", engine, frontend_route_extensions)
     except asyncio.exceptions.CancelledError:
         pass
 

@@ -3,6 +3,7 @@
 
 use std::cmp::Ordering;
 
+use super::core::EngineEventBatch;
 use crate::common::handoff::HandoffId;
 use crate::common::protocols::OutputSignal;
 use crate::scheduler::SchedulerLifecycleEvent;
@@ -15,14 +16,16 @@ pub(crate) enum SimulationWorkerStage {
 }
 
 #[derive(Debug)]
-pub(crate) enum SimulationEventKind {
+pub(crate) enum SimulationEventKind<Events: EngineEventBatch = ()> {
     WorkerCompletion {
         stage: SimulationWorkerStage,
         worker_idx: usize,
         completed_requests: usize,
         output_signals: Vec<OutputSignal>,
         lifecycle_events: Vec<SchedulerLifecycleEvent>,
-        kv_events: Vec<dynamo_kv_router::protocols::RouterEvent>,
+        engine_events: Events,
+        made_progress: bool,
+        had_raw_observations: bool,
         fpm: Option<Box<crate::common::protocols::ForwardPassSnapshot>>,
         accept_length_output_tokens: usize,
         accept_length_decode_forwards: usize,
@@ -40,7 +43,7 @@ pub(crate) enum SimulationEventKind {
     PlannerTick,
 }
 
-impl SimulationEventKind {
+impl<Events: EngineEventBatch> SimulationEventKind<Events> {
     /// Tie-breaker among events at the *same* `at_ms`: a `PlannerTick` always
     /// sorts after every other kind, so the planner observes a fully settled
     /// timestamp (all worker completions / ready / handoff events at that time
@@ -55,27 +58,27 @@ impl SimulationEventKind {
 }
 
 #[derive(Debug)]
-pub(crate) struct SimulationEvent {
+pub(crate) struct SimulationEvent<Events: EngineEventBatch = ()> {
     pub(crate) at_ms: f64,
     pub(crate) seq_no: u64,
-    pub(crate) kind: SimulationEventKind,
+    pub(crate) kind: SimulationEventKind<Events>,
 }
 
-impl PartialEq for SimulationEvent {
+impl<Events: EngineEventBatch> PartialEq for SimulationEvent<Events> {
     fn eq(&self, other: &Self) -> bool {
         self.at_ms.to_bits() == other.at_ms.to_bits() && self.seq_no == other.seq_no
     }
 }
 
-impl Eq for SimulationEvent {}
+impl<Events: EngineEventBatch> Eq for SimulationEvent<Events> {}
 
-impl PartialOrd for SimulationEvent {
+impl<Events: EngineEventBatch> PartialOrd for SimulationEvent<Events> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl Ord for SimulationEvent {
+impl<Events: EngineEventBatch> Ord for SimulationEvent<Events> {
     fn cmp(&self, other: &Self) -> Ordering {
         other
             .at_ms

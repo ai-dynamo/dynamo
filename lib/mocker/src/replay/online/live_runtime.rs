@@ -220,7 +220,11 @@ impl LiveRuntime {
 
         loop {
             let now = now_ms(start);
-            let ready_turns = workload.driver.lock().unwrap().pop_ready(now, usize::MAX);
+            // Materialize one prompt at a time so a same-timestamp burst does not block
+            // every request behind synchronous preparation of the full ready backlog.
+            // Mark the CPU-bound section as blocking so Tokio can keep driving request tasks.
+            let ready_turns =
+                tokio::task::block_in_place(|| workload.driver.lock().unwrap().pop_ready(now, 1));
             if !ready_turns.is_empty() {
                 for ready_turn in ready_turns {
                     let guard = cap_enabled.then(|| {
@@ -237,6 +241,7 @@ impl LiveRuntime {
                         guard,
                     ));
                 }
+                tokio::task::yield_now().await;
                 continue;
             }
 

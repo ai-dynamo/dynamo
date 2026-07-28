@@ -15,7 +15,10 @@ from typing import (
     Sequence,
     Set,
     Tuple,
+    TypedDict,
 )
+
+from typing_extensions import NotRequired
 
 # Import from specialized modules
 from .prometheus_metrics import RuntimeMetrics as PyRuntimeMetrics
@@ -864,6 +867,7 @@ class ModelRuntimeConfig:
     data_parallel_start_rank: int
     data_parallel_size: int
     enable_local_indexer: bool
+    kv_event_publishing_enabled: bool | None
     kv_state_endpoint: str | None
     enable_eagle: bool
     taints: Set[str]
@@ -1131,6 +1135,23 @@ class ApproxKvIndexer:
         ...
 
 
+class KvStoredEventInput(TypedDict):
+    type: Literal["stored"]
+    token_ids: List[int]
+    num_block_tokens: List[int]
+    block_hashes: List[int]
+    parent_hash: NotRequired[Optional[int]]
+    block_mm_infos: NotRequired[Optional[List[Optional[Dict[str, Any]]]]]
+    lora_name: NotRequired[Optional[str]]
+    is_eagle: NotRequired[Optional[bool]]
+    cache_salt: NotRequired[Optional[str]]
+
+
+class KvRemovedEventInput(TypedDict):
+    type: Literal["removed"]
+    block_hashes: List[int]
+
+
 class KvEventPublisher:
     """
     A KV event publisher will publish KV events corresponding to the component.
@@ -1157,7 +1178,8 @@ class KvEventPublisher:
         When zmq_endpoint is provided, the publisher subscribes to a ZMQ socket for
         incoming engine events (e.g. from SGLang/vLLM) and relays them to NATS.
 
-        When zmq_endpoint is None, events are pushed manually via publish_stored/publish_removed.
+        When zmq_endpoint is None, events are pushed manually via publish_batch,
+        publish_stored, or publish_removed.
 
         Args:
             endpoint: The endpoint to extract component information from for event publishing
@@ -1167,6 +1189,8 @@ class KvEventPublisher:
             enable_local_indexer: Enable worker-local KV indexer
             zmq_endpoint: Optional ZMQ endpoint for relay mode (e.g. "tcp://127.0.0.1:5557")
             zmq_topic: ZMQ topic to subscribe to (defaults to "" when zmq_endpoint is set)
+            batching_timeout_ms: Cross-list batching timeout in milliseconds. None/0
+                flushes at each submitted source-list boundary.
             kv_state_endpoint: KV event ownership endpoint; defaults to endpoint.
         """
 
@@ -1208,6 +1232,18 @@ class KvEventPublisher:
 
         Args:
             block_hashes: List of block hashes to remove (signed 64-bit integers)
+        """
+        ...
+
+    def publish_batch(
+        self, events: Sequence[KvStoredEventInput | KvRemovedEventInput]
+    ) -> None:
+        """
+        Publish an ordered list of KV events as one processor input.
+
+        The complete list is validated before it is enqueued. Compatible
+        events are coalesced while preserving source order and the processor's
+        existing block-count limits.
         """
         ...
 
@@ -1869,7 +1905,11 @@ class KvRouterConfig:
         overlap_score_credit: float = 1.0,
         overlap_score_credit_decay: float = 0.0,
         prefill_load_scale: float = 1.0,
+        decode_active_request_weight: float = 0.0,
         router_policy_config: Optional[str] = None,
+        router_tracking_hash: Literal["public-xxh3-v1", "keyed-xxh3-v1"] = "public-xxh3-v1",
+        router_tracking_key_file: Optional[str | os.PathLike[str]] = None,
+        router_tracking_key_id: Optional[str] = None,
     ) -> None:
         """
         Create a KV router configuration.
@@ -1878,6 +1918,7 @@ class KvRouterConfig:
             overlap_score_weight: Deprecated positional/keyword alias for prefill_load_scale. When present, it takes precedence over prefill_load_scale; a value of 0 also sets overlap_score_credit to 0.
             overlap_score_credit: Finite, non-negative credit multiplier for device-local prefix overlap (default: 1.0). Values above 1.0 give device overlap extra credit and can make adjusted prefill cost negative.
             prefill_load_scale: Scale for adjusted prompt-side prefill load after cache-hit credits (default: 1.0)
+            decode_active_request_weight: Experimental block-equivalent decode cost added for each active request on a candidate worker (default: 0.0)
             host_cache_hit_weight: Credit multiplier for host-pinned cache hits (default: 0.75)
             disk_cache_hit_weight: Credit multiplier for disk/external cache hits (default: 0.25)
             router_temperature: Temperature for normalized worker sampling via softmax (default: 0.0)
@@ -1891,6 +1932,12 @@ class KvRouterConfig:
             router_assume_kv_reuse: Assume KV cache reuse when tracking active blocks (default: True).
                 When True, computes actual block hashes. When False, generates random hashes.
             router_track_prefill_tokens: Include prompt-side prefill tokens in active load accounting (default: True).
+            router_tracking_hash: Tracking identity algorithm, "public-xxh3-v1" or
+                "keyed-xxh3-v1" (default: "public-xxh3-v1").
+            router_tracking_key_file: File containing exactly 32 raw provider-key bytes.
+                Required only for keyed tracking mode.
+            router_tracking_key_id: Provider-managed key epoch mixed into keyed scope
+                derivation. Required only for keyed tracking mode.
             router_prefill_load_model: Prompt-side prefill load model (default: "none").
                 "none" keeps static prompt load accounting.
                 "aic" decays the oldest active prefill request using AIC-predicted duration.
@@ -1945,6 +1992,10 @@ class KvRouterConfig:
     def prefill_load_scale(self) -> float: ...
     @prefill_load_scale.setter
     def prefill_load_scale(self, value: float) -> None: ...
+    @property
+    def decode_active_request_weight(self) -> float: ...
+    @decode_active_request_weight.setter
+    def decode_active_request_weight(self, value: float) -> None: ...
 
     def with_overrides(
         self,
@@ -1953,6 +2004,7 @@ class KvRouterConfig:
         overlap_score_credit: Optional[float] = None,
         overlap_score_credit_decay: Optional[float] = None,
         prefill_load_scale: Optional[float] = None,
+        decode_active_request_weight: Optional[float] = None,
     ) -> "KvRouterConfig": ...
 
 class ReasoningConfig:
@@ -2043,6 +2095,7 @@ class MockEngineArgs:
         bandwidth_g2_to_g4_gbps: Optional[float] = None,
         bandwidth_g4_to_g2_gbps: Optional[float] = None,
         max_model_len: Optional[int] = None,
+        g1_backend: str = "kvbm",
     ) -> None:
         ...
 
@@ -2075,6 +2128,9 @@ class MockEngineArgs:
 
     @enable_prefix_caching.setter
     def enable_prefix_caching(self, value: bool) -> None: ...
+
+    @property
+    def g1_backend(self) -> str: ...
 
     @property
     def enable_local_indexer(self) -> bool: ...
@@ -2421,8 +2477,79 @@ async def make_engine(distributed_runtime: DistributedRuntime, args: EntrypointA
     """Make an engine matching the args"""
     ...
 
-async def run_input(runtime: DistributedRuntime, input: str, engine_config: EngineConfig) -> None:
-    """Start an engine, connect it to an input, and run until stopped."""
+class FrontendExtensionContext:
+    """Read-only, live view of frontend state passed to extension route handlers.
+
+    Handlers receive this and answer from current state. The surface is
+    intentionally narrow (typed read-only accessors only); it does not expose
+    the internal service state.
+    """
+
+    def is_ready(self) -> bool:
+        """Whether the HTTP service has finished startup and is ready to serve."""
+        ...
+
+    def is_cancelled(self) -> bool:
+        """Whether the frontend is shutting down (draining)."""
+        ...
+
+    def has_any_ready_model(self) -> bool:
+        """Whether at least one model is registered and ready to serve."""
+        ...
+
+    def is_model_ready_to_serve(self, model: str) -> bool:
+        """Whether the named model is registered and ready to serve."""
+        ...
+
+    def model_display_names(self) -> list[str]:
+        """Sorted display names of all registered models."""
+        ...
+
+    def serving_ready_display_names(self) -> list[str]:
+        """Sorted display names of models ready to serve."""
+        ...
+
+class FrontendRoute:
+    """A trusted extension route served on the Dynamo HTTP frontend.
+
+    Currently restricted to static-path ``GET`` routes. ``handler`` is a
+    synchronous callable that receives a ``FrontendExtensionContext`` and
+    returns a JSON-serializable body (implies HTTP 200) or a ``FrontendResponse``
+    to set the status code. Async handlers and path parameters are rejected at
+    construction.
+    """
+
+    def __init__(
+        self,
+        method: str,
+        path: str,
+        handler: Callable[[FrontendExtensionContext], object],
+    ) -> None: ...
+    @property
+    def method(self) -> str: ...
+    @property
+    def path(self) -> str: ...
+
+class FrontendResponse:
+    """Explicit status-code override returned by a ``FrontendRoute`` handler.
+
+    Return this to set a non-200 status (e.g. ``FrontendResponse(503, body)``);
+    return a plain JSON-serializable value for the default 200.
+    """
+
+    def __init__(self, status_code: int, body: object) -> None: ...
+
+async def run_input(
+    distributed_runtime: DistributedRuntime,
+    input: str,
+    engine_config: EngineConfig,
+    frontend_route_extensions: Optional[Sequence[FrontendRoute]] = None,
+) -> None:
+    """Start an engine, connect it to an input, and run until stopped.
+
+    ``frontend_route_extensions`` supplies additional HTTP routes to the
+    frontend (HTTP input only); see ``FrontendRoute``.
+    """
     ...
 
 def run_mocker_trace_replay(
@@ -2489,7 +2616,9 @@ def run_mocker_synthetic_trace_replay(
     replay_mode: Literal["offline", "online"] = "offline",
     router_mode: Literal["round_robin", "kv_router"] = "round_robin",
     arrival_speedup_ratio: float = 1.0,
-    arrival_interval_ms: float = 1.0,
+    request_rate: Optional[float] = None,
+    arrival_interval_ms: Optional[float] = None,
+    arrival_seed: int = 42,
     turns_per_session: int = 1,
     shared_prefix_ratio: float = 0.0,
     num_prefix_groups: int = 0,
@@ -2559,7 +2688,9 @@ class PlannerReplayBridge:
         model_name: Optional[str] = None,
         replay_concurrency: Optional[int] = None,
         arrival_speedup_ratio: float = 1.0,
-        arrival_interval_ms: float = 1.0,
+        request_rate: Optional[float] = None,
+        arrival_interval_ms: Optional[float] = None,
+        arrival_seed: int = 42,
         turns_per_session: int = 1,
         shared_prefix_ratio: float = 0.0,
         num_prefix_groups: int = 0,
@@ -2583,7 +2714,9 @@ class PlannerReplayBridge:
         model_name: Optional[str] = None,
         replay_concurrency: Optional[int] = None,
         arrival_speedup_ratio: float = 1.0,
-        arrival_interval_ms: float = 1.0,
+        request_rate: Optional[float] = None,
+        arrival_interval_ms: Optional[float] = None,
+        arrival_seed: int = 42,
         turns_per_session: int = 1,
         shared_prefix_ratio: float = 0.0,
         num_prefix_groups: int = 0,

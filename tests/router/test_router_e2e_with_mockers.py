@@ -40,8 +40,10 @@ from tests.router.e2e_harness import (
     allocate_frontend_ports,
     build_test_payload,
     run_basic_router_test,
+    run_disagg_kv_event_publisher_disabled_test,
     run_disagg_router_decisions_test,
     run_indexers_sync_test,
+    run_kv_event_publisher_disabled_test,
     run_router_decisions_test,
 )
 from tests.router.helper import (
@@ -344,6 +346,72 @@ class CounterWorkerProcess:
                     os.unlink(path)
                 except OSError:
                     pass
+
+
+@pytest.mark.timeout(120)
+@pytest.mark.parametrize(
+    ("topology", "request_plane"),
+    [
+        pytest.param("aggregated", "tcp", id="aggregated"),
+        pytest.param("disaggregated", "nats", id="disaggregated"),
+    ],
+    indirect=["request_plane"],
+)
+def test_mocker_kv_event_publisher_disabled_diagnostic(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_tokenizers,
+    topology,
+    request_plane,
+):
+    dp_size = 1 if topology == "aggregated" else 2
+    mocker_args = {
+        "speedup_ratio": SPEEDUP_RATIO,
+        "block_size": BLOCK_SIZE,
+        "dp_size": dp_size,
+        "enable_prefix_caching": False,
+    }
+
+    if topology == "aggregated":
+        run_kv_event_publisher_disabled_test(
+            engine_process_cls=MockerProcess,
+            engine_args_name="mocker_args",
+            engine_args=mocker_args,
+            request=request,
+            request_plane=request_plane,
+            block_size=BLOCK_SIZE,
+            model_name=MODEL_NAME,
+            expected_rank_count=dp_size,
+            engine_process_kwargs={"num_mockers": 1},
+            test_payload=TEST_PAYLOAD,
+        )
+        return
+
+    decode_mocker_args = {
+        "speedup_ratio": SPEEDUP_RATIO,
+        "block_size": BLOCK_SIZE,
+        "dp_size": dp_size,
+    }
+
+    run_disagg_kv_event_publisher_disabled_test(
+        request=request,
+        request_plane=request_plane,
+        block_size=BLOCK_SIZE,
+        model_name=MODEL_NAME,
+        expected_prefill_rank_count=dp_size,
+        worker_context_factory=lambda namespace: launch_disagg_workers(
+            request,
+            namespace,
+            "prefill_first",
+            prefill_mocker_args=mocker_args,
+            decode_mocker_args=decode_mocker_args,
+            num_prefill_mockers=1,
+            num_decode_mockers=1,
+            enable_disagg_bootstrap=False,
+            request_plane=request_plane,
+        ),
+        test_payload=TEST_PAYLOAD,
+    )
 
 
 @pytest.mark.timeout(180)  # planner-profile mocker setup can exceed 120s on CI CPUs
