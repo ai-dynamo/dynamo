@@ -10,13 +10,14 @@ OSRB submission and GPL/LGPL distribution-on-request compliance.
 Per-ecosystem strategy (matches the plan in
 ~/.claude/plans/ok-i-think-this-parallel-widget.md):
 
-  dpkg     diff against the base-SBOM to identify packages we ADDED
-           (vs. inherited from cuda-dl-base / NGC base), then run
-           `apt-get source --only-source --download-only -d <pkg>`
-           on each delta. Skip silently on packages that have no
-           source repo (proprietary CUDA, NVIDIA-internal, etc.) —
-           those are documented in license_overrides.yaml as
-           "source not available; see EULA".
+  dpkg     diff against the base-SBOM to identify binary packages we
+           ADDED (vs. inherited from cuda-dl-base / NGC base), resolve
+           each to its source package, then run `apt-get source
+           --only-source --download-only -d <src>` once per source.
+           Packages with no public source repo (proprietary CUDA,
+           NVIDIA-internal, etc.) are recorded in manifest.json with a
+           reason; they are also documented in license_overrides.yaml
+           as "source not available; see EULA".
 
   rust     filtered vendor tree from the wheel_builder stage
            (cargo vendor --locked, then filter to SBOM-declared
@@ -29,36 +30,43 @@ Per-ecosystem strategy (matches the plan in
            snapshot-agent / EPP have it.
 
   native   preserve source tarballs for from-source components
-           (criu, ucx, libfabric, ffmpeg, gdrcopy, NIXL, etc.).
-           These were downloaded by the wheel_builder stage and
-           are COPYd in by the Dockerfile.
+           (criu, ucx, libfabric, ffmpeg, gdrcopy, etc.). These were
+           downloaded by the wheel_builder stage and are COPYd in by
+           the Dockerfile.
 
   python   skipped intentionally. Source already ships in the
            installed wheels (sdists / .py source files in
            site-packages); pip download --no-binary would
            duplicate ~GB for zero compliance value.
 
-Final output: /sources.zip, packed with deterministic ordering and a
-fixed mtime so the artifact's sha256 is stable across rebuilds. The
-companion OSRB bundle (osrb/package.py) records this archive's
-sha256 in build-provenance.json for cross-verification.
+Final output: an unpacked /sources tree carrying README.md,
+manifest.json (per-ecosystem declared/collected/missing) and
+CHECKSUMS.sha256. CI exports it with `--output type=local`, so the
+uploaded artifact holds the files directly instead of an archive
+nested inside GitHub's own artifact zip. The companion OSRB bundle
+(osrb/package.py) records a digest over the checksum manifest in
+build-provenance.json for cross-verification.
 
-Runs in the post-merge / RC / release CI pipelines only — skipped on
-PR builds (storage cost too high per-build, and PR doesn't change
-the source-of-truth a release ships from).
+Gated on ENABLE_SOURCE_ARCHIVAL; callers opt in (nightly / RC /
+release) because the tree runs to hundreds of MB per image.
+
+Collection is best-effort by design: a gap never fails the build, but
+every gap is counted and named in manifest.json so an auditor can see
+exactly what is and isn't covered.
 """
 
 from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
-import zipfile
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -76,6 +84,42 @@ def _enumerate_installed_dpkgs(root: Path = Path("/")) -> set[str]:
         text=True,
     )
     return {line.strip() for line in result.stdout.splitlines() if line.strip()}
+
+
+def _binary_to_source_map(root: Path = Path("/")) -> dict[str, str]:
+    """Map each installed binary package to the source package it builds from.
+
+    `apt-get source` resolves *source* package names, but dpkg-query reports
+    *binary* names, and the two frequently differ — udev, libsystemd-shared
+    and systemd-dev all come from the `systemd` source. dpkg's
+    ${source:Package} field carries the mapping directly and falls back to
+    the binary name when a package declares no distinct source.
+    """
+    cmd = ["dpkg-query", "-W", "-f=${Package}\\t${source:Package}\\n"]
+    if root != Path("/"):
+        cmd.insert(1, f"--admindir={root / 'var/lib/dpkg'}")
+    result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+    mapping: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        binary, _, source = line.partition("\t")
+        binary, source = binary.strip(), source.strip()
+        if binary:
+            mapping[binary] = source or binary
+    return mapping
+
+
+# Vendor repositories that publish no source. Matched as prefixes against the
+# source-package name so a genuine proprietary skip stays distinguishable from
+# a fetch that simply failed.
+_NO_PUBLIC_SOURCE_PREFIXES = (
+    "cuda-",
+    "doca-",
+    "libcudnn",
+    "libnccl",
+    "mlnx-",
+    "nsight-",
+    "nvidia-",
+)
 
 
 def _baseline_dpkg_names(baseline_sbom: Path) -> set[str]:
@@ -198,10 +242,13 @@ def _rewrite_deb822(text: str) -> str:
 
 def collect_dpkg_sources(
     baseline_sbom: Path | None, output_dir: Path, dpkg_root: Path = Path("/")
-) -> int:
+) -> dict:
     """Diff installed dpkg state against the baseline, fetch source for the deltas.
 
-    Returns the number of packages whose source was successfully fetched.
+    The baseline diff runs in binary-package space (that is what the baseline
+    SBOM enumerates), then the delta is collapsed onto source packages before
+    fetching, so a source package that produced several installed binaries is
+    fetched once rather than once per binary.
 
     For each delta package, `apt-get source --download-only -d` fetches
     the `.dsc` + `.tar.{xz,gz}` and (when present) `.debian.tar.{xz,gz}`
@@ -213,9 +260,10 @@ def collect_dpkg_sources(
     output_dir.mkdir(parents=True, exist_ok=True)
     try:
         installed = _enumerate_installed_dpkgs(dpkg_root)
+        bin_to_src = _binary_to_source_map(dpkg_root)
     except (subprocess.CalledProcessError, FileNotFoundError) as exc:
         logger.error("dpkg-query failed (is dpkg installed?): %s", exc)
-        return 0
+        return {"declared": 0, "collected": 0, "missing": [], "skipped": []}
     logger.info("Installed dpkg packages under %s: %d", dpkg_root, len(installed))
 
     if baseline_sbom is None:
@@ -236,12 +284,23 @@ def collect_dpkg_sources(
         )
 
     if not delta_names:
-        return 0
+        return {"declared": 0, "collected": 0, "missing": [], "skipped": []}
+
+    # Collapse the binary delta onto source packages: systemd, udev,
+    # libsystemd-shared and systemd-dev are one `systemd` fetch, not four.
+    source_targets: dict[str, set[str]] = {}
+    for binary in delta_names:
+        source_targets.setdefault(bin_to_src.get(binary, binary), set()).add(binary)
+    logger.info(
+        "Delta of %d binary packages resolves to %d source packages.",
+        len(delta_names),
+        len(source_targets),
+    )
 
     fetched = 0
-    skipped: list[str] = []
+    skipped: list[dict] = []
     with _deb_src_enabled():
-        for name in sorted(delta_names):
+        for name in sorted(source_targets):
             try:
                 subprocess.run(
                     ["apt-get", "source", "--only-source", "--download-only", name],
@@ -252,21 +311,43 @@ def collect_dpkg_sources(
                 )
                 fetched += 1
             except subprocess.CalledProcessError:
-                # Most common cause: NVIDIA-proprietary repos don't publish
-                # source. Documented in the bundle README. Log so an auditor
-                # can see which packages were skipped and why.
-                skipped.append(name)
-                logger.debug("no public source for %s; skipping", name)
+                proprietary = name.startswith(_NO_PUBLIC_SOURCE_PREFIXES)
+                skipped.append(
+                    {
+                        "source_package": name,
+                        "binary_packages": sorted(source_targets[name]),
+                        "reason": (
+                            "no public source repo (vendor-proprietary)"
+                            if proprietary
+                            else "apt-get source failed"
+                        ),
+                    }
+                )
 
+    unexplained = [s for s in skipped if s["reason"] == "apt-get source failed"]
     if skipped:
         logger.warning(
-            "Skipped %d dpkg packages with no public source repo "
-            "(typically NVIDIA-proprietary; see bundle README): %s",
+            "Skipped %d dpkg source packages (%d vendor-proprietary, "
+            "%d fetch failures): %s",
             len(skipped),
-            ", ".join(skipped[:20]) + (" …" if len(skipped) > 20 else ""),
+            len(skipped) - len(unexplained),
+            len(unexplained),
+            ", ".join(s["source_package"] for s in skipped[:20])
+            + (" …" if len(skipped) > 20 else ""),
         )
-    logger.info("dpkg sources collected: %d / %d", fetched, len(delta_names))
-    return fetched
+    if unexplained:
+        logger.warning(
+            "dpkg source packages that should have public source but could not "
+            "be fetched: %s",
+            ", ".join(s["source_package"] for s in unexplained),
+        )
+    logger.info("dpkg sources collected: %d / %d", fetched, len(source_targets))
+    return {
+        "declared": len(source_targets),
+        "collected": fetched,
+        "missing": [],
+        "skipped": skipped,
+    }
 
 
 # First-party Rust crate prefixes. Crates whose name starts with any of
@@ -312,20 +393,66 @@ def _shipped_rust_crates(site_packages_dirs: list[Path]) -> set[tuple[str, str]]
     return crates
 
 
+def _crate_id(crate_dir: Path) -> tuple[str, str] | None:
+    """Read (name, version) out of a vendored crate's own Cargo.toml."""
+    try:
+        text = (crate_dir / "Cargo.toml").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+    name = version = None
+    try:
+        import tomllib
+
+        package = tomllib.loads(text).get("package") or {}
+        name, version = package.get("name"), package.get("version")
+    except Exception:
+        # tomllib is 3.11+, and a handful of published manifests carry syntax
+        # it rejects. [package] is the first table cargo emits, so scan it.
+        match = re.search(r"^\s*\[package\]\s*$(.*?)(?=^\s*\[)", text, re.M | re.S)
+        block = match.group(1) if match else text
+        name_match = re.search(r'^\s*name\s*=\s*"([^"]+)"', block, re.M)
+        version_match = re.search(r'^\s*version\s*=\s*"([^"]+)"', block, re.M)
+        name = name_match.group(1) if name_match else None
+        version = version_match.group(1) if version_match else None
+
+    return (name, str(version)) if name and version else None
+
+
+def _index_vendor_tree(vendor_full: Path) -> dict[tuple[str, str], Path]:
+    """Map (crate name, version) to its directory in a cargo-vendor tree.
+
+    Directory names cannot be derived from the crate identity: `cargo vendor`
+    names a directory after the crate alone when a single version is
+    vendored, and `<name>-<version>` only for the additional versions of a
+    crate that appears more than once. Reading each manifest recovers the
+    pair regardless of which form cargo chose.
+    """
+    index: dict[tuple[str, str], Path] = {}
+    for entry in sorted(vendor_full.iterdir()):
+        if not entry.is_dir():
+            continue
+        crate_id = _crate_id(entry)
+        if crate_id is not None:
+            index[crate_id] = entry
+    logger.info("Indexed %d crates in vendor tree %s", len(index), vendor_full)
+    return index
+
+
 def collect_rust_sources(
     site_packages_dirs: list[Path], vendor_full: Path, output_dir: Path
-) -> int:
+) -> dict:
     """Copy third-party Rust crate sources into output_dir.
 
-    Walks installed wheels' embedded SBOMs to discover what shipped,
-    then for each (name, version) copies vendor_full/<name>-<version>/
-    to output_dir/vendor/<name>-<version>/ EXCEPT for first-party
-    crates (dynamo-*, kvbm-*, nixl-*), which are NVIDIA-authored.
+    Walks installed wheels' embedded SBOMs to discover what shipped, then
+    copies each declared crate out of the indexed vendor tree into
+    output_dir/vendor/<name>-<version>/ EXCEPT for first-party crates
+    (dynamo-*, kvbm-*, nixl-*), which are NVIDIA-authored. The output is
+    always named <name>-<version> even where the vendor tree used the bare
+    crate name, so the archive is unambiguous for an auditor.
 
     Cargo.toml + Cargo.lock from the workspace are copied alongside so a
     consumer can reconstruct a buildable vendor tree.
-
-    Returns the number of crate directories copied.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     vendor_dest = output_dir / "vendor"
@@ -337,8 +464,9 @@ def collect_rust_sources(
             "cargo vendor with ENABLE_SOURCE_ARCHIVAL=true?",
             vendor_full,
         )
-        return 0
+        return {"declared": 0, "collected": 0, "missing": [], "skipped": []}
 
+    index = _index_vendor_tree(vendor_full)
     crates = _shipped_rust_crates(site_packages_dirs)
     copied = 0
     skipped_first_party = 0
@@ -347,8 +475,8 @@ def collect_rust_sources(
         if name.startswith(_FIRST_PARTY_RUST_PREFIXES):
             skipped_first_party += 1
             continue
-        crate_dir = vendor_full / f"{name}-{version}"
-        if not crate_dir.is_dir():
+        crate_dir = index.get((name, version))
+        if crate_dir is None:
             missing_in_vendor.append(f"{name}-{version}")
             continue
         shutil.copytree(crate_dir, vendor_dest / f"{name}-{version}")
@@ -360,24 +488,35 @@ def collect_rust_sources(
         if candidate.is_file():
             shutil.copy2(candidate, output_dir / manifest_name)
 
+    declared = len(crates) - skipped_first_party
     logger.info(
-        "Rust sources collected: %d third-party crates (skipped %d "
-        "first-party; %d crates declared in SBOMs but missing from "
-        "vendor tree)",
+        "Rust sources collected: %d / %d third-party crates (skipped %d first-party)",
         copied,
+        declared,
         skipped_first_party,
-        len(missing_in_vendor),
     )
-    if missing_in_vendor and len(missing_in_vendor) <= 20:
-        logger.debug("missing-from-vendor: %s", ", ".join(missing_in_vendor))
-    return copied
+    if missing_in_vendor:
+        logger.warning(
+            "%d crates declared in wheel SBOMs are missing from the vendor "
+            "tree and are NOT in the archive: %s",
+            len(missing_in_vendor),
+            ", ".join(sorted(missing_in_vendor)[:20])
+            + (" …" if len(missing_in_vendor) > 20 else ""),
+        )
+    return {
+        "declared": declared,
+        "collected": copied,
+        "missing": sorted(missing_in_vendor),
+        "skipped": [],
+        "first_party_excluded": skipped_first_party,
+    }
 
 
 # First-party Go module prefixes. Our own code; source public on GitHub.
 _FIRST_PARTY_GO_PREFIXES = ("github.com/ai-dynamo/",)
 
 
-def collect_go_sources(go_vendor_dir: Path, output_dir: Path) -> int:
+def collect_go_sources(go_vendor_dir: Path, output_dir: Path) -> dict:
     """Copy third-party Go module sources from a `go mod vendor` tree.
 
     The simplest correct approach: copy the entire vendor tree, then
@@ -391,8 +530,8 @@ def collect_go_sources(go_vendor_dir: Path, output_dir: Path) -> int:
     module sources), so the first-party filter is the only filter
     needed.
 
-    Returns the number of top-level Go module-path prefixes copied
-    (approximate — used for logging).
+    Module counts are approximate — a `go mod vendor` tree carries no
+    declared-set to reconcile against, so declared == collected here.
     """
     if not go_vendor_dir.is_dir():
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -401,7 +540,7 @@ def collect_go_sources(go_vendor_dir: Path, output_dir: Path) -> int:
             "`go mod vendor` with ENABLE_SOURCE_ARCHIVAL=true?",
             go_vendor_dir,
         )
-        return 0
+        return {"declared": 0, "collected": 0, "missing": [], "skipped": []}
 
     # shutil.copytree requires dirs_exist_ok=True to merge into an
     # existing output directory; we always create the parent path even
@@ -432,18 +571,25 @@ def collect_go_sources(go_vendor_dir: Path, output_dir: Path) -> int:
         pruned,
         go_vendor_dir,
     )
-    return len(module_dirs)
+    return {
+        "declared": len(module_dirs),
+        "collected": len(module_dirs),
+        "missing": [],
+        "skipped": [],
+        "first_party_excluded": pruned,
+    }
 
 
 # First-party native components — NVIDIA-authored from-source builds.
-# Source lives in the dynamo repo; we don't ship it in OSRB archives
+# Source lives in an ai-dynamo repo; we don't ship it in OSRB archives
 # because we're the upstream author, not redistributing someone else's
-# OSS. Match against the leading filename token (everything before the
-# first hyphen + version).
-_FIRST_PARTY_NATIVE_NAMES = {"cuda-checkpoint-helper"}
+# OSS. Mirrors _FIRST_PARTY_RUST_PREFIXES, which already treats nixl-* as
+# first-party. Match against the leading filename token (everything before
+# the first hyphen + version).
+_FIRST_PARTY_NATIVE_NAMES = {"cuda-checkpoint-helper", "nixl"}
 
 
-def collect_native_sources(workspace_native_dir: Path, output_dir: Path) -> int:
+def collect_native_sources(workspace_native_dir: Path, output_dir: Path) -> dict:
     """Copy third-party native source archives preserved by builder stages.
 
     Each builder Dockerfile that does `RUN git clone …` or `wget …tar` should
@@ -452,7 +598,7 @@ def collect_native_sources(workspace_native_dir: Path, output_dir: Path) -> int:
     stage `COPY --from=<builder> /tmp/native-sources/ /opt/native-sources/`
     puts them where this script can find them.
 
-    First-party components (cuda-checkpoint-helper) are filtered out:
+    First-party components (cuda-checkpoint-helper, nixl) are filtered out:
     NVIDIA-authored, source on GitHub, not OSS redistribution.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -460,7 +606,7 @@ def collect_native_sources(workspace_native_dir: Path, output_dir: Path) -> int:
         logger.warning(
             "No native source directory at %s; skipping.", workspace_native_dir
         )
-        return 0
+        return {"declared": 0, "collected": 0, "missing": [], "skipped": []}
     copied = 0
     skipped_first_party = 0
     for item in workspace_native_dir.iterdir():
@@ -487,14 +633,26 @@ def collect_native_sources(workspace_native_dir: Path, output_dir: Path) -> int:
         skipped_first_party,
         workspace_native_dir,
     )
-    return copied
+    if copied == 0:
+        logger.warning(
+            "native ecosystem is enabled but %s yielded no entries; no native "
+            "source is in the archive",
+            workspace_native_dir,
+        )
+    return {
+        "declared": copied,
+        "collected": copied,
+        "missing": [],
+        "skipped": [],
+        "first_party_excluded": skipped_first_party,
+    }
 
 
 _README_TEMPLATE = """\
 # Source archive — OSRB submission companion
 
 Generated by container/compliance/collect_sources.py during the
-post-merge / RC / release container build.
+nightly / RC / release container build.
 
 ## Contents
 
@@ -505,10 +663,18 @@ runtime this archive belongs to).
 
 | Directory | What's here |
 |---|---|
-| `dpkg/`    | `.dsc` + tarballs for Debian/Ubuntu packages we install on top of the baseline image. Scoped to the delta against the baseline SBOM. NVIDIA-proprietary packages (CUDA repos) have no public source repo and are not included; see "skipped packages" in the build log. |
+| `dpkg/`    | `.dsc` + tarballs for Debian/Ubuntu source packages behind the binary packages we install on top of the baseline image. Scoped to the delta against the baseline SBOM, then collapsed onto source packages. Vendor-proprietary packages (CUDA / DOCA / Mellanox repos) publish no source and are not included; see `manifest.json`. |
 | `rust/`    | `cargo vendor` tree filtered to the third-party crates that appear in the installed wheels' embedded SBOMs. Excludes first-party crates (`dynamo-*`, `kvbm-*`, `nixl-*`) — those are NVIDIA-authored and source is public at github.com/ai-dynamo. Includes the workspace `Cargo.toml` + `Cargo.lock` for context. |
 | `go/`      | `go mod vendor` tree for the operator / snapshot / EPP binaries. Excludes first-party modules (`github.com/ai-dynamo/...`). |
-| `native/`  | Upstream source tarballs (or git clones) for from-source builds — CRIU, cuda-checkpoint, ucx, libfabric, gdrcopy, ffmpeg, NIXL where applicable. Excludes first-party native helpers (`cuda-checkpoint-helper`). |
+| `native/`  | Upstream source tarballs (or git clones) for from-source builds — CRIU, cuda-checkpoint, UCX, libfabric, gdrcopy, nv-codec-headers, FFmpeg where applicable. Excludes first-party native components (`cuda-checkpoint-helper`, `nixl`). |
+
+## Coverage
+
+`manifest.json` records, per ecosystem, how many components were
+declared, how many were collected, and the name and reason for every
+one that was not. Collection is best-effort and never fails the build,
+so this file — not the presence of a directory — is the authoritative
+statement of what this archive does and does not cover.
 
 ## Python sources are not in this archive
 
@@ -526,11 +692,17 @@ PyTorch ships the source separately. If OSRB needs C-extension source
 for a specific package, fetch it from PyPI's sdist (e.g.
 `pip download --no-binary :all: <package>`).
 
-## Cross-reference
+## Verifying this archive
 
-This archive's SHA-256 is recorded in the companion OSRB bundle's
-`build-provenance.json` under the `sources.sha256` field, so tampering
-between bundle and sources is detectable.
+`CHECKSUMS.sha256` lists every file in this tree:
+
+    sha256sum -c CHECKSUMS.sha256
+
+The companion OSRB bundle's `build-provenance.json` records a SHA-256
+taken over that checksum listing under `sources.sha256`, so tampering
+between bundle and sources is detectable:
+
+    sha256sum CHECKSUMS.sha256
 """
 
 
@@ -539,34 +711,58 @@ def write_readme(sources_root: Path) -> None:
     (sources_root / "README.md").write_text(_README_TEMPLATE, encoding="utf-8")
 
 
-def pack_sources_zip(sources_root: Path, zip_path: Path) -> None:
-    """Pack sources_root as a deterministic-ish zip.
-
-    Walks in sorted order with a fixed mtime per ZipInfo — central-directory
-    layout makes byte-exact reproducibility imperfect for zip vs tar, but
-    these knobs are enough for OSRB cross-verification: the bundle records
-    the sha256 of this archive in build-provenance.json.
-    """
-    if not sources_root.is_dir():
-        raise FileNotFoundError(f"sources root missing: {sources_root}")
-    fixed_mtime = (1980, 1, 1, 0, 0, 0)
-    paths = sorted(p for p in sources_root.rglob("*") if p.is_file())
-    with zipfile.ZipFile(
-        zip_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6
-    ) as zf:
-        for path in paths:
-            arcname = path.relative_to(sources_root.parent).as_posix()
-            info = zipfile.ZipInfo(filename=arcname, date_time=fixed_mtime)
-            info.compress_type = zipfile.ZIP_DEFLATED
-            info.external_attr = 0o644 << 16
-            with path.open("rb") as f:
-                zf.writestr(info, f.read())
-    logger.info(
-        "Wrote %s (%.1f MB, %d files)",
-        zip_path,
-        zip_path.stat().st_size / 1e6,
-        len(paths),
+def write_manifest(sources_root: Path, stats: dict[str, dict]) -> None:
+    """Record per-ecosystem coverage so gaps are visible rather than silent."""
+    total_declared = sum(s.get("declared", 0) for s in stats.values())
+    total_collected = sum(s.get("collected", 0) for s in stats.values())
+    doc = {
+        "ecosystems": stats,
+        "totals": {
+            "declared": total_declared,
+            "collected": total_collected,
+            "missing": sum(len(s.get("missing", [])) for s in stats.values()),
+            "skipped": sum(len(s.get("skipped", [])) for s in stats.values()),
+        },
+    }
+    (sources_root / "manifest.json").write_text(
+        json.dumps(doc, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
+    for eco, s in sorted(stats.items()):
+        declared, collected = s.get("declared", 0), s.get("collected", 0)
+        if declared and collected < declared:
+            logger.warning(
+                "%s coverage: %d/%d (%.1f%%) — see manifest.json",
+                eco,
+                collected,
+                declared,
+                100.0 * collected / declared,
+            )
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def write_checksums(sources_root: Path) -> int:
+    """sha256 every file in the tree, in sorted order, to CHECKSUMS.sha256.
+
+    Sorted relative paths make the listing reproducible across builds, which
+    is what lets the OSRB bundle record a single digest over the whole tree.
+    """
+    lines: list[str] = []
+    for path in sorted(sources_root.rglob("*")):
+        if not path.is_file() or path.name == "CHECKSUMS.sha256":
+            continue
+        rel = path.relative_to(sources_root).as_posix()
+        lines.append(f"{_file_sha256(path)}  {rel}")
+    (sources_root / "CHECKSUMS.sha256").write_text(
+        "\n".join(lines) + "\n", encoding="utf-8"
+    )
+    return len(lines)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -579,16 +775,14 @@ def main(argv: list[str] | None = None) -> int:
         "Default: all applicable.",
     )
     parser.add_argument(
-        "--output-zip",
-        type=Path,
-        default=Path("/sources.zip"),
-        help="Where to write the final sources zip.",
-    )
-    parser.add_argument(
         "--sources-root",
         type=Path,
         default=Path("/sources"),
-        help="Working directory for collected sources.",
+        help=(
+            "Output directory for collected sources. Exported verbatim by the "
+            "`sources_archive` stage — there is no inner archive, so the CI "
+            "artifact holds these files directly."
+        ),
     )
     parser.add_argument(
         "--baseline-sbom",
@@ -700,9 +894,9 @@ def main(argv: list[str] | None = None) -> int:
             )
             base_sbom = None
 
-    counts: dict[str, int] = {}
+    stats: dict[str, dict] = {}
     if "dpkg" in ecosystems:
-        counts["dpkg"] = collect_dpkg_sources(
+        stats["dpkg"] = collect_dpkg_sources(
             base_sbom, args.sources_root / "dpkg", dpkg_root=args.dpkg_root
         )
     if "rust" in ecosystems:
@@ -710,19 +904,28 @@ def main(argv: list[str] | None = None) -> int:
             site_dirs = [args.rust_site_packages]
         else:
             site_dirs = list(args.rust_venv.glob("lib/python*/site-packages"))
-        counts["rust"] = collect_rust_sources(
+        stats["rust"] = collect_rust_sources(
             site_dirs, args.rust_vendor_full, args.sources_root / "rust"
         )
     if "go" in ecosystems:
-        counts["go"] = collect_go_sources(args.go_vendor_dir, args.sources_root / "go")
+        stats["go"] = collect_go_sources(args.go_vendor_dir, args.sources_root / "go")
     if "native" in ecosystems:
-        counts["native"] = collect_native_sources(
+        stats["native"] = collect_native_sources(
             args.native_source_dir, args.sources_root / "native"
         )
 
     write_readme(args.sources_root)
-    pack_sources_zip(args.sources_root, args.output_zip)
-    logger.info("Source archival complete: %s", counts)
+    write_manifest(args.sources_root, stats)
+    file_count = write_checksums(args.sources_root)
+    logger.info(
+        "Source archival complete: %d files under %s; %s",
+        file_count,
+        args.sources_root,
+        {
+            eco: f"{s.get('collected', 0)}/{s.get('declared', 0)}"
+            for eco, s in stats.items()
+        },
+    )
     return 0
 
 

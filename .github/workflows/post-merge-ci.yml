@@ -651,7 +651,7 @@ jobs:
   # the same warm builder — a cache hit + small scratch export instead of a cold
   # full-image rebuild on a separate fresh builder. archive_sources is currently
   # false (source archival temporarily disabled), so release branches do not emit
-  # the /sources.zip OSRB artifact; EFA images are covered (make_efa flows to the
+  # the /sources OSRB artifact; EFA images are covered (make_efa flows to the
   # extract). A compliance failure fails the build.
   #
   # planner stays on the legacy shared-compliance scan until it migrates to

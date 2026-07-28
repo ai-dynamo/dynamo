@@ -335,9 +335,9 @@ runs:
           done
         fi
 
-    # /sources/ — reproducible tarball of source archives for everything we
-    # ship on top of the FROM base. Bigger than legal/sboms (typically
-    # 50-300 MB), so gated by archive_sources input. Skipped on PR builds.
+    # /sources/ — unpacked tree of source archives for everything we ship on
+    # top of the FROM base. Bigger than legal/sboms (typically 50-300 MB), so
+    # gated by archive_sources input. Skipped on PR builds.
     - name: Extract /sources/
       if: ${{ inputs.archive_sources == 'true' }}
       shell: bash
@@ -395,12 +395,13 @@ runs:
         path: /tmp/compliance/
         retention-days: ${{ inputs.artifact_retention_days }}
 
-    - name: Upload /sources/ tarball
+    - name: Upload /sources/ tree
       if: ${{ inputs.archive_sources == 'true' && always() }}
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
       with:
         name: compliance-${{ inputs.git_sha }}-${{ inputs.artifact_name_prefix }}-sources
-        # Multi-arch builds export per-arch linux_<arch>/sources.zip subdirs (same
-        # as the compliance artifact above), so upload the dir, not a fixed filename.
+        # The stage exports the source tree unpacked, under a per-arch
+        # linux_<arch>/ subdir on multi-arch builds (same as the compliance
+        # artifact above), so this artifact holds the files directly.
         path: /tmp/sources/
         retention-days: 365   # OSRB submissions retain longer than NOTICES/SBOMs

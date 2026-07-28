@@ -9,8 +9,8 @@ bundle suitable for NVIDIA's Open Source Review Board:
   Inputs (all already produced by the inline-compliance pipeline):
     /tmp/legal/                 NOTICES + license texts (from --target legal)
     /tmp/sboms/                 per-ecosystem deps CSVs (from --target sboms)
-    /tmp/sources/sources.zip    source archives (from --target sources_archive,
-                                post-merge / RC / release only)
+    /tmp/sources/               unpacked source tree (from --target
+                                sources_archive; opt-in per caller)
     container/compliance/base_sboms/<base>.cdx.json   if applicable
     container/compliance/osrb/{linkage.yaml,distribution.yaml,modifications/}
 
@@ -22,14 +22,14 @@ bundle suitable for NVIDIA's Open Source Review Board:
       modifications/            patches we apply to vendored deps (typically empty)
       attribution-base.txt      "these packages came from <base>"
       build-provenance.json     image digest, build timestamp, git SHAs, tool
-                                versions, AND the sha256 of the companion
-                                sources archive (so OSRB can verify the
+                                versions, AND a digest over the companion
+                                sources tree (so OSRB can verify the
                                 independently-uploaded sources match this bundle)
       README.md                 generated; explains every file
       CHECKSUMS.sha256          integrity check after upload
 
-  Sources are emitted in a SEPARATE archive (sources-<image>-<version>-<arch>.zip)
-  by container/compliance/collect_sources.py — the OSRB bundle is small
+  Sources are emitted SEPARATELY as an unpacked tree by
+  container/compliance/collect_sources.py — the OSRB bundle is small
   (MB-scale, just metadata + license texts) and reviewable on its own,
   while sources can be GB-scale and downloaded only when needed.
 
@@ -223,26 +223,50 @@ def copy_license_texts(legal_dir: Path, output_dir: Path) -> int:
     return sum(1 for _ in target.rglob("*") if _.is_file())
 
 
-def sources_archive_metadata(sources_archive: Path | None) -> dict:
-    """Return sha256 + size of the companion sources archive for provenance.
+def sources_tree_metadata(sources_dir: Path | None) -> dict:
+    """Return a digest over the companion sources tree for provenance.
 
-    Sources are NOT embedded in the OSRB bundle — they live in a separate
-    archive (sources-<image>-<version>-<arch>.zip) so reviewers can
-    inspect the metadata without pulling potentially-GB of source.
-    Recording the sha256 here lets OSRB verify the sources archive they
-    downloaded separately matches this bundle.
+    Sources are NOT embedded in the OSRB bundle — they ship as a separate
+    unpacked tree so reviewers can inspect the metadata without pulling
+    potentially-GB of source. The tree has no single file to hash, so we
+    hash its checksum listing: sorted `<sha256>  <relpath>` lines, one per
+    file. That digest changes if any file's content, name or presence
+    changes, and an auditor can reproduce it with `sha256sum
+    CHECKSUMS.sha256` after verifying the listing itself.
     """
-    if (
-        sources_archive is None
-        or not sources_archive.is_file()
-        or sources_archive.stat().st_size == 0
-    ):
-        return {"sources_archive": None, "sha256": None, "size_bytes": 0}
-    digest = hashlib.sha256(sources_archive.read_bytes()).hexdigest()
+    empty = {
+        "sources_tree": None,
+        "sha256": None,
+        "file_count": 0,
+        "size_bytes": 0,
+    }
+    if sources_dir is None or not sources_dir.is_dir():
+        return empty
+
+    lines: list[str] = []
+    total_bytes = 0
+    for path in sorted(sources_dir.rglob("*")):
+        # Excluded so the digest is reproducible from the tree alone,
+        # whether or not collect_sources already wrote the listing.
+        if not path.is_file() or path.name == "CHECKSUMS.sha256":
+            continue
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        total_bytes += path.stat().st_size
+        lines.append(
+            f"{digest.hexdigest()}  {path.relative_to(sources_dir).as_posix()}"
+        )
+
+    if not lines:
+        return empty
+    listing = "\n".join(lines) + "\n"
     return {
-        "sources_archive": sources_archive.name,
-        "sha256": digest,
-        "size_bytes": sources_archive.stat().st_size,
+        "sources_tree": sources_dir.name,
+        "sha256": hashlib.sha256(listing.encode("utf-8")).hexdigest(),
+        "file_count": len(lines),
+        "size_bytes": total_bytes,
     }
 
 
@@ -351,22 +375,29 @@ compliance pipeline that runs as part of every dynamo image build.
 | `licenses/` | Upstream LICENSE text for every package, mirrored from `/legal/` produced by the inline-compliance pipeline. |
 | `modifications/` | Patches we apply to vendored upstream sources, with per-patch READMEs explaining upstream tracking and why we can't bump to the fix. Empty for most packages. |
 | `attribution-base.txt` | Plain-text statement: "these packages came from `<base>@<digest>`; refer to NGC's separate OSRB for them." |
-| `build-provenance.json` | Image digest, build timestamp, git SHA of dynamo, base-image digest, tool versions, AND the sha256 of the companion sources archive (`sources` field) for cross-verification. |
+| `build-provenance.json` | Image digest, build timestamp, git SHA of dynamo, base-image digest, tool versions, AND a digest over the companion sources tree (`sources` field) for cross-verification. |
 | `CHECKSUMS.sha256` | sha256 of every file in this bundle. Verify after upload to detect tampering. |
 
-## Companion sources archive
+## Companion sources tree
 
 Source archives for everything dynamo ships on top of the base image are
-emitted in a SEPARATE archive named `sources-{image}-{version}-<arch>.zip`
-alongside this bundle. They live separately because:
+published SEPARATELY from this bundle, as an unpacked tree carrying its
+own `README.md`, `manifest.json` and `CHECKSUMS.sha256`. They live
+separately because:
 
 - Sources are large (typically 100s of MB to GBs) — embedding would
   bloat the OSRB review bundle.
 - Reviewers can audit license compliance and the manifest without
   pulling source.
-- The sha256 of the sources archive is recorded in
+- A digest over the sources tree's checksum listing is recorded in
   `build-provenance.json` (`sources.sha256`), so they stay
-  cryptographically tied to this bundle.
+  cryptographically tied to this bundle. Verify with `sha256sum -c
+  CHECKSUMS.sha256` inside the sources tree, then `sha256sum
+  CHECKSUMS.sha256` to compare against that field.
+
+`manifest.json` in that tree is the authoritative statement of source
+coverage: collection is best-effort, and every component that could not
+be collected is named there with a reason.
 
 ## Verifying the bundle
 
@@ -436,13 +467,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--legal-dir", type=Path, required=True)
     parser.add_argument("--sboms-dir", type=Path, required=True)
     parser.add_argument(
-        "--sources-archive",
+        "--sources-dir",
         type=Path,
         default=None,
-        help="Path to the companion sources zip "
-        "(sources-<image>-<version>-<arch>.zip). Not embedded "
-        "in the OSRB bundle; only its sha256 + size are recorded "
-        "in build-provenance.json for cross-verification.",
+        help="Path to the companion sources tree extracted from the "
+        "`sources_archive` stage. Not embedded in the OSRB bundle; only a "
+        "digest over its checksum listing, file count and total size are "
+        "recorded in build-provenance.json for cross-verification.",
     )
     parser.add_argument(
         "--base-sbom",
@@ -496,7 +527,7 @@ def main(argv: list[str] | None = None) -> int:
         shutil.rmtree(bundle_root)
     bundle_root.mkdir(parents=True)
 
-    sources_meta = sources_archive_metadata(args.sources_archive)
+    sources_meta = sources_tree_metadata(args.sources_dir)
 
     write_manifest_csv(deps_rows, base_keys, linkage_map, bundle_root / "manifest.csv")
     write_consolidated_cyclonedx(
@@ -529,7 +560,7 @@ def main(argv: list[str] | None = None) -> int:
     shutil.rmtree(bundle_root)
 
     logger.info(
-        "Wrote %s (licenses: %d files, mods: %d patches, sources_archive sha256: %s)",
+        "Wrote %s (licenses: %d files, mods: %d patches, sources_tree sha256: %s)",
         args.output,
         licenses_n,
         mods_n,
