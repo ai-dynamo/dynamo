@@ -381,14 +381,20 @@ RUN if [ "${TARGETARCH}" != "amd64" ]; then \
     fi
 
 # Install minimal runtime dependencies for CRIU restore (nsrestore runs here via nsenter)
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && \
+    if apt-cache show libgnutls30t64 >/dev/null 2>&1; then \
+      gnutls_package=libgnutls30t64; \
+    else \
+      gnutls_package=libgnutls30; \
+    fi && \
+    apt-get install -y --no-install-recommends \
     libbsd0 \
     libcap2 \
     libnet1 \
     libnl-3-200 \
     libnl-route-3-200 \
     libprotobuf-c1 \
-    libgnutls30t64 \
+    "${gnutls_package}" \
     libnftables1 \
     iproute2 \
     iptables \
