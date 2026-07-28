@@ -16,6 +16,29 @@ not be mistaken for virtual-time progress or quiescence.
 - Stop same-time iteration when no observable state changed, but only after the
   owning subsystem can account for how unfinished work will wake.
 
+## Eager forward-pass execution
+
+Offline replay intentionally executes each non-preemptive forward pass eagerly,
+mutating the participating `EngineCore` instances to their post-pass state
+before virtual time reaches the pass-completion timestamp. Completion effects
+remain deferred until that timestamp; observations whose backend contract is
+pass-start visibility remain visible at the pass start.
+
+- The pass batch is closed when the epoch starts. While its worker or
+  attention-DP group is busy, later arrivals and commands must affect only
+  queued or post-pass state, or be deferred. They must not alter the committed
+  pass outcome.
+- All ranks in an attention-DP group, including ranks with no work in the
+  current epoch, share the slowest-rank completion boundary.
+- Do not generalize this guarantee to the whole `EngineComponent` or to other
+  replay components. KVBM transport, disaggregated handoffs, worker startup,
+  planner actions, and router queues may have independent deadlines or
+  explicitly revocable events.
+- Preserve eager pass execution unless the modeled engine gains genuinely
+  preemptive behavior. Do not add engine-core snapshotting, transactional
+  rollback, or speculative-state recovery without a demonstrated semantic
+  need.
+
 For now, preserve the current replay behavior and the balanced checks above.
 Changes to async settlement belong to DEP #11018; do not approximate them here
 with replay-level timing tricks or new hard assertions.
