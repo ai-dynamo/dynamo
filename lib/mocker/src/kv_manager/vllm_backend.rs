@@ -79,15 +79,15 @@ pub(crate) struct NativeDestinationReservation {
     request_id: Uuid,
     pool: BlockReservation,
     layout: Option<VllmBlockLayout>,
-    /// Attention blocks the reservation covers, excluding other groups' share.
+    /// Used to count missing prompt tokens for transfer timing (`attention_fresh * block_size`).
     attention_fresh: usize,
-    /// Leading attention prefix pins, which precede other groups' pins in the
-    /// reservation.
+    /// Attention reusable prefix length fixed at reserve time and replayed at activate.
     attention_prefix: usize,
 }
 
 impl NativeDestinationReservation {
     pub(crate) fn transferable_prompt_tokens(&self, block_size: usize) -> usize {
+        // only looking at attention layers so we don't double count
         self.attention_fresh.saturating_mul(block_size)
     }
 
@@ -127,10 +127,6 @@ impl VllmBlockLayout {
 
 pub(crate) struct VllmKvManager {
     pool: VllmBlockPool,
-    /// The model's KV cache groups, in the order this coordinator visits them:
-    /// prefix pins are reserved and later activated in that order. Group ids are
-    /// assigned when the groups are built, and every lookup goes by group kind,
-    /// so nothing below `new` depends on the order.
     groups: Vec<GroupManager>,
     block_size: usize,
     enable_prefix_caching: bool,
@@ -193,9 +189,6 @@ impl VllmKvManager {
         self.attention().id()
     }
 
-    /// Groups that only constrain the attention group's decisions, never seed
-    /// them: they can reduce a cache hit and consume capacity, but they own no
-    /// dense table and no router-visible block.
     fn other_groups(&self) -> impl Iterator<Item = &GroupManager> {
         self.groups
             .iter()
@@ -225,17 +218,11 @@ impl VllmKvManager {
     }
 
     /// Release a request's blocks from every group.
-    ///
-    /// A release always covers the request's whole footprint: each `Deref` signal
-    /// derives its block list from the sequence's allocated tokens. Groups whose
-    /// table is not parallel to the attention table lean on that, dropping all of
-    /// a request's state rather than trimming it. Trimming a live request is a
-    /// real vLLM operation — `remove_skipped_blocks` — that this mocker does not
-    /// model yet, so a partial release is rejected before any group mutates,
-    /// because releases run group by group and cannot be rolled back.
     pub(super) fn deref_for_request(&mut self, request_id: Uuid, blocks: &[UniqueBlock]) {
-        // A request the attention group does not hold falls through to it, which
-        // reports that more precisely than a totality check can.
+        // TODO: trimming a live request is a real vLLM operation — `remove_skipped_blocks` — 
+        // that this mocker does not model yet, so a partial release is rejected before any group mutates.
+        // Unknown requests (`held == 0`) skip the partial-release check and let
+        // attention's `release` panic with "owns no block table" instead.
         let held = self.attention().block_count(request_id);
         assert!(
             held == 0 || blocks.len() == held,
@@ -594,8 +581,7 @@ impl VllmKvManager {
     /// Publish evictions for the main attention group only.
     ///
     /// `KvCacheEvent` has no group field and the router indexes a single block
-    /// namespace, so a non-attention group's eviction must not be reported as
-    /// an attention block disappearing.
+    /// namespace, so non-attention groups' evictions are not reported
     fn publish_removed(&mut self, keys: Vec<GroupedHash>) {
         let attention = self.attention_id();
         let hashes = keys
@@ -715,16 +701,15 @@ impl VllmKvManager {
 
     pub(crate) fn get_prefill_cost(&self, sequence: &ActiveSequence) -> PrefillCost {
         let blocks = sequence.unique_blocks();
+
+        // vLLM's hybrid coordinator seeds the candidate with the dense
+        // full-attention hit and reduces it until every group agrees on one boundary.
         let attention = if self.enable_prefix_caching && sequence.enable_prefix_caching() {
             self.attention().longest_cache_hit(&self.pool, blocks)
         } else {
             CacheHit::default()
         };
 
-        // vLLM's hybrid coordinator seeds the candidate with the dense
-        // full-attention hit and reduces it until every group agrees on one
-        // boundary. Groups share a block size here, so a single pass converges
-        // (its `is_simple_hybrid` shortcut).
         let mut reconciled = attention.tokens;
         for group in self.other_groups() {
             let Some(hit) = group.longest_cache_hit(&self.pool, blocks) else {
