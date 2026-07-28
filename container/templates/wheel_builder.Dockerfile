@@ -226,6 +226,21 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=shared \
     uv venv ${VIRTUAL_ENV} --python $PYTHON_VERSION && \
     uv pip install --upgrade meson pybind11 patchelf maturin[patchelf] tomlkit pyyaml
 
+# Compliance: native source archives drop here. Each from-source build below
+# preserves its upstream tree at /tmp/native-sources/<name>-<ref>.tar.gz so the
+# per-image `sources_collect` stage can COPY them out for OSRB submission.
+# Sources are captured after checkout and any patch we apply, but before
+# configure/make, so the archive is the source we actually built and carries no
+# build output. Created unconditionally (cheap) so the COPY always succeeds even
+# when no native source builds run for this framework.
+#
+# Deliberately NOT gated on ENABLE_SOURCE_ARCHIVAL: declaring that ARG at this
+# scope would invalidate every downstream layer when the flag flips between PR
+# and nightly builds, and gating would let an ARG flip silently empty the
+# archive. This stage is never COPY'd into a runtime image, so the cost is a
+# few MB in a build-only stage.
+RUN mkdir -p /tmp/native-sources
+
 ARG NIXL_UCX_REF
 
 {% if device == "cuda" %}
@@ -234,6 +249,7 @@ ARG NIXL_GDRCOPY_REF
 # Build and install gdrcopy
 RUN ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64") && \
     git clone --depth 1 --branch ${NIXL_GDRCOPY_REF} https://github.com/NVIDIA/gdrcopy.git && \
+    tar czf /tmp/native-sources/gdrcopy-${NIXL_GDRCOPY_REF}.tar.gz --exclude=.git gdrcopy && \
     cd gdrcopy/packages && \
     CUDA=/usr/local/cuda ./build-rpm-packages.sh && \
     rpm -Uvh gdrcopy-kmod-*.el8.noarch.rpm && \
@@ -255,14 +271,6 @@ RUN if [ "$USE_SCCACHE" = "true" ]; then \
         ln -s /opt/sccache/sccache /usr/local/bin/sccache && \
         /tmp/use-sccache.sh install; \
     fi
-
-# Compliance: native source archives drop here. RUN git clone / wget …tar lines
-# in the wheel_builder pipeline preserve their resulting archive at
-# /tmp/native-sources/<name>-<version>.tar.gz so the per-image `sources_collect`
-# stage can COPY them out for OSRB submission. Created here unconditionally
-# (cheap) so the COPY always succeeds even when no native source builds run
-# for this framework.
-RUN mkdir -p /tmp/native-sources
 
 # Compliance source-archival pattern (do NOT add ARG ENABLE_SOURCE_ARCHIVAL
 # at this scope — it would invalidate every downstream layer when the flag
@@ -316,11 +324,13 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     # in the consuming container.
     cd /tmp && \
     git clone --depth 1 --branch ${NV_CODEC_HEADERS_REF} https://github.com/FFmpeg/nv-codec-headers.git && \
+    tar czf /tmp/native-sources/nv-codec-headers-${NV_CODEC_HEADERS_REF}.tar.gz --exclude=.git -C /tmp nv-codec-headers && \
     make -C nv-codec-headers PREFIX=/usr/local install && \
     # libvpx: BSD-licensed VP9 encoder needed for the WebM output path. Built from
     # source so we don't need to track distro package names (libvpx-dev on Debian
     # vs libvpx-devel via EPEL on RHEL/manylinux).
     git clone --depth 1 --branch ${LIBVPX_REF} https://chromium.googlesource.com/webm/libvpx.git && \
+    tar czf /tmp/native-sources/libvpx-${LIBVPX_REF}.tar.gz --exclude=.git -C /tmp libvpx && \
     cd libvpx && \
     ./configure --prefix=/usr/local --enable-shared --disable-static --disable-examples --disable-unit-tests --disable-tools --disable-docs && \
     make -j$(nproc) && \
@@ -328,6 +338,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     ldconfig && \
     cd /tmp && \
     curl --retry 5 --retry-delay 3 -LO https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz && \
+    cp ffmpeg-${FFMPEG_VERSION}.tar.xz /tmp/native-sources/ && \
     tar xf ffmpeg-${FFMPEG_VERSION}.tar.xz && \
     cd ffmpeg-${FFMPEG_VERSION} && \
     ./configure \
@@ -372,6 +383,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     if [ "$DEVICE" = "xpu" ]; then \
     git apply --ignore-whitespace /tmp/ucx.patch; \
     fi && \
+    tar czf /tmp/native-sources/ucx-${NIXL_UCX_REF}.tar.gz --exclude=.git -C /usr/local/src ucx && \
     ./autogen.sh &&      \
     if [ "$DEVICE" = "xpu" ]; then \
      ./contrib/configure-release     \
@@ -437,6 +449,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     git clone "${NIXL_LIBFABRIC_REPO}" && \
     cd libfabric && \
     git checkout $NIXL_LIBFABRIC_REF && \
+    tar czf /tmp/native-sources/libfabric-${NIXL_LIBFABRIC_REF}.tar.gz --exclude=.git -C /usr/local/src libfabric && \
     ./autogen.sh && \
     ./configure --prefix="/usr/local/libfabric" \
                 --disable-verbs \
