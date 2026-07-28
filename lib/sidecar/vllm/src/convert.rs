@@ -189,7 +189,7 @@ fn build_kv_parameters(
             return Err(client::invalid_argument("extra_args must be a JSON object"));
         }
     };
-    validate_and_remove_vllm_tito(extra.as_mut())?;
+    validate_and_remove_vllm_tito(extra.as_mut(), cache_salt.as_deref())?;
     if let Some(extra) = extra.as_ref() {
         for key in extra.keys() {
             if !matches!(
@@ -285,6 +285,7 @@ fn stringify_remote_port(params: &mut serde_json::Value) {
 
 fn validate_and_remove_vllm_tito(
     extra: Option<&mut serde_json::Map<String, serde_json::Value>>,
+    canonical_cache_salt: Option<&str>,
 ) -> Result<(), DynamoError> {
     let Some(envelope) = extra.and_then(|extra| extra.remove("vllm_tito")) else {
         return Ok(());
@@ -355,6 +356,7 @@ fn validate_and_remove_vllm_tito(
                 | "ignore_eos"
                 | "logprobs"
                 | "prompt_logprobs"
+                | "cache_salt"
                 | "skip_reading_prefix_cache"
                 | "skip_special_tokens"
                 | "return_token_ids"
@@ -380,7 +382,38 @@ fn validate_and_remove_vllm_tito(
             "extra_args.vllm_tito.sampling_params.return_token_ids must be true",
         ));
     }
+    validate_compat_cache_salt(
+        sampling.get("cache_salt"),
+        canonical_cache_salt,
+        "sampling_params.cache_salt",
+    )?;
+    validate_compat_cache_salt(
+        envelope.get("cache_salt"),
+        canonical_cache_salt,
+        "cache_salt",
+    )?;
 
+    Ok(())
+}
+
+fn validate_compat_cache_salt(
+    value: Option<&serde_json::Value>,
+    canonical: Option<&str>,
+    path: &str,
+) -> Result<(), DynamoError> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    let Some(value) = value.as_str() else {
+        return Err(client::invalid_argument(format!(
+            "extra_args.vllm_tito.{path} must be a string"
+        )));
+    };
+    if Some(value) != canonical {
+        return Err(client::invalid_argument(format!(
+            "extra_args.vllm_tito.{path} must match the canonical cache_salt"
+        )));
+    }
     Ok(())
 }
 

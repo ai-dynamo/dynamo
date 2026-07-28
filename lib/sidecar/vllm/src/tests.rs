@@ -453,6 +453,7 @@ fn token_native_compatibility_envelope_is_accepted_when_fields_are_projected() {
                 "ignore_eos": true,
                 "logprobs": 1,
                 "prompt_logprobs": 1,
+                "cache_salt": "cache-salt",
                 "skip_special_tokens": false,
                 "return_token_ids": true
             },
@@ -477,6 +478,7 @@ fn token_native_compatibility_envelope_is_accepted_when_fields_are_projected() {
     assert_eq!(wire.temperature, Some(0.2));
     assert_eq!(wire.stopping.as_ref().unwrap().stop_token_ids, [2]);
     assert!(wire.response.as_ref().unwrap().output_logprobs);
+    assert_eq!(wire.kv.as_ref().unwrap().cache_salt, "cache-salt");
 }
 
 #[test]
@@ -505,6 +507,36 @@ fn token_native_compatibility_envelope_rejects_disabled_token_ids() {
         error
             .to_string()
             .contains("sampling_params.return_token_ids must be true")
+    );
+}
+
+#[test]
+fn token_native_compatibility_envelope_rejects_conflicting_cache_salt() {
+    let mut request = request();
+    request.extra_args = Some(json!({
+        "vllm_tito": {
+            "request_id": "request-1",
+            "sampling_params": {
+                "max_tokens": 1,
+                "cache_salt": "different-policy-version"
+            },
+            "cache_salt": "cache-salt",
+            "stream": false,
+            "priority": 0
+        }
+    }));
+
+    let error = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect_err("duplicate cache salts must match the canonical routing salt");
+
+    assert!(
+        error
+            .to_string()
+            .contains("sampling_params.cache_salt must match the canonical cache_salt")
     );
 }
 
