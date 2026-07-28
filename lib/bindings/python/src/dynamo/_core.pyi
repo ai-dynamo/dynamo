@@ -2095,7 +2095,7 @@ class MockEngineArgs:
         bandwidth_g2_to_g4_gbps: Optional[float] = None,
         bandwidth_g4_to_g2_gbps: Optional[float] = None,
         max_model_len: Optional[int] = None,
-        g1_backend: str = "kvbm",
+        g1_backend: Optional[str] = None,
     ) -> None:
         ...
 
