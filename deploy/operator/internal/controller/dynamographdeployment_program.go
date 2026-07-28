@@ -72,6 +72,12 @@ type programRestart struct {
 	Status *nvidiacomv1beta1.RestartStatus
 }
 
+type componentProgressResolver func(
+	context.Context,
+	*nvidiacomv1beta1.DynamoGraphDeployment,
+	[]string,
+) []string
+
 type workloadReconcileRequest struct {
 	DGD             *nvidiacomv1beta1.DynamoGraphDeployment
 	RestartState    *dynamo.RestartState
@@ -273,7 +279,12 @@ func (p *componentProgram) Reconcile(
 		return programResult, failWorkloadProgram(reasonNoMultinodeOrchestrator, err)
 	}
 	previousRestart := programResult.Status.Restart
-	restart := p.reconciler.resolveProgramRestartState(ctx, req.DGD, &programResult.Status)
+	restart := p.reconciler.resolveProgramRestartState(
+		ctx,
+		req.DGD,
+		&programResult.Status,
+		p.reconciler.getUpdatedInProgressForComponent,
+	)
 	recordRestartTransition(previousRestart, restart.Status, &programResult)
 	programResult.Status.Restart = restart.Status
 

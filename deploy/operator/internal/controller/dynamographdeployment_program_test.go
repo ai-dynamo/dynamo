@@ -29,6 +29,7 @@ import (
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
+	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -293,9 +294,13 @@ func TestGroveProgram_ReconcilePreservesResultOnError(t *testing.T) {
 	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {ComponentType: commonconsts.ComponentTypeWorker},
 	})
+	dgd.Spec.TopologyConstraint = &nvidiacomv1beta1.SpecTopologyConstraint{ClusterTopologyName: "test-topology"}
+	pcs := &grovev1alpha1.PodCliqueSet{
+		ObjectMeta: metav1.ObjectMeta{Name: dgd.Name, Namespace: dgd.Namespace},
+	}
 	kubeClient := fake.NewClientBuilder().
 		WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
-		WithObjects(dgd).
+		WithObjects(dgd, pcs).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Update: func(context.Context, client.WithWatch, client.Object, ...client.UpdateOption) error {
 				return reconcileErr
@@ -324,6 +329,13 @@ func TestGroveProgram_ReconcilePreservesResultOnError(t *testing.T) {
 	require.NotNil(t, ready)
 	assert.Equal(t, metav1.ConditionFalse, ready.Status)
 	assert.Equal(t, string(reasonFailedToInitializeWorkerHash), ready.Reason)
+	topologyCondition := meta.FindStatusCondition(
+		result.Status.Conditions,
+		nvidiacomv1beta1.ConditionTypeTopologyLevelsAvailable,
+	)
+	require.NotNil(t, topologyCondition)
+	assert.Equal(t, metav1.ConditionUnknown, topologyCondition.Status)
+	assert.Equal(t, nvidiacomv1beta1.ConditionReasonTopologyConditionPending, topologyCondition.Reason)
 	assert.Equal(t, previous, dgd.Status)
 	reason, ok := workloadProgramFailureReason(err)
 	require.True(t, ok)
@@ -437,6 +449,7 @@ func TestRecordRestartTransitionQueuesSupersededTransition(t *testing.T) {
 		context.Background(),
 		dgd,
 		&result.Status,
+		nil,
 	)
 	recordRestartTransition(result.Status.Restart, restart.Status, &result)
 	result.Status.Restart = restart.Status

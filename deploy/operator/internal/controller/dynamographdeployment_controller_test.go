@@ -57,6 +57,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 )
 
 func newDynamoGraphDeploymentControllerTestScheme(t testing.TB) *runtime.Scheme {
@@ -3945,7 +3946,12 @@ func Test_computeRestartStatus(t *testing.T) {
 				},
 			}
 
-			result := reconciler.computeRestartStatus(ctx, dgd)
+			var resolveProgress componentProgressResolver = reconciler.getUpdatedInProgressForComponent
+			if tt.groveEnabled {
+				resolveProgress = newGroveStatusResolver(reconciler.Client).
+					getUpdatedInProgress
+			}
+			result := reconciler.computeRestartStatusWithProgressResolver(ctx, dgd, resolveProgress)
 
 			if tt.wantRestartStatus == nil {
 				g.Expect(result).To(gomega.BeNil())
@@ -4601,7 +4607,7 @@ func TestComponentProgram_ReconcileWorkloads(t *testing.T) {
 	}
 }
 
-func TestPropagateTopologyCondition(t *testing.T) {
+func TestGroveStatusResolver_ProjectTopologyCondition(t *testing.T) {
 	tests := []struct {
 		name           string
 		dgd            *v1beta1.DynamoGraphDeployment
@@ -4613,7 +4619,7 @@ func TestPropagateTopologyCondition(t *testing.T) {
 		wantEventCount int
 	}{
 		{
-			name: "no topology constraints - no condition added",
+			name: "removed topology constraints preserve the previous condition",
 			dgd: betaDGD(t, &v1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 				Spec: v1alpha1.DynamoGraphDeploymentSpec{
@@ -4621,9 +4627,18 @@ func TestPropagateTopologyCondition(t *testing.T) {
 						"worker": {},
 					},
 				},
+				Status: v1alpha1.DynamoGraphDeploymentStatus{
+					Conditions: []metav1.Condition{{
+						Type:   v1alpha1.ConditionTypeTopologyLevelsAvailable,
+						Status: metav1.ConditionTrue,
+						Reason: v1alpha1.ConditionReasonAllTopologyLevelsAvailable,
+					}},
+				},
 			}),
 			groveEnabled:  true,
-			wantCondition: false,
+			wantCondition: true,
+			wantStatus:    metav1.ConditionTrue,
+			wantReason:    v1alpha1.ConditionReasonAllTopologyLevelsAvailable,
 		},
 		{
 			name: "topology set but Grove not enabled - no condition added",
@@ -4796,8 +4811,13 @@ func TestPropagateTopologyCondition(t *testing.T) {
 			}
 
 			ctx := context.Background()
+			originalStatus := tt.dgd.DeepCopy().Status
 			programResult := newWorkloadProgramResult(tt.dgd)
-			reconciler.propagateTopologyCondition(ctx, tt.dgd, &programResult)
+			if tt.groveEnabled {
+				newGroveStatusResolver(reconciler.Client).
+					projectTopologyCondition(ctx, tt.dgd, &programResult)
+			}
+			g.Expect(tt.dgd.Status).To(gomega.Equal(originalStatus), "status projection must not mutate request.DGD.Status")
 
 			var topoCond *metav1.Condition
 			for i := range programResult.Status.Conditions {
@@ -4817,12 +4837,45 @@ func TestPropagateTopologyCondition(t *testing.T) {
 			g.Expect(topoCond.Reason).To(gomega.Equal(tt.wantReason))
 
 			g.Expect(programResult.Events).To(gomega.HaveLen(tt.wantEventCount))
-			g.Expect(tt.dgd.Status.Conditions).To(gomega.BeEmpty(), "status projection must remain local until the outer status write")
+			g.Expect(tt.dgd.Status).To(gomega.Equal(originalStatus), "status projection must remain local until the outer status write")
 		})
 	}
 }
 
-func TestMapPodCliqueScalingGroupToRequests(t *testing.T) {
+func TestGroveWatchSetup_MapPodCliqueToRequests(t *testing.T) {
+	setup := newGroveWatchSetup(nil)
+
+	t.Run("labeled PodClique maps directly to its DGD", func(t *testing.T) {
+		requests := setup.mapPodCliqueToRequests(
+			context.Background(),
+			&grovev1alpha1.PodClique{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "graph-0-worker",
+					Namespace: "default",
+					Labels: map[string]string{
+						commonconsts.KubeLabelDynamoGraphDeploymentName: "graph",
+					},
+				},
+			},
+		)
+
+		require.Len(t, requests, 1)
+		assert.Equal(t, types.NamespacedName{Namespace: "default", Name: "graph"}, requests[0].NamespacedName)
+	})
+
+	t.Run("unlabeled or unrelated objects are ignored", func(t *testing.T) {
+		assert.Empty(t, setup.mapPodCliqueToRequests(
+			context.Background(),
+			&grovev1alpha1.PodClique{ObjectMeta: metav1.ObjectMeta{Name: "orphan", Namespace: "default"}},
+		))
+		assert.Empty(t, setup.mapPodCliqueToRequests(
+			context.Background(),
+			&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "not-a-podclique", Namespace: "default"}},
+		))
+	})
+}
+
+func TestGroveWatchSetup_MapPodCliqueScalingGroupToRequests(t *testing.T) {
 	// Register Grove types with the scheme so fake client can handle them
 	if err := grovev1alpha1.AddToScheme(scheme.Scheme); err != nil {
 		t.Fatalf("Failed to add grovev1alpha1 to scheme: %v", err)
@@ -4974,7 +5027,8 @@ func TestMapPodCliqueScalingGroupToRequests(t *testing.T) {
 			r := &DynamoGraphDeploymentReconciler{
 				Client: builder.Build(),
 			}
-			reqs := r.mapPodCliqueScalingGroupToRequests(context.Background(), tt.obj)
+			reqs := newGroveWatchSetup(r.Client).
+				mapPodCliqueScalingGroupToRequests(context.Background(), tt.obj)
 
 			g.Expect(reqs).To(gomega.HaveLen(tt.wantRequests))
 			if tt.wantRequests == 1 {
@@ -5048,6 +5102,11 @@ func TestPodCliqueStatusChangeIsSignificant(t *testing.T) {
 			want:   true,
 		},
 		{
+			name:   "generation-only change is filtered",
+			mutate: func(pc *grovev1alpha1.PodClique) { pc.Generation = 2 },
+			want:   false,
+		},
+		{
 			name: "scheduling condition change is significant",
 			mutate: func(pc *grovev1alpha1.PodClique) {
 				pc.Status.Conditions = []metav1.Condition{{
@@ -5069,6 +5128,17 @@ func TestPodCliqueStatusChangeIsSignificant(t *testing.T) {
 			assert.Equal(t, tt.want, podCliqueStatusChangeIsSignificant(oldPC, newPC))
 		})
 	}
+
+	oldPodClique := base()
+	oldPodClique.Status.Conditions = []metav1.Condition{{
+		Type:    groveconstants.ConditionTypePodCliqueScheduled,
+		Status:  metav1.ConditionFalse,
+		Reason:  groveconstants.ConditionReasonInsufficientScheduledPods,
+		Message: "one node unavailable",
+	}}
+	newPodClique := oldPodClique.DeepCopy()
+	newPodClique.Status.Conditions[0].Message = "two nodes unavailable"
+	assert.False(t, podCliqueStatusChangeIsSignificant(oldPodClique, newPodClique))
 }
 
 func TestPCSGStatusChangeIsSignificant(t *testing.T) {
@@ -5126,6 +5196,11 @@ func TestPCSGStatusChangeIsSignificant(t *testing.T) {
 			want:   true,
 		},
 		{
+			name:   "generation-only change is filtered",
+			mutate: func(pcsg *grovev1alpha1.PodCliqueScalingGroup) { pcsg.Generation = 2 },
+			want:   false,
+		},
+		{
 			name: "MinAvailableBreached condition change is significant",
 			mutate: func(pcsg *grovev1alpha1.PodCliqueScalingGroup) {
 				pcsg.Status.Conditions = []metav1.Condition{{
@@ -5147,4 +5222,29 @@ func TestPCSGStatusChangeIsSignificant(t *testing.T) {
 			assert.Equal(t, tt.want, pcsgStatusChangeIsSignificant(oldPCSG, newPCSG))
 		})
 	}
+
+	oldScalingGroup := base()
+	oldScalingGroup.Status.Conditions = []metav1.Condition{{
+		Type:    groveconstants.ConditionTypeMinAvailableBreached,
+		Status:  metav1.ConditionFalse,
+		Reason:  groveconstants.ConditionReasonInsufficientAvailablePCSGReplicas,
+		Message: "one replica unavailable",
+	}}
+	newScalingGroup := oldScalingGroup.DeepCopy()
+	newScalingGroup.Status.Conditions[0].Message = "two replicas unavailable"
+	assert.False(t, pcsgStatusChangeIsSignificant(oldScalingGroup, newScalingGroup))
+}
+
+func TestGroveChildEventPredicates(t *testing.T) {
+	podClique := &grovev1alpha1.PodClique{}
+	podCliquePredicates := podCliqueEventPredicates()
+	assert.False(t, podCliquePredicates.Create(event.CreateEvent{Object: podClique}))
+	assert.False(t, podCliquePredicates.Delete(event.DeleteEvent{Object: podClique}))
+	assert.False(t, podCliquePredicates.Generic(event.GenericEvent{Object: podClique}))
+
+	scalingGroup := &grovev1alpha1.PodCliqueScalingGroup{}
+	scalingGroupPredicates := pcsgEventPredicates()
+	assert.False(t, scalingGroupPredicates.Create(event.CreateEvent{Object: scalingGroup}))
+	assert.False(t, scalingGroupPredicates.Delete(event.DeleteEvent{Object: scalingGroup}))
+	assert.False(t, scalingGroupPredicates.Generic(event.GenericEvent{Object: scalingGroup}))
 }

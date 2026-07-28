@@ -1193,11 +1193,13 @@ func TestGenerateGrovePodCliqueSet_ProjectsClusterTopologyDomainsToWorkerCliques
 		},
 	}
 
+	operatorConfig := &configv1alpha1.OperatorConfiguration{}
+	runtimeConfig := &controller_common.RuntimeConfig{}
 	got, err := GenerateGrovePodCliqueSet(
 		context.Background(),
 		dgd,
-		&configv1alpha1.OperatorConfiguration{},
-		&controller_common.RuntimeConfig{},
+		operatorConfig,
+		runtimeConfig,
 		kubeClient,
 		nil,
 		nil,
@@ -1238,6 +1240,83 @@ func TestGenerateGrovePodCliqueSet_ProjectsClusterTopologyDomainsToWorkerCliques
 	}, topologyItems)
 	assert.NotContains(t, cliques["frontend"].Annotations, commonconsts.KubeAnnotationTopologyClusterTopologyName)
 	assert.False(t, hasTopologyLabelVolume(cliques["frontend"].Spec.PodSpec.Volumes))
+}
+
+func TestGenerateGrovePodCliqueSet_InjectsReadyCheckpointRestore(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(&corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "checkpoint-storage",
+				Namespace: "default",
+			},
+		}).
+		Build()
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+		},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: "vllm",
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "worker",
+				ComponentType: v1beta1.ComponentTypeWorker,
+				Replicas:      ptr.To(int32(1)),
+			}},
+		},
+	}
+	operatorConfig := &configv1alpha1.OperatorConfiguration{
+		Checkpoint: configv1alpha1.CheckpointConfiguration{
+			Enabled: true,
+			Storage: configv1alpha1.CheckpointStorageConfiguration{
+				Type: snapshotprotocol.StorageTypePVC,
+				PVC: configv1alpha1.CheckpointPVCConfig{
+					PVCName:  "checkpoint-storage",
+					BasePath: "/checkpoints",
+				},
+			},
+		},
+	}
+	runtimeConfig := &controller_common.RuntimeConfig{
+		Gate: features.Gates{Checkpoint: true},
+	}
+	checkpointInfos := map[string]*checkpoint.CheckpointInfo{
+		"worker": {
+			Enabled:       true,
+			Ready:         true,
+			Hash:          "ready-checkpoint",
+			StartupPolicy: v1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
+		},
+	}
+
+	got, err := GenerateGrovePodCliqueSet(
+		context.Background(),
+		dgd,
+		operatorConfig,
+		runtimeConfig,
+		kubeClient,
+		nil,
+		nil,
+		nil,
+		checkpointInfos,
+	)
+	require.NoError(t, err)
+	require.Len(t, got.Spec.Template.Cliques, 1)
+
+	podSpec := got.Spec.Template.Cliques[0].Spec.PodSpec
+	var checkpointVolume *corev1.Volume
+	for i := range podSpec.Volumes {
+		if podSpec.Volumes[i].Name == snapshotprotocol.CheckpointVolumeName {
+			checkpointVolume = &podSpec.Volumes[i]
+			break
+		}
+	}
+	require.NotNil(t, checkpointVolume)
+	require.NotNil(t, checkpointVolume.PersistentVolumeClaim)
+	assert.Equal(t, "checkpoint-storage", checkpointVolume.PersistentVolumeClaim.ClaimName)
 }
 
 func TestGenerateLabelsAndAnnotations_UsePreservedAlphaDGDServiceMetadata(t *testing.T) {
