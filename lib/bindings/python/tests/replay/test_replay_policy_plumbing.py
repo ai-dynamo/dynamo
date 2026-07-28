@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+from contextlib import contextmanager
 
 import pytest
 
@@ -46,6 +47,95 @@ def test_replay_api_forwards_policy_model_name(monkeypatch):
 
     assert calls[0][2]["model_name"] == "model-a"
     assert calls[1][2]["model_name"] == "model-b"
+
+
+class _FakePlannerAdapter:
+    def __init__(self):
+        self.closed = False
+        self.finalized = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.closed = True
+        return False
+
+    def finalize(self, report):
+        self.finalized = report
+        return {"trace_report": report}
+
+
+@pytest.mark.parametrize("kind", ["trace", "synthetic"])
+def test_normal_and_planner_modes_share_private_replay_callable(monkeypatch, kind):
+    calls = []
+    adapter = _FakePlannerAdapter()
+
+    def capture(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {"completed_requests": 1}
+
+    @contextmanager
+    def fake_planner_scope(**kwargs):
+        with adapter:
+            yield adapter
+
+    monkeypatch.setattr(replay_main, "_planner_replay_adapter", fake_planner_scope)
+    if kind == "trace":
+        monkeypatch.setattr(replay_api, "_run_mocker_trace_replay", capture)
+        replay_api.run_trace_replay("trace.jsonl")
+        result = replay_api.run_trace_replay(
+            "trace.jsonl",
+            planner_config={"mode": "agg"},
+        )
+    else:
+        monkeypatch.setattr(replay_api, "_run_mocker_synthetic_trace_replay", capture)
+        replay_api.run_synthetic_trace_replay(64, 8, 1)
+        result = replay_api.run_synthetic_trace_replay(
+            64,
+            8,
+            1,
+            planner_config={"mode": "agg"},
+        )
+
+    assert calls[0][1]["scaling_policy"] is None
+    assert calls[1][1]["scaling_policy"] is adapter
+    assert result == {"trace_report": {"completed_requests": 1}}
+    assert adapter.closed
+
+
+def test_planner_bootstrap_precedes_rust_wall_time_boundary(monkeypatch):
+    adapter = _FakePlannerAdapter()
+    sequence = []
+
+    @contextmanager
+    def fake_planner_scope(**kwargs):
+        sequence.append("bootstrap")
+        with adapter:
+            yield adapter
+
+    def capture(*args, **kwargs):
+        sequence.append("rust")
+        return {
+            "wall_time_ms": 2.5,
+            "processed_tokens_per_s": 4.0,
+            "processed_output_tokens_per_s": 1.0,
+        }
+
+    monkeypatch.setattr(replay_main, "_planner_replay_adapter", fake_planner_scope)
+    monkeypatch.setattr(replay_api, "_run_mocker_synthetic_trace_replay", capture)
+
+    result = replay_api.run_synthetic_trace_replay(
+        64,
+        8,
+        1,
+        planner_config={"mode": "agg"},
+    )
+
+    assert sequence == ["bootstrap", "rust"]
+    assert result["trace_report"]["wall_time_ms"] == 2.5
+    assert result["trace_report"]["processed_tokens_per_s"] == 4.0
+    assert result["trace_report"]["processed_output_tokens_per_s"] == 1.0
 
 
 def test_replay_api_and_cli_route_trace_file_lists(monkeypatch):

@@ -5,16 +5,21 @@
 
 Exercises the single offline-replay entrypoints (``run_synthetic_trace_replay`` /
 ``run_trace_replay`` with no ``planner_config``) across the load modes that the
-planner path previously needed bespoke bridge constructors for: synthetic
+planner path previously needed bespoke planner constructors for: synthetic
 fixed and Poisson open-loop workloads, closed-loop (concurrency-capped)
 workloads, synthetic prefix-cache sharing, and a concurrency cap on a Mooncake
 trace file. With the unified event-driven path these all run through the same
 multi-worker runtime, so a bare run drives every request to completion.
 """
 
+import copy
+import threading
+import time
+
 import pytest
 
-from dynamo.mocker import MockEngineArgs, PlannerReplayBridge
+from dynamo._core import run_mocker_synthetic_trace_replay
+from dynamo.mocker import MockEngineArgs
 from dynamo.replay import run_synthetic_trace_replay, run_trace_replay
 
 from .replay_utils import _vllm_args, _write_trace_and_args
@@ -97,7 +102,7 @@ def test_trace_closed_loop(tmp_path):
 
 def test_planner_callback_error_preserves_python_exception_type():
     # A raising planner callback must propagate its original Python exception
-    # type (here ValueError) out of bridge.run() — not a generic Exception — so
+    # type (here ValueError) out of replay — not a generic Exception — so
     # callback failures stay diagnosable (type + traceback preserved across the
     # Rust seam).
     class _RaisingPlanner:
@@ -107,13 +112,109 @@ def test_planner_callback_error_preserves_python_exception_type():
         def on_tick(self, metrics):
             raise ValueError("boom from on_tick")
 
-    bridge = PlannerReplayBridge.from_synthetic(
-        input_tokens=64,
-        output_tokens=16,
-        request_count=8,
-        extra_engine_args=MockEngineArgs(block_size=64, speedup_ratio=1000.0),
-        num_workers=1,
-        replay_concurrency=2,
-    )
     with pytest.raises(ValueError, match="boom from on_tick"):
-        bridge.run(_RaisingPlanner())
+        run_mocker_synthetic_trace_replay(
+            64,
+            16,
+            8,
+            extra_engine_args=MockEngineArgs(
+                block_size=64,
+                speedup_ratio=1000.0,
+            ),
+            num_workers=1,
+            replay_concurrency=2,
+            scaling_policy=_RaisingPlanner(),
+        )
+
+
+class _DisabledScalingPolicy:
+    def initial_tick_ms(self):
+        return float("inf")
+
+    def on_tick(self, metrics):
+        raise AssertionError("a disabled scaling policy must not receive ticks")
+
+
+def _canonical_report(report):
+    report = copy.deepcopy(report)
+    for key in (
+        "wall_time_ms",
+        "processed_tokens_per_s",
+        "processed_output_tokens_per_s",
+    ):
+        report.pop(key, None)
+    return report
+
+
+@pytest.mark.parametrize("disagg", [False, True])
+def test_disabled_policy_is_semantically_identical_to_normal_replay(disagg):
+    kwargs = {
+        "input_tokens": 64,
+        "output_tokens": 16,
+        "request_count": 16,
+        "replay_concurrency": 4,
+    }
+    if disagg:
+        kwargs.update(
+            prefill_engine_args=MockEngineArgs(
+                block_size=64,
+                speedup_ratio=1000.0,
+                worker_type="prefill",
+            ),
+            decode_engine_args=MockEngineArgs(
+                block_size=64,
+                speedup_ratio=1000.0,
+                worker_type="decode",
+            ),
+        )
+    else:
+        kwargs["extra_engine_args"] = MockEngineArgs(
+            block_size=64,
+            speedup_ratio=1000.0,
+        )
+
+    normal = run_mocker_synthetic_trace_replay(**kwargs)
+    with_policy = run_mocker_synthetic_trace_replay(
+        **kwargs,
+        scaling_policy=_DisabledScalingPolicy(),
+    )
+
+    assert _canonical_report(normal) == _canonical_report(with_policy)
+
+
+def test_scaling_policy_rejects_online_replay_before_dispatch():
+    with pytest.raises(
+        ValueError, match="scaling_policy only supports replay_mode='offline'"
+    ):
+        run_mocker_synthetic_trace_replay(
+            64,
+            16,
+            8,
+            extra_engine_args=MockEngineArgs(block_size=64),
+            replay_mode="online",
+            scaling_policy=_DisabledScalingPolicy(),
+        )
+
+
+def test_normal_replay_releases_gil_for_background_python_thread():
+    progressed = threading.Event()
+
+    def run_after_delay():
+        time.sleep(0.02)
+        progressed.set()
+
+    thread = threading.Thread(target=run_after_delay)
+    thread.start()
+    run_mocker_synthetic_trace_replay(
+        64,
+        16,
+        50_000,
+        extra_engine_args=MockEngineArgs(block_size=64, speedup_ratio=1000.0),
+        num_workers=2,
+        replay_concurrency=16,
+        scaling_policy=None,
+    )
+    progressed_during_replay = progressed.is_set()
+    thread.join(timeout=1.0)
+
+    assert progressed_during_replay
