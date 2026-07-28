@@ -4,7 +4,6 @@
 """Router CLI parsing, config, and assembly for the standalone router."""
 
 import argparse
-import logging
 import os
 from typing import Optional
 
@@ -20,8 +19,6 @@ from dynamo.common.configuration.groups.kv_router_args import (
 from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
 from dynamo.common.utils.namespace import get_worker_namespace
 from dynamo.llm import AicPerfConfig, KvRouterConfig
-
-logger = logging.getLogger(__name__)
 
 
 class DynamoRouterConfig(KvRouterConfigBase, AicPerfConfigBase):
@@ -52,13 +49,7 @@ class DynamoRouterConfig(KvRouterConfigBase, AicPerfConfigBase):
 
         worker_namespace = get_worker_namespace(self.namespace)
         if worker_namespace != endpoint_namespace:
-            old_endpoint = self.endpoint
             self.endpoint = f"{worker_namespace}.{component}.{endpoint_name}"
-            logger.info(
-                "Resolved router worker endpoint namespace: %s -> %s",
-                old_endpoint,
-                self.endpoint,
-            )
 
         if self.serve_indexer and self.use_remote_indexer:
             raise ValueError(
