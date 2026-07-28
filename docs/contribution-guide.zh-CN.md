@@ -17,7 +17,7 @@ Dynamo 拥有 200 多位外部贡献者、220 多个已合并的社区 PR，并�
 
 加入社区：
 
-- [CNCF Slack (`#ai-dynamo`)](https://communityinviter.com/apps/cloud-native/cncf) -- 加入 CNCF Slack，并在 `#ai-dynamo` 中找到我们
+- [CNCF Slack (`#ai-dynamo`)](https://slack.cncf.io) -- 加入 CNCF Slack，并在 `#ai-dynamo` 中找到我们
 - [Discord](https://discord.gg/D92uqZRjCZ)
 - [GitHub Discussions](https://github.com/ai-dynamo/dynamo/discussions)
 - [设计提案](https://github.com/ai-dynamo/enhancements) -- 重大功能的 RFC
@@ -70,7 +70,7 @@ Dynamo 拥有 200 多位外部贡献者、220 多个已合并的社区 PR，并�
 
 并非所有贡献都是代码。你还可以：
 
-- 在 [Discord](https://discord.gg/D92uqZRjCZ) 或 [CNCF Slack](https://communityinviter.com/apps/cloud-native/cncf) 的 `#ai-dynamo` 频道中回答问题
+- 在 [Discord](https://discord.gg/D92uqZRjCZ) 或 [CNCF Slack](https://slack.cncf.io) 的 `#ai-dynamo` 频道中回答问题
 - 审阅 pull request
 - 分享你如何使用 Dynamo -- 博客文章、演讲或社交媒体都可以
 - 为[仓库](https://github.com/ai-dynamo/dynamo)点 star
@@ -427,7 +427,7 @@ git commit -s -m "fix: your descriptive message"
 
 ## 获取帮助
 
-- **CNCF Slack**: [加入 CNCF Slack](https://communityinviter.com/apps/cloud-native/cncf)，并在 `#ai-dynamo` 中找到我们
+- **CNCF Slack**: [加入 CNCF Slack](https://slack.cncf.io)，并在 `#ai-dynamo` 中找到我们
 - **Discord**: [加入我们的社区](https://discord.gg/D92uqZRjCZ)
 - **Discussions**: [GitHub Discussions](https://github.com/ai-dynamo/dynamo/discussions)
 - **设计提案**: [重大功能的 RFC](https://github.com/ai-dynamo/enhancements)
