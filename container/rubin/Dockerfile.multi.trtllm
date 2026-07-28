@@ -37,7 +37,7 @@ ENV CUDARC_CUDA_VERSION=13010 \
 RUN curl -fSL https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
 ENV PATH=/root/.cargo/bin:${PATH}
 
-RUN pip install --no-cache-dir "maturin[patchelf]" uv
+RUN pip install --break-system-packages --no-cache-dir "maturin[patchelf]" uv
 
 # Copy dynamo source from the build context.
 WORKDIR /opt/dynamo
