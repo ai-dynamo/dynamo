@@ -1401,6 +1401,12 @@ where
     /// and dispatch, fall back to one other instance from `free_ids` (same
     /// filter as pre-selection) and return the updated id so the caller can
     /// `report_instance_down` the right worker on later failures.
+    ///
+    /// Failures are typed rather than untyped `anyhow`, so the worker-
+    /// disappeared path is classified instead of collapsing to
+    /// `ErrorType::Unknown`: a vanished instance is `CannotConnect`
+    /// (migratable, matching the `direct()` pre-dispatch check), while "no
+    /// instances left" is `Unavailable` (HTTP 503, not retryable in-process).
     fn resolve_transport(
         &self,
         instance_id: u64,
@@ -1430,11 +1436,15 @@ where
         let allowed_fallback = match fallback {
             TransportFallback::Allow => None,
             TransportFallback::Deny => {
-                return Err(anyhow::anyhow!(
-                    "Instance {} not found for endpoint {}",
-                    instance_id,
-                    self.client.endpoint.id()
-                ));
+                return Err(DynamoError::builder()
+                    .error_type(ErrorType::CannotConnect)
+                    .message(format!(
+                        "Instance {} not found for endpoint {}",
+                        instance_id,
+                        self.client.endpoint.id()
+                    ))
+                    .build()
+                    .into());
             }
             TransportFallback::Within(allowed) => Some(allowed),
         };
@@ -1451,19 +1461,28 @@ where
                     "Instance disappeared during routing, reselecting"
                 );
                 let (addr, kind, inst) = lookup(id).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Fallback instance {} also not found for endpoint {}",
-                        id,
-                        self.client.endpoint.id()
+                    anyhow::Error::new(
+                        DynamoError::builder()
+                            .error_type(ErrorType::CannotConnect)
+                            .message(format!(
+                                "Fallback instance {} also not found for endpoint {}",
+                                id,
+                                self.client.endpoint.id()
+                            ))
+                            .build(),
                     )
                 })?;
                 Ok((id, addr, kind, inst))
             }
-            None => Err(anyhow::anyhow!(
-                "Instance {} not found and no other instances available for endpoint {}",
-                instance_id,
-                self.client.endpoint.id()
-            )),
+            None => Err(DynamoError::builder()
+                .error_type(ErrorType::Unavailable)
+                .message(format!(
+                    "Instance {} not found and no other instances available for endpoint {}",
+                    instance_id,
+                    self.client.endpoint.id()
+                ))
+                .build()
+                .into()),
         }
     }
 
@@ -1737,6 +1756,18 @@ mod tests {
         },
     };
     use serde::{Deserialize, Serialize};
+
+    /// Mirror of the migratable set in `dynamo_llm::migration::is_migratable`.
+    /// Duplicated because `dynamo-llm` depends on this crate, not the reverse.
+    /// These tests pin the classification contract that migration relies on:
+    /// if this list and migration's diverge, a worker-disappeared error would
+    /// silently stop being retried.
+    const MIGRATABLE_ERROR_TYPES: &[ErrorType] = &[
+        ErrorType::CannotConnect,
+        ErrorType::Disconnected,
+        ErrorType::ConnectionTimeout,
+        ErrorType::Backend(BackendError::EngineShutdown),
+    ];
 
     #[derive(Clone, Debug, Deserialize, Serialize)]
     struct TestResponse {
@@ -2679,10 +2710,21 @@ mod tests {
         let result = router.generate(request).await;
 
         assert!(result.is_err());
-        let msg = format!("{}", result.unwrap_err());
+        let error = result.unwrap_err();
+        let msg = format!("{error}");
         assert!(
             msg.contains("not found") && msg.contains("no other instances available"),
             "Expected clear error about missing instance with no fallback, got: {msg}"
+        );
+        // Typed so the frontend reports 503 rather than a generic 500, and so
+        // migration does not retry a request that has nowhere left to go.
+        assert!(
+            match_error_chain(error.as_ref(), &[ErrorType::Unavailable], &[]),
+            "no-instances-left must be typed Unavailable, got: {error}"
+        );
+        assert!(
+            !match_error_chain(error.as_ref(), MIGRATABLE_ERROR_TYPES, &[]),
+            "no-instances-left must not be classified migratable, got: {error}"
         );
 
         rt.shutdown();
@@ -2725,18 +2767,31 @@ mod tests {
             "constrained dispatch should fall back within the allowed worker set"
         );
         let disallowed = HashSet::new();
+        let error = router
+            .resolve_transport(stale_id, TransportFallback::Within(&disallowed))
+            .expect_err("constrained dispatch must not fall back outside the allowed worker set");
         assert!(
-            router
-                .resolve_transport(stale_id, TransportFallback::Within(&disallowed))
-                .is_err(),
-            "constrained dispatch must not fall back outside the allowed worker set"
+            match_error_chain(error.as_ref(), &[ErrorType::Unavailable], &[]),
+            "exhausting the allowed worker set must be typed Unavailable, got: {error}"
         );
+
         let error = router
             .resolve_transport(stale_id, TransportFallback::Deny)
-            .unwrap_err();
+            .expect_err("exact dispatch must reject the missing selected worker");
         assert!(
             error.to_string().contains("not found"),
-            "exact dispatch must reject the missing selected worker"
+            "exact dispatch error should name the missing worker, got: {error}"
+        );
+        // A worker that vanished between selection and dispatch is the same
+        // condition `direct()` already treats as migratable, so exact dispatch
+        // must classify it identically instead of collapsing to Unknown.
+        assert!(
+            match_error_chain(error.as_ref(), &[ErrorType::CannotConnect], &[]),
+            "vanished instance under exact dispatch must be typed CannotConnect, got: {error}"
+        );
+        assert!(
+            match_error_chain(error.as_ref(), MIGRATABLE_ERROR_TYPES, &[]),
+            "vanished instance under exact dispatch must classify as migratable, got: {error}"
         );
 
         rt.shutdown();
