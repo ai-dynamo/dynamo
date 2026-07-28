@@ -1187,3 +1187,115 @@ def test_get_service_replica_status_available_replicas_zero(k8s_api, mock_custom
     # availableReplicas=0 should be used (not readyReplicas)
     assert count == 0
     assert is_stable is True
+
+
+def test_has_terminating_pods_true_when_running_pod_has_deletion_timestamp(
+    k8s_api, mock_core_api
+):
+    """has_terminating_pods returns True when a Running pod has a deletionTimestamp.
+
+    Deployment status excludes terminating pods. During a decode scale-down
+    (4→1) the Deployment can report desired=updated=available=1 while 3 old
+    decode pods linger with a deletionTimestamp. get_actual_worker_counts calls
+    has_terminating_pods to detect this blind spot and return is_stable=False,
+    preventing the planner from admitting the opposing scale-up before old pods
+    are fully gone.  get_service_replica_status stays pod-free intentionally so
+    non-power paths do not acquire the pods/list RBAC surface.
+    """
+    from unittest.mock import sentinel
+
+    deployment: Dict[str, Any] = {
+        "metadata": {"name": "my-dgd"},
+        "spec": {"components": [{"name": "decode-worker", "replicas": 1}]},
+        "status": {
+            "components": {
+                "decode-worker": {
+                    "availableReplicas": 1,
+                    "readyReplicas": 1,
+                    "updatedReplicas": 1,
+                }
+            }
+        },
+    }
+    terminating = _make_pod(
+        "pod-old",
+        phase="Running",
+        deletion_timestamp=sentinel.ts,
+    )
+    _mock_pod_list(mock_core_api, [terminating], component="decode-worker")
+
+    assert k8s_api.has_terminating_pods(deployment, "decode-worker") is True
+
+
+def test_has_terminating_pods_false_when_no_deletion_timestamp(k8s_api, mock_core_api):
+    """has_terminating_pods returns False when all pods are cleanly Running."""
+    deployment: Dict[str, Any] = {
+        "metadata": {"name": "my-dgd"},
+        "spec": {"components": [{"name": "decode-worker", "replicas": 1}]},
+        "status": {
+            "components": {
+                "decode-worker": {
+                    "availableReplicas": 1,
+                    "readyReplicas": 1,
+                    "updatedReplicas": 1,
+                }
+            }
+        },
+    }
+    running = _make_pod("pod-0", phase="Running")
+    _mock_pod_list(mock_core_api, [running], component="decode-worker")
+
+    assert k8s_api.has_terminating_pods(deployment, "decode-worker") is False
+
+
+def test_worker_pods_settled_terminating_pod_correct_annotation_blocks(
+    k8s_api, mock_core_api
+):
+    """A terminating pod carrying the *expected* annotation must still block settlement.
+
+    P1 regression: before the fix, a terminating pod whose annotation matched
+    the DGD snapshot was silently accepted, letting the planner admit a scale-up
+    while the old pod was still Running and consuming power.
+    """
+    from unittest.mock import sentinel
+
+    dgd = _stable_worker_dgd(generation=2, observed_generation=2, decode_watts="300")
+    terminating = _make_pod(
+        "pod-old",
+        phase="Running",
+        annotation="300",  # matches expected — was incorrectly accepted before fix
+        deletion_timestamp=sentinel.ts,
+    )
+    _mock_pod_list(mock_core_api, [terminating])
+    settled, pending = k8s_api.worker_pods_settled(dgd, {"VllmDecodeWorker": "300"})
+    assert settled is False
+    assert any("pod-old" in msg and "terminating" in msg for msg in pending)
+
+
+@pytest.mark.asyncio
+async def test_wait_failed_rollout_raises_immediately(k8s_api, mock_core_api):
+    """A Failed rollingUpdate phase must raise RolloutFailedError immediately.
+
+    Failed is a terminal operator state (endTime is set). Retrying until the
+    generic 30-minute timeout wastes time and hides the root cause.
+    """
+    from dynamo.planner.errors import RolloutFailedError
+
+    dgd = _stable_worker_dgd(generation=2, observed_generation=2, decode_watts="300")
+    dgd["status"]["rollingUpdate"] = {
+        "phase": "Failed",
+        "message": "pod CrashLoopBackOff",
+    }
+    with patch.object(k8s_api, "get_graph_deployment", return_value=dgd):
+        with pytest.raises(RolloutFailedError) as exc_info:
+            await k8s_api.wait_for_graph_deployment_ready(
+                "test-deployment",
+                include_planner=False,
+                require_backing_settled=True,
+                require_prefill=False,
+                require_decode=True,
+                max_attempts=10,
+                delay_seconds=0.01,
+            )
+    assert "test-deployment" in str(exc_info.value)
+    assert "Failed" in str(exc_info.value)

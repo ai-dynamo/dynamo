@@ -748,6 +748,16 @@ class KubernetesConnector(PlannerConnector):
             ready_replicas, is_stable = self.kube_api.get_service_replica_status(
                 deployment, service.name
             )
+            # Deployment status excludes terminating pods. Without this check a
+            # scale-down that reaches desired==updated==available while old pods
+            # still linger with a deletionTimestamp would look stable, letting
+            # the planner admit the opposing scale-up and transiently exceed the
+            # power ceiling. Check terminating pods only here (not in the base
+            # stability method) so non-power paths stay within their RBAC surface.
+            if is_stable and self.kube_api.has_terminating_pods(
+                deployment, service.name
+            ):
+                is_stable = False
             if not is_stable:
                 all_stable = False
             prefill_count = ready_replicas
@@ -761,6 +771,10 @@ class KubernetesConnector(PlannerConnector):
             ready_replicas, is_stable = self.kube_api.get_service_replica_status(
                 deployment, service.name
             )
+            if is_stable and self.kube_api.has_terminating_pods(
+                deployment, service.name
+            ):
+                is_stable = False
             if not is_stable:
                 all_stable = False
             decode_count = ready_replicas

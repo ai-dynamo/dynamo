@@ -21,7 +21,7 @@ from typing import Optional
 from kubernetes import client, config
 from kubernetes.config.config_exception import ConfigException
 
-from dynamo.planner.errors import DynamoGraphDeploymentNotFoundError
+from dynamo.planner.errors import DynamoGraphDeploymentNotFoundError, RolloutFailedError
 from dynamo.planner.monitoring.dgd_services import (
     POWER_ANNOTATION_KEY,
     Service,
@@ -40,8 +40,12 @@ DYNAMO_WORKER_METADATA_API_VERSION = "v1alpha1"
 DGD_PLURAL = "dynamographdeployments"
 DGDSA_PLURAL = "dynamographdeploymentscalingadapters"
 # During a rollout old Pods are still active and carry the previous cap, so
-# an InProgress/Pending/Failed phase must block pod-annotation settlement.
-ROLLING_UPDATE_BLOCKING_PHASES = frozenset({"Pending", "InProgress", "Failed"})
+# progressing phases must block pod-annotation settlement.
+# Failed is terminal (the operator sets endTime) and must NOT be treated as a
+# retryable blocking phase — wait_for_graph_deployment_ready raises
+# RolloutFailedError immediately when it sees Failed so callers get an
+# actionable error rather than timing out after 30 minutes.
+ROLLING_UPDATE_BLOCKING_PHASES = frozenset({"Pending", "InProgress"})
 JSON_PATCH_CONTENT_TYPE = "application/json-patch+json"
 # Stable labels the operator stamps on every worker Pod.
 DYNAMO_DGD_NAME_LABEL = "nvidia.com/dynamo-graph-deployment-name"
@@ -340,6 +344,25 @@ class KubernetesAPI:
             return True, f"rollingUpdate.phase={phase}"
         return False, ""
 
+    def has_terminating_pods(self, deployment: dict, component_name: str) -> bool:
+        """True if any non-terminal pod for component_name has a deletionTimestamp.
+
+        Deployment status excludes terminating pods, so ``get_service_replica_status``
+        can report desired==updated==available while old pods are still Running.
+        Callers that gate power-budget scale-ups on stability must call this
+        separately; the base stability check intentionally stays pod-free so
+        non-power paths do not acquire the pods/list RBAC surface.
+        """
+        dgd_name = deployment.get("metadata", {}).get("name", "")
+        if not dgd_name:
+            return False
+        all_pods = self._list_pods_for_component(dgd_name, component_name)
+        return any(
+            p.metadata.deletion_timestamp is not None
+            and (p.status is None or p.status.phase not in ("Succeeded", "Failed"))
+            for p in all_pods
+        )
+
     def _list_pods_for_component(self, dgd_name: str, component_name: str) -> list:
         """List all pods (any phase) for the given DGD + component label pair."""
         label_selector = (
@@ -399,14 +422,24 @@ class KubernetesAPI:
                 continue
 
             for pod in non_terminal:
+                # Terminating pods still consume GPU power and will soon be
+                # replaced. Even when they carry the expected annotation they
+                # must block settlement so that the planner never counts them
+                # as "done" and admits new pods that could push total power
+                # past the ceiling before the old ones fully disappear.
+                if pod.metadata.deletion_timestamp is not None:
+                    phase = (pod.status.phase if pod.status else None) or "?"
+                    pending.append(
+                        f"{component_name}/{pod.metadata.name}"
+                        f" (phase={phase}, terminating): waiting for pod to disappear"
+                    )
+                    continue
                 actual = (pod.metadata.annotations or {}).get(POWER_ANNOTATION_KEY)
                 if actual != expected_raw:
                     phase = (pod.status.phase if pod.status else None) or "?"
-                    terminating = pod.metadata.deletion_timestamp is not None
-                    suffix = ", terminating" if terminating else ""
                     pending.append(
                         f"{component_name}/{pod.metadata.name}"
-                        f" (phase={phase}{suffix}):"
+                        f" (phase={phase}):"
                         f" annotation {actual!r} != {expected_raw!r}"
                     )
 
@@ -458,6 +491,16 @@ class KubernetesAPI:
             await asyncio.sleep(delay_seconds)
 
             graph_deployment = self.get_graph_deployment(graph_deployment_name)
+
+            # Failed is a terminal rollout state; retrying until timeout (up to
+            # 30 min) serves no purpose. Raise immediately so the operator or
+            # user can investigate and recover.
+            rolling = graph_deployment.get("status", {}).get("rollingUpdate") or {}
+            if rolling.get("phase") == "Failed":
+                raise RolloutFailedError(
+                    deployment_name=graph_deployment_name,
+                    reason=rolling.get("message", ""),
+                )
 
             if include_planner:
                 conditions = graph_deployment.get("status", {}).get("conditions", [])

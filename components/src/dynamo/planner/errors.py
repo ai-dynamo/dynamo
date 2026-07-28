@@ -38,6 +38,7 @@ __all__ = [
     "EmptyTargetReplicasError",
     "PowerAnnotationMissingError",
     "PowerAnnotationInvalidError",
+    "RolloutFailedError",
 ]
 
 
@@ -285,4 +286,30 @@ class PowerAnnotationInvalidError(ComponentError):
         return (
             f"{self.__class__.__name__}("
             f"component_name={self.component_name!r}, value={self.value!r})"
+        )
+
+
+class RolloutFailedError(PlannerError):
+    """Raised when the operator marks a DGD rolling update as Failed.
+
+    Failed is a terminal rollout state (the operator sets ``endTime``).
+    Retrying until a generic timeout would leave the planner stuck for up to
+    30 minutes; instead we surface this as an immediate actionable error so
+    the operator or user can investigate and recover.
+    """
+
+    def __init__(self, deployment_name: str, reason: str = ""):
+        self.deployment_name = deployment_name
+        self.reason = reason
+        detail = f": {reason}" if reason else ""
+        message = (
+            f"DGD '{deployment_name}' rollingUpdate.phase is Failed{detail}. "
+            "Investigate the operator status and recover before restarting the planner."
+        )
+        super().__init__(message)
+
+    def __repr__(self) -> str:
+        return (
+            f"{self.__class__.__name__}("
+            f"deployment_name={self.deployment_name!r}, reason={self.reason!r})"
         )
