@@ -21,6 +21,7 @@ pub use host::{
     KvDcRelayStats,
 };
 pub use identity::{
-    CanonicalModelId, CanonicalModelIdError, CanonicalModelRegistration, ModelAlias,
-    ModelAliasBinding, ModelAliasError, ModelPoolBinding, ModelTarget, PoolIdentitySources,
+    CanonicalModelId, CanonicalModelIdError, CanonicalModelRegistration, DcPoolCatalog,
+    DcPoolDescriptor, ModelAlias, ModelAliasBinding, ModelAliasError, ModelPoolBinding,
+    ModelTarget, PoolIdentitySources,
 };

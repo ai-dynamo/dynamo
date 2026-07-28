@@ -4,6 +4,8 @@
 use std::fmt;
 
 use dynamo_kv_router::identity::{IdentitySource, PoolId};
+use dynamo_kv_router::indexer::cuckoo::ProducerIdentity;
+use dynamo_runtime::protocols::EndpointId;
 use serde::{Deserialize, Deserializer, Serialize};
 
 fn validate_identity_text<E>(
@@ -173,6 +175,76 @@ impl ModelTarget {
             Self::Base { .. } => None,
             Self::Lora { adapter, .. } => Some(adapter),
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DcPoolDescriptor {
+    producer: ProducerIdentity,
+    serving_endpoint: EndpointId,
+    registrations: Vec<CanonicalModelRegistration>,
+}
+
+impl DcPoolDescriptor {
+    pub(crate) const fn new(
+        producer: ProducerIdentity,
+        serving_endpoint: EndpointId,
+        registrations: Vec<CanonicalModelRegistration>,
+    ) -> Self {
+        Self {
+            producer,
+            serving_endpoint,
+            registrations,
+        }
+    }
+
+    pub const fn producer(&self) -> ProducerIdentity {
+        self.producer
+    }
+
+    pub const fn pool_id(&self) -> PoolId {
+        self.producer.pool_id()
+    }
+
+    pub const fn serving_endpoint(&self) -> &EndpointId {
+        &self.serving_endpoint
+    }
+
+    pub fn registrations(&self) -> &[CanonicalModelRegistration] {
+        &self.registrations
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DcPoolCatalog {
+    process_incarnation: u64,
+    revision: u64,
+    pools: Vec<DcPoolDescriptor>,
+}
+
+impl DcPoolCatalog {
+    pub(crate) const fn new(
+        process_incarnation: u64,
+        revision: u64,
+        pools: Vec<DcPoolDescriptor>,
+    ) -> Self {
+        Self {
+            process_incarnation,
+            revision,
+            pools,
+        }
+    }
+
+    pub const fn process_incarnation(&self) -> u64 {
+        self.process_incarnation
+    }
+
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub fn pools(&self) -> &[DcPoolDescriptor] {
+        &self.pools
     }
 }
 

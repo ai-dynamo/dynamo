@@ -14,8 +14,8 @@ use tokio_util::sync::CancellationToken;
 use super::actor::{ActorFault, KvDcRelayHandle, StreamScope};
 use super::host::KvDcRelayError;
 use super::identity::{
-    CanonicalModelId, CanonicalModelRegistration, ModelAlias, ModelAliasBinding, ModelPoolBinding,
-    ModelTarget,
+    CanonicalModelId, CanonicalModelRegistration, DcPoolCatalog, DcPoolDescriptor, ModelAlias,
+    ModelAliasBinding, ModelPoolBinding,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -42,21 +42,9 @@ struct PoolEntry {
     fenced: bool,
 }
 
-struct CanonicalTargetClaim {
-    target: ModelTarget,
-    refcount: usize,
-}
-
-struct AliasOwner {
-    model: CanonicalModelId,
-    refcount: usize,
-}
-
 struct PoolRegistryState {
     pools: HashMap<PoolId, PoolEntry>,
     next_layout_generation: u64,
-    canonical_targets: HashMap<CanonicalModelId, CanonicalTargetClaim>,
-    alias_owners: HashMap<ModelAlias, AliasOwner>,
     catalog_revision: u64,
 }
 
@@ -65,20 +53,9 @@ impl Default for PoolRegistryState {
         Self {
             pools: HashMap::new(),
             next_layout_generation: 1,
-            canonical_targets: HashMap::new(),
-            alias_owners: HashMap::new(),
             catalog_revision: 0,
         }
     }
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Clone, Default)]
-pub(super) struct PoolCatalog {
-    pub(super) revision: u64,
-    pub(super) pools: Vec<ProducerIdentity>,
-    pub(super) model_bindings: Vec<ModelPoolBinding>,
-    pub(super) alias_bindings: Vec<ModelAliasBinding>,
 }
 
 pub(super) struct PoolAttachment {
@@ -94,12 +71,13 @@ pub(super) struct PoolRegistry {
     process_incarnation: u64,
     actor_config: PoolActorConfig,
     state: Mutex<PoolRegistryState>,
-    catalog_tx: watch::Sender<PoolCatalog>,
+    catalog_tx: watch::Sender<DcPoolCatalog>,
 }
 
 impl PoolRegistry {
     pub(super) fn new(process_incarnation: u64, actor_config: PoolActorConfig) -> Self {
-        let (catalog_tx, _) = watch::channel(PoolCatalog::default());
+        let (catalog_tx, _) =
+            watch::channel(DcPoolCatalog::new(process_incarnation, 0, Vec::new()));
         Self {
             process_incarnation,
             actor_config,
@@ -127,7 +105,7 @@ impl PoolRegistry {
                 request.endpoint
             );
         }
-        validate_registrations(&state, &request.registrations)?;
+        validate_registrations(&request.registrations)?;
 
         let layout_generation = allocate_layout_generation(&mut state)?;
         let mut config = CkfConfig::new(self.actor_config.expected_unique_blocks);
@@ -145,7 +123,6 @@ impl PoolRegistry {
         let registrations: Arc<[CanonicalModelRegistration]> = request.registrations.into();
         let cancel = CancellationToken::new();
 
-        add_registration_claims(&mut state, &registrations);
         state.pools.insert(
             request.pool_id,
             PoolEntry {
@@ -158,7 +135,7 @@ impl PoolRegistry {
                 fenced: false,
             },
         );
-        publish_catalog(&mut state, &self.catalog_tx);
+        publish_catalog(&mut state, self.process_incarnation, &self.catalog_tx);
 
         Ok(PoolAttachment {
             pool_id: request.pool_id,
@@ -186,8 +163,7 @@ impl PoolRegistry {
                 .pools
                 .remove(&pool_id)
                 .ok_or(KvDcRelayError::ActorStopped)?;
-            remove_registration_claims(&mut state, &entry.registrations);
-            publish_catalog(&mut state, &self.catalog_tx);
+            publish_catalog(&mut state, self.process_incarnation, &self.catalog_tx);
             entry
         };
 
@@ -213,35 +189,22 @@ impl PoolRegistry {
             return Ok(());
         }
 
+        validate_registrations(&registrations)?;
         let registrations: Arc<[CanonicalModelRegistration]> = registrations.into();
         let mut state = self.state.lock().await;
-        let old = {
-            let entry = state
-                .pools
-                .get(&attachment.pool_id)
-                .ok_or_else(|| anyhow::anyhow!("pool {} is not attached", attachment.pool_id))?;
-            anyhow::ensure!(
-                entry.layout_generation == attachment.layout_generation && !entry.fenced,
-                "pool {} generation {} is no longer active",
-                attachment.pool_id,
-                attachment.layout_generation
-            );
-            entry.registrations.clone()
-        };
-
-        remove_registration_claims(&mut state, &old);
-        if let Err(error) = validate_registrations(&state, &registrations) {
-            add_registration_claims(&mut state, &old);
-            return Err(error);
-        }
-        let Some(entry) = state.pools.get_mut(&attachment.pool_id) else {
-            add_registration_claims(&mut state, &old);
-            anyhow::bail!("pool {} disappeared", attachment.pool_id);
-        };
+        let entry = state
+            .pools
+            .get_mut(&attachment.pool_id)
+            .ok_or_else(|| anyhow::anyhow!("pool {} is not attached", attachment.pool_id))?;
+        anyhow::ensure!(
+            entry.layout_generation == attachment.layout_generation && !entry.fenced,
+            "pool {} generation {} is no longer active",
+            attachment.pool_id,
+            attachment.layout_generation
+        );
         entry.registrations = registrations.clone();
-        add_registration_claims(&mut state, &registrations);
         attachment.registrations = registrations;
-        publish_catalog(&mut state, &self.catalog_tx);
+        publish_catalog(&mut state, self.process_incarnation, &self.catalog_tx);
         Ok(())
     }
 
@@ -257,18 +220,47 @@ impl PoolRegistry {
             entry.fenced = true;
             entry.cancel.cancel();
             let handle = entry.handle.clone();
-            publish_catalog(&mut state, &self.catalog_tx);
+            publish_catalog(&mut state, self.process_incarnation, &self.catalog_tx);
             handle
         };
         handle.fence().await
     }
 
     pub(super) async fn model_pool_bindings(&self) -> Vec<ModelPoolBinding> {
-        self.catalog_tx.borrow().model_bindings.clone()
+        let catalog = self.catalog_tx.borrow();
+        let mut bindings: Vec<_> = catalog
+            .pools()
+            .iter()
+            .flat_map(|pool| {
+                pool.registrations().iter().map(|registration| {
+                    ModelPoolBinding::with_target(
+                        registration.model().clone(),
+                        pool.pool_id(),
+                        registration.target().clone(),
+                    )
+                })
+            })
+            .collect();
+        bindings.sort_unstable();
+        bindings
     }
 
     pub(super) async fn model_alias_bindings(&self) -> Vec<ModelAliasBinding> {
-        self.catalog_tx.borrow().alias_bindings.clone()
+        let catalog = self.catalog_tx.borrow();
+        let mut bindings: Vec<_> = catalog
+            .pools()
+            .iter()
+            .flat_map(|pool| {
+                pool.registrations().iter().flat_map(|registration| {
+                    registration.aliases().iter().map(|alias| {
+                        ModelAliasBinding::new(alias.clone(), registration.model().clone())
+                    })
+                })
+            })
+            .collect();
+        bindings.sort_unstable();
+        bindings.dedup();
+        bindings
     }
 
     pub(super) async fn model_pool_bindings_for(
@@ -276,39 +268,37 @@ impl PoolRegistry {
         requested_model: &str,
     ) -> Vec<ModelPoolBinding> {
         let catalog = self.catalog_tx.borrow();
-        let requested_alias = ModelAlias::new(requested_model.to_string()).ok();
-        let canonical = requested_alias
-            .as_ref()
-            .and_then(|alias| {
-                catalog
-                    .alias_bindings
-                    .iter()
-                    .find(|binding| binding.alias() == alias)
-            })
-            .map(|binding| binding.model().clone())
-            .or_else(|| {
-                CanonicalModelId::new(requested_model.to_string())
-                    .ok()
-                    .filter(|model| {
-                        catalog
-                            .model_bindings
-                            .iter()
-                            .any(|binding| binding.model() == model)
-                    })
-            });
-        let Some(canonical) = canonical else {
-            return Vec::new();
-        };
-        catalog
-            .model_bindings
+        let mut bindings: Vec<_> = catalog
+            .pools()
             .iter()
-            .filter(|binding| binding.model() == &canonical)
-            .cloned()
-            .collect()
+            .flat_map(|pool| {
+                pool.registrations()
+                    .iter()
+                    .filter(|registration| {
+                        registration.model().as_str() == requested_model
+                            || registration
+                                .aliases()
+                                .iter()
+                                .any(|alias| alias.as_str() == requested_model)
+                    })
+                    .map(|registration| {
+                        ModelPoolBinding::with_target(
+                            registration.model().clone(),
+                            pool.pool_id(),
+                            registration.target().clone(),
+                        )
+                    })
+            })
+            .collect();
+        bindings.sort_unstable();
+        bindings
     }
 
-    #[allow(dead_code)]
-    pub(super) fn watch_catalog(&self) -> watch::Receiver<PoolCatalog> {
+    pub(super) fn catalog(&self) -> DcPoolCatalog {
+        self.catalog_tx.borrow().clone()
+    }
+
+    pub(super) fn watch_catalog(&self) -> watch::Receiver<DcPoolCatalog> {
         self.catalog_tx.subscribe()
     }
 
@@ -316,9 +306,7 @@ impl PoolRegistry {
         let entries = {
             let mut state = self.state.lock().await;
             let entries = state.pools.drain().collect::<Vec<_>>();
-            state.canonical_targets.clear();
-            state.alias_owners.clear();
-            publish_catalog(&mut state, &self.catalog_tx);
+            publish_catalog(&mut state, self.process_incarnation, &self.catalog_tx);
             entries
         };
         for (pool_id, entry) in entries {
@@ -370,63 +358,34 @@ fn allocate_layout_generation(state: &mut PoolRegistryState) -> anyhow::Result<u
     Ok(generation)
 }
 
-fn publish_catalog(state: &mut PoolRegistryState, sender: &watch::Sender<PoolCatalog>) {
+fn publish_catalog(
+    state: &mut PoolRegistryState,
+    process_incarnation: u64,
+    sender: &watch::Sender<DcPoolCatalog>,
+) {
     state.catalog_revision = state.catalog_revision.saturating_add(1);
-    sender.send_replace(catalog_from_state(state));
+    sender.send_replace(catalog_from_state(state, process_incarnation));
 }
 
-fn catalog_from_state(state: &PoolRegistryState) -> PoolCatalog {
+fn catalog_from_state(state: &PoolRegistryState, process_incarnation: u64) -> DcPoolCatalog {
     let mut pools: Vec<_> = state
         .pools
         .values()
         .filter(|entry| !entry.fenced)
-        .map(|entry| entry.identity)
-        .collect();
-    pools.sort_unstable_by_key(|identity| identity.pool_id());
-
-    let mut model_bindings: Vec<_> = state
-        .pools
-        .iter()
-        .filter(|(_, entry)| !entry.fenced)
-        .flat_map(|(&pool_id, entry)| {
-            entry.registrations.iter().map(move |registration| {
-                ModelPoolBinding::with_target(
-                    registration.model().clone(),
-                    pool_id,
-                    registration.target().clone(),
-                )
-            })
+        .map(|entry| {
+            DcPoolDescriptor::new(
+                entry.identity,
+                entry.endpoint.clone(),
+                entry.registrations.to_vec(),
+            )
         })
         .collect();
-    model_bindings.sort_unstable();
+    pools.sort_unstable_by_key(DcPoolDescriptor::pool_id);
 
-    let mut alias_bindings: Vec<_> = state
-        .pools
-        .values()
-        .filter(|entry| !entry.fenced)
-        .flat_map(|entry| {
-            entry.registrations.iter().flat_map(|registration| {
-                registration.aliases().iter().map(|alias| {
-                    ModelAliasBinding::new(alias.clone(), registration.model().clone())
-                })
-            })
-        })
-        .collect();
-    alias_bindings.sort_unstable();
-    alias_bindings.dedup();
-
-    PoolCatalog {
-        revision: state.catalog_revision,
-        pools,
-        model_bindings,
-        alias_bindings,
-    }
+    DcPoolCatalog::new(process_incarnation, state.catalog_revision, pools)
 }
 
-fn validate_registrations(
-    state: &PoolRegistryState,
-    registrations: &[CanonicalModelRegistration],
-) -> anyhow::Result<()> {
+fn validate_registrations(registrations: &[CanonicalModelRegistration]) -> anyhow::Result<()> {
     let mut request_models = HashMap::with_capacity(registrations.len());
     for registration in registrations {
         if let Some(previous) =
@@ -442,26 +401,10 @@ fn validate_registrations(
                 registration.model()
             );
         }
-        if let Some(existing) = state.canonical_targets.get(registration.model()) {
-            anyhow::ensure!(
-                existing.target == *registration.target(),
-                "canonical model {} resolves to conflicting targets",
-                registration.model()
-            );
-        }
     }
 
     let mut request_aliases = HashMap::<ModelAlias, CanonicalModelId>::new();
     for registration in registrations {
-        let model_as_alias = ModelAlias::new(registration.model().as_str().to_string())?;
-        if let Some(owner) = state.alias_owners.get(&model_as_alias) {
-            anyhow::ensure!(
-                owner.model == *registration.model(),
-                "canonical model {} is already claimed as an alias of {}",
-                registration.model(),
-                owner.model
-            );
-        }
         for alias in registration.aliases() {
             let alias_as_model = CanonicalModelId::new(alias.as_str().to_string())?;
             anyhow::ensure!(
@@ -480,78 +423,9 @@ fn validate_registrations(
                     registration.model()
                 );
             }
-            anyhow::ensure!(
-                !state.canonical_targets.contains_key(&alias_as_model),
-                "model alias {} conflicts with an existing canonical model",
-                alias
-            );
-            if let Some(owner) = state.alias_owners.get(alias) {
-                anyhow::ensure!(
-                    owner.model == *registration.model(),
-                    "model alias {} is claimed by both {} and {}",
-                    alias,
-                    owner.model,
-                    registration.model()
-                );
-            }
         }
     }
     Ok(())
-}
-
-fn add_registration_claims(
-    state: &mut PoolRegistryState,
-    registrations: &[CanonicalModelRegistration],
-) {
-    for registration in registrations {
-        let claim = state
-            .canonical_targets
-            .entry(registration.model().clone())
-            .or_insert_with(|| CanonicalTargetClaim {
-                target: registration.target().clone(),
-                refcount: 0,
-            });
-        debug_assert_eq!(claim.target, *registration.target());
-        claim.refcount = claim.refcount.saturating_add(1);
-        for alias in registration.aliases() {
-            let owner = state
-                .alias_owners
-                .entry(alias.clone())
-                .or_insert_with(|| AliasOwner {
-                    model: registration.model().clone(),
-                    refcount: 0,
-                });
-            debug_assert_eq!(owner.model, *registration.model());
-            owner.refcount = owner.refcount.saturating_add(1);
-        }
-    }
-}
-
-fn remove_registration_claims(
-    state: &mut PoolRegistryState,
-    registrations: &[CanonicalModelRegistration],
-) {
-    for registration in registrations {
-        let remove_model = state
-            .canonical_targets
-            .get_mut(registration.model())
-            .is_some_and(|claim| {
-                claim.refcount = claim.refcount.saturating_sub(1);
-                claim.refcount == 0
-            });
-        if remove_model {
-            state.canonical_targets.remove(registration.model());
-        }
-        for alias in registration.aliases() {
-            let remove_alias = state.alias_owners.get_mut(alias).is_some_and(|owner| {
-                owner.refcount = owner.refcount.saturating_sub(1);
-                owner.refcount == 0
-            });
-            if remove_alias {
-                state.alias_owners.remove(alias);
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -612,6 +486,75 @@ mod tests {
         assert_eq!(bindings.len(), 2);
         assert_ne!(bindings[0].pool_id(), bindings[1].pool_id());
         assert_eq!(registry.pool_count().await, 2);
+        let catalog = registry.catalog();
+        assert_eq!(catalog.process_incarnation(), 7);
+        assert_eq!(catalog.pools().len(), 2);
+        assert_eq!(
+            catalog
+                .pools()
+                .iter()
+                .find(|descriptor| descriptor.pool_id() == pool(1))
+                .unwrap()
+                .serving_endpoint(),
+            &EndpointId::from("fast.router.generate")
+        );
+
+        registry.detach(first).await.unwrap();
+        registry.detach(second).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn registration_updates_do_not_coordinate_aliases_across_pools() {
+        let registry = PoolRegistry::new(7, config());
+        let mut first = registry
+            .attach(request(pool(1), "fast.router.generate", "llama"))
+            .await
+            .unwrap();
+        let mut second = registry
+            .attach(request(pool(2), "slow.router.generate", "mistral"))
+            .await
+            .unwrap();
+
+        registry
+            .replace_registrations(
+                &mut first,
+                vec![CanonicalModelRegistration::new(
+                    CanonicalModelId::new("llama").unwrap(),
+                    vec![ModelAlias::new("mistral-alias").unwrap()],
+                )],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            registry
+                .model_pool_bindings_for("mistral-alias")
+                .await
+                .len(),
+            2
+        );
+
+        registry
+            .replace_registrations(
+                &mut second,
+                vec![CanonicalModelRegistration::new(
+                    CanonicalModelId::new("mistral").unwrap(),
+                    vec![ModelAlias::new("llama-alias").unwrap()],
+                )],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            registry.model_pool_bindings_for("mistral-alias").await[0]
+                .model()
+                .as_str(),
+            "llama"
+        );
+        assert_eq!(
+            registry.model_pool_bindings_for("llama-alias").await[0]
+                .model()
+                .as_str(),
+            "mistral"
+        );
 
         registry.detach(first).await.unwrap();
         registry.detach(second).await.unwrap();
@@ -755,7 +698,7 @@ mod tests {
 
         registry.fence(pool_id).await.unwrap();
         assert!(registry.model_pool_bindings().await.is_empty());
-        assert!(registry.watch_catalog().borrow().pools.is_empty());
+        assert!(registry.watch_catalog().borrow().pools().is_empty());
 
         registry.detach(attachment).await.unwrap();
     }

@@ -155,10 +155,6 @@ pub(crate) enum MaterializationConflict {
         card: ModelCardInstanceId,
         reason: String,
     },
-    Binding {
-        model: CanonicalModelId,
-        reason: String,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -481,16 +477,6 @@ impl MembershipState {
                     }
                     continue;
                 };
-                let adapter_domain =
-                    resolve_indexer_domain(card, &endpoint, KV_EVENT_HASH_FORMAT_VERSION);
-                if adapter_domain != base.domain {
-                    builder.conflicts.push(MaterializationConflict::Card {
-                        card: id.clone(),
-                        reason: "adapter does not share its worker's base indexer domain"
-                            .to_string(),
-                    });
-                    continue;
-                }
                 let Some(base_model) = base.model.clone() else {
                     builder.conflicts.push(MaterializationConflict::Card {
                         card: id.clone(),
@@ -545,11 +531,9 @@ impl MembershipState {
             builders.insert(endpoint, builder);
         }
 
-        let mut lookup_owners = HashMap::<String, HashSet<BindingIdentity>>::new();
-        for builder in builders
-            .values()
-            .filter(|builder| builder.conflicts.is_empty())
-        {
+        let mut endpoints = HashMap::new();
+        for (endpoint, mut builder) in builders {
+            let mut lookup_owners = HashMap::<String, HashSet<BindingIdentity>>::new();
             for claim in &builder.claims {
                 lookup_owners
                     .entry(claim.binding.model.as_str().to_string())
@@ -562,31 +546,22 @@ impl MembershipState {
                         .insert(claim.binding.clone());
                 }
             }
-        }
-        let ambiguous_names: HashSet<_> = lookup_owners
-            .into_iter()
-            .filter_map(|(name, owners)| (owners.len() > 1).then_some(name))
-            .collect();
+            for name in lookup_owners
+                .into_iter()
+                .filter_map(|(name, owners)| (owners.len() > 1).then_some(name))
+            {
+                builder.conflicts.push(MaterializationConflict::Endpoint {
+                    endpoint: endpoint.clone(),
+                    reason: format!(
+                        "request-facing name {name} resolves to conflicting targets within the endpoint pool"
+                    ),
+                });
+            }
 
-        let mut endpoints = HashMap::new();
-        for (endpoint, mut builder) in builders {
             let mut grouped_claims = HashMap::<BindingIdentity, HashSet<ModelAlias>>::new();
             for claim in builder.claims {
-                if ambiguous_names.contains(claim.binding.model.as_str()) {
-                    builder.conflicts.push(MaterializationConflict::Binding {
-                        model: claim.binding.model,
-                        reason: "request-facing model name resolves to conflicting targets"
-                            .to_string(),
-                    });
-                    continue;
-                }
                 let aliases = grouped_claims.entry(claim.binding).or_default();
-                aliases.extend(
-                    claim
-                        .aliases
-                        .into_iter()
-                        .filter(|alias| !ambiguous_names.contains(alias.as_str())),
-                );
+                aliases.extend(claim.aliases);
             }
             let mut registrations: Vec<_> = grouped_claims
                 .into_iter()
@@ -1168,7 +1143,7 @@ mod tests {
     }
 
     #[test]
-    fn adapter_with_a_different_domain_blocks_materialization() {
+    fn adapter_metadata_does_not_override_the_base_pool_domain() {
         let filter = DcDiscoveryFilter::default();
         let mut state = MembershipState::default();
         state.apply(
@@ -1180,7 +1155,7 @@ mod tests {
             )),
             &filter,
         );
-        let mut adapter = card("tenant-a", "other/base", 64);
+        let mut adapter = card("tenant-a", "unrelated/adapter", 1);
         adapter.lora = Some(LoraInfo {
             name: "tenant-a".to_string(),
             max_gpu_lora_count: Some(4),
@@ -1193,14 +1168,17 @@ mod tests {
         let endpoint = EndpointId::from("prod.backend.generate");
         let view = state.view(&filter);
         let membership = membership_for_endpoint(&view, &endpoint);
-        assert!(!membership.is_materializable());
-        assert!(membership.conflicts.iter().any(|conflict| {
-            matches!(
-                conflict,
-                MaterializationConflict::Card { reason, .. }
-                    if reason.contains("base indexer domain")
-            )
-        }));
+        assert!(membership.is_materializable());
+        assert!(membership.conflicts.is_empty());
+        assert_eq!(
+            membership
+                .domain
+                .as_ref()
+                .unwrap()
+                .diagnostic_model_artifact,
+            "meta/llama"
+        );
+        assert_eq!(membership.models, ["llama", "tenant-a"]);
     }
 
     #[test]
@@ -1259,6 +1237,62 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["chat", "instruct"]
         );
+    }
+
+    #[test]
+    fn request_names_are_scoped_to_each_endpoint_pool() {
+        let filter = DcDiscoveryFilter::default();
+        let mut state = MembershipState::default();
+        let mut fast = card("llama", "meta/llama", 64);
+        fast.aliases = vec!["chat".to_string()];
+        let mut slow = card("mistral", "mistral/model", 64);
+        slow.aliases = vec!["chat".to_string()];
+        state.apply(
+            DiscoveryEvent::Added(instance("fast", 1, None, fast)),
+            &filter,
+        );
+        state.apply(
+            DiscoveryEvent::Added(instance("slow", 2, None, slow)),
+            &filter,
+        );
+
+        let view = state.view(&filter);
+        assert_eq!(view.endpoints.len(), 2);
+        assert!(view.endpoints.values().all(|membership| {
+            membership.is_materializable() && membership.aliases == ["chat"]
+        }));
+    }
+
+    #[test]
+    fn request_names_must_be_unambiguous_within_an_endpoint_pool() {
+        let filter = DcDiscoveryFilter::default();
+        let mut state = MembershipState::default();
+        let mut base = card("llama", "meta/llama", 64);
+        base.aliases = vec!["tenant-a".to_string()];
+        let mut adapter = card("tenant-a", "unrelated/adapter", 1);
+        adapter.lora = Some(LoraInfo {
+            name: "tenant-a".to_string(),
+            max_gpu_lora_count: Some(4),
+        });
+        state.apply(
+            DiscoveryEvent::Added(instance("generate", 1, None, base)),
+            &filter,
+        );
+        state.apply(
+            DiscoveryEvent::Added(instance("generate", 1, Some("tenant-a"), adapter)),
+            &filter,
+        );
+
+        let view = state.view(&filter);
+        let membership = &view.endpoints[&EndpointId::from("prod.backend.generate")];
+        assert!(!membership.is_materializable());
+        assert!(membership.conflicts.iter().any(|conflict| {
+            matches!(
+                conflict,
+                MaterializationConflict::Endpoint { reason, .. }
+                    if reason.contains("tenant-a")
+            )
+        }));
     }
 
     #[test]
