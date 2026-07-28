@@ -2060,7 +2060,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 			t.Fatalf("generatePodTemplateSpec failed: %v", err)
 		}
 
-		if got := podTemplateSpec.Labels[commonconsts.KubeLabelDynamoNamespace]; got != defaultNamespace {
+		if got := podTemplateSpec.Labels[commonconsts.KubeLabelDynamoNamespace]; got != testNamespace {
 			t.Fatalf("expected %s label to be %q, got %q", commonconsts.KubeLabelDynamoNamespace, "default", got)
 		}
 		if got := podTemplateSpec.Labels[commonconsts.KubeLabelDynamoComponentType]; got != commonconsts.ComponentTypeWorker {
@@ -2288,7 +2288,7 @@ func Test_createOrUpdateOrDeleteDeployments_K8sAPIDefaults(t *testing.T) {
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 
 	name := "test-component"
-	namespace := defaultNamespace
+	namespace := testNamespace
 
 	// Create DynamoComponentDeployment
 	replicaCount := int32(3)

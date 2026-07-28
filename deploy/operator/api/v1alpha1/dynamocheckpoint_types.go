@@ -129,8 +129,8 @@ type DynamoCheckpointJobConfig struct {
 	// +kubebuilder:validation:Minimum=0
 	BackoffLimit *int32 `json:"backoffLimit,omitempty"`
 
-	// Deprecated: TTLSecondsAfterFinished is ignored. Checkpoint Jobs use a fixed
-	// 300 second TTL.
+	// Deprecated: TTLSecondsAfterFinished is ignored. The operator deletes checkpoint
+	// Jobs after recording their terminal outcome.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	TTLSecondsAfterFinished *int32 `json:"ttlSecondsAfterFinished,omitempty"`

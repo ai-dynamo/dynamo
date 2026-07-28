@@ -23,8 +23,9 @@ pub struct Args {
 
     /// Reachable host that decode workers use to connect to a prefill worker's
     /// SGLang disaggregation bootstrap port. By default this is derived from
-    /// `dist_init_addr`, then a routable local address. This is required when
-    /// discovery exposes only loopback or wildcard addresses.
+    /// SGLang's concrete `host`, then `dist_init_addr`, then a routable local
+    /// address. This is required when discovery exposes only loopback or
+    /// wildcard addresses.
     #[arg(long, env = "SGLANG_DISAGGREGATION_BOOTSTRAP_HOST")]
     pub bootstrap_host: Option<String>,
 
