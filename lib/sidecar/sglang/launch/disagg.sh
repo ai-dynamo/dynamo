@@ -29,7 +29,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         -h|--help)
-            echo "Usage: $0 [--model-path <name>] [SGLang engine options...]"
+            echo "Usage: $0 [--model|--model-path <name>] [SGLang engine options...]"
             echo
             echo "Additional options are passed to both SGLang engines."
             echo
