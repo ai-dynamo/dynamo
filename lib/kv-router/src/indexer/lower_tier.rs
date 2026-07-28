@@ -22,7 +22,9 @@ use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
 #[cfg(feature = "bench")]
 use super::WorkerObservationState;
-use super::{EventKind, KvIndexerMetrics, SyncIndexer, WorkerLookupStats, WorkerTask};
+use super::{
+    EventKind, KvIndexerMetrics, PreBoundEventCounters, SyncIndexer, WorkerLookupStats, WorkerTask,
+};
 use crate::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheEventError, KvCacheStoreData,
     KvCacheStoredBlockData, LocalBlockHash, OverlapScores, RouterEvent, StorageTier,
@@ -220,6 +222,7 @@ impl LowerTierIndexer {
         &self,
         worker_blocks: &mut WorkerBlockIndex,
         event: RouterEvent,
+        counters: Option<&PreBoundEventCounters>,
     ) -> Result<(), KvCacheEventError> {
         let worker = WorkerWithDpRank::new(event.worker_id, event.event.dp_rank);
         let storage_tier = event.storage_tier;
@@ -230,12 +233,22 @@ impl LowerTierIndexer {
                 Ok(())
             }
             KvCacheEventData::Removed(remove_data) => {
-                let _ = self.remove_blocks_impl(
+                let stats = self.remove_blocks_impl(
                     worker_blocks,
                     worker,
                     storage_tier,
                     &remove_data.block_hashes,
                 );
+                if let Some(counters) = counters {
+                    counters.inc_lower_tier_removal(
+                        stats.removals_fanout_chunks,
+                        stats.removal_hashes_member_covered,
+                        stats.removal_hashes_legacy_deleted,
+                        stats.removal_hashes_owner_protected,
+                        stats.removal_hashes_unknown,
+                        stats.entries_kept_shared_owner,
+                    );
+                }
                 Ok(())
             }
             KvCacheEventData::Cleared => {
@@ -756,7 +769,7 @@ impl SyncIndexer for LowerTierIndexer {
             match task {
                 WorkerTask::Event(event) => {
                     let kind = EventKind::of(&event.event.data);
-                    let result = self.apply_event(&mut worker_blocks, event);
+                    let result = self.apply_event(&mut worker_blocks, event, counters.as_ref());
                     if let Err(ref error) = result {
                         tracing::warn!(%error, "Failed to apply lower-tier event");
                     }
@@ -766,7 +779,7 @@ impl SyncIndexer for LowerTierIndexer {
                 }
                 WorkerTask::EventWithAck { event, resp } => {
                     let kind = EventKind::of(&event.event.data);
-                    let result = self.apply_event(&mut worker_blocks, event);
+                    let result = self.apply_event(&mut worker_blocks, event, counters.as_ref());
                     let applied = result.is_ok();
                     if let Err(ref error) = result {
                         tracing::warn!(%error, "Failed to apply lower-tier event");
@@ -786,7 +799,7 @@ impl SyncIndexer for LowerTierIndexer {
                     correlation_id,
                 } => {
                     let kind = EventKind::of(&event.event.data);
-                    let result = self.apply_event(&mut worker_blocks, event);
+                    let result = self.apply_event(&mut worker_blocks, event, counters.as_ref());
                     observation.record(correlation_id, result.is_ok());
                     if let Err(ref error) = result {
                         tracing::warn!(%error, "Failed to apply lower-tier event");
@@ -1112,7 +1125,7 @@ mod tests {
             &mut self,
             event: crate::protocols::RouterEvent,
         ) -> Result<(), crate::protocols::KvCacheEventError> {
-            self.index.apply_event(&mut self.worker_blocks, event)
+            self.index.apply_event(&mut self.worker_blocks, event, None)
         }
 
         fn remove_worker(&mut self, worker_id: u64) {
@@ -2863,5 +2876,96 @@ mod tests {
             .query_contiguous_hits(&local_hashes(&[11, 12, 13]), &continuations);
         assert_eq!(original, replayed);
         assert_eq!(replayed.get(&worker), Some(&3));
+    }
+
+    #[cfg(feature = "metrics")]
+    #[tokio::test]
+    async fn lower_tier_removal_metrics_match_mutation_outcomes() {
+        use std::sync::Arc;
+
+        use crate::indexer::{
+            KvIndexerMetrics, METRIC_LOWER_TIER_ENTRIES_KEPT_SHARED_OWNER,
+            METRIC_LOWER_TIER_REMOVAL_HASHES_LEGACY_DELETED,
+            METRIC_LOWER_TIER_REMOVAL_HASHES_MEMBER_COVERED,
+            METRIC_LOWER_TIER_REMOVAL_HASHES_OWNER_PROTECTED,
+            METRIC_LOWER_TIER_REMOVAL_HASHES_UNKNOWN, METRIC_LOWER_TIER_REMOVALS_FANOUT_CHUNKS,
+        };
+
+        let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
+        let index = ThreadPoolIndexer::new_with_metrics(
+            LowerTierIndexer::new(),
+            1,
+            1,
+            Some(metrics.clone()),
+        );
+
+        index
+            .apply_event(store_event(
+                300,
+                0,
+                0,
+                None,
+                &[5, 6, 7, 8],
+                &[105, 106, 107, 108],
+            ))
+            .await;
+        index
+            .apply_event(store_event(
+                300,
+                0,
+                1,
+                None,
+                &[5, 6, 17, 18],
+                &[105, 106, 117, 118],
+            ))
+            .await;
+        index
+            .apply_event(remove_event(
+                300,
+                2,
+                0,
+                vec![ExternalSequenceBlockHash(105)],
+            ))
+            .await;
+        index
+            .apply_event(remove_event(
+                300,
+                3,
+                0,
+                vec![
+                    ExternalSequenceBlockHash(105),
+                    ExternalSequenceBlockHash(105),
+                    ExternalSequenceBlockHash(106),
+                    ExternalSequenceBlockHash(107),
+                    ExternalSequenceBlockHash(108),
+                    ExternalSequenceBlockHash(999),
+                ],
+            ))
+            .await;
+        let _ = index.dump_events().await.unwrap();
+
+        let mut legacy = TestLowerTierIndex::new();
+        legacy
+            .apply_event(store_event(301, 0, 4, None, &[9], &[900]))
+            .unwrap();
+        legacy.mark_legacy(301, 0);
+        let counters = metrics.prebind();
+        legacy
+            .index
+            .apply_event(
+                &mut legacy.worker_blocks,
+                remove_event(301, 5, 0, vec![ExternalSequenceBlockHash(900)]),
+                Some(&counters),
+            )
+            .unwrap();
+        assert!(legacy.is_clean());
+
+        let value = |label| metrics.lower_tier_removal.with_label_values(&[label]).get();
+        assert_eq!(value(METRIC_LOWER_TIER_REMOVALS_FANOUT_CHUNKS), 1);
+        assert_eq!(value(METRIC_LOWER_TIER_REMOVAL_HASHES_MEMBER_COVERED), 3);
+        assert_eq!(value(METRIC_LOWER_TIER_REMOVAL_HASHES_LEGACY_DELETED), 1);
+        assert_eq!(value(METRIC_LOWER_TIER_REMOVAL_HASHES_OWNER_PROTECTED), 1);
+        assert_eq!(value(METRIC_LOWER_TIER_REMOVAL_HASHES_UNKNOWN), 1);
+        assert_eq!(value(METRIC_LOWER_TIER_ENTRIES_KEPT_SHARED_OWNER), 2);
     }
 }
