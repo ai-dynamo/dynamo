@@ -249,8 +249,11 @@ jobs:
             echo "No release manifest at this commit; skipping gate." | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          # Mainline scope only, same as release-branch-guard.yml.
-          if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          # Mainline scope only (X.Y.0), same as release-branch-guard.yml.
+          # A patch publish (e.g. 1.4.1) runs from a release branch whose
+          # manifest is frozen at the X.Y.0 cut, so enforcing here would
+          # block every patch RC on a release.version mismatch.
+          if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.0$ ]]; then
             echo "Non-mainline version '${VERSION}'; skipping gate." | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi

@@ -33,7 +33,11 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${BRANCH#release/}"
-          if [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          # Mainline cuts only: X.Y.0. Patch trains (release/1.2.1,
+          # release/1.3.1 both exist today) are cut from an existing release
+          # branch, carry that release's frozen manifest, and would otherwise
+          # fail the release.version check and false-alarm the Slack channel.
+          if [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.0$ ]]; then
             echo "mainline=true" >> "$GITHUB_OUTPUT"
             echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           else
