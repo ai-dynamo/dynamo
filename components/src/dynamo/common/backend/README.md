@@ -16,7 +16,7 @@ guided decoding / structural tag.
 > path. See [Feature Gaps](#feature-gaps) for the per-engine matrix.
 
 > **Looking for a walkthrough?** Start with the
-> [Writing Unified Backends](../../../../../docs/development/unified-backends.md)
+> [Writing Unified Backends](../../../../../docs/fern/development/unified-backends.md)
 > guide and choose the Python tab. This README is the in-tree reference:
 > file layout, per-engine cancellation cookbook, disaggregation contract,
 > error-handling table, and the feature-gap matrix.

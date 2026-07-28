@@ -3147,6 +3147,7 @@ async fn images(
             dynamo_protocols::types::ImageModel::GptImage1 => "gpt-image-1".to_string(),
             dynamo_protocols::types::ImageModel::GptImage1dot5 => "gpt-image-1.5".to_string(),
             dynamo_protocols::types::ImageModel::GptImage1Mini => "gpt-image-1-mini".to_string(),
+            dynamo_protocols::types::ImageModel::GptImage2 => "gpt-image-2".to_string(),
             dynamo_protocols::types::ImageModel::Other(s) => s.clone(),
         })
         .unwrap_or_else(|| "diffusion".to_string());
