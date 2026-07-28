@@ -42,7 +42,7 @@ inputs:
     required: false
     default: 'false'
   artifact_retention_days:
-    description: 'Retention (days) for the uploaded compliance artifact (NOTICES + CSV + CycloneDX). PR passes 7; post-merge / nightly default to 30. The /sources OSRB tarball keeps its own longer retention.'
+    description: 'Retention (days) for the uploaded compliance artifact (NOTICES + CSV + CycloneDX). PR passes 7; post-merge / nightly default to 30. The /sources OSRB tarball is pinned to 30 regardless.'
     required: false
     default: '30'
   git_sha:
@@ -404,4 +404,7 @@ runs:
         # (same as the compliance artifact above), so upload the dir, not a
         # fixed filename.
         path: /tmp/sources/
-        retention-days: 365   # OSRB submissions retain longer than NOTICES/SBOMs
+        # Matches the compliance artifact's nightly retention. These run to
+        # ~200-300 MB per arch, so a longer window costs real storage; an OSRB
+        # submission that needs them past this re-runs the build from the tag.
+        retention-days: 30
