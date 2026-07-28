@@ -66,6 +66,7 @@ const (
 	maxDisaggregatedSetNameLength     = 31
 	maxDisaggregatedSetRoleNameLength = 63 - maxDisaggregatedSetNameLength - disaggregatedSetRevisionLength - 2
 	disaggregatedSetNameHashLength    = 8
+	dynamoGraphDeploymentKind         = "DynamoGraphDeployment"
 )
 
 type disaggregatedSetSelection struct {
@@ -515,7 +516,11 @@ func (r *DynamoGraphDeploymentReconciler) generateDisaggregatedSet(
 		if dcd == nil {
 			return nil, fmt.Errorf("generated DynamoComponentDeployment missing for selected component %q", componentName)
 		}
-		role, err := r.buildDisaggregatedSetRole(ctx, dcd)
+		renderDCD := dcd.DeepCopy()
+		if ownerRef := dgdControllerOwnerReference(dgd); ownerRef != nil {
+			renderDCD.SetOwnerReferences([]metav1.OwnerReference{*ownerRef})
+		}
+		role, err := r.buildDisaggregatedSetRole(ctx, renderDCD)
 		if err != nil {
 			return nil, fmt.Errorf("failed to build DisaggregatedSet role %q: %w", roleName, err)
 		}
@@ -563,10 +568,14 @@ func (r *DynamoGraphDeploymentReconciler) buildDisaggregatedSetRole(
 	lwsSpec := leaderworkersetv1.LeaderWorkerSetSpec{
 		Replicas:      &desiredReplicas,
 		StartupPolicy: leaderworkersetv1.LeaderCreatedStartupPolicy,
+		RolloutStrategy: leaderworkersetv1.RolloutStrategy{
+			Type: leaderworkersetv1.RollingUpdateStrategyType,
+		},
 		LeaderWorkerTemplate: leaderworkersetv1.LeaderWorkerTemplate{
 			LeaderTemplate: leaderPodTemplateSpec,
 			WorkerTemplate: *workerPodTemplateSpec,
 			Size:           &groupSize,
+			RestartPolicy:  leaderworkersetv1.RecreateGroupOnPodRestart,
 		},
 	}
 	lwsSpecUnstructured, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&lwsSpec)
@@ -738,16 +747,30 @@ func (r *DynamoGraphDeploymentReconciler) syncDisaggregatedSet(ctx context.Conte
 	current.SetAnnotations(annotations)
 	setDGDControllerOwnerReference(dgd, current)
 	current.Object["spec"] = desired.Object["spec"]
-	if equality.Semantic.DeepEqual(original.Object["spec"], current.Object["spec"]) &&
-		equality.Semantic.DeepEqual(original.GetLabels(), current.GetLabels()) &&
-		equality.Semantic.DeepEqual(original.GetAnnotations(), current.GetAnnotations()) &&
-		equality.Semantic.DeepEqual(original.GetOwnerReferences(), current.GetOwnerReferences()) {
+	if disaggregatedSetDesiredStateEqual(original, current) {
+		return false, current, nil
+	}
+
+	// Ask the API server to apply structural defaults before deciding whether
+	// the desired state differs. This keeps reconciliation stable across the
+	// pinned CRD and forward-compatible CRDs that add new defaulted fields.
+	if err := r.Patch(ctx, current, client.MergeFrom(original), client.DryRunAll); err != nil {
+		return false, nil, fmt.Errorf("failed to dry-run patch DisaggregatedSet %s/%s: %w", current.GetNamespace(), current.GetName(), err)
+	}
+	if disaggregatedSetDesiredStateEqual(original, current) {
 		return false, current, nil
 	}
 	if err := r.Patch(ctx, current, client.MergeFrom(original)); err != nil {
 		return false, nil, fmt.Errorf("failed to patch DisaggregatedSet %s/%s: %w", current.GetNamespace(), current.GetName(), err)
 	}
 	return true, current, nil
+}
+
+func disaggregatedSetDesiredStateEqual(a, b *unstructured.Unstructured) bool {
+	return equality.Semantic.DeepEqual(a.Object["spec"], b.Object["spec"]) &&
+		equality.Semantic.DeepEqual(a.GetLabels(), b.GetLabels()) &&
+		equality.Semantic.DeepEqual(a.GetAnnotations(), b.GetAnnotations()) &&
+		equality.Semantic.DeepEqual(a.GetOwnerReferences(), b.GetOwnerReferences())
 }
 
 func (r *DynamoGraphDeploymentReconciler) deleteDisaggregatedSetIfExists(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment) error {
@@ -862,13 +885,145 @@ func (r *DynamoGraphDeploymentReconciler) ensureControlledByDGD(ctx context.Cont
 	return nil
 }
 
+func (r *DynamoGraphDeploymentReconciler) restoreDisaggregatedSetServiceOwnershipToDCDs(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+) error {
+	if r.RuntimeConfig == nil || !r.RuntimeConfig.Gate.Enabled(features.DisaggregatedSet) {
+		return nil
+	}
+	ds := newDisaggregatedSetObject()
+	if err := r.Get(ctx, types.NamespacedName{Name: disaggregatedSetName(dgd), Namespace: dgd.Namespace}, ds); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to get DisaggregatedSet before restoring Service ownership: %w", err)
+	}
+	if !isControlledByBetaDGD(ds, dgd) {
+		return fmt.Errorf("refusing to restore Service ownership because DisaggregatedSet %s/%s is not controlled by DynamoGraphDeployment %s/%s", ds.GetNamespace(), ds.GetName(), dgd.Namespace, dgd.Name)
+	}
+
+	dcds := &nvidiacomv1beta1.DynamoComponentDeploymentList{}
+	if err := r.List(ctx, dcds, client.InNamespace(dgd.Namespace), client.MatchingLabels{
+		consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+	}); err != nil {
+		return fmt.Errorf("failed to list replacement DynamoComponentDeployments: %w", err)
+	}
+	sort.Slice(dcds.Items, func(i, j int) bool { return dcds.Items[i].Name < dcds.Items[j].Name })
+
+	serviceOwners := map[string]*nvidiacomv1beta1.DynamoComponentDeployment{}
+	componentOwners := map[string]*nvidiacomv1beta1.DynamoComponentDeployment{}
+	for i := range dcds.Items {
+		dcd := &dcds.Items[i]
+		if !isControlledByBetaDGD(dcd, dgd) {
+			continue
+		}
+		serviceOwners[dynamo.NormalizeKubeResourceName(dcd.Name)] = dcd
+		componentName := dynamo.GetDCDComponentName(dcd)
+		if componentOwners[componentName] == nil {
+			componentOwners[componentName] = dcd
+		}
+	}
+	for i := range dgd.Spec.Components {
+		component := &dgd.Spec.Components[i]
+		if component.ModelRef == nil || component.ModelRef.Name == "" {
+			continue
+		}
+		if owner := componentOwners[component.ComponentName]; owner != nil {
+			modelServiceName := dynamo.GenerateServiceName(component.ModelRef.Name)
+			if serviceOwners[modelServiceName] == nil {
+				serviceOwners[modelServiceName] = owner
+			}
+		}
+	}
+
+	serviceNames := make([]string, 0, len(serviceOwners))
+	for serviceName := range serviceOwners {
+		serviceNames = append(serviceNames, serviceName)
+	}
+	sort.Strings(serviceNames)
+	for _, serviceName := range serviceNames {
+		service := &corev1.Service{}
+		if err := r.Get(ctx, types.NamespacedName{Name: serviceName, Namespace: dgd.Namespace}, service); err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			return fmt.Errorf("failed to get replacement Service %s/%s: %w", dgd.Namespace, serviceName, err)
+		}
+		if err := r.ensureControlledByDCD(ctx, dgd, serviceOwners[serviceName], service); err != nil {
+			return fmt.Errorf("failed to restore Service %s/%s ownership: %w", service.Namespace, service.Name, err)
+		}
+	}
+	return nil
+}
+
+func (r *DynamoGraphDeploymentReconciler) ensureControlledByDCD(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
+	obj client.Object,
+) error {
+	ownerRef := dcdControllerOwnerReference(dcd)
+	if ownerRef == nil {
+		return fmt.Errorf("DynamoComponentDeployment %s/%s has no UID", dcd.Namespace, dcd.Name)
+	}
+	if metav1.IsControlledBy(obj, dcd) {
+		return nil
+	}
+	if controllerOwner := metav1.GetControllerOf(obj); controllerOwner != nil && !ownerReferenceMatchesDGD(controllerOwner, dgd) {
+		return fmt.Errorf("resource is controlled by %s/%s %q", controllerOwner.APIVersion, controllerOwner.Kind, controllerOwner.Name)
+	}
+
+	original := obj.DeepCopyObject().(client.Object)
+	ownerRefs := make([]metav1.OwnerReference, 0, len(obj.GetOwnerReferences())+1)
+	for _, ref := range obj.GetOwnerReferences() {
+		if ptr.Deref(ref.Controller, false) {
+			continue
+		}
+		if ref.APIVersion == ownerRef.APIVersion && ref.Kind == ownerRef.Kind && ref.Name == ownerRef.Name {
+			continue
+		}
+		ownerRefs = append(ownerRefs, ref)
+	}
+	ownerRefs = append(ownerRefs, *ownerRef)
+	obj.SetOwnerReferences(ownerRefs)
+	if err := r.Patch(ctx, obj, client.MergeFrom(original)); err != nil {
+		return fmt.Errorf("failed to update owner references: %w", err)
+	}
+	return nil
+}
+
+func dcdControllerOwnerReference(dcd *nvidiacomv1beta1.DynamoComponentDeployment) *metav1.OwnerReference {
+	if dcd == nil || dcd.UID == "" {
+		return nil
+	}
+	return &metav1.OwnerReference{
+		APIVersion:         nvidiacomv1beta1.GroupVersion.String(),
+		Kind:               "DynamoComponentDeployment",
+		Name:               dcd.Name,
+		UID:                dcd.UID,
+		Controller:         ptr.To(true),
+		BlockOwnerDeletion: ptr.To(true),
+	}
+}
+
+func ownerReferenceMatchesDGD(owner *metav1.OwnerReference, dgd *nvidiacomv1beta1.DynamoGraphDeployment) bool {
+	return owner != nil &&
+		dgd != nil &&
+		owner.APIVersion == nvidiacomv1beta1.GroupVersion.String() &&
+		owner.Kind == dynamoGraphDeploymentKind &&
+		owner.Name == dgd.Name &&
+		owner.UID != "" &&
+		owner.UID == dgd.UID
+}
+
 func dgdControllerOwnerReference(dgd *nvidiacomv1beta1.DynamoGraphDeployment) *metav1.OwnerReference {
 	if dgd == nil || dgd.UID == "" {
 		return nil
 	}
 	return &metav1.OwnerReference{
 		APIVersion:         nvidiacomv1beta1.GroupVersion.String(),
-		Kind:               "DynamoGraphDeployment",
+		Kind:               dynamoGraphDeploymentKind,
 		Name:               dgd.Name,
 		UID:                dgd.UID,
 		Controller:         ptr.To(true),
@@ -905,7 +1060,7 @@ func isControlledByBetaDGD(obj client.Object, dgd *nvidiacomv1beta1.DynamoGraphD
 	controllerOwner := metav1.GetControllerOf(obj)
 	return controllerOwner != nil &&
 		controllerOwner.APIVersion == nvidiacomv1beta1.GroupVersion.String() &&
-		controllerOwner.Kind == "DynamoGraphDeployment" &&
+		controllerOwner.Kind == dynamoGraphDeploymentKind &&
 		controllerOwner.Name == dgd.Name
 }
 
@@ -936,10 +1091,10 @@ func checkDisaggregatedSetReadiness(ds *unstructured.Unstructured, selection dis
 			}
 			continue
 		}
-		if componentStatus.Replicas < desiredReplicas ||
-			componentStatus.UpdatedReplicas < desiredReplicas ||
+		if componentStatus.Replicas != desiredReplicas ||
+			componentStatus.UpdatedReplicas != desiredReplicas ||
 			componentStatus.ReadyReplicas == nil ||
-			*componentStatus.ReadyReplicas < desiredReplicas {
+			*componentStatus.ReadyReplicas != desiredReplicas {
 			notReadyReasons = append(notReadyReasons, fmt.Sprintf(
 				"%s role %q replicas not ready (desired=%d replicas=%d updated=%d ready=%d)",
 				componentName,
@@ -1161,7 +1316,10 @@ func disaggregatedSetStatusChanged(oldObj, newObj client.Object) bool {
 	if !okOld || !okNew {
 		return false
 	}
-	return oldDS.GetGeneration() != newDS.GetGeneration() || !equality.Semantic.DeepEqual(oldDS.Object["status"], newDS.Object["status"])
+	return oldDS.GetGeneration() != newDS.GetGeneration() ||
+		!equality.Semantic.DeepEqual(oldDS.Object["status"], newDS.Object["status"]) ||
+		!equality.Semantic.DeepEqual(oldDS.GetLabels(), newDS.GetLabels()) ||
+		!equality.Semantic.DeepEqual(oldDS.GetOwnerReferences(), newDS.GetOwnerReferences())
 }
 
 func leaderWorkerSetStatusChanged(oldObj, newObj client.Object) bool {
@@ -1170,7 +1328,10 @@ func leaderWorkerSetStatusChanged(oldObj, newObj client.Object) bool {
 	if !okOld || !okNew {
 		return false
 	}
-	return oldLWS.Generation != newLWS.Generation || !equality.Semantic.DeepEqual(oldLWS.Status, newLWS.Status)
+	return oldLWS.Generation != newLWS.Generation ||
+		!equality.Semantic.DeepEqual(oldLWS.Status, newLWS.Status) ||
+		!equality.Semantic.DeepEqual(oldLWS.GetLabels(), newLWS.GetLabels()) ||
+		!equality.Semantic.DeepEqual(oldLWS.GetOwnerReferences(), newLWS.GetOwnerReferences())
 }
 
 func (r *DynamoGraphDeploymentReconciler) mapDisaggregatedSetChildLWSToDGD(ctx context.Context, obj client.Object) []ctrl.Request {
@@ -1186,7 +1347,7 @@ func (r *DynamoGraphDeploymentReconciler) mapDisaggregatedSetChildLWSToDGD(ctx c
 		return nil
 	}
 	owner := metav1.GetControllerOf(ds)
-	if owner == nil || owner.APIVersion != nvidiacomv1beta1.GroupVersion.String() || owner.Kind != "DynamoGraphDeployment" {
+	if owner == nil || owner.APIVersion != nvidiacomv1beta1.GroupVersion.String() || owner.Kind != dynamoGraphDeploymentKind {
 		return nil
 	}
 	return []ctrl.Request{{NamespacedName: types.NamespacedName{Name: owner.Name, Namespace: ds.GetNamespace()}}}

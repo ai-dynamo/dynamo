@@ -500,7 +500,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileWorkloadResources(
 
 	if r.isGrovePathway(dynamoDeployment) {
 		logger.Info("Reconciling Grove resources", "hasMultinode", hasMultinode, "lwsEnabled", r.RuntimeConfig.Gate.Enabled(features.LWS))
-		return r.reconcileReplacementBeforeDisaggregatedSetCleanup(ctx, dynamoDeployment, func() (ReconcileResult, error) {
+		return r.reconcileReplacementBeforeDisaggregatedSetCleanup(ctx, dynamoDeployment, false, func() (ReconcileResult, error) {
 			return r.reconcileGroveResources(ctx, dynamoDeployment, restartState, checkpointInfos)
 		})
 	}
@@ -517,7 +517,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileWorkloadResources(
 		}
 	}
 	logger.Info("Reconciling Dynamo components deployments", "hasMultinode", hasMultinode, "lwsEnabled", r.RuntimeConfig.Gate.Enabled(features.LWS))
-	return r.reconcileReplacementBeforeDisaggregatedSetCleanup(ctx, dynamoDeployment, func() (ReconcileResult, error) {
+	return r.reconcileReplacementBeforeDisaggregatedSetCleanup(ctx, dynamoDeployment, true, func() (ReconcileResult, error) {
 		return r.reconcileDynamoComponentsDeployments(ctx, dynamoDeployment, restartState, checkpointInfos)
 	})
 }
@@ -525,11 +525,17 @@ func (r *DynamoGraphDeploymentReconciler) reconcileWorkloadResources(
 func (r *DynamoGraphDeploymentReconciler) reconcileReplacementBeforeDisaggregatedSetCleanup(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	restoreDCDServiceOwnership bool,
 	reconcileReplacement func() (ReconcileResult, error),
 ) (ReconcileResult, error) {
 	result, err := reconcileReplacement()
 	if err != nil || result.State != nvidiacomv1beta1.DGDStateSuccessful {
 		return result, err
+	}
+	if restoreDCDServiceOwnership {
+		if err := r.restoreDisaggregatedSetServiceOwnershipToDCDs(ctx, dgd); err != nil {
+			return ReconcileResult{}, err
+		}
 	}
 	if err := r.deleteDisaggregatedSetOnLegacyPath(ctx, dgd); err != nil {
 		return ReconcileResult{}, err

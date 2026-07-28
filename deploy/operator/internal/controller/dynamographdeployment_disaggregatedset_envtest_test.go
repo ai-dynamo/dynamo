@@ -12,8 +12,10 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
@@ -57,10 +59,14 @@ var _ = Describe("DisaggregatedSet", func() {
 
 	It("keeps the serving resources during DCD to DS cutover", func() {
 		ctx := context.Background()
+		By("creating a ready two-component DCD deployment with stable component Services")
 		dgd := newDSHappyPathDGD()
 		dgd.Name = "demo-ds-cutover"
 		dgd.UID = ""
 		dgd.Annotations = nil
+		for i := range dgd.Spec.Components {
+			dgd.Spec.Components[i].ModelRef = &nvidiacomv1beta1.ModelReference{Name: "shared-smoke-model"}
+		}
 		Expect(k8sClient.Create(ctx, dgd)).To(Succeed())
 		DeferCleanup(func() {
 			_ = k8sClient.Delete(ctx, dgd)
@@ -100,6 +106,7 @@ var _ = Describe("DisaggregatedSet", func() {
 		}
 		Expect(serviceUIDs).To(HaveLen(2))
 
+		By("enabling DisaggregatedSet without removing the serving DCDs")
 		markCutoverDCDsReady(ctx, dgd)
 		result, err = reconciler.reconcileWorkloadResources(ctx, dgd, true, false, "", nil, nil)
 		Expect(err).NotTo(HaveOccurred())
@@ -117,6 +124,7 @@ var _ = Describe("DisaggregatedSet", func() {
 		Expect(ownedCutoverDCDs(ctx, dgd)).To(HaveLen(2), "legacy DCDs must remain until DS is ready")
 		Expect(cutoverServiceUIDs(ctx, dgd.Namespace, serviceUIDs)).To(Equal(serviceUIDs))
 
+		By("marking the DisaggregatedSet ready and completing ownership handoff")
 		ds := newDisaggregatedSetObject()
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: disaggregatedSetName(dgd), Namespace: dgd.Namespace}, ds)).To(Succeed())
 		ds.Object["status"] = map[string]any{
@@ -133,6 +141,47 @@ var _ = Describe("DisaggregatedSet", func() {
 		Expect(result.State).To(Equal(nvidiacomv1beta1.DGDStateSuccessful))
 		Expect(ownedCutoverDCDs(ctx, dgd)).To(BeEmpty())
 		Expect(cutoverServiceUIDs(ctx, dgd.Namespace, serviceUIDs)).To(Equal(serviceUIDs), "DS cutover must preserve component Services")
+		modelServiceName := dynamo.GenerateServiceName("shared-smoke-model")
+		modelService := &corev1.Service{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: modelServiceName, Namespace: dgd.Namespace}, modelService)).To(Succeed())
+		Expect(metav1.IsControlledBy(modelService, dgd)).To(BeTrue())
+		modelServiceUID := modelService.UID
+
+		By("falling back to DCDs while preserving Services until replacements are ready")
+		dgd.Annotations = nil
+		Expect(k8sClient.Update(ctx, dgd)).To(Succeed())
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgd.Name, Namespace: dgd.Namespace}, dgd)).To(Succeed())
+
+		result, err = reconciler.reconcileWorkloadResources(ctx, dgd, true, false, "", nil, nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(result.State).To(Equal(nvidiacomv1beta1.DGDStatePending))
+		Expect(ownedCutoverDCDs(ctx, dgd)).To(HaveLen(2))
+		markCutoverDCDsReady(ctx, dgd)
+
+		By("restoring component and shared model Service ownership before deleting the stale DisaggregatedSet")
+		result, err = reconciler.reconcileWorkloadResources(ctx, dgd, true, false, "", nil, nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(result.State).To(Equal(nvidiacomv1beta1.DGDStateSuccessful))
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: disaggregatedSetName(dgd), Namespace: dgd.Namespace}, newDisaggregatedSetObject()))).To(BeTrue())
+
+		fallbackDCDs := ownedCutoverDCDs(ctx, dgd)
+		fallbackDCDNames := map[string]struct{}{}
+		for _, dcd := range fallbackDCDs {
+			fallbackDCDNames[dcd.Name] = struct{}{}
+			service := &corev1.Service{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dynamo.NormalizeKubeResourceName(dcd.Name), Namespace: dgd.Namespace}, service)).To(Succeed())
+			owner := metav1.GetControllerOf(service)
+			Expect(owner).NotTo(BeNil())
+			Expect(owner.Kind).To(Equal("DynamoComponentDeployment"))
+			Expect(owner.Name).To(Equal(dcd.Name))
+		}
+		Expect(cutoverServiceUIDs(ctx, dgd.Namespace, serviceUIDs)).To(Equal(serviceUIDs))
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: modelServiceName, Namespace: dgd.Namespace}, modelService)).To(Succeed())
+		Expect(modelService.UID).To(Equal(modelServiceUID))
+		modelOwner := metav1.GetControllerOf(modelService)
+		Expect(modelOwner).NotTo(BeNil())
+		Expect(modelOwner.Kind).To(Equal("DynamoComponentDeployment"))
+		Expect(fallbackDCDNames).To(HaveKey(modelOwner.Name))
 	})
 })
 

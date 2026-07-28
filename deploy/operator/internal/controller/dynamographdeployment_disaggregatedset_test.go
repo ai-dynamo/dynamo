@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -31,6 +33,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/discovery"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/stretchr/testify/require"
@@ -172,6 +175,174 @@ func TestCheckDisaggregatedSetReadiness(t *testing.T) {
 	}
 	ready, _, _ = checkDisaggregatedSetReadiness(ds, selection)
 	require.True(t, ready)
+
+	t.Log("parent role status must not report readiness while extra replicas remain")
+	ds.Object["status"].(map[string]any)["roleStatuses"] = []any{
+		map[string]any{"name": "prefill", "replicas": int64(3), "updatedReplicas": int64(2), "readyReplicas": int64(3)},
+		map[string]any{"name": "decode", "replicas": int64(2), "updatedReplicas": int64(2), "readyReplicas": int64(2)},
+	}
+	ready, reason, _ = checkDisaggregatedSetReadiness(ds, selection)
+	require.False(t, ready)
+	require.Contains(t, reason, "prefill")
+}
+
+func TestGenerateDisaggregatedSetRolesUseDGDIdentityAndExplicitDefaults(t *testing.T) {
+	t.Log("build a two-role DisaggregatedSet with Kubernetes discovery enabled")
+	scheme := runtime.NewScheme()
+	require.NoError(t, nvidiacomv1beta1.AddToScheme(scheme))
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, leaderworkersetv1.AddToScheme(scheme))
+
+	dgd := newDSHappyPathDGD()
+	dcds, err := dynamo.GenerateDynamoComponentsDeployments(dgd, nil, nil, dynamo.RollingUpdateContext{})
+	require.NoError(t, err)
+	selection, reason := selectDisaggregatedSetComponents(dgd)
+	require.Empty(t, reason)
+
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client: fake.NewClientBuilder().WithScheme(scheme).Build(),
+		Config: &configv1alpha1.OperatorConfiguration{
+			Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
+		},
+		RuntimeConfig: &commoncontroller.RuntimeConfig{Gate: features.Gates{LWS: true, DisaggregatedSet: true}},
+	}
+	ds, err := reconciler.generateDisaggregatedSet(t.Context(), dgd, dcds, selection)
+	require.NoError(t, err)
+
+	t.Log("verify every role carries schema-valid defaults and the stable DGD service account")
+	roles, found, err := unstructured.NestedSlice(ds.Object, "spec", "roles")
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Len(t, roles, 2)
+	for _, rawRole := range roles {
+		role := rawRole.(map[string]any)
+		require.Equal(t, string(leaderworkersetv1.RollingUpdateStrategyType), nestedString(t, role, "spec", "rolloutStrategy", "type"))
+		require.Equal(t, string(leaderworkersetv1.RecreateGroupOnPodRestart), nestedString(t, role, "spec", "leaderWorkerTemplate", "restartPolicy"))
+		require.Equal(t, discovery.GetK8sDiscoveryServiceAccountName(dgd.Name), nestedString(t, role, "spec", "leaderWorkerTemplate", "leaderTemplate", "spec", "serviceAccountName"))
+		require.Equal(t, discovery.GetK8sDiscoveryServiceAccountName(dgd.Name), nestedString(t, role, "spec", "leaderWorkerTemplate", "workerTemplate", "spec", "serviceAccountName"))
+	}
+}
+
+func nestedString(t *testing.T, obj map[string]any, fields ...string) string {
+	t.Helper()
+	value, found, err := unstructured.NestedString(obj, fields...)
+	require.NoError(t, err)
+	require.True(t, found, "missing field %s", strings.Join(fields, "."))
+	return value
+}
+
+func TestDisaggregatedSetPredicatesObserveRoutingMetadata(t *testing.T) {
+	t.Log("DisaggregatedSet updates enqueue on labels and controller ownership")
+	baseDS := newDisaggregatedSetObject()
+	baseDS.SetLabels(map[string]string{consts.KubeLabelDynamoGraphDeploymentName: "demo"})
+	relabeledDS := baseDS.DeepCopy()
+	relabeledDS.SetLabels(map[string]string{consts.KubeLabelDynamoGraphDeploymentName: "other"})
+	reownedDS := baseDS.DeepCopy()
+	reownedDS.SetOwnerReferences([]metav1.OwnerReference{{APIVersion: nvidiacomv1beta1.GroupVersion.String(), Kind: dynamoGraphDeploymentKind, Name: "demo", UID: "demo-uid", Controller: ptr.To(true)}})
+	dsCases := []struct {
+		name    string
+		updated *unstructured.Unstructured
+		changed bool
+	}{
+		{name: "unchanged", updated: baseDS.DeepCopy(), changed: false},
+		{name: "label changed", updated: relabeledDS, changed: true},
+		{name: "owner changed", updated: reownedDS, changed: true},
+	}
+	for _, testCase := range dsCases {
+		t.Run("DisaggregatedSet/"+testCase.name, func(t *testing.T) {
+			require.Equal(t, testCase.changed, disaggregatedSetStatusChanged(baseDS, testCase.updated))
+		})
+	}
+
+	t.Log("LeaderWorkerSet updates enqueue on routing labels and controller ownership")
+	baseLWS := &leaderworkersetv1.LeaderWorkerSet{ObjectMeta: metav1.ObjectMeta{
+		Labels: map[string]string{
+			disaggregatedsetv1.SetNameLabelKey:  "demo",
+			disaggregatedsetv1.RoleLabelKey:     "prefill",
+			disaggregatedsetv1.RevisionLabelKey: "revision-a",
+		},
+	}}
+	relabeledLWS := baseLWS.DeepCopy()
+	relabeledLWS.Labels[disaggregatedsetv1.RevisionLabelKey] = "revision-b"
+	reownedLWS := baseLWS.DeepCopy()
+	reownedLWS.SetOwnerReferences([]metav1.OwnerReference{{APIVersion: disaggregatedSetGVK.GroupVersion().String(), Kind: "DisaggregatedSet", Name: "demo", UID: "demo-ds-uid", Controller: ptr.To(true)}})
+	lwsCases := []struct {
+		name    string
+		updated *leaderworkersetv1.LeaderWorkerSet
+		changed bool
+	}{
+		{name: "unchanged", updated: baseLWS.DeepCopy(), changed: false},
+		{name: "revision label changed", updated: relabeledLWS, changed: true},
+		{name: "owner changed", updated: reownedLWS, changed: true},
+	}
+	for _, testCase := range lwsCases {
+		t.Run("LeaderWorkerSet/"+testCase.name, func(t *testing.T) {
+			require.Equal(t, testCase.changed, leaderWorkerSetStatusChanged(baseLWS, testCase.updated))
+		})
+	}
+}
+
+func TestEnsureControlledByDCDTransfersOnlyDGDOwnedResources(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, nvidiacomv1beta1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "default", UID: "dgd-uid"},
+	}
+	dcd := &nvidiacomv1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo-prefill", Namespace: "default", UID: "dcd-uid"},
+	}
+
+	t.Run("preserves non-controller owners during DGD to DCD handoff", func(t *testing.T) {
+		service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{
+			Name:      "demo-prefill",
+			Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{
+				*dgdControllerOwnerReference(dgd),
+				{APIVersion: "v1", Kind: "ConfigMap", Name: "keep", UID: "keep-uid"},
+			},
+		}}
+		reconciler := &DynamoGraphDeploymentReconciler{
+			Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(service).Build(),
+		}
+
+		require.NoError(t, reconciler.ensureControlledByDCD(t.Context(), dgd, dcd, service))
+		persisted := &corev1.Service{}
+		require.NoError(t, reconciler.Get(t.Context(), client.ObjectKeyFromObject(service), persisted))
+		require.True(t, metav1.IsControlledBy(persisted, dcd))
+		require.Contains(t, persisted.OwnerReferences, metav1.OwnerReference{
+			APIVersion: "v1",
+			Kind:       "ConfigMap",
+			Name:       "keep",
+			UID:        "keep-uid",
+		})
+	})
+
+	t.Run("refuses to steal a resource from an unrelated controller", func(t *testing.T) {
+		foreignOwner := metav1.OwnerReference{
+			APIVersion: "apps/v1",
+			Kind:       "StatefulSet",
+			Name:       "foreign",
+			UID:        "foreign-uid",
+			Controller: ptr.To(true),
+		}
+		service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{
+			Name:            "foreign-owned",
+			Namespace:       "default",
+			OwnerReferences: []metav1.OwnerReference{foreignOwner},
+		}}
+		reconciler := &DynamoGraphDeploymentReconciler{
+			Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(service).Build(),
+		}
+
+		err := reconciler.ensureControlledByDCD(t.Context(), dgd, dcd, service)
+		require.ErrorContains(t, err, "resource is controlled by apps/v1/StatefulSet")
+		persisted := &corev1.Service{}
+		require.NoError(t, reconciler.Get(t.Context(), client.ObjectKeyFromObject(service), persisted))
+		require.Equal(t, []metav1.OwnerReference{foreignOwner}, persisted.OwnerReferences)
+	})
 }
 
 func TestApplyDisaggregatedSetCheckpointStartupPoliciesCoordinatesSelectedRoles(t *testing.T) {
@@ -467,7 +638,7 @@ func TestReconcileReplacementBeforeDisaggregatedSetCleanup(t *testing.T) {
 	}
 	key := types.NamespacedName{Name: ds.GetName(), Namespace: ds.GetNamespace()}
 
-	result, err := reconciler.reconcileReplacementBeforeDisaggregatedSetCleanup(t.Context(), dgd, func() (ReconcileResult, error) {
+	result, err := reconciler.reconcileReplacementBeforeDisaggregatedSetCleanup(t.Context(), dgd, false, func() (ReconcileResult, error) {
 		existing := newDisaggregatedSetObject()
 		require.NoError(t, reconciler.Get(t.Context(), key, existing), "DisaggregatedSet must remain while its replacement is pending")
 		return ReconcileResult{State: nvidiacomv1beta1.DGDStatePending}, nil
@@ -476,7 +647,7 @@ func TestReconcileReplacementBeforeDisaggregatedSetCleanup(t *testing.T) {
 	require.Equal(t, nvidiacomv1beta1.DGDStatePending, result.State)
 	require.NoError(t, reconciler.Get(t.Context(), key, newDisaggregatedSetObject()))
 
-	result, err = reconciler.reconcileReplacementBeforeDisaggregatedSetCleanup(t.Context(), dgd, func() (ReconcileResult, error) {
+	result, err = reconciler.reconcileReplacementBeforeDisaggregatedSetCleanup(t.Context(), dgd, false, func() (ReconcileResult, error) {
 		return ReconcileResult{State: nvidiacomv1beta1.DGDStateSuccessful}, nil
 	})
 	require.NoError(t, err)
