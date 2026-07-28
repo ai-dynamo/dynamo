@@ -1,6 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
 # Standalone (selector) on-ramp: aggregated serving, REPLICATED
 # (multiple EPP replicas that sync active load with each other).
 #
@@ -20,22 +32,32 @@
 # has an empty KV index and re-warms from live traffic + replay.)
 #
 # Prerequisites:
+#   - Gateway API and GAIE CRDs.
 #   - A GAIE-compatible Gateway named `inference-gateway` in the
 #     `agentgateway-system` namespace (the installer script deploys it there),
 #     with a listener that allows routes from other namespaces
 #     (allowedRoutes.namespaces.from: All).
+#   - A standalone-capable Dynamo Rust EPP image.
 #   - A secret `hf-token-secret` with key `HF_TOKEN` for the vLLM worker.
+#     This secret is required only for gated models; the public model used below
+#     does not require it.
+#
+# Replace `dynamo/dynamo-rust-epp:dev` before applying this manifest unless that
+# image is already available to the cluster.
+#
 # Apply with: kubectl apply -n <ns> -f agg.yaml
 # Test:
 #   GW=$(kubectl get gateway inference-gateway -n agentgateway-system -o jsonpath='{.status.addresses[0].value}')
+#   The model in the request MUST match DYN_MODEL_NAME below.
 #   curl http://$GW/v1/chat/completions -H 'content-type: application/json' -d '{
-#     "model": "Qwen/Qwen3-0.6B",   # MUST match DYN_MODEL_NAME below
+#     "model": "Qwen/Qwen3-0.6B",
 #     "messages": [{"role":"user","content":"hello"}]
 #   }'
 ---
 # Raw vLLM aggregated worker pool. Vanilla image; prefix caching + native
 # KV-cache events on a ZMQ PUB socket the embedded selector subscribes to.
 # --block-size MUST match the EPP's DYN_KV_CACHE_BLOCK_SIZE.
+# --max-num-batched-tokens MUST match DYN_EPP_MAX_NUM_BATCHED_TOKENS.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -43,7 +65,7 @@ metadata:
   labels:
     app: vllm-qwen
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app: vllm-qwen
@@ -54,19 +76,21 @@ spec:
     spec:
       containers:
         - name: vllm
-          image: vllm/vllm-openai:latest
+          image: vllm/vllm-openai:v0.26.0
           args:
-            - "--model"
-            - "Qwen/Qwen3-0.6B"
-            - "--served-model-name"
-            - "Qwen/Qwen3-0.6B"
-            - "--port"
+            - --model
+            - Qwen/Qwen3-0.6B
+            - --served-model-name
+            - Qwen/Qwen3-0.6B
+            - --port
             - "8000"
-            - "--enable-prefix-caching"
-            - "--block-size"
+            - --enable-prefix-caching
+            - --block-size
             - "16"
-            - "--kv-events-config"
-            - '{"enable_kv_cache_events":true,"endpoint":"tcp://*:5557"}'
+            - --max-num-batched-tokens
+            - "8192"
+            - --kv-events-config
+            - '{"publisher":"zmq","endpoint":"tcp://*:5557","enable_kv_cache_events":true}'
           ports:
             - name: http
               containerPort: 8000
@@ -87,11 +111,6 @@ spec:
             timeoutSeconds: 5
             failureThreshold: 3
           env:
-            - name: HF_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: hf-token-secret
-                  key: HF_TOKEN
             # As non-root (UID 1000) the image's default HOME is not writable, so
             # point HOME and the HF/model cache at world-writable /tmp — the worker
             # can then download the model without a mounted volume for this example.
@@ -100,9 +119,9 @@ spec:
             - name: HF_HOME
               value: /tmp/huggingface
           resources:
-            limits:
-              nvidia.com/gpu: "1"
             requests:
+              nvidia.com/gpu: "1"
+            limits:
               nvidia.com/gpu: "1"
           securityContext:
             allowPrivilegeEscalation: false
@@ -142,20 +161,36 @@ kind: ServiceAccount
 metadata:
   name: dynamo-epp
 ---
+# Standalone discovery reads only namespaced worker, pool, and EndpointSlice state.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: dynamo-epp
 rules:
-  - apiGroups: [""]
-    resources: ["pods"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["inference.networking.k8s.io"]
-    resources: ["inferencepools"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["discovery.k8s.io"]
-    resources: ["endpointslices"]
-    verbs: ["get", "list", "watch"]
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - inference.networking.k8s.io
+    resources:
+      - inferencepools
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - discovery.k8s.io
+    resources:
+      - endpointslices
+    verbs:
+      - get
+      - list
+      - watch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -191,45 +226,46 @@ spec:
       serviceAccountName: dynamo-epp
       containers:
         - name: epp
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:latest
+          image: dynamo/dynamo-rust-epp:dev
           imagePullPolicy: IfNotPresent
           env:
             # Standalone mode: runtime-free selector in-process (no Dynamo
             # runtime, no separate selection-service Deployment).
             - name: DYN_EPP_MODE
-              value: "standalone"
-            # Replication: watch THIS Deployment's own Service
-            # (EndpointSlices) to find sibling EPP replicas and sync active load
-            # over its required named replica-agg port. Omit this env to run a
-            # single fully-local replica (and set replicas: 1).
-            - name: DYN_EPP_PEER_SERVICE
-              value: "dynamo-epp"
+              value: standalone
             # Pod discovery: read the InferencePool this EPP backs. Its selector
             # and target port are the single source of truth (same object the
             # gateway routes to). Pool namespace defaults to POD_NAMESPACE.
             - name: DYN_EPP_INFERENCE_POOL_NAME
-              value: "vllm-qwen-pool"
-            # KV-event port can't live in the InferencePool, so it stays here.
-            - name: DYN_EPP_KV_EVENT_PORT
-              value: "5557"
+              value: vllm-qwen-pool
             # Model identity and tokenizer service used for routing tokens.
             - name: DYN_MODEL_NAME
-              value: "Qwen/Qwen3-0.6B"
+              value: Qwen/Qwen3-0.6B
             # Tokenizer service base URL + wire protocol. Points at vLLM's
             # /v1/chat/completions/render endpoint; "vllm-render" is the only
             # supported protocol today. Both are required.
             - name: DYN_EPP_TOKENIZER_SERVICE_URL
-              value: "http://vllm-qwen-render:8000"
+              value: http://vllm-qwen-render:8000
             - name: DYN_EPP_TOKENIZER_PROTOCOL
-              value: "vllm-render"
+              value: vllm-render
+            # Must match the vLLM engine's --block-size.
             - name: DYN_KV_CACHE_BLOCK_SIZE
               value: "16"
+            # KV-event port can't live in the InferencePool, so it stays here.
+            - name: DYN_EPP_KV_EVENT_PORT
+              value: "5557"
             # Per-worker max batched tokens. REQUIRED: the router's
             # queue-threshold admission is on by default, and a worker missing
             # this is left unschedulable ("no schedulable workers"). Set it to
             # the vLLM engine's --max-num-batched-tokens.
             - name: DYN_EPP_MAX_NUM_BATCHED_TOKENS
               value: "8192"
+            # Replication: watch THIS Deployment's own Service
+            # (EndpointSlices) to find sibling EPP replicas and sync active load
+            # over its required named replica-agg port. Omit this env to run a
+            # single fully-local replica (and set replicas: 1).
+            - name: DYN_EPP_PEER_SERVICE
+              value: dynamo-epp
             # The reflector watches pods in the EPP's own namespace.
             - name: POD_NAMESPACE
               valueFrom:
@@ -261,6 +297,7 @@ spec:
               drop:
                 - ALL
 ---
+# GAIE calls the gRPC port. EPP replicas use `replica-agg` for load-state sync.
 apiVersion: v1
 kind: Service
 metadata:
@@ -272,7 +309,7 @@ spec:
     - name: grpc
       appProtocol: http2
       port: 9002
-      targetPort: 9002
+      targetPort: grpc
     - name: replica-agg
       port: 9092
       targetPort: replica-agg
@@ -309,7 +346,9 @@ spec:
     # (status.parents stays empty). Change these to match your Gateway; drop
     # `namespace` only if the Gateway is in THIS namespace. The Gateway listener
     # must also allow routes from this namespace (allowedRoutes.namespaces).
-    - name: inference-gateway
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: inference-gateway
       namespace: agentgateway-system
       sectionName: http
   rules:
@@ -321,5 +360,7 @@ spec:
         - group: inference.networking.k8s.io
           kind: InferencePool
           name: vllm-qwen-pool
+          port: 8000
+          weight: 1
       timeouts:
-        request: "300s"
+        request: 300s

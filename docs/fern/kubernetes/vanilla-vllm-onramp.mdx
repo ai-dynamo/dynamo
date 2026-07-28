@@ -3,465 +3,543 @@
 # SPDX-License-Identifier: Apache-2.0
 title: "Vanilla vLLM GAIE On-ramp"
 sidebar-title: "Vanilla vLLM On-ramp"
-subtitle: Dynamo EPP routing for existing GAIE deployments that run vanilla vLLM pods
+subtitle: Add Dynamo's advanced KV-aware routing to GAIE deployments that use upstream vLLM images.
 ---
-This on-ramp is for Kubernetes users who already use
-[Gateway API Inference Extension (GAIE)](https://github.com/kubernetes-sigs/gateway-api-inference-extension) with
-vanilla `vLLM serve` pods and want to evaluate the Dynamo kv aware router without installing the Dynamo operator
-first. GAIE still owns endpoint selection at the Gateway API layer. The difference is that the
-Endpoint Picker uses Dynamo Router without the rest of the Dynamo stack.
 
-If you already run GAIE + vLLM, you **replace only your EndpointPicker (EPP) image**
-with the Dynamo EPP image, specify the `DYN_EPP_MODE="standalone"` environment variable, and you are done — no need to install the Dynamo operator, Dynamo runtime, or Dynamo worker.
+<Warning>
+This on-ramp uses the **experimental standalone mode** of the Dynamo Endpoint Picker Plugin (EPP).
+This is a special operator-free integration for existing vanilla vLLM fleets, not the standard
+operator-managed Gateway API path. Standalone mode is not available in a published Dynamo release
+yet. Use an image built from a Dynamo revision that includes standalone EPP support.
+</Warning>
 
-## What This Deploys
+Use this on-ramp to add Dynamo's advanced KV-aware routing to
+[Gateway API Inference Extension (GAIE)](https://github.com/kubernetes-sigs/gateway-api-inference-extension)
+deployments that run stock `vllm serve` workers. **Stock vLLM** means the upstream vLLM container
+images. You do not need to replace them with Dynamo vLLM images, install the Dynamo operator, or
+migrate the rest of the deployment to Dynamo. The standalone Dynamo Endpoint Picker Plugin (EPP)
+adds the routing layer while your Gateway, `HTTPRoute`, and `InferencePool` remain standard GAIE
+resources and your workers keep running the upstream vLLM images.
+
+The EPP runs the same Dynamo worker selection service used by a full Dynamo deployment. In standalone
+mode, it runs in-process without a `DynamoGraphDeployment` (DGD) or the Dynamo distributed runtime
+and event plane.
+
+This is still the **Gateway API routing topology** described in
+[KV-Aware Routing on Kubernetes](kv-aware-routing.md). Standalone mode changes who creates the
+resources and how the EPP discovers worker state; it does not add a third request-entry topology.
+
+## Architecture
 
 ```mermaid
 flowchart LR
-    Client["Client"] -->|"sends request"| Gateway["Gateway API<br/>Gateway"]
-    Gateway -->|"matches"| Route["HTTPRoute"]
-    Route -->|"targets"| Pool["InferencePool"]
-    Pool -->|"calls"| EPP["Dynamo EPP<br/>standalone mode"]
-    EPP -->|"selects endpoint"| VLLM["raw vLLM pod"]
-    VLLM -. "publishes KV events<br/>ZMQ :5557" .-> EPP
-    EPP -->|"updates"| Index["In-memory KV index"]
+    Client["Client"] --> Gateway["Gateway"]
+    Gateway --> Route["HTTPRoute"]
+    Route --> Pool["InferencePool"]
+    Pool --> EPP["Dynamo EPP<br/>standalone mode"]
+    EPP --> Worker["Ready vLLM pod"]
+    Worker -. "KV events<br/>ZMQ :5557" .-> EPP
+    EPP -->|"POST request body<br/>/v1/chat/completions/render"| Render["vLLM HTTP Service<br/>tokenizer endpoint"]
+    Render -->|"routing tokens"| EPP
+    Render -. "selects the same vLLM pods" .-> Worker
 ```
 
-This is intentionally not the same lifecycle model as the operator-managed GAIE quickstart. There is no `DynamoGraphDeployment`, no Dynamo worker runtime, and no Dynamo event plane in this on-ramp. We will be starting with a simple Kubernetes `apps/v1` Deployment of `vllm serve` pods.
+The `InferencePool` is the source of truth for the worker labels and HTTP port. The EPP watches that
+pool and Ready pods in its namespace, subscribes directly to each worker's KV event socket, and calls
+vLLM's `/v1/chat/completions/render` endpoint to tokenize each routing request. The Gateway forwards
+the original request to the selected pod. The render Service is not a separate renderer workload; it
+is a stable Kubernetes Service address for the HTTP endpoint served by the same vLLM pods.
 
-| | This on-ramp (standalone mode) | Full Dynamo (dynamo mode) |
+| Concern | Standalone on-ramp | Operator-managed Gateway API routing |
 |---|---|---|
-| Workers | stock `vllm serve` | Dynamo workers (vLLM/SGLang/TRT-LLM) |
-| Discovery | K8s pod reflector; membership comes from the `InferencePool` (selector + target port) | Dynamo discovery (etcd/K8s) |
-| KV events | per-pod vLLM ZMQ → the in-process `SelectionCore` indexer subscribes directly | Dynamo event plane |
-| Runtime | none — runtime-free (no etcd, no NATS, no event plane) | etcd + NATS |
-| Operator | not required | required (DynamoGraphDeployment) |
-| Tokenization | EPP calls vLLM `/v1/chat/completions/render` for routing tokens | model-card preprocessor, no extra render call |
+| Workers | Stock vLLM pods | Dynamo workers and direct-mode Frontend sidecars |
+| Resource lifecycle | User-managed Deployments, Services, RBAC, `InferencePool`, and `HTTPRoute` | DGD and Dynamo operator |
+| Worker discovery | Kubernetes pod watch driven by `InferencePool.spec.selector` | Dynamo runtime discovery |
+| KV state | Direct per-pod vLLM ZMQ subscriptions | Dynamo event plane |
+| Tokenization | vLLM `/v1/chat/completions/render` Service | Dynamo model-card preprocessor |
+| Supported serving shape | Aggregated vLLM with data-parallel size 1 per pod | Aggregated and disaggregated Dynamo deployments |
 
-The EPP is served in one of two modes, selected at startup by **`DYN_EPP_MODE`**
-(`dynamo` | `standalone`); the same binary serves both. In
-standalone mode the EPP and a runtime-free `SelectionService` are compiled into
-one process, so there is no separate selection-service Deployment and no HTTP
-hop. It runs single-replica, or **replicated** — set `DYN_EPP_PEER_SERVICE` and
-the replicas discover each other and sync active load (admission/prefill/free)
-over ZMQ.
+For the operator-managed architecture and generated-resource boundary, see
+[Gateway API Routing Architecture](../design-docs/gateway-api-routing.md).
 
+## Before You Begin
 
-### 1. Prerequisites
+You need:
 
-- Kubernetes cluster with GPU nodes.
-- `kubectl`, [Helm](https://helm.sh/docs/intro/install/), and
-  [jq](https://jqlang.org/download/) configured for the cluster.
-- Baseline Gateway API knowledge from the upstream
-  [Gateway API getting started guide](https://gateway-api.sigs.k8s.io/guides/getting-started/introduction/)
-  and the upstream
-  [Inference Extension GAIE guide](https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/main/site-src/guides/index.md).
-- A Gateway API implementation that supports GAIE `InferencePool` resources and `endpointPickerRef`
-  calls. This walkthrough shows the same verified agentgateway path as the GAIE
-  quickstart; other implementations might work when they support that same EPP path. See the upstream
-  [GAIE gateway implementation list](https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/main/site-src/implementations/gateways.md)
-  for other implementations. The example below uses the [AgentGateway](https://agentgateway.dev/docs/kubernetes/main/quickstart/install/) in the `agentgateway-system` namespace.
-- A model namespace that can run GPU workloads.
-- Hugging Face credentials if the model requires them. The
-  [Kubernetes Quickstart](quickstart.mdx) explains the general secret
-  pattern; it is not GAIE-specific.
-- Access to a Dynamo EPP image.
-Set up a Gateway-API gateway + Inference Extension (GAIE) if you don't have one
-yet. Follow the instructions for your gateway (e.g.
+- A Kubernetes cluster with GPU nodes.
+- `kubectl` and Helm configured for the cluster.
+- A Dynamo source checkout.
+- A container registry that every cluster node can pull from.
+- Two schedulable GPUs for the example's two vLLM replicas. You can scale the worker Deployment to
+  one replica for a smoke test.
 
-We provide a convenience script if you are installing from scratch for experimentation.
-```bash
-# Gateway API + Inference Extension CRDs + a gateway named `inference-gateway`.
-# The Gateway is created in the `agentgateway-system` namespace, and its
-# listener allows routes from other namespaces (allowedRoutes.namespaces.from:
-# All) so the HTTPRoute in your workload namespace attaches.
-deploy/inference-gateway/scripts/install_gaie_crd_agentgateway.sh
-```
+The example serves the public `Qwen/Qwen3-0.6B` model, which does not require a Hugging Face token.
 
-If you are starting from scratch install the [Prerequisites](#1-prerequisites) and apply the provided example file [`agg.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/inference-gateway/ext-proc/examples/onramp/agg.yaml).
+## Build the EPP Image
+
+Standalone mode is not available in a published Dynamo image yet. From the repository root, build
+the Rust EPP from the current source revision and push it to your container registry:
 
 ```bash
-kubectl apply -n <ns> -f agg.yaml
-# The Gateway lives in the `agentgateway-system` namespace:
-GW=$(kubectl get gateway inference-gateway -n agentgateway-system -o jsonpath='{.status.addresses[0].value}')
-curl http://$GW/v1/chat/completions -H 'content-type: application/json' -d '{
-  "model": "Qwen/Qwen3-0.6B",
-  "messages": [{"role":"user","content":"hello"}]
-}'
+export EPP_IMAGE=registry.example.com/your-project/dynamo-rust-epp:standalone
+
+make -C deploy/inference-gateway/ext-proc \
+  IMAGE_TAG="$EPP_IMAGE" \
+  image-push
 ```
-Otherwise, if you already have GAIE and raw vLLM workers running follow the steps below.
 
+## Choose a Deployment Path
 
-## Example Progression from vLLM to vLLM + Dynamo + GAIE
+Choose the path that matches your starting point:
 
-### Initial Deployment
+- **Deploy from Scratch** installs the Gateway API layer and applies the complete example, including
+  vLLM workers, the EPP, an `InferencePool`, and an `HTTPRoute`.
+- **Use the Dynamo EPP in an Existing GAIE Deployment** keeps your current Gateway, `HTTPRoute`,
+  `InferencePool`, and vLLM workers. Deploy a replacement EPP as shown below, or adapt the existing
+  EPP Deployment in place with the same configuration.
+
+Both paths use the same example names so the verification commands apply to either path:
+
+| Resource | Example Name |
+|---|---|
+| Workload namespace | `gaie-vllm-onramp` (`$NAMESPACE`) |
+| Gateway namespace | `agentgateway-system` (`$AGW_NAMESPACE`) |
+| Gateway | `inference-gateway` |
+| vLLM Deployment | `vllm-qwen` |
+| vLLM HTTP/render Service | `vllm-qwen-render` |
+| EPP Deployment and Service | `dynamo-epp` |
+| InferencePool | `vllm-qwen-pool` |
+| HTTPRoute | `vllm-qwen-route` |
+
+<Note>
+For an existing GAIE deployment, these are example names. Replace them in the commands and YAML
+snippets with the names of your existing resources.
+</Note>
+
+Set the shared namespace variables:
+
+```bash
+export NAMESPACE=gaie-vllm-onramp
+export AGW_NAMESPACE=agentgateway-system
+```
+
+<Tabs>
+<Tab title="Deploy from Scratch">
+
+### Install the Gateway API Layer
+
+Install Gateway API, GAIE, agentgateway, and the Gateway:
+
+```bash
+./deploy/inference-gateway/scripts/install_gaie_crd_agentgateway.sh
+```
+
+The script pins the supported Gateway API, GAIE, and agentgateway versions. It creates the
+`inference-gateway` Gateway in `$AGW_NAMESPACE`; the `http` listener allows `HTTPRoute` resources
+from workload namespaces. The on-ramp resources remain in `$NAMESPACE`.
+
+Verify that the Gateway is programmed:
+
+```bash
+kubectl wait gateway/inference-gateway -n "$AGW_NAMESPACE" \
+  --for=condition=Programmed --timeout=180s
+```
+
+### Configure Model Access
+
+The public `Qwen/Qwen3-0.6B` model in the example does not require authentication. To substitute a
+gated or private Hugging Face model, create a Secret in the workload namespace before deploying:
+
+```bash
+read -rsp "Hugging Face token: " HF_TOKEN
+echo
+kubectl create secret generic hf-token-secret -n "$NAMESPACE" \
+  --from-literal=HF_TOKEN="$HF_TOKEN"
+unset HF_TOKEN
+```
+
+Add the Secret reference to the vLLM container in `agg.yaml`:
 
 ```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: vllm-qwen
-  labels:
-    app: vllm-qwen
-spec:
-  replicas: 3
-  selector:
-    matchLabels:
-      app: vllm-qwen
-  template:
-    metadata:
-      labels:
-        app: vllm-qwen
-    spec:
-      containers:
-        - name: vllm
-          image: vllm/vllm-openai:latest
-          args:
-            - "--model"
-            - "Qwen/Qwen3-0.6B"
-          ports:
-            - name: http
-              containerPort: 8000
-          resources:
-            limits:
-              nvidia.com/gpu: "1"
----
+env:
+  - name: HF_TOKEN
+    valueFrom:
+      secretKeyRef:
+        name: hf-token-secret
+        key: HF_TOKEN
+```
+
+### Deploy the On-ramp
+
+The installation script above creates the Gateway API and GAIE layer. The example manifest then
+creates the workload layer in `$NAMESPACE`:
+
+- Two stock vLLM workers with prefix caching, KV events, and readiness probes.
+- A `vllm-qwen-render` Service that selects those same workers and exposes their HTTP port for
+  `/v1/chat/completions/render`.
+- Namespaced read-only RBAC for pods, `InferencePool`, and `EndpointSlice` resources.
+- Two standalone EPP replicas and their gRPC and replica-synchronization Service.
+- An `InferencePool` and an `HTTPRoute` that attaches to the cross-namespace Gateway.
+
+Apply the manifest from the repository root using the image you pushed:
+
+```bash
+sed "s#dynamo/dynamo-rust-epp:dev#$EPP_IMAGE#" \
+  deploy/inference-gateway/ext-proc/examples/onramp/agg.yaml |
+  kubectl apply -n "$NAMESPACE" -f -
+```
+
+The checked-in manifest is also available as
+[`agg.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/inference-gateway/ext-proc/examples/onramp/agg.yaml).
+
+</Tab>
+<Tab title="Use the Dynamo EPP in an Existing GAIE Deployment">
+
+The starting point for this path is a working GAIE request path with a Gateway, `HTTPRoute`,
+`InferencePool`, EPP Deployment and Service, and upstream vLLM Deployment. Keep the Gateway,
+`HTTPRoute`, `InferencePool`, and vLLM workload. Choose how to deploy the Dynamo EPP:
+
+- **Deploy a replacement EPP.** Create a new Dynamo EPP Deployment and Service, switch
+  `InferencePool.spec.endpointPickerRef` to the new Service, and then remove the previous EPP
+  Deployment and Service.
+- **Adapt the existing EPP Deployment in place.** Change its container image and configuration to
+  run the Dynamo EPP. Keep the existing Service name and port so
+  `InferencePool.spec.endpointPickerRef` does not change.
+
+The steps below demonstrate the replacement path and use `dynamo-epp` for the new Deployment and
+Service. To adapt the existing Deployment instead, apply the same Dynamo image, environment
+variables, ports, readiness probe, ServiceAccount, and RBAC in place. Keep its labels aligned with
+the existing Service selector, and keep the Service and `endpointPickerRef` unchanged.
+
+Ensure that the Gateway listener allows routes from `$NAMESPACE`. See
+[Install Gateway API Routing](gateway-api-installation.mdx) for the shared agentgateway and Istio
+prerequisites.
+
+### Configure vLLM
+
+Every worker selected by the `InferencePool` must:
+
+- Expose its OpenAI-compatible server port.
+- Pass a readiness probe before the EPP registers it.
+- Enable prefix caching.
+- Publish KV cache events over ZMQ.
+- Use the same block size and maximum batched-token value configured on the EPP.
+
+The `InferencePool` selects pods, not the Deployment object. Ensure that its selector label is on
+`spec.template.metadata.labels`. To add the example label without replacing existing pod-template
+labels, patch the vLLM Deployment:
+
+```bash
+kubectl patch deployment/vllm-qwen -n "$NAMESPACE" --type merge \
+  --patch '{"spec":{"template":{"metadata":{"labels":{"app":"vllm-qwen"}}}}}'
+```
+
+Do not use `kubectl label deployment` for this step. That command changes
+`Deployment.metadata.labels`, which does not label the worker pods.
+
+Compare a typical existing vLLM container with the changes required by the on-ramp.
+
+**Before — existing vLLM container:**
+
+```yaml
+containers:
+  - name: vllm
+    image: vllm/vllm-openai:v0.26.0
+    args:
+      - --model
+      - Qwen/Qwen3-0.6B
+      - --port
+      - "8000"
+    ports:
+      - name: http
+        containerPort: 8000
+```
+
+**After — vLLM container prepared for the Dynamo EPP:**
+
+```yaml
+containers:
+  - name: vllm
+    image: vllm/vllm-openai:v0.26.0
+    args:
+      - --model
+      - Qwen/Qwen3-0.6B
+      - --served-model-name         # NEW: pin the OpenAI model ID used by the EPP
+      - Qwen/Qwen3-0.6B
+      - --port                      # CHECK: must match InferencePool.spec.targetPorts
+      - "8000"
+      - --enable-prefix-caching     # NEW: enable prefix reuse for KV-aware routing
+      - --block-size                # NEW: must equal DYN_KV_CACHE_BLOCK_SIZE
+      - "16"
+      - --max-num-batched-tokens    # NEW: must equal DYN_EPP_MAX_NUM_BATCHED_TOKENS
+      - "8192"
+      - --kv-events-config          # NEW: publish KV events on a ZMQ socket for the EPP
+      - '{"publisher":"zmq","endpoint":"tcp://*:5557","enable_kv_cache_events":true}'
+    ports:
+      - name: http
+        containerPort: 8000
+      - name: kv-events             # NEW: KV-event port the EPP subscribes to
+        containerPort: 5557
+    readinessProbe:                 # NEW: expose the worker only after vLLM can serve
+      httpGet:
+        path: /health
+        port: http
+```
+
+To tokenize each routing request, the Dynamo EPP calls vLLM's
+`/v1/chat/completions/render` endpoint through a stable Service URL. This is not a separate renderer
+deployment; the endpoint runs on the same vLLM pods that serve inference requests. Reuse an existing
+HTTP Service when it selects the same homogeneous vLLM pods, or create a Service such as:
+
+```yaml
 apiVersion: v1
 kind: Service
 metadata:
-  name: vllm-qwen
+  name: vllm-qwen-render
 spec:
   selector:
     app: vllm-qwen
   ports:
     - name: http
       port: 8000
-      targetPort: 8000
+      targetPort: http
 ```
 
-```bash
-# HF token secret for the vLLM worker (required for gated models)
-kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=<your-token>
-```
+Because the Service and EPP are in the same namespace, its base URL is
+`http://vllm-qwen-render:8000`. Set `DYN_EPP_TOKENIZER_SERVICE_URL` to that URL, or to the
+corresponding URL for the existing Service you reuse.
 
-### 2. Create / Wire the InferencePool and HTTPRoute
+### Deploy a Replacement EPP
 
-Now that Gateway and GAIE is installed, we can create an InferencePool and an accompanying Dynamo EPP.
-
-Point the `InferencePool` at your vLLM workers (see the
-[`vllm-qwen-pool` InferencePool in `agg.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/inference-gateway/ext-proc/examples/onramp/agg.yaml#L254) for a complete example):
-
-Specifically, these fields depend on the model you deploy, so make sure the settings below are adjusted to match your workers.
-
-- `spec.selector` — labels matching your vLLM pods.
-```yaml
-  selector:
-    matchLabels:
-      app: vllm-qwen
-```
-
-- `spec.targetPorts[].number` — the vLLM serving port (usually `8000`).
-```yaml
-  targetPorts:
-    - number: 8000
-```
-
-- `spec.endpointPickerRef` (a.k.a. `spec.extensionRef`) — the EPP service + port.
-```yaml
-  endpointPickerRef:
-    kind: Service
-    name: dynamo-epp
-    port:
-      number: 9002
-```
-
-Attach the `HTTPRoute` to the gateway and target the pool (see the
-[`vllm-qwen-route` HTTPRoute in `agg.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/inference-gateway/ext-proc/examples/onramp/agg.yaml#L270) for a complete example):
-
-- `spec.rules[].backendRefs[]` — targets the `InferencePool`.
-```yaml
-    - backendRefs:
-        - group: inference.networking.k8s.io
-          kind: InferencePool
-          name: vllm-qwen-pool
-          port: 8000
-          weight: 1
-```
-
-- `spec.parentRefs[]` — your gateway (set `namespace` + `sectionName` when the
-  gateway lives in another namespace, e.g. `agentgateway-system`).
-```yaml
-  parentRefs:
-    - group: gateway.networking.k8s.io
-      kind: Gateway
-      name: inference-gateway
-      # Name the Gateway's namespace + listener when it lives elsewhere (drop
-      # `namespace` only if the Gateway is in this namespace). Otherwise the
-      # route silently fails to attach (status.parents stays empty).
-      namespace: agentgateway-system
-      sectionName: http
-```
-
-### 3. Update vLLM deployment
-
-Add labels to your vLLM pods that match `InferencePool.spec.selector` (the EPP
-reads the pool to learn which pods to watch — there is no separate selector env
-var):
-
-```yaml
-metadata:
-  name: vllm-qwen
-  labels:
-    app: vllm-qwen
-```
-
-or
-```bash
-kubectl -n <ns> label deployment <vllm-deployment> app=vllm-qwen --overwrite
-```
-
-### 4. Add the EPP to your deployment
-
-Remove the vLLM router (if you have it already installed) and replace it with the EPP (Dynamo Router).
-Add the EPP as a `Deployment` + `Service` (see the
-[`dynamo-epp` Deployment in `agg.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/inference-gateway/ext-proc/examples/onramp/agg.yaml#L146) for a complete example) and set:
-
-```yaml
-kind: Deployment
-metadata:
-  name: dynamo-epp
-  labels:
-    app: dynamo-epp
-```
-
-1. **Set the EPP image.** The Dynamo EPP ships as the "frontend" image with each
-   release; standalone mode is a pure runtime flag, no special build.
-
-2. **Select standalone mode and point at the pool.** The EPP reads the
-   `InferencePool` it backs (the same object the gateway routes to) to learn the
-   pod selector and HTTP target port — so no pod-selector/target-port env is
-   needed. It watches pods in its own namespace (`POD_NAMESPACE`, via the
-   downward API):
-
-   ```yaml
-   - name: DYN_EPP_MODE
-     value: "standalone"       # in-process selector; no separate service
-   - name: DYN_EPP_INFERENCE_POOL_NAME
-     value: "vllm-qwen-pool"    # the InferencePool this EPP backs
-   - name: POD_NAMESPACE
-     valueFrom:
-       fieldRef:
-         fieldPath: metadata.namespace
-   ```
-
-3. **Point at the workers' KV-event socket.** The worker publishes KV events via
-   `--kv-events-config`; the in-process `SelectionCore` indexer subscribes on the
-   matching port at each Ready pod's IP.
-
-   vLLM worker arg:
-
-   ```text
-   --kv-events-config '{"enable_kv_cache_events":true,"endpoint":"tcp://*:5557"}'
-   ```
-
-   EPP env:
-
-   ```yaml
-   - name: DYN_EPP_KV_EVENT_PORT
-     value: "5557"
-   ```
-
-4. **Set the model, tokenizer service, and block size.** The tokenizer service
-   URL points to a vLLM HTTP Service exposing `/v1/chat/completions/render`; it
-   may select the same homogeneous worker pods. `DYN_EPP_TOKENIZER_PROTOCOL`
-   selects its wire protocol (only `vllm-render` is supported today). The block
-   size MUST equal the vLLM `--block-size`:
-
-   ```yaml
-   - name: DYN_MODEL_NAME
-     value: "Qwen/Qwen3-0.6B"
-   - name: DYN_EPP_TOKENIZER_SERVICE_URL
-     value: "http://vllm-qwen-render:8000"
-   - name: DYN_EPP_TOKENIZER_PROTOCOL
-     value: "vllm-render"
-   - name: DYN_KV_CACHE_BLOCK_SIZE
-     value: "16"
-   ```
-
-5. **(Optional) Tune KV routing and recovery:**
-
-   ```yaml
-   # KV indexer thread pool for the in-process selector.
-   - name: DYN_EPP_SELECTION_INDEXER_THREADS
-     value: "4"
-   # ZMQ replay socket for gap recovery (only if the vLLM worker exposes one).
-   - name: DYN_EPP_KV_EVENT_REPLAY_PORT
-     value: "5558"
-   # Scoring / queueing behavior use the standard router env, e.g.:
-   - name: DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT
-     value: "1.0"
-   ```
-
-   To run **more than one** EPP replica, set `DYN_EPP_PEER_SERVICE` to the EPP's
-   own `Service` so replicas discover each other and sync active load over its
-   required named `replica-agg` port (see the `README.md` "Replicated mode"
-   section), and add `POD_IP` (downward API `status.podIP`) so a replica excludes
-   itself.
-
-   See the full list in the
-   [environment contract](#standalone-mode-environment-contract) below.
-
-In the end your final vLLM deployment will look like below:
+Create a ServiceAccount with namespaced `get`, `list`, and `watch` access to pods, `InferencePool`
+resources, and `EndpointSlice` resources. Then create the replacement Deployment with the Dynamo EPP
+image. The environment variables belong to the EPP container in
+`spec.template.spec.containers[].env`:
 
 ```yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: vllm-qwen
-  labels:
-    app: vllm-qwen
+  name: dynamo-epp
 spec:
-  replicas: 3
+  replicas: 2
   selector:
     matchLabels:
-      app: vllm-qwen
+      app: dynamo-epp
   template:
     metadata:
       labels:
-        app: vllm-qwen
+        app: dynamo-epp
     spec:
+      serviceAccountName: dynamo-epp
       containers:
-        - name: vllm
-          image: vllm/vllm-openai:latest
-          args:
-            - "--model"
-            - "Qwen/Qwen3-0.6B"
-            - "--served-model-name"     # NEW: pin the OpenAI model id
-            - "Qwen/Qwen3-0.6B"
-            - "--port"                  # NEW: explicit (8000 is vLLM's default)
-            - "8000"
-            - "--enable-prefix-caching" # NEW: required so vLLM emits prefix KV events
-            - "--block-size"            # NEW: MUST equal the EPP's DYN_KV_CACHE_BLOCK_SIZE
-            - "16"
-            - "--kv-events-config"      # NEW: publish KV events on a ZMQ PUB socket for the EPP
-            - '{"enable_kv_cache_events":true,"endpoint":"tcp://*:5557"}'
-          ports:
-            - name: http
-              containerPort: 8000
-            - name: kv-events           # NEW: KV-event PUB port the EPP subscribes to
-              containerPort: 5557
-          env:                          # NEW: HF token lets the worker pull the model (required for gated models)
-            - name: HF_TOKEN
+        - name: epp
+          image: <EPP_IMAGE>
+          env:
+            - name: DYN_EPP_MODE
+              value: standalone
+            - name: DYN_EPP_INFERENCE_POOL_NAME
+              value: vllm-qwen-pool
+            - name: POD_NAMESPACE
               valueFrom:
-                secretKeyRef:
-                  name: hf-token-secret
-                  key: HF_TOKEN
-          resources:
-            limits:
-              nvidia.com/gpu: "1"
-      tolerations:
-        - effect: NoSchedule
-          key: nvidia.com/gpu
-          operator: Exists
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: DYN_MODEL_NAME
+              value: Qwen/Qwen3-0.6B
+            - name: DYN_EPP_TOKENIZER_SERVICE_URL
+              value: http://vllm-qwen-render:8000
+            - name: DYN_EPP_TOKENIZER_PROTOCOL
+              value: vllm-render
+            - name: DYN_KV_CACHE_BLOCK_SIZE
+              value: "16"
+            - name: DYN_EPP_KV_EVENT_PORT
+              value: "5557"
+            - name: DYN_EPP_MAX_NUM_BATCHED_TOKENS
+              value: "8192"
+            - name: DYN_EPP_PEER_SERVICE
+              value: dynamo-epp
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
 ```
 
-## Test
+The example runs two EPP replicas, so `DYN_EPP_PEER_SERVICE` and `POD_IP` are part of its required
+configuration.
+
+The model name, block size, event port, and maximum batched-token values in the example are one
+coherent configuration. Change them together when adapting another model or vLLM deployment.
+
+Create the replacement `dynamo-epp` Service with gRPC port `9002` and, for two replicas, the named
+`replica-agg` port. The complete ServiceAccount, RBAC, Deployment, and Service definitions are
+available in the
+[`agg.yaml` EPP resources](https://github.com/ai-dynamo/dynamo/blob/main/deploy/inference-gateway/ext-proc/examples/onramp/agg.yaml).
+
+### Connect the InferencePool
+
+Confirm these fields on the existing `InferencePool`:
+
+- Confirm that `spec.selector` matches labels on the vLLM pod template, not only the Deployment.
+- Confirm that `spec.targetPorts[0].number` is the vLLM HTTP port.
+- Update `spec.endpointPickerRef` to the replacement `dynamo-epp` Service on port `9002`. When
+  adapting the existing Deployment behind the same Service and port, this field does not change.
+
+The Dynamo EPP reads the pool at runtime. Do not duplicate the worker selector or HTTP port in EPP
+environment variables.
+
+If you deployed a replacement, remove the previous EPP Deployment and Service after switching
+`spec.endpointPickerRef`.
+
+</Tab>
+</Tabs>
+
+## Verify the Deployment
+
+These commands apply to both paths because they use the same example names. Wait for the vLLM
+workers and EPP:
 
 ```bash
-# terminal 1
-kubectl -n agentgateway-system port-forward svc/inference-gateway 8000:80
+kubectl wait deployment/vllm-qwen -n "$NAMESPACE" \
+  --for=condition=Available --timeout=600s
 
-# terminal 2
-GATEWAY_URL=http://localhost:8000
+kubectl wait deployment/dynamo-epp -n "$NAMESPACE" \
+  --for=condition=Available --timeout=180s
+```
 
-# quick health/smoke first
-curl --max-time 20 -sS "$GATEWAY_URL/v1/models" | jq .
+Confirm that the route attached to the intended Gateway:
 
-# then chat completion
-curl --max-time 120 -sS "$GATEWAY_URL/v1/chat/completions" \
+```bash
+kubectl get httproute/vllm-qwen-route -n "$NAMESPACE" \
+  -o jsonpath='{range .status.parents[*]}{.parentRef.name}{"\\t"}{range .conditions[*]}{.type}={.status}{" "}{end}{"\\n"}{end}'
+```
+
+The output should identify `inference-gateway` and report `Accepted=True` and
+`ResolvedRefs=True`.
+
+Find the Service generated for the Gateway and start a port-forward:
+
+```bash
+export GATEWAY_SERVICE=$(kubectl get service -n "$AGW_NAMESPACE" \
+  -l gateway.networking.k8s.io/gateway-name=inference-gateway \
+  -o jsonpath='{.items[0].metadata.name}')
+
+kubectl port-forward -n "$AGW_NAMESPACE" "service/$GATEWAY_SERVICE" 8000:80
+```
+
+In another terminal, send an OpenAI-compatible request:
+
+```bash
+curl --max-time 120 -sS http://localhost:8000/v1/chat/completions \
   -H 'content-type: application/json' \
   -d '{
     "model": "Qwen/Qwen3-0.6B",
-    "messages": [{"role":"user","content":"hello"}]
-  }' | jq .
-
+    "messages": [
+      {"role": "user", "content": "Write one sentence about prefix caching."}
+    ],
+    "max_tokens": 64
+  }'
 ```
 
-## Standalone mode environment contract
+Inspect the EPP logs near the request:
 
+```bash
+kubectl logs -n "$NAMESPACE" deployment/dynamo-epp --tail=200
+```
 
-> [!NOTE]
-> The `model` field MUST match `DYN_MODEL_NAME` in the EPP deployment, and the
-> EPP's `DYN_KV_CACHE_BLOCK_SIZE` MUST equal the vLLM `--block-size`.
+The logs should show worker discovery and endpoint selection. If the model responds but the EPP logs
+show no selection, the route is bypassing the `InferencePool`.
 
-| Env | Meaning | Required? |
+## EPP Replication
+
+Each EPP replica has an in-process selector and KV index. When `DYN_EPP_PEER_SERVICE` is set, replicas
+watch their own Service's `EndpointSlice` resources and discover its named TCP `replica-agg` port.
+They synchronize admission, prefill-complete, and free events so active-load accounting converges
+across replicas.
+
+```mermaid
+flowchart LR
+    Pool["InferencePool"] -->|"selection request<br/>gRPC :9002"| Service["dynamo-epp Service"]
+    Service --> ReplicaA["EPP replica A<br/>selector + KV index"]
+    Service --> ReplicaB["EPP replica B<br/>selector + KV index"]
+    Slices["Service EndpointSlices"] -. "discover sibling pod IPs" .-> ReplicaA
+    Slices -. "discover sibling pod IPs" .-> ReplicaB
+    Workers["Ready vLLM pods"] -. "KV events :5557<br/>independent index warm-up" .-> ReplicaA
+    Workers -. "KV events :5557<br/>independent index warm-up" .-> ReplicaB
+    ReplicaA <-->|"replica-agg :9092<br/>admission, prefill-complete, free"| ReplicaB
+```
+
+Replica synchronization does not copy the full KV index to a new EPP. A new replica warms its index
+from live worker events and optional replay. For consistency details, see
+[Standalone Selection Service](../components/router/standalone-selection.md).
+
+For a single EPP replica, set `spec.replicas: 1` and remove `DYN_EPP_PEER_SERVICE`, `POD_IP`, and the
+`replica-agg` Service port.
+
+## Standalone EPP Configuration Reference
+
+| Variable | Required | Meaning |
 |---|---|---|
-| `DYN_EPP_MODE=standalone` | Select standalone (selector) mode | required |
-| `DYN_EPP_INFERENCE_POOL_NAME` | Name of the `InferencePool` this EPP backs (its selector + target port drive pod discovery) | required |
-| `DYN_MODEL_NAME` | Model id (no model card in this mode) | required |
-| `DYN_EPP_TOKENIZER_SERVICE_URL` | Base URL of the tokenizer service (vLLM `/v1/chat/completions/render`) | required |
-| `DYN_EPP_TOKENIZER_PROTOCOL` | Tokenizer service wire protocol; only `vllm-render` is supported | required |
-| `DYN_KV_CACHE_BLOCK_SIZE` | MUST equal vLLM `--block-size` | required |
-| `DYN_EPP_KV_EVENT_PORT` | vLLM KV-events PUB port (not in the pool spec) | optional; default 5557 |
-| `DYN_EPP_KV_EVENT_REPLAY_PORT` | ZMQ REQ port for live-stream gap replay | optional |
-| `DYN_EPP_TOKENIZATION_TIMEOUT_MS` | Deadline for the tokenizer service request | optional; default 5000 |
-| `DYN_EPP_TOKENIZER_MAX_RESPONSE_BYTES` | Max tokenizer response body accepted | optional; default 16777216 (16 MiB) |
-| `DYN_EPP_TOTAL_KV_BLOCKS` | Per-worker total KV blocks hint | optional |
-| `DYN_EPP_MAX_NUM_BATCHED_TOKENS` | Per-worker max batched tokens | optional |
-| `DYN_EPP_SELECTION_INDEXER_THREADS` | KV indexer thread pool | optional; default 4 |
-| `DYN_EPP_PEER_SERVICE` | The EPP's own Service. Set = replicated; the Service must expose named port `replica-agg`. Unset = single local replica | optional; unset by default |
-| `POD_NAMESPACE` | The namespace the EPP, its `InferencePool`, worker pods, and sibling replicas all live in (downward API) | required |
-| `POD_IP` | EPP's own pod IP (downward API); needed only for replication, so a replica excludes itself from its peer set | required when `DYN_EPP_PEER_SERVICE` is set |
+| `DYN_EPP_MODE=standalone` | Yes | Runs the embedded selection service without the Dynamo runtime. |
+| `DYN_EPP_INFERENCE_POOL_NAME` | Yes | Name of the `InferencePool` that drives worker discovery. |
+| `POD_NAMESPACE` | Yes | Namespace containing the EPP, pool, and workers; inject with the downward API. |
+| `DYN_MODEL_NAME` | Yes | Served model ID. Requests must use the same `model` value. |
+| `DYN_EPP_TOKENIZER_SERVICE_URL` | Yes | Base URL of the vLLM render Service. |
+| `DYN_EPP_TOKENIZER_PROTOCOL=vllm-render` | Yes | Tokenizer wire protocol; this is the only supported value. |
+| `DYN_KV_CACHE_BLOCK_SIZE` | Yes | Must equal vLLM `--block-size`. |
+| `DYN_EPP_KV_EVENT_PORT` | No | Per-pod vLLM KV event port; defaults to `5557`. |
+| `DYN_EPP_KV_EVENT_REPLAY_PORT` | No | Per-pod replay port for KV event gap recovery. |
+| `DYN_EPP_MAX_NUM_BATCHED_TOKENS` | Policy-dependent | Must equal vLLM `--max-num-batched-tokens`; required when router queue thresholds are enabled. |
+| `DYN_EPP_TOTAL_KV_BLOCKS` | No | Optional per-worker total KV block hint. |
+| `DYN_EPP_SELECTION_INDEXER_THREADS` | No | KV indexer thread count; defaults to `4`. |
+| `DYN_EPP_TOKENIZATION_TIMEOUT_MS` | No | Render request timeout; defaults to `5000`. |
+| `DYN_EPP_TOKENIZER_MAX_RESPONSE_BYTES` | No | Maximum render response size; defaults to `16777216`. |
+| `DYN_EPP_MAX_INFLIGHT_REQUESTS` | No | Concurrent EPP request guardrail; defaults to `1024`, and excess requests receive `503`. |
+| `DYN_EPP_PEER_SERVICE` | No | EPP Service used to discover sibling replicas. |
+| `POD_IP` | With peer service | EPP pod IP used to exclude the local replica from its peer set. |
 
+## Scope and Limitations
 
-## Replicated mode
+The standalone path currently targets aggregated vLLM serving with data-parallel size 1 per pod. It
+does not provide the DGD/operator lifecycle, Dynamo runtime discovery, disaggregated prefill/decode
+orchestration, request migration, topology-aware routing, or full operator-managed observability.
 
-You can run **more than one** EPP replica. Each replica still runs its own
-in-process selector, but the replicas discover each other and synchronize active
-load so they don't each under-count load and herd onto the same worker. This is
-what `agg.yaml` deploys (`replicas: 2`); set `replicas: 1` and drop
-`DYN_EPP_PEER_SERVICE` for a single local replica.
+Use [Route Requests with Gateway API](inference-gateway.mdx) when you want the supported
+operator-managed lifecycle, Dynamo workers, or disaggregated serving. Use
+[Gateway API Routing Reference](../components/router/gateway-api-reference.mdx) for the DGD and
+operator-generated resource contract; that contract does not configure standalone mode.
 
-```yaml
-spec:
-  replicas: 2
-  # ...
-        env:
-          # Watch THIS Deployment's own Service to find sibling replicas:
-          - name: DYN_EPP_PEER_SERVICE
-            value: "dynamo-epp"
-          # Own pod IP, so a replica excludes itself from its peer set:
-          - name: POD_IP
-            valueFrom:
-              fieldRef:
-                fieldPath: status.podIP
-        ports:
-          - name: replica-agg
-            containerPort: 9092
----
-apiVersion: v1
-kind: Service
-spec:
-  ports:
-    - name: replica-agg
-      port: 9092
-      targetPort: replica-agg
+## Troubleshoot
+
+| Symptom | Check |
+|---|---|
+| EPP exits with `standalone is not yet supported` | The image predates the standalone implementation. Build or select the required `dynamo-rust-epp` revision. |
+| EPP stays not ready | Confirm the pool exists, its selector is valid, at least one matching pod is Ready, and EPP RBAC can watch all three resource types. |
+| EPP reports no schedulable workers | Set `DYN_EPP_MAX_NUM_BATCHED_TOKENS` to the vLLM `--max-num-batched-tokens` value when queueing is enabled. |
+| Route has no accepted parent | Confirm `parentRefs[].namespace` names the Gateway namespace, `sectionName` names its listener, and the listener allows routes from the workload namespace. |
+| Tokenization fails | Check the render Service endpoints and call `/v1/chat/completions/render` from the EPP namespace. |
+| Prefix locality does not improve | Confirm the vLLM event publisher and EPP event port match, and that the EPP block size equals vLLM `--block-size`. |
+
+Follow the full request path when debugging:
+
+```bash
+kubectl describe gateway/inference-gateway -n "$AGW_NAMESPACE"
+kubectl describe httproute/vllm-qwen-route -n "$NAMESPACE"
+kubectl get inferencepool/vllm-qwen-pool -n "$NAMESPACE" -o yaml
+kubectl get pods -n "$NAMESPACE" -l app=vllm-qwen -o wide
+kubectl logs -n "$NAMESPACE" deployment/dynamo-epp --tail=200
 ```
 
-How it works:
+## Clean Up the From-Scratch Example
 
-1. Each replica builds its in-process selector with **replica-sync enabled**
-   (resolving and binding the Service's named `replica-agg` port).
-2. It watches its **own** `Service`'s EndpointSlices (the `DYN_EPP_PEER_SERVICE`
-   above) and registers/deregisters every other replica as a replica-sync peer
-   as pods come and go — excluding itself via `POD_IP`. Peers connect pod-to-pod
-   on the resolved `replica-agg` endpoint port.
-3. Admission (`select_and_reserve`), `prefill_complete`, and `free` are broadcast
-   over ZMQ, so every replica's selector converges on the same active-load view.
-   This is the same consistency model as the standalone selector — output-block
-   growth stays local by design; admission/prefill/free are synchronized.
+If you used the **Deploy from Scratch** path, delete the example resources:
 
+```bash
+kubectl delete -n "$NAMESPACE" \
+  -f deploy/inference-gateway/ext-proc/examples/onramp/agg.yaml
+```
 
-Replica synchronization is best-effort; see the
-[selection service docs](../components/router/standalone-selection.md)
-for the consistency invariants.
+Delete the namespace only if it contains no resources you want to keep:
+
+```bash
+kubectl delete namespace "$NAMESPACE"
+```

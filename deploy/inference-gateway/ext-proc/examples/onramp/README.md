@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 # Dynamo EPP on-ramp for vanilla vLLM
 
 This directory contains raw Kubernetes manifests for an on-ramp that runs Dynamo's
-Endpoint Picker Plugin (EPP) behind Gateway API Inference Extension (GAIE) with stock `vLLM serve`
+Endpoint Picker Plugin (EPP) behind Gateway API Inference Extension (GAIE) with stock `vllm serve`
 pods. It does not install the Dynamo operator, create a `DynamoGraphDeployment`, or run Dynamo's
 NATS/JetStream event plane.
 
@@ -15,28 +15,36 @@ For the user-facing walkthrough, start with
 
 ## How the on-ramp works
 
-This on-ramp is available for Aggregated serving only at this time.
+This on-ramp is available for aggregated serving only at this time.
 
-The aggregated on-ramp uses the public `vllm/vllm-openai:latest` image. Replace it with the vLLM
-image your platform standardizes on if you need a pinned or internally mirrored image.
+The aggregated on-ramp uses the upstream `vllm/vllm-openai:v0.26.0` image. Replace it with the vLLM
+image your platform standardizes on if you need another pinned or internally mirrored image.
 KV-aware selection is provided by the runtime-free
 [selection service](../../../../../docs/fern/components/router/standalone-selection.md),
-which the EPP runs **in-process**: the EPP and the selection service are compiled
-into one binary, so there is no separate selector Deployment and no HTTP hop. The
-EPP can run single-replica, or **replicated** with cross-replica active-load sync
-between EPP pods (see [Replicated mode](../../../../../docs/fern/kubernetes/vanilla-vllm-onramp.mdx#replicated-mode)).
+which the EPP runs **in-process**: the EPP and the selection service are compiled into one binary,
+so there is no separate selector Deployment and no HTTP hop. The EPP can run single-replica, or
+**replicated** with cross-replica active-load sync between EPP pods (see
+[Replicated mode](../../../../../docs/fern/kubernetes/vanilla-vllm-onramp.mdx#epp-replication)).
 
-No special EPP image is needed. Use the EPP image provided with Dynamo releases.
-Whether EPP uses the Dynamo runtime or not is controlled with the `DYN_EPP_MODE` env var: dynamo vs standalone
+Whether the EPP uses the Dynamo runtime or not is controlled with the `DYN_EPP_MODE` environment
+variable: `dynamo` uses the Dynamo runtime, while `standalone` runs the runtime-free selection
+service in-process. Standalone mode uses the standard Rust EPP binary. Because the first Dynamo
+release containing standalone mode has not been published yet, build the EPP from the current source
+revision and push it to a registry that every cluster node can pull from:
+
+```bash
+export EPP_IMAGE=registry.example.com/your-project/dynamo-rust-epp:standalone
+
+make -C ../.. IMAGE_TAG="$EPP_IMAGE" image-push
+```
 
 ```yaml
 - name: DYN_EPP_MODE
   value: "standalone"
 ```
 
-The EPP watches ready vLLM pods in the `InferencePool`, subscribes to native vLLM KV cache
-events , tokenizes prompts for routing, and returns the selected
-endpoint to the gateway.
+The EPP watches ready vLLM pods in the `InferencePool`, subscribes to native vLLM KV cache events,
+tokenizes prompts for routing, and returns the selected endpoint to the gateway.
 
 ```mermaid
 flowchart LR
@@ -52,9 +60,7 @@ flowchart LR
     Index -->|"scores"| Picker["Endpoint picker"]
 ```
 
-
 ## What Dynamo-managed GAIE adds
-
 
 - Disaggregated prefill/decode (Disaggregated serving is planned follow-up in the standalone mode.)
 - Operator-managed lifecycle for Workers, Services, `InferencePool`, and EPP resources.
@@ -86,4 +92,3 @@ flowchart LR
    currently-Ready worker (booking its load via select-and-reserve), and returns
    the worker's endpoint to Envoy as routing headers. The selected
    worker processes the original forwarded request.
-
