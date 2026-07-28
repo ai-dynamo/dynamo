@@ -9,6 +9,8 @@ set -e
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 export DYNAMO_HOME="${DYNAMO_HOME:-$(readlink -f "$SCRIPT_DIR/../../../..")}"
 # shellcheck disable=SC1091 # Resolved relative to this script at runtime.
+source "$DYNAMO_HOME/examples/common/gpu_utils.sh"   # build_trtllm_override_args_with_mem
+# shellcheck disable=SC1091 # Resolved relative to this script at runtime.
 source "$DYNAMO_HOME/examples/common/launch_utils.sh" # print_launch_banner, wait_any_exit
 
 MODEL="${MODEL:-Qwen/Qwen3-0.6B}"
@@ -26,7 +28,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         -h|--help)
-            echo "Usage: $0 [--model-path <name>] [TensorRT-LLM engine options...]"
+            echo "Usage: $0 [--model|--model-path <name>] [TensorRT-LLM engine options...]"
             echo
             echo "Additional options are passed to the TensorRT-LLM engine."
             echo
@@ -47,7 +49,16 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-trap dynamo_exit_trap EXIT
+TRTLLM_EXTRA_CONFIG=""
+trtllm_exit_trap() {
+    local rc=$?
+    if [[ -n "$TRTLLM_EXTRA_CONFIG" ]]; then
+        rm -f -- "$TRTLLM_EXTRA_CONFIG"
+    fi
+    echo "Cleaning up..."
+    dynamo_reap_and_exit "$rc"
+}
+trap trtllm_exit_trap EXIT
 
 TRTLLM_PYTHON="${TRTLLM_PYTHON:-python3}"
 TRTLLM_GRPC_PORT="${TRTLLM_GRPC_PORT:-50051}"
@@ -55,6 +66,14 @@ TRTLLM_CONTEXT_LENGTH="${TRTLLM_CONTEXT_LENGTH:-4096}"
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+GPU_MEM_ARGS=$(build_trtllm_override_args_with_mem)
+TRTLLM_GPU_MEM_ARGS=()
+if [[ -n "$GPU_MEM_ARGS" ]]; then
+    TRTLLM_EXTRA_CONFIG=$(mktemp "${TMPDIR:-/tmp}/dynamo-trtllm-sidecar.XXXXXX.yaml")
+    printf '%s\n' "$GPU_MEM_ARGS" > "$TRTLLM_EXTRA_CONFIG"
+    TRTLLM_GPU_MEM_ARGS=(--extra_llm_api_options "$TRTLLM_EXTRA_CONFIG")
+fi
+
 print_launch_banner "Launching TensorRT-LLM Native-gRPC Sidecar (1 GPU)" "$MODEL" "$HTTP_PORT" \
     "TensorRT-LLM gRPC: 127.0.0.1:${TRTLLM_GRPC_PORT}" \
     "Context length:    ${TRTLLM_CONTEXT_LENGTH}"
@@ -67,6 +86,7 @@ CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" \
     --grpc \
     --host 127.0.0.1 \
     --port "$TRTLLM_GRPC_PORT" \
+    "${TRTLLM_GPU_MEM_ARGS[@]}" \
     "${EXTRA_ARGS[@]}" &
 
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT:-8081}" \
