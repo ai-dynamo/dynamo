@@ -499,7 +499,7 @@ impl VllmCore {
                 args.block_size,
                 kv_event_publishers,
                 dp_rank,
-                args.g1_backend,
+                args.resolved_g1_backend(),
                 args.enable_prefix_caching,
             ),
             args,
