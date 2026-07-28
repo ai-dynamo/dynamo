@@ -25,6 +25,8 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -36,7 +38,23 @@ type groveProgram struct {
 	// Grove rendering, scaling, and persistence helpers. Later extractions can
 	// narrow this without moving Grove orchestration back into the common flow.
 	reconciler *DynamoGraphDeploymentReconciler
+	renderer   *groveWorkloadRenderer
 	lwsEnabled bool
+}
+
+func newGroveProgram(reconciler *DynamoGraphDeploymentReconciler) *groveProgram {
+	lwsEnabled := reconciler.RuntimeConfig != nil &&
+		reconciler.RuntimeConfig.Gate.Enabled(features.LWS)
+	return &groveProgram{
+		reconciler: reconciler,
+		renderer: newGroveWorkloadRenderer(
+			reconciler.Client,
+			reconciler.Config,
+			reconciler.RuntimeConfig,
+			reconciler.DockerSecretRetriever,
+		),
+		lwsEnabled: lwsEnabled,
+	}
 }
 
 // Reconcile composes the complete Grove pathway. Each earlier operation
@@ -108,18 +126,22 @@ func (p *groveProgram) reconcileWorkloads(
 	dynamoDeployment := req.DGD
 	logger := log.FromContext(ctx)
 
-	renderDeployment, existingPodCliqueSet, err := r.prepareGroveRenderDeployment(ctx, dynamoDeployment)
-	if err != nil {
-		return ReconcileResult{}, err
-	}
-
-	grovePodCliqueSetAsResource, err := r.reconcileGrovePodCliqueSet(
+	desiredPodCliqueSet, err := p.renderer.Render(
 		ctx,
 		dynamoDeployment,
-		renderDeployment,
-		existingPodCliqueSet,
 		req.RestartState,
 		req.CheckpointInfos,
+	)
+	if err != nil {
+		logger.Error(err, "failed to generate the Grove GangSet")
+		return ReconcileResult{}, fmt.Errorf("failed to generate the Grove GangSet: %w", err)
+	}
+	renderDeployment := groveRenderDeployment(dynamoDeployment, desiredPodCliqueSet)
+
+	grovePodCliqueSetAsResource, err := p.reconcilePodCliqueSet(
+		ctx,
+		dynamoDeployment,
+		desiredPodCliqueSet,
 	)
 	if err != nil {
 		logger.Error(err, "failed to reconcile the Grove PodClique Set")
@@ -306,6 +328,52 @@ func (p *groveProgram) reconcileWorkloads(
 	}
 
 	return p.checkResourcesReadiness(ctx, dynamoDeployment, resources)
+}
+
+func (p *groveProgram) reconcilePodCliqueSet(
+	ctx context.Context,
+	dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment,
+	desired *grovev1alpha1.PodCliqueSet,
+) (*commoncontroller.Resource, error) {
+	r := p.reconciler
+	logger := log.FromContext(ctx)
+
+	_, synced, err := commoncontroller.SyncResource(
+		ctx,
+		r,
+		dynamoDeployment,
+		func(context.Context) (*grovev1alpha1.PodCliqueSet, bool, error) {
+			return desired, false, nil
+		},
+	)
+	if err != nil {
+		logger.Error(err, "failed to sync the Grove GangSet")
+		return nil, fmt.Errorf("failed to sync the Grove GangSet: %w", err)
+	}
+
+	resource, err := commoncontroller.NewResourceWithComponentStatuses(
+		synced,
+		func() (bool, string, map[string]nvidiacomv1beta1.ComponentReplicaStatus) {
+			// Grove readiness: all underlying PodCliques and
+			// PodCliqueScalingGroups have replicas == availableReplicas. A
+			// transient read error is handled authoritatively by groveProgram,
+			// which re-evaluates and returns the error so reconciliation retries.
+			allComponentsReady, reason, componentStatuses, readErr :=
+				dynamo.GetComponentReadinessAndServiceReplicaStatuses(ctx, r.Client, dynamoDeployment)
+			if readErr != nil {
+				return false, nvidiacomv1beta1.DGDReadyReasonSomeResourcesNotReady, nil
+			}
+			if !allComponentsReady {
+				return false, reason, componentStatuses
+			}
+			return true, "", componentStatuses
+		},
+	)
+	if err != nil {
+		logger.Error(err, "failed to create the Grove PodClique Set resource")
+		return nil, fmt.Errorf("failed to create the Grove PodClique Set resource: %w", err)
+	}
+	return resource, nil
 }
 
 // checkResourcesReadiness computes the readiness result for the synced Grove

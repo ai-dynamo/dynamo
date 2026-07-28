@@ -589,10 +589,7 @@ func (r *DynamoGraphDeploymentReconciler) selectWorkloadProgram(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) workloadProgram {
 	if r.isGrovePathway(dgd) {
-		return &groveProgram{
-			reconciler: r,
-			lwsEnabled: r.RuntimeConfig.Gate.Enabled(features.LWS),
-		}
+		return newGroveProgram(r)
 	}
 	return &componentProgram{
 		reconciler: r,

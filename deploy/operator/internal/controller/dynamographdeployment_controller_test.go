@@ -2639,7 +2639,7 @@ func TestGroveProgram_ReconcileWorkloads(t *testing.T) {
 				},
 			}
 
-			result, err := (&groveProgram{reconciler: reconciler}).reconcileWorkloads(
+			result, err := newGroveProgram(reconciler).reconcileWorkloads(
 				ctx,
 				workloadReconcileRequest{DGD: dgd},
 			)
@@ -2712,7 +2712,7 @@ func TestGroveProgram_ReconcileWorkloadsUsesPreservedAlphaServiceIngress(t *test
 		},
 	}
 
-	_, err := (&groveProgram{reconciler: reconciler}).reconcileWorkloads(
+	_, err := newGroveProgram(reconciler).reconcileWorkloads(
 		ctx,
 		workloadReconcileRequest{DGD: dgd},
 	)
@@ -2733,7 +2733,7 @@ func TestGroveProgram_ReconcileWorkloadsUsesPreservedAlphaServiceIngress(t *test
 	g.Expect(service.Annotations["legacy-annotation"]).To(gomega.Equal("kept"))
 }
 
-func TestDynamoGraphDeploymentReconciler_prepareGroveRenderDeployment_PreservesLegacyWorkerSelectors(t *testing.T) {
+func TestGroveWorkloadRendererRenderPreservesLegacyWorkerSelectors(t *testing.T) {
 	ctx := context.Background()
 	g := gomega.NewGomegaWithT(t)
 
@@ -2792,11 +2792,16 @@ func TestDynamoGraphDeploymentReconciler_prepareGroveRenderDeployment_PreservesL
 		WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
 		WithObjects(dgd, existingPCS).
 		Build()
-	reconciler := &DynamoGraphDeploymentReconciler{Client: fakeKubeClient}
+	renderer := newGroveWorkloadRenderer(
+		fakeKubeClient,
+		&configv1alpha1.OperatorConfiguration{},
+		&controller_common.RuntimeConfig{},
+		nil,
+	)
 
-	renderDGD, existing, err := reconciler.prepareGroveRenderDeployment(ctx, dgd)
+	generatedPCS, err := renderer.Render(ctx, dgd, nil, nil)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
-	g.Expect(existing).NotTo(gomega.BeNil())
+	renderDGD := groveRenderDeployment(dgd, generatedPCS)
 	g.Expect(dgd.GetComponentByName("VllmDecodeWorker").ComponentType).To(gomega.Equal(v1beta1.ComponentTypeDecode))
 
 	prefill := renderDGD.GetComponentByName("VllmPrefillWorker")
@@ -2813,9 +2818,6 @@ func TestDynamoGraphDeploymentReconciler_prepareGroveRenderDeployment_PreservesL
 	g.Expect(decode.ComponentType).To(gomega.Equal(v1beta1.ComponentTypeWorker))
 	g.Expect(decode.PodTemplate.Labels[commonconsts.KubeLabelDynamoSubComponentType]).To(gomega.Equal(commonconsts.ComponentTypeDecode))
 
-	generatedPCS, err := dynamo.GenerateGrovePodCliqueSet(ctx, renderDGD, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, fakeKubeClient, nil, nil, nil, nil)
-	g.Expect(err).NotTo(gomega.HaveOccurred())
-	preserveGrovePodCliqueSetOrder(generatedPCS, existing)
 	g.Expect(generatedPCS.Spec.Template.Cliques[0].Name).To(gomega.Equal("vllmprefillworker"))
 
 	var prefillClique *grovev1alpha1.PodCliqueTemplateSpec
@@ -3031,7 +3033,7 @@ func TestPreserveGrovePodCliqueSetReplicasSkipsCheckpointGatedComponents(t *test
 	g.Expect(*desired.Spec.Template.PodCliqueScalingGroupConfigs[0].Replicas).To(gomega.Equal(int32(7)))
 }
 
-func TestDynamoGraphDeploymentReconciler_prepareGroveRenderDeployment_KeepsNativeWorkerSelectors(t *testing.T) {
+func TestGroveWorkloadRendererRenderKeepsNativeWorkerSelectors(t *testing.T) {
 	ctx := context.Background()
 	g := gomega.NewGomegaWithT(t)
 
@@ -3064,10 +3066,15 @@ func TestDynamoGraphDeploymentReconciler_prepareGroveRenderDeployment_KeepsNativ
 		WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
 		WithObjects(dgd, existingPCS).
 		Build()
-	reconciler := &DynamoGraphDeploymentReconciler{Client: fakeKubeClient}
-
-	renderDGD, _, err := reconciler.prepareGroveRenderDeployment(ctx, dgd)
+	renderer := newGroveWorkloadRenderer(
+		fakeKubeClient,
+		&configv1alpha1.OperatorConfiguration{},
+		&controller_common.RuntimeConfig{},
+		nil,
+	)
+	desired, err := renderer.Render(ctx, dgd, nil, nil)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
+	renderDGD := groveRenderDeployment(dgd, desired)
 	prefill := renderDGD.GetComponentByName("prefill")
 	if prefill == nil {
 		t.Fatal("expected rendered prefill component")

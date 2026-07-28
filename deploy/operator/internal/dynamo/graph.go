@@ -2137,7 +2137,7 @@ type cliqueParams struct {
 	restartState                *RestartState
 	existingRestartAnnotations  map[string]string
 	validatedQueueName          string
-	kubeClient                  ctrlclient.Client
+	reader                      ctrlclient.Reader
 	ctx                         context.Context
 	groveClusterTopologyDomains []v1beta1.TopologyDomain
 }
@@ -2165,7 +2165,7 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 			p.checkpointInfo.StartupPolicy == v1alpha1.CheckpointStartupPolicyImmediate)
 	if checkpointEnabled && p.r.Role != RoleGMS && !shouldUseAdmissionRestore {
 		if err := checkpoint.InjectCheckpointIntoPodSpecWithStorageConfig(
-			p.ctx, p.kubeClient, p.dynamoDeployment.Namespace, podSpec, p.checkpointInfo,
+			p.ctx, p.reader, p.dynamoDeployment.Namespace, podSpec, p.checkpointInfo,
 			p.operatorConfig.Checkpoint.Storage,
 			p.operatorConfig.Checkpoint.EffectiveSeccompProfile(),
 		); err != nil {
@@ -2285,16 +2285,16 @@ func applyRestartAnnotation(annotations map[string]string, componentName string,
 	return annotations
 }
 
-func resolveGroveClusterTopologyDomains(ctx context.Context, kubeClient ctrlclient.Client, kvt *v1beta1.KvTransferPolicy) ([]v1beta1.TopologyDomain, error) {
+func resolveGroveClusterTopologyDomains(ctx context.Context, reader ctrlclient.Reader, kvt *v1beta1.KvTransferPolicy) ([]v1beta1.TopologyDomain, error) {
 	if kvt == nil || kvt.ClusterTopologyName == "" {
 		return nil, nil
 	}
-	if kubeClient == nil {
+	if reader == nil {
 		return nil, fmt.Errorf("spec.experimental.kvTransferPolicy.clusterTopologyName %q requires a Kubernetes client to read ClusterTopologyBinding", kvt.ClusterTopologyName)
 	}
 
 	ct := &grovev1alpha1.ClusterTopologyBinding{}
-	if err := kubeClient.Get(ctx, types.NamespacedName{Name: kvt.ClusterTopologyName}, ct); err != nil {
+	if err := reader.Get(ctx, types.NamespacedName{Name: kvt.ClusterTopologyName}, ct); err != nil {
 		if k8serrors.IsNotFound(err) {
 			return nil, fmt.Errorf("spec.experimental.kvTransferPolicy.clusterTopologyName %q references a ClusterTopologyBinding resource that was not found", kvt.ClusterTopologyName)
 		}
@@ -2349,7 +2349,7 @@ func GenerateGrovePodCliqueSet(
 	dynamoDeployment *v1beta1.DynamoGraphDeployment,
 	operatorConfig *configv1alpha1.OperatorConfiguration,
 	runtimeConfig *controller_common.RuntimeConfig,
-	kubeClient ctrlclient.Client,
+	reader ctrlclient.Reader,
 	secretsRetriever SecretsRetriever,
 	restartState *RestartState,
 	existingRestartAnnotations map[string]string,
@@ -2401,7 +2401,7 @@ func GenerateGrovePodCliqueSet(
 	var groveClusterTopologyDomains []v1beta1.TopologyDomain
 	if dynamoDeployment.Spec.Experimental != nil {
 		var err error
-		groveClusterTopologyDomains, err = resolveGroveClusterTopologyDomains(ctx, kubeClient, dynamoDeployment.Spec.Experimental.KvTransferPolicy)
+		groveClusterTopologyDomains, err = resolveGroveClusterTopologyDomains(ctx, reader, dynamoDeployment.Spec.Experimental.KvTransferPolicy)
 		if err != nil {
 			return nil, err
 		}
@@ -2463,7 +2463,7 @@ func GenerateGrovePodCliqueSet(
 				restartState:                restartState,
 				existingRestartAnnotations:  existingRestartAnnotations,
 				validatedQueueName:          validatedQueueName,
-				kubeClient:                  kubeClient,
+				reader:                      reader,
 				ctx:                         ctx,
 				groveClusterTopologyDomains: groveClusterTopologyDomains,
 			})

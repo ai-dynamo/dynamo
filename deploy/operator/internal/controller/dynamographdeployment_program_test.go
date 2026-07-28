@@ -302,12 +302,10 @@ func TestGroveProgram_ReconcilePreservesResultOnError(t *testing.T) {
 			},
 		}).
 		Build()
-	program := &groveProgram{
-		reconciler: &DynamoGraphDeploymentReconciler{
-			Client:   kubeClient,
-			Recorder: record.NewFakeRecorder(10),
-		},
-	}
+	program := newGroveProgram(&DynamoGraphDeploymentReconciler{
+		Client:   kubeClient,
+		Recorder: record.NewFakeRecorder(10),
+	})
 	dgd.Status = nvidiacomv1beta1.DynamoGraphDeploymentStatus{
 		State: nvidiacomv1beta1.DGDStatePending,
 		Components: map[string]nvidiacomv1beta1.ComponentReplicaStatus{
