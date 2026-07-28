@@ -42,7 +42,6 @@ jobs:
           - lifecycle
     env:
       DGDR_NAMESPACE: dgdr-${{ matrix.suite }}-${{ github.run_id }}-${{ github.run_attempt }}
-      KUBECONFIG: ${{ github.workspace }}/.kubeconfig-vcluster
     permissions:
       contents: read
     steps:
@@ -81,6 +80,7 @@ jobs:
         shell: bash
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          KUBECONFIG: ${{ github.workspace }}/.kubeconfig-vcluster
         run: |
           set -euo pipefail
           kubectl delete namespace "${DGDR_NAMESPACE}" \
@@ -94,6 +94,8 @@ jobs:
 
       - name: Verify DGDR test prerequisites
         shell: bash
+        env:
+          KUBECONFIG: ${{ github.workspace }}/.kubeconfig-vcluster
         run: |
           set -euo pipefail
           kubectl wait --for=condition=established \
@@ -119,6 +121,8 @@ jobs:
       - name: Clean up DGDR test namespace
         if: always() && steps.connect-vcluster.outcome == 'success'
         shell: bash
+        env:
+          KUBECONFIG: ${{ github.workspace }}/.kubeconfig-vcluster
         run: |
           kubectl delete namespace "${DGDR_NAMESPACE}" \
             --ignore-not-found --wait=true --timeout=5m
