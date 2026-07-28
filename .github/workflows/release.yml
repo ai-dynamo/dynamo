@@ -449,6 +449,12 @@ jobs:
               FAILED_COPIES+=("kubernetes-operator-nightly:${NGC_VERSION_TAG} (source missing)")
             elif copy_image "${SOURCE}" "${TARGET}" "kubernetes-operator-nightly:${NGC_VERSION_TAG}"; then
               OPERATOR_STAGED=true
+              # Mutable `:nightly` floating tag on the stable repo, matching
+              # the runtimes (no cuda alias — operator has no cuda variants).
+              # `|| true`: a floating-tag miss records in FAILED_COPIES via
+              # copy_image but must not abort the step under set -e.
+              MUTABLE_TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/kubernetes-operator:nightly"
+              copy_image "${SOURCE}" "${MUTABLE_TARGET}" "kubernetes-operator:nightly" || true
             else
               echo "::warning::Copy failed for kubernetes-operator-nightly:${NGC_VERSION_TAG} — source exists; check NGC write access to kubernetes-operator-nightly"
             fi
@@ -466,6 +472,10 @@ jobs:
               FAILED_COPIES+=("dynamo-planner-nightly:${NGC_VERSION_TAG} (source missing)")
             elif copy_image "${SOURCE}" "${TARGET}" "dynamo-planner-nightly:${NGC_VERSION_TAG}"; then
               PLANNER_STAGED=true
+              # Mutable `:nightly` floating tag on the stable repo, matching
+              # the runtimes (no cuda alias — planner has no cuda variants).
+              MUTABLE_TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/dynamo-planner:nightly"
+              copy_image "${SOURCE}" "${MUTABLE_TARGET}" "dynamo-planner:nightly" || true
             else
               echo "::warning::Copy failed for dynamo-planner-nightly:${NGC_VERSION_TAG} — source exists; check NGC write access to dynamo-planner-nightly"
             fi
@@ -589,6 +599,8 @@ jobs:
             echo "- \`vllm-runtime:nightly\` / \`vllm-runtime:nightly-cuda13\`" >> $GITHUB_STEP_SUMMARY
             echo "- \`sglang-runtime:nightly\` / \`sglang-runtime:nightly-cuda13\`" >> $GITHUB_STEP_SUMMARY
             echo "- \`tensorrtllm-runtime:nightly\` / \`tensorrtllm-runtime:nightly-cuda13\`" >> $GITHUB_STEP_SUMMARY
+            echo "- \`kubernetes-operator:nightly\`${OP_NOTE}" >> $GITHUB_STEP_SUMMARY
+            echo "- \`dynamo-planner:nightly\`${PL_NOTE}" >> $GITHUB_STEP_SUMMARY
           fi
           if [[ "${NIGHTLY}" != "true" ]]; then
             echo "" >> $GITHUB_STEP_SUMMARY
