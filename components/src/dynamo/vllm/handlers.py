@@ -1041,6 +1041,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         # metadata-only, but vLLM activates a prefill adapter lazily when an
         # inference request supplies its LoRARequest.
         self._engine_loaded_loras: set[str] = set()
+        # Shared lock protecting capacity check and insertion into loaded_loras.
+        # Per-adapter locks (via _get_lora_lock) serialize ops on the same adapter,
+        # but concurrent loads of *different* adapters need a shared capacity guard
+        # to prevent both bypassing the check before either inserts (atomicity).
+        self._lora_capacity_guard = asyncio.Lock()
         self._paused: bool = False
         self._weight_version: str = "initial"
 
@@ -2214,20 +2219,27 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         return
 
                     lora_capacity = getattr(self, "_lora_capacity", None)
-                    if (
-                        old_info is None
-                        and lora_capacity is not None
-                        and len(self._lora_state.loaded_loras) >= lora_capacity
-                    ):
-                        yield {
-                            "status": "error",
-                            "message": (
-                                "LoRA capacity exceeded: "
-                                f"at most {lora_capacity} adapter(s) may be loaded"
-                            ),
-                            "lora_name": lora_name,
-                        }
-                        return
+                    capacity_reserved = False
+                    # Guard capacity check: serialize new adapter loads to prevent two
+                    # concurrent loads from both observing capacity below limit and proceeding.
+                    if lora_capacity is not None and old_info is None:
+                        async with self._lora_capacity_guard:
+                            # Re-check under lock in case another load slipped in
+                            if len(self._lora_state.loaded_loras) >= lora_capacity:
+                                yield {
+                                    "status": "error",
+                                    "message": (
+                                        "LoRA capacity exceeded: "
+                                        f"at most {lora_capacity} adapter(s) may be loaded"
+                                    ),
+                                    "lora_name": lora_name,
+                                }
+                                return
+                            # Reserve a capacity slot with placeholder (will be replaced below).
+                            self._lora_state.loaded_loras[lora_name] = LoRAInfo(
+                                id=-1, path=""
+                            )
+                            capacity_reserved = True
 
                     logger.info(
                         f"Downloading LoRA adapter: {lora_name} from {lora_uri}"
@@ -2236,6 +2248,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         lora_uri
                     )
                     if not path_ok:
+                        if capacity_reserved:
+                            self._lora_state.loaded_loras.pop(lora_name, None)
                         yield {
                             "status": "error",
                             "message": lora_path_or_error,
@@ -2253,6 +2267,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             await self.engine_client.remove_lora(old_info.id)
                             self._engine_loaded_loras.discard(lora_name)
                         except Exception as e:
+                            if capacity_reserved:
+                                self._lora_state.loaded_loras.pop(lora_name, None)
                             logger.error(
                                 f"Failed to remove existing LoRA '{lora_name}' "
                                 f"before hot-swap: {e}"
@@ -2304,6 +2320,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                                         f"Rollback failed for LoRA {lora_name}: "
                                         f"{rollback_error}"
                                     )
+                            else:
+                                # For new loads that weren't hot-swap, clean up reservation
+                                if capacity_reserved:
+                                    self._lora_state.loaded_loras.pop(lora_name, None)
                             yield {
                                 "status": "error",
                                 "message": f"Failed to add LoRA '{lora_name}': {e}",
@@ -2311,7 +2331,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             }
                             return
 
-                    # Track the LoRA
+                    # Insert or update the real LoRA info (replaces placeholder if reserved).
                     self._lora_state.loaded_loras[lora_name] = LoRAInfo(
                         id=lora_id, path=lora_path
                     )

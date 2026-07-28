@@ -80,6 +80,11 @@ class BaseOmniHandler(BaseWorkerHandler[Dict[str, Any], Dict[str, Any]]):
         self._advertised_gpu_lora_capacity = self._resolve_advertised_gpu_lora_capacity(
             config
         )
+        # Shared lock protecting capacity check and insertion into loaded_loras.
+        # Per-adapter locks (via _get_lora_lock) serialize ops on the same adapter,
+        # but concurrent loads of *different* adapters need a shared capacity guard
+        # to prevent both bypassing the check before either inserts (atomicity).
+        self._lora_capacity_guard = asyncio.Lock()
         # Track adapters already handed to vLLM so load/unload stays idempotent.
         # This set ensures the same adapter isn't handed to add_lora() twice,
         # and tracks which adapters are in the engine (vs. just in loaded_loras metadata).

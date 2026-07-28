@@ -71,6 +71,9 @@ def _make_handler(stage_types=("diffusion",)):
     handler._lora_load_locks = handler._lora_state.lora_load_locks
     handler._lora_load_locks_guard = handler._lora_state.lora_load_locks_guard
     handler._lora_capacity = None
+    handler._lora_capacity_guard = (
+        asyncio.Lock()
+    )  # Shared capacity guard for concurrent loads
     handler._engine_loaded_loras = set()
 
     # Add attributes required by _resolve_lora_request() (called by _resolve_and_apply_lora)
