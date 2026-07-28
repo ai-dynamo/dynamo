@@ -136,7 +136,9 @@ async def test_load_video_batch_preserves_url_validation_error():
     )
 
     with pytest.raises(UrlValidationError):
-        await loader.load_video_batch([{URL_VARIANT_KEY: "https://nonexistent.invalid/x.mp4"}])
+        await loader.load_video_batch(
+            [{URL_VARIANT_KEY: "https://nonexistent.invalid/x.mp4"}]
+        )
 
 
 @pytest.mark.asyncio

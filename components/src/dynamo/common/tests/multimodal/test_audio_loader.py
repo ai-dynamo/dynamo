@@ -163,7 +163,9 @@ async def test_load_audio_batch_preserves_url_validation_error():
     )
 
     with pytest.raises(UrlValidationError):
-        await loader.load_audio_batch([{URL_VARIANT_KEY: "https://nonexistent.invalid/x.wav"}])
+        await loader.load_audio_batch(
+            [{URL_VARIANT_KEY: "https://nonexistent.invalid/x.wav"}]
+        )
 
 
 @pytest.mark.asyncio
