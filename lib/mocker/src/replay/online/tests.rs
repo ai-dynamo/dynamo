@@ -778,10 +778,7 @@ fn test_online_replay_four_workers_clean_every_lifecycle() {
     )
     .unwrap();
 
-    assert_eq!(
-        report.request_counts.completed_requests as usize,
-        REQUEST_COUNT
-    );
+    assert_eq!(report.request_counts.completed_requests, REQUEST_COUNT);
     assert_eq!(stats.dispatch_history.len(), REQUEST_COUNT);
     assert_eq!(stats.prefill_marked_count, REQUEST_COUNT);
     assert_eq!(stats.freed_count, REQUEST_COUNT);
