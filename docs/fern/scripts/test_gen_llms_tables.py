@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 """Tests for the generated tables in gen_llms_tables.py.
 
 Run: python3 -m pytest docs/fern/scripts/test_gen_llms_tables.py
