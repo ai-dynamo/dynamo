@@ -3,21 +3,24 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Disaggregated serving through two SGLang native gRPC servers (2 GPUs).
-# Requires SGLang PR #25185 plus server-side DisaggregatedParams forwarding.
+# Requires an SGLang build with native gRPC sidecar and disaggregated serving support.
 
 set -e
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-source "$SCRIPT_DIR/../../../common/gpu_utils.sh"
-source "$SCRIPT_DIR/../../../common/launch_utils.sh"
+# shellcheck disable=SC1091 # Resolved relative to this script at runtime.
+source "$SCRIPT_DIR/../../../common/gpu_utils.sh"   # build_sglang_gpu_mem_args
+# shellcheck disable=SC1091 # Resolved relative to this script at runtime.
+source "$SCRIPT_DIR/../../../common/launch_utils.sh" # print_launch_banner, wait_any_exit
 
-MODEL="Qwen/Qwen3-0.6B"
+MODEL="${MODEL:-Qwen/Qwen3-0.6B}"
+
 EXTRA_ARGS=()
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --model-path)
+        --model|--model-path)
             if [[ $# -lt 2 || "$2" == -* ]]; then
-                echo "Missing value for --model-path"
+                echo "Missing value for $1"
                 echo "Use --help for usage information"
                 exit 1
             fi
@@ -25,9 +28,26 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         -h|--help)
-            echo "Usage: $0 [--model-path <name>] [SGLang options...]"
+            echo "Usage: $0 [--model-path <name>] [SGLang engine options...]"
             echo
-            echo "Set SGLANG_PYTHON to the Python executable containing the patched SGLang build."
+            echo "Additional options are passed to both SGLang engines."
+            echo
+            echo "Environment overrides:"
+            echo "  MODEL                                   Model to serve (default: Qwen/Qwen3-0.6B)"
+            echo "  SGLANG_PYTHON                           Python with SGLang installed (default: python3)"
+            echo "  SGLANG_PREFILL_GPU                      Prefill GPU assignment (default: 0)"
+            echo "  SGLANG_DECODE_GPU                       Decode GPU assignment (default: 1)"
+            echo "  DYN_HTTP_PORT                           Dynamo frontend port (default: 8000)"
+            echo "  DYN_SYSTEM_PORT1                        Prefill sidecar system port (default: 8081)"
+            echo "  DYN_SYSTEM_PORT2                        Decode sidecar system port (default: 8082)"
+            echo "  SGLANG_PREFILL_HTTP_PORT                Prefill HTTP port (default: 30000)"
+            echo "  SGLANG_PREFILL_GRPC_PORT                Prefill gRPC port (default: 30001)"
+            echo "  SGLANG_DECODE_HTTP_PORT                 Decode HTTP port (default: 30010)"
+            echo "  SGLANG_DECODE_GRPC_PORT                 Decode gRPC port (default: 30011)"
+            echo "  SGLANG_DISAGGREGATION_BOOTSTRAP_PORT    KV-transfer bootstrap port (default: 8998)"
+            echo "  SGLANG_BOOTSTRAP_HOST                   Advertised bootstrap host (default: 127.0.0.1)"
+            echo "  MAX_MODEL_LEN                           Maximum model length (default: 4096)"
+            echo "  MAX_CONCURRENT_SEQS                     Maximum concurrent sequences per engine (default: 2)"
             exit 0
             ;;
         *)
@@ -37,10 +57,10 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-trap 'echo Cleaning up...; kill 0' EXIT
+trap dynamo_exit_trap EXIT
 
 SGLANG_PYTHON="${SGLANG_PYTHON:-python3}"
-SGLANG_HOST="${SGLANG_HOST:-127.0.0.1}"
+SGLANG_HOST="127.0.0.1"
 SGLANG_BOOTSTRAP_HOST="${SGLANG_BOOTSTRAP_HOST:-$SGLANG_HOST}"
 SGLANG_DISAGGREGATION_BOOTSTRAP_PORT="${SGLANG_DISAGGREGATION_BOOTSTRAP_PORT:-8998}"
 SGLANG_PREFILL_HTTP_PORT="${SGLANG_PREFILL_HTTP_PORT:-30000}"
@@ -49,16 +69,22 @@ SGLANG_DECODE_HTTP_PORT="${SGLANG_DECODE_HTTP_PORT:-30010}"
 SGLANG_DECODE_GRPC_PORT="${SGLANG_DECODE_GRPC_PORT:-30011}"
 SGLANG_PREFILL_GPU="${SGLANG_PREFILL_GPU:-0}"
 SGLANG_DECODE_GPU="${SGLANG_DECODE_GPU:-1}"
-HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
+MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
 
+HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
 
-print_launch_banner "Launching SGLang Native-gRPC Disaggregated Serving (2 GPUs)" "$MODEL" "$HTTP_PORT"
+print_launch_banner "Launching SGLang Native-gRPC Sidecar (Disaggregated, 2 GPUs)" "$MODEL" "$HTTP_PORT" \
+    "Prefill:     GPU ${SGLANG_PREFILL_GPU}, HTTP http://${SGLANG_HOST}:${SGLANG_PREFILL_HTTP_PORT}, gRPC ${SGLANG_HOST}:${SGLANG_PREFILL_GRPC_PORT}" \
+    "Decode:      GPU ${SGLANG_DECODE_GPU}, HTTP http://${SGLANG_HOST}:${SGLANG_DECODE_HTTP_PORT}, gRPC ${SGLANG_HOST}:${SGLANG_DECODE_GRPC_PORT}" \
+    "Bootstrap:   ${SGLANG_BOOTSTRAP_HOST}:${SGLANG_DISAGGREGATION_BOOTSTRAP_PORT}"
 
 python3 -m dynamo.frontend &
 
+# shellcheck disable=SC2086 # GPU_MEM_ARGS intentionally expands into multiple flags.
 CUDA_VISIBLE_DEVICES="$SGLANG_PREFILL_GPU" \
-    "$SGLANG_PYTHON" -m sglang.launch_server \
+"$SGLANG_PYTHON" -m sglang.launch_server \
     --model-path "$MODEL" \
     --host "$SGLANG_HOST" \
     --port "$SGLANG_PREFILL_HTTP_PORT" \
@@ -66,11 +92,14 @@ CUDA_VISIBLE_DEVICES="$SGLANG_PREFILL_GPU" \
     --disaggregation-mode prefill \
     --disaggregation-bootstrap-port "$SGLANG_DISAGGREGATION_BOOTSTRAP_PORT" \
     --disaggregation-transfer-backend nixl \
+    --context-length "$MAX_MODEL_LEN" \
+    --max-running-requests "$MAX_CONCURRENT_SEQS" \
     $GPU_MEM_ARGS \
     "${EXTRA_ARGS[@]}" &
 
+# shellcheck disable=SC2086 # GPU_MEM_ARGS intentionally expands into multiple flags.
 CUDA_VISIBLE_DEVICES="$SGLANG_DECODE_GPU" \
-    "$SGLANG_PYTHON" -m sglang.launch_server \
+"$SGLANG_PYTHON" -m sglang.launch_server \
     --model-path "$MODEL" \
     --host "$SGLANG_HOST" \
     --port "$SGLANG_DECODE_HTTP_PORT" \
@@ -78,6 +107,8 @@ CUDA_VISIBLE_DEVICES="$SGLANG_DECODE_GPU" \
     --disaggregation-mode decode \
     --disaggregation-bootstrap-port "$SGLANG_DISAGGREGATION_BOOTSTRAP_PORT" \
     --disaggregation-transfer-backend nixl \
+    --context-length "$MAX_MODEL_LEN" \
+    --max-running-requests "$MAX_CONCURRENT_SEQS" \
     $GPU_MEM_ARGS \
     "${EXTRA_ARGS[@]}" &
 
