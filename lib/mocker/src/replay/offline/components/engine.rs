@@ -365,43 +365,42 @@ where
         now_ms: f64,
         mut collector: Option<&mut TraceCollector>,
     ) -> anyhow::Result<EngineEffects<Observation::Batch>> {
-        let stage = self.stage;
-        let pass_mode = self.pass_mode;
-        let worker_groups = &self.worker_groups;
-        let workers = &mut self.workers;
-        for rank_ids in worker_groups.values() {
+        // Iterating `self.worker_groups` in place relies on disjoint field borrows:
+        // the loop body only mutates `self.workers`, never the group map itself.
+        for rank_ids in self.worker_groups.values() {
             // A logical attention-DP worker advances in group-owned epochs.
             // A rank that received work mid-epoch must wait until every sibling
             // has crossed the prior completion boundary.
             if rank_ids
                 .iter()
-                .any(|rank_id| workers.get(rank_id).unwrap().is_busy())
+                .any(|rank_id| self.workers.get(rank_id).unwrap().is_busy())
             {
                 continue;
             }
             if !rank_ids
                 .iter()
-                .any(|rank_id| workers.get(rank_id).unwrap().is_ready())
+                .any(|rank_id| self.workers.get(rank_id).unwrap().is_ready())
             {
                 continue;
             }
 
             let mut executed_by_rank = BTreeMap::new();
             for &rank_id in rank_ids {
-                if !workers.get(&rank_id).unwrap().is_ready() {
+                if !self.workers.get(&rank_id).unwrap().is_ready() {
                     continue;
                 }
-                let executed = match pass_mode {
+                let executed = match self.pass_mode {
                     EnginePassMode::Visible => {
                         let Some(collector) = collector.as_deref_mut() else {
                             bail!("offline replay visible engine pass requires a collector");
                         };
-                        workers
+                        self.workers
                             .get_mut(&rank_id)
                             .unwrap()
                             .execute_pass(collector, now_ms)
                     }
-                    EnginePassMode::Hidden => workers
+                    EnginePassMode::Hidden => self
+                        .workers
                         .get_mut(&rank_id)
                         .unwrap()
                         .execute_hidden_pass(now_ms),
@@ -421,13 +420,13 @@ where
                     if group_end_ms > now_ms {
                         // Empty ranks still participate in the barrier so work
                         // arriving mid-epoch cannot start ahead of a sibling.
-                        workers.get_mut(&rank_id).unwrap().mark_busy();
+                        self.workers.get_mut(&rank_id).unwrap().mark_busy();
                         effects
                             .scheduled_completions
                             .push(ScheduledWorkerCompletion {
                                 at_ms: group_end_ms,
                                 payload: WorkerCompletionPayload {
-                                    stage,
+                                    stage: self.stage,
                                     worker_idx: rank_id,
                                     completed_requests: 0,
                                     output_signals: Vec::new(),
@@ -449,7 +448,7 @@ where
                 if let Some(fpm) = executed.fpm.as_mut() {
                     fpm.wall_time_secs = group_wall_time_secs;
                 }
-                if pass_mode == EnginePassMode::Visible {
+                if self.pass_mode == EnginePassMode::Visible {
                     collector
                         .as_deref_mut()
                         .expect("visible pass collector checked before execution")
@@ -478,7 +477,7 @@ where
                         observed_events
                     };
                 let payload = WorkerCompletionPayload {
-                    stage,
+                    stage: self.stage,
                     worker_idx: rank_id,
                     completed_requests: executed.completed_requests,
                     output_signals: executed.output_signals,
@@ -494,7 +493,7 @@ where
                 };
 
                 if group_end_ms > now_ms {
-                    workers.get_mut(&rank_id).unwrap().mark_busy();
+                    self.workers.get_mut(&rank_id).unwrap().mark_busy();
                     effects
                         .scheduled_completions
                         .push(ScheduledWorkerCompletion {
