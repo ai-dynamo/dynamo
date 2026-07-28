@@ -337,6 +337,13 @@ pub struct ParsingOptions {
     /// support are checked separately in the aggregator.
     #[serde(default)]
     pub experimental_v2_batch_eligible: bool,
+
+    /// The request's `parallel_tool_calls`. When `Some(false)`, the aggregator
+    /// caps each choice to a single tool call as a post-parse fallback for
+    /// tool_choice modes / engines where generation-time enforcement does not
+    /// fire. `None` / `Some(true)` leave the tool calls untouched.
+    #[serde(default)]
+    pub parallel_tool_calls: Option<bool>,
 }
 
 impl ParsingOptions {
@@ -345,6 +352,7 @@ impl ParsingOptions {
             tool_call_parser,
             reasoning_parser,
             experimental_v2_batch_eligible: false,
+            parallel_tool_calls: None,
         }
     }
 
@@ -353,6 +361,14 @@ impl ParsingOptions {
     /// `chat_completions::tool_parser_v2::batch_tool_choice_eligible`.
     pub fn with_experimental_v2_batch_eligible(mut self, eligible: bool) -> Self {
         self.experimental_v2_batch_eligible = eligible;
+        self
+    }
+
+    /// Set the request's `parallel_tool_calls`. `Some(false)` caps the aggregated
+    /// response to the first tool call. `None` / `Some(true)` leave tool calls
+    /// untouched.
+    pub fn with_parallel_tool_calls(mut self, parallel_tool_calls: Option<bool>) -> Self {
+        self.parallel_tool_calls = parallel_tool_calls;
         self
     }
 }
