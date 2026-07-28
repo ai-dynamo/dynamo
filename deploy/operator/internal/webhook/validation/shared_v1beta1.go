@@ -404,11 +404,11 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 		}
 	}
 
-	// Ratchet an unchanged legacy tuple but reject a missing image or newly invalid tuple.
+	// Ratchet legacy image absence or an unchanged legacy tuple, but reject a newly invalid tuple.
 	if v.validatesRuntimeVersionFor(runtimeVersionSourceV1Beta1) {
 		newImage, imagePath := runtimeVersionImageAndPath(newComponent, fldPath)
 		oldImage, _ := runtimeVersionImageAndPath(oldComponent, fldPath)
-		if newImage == "" {
+		if newImage == "" && oldImage != "" {
 			allErrs = append(allErrs, field.Required(imagePath, "is required"))
 		} else if runtimeVersionOverrideRequired(newImage, newComponent.RuntimeVersionOverride) &&
 			(newImage != oldImage || newComponent.RuntimeVersionOverride != oldComponent.RuntimeVersionOverride) {

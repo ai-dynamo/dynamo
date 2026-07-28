@@ -70,6 +70,42 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDGDForAdmission(nil),
 		},
 		{
+			name: "beta component pod template is required on create",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				betaWorkerComponent(dgd).PodTemplate = nil
+			}),
+			wantCELErr: "spec.components[1]: Invalid value: podTemplate is required for new components and cannot be removed once set",
+		},
+		{
+			name: "alpha service extra pod spec is required on create",
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Spec.Services[dgdAdmissionWorkerName].ExtraPodSpec = nil
+			}),
+			wantCELErr: "spec.services[worker]: Invalid value: extraPodSpec is required for new components and cannot be removed once set",
+		},
+		{
+			name:               "legacy beta component missing pod template is ratcheted on update",
+			seedWithoutWebhook: true,
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				betaWorkerComponent(dgd).PodTemplate = nil
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				betaWorkerComponent(dgd).PodTemplate = nil
+				dgd.Labels = map[string]string{"updated": "true"}
+			}),
+		},
+		{
+			name:               "legacy alpha service missing extra pod spec is ratcheted on update",
+			seedWithoutWebhook: true,
+			oldDeployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Spec.Services[dgdAdmissionWorkerName].ExtraPodSpec = nil
+			}),
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Spec.Services[dgdAdmissionWorkerName].ExtraPodSpec = nil
+				dgd.Labels = map[string]string{"updated": "true"}
+			}),
+		},
+		{
 			name: "component custom image requires runtime version override",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				worker := betaWorkerComponent(dgd)

@@ -70,6 +70,7 @@ type DynamoComponentDeploymentSpec struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.eppConfig) || (has(self.type) && self.type == 'epp')",message="eppConfig may only be set when type is epp"
 // +kubebuilder:validation:XValidation:rule="!has(self.minAvailable) || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)",message="minAvailable must be less than or equal to replicas unless replicas is 0"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)",message="minAvailable is immutable after creation"
+// +kubebuilder:validation:XValidation:rule="has(self.podTemplate) || (oldSelf.hasValue() && !has(oldSelf.value().podTemplate))",message="podTemplate is required for new components and cannot be removed once set",optionalOldSelf=true
 type DynamoComponentDeploymentSharedSpec struct {
 	// name is the stable logical identifier for this component within its
 	// DynamoGraphDeployment. It must be unique within the parent's
@@ -112,15 +113,17 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +optional
 	GlobalDynamoNamespace bool `json:"globalDynamoNamespace,omitempty"`
 
-	// podTemplate is required and must include a container named "main" with
-	// a non-empty image. The operator merges defaults into that container.
+	// podTemplate defines the component's Pod configuration. New components must
+	// include a container named "main" with a non-empty image. Existing components
+	// created without a podTemplate may remain unchanged. The operator merges
+	// defaults into the main container.
 	// If the main image tag is not a Dynamo semantic version, set
 	// runtimeVersionOverride explicitly.
 	//
 	// All other containers are user-managed sidecars and must specify their
 	// required fields, including image.
-	// +required
-	PodTemplate *corev1.PodTemplateSpec `json:"podTemplate"`
+	// +optional
+	PodTemplate *corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
 
 	// replicas is the desired number of Pods for this component. When
 	// `scalingAdapter` is set on this component, this field is managed by

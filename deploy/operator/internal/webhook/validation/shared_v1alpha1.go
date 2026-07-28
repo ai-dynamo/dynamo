@@ -102,11 +102,11 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdateV1al
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 
-	// Ratchet an unchanged legacy tuple but reject a missing image or newly invalid tuple.
+	// Ratchet legacy image absence or an unchanged legacy tuple, but reject a newly invalid tuple.
 	if v.validatesRuntimeVersionFor(runtimeVersionSourceV1Alpha1) {
 		newImage, imagePath := runtimeVersionImageAndPathV1Alpha1(newSpec, fldPath)
 		oldImage, _ := runtimeVersionImageAndPathV1Alpha1(oldSpec, fldPath)
-		if newImage == "" {
+		if newImage == "" && oldImage != "" {
 			allErrs = append(allErrs, field.Required(imagePath, "is required"))
 		} else if runtimeVersionOverrideRequired(newImage, newSpec.RuntimeVersionOverride) &&
 			(newImage != oldImage || newSpec.RuntimeVersionOverride != oldSpec.RuntimeVersionOverride) {

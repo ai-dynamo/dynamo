@@ -111,6 +111,9 @@ The main image remains required when an override is set. Sidecar image tags are 
 runtime-version detection. The override declares the Dynamo runtime packaged in the image; it is
 not the CUDA, inference-engine, operator, Git, or image-build version. It does not rewrite the
 image or change the rendered Pod, and changing only this field does not trigger a worker rollout.
+For compatibility, an existing component created without its pod configuration or main image can
+still be updated while that field remains missing. New components must provide both, and adding,
+changing, or removing the image applies current admission validation.
 
 ## Run Locally
 

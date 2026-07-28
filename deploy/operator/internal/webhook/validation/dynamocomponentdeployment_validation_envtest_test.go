@@ -69,6 +69,58 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
+			name: "v1beta1 pod template is required on create",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.PodTemplate = nil
+			}),
+			wantCELErr: "spec: Invalid value: podTemplate is required for new components and cannot be removed once set",
+		},
+		{
+			name: "v1alpha1 extra pod spec is required on create",
+			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.ExtraPodSpec = nil
+			}),
+			wantCELErr: "spec: Invalid value: extraPodSpec is required for new components and cannot be removed once set",
+		},
+		{
+			name:               "legacy v1beta1 missing pod template is ratcheted on update",
+			seedWithoutWebhook: true,
+			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.PodTemplate = nil
+			}),
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.PodTemplate = nil
+				dcd.Labels = map[string]string{"updated": "true"}
+			}),
+		},
+		{
+			name:               "legacy v1alpha1 missing extra pod spec is ratcheted on update",
+			seedWithoutWebhook: true,
+			oldDeployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.ExtraPodSpec = nil
+			}),
+			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.ExtraPodSpec = nil
+				dcd.Labels = map[string]string{"updated": "true"}
+			}),
+		},
+		{
+			name:          "v1beta1 pod template cannot be removed",
+			oldDeployment: betaDCDForAdmission(nil),
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.PodTemplate = nil
+			}),
+			wantCELErr: "spec: Invalid value: podTemplate is required for new components and cannot be removed once set",
+		},
+		{
+			name:          "v1alpha1 extra pod spec cannot be removed",
+			oldDeployment: alphaDCDForAdmission(nil),
+			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.ExtraPodSpec = nil
+			}),
+			wantCELErr: "spec: Invalid value: extraPodSpec is required for new components and cannot be removed once set",
+		},
+		{
 			name: "v1beta1 main image is required",
 			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 				dcd.Spec.PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
