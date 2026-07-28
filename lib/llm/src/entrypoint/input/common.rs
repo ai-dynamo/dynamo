@@ -69,6 +69,10 @@ fn preprocessed_multimodal_cache_keys(request: &PreprocessedRequest) -> Vec<Stri
             MultimodalData::Url(url) => keys.push(multimodal_cache_key_from_url(url.as_str())),
             MultimodalData::RawUrl(url) => keys.push(multimodal_cache_key_from_url(url)),
             MultimodalData::Decoded(_) => {}
+            // Opaque UUIDs are not content-derived routing keys. UUID-only
+            // reuse intentionally relies on text-prefix routing and affinity
+            // to the worker that owns the processor/embedding cache entry.
+            MultimodalData::UuidOnly(_) => {}
         }
     }
     keys.sort();
@@ -185,6 +189,7 @@ fn preprocessed_backend_engine(
     router_mode: RouterMode,
     chooser: Option<Arc<KvRouter>>,
     model_manager: &Arc<crate::discovery::ModelManager>,
+    endpoint_id: &dynamo_runtime::protocols::EndpointId,
     affinity: Option<AffinityCoordinator>,
 ) -> anyhow::Result<ServiceEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>>>
 {
@@ -193,7 +198,7 @@ fn preprocessed_backend_engine(
     // arms below are only reached with LoRA serving disabled.
     validate_router_mode_for_lora(
         router_mode,
-        model_manager.lora_filter().is_some(),
+        model_manager.lora_enabled(),
         affinity.is_some(),
     )?;
 
@@ -201,17 +206,19 @@ fn preprocessed_backend_engine(
         RouterMode::Direct => Arc::new(SessionAffinityPushRouter::new_with_coordinator(
             router, affinity, true,
         )),
-        RouterMode::Random | RouterMode::RoundRobin => match model_manager.lora_filter() {
-            Some(lora_filter) => Arc::new(LoraFilteredRouter::new(
-                router,
-                lora_filter,
-                model_manager.lora_load_estimator().clone(),
-                router_mode,
-            )),
-            None => Arc::new(SessionAffinityPushRouter::new_with_coordinator(
-                router, affinity, false,
-            )),
-        },
+        RouterMode::Random | RouterMode::RoundRobin => {
+            match model_manager.lora_filter_for(endpoint_id) {
+                Some(lora_filter) => Arc::new(LoraFilteredRouter::new(
+                    router,
+                    lora_filter,
+                    model_manager.lora_load_estimator_for(endpoint_id),
+                    router_mode,
+                )),
+                None => Arc::new(SessionAffinityPushRouter::new_with_coordinator(
+                    router, affinity, false,
+                )),
+            }
+        }
         RouterMode::PowerOfTwoChoices
         | RouterMode::LeastLoaded
         | RouterMode::DeviceAwareWeighted => {
@@ -251,13 +258,14 @@ pub async fn build_preprocessed_routing(
     // (possibly long) DYN_ROUTER_MIN_INITIAL_WORKERS wait.
     validate_router_mode_for_lora(
         router_mode,
-        model_manager.lora_filter().is_some(),
+        model_manager.lora_enabled(),
         session_affinity_ttl_secs.is_some(),
     )?;
     let min_initial_workers = min_initial_workers_from_env()?;
     let router_client = router_client(client, router_mode, chooser.as_ref())?;
 
     wait_for_min_initial_workers(&router_client, min_initial_workers).await?;
+    let endpoint_id = router_client.endpoint.id();
 
     let affinity = create_affinity_coordinator(
         session_affinity_ttl_secs.map(Duration::from_secs),
@@ -304,8 +312,14 @@ pub async fn build_preprocessed_routing(
     });
     let encoder_router = encoder_chooser.unwrap_or_else(EncoderRouter::disabled);
 
-    let backend_engine =
-        preprocessed_backend_engine(router, router_mode, chooser, &model_manager, affinity)?;
+    let backend_engine = preprocessed_backend_engine(
+        router,
+        router_mode,
+        chooser,
+        &model_manager,
+        &endpoint_id,
+        affinity,
+    )?;
     Ok(PreprocessedRouting {
         backend_engine,
         prefill_router,

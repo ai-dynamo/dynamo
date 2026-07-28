@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: aic-profiler
+spec:
+  model: Qwen/Qwen3-0.6B
+  backend: vllm
+  image: test.invalid/profiler:replaced-by-test
+  searchStrategy: rapid
+  autoApply: true
+  hardware:
+    gpuSku: h100_sxm
+    vramMb: 81920
+    numGpusPerNode: 8
+    totalGpus: 8
+    interconnect: nvlink
+    rdma: false
+  workload:
+    isl: 4000
+    osl: 1000
+  sla:
+    ttft: 2000
+    itl: 30
+  features:
+    mocker:
+      enabled: true

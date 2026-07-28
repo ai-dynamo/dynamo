@@ -72,19 +72,21 @@
 /lib/kv-router/src/sequences/                                                @ai-dynamo/dynamo-router-codeowners
 /components/src/dynamo/router/                                               @ai-dynamo/dynamo-router-codeowners
 /lib/kv-router/src/scheduling/                                               @ai-dynamo/dynamo-router-codeowners
+/components/src/dynamo/kv_dc_relay/                                          @ai-dynamo/dynamo-router-codeowners
 /components/src/dynamo/global_router/                                        @ai-dynamo/dynamo-router-codeowners
+/components/src/dynamo/squeeze_evolve/                                       @ai-dynamo/dynamo-router-codeowners
 /examples/router/policy-class-queues.yaml                                    @ai-dynamo/dynamo-router-codeowners
 /components/src/dynamo/global_router/tests/                                  @ai-dynamo/dynamo-router-codeowners
 /components/src/dynamo/thunderagent_router/                                  @ai-dynamo/dynamo-router-codeowners
 
 # === backend-vllm  (@ai-dynamo/dynamo-backend-vllm-codeowners) ===
+/lib/sidecar/vllm/                                                           @ai-dynamo/dynamo-backend-vllm-codeowners
 /examples/backends/vllm/                                                     @ai-dynamo/dynamo-backend-vllm-codeowners
-/lib/vllm-rs-backend/src/                                                    @ai-dynamo/dynamo-backend-vllm-codeowners
 /components/src/dynamo/vllm/                                                 @ai-dynamo/dynamo-backend-vllm-codeowners
-/lib/vllm-rs-backend/Cargo.toml                                              @ai-dynamo/dynamo-backend-vllm-codeowners
 /components/src/dynamo/vllm/tests/                                           @ai-dynamo/dynamo-backend-vllm-codeowners
 
 # === backend-trtllm  (@ai-dynamo/dynamo-backend-trtllm-codeowners) ===
+/lib/sidecar/trtllm/                                                         @ai-dynamo/dynamo-backend-trtllm-codeowners
 /examples/backends/trtllm/                                                   @ai-dynamo/dynamo-backend-trtllm-codeowners
 /components/src/dynamo/trtllm/                                               @ai-dynamo/dynamo-backend-trtllm-codeowners
 /components/src/dynamo/trtllm/tests/                                         @ai-dynamo/dynamo-backend-trtllm-codeowners
@@ -96,8 +98,8 @@
 /components/src/dynamo/trtllm/logits_processing/                             @ai-dynamo/dynamo-backend-trtllm-codeowners
 
 # === backend-sglang  (@ai-dynamo/dynamo-backend-sglang-codeowners) ===
+/lib/sidecar/sglang/                                                         @ai-dynamo/dynamo-backend-sglang-codeowners
 /examples/backends/sglang/                                                   @ai-dynamo/dynamo-backend-sglang-codeowners
-/lib/backend/sglang-sidecar/                                                 @ai-dynamo/dynamo-backend-sglang-codeowners
 /components/src/dynamo/sglang/                                               @ai-dynamo/dynamo-backend-sglang-codeowners
 /components/src/dynamo/sglang/tests/                                         @ai-dynamo/dynamo-backend-sglang-codeowners
 /components/src/dynamo/sglang/request_handlers/                              @ai-dynamo/dynamo-backend-sglang-codeowners
@@ -159,6 +161,8 @@
 /examples/diffusers/                                                         @ai-dynamo/dynamo-diffusion-codeowners
 
 # === planner  (@ai-dynamo/dynamo-planner-codeowners) ===
+/aisimulate/                                                                 @ai-dynamo/dynamo-planner-codeowners
+/examples/aisimulate/                                                        @ai-dynamo/dynamo-planner-codeowners
 /examples/global_planner/                                                    @ai-dynamo/dynamo-planner-codeowners
 /components/src/dynamo/planner/                                              @ai-dynamo/dynamo-planner-codeowners
 /components/src/dynamo/profiler/                                             @ai-dynamo/dynamo-planner-codeowners
@@ -202,6 +206,7 @@
 /lib/runtime/tests/                                                          @ai-dynamo/dynamo-runtime-codeowners
 /lib/backend-common/                                                         @ai-dynamo/dynamo-runtime-codeowners
 /lib/llm/src/common/                                                         @ai-dynamo/dynamo-runtime-codeowners
+/lib/sidecar/common/                                                         @ai-dynamo/dynamo-runtime-codeowners
 /tests/dependencies/                                                         @ai-dynamo/dynamo-runtime-codeowners
 /tests/serve/launch/                                                         @ai-dynamo/dynamo-runtime-codeowners
 /tests/serve/trtllm/                                                         @ai-dynamo/dynamo-runtime-codeowners
@@ -209,6 +214,7 @@
 /lib/llm/src/kernels/                                                        @ai-dynamo/dynamo-runtime-codeowners
 /lib/runtime/benches/                                                        @ai-dynamo/dynamo-runtime-codeowners
 /lib/runtime/examples/                                                       @ai-dynamo/dynamo-runtime-codeowners
+/lib/sidecar/README.md                                                       @ai-dynamo/dynamo-runtime-codeowners
 /tests/serve/fixtures/                                                       @ai-dynamo/dynamo-runtime-codeowners
 /lib/llm/src/discovery/                                                      @ai-dynamo/dynamo-runtime-codeowners
 /lib/runtime/src/utils/                                                      @ai-dynamo/dynamo-runtime-codeowners
@@ -286,10 +292,8 @@
 
 # === docs  (@ai-dynamo/dynamo-docs-codeowners) ===
 /docs/                                                                       @ai-dynamo/dynamo-docs-codeowners
-/fern/                                                                       @ai-dynamo/dynamo-docs-codeowners
 /README.md                                                                   @ai-dynamo/dynamo-docs-codeowners
 /README.zh-CN.md                                                             @ai-dynamo/dynamo-docs-codeowners
-/fern/components/                                                            @ai-dynamo/dynamo-docs-codeowners
 /examples/README.md                                                          @ai-dynamo/dynamo-docs-codeowners
 /components/README.md                                                        @ai-dynamo/dynamo-docs-codeowners
 /examples/__init__.py                                                        @ai-dynamo/dynamo-docs-codeowners
@@ -590,8 +594,8 @@
 
 # --- Shared ownership: multi-team (any one approves; wins via last-match) ---
 /.agents/                                                                    @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-agents-codeowners
-/docs/agents/                                                                @ai-dynamo/dynamo-docs-codeowners @ai-dynamo/dynamo-agents-codeowners
 /tests/deploy/                                                               @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-operator-codeowners
+/docs/fern/agents/                                                           @ai-dynamo/dynamo-docs-codeowners @ai-dynamo/dynamo-agents-codeowners
 /benchmarks/router/                                                          @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-router-codeowners
 /deploy/power-agent/                                                         @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-planner-codeowners
 /lib/llm/src/mocker/                                                         @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-performance-codeowners
@@ -608,8 +612,6 @@
 /lib/llm/src/fpm_publisher.rs                                                @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
 /lib/mocker/src/kvbm_offload/                                                @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/kvbm-logical/src/metrics/                                               @ai-dynamo/dynamo-kv-memory-codeowners @ai-dynamo/dynamo-observability-codeowners
-/docs/backends/sglang/agents.md                                              @ai-dynamo/dynamo-docs-codeowners @ai-dynamo/dynamo-agents-codeowners
-/docs/digest/agentic-inference/                                              @ai-dynamo/dynamo-docs-codeowners @ai-dynamo/dynamo-agents-codeowners
 /lib/llm/src/protocols/agents.rs                                             @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-agents-codeowners
 /lib/runtime/src/health_check.rs                                             @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
 /components/src/dynamo/vllm/omni/                                            @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-multimodal-codeowners
@@ -621,6 +623,8 @@
 /components/src/dynamo/vllm/main.py                                          @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-kv-memory-codeowners @ai-dynamo/dynamo-observability-codeowners
 /deploy/inference-gateway/ext-proc/                                          @ai-dynamo/dynamo-epp-codeowners @ai-dynamo/dynamo-router-codeowners
 /lib/kvbm-engine/src/pubsub/nats.rs                                          @ai-dynamo/dynamo-kv-memory-codeowners @ai-dynamo/dynamo-runtime-codeowners
+/docs/fern/backends/sglang/agents.md                                         @ai-dynamo/dynamo-docs-codeowners @ai-dynamo/dynamo-agents-codeowners
+/docs/fern/digest/agentic-inference/                                         @ai-dynamo/dynamo-docs-codeowners @ai-dynamo/dynamo-agents-codeowners
 /lib/backend-common/src/telemetry.rs                                         @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
 /lib/llm/src/http/service/metrics.rs                                         @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-observability-codeowners
 /lib/llm/src/protocols/openai/audios/                                        @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-multimodal-codeowners
