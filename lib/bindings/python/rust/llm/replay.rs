@@ -929,11 +929,6 @@ pub fn run_mocker_trace_replay(
     )?;
     let router_config = load_replay_router_config(router_config, model_name)?;
     let replay_mode = replay_mode.to_owned();
-    if report_jsonl_path.is_some() && replay_mode != "offline" {
-        return Err(PyValueError::new_err(
-            "report_jsonl_path is only supported for replay_mode='offline'",
-        ));
-    }
     let jsonl_path_for_emit = report_jsonl_path.clone();
     let record_per_request = report_jsonl_path.is_some();
     if let Some(ms) = max_sim_time_ms {
@@ -948,21 +943,9 @@ pub fn run_mocker_trace_replay(
             ));
         }
     }
-    // Goodput SLA: when set, the collector classifies SLA-satisfying requests and
-    // the report carries goodput_* keys. Offline replay only (the online/live
-    // entrypoints don't take it) — reject it for non-offline modes rather than
-    // silently dropping it, matching report_jsonl_path / max_sim_time_ms. With none
-    // set, goodput is omitted as before.
     validate_sla_threshold("sla_ttft_ms", sla_ttft_ms)?;
     validate_sla_threshold("sla_itl_ms", sla_itl_ms)?;
     validate_sla_threshold("sla_e2e_ms", sla_e2e_ms)?;
-    if replay_mode != "offline"
-        && (sla_ttft_ms.is_some() || sla_itl_ms.is_some() || sla_e2e_ms.is_some())
-    {
-        return Err(PyValueError::new_err(
-            "sla_ttft_ms, sla_itl_ms, and sla_e2e_ms only support replay_mode='offline'",
-        ));
-    }
     let sla = dynamo_mocker::replay::SlaThresholds {
         ttft_ms: sla_ttft_ms,
         itl_ms: sla_itl_ms,
@@ -1039,7 +1022,7 @@ pub fn run_mocker_trace_replay(
                 )
             }
             ReplayDispatch::AggregatedOnlineConcurrency(args, max_in_flight) => {
-                dynamo_mocker::replay::simulate_concurrency_live_file_with_router_mode_and_format(
+                dynamo_mocker::replay::simulate_concurrency_live_file_with_router_mode_and_format_and_options(
                     *args,
                     router_config.clone(),
                     prefill_load_estimator.clone(),
@@ -1051,10 +1034,12 @@ pub fn run_mocker_trace_replay(
                     trace_format,
                     trace_shared_prefix_ratio,
                     trace_num_prefix_groups,
+                    record_per_request,
+                    sla,
                 )
             }
             ReplayDispatch::AggregatedOnline(args) => {
-                dynamo_mocker::replay::simulate_trace_live_file_with_router_mode_and_format(
+                dynamo_mocker::replay::simulate_trace_live_file_with_router_mode_and_format_and_options(
                     *args,
                     router_config.clone(),
                     prefill_load_estimator.clone(),
@@ -1066,6 +1051,8 @@ pub fn run_mocker_trace_replay(
                     trace_format,
                     trace_shared_prefix_ratio,
                     trace_num_prefix_groups,
+                    record_per_request,
+                    sla,
                 )
             }
             ReplayDispatch::DisaggOfflineConcurrency(config, max_in_flight) => {
@@ -1164,7 +1151,7 @@ fn run_loaded_dynamo_request_trace(
                     )
                 }
                 ReplayDispatch::AggregatedOnlineConcurrency(args, max_in_flight) => {
-                    dynamo_mocker::replay::simulate_concurrency_live_workload_with_router_mode(
+                    dynamo_mocker::replay::simulate_concurrency_live_workload_with_router_mode_and_options(
                         *args,
                         router_config,
                         prefill_load_estimator,
@@ -1172,10 +1159,12 @@ fn run_loaded_dynamo_request_trace(
                         max_in_flight,
                         num_workers,
                         router_mode,
+                        record_per_request,
+                        sla,
                     )
                 }
                 ReplayDispatch::AggregatedOnline(args) => {
-                    dynamo_mocker::replay::simulate_loaded_trace_live_with_router_mode(
+                    dynamo_mocker::replay::simulate_loaded_trace_live_with_router_mode_and_options(
                         *args,
                         router_config,
                         prefill_load_estimator,
@@ -1183,6 +1172,8 @@ fn run_loaded_dynamo_request_trace(
                         num_workers,
                         arrival_speedup_ratio,
                         router_mode,
+                        record_per_request,
+                        sla,
                     )
                 }
                 ReplayDispatch::DisaggOfflineConcurrency(config, max_in_flight) => {
@@ -1219,9 +1210,6 @@ fn run_loaded_dynamo_request_trace(
                     "agentic Dynamo request traces are not supported with replay_concurrency"
                 );
             }
-            if replay_mode != "offline" {
-                anyhow::bail!("agentic Dynamo request traces are not supported for online replay");
-            }
             let ReplayArgsSelection::Aggregated(args) = args_selection else {
                 anyhow::bail!(
                     "agentic Dynamo request traces are not supported for disaggregated replay"
@@ -1230,15 +1218,31 @@ fn run_loaded_dynamo_request_trace(
             let trace = trace
                 .normalize_starts()
                 .speed_up_timing(arrival_speedup_ratio)?;
-            dynamo_mocker::replay::simulate_agentic_trace_workload_with_router_mode(
-                *args,
-                router_config,
-                prefill_load_estimator,
-                trace,
-                num_workers,
-                router_mode,
-                sla,
-            )
+            match replay_mode {
+                "offline" => dynamo_mocker::replay::simulate_agentic_trace_workload_with_router_mode(
+                    *args,
+                    router_config,
+                    prefill_load_estimator,
+                    trace,
+                    num_workers,
+                    router_mode,
+                    sla,
+                ),
+                "online" => dynamo_mocker::replay::simulate_agentic_trace_live_workload_with_router_mode_and_options(
+                    *args,
+                    router_config,
+                    prefill_load_estimator,
+                    trace,
+                    num_workers,
+                    router_mode,
+                    record_per_request,
+                    sla,
+                ),
+                other => anyhow::bail!(
+                    "replay_mode must be either 'offline' or 'online', got '{}'",
+                    other
+                ),
+            }
         }
     }
 }
@@ -1308,16 +1312,6 @@ pub fn run_mocker_synthetic_trace_replay(
         itl_ms: sla_itl_ms,
         e2e_ms: sla_e2e_ms,
     };
-    // The online branches below don't thread `sla`, so reject SLA with a
-    // non-offline replay_mode rather than silently dropping goodput
-    // (mirrors run_mocker_trace_replay).
-    if replay_mode != "offline"
-        && (sla_ttft_ms.is_some() || sla_itl_ms.is_some() || sla_e2e_ms.is_some())
-    {
-        return Err(PyValueError::new_err(
-            "sla_ttft_ms, sla_itl_ms, and sla_e2e_ms only support replay_mode='offline'",
-        ));
-    }
     let args_selection = load_replay_args_selection(
         py,
         extra_engine_args,
@@ -1399,7 +1393,7 @@ pub fn run_mocker_synthetic_trace_replay(
                         )
                     }
                     ("online", Some(max_in_flight)) => {
-                        dynamo_mocker::replay::simulate_concurrency_live_workload_with_router_mode(
+                        dynamo_mocker::replay::simulate_concurrency_live_workload_with_router_mode_and_options(
                             *args,
                             router_config.clone(),
                             prefill_load_estimator.clone(),
@@ -1407,16 +1401,20 @@ pub fn run_mocker_synthetic_trace_replay(
                             max_in_flight,
                             num_workers,
                             router_mode,
+                            false,
+                            sla,
                         )
                     }
                     ("online", None) => {
-                        dynamo_mocker::replay::simulate_trace_live_workload_with_router_mode(
+                        dynamo_mocker::replay::simulate_trace_live_workload_with_router_mode_and_options(
                             *args,
                             router_config.clone(),
                             prefill_load_estimator.clone(),
                             trace,
                             num_workers,
                             router_mode,
+                            false,
+                            sla,
                         )
                     }
                     (other, _) => anyhow::bail!(
@@ -1490,7 +1488,7 @@ pub fn run_mocker_synthetic_trace_replay(
                     sla,
                 ),
                 ("online", Some(max_in_flight)) => {
-                    dynamo_mocker::replay::simulate_concurrency_live_requests_with_router_mode(
+                    dynamo_mocker::replay::simulate_concurrency_live_requests_with_router_mode_and_options(
                         *args,
                         router_config.clone(),
                         prefill_load_estimator.clone(),
@@ -1498,10 +1496,12 @@ pub fn run_mocker_synthetic_trace_replay(
                         max_in_flight,
                         num_workers,
                         router_mode,
+                        false,
+                        sla,
                     )
                 }
                 ("online", None) => {
-                    dynamo_mocker::replay::simulate_trace_live_requests_with_router_mode(
+                    dynamo_mocker::replay::simulate_trace_live_requests_with_router_mode_and_options(
                         *args,
                         router_config.clone(),
                         prefill_load_estimator.clone(),
@@ -1509,6 +1509,8 @@ pub fn run_mocker_synthetic_trace_replay(
                         num_workers,
                         arrival_speedup_ratio,
                         router_mode,
+                        false,
+                        sla,
                     )
                 }
                 (other, _) => anyhow::bail!(
@@ -1765,6 +1767,12 @@ fn load_optional_replay_mocker_args(
         .transpose()
 }
 
+fn is_aic_memory_estimator_unavailable(py: Python<'_>, error: &PyErr) -> bool {
+    py.import("dynamo._internal.aic")
+        .and_then(|module| module.getattr("AicMemoryEstimatorUnavailableError"))
+        .is_ok_and(|exception_type| error.is_instance(py, &exception_type))
+}
+
 fn materialize_replay_mocker_args(
     py: Python<'_>,
     extra_args: MockEngineArgs,
@@ -1800,7 +1808,7 @@ fn materialize_replay_mocker_args(
         // `dp_size` independent per-rank schedulers, each with a per-rank KV pool.
         // The topology applies whether KV capacity is explicit or estimated.
         if !num_gpu_blocks_explicit {
-            let per_rank_blocks = estimate_aic_num_gpu_blocks(
+            let capacity = estimate_aic_num_gpu_blocks(
                 py,
                 &backend,
                 &system,
@@ -1822,18 +1830,32 @@ fn materialize_replay_mocker_args(
                 fmha_dtype.as_deref(),
                 kv_cache_dtype.as_deref(),
                 comm_dtype.as_deref(),
-            )
-            .map_err(|e| {
-                PyException::new_err(format!(
-                    "Failed to estimate AIC KV cache capacity (--aic-perf-model was requested): {}",
-                    e
-                ))
-            })?;
-            // AIC returns a per-rank (per-GPU) block count. When replicating attention-DP
-            // into per-rank workers, each worker owns this per-rank pool (engine-wide
-            // capacity stays `per_rank * dp`, now partitioned per rank as on real hardware).
-            // With dp == 1 the per-rank pool is the engine-wide pool.
-            args.num_gpu_blocks = per_rank_blocks;
+            );
+            match capacity {
+                Ok(per_rank_blocks) => {
+                    // AIC returns a per-rank (per-GPU) block count. When replicating
+                    // attention-DP into per-rank workers, each worker owns this per-rank
+                    // pool (engine-wide capacity stays `per_rank * dp`, now partitioned
+                    // per rank as on real hardware). With dp == 1 the per-rank pool is
+                    // the engine-wide pool.
+                    args.num_gpu_blocks = per_rank_blocks;
+                }
+                Err(error) if is_aic_memory_estimator_unavailable(py, &error) => {
+                    tracing::warn!(
+                        %error,
+                        num_gpu_blocks = args.num_gpu_blocks,
+                        "AIC KV-cache capacity estimation is unavailable during replay; \
+                         using the default block count. Upgrade aiconfigurator or set \
+                         num_gpu_blocks explicitly"
+                    );
+                }
+                Err(error) => {
+                    return Err(PyException::new_err(format!(
+                        "Failed to estimate AIC KV cache capacity \
+                         (--aic-perf-model was requested): {error}"
+                    )));
+                }
+            }
         }
         let callback = create_aic_callback(
             py,
