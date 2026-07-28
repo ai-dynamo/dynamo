@@ -27,7 +27,7 @@ flowchart LR
     EPP -->|"updates"| Index["In-memory KV index"]
 ```
 
-This is intentionally not the same lifecycle model as the operator-managed GAIE quickstart. There is no `DynamoGraphDeployment`, no Dynamo worker runtime, and no Dynamo event plane in this on-ramp.
+This is intentionally not the same lifecycle model as the operator-managed GAIE quickstart. There is no `DynamoGraphDeployment`, no Dynamo worker runtime, and no Dynamo event plane in this on-ramp. We will be starting with a simple Kubernetes `apps/v1` Deployment of `vllm serve` pods.
 
 | | This on-ramp (standalone mode) | Full Dynamo (dynamo mode) |
 |---|---|---|
@@ -47,7 +47,7 @@ the replicas discover each other and sync active load (admission/prefill/free)
 over ZMQ.
 
 
-## Prerequisites
+### 1. Prerequisites
 
 - Kubernetes cluster with GPU nodes.
 - `kubectl`, [Helm](https://helm.sh/docs/intro/install/), and
@@ -55,18 +55,25 @@ over ZMQ.
 - Baseline Gateway API knowledge from the upstream
   [Gateway API getting started guide](https://gateway-api.sigs.k8s.io/guides/getting-started/introduction/)
   and the upstream
-  [GAIE guide](https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/main/site-src/guides/index.md).
+  [Inference Extension GAIE guide](https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/main/site-src/guides/index.md).
 - A Gateway API implementation that supports GAIE `InferencePool` resources and `endpointPickerRef`
   calls. This walkthrough shows the same verified agentgateway path as the GAIE
   quickstart; other implementations might work when they support that same EPP path. See the upstream
   [GAIE gateway implementation list](https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/main/site-src/implementations/gateways.md)
-  for other implementations.
+  for other implementations. The example below uses the [AgentGateway](https://agentgateway.dev/docs/kubernetes/main/quickstart/install/) in the `agentgateway-system` namespace.
 - A model namespace that can run GPU workloads.
 - Hugging Face credentials if the model requires them. The
   [Kubernetes Quickstart](quickstart.mdx) explains the general secret
   pattern; it is not GAIE-specific.
 - Access to a Dynamo EPP image.
+Set up a Gateway-API gateway + Inference Extension (GAIE) if you don't have one
+yet. Follow the instructions for your gateway (e.g.
 
+We provide a convenience script if you are installing from scratch for experimentation.
+```bash
+# Gateway API + Inference Extension CRDs + a gateway named `inference-gateway`
+deploy/inference-gateway/scripts/install_gaie_crd_agentgateway.sh
+```
 
 If you are starting from scratch install the [Prerequisites](#1-prerequisites) and apply the provided example file [`agg.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/inference-gateway/ext-proc/examples/onramp/agg.yaml).
 
@@ -128,20 +135,6 @@ spec:
       port: 8000
       targetPort: 8000
 ```
-
-### 1. Prerequisites
-
-Set up a Gateway-API gateway + Inference Extension (GAIE) if you don't have one
-yet. Follow the instructions for your gateway (e.g. [AgentGateway](https://agentgateway.dev/docs/kubernetes/main/quickstart/install/)) and [Inference Extension](https://gateway-api-inference-extension.sigs.k8s.io/guides/).
-
-We provide a convenience script if you are installing from scratch for experimentation.
-```bash
-# Gateway API + Inference Extension CRDs + a gateway named `inference-gateway`
-deploy/inference-gateway/scripts/install_gaie_crd_agentgateway.sh
-```
-
-Create the HuggingFace token secret the vLLM worker uses to download the
-model.
 
 ```bash
 # HF token secret for the vLLM worker (required for gated models)
@@ -315,7 +308,7 @@ metadata:
    See the full list in the
    [environment contract](#standalone-mode-environment-contract) below.
 
-In the end your Final vLLM deployment will look like below:
+In the end your final vLLM deployment will look like below:
 
 ```yaml
 apiVersion: apps/v1
