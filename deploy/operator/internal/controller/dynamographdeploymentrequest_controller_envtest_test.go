@@ -1443,11 +1443,13 @@ spec:
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &current)).Should(Succeed())
 			current.Status.Phase = nvidiacomv1beta1.DGDRPhaseReady
 			current.Status.ObservedGeneration = current.Generation
+			lastTransitionTime := metav1.Now()
 			current.Status.Conditions = []metav1.Condition{
 				{
 					Type:               nvidiacomv1beta1.ConditionTypeSpecGenerated,
 					Status:             metav1.ConditionTrue,
 					ObservedGeneration: current.Generation,
+					LastTransitionTime: lastTransitionTime,
 					Reason:             "SpecGenerated",
 					Message:            "Spec is available",
 				},
@@ -1455,6 +1457,7 @@ spec:
 					Type:               nvidiacomv1beta1.ConditionTypeSucceeded,
 					Status:             metav1.ConditionTrue,
 					ObservedGeneration: current.Generation,
+					LastTransitionTime: lastTransitionTime,
 					Reason:             "SpecGenerated",
 					Message:            "Profiling complete, spec available",
 				},
@@ -1538,11 +1541,13 @@ spec:
 			current.Status.Phase = nvidiacomv1beta1.DGDRPhaseDeployed
 			current.Status.DGDName = dgdName
 			current.Status.ObservedGeneration = current.Generation
+			lastTransitionTime := metav1.Now()
 			current.Status.Conditions = []metav1.Condition{
 				{
 					Type:               nvidiacomv1beta1.ConditionTypeSpecGenerated,
 					Status:             metav1.ConditionTrue,
 					ObservedGeneration: current.Generation,
+					LastTransitionTime: lastTransitionTime,
 					Reason:             "SpecGenerated",
 					Message:            "Spec generated",
 				},
@@ -1550,6 +1555,7 @@ spec:
 					Type:               nvidiacomv1beta1.ConditionTypeDeploymentReady,
 					Status:             metav1.ConditionTrue,
 					ObservedGeneration: current.Generation,
+					LastTransitionTime: lastTransitionTime,
 					Reason:             "DeploymentReady",
 					Message:            "Deployment is ready",
 				},
@@ -1557,6 +1563,7 @@ spec:
 					Type:               nvidiacomv1beta1.ConditionTypeSucceeded,
 					Status:             metav1.ConditionTrue,
 					ObservedGeneration: current.Generation,
+					LastTransitionTime: lastTransitionTime,
 					Reason:             "Deployed",
 					Message:            "Deployment is healthy",
 				},
