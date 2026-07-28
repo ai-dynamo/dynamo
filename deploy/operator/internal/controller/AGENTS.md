@@ -12,3 +12,11 @@ SPDX-License-Identifier: Apache-2.0
 - After a successful write, either continue with the object returned by the client or wait for its watch event. Do not immediately read the write back through an uncached client.
 - Use durable status, conditions, or transaction markers when the reconciler must distinguish work that is pending from work that was previously observed and later deleted.
 - Use an uncached read only when a concrete correctness requirement cannot be represented with durable state and watches, and document that exception.
+
+# Tests
+
+- Use one `t.Log` heading before each block that implements a test step so the test output tells the scenario's story.
+- Keep bespoke test execution in the test body. Do not hide it in closures; reserve closures for a very small set of standard control helpers such as `Eventually` and manager setup.
+- Do not share DGD, DGDR, or other test fixtures between tests. Every fixture must be owned by one test.
+- Keep fixtures in local variables or constants so their ownership remains visible.
+- Prefer a shared construction DSL when complex fixtures repeat boilerplate. The DSL should describe the object at a domain level; share the DSL, never the constructed fixture.
