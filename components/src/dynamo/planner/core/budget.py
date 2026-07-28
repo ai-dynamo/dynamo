@@ -261,18 +261,21 @@ def _is_opposing_rebalance(
     current_p: Optional[int],
     current_d: Optional[int],
 ) -> bool:
-    """True when one role scales up and the other scales down."""
-    if (
-        proposed_p is None
-        or proposed_d is None
-        or current_p is None
-        or current_d is None
-    ):
+    """True when one role scales up and the other scales down.
+
+    ``None`` current means no replicas are seated yet, treated as 0 — matching
+    ``_hold_at_current`` and ``peak_parallel_watts``.  ``None`` proposed means
+    the role is not part of this tick's proposal; direction is indeterminate so
+    the function returns False and the caller must handle it.
+    """
+    if proposed_p is None or proposed_d is None:
         return False
-    p_up = proposed_p > current_p
-    p_down = proposed_p < current_p
-    d_up = proposed_d > current_d
-    d_down = proposed_d < current_d
+    cp = 0 if current_p is None else current_p
+    cd = 0 if current_d is None else current_d
+    p_up = proposed_p > cp
+    p_down = proposed_p < cp
+    d_up = proposed_d > cd
+    d_down = proposed_d < cd
     return (p_up and d_down) or (p_down and d_up)
 
 
@@ -431,14 +434,14 @@ def _shrink_pair(
     projected = num_p * p_watts + num_d * d_watts
     if projected <= budget:
         return num_p, num_d
+    # minimum_power_footprint_fits() at startup guarantees this is unreachable
+    # in a correctly configured deployment. Use RuntimeError (not assert) so
+    # the guard is never stripped by -O optimized-mode Python.
     if budget < min_endpoint * (p_watts + d_watts):
-        # Infeasible under the ceiling (startup validation should have caught
-        # it). Best effort: hold each pool at the floor.
-        # May return a count above a role's proposal when that floor exceeds
-        # the proposal; ``apply_power_budget`` immediately ``min()``s against
-        # ``proposed_p``/``proposed_d``, so the emitted decision never raises
-        # a role above what was proposed.
-        return min_endpoint, min_endpoint
+        raise RuntimeError(
+            f"Power budget infeasible: {budget=} < {min_endpoint=} "
+            f"* ({p_watts=} + {d_watts=}); startup validation missed this"
+        )
     scale = budget / projected
     max_p = math.floor((budget - min_endpoint * d_watts) / p_watts)
     new_p = max(min_endpoint, min(max_p, math.floor(num_p * scale)))

@@ -15,6 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 from dynamo.planner.core.budget import (
+    _shrink_pair,
     apply_power_budget,
     minimum_power_footprint_fits,
     peak_parallel_watts,
@@ -139,6 +140,30 @@ def test_apply_power_budget_clamp_synthesized_rebalance_is_staged():
         "power_rebalance_staged",
     )
     assert peak_parallel_watts(4, 1, 2, 1, 1000, 1000) <= 5000
+
+
+def test_apply_power_budget_rebalance_staged_with_none_current_p():
+    """None current_p (unobserved prefill) must not bypass peak staging.
+
+    Prefill unobserved (current_p=None, treated as 0), decode at 4.
+    Proposal (4,1) settles at 5000 W, but parallel peak is
+    max(0,4)*1000 + max(4,1)*1000 = 8000 W > 5000 W budget.
+    The scale-up leg (prefill) must be held at 0 to stage the decode
+    scale-down first.
+    """
+    result = apply_power_budget(4, 1, None, 4, 1000, 1000, 5000, 1)
+    assert result == (0, 1, "power_rebalance_staged"), result
+    assert peak_parallel_watts(None, 4, 0, 1, 1000, 1000) <= 5000
+
+
+def test_shrink_pair_infeasible_raises_runtime_error():
+    """_shrink_pair must raise RuntimeError for an infeasible budget.
+
+    minimum_power_footprint_fits() at startup prevents this in production.
+    The explicit RuntimeError (not assert) is safe under -O optimized Python.
+    """
+    with pytest.raises(RuntimeError, match="infeasible"):
+        _shrink_pair(5, 5, 2000, 2000, 1000, 1)
 
 
 def test_already_over_budget_baseline_with_no_proposal_is_left_alone():

@@ -161,6 +161,56 @@ def test_init_requires_power_capable_connector():
         env._load_static_power_caps_at_startup()
 
 
+def test_init_required_prefill_config_none_raises():
+    """A connector returning None prefill config when prefill is required must fail closed."""
+    controller = Mock()
+    controller.get_component_power_configs = Mock(
+        return_value=(None, _cfg("decode", 300))
+    )
+    env = _env(controller, require_prefill=True, require_decode=True)
+    with pytest.raises(DeploymentValidationError, match="prefill"):
+        env._load_static_power_caps_at_startup()
+
+
+def test_init_required_decode_config_none_raises():
+    """A connector returning None decode config when decode is required must fail closed."""
+    controller = Mock()
+    controller.get_component_power_configs = Mock(
+        return_value=(_cfg("prefill", 700), None)
+    )
+    env = _env(controller, require_prefill=True, require_decode=True)
+    with pytest.raises(DeploymentValidationError, match="decode"):
+        env._load_static_power_caps_at_startup()
+
+
+@pytest.mark.asyncio
+async def test_initialize_power_on_requires_settled_wait_coroutine():
+    """Power on + connector without async settled-wait must raise immediately.
+
+    Falling through to replica-count readiness would silently skip
+    observedGeneration and pod annotation convergence — the same degradation
+    the _load_static_power_caps require guard was added to prevent.
+    """
+    controller = Mock()
+    controller.async_init = AsyncMock()
+    controller.validate_deployment = AsyncMock()
+    # Non-async attribute — iscoroutinefunction returns False.
+    controller.wait_for_settled_graph_deployment = Mock(return_value=None)
+    controller.get_component_power_configs = Mock(
+        return_value=(_cfg("prefill", 700), _cfg("decode", 300))
+    )
+
+    env = _env(controller)
+    fpm = Mock()
+    fpm.async_init = AsyncMock()
+    env.fpm_provider = fpm
+
+    with pytest.raises(
+        DeploymentValidationError, match="wait_for_settled_graph_deployment"
+    ):
+        await env.initialize()
+
+
 def test_restart_adopts_current_cap_not_stale_max():
     fresh_env = _env(_controller(500, 1200))
     fresh_env._load_static_power_caps_at_startup()

@@ -21,11 +21,7 @@ from typing import Optional
 from kubernetes import client, config
 from kubernetes.config.config_exception import ConfigException
 
-from dynamo.planner.errors import (
-    DuplicateSubComponentError,
-    DynamoGraphDeploymentNotFoundError,
-    SubComponentNotFoundError,
-)
+from dynamo.planner.errors import DynamoGraphDeploymentNotFoundError
 from dynamo.planner.monitoring.dgd_services import (
     POWER_ANNOTATION_KEY,
     Service,
@@ -505,22 +501,16 @@ class KubernetesAPI:
                 )
                 continue
 
-            try:
-                power_names = resolve_power_component_names(
-                    graph_deployment,
-                    require_prefill=require_prefill,
-                    require_decode=require_decode,
-                    prefill_name=prefill_component_name,
-                    decode_name=decode_component_name,
-                )
-            except (SubComponentNotFoundError, DuplicateSubComponentError) as exc:
-                logger.info(
-                    "[Attempt %d/%d] Waiting for power-relevant workers to be resolvable: %s",
-                    attempt + 1,
-                    max_attempts,
-                    exc,
-                )
-                continue
+            # Role resolution runs after is_spec_generation_observed has
+            # confirmed the DGD spec is stable. Missing or duplicate roles at
+            # this point are configuration errors, not operator rollout lag.
+            power_names = resolve_power_component_names(
+                graph_deployment,
+                require_prefill=require_prefill,
+                require_decode=require_decode,
+                prefill_name=prefill_component_name,
+                decode_name=decode_component_name,
+            )
 
             # Build per-component expected annotation strings from the same
             # DGD snapshot. A missing or malformed annotation is invalid

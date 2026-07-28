@@ -20,7 +20,11 @@ import pytest
 from kubernetes import client
 
 from dynamo.planner.connectors.clients.kubernetes_api import KubernetesAPI
-from dynamo.planner.errors import DynamoGraphDeploymentNotFoundError
+from dynamo.planner.errors import (
+    DuplicateSubComponentError,
+    DynamoGraphDeploymentNotFoundError,
+    SubComponentNotFoundError,
+)
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -858,6 +862,64 @@ async def test_wait_missing_dgd_annotation_raises_immediately(k8s_api, mock_core
                 delay_seconds=0.01,
             )
     mock_core_api.list_namespaced_pod.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_wait_settlement_propagates_missing_role_immediately(
+    k8s_api, mock_core_api
+):
+    """SubComponentNotFoundError after generation is observed must propagate, not retry.
+
+    Once observedGeneration >= generation the DGD spec is stable; a missing
+    power-relevant role is a configuration error, not a rollout race. The
+    component is stable in status so non_planner_components_stable passes;
+    only role resolution fails.
+    """
+    dgd = _stable_worker_dgd(generation=2, observed_generation=2, decode_watts="300")
+    # Change type to something the power resolver cannot match as a decode role.
+    # The component name and status entry are preserved so stability check passes.
+    dgd["spec"]["components"][0]["type"] = "frontend"
+
+    with patch.object(k8s_api, "get_graph_deployment", return_value=dgd):
+        with pytest.raises(SubComponentNotFoundError):
+            await k8s_api.wait_for_graph_deployment_ready(
+                "test-deployment",
+                include_planner=False,
+                require_backing_settled=True,
+                require_prefill=False,
+                require_decode=True,
+                max_attempts=5,
+                delay_seconds=0.01,
+            )
+
+
+@pytest.mark.asyncio
+async def test_wait_settlement_propagates_duplicate_role_immediately(
+    k8s_api, mock_core_api
+):
+    """DuplicateSubComponentError is always a config error and must not be retried."""
+    dgd = _stable_worker_dgd(generation=2, observed_generation=2, decode_watts="300")
+    # Add a second stable decode component to trigger DuplicateSubComponentError.
+    dgd["spec"]["components"].append(
+        {"name": "VllmDecodeWorker2", "type": "decode", "replicas": 2}
+    )
+    dgd["status"]["components"]["VllmDecodeWorker2"] = {
+        "readyReplicas": 2,
+        "updatedReplicas": 2,
+        "availableReplicas": 2,
+    }
+
+    with patch.object(k8s_api, "get_graph_deployment", return_value=dgd):
+        with pytest.raises(DuplicateSubComponentError):
+            await k8s_api.wait_for_graph_deployment_ready(
+                "test-deployment",
+                include_planner=False,
+                require_backing_settled=True,
+                require_prefill=False,
+                require_decode=True,
+                max_attempts=5,
+                delay_seconds=0.01,
+            )
 
 
 @pytest.mark.asyncio

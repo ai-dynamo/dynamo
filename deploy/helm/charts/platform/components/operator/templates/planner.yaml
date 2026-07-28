@@ -72,7 +72,10 @@ roleRef:
   name: planner-role
   apiGroup: rbac.authorization.k8s.io
 {{- else }}
-# Cluster-wide mode: ClusterRole for planner
+# Cluster-wide mode: ClusterRole for planner.
+# Even though this is a ClusterRole, the operator binds it via a namespace-scoped
+# RoleBinding (internal/rbac/manager.go EnsureServiceAccountWithRBAC), so all
+# permissions — including pods/list — are effective only in the DGD's namespace.
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole

@@ -207,15 +207,23 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
             wait_settled = getattr(
                 self.controller, "wait_for_settled_graph_deployment", None
             )
-            if inspect.iscoroutinefunction(wait_settled):
-                prefill_name, decode_name = self._power_component_names()
-                return await wait_settled(
-                    include_planner=False,
-                    require_prefill=self.require_prefill,
-                    require_decode=self.require_decode,
-                    prefill_component_name=prefill_name,
-                    decode_component_name=decode_name,
+            if not inspect.iscoroutinefunction(wait_settled):
+                raise DeploymentValidationError(
+                    [
+                        "Power awareness requires a connector that implements "
+                        "wait_for_settled_graph_deployment as an async method "
+                        "(pod-annotation startup convergence check); "
+                        "this connector does not."
+                    ]
                 )
+            prefill_name, decode_name = self._power_component_names()
+            return await wait_settled(
+                include_planner=False,
+                require_prefill=self.require_prefill,
+                require_decode=self.require_decode,
+                prefill_component_name=prefill_name,
+                decode_component_name=decode_name,
+            )
         await self.controller.wait_for_deployment_ready(include_planner=False)
         return self._shared_dgd_deployment()
 
@@ -348,6 +356,20 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
             raise DeploymentValidationError(
                 [f"Failed to resolve DGD-owned power caps at startup: {exc}"]
             ) from exc
+
+        errors: list[str] = []
+        if self.require_prefill and prefill_cfg is None:
+            errors.append(
+                "Power awareness is on and prefill is required, but the connector "
+                "returned no prefill power config; cannot cache startup caps."
+            )
+        if self.require_decode and decode_cfg is None:
+            errors.append(
+                "Power awareness is on and decode is required, but the connector "
+                "returned no decode power config; cannot cache startup caps."
+            )
+        if errors:
+            raise DeploymentValidationError(errors)
 
         state = self.deployment_state()
         if self.require_prefill and prefill_cfg is not None:
