@@ -499,6 +499,7 @@ fn preprocessed_from_generate(
         .and_then(|value| u32::try_from(value).ok());
     let stop_token_ids_hidden = sampling.stop_token_ids().map(<[u32]>::to_vec);
     let skip_reading_prefix_cache = sampling.skip_reading_prefix_cache();
+    let cache_salt = request.resolved_cache_salt().map(str::to_owned);
     let kv_transfer_params = request
         .kv_transfer_params
         .as_ref()
@@ -539,11 +540,7 @@ fn preprocessed_from_generate(
     }
     let tracker = Arc::new(RequestTracker::new());
     tracker.record_isl(request.token_ids.len(), None);
-    let GenerateRequest {
-        token_ids,
-        cache_salt,
-        ..
-    } = request;
+    let GenerateRequest { token_ids, .. } = request;
 
     PreprocessedRequest::builder()
         .model(model.to_string())
@@ -1444,6 +1441,7 @@ mod tests {
                 "ignore_eos": true,
                 "logprobs": 1,
                 "prompt_logprobs": 2,
+                "cache_salt": "policy-7",
                 "skip_reading_prefix_cache": true,
                 "skip_special_tokens": false
             },
@@ -1490,6 +1488,13 @@ mod tests {
         assert_eq!(preprocessed.output_options.logprobs, Some(1));
         assert_eq!(preprocessed.output_options.prompt_logprobs, Some(2));
         assert_eq!(preprocessed.output_options.skip_special_tokens, None);
+        assert_eq!(
+            preprocessed
+                .routing
+                .as_ref()
+                .and_then(|routing| routing.cache_namespace.as_deref()),
+            Some("policy-7")
+        );
 
         let extra = preprocessed.extra_args.as_ref().expect("extra args");
         assert_eq!(extra["skip_reading_prefix_cache"], serde_json::json!(true));

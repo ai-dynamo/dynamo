@@ -78,6 +78,12 @@ impl GenerateRequest {
         }
     }
 
+    pub(crate) fn resolved_cache_salt(&self) -> Option<&str> {
+        self.cache_salt
+            .as_deref()
+            .or_else(|| self.sampling_params.cache_salt())
+    }
+
     /// Validate the request-level rules enforced by vLLM's Rust generate route.
     pub fn validate(&self) -> Result<(), String> {
         if self.token_ids.is_empty() {
@@ -118,6 +124,16 @@ impl GenerateRequest {
             return Err(format!(
                 "sampling_params.min_tokens ({min_tokens}) exceeds max_tokens ({max_tokens})."
             ));
+        }
+
+        if let (Some(top_level), Some(nested)) = (
+            self.cache_salt.as_deref(),
+            self.sampling_params.cache_salt(),
+        ) && top_level != nested
+        {
+            return Err(
+                "sampling_params.cache_salt conflicts with the top-level cache_salt.".to_string(),
+            );
         }
 
         Ok(())
@@ -177,6 +193,7 @@ pub struct SamplingParams {
     /// typed view opaque avoids duplicating version-specific vLLM validation.
     structured_outputs: Option<Value>,
     skip_reading_prefix_cache: Option<bool>,
+    cache_salt: Option<String>,
     vllm_xargs: Option<HashMap<String, Value>>,
 }
 
@@ -241,6 +258,10 @@ impl SamplingParams {
         self.skip_reading_prefix_cache
     }
 
+    pub fn cache_salt(&self) -> Option<&str> {
+        self.cache_salt.as_deref()
+    }
+
     pub fn as_value(&self) -> &Value {
         &self.raw
     }
@@ -299,6 +320,7 @@ impl<'de> Deserialize<'de> for SamplingParams {
             logprob_token_ids: field!(logprob_token_ids),
             structured_outputs: field!(structured_outputs),
             skip_reading_prefix_cache: field!(skip_reading_prefix_cache),
+            cache_salt: field!(cache_salt),
             vllm_xargs: field!(vllm_xargs),
             raw,
         })
@@ -840,6 +862,14 @@ mod tests {
                     "sampling_params": {"min_tokens": 3, "max_tokens": 2}
                 }),
                 "min_tokens",
+            ),
+            (
+                json!({
+                    "token_ids": [1],
+                    "sampling_params": {"cache_salt": "policy-1"},
+                    "cache_salt": "policy-2"
+                }),
+                "cache_salt",
             ),
         ];
 
