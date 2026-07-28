@@ -153,7 +153,7 @@ See [values.yaml](./values.yaml) for the full configuration surface.
 Once the chart is installed, use the snapshot guide to create a checkpoint or
 exercise the lower-level `snapshotctl` flow:
 
-- [Snapshot guide](../../../../docs/kubernetes/snapshot.md)
+- [Snapshot guide](../../../../docs/fern/kubernetes/snapshot.md)
 
 ## Uninstall
 
