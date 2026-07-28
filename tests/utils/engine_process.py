@@ -196,15 +196,15 @@ class EngineProcess(ManagedProcess):
             ),
         ]
 
-        # For disagg-same-gpu deployments, health-check each worker's
-        # system port so we wait for ALL workers to be ready, not just the
-        # first one to register with the frontend.  Worker liveness checks
-        # run FIRST so the frontend has time to discover newly-registered
-        # workers before the frontend endpoint checks run.
+        # For deployments that opt in, health-check each worker's system
+        # port so we wait for ALL workers to be ready, not just the first
+        # one to register with the frontend. Worker health checks run FIRST
+        # so the frontend has time to discover newly registered workers
+        # before the frontend endpoint checks run.
         #
         # NOTE: DYN_SYSTEM_PORT* env vars are injected by the dynamic port
         # fixtures for ALL tests, so we gate on health_check_workers (only
-        # set by same-gpu disagg configs) to avoid health-checking ports
+        # set only by compatible configs) to avoid health-checking ports
         # that don't serve /health in regular multi-GPU tests.
         delayed = config.delayed_start
         worker_checks: list[tuple] = []

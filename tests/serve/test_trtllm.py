@@ -103,15 +103,16 @@ trtllm_configs = {
         script_name="disagg.sh",
         marks=[
             pytest.mark.core,
-            pytest.mark.skip(
-                reason="Flaky custom health check timeout; re-enable via DYN-3673"
-            ),
             pytest.mark.gpu_2,
             pytest.mark.trtllm,
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
         frontend_port=DefaultPort.FRONTEND.value,
+        health_check_workers=True,
+        env={
+            "DYN_HEALTH_CHECK_ENABLED": "true",
+        },
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
