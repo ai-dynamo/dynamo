@@ -35,7 +35,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::actor::{ActorFault, KvDcRelayHandle, KvDcRelayRecoveryTarget};
 use super::discovery::{
-    DcMembershipView, DcMembershipWatch, DomainMembership, DomainSlotId, KvCacheDomainKey,
+    DcMembershipView, DcMembershipWatch, EndpointMembership, KvCacheDomainKey,
     KvDcRelayDiscoveryConfig,
 };
 use super::identity::{CanonicalModelRegistration, ModelAliasBinding, ModelPoolBinding};
@@ -65,9 +65,6 @@ pub enum KvDcRelayError {
     #[cfg(feature = "ckf-diagnostics")]
     #[error("unknown or inactive serving endpoint {0}")]
     UnknownEndpoint(String),
-    #[cfg(feature = "ckf-diagnostics")]
-    #[error("serving endpoint {0} contains multiple indexer domains")]
-    AmbiguousEndpoint(String),
     #[error(
         "stale source epoch for worker {worker_id} rank {dp_rank}: current {current}, received {received}"
     )]
@@ -297,7 +294,7 @@ impl SlotLifecycle {
 struct EndpointSlotStatus {
     lifecycle: SlotLifecycle,
     layout_generation: u64,
-    membership: Option<DomainMembership>,
+    membership: Option<EndpointMembership>,
     actor: Option<KvDcRelayHandle>,
     #[cfg(feature = "ckf-diagnostics")]
     recovery: WorkerQueryHealthSnapshot,
@@ -319,7 +316,7 @@ impl Default for EndpointSlotStatus {
 type SharedEndpointStatus = Arc<RwLock<EndpointSlotStatus>>;
 
 struct EndpointSlotTask {
-    metadata: watch::Sender<Option<DomainMembership>>,
+    metadata: watch::Sender<Option<EndpointMembership>>,
     status: SharedEndpointStatus,
     task: JoinHandle<()>,
 }
@@ -346,7 +343,7 @@ pub struct KvDcRelay {
     cancel: CancellationToken,
     membership: Mutex<Option<DcMembershipWatch>>,
     supervisor: Mutex<Option<JoinHandle<()>>>,
-    statuses: Arc<RwLock<HashMap<DomainSlotId, SharedEndpointStatus>>>,
+    statuses: Arc<RwLock<HashMap<EndpointId, SharedEndpointStatus>>>,
     pools: Arc<PoolRegistry>,
 }
 
@@ -462,20 +459,12 @@ impl KvDcRelay {
         &self,
         endpoint: &EndpointId,
     ) -> Result<KvDcRelayDiagnosticSnapshot, KvDcRelayError> {
-        let matching: Vec<_> = self
+        let status = self
             .statuses
             .read()
             .await
-            .iter()
-            .filter(|(slot_id, _)| &slot_id.endpoint == endpoint)
-            .map(|(_, status)| status.clone())
-            .collect();
-        if matching.len() > 1 {
-            return Err(KvDcRelayError::AmbiguousEndpoint(endpoint.to_string()));
-        }
-        let status = matching
-            .into_iter()
-            .next()
+            .get(endpoint)
+            .cloned()
             .ok_or_else(|| KvDcRelayError::UnknownEndpoint(endpoint.to_string()))?;
         let status = status.read().await;
         let handle = status
@@ -559,18 +548,18 @@ async fn run_host_supervisor(
     component: Component,
     ckf_dc_id: dynamo_kv_router::DcId,
     mut membership_rx: watch::Receiver<DcMembershipView>,
-    statuses: Arc<RwLock<HashMap<DomainSlotId, SharedEndpointStatus>>>,
+    statuses: Arc<RwLock<HashMap<EndpointId, SharedEndpointStatus>>>,
     pools: Arc<PoolRegistry>,
     recovery_attempt_timeout: Duration,
     cancel: CancellationToken,
 ) {
     let recovery_fetch_permit = Arc::new(Semaphore::new(DEFAULT_RECOVERY_FETCH_CONCURRENCY));
-    let mut slots: HashMap<DomainSlotId, EndpointSlotTask> = HashMap::new();
+    let mut slots: HashMap<EndpointId, EndpointSlotTask> = HashMap::new();
     let mut retired_slots = JoinSet::new();
 
     loop {
         let view = membership_rx.borrow_and_update().clone();
-        for (slot_id, membership) in view.domains.iter() {
+        for (slot_id, membership) in view.endpoints.iter() {
             let slot = slots.entry(slot_id.clone()).or_insert_with(|| {
                 let (metadata, metadata_rx) = watch::channel(None);
                 let status = Arc::new(RwLock::new(EndpointSlotStatus::default()));
@@ -624,8 +613,8 @@ async fn run_host_supervisor(
 }
 
 fn publish_endpoint_metadata_if_changed(
-    sender: &watch::Sender<Option<DomainMembership>>,
-    membership: &DomainMembership,
+    sender: &watch::Sender<Option<EndpointMembership>>,
+    membership: &EndpointMembership,
 ) {
     sender.send_if_modified(|current| {
         if current.as_ref() == Some(membership) {
@@ -638,12 +627,12 @@ fn publish_endpoint_metadata_if_changed(
 
 fn retire_departed_endpoint_slots(
     view: &DcMembershipView,
-    slots: &mut HashMap<DomainSlotId, EndpointSlotTask>,
-    retired_slots: &mut JoinSet<(DomainSlotId, Result<(), tokio::task::JoinError>)>,
+    slots: &mut HashMap<EndpointId, EndpointSlotTask>,
+    retired_slots: &mut JoinSet<(EndpointId, Result<(), tokio::task::JoinError>)>,
 ) {
     let departed: Vec<_> = slots
         .keys()
-        .filter(|slot_id| !view.domains.contains_key(*slot_id))
+        .filter(|slot_id| !view.endpoints.contains_key(*slot_id))
         .cloned()
         .collect();
     for slot_id in departed {
@@ -659,7 +648,7 @@ fn retire_departed_endpoint_slots(
 }
 
 type RetiredEndpointSlot =
-    Result<(DomainSlotId, Result<(), tokio::task::JoinError>), tokio::task::JoinError>;
+    Result<(EndpointId, Result<(), tokio::task::JoinError>), tokio::task::JoinError>;
 
 fn report_retired_endpoint_slot(retired: Option<RetiredEndpointSlot>) {
     match retired {
@@ -671,11 +660,11 @@ fn report_retired_endpoint_slot(retired: Option<RetiredEndpointSlot>) {
     }
 }
 
-fn report_endpoint_slot_exit(slot_id: DomainSlotId, result: Result<(), tokio::task::JoinError>) {
+fn report_endpoint_slot_exit(slot_id: EndpointId, result: Result<(), tokio::task::JoinError>) {
     if let Err(error) = result
         && !error.is_cancelled()
     {
-        tracing::warn!(endpoint = %slot_id.endpoint, %error, "KV DC Relay domain slot failed");
+        tracing::warn!(endpoint = %slot_id, %error, "KV DC Relay endpoint slot failed");
     }
 }
 
@@ -683,8 +672,8 @@ fn report_endpoint_slot_exit(slot_id: DomainSlotId, result: Result<(), tokio::ta
 async fn run_endpoint_slot(
     component: Component,
     ckf_dc_id: dynamo_kv_router::DcId,
-    slot_id: DomainSlotId,
-    mut metadata_rx: watch::Receiver<Option<DomainMembership>>,
+    slot_id: EndpointId,
+    mut metadata_rx: watch::Receiver<Option<EndpointMembership>>,
     status: SharedEndpointStatus,
     rebuild_permit: Arc<Semaphore>,
     recovery_fetch_permit: Arc<Semaphore>,
@@ -692,7 +681,7 @@ async fn run_endpoint_slot(
     recovery_attempt_timeout: Duration,
     cancel: CancellationToken,
 ) {
-    let endpoint = slot_id.endpoint.clone();
+    let endpoint = slot_id.clone();
     let mut config_tx: Option<watch::Sender<HashMap<WorkerId, ModelRuntimeConfig>>> = None;
     let mut source_watch: Option<KvSourceMembershipWatch> = None;
     let mut runtime: Option<EndpointPoolRuntime> = None;
@@ -771,7 +760,7 @@ async fn run_endpoint_slot(
             if !membership.is_materializable() {
                 return None;
             }
-            let domain = membership.domain.clone();
+            let domain = membership.domain.clone()?;
             let kv_state_endpoint = source_view.as_ref()?.resolved_kv_state_endpoint()?.clone();
             source_view
                 .as_ref()?
@@ -1124,7 +1113,7 @@ async fn fence_endpoint_pool(active: EndpointPoolRuntime, pools: &PoolRegistry) 
 
 #[cfg(feature = "ckf-diagnostics")]
 async fn endpoint_stats(
-    slot_id: DomainSlotId,
+    slot_id: EndpointId,
     status: SharedEndpointStatus,
 ) -> Result<KvDcRelayEndpointStats, KvDcRelayError> {
     let status = status.read().await.clone();
@@ -1185,12 +1174,13 @@ async fn endpoint_stats(
     };
     let membership = status.membership;
     Ok(KvDcRelayEndpointStats {
-        serving_endpoint: slot_id.endpoint.to_string(),
+        serving_endpoint: slot_id.to_string(),
         lifecycle: status.lifecycle.as_str().to_string(),
         layout_generation: status.layout_generation,
         cache_domain: membership
             .as_ref()
-            .map(|membership| cache_domain_stats(&membership.domain)),
+            .and_then(|membership| membership.domain.as_ref())
+            .map(cache_domain_stats),
         membership_conflicts: membership
             .as_ref()
             .map(|membership| {
@@ -1302,16 +1292,7 @@ mod tests {
 
     #[tokio::test]
     async fn departed_endpoint_slots_are_reaped_instead_of_parked() {
-        let endpoint = EndpointId::from("prod.backend.generate");
-        let domain = super::super::resolution::resolve_indexer_domain(
-            &crate::model_card::ModelDeploymentCard::with_name_only("model"),
-            &endpoint,
-            1,
-        );
-        let slot_id = DomainSlotId {
-            endpoint,
-            indexer_domain: domain.id,
-        };
+        let slot_id = EndpointId::from("prod.backend.generate");
         let (metadata, mut metadata_rx) = watch::channel(None);
         let task = tokio::spawn(async move { while metadata_rx.changed().await.is_ok() {} });
         let mut slots = HashMap::from([(
