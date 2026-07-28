@@ -15,6 +15,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
 };
+use std::time::Duration;
 
 use async_trait::async_trait;
 use dashmap::{DashMap, DashSet};
@@ -37,6 +38,7 @@ use crate::{
 };
 
 const SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY: &str = "sglang_hicache_mooncake";
+const MOONCAKE_EVENT_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 struct SglangHicacheMooncakeConfig {
@@ -146,14 +148,17 @@ impl HicacheSharedKvCache {
             match event.event_type.as_str() {
                 "stored" => {
                     self.present_keys.insert(object_key);
+                    if let Some(group_id) = group_id {
+                        self.group_states.insert(group_id, (sequence, false));
+                    }
                 }
                 "removed" => {
                     self.present_keys.remove(&object_key);
+                    // An older Mooncake publisher may omit `group_id` on removal. Clearing all
+                    // verified groups is conservative and prevents a stale group fast-path hit.
+                    self.group_states.clear();
                 }
                 _ => {}
-            }
-            if let Some(group_id) = group_id {
-                self.group_states.insert(group_id, (sequence, false));
             }
         }
     }
@@ -183,46 +188,54 @@ impl HicacheSharedKvCache {
             }
         };
 
-        let mut socket = match connect_sub_socket(&endpoint, None).await {
-            Ok(socket) => socket,
-            Err(error) => {
-                tracing::warn!(%endpoint, %error, "Failed to connect to Mooncake KV events");
-                return;
-            }
-        };
-        tracing::info!(%endpoint, "Connected to Mooncake KV events");
-
         loop {
-            tokio::select! {
-                _ = cancellation_token.cancelled() => return,
-                message = socket.next() => {
-                    let frames = match message {
-                        Some(Ok(frames)) => multipart_message(frames),
-                        Some(Err(error)) => {
-                            tracing::warn!(%endpoint, %error, "Mooncake KV event stream failed");
-                            self.clear();
-                            return;
-                        }
-                        None => {
-                            tracing::warn!(%endpoint, "Mooncake KV event stream ended");
-                            self.clear();
-                            return;
-                        }
-                    };
-                    if frames.len() != 3 || frames[1].len() != 8 {
-                        tracing::warn!(frame_count = frames.len(), "Invalid Mooncake KV event frame");
-                        self.clear();
-                        continue;
+            self.clear();
+            let mut socket = match connect_sub_socket(&endpoint, None).await {
+                Ok(socket) => socket,
+                Err(error) => {
+                    tracing::warn!(%endpoint, %error, "Failed to connect to Mooncake KV events; retrying");
+                    tokio::select! {
+                        _ = cancellation_token.cancelled() => return,
+                        _ = tokio::time::sleep(MOONCAKE_EVENT_RECONNECT_DELAY) => continue,
                     }
-                    let sequence = u64::from_be_bytes(frames[1].as_slice().try_into().unwrap());
-                    match rmp_serde::from_slice::<MooncakeEventBatch>(&frames[2]) {
-                        Ok((_, events, _)) => self.apply_batch(sequence, events),
-                        Err(error) => {
-                            tracing::warn!(%error, "Failed to decode Mooncake KV event batch");
-                            self.clear();
+                }
+            };
+            tracing::info!(%endpoint, "Connected to Mooncake KV events");
+
+            loop {
+                tokio::select! {
+                    _ = cancellation_token.cancelled() => return,
+                    message = socket.next() => {
+                        let frames = match message {
+                            Some(Ok(frames)) => multipart_message(frames),
+                            Some(Err(error)) => {
+                                tracing::warn!(%endpoint, %error, "Mooncake KV event stream failed; reconnecting");
+                                break;
+                            }
+                            None => {
+                                tracing::warn!(%endpoint, "Mooncake KV event stream ended; reconnecting");
+                                break;
+                            }
+                        };
+                        if frames.len() != 3 || frames[1].len() != 8 {
+                            tracing::warn!(frame_count = frames.len(), "Invalid Mooncake KV event frame; reconnecting");
+                            break;
+                        }
+                        let sequence = u64::from_be_bytes(frames[1].as_slice().try_into().unwrap());
+                        match rmp_serde::from_slice::<MooncakeEventBatch>(&frames[2]) {
+                            Ok((_, events, _)) => self.apply_batch(sequence, events),
+                            Err(error) => {
+                                tracing::warn!(%error, "Failed to decode Mooncake KV event batch; reconnecting");
+                                break;
+                            }
                         }
                     }
                 }
+            }
+
+            tokio::select! {
+                _ = cancellation_token.cancelled() => return,
+                _ = tokio::time::sleep(MOONCAKE_EVENT_RECONNECT_DELAY) => {}
             }
         }
     }
@@ -636,7 +649,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_check_blocks_uses_group_id() {
+    async fn test_check_blocks_invalidates_group_on_unlabeled_removal() {
         let hash = "cf97adeedb59e05bfd73a2b4c2a8885708c4f4f70c84c64b27120e72ab733b72";
         let group_id = format!("sglang-hicache:{hash}");
         let cache = HicacheSharedKvCache::new(runtime_watch_with_config(mooncake_config()));
@@ -668,11 +681,29 @@ mod tests {
                 event_type: "removed".to_string(),
                 object_key: Some(format!("{hash}_0_v")),
                 tenant_id: "default".to_string(),
-                group_id: Some(group_id),
+                group_id: None,
             }],
         );
+        assert!(cache.group_states.is_empty());
         let hits = cache.check_blocks(&[1, 2, 3, 4], 4, None).await.unwrap();
         assert_eq!(hits.total_hits, 0);
+    }
+
+    #[tokio::test]
+    async fn test_subscriber_retries_failed_connection_until_cancelled() {
+        let mut config = mooncake_config();
+        config.kv_events_endpoint = Some("invalid://mooncake-events".to_string());
+        let cache = HicacheSharedKvCache::new(runtime_watch_with_config(config));
+        let cancellation_token = CancellationToken::new();
+        let task = tokio::spawn(cache.run_subscriber(cancellation_token.clone()));
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(!task.is_finished());
+        cancellation_token.cancel();
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[test]

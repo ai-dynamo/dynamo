@@ -148,6 +148,9 @@ pub struct ModelManager {
     /// Per-endpoint runtime config watchers. Keyed by EndpointId (includes namespace).
     runtime_configs: DashMap<EndpointId, RuntimeConfigWatch>,
 
+    /// Per-component HiCache state and its one Mooncake event subscriber.
+    hicache_caches: DashMap<String, HicacheSharedKvCache>,
+
     /// Shared KV-source membership coordinators, scoped by exact serving endpoint.
     /// Weak ownership lets the discovery loop stop when its last consumer goes away.
     kv_source_memberships: DashMap<EndpointId, Weak<KvSourceMembershipCoordinator>>,
@@ -188,6 +191,7 @@ impl ModelManager {
             prefill_router_activators: DashMap::new(),
             encoder_router_activators: DashMap::new(),
             runtime_configs: DashMap::new(),
+            hicache_caches: DashMap::new(),
             kv_source_memberships: DashMap::new(),
             lora_domains: DashMap::new(),
             lora_enabled: crate::lora::lora_serving_enabled(),
@@ -1050,6 +1054,21 @@ impl ModelManager {
         lora_enabled && worker_type == crate::protocols::common::timing::WORKER_TYPE_DECODE
     }
 
+    fn hicache_cache_for(
+        &self,
+        endpoint: &Endpoint,
+        runtime_configs: RuntimeConfigWatch,
+    ) -> HicacheSharedKvCache {
+        self.hicache_caches
+            .entry(endpoint.component().to_string())
+            .or_insert_with(|| {
+                let cache = HicacheSharedKvCache::new(runtime_configs);
+                cache.start_subscriber(endpoint.component());
+                cache
+            })
+            .clone()
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn kv_chooser_for(
         &self,
@@ -1127,9 +1146,9 @@ impl ModelManager {
                     worker_component = worker_component_name,
                     "Using HiCache shared KV cache"
                 );
-                let cache = HicacheSharedKvCache::new(workers_with_configs.clone());
-                cache.start_subscriber(endpoint.component());
-                Some(Box::new(cache))
+                Some(Box::new(
+                    self.hicache_cache_for(endpoint, workers_with_configs.clone()),
+                ))
             }
         };
 
