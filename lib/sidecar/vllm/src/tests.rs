@@ -525,7 +525,9 @@ async fn prefill_decode_handoff_is_opaque_and_repeatable() {
         let requests = server.service.requests.lock().await;
         let decode_wire = requests.last().unwrap().kv.as_ref().unwrap();
         let decoded = struct_to_json(decode_wire.kv_transfer_params.clone().unwrap()).unwrap();
-        assert_eq!(decoded, handoff);
+        let mut expected = handoff;
+        expected["remote_port"] = json!("20097");
+        assert_eq!(decoded, expected);
     }
 }
 

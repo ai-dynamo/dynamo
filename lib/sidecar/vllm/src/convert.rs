@@ -217,15 +217,17 @@ fn build_kv_parameters(
             );
             Some(serde_json::Value::Object(params))
         }
-        DisaggregationMode::Decode => Some(
-            prefill_result
+        DisaggregationMode::Decode => {
+            let mut params = prefill_result
                 .ok_or_else(|| {
                     client::invalid_argument(
                         "decode request is missing the prefill_result KV payload",
                     )
                 })?
-                .disaggregated_params,
-        ),
+                .disaggregated_params;
+            normalize_remote_port(&mut params)?;
+            Some(params)
+        }
         DisaggregationMode::Encode => {
             return Err(client::invalid_argument(
                 "encode mode is not supported by the vLLM sidecar",
@@ -238,6 +240,41 @@ fn build_kv_parameters(
         cache_salt: cache_salt.unwrap_or_default(),
         kv_transfer_params: kv_transfer_params.map(json_to_struct).transpose()?,
     })
+}
+
+fn normalize_remote_port(params: &mut serde_json::Value) -> Result<(), DynamoError> {
+    let serde_json::Value::Object(params) = params else {
+        return Err(client::invalid_argument(
+            "prefill_result KV payload must be a JSON object",
+        ));
+    };
+    let Some(remote_port) = params.get_mut("remote_port") else {
+        return Ok(());
+    };
+    if remote_port.is_string() {
+        return Ok(());
+    }
+    let serde_json::Value::Number(number) = remote_port else {
+        return Err(client::invalid_argument(
+            "prefill_result remote_port must be an integer or string",
+        ));
+    };
+    let value = number
+        .as_u64()
+        .or_else(|| {
+            number.as_f64().and_then(|value| {
+                (value.is_finite() && value.fract() == 0.0 && value >= 0.0).then_some(value as u64)
+            })
+        })
+        .filter(|value| (1..=u16::MAX as u64).contains(value))
+        .ok_or_else(|| {
+            client::invalid_argument(format!(
+                "prefill_result remote_port must be between 1 and {}; got {number}",
+                u16::MAX
+            ))
+        })?;
+    *remote_port = serde_json::Value::String(value.to_string());
+    Ok(())
 }
 
 fn bool_extra(
