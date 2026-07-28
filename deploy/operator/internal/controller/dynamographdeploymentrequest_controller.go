@@ -476,6 +476,10 @@ func (r *DynamoGraphDeploymentRequestReconciler) Reconcile(ctx context.Context, 
 				return ctrl.Result{}, err
 			}
 
+			// The repair preserves the lifecycle state while reaffirming each existing condition for this generation.
+			for i := range dgdr.Status.Conditions {
+				dgdr.Status.Conditions[i].ObservedGeneration = dgdr.Generation
+			}
 			dgdr.Status.ObservedGeneration = dgdr.Generation
 			if err := r.Status().Update(ctx, dgdr); err != nil {
 				return ctrl.Result{}, fmt.Errorf("failed to observe DGDR runtime version override repair: %w", err)
@@ -955,9 +959,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to unmarshal generated deployment from annotation: %w", err)
 	}
-	if _, err := applyDGDRRuntimeVersionOverride(dgdr, generatedDGD); err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to apply DGDR runtime version override to generated DGD: %w", err)
-	}
+	applyDGDRRuntimeVersionOverride(dgdr, generatedDGD)
 
 	// Determine DGD name and namespace from generated deployment
 	dgdName := generatedDGD.Name
@@ -2055,9 +2057,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) generateDGDSpec(ctx context.Con
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to extract DGD from %s: %w", outputFile, err)
 	}
-	if _, err := applyDGDRRuntimeVersionOverride(dgdr, dgd); err != nil {
-		return nil, "", fmt.Errorf("failed to apply DGDR runtime version override to profiler DGD: %w", err)
-	}
+	applyDGDRRuntimeVersionOverride(dgdr, dgd)
 
 	// Override the profiler-generated name with a DGDR-scoped unique name.
 	// The profiler emits a static topology-derived name (e.g. "vllm-agg") which
@@ -2115,21 +2115,9 @@ func (r *DynamoGraphDeploymentRequestReconciler) generateDGDSpec(ctx context.Con
 func applyDGDRRuntimeVersionOverride(
 	dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-) (bool, error) {
+) bool {
 	if dgdr.Spec.RuntimeVersionOverride == "" {
-		return false, nil
-	}
-
-	for _, component := range dgd.Spec.Components {
-		if component.RuntimeVersionOverride != "" &&
-			component.RuntimeVersionOverride != dgdr.Spec.RuntimeVersionOverride {
-			return false, fmt.Errorf(
-				"component %q already has runtime version override %q, cannot replace it with %q",
-				component.ComponentName,
-				component.RuntimeVersionOverride,
-				dgdr.Spec.RuntimeVersionOverride,
-			)
-		}
+		return false
 	}
 
 	changed := false
@@ -2139,7 +2127,7 @@ func applyDGDRRuntimeVersionOverride(
 			changed = true
 		}
 	}
-	return changed, nil
+	return changed
 }
 
 // repairGeneratedDGDArtifacts applies a repaired override to persisted manifests and the managed live DGD.
@@ -2155,9 +2143,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) repairGeneratedDGDArtifacts(
 		if err != nil {
 			return fmt.Errorf("failed to decode selected DGD config for runtime version repair: %w", err)
 		}
-		if _, err := applyDGDRRuntimeVersionOverride(dgdr, dgd); err != nil {
-			return fmt.Errorf("failed to repair selected DGD config runtime version: %w", err)
-		}
+		applyDGDRRuntimeVersionOverride(dgdr, dgd)
 		dgdJSON, _, err := r.encodeBetaDGDManifest(dgd)
 		if err != nil {
 			return fmt.Errorf("failed to encode selected DGD config after runtime version repair: %w", err)
@@ -2175,9 +2161,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) repairGeneratedDGDArtifacts(
 	if err != nil {
 		return fmt.Errorf("failed to decode generated DGD annotation for runtime version repair: %w", err)
 	}
-	if _, err := applyDGDRRuntimeVersionOverride(dgdr, dgd); err != nil {
-		return fmt.Errorf("failed to repair generated DGD annotation runtime version: %w", err)
-	}
+	applyDGDRRuntimeVersionOverride(dgdr, dgd)
 	_, dgdYAML, err := r.encodeBetaDGDManifest(dgd)
 	if err != nil {
 		return fmt.Errorf("failed to encode generated DGD annotation after runtime version repair: %w", err)
@@ -2238,10 +2222,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) repairLiveDGDRDGD(
 	}
 
 	original := dgd.DeepCopy()
-	changed, err := applyDGDRRuntimeVersionOverride(dgdr, dgd)
-	if err != nil {
-		return fmt.Errorf("failed to repair live DGD %s runtime version: %w", dgd.Name, err)
-	}
+	changed := applyDGDRRuntimeVersionOverride(dgdr, dgd)
 	if !changed {
 		return nil
 	}

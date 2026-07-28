@@ -955,7 +955,13 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: registry.example/runtime:custom`
+          image: registry.example/runtime:custom
+    Worker:
+      replicas: 1
+      runtimeVersionOverride: 1.2.0
+      extraPodSpec:
+        mainContainer:
+          image: registry.example/runtime:other-custom`
 
 			// expectedDGDName is the name the operator should assign: DGDR name + "-dgd",
 			// not the static "vllm-agg" that the profiler emitted.
@@ -985,7 +991,9 @@ spec:
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &updated)).Should(Succeed())
 			Expect(updated.Status.Phase).Should(Equal(nvidiacomv1beta1.DGDRPhaseDeploying))
 			Expect(updated.Annotations[AnnotationGeneratedDGDSpec]).Should(ContainSubstring("runtimeVersionOverride: 1.1.0"))
+			Expect(updated.Annotations[AnnotationGeneratedDGDSpec]).Should(ContainSubstring("runtimeVersionOverride: 1.2.0"))
 			Expect(string(updated.Status.ProfilingResults.SelectedConfig.Raw)).Should(ContainSubstring(`"runtimeVersionOverride":"1.1.0"`))
+			Expect(string(updated.Status.ProfilingResults.SelectedConfig.Raw)).Should(ContainSubstring(`"runtimeVersionOverride":"1.2.0"`))
 
 			// Reconcile again to create DGD
 			_, err = reconciler.Reconcile(ctx, reconcile.Request{
@@ -996,9 +1004,15 @@ spec:
 			// Verify beta DGD was created with the DGDR-scoped name (not the profiler's "vllm-agg")
 			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: expectedDGDName, Namespace: namespace}, dgd)).Should(Succeed())
-			Expect(dgd.Spec.Components).Should(HaveLen(1))
-			Expect(dgd.Spec.Components[0].ComponentName).Should(Equal("Frontend"))
-			Expect(dgd.Spec.Components[0].RuntimeVersionOverride).Should(Equal("1.1.0"))
+			Expect(dgd.Spec.Components).Should(HaveLen(2))
+			componentOverrides := map[string]string{}
+			for _, component := range dgd.Spec.Components {
+				componentOverrides[component.ComponentName] = component.RuntimeVersionOverride
+			}
+			Expect(componentOverrides).Should(Equal(map[string]string{
+				"Frontend": "1.1.0",
+				"Worker":   "1.2.0",
+			}))
 
 			// Get final DGDR status
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &updated)).Should(Succeed())
@@ -1401,14 +1415,25 @@ spec:
 				},
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
 					BackendFramework: "vllm",
-					Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{
-						ComponentName: "worker",
-						ComponentType: nvidiacomv1beta1.ComponentTypeWorker,
-						Replicas:      ptr.To[int32](1),
-						PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
-							Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/runtime:custom"}},
-						}},
-					}},
+					Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+						{
+							ComponentName: "worker",
+							ComponentType: nvidiacomv1beta1.ComponentTypeWorker,
+							Replicas:      ptr.To[int32](1),
+							PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/runtime:custom"}},
+							}},
+						},
+						{
+							ComponentName:          "frontend",
+							ComponentType:          nvidiacomv1beta1.ComponentTypeFrontend,
+							RuntimeVersionOverride: "1.2.0",
+							Replicas:               ptr.To[int32](1),
+							PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/runtime:other-custom"}},
+							}},
+						},
+					},
 				},
 			}
 			dgdJSON, dgdYAML, err := reconciler.encodeBetaDGDManifest(generatedDGD)
@@ -1418,6 +1443,22 @@ spec:
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &current)).Should(Succeed())
 			current.Status.Phase = nvidiacomv1beta1.DGDRPhaseReady
 			current.Status.ObservedGeneration = current.Generation
+			current.Status.Conditions = []metav1.Condition{
+				{
+					Type:               nvidiacomv1beta1.ConditionTypeSpecGenerated,
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: current.Generation,
+					Reason:             "SpecGenerated",
+					Message:            "Spec is available",
+				},
+				{
+					Type:               nvidiacomv1beta1.ConditionTypeSucceeded,
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: current.Generation,
+					Reason:             "SpecGenerated",
+					Message:            "Profiling complete, spec available",
+				},
+			}
 			current.Status.ProfilingResults = &nvidiacomv1beta1.ProfilingResultsStatus{
 				SelectedConfig: &runtime.RawExtension{Raw: dgdJSON},
 			}
@@ -1440,16 +1481,21 @@ spec:
 			Expect(current.Generation).Should(BeNumerically(">", initialGeneration))
 			Expect(current.Status.ObservedGeneration).Should(Equal(current.Generation))
 			Expect(current.Status.Phase).Should(Equal(nvidiacomv1beta1.DGDRPhaseReady))
+			for _, condition := range current.Status.Conditions {
+				Expect(condition.ObservedGeneration).Should(Equal(current.Generation))
+			}
 
 			t.Log("Verify that both persisted generated manifests contain the repaired override")
 			selectedDGD, err := reconciler.extractDGDFromYAML(current.Status.ProfilingResults.SelectedConfig.Raw)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(selectedDGD.Spec.Components).Should(HaveLen(1))
+			Expect(selectedDGD.Spec.Components).Should(HaveLen(2))
 			Expect(selectedDGD.Spec.Components[0].RuntimeVersionOverride).Should(Equal("1.1.0"))
+			Expect(selectedDGD.Spec.Components[1].RuntimeVersionOverride).Should(Equal("1.2.0"))
 			annotatedDGD, err := reconciler.extractDGDFromYAML([]byte(current.Annotations[AnnotationGeneratedDGDSpec]))
 			Expect(err).NotTo(HaveOccurred())
-			Expect(annotatedDGD.Spec.Components).Should(HaveLen(1))
+			Expect(annotatedDGD.Spec.Components).Should(HaveLen(2))
 			Expect(annotatedDGD.Spec.Components[0].RuntimeVersionOverride).Should(Equal("1.1.0"))
+			Expect(annotatedDGD.Spec.Components[1].RuntimeVersionOverride).Should(Equal("1.2.0"))
 
 			t.Log("Apply the repaired selected config through admission")
 			Expect(k8sClient.Create(ctx, selectedDGD)).Should(Succeed())
@@ -1492,6 +1538,29 @@ spec:
 			current.Status.Phase = nvidiacomv1beta1.DGDRPhaseDeployed
 			current.Status.DGDName = dgdName
 			current.Status.ObservedGeneration = current.Generation
+			current.Status.Conditions = []metav1.Condition{
+				{
+					Type:               nvidiacomv1beta1.ConditionTypeSpecGenerated,
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: current.Generation,
+					Reason:             "SpecGenerated",
+					Message:            "Spec generated",
+				},
+				{
+					Type:               nvidiacomv1beta1.ConditionTypeDeploymentReady,
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: current.Generation,
+					Reason:             "DeploymentReady",
+					Message:            "Deployment is ready",
+				},
+				{
+					Type:               nvidiacomv1beta1.ConditionTypeSucceeded,
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: current.Generation,
+					Reason:             "Deployed",
+					Message:            "Deployment is healthy",
+				},
+			}
 			Expect(k8sClient.Status().Update(ctx, &current)).Should(Succeed())
 
 			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
@@ -1534,9 +1603,12 @@ spec:
 			Expect(dgd.Spec.Components[0].RuntimeVersionOverride).Should(Equal("1.1.0"))
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &current)).Should(Succeed())
 			Expect(current.Status.ObservedGeneration).Should(Equal(current.Generation))
+			for _, condition := range current.Status.Conditions {
+				Expect(condition.ObservedGeneration).Should(Equal(current.Generation))
+			}
 		})
 
-		It("Should not replace an existing DGD runtime version override", func() {
+		It("Should fill only missing DGD runtime version overrides", func() {
 			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
 					RuntimeVersionOverride: "1.1.0",
@@ -1544,17 +1616,22 @@ spec:
 			}
 			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
-					Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{
-						ComponentName:          "worker",
-						RuntimeVersionOverride: "1.2.0",
-					}},
+					Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+						{
+							ComponentName:          "worker",
+							RuntimeVersionOverride: "1.2.0",
+						},
+						{
+							ComponentName: "frontend",
+						},
+					},
 				},
 			}
 
-			changed, err := applyDGDRRuntimeVersionOverride(dgdr, dgd)
-			Expect(err).Should(MatchError(ContainSubstring("cannot replace it")))
-			Expect(changed).Should(BeFalse())
+			changed := applyDGDRRuntimeVersionOverride(dgdr, dgd)
+			Expect(changed).Should(BeTrue())
 			Expect(dgd.Spec.Components[0].RuntimeVersionOverride).Should(Equal("1.2.0"))
+			Expect(dgd.Spec.Components[1].RuntimeVersionOverride).Should(Equal("1.1.0"))
 		})
 	})
 

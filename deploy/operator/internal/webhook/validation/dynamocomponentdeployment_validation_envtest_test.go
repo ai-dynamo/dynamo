@@ -117,18 +117,23 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			wantWebhookErrs: []string{"spec.extraPodSpec.mainContainer.image: Required value: is required"},
 		},
 		{
-			name: "v1alpha1 custom image requires runtime version override",
+			name: "v1alpha1 custom image does not require runtime version override",
 			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
 				dcd.Spec.RuntimeVersionOverride = ""
 				dcd.Spec.ExtraPodSpec = &nvidiacomv1alpha1.ExtraPodSpec{
 					MainContainer: &corev1.Container{Image: customRuntimeImage},
 				}
 			}),
-			wantWebhookErrs: []string{"spec.runtimeVersionOverride: Required value: is required when the specified main container image has no parseable semantic-version tag"},
 		},
 		{
-			name:               "unchanged legacy v1beta1 runtime version is ratcheted on update",
-			seedWithoutWebhook: true,
+			name: "v1beta1 custom image does not require runtime version override",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.RuntimeVersionOverride = ""
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = customRuntimeImage
+			}),
+		},
+		{
+			name: "v1beta1 metadata update with custom image does not require runtime version override",
 			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 				dcd.Spec.RuntimeVersionOverride = ""
 				dcd.Spec.PodTemplate.Spec.Containers[0].Image = customRuntimeImage
@@ -140,8 +145,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
-			name:               "unchanged legacy v1alpha1 runtime version is ratcheted on update",
-			seedWithoutWebhook: true,
+			name: "v1alpha1 metadata update with custom image does not require runtime version override",
 			oldDeployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
 				dcd.Spec.RuntimeVersionOverride = ""
 				dcd.Spec.ExtraPodSpec.MainContainer.Image = customRuntimeImage
@@ -153,7 +157,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
-			name: "v1beta1 image change to custom requires runtime version override",
+			name: "v1beta1 image change to custom does not require runtime version override",
 			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 				dcd.Spec.RuntimeVersionOverride = ""
 			}),
@@ -161,11 +165,9 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				dcd.Spec.RuntimeVersionOverride = ""
 				dcd.Spec.PodTemplate.Spec.Containers[0].Image = customRuntimeImage
 			}),
-			wantWebhookErrs: []string{"spec.runtimeVersionOverride: Required value: is required when the specified main container image has no parseable semantic-version tag"},
 		},
 		{
-			name:               "changing a legacy v1alpha1 custom image requires runtime version override",
-			seedWithoutWebhook: true,
+			name: "changing a v1alpha1 custom image does not require runtime version override",
 			oldDeployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
 				dcd.Spec.RuntimeVersionOverride = ""
 				dcd.Spec.ExtraPodSpec.MainContainer.Image = customRuntimeImage
@@ -174,7 +176,6 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				dcd.Spec.RuntimeVersionOverride = ""
 				dcd.Spec.ExtraPodSpec.MainContainer.Image = "registry.example/runtime:other-custom"
 			}),
-			wantWebhookErrs: []string{"spec.runtimeVersionOverride: Required value: is required when the specified main container image has no parseable semantic-version tag"},
 		},
 		{
 			name: "v1alpha1 compatibility validation does not duplicate runtime version errors",
@@ -185,7 +186,6 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}),
 			wantWebhookErrs: []string{
 				"spec.ingress.host: Required value: is required when ingress is enabled",
-				"spec.runtimeVersionOverride: Required value: is required when the specified main container image has no parseable semantic-version tag",
 			},
 		},
 		{

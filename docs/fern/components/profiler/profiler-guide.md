@@ -213,15 +213,16 @@ spec:
 ```
 
 > [!NOTE]
-> The DGDR-level `spec.runtimeVersionOverride` is authoritative for every
-> component in the generated DGD. The operator applies it after processing
-> profiler output and DGD overrides, including when a profiler based on Dynamo
-> 1.3.0 or earlier discards the field while parsing the DGDR. Set the override
-> when the effective generated runtime images do not use tags that identify
-> their Dynamo runtime versions.
+> The DGDR-level `spec.runtimeVersionOverride` supplies a default for generated
+> DGD components. The operator applies it after processing profiler output and
+> DGD overrides only when a component does not already set an explicit value,
+> including when a profiler based on Dynamo 1.3.0 or earlier discards the field
+> while parsing the DGDR. Set the override when the effective generated runtime
+> images do not use tags that identify their Dynamo runtime versions.
 > The profiler also applies the field when its output is consumed directly,
-> outside the operator-managed DGDR workflow. The operator remains authoritative
-> for DGDR-managed deployments and reapplies the value after all DGD overrides.
+> outside the operator-managed DGDR workflow. For DGDR-managed deployments, an
+> explicit component value in `spec.overrides.dgd` takes precedence over the
+> DGDR-level default.
 >
 > [Profiler Image Version Compatibility](../../kubernetes/dgdr-reference.mdx#profiler-image-version-compatibility)
 > for details.

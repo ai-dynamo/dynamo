@@ -459,10 +459,11 @@ type DynamoGraphDeploymentRequestSpec struct {
 	// +optional
 	Image string `json:"image,omitempty"`
 
-	// RuntimeVersionOverride explicitly sets the Dynamo runtime version for every
-	// component in the generated DynamoGraphDeployment. Set this when Image uses
-	// a non-semantic-version tag or digest, or when its tag does not identify the
-	// Dynamo runtime version.
+	// RuntimeVersionOverride supplies the default Dynamo runtime version for
+	// generated DynamoGraphDeployment components that do not set their own
+	// override. Set this when Image uses a non-semantic-version tag or digest, or
+	// when its tag does not identify the Dynamo runtime version. An explicit
+	// component value in overrides.dgd takes precedence.
 	// +kubebuilder:validation:Pattern=`^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$`
 	// +optional
 	RuntimeVersionOverride string `json:"runtimeVersionOverride,omitempty"`

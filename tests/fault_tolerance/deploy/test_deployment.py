@@ -25,7 +25,11 @@ from tests.fault_tolerance.deploy.scenarios import (
     Scenario,
     scenarios,
 )
-from tests.utils.managed_deployment import DeploymentSpec, ManagedDeployment
+from tests.utils.managed_deployment import (
+    DeploymentSpec,
+    ManagedDeployment,
+    dynamo_runtime_compatibility_version,
+)
 from tests.utils.test_output import resolve_test_output_path
 
 
@@ -520,6 +524,9 @@ async def test_fault_scenario(
 
     if image:
         scenario.deployment.set_image(image)
+        scenario.deployment.set_runtime_version_override(
+            dynamo_runtime_compatibility_version()
+        )
 
     # Get model using helper function and ensure it's set on all services
     model = get_model_from_deployment(scenario.deployment, scenario)

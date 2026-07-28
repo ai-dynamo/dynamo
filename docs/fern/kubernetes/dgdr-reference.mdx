@@ -50,18 +50,18 @@ When `spec.image` is omitted, the operator defaults it on creation to
 requires `operatorVersion` to be valid semantic versioning, so the default
 image has a parseable version tag.
 
-The DGDR-level `spec.runtimeVersionOverride` is authoritative for every
-component in the generated DGD. After the profiler materializes the DGD and
-applies `spec.overrides.dgd`, the operator copies the DGDR value to every
-generated component before DGD admission. This behavior applies across profiler
+The DGDR-level `spec.runtimeVersionOverride` supplies a default for generated
+DGD components. After the profiler materializes the DGD and applies
+`spec.overrides.dgd`, the operator copies the DGDR value only to components that
+do not already have an explicit override. This behavior applies across profiler
 versions. Profilers through Dynamo 1.3.0 may discard the field while parsing the
-DGDR, but the operator reapplies it from the stored DGDR.
+DGDR, but the operator reapplies the default from the stored DGDR.
 
 Set `spec.runtimeVersionOverride` when an effective generated component image
 uses a non-semantic-version tag or digest, or when its tag does not identify the
 intended Dynamo runtime version. The DGDR value also covers images replaced
-through `spec.overrides.dgd` and takes precedence over component-level values in
-that override.
+through `spec.overrides.dgd` when that component does not set its own
+`runtimeVersionOverride`. An explicit component-level value takes precedence.
 
 When the DGDR-level field is unset, each effective generated DGD component
 follows the DGD component rules independently. An overridden image without a

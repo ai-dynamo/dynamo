@@ -82,7 +82,8 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecV1alpha1(
 		image, imagePath := runtimeVersionImageAndPathV1Alpha1(spec, fldPath)
 		if image == "" {
 			allErrs = append(allErrs, field.Required(imagePath, "is required"))
-		} else if runtimeVersionOverrideRequired(image, spec.RuntimeVersionOverride) {
+		} else if !v.allowMissingRuntimeVersionOverride &&
+			runtimeVersionOverrideRequired(image, spec.RuntimeVersionOverride) {
 			allErrs = append(allErrs, field.Required(
 				fldPath.Child("runtimeVersionOverride"),
 				runtimeVersionOverrideRequiredMessage,
@@ -108,7 +109,8 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdateV1al
 		oldImage, _ := runtimeVersionImageAndPathV1Alpha1(oldSpec, fldPath)
 		if newImage == "" && oldImage != "" {
 			allErrs = append(allErrs, field.Required(imagePath, "is required"))
-		} else if runtimeVersionOverrideRequired(newImage, newSpec.RuntimeVersionOverride) &&
+		} else if !v.allowMissingRuntimeVersionOverride &&
+			runtimeVersionOverrideRequired(newImage, newSpec.RuntimeVersionOverride) &&
 			(newImage != oldImage || newSpec.RuntimeVersionOverride != oldSpec.RuntimeVersionOverride) {
 			allErrs = append(allErrs, field.Required(
 				fldPath.Child("runtimeVersionOverride"),

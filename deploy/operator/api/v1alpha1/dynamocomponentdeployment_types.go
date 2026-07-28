@@ -71,10 +71,10 @@ type DynamoComponentDeploymentSharedSpec struct {
 	SubComponentType string `json:"subComponentType,omitempty"`
 
 	// RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's
-	// main image. Admission requires it when spec.extraPodSpec.mainContainer.image has no parseable
-	// semantic-version tag. Set it also when the parsed tag is not the Dynamo runtime version. Use
-	// the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image or rendered
-	// Pod, and changing only this field does not trigger a rollout.
+	// main image. DGD admission requires it when spec.extraPodSpec.mainContainer.image has no parseable
+	// semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is
+	// not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0".
+	// It does not change the image or rendered Pod, and changing only this field does not trigger a rollout.
 	// +kubebuilder:validation:Pattern=`^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$`
 	// +optional
 	RuntimeVersionOverride string `json:"runtimeVersionOverride,omitempty"`

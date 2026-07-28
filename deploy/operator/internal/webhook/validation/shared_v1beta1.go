@@ -36,10 +36,11 @@ import (
 // sharedValidation carries request-wide dependencies and accumulation used by
 // validation for API types shared by multiple resources.
 type sharedValidation struct {
-	ctx                  context.Context
-	mgr                  ctrl.Manager
-	warnings             admission.Warnings
-	runtimeVersionSource runtimeVersionValidationSource
+	ctx                                context.Context
+	mgr                                ctrl.Manager
+	warnings                           admission.Warnings
+	runtimeVersionSource               runtimeVersionValidationSource
+	allowMissingRuntimeVersionOverride bool
 }
 
 func (v *sharedValidation) warn(message string) {
@@ -130,7 +131,8 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 		image, imagePath := runtimeVersionImageAndPath(spec, fldPath)
 		if image == "" {
 			allErrs = append(allErrs, field.Required(imagePath, "is required"))
-		} else if runtimeVersionOverrideRequired(image, spec.RuntimeVersionOverride) {
+		} else if !v.allowMissingRuntimeVersionOverride &&
+			runtimeVersionOverrideRequired(image, spec.RuntimeVersionOverride) {
 			allErrs = append(allErrs, field.Required(
 				fldPath.Child("runtimeVersionOverride"),
 				runtimeVersionOverrideRequiredMessage,
@@ -410,7 +412,8 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 		oldImage, _ := runtimeVersionImageAndPath(oldComponent, fldPath)
 		if newImage == "" && oldImage != "" {
 			allErrs = append(allErrs, field.Required(imagePath, "is required"))
-		} else if runtimeVersionOverrideRequired(newImage, newComponent.RuntimeVersionOverride) &&
+		} else if !v.allowMissingRuntimeVersionOverride &&
+			runtimeVersionOverrideRequired(newImage, newComponent.RuntimeVersionOverride) &&
 			(newImage != oldImage || newComponent.RuntimeVersionOverride != oldComponent.RuntimeVersionOverride) {
 			allErrs = append(allErrs, field.Required(
 				fldPath.Child("runtimeVersionOverride"),
