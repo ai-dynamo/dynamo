@@ -116,6 +116,38 @@ def test_parse_served_model_ids_matches_exact_ids() -> None:
     assert parse_served_model_ids(content) == {"Qwen/Qwen3-0.6B", "Qwen3"}
 
 
+@pytest.mark.parametrize(
+    ("backend", "worker_names"),
+    [
+        ("vllm", {"VllmDecodeWorker", "VllmPrefillWorker"}),
+        (
+            "sglang",
+            {"decode", "prefill", "SglangDecodeWorker", "SglangPrefillWorker"},
+        ),
+    ],
+)
+def test_manifest_explicitly_trusts_known_remote_model(
+    backend: str, worker_names: set[str]
+) -> None:
+    manager = SimpleNamespace(
+        config=DGDRTestConfig(
+            namespace="test-namespace",
+            image="test",
+            backend=backend,
+        )
+    )
+
+    dgdr = dgdr_tests.manifest(manager, "remote-code")
+
+    override = dgdr["spec"]["overrides"]["dgd"]
+    assert override["apiVersion"] == "nvidia.com/v1alpha1"
+    assert set(override["spec"]["services"]) == worker_names
+    for worker in override["spec"]["services"].values():
+        assert worker["extraPodSpec"]["mainContainer"]["args"] == [
+            "--trust-remote-code"
+        ]
+
+
 @pytest.mark.parametrize("content", ["not-json", '{"object": "list"}'])
 def test_parse_served_model_ids_rejects_invalid_responses(content: str) -> None:
     with pytest.raises(AssertionError, match="model-list response"):

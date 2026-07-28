@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import copy
+
 import pytest
 from kubernetes_asyncio.client import exceptions
 
@@ -16,6 +18,7 @@ from tests.deploy.dgdr_utils import (
     total_worker_gpus,
     unique_name,
 )
+from tests.utils.constants import QWEN
 
 pytestmark = [
     pytest.mark.k8s,
@@ -30,6 +33,28 @@ PLANNER_MOCKER_PROFILE_DATA = (
     "/workspace/components/src/dynamo/planner/tests/data/profiling_results/"
     "H200_TP1P_TP1D"
 )
+REMOTE_CODE_WORKERS = {
+    "vllm": ("VllmDecodeWorker", "VllmPrefillWorker"),
+    "sglang": ("decode", "prefill", "SglangDecodeWorker", "SglangPrefillWorker"),
+}
+
+
+def remote_code_override(backend: str) -> dict:
+    """Explicitly trust the known Qwen test model in generated worker services."""
+
+    worker_override = {
+        "extraPodSpec": {"mainContainer": {"args": ["--trust-remote-code"]}}
+    }
+    return {
+        "apiVersion": "nvidia.com/v1alpha1",
+        "kind": "DynamoGraphDeployment",
+        "spec": {
+            "services": {
+                name: copy.deepcopy(worker_override)
+                for name in REMOTE_CODE_WORKERS[backend]
+            }
+        },
+    }
 
 
 def manifest(
@@ -37,6 +62,14 @@ def manifest(
     suffix: str,
     spec: dict | None = None,
 ) -> dict:
+    spec = copy.deepcopy(spec) if spec else {}
+    backend = spec.get("backend", manager.config.backend)
+    model = spec.get("model", manager.config.model)
+    if model == QWEN and backend in REMOTE_CODE_WORKERS:
+        spec.setdefault("overrides", {}).setdefault(
+            "dgd", remote_code_override(backend)
+        )
+
     return build_dgdr(
         manager.config,
         unique_name(manager.config, suffix),
