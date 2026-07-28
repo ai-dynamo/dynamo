@@ -10,7 +10,7 @@ from typing import Optional
 from dynamo.planner.config.backend_components import WORKER_COMPONENT_NAMES
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.config.planner_config import PlannerConfig
-from dynamo.planner.connectors.base import PlannerConnector
+from dynamo.planner.connectors.base import PlannerConnector, PowerAwareConnector
 from dynamo.planner.core.budget import minimum_power_footprint_fits
 from dynamo.planner.core.types import FpmObservations, TrafficObservation
 from dynamo.planner.environment.interface import (
@@ -184,17 +184,16 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
     def _shared_dgd_deployment(self) -> Optional[dict]:
         """One DGD GET for GPU + power reads when power awareness is on.
 
-        Uses the Kubernetes-only ``get_graph_deployment`` duck-type; other
-        connectors keep separate (or no-op) paths. Not added to
-        ``PlannerConnector``. Prefer ``_wait_for_startup_dgd_snapshot`` at
-        init so caps come from a generation-observed, worker-stable snapshot.
+        Only connectors that implement ``PowerAwareConnector`` expose
+        ``get_graph_deployment``; others return ``None`` (no-op). Prefer
+        ``_wait_for_startup_dgd_snapshot`` at init so caps come from a
+        generation-observed, worker-stable snapshot.
         """
         if not self.config.enable_power_awareness:
             return None
-        fetch = getattr(self.controller, "get_graph_deployment", None)
-        if not callable(fetch):
+        if not isinstance(self.controller, PowerAwareConnector):
             return None
-        return fetch()
+        return self.controller.get_graph_deployment()
 
     async def _wait_for_startup_dgd_snapshot(self) -> Optional[dict]:
         """Wait for readiness; when power is on, return a settled DGD snapshot.
@@ -204,20 +203,18 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
         planners keep the standard ``wait_for_deployment_ready`` path.
         """
         if self.config.enable_power_awareness:
-            wait_settled = getattr(
-                self.controller, "wait_for_settled_graph_deployment", None
-            )
-            if not inspect.iscoroutinefunction(wait_settled):
+            if not isinstance(self.controller, PowerAwareConnector):
                 raise DeploymentValidationError(
                     [
                         "Power awareness requires a connector that implements "
-                        "wait_for_settled_graph_deployment as an async method "
-                        "(pod-annotation startup convergence check); "
+                        "PowerAwareConnector (get_graph_deployment, "
+                        "get_component_power_configs, "
+                        "wait_for_settled_graph_deployment); "
                         "this connector does not."
                     ]
                 )
             prefill_name, decode_name = self._power_component_names()
-            return await wait_settled(
+            return await self.controller.wait_for_settled_graph_deployment(
                 include_planner=False,
                 require_prefill=self.require_prefill,
                 require_decode=self.require_decode,
@@ -388,19 +385,17 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
         generic ``type: worker`` fallback). Called at startup only to adopt
         static caps. Never called at runtime — caps are startup-static.
         """
-        get_configs = getattr(self.controller, "get_component_power_configs", None)
-        if not callable(get_configs):
+        if not isinstance(self.controller, PowerAwareConnector):
             raise DeploymentValidationError(
                 [
-                    "Power awareness requires a connector that can resolve "
-                    "DGD-owned per-GPU caps; this connector does not implement "
+                    "Power awareness requires a connector that implements "
+                    "PowerAwareConnector; this connector does not implement "
                     "get_component_power_configs."
                 ]
             )
 
         prefill_name, decode_name = self._power_component_names()
-        return self._call_with_optional_deployment(
-            get_configs,
+        return self.controller.get_component_power_configs(
             deployment=deployment,
             require_prefill=self.require_prefill,
             require_decode=self.require_decode,

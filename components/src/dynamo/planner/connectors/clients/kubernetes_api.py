@@ -558,20 +558,16 @@ class KubernetesAPI:
             # Build per-component expected annotation strings from the same
             # DGD snapshot. A missing or malformed annotation is invalid
             # configuration — raise immediately rather than retrying.
+            # Use the validated canonical integer string so whitespace in the
+            # DGD annotation (accepted by get_gpu_power_limit_watts) never
+            # causes a spurious settlement mismatch against pod annotations.
             components_map = get_components_by_name(graph_deployment)
             expected_power: dict[str, str] = {}
             for name in power_names:
                 svc = Service(name=name, service=components_map.get(name, {}))
                 # Raises PowerAnnotationMissingError / PowerAnnotationInvalidError
                 # on bad config; let those propagate as a fail-fast startup error.
-                svc.get_gpu_power_limit_watts()
-                raw_annotations = (
-                    svc.service.get("podTemplate", {})
-                    .get("metadata", {})
-                    .get("annotations")
-                    or {}
-                )
-                expected_power[name] = str(raw_annotations[POWER_ANNOTATION_KEY])
+                expected_power[name] = str(svc.get_gpu_power_limit_watts())
 
             pods_ok, pods_pending = self.worker_pods_settled(
                 graph_deployment, expected_power

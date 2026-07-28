@@ -10,10 +10,13 @@ capability discovery, and replica-state introspection for one deployment mode.
 
 from __future__ import annotations
 
-from typing import Optional, Protocol
+from typing import TYPE_CHECKING, Optional, Protocol, runtime_checkable
 
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.monitoring.worker_info import WorkerInfo
+
+if TYPE_CHECKING:
+    from dynamo.planner.monitoring.dgd_services import ComponentPowerConfig
 
 
 class WorkerInfoProvider(Protocol):
@@ -68,4 +71,39 @@ class PlannerConnector(WorkerInfoProvider, Protocol):
         pass
 
 
-__all__ = ["PlannerConnector", "WorkerInfoProvider"]
+@runtime_checkable
+class PowerAwareConnector(Protocol):
+    """Narrow read-only power capability — Kubernetes-specific, not part of PlannerConnector.
+
+    The environment checks ``isinstance(controller, PowerAwareConnector)`` at
+    each power-aware boundary when ``enable_power_awareness=True``. All three
+    methods must be present; a typo or absent method is caught at the isinstance
+    check rather than silently falling back to a no-op.
+    """
+
+    def get_graph_deployment(self) -> dict:
+        ...
+
+    def get_component_power_configs(
+        self,
+        require_prefill: bool = True,
+        require_decode: bool = True,
+        prefill_component_name: Optional[str] = None,
+        decode_component_name: Optional[str] = None,
+        deployment: Optional[dict] = None,
+    ) -> tuple[Optional[ComponentPowerConfig], Optional[ComponentPowerConfig]]:
+        ...
+
+    async def wait_for_settled_graph_deployment(
+        self,
+        include_planner: bool = True,
+        *,
+        require_prefill: bool = True,
+        require_decode: bool = True,
+        prefill_component_name: Optional[str] = None,
+        decode_component_name: Optional[str] = None,
+    ) -> dict:
+        ...
+
+
+__all__ = ["PlannerConnector", "PowerAwareConnector", "WorkerInfoProvider"]

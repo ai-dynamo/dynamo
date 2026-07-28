@@ -65,8 +65,21 @@ def _env(
     )
 
 
+def _power_controller(**kwargs):
+    """Minimal mock that satisfies isinstance(..., PowerAwareConnector).
+
+    All three protocol methods must be present in __dict__ so
+    inspect.getattr_static can find them (runtime_checkable uses static
+    lookup in Python 3.12+, bypassing Mock's __getattr__).
+    """
+    controller = Mock(**kwargs)
+    controller.get_graph_deployment = Mock()
+    controller.wait_for_settled_graph_deployment = AsyncMock()
+    return controller
+
+
 def _controller(prefill_watts=700, decode_watts=1200, *, gpus_per_replica=1):
-    controller = Mock()
+    controller = _power_controller()
     controller.get_component_power_configs = Mock(
         return_value=(
             _cfg("prefill", prefill_watts, gpus_per_replica),
@@ -77,7 +90,7 @@ def _controller(prefill_watts=700, decode_watts=1200, *, gpus_per_replica=1):
 
 
 def _refresh_controller(prefill_cfg, decode_cfg):
-    controller = Mock()
+    controller = _power_controller()
     controller.get_gpu_counts = Mock(return_value=(1, 1))
     controller.get_component_power_configs = Mock(
         return_value=(prefill_cfg, decode_cfg)
@@ -163,7 +176,7 @@ def test_init_requires_power_capable_connector():
 
 def test_init_required_prefill_config_none_raises():
     """A connector returning None prefill config when prefill is required must fail closed."""
-    controller = Mock()
+    controller = _power_controller()
     controller.get_component_power_configs = Mock(
         return_value=(None, _cfg("decode", 300))
     )
@@ -174,7 +187,7 @@ def test_init_required_prefill_config_none_raises():
 
 def test_init_required_decode_config_none_raises():
     """A connector returning None decode config when decode is required must fail closed."""
-    controller = Mock()
+    controller = _power_controller()
     controller.get_component_power_configs = Mock(
         return_value=(_cfg("prefill", 700), None)
     )
@@ -184,30 +197,32 @@ def test_init_required_decode_config_none_raises():
 
 
 @pytest.mark.asyncio
-async def test_initialize_power_on_requires_settled_wait_coroutine():
-    """Power on + connector without async settled-wait must raise immediately.
+async def test_initialize_power_on_requires_power_aware_connector():
+    """Power on + connector missing a PowerAwareConnector method must raise immediately.
 
-    Falling through to replica-count readiness would silently skip
-    observedGeneration and pod annotation convergence — the same degradation
-    the _load_static_power_caps require guard was added to prevent.
+    runtime_checkable uses inspect.getattr_static (Python 3.12+), which
+    bypasses Mock's __getattr__. A method not explicitly set on the mock
+    instance is invisible to the isinstance check, so omitting
+    wait_for_settled_graph_deployment triggers DeploymentValidationError
+    rather than silently falling through to replica-count readiness and
+    skipping observedGeneration / pod-annotation convergence.
     """
     controller = Mock()
     controller.async_init = AsyncMock()
     controller.validate_deployment = AsyncMock()
-    # Non-async attribute — iscoroutinefunction returns False.
-    controller.wait_for_settled_graph_deployment = Mock(return_value=None)
+    controller.get_graph_deployment = Mock()
     controller.get_component_power_configs = Mock(
         return_value=(_cfg("prefill", 700), _cfg("decode", 300))
     )
+    # wait_for_settled_graph_deployment intentionally absent from __dict__:
+    # isinstance(controller, PowerAwareConnector) → False.
 
     env = _env(controller)
     fpm = Mock()
     fpm.async_init = AsyncMock()
     env.fpm_provider = fpm
 
-    with pytest.raises(
-        DeploymentValidationError, match="wait_for_settled_graph_deployment"
-    ):
+    with pytest.raises(DeploymentValidationError, match="PowerAwareConnector"):
         await env.initialize()
 
 
