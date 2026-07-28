@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::{Arc, OnceLock};
 
 use dynamo_kv_router::identity::{IdentitySource, PoolId};
 use dynamo_kv_router::indexer::cuckoo::ProducerIdentity;
@@ -182,14 +184,14 @@ impl ModelTarget {
 pub struct DcPoolDescriptor {
     producer: ProducerIdentity,
     serving_endpoint: EndpointId,
-    registrations: Vec<CanonicalModelRegistration>,
+    registrations: Arc<[CanonicalModelRegistration]>,
 }
 
 impl DcPoolDescriptor {
-    pub(crate) const fn new(
+    pub(crate) fn new(
         producer: ProducerIdentity,
         serving_endpoint: EndpointId,
-        registrations: Vec<CanonicalModelRegistration>,
+        registrations: Arc<[CanonicalModelRegistration]>,
     ) -> Self {
         Self {
             producer,
@@ -215,24 +217,64 @@ impl DcPoolDescriptor {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug)]
+struct DcPoolCatalogPools {
+    by_id: BTreeMap<PoolId, DcPoolDescriptor>,
+    ordered: OnceLock<Vec<DcPoolDescriptor>>,
+}
+
+impl Clone for DcPoolCatalogPools {
+    fn clone(&self) -> Self {
+        Self {
+            by_id: self.by_id.clone(),
+            ordered: OnceLock::new(),
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct DcPoolCatalog {
     process_incarnation: u64,
     revision: u64,
-    pools: Vec<DcPoolDescriptor>,
+    pools: DcPoolCatalogPools,
 }
 
 impl DcPoolCatalog {
-    pub(crate) const fn new(
+    pub(crate) fn new(
         process_incarnation: u64,
         revision: u64,
         pools: Vec<DcPoolDescriptor>,
     ) -> Self {
+        let by_id = pools
+            .into_iter()
+            .map(|descriptor| (descriptor.pool_id(), descriptor))
+            .collect();
         Self {
             process_incarnation,
             revision,
-            pools,
+            pools: DcPoolCatalogPools {
+                by_id,
+                ordered: OnceLock::new(),
+            },
         }
+    }
+
+    pub(crate) fn upsert(&mut self, revision: u64, descriptor: DcPoolDescriptor) {
+        self.revision = revision;
+        self.pools.by_id.insert(descriptor.pool_id(), descriptor);
+        self.pools.ordered.take();
+    }
+
+    pub(crate) fn remove(&mut self, revision: u64, pool_id: PoolId) {
+        self.revision = revision;
+        self.pools.by_id.remove(&pool_id);
+        self.pools.ordered.take();
+    }
+
+    pub(crate) fn clear(&mut self, revision: u64) {
+        self.revision = revision;
+        self.pools.by_id.clear();
+        self.pools.ordered.take();
     }
 
     pub const fn process_incarnation(&self) -> u64 {
@@ -244,7 +286,56 @@ impl DcPoolCatalog {
     }
 
     pub fn pools(&self) -> &[DcPoolDescriptor] {
-        &self.pools
+        self.pools
+            .ordered
+            .get_or_init(|| self.pools.by_id.values().cloned().collect())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_materialized(&self) -> bool {
+        self.pools.ordered.get().is_some()
+    }
+}
+
+impl fmt::Debug for DcPoolCatalog {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DcPoolCatalog")
+            .field("process_incarnation", &self.process_incarnation)
+            .field("revision", &self.revision)
+            .field("pools", &self.pools())
+            .finish()
+    }
+}
+
+impl PartialEq for DcPoolCatalog {
+    fn eq(&self, other: &Self) -> bool {
+        self.process_incarnation == other.process_incarnation
+            && self.revision == other.revision
+            && self.pools.by_id == other.pools.by_id
+    }
+}
+
+impl Eq for DcPoolCatalog {}
+
+impl Serialize for DcPoolCatalog {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        #[derive(Serialize)]
+        struct Catalog<'a> {
+            process_incarnation: u64,
+            revision: u64,
+            pools: &'a [DcPoolDescriptor],
+        }
+
+        Catalog {
+            process_incarnation: self.process_incarnation,
+            revision: self.revision,
+            pools: self.pools(),
+        }
+        .serialize(serializer)
     }
 }
 

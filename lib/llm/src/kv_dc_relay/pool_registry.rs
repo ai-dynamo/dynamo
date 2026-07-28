@@ -168,6 +168,8 @@ impl PoolRegistry {
         };
         let identity = handle.identity();
         let registrations: Arc<[CanonicalModelRegistration]> = request.registrations.into();
+        let descriptor =
+            DcPoolDescriptor::new(identity, request.endpoint.clone(), registrations.clone());
         let cancel = CancellationToken::new();
 
         let mut state = self.state.lock();
@@ -197,7 +199,7 @@ impl PoolRegistry {
                 state: PoolEntryState::Active,
             },
         );
-        publish_catalog(&mut state, self.process_incarnation, &self.catalog_tx);
+        publish_catalog_upsert(&mut state, &self.catalog_tx, descriptor);
 
         Ok(PoolAttachment {
             pool_id: request.pool_id,
@@ -253,8 +255,13 @@ impl PoolRegistry {
             attachment.layout_generation
         );
         entry.registrations = registrations.clone();
+        let descriptor = DcPoolDescriptor::new(
+            entry.identity,
+            entry.endpoint.clone(),
+            registrations.clone(),
+        );
         attachment.registrations = registrations;
-        publish_catalog(&mut state, self.process_incarnation, &self.catalog_tx);
+        publish_catalog_upsert(&mut state, &self.catalog_tx, descriptor);
         Ok(())
     }
 
@@ -278,7 +285,7 @@ impl PoolRegistry {
         };
         entry.cancel.cancel();
         if was_active {
-            publish_catalog(&mut state, self.process_incarnation, &self.catalog_tx);
+            publish_catalog_remove(&mut state, &self.catalog_tx, pool_id);
         }
         true
     }
@@ -297,7 +304,7 @@ impl PoolRegistry {
         };
         entry.cancel.cancel();
         if was_active {
-            publish_catalog(&mut state, self.process_incarnation, &self.catalog_tx);
+            publish_catalog_remove(&mut state, &self.catalog_tx, pool_id);
         }
         true
     }
@@ -316,7 +323,7 @@ impl PoolRegistry {
             state.accepting = false;
             state.reservations.clear();
             let entries = state.pools.drain().collect::<Vec<_>>();
-            publish_catalog(&mut state, self.process_incarnation, &self.catalog_tx);
+            publish_catalog_clear(&mut state, &self.catalog_tx);
             entries
         };
         for (pool_id, entry) in entries {
@@ -388,31 +395,32 @@ fn rollback_reservation(state: &mut PoolRegistryState, pool_id: PoolId, layout_g
     }
 }
 
-fn publish_catalog(
-    state: &mut PoolRegistryState,
-    process_incarnation: u64,
-    sender: &watch::Sender<DcPoolCatalog>,
-) {
+fn advance_catalog_revision(state: &mut PoolRegistryState) -> u64 {
     state.catalog_revision = state.catalog_revision.saturating_add(1);
-    sender.send_replace(catalog_from_state(state, process_incarnation));
+    state.catalog_revision
 }
 
-fn catalog_from_state(state: &PoolRegistryState, process_incarnation: u64) -> DcPoolCatalog {
-    let mut pools: Vec<_> = state
-        .pools
-        .values()
-        .filter(|entry| entry.state == PoolEntryState::Active)
-        .map(|entry| {
-            DcPoolDescriptor::new(
-                entry.identity,
-                entry.endpoint.clone(),
-                entry.registrations.to_vec(),
-            )
-        })
-        .collect();
-    pools.sort_unstable_by_key(DcPoolDescriptor::pool_id);
+fn publish_catalog_upsert(
+    state: &mut PoolRegistryState,
+    sender: &watch::Sender<DcPoolCatalog>,
+    descriptor: DcPoolDescriptor,
+) {
+    let revision = advance_catalog_revision(state);
+    sender.send_modify(|catalog| catalog.upsert(revision, descriptor));
+}
 
-    DcPoolCatalog::new(process_incarnation, state.catalog_revision, pools)
+fn publish_catalog_remove(
+    state: &mut PoolRegistryState,
+    sender: &watch::Sender<DcPoolCatalog>,
+    pool_id: PoolId,
+) {
+    let revision = advance_catalog_revision(state);
+    sender.send_modify(|catalog| catalog.remove(revision, pool_id));
+}
+
+fn publish_catalog_clear(state: &mut PoolRegistryState, sender: &watch::Sender<DcPoolCatalog>) {
+    let revision = advance_catalog_revision(state);
+    sender.send_modify(|catalog| catalog.clear(revision));
 }
 
 fn validate_registrations(registrations: &[CanonicalModelRegistration]) -> anyhow::Result<()> {
@@ -558,6 +566,46 @@ mod tests {
 
         registry.detach(first).await.unwrap();
         registry.detach(second).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn burst_attach_defers_catalog_materialization_until_observed() {
+        let registry = PoolRegistry::new(7, config());
+        let catalog_rx = registry.watch_catalog();
+        let mut attachments = Vec::new();
+
+        for seed in 1..=32 {
+            attachments.push(
+                registry
+                    .attach(request(
+                        pool(seed),
+                        &format!("pool-{seed}.router.generate"),
+                        &format!("model-{seed}"),
+                    ))
+                    .await
+                    .unwrap(),
+            );
+        }
+
+        assert_eq!(catalog_rx.borrow().revision(), 32);
+        assert!(!catalog_rx.borrow().is_materialized());
+
+        let catalog = registry.catalog();
+        let pool_ids: Vec<_> = catalog
+            .pools()
+            .iter()
+            .map(DcPoolDescriptor::pool_id)
+            .collect();
+        assert!(catalog.is_materialized());
+        assert!(pool_ids.windows(2).all(|pair| pair[0] < pair[1]));
+        let serialized = serde_json::to_value(&catalog).unwrap();
+        assert_eq!(serialized["process_incarnation"], 7);
+        assert_eq!(serialized["revision"], 32);
+        assert_eq!(serialized["pools"].as_array().unwrap().len(), 32);
+
+        registry.shutdown().await;
+        assert_eq!(catalog.pools().len(), attachments.len());
+        assert!(registry.catalog().pools().is_empty());
     }
 
     #[tokio::test]

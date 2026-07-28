@@ -1467,6 +1467,7 @@ fn actor_health(handle: &KvDcRelayHandle) -> KvDcRelayActorStats {
 mod tests {
     use dynamo_kv_router::{
         identity::{CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, RoutingScopeId},
+        indexer::cuckoo::CkfFailurePoint,
         protocols::{KV_EVENT_SUBJECT, WorkerWithDpRank},
     };
     use dynamo_runtime::{
@@ -1476,7 +1477,9 @@ mod tests {
         transports::event_plane::{EventPublisher, EventScope},
     };
 
+    use super::super::actor::ActorFaultCategory;
     use super::*;
+    use crate::kv_router::indexer::SourceEpoch;
 
     fn membership(endpoint: &str, domain: KvCacheDomainKey) -> EndpointMembership {
         let endpoint = EndpointId::from(endpoint);
@@ -1930,23 +1933,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recovery_wait_drains_pending_faults_in_order() {
-        let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
-        sender.send(1u8).await.unwrap();
-        sender.send(2u8).await.unwrap();
-        let capacity_sender = sender.clone();
+    async fn queued_non_fencing_fault_does_not_suppress_a_later_fence() {
+        let non_fencing = CkfFailurePoint::PrecommitAllocationFailure.disposition();
+        let fencing = CkfFailurePoint::PrewriteInvariantMismatch.disposition();
+        let fault = |event_id, category, disposition| ActorFault {
+            worker_id: 1,
+            dp_rank: 0,
+            source_epoch: SourceEpoch::new(1),
+            event_id: Some(event_id),
+            category,
+            disposition,
+            message: format!("fault {event_id}"),
+        };
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        sender
+            .send(fault(1, ActorFaultCategory::Resource, non_fencing))
+            .await
+            .unwrap();
         let mut pending = VecDeque::new();
 
-        let result = collect_pending_while(&mut receiver, &mut pending, async move {
-            while capacity_sender.capacity() != 2 {
-                tokio::task::yield_now().await;
-            }
-            7
-        })
+        let send_result = collect_pending_while(
+            &mut receiver,
+            &mut pending,
+            sender.send(fault(2, ActorFaultCategory::ProducerInvariant, fencing)),
+        )
         .await;
+        send_result.unwrap();
 
-        assert_eq!(result, 7);
-        assert_eq!(pending, VecDeque::from([1, 2]));
+        let first = pending.pop_front().unwrap();
+        let second = match pending.pop_front() {
+            Some(fault) => fault,
+            None => receiver.recv().await.unwrap(),
+        };
+
+        assert_eq!(
+            [first.disposition.action, second.disposition.action],
+            [
+                CkfFailureAction::ReportResourceFailure,
+                CkfFailureAction::FenceAndRebuildProducer,
+            ]
+        );
     }
 
     #[tokio::test]
