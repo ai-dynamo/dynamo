@@ -49,7 +49,7 @@ the request payload.
 After you implement the backend, package it into a runtime image with
 [Runtime Containers](custom-containers.md). For Kubernetes deployment, place the
 custom backend in a `DynamoGraphDeployment` and follow the
-[Deployment Overview](../kubernetes/model-deployment-guide.md).
+[Model Deployment](../getting-started/kubernetes-deployment.mdx).
 
 <Tabs>
 <Tab title="Python" language="python">
