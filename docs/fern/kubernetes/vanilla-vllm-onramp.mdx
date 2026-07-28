@@ -71,7 +71,10 @@ yet. Follow the instructions for your gateway (e.g.
 
 We provide a convenience script if you are installing from scratch for experimentation.
 ```bash
-# Gateway API + Inference Extension CRDs + a gateway named `inference-gateway`
+# Gateway API + Inference Extension CRDs + a gateway named `inference-gateway`.
+# The Gateway is created in the `agentgateway-system` namespace, and its
+# listener allows routes from other namespaces (allowedRoutes.namespaces.from:
+# All) so the HTTPRoute in your workload namespace attaches.
 deploy/inference-gateway/scripts/install_gaie_crd_agentgateway.sh
 ```
 
@@ -79,7 +82,7 @@ If you are starting from scratch install the [Prerequisites](#1-prerequisites) a
 
 ```bash
 kubectl apply -n <ns> -f agg.yaml
-# The Gateway may live in another namespace (e.g. agentgateway-system):
+# The Gateway lives in the `agentgateway-system` namespace:
 GW=$(kubectl get gateway inference-gateway -n agentgateway-system -o jsonpath='{.status.addresses[0].value}')
 curl http://$GW/v1/chat/completions -H 'content-type: application/json' -d '{
   "model": "Qwen/Qwen3-0.6B",
