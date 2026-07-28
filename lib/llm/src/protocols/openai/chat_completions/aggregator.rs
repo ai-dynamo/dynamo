@@ -1121,8 +1121,14 @@ mod tests {
             None,
             None,
         );
-        annotated_delta2.data.as_mut().expect("delta data").nvext =
-            Some(serde_json::json!({ "stop_reason": 128001 }));
+        annotated_delta2.data.as_mut().expect("delta data").nvext = Some(serde_json::json!({
+            "stop_reason": 128001,
+            "classifier": {
+                "label": "class_0",
+                "score": 0.73,
+                "embedding_shape": [256, 2048],
+            },
+        }));
 
         let stream = Box::pin(stream::iter(vec![annotated_delta1, annotated_delta2]));
         let response = DeltaAggregator::apply(stream, ParsingOptions::default())
@@ -1134,6 +1140,11 @@ mod tests {
             Some(serde_json::json!({
                 "engine_data": { "trace_id": "abc" },
                 "stop_reason": 128001,
+                "classifier": {
+                    "label": "class_0",
+                    "score": 0.73,
+                    "embedding_shape": [256, 2048],
+                },
             }))
         );
     }

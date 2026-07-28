@@ -93,6 +93,7 @@ from .multimodal_utils.custom_encoder_adapter import (
     CustomEncoderAdapter,
     create_custom_encoder_adapter,
 )
+from .multimodal_utils.external_qwen_adapter import build_external_qwen_prompt
 from .multimodal_utils.prefill_worker_utils import MultiModalEmbeddingLoader
 from .multimodal_utils.request_processor import (
     IMAGE_URL_KEY,
@@ -2562,10 +2563,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         mm_processor_kwargs: Dict[str, Any] | None = None,
     ) -> tuple[TokensPrompt | EmbedsPrompt | None, Dict[str, Any] | None]:
         """
-        Build a prompt from request, handling both prompt_embeds and token_ids.
+        Build a prompt from request, handling external multimodal artifacts,
+        prompt_embeds, and token_ids.
 
         Args:
-            request: The request dict containing either prompt_embeds or token_ids
+            request: The request dict containing an external artifact,
+                prompt_embeds, or token_ids
             request_id: Request ID for logging
             multi_modal_data: Optional multimodal data to attach to TokensPrompt
             log_prefix: Prefix for log messages (e.g., "Prefill " for prefill requests)
@@ -2577,6 +2580,55 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             - On success: (prompt, None)
             - On failure: (None, error_dict to yield)
         """
+        external_mm_data = request.get("external_mm_data")
+        if external_mm_data is not None:
+            try:
+                if self.config.disaggregation_mode != DisaggregationMode.AGGREGATED:
+                    raise ValueError(
+                        "external_mm_data is supported only in aggregated mode"
+                    )
+                if multi_modal_data is not None:
+                    raise ValueError(
+                        "external_mm_data cannot be combined with multi_modal_data"
+                    )
+                if request.get("prompt_embeds") is not None:
+                    raise ValueError(
+                        "external_mm_data cannot be combined with prompt_embeds"
+                    )
+                if mm_processor_kwargs:
+                    raise ValueError(
+                        "external_mm_data does not support mm_processor_kwargs"
+                    )
+                prompt = build_external_qwen_prompt(
+                    external_mm_data=external_mm_data,
+                    token_ids=request["token_ids"],
+                    model_name=self.config.model,
+                    model_config=self.model_config,
+                    engine_args=self.config.engine_args,
+                    vllm_config=self.engine_client.vllm_config,
+                    enable_multimodal=self.config.enable_multimodal,
+                )
+                logger.info(
+                    "%sUsing external Qwen image embeddings for request_id=%s",
+                    log_prefix,
+                    request_id,
+                )
+                return prompt, None
+            except (KeyError, TypeError, ValueError) as exc:
+                logger.error(
+                    "Failed to process external_mm_data for %srequest %s: %s",
+                    log_prefix.lower(),
+                    request_id,
+                    exc,
+                )
+                return (
+                    None,
+                    {
+                        "finish_reason": f"error: Invalid external_mm_data: {exc}",
+                        "token_ids": [],
+                    },
+                )
+
         if "prompt_embeds" in request and request["prompt_embeds"]:
             if not self.config.engine_args.enable_prompt_embeds:
                 msg = (
@@ -3249,14 +3301,15 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # the unsafe pre-first-token window, and the admin abort_request route can
         # reach this request via self._deferred_aborts.
         is_decode_only = self.config.disaggregation_mode == DisaggregationMode.DECODE
-        async with _deferred_abort_guard(
-            self.engine_client,
-            request_id,
-            is_decode_only,
-            self._deferred_aborts,
-            self._shutdown_on_engine_dead,
-        ) as abort_guard, self._abort_monitor(
-            context, request_id, abort_guard=abort_guard
+        async with (
+            _deferred_abort_guard(
+                self.engine_client,
+                request_id,
+                is_decode_only,
+                self._deferred_aborts,
+                self._shutdown_on_engine_dead,
+            ) as abort_guard,
+            self._abort_monitor(context, request_id, abort_guard=abort_guard),
         ):
             try:
                 gen = self.engine_client.generate(

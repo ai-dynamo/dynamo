@@ -270,6 +270,7 @@ STUB_MODULES = [
     "mistral_common.tokens.tokenizers",
     "mistral_common.tokens.tokenizers.base",
     "safetensors",
+    "safetensors.torch",
     "nixl",
     "nixl._api",
     "nixl._bindings",

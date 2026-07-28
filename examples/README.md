@@ -53,6 +53,7 @@ Platform-specific manifests and templates for production environments. Deploymen
 Low-level runtime examples for developers using Python<>Rust bindings:
 
 - **[Hello World](custom_backend/hello_world/README.md)** - Minimal Dynamo runtime service demonstrating basic concepts
+- **[Custom Vision DAG](custom_backend/multimodal_dag/README.md)** - Two-GPU multimodal DAG combining custom Python workers with vLLM
 
 ## Getting Started
 

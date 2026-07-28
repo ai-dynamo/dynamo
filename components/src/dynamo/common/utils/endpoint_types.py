@@ -11,8 +11,9 @@ def parse_endpoint_types(endpoint_types_str: str) -> ModelType:
 
     Args:
         endpoint_types_str: Comma-separated list of endpoint types.
-                          Valid values: 'chat', 'completions'
-                          Examples: 'chat', 'completions', 'chat,completions'
+                          Valid values: 'chat', 'completions', 'internal'
+                          Examples: 'chat', 'completions', 'chat,completions',
+                          'internal'
 
     Returns:
         ModelType flags combined with bitwise OR
@@ -27,6 +28,8 @@ def parse_endpoint_types(endpoint_types_str: str) -> ModelType:
         ModelType.Completions
         >>> parse_endpoint_types("chat,completions")
         ModelType.Chat | ModelType.Completions
+        >>> parse_endpoint_types("internal")
+        ModelType.Empty
     """
     if not endpoint_types_str or not endpoint_types_str.strip():
         raise ValueError("Endpoint types string cannot be empty")
@@ -35,6 +38,8 @@ def parse_endpoint_types(endpoint_types_str: str) -> ModelType:
 
     if not types:
         raise ValueError("No valid endpoint types provided")
+    if "internal" in types and len(types) != 1:
+        raise ValueError("'internal' cannot be combined with public endpoint types")
 
     result: ModelType | None = None
     for t in types:
@@ -42,9 +47,12 @@ def parse_endpoint_types(endpoint_types_str: str) -> ModelType:
             flag = ModelType.Chat
         elif t == "completions":
             flag = ModelType.Completions
+        elif t == "internal":
+            flag = ModelType.Empty
         else:
             raise ValueError(
-                f"Invalid endpoint type: '{t}'. Valid options: 'chat', 'completions'"
+                f"Invalid endpoint type: '{t}'. Valid options: "
+                "'chat', 'completions', 'internal'"
             )
 
         result = flag if result is None else result | flag

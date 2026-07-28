@@ -253,7 +253,12 @@ class DynamoRuntimeArgGroup(ArgGroup):
             env_var="DYN_ENDPOINT_TYPES",
             default="chat,completions",
             obsolete_flag="--dyn-endpoint-types",
-            help="Comma-separated list of endpoint types to enable. Options: 'chat', 'completions'. Use 'completions' for models without chat templates.",
+            help=(
+                "Comma-separated list of endpoint types to enable. Options: "
+                "'chat', 'completions', or 'internal'. Use 'completions' for "
+                "models without chat templates. 'internal' registers no public "
+                "OpenAI surface and cannot be combined with other types."
+            ),
         )
 
         add_argument(

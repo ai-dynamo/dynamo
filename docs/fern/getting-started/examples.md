@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Examples
-subtitle: Reference deployments for the SGLang, TensorRT-LLM, and vLLM backends, plus a Hello World walkthrough.
+subtitle: Reference deployments for supported backends, plus custom worker walkthroughs.
 ---
 
 The examples below assume you build the latest image yourself from source. If using a prebuilt image, follow the examples from the corresponding branch.
@@ -12,6 +12,14 @@ The examples below assume you build the latest image yourself from source. If us
 Demonstrates the basic concepts of Dynamo by creating a simple GPU-unaware graph.
 
 [View Hello World Example](https://github.com/ai-dynamo/dynamo/tree/main/examples/custom_backend/hello_world)
+
+## Multimodal Worker DAG
+
+Demonstrates a two-GPU graph that runs a custom Qwen vision encoder, then calls a
+dummy classifier and a standard vLLM worker concurrently. The frontend forwards the
+original text-plus-image OpenAI request without preprocessing it.
+
+[View Custom Vision DAG Example](https://github.com/ai-dynamo/dynamo/tree/main/examples/custom_backend/multimodal_dag)
 
 ## vLLM
 

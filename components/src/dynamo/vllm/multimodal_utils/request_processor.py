@@ -323,6 +323,7 @@ class VllmMultimodalRequestProcessor:
         if (
             request.get("multi_modal_data") is not None
             or request.get("multi_modal_uuids") is not None
+            or request.get("external_mm_data") is not None
             or has_transfer
         ) and not self.enable_multimodal:
             raise self._multimodal_disabled_error()
