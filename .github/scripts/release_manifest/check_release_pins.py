@@ -219,7 +219,10 @@ def _write_github_output(name: str, value: str) -> None:
     with open(out, "a", encoding="utf-8") as fh:
         if "\n" in value:
             delim = "__RELEASE_PINS_EOF__"
-            assert delim not in value
+            if delim in value:
+                # A bare assert would be stripped under `python3 -O`, letting a
+                # crafted value close the heredoc early and inject GITHUB_OUTPUT.
+                raise ManifestError(f"{name}: value contains the output delimiter")
             fh.write(f"{name}<<{delim}\n{value}\n{delim}\n")
         else:
             fh.write(f"{name}={value}\n")
