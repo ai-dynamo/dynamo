@@ -342,26 +342,23 @@ def _aic_disagg_replay_args(
 
 
 def _run_aic_static_point(backend_name: str, isl: int, osl: int, batch_size: int):
-    backend_factory = pytest.importorskip("aiconfigurator.sdk.backends.factory")
-    config = pytest.importorskip("aiconfigurator.sdk.config")
-    inference_session = pytest.importorskip("aiconfigurator.sdk.inference_session")
-    models = pytest.importorskip("aiconfigurator.sdk.models")
-    perf_database = pytest.importorskip("aiconfigurator.sdk.perf_database")
+    aic_core = pytest.importorskip("aiconfigurator_core")
 
-    database = perf_database.get_database(
+    database = aic_core.sdk.perf_database.get_database(
         system=AIC_PARITY_SYSTEM,
         backend=backend_name,
         version=AIC_PARITY_VERSIONS[backend_name],
     )
-    backend = backend_factory.get_backend(backend_name)
-    model = models.get_model(
+    backend = aic_core.sdk.backends.factory.get_backend(backend_name)
+    model = aic_core.sdk.models.get_model(
         model_path=AIC_PARITY_MODEL,
-        model_config=config.ModelConfig(tp_size=1),
+        model_config=aic_core.sdk.config.ModelConfig(tp_size=1),
         backend_name=backend_name,
     )
-    session = inference_session.InferenceSession(model, database, backend)
-    summary = session.run_static(
-        runtime_config=config.RuntimeConfig(
+    summary = backend.run_static(
+        model=model,
+        database=database,
+        runtime_config=aic_core.sdk.config.RuntimeConfig(
             batch_size=batch_size,
             beam_width=1,
             isl=isl,

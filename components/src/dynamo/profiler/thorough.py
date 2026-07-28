@@ -528,7 +528,6 @@ async def run_thorough(
     best_config_df = result.get("best_config_df", pd.DataFrame())
 
     # --- Stage 4: DGD generation ---
-    # AIC Task v2 requires role-specific fields for disaggregated serving.
     task = Task(
         serving_mode="disagg",
         prefill_model_path=local_or_hf_model,

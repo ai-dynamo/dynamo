@@ -3,9 +3,12 @@
 
 # Dependencies required by the planner, profiler, and global_planner services.
 
-# AIC 0.10 publishes one wheel with the native aiconfigurator_core extension
-# bundled in; do not add a separate Python core-wheel dependency.
-aiconfigurator>=0.10.0,<0.11.0
+# The upper and core 0.11 wheels are built from the same pinned AIC source
+# revision in wheel_builder.Dockerfile. Keep both requirements explicit so the
+# planner image cannot resolve either layer from a different package index.
+aiconfigurator==0.11.0
+
+aiconfigurator-core==0.11.0
 aiofiles<=25.1.0
 aiohttp>=3.9.0,<4.0
 filterpy==1.4.5

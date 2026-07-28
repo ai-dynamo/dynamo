@@ -35,6 +35,10 @@ dynamo:
   planner_baseline_sbom: python@043085f9
   python_version: "3.12"
 
+  # AIConfigurator main revision containing the paired upper and core packages.
+  # Keep aligned with the Rust git dependency in Cargo.toml.
+  aiconfigurator_ref: f3b78eab442377b2693ee52dcdcdc6dd82c21f9e
+
   nats_version: v2.10.28
   etcd_version: v3.5.30
 

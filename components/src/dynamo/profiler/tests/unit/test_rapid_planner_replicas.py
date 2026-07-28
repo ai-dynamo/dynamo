@@ -87,7 +87,7 @@ def _make_picked_row(
 
 
 def _make_task() -> Task:
-    """Build a disagg Task v2 with `total_gpus=8` matching `_make_dgdr()`."""
+    """Build a disagg `Task` with `total_gpus=8` matching `_make_dgdr()`."""
     return Task(
         serving_mode="disagg",
         prefill_model_path="Qwen/Qwen3-30B-A3B",

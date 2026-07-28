@@ -5,6 +5,10 @@ inputs:
     description: 'Pytest marks'
     required: true
     default: 'e2e and vllm and gpu_1 and not slow'
+  pytest_ignore_paths:
+    description: 'Whitespace-separated repository paths excluded from pytest collection'
+    required: false
+    default: ''
   container_workspace:
     description: 'Container workspace to run tests from'
     required: true
@@ -176,11 +180,16 @@ runs:
         fi
         echo "📦 Running pytest from container workspace: ${CONTAINER_WORKSPACE}"
 
+        IGNORE_OPTS=""
+        for path in ${{ inputs.pytest_ignore_paths }}; do
+          IGNORE_OPTS="${IGNORE_OPTS} --ignore=${path}"
+        done
+
         # Determine docker runtime flags and pytest command based on dry_run mode
         if [[ "${{ inputs.dry_run }}" == "true" ]]; then
           echo "🔍 Running pytest in dry-run mode (collect-only, no GPU required)"
           GPU_FLAGS=""
-          PYTEST_CMD="python -m pytest -v --collect-only -m \"${{ inputs.pytest_marks }}\""
+          PYTEST_CMD="python -m pytest -v --collect-only ${IGNORE_OPTS} -m \"${{ inputs.pytest_marks }}\""
         else
           echo "🚀 Running pytest in normal mode"
           # Determine parallelization based on parallel_mode input
@@ -223,7 +232,7 @@ runs:
             export PYTHONPATH="${CONTAINER_WORKSPACE}/components/src:${CONTAINER_WORKSPACE}/lib/bindings/python/src${PYTHONPATH:+:${PYTHONPATH}}"
           fi
 
-          PYTEST_CMD="python -m pytest ${PARALLEL_OPTS} ${VRAM_OPTS} ${DIST_OPTS} --continue-on-collection-errors -v --tb=short --basetemp=${WORK_DIR}/pytest_temp -o cache_dir=${WORK_DIR}/.pytest_cache --junitxml=${TEST_RESULTS_DIR}/${{ env.PYTEST_XML_FILE }} --alluredir=${TEST_RESULTS_DIR}/allure-results --durations=10 ${COVERAGE_FLAGS} -m \"${{ inputs.pytest_marks }}\""
+          PYTEST_CMD="python -m pytest ${PARALLEL_OPTS} ${VRAM_OPTS} ${DIST_OPTS} --continue-on-collection-errors -v --tb=short --basetemp=${WORK_DIR}/pytest_temp -o cache_dir=${WORK_DIR}/.pytest_cache --junitxml=${TEST_RESULTS_DIR}/${{ env.PYTEST_XML_FILE }} --alluredir=${TEST_RESULTS_DIR}/allure-results --durations=10 ${COVERAGE_FLAGS} ${IGNORE_OPTS} -m \"${{ inputs.pytest_marks }}\""
         fi
 
         echo "▶️ Executing (cwd=${CONTAINER_WORKSPACE}): ${PYTEST_CMD}"
