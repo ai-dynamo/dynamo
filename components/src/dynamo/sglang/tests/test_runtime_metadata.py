@@ -190,3 +190,67 @@ async def test_hicache_publish_failure_preserves_core_capacity(monkeypatch, capl
     assert (
         "Failed to attach native offloading capacity from SGLang HiCache" in caplog.text
     )
+
+
+# NOTE: import lazily, per the `_eagle_enabled_for` test above -- register.py does
+# `from sglang.srt.environ import envs`, absent in the `pytest-marker-report`
+# pre-commit hook's collection env.
+
+
+def test_image_placeholder_token_is_none_for_text_only_workers():
+    """No mm_processor means no images, so nothing to declare."""
+    from dynamo.sglang.register import _get_image_placeholder_token
+
+    engine = SimpleNamespace(tokenizer_manager=SimpleNamespace(mm_processor=None))
+
+    assert _get_image_placeholder_token(engine) is None
+
+
+def test_image_placeholder_token_comes_from_the_loaded_processor():
+    """The declaration must be read from the processor, not hardcoded per engine."""
+    from dynamo.sglang.register import _get_image_placeholder_token
+
+    engine = SimpleNamespace(
+        tokenizer_manager=SimpleNamespace(
+            mm_processor=SimpleNamespace(
+                mm_tokens=SimpleNamespace(image_token="<|media_pad|>")
+            )
+        )
+    )
+
+    assert _get_image_placeholder_token(engine) == "<|media_pad|>"
+
+
+def test_image_placeholder_token_declines_multiple_spellings():
+    """MultimodalSpecialTokens.image_token may be a list; the renderer emits one
+    token, so several spellings can't be reduced to a declaration."""
+    from dynamo.sglang.register import _get_image_placeholder_token
+
+    engine = SimpleNamespace(
+        tokenizer_manager=SimpleNamespace(
+            mm_processor=SimpleNamespace(
+                mm_tokens=SimpleNamespace(image_token=["<|a|>", "<|b|>"])
+            )
+        )
+    )
+
+    assert _get_image_placeholder_token(engine) is None
+
+
+def test_image_placeholder_token_warns_when_processor_has_no_mm_tokens(caplog):
+    """Version drift: a multimodal processor we can't read is worth a breadcrumb,
+    because K3 requests on this worker will then fail placeholder validation."""
+    from dynamo.sglang.register import _get_image_placeholder_token
+
+    engine = SimpleNamespace(
+        tokenizer_manager=SimpleNamespace(mm_processor=SimpleNamespace())
+    )
+
+    assert _get_image_placeholder_token(engine) is None
+    assert "exposes no `mm_tokens`" in caplog.text
+
+
+def test_image_placeholder_token_survives_an_engine_without_a_tokenizer_manager():
+    from dynamo.sglang.register import _get_image_placeholder_token
+
+    assert _get_image_placeholder_token(SimpleNamespace()) is None

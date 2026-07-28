@@ -344,6 +344,59 @@ def _eagle_enabled_for(speculative_algorithm: Optional[str]) -> bool:
         return False
 
 
+def _get_image_placeholder_token(engine: sgl.Engine) -> Optional[str]:
+    """Literal token this worker's multimodal processor expects, one per image.
+
+    The frontend renders whatever we report here rather than assuming a token
+    per engine, so this must come from the processor SGLang actually loaded.
+    ``TokenizerManager.mm_processor`` is None for text-only models, and each
+    multimodal processor builds an ``mm_tokens`` spec in its ``__init__`` (the
+    Kimi ones declare ``<|media_pad|>``).
+
+    Reaches into SGLang internals, so it is defensive in the style of
+    ``_compat.ensure_sglang_tensor_image_size``: these attributes move between
+    releases. Any miss returns None, which leaves the frontend on the
+    formatter's own default.
+    """
+    try:
+        tokenizer_manager = getattr(engine, "tokenizer_manager", None)
+        mm_processor = getattr(tokenizer_manager, "mm_processor", None)
+        if mm_processor is None:
+            return None  # text-only model, or no tokenizer manager
+
+        mm_tokens = getattr(mm_processor, "mm_tokens", None)
+        if mm_tokens is None:
+            logging.warning(
+                "SGLang multimodal processor %s exposes no `mm_tokens`; not "
+                "declaring an image placeholder token. Multimodal requests on "
+                "models rendered by a native Dynamo formatter (Kimi-K3) will "
+                "fail this worker's placeholder validation.",
+                type(mm_processor).__name__,
+            )
+            return None
+
+        # MultimodalSpecialTokens.image_token is Optional[Union[str, List[str]]];
+        # `.build()` backfills the string form from image_token_id, so a plain
+        # str is the common case. Several spellings can't be reduced to the one
+        # token the renderer emits, so decline rather than guess.
+        image_token = getattr(mm_tokens, "image_token", None)
+        if isinstance(image_token, str) and image_token:
+            return image_token
+        if isinstance(image_token, (list, tuple)):
+            logging.info(
+                "SGLang processor %s declares multiple image-token spellings "
+                "(%r); not declaring one to the frontend.",
+                type(mm_processor).__name__,
+                list(image_token),
+            )
+        return None
+    except Exception as e:
+        logging.warning(
+            "Could not derive the image placeholder token from SGLang: %s", e
+        )
+        return None
+
+
 async def _get_runtime_config(
     engine: sgl.Engine, server_args: ServerArgs, dynamo_args: DynamoConfig
 ) -> Optional[ModelRuntimeConfig]:
@@ -376,12 +429,11 @@ async def _get_runtime_config(
     runtime_config.enable_local_indexer = (
         dynamo_args.enable_local_indexer and not is_decode_worker
     )
-    # SGLang's multimodal processors expand a single image pad token to the
-    # image's feature count and never rebuild the model's native media
-    # sequence, so the frontend must send the pad rather than the placeholder
-    # marker. Engines that re-derive the sequence from the marker leave this
-    # false.
-    runtime_config.expands_image_pad_token = True
+    # This worker's multimodal processor owns the literal token it expects to
+    # see once per image; the frontend renders that token directly instead of
+    # assuming one. None for text-only workers, and inert for models whose
+    # per-image token is fixed by their Jinja chat template.
+    runtime_config.image_placeholder_token = _get_image_placeholder_token(engine)
 
     start_dp_rank, end_dp_rank = model_card_dp_rank_bounds(server_args)
     registered_dp_size = end_dp_rank - start_dp_rank

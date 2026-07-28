@@ -158,8 +158,8 @@ impl ModelRuntimeConfig {
     }
 
     #[setter]
-    fn set_expands_image_pad_token(&mut self, expands_image_pad_token: bool) {
-        self.inner.expands_image_pad_token = expands_image_pad_token;
+    fn set_image_placeholder_token(&mut self, image_placeholder_token: Option<String>) {
+        self.inner.image_placeholder_token = image_placeholder_token;
     }
 
     #[setter]
@@ -246,8 +246,8 @@ impl ModelRuntimeConfig {
     }
 
     #[getter]
-    fn expands_image_pad_token(&self) -> bool {
-        self.inner.expands_image_pad_token
+    fn image_placeholder_token(&self) -> Option<String> {
+        self.inner.image_placeholder_token.clone()
     }
 
     #[getter]

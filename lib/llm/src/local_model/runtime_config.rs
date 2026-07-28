@@ -171,28 +171,24 @@ pub struct ModelRuntimeConfig {
     #[serde(default = "default_local_indexer")]
     pub enable_local_indexer: bool,
 
-    /// Whether this engine expands a single image pad token to the image's
-    /// feature count instead of rebuilding the model's native media sequence.
+    /// Literal token this worker's multimodal processor expects to see exactly
+    /// once per image in the prompt it receives.
     ///
-    /// Multimodal families whose prompt carries one placeholder marker per
-    /// image (currently Kimi-K3) need that marker turned into the model's real
-    /// media sequence before the vision embeddings can bind to it, and engines
-    /// split on who does it:
+    /// Read from the processor the worker actually loaded, so it reflects that
+    /// engine's real contract rather than an assumption about it. Engines
+    /// disagree: SGLang's processors consume `<|media_pad|>` and repeat it to
+    /// the feature count, while vLLM consumes the checkpoint's
+    /// `<|kimi_image_placeholder|>` and builds the native media sequence itself.
     ///
-    /// - `false` (default): the engine re-derives the media sequence from the
-    ///   frontend's placeholder marker, reading image dimensions from the
-    ///   multimodal payload. The preprocessor passes the marker through
-    ///   untouched; pre-substituting here would collide with the engine's own
-    ///   expansion.
-    /// - `true`: the engine only repeats a pad token up to the feature count
-    ///   and never constructs the media sequence, so it needs exactly one pad
-    ///   token per image in the prompt. The preprocessor substitutes the
-    ///   formatter's `image_pad_token()` for the marker.
+    /// `None` (the default) leaves the renderer on its own per-family default.
     ///
-    /// Ignored for formatters that declare no pad token, which is every family
-    /// except Kimi-K3.
-    #[serde(default)]
-    pub expands_image_pad_token: bool,
+    /// Consumed only by native formatters that emit image placeholders as
+    /// discrete segments — currently Kimi-K3, via `kimi_k3_formatter_for`. No
+    /// Jinja-templated family has a way to receive it, so declaring one is
+    /// inert for every other model. Also not consulted on the `use_raw_prompt`
+    /// path, which bypasses the formatter entirely.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_placeholder_token: Option<String>,
 
     /// Endpoint whose event sources describe this worker's KV state.
     ///
@@ -298,7 +294,7 @@ impl Default for ModelRuntimeConfig {
             exclude_tools_when_tool_choice_none: default_exclude_tools_when_tool_choice_none(),
             data_parallel_start_rank: default_data_parallel_start_rank(),
             data_parallel_size: default_data_parallel_size(),
-            expands_image_pad_token: false,
+            image_placeholder_token: None,
             enable_local_indexer: true,
             kv_state_endpoint: None,
             runtime_data: HashMap::new(),

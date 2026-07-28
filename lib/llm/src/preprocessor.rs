@@ -897,23 +897,12 @@ impl OpenAIPreprocessor {
         let mut builder = self.builder(request)?;
 
         let template_start = Instant::now();
-        let mut formatted_prompt = {
+        let formatted_prompt = {
             let _nvtx = dynamo_nvtx_range!("preprocess.template");
             self.apply_template(request)
                 .with_context(|| "Failed to apply prompt template")?
         };
         TEMPLATE_SECONDS.observe(template_start.elapsed().as_secs_f64());
-
-        // Engines that only repeat a pad token to the image's feature count
-        // never build the model's native media sequence, so hand them the pad
-        // instead of the placeholder marker. Engines that rebuild the sequence
-        // themselves keep the marker (the default) — substituting here would
-        // leave them nothing to match on.
-        if self.runtime_config.expands_image_pad_token
-            && let Some(prompt) = formatted_prompt.as_mut()
-        {
-            self.substitute_image_pad_token(prompt);
-        }
 
         // Generic reasoning parsers start from `<think>`; MiniMax M3 starts
         // from `<mm:think>`. If the chat template injected that opener at the
@@ -1287,48 +1276,6 @@ impl OpenAIPreprocessor {
         } else {
             Ok(None)
         }
-    }
-
-    /// Swap each image-placeholder marker segment for the formatter's pad
-    /// token, for engines that expand a pad rather than rebuilding the model's
-    /// media sequence from the marker.
-    ///
-    /// A strict no-op for formatters that declare no pad token (every family
-    /// except Kimi K3) and for requests rendered as raw text, which have no
-    /// segment boundaries to rewrite. Cardinality is unchanged — one marker
-    /// becomes one pad — so the engine's own placeholder count still holds.
-    fn substitute_image_pad_token(&self, prompt: &mut RenderedPrompt) {
-        let (Some(marker), Some(pad)) = (
-            self.formatter.image_placeholder_template(),
-            self.formatter.image_pad_token(),
-        ) else {
-            return;
-        };
-        Self::swap_marker_segments(marker, pad, prompt);
-    }
-
-    /// Segment-rewriting core of [`Self::substitute_image_pad_token`].
-    fn swap_marker_segments(marker: &str, pad: &str, prompt: &mut RenderedPrompt) {
-        let Some(segments) = prompt.segments() else {
-            return; // raw_prompt path → no segments to rewrite
-        };
-        if !segments.iter().any(|seg| seg.text == marker) {
-            return;
-        }
-        let rewritten = segments
-            .iter()
-            .map(|seg| {
-                if seg.text == marker {
-                    crate::tokenizers::EncodeSegment {
-                        text: pad.to_string(),
-                        allow_special: true,
-                    }
-                } else {
-                    seg.clone()
-                }
-            })
-            .collect();
-        *prompt = RenderedPrompt::segmented(rewritten);
     }
 
     /// Replace inline `data:` URLs with empty strings in message content parts.
@@ -3944,64 +3891,6 @@ mod tests {
     use super::*;
     use crate::protocols::common::preprocessor::MultimodalData;
     use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
-
-    const K3_MARKER: &str = "<|kimi_image_placeholder|>";
-    const K3_PAD: &str = "<|media_pad|>";
-
-    fn seg(text: &str, allow_special: bool) -> crate::tokenizers::EncodeSegment {
-        crate::tokenizers::EncodeSegment {
-            text: text.to_string(),
-            allow_special,
-        }
-    }
-
-    #[test]
-    fn swap_marker_segments_replaces_each_marker_with_one_pad() {
-        let mut prompt = RenderedPrompt::segmented(vec![
-            seg("<|open|>message role=\"user\"<|sep|>", true),
-            seg(K3_MARKER, true),
-            seg("and", false),
-            seg(K3_MARKER, true),
-            seg("compare them", false),
-        ]);
-
-        OpenAIPreprocessor::swap_marker_segments(K3_MARKER, K3_PAD, &mut prompt);
-
-        let segments = prompt.segments().expect("still segmented");
-        let pads = segments.iter().filter(|s| s.text == K3_PAD).count();
-        // Cardinality is preserved 1:1 -- the engine expands each pad itself.
-        assert_eq!(pads, 2);
-        assert!(!segments.iter().any(|s| s.text == K3_MARKER));
-        // The pad must stay a special segment or it tokenizes as literal text.
-        assert!(segments.iter().all(|s| s.text != K3_PAD || s.allow_special));
-        // Surrounding structure and ordinary text are untouched.
-        assert_eq!(segments[2].text, "and");
-        assert!(!segments[2].allow_special);
-    }
-
-    #[test]
-    fn swap_marker_segments_is_a_noop_without_markers() {
-        let original = vec![seg("<|open|>message<|sep|>", true), seg("hello", false)];
-        let mut prompt = RenderedPrompt::segmented(original.clone());
-
-        OpenAIPreprocessor::swap_marker_segments(K3_MARKER, K3_PAD, &mut prompt);
-
-        let segments = prompt.segments().expect("still segmented");
-        assert_eq!(segments.len(), original.len());
-        assert_eq!(segments[0].text, original[0].text);
-        assert_eq!(segments[1].text, original[1].text);
-    }
-
-    #[test]
-    fn swap_marker_segments_leaves_raw_text_prompts_alone() {
-        // The raw_prompt path has no segment boundaries, so a marker inside user
-        // text must never be rewritten into prompt structure.
-        let mut prompt = RenderedPrompt::text(format!("please describe {K3_MARKER}"));
-
-        OpenAIPreprocessor::swap_marker_segments(K3_MARKER, K3_PAD, &mut prompt);
-
-        assert_eq!(prompt.as_str(), format!("please describe {K3_MARKER}"));
-    }
 
     #[test]
     fn prompt_invalid_request_maps_to_invalid_argument() {

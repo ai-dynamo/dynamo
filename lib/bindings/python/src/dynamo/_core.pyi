@@ -864,6 +864,7 @@ class ModelRuntimeConfig:
     data_parallel_start_rank: int
     data_parallel_size: int
     enable_local_indexer: bool
+    image_placeholder_token: str | None
     kv_state_endpoint: str | None
     enable_eagle: bool
     taints: Set[str]
