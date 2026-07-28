@@ -2444,6 +2444,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         "lora_id": lora_id,
                         "hot_swap": is_hot_swap,
                     }
+                except Exception as e:
+                    # Catch unexpected exceptions (e.g., from lora_name_to_id, engine calls)
+                    # and clean up the capacity reservation to prevent ghost entries.
+                    if capacity_reserved:
+                        self._lora_state.loaded_loras.pop(lora_name, None)
+                    logger.exception(f"Failed to load LoRA adapter: {e}")
+                    yield {"status": "error", "message": str(e)}
                 finally:
                     # Stripes are intentionally retained. Evicting a lock here
                     # can separate a waiting request from a later lifecycle op.
