@@ -1219,13 +1219,15 @@ fn replacement_batch_hashes(
 ) -> Result<HashMap<WorkerWithDpRank, HashSet<ExternalSequenceBlockHash>>, KvDcRelayError> {
     let mut hashes_by_rank = HashMap::new();
     for replacement in replacements {
-        let _publisher_id = replacement.publisher_id;
         let member = WorkerWithDpRank::new(replacement.worker_id, replacement.dp_rank);
         if hashes_by_rank.contains_key(&member) {
             return Err(KvDcRelayError::InvalidTreeDump {
                 worker_id: replacement.worker_id,
                 dp_rank: replacement.dp_rank,
-                message: "replacement batch contains the same rank more than once".to_string(),
+                message: format!(
+                    "replacement batch contains the same rank more than once (publisher {})",
+                    replacement.publisher_id
+                ),
             });
         }
         let hashes = replacement_hashes(

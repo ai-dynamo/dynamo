@@ -1402,7 +1402,7 @@ mod tests {
         let view = membership_view(
             &serving,
             &kv_endpoint,
-            [(worker, KvSourceStatus::ActiveLiveOnly(source.clone()), 7)],
+            [(worker, KvSourceStatus::ActiveLiveOnly(source.clone()))],
         );
         let (_tx, rx) = watch::channel(view);
         let client = WorkerQueryClient::new_target_for_test(
@@ -1442,7 +1442,7 @@ mod tests {
         let view = membership_view(
             &serving,
             &kv_endpoint,
-            [(worker, KvSourceStatus::ActiveLiveOnly(source.clone()), 7)],
+            [(worker, KvSourceStatus::ActiveLiveOnly(source.clone()))],
         );
         let (_tx, rx) = watch::channel(view);
         let target = RecordingTarget::default();
@@ -1488,16 +1488,8 @@ mod tests {
             &serving,
             &kv_endpoint,
             [
-                (
-                    worker_a,
-                    KvSourceStatus::ActiveLiveOnly(source_a.clone()),
-                    1,
-                ),
-                (
-                    worker_b,
-                    KvSourceStatus::ActiveLiveOnly(source_b.clone()),
-                    1,
-                ),
+                (worker_a, KvSourceStatus::ActiveLiveOnly(source_a.clone())),
+                (worker_b, KvSourceStatus::ActiveLiveOnly(source_b.clone())),
             ],
         );
         let (_tx, rx) = watch::channel(view);
@@ -1566,7 +1558,7 @@ mod tests {
         let initial = membership_view(
             &serving,
             &kv_endpoint,
-            [(worker, KvSourceStatus::ActiveRecoverable(old.clone()), 0)],
+            [(worker, KvSourceStatus::ActiveRecoverable(old.clone()))],
         );
         let (_tx, rx) = watch::channel(initial.clone());
         let client = WorkerQueryClient::new_for_test(indexer, rx, transport.clone());
@@ -1597,7 +1589,6 @@ mod tests {
                     KvSourceStatus::Ambiguous(KvSourceAmbiguity::Incarnations {
                         publisher_ids: vec![100, 205],
                     }),
-                    1,
                 )],
             ))
             .await;
@@ -1608,7 +1599,7 @@ mod tests {
             .reconcile_view(membership_view(
                 &serving,
                 &kv_endpoint,
-                [(worker, KvSourceStatus::ActiveLiveOnly(new), 2)],
+                [(worker, KvSourceStatus::ActiveLiveOnly(new))],
             ))
             .await;
         assert!(!client.publisher_bindings.contains_key(&100));
@@ -1650,7 +1641,7 @@ mod tests {
         let initial = membership_view(
             &serving,
             &kv_endpoint,
-            [(worker, KvSourceStatus::ActiveLiveOnly(source.clone()), 0)],
+            [(worker, KvSourceStatus::ActiveLiveOnly(source.clone()))],
         );
         let (_tx, rx) = watch::channel(initial.clone());
         let (kv_indexer, indexer) = indexer();
@@ -1668,7 +1659,7 @@ mod tests {
             .reconcile_view(membership_view(
                 &serving,
                 &kv_endpoint,
-                [(worker, KvSourceStatus::ActiveLiveOnly(source), 2)],
+                [(worker, KvSourceStatus::ActiveLiveOnly(source))],
             ))
             .await;
         kv_indexer.flush().await;
@@ -1687,7 +1678,6 @@ mod tests {
             [(
                 worker,
                 KvSourceStatus::ActiveLiveOnly(source_for(&kv_endpoint, worker, 100, None)),
-                3,
             )],
         );
         let (_tx, rx) = watch::channel(initial.clone());
@@ -1716,7 +1706,6 @@ mod tests {
                 [(
                     worker,
                     KvSourceStatus::ActiveLiveOnly(source_for(&kv_endpoint, worker, 205, None)),
-                    4,
                 )],
             ))
             .await;
@@ -1772,7 +1761,6 @@ mod tests {
             [(
                 worker,
                 KvSourceStatus::ActiveLiveOnly(source_for(&kv_endpoint, worker, 205, None)),
-                3,
             )],
         );
         let (_tx, rx) = watch::channel(view.clone());
@@ -1803,7 +1791,7 @@ mod tests {
         let view = membership_view(
             &serving,
             &kv_endpoint,
-            [(worker, KvSourceStatus::ActiveLiveOnly(source.clone()), 3)],
+            [(worker, KvSourceStatus::ActiveLiveOnly(source.clone()))],
         );
         let (_tx, rx) = watch::channel(view.clone());
         let target = RecordingTarget::default();
@@ -1828,7 +1816,6 @@ mod tests {
                 [(
                     worker,
                     KvSourceStatus::ActiveLiveOnly(source_for(&kv_endpoint, worker, 206, None)),
-                    4,
                 )],
             ))
             .await;
@@ -1846,7 +1833,6 @@ mod tests {
             [(
                 worker,
                 KvSourceStatus::ActiveLiveOnly(source_for(&kv_endpoint, worker, 205, None)),
-                7,
             )],
         );
         let (_tx, rx) = watch::channel(view.clone());
@@ -1876,7 +1862,6 @@ mod tests {
             [(
                 worker,
                 KvSourceStatus::ActiveLiveOnly(source_for(&kv_endpoint, worker, 100, None)),
-                0,
             )],
         );
         let (_tx, rx) = watch::channel(initial.clone());
@@ -1893,7 +1878,6 @@ mod tests {
             [(
                 worker,
                 KvSourceStatus::ActiveLiveOnly(source_for(&kv_endpoint, worker, 205, None)),
-                1,
             )],
         );
         client.reconcile_view(replacement.clone()).await;
@@ -1937,7 +1921,6 @@ mod tests {
             [(
                 worker,
                 KvSourceStatus::ActiveLiveOnly(source_for(&kv_endpoint, worker, 100, None)),
-                0,
             )],
         );
         let (_tx, rx) = watch::channel(view.clone());
@@ -1979,7 +1962,6 @@ mod tests {
                     100,
                     Some(shared_target.clone()),
                 )),
-                0,
             )],
         );
         let (_tx, rx) = watch::channel(initial.clone());
@@ -2000,7 +1982,6 @@ mod tests {
                     205,
                     Some(shared_target),
                 )),
-                1,
             )],
         );
         client.reconcile_view(replacement).await;
@@ -2019,7 +2000,6 @@ mod tests {
             [(
                 worker,
                 KvSourceStatus::ActiveRecoverable(source(&kv_endpoint, 100)),
-                0,
             )],
         );
         let (_tx, rx) = watch::channel(view.clone());
@@ -2067,7 +2047,6 @@ mod tests {
             [(
                 worker,
                 KvSourceStatus::ActiveRecoverable(source(&kv_endpoint, 100)),
-                0,
             )],
         );
         let (_tx, rx) = watch::channel(view.clone());
@@ -2116,7 +2095,6 @@ mod tests {
             [(
                 worker,
                 KvSourceStatus::ActiveRecoverable(source(&kv_endpoint, 100)),
-                0,
             )],
         );
         let (_tx, rx) = watch::channel(view.clone());
@@ -2172,7 +2150,6 @@ mod tests {
             [(
                 worker,
                 KvSourceStatus::ActiveRecoverable(source(&kv_endpoint, 100)),
-                0,
             )],
         );
         let (_tx, rx) = watch::channel(view.clone());
@@ -2241,7 +2218,7 @@ mod tests {
         let view = membership_view(
             &serving,
             &kv_endpoint,
-            [(worker, KvSourceStatus::ActiveLiveOnly(source), 0)],
+            [(worker, KvSourceStatus::ActiveLiveOnly(source))],
         );
         let (_tx, rx) = watch::channel(view.clone());
         let (kv_indexer, indexer) = indexer();
@@ -2271,8 +2248,8 @@ mod tests {
             &serving,
             &kv_endpoint,
             [
-                (rank_4, KvSourceStatus::ActiveLiveOnly(source_4), 0),
-                (rank_5, KvSourceStatus::ActiveLiveOnly(source_5), 0),
+                (rank_4, KvSourceStatus::ActiveLiveOnly(source_4)),
+                (rank_5, KvSourceStatus::ActiveLiveOnly(source_5)),
             ],
         );
         let (_tx, rx) = watch::channel(view.clone());
@@ -2312,12 +2289,10 @@ mod tests {
                 (
                     rank_4,
                     KvSourceStatus::ActiveLiveOnly(source_for(&kv_endpoint, rank_4, 100, None)),
-                    0,
                 ),
                 (
                     rank_5,
                     KvSourceStatus::ActiveLiveOnly(source_for(&kv_endpoint, rank_5, 205, None)),
-                    0,
                 ),
             ],
         );
@@ -2556,10 +2531,10 @@ mod tests {
     fn membership_view(
         serving_endpoint: &EndpointId,
         kv_state_endpoint: &EndpointId,
-        sources: impl IntoIterator<Item = (WorkerWithDpRank, KvSourceStatus, u64)>,
+        sources: impl IntoIterator<Item = (WorkerWithDpRank, KvSourceStatus)>,
     ) -> KvSourceMembershipView {
         let mut statuses = HashMap::new();
-        for (worker, status, _) in sources {
+        for (worker, status) in sources {
             statuses.insert(worker, status);
         }
         KvSourceMembershipView {
