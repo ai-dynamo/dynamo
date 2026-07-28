@@ -21,26 +21,62 @@ Importing a media loader from the package must not transitively load
 almost certainly already imported both.
 """
 
+import os
 import subprocess
 import sys
 import textwrap
 
 import pytest
 
+import dynamo.common.multimodal as mm
+
+# Each subprocess measures at ~2s locally; the marker is a backstop well above
+# that, and the inner ``subprocess.run`` timeout is what normally fires so the
+# failure names the stuck child instead of the whole test.
+_SUBPROCESS_TIMEOUT_SECONDS = 120
+
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
+    pytest.mark.timeout(180),
 ]
+
+# Only what a fresh interpreter needs to find this repo's installed packages.
+# Everything else is dropped so ambient Python configuration (notably user
+# site-packages and ``PYTHONSTARTUP``) cannot skew the import-hygiene assertions.
+_ENV_ALLOW_LIST = (
+    "PATH",
+    "HOME",
+    "PYTHONPATH",
+    "VIRTUAL_ENV",
+    "LD_LIBRARY_PATH",
+    "TMPDIR",
+)
+
+
+def _isolated_env() -> dict[str, str]:
+    """Build a minimal allow-listed environment for the child interpreter."""
+    env = {name: os.environ[name] for name in _ENV_ALLOW_LIST if name in os.environ}
+    env["PYTHONNOUSERSITE"] = "1"
+    return env
 
 
 def _run_in_subprocess(script: str) -> None:
     """Run ``script`` in a fresh interpreter, failing the test on nonzero exit."""
-    result = subprocess.run(
-        [sys.executable, "-c", textwrap.dedent(script)],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", textwrap.dedent(script)],
+            capture_output=True,
+            text=True,
+            timeout=_SUBPROCESS_TIMEOUT_SECONDS,
+            env=_isolated_env(),
+        )
+    except subprocess.TimeoutExpired as exc:
+        pytest.fail(
+            f"subprocess did not finish within {_SUBPROCESS_TIMEOUT_SECONDS}s\n"
+            f"stdout:\n{exc.stdout}\nstderr:\n{exc.stderr}"
+        )
     if result.returncode != 0:
         pytest.fail(
             "subprocess failed with exit code "
@@ -136,7 +172,5 @@ def test_embedding_factories_cover_every_transfer_mode_with_stable_identity() ->
 
 def test_unknown_attribute_still_raises_attribute_error() -> None:
     """``__getattr__`` must not swallow typos into silence."""
-    import dynamo.common.multimodal as mm
-
     with pytest.raises(AttributeError, match="no attribute 'NotARealSymbol'"):
-        mm.NotARealSymbol
+        _ = mm.NotARealSymbol
