@@ -22,16 +22,17 @@ with replay-level timing tricks or new hard assertions.
 
 ## Eager forward-pass execution
 
-Offline replay intentionally executes each non-preemptive forward pass eagerly,
-mutating the participating `EngineCore` instances to their post-pass state
-before virtual time reaches the pass-completion timestamp. Completion effects
-remain deferred until that timestamp; observations whose backend contract is
-pass-start visibility remain visible at the pass start.
+Starting an epoch commits one non-preemptive batch. Here, non-preemptive means
+later arrivals or commands cannot interrupt that batch or change its outcome;
+they may affect only queued or post-pass state, or be deferred.
 
-- The pass batch is closed when the epoch starts. While its worker or
-  attention-DP group is busy, later arrivals and commands must affect only
-  queued or post-pass state, or be deferred. They must not alter the committed
-  pass outcome.
+Offline replay executes the committed batch eagerly at epoch start, finalizing
+its participating `EngineCore` state changes and scheduled completion payload
+before virtual time reaches the completion timestamp. Visibility is split:
+
+- Admission observations and `PassStart` events are visible at epoch start.
+- Request outputs, lifecycle events, FPM publications, and `PassEnd` events
+  wait for the shared completion boundary.
 - All ranks in an attention-DP group, including ranks with no work in the
   current epoch, share the slowest-rank completion boundary.
 - Do not generalize this guarantee to the whole `EngineComponent` or to other
