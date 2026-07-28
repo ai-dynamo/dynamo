@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use dynamo_runtime::component::Component;
+use dynamo_runtime::component::Endpoint;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::EventPublisher;
 
@@ -56,17 +56,14 @@ impl MultimodalEmbeddingCachePublisher {
         })
     }
 
-    pub async fn create_endpoint(&self, component: Component) -> Result<()> {
+    pub async fn create_endpoint(&self, endpoint: Endpoint) -> Result<()> {
         if self.tx.get().is_some() {
             return Ok(());
         }
 
-        let worker_id = component.drt().connection_id();
-        let publisher = EventPublisher::for_namespace(
-            component.namespace(),
-            MULTIMODAL_EMBEDDING_CACHE_SUBJECT,
-        )
-        .await?;
+        let worker_id = endpoint.drt().connection_id();
+        let publisher =
+            EventPublisher::for_endpoint(&endpoint, MULTIMODAL_EMBEDDING_CACHE_SUBJECT).await?;
         let (tx, rx) = mpsc::channel(CACHE_UPDATE_CHANNEL_CAPACITY);
         let cancellation_token = self.cancellation_token.clone();
 
@@ -74,7 +71,7 @@ impl MultimodalEmbeddingCachePublisher {
             return Ok(());
         }
 
-        component.drt().runtime().secondary().spawn(async move {
+        endpoint.drt().runtime().secondary().spawn(async move {
             run_multimodal_embedding_cache_processor(publisher, worker_id, cancellation_token, rx)
                 .await;
         });

@@ -62,9 +62,8 @@ func (h *DynamoGraphDeploymentRequestHandler) ValidateCreate(ctx context.Context
 
 	logger.Info("validate create", "name", request.Name, "namespace", request.Namespace)
 
-	// Create validator and perform validation
-	validator := NewDynamoGraphDeploymentRequestValidator(request)
-	return validator.Validate(ctx)
+	validator := NewDynamoGraphDeploymentRequestValidator()
+	return validator.Validate(ctx, request)
 }
 
 // ValidateUpdate validates a DynamoGraphDeploymentRequest update request.
@@ -93,9 +92,8 @@ func (h *DynamoGraphDeploymentRequestHandler) ValidateUpdate(ctx context.Context
 		return nil, err
 	}
 
-	// Create validator and perform validation
-	validator := NewDynamoGraphDeploymentRequestValidator(newRequest)
-	return validator.ValidateUpdate(oldRequest)
+	validator := NewDynamoGraphDeploymentRequestValidator()
+	return validator.ValidateUpdate(ctx, oldRequest, newRequest)
 }
 
 // ValidateDelete validates a DynamoGraphDeploymentRequest delete request.

@@ -53,6 +53,12 @@ Mooncake JSONL with session-based serialization:
 
 ## Usage
 
+Install the local data-generator package from the Dynamo repository root:
+
+```bash
+uv pip install -e ./benchmarks
+```
+
 Basic conversion:
 ```bash
 python convert.py --input-file /path/to/all_requests_profiler_traces.json

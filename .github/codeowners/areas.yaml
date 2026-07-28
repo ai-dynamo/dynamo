@@ -46,9 +46,11 @@ areas:
 - label: router
   github_team: '@ai-dynamo/dynamo-router-codeowners'
   path_globs:
+  - components/src/dynamo/kv_dc_relay/
   - components/src/dynamo/global_router/
   - components/src/dynamo/global_router/tests/
   - components/src/dynamo/router/
+  - components/src/dynamo/squeeze_evolve/
   - components/src/dynamo/thunderagent_router/
   - lib/kv-router/
   - lib/kv-router/src/indexer/
@@ -71,8 +73,7 @@ areas:
   - components/src/dynamo/vllm/
   - components/src/dynamo/vllm/tests/
   - examples/backends/vllm/
-  - lib/vllm-rs-backend/Cargo.toml
-  - lib/vllm-rs-backend/src/
+  - lib/sidecar/vllm/
 - label: backend-trtllm
   github_team: '@ai-dynamo/dynamo-backend-trtllm-codeowners'
   path_globs:
@@ -85,15 +86,15 @@ areas:
   - components/src/dynamo/trtllm/utils/
   - components/src/dynamo/trtllm/workers/
   - examples/backends/trtllm/
+  - lib/sidecar/trtllm/
 - label: backend-sglang
   github_team: '@ai-dynamo/dynamo-backend-sglang-codeowners'
   path_globs:
   - components/src/dynamo/sglang/
-  - components/src/dynamo/sglang_sidecar/
   - components/src/dynamo/sglang/request_handlers/
   - components/src/dynamo/sglang/tests/
   - examples/backends/sglang/
-  - lib/sglang-sidecar/
+  - lib/sidecar/sglang/
 - label: kv-memory
   github_team: '@ai-dynamo/dynamo-kv-memory-codeowners'
   path_globs:
@@ -212,6 +213,8 @@ areas:
   - components/src/dynamo/profiler/tests/
   - components/src/dynamo/profiler/utils/
   - examples/global_planner/
+  - aisimulate/
+  - examples/aisimulate/
 - label: runtime
   github_team: '@ai-dynamo/dynamo-runtime-codeowners'
   path_globs:
@@ -229,6 +232,8 @@ areas:
   - examples/custom_backend/
   - lib/backend-common/
   - lib/backend-common/examples/
+  - lib/sidecar/README.md
+  - lib/sidecar/common/
   - lib/bindings/
   - lib/bindings/c/
   - lib/bindings/python/
@@ -349,8 +354,6 @@ areas:
   - docs/
   - examples/README.md
   - examples/__init__.py
-  - fern/
-  - fern/components/
 - label: process
   github_team: '@ai-dynamo/dynamo-process-codeowners'
   path_globs:
@@ -565,15 +568,15 @@ shared:
   owners:
   - frontend
   - agents
-- glob: docs/agents/
+- glob: docs/fern/agents/
   owners:
   - docs
   - agents
-- glob: docs/digest/agentic-inference/
+- glob: docs/fern/digest/agentic-inference/
   owners:
   - docs
   - agents
-- glob: docs/backends/sglang/agents.md
+- glob: docs/fern/backends/sglang/agents.md
   owners:
   - docs
   - agents

@@ -138,6 +138,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileScalingAdapters(t *testing.T) 
 		expectedAdapterCount int
 		expectedAdapters     map[string]int32 // map of adapter name to expected replicas
 		expectDeleted        []string         // adapter names that should be deleted
+		assertNoReplicaPatch bool
 	}{
 		{
 			name: "creates adapters for services with scalingAdapter.enabled=true",
@@ -190,6 +191,66 @@ func TestDynamoGraphDeploymentReconciler_reconcileScalingAdapters(t *testing.T) 
 			expectedAdapters: map[string]int32{
 				"test-dgd-worker": 1, // default replicas
 			},
+		},
+		{
+			name: "preserves existing adapter replicas across components",
+			dgd: betaDGD(t, &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-dgd",
+					Namespace: "default",
+					UID:       "test-uid",
+				},
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Frontend": {
+							Replicas: ptr.To(int32(2)),
+							ScalingAdapter: &v1alpha1.ScalingAdapter{
+								Enabled: true,
+							},
+						},
+						"decode": {
+							Replicas: ptr.To(int32(3)),
+							ScalingAdapter: &v1alpha1.ScalingAdapter{
+								Enabled: true,
+							},
+						},
+					},
+				},
+			}),
+			existingAdapters: []v1alpha1.DynamoGraphDeploymentScalingAdapter{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-dgd-frontend",
+						Namespace: "default",
+					},
+					Spec: v1alpha1.DynamoGraphDeploymentScalingAdapterSpec{
+						Replicas: 5,
+						DGDRef: v1alpha1.DynamoGraphDeploymentServiceRef{
+							Name:        "test-dgd",
+							ServiceName: "Frontend",
+						},
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-dgd-decode",
+						Namespace: "default",
+					},
+					Spec: v1alpha1.DynamoGraphDeploymentScalingAdapterSpec{
+						Replicas: 0,
+						DGDRef: v1alpha1.DynamoGraphDeploymentServiceRef{
+							Name:        "test-dgd",
+							ServiceName: "decode",
+						},
+					},
+				},
+			},
+			expectedAdapterCount: 2,
+			expectedAdapters: map[string]int32{
+				"test-dgd-frontend": 5,
+				"test-dgd-decode":   0,
+			},
+			assertNoReplicaPatch: true,
 		},
 		{
 			name: "skips adapter creation when not enabled",
@@ -375,10 +436,22 @@ func TestDynamoGraphDeploymentReconciler_reconcileScalingAdapters(t *testing.T) 
 			}
 
 			// Create fake client
-			fakeClient := fake.NewClientBuilder().
+			clientBuilder := fake.NewClientBuilder().
 				WithScheme(testScheme).
-				WithObjects(initObjs...).
-				Build()
+				WithObjects(initObjs...)
+			if tt.assertNoReplicaPatch {
+				t.Log("Intercept adapter patches and verify they exclude replicas")
+				clientBuilder = clientBuilder.WithInterceptorFuncs(interceptor.Funcs{
+					Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+						data, err := patch.Data(obj)
+						require.NoError(t, err)
+						assert.NotContains(t, string(data), `"replicas"`,
+							"existing adapter patches must never include spec.replicas")
+						return c.Patch(ctx, obj, patch, opts...)
+					},
+				})
+			}
+			fakeClient := clientBuilder.Build()
 
 			// Create reconciler
 			r := &DynamoGraphDeploymentReconciler{
@@ -1250,7 +1323,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpointsAutoUsesTargetConta
 	reconciler := &DynamoGraphDeploymentReconciler{
 		Client:        fake.NewClientBuilder().WithScheme(testScheme).Build(),
 		Config:        &configv1alpha1.OperatorConfiguration{},
-		RuntimeConfig: &controller_common.RuntimeConfig{},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
 	}
 	dgd := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1297,13 +1370,55 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpointsAutoUsesTargetConta
 	assert.Equal(t, checkpointStatuses["worker"].CheckpointID, ckpt.Spec.Identity.ExtraParameters["checkpointID"])
 }
 
+func TestDynamoGraphDeploymentReconciler_reconcileCheckpointsRejectsDisabledFeatureBeforeCreatingResources(t *testing.T) {
+	ctx := context.Background()
+	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client: fake.NewClientBuilder().WithScheme(testScheme).Build(),
+		Config: &configv1alpha1.OperatorConfiguration{
+			Checkpoint: configv1alpha1.CheckpointConfiguration{
+				Storage: configv1alpha1.CheckpointStorageConfiguration{
+					Type: configv1alpha1.CheckpointStorageTypePVC,
+					PVC: configv1alpha1.CheckpointPVCConfig{
+						PVCName: "checkpoint-storage",
+						Create:  true,
+						Size:    "1Gi",
+					},
+				},
+			},
+		},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{}},
+	}
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "worker",
+				Experimental: &v1beta1.ExperimentalSpec{
+					Checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: true},
+				},
+			}},
+		},
+	}
+
+	_, _, err := reconciler.reconcileCheckpoints(ctx, dgd)
+	require.ErrorContains(t, err, "checkpoint functionality is disabled")
+
+	checkpoints := &v1alpha1.DynamoCheckpointList{}
+	require.NoError(t, reconciler.List(ctx, checkpoints, client.InNamespace("default")))
+	assert.Empty(t, checkpoints.Items)
+	pvcs := &corev1.PersistentVolumeClaimList{}
+	require.NoError(t, reconciler.List(ctx, pvcs, client.InNamespace("default")))
+	assert.Empty(t, pvcs.Items)
+}
+
 func TestDynamoGraphDeploymentReconciler_reconcileCheckpointsAutoPreservesPodTemplateMetadata(t *testing.T) {
 	ctx := context.Background()
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
 	reconciler := &DynamoGraphDeploymentReconciler{
 		Client:        fake.NewClientBuilder().WithScheme(testScheme).Build(),
 		Config:        &configv1alpha1.OperatorConfiguration{},
-		RuntimeConfig: &controller_common.RuntimeConfig{},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
 	}
 	dgd := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1363,7 +1478,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpointsSyncsExistingAutoLi
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
 	reconciler := &DynamoGraphDeploymentReconciler{
 		Config:        &configv1alpha1.OperatorConfiguration{},
-		RuntimeConfig: &controller_common.RuntimeConfig{},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
 	}
 	dgd := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1513,7 +1628,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_checkpointRefSkips
 			Build(),
 		Config:        &configv1alpha1.OperatorConfiguration{},
 		Recorder:      record.NewFakeRecorder(10),
-		RuntimeConfig: &controller_common.RuntimeConfig{},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
 	}
 
 	ref := friendlyCheckpointName
@@ -1605,7 +1720,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_checkpointRefUsesR
 			Build(),
 		Config:        &configv1alpha1.OperatorConfiguration{},
 		Recorder:      record.NewFakeRecorder(10),
-		RuntimeConfig: &controller_common.RuntimeConfig{},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
 	}
 
 	ref := friendlyCheckpointName
@@ -1691,7 +1806,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_overlaysServiceGMS
 		Config:   &configv1alpha1.OperatorConfiguration{},
 		Recorder: record.NewFakeRecorder(10),
 		RuntimeConfig: &controller_common.RuntimeConfig{
-			Gate: features.Gates{GMSSnapshot: true},
+			Gate: features.Gates{Checkpoint: true, GMSSnapshot: true},
 		},
 	}
 
@@ -1767,7 +1882,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_rejectsServiceGMSW
 			Build(),
 		Config:        &configv1alpha1.OperatorConfiguration{},
 		Recorder:      record.NewFakeRecorder(10),
-		RuntimeConfig: &controller_common.RuntimeConfig{},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
 	}
 
 	ref := friendlyCheckpointName
@@ -1852,7 +1967,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_createsCheckpointS
 			},
 		},
 		Recorder:      record.NewFakeRecorder(10),
-		RuntimeConfig: &controller_common.RuntimeConfig{},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
 	}
 
 	ref := friendlyCheckpointName
@@ -1939,7 +2054,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_autoModeWaitsForEx
 			Build(),
 		Config:        &configv1alpha1.OperatorConfiguration{},
 		Recorder:      record.NewFakeRecorder(10),
-		RuntimeConfig: &controller_common.RuntimeConfig{},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
 	}
 
 	dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
@@ -5119,7 +5234,7 @@ func TestPCSGStatusChangeIsSignificant(t *testing.T) {
 				pcsg.Status.Conditions = []metav1.Condition{{
 					Type:               groveconstants.ConditionTypeMinAvailableBreached,
 					Status:             metav1.ConditionFalse,
-					Reason:             groveconstants.ConditionReasonInsufficientScheduledPCSGReplicas,
+					Reason:             groveconstants.ConditionReasonInsufficientAvailablePCSGReplicas,
 					LastTransitionTime: metav1.Now(),
 				}}
 			},

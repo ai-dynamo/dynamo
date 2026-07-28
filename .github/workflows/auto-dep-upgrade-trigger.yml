@@ -73,6 +73,9 @@ jobs:
       - name: Apply bump
         if: steps.detect.outputs.upgrade_needed == 'true' && steps.branch.outputs.exists == 'false'
         run: |
+          # Pre-flight: prove the bump tooling still edits exactly the
+          # MAIN_TOT pin in releases.data.ts before touching the real tree.
+          python3 .github/scripts/dep_upgrade/check_bump_dependency.py
           python3 .github/scripts/dep_upgrade/bump_dependency.py \
             --framework ${{ matrix.framework }} \
             --version ${{ steps.detect.outputs.latest }}
@@ -84,7 +87,11 @@ jobs:
           git config user.name  "dynamo-ops"
           git config user.email "170655669+dynamo-ops@users.noreply.github.com"
           git checkout -b "${{ steps.branch.outputs.name }}"
-          git add container/context.yaml pyproject.toml docs/reference/support-matrix.md
+          # releases.data.ts feeds generated llms-tables twins and JSON/Atom assets;
+          # regenerate them in the same commit or check_reference.sh flags the branch stale.
+          python3 docs/fern/scripts/gen_llms_tables.py
+          git add container/context.yaml pyproject.toml docs/fern/components/releases.data.ts
+          git add docs/fern/
           git commit -s -m "chore: bump ${{ matrix.framework }} to v${{ steps.detect.outputs.latest }}"
           git push origin "${{ steps.branch.outputs.name }}"
 

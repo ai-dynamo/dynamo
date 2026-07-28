@@ -126,6 +126,11 @@ type DynamoGraphDeploymentStatus struct {
 	// Currently only supported for single-node, non-Grove deployments (DCD/Deployment).
 	// +optional
 	RollingUpdate *RollingUpdateStatus `json:"rollingUpdate,omitempty"`
+
+	// placement groups DGD-level scheduler placement signals (score, reporting
+	// state, and any future placement fields).
+	// +optional
+	Placement *PlacementStatus `json:"placement,omitempty"`
 }
 
 // DGD Ready condition reasons used to classify Grove-backed not-ready

@@ -3,9 +3,8 @@
 
 """Headless multi-node worker mode for the vLLM backend.
 
-Shared by the legacy entry point (``dynamo.vllm.main``) and the unified
-entry point (``dynamo.vllm.unified_main``). Secondary nodes in a multi-node
-TP/PP (or ``mp`` data-parallel) deployment run vLLM workers only — no engine
+Used by the vLLM entry point (``dynamo.vllm.main``). Secondary nodes in a
+multi-node TP/PP (or ``mp`` data-parallel) deployment run vLLM workers only — no engine
 core, no scheduler, no Dynamo endpoints — bypassing DistributedRuntime
 entirely (no NATS/etcd).
 

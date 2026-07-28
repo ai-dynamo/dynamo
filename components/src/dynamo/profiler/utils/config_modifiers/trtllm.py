@@ -4,6 +4,7 @@
 import json
 import logging
 import re
+import shlex
 from typing import Tuple
 from uuid import uuid4
 
@@ -45,6 +46,98 @@ DEFAULT_TRTLLM_DISAGG_CONFIG_PATH = resolve_deploy_path(
 DEFAULT_TRTLLM_AGG_CONFIG_PATH = resolve_deploy_path(
     "examples/backends/trtllm/deploy/agg.yaml"
 )
+
+_CHUNKED_PREFILL_FLAG = "--trtllm.enable_chunked_prefill"
+_OVERRIDE_ENGINE_ARGS_FLAG = "--override-engine-args"
+_SHELL_WORD_PATTERN = r"(?:'[^']*'|\"(?:\\.|[^\"\\])*\"|[^\s;&|]+)"
+_SHELL_CHUNKED_PREFILL_PATTERN = re.compile(
+    rf"(?<!\S){re.escape(_CHUNKED_PREFILL_FLAG)}"
+    rf"(?:[ \t]+(?!--){_SHELL_WORD_PATTERN})?"
+)
+_SHELL_OVERRIDE_ENGINE_ARGS_PATTERN = re.compile(
+    rf"(?<!\S){re.escape(_OVERRIDE_ENGINE_ARGS_FLAG)}"
+    rf"[ \t]+(?P<value>{_SHELL_WORD_PATTERN})"
+)
+
+
+def _shell_command_end(command: str) -> int:
+    """Find the end of the ``dynamo.trtllm`` shell command segment."""
+    index = command.find("dynamo.trtllm")
+    if index < 0:
+        return len(command.rstrip())
+
+    quote: str | None = None
+    while index < len(command):
+        char = command[index]
+        if quote is not None:
+            if char == quote:
+                quote = None
+                index += 1
+            elif quote == '"' and char == "\\" and index + 1 < len(command):
+                index += 2
+            else:
+                index += 1
+            continue
+
+        if char in ("'", '"'):
+            quote = char
+            index += 1
+        elif char == "\\" and index + 1 < len(command):
+            index += 2
+        elif char == "&" and index > 0 and command[index - 1] in "<>":
+            index += 1
+        elif char in ";|&\n":
+            return index
+        else:
+            index += 1
+
+    return len(command.rstrip())
+
+
+def _enable_chunked_prefill_in_shell_command(command: str) -> str:
+    """Enable chunked prefill without re-quoting the surrounding shell command."""
+    command = _SHELL_CHUNKED_PREFILL_PATTERN.sub("", command)
+
+    match = _SHELL_OVERRIDE_ENGINE_ARGS_PATTERN.search(command)
+    if match:
+        try:
+            parsed = shlex.split(match.group("value"))
+            override = json.loads(parsed[0]) if len(parsed) == 1 else None
+        except (json.JSONDecodeError, ValueError):
+            return command
+        if isinstance(override, dict):
+            override["enable_chunked_prefill"] = True
+            encoded = shlex.quote(json.dumps(override))
+            start, end = match.span("value")
+            return command[:start] + encoded + command[end:]
+        return command
+
+    insertion = _shell_command_end(command)
+    prefix = command[:insertion].rstrip()
+    suffix = command[insertion:]
+    leading_space = " " if prefix else ""
+    trailing_space = " " if suffix and not suffix[0].isspace() else ""
+    return (
+        f"{prefix}{leading_space}{_CHUNKED_PREFILL_FLAG} true"
+        f"{trailing_space}{suffix}"
+    )
+
+
+def _get_shell_form_command(main_container: dict) -> str | None:
+    """Return the single command string used by a ``sh -c`` container."""
+    command = main_container.get("command")
+    args = main_container.get("args")
+    if (
+        isinstance(command, list)
+        and len(command) >= 2
+        and command[0] in ("sh", "/bin/sh")
+        and command[1] == "-c"
+        and isinstance(args, list)
+        and len(args) == 1
+        and isinstance(args[0], str)
+    ):
+        return args[0]
+    return None
 
 
 def _trtllm_flags(overrides: dict) -> list[str]:
@@ -107,6 +200,64 @@ def _merge_overrides_into_args(args: list[str], overrides: dict) -> list[str]:
         args = append_argument(args, _trtllm_flags(overrides))
 
     return args
+
+
+def enable_trtllm_chunked_prefill(config: dict) -> dict:
+    """Enable chunked prefill on generated TRT-LLM workers using dynamic flags.
+
+    Replace an existing dynamic flag so the result is idempotent.  When a
+    worker uses explicit ``--override-engine-args``, enable chunked prefill in
+    that JSON representation instead of mixing it with ``--trtllm.*`` flags.
+    """
+    services = config.get("spec", {}).get("services", {})
+    if not isinstance(services, dict):
+        return config
+
+    for service in services.values():
+        if not isinstance(service, dict) or service.get("componentType") != "worker":
+            continue
+        if service.get("subComponentType") == "encode":
+            continue
+
+        main_container = service.get("extraPodSpec", {}).get("mainContainer")
+        if not isinstance(main_container, dict):
+            continue
+
+        shell_command = _get_shell_form_command(main_container)
+        if shell_command is not None:
+            main_container["args"] = [
+                _enable_chunked_prefill_in_shell_command(shell_command)
+            ]
+            continue
+
+        args = break_arguments(main_container.get("args", []))
+        while _CHUNKED_PREFILL_FLAG in args:
+            idx = args.index(_CHUNKED_PREFILL_FLAG)
+            del args[idx]
+            if idx < len(args) and not (
+                isinstance(args[idx], str) and args[idx].startswith("--")
+            ):
+                del args[idx]
+
+        if _OVERRIDE_ENGINE_ARGS_FLAG in args:
+            idx = args.index(_OVERRIDE_ENGINE_ARGS_FLAG)
+            if idx + 1 < len(args):
+                try:
+                    override = json.loads(args[idx + 1])
+                except json.JSONDecodeError:
+                    pass
+                else:
+                    if isinstance(override, dict):
+                        override["enable_chunked_prefill"] = True
+                        args[idx + 1] = json.dumps(override)
+            main_container["args"] = args
+            continue
+
+        main_container["args"] = _merge_overrides_into_args(
+            args, {"enable_chunked_prefill": True}
+        )
+
+    return config
 
 
 class TrtllmConfigModifier(BaseConfigModifier):
