@@ -1059,15 +1059,28 @@ impl VllmCore {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn execute_pass(
         &mut self,
         collector: &mut TraceCollector,
         now_ms: f64,
     ) -> EnginePassResult {
+        self.try_execute_pass(collector, now_ms)
+            .expect("vLLM scheduler pass failed")
+    }
+
+    pub(crate) fn try_execute_pass(
+        &mut self,
+        collector: &mut TraceCollector,
+        now_ms: f64,
+    ) -> anyhow::Result<EnginePassResult> {
         self.execute_pass_internal(Some(collector), now_ms, None)
     }
 
-    pub(crate) fn execute_hidden_pass(&mut self, now_ms: f64) -> EnginePassResult {
+    pub(crate) fn try_execute_hidden_pass(
+        &mut self,
+        now_ms: f64,
+    ) -> anyhow::Result<EnginePassResult> {
         self.execute_pass_internal(None, now_ms, None)
     }
 
@@ -1341,7 +1354,7 @@ impl VllmCore {
         mut collector: Option<&mut TraceCollector>,
         now_ms: f64,
         admission_tx: Option<&mpsc::UnboundedSender<AdmissionEvent>>,
-    ) -> EnginePassResult {
+    ) -> anyhow::Result<EnginePassResult> {
         let requests_before = self.state.requests.len();
         #[cfg(feature = "kvbm-offload")]
         self.tick_and_promote_swap_ins(now_ms);
@@ -1531,9 +1544,10 @@ impl VllmCore {
         }
 
         let prefill_time =
-            predict_prefill_duration(batch_count, batch_total_isl, batch_total_prefix, &self.args);
+            predict_prefill_duration(batch_count, batch_total_isl, batch_total_prefix, &self.args)?;
         let decode_start_ms = now_ms + prefill_time.as_secs_f64() * 1000.0;
-        let (decode_time, mut output_signals) = self.emit_ready_tokens(collector, decode_start_ms);
+        let (decode_time, mut output_signals) =
+            self.emit_ready_tokens(collector, decode_start_ms)?;
         // Emit the terminal signals for the requests the gate rejected above
         // (see the gate comment for why this can't be done inline).
         for uuid in rejected_uuids {
@@ -1567,7 +1581,7 @@ impl VllmCore {
         let (accept_length_output_tokens, accept_length_decode_forwards) =
             accept_length_sample(&output_signals);
         self.state.debug_assert_invariants();
-        EnginePassResult {
+        Ok(EnginePassResult {
             end_ms,
             completed_requests: requests_before.saturating_sub(self.state.requests.len()),
             output_signals,
@@ -1583,7 +1597,7 @@ impl VllmCore {
             fpm: Some(fpm),
             accept_length_output_tokens,
             accept_length_decode_forwards,
-        }
+        })
     }
 
     pub(super) fn drop_request(&mut self, uuid: Uuid) {
@@ -1985,7 +1999,7 @@ impl VllmCore {
         &mut self,
         mut collector: Option<&mut TraceCollector>,
         decode_start_ms: f64,
-    ) -> (Duration, Vec<OutputSignal>) {
+    ) -> anyhow::Result<(Duration, Vec<OutputSignal>)> {
         let mut ready = Vec::with_capacity(self.state.running.len());
         let mut already_complete = Vec::new();
         let mut total_length = 0usize;
@@ -2031,7 +2045,7 @@ impl VllmCore {
             if !output_signals.is_empty() {
                 self.state.compact_running();
             }
-            return (Duration::ZERO, output_signals);
+            return Ok((Duration::ZERO, output_signals));
         }
 
         if self.speculative_sampler.is_some() {
@@ -2041,9 +2055,9 @@ impl VllmCore {
 
             self.state.compact_running();
             let (decode_time, mut speculative_signals) =
-                self.emit_speculative_ready_tokens(ready, collector, decode_start_ms);
+                self.emit_speculative_ready_tokens(ready, collector, decode_start_ms)?;
             output_signals.append(&mut speculative_signals);
-            return (decode_time, output_signals);
+            return Ok((decode_time, output_signals));
         }
 
         // For prefill workers, the first decode token is produced as part of
@@ -2059,7 +2073,7 @@ impl VllmCore {
                 active_kv_tokens,
                 context_length,
                 total_kv_tokens,
-            );
+            )?;
             let dt = scale_decode_time(decode_ms, &self.args);
             (dt, decode_start_ms + dt.as_secs_f64() * 1000.0)
         };
@@ -2189,13 +2203,13 @@ impl VllmCore {
             if running_changed {
                 self.state.compact_running();
             }
-            return (Duration::ZERO, output_signals);
+            return Ok((Duration::ZERO, output_signals));
         }
 
         if running_changed {
             self.state.compact_running();
         }
-        (decode_time, output_signals)
+        Ok((decode_time, output_signals))
     }
 
     fn emit_speculative_ready_tokens(
@@ -2203,7 +2217,7 @@ impl VllmCore {
         mut ready: Vec<Uuid>,
         collector: Option<&mut TraceCollector>,
         decode_start_ms: f64,
-    ) -> (Duration, Vec<OutputSignal>) {
+    ) -> anyhow::Result<(Duration, Vec<OutputSignal>)> {
         let max_burst = if self.args.worker_type == WorkerType::Prefill {
             1
         } else {
@@ -2214,7 +2228,7 @@ impl VllmCore {
         };
         for uuid in ready.iter().copied() {
             if self.refresh_request_offload_dependency(uuid).is_some() {
-                return (Duration::ZERO, Vec::new());
+                return Ok((Duration::ZERO, Vec::new()));
             }
         }
         let mut running_changed = false;
@@ -2253,7 +2267,7 @@ impl VllmCore {
                             .expect("speculative dependency request must remain active");
                         request.offload_dependency = dependency;
                     }
-                    return (Duration::ZERO, Vec::new());
+                    return Ok((Duration::ZERO, Vec::new()));
                 }
                 G1Acquire::RetryNow { .. } => {
                     panic!("speculative reservation must consume bounded RetryNow internally")
@@ -2265,7 +2279,7 @@ impl VllmCore {
                 if running_changed {
                     self.state.compact_running();
                 }
-                return (Duration::ZERO, Vec::new());
+                return Ok((Duration::ZERO, Vec::new()));
             };
             running_changed = true;
             for signal in preempted.signals {
@@ -2292,7 +2306,7 @@ impl VllmCore {
             }
             if ready.is_empty() {
                 self.state.compact_running();
-                return (Duration::ZERO, Vec::new());
+                return Ok((Duration::ZERO, Vec::new()));
             }
         };
 
@@ -2316,7 +2330,7 @@ impl VllmCore {
                 active_kv_tokens,
                 context_length,
                 total_kv_tokens,
-            );
+            )?;
             let duration = scale_decode_time(decode_ms, &self.args);
             (duration, decode_start_ms + duration.as_secs_f64() * 1000.0)
         };
@@ -2449,7 +2463,7 @@ impl VllmCore {
         if running_changed {
             self.state.compact_running();
         }
-        (decode_time, output_signals)
+        Ok((decode_time, output_signals))
     }
 }
 
@@ -2458,21 +2472,23 @@ fn predict_prefill_duration(
     batch_total_isl: usize,
     batch_total_prefix: usize,
     args: &MockEngineArgs,
-) -> Duration {
+) -> anyhow::Result<Duration> {
     if batch_count == 0 || args.worker_type == WorkerType::Decode {
-        return Duration::ZERO;
+        return Ok(Duration::ZERO);
     }
 
     let mean_isl = batch_total_isl / batch_count;
     let mean_prefix = batch_total_prefix / batch_count;
     let prefill_ms = args
         .perf_model
-        .predict_prefill_time(batch_count, mean_isl, mean_prefix);
+        .predict_prefill_time(batch_count, mean_isl, mean_prefix)?;
     let total_time = Duration::from_secs_f64(prefill_ms / 1000.0);
     if args.speedup_ratio <= 0.0 || total_time <= Duration::ZERO {
-        return total_time;
+        return Ok(total_time);
     }
-    Duration::from_secs_f64(total_time.as_secs_f64() / args.speedup_ratio)
+    Ok(Duration::from_secs_f64(
+        total_time.as_secs_f64() / args.speedup_ratio,
+    ))
 }
 
 fn scale_decode_time(decode_ms: f64, args: &MockEngineArgs) -> Duration {

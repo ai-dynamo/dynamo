@@ -34,7 +34,6 @@ replay entrypoints.
 
 from __future__ import annotations
 
-import inspect
 import json
 
 from .config import OptimizationGoal, Workload
@@ -63,40 +62,6 @@ def _unwrap(report) -> dict[str, float]:
     if hasattr(report, "total_ticks"):
         trace_report["planner_total_ticks"] = float(report.total_ticks)
     return trace_report
-
-
-def _replay_accepts_kw(func, name: str) -> bool:
-    params = inspect.signature(func).parameters
-    return name in params or any(
-        param.kind is inspect.Parameter.VAR_KEYWORD for param in params.values()
-    )
-
-
-def _replay_kwargs(func, kwargs: dict) -> dict:
-    params = inspect.signature(func).parameters
-    if any(param.kind is inspect.Parameter.VAR_KEYWORD for param in params.values()):
-        return kwargs
-    return {name: value for name, value in kwargs.items() if name in params}
-
-
-def _check_planner_supported(func, planner_config: dict | None) -> None:
-    if planner_config is not None and not _replay_accepts_kw(func, "planner_config"):
-        raise RuntimeError(
-            "installed Dynamo replay API does not accept planner_config; use static planner_scaling_policy='disabled'"
-        )
-
-
-def _run_trace_replay_compat(func, trace_path: str, kwargs: dict):
-    _check_planner_supported(func, kwargs.get("planner_config"))
-    if "trace_file" in inspect.signature(func).parameters:
-        return func(trace_path, **_replay_kwargs(func, kwargs))
-    kwargs = dict(kwargs, trace_files=trace_path)
-    return func(**_replay_kwargs(func, kwargs))
-
-
-def _run_synthetic_trace_replay_compat(func, kwargs: dict):
-    _check_planner_supported(func, kwargs.get("planner_config"))
-    return func(**_replay_kwargs(func, kwargs))
 
 
 def _require_goodput_metric(
@@ -208,24 +173,22 @@ class ReplayEvaluator:
         )
         if plan.deployment_mode == "agg":
             extra = MockEngineArgs.from_json(json.dumps(plan.agg_engine_args))
-            report = _run_trace_replay_compat(
-                run_trace_replay,
-                wl.trace_path,
-                dict(extra_engine_args=extra, num_workers=plan.num_workers, **common),
+            report = run_trace_replay(
+                trace_files=wl.trace_path,
+                extra_engine_args=extra,
+                num_workers=plan.num_workers,
+                **common,
             )
         else:
             prefill = MockEngineArgs.from_json(json.dumps(plan.prefill_engine_args))
             decode = MockEngineArgs.from_json(json.dumps(plan.decode_engine_args))
-            report = _run_trace_replay_compat(
-                run_trace_replay,
-                wl.trace_path,
-                dict(
-                    prefill_engine_args=prefill,
-                    decode_engine_args=decode,
-                    num_prefill_workers=plan.num_prefill_workers,
-                    num_decode_workers=plan.num_decode_workers,
-                    **common,
-                ),
+            report = run_trace_replay(
+                trace_files=wl.trace_path,
+                prefill_engine_args=prefill,
+                decode_engine_args=decode,
+                num_prefill_workers=plan.num_prefill_workers,
+                num_decode_workers=plan.num_decode_workers,
+                **common,
             )
         return _unwrap(report)
 
@@ -251,21 +214,19 @@ class ReplayEvaluator:
         )
         if plan.deployment_mode == "agg":
             extra = MockEngineArgs.from_json(json.dumps(plan.agg_engine_args))
-            report = _run_synthetic_trace_replay_compat(
-                run_synthetic_trace_replay,
-                dict(extra_engine_args=extra, num_workers=plan.num_workers, **common),
+            report = run_synthetic_trace_replay(
+                extra_engine_args=extra,
+                num_workers=plan.num_workers,
+                **common,
             )
         else:
             prefill = MockEngineArgs.from_json(json.dumps(plan.prefill_engine_args))
             decode = MockEngineArgs.from_json(json.dumps(plan.decode_engine_args))
-            report = _run_synthetic_trace_replay_compat(
-                run_synthetic_trace_replay,
-                dict(
-                    prefill_engine_args=prefill,
-                    decode_engine_args=decode,
-                    num_prefill_workers=plan.num_prefill_workers,
-                    num_decode_workers=plan.num_decode_workers,
-                    **common,
-                ),
+            report = run_synthetic_trace_replay(
+                prefill_engine_args=prefill,
+                decode_engine_args=decode,
+                num_prefill_workers=plan.num_prefill_workers,
+                num_decode_workers=plan.num_decode_workers,
+                **common,
             )
         return _unwrap(report)

@@ -125,7 +125,7 @@ def test_all_aiconfigurator_dependencies_use_one_release() -> None:
     )
 
     assert set(root_requirements) == {"aiconfigurator-core"}
-    assert set(aisimulate_requirements) == {"aiconfigurator"}
+    assert set(aisimulate_requirements) == AIC_PACKAGES
     assert set(benchmark_requirements) == {"aiconfigurator-core"}
     assert set(planner_requirements) == AIC_PACKAGES
 
@@ -147,6 +147,10 @@ def test_all_aiconfigurator_dependencies_use_one_release() -> None:
         "AI Simulate upper": _python_exact_version(
             aisimulate_requirements["aiconfigurator"],
             package="aiconfigurator",
+        ),
+        "AI Simulate core": _python_exact_version(
+            aisimulate_requirements["aiconfigurator-core"],
+            package="aiconfigurator-core",
         ),
         "benchmarks core": _python_exact_version(
             benchmark_requirements["aiconfigurator-core"],
