@@ -5,31 +5,31 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow, bail};
-use tokio::sync::mpsc;
+use anyhow::{Context, Result, bail, ensure};
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::common::protocols::DirectRequest;
+use crate::live::LiveEngine;
+use crate::replay::ReplayTerminalStatus;
 
 use super::ReplayRouter;
-use super::state::{
-    RequestRegistry, RequestState, SharedLiveRuntimeStats, WorkloadDispatchState, now_ms,
-    request_uuid,
-};
+use super::recorder::{RecorderSender, TerminalObservation};
+use super::state::{SharedLiveRuntimeStats, WorkloadDispatchState, now_ms, request_uuid};
 
 #[derive(Clone)]
 pub(super) struct RequestTaskContext {
-    pub(super) senders: Arc<[mpsc::UnboundedSender<DirectRequest>]>,
+    pub(super) engines: Arc<[LiveEngine]>,
     pub(super) router: Arc<ReplayRouter>,
-    pub(super) requests: RequestRegistry,
+    pub(super) recorder: RecorderSender,
     pub(super) stats: Arc<SharedLiveRuntimeStats>,
     pub(super) workload: Option<Arc<WorkloadDispatchState>>,
+    pub(super) cancel: CancellationToken,
+    pub(super) start: Instant,
 }
 
 /// Releases a `WorkloadDriver` cap slot on drop if `mark_completed` was not called.
-/// Preserves the drop-safety of the old `OwnedSemaphorePermit` so a cancelled or
-/// panicking request task can't leak capacity.
 pub(super) struct InFlightGuard {
     dispatch: Arc<WorkloadDispatchState>,
     uuid: Uuid,
@@ -88,30 +88,86 @@ pub(super) async fn run_request_task(
     request: DirectRequest,
     mut guard: Option<InFlightGuard>,
 ) -> Result<()> {
+    if ctx.cancel.is_cancelled() {
+        bail!("online replay cancelled");
+    }
     let uuid = request_uuid(&request)?;
-
     let worker_idx = ctx
         .router
-        .select_worker(&request, ctx.senders.len())
+        .select_worker(&request, ctx.engines.len())
         .await?;
-    if worker_idx >= ctx.senders.len() {
-        bail!("online replay selected unknown worker index {worker_idx}");
+    if ctx.cancel.is_cancelled() {
+        bail!("online replay cancelled");
     }
+    ensure!(
+        worker_idx < ctx.engines.len(),
+        "online replay selected unknown worker index {worker_idx}"
+    );
 
-    let state = Arc::new(RequestState::default());
-    ctx.requests.insert(uuid, Arc::clone(&state));
-    if let Err(error) = ctx.senders[worker_idx].send(request) {
-        ctx.requests.remove(&uuid);
-        return Err(anyhow!(
-            "online replay failed to dispatch request to worker {worker_idx}: {error}"
-        ));
+    let mut live_request = ctx.engines[worker_idx]
+        .submit(request)
+        .await
+        .with_context(|| {
+            format!("online replay failed to submit request {uuid} to worker {worker_idx}")
+        })?;
+    if ctx.cancel.is_cancelled() {
+        bail!("online replay cancelled");
     }
-
     ctx.stats.record_dispatch(worker_idx);
-    tracing::debug!(%uuid, worker_idx, "replay_diag: request dispatched, awaiting completion");
-    state.wait_for_completion().await;
+    ctx.recorder.record_decode_assignment(uuid, worker_idx)?;
+
+    let mut first_token_seen = false;
+    let mut token_times_ms = Vec::new();
+    let (terminal_time_ms, status) = loop {
+        let observed = live_request.recv_observed().await.ok_or_else(|| {
+            anyhow::anyhow!(
+                "online replay request {uuid} output stream closed before terminal delivery"
+            )
+        })?;
+        let output = observed.event;
+        ensure!(
+            output.uuid == uuid,
+            "online replay request {uuid} received output for {}",
+            output.uuid
+        );
+
+        let output_time_ms = observed
+            .observed_at
+            .saturating_duration_since(ctx.start)
+            .as_secs_f64()
+            * 1000.0;
+        if !output.rejected && output.token_id.is_some() {
+            token_times_ms.push(output_time_ms);
+            if !first_token_seen {
+                first_token_seen = true;
+                let marked = ctx.router.on_first_token(uuid).await?;
+                if marked {
+                    ctx.stats.record_prefill_marked();
+                }
+            }
+        }
+        if output.completed {
+            let status = if output.rejected {
+                ReplayTerminalStatus::Rejected
+            } else {
+                ReplayTerminalStatus::Completed
+            };
+            break (output_time_ms, status);
+        }
+    };
+
+    ctx.recorder.record_terminal(TerminalObservation {
+        uuid,
+        token_times_ms,
+        terminal_time_ms,
+        status,
+    })?;
+    let freed = ctx.router.on_complete(uuid).await?;
+    if freed {
+        ctx.stats.record_freed();
+    }
     ctx.stats.record_completion();
-    ctx.requests.remove(&uuid);
+
     if let Some(workload) = ctx.workload.as_ref() {
         let completion_ms = now_ms(workload.start);
         workload
