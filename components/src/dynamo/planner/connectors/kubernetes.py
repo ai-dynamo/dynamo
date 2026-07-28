@@ -478,7 +478,7 @@ class KubernetesConnector(PlannerConnector):
     async def wait_for_deployment_ready(self, include_planner: bool = True):
         """Wait for the deployment to be ready (legacy replica-stability path).
 
-        Does **not** query DCD/Grove backing resources or require
+        Does **not** check pod annotation convergence or require
         ``observedGeneration`` catch-up. Power-aware callers that permanently
         cache DGD fields must use :meth:`wait_for_settled_graph_deployment`
         instead.
@@ -510,8 +510,9 @@ class KubernetesConnector(PlannerConnector):
         - ``status.observedGeneration >= metadata.generation``
         - every non-terminal worker Pod carries the expected
           ``dynamo.nvidia.com/gpu-power-limit`` annotation from the current
-          DGD snapshot, confirming the running hardware enforces the cap
-          that will be cached at startup
+          DGD snapshot, confirming the operator has propagated the DGD intent
+          to running Pods (hardware enforcement by the Power Agent/NVML is
+          separate and not verified here)
 
         Power-relevant workers are selected with the same role/name resolution
         as :meth:`get_component_power_configs` (typed roles, explicit-name

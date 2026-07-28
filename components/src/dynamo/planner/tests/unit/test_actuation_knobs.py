@@ -9,8 +9,9 @@ read/resolve path — ``KubernetesConnector.get_component_power_configs``
 resolves per-role ``ComponentPowerConfig`` from a DGD dict (disagg + agg) and
 propagates the typed parser errors. The no-mutation guarantee is enforced by
 the mocked Kubernetes behavioral gate in
-``tests/integration/test_power_no_mutation.py`` (assert CoreV1 is never
-instantiated / never patched), not by brittle ``hasattr`` blacklists.
+``tests/integration/test_power_no_mutation.py`` (CoreV1 is instantiated for
+read-only pod listing but no patch method exists or is called), not by
+brittle ``hasattr`` blacklists.
 """
 
 import os

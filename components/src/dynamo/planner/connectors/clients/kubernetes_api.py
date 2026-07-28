@@ -441,13 +441,13 @@ class KubernetesAPI:
             delay_seconds: Seconds between polls.
             require_backing_settled: Power-only gate. When True (and
                 ``include_planner`` is False), also requires
-                ``status.observedGeneration >= metadata.generation`` and each
-                power-relevant worker's backing CR (DCD / Grove PodClique) to be
-                generation-ready, and blocks while
+                ``status.observedGeneration >= metadata.generation`` and every
+                non-terminal worker Pod carrying the expected per-GPU annotation
+                from the current DGD snapshot, and blocks while
                 ``status.rollingUpdate.phase`` is Pending/InProgress/Failed.
                 Must stay False for the legacy ``wait_for_deployment_ready``
                 path so power-disabled planners keep working with older
-                operators / custom SAs that lack DCD/Grove get permissions.
+                operators or custom SAs that lack pods/list permission.
             require_prefill / require_decode / ``*_component_name``:
                 Forwarded to :func:`resolve_power_component_names` when
                 ``require_backing_settled`` is True so settlement covers the

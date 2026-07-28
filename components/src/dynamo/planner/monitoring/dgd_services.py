@@ -393,12 +393,12 @@ def resolve_power_component_names(
     prefill_name: Optional[str] = None,
     decode_name: Optional[str] = None,
 ) -> list[str]:
-    """Return DGD component names whose backing CRs must settle for power caps.
+    """Return DGD component names whose Pods must carry the current power annotation.
 
     Uses the same role/name resolution as :func:`resolve_component_power_configs`
     (typed roles, explicit-name fallback for untyped workers, unique generic
     ``type: worker`` for agg) but does not read the power annotation — so the
-    settlement gate can run before cap validation.
+    pod-annotation settlement gate can run before cap validation.
     """
     names: list[str] = []
     if require_prefill:
