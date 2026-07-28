@@ -441,7 +441,7 @@ export const FEATURES: Feature[] = [
     name: "Multimodal (Image)",
     sglang: {
       status: "yes",
-      note: "Not compatible with KV-aware routing. Disagg patterns: EPD, E/PD, E/P/D (not traditional EP/D)",
+      note: "KV-aware routing supported on Dynamo's SGLang image; a custom build without the hash-forwarding patch falls back to text-prefix routing. Disagg patterns: EPD, E/PD, E/P/D (not traditional EP/D)",
     },
     trtllm: {
       status: "yes",

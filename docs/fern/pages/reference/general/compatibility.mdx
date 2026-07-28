@@ -258,7 +258,7 @@ Pairwise feature-by-feature compatibility within each backend. Each cell reports
 | **KV-Aware Routing** | ✅ | — | | | | | | | | |
 | **SLA-Based Planner** | ✅ | ✅ | — | | | | | | | |
 | **KV Block Manager** | 🚧 | 🚧 | 🚧 | — | | | | | | |
-| **Multimodal** | ✅<sup>2</sup> | <sup>1</sup> | — | 🚧 | — | | | | | |
+| **Multimodal** | ✅<sup>2</sup> | ✅<sup>1</sup> | — | 🚧 | — | | | | | |
 | **Request Migration** | ✅ | ✅ | ✅ | 🚧 | ✅ | — | | | | |
 | **Request Cancellation** | 🚧<sup>3</sup> | ✅ | ✅ | 🚧 | 🚧 | ✅ | — | | | |
 | **LoRA** | | | | 🚧 | | | | — | | |
@@ -266,7 +266,7 @@ Pairwise feature-by-feature compatibility within each backend. Each cell reports
 | **Speculative Decoding** | 🚧 | 🚧 | — | 🚧 | — | 🚧 | — | | 🚧 | — |
 
 > **Notes:**
-> 1. **Multimodal + KV-Aware Routing**: Not supported. ([Source][kv-routing])
+> 1. **Multimodal + KV-Aware Routing**: Supported on Dynamo's SGLang image, which carries the upstream hash-forwarding patch. A custom SGLang build without that patch still serves the request, but routing degrades to text-prefix overlap: Dynamo probes the engine once at startup for the `mm_hashes` argument and drops image identity from the routing key when it is absent. ([Source][mm-kv-routing])
 > 2. **Multimodal Patterns**: Supports simple Aggregated **EPD**, **E/PD**, and **E/P/D** patterns. Traditional Disagg **EP/D** is not supported. ([Source][mm-sglang])
 > 3. **Request Cancellation**: Cancellation during the remote prefill phase is not supported in disaggregated mode. ([Source][sglang-readme])
 > 4. **Speculative Decoding**: Code hooks exist (`spec_decode_stats` in publisher), but no examples or documentation yet.
@@ -416,7 +416,7 @@ Current stable release: v1.3.0 (container tag `1.3.0`, wheel version `1.3.0.post
 | KV-Aware Routing | Supported | Supported | Supported |
 | SLA-Based Planner | Supported | Supported | Supported |
 | KV Block Manager | Experimental (Work in progress across all combinations) | Supported | Supported |
-| Multimodal (Image) | Supported (Not compatible with KV-aware routing. Disagg patterns: EPD, E/PD, E/P/D (not traditional EP/D)) | Supported (Image URLs + pre-computed embeddings. Disagg: EP/D + E/P/D. KV-aware routing via dedicated MM Router Worker (requires KV event publishing)) | Supported (With KV-aware routing, image-aware routing on documented paths) |
+| Multimodal (Image) | Supported (KV-aware routing supported on Dynamo's SGLang image; a custom build without the hash-forwarding patch falls back to text-prefix routing. Disagg patterns: EPD, E/PD, E/P/D (not traditional EP/D)) | Supported (Image URLs + pre-computed embeddings. Disagg: EP/D + E/P/D. KV-aware routing via dedicated MM Router Worker (requires KV event publishing)) | Supported (With KV-aware routing, image-aware routing on documented paths) |
 | Multimodal (Video) | Supported | Not supported | Supported (Video input with frame sampling) |
 | Multimodal (Audio) | Not supported | Not supported | Experimental (Qwen2-Audio, experimental) |
 | Request Migration | Supported | Supported (Work in progress with multimodal) | Supported |

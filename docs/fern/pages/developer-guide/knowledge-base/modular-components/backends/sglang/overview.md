@@ -151,7 +151,7 @@ SGLang is optimized for high-throughput serving with fast primitives, providing 
 | **KV-Aware Routing** | ✅ | — | | | | | | | | |
 | **SLA-Based Planner** | ✅ | ✅ | — | | | | | | | |
 | **KV Block Manager** | 🚧 | 🚧 | 🚧 | — | | | | | | |
-| **Multimodal** | ✅<sup>2</sup> | <sup>1</sup> | — | 🚧 | — | | | | | |
+| **Multimodal** | ✅<sup>2</sup> | ✅<sup>1</sup> | — | 🚧 | — | | | | | |
 | **Request Migration** | ✅ | ✅ | ✅ | 🚧 | ✅ | — | | | | |
 | **Request Cancellation** | 🚧<sup>3</sup> | ✅ | ✅ | 🚧 | 🚧 | ✅ | — | | | |
 | **LoRA** | | | | 🚧 | | | | — | | |
@@ -159,7 +159,7 @@ SGLang is optimized for high-throughput serving with fast primitives, providing 
 | **Speculative Decoding** | 🚧 | 🚧 | — | 🚧 | — | 🚧 | — | | 🚧 | — |
 
 > **Notes:**
-> 1. **Multimodal + KV-Aware Routing**: Not supported. ([Source](../../router/overview.md))
+> 1. **Multimodal + KV-Aware Routing**: Supported on Dynamo's SGLang image, which carries the upstream hash-forwarding patch. A custom SGLang build without that patch still serves the request, but routing degrades to text-prefix overlap: Dynamo probes the engine once at startup for the `mm_hashes` argument and drops image identity from the routing key when it is absent. ([Source](../../../../../use-cases/multimodal-serving/multimodal-kv-routing.md))
 > 2. **Multimodal Patterns**: Supports simple Aggregated **EPD**, **E/PD**, and **E/P/D** patterns. Traditional Disagg **EP/D** is not supported. ([Source](multimodal.md))
 > 3. **Request Cancellation**: Cancellation during the remote prefill phase is not supported in disaggregated mode. ([Source](../../../concepts/fault-tolerance/request-cancellation-architecture.md))
 > 4. **Speculative Decoding**: Code hooks exist (`spec_decode_stats` in publisher), but no examples or documentation yet.
