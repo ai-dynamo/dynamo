@@ -609,12 +609,19 @@ ARG ENABLE_SOURCE_ARCHIVAL=false
 # builds (e.g. multiple frameworks in CI) read the same cache concurrently.
 # mkdir runs unconditionally so the dir always exists for wheel_builder to COPY,
 # even on non-archival builds (empty then); cargo vendor only runs when enabled.
+# --sync folds the nested binding workspaces (lib/bindings/python + kvbm, each a
+# separate workspace with its own Cargo.lock) into the single vendor tree so their
+# third-party crates are archived too; the root workspace alone misses the crates
+# those bindings pull in (e.g. the pyo3/uv-side graph).
 RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
     --mount=type=cache,target=/root/.cargo/git,sharing=shared \
     mkdir -p /tmp/dynamo-vendor-full && \
     if [ "$ENABLE_SOURCE_ARCHIVAL" = "true" ]; then \
         cd /opt/dynamo && \
-        cargo vendor --locked /tmp/dynamo-vendor-full > /dev/null && \
+        cargo vendor --locked \
+            --sync lib/bindings/python/Cargo.toml \
+            --sync lib/bindings/kvbm/Cargo.toml \
+            /tmp/dynamo-vendor-full > /dev/null && \
         cp Cargo.toml Cargo.lock /tmp/dynamo-vendor-full/ ; \
     fi
 
