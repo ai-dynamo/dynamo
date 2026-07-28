@@ -148,12 +148,10 @@ fn publisher(
     captured: DeferredKvPublishBuffer,
     log: Arc<Mutex<Vec<PublishedEffect>>>,
 ) -> LiveEffectsPublisher {
-    let (admission_tx, _admission_rx) = mpsc::unbounded_channel();
     let (lifecycle_tx, _lifecycle_rx) = mpsc::channel(4);
     let (metrics_tx, _metrics_rx) = watch::channel(MockerMetrics::default());
     LiveEffectsPublisher::new(
-        Some(output_tx.into()),
-        Some(admission_tx),
+        Some(SchedulerEventSender::Outputs(output_tx.into())),
         lifecycle_tx,
         metrics_tx,
         KvEventPublishers::default(),
@@ -263,7 +261,7 @@ async fn pass_effects_publish_once_in_boundary_order_and_isolate_midpass_ack() {
     let log = Arc::new(Mutex::new(Vec::new()));
     let publisher = publisher(output_tx, captured, log.clone());
     let mut pending = publisher.capture_pass(pass());
-    publisher.publish_pass_start(&mut pending);
+    publisher.publish_pass_start(&mut pending).await.unwrap();
 
     let (reply, reply_rx) = tokio::sync::oneshot::channel();
     publisher
@@ -288,7 +286,7 @@ async fn pass_effects_publish_once_in_boundary_order_and_isolate_midpass_ack() {
         &[PublishedEffect::Admissions, PublishedEffect::Ack]
     );
 
-    publisher.publish_pass(&mut core, pending).await;
+    publisher.publish_pass(&mut core, pending).await.unwrap();
     assert_eq!(
         log.lock().unwrap().as_slice(),
         &[
@@ -326,7 +324,7 @@ async fn controlled_pass_start_router_effects_precede_midpass_ack_without_duplic
     pass.router_event_visibility = RouterEventVisibility::PassStart;
     let mut pending = publisher.capture_pass(pass);
 
-    publisher.publish_pass_start(&mut pending);
+    publisher.publish_pass_start(&mut pending).await.unwrap();
     let (reply, reply_rx) = tokio::sync::oneshot::channel();
     publisher
         .apply_command(
@@ -354,7 +352,7 @@ async fn controlled_pass_start_router_effects_precede_midpass_ack_without_duplic
         ]
     );
 
-    publisher.publish_pass(&mut core, pending).await;
+    publisher.publish_pass(&mut core, pending).await.unwrap();
     assert_eq!(
         log.lock().unwrap().as_slice(),
         &[
@@ -452,7 +450,8 @@ async fn external_shutdown_stops_a_nonempty_zero_duration_progress_loop() {
         publisher,
         cancel_token,
     )
-    .await;
+    .await
+    .unwrap();
 
     cancel_task.await.unwrap();
     assert!(core.execute_count > 0);
