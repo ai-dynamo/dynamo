@@ -288,6 +288,7 @@ def build_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
             args, "max_num_batched_tokens", _DEFAULT_MAX_NUM_BATCHED_TOKENS
         ),
         enable_prefix_caching=getattr(args, "enable_prefix_caching", True),
+        g1_backend=getattr(args, "g1_backend", "kvbm"),
         enable_chunked_prefill=getattr(args, "enable_chunked_prefill", True),
         speedup_ratio=getattr(args, "speedup_ratio", 1.0),
         decode_speedup_ratio=getattr(args, "decode_speedup_ratio", 1.0),
@@ -375,6 +376,9 @@ def build_runtime_config(
         rc.max_num_batched_tokens = _DEFAULT_MAX_NUM_BATCHED_TOKENS
     rc.enable_local_indexer = (
         engine_args.enable_local_indexer and not engine_args.is_decode()
+    )
+    rc.kv_event_publishing_enabled = (
+        engine_args.enable_prefix_caching and not engine_args.is_decode()
     )
     rc.data_parallel_size = engine_args.dp_size
     rc.set_engine_specific("output_replay_consumer", "true")

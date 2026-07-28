@@ -10,7 +10,6 @@ import os
 import re
 import socket
 import sys
-import warnings
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -546,8 +545,6 @@ def test_disaggregation_mode_default(mock_vllm_cli):
     mock_vllm_cli("--model", "Qwen/Qwen3-0.6B")
     config = parse_args()
     assert config.disaggregation_mode == DisaggregationMode.AGGREGATED
-    assert config.is_prefill_worker is False
-    assert config.is_decode_worker is False
 
 
 def test_kv_events_disabled_by_default_without_explicit_config(mock_vllm_cli):
@@ -570,8 +567,6 @@ def test_disaggregation_mode_prefill(mock_vllm_cli):
     )
     config = parse_args()
     assert config.disaggregation_mode == DisaggregationMode.PREFILL
-    assert config.is_prefill_worker is True
-    assert config.is_decode_worker is False
     assert config.component == "prefill"
 
 
@@ -580,66 +575,6 @@ def test_disaggregation_mode_decode(mock_vllm_cli):
     mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", "--disaggregation-mode", "decode")
     config = parse_args()
     assert config.disaggregation_mode == DisaggregationMode.DECODE
-    assert config.is_prefill_worker is False
-    assert config.is_decode_worker is True
-
-
-def test_legacy_is_prefill_worker_emits_deprecation(mock_vllm_cli):
-    """Test that --is-prefill-worker still works but emits DeprecationWarning."""
-    mock_vllm_cli(
-        "--model",
-        "Qwen/Qwen3-0.6B",
-        "--is-prefill-worker",
-        "--kv-transfer-config",
-        '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',
-    )
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-        config = parse_args()
-    deprecation_warnings = [x for x in w if issubclass(x.category, DeprecationWarning)]
-    assert len(deprecation_warnings) >= 1
-    assert "deprecated" in str(deprecation_warnings[0].message).lower()
-    assert config.disaggregation_mode == DisaggregationMode.PREFILL
-    assert config.is_prefill_worker is True
-
-
-def test_legacy_is_decode_worker_emits_deprecation(mock_vllm_cli):
-    """Test that --is-decode-worker still works but emits DeprecationWarning."""
-    mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", "--is-decode-worker")
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-        config = parse_args()
-    deprecation_warnings = [x for x in w if issubclass(x.category, DeprecationWarning)]
-    assert len(deprecation_warnings) >= 1
-    assert "deprecated" in str(deprecation_warnings[0].message).lower()
-    assert config.disaggregation_mode == DisaggregationMode.DECODE
-    assert config.is_decode_worker is True
-
-
-def test_conflicting_legacy_and_new_flags_raises(mock_vllm_cli):
-    """Test that combining legacy flags with explicit --disaggregation-mode raises ValueError."""
-    mock_vllm_cli(
-        "--model",
-        "Qwen/Qwen3-0.6B",
-        "--disaggregation-mode",
-        "prefill",
-        "--is-decode-worker",
-    )
-    with pytest.raises(ValueError, match="Cannot combine"):
-        parse_args()
-
-
-def test_explicit_default_mode_with_legacy_flag_raises(mock_vllm_cli):
-    """Test that --disaggregation-mode agg --is-decode-worker raises ValueError."""
-    mock_vllm_cli(
-        "--model",
-        "Qwen/Qwen3-0.6B",
-        "--disaggregation-mode",
-        "agg",
-        "--is-decode-worker",
-    )
-    with pytest.raises(ValueError, match="Cannot combine"):
-        parse_args()
 
 
 # --- _is_routable tests (pure logic, no mocking) ---

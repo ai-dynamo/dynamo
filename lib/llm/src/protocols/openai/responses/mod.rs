@@ -17,7 +17,7 @@ use dynamo_protocols::types::responses::{
 use dynamo_protocols::types::{
     ChatCompletionMessageToolCall, ChatCompletionNamedToolChoice,
     ChatCompletionRequestAssistantMessage, ChatCompletionRequestAssistantMessageContent,
-    ChatCompletionRequestMessage, ChatCompletionRequestMessageContentPartImage,
+    ChatCompletionRequestMessage, ChatCompletionRequestMessageContentPartImageArgs,
     ChatCompletionRequestMessageContentPartText, ChatCompletionRequestSystemMessage,
     ChatCompletionRequestSystemMessageContent, ChatCompletionRequestToolMessage,
     ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessage,
@@ -287,18 +287,12 @@ fn convert_input_content_to_user_content(
                     .ok_or_else(|| anyhow::anyhow!("input_image requires image_url"))?;
                 let url = url::Url::parse(url_str)
                     .map_err(|e| anyhow::anyhow!("Invalid image URL '{}': {}", url_str, e))?;
-                #[allow(deprecated)]
-                let image_url = ImageUrl {
-                    url,
-                    detail: Some(convert_image_detail_str(&img.detail)),
-                    uuid: None,
-                };
-                chat_parts.push(ChatCompletionRequestUserMessageContentPart::ImageUrl(
-                    ChatCompletionRequestMessageContentPartImage {
-                        image_url: Some(image_url),
-                        uuid: None,
-                    },
-                ));
+                let mut image_url = ImageUrl::from(url.to_string());
+                image_url.detail = Some(convert_image_detail_str(&img.detail));
+                let image_part = ChatCompletionRequestMessageContentPartImageArgs::default()
+                    .image_url(image_url)
+                    .build()?;
+                chat_parts.push(image_part.into());
             }
             // TODO: handle InputVideo / InputAudio when upstream adds them
             InputContent::InputFile(_) => {
@@ -1015,7 +1009,7 @@ pub fn chat_completion_to_response(
             && !reasoning_text.is_empty()
         {
             output.push(OutputItem::Reasoning(ReasoningItem {
-                id: format!("rs_{}", Uuid::new_v4().simple()),
+                id: Some(format!("rs_{}", Uuid::new_v4().simple())),
                 summary: vec![SummaryPart::SummaryText(SummaryTextContent {
                     text: reasoning_text,
                 })],
@@ -2615,7 +2609,7 @@ thinking
         let schema = ResponseFormatJsonSchema {
             name: "city".into(),
             description: None,
-            schema: Some(serde_json::json!({"type": "object"})),
+            schema: serde_json::json!({"type": "object"}),
             strict: Some(true),
         };
         let mut req = make_response_with_input("structured");

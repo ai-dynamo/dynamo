@@ -42,7 +42,7 @@ pub struct RawWorker {
 /// plus its pre-stripped `ip:port`, so request-path reads (notably
 /// [`PodDiscovery::resolve_endpoint`]) are O(1) lookups that never re-parse the
 /// endpoint or clone the [`PoolState`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct WorkerEntry {
     worker: RawWorker,
     /// Scheme-less `ip:port` derived once from `worker.http_endpoint`.
@@ -172,7 +172,7 @@ impl PodDiscovery {
                     }
                 };
 
-                match delta {
+                let index_changed = match delta {
                     Delta::Stop => break,
                     Delta::Skip => continue,
                     Delta::Rebuild => rebuild_index(
@@ -190,12 +190,14 @@ impl PodDiscovery {
                         replay_port,
                     ),
                     Delta::Remove(pod) => remove_pod(&index_task, &pod),
-                }
+                };
 
                 // Readiness based on initial pods being synced and the pool being resolved.
                 ready_task.store(pod_synced && pool_rx.borrow().is_some(), Ordering::Release);
-                generation = generation.wrapping_add(1);
-                let _ = changes_tx.send(generation);
+                if index_changed {
+                    generation = generation.wrapping_add(1);
+                    let _ = changes_tx.send(generation);
+                }
             }
             // Watch stream has ended, so stop advertising readiness and clear the index.
             ready_task.store(false, Ordering::Release);
@@ -221,9 +223,21 @@ impl PodDiscovery {
             .collect()
     }
 
-    // Return the IDs of all currently `Ready`, pool-selected workers.
-    pub fn ready_worker_ids(&self) -> HashSet<u64> {
-        self.index.read().unwrap().keys().copied().collect()
+    /// Whether any `Ready`, pool-selected worker exists. O(1) — lets the hot path
+    /// test emptiness without materializing the id set.
+    pub fn has_ready_workers(&self) -> bool {
+        !self.index.read().unwrap().is_empty()
+    }
+
+    /// Resolve any `Ready` worker's `ip:port` endpoint, for body-less requests
+    /// that route to an arbitrary worker without building an id set.
+    pub fn resolve_any_endpoint(&self) -> Option<String> {
+        self.index
+            .read()
+            .unwrap()
+            .values()
+            .next()
+            .map(|entry| entry.endpoint.clone())
     }
 
     // Resolve a `worker_id` to its current `ip:port` HTTP endpoint.
@@ -235,29 +249,41 @@ impl PodDiscovery {
             .map(|entry| entry.endpoint.clone())
     }
 
-    /// Retain the `worker_ids` whose current `ip:port` endpoint satisfies `pred`,
-    /// under a **single** read lock and **without cloning** any endpoint (`pred`
-    /// borrows it). Used on the subset-routing path so membership testing doesn't
-    /// allocate a throwaway `String` per candidate. Unknown workers are dropped.
-    pub fn filter_workers_by_endpoint(
-        &self,
-        worker_ids: &HashSet<u64>,
-        pred: impl Fn(&str) -> bool,
-    ) -> HashSet<u64> {
+    /// Worker IDs of the currently `Ready`, pool-selected workers whose `ip:port`
+    /// endpoint satisfies `pred`, collected in a **single** index pass under one
+    /// read lock — no intermediate full-ready set, and `pred` borrows the endpoint
+    /// (no per-worker `String` clone). Used only on the subset-routing path.
+    ///
+    /// `pred` runs while the index read lock is held, so it must not re-enter
+    /// `PodDiscovery` (`resolve_endpoint`, another read, …): `std::sync::RwLock`
+    /// read locks are not guaranteed re-entrant and a nested acquire can deadlock.
+    pub fn ready_worker_ids_matching(&self, pred: impl Fn(&str) -> bool) -> HashSet<u64> {
         let index = self.index.read().unwrap();
-        worker_ids
+        index
             .iter()
-            .copied()
-            .filter(|worker_id| {
-                index
-                    .get(worker_id)
-                    .is_some_and(|entry| pred(entry.endpoint.as_str()))
-            })
+            .filter(|(_, entry)| pred(entry.endpoint.as_str()))
+            .map(|(worker_id, _)| *worker_id)
             .collect()
     }
 
     pub fn subscribe_changes(&self) -> watch::Receiver<u64> {
         self.changes.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(workers: Vec<RawWorker>) -> (Self, watch::Sender<u64>) {
+        let index = workers
+            .into_iter()
+            .map(|worker| (worker.worker_id, WorkerEntry::from_raw(worker)))
+            .collect();
+        let (changes_tx, changes) = watch::channel(0u64);
+        (
+            Self {
+                index: Arc::new(RwLock::new(index)),
+                changes,
+            },
+            changes_tx,
+        )
     }
 }
 
@@ -308,16 +334,16 @@ fn defer_pool_rebuild(relisting: bool, pool_present: bool) -> bool {
 
 /// Apply a single pod delta to the index: upsert the worker if it is `Ready` and
 /// pool-selected, otherwise drop any existing entry (a pod that went NotReady,
-/// terminating, or unselected).
+/// terminating, or unselected). Returns whether the derived index changed.
 fn upsert_pod(
     index: &RwLock<WorkerIndex>,
     pod: &Pod,
     pool: Option<&PoolState>,
     kv_event_port: u16,
     replay_port: Option<u16>,
-) {
+) -> bool {
     let Some(worker_id) = pod_worker_id(pod) else {
-        return;
+        return false;
     };
     let entry = pool
         .and_then(|pool| raw_worker_from_pod(pod, pool, kv_event_port, replay_port))
@@ -325,32 +351,36 @@ fn upsert_pod(
     let mut index = index.write().unwrap();
     match entry {
         Some(entry) => {
-            index.insert(worker_id, entry);
+            if index.get(&worker_id) == Some(&entry) {
+                false
+            } else {
+                index.insert(worker_id, entry);
+                true
+            }
         }
-        None => {
-            index.remove(&worker_id);
-        }
+        None => index.remove(&worker_id).is_some(),
     }
 }
 
-/// Drop a deleted pod's worker from the index. O(1).
-fn remove_pod(index: &RwLock<WorkerIndex>, pod: &Pod) {
-    if let Some(worker_id) = pod_worker_id(pod) {
-        index.write().unwrap().remove(&worker_id);
-    }
+/// Drop a deleted pod's worker from the index. Returns whether an entry existed.
+fn remove_pod(index: &RwLock<WorkerIndex>, pod: &Pod) -> bool {
+    pod_worker_id(pod)
+        .and_then(|worker_id| index.write().unwrap().remove(&worker_id))
+        .is_some()
 }
 
 /// Recompute the whole index from the current pod store and pool selector.
 /// Empty until the `InferencePool` has resolved. Used only for the initial LIST,
 /// watch relists (which may have dropped pods without a `Delete`), and
-/// pool-selector changes (which re-classify every pod).
+/// pool-selector changes (which re-classify every pod). Returns whether the
+/// rebuilt index differs from the current one.
 fn rebuild_index(
     store: &kube::runtime::reflector::Store<Pod>,
     pool: Option<&PoolState>,
     kv_event_port: u16,
     replay_port: Option<u16>,
     index: &RwLock<WorkerIndex>,
-) {
+) -> bool {
     let mut fresh = WorkerIndex::new();
     if let Some(pool) = pool {
         for pod in store.state().iter() {
@@ -359,7 +389,13 @@ fn rebuild_index(
             }
         }
     }
-    *index.write().unwrap() = fresh;
+    let mut current = index.write().unwrap();
+    if *current == fresh {
+        false
+    } else {
+        *current = fresh;
+        true
+    }
 }
 
 /// Build a [`RawWorker`] from a pod, or `None` if it is not `Ready`, not
@@ -578,7 +614,20 @@ mod tests {
         ]);
 
         let index = RwLock::new(WorkerIndex::new());
-        rebuild_index(&store, Some(&pool()), 5557, Some(5560), &index);
+        assert!(rebuild_index(
+            &store,
+            Some(&pool()),
+            5557,
+            Some(5560),
+            &index
+        ));
+        assert!(!rebuild_index(
+            &store,
+            Some(&pool()),
+            5557,
+            Some(5560),
+            &index
+        ));
 
         // Only the ready, correctly-labeled pod is materialized.
         let index = index.read().unwrap();
@@ -599,7 +648,7 @@ mod tests {
             &[("app", "vllm-qwen")],
         )]);
         let index = RwLock::new(WorkerIndex::new());
-        rebuild_index(&store, None, 5557, None, &index);
+        assert!(!rebuild_index(&store, None, 5557, None, &index));
         assert!(index.read().unwrap().is_empty());
     }
 
@@ -615,7 +664,8 @@ mod tests {
         );
 
         // Ready + selected -> inserted, with a pre-stripped endpoint.
-        upsert_pod(&index, &ready, Some(&pool()), 5557, None);
+        assert!(upsert_pod(&index, &ready, Some(&pool()), 5557, None));
+        assert!(!upsert_pod(&index, &ready, Some(&pool()), 5557, None));
         assert_eq!(
             index.read().unwrap().get(&id).map(|e| e.endpoint.as_str()),
             Some("10.0.0.1:8000")
@@ -628,14 +678,20 @@ mod tests {
             Some(false),
             &[("app", "vllm-qwen")],
         );
-        upsert_pod(&index, &not_ready, Some(&pool()), 5557, None);
+        assert!(upsert_pod(&index, &not_ready, Some(&pool()), 5557, None));
+        assert!(!upsert_pod(&index, &not_ready, Some(&pool()), 5557, None));
         assert!(!index.read().unwrap().contains_key(&id));
 
         // Re-add, then a Delete removes it.
-        upsert_pod(&index, &ready, Some(&pool()), 5557, None);
+        assert!(upsert_pod(&index, &ready, Some(&pool()), 5557, None));
         assert!(index.read().unwrap().contains_key(&id));
-        remove_pod(&index, &ready);
+        assert!(remove_pod(&index, &ready));
+        assert!(!remove_pod(&index, &ready));
         assert!(!index.read().unwrap().contains_key(&id));
+
+        // An unrelated namespace pod does not change the derived worker index.
+        let unselected = pod("other-0", Some("10.0.0.2"), Some(true), &[("app", "other")]);
+        assert!(!upsert_pod(&index, &unselected, Some(&pool()), 5557, None));
     }
 
     #[test]
@@ -651,10 +707,11 @@ mod tests {
             &[("app", "vllm-qwen")],
         );
 
-        upsert_pod(&index, &ready, Some(&pool()), 5557, None);
+        assert!(upsert_pod(&index, &ready, Some(&pool()), 5557, None));
         assert!(index.read().unwrap().contains_key(&id));
 
-        upsert_pod(&index, &ready, None, 5557, None);
+        assert!(upsert_pod(&index, &ready, None, 5557, None));
+        assert!(!upsert_pod(&index, &ready, None, 5557, None));
         assert!(!index.read().unwrap().contains_key(&id));
     }
 
@@ -683,7 +740,7 @@ mod tests {
         writer.apply_watcher_event(&watcher::Event::InitApply(vllm_1.clone()));
         writer.apply_watcher_event(&watcher::Event::InitDone);
         let index = RwLock::new(WorkerIndex::new());
-        rebuild_index(&store, Some(&pool()), 5557, None, &index);
+        assert!(rebuild_index(&store, Some(&pool()), 5557, None, &index));
         assert_eq!(index.read().unwrap().len(), 2);
 
         // During the next LIST, vllm-1 has disappeared. The reflector buffers
@@ -709,7 +766,13 @@ mod tests {
         // InitDone makes the staged list live. Its single rebuild uses both the
         // completed one-pod Store and the latest PoolState.
         writer.apply_watcher_event(&watcher::Event::InitDone);
-        rebuild_index(&store, Some(&updated_pool), 5557, None, &index);
+        assert!(rebuild_index(
+            &store,
+            Some(&updated_pool),
+            5557,
+            None,
+            &index
+        ));
         let index = index.read().unwrap();
         assert_eq!(index.len(), 1);
         assert_eq!(
@@ -765,7 +828,7 @@ mod tests {
             Some(true),
             &[("app", "vllm-qwen")],
         )]);
-        rebuild_index(&store, Some(&pool()), 5557, None, &index);
+        assert!(rebuild_index(&store, Some(&pool()), 5557, None, &index));
 
         let index = index.read().unwrap();
         assert_eq!(index.len(), 1);
@@ -810,22 +873,22 @@ mod tests {
     }
 
     #[test]
-    fn filter_workers_by_endpoint_matches_without_cloning() {
+    fn ready_worker_ids_matching_filters_without_cloning() {
         let discovery = discovery_with_endpoints(HashMap::from([
             (1u64, "10.0.0.1:8000".to_string()),
             (2u64, "10.0.0.2:8000".to_string()),
             (3u64, "10.0.0.3:8000".to_string()),
         ]));
-        let allowed: HashSet<u64> = [1, 2, 3].into_iter().collect();
 
         // Predicate borrows the endpoint; only worker 2 matches.
-        let filtered =
-            discovery.filter_workers_by_endpoint(&allowed, |endpoint| endpoint == "10.0.0.2:8000");
+        let filtered = discovery.ready_worker_ids_matching(|endpoint| endpoint == "10.0.0.2:8000");
         assert_eq!(filtered, HashSet::from([2]));
 
-        // A worker id with no endpoint in the snapshot is dropped.
-        let allowed_with_unknown: HashSet<u64> = [1, 99].into_iter().collect();
-        let filtered = discovery.filter_workers_by_endpoint(&allowed_with_unknown, |_| true);
-        assert_eq!(filtered, HashSet::from([1]));
+        // Match-all returns every ready worker (single pass, no input set).
+        let all = discovery.ready_worker_ids_matching(|_| true);
+        assert_eq!(all, HashSet::from([1, 2, 3]));
+
+        // No match -> empty.
+        assert!(discovery.ready_worker_ids_matching(|_| false).is_empty());
     }
 }

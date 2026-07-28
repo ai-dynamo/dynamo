@@ -190,8 +190,10 @@ pub fn validate_response_format(
                 anyhow::bail!("`response_format.json_schema.name` cannot be empty");
             }
 
-            // Validate schema presence
-            if json_schema.schema.is_none() {
+            // Validate schema presence. `schema` is a non-optional
+            // `serde_json::Value`, so an explicit `null` is the only way it
+            // can still arrive empty.
+            if json_schema.schema.is_null() {
                 anyhow::bail!(
                     "`response_format.json_schema.schema` is required when `response_format.type` is `json_schema`"
                 );

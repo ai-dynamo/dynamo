@@ -1,0 +1,102 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Profiler Configuration Reference
+subtitle: Field reference for the Dynamo profiler CLI arguments — the SLA profiler entry point and the low-level per-endpoint profiler.
+---
+
+The Dynamo profiler has two entry points, each with its own arguments:
+
+- **`python -m dynamo.profiler`** — the SLA profiler. Sweeps a model across tensor-parallel sizes and interpolates prefill/decode performance to recommend a deployment that meets your SLA. Takes a DynamoGraphDeploymentRequest (DGDR) spec plus a handful of operational flags.
+- **`python -m dynamo.profiler.profile_endpoint`** — the low-level per-endpoint profiler. Profiles a single already-running prefill or decode endpoint.
+
+For the profiling workflow and DGDR spec structure, see the [Profiler Guide](README.md). Field names, types, and defaults on this page come from [`__main__.py`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/profiler/__main__.py) and [`profile_endpoint.py`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/profiler/profile_endpoint.py).
+
+## SLA profiler (`dynamo.profiler`)
+
+<ParamField path="--config" type="string" required={true}>
+  DynamoGraphDeploymentRequestSpec as an inline JSON string or a path to a JSON/YAML file. This defines the model, backend, and SLA targets to profile against. Startup fails if it is neither a valid file path nor valid JSON.
+</ParamField>
+
+<ParamField path="--output-dir" type="string" default="profiling_results">
+  Path to the output results directory. The profiler writes plots, the interpolation data, `profile_sla.log`, and a `profiler_status.yaml` status file here.
+</ParamField>
+
+<ParamField path="--deployment-timeout" type="integer" default="3600">
+  Maximum seconds to wait for each trial deployment to become ready before failing.
+</ParamField>
+
+<ParamField path="--prefill-interpolation-granularity" type="integer" default="16">
+  Number of input-sequence-length (ISL) samples used to interpolate prefill performance. Higher values give a finer prefill curve at the cost of more profiling runs.
+</ParamField>
+
+<ParamField path="--decode-interpolation-granularity" type="integer" default="6">
+  Number of samples used to interpolate decode performance across the KV-cache load range. Higher values give a finer decode curve at the cost of more profiling runs.
+</ParamField>
+
+<ParamField path="--dry-run" type="boolean" default="false">
+  Skip deployments and benchmarking. Use this to validate the config and preview the planned sweep without provisioning GPUs.
+</ParamField>
+
+## Per-endpoint profiler (`dynamo.profiler.profile_endpoint`)
+
+This entry point profiles a single running endpoint. It is normally invoked by the SLA profiler, but you can run it directly against an existing deployment.
+
+<ParamField path="--mode" type="string" required={true}>
+  Which phase to profile.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>prefill</Badge> <Badge intent="note" minimal>decode</Badge></span>
+</ParamField>
+
+<ParamField path="--model_name" type="string" required={true}>
+  Model name to send with requests. Must match the model the endpoint serves.
+</ParamField>
+
+<ParamField path="--url" type="string" required={true}>
+  Base URL of the endpoint to profile, for example `http://localhost:8000`.
+</ParamField>
+
+<ParamField path="--num_gpus" type="integer" required={true}>
+  Number of GPUs backing the endpoint. Used to normalize the reported per-GPU performance.
+</ParamField>
+
+<ParamField path="--tokenizer_path" type="string" default="">
+  Path to the tokenizer. When empty, the tokenizer is resolved from `--model_name`.
+</ParamField>
+
+<ParamField path="--max_kv_tokens" type="integer" default="0">
+  Maximum KV-cache tokens for the endpoint. Used only in `decode` mode to bound the KV-load sweep. `0` lets the profiler detect the limit.
+</ParamField>
+
+<ParamField path="--work_dir" type="string" default="endpoint_profiling_results/">
+  Directory to save this endpoint's profiling results.
+</ParamField>
+
+<ParamField path="--max_context_length" type="integer" default="16384">
+  Maximum context length to probe when generating request payloads.
+</ParamField>
+
+<ParamField path="--interpolation_granularity" type="integer" default="8">
+  Number of samples used to interpolate this endpoint's results.
+</ParamField>
+
+<ParamField path="--attention_dp_size" type="integer" default="1">
+  Attention data-parallel size of the endpoint. Set this for MoE models that run attention with data parallelism.
+</ParamField>
+
+## Related pages
+
+<CardGroup cols={2}>
+  <Card title="Profiler Guide" href="README.md" icon="book">
+    Profiling workflow, DGDR spec structure, and how the SLA recommendation is produced.
+  </Card>
+  <Card title="Profiler Examples" href="profiler-examples.md" icon="terminal">
+    End-to-end profiling runs and how to read the output.
+  </Card>
+  <Card title="Planner Configuration" href="../planner/planner-config-reference.mdx" icon="sliders">
+    Field reference for the Planner that consumes profiler output.
+  </Card>
+  <Card title="Runtime Configuration" href="../../reference/runtime-config-reference.mdx" icon="gear">
+    Shared Dynamo runtime flags parsed by every component.
+  </Card>
+</CardGroup>
