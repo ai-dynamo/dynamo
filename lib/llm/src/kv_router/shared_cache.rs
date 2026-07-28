@@ -142,7 +142,9 @@ impl HicacheSharedKvCache {
         self.clear();
     }
 
-    fn resolve_mooncake_config(&self) -> Option<SglangHicacheMooncakeConfig> {
+    fn resolve_mooncake_config_and_endpoint(
+        &self,
+    ) -> Option<(SglangHicacheMooncakeConfig, String)> {
         let workers = self.runtime_configs.borrow();
         let mut configs = Vec::new();
 
@@ -165,21 +167,14 @@ impl HicacheSharedKvCache {
             return None;
         }
 
-        Some(first.clone())
-    }
-
-    fn kv_events_endpoint(&self) -> Option<String> {
-        self.resolve_mooncake_config()?;
         if let Some(endpoint) = &self.frontend_kv_events_endpoint {
-            return Some(endpoint.clone());
+            return Some((first.clone(), endpoint.clone()));
         }
 
-        let workers = self.runtime_configs.borrow();
-        let mut endpoints = workers.iter().filter_map(|(worker_id, runtime_config)| {
-            mooncake_config_from_runtime(*worker_id, runtime_config)
-                .and_then(|config| config.kv_events_endpoint)
-                .filter(|endpoint| !endpoint.is_empty())
-        });
+        let mut endpoints = configs
+            .iter()
+            .filter_map(|(_, config)| config.kv_events_endpoint.as_deref())
+            .filter(|endpoint| !endpoint.is_empty());
         let endpoint = endpoints.next()?;
         if endpoints.any(|candidate| candidate != endpoint) {
             tracing::warn!(
@@ -187,7 +182,12 @@ impl HicacheSharedKvCache {
             );
             return None;
         }
-        Some(endpoint)
+        Some((first.clone(), endpoint.to_string()))
+    }
+
+    fn kv_events_endpoint(&self) -> Option<String> {
+        self.resolve_mooncake_config_and_endpoint()
+            .map(|(_, endpoint)| endpoint)
     }
 
     fn apply_batch(&self, sequence: u64, events: Vec<MooncakeObjectEvent>) {
@@ -360,7 +360,7 @@ impl SharedKvCache for HicacheSharedKvCache {
             return Ok(SharedCacheHits::default());
         }
 
-        let Some(config) = self.resolve_mooncake_config() else {
+        let Some((config, _endpoint)) = self.resolve_mooncake_config_and_endpoint() else {
             tracing::debug!("No SGLang Mooncake HiCache runtime config available");
             return Ok(SharedCacheHits::default());
         };
@@ -385,11 +385,6 @@ impl SharedKvCache for HicacheSharedKvCache {
                 router_page_size = block_size,
                 "HiCache page size mismatch; skipping shared-cache lookup"
             );
-            return Ok(SharedCacheHits::default());
-        }
-
-        if self.kv_events_endpoint().is_none() {
-            tracing::debug!("Mooncake KV event endpoint is unavailable");
             return Ok(SharedCacheHits::default());
         }
 
