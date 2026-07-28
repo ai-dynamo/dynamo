@@ -58,8 +58,8 @@ custom backend in a `DynamoGraphDeployment` and follow the
 > **New — Dynamo's unified backend.** This guide covers the new
 > **unified backend** infrastructure in
 > [`dynamo.common.backend`](https://github.com/ai-dynamo/dynamo/tree/main/components/src/dynamo/common/backend):
-> a shared `LLMEngine` ABC that vLLM, SGLang, TRT-LLM, and a sample
-> engine already implement, and that any custom Python engine can plug
+> a shared `LLMEngine` ABC that a sample engine already implements,
+> and that any custom Python engine can plug
 > into the same way. For the Rust version of the same contract, use the
 > Rust tab on this page. For the older lower-level Python worker path (`register_model` +
 > `serve_endpoint`) — still the right choice for features the unified
@@ -97,9 +97,9 @@ alongside this guide.
   — authoritative method-by-method contract.
 - [Package README](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/README.md)
   — in-tree reference: `GenerateRequest` / `GenerateChunk` field
-  definitions, per-engine cancellation cookbook (vLLM / SGLang /
-  TRT-LLM), full `DynamoException` table, file index, and the
-  per-engine feature-gap matrix.
+  definitions, per-engine cancellation cookbook, full
+  `DynamoException` table, file index, and the per-engine
+  feature-gap matrix.
 
 ### Python feature gaps
 
@@ -112,8 +112,8 @@ gaps in the contract itself.
 Lifecycle and runtime:
 - Aggregated token-in-token-out inference
 - Disaggregated serving (`agg` / `prefill` / `decode`) — KV transfer
-  uses NIXL across supported engines; SGLang exchanges a Dynamo-level
-  bootstrap address (host/port/room), vLLM and TRT-LLM use an
+  uses NIXL across supported engines; some engines exchange a
+  Dynamo-level bootstrap address (host/port/room) while others use an
   engine-internal handshake
 - Model registration with discovery and endpoint types
 - Request cancellation via `abort()` + `context.is_stopped()`
@@ -122,7 +122,7 @@ Lifecycle and runtime:
 - `DynamoException` error chain wrapping
 - Finish reason normalization (handled by the Rust layer)
 - Engine control plumbing, with per-backend profiling, quiesce/resume, and supported weight-update controls
-- vLLM KV block clearing in aggregated, prefill, and decode modes through
+- KV block clearing in aggregated, prefill, and decode modes through
   `POST /engine/control/clear_kv_blocks` on the worker's system port. Send
   `{}` as the JSON body. A successful reset clears both the prefix cache
   and connector cache and returns
@@ -141,8 +141,7 @@ Lifecycle and runtime:
 Observability:
 - Health-check canary via `health_check_payload()` (plus
   `DYN_HEALTH_CHECK_PAYLOAD` / `--health-check-payload` overrides)
-- Vendor-prefixed Prometheus bridge (`vllm:` / `sglang:` /
-  `trtllm_` / `lmcache:`) via `register_prometheus()`
+- Vendor-prefixed Prometheus bridge via `register_prometheus()`
 - Framework-owned lifecycle gauges (`cleanup_time_seconds`,
   `drain_time_seconds`, `model_load_time_seconds`) — always on
 - Per-rank `dynamo_component_*` gauges + router `kv_used_blocks`
@@ -159,10 +158,8 @@ Observability:
 
 Request handling:
 - Guided decoding — wired per-engine on the request side with
-  JSON schema, regex, grammar, and choice coverage. vLLM uses
-  `StructuredOutputsParams`, TRT-LLM uses `GuidedDecodingParams`, and
-  SGLang maps the constraints to `json_schema`, `regex`, and `ebnf`;
-  SGLang translates choices to an escaped regex alternation
+  JSON schema, regex, grammar, and choice coverage. Each engine
+  maps the constraints onto its own structured-output parameters
 - Structural tag generation via `WorkerConfig.structural_tag_{mode,
   scope, schema}` and `serialize_structural_tag`
 - Custom Jinja chat templates via
@@ -175,9 +172,9 @@ Request handling:
 
 | Feature | What's missing |
 |---------|----------------|
-| Logprob response wire | Legacy handlers extract logprobs onto response chunks (vLLM `_extract_logprobs`, SGLang `_extract_logprobs` in `decode_handler`, TRT-LLM `_extract_logprobs` in `handler_base`); the unified `generate()` loops do not populate `log_probs` / `top_logprobs` / `cum_log_probs` on `GenerateChunk`. vLLM's `build_sampling_params` still passes `output_options.logprobs` to the engine on the unified path, so the engine computes them, but the values are dropped before they reach the chunk. SGLang and TRT-LLM unified `generate()` do not read `output_options.logprobs` at all. |
+| Logprob response wire | Legacy handlers extract logprobs onto response chunks, but the unified `generate()` loops do not populate `log_probs` / `top_logprobs` / `cum_log_probs` on `GenerateChunk`. An engine may still pass `output_options.logprobs` through on the unified path so it computes them, but the values are dropped before they reach the chunk; others do not read `output_options.logprobs` at all. |
 | Text-in-text-out mode | Unified hardcodes `ModelInput.Tokens`; no engine-side tokenization or chat templating path |
-| Multimodal parity | vLLM supports aggregated and prefill/decode image and video inference. SGLang and TRT-LLM multimodal execution, separate encode workers, and the `ENCODE` role are not yet available through their unified engines. |
+| Multimodal parity | Multimodal execution, separate encode workers, and the `ENCODE` role are not yet available through the unified contract. |
 | Diffusion | Image (FLUX), video (Wan2.1), LLM diffusion (DLLM) workers; no diffusion engine, MediaOutput, or media scheduling on the unified path |
 | LoRA adapters | Dynamic load / unload / list, ModelDeploymentCard publishing, per-adapter serialization locks, per-request adapter threading on prefill |
 | Snapshot / checkpoint | CRIU-based engine state save/restore + identity reload |
@@ -354,8 +351,8 @@ your CLI parsing reads config from a file or hits an API. Most
 backends don't need to.
 
 For backends that already have a `DynamoRuntimeConfig`-shaped
-config object (e.g. ones derived from vLLM's, SGLang's, or
-TRT-LLM's existing config), prefer the
+config object (e.g. one derived from an existing engine's own
+config), prefer the
 `WorkerConfig.from_runtime_config(runtime_cfg, model_name=...)`
 helper — it pulls the shared discovery / request-plane / parser
 fields off the config in one line.
@@ -390,8 +387,8 @@ async def start(self, worker_id: int) -> EngineConfig:
 ```
 
 `worker_id` is an opaque per-worker identifier — most engines ignore
-it. Backends needing a stable cluster-wide key (e.g. TRT-LLM's
-`disagg_machine_id` snowflake) should derive from it instead of
+it. Backends needing a stable cluster-wide key (e.g. a
+disaggregation machine ID) should derive from it instead of
 hashing host/pid or asking operators for a CLI override.
 
 Every `EngineConfig` field except `model` is optional. `None` means
@@ -521,7 +518,7 @@ families into the worker's `/metrics` output. The framework owns the
 from dynamo.common.backend.metrics import register_global_registry
 
 async def register_prometheus(self, metrics):
-    register_global_registry(metrics, engine_prefix="vllm:")
+    register_global_registry(metrics, engine_prefix="myengine:")
 ```
 
 Use `component_metrics_dp_ranks()` plus
@@ -555,11 +552,9 @@ Keep the rank list stable for the engine lifetime. `Worker` invokes
 `WorkerConfig.enable_kv_routing` is enabled. `register_prometheus()` still
 runs when `enable_kv_routing=False`.
 
-Use the in-tree backends as references: vLLM pushes snapshots from its
-stat logger and bridges `vllm:` / `lmcache:` metrics, SGLang pushes
-leader-node scheduler snapshots and bridges `sglang:` when
-`--enable-metrics` is set, and TRT-LLM pushes snapshots from its stats
-poll thread while bridging `trtllm_` metrics.
+A typical engine pushes per-rank snapshots from its own stats callback
+(a stat logger, scheduler hook, or a dedicated poll thread) and bridges
+its vendor-prefixed metric families through `register_prometheus()`.
 
 #### Python: KV event publishing (optional)
 
@@ -574,7 +569,7 @@ see [Rust Step 4](#rust-step-4-implement-the-llmengine-trait) and the
 [`LLMEngine` trait](https://github.com/ai-dynamo/dynamo/blob/main/lib/backend-common/src/engine.rs).
 
 Use `ZmqSource` when the engine already emits Dynamo-compatible KV events on a
-ZMQ socket, as vLLM and SGLang do:
+ZMQ socket:
 
 ```python
 from dynamo.common.backend.publisher import ZmqSource
@@ -587,8 +582,7 @@ async def kv_event_sources(self):
 ```
 
 Use `PushSource` when the engine needs a live publisher object and drives
-`publish_stored()` / `publish_removed()` from its own event thread. The in-tree
-TRT-LLM backend is the reference implementation for this path:
+`publish_stored()` / `publish_removed()` from its own event thread:
 
 ```python
 from dynamo.common.backend.publisher import PushSource
@@ -842,8 +836,8 @@ Before shipping:
 > **New — Dynamo's unified backend.** This guide covers the new
 > **unified backend** infrastructure in
 > [`dynamo-backend-common`](https://github.com/ai-dynamo/dynamo/tree/main/lib/backend-common): a shared
-> `LLMEngine` contract that vLLM, SGLang, TRT-LLM, and the mocker
-> already implement, and that any custom engine can plug into the
+> `LLMEngine` contract that the mocker already implements, and that
+> any custom engine can plug into the
 > same way.
 >
 > **Beta — actively under development.** The Rust native backend
@@ -902,8 +896,8 @@ written in Rust directly or plugged in from Python via the PyO3
 Lifecycle and runtime:
 - Aggregated token-in-token-out inference
 - Disaggregated serving (`Aggregated` / `Prefill` / `Decode`) — KV
-  transfer uses NIXL across all production engines; SGLang exchanges
-  a Dynamo-level bootstrap address, vLLM and TRT-LLM use an
+  transfer uses NIXL across production engines; some engines exchange
+  a Dynamo-level bootstrap address while others use an
   engine-internal handshake. The Rust
   [mocker example](https://github.com/ai-dynamo/dynamo/tree/main/lib/backend-common/examples/mocker)
   exercises the same wire format CPU-only
@@ -946,11 +940,9 @@ Observability:
 
 Request handling:
 - Guided decoding — request shape carries
-  `SamplingOptions::guided_decoding` (`GuidedDecodingOptions`);
-  vLLM, SGLang, and TRT-LLM forward JSON schema, regex, grammar, and
-  choice. SGLang translates grammar to `ebnf` and choices to an escaped
-  regex alternation. A new Rust engine should forward whichever variants
-  its backend supports
+  `SamplingOptions::guided_decoding` (`GuidedDecodingOptions`) with
+  JSON schema, regex, grammar, and choice. A new Rust engine should
+  forward whichever variants its backend supports
 - Structural tag generation — `WorkerConfig::structural_tag_{mode,
   scope, schema}` (typed enums)
 - Custom Jinja chat templates — `WorkerConfig::custom_jinja_template`
@@ -964,7 +956,7 @@ Request handling:
 
 | Feature | What's missing |
 |---------|----------------|
-| `cum_log_probs` response wire | Completion-side `log_probs` / `top_logprobs` are populated on the unified path for vLLM, SGLang, and TRT-LLM (shared helpers in `components/src/dynamo/common/backend/logprobs.py`). Prompt-side logprobs ride on the final chunk's `LLMEngineOutput.engine_data["prompt_logprobs"]` (consumed by `prompt_logprobs_from_engine_data` in the response builders). `cum_log_probs` is still not emitted. |
+| `cum_log_probs` response wire | Completion-side `log_probs` / `top_logprobs` are populated on the unified path via shared helpers in `components/src/dynamo/common/backend/logprobs.py`. Prompt-side logprobs ride on the final chunk's `LLMEngineOutput.engine_data["prompt_logprobs"]` (consumed by `prompt_logprobs_from_engine_data` in the response builders). `cum_log_probs` is still not emitted. |
 | Text-in-text-out mode | `ModelInput::Text` is rejected at startup — `Tokens` only |
 | Native Rust multimodal engines | The shared request fields are available, but native Rust engines do not yet implement image, video, embedding transfer, or the `ENCODE` role. |
 | Diffusion | Image (FLUX), video (Wan2.1), LLM diffusion (DLLM) workers; no diffusion engine, MediaOutput, or media scheduling on the unified path |
@@ -1273,7 +1265,7 @@ async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
 
 `worker_id` is an opaque per-worker identifier — most engines ignore
 it with `_worker_id`. Backends needing a stable cluster-wide key
-(e.g. TRT-LLM's `disagg_machine_id` snowflake) should derive from it.
+(e.g. a disaggregation machine ID) should derive from it.
 
 Every `EngineConfig` field except `model` is optional. `None` means
 "don't advertise"; KV-aware routing falls back to round-robin when KV
@@ -1281,7 +1273,7 @@ fields are unset. Engines wrapping an external runtime can read these
 values from the live engine after it comes up, instead of hard-coding
 them. The `..Default::default()` is load-bearing: `EngineConfig`
 sometimes grows new fields (e.g. `bootstrap_host`/`bootstrap_port`
-for SGLang disagg) and the default keeps existing engines compiling.
+for disaggregation) and the default keeps existing engines compiling.
 
 #### Rust: `generate()`
 
@@ -1484,8 +1476,8 @@ scheduler to stop computing for this request).
   `start()` succeeded — even if registration or serve fails afterward.
 
 Make `cleanup()` idempotent and tolerant of being called from a
-half-initialized state. Engines like vLLM/TRT-LLM tear down NCCL groups
-in `cleanup()` and a second attempt can hang.
+half-initialized state. An engine that tears down NCCL groups
+in `cleanup()` can hang on a second attempt.
 
 ### Rust Step 5: Write `main.rs`
 
