@@ -22,11 +22,9 @@ import (
 	"fmt"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -127,9 +125,16 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 		)...)
 	}
 
+	// Validate runtime compatibility against the source-version fields.
 	if v.validatesRuntimeVersionFor(runtimeVersionSourceV1Beta1) {
-		if err := runtimeVersionOverrideError(spec, fldPath); err != nil {
-			allErrs = append(allErrs, err)
+		image, imagePath := runtimeVersionImageAndPath(spec, fldPath)
+		if image == "" {
+			allErrs = append(allErrs, field.Required(imagePath, "is required"))
+		} else if runtimeVersionOverrideRequired(image, spec.RuntimeVersionOverride) {
+			allErrs = append(allErrs, field.Required(
+				fldPath.Child("runtimeVersionOverride"),
+				runtimeVersionOverrideRequiredMessage,
+			))
 		}
 	}
 
@@ -398,6 +403,21 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 			))
 		}
 	}
+
+	// Ratchet an unchanged legacy tuple but reject a missing image or newly invalid tuple.
+	if v.validatesRuntimeVersionFor(runtimeVersionSourceV1Beta1) {
+		newImage, imagePath := runtimeVersionImageAndPath(newComponent, fldPath)
+		oldImage, _ := runtimeVersionImageAndPath(oldComponent, fldPath)
+		if newImage == "" {
+			allErrs = append(allErrs, field.Required(imagePath, "is required"))
+		} else if runtimeVersionOverrideRequired(newImage, newComponent.RuntimeVersionOverride) &&
+			(newImage != oldImage || newComponent.RuntimeVersionOverride != oldComponent.RuntimeVersionOverride) {
+			allErrs = append(allErrs, field.Required(
+				fldPath.Child("runtimeVersionOverride"),
+				runtimeVersionOverrideRequiredMessage,
+			))
+		}
+	}
 	return allErrs
 }
 
@@ -456,29 +476,4 @@ func (v *sharedValidation) validateExperimentalSpecUpdate(
 		))
 	}
 	return allErrs
-}
-
-func runtimeVersionOverrideError(
-	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
-	fldPath *field.Path,
-) *field.Error {
-	overridePath := fldPath.Child("runtimeVersionOverride")
-	image := ""
-	imagePath := fldPath.Child("podTemplate", "spec", "containers")
-	if spec.PodTemplate != nil {
-		if index := containerIndexByName(spec.PodTemplate.Spec.Containers, consts.MainContainerName); index >= 0 {
-			image = spec.PodTemplate.Spec.Containers[index].Image
-			imagePath = imagePath.Index(index).Child("image")
-		}
-	}
-	if image == "" {
-		return field.Required(imagePath, "is required")
-	}
-	if spec.RuntimeVersionOverride != "" {
-		return nil
-	}
-	if _, err := runtimeversion.ParseImageVersion(image); err != nil {
-		return field.Required(overridePath, "is required when the specified main container image has no parseable semantic-version tag")
-	}
-	return nil
 }

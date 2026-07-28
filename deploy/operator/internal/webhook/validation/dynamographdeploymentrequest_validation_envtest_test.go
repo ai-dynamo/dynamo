@@ -23,6 +23,7 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdrutil"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -225,28 +226,41 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			gpuDiscovery: true,
 		},
 		{
-			name:               "legacy custom image without override must be repaired on update",
+			name:               "unchanged legacy custom image without override is ratcheted on update",
 			seedWithoutWebhook: true,
 			oldRequest: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
 				request.Spec.RuntimeVersionOverride = ""
+				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseDeployed
 			}),
 			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
 				request.Spec.RuntimeVersionOverride = ""
+				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseDeployed
 				request.Labels = map[string]string{"updated": "true"}
 			}),
 			gpuDiscovery: true,
-			wantWebhook: []string{
-				"spec.runtimeVersionOverride: Required value: is required when spec.image has no parseable semantic-version tag",
-			},
 		},
 		{
-			name:               "adding runtime version override repairs legacy custom image",
+			name:               "adding runtime version override repairs legacy custom image in immutable phase",
 			seedWithoutWebhook: true,
 			oldRequest: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
 				request.Spec.RuntimeVersionOverride = ""
+				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseDeployed
 			}),
 			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseDeployed
 				request.Labels = map[string]string{"updated": "true"}
+			}),
+			gpuDiscovery: true,
+		},
+		{
+			name:               "runtime version override repair does not require observed fingerprint",
+			seedWithoutWebhook: true,
+			oldRequest: betaDGDRForAdmissionWithoutFingerprint(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.RuntimeVersionOverride = ""
+				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseDeployed
+			}),
+			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseDeployed
 			}),
 			gpuDiscovery: true,
 		},
@@ -257,6 +271,21 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				request.Spec.RuntimeVersionOverride = ""
 			}),
 			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.RuntimeVersionOverride = ""
+			}),
+			gpuDiscovery: true,
+			wantWebhook: []string{
+				"spec.runtimeVersionOverride: Required value: is required when spec.image has no parseable semantic-version tag",
+			},
+		},
+		{
+			name:               "changing a legacy custom image without override is rejected on update",
+			seedWithoutWebhook: true,
+			oldRequest: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.RuntimeVersionOverride = ""
+			}),
+			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.Image = "test-profiler:other-custom"
 				request.Spec.RuntimeVersionOverride = ""
 			}),
 			gpuDiscovery: true,
@@ -348,6 +377,15 @@ func betaDGDRForAdmission(
 	if mutate != nil {
 		mutate(request)
 	}
+	request.Status.ObservedSpecFingerprint, _ = dgdrutil.SpecFingerprint(&request.Spec)
+	return request
+}
+
+func betaDGDRForAdmissionWithoutFingerprint(
+	mutate func(*nvidiacomv1beta1.DynamoGraphDeploymentRequest),
+) *nvidiacomv1beta1.DynamoGraphDeploymentRequest {
+	request := betaDGDRForAdmission(mutate)
+	request.Status.ObservedSpecFingerprint = ""
 	return request
 }
 

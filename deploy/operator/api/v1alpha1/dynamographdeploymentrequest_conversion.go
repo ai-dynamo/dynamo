@@ -1013,6 +1013,7 @@ func saveDGDRHubOnlyStatus(src *v1beta1.DynamoGraphDeploymentRequestStatus, dst 
 	if src == nil || save == nil {
 		return
 	}
+	save.ObservedSpecFingerprint = src.ObservedSpecFingerprint
 	if src.Phase == v1beta1.DGDRPhaseDeployed && dgdrStateToPhase(string(dst.State), dst.Deployment) != src.Phase {
 		save.Phase = src.Phase
 		save.DGDName = src.DGDName
@@ -1035,6 +1036,7 @@ func restoreDGDRHubOnlyStatus(restored *v1beta1.DynamoGraphDeploymentRequestStat
 	if restored == nil || dst == nil {
 		return
 	}
+	dst.ObservedSpecFingerprint = restored.ObservedSpecFingerprint
 	if restored.Phase == v1beta1.DGDRPhaseDeployed &&
 		dst.Phase == v1beta1.DGDRPhaseReady &&
 		src != nil &&

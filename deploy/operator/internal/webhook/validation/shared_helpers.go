@@ -27,8 +27,10 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/epp"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
@@ -38,6 +40,8 @@ const (
 
 	vllmDistributedExecutorBackendMP  = "mp"
 	vllmDistributedExecutorBackendRay = "ray"
+
+	runtimeVersionOverrideRequiredMessage = "is required when the specified main container image has no parseable semantic-version tag"
 )
 
 // runtimeVersionValidationSource identifies the API representation whose field
@@ -47,6 +51,7 @@ type runtimeVersionValidationSource uint8
 const (
 	runtimeVersionSourceV1Beta1 runtimeVersionValidationSource = iota
 	runtimeVersionSourceV1Alpha1
+	runtimeVersionSourceDisabled
 )
 
 // runtimeVersionValidationSourceForRequest uses RequestKind because it preserves
@@ -74,6 +79,46 @@ func runtimeVersionValidationSourceForGVK(gvk schema.GroupVersionKind) runtimeVe
 
 func (v *sharedValidation) validatesRuntimeVersionFor(source runtimeVersionValidationSource) bool {
 	return v.runtimeVersionSource == source
+}
+
+// runtimeVersionImageAndPath returns the main image and its v1beta1 field path.
+// spec and fldPath must not be nil.
+func runtimeVersionImageAndPath(
+	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	fldPath *field.Path,
+) (string, *field.Path) {
+	imagePath := fldPath.Child("podTemplate", "spec", "containers")
+
+	// Resolve the exact container path when the named main container exists.
+	if spec.PodTemplate != nil {
+		if index := containerIndexByName(spec.PodTemplate.Spec.Containers, consts.MainContainerName); index >= 0 {
+			imagePath = imagePath.Index(index).Child("image")
+			return spec.PodTemplate.Spec.Containers[index].Image, imagePath
+		}
+	}
+	return "", imagePath
+}
+
+// runtimeVersionImageAndPathV1Alpha1 returns the main image and its v1alpha1 field path.
+// spec and fldPath must not be nil.
+func runtimeVersionImageAndPathV1Alpha1(
+	spec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec,
+	fldPath *field.Path,
+) (string, *field.Path) {
+	imagePath := fldPath.Child("extraPodSpec", "mainContainer", "image")
+	if spec.ExtraPodSpec != nil && spec.ExtraPodSpec.MainContainer != nil {
+		return spec.ExtraPodSpec.MainContainer.Image, imagePath
+	}
+	return "", imagePath
+}
+
+// runtimeVersionOverrideRequired reports whether image cannot provide a version and override is absent.
+func runtimeVersionOverrideRequired(image, override string) bool {
+	if override != "" {
+		return false
+	}
+	_, err := runtimeversion.ParseImageVersion(image)
+	return err != nil
 }
 
 func hasContainerNamed(containers []corev1.Container, name string) bool {

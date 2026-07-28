@@ -118,7 +118,7 @@ func (h *DynamoComponentDeploymentHandler) validateUpdate(
 	}
 
 	validator := NewDynamoComponentDeploymentValidator()
-	return validator.validateUpdate(ctx, oldDeployment, newDeployment, runtimeVersionValidationSourceForRequest(ctx, expectedGVK))
+	return validator.ValidateUpdate(ctx, oldDeployment, newDeployment, runtimeVersionValidationSourceForRequest(ctx, expectedGVK))
 }
 
 // ValidateDelete validates a DynamoComponentDeployment delete request.

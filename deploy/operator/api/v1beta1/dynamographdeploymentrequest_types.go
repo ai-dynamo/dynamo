@@ -584,6 +584,11 @@ type DynamoGraphDeploymentRequestStatus struct {
 	// ObservedGeneration is the most recent generation observed by the controller.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
+	// ObservedSpecFingerprint identifies the spec associated with ObservedGeneration.
+	// The controller uses it to verify runtimeVersionOverride-only repairs.
+	// +optional
+	ObservedSpecFingerprint string `json:"observedSpecFingerprint,omitempty"`
 }
 
 // DynamoGraphDeploymentRequest is the Schema for the dynamographdeploymentrequests API.

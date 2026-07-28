@@ -9392,6 +9392,11 @@ spec:
                   description: ObservedGeneration is the most recent generation observed by the controller.
                   format: int64
                   type: integer
+                observedSpecFingerprint:
+                  description: |-
+                    ObservedSpecFingerprint identifies the spec associated with ObservedGeneration.
+                    The controller uses it to verify runtimeVersionOverride-only repairs.
+                  type: string
                 phase:
                   description: Phase is the high-level lifecycle phase of the deployment request.
                   enum:

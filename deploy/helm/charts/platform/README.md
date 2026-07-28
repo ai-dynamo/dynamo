@@ -69,11 +69,12 @@ Admission now requires every component's main-container image. In `v1beta1`, set
 required by Dynamo admission, but were effectively required: Kubernetes rejects the rendered Pod
 specification when its main container has no image.
 
-After upgrading the CRDs and operator, admission denies a new DGD, or an update to a pre-existing
-DGD, when a component's main-image tag is not a semantic version and `runtimeVersionOverride` is
-unset. This includes custom and SHA-tagged images. Set `runtimeVersionOverride` to the Dynamo
-runtime compatibility version for that image before creating or updating the DGD. Existing resources
-are not changed or revalidated solely by the upgrade.
+After upgrading the CRDs and operator, admission denies a new DGD, DCD, or DGDR when a component's
+main-image tag is not a semantic version and `runtimeVersionOverride` is unset. This includes custom
+and SHA-tagged images. On updates, this requirement is ratcheted: a pre-existing resource with an
+unchanged non-semantic-version image remains admissible without backfilling the override. Changing
+the image to a non-semantic-version tag requires setting `runtimeVersionOverride` to that image's
+Dynamo runtime compatibility version in the same update.
 
 ### Bundled NATS is now disabled by default
 

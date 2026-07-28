@@ -65,6 +65,30 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecV1alp
 	return allErrs
 }
 
+// validateDynamoGraphDeploymentSpecUpdateV1alpha1 validates source-version runtime fields on update.
+// newSpec, oldSpec, and fldPath must not be nil.
+func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecUpdateV1alpha1(
+	newSpec *nvidiacomv1alpha1.DynamoGraphDeploymentSpec,
+	oldSpec *nvidiacomv1alpha1.DynamoGraphDeploymentSpec,
+	fldPath *field.Path,
+) field.ErrorList {
+	allErrs := field.ErrorList{}
+	servicesPath := fldPath.Child("services")
+	for _, serviceName := range sortedV1Alpha1ServiceNames(newSpec.Services) {
+		newService := newSpec.Services[serviceName]
+		oldService, exists := oldSpec.Services[serviceName]
+		if !exists {
+			continue
+		}
+		allErrs = append(allErrs, v.validateDynamoComponentDeploymentSharedSpecUpdateV1alpha1(
+			newService,
+			oldService,
+			servicesPath.Key(serviceName),
+		)...)
+	}
+	return allErrs
+}
+
 // validatePVCV1alpha1 validates pvc. pvc and fldPath must not be nil.
 func (v *dynamoGraphDeploymentValidation) validatePVCV1alpha1(
 	pvc *nvidiacomv1alpha1.PVC,
