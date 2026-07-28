@@ -1373,6 +1373,10 @@ mod core_behavior {
     #[test]
     fn test_running_request_catches_up_decode_tail_before_promote() {
         let args = MockEngineArgs::builder()
+            // This test exercises the compatibility `G1Manager::process`
+            // entrypoint, which is intentionally KVBM-only. Production
+            // scheduler paths use the owner-aware entrypoint for native G1.
+            .g1_backend(G1Backend::Kvbm)
             .block_size(4)
             .num_gpu_blocks(8)
             .max_num_batched_tokens(Some(8))
@@ -1653,10 +1657,15 @@ mod router_events {
         assert!(pass.kv_events.iter().all(|event| event.event.dp_rank == 0));
     }
 
+    #[rstest]
+    #[case::kvbm(G1Backend::Kvbm)]
+    #[case::native(G1Backend::Native)]
     #[tokio::test]
-    async fn test_completion_events_apply_cleanly() {
+    async fn test_completion_events_apply_cleanly(#[case] backend: G1Backend) {
         let harness = RouterIndexerHarness::new(4, ROUTER_TEST_WORKER_ID);
-        let mut core = VllmCore::new_with_kv_capture(router_args(), ROUTER_TEST_WORKER_ID);
+        let mut args = router_args();
+        args.g1_backend = Some(backend);
+        let mut core = VllmCore::new_with_kv_capture(args, ROUTER_TEST_WORKER_ID);
         core.receive(DirectRequest {
             tokens: (0..8).collect(),
             max_output_tokens: 4,
@@ -1677,7 +1686,7 @@ mod router_events {
             harness.apply_events(pass.kv_events).await;
         }
 
-        assert!(saw_store);
+        assert!(saw_store, "backend={backend:?}");
         assert!(harness.ok_count(METRIC_EVENT_STORED) > 0);
         assert_eq!(core.kv_manager.num_active_blocks(), 0);
         harness.assert_no_event_warnings();
@@ -2865,7 +2874,9 @@ mod offload {
     use uuid::Uuid;
 
     use crate::common::handoff::HandoffId;
-    use crate::common::protocols::{DirectRequest, MockEngineArgs, MoveBlock, WorkerType};
+    use crate::common::protocols::{
+        DirectRequest, G1Backend, MockEngineArgs, MoveBlock, WorkerType,
+    };
     use crate::common::sequence::ActiveSequence;
     use crate::kv_manager::G1Acquire;
     use crate::kvbm_offload::shared_g3::shared_g3_test_guard_blocking;
@@ -2980,6 +2991,7 @@ mod offload {
     #[test]
     fn decode_growth_waits_without_preempting() {
         let args = MockEngineArgs::builder()
+            .g1_backend(G1Backend::Kvbm)
             .num_gpu_blocks(3)
             .block_size(4)
             .max_num_batched_tokens(Some(64))
@@ -3065,6 +3077,7 @@ mod offload {
     #[test]
     fn speculative_decode_reservation_waits_without_preempting() {
         let args = MockEngineArgs::builder()
+            .g1_backend(G1Backend::Kvbm)
             .num_gpu_blocks(5)
             .block_size(4)
             .max_num_batched_tokens(Some(64))
@@ -3146,6 +3159,7 @@ mod offload {
     #[tokio::test]
     async fn execute_pass_ticks_offload_engine_when_attached() {
         let args = MockEngineArgs::builder()
+            .g1_backend(G1Backend::Kvbm)
             .num_gpu_blocks(8)
             .block_size(4)
             .max_num_batched_tokens(Some(64))
@@ -3172,6 +3186,7 @@ mod offload {
     async fn live_destination_eviction_uses_command_application_time() {
         let block_size = 4;
         let args = MockEngineArgs::builder()
+            .g1_backend(G1Backend::Kvbm)
             .num_gpu_blocks(2)
             .block_size(block_size)
             .max_num_batched_tokens(Some(64))
@@ -3289,6 +3304,7 @@ mod offload {
     #[tokio::test]
     async fn ready_swap_ins_drain_on_pass_entry() {
         let args = MockEngineArgs::builder()
+            .g1_backend(G1Backend::Kvbm)
             .num_gpu_blocks(8)
             .block_size(4)
             .max_num_batched_tokens(Some(64))
@@ -3365,6 +3381,7 @@ mod offload {
     #[tokio::test]
     async fn g2_swap_in_reserves_destination_slot_before_transfer() {
         let args = MockEngineArgs::builder()
+            .g1_backend(G1Backend::Kvbm)
             .num_gpu_blocks(1)
             .block_size(4)
             .max_num_batched_tokens(Some(64))
@@ -3446,6 +3463,7 @@ mod offload {
     fn tick_offload_only_completes_g3_staging_before_same_timestamp_admission() {
         let _guard = shared_g3_test_guard_blocking();
         let args = MockEngineArgs::builder()
+            .g1_backend(G1Backend::Kvbm)
             // Use two blocks so the staged hit still has a reusable prefix
             // after vLLM's required final-block recompute.
             .num_gpu_blocks(2)
@@ -3530,6 +3548,7 @@ mod offload {
     async fn partial_g2_swap_in_pins_cached_g1_prefix() {
         let block_size = 4;
         let args = MockEngineArgs::builder()
+            .g1_backend(G1Backend::Kvbm)
             .num_gpu_blocks(3)
             .block_size(block_size)
             .max_num_batched_tokens(Some(64))
@@ -3604,6 +3623,7 @@ mod offload {
     async fn cancel_parked_swap_in_releases_ownership_and_isolates_uuid_reuse() {
         let block_size = 4;
         let args = MockEngineArgs::builder()
+            .g1_backend(G1Backend::Kvbm)
             .num_gpu_blocks(3)
             .block_size(block_size)
             .max_num_batched_tokens(Some(64))
@@ -3755,6 +3775,7 @@ mod offload {
     #[tokio::test]
     async fn completed_swap_ins_reenter_front_preserving_order() {
         let args = MockEngineArgs::builder()
+            .g1_backend(G1Backend::Kvbm)
             .num_gpu_blocks(2)
             .block_size(4)
             .max_num_batched_tokens(Some(64))
@@ -3862,6 +3883,7 @@ mod offload {
         // 4 tokens per block; sequence has 16 tokens → 4 full blocks.
         let block_size = 4;
         let args = MockEngineArgs::builder()
+            .g1_backend(G1Backend::Kvbm)
             .num_gpu_blocks(16)
             .block_size(block_size)
             .max_num_batched_tokens(Some(64))
@@ -3997,6 +4019,7 @@ mod offload {
 
         async fn run_mode() -> ModeReport {
             let args = MockEngineArgs::builder()
+                .g1_backend(G1Backend::Kvbm)
                 .num_gpu_blocks(32)
                 .block_size(BLOCK_SIZE)
                 .max_num_batched_tokens(Some(256))
@@ -4124,6 +4147,7 @@ mod offload {
     fn destination_reservation_retries_after_presence_filtered_offload() {
         let block_size = 4;
         let args = MockEngineArgs::builder()
+            .g1_backend(G1Backend::Kvbm)
             .num_gpu_blocks(2)
             .block_size(block_size)
             .max_num_batched_tokens(Some(64))
