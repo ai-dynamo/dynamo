@@ -1022,11 +1022,23 @@ export interface ReleaseStats {
 
 /* COUNTING RULES — apply these when ingesting a new release so rows stay
    comparable across the two release-note eras:
-   - prs / contributors / firstTimers: use the figure the body states outright
-     ("merged 930 PRs from 125 contributors", "welcome 14 new contributors").
-     Where the body only lists first-timers without a total, count the list.
-     Omit rather than derive: v1.0.0 states commits, not PRs, so prs is absent,
-     and v1.2.0 names no first-timers at all.
+   - prs / contributors: use the figure the body states outright ("merged 930
+     PRs from 125 contributors"). Omit rather than derive: v1.0.0 states
+     commits, not PRs, so prs is absent.
+   - firstTimers: the release-wide figure the body states, or the complete
+     release-wide list it enumerates when it states no figure. Scope and
+     completeness both matter, because the bodies vary: a list confined to
+     external contributors is not a release-wide count, and one introduced with
+     "include" is by its own wording not the whole set. A cell that can only be
+     backed by such a list is absent, not a number — v1.1.0 offers twelve
+     bulleted "first-time external contributors ... include", which is both,
+     so it is absent, and v1.2.0 names no first-timers at all.
+     Bodies are the source for this column, as they are for every other column
+     here. GitHub's own New Contributors lists compute a different quantity —
+     first-ever merged PR anywhere in the repo, over the compare range — and
+     disagree with the hand-written pre-v1.0.0 announcements (11 against the
+     20 and 14 those bodies state). Neither is wrong; they answer different
+     questions. Do not mix them into one column.
    - breaking: top-level entries under Breaking Changes, including its
      Deprecated/Removed subsections, but excluding subsections that only
      restate a prior release's announced deprecations ("vX.Y.Z
@@ -1048,9 +1060,9 @@ export interface ReleaseStats {
    published 930/603/896, missing in both directions, so it cannot be trusted
    to fill the rest. Leave them absent unless a method reproduces all three. */
 export const RELEASE_STATS: Record<string, ReleaseStats> = {
-  "v1.3.0": { prs: 930, contributors: 125, firstTimers: 23, breaking: 24, knownIssues: 10 },
+  "v1.3.0": { prs: 930, contributors: 125, firstTimers: 24, breaking: 24, knownIssues: 10 },
   "v1.2.0": { prs: 603, contributors: 82, breaking: 5, knownIssues: 11 },
-  "v1.1.0": { prs: 896, contributors: 113, firstTimers: 12, breaking: 8, knownIssues: 20 },
+  "v1.1.0": { prs: 896, contributors: 113, breaking: 8, knownIssues: 20 },
   "v1.0.0": { contributors: 90, firstTimers: 34, breaking: 41, knownIssues: 14 },
   "v0.9.0": { firstTimers: 14, breaking: 1, knownIssues: 13 },
   "v0.8.0": { firstTimers: 20, breaking: 0, knownIssues: 14 },

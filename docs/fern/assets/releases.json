@@ -1786,7 +1786,7 @@
     "v1.3.0": {
       "prs": 930,
       "contributors": 125,
-      "firstTimers": 23,
+      "firstTimers": 24,
       "breaking": 24,
       "knownIssues": 10
     },
@@ -1799,7 +1799,6 @@
     "v1.1.0": {
       "prs": 896,
       "contributors": 113,
-      "firstTimers": 12,
       "breaking": 8,
       "knownIssues": 20
     },

@@ -781,6 +781,13 @@ def render_release_stats(data: dict) -> str:
             "## Release statistics",
             "Counts taken from each release's GitHub body. A dash means the "
             "count was not recorded for that release, not that it was zero.",
+            "The pre-v1.0.0 bodies predate the current release-note template "
+            "and state no PR or contributor totals, so those cells stay empty: "
+            "the figures were never published, and the counts recoverable from "
+            "the archive and from git disagree with each other and with the "
+            "totals the later bodies state. First-time contributors are "
+            "counted release-wide; a release whose body lists only its "
+            "external first-timers is left empty rather than undercounted.",
             release_stats_table(data),
         ]
     )
