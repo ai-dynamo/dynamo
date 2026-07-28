@@ -614,7 +614,7 @@ where
                 usize::try_from(target_cached_prefix_blocks).unwrap_or(usize::MAX);
             let (source, block_hashes) =
                 candidates.best_source(prefix_blocks_to_beat, |worker| {
-                    worker.worker_id != target.worker_id
+                    worker != target
                         && configs.get(&worker.worker_id).is_some_and(|config| {
                             config.supports_router_hints()
                                 && config
@@ -1889,7 +1889,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn router_hint_excludes_other_dp_ranks_of_selected_target_worker() {
+    async fn router_hint_allows_other_dp_ranks_of_selected_target_worker() {
         let mut workers = HashMap::new();
         workers.insert(7, router_hint_runtime_config(Some("tcp://127.0.0.1:23280")));
         let router = make_test_router_with_workers(
@@ -1912,7 +1912,16 @@ mod tests {
         let hint =
             router.router_hint_for_selection(WorkerWithDpRank::new(7, 0), 0, Some(&candidates));
 
-        assert_eq!(hint, None);
+        assert_eq!(
+            hint,
+            Some(RouterHint {
+                source_control_endpoint: "tcp://127.0.0.1:23280".to_string(),
+                block_hashes: vec![
+                    ExternalSequenceBlockHash(101),
+                    ExternalSequenceBlockHash(102)
+                ],
+            })
+        );
     }
 
     #[tokio::test]
