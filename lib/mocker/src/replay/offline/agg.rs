@@ -1120,7 +1120,7 @@ mod tests {
         run_trace_workload_multi_collect_with_stats, run_trace_workload_single_collect,
     };
     use super::*;
-    use crate::common::protocols::{EngineType, SglangArgs};
+    use crate::common::protocols::{EngineType, G1Backend, SglangArgs};
     use crate::loadgen::{AgenticTrace, AgenticTurnTrace, SessionTrace, Trace, TurnTrace};
     use crate::replay::offline::extensions::kv_router::{ReplayKvRouterConfig, RouterQueuePolicy};
     use crate::replay::{TraceRequestStatsSnapshot, normalize_trace_requests};
@@ -2058,7 +2058,9 @@ mod tests {
     #[test]
     fn test_multi_worker_trace_kv_router_debug_snapshot_tracks_queue_and_cached_dispatch() {
         let policy = RouterQueuePolicy::Fcfs;
-        let args = queueing_router_args(policy);
+        let mut args = queueing_router_args(policy);
+        // Preserve this snapshot's historical KVBM event-visibility semantics.
+        args.g1_backend = Some(G1Backend::Kvbm);
         let mut runtime = AggRuntime::new(
             &args,
             Some(queueing_router_config(policy)),
