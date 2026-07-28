@@ -31,8 +31,8 @@ def test_token_budget_matches_trtllm_policy():
     assert key == TOKEN_BUDGET_RUNTIME_KEY
     assert json.loads(value) == {
         "combined_limit": 4096,
-        "output_overflow": "clamp",
-        "prompt_overflow": "reject",
+        "reject_prompt_overflow": True,
+        "reject_total_overflow": False,
     }
 
 

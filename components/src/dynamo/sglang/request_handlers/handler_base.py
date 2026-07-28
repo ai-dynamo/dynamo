@@ -415,9 +415,7 @@ class LoraMixin:
                             # Reuse the base-model metadata builder so LoRA
                             # cards advertise the same token-overflow policy,
                             # parser configuration, and routing capabilities.
-                            # Keep this import lazy because the repository's
-                            # static test-collection environment intentionally
-                            # lacks parts of SGLang imported by register.py.
+                            # Lazy import: static test collection lacks parts of SGLang.
                             from dynamo.sglang.register import get_runtime_config
 
                             runtime_config = await get_runtime_config(

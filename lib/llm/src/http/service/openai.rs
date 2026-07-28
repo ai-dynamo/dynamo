@@ -121,6 +121,8 @@ pub(crate) struct ErrorMessage {
     code: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
     details: Option<Box<serde_json::Value>>,
+    #[serde(skip)]
+    metric_error_type: Option<ErrorType>,
 }
 
 fn map_error_code_to_error_type(code: StatusCode) -> String {
@@ -159,7 +161,11 @@ fn classify_error_for_metrics(code: StatusCode, message: &str) -> ErrorType {
 
 /// Extract ErrorType from ErrorResponse for metrics
 fn extract_error_type_from_response(response: &ErrorResponse) -> ErrorType {
-    classify_error_for_metrics(response.0, &response.1.message)
+    response
+        .1
+        .metric_error_type
+        .clone()
+        .unwrap_or_else(|| classify_error_for_metrics(response.0, &response.1.message))
 }
 
 /// Match `InvalidArgument` at top-level OR under `Backend()`.
@@ -211,6 +217,7 @@ impl ErrorMessage {
                 error_type,
                 code: code.as_u16(),
                 details: None,
+                metric_error_type: None,
             }),
         )
     }
@@ -243,6 +250,7 @@ impl ErrorMessage {
                 error_type,
                 code: code.as_u16(),
                 details: None,
+                metric_error_type: None,
             }),
         )
     }
@@ -260,6 +268,7 @@ impl ErrorMessage {
                 error_type,
                 code: code.as_u16(),
                 details: None,
+                metric_error_type: None,
             }),
         )
     }
@@ -279,6 +288,7 @@ impl ErrorMessage {
                 error_type,
                 code: code.as_u16(),
                 details: None,
+                metric_error_type: None,
             }),
         )
     }
@@ -302,6 +312,7 @@ impl ErrorMessage {
                 error_type,
                 code: code.as_u16(),
                 details: None,
+                metric_error_type: None,
             }),
         )
     }
@@ -328,6 +339,7 @@ impl ErrorMessage {
                 error_type: map_error_code_to_error_type(status),
                 code: status.as_u16(),
                 details: None,
+                metric_error_type: None,
             }),
         )
     }
@@ -346,6 +358,7 @@ impl ErrorMessage {
                 error_type,
                 code: code.as_u16(),
                 details: None,
+                metric_error_type: None,
             }),
         )
     }
@@ -360,6 +373,7 @@ impl ErrorMessage {
                 error_type,
                 code: code.as_u16(),
                 details: None,
+                metric_error_type: None,
             }),
         )
     }
@@ -378,6 +392,7 @@ impl ErrorMessage {
                     error_type: map_error_code_to_error_type(code),
                     code: code.as_u16(),
                     details: serde_json::to_value(rejection).ok().map(Box::new),
+                    metric_error_type: None,
                 }),
             );
         }
@@ -403,10 +418,11 @@ impl ErrorMessage {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorMessage {
-                    message: format!("{VALIDATION_PREFIX}{}", dynamo_err.message()),
+                    message: dynamo_err.message().to_string(),
                     error_type: map_error_code_to_error_type(StatusCode::BAD_REQUEST),
                     code: StatusCode::BAD_REQUEST.as_u16(),
                     details: None,
+                    metric_error_type: Some(ErrorType::Validation),
                 }),
             );
         }
@@ -449,6 +465,7 @@ impl ErrorMessage {
                     error_type: map_error_code_to_error_type(code),
                     code: code.as_u16(),
                     details: None,
+                    metric_error_type: None,
                 }),
             ),
             Err(_) => ErrorMessage::sanitized_with_details(SanitizedError::Internal, err.message),
@@ -465,6 +482,7 @@ impl From<HttpError> for ErrorMessage {
             ),
             code: err.code,
             details: None,
+            metric_error_type: None,
         }
     }
 }
@@ -488,6 +506,7 @@ pub async fn smart_json_error_middleware(request: Request<Body>, next: Next) -> 
                 error_type: map_error_code_to_error_type(StatusCode::BAD_REQUEST),
                 code: StatusCode::BAD_REQUEST.as_u16(),
                 details: None,
+                metric_error_type: None,
             }),
         )
             .into_response()
@@ -1468,6 +1487,7 @@ fn json_deserialize_error(error: serde_json::Error) -> ErrorResponse {
             error_type: map_error_code_to_error_type(code),
             code: code.as_u16(),
             details: None,
+            metric_error_type: None,
         }),
     )
 }
@@ -1496,6 +1516,7 @@ fn unsupported_media_type_error() -> ErrorResponse {
             error_type: map_error_code_to_error_type(code),
             code: code.as_u16(),
             details: None,
+            metric_error_type: None,
         }),
     )
 }
@@ -1726,6 +1747,7 @@ pub(super) async fn check_for_backend_error(
                         error_type: map_error_code_to_error_type(status_code),
                         code: status_code.as_u16(),
                         details: None,
+                        metric_error_type: None,
                     }),
                 ),
             });
@@ -3233,6 +3255,7 @@ async fn images_edits(
                 error_type: map_error_code_to_error_type(code),
                 code: code.as_u16(),
                 details: None,
+                metric_error_type: None,
             }),
         ));
     }

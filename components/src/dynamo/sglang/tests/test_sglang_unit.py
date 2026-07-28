@@ -1184,8 +1184,8 @@ async def test_lora_registration_model_type_gate(
     lora_runtime_config = SimpleNamespace(
         runtime_data={
             "token_budget": (
-                '{"combined_limit":4096,"output_overflow":"reject",'
-                '"prompt_overflow":"reject"}'
+                '{"combined_limit":4096,"reject_prompt_overflow":true,'
+                '"reject_total_overflow":true}'
             )
         }
     )

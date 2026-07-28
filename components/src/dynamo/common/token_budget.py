@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from enum import Enum
 from typing import Any
 
 # Must match `TOKEN_BUDGET_RUNTIME_KEY` in
@@ -13,23 +12,17 @@ from typing import Any
 TOKEN_BUDGET_RUNTIME_KEY = "token_budget"
 
 
-class OutputOverflow(str, Enum):
-    REJECT = "reject"
-    CLAMP = "clamp"
-    BACKEND = "backend"
-
-
-class PromptOverflow(str, Enum):
-    REJECT = "reject"
-    TRUNCATE = "truncate"
-    BACKEND = "backend"
-
-
 @dataclass(frozen=True)
 class TokenBudget:
+    """Advertise which token-overflow requests the frontend may reject early.
+
+    A false flag delegates that overflow dimension to the backend. The backend
+    remains responsible for any clamping, truncation, or rejection after that.
+    """
+
     combined_limit: int
-    output_overflow: OutputOverflow
-    prompt_overflow: PromptOverflow
+    reject_prompt_overflow: bool
+    reject_total_overflow: bool
 
     def __post_init__(self) -> None:
         if self.combined_limit < 0:
@@ -43,8 +36,8 @@ def publish_token_budget(runtime_config: Any, token_budget: TokenBudget) -> None
         json.dumps(
             {
                 "combined_limit": token_budget.combined_limit,
-                "output_overflow": token_budget.output_overflow.value,
-                "prompt_overflow": token_budget.prompt_overflow.value,
+                "reject_prompt_overflow": token_budget.reject_prompt_overflow,
+                "reject_total_overflow": token_budget.reject_total_overflow,
             }
         ),
     )

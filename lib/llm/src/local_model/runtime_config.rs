@@ -23,32 +23,18 @@ pub const TOPOLOGY_TAINT_PREFIX: &str = "dynamo.topology/";
 /// Runtime-data key for an engine-published token-overflow contract.
 pub const TOKEN_BUDGET_RUNTIME_KEY: &str = "token_budget";
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum OutputOverflow {
-    Reject,
-    Clamp,
-    Backend,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum PromptOverflow {
-    Reject,
-    Truncate,
-    Backend,
-}
-
-/// Describes the request-token limit enforced by an engine and how that engine
-/// handles each kind of overflow.
+/// Describes which request-token overflows the frontend may reject early.
 ///
-/// The combined limit already accounts for engine-reserved tokens. `Backend`
-/// means the frontend cannot safely reproduce the behavior and must defer.
+/// The combined limit already accounts for engine-reserved tokens. A false
+/// flag delegates that overflow dimension to the backend, which remains
+/// responsible for any clamping, truncation, or rejection.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TokenBudget {
     pub combined_limit: u32,
-    pub output_overflow: OutputOverflow,
-    pub prompt_overflow: PromptOverflow,
+    #[serde(default)]
+    pub reject_prompt_overflow: bool,
+    #[serde(default)]
+    pub reject_total_overflow: bool,
 }
 
 /// Canonical worker-taint form for topology metadata.

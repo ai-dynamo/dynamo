@@ -86,7 +86,7 @@ from dynamo.vllm.kv_connector_protocols import (
 
 from .args import Config
 from .cache_info import get_configured_kv_event_block_size
-from .capacity import set_vllm_token_budget
+from .capacity import publish_vllm_token_budget
 from .constants import DisaggregationMode, EmbeddingTransferMode
 from .engine_monitor import VllmEngineMonitor
 from .multimodal_utils.async_vision_encoder import AsyncVisionEncoder
@@ -2241,7 +2241,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
                             runtime_config = ModelRuntimeConfig()
                             runtime_config.context_length = self.model_max_len
-                            set_vllm_token_budget(runtime_config, self.model_max_len)
+                            publish_vllm_token_budget(
+                                runtime_config, self.model_max_len
+                            )
                             runtime_config.kv_event_publishing_enabled = (
                                 self.config.use_kv_events
                             )

@@ -96,8 +96,8 @@ async def test_prefill_load_records_and_publishes_without_eager_engine_add(
     assert runtime_config.context_length == 8192
     assert json.loads(runtime_config.runtime_data["token_budget"]) == {
         "combined_limit": 8192,
-        "output_overflow": "reject",
-        "prompt_overflow": "reject",
+        "reject_prompt_overflow": True,
+        "reject_total_overflow": True,
     }
     assert runtime_config.kv_event_publishing_enabled is True
     # The adapter card must carry the engine-actual main-attention block size,

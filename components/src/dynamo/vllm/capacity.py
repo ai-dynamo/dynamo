@@ -7,17 +7,12 @@ import json
 import logging
 from typing import Any
 
-from dynamo.common.token_budget import (
-    OutputOverflow,
-    PromptOverflow,
-    TokenBudget,
-    publish_token_budget,
-)
+from dynamo.common.token_budget import TokenBudget, publish_token_budget
 
 logger = logging.getLogger(__name__)
 
 
-def set_vllm_token_budget(runtime_config: Any, max_model_len: int | None) -> None:
+def publish_vllm_token_budget(runtime_config: Any, max_model_len: int | None) -> None:
     """Publish vLLM's request-overflow contract to the Dynamo frontend."""
     if max_model_len is None:
         return
@@ -25,8 +20,8 @@ def set_vllm_token_budget(runtime_config: Any, max_model_len: int | None) -> Non
         runtime_config,
         TokenBudget(
             combined_limit=max_model_len,
-            output_overflow=OutputOverflow.REJECT,
-            prompt_overflow=PromptOverflow.REJECT,
+            reject_prompt_overflow=True,
+            reject_total_overflow=True,
         ),
     )
 

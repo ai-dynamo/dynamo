@@ -540,10 +540,7 @@ async fn test_http_service() {
     );
     let body: serde_json::Value = response.json().await.unwrap();
     assert_eq!(body["code"], StatusCode::BAD_REQUEST.as_u16());
-    assert_eq!(
-        body["message"],
-        "Validation: request exceeds strict token budget"
-    );
+    assert_eq!(body["message"], "request exceeds strict token budget");
     compare_counter(
         &metrics,
         "invalid-argument",

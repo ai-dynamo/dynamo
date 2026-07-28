@@ -14,7 +14,6 @@ import pytest
 import requests
 import yaml
 
-from dynamo.common.token_budget import OutputOverflow, PromptOverflow
 from tests.serve.common import WORKSPACE_DIR, managed_serve_deployment
 from tests.utils.constants import DynamoPortRange
 from tests.utils.engine_process import EngineConfig
@@ -30,8 +29,8 @@ CONTEXT_LIMIT = 128
 class BackendParitySpec:
     framework: str
     mode: str
-    output_overflow: OutputOverflow
-    prompt_overflow: PromptOverflow
+    reject_prompt_overflow: bool
+    reject_total_overflow: bool
     prompt_reject_after_headers: bool = False
 
     @property
@@ -68,8 +67,8 @@ PARITY_SPECS = (
         BackendParitySpec(
             "vllm",
             "default",
-            OutputOverflow.REJECT,
-            PromptOverflow.REJECT,
+            reject_prompt_overflow=True,
+            reject_total_overflow=True,
         ),
         id="vllm-default",
         marks=[
@@ -82,8 +81,8 @@ PARITY_SPECS = (
         BackendParitySpec(
             "sglang",
             "default",
-            OutputOverflow.REJECT,
-            PromptOverflow.REJECT,
+            reject_prompt_overflow=True,
+            reject_total_overflow=True,
         ),
         id="sglang-default",
         marks=[
@@ -96,8 +95,8 @@ PARITY_SPECS = (
         BackendParitySpec(
             "sglang",
             "auto-truncate",
-            OutputOverflow.CLAMP,
-            PromptOverflow.TRUNCATE,
+            reject_prompt_overflow=False,
+            reject_total_overflow=False,
         ),
         id="sglang-auto-truncate",
         marks=[
@@ -110,8 +109,8 @@ PARITY_SPECS = (
         BackendParitySpec(
             "trtllm",
             "default",
-            OutputOverflow.CLAMP,
-            PromptOverflow.REJECT,
+            reject_prompt_overflow=True,
+            reject_total_overflow=False,
             prompt_reject_after_headers=True,
         ),
         id="trtllm-default",
@@ -366,9 +365,9 @@ def _parse_usage(body: dict | None) -> TokenUsage | None:
 
 def _is_rejected(spec: BackendParitySpec, case: RequestCase) -> bool:
     if case.name == "output-overflow":
-        return spec.output_overflow is OutputOverflow.REJECT
+        return spec.reject_total_overflow
     if case.name == "prompt-overflow":
-        return spec.prompt_overflow is PromptOverflow.REJECT
+        return spec.reject_prompt_overflow
     return False
 
 
@@ -438,13 +437,11 @@ def _assert_outcome_semantics(
     assert usage.total_tokens <= CONTEXT_LIMIT
 
     if case.name == "output-overflow":
-        assert spec.output_overflow is OutputOverflow.CLAMP
         assert 0 < usage.completion_tokens < case.max_tokens, (
             "Output-overflow request was accepted but max_tokens was not "
             f"observably clamped: {usage}"
         )
     elif case.name == "prompt-overflow":
-        assert spec.prompt_overflow is PromptOverflow.TRUNCATE
         assert usage.prompt_tokens < CONTEXT_LIMIT, (
             "Prompt-overflow request was accepted but the prompt was not "
             f"observably truncated: {usage}"

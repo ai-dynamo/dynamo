@@ -7,12 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from dynamo.common.token_budget import (
-    TOKEN_BUDGET_RUNTIME_KEY,
-    OutputOverflow,
-    PromptOverflow,
-    TokenBudget,
-)
+from dynamo.common.token_budget import TOKEN_BUDGET_RUNTIME_KEY, TokenBudget
 from dynamo.sglang.capacity import (
     get_hicache_native_offloading_capacity,
     get_spec_decode_runtime_data,
@@ -89,32 +84,20 @@ def test_eagle_enabled_for_speculative_algorithm(speculative_algorithm, expected
         (
             False,
             True,
-            0,
-            TokenBudget(256, OutputOverflow.REJECT, PromptOverflow.REJECT),
-        ),
-        (
-            False,
-            True,
             4,
-            TokenBudget(252, OutputOverflow.REJECT, PromptOverflow.REJECT),
+            TokenBudget(252, True, True),
         ),
         (
             True,
             True,
             0,
-            TokenBudget(256, OutputOverflow.CLAMP, PromptOverflow.TRUNCATE),
+            TokenBudget(256, False, False),
         ),
         (
             False,
             False,
             0,
-            TokenBudget(256, OutputOverflow.BACKEND, PromptOverflow.REJECT),
-        ),
-        (
-            True,
-            False,
-            300,
-            TokenBudget(0, OutputOverflow.BACKEND, PromptOverflow.TRUNCATE),
+            TokenBudget(256, True, False),
         ),
     ],
 )
@@ -294,8 +277,8 @@ async def test_hicache_publish_failure_preserves_core_capacity(monkeypatch, capl
     assert runtime_config.max_num_batched_tokens == 1024
     assert json.loads(runtime_config.runtime_data[TOKEN_BUDGET_RUNTIME_KEY]) == {
         "combined_limit": 4092,
-        "output_overflow": "reject",
-        "prompt_overflow": "reject",
+        "reject_prompt_overflow": True,
+        "reject_total_overflow": True,
     }
     assert (
         "Failed to attach native offloading capacity from SGLang HiCache" in caplog.text

@@ -14,12 +14,7 @@ from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 
 from dynamo._core import Endpoint
 from dynamo.common.native_offloading import NATIVE_OFFLOADING_CAPACITY_RUNTIME_KEY
-from dynamo.common.token_budget import (
-    OutputOverflow,
-    PromptOverflow,
-    TokenBudget,
-    publish_token_budget,
-)
+from dynamo.common.token_budget import TokenBudget, publish_token_budget
 from dynamo.common.utils.output_modalities import get_output_modalities
 from dynamo.common.utils.topology import apply_topology_config
 from dynamo.llm import (
@@ -189,14 +184,12 @@ async def _register_model_with_runtime_config(
 
 
 def _get_bootstrap_info_for_config(
-    engine: Optional[sgl.Engine],
+    engine: sgl.Engine,
 ) -> tuple[Optional[str], Optional[int]]:
     """Thin wrapper for the shared `_disagg.compute_bootstrap_address`,
     kept for source-compat with this module's callers."""
     from dynamo.sglang._disagg import compute_bootstrap_address
 
-    if engine is None:
-        return None, None
     return compute_bootstrap_address(engine)
 
 
@@ -356,37 +349,20 @@ def _eagle_enabled_for(speculative_algorithm: Optional[str]) -> bool:
         return False
 
 
-def _get_token_budget(
-    engine: Optional[sgl.Engine], server_args: ServerArgs
-) -> Optional[TokenBudget]:
-    """Describe SGLang's request-overflow behavior.
-
-    Multimodal encode workers do not own a tokenizer manager, so they cannot
-    publish this text-generation policy. ``num_reserved_tokens`` covers
-    speculative draft-token space.
-    """
-    if engine is None:
-        return None
+def _get_token_budget(engine: sgl.Engine, server_args: ServerArgs) -> TokenBudget:
+    """Describe SGLang's request-overflow behavior."""
     tokenizer_manager = engine.tokenizer_manager
 
-    prompt_overflow = (
-        PromptOverflow.TRUNCATE
-        if server_args.allow_auto_truncate
-        else PromptOverflow.REJECT
-    )
-    if not tokenizer_manager.validate_total_tokens:
-        output_overflow = OutputOverflow.BACKEND
-    elif server_args.allow_auto_truncate:
-        output_overflow = OutputOverflow.CLAMP
-    else:
-        output_overflow = OutputOverflow.REJECT
-
     return TokenBudget(
+        # Speculative decoding reserves draft-token space inside context_len.
         combined_limit=max(
             0, tokenizer_manager.context_len - tokenizer_manager.num_reserved_tokens
         ),
-        output_overflow=output_overflow,
-        prompt_overflow=prompt_overflow,
+        reject_prompt_overflow=not server_args.allow_auto_truncate,
+        reject_total_overflow=(
+            tokenizer_manager.validate_total_tokens
+            and not server_args.allow_auto_truncate
+        ),
     )
 
 
@@ -408,9 +384,10 @@ async def get_runtime_config(
     runtime_config = ModelRuntimeConfig()
     runtime_config.kv_state_endpoint = dynamo_args.kv_state_endpoint
     runtime_config.context_length = server_args.context_length
-    token_budget = _get_token_budget(engine, server_args)
-    if token_budget is not None:
-        publish_token_budget(runtime_config, token_budget)
+    # Multimodal encode workers have no tokenizer manager and delegate
+    # generation overflow handling to their downstream backend.
+    if engine is not None:
+        publish_token_budget(runtime_config, _get_token_budget(engine, server_args))
     # set reasoning parser and tool call parser
     runtime_config.reasoning_parser = dynamo_args.dyn_reasoning_parser
     runtime_config.tool_call_parser = dynamo_args.dyn_tool_call_parser
@@ -461,7 +438,9 @@ async def get_runtime_config(
     apply_topology_config(runtime_config)
 
     # Set bootstrap endpoint for disaggregated serving (prefill workers)
-    bootstrap_host, bootstrap_port = _get_bootstrap_info_for_config(engine)
+    bootstrap_host, bootstrap_port = (
+        _get_bootstrap_info_for_config(engine) if engine is not None else (None, None)
+    )
     if bootstrap_host and bootstrap_port:
         runtime_config.set_disaggregated_endpoint(bootstrap_host, bootstrap_port)
         logging.info(

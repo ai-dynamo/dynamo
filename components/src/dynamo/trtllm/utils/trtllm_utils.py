@@ -7,12 +7,7 @@ import logging
 from collections.abc import Mapping
 from typing import Any
 
-from dynamo.common.token_budget import (
-    OutputOverflow,
-    PromptOverflow,
-    TokenBudget,
-    publish_token_budget,
-)
+from dynamo.common.token_budget import TokenBudget, publish_token_budget
 
 
 def publish_trtllm_token_budget(runtime_config: Any, max_seq_len: int) -> None:
@@ -21,8 +16,8 @@ def publish_trtllm_token_budget(runtime_config: Any, max_seq_len: int) -> None:
         runtime_config,
         TokenBudget(
             combined_limit=max_seq_len,
-            output_overflow=OutputOverflow.CLAMP,
-            prompt_overflow=PromptOverflow.REJECT,
+            reject_prompt_overflow=True,
+            reject_total_overflow=False,
         ),
     )
 
