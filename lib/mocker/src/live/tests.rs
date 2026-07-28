@@ -1,8 +1,27 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::time::Duration;
+
 use super::*;
 use crate::common::protocols::EngineType;
+use dynamo_kv_router::protocols::StorageTier;
+
+struct NoopKvSink;
+
+impl crate::common::protocols::KvCacheEventSink for NoopKvSink {
+    fn publish(&self, _event: dynamo_kv_router::protocols::KvCacheEvent) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn publish_with_storage_tier(
+        &self,
+        _event: dynamo_kv_router::protocols::KvCacheEvent,
+        _storage_tier: StorageTier,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
 
 fn args(engine_type: EngineType) -> MockEngineArgs {
     MockEngineArgs::builder()
@@ -357,4 +376,169 @@ async fn dispatcher_exit_shuts_down_the_engine_and_closes_streams() {
         .expect("dispatcher failure should stop new submissions");
     assert!(error.to_string().contains("not running"));
     assert_eq!(engine.active_request_count(), 0);
+}
+
+#[tokio::test]
+async fn ordered_lane_forwards_admission_before_releasing_output() {
+    let (gate_tx, gate_rx) = watch::channel(false);
+    let (admission_tx, mut admission_rx) = mpsc::unbounded_channel();
+    let engine = LiveEngine::start_internal(
+        args(EngineType::Vllm),
+        0,
+        LiveEngineOptions {
+            admission_tx: Some(admission_tx),
+            ..LiveEngineOptions::default()
+        },
+        Some(gate_rx),
+    )
+    .unwrap();
+    let uuid = Uuid::from_u128(20);
+    let mut request = engine
+        .submit(DirectRequest {
+            tokens: vec![1, 2, 3],
+            max_output_tokens: 1,
+            output_token_ids: Some(vec![9]),
+            uuid: Some(uuid),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let admission = admission_rx.recv().await.unwrap();
+    assert_eq!(admission.event.uuid, uuid);
+    gate_tx.send(true).unwrap();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while request.rx.is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("output should reach its request stream");
+    let after_dispatch = tokio::time::Instant::now();
+    let observed = request.recv_observed().await.unwrap();
+    assert!(observed.observed_at <= after_dispatch);
+    assert_eq!(observed.event.uuid, uuid);
+    assert!(observed.event.completed);
+    engine.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn replay_options_allow_zero_output_and_full_response_buffering() {
+    let zero_engine = LiveEngine::start_with_options(
+        args(EngineType::Sglang),
+        0,
+        LiveEngineOptions {
+            request_output_capacity: None,
+            allow_zero_output: true,
+            ..LiveEngineOptions::default()
+        },
+    )
+    .unwrap();
+    let mut zero = zero_engine
+        .submit(DirectRequest {
+            tokens: vec![1, 2, 3],
+            max_output_tokens: 0,
+            uuid: Some(Uuid::from_u128(21)),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let terminal = zero.recv().await.unwrap();
+    assert!(terminal.completed);
+    assert_eq!(terminal.token_id, None);
+    zero_engine.shutdown().await.unwrap();
+
+    let buffered_engine = LiveEngine::start_with_options(
+        args(EngineType::Vllm),
+        0,
+        LiveEngineOptions {
+            request_output_capacity: None,
+            allow_zero_output: true,
+            ..LiveEngineOptions::default()
+        },
+    )
+    .unwrap();
+    let mut buffered = buffered_engine
+        .submit(DirectRequest {
+            tokens: vec![4, 5, 6],
+            max_output_tokens: 32,
+            output_token_ids: Some(vec![7; 32]),
+            uuid: Some(Uuid::from_u128(22)),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while buffered_engine.active_request_count() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the full response should buffer without a receiver draining it");
+    let mut output_count = 0;
+    let mut saw_terminal = false;
+    while let Some(output) = buffered.recv().await {
+        output_count += usize::from(output.token_id.is_some());
+        if output.completed {
+            saw_terminal = true;
+            break;
+        }
+    }
+    assert_eq!(output_count, 32);
+    assert!(saw_terminal);
+    assert_eq!(buffered_engine.active_request_count(), 0);
+    buffered_engine.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn shutdown_waits_for_scheduler_owned_publishers_to_drop() {
+    let sink: Arc<dyn crate::common::protocols::KvCacheEventSink> = Arc::new(NoopKvSink);
+    let sink_weak = Arc::downgrade(&sink);
+    let engine = LiveEngine::start_with_options(
+        args(EngineType::Vllm),
+        0,
+        LiveEngineOptions {
+            kv_event_publishers: KvEventPublishers::new(Some(sink), None),
+            ..LiveEngineOptions::default()
+        },
+    )
+    .unwrap();
+
+    engine.shutdown().await.unwrap();
+    assert!(
+        sink_weak.upgrade().is_none(),
+        "scheduler publisher must be destroyed before shutdown resolves"
+    );
+}
+
+#[tokio::test]
+async fn shutdown_surfaces_admission_forwarding_failure() {
+    let (admission_tx, admission_rx) = mpsc::unbounded_channel();
+    drop(admission_rx);
+    let engine = LiveEngine::start_with_options(
+        args(EngineType::Vllm),
+        0,
+        LiveEngineOptions {
+            admission_tx: Some(admission_tx),
+            ..LiveEngineOptions::default()
+        },
+    )
+    .unwrap();
+    let submitted = engine
+        .submit(DirectRequest {
+            tokens: vec![1, 2, 3],
+            max_output_tokens: 2,
+            uuid: Some(Uuid::from_u128(23)),
+            ..Default::default()
+        })
+        .await;
+    if let Ok(mut request) = submitted {
+        while request.recv().await.is_some() {}
+    }
+
+    let error = engine.shutdown().await.unwrap_err();
+    assert!(
+        format!("{error:#}").contains("admission receiver closed"),
+        "{error:#}"
+    );
 }
