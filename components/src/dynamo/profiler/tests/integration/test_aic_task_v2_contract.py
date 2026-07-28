@@ -51,13 +51,21 @@ def test_rapid_task_v2_build_and_execute_contract() -> None:
     agg.agg_moe_ep_candidates = [1]
     agg.agg_cp_candidates = [1]
 
-    chosen, best_configs, pareto_fronts, throughputs, latencies = _execute_tasks(
+    (
+        chosen,
+        best_configs,
+        pareto_fronts,
+        throughputs,
+        latencies,
+        outcomes,
+    ) = _execute_tasks(
         {"agg": agg},
         mode="default",
         top_n=1,
     )
 
     assert chosen == "agg"
+    assert outcomes["agg"].error is None
     assert not best_configs["agg"].empty
     assert not pareto_fronts["agg"].empty
     assert throughputs["agg"] > 0.0

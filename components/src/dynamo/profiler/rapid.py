@@ -293,7 +293,7 @@ def _run_default_sim(
         load_kwargs["target_concurrency"] = dgdr.workload.concurrency
         load_kwargs["max_total_gpus"] = total_gpus
 
-    chosen, best_configs, _, _, best_latencies_map = _execute_tasks(
+    chosen, best_configs, _, _, best_latencies_map, _ = _execute_tasks(
         task_configs,
         mode="default",
         top_n=5,
