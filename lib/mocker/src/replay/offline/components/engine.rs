@@ -49,10 +49,6 @@ where
     ready_groups: BTreeSet<usize>,
     /// Ready groups that made no observable progress during the prior drive.
     deferred_ready_groups: BTreeSet<usize>,
-    /// Counter for generating the next stable scheduler ID.
-    next_id: usize,
-    /// Counter for generating the next stable mocker worker ID.
-    next_worker_id: usize,
     /// Mocker workers marked for removal — skipped by round-robin, removed when drained.
     pending_removal: BTreeSet<usize>,
     /// Mocker workers still starting up — excluded from active set until ready.
@@ -91,8 +87,6 @@ where
             live_group_count: count,
             ready_groups: BTreeSet::new(),
             deferred_ready_groups: BTreeSet::new(),
-            next_id: count,
-            next_worker_id: count,
             pending_removal: BTreeSet::new(),
             pending_startup: BTreeSet::new(),
             args: MockEngineArgs::default(),
@@ -139,8 +133,6 @@ where
             live_group_count: num_workers,
             ready_groups: BTreeSet::new(),
             deferred_ready_groups: BTreeSet::new(),
-            next_id: num_workers.saturating_mul(dp_size),
-            next_worker_id: num_workers,
             pending_removal: BTreeSet::new(),
             pending_startup: BTreeSet::new(),
             args,
@@ -243,12 +235,10 @@ where
     /// Add a new mocker worker and all of its DP-rank schedulers, returning
     /// the stable mocker worker ID.
     pub(in crate::replay::offline) fn add_worker(&mut self) -> usize {
-        let worker_id = self.next_worker_id;
-        self.next_worker_id += 1;
+        let worker_id = self.worker_groups.len();
         let mut rank_ids = Vec::with_capacity(self.args.dp_size.max(1) as usize);
         for dp_rank in 0..self.args.dp_size.max(1) {
-            let rank_id = self.next_id;
-            self.next_id += 1;
+            let rank_id = self.workers.len();
             let worker = OfflineWorkerState::new_with_rank(
                 rank_id,
                 worker_id as u64,
@@ -746,7 +736,7 @@ where
 
     #[cfg(test)]
     pub(in crate::replay::offline) fn rank_id_capacity(&self) -> usize {
-        self.next_id
+        self.workers.len()
     }
 
     #[cfg(feature = "kvbm-offload")]
@@ -1133,6 +1123,15 @@ mod tests {
         assert!(newly_marked.is_empty());
         assert_eq!(engine.active_worker_ids().len(), 2);
         assert_eq!(engine.worker_count(), 2);
+
+        // Tombstoned stable IDs are never reused. The next worker and rank
+        // come from the append-only vector tails.
+        let (added, newly_marked, removed) = engine.apply_target_count(3);
+        assert_eq!(added, vec![4]);
+        assert!(newly_marked.is_empty());
+        assert!(removed.is_empty());
+        assert_eq!(engine.worker_groups[4].as_deref(), Some(&[4][..]));
+        assert_eq!(engine.rank_id_capacity(), 5);
     }
 
     #[test]
