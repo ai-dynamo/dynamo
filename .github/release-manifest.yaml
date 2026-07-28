@@ -30,13 +30,13 @@ pins:
   - name: vllm-cuda-runtime-image
     file: container/context.yaml
     path: vllm.cuda13.0.runtime_image_tag
-    required: v0.24.0-ubuntu2404
+    required: v0.25.1-ubuntu2404
     auto_upgrade: true
 
   - name: vllm-cpu-runtime-image
     file: container/context.yaml
     path: vllm.cpu.runtime_image_tag
-    required: v0.24.0
+    required: v0.25.1
     auto_upgrade: true
 
   # Commit-SHA tag; upgrades need a matching base_image_tag change, so
@@ -50,13 +50,13 @@ pins:
   - name: sglang-cuda-runtime-image
     file: container/context.yaml
     path: sglang.cuda13.0.runtime_image_tag
-    required: v0.5.14-cu130-runtime
+    required: v0.5.15-cu130-runtime
     auto_upgrade: true
 
   - name: trtllm-runtime-image
     file: container/context.yaml
     path: trtllm.cuda13.1.runtime_image_tag
-    required: 1.3.0rc20
+    required: 1.3.0rc22
     auto_upgrade: true
 
   - name: dynamo-nixl
@@ -76,7 +76,7 @@ pins:
   - name: sglang-nixl
     file: container/context.yaml
     path: sglang.nixl_ref
-    required: v1.0.1
+    required: v1.3.0
     auto_upgrade: true
 
   - name: trtllm-nixl
