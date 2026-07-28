@@ -47,8 +47,7 @@ fn env_self_host_metadata_default() -> bool {
 }
 
 fn self_host_metadata_default(value: Option<&str>) -> bool {
-    // Default ON. Only an explicitly falsy value (`0`/`false`/`no`/`off`)
-    // opts out; unset, empty, and unrecognized values keep the default.
+    // Unset, empty, and unrecognized values keep the default-on behavior.
     value
         .and_then(dynamo_runtime::config::parse_bool_opt)
         .unwrap_or(true)
@@ -663,8 +662,8 @@ impl LocalModel {
         let component = endpoint.component().name().to_string();
         let endpoint_name = endpoint.name().to_string();
         let Some(base_url) = self_host_base_url(drt)? else {
-            static WARNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-            WARNED.get_or_init(|| {
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
                 tracing::warn!(
                     "self_host_metadata is ON but DYN_SYSTEM_PORT is unset; \
                      falling back to shared-storage MDC. Set DYN_SYSTEM_PORT \
