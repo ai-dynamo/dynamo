@@ -776,19 +776,27 @@ where
             .await
     }
 
-    /// Issue a request to a specific endpoint
+    /// Issue a request to exactly one endpoint without transport fallback.
     pub async fn direct(
         &self,
         request: SingleIn<T>,
         instance_id: u64,
     ) -> anyhow::Result<ManyOut<U>> {
-        self.direct_within(request, instance_id, None).await
+        tracing::info!(
+            router_mode = "direct",
+            worker_id = instance_id,
+            "Selected worker"
+        );
+        self.generate_with_fault_detection(instance_id, request, TransportFallback::Deny)
+            .await
     }
 
-    /// Like [`direct`], but if the selected instance disappears between selection and dispatch,
-    /// the internal reselection is constrained to `allowed_fallback` (when `Some`). Callers that
-    /// pre-narrowed the candidate set (e.g. LoRA replica-set filtering) pass that set so the
-    /// vanished-instance fallback cannot escape it and route to an arbitrary worker.
+    /// Dispatch to a selected endpoint with transport fallback.
+    ///
+    /// Unlike [`Self::direct`], if the selected instance disappears between selection and
+    /// dispatch, this method may reselect another worker. When `allowed_fallback` is `Some`,
+    /// reselection is constrained to that set; callers that pre-narrowed the candidates (e.g.
+    /// LoRA replica-set filtering) use it to prevent fallback to an arbitrary worker.
     pub async fn direct_within(
         &self,
         request: SingleIn<T>,
@@ -812,8 +820,9 @@ where
     where
         F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
     {
-        // Direct dispatch honors the caller-selected worker while it remains in discovery.
-        // Local inhibition only filters worker selection owned by this router.
+        // Fallback-enabled dispatch still honors a selected worker while it remains in
+        // discovery. Local inhibition only filters worker selection owned by this router;
+        // fallback is considered only if the selected worker disappears after this check.
         if !self.client.instance_ids().contains(&instance_id) {
             return Err(DynamoError::builder()
                 .error_type(ErrorType::CannotConnect)
@@ -1397,10 +1406,9 @@ where
     }
 
     /// Resolve `(instance_id, address, transport_kind_label, Instance)` for
-    /// the selected worker. If the instance has disappeared between selection
-    /// and dispatch, fall back to one other instance from `free_ids` (same
-    /// filter as pre-selection) and return the updated id so the caller can
-    /// `report_instance_down` the right worker on later failures.
+    /// the selected worker. If that worker has disappeared, apply the caller's
+    /// fallback policy; exact dispatch returns typed worker-unavailability
+    /// instead of silently changing the selected worker.
     fn resolve_transport(
         &self,
         instance_id: u64,
@@ -1430,11 +1438,14 @@ where
         let allowed_fallback = match fallback {
             TransportFallback::Allow => None,
             TransportFallback::Deny => {
-                return Err(anyhow::anyhow!(
-                    "Instance {} not found for endpoint {}",
-                    instance_id,
-                    self.client.endpoint.id()
-                ));
+                return Err(DynamoError::builder()
+                    .error_type(ErrorType::CannotConnect)
+                    .message(format!(
+                        "instance_id={instance_id} not found for endpoint {}",
+                        self.client.endpoint.id()
+                    ))
+                    .build()
+                    .into());
             }
             TransportFallback::Within(allowed) => Some(allowed),
         };
@@ -2734,9 +2745,14 @@ mod tests {
         let error = router
             .resolve_transport(stale_id, TransportFallback::Deny)
             .unwrap_err();
+        let error_ref: &(dyn std::error::Error + 'static) = error.as_ref();
+        let dynamo_error = error_ref
+            .downcast_ref::<DynamoError>()
+            .expect("exact dispatch should return typed worker-unavailability");
+        assert_eq!(dynamo_error.error_type(), ErrorType::CannotConnect);
         assert!(
-            error.to_string().contains("not found"),
-            "exact dispatch must reject the missing selected worker"
+            match_error_chain(error_ref, &[ErrorType::CannotConnect], &[]),
+            "exact-dispatch missing-worker failure should be migration-classifiable: {error}"
         );
 
         rt.shutdown();
