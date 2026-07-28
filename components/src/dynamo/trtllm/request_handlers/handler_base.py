@@ -48,7 +48,6 @@ from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.trtllm.constants import DisaggregationMode
 from dynamo.trtllm.conversation_affinity import (
     CONVERSATION_PARAMS_AVAILABLE,
-    SUPPORTS_EXPLICIT_DP_RANK_CONVERSATION_BINDING,
     conversation_params_for,
     engine_conversation_affinity_enabled,
     session_id_from_request,
@@ -1144,16 +1143,6 @@ class HandlerBase(BaseGenerativeHandler):
                     "release newer than 1.3.0rc20)."
                 )
         conv_affinity = self._conversation_affinity
-        if (
-            conv_affinity
-            and self._conversation_affinity_dp_rank_source == "dynamo"
-            and not SUPPORTS_EXPLICIT_DP_RANK_CONVERSATION_BINDING
-        ):
-            logger.warning(
-                "Dynamo-owned conversation-affinity DP-rank placement is unsupported by "
-                "this TensorRT-LLM build; falling back to engine-owned initial placement."
-            )
-            self._conversation_affinity_dp_rank_source = "engine"
 
         # Extract dp_rank from request's routing hints for attention DP routing
         routing = request.get("routing", {})

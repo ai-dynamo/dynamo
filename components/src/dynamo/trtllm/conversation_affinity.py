@@ -36,13 +36,6 @@ try:  # Requires a TensorRT-LLM release newer than 1.3.0rc20.
 except ImportError:  # pragma: no cover - depends on installed wheel
     ConversationParams = None  # type: ignore[assignment]
 
-try:
-    from tensorrt_llm._torch.pyexecutor.scheduler.adp_router import (
-        SUPPORTS_EXPLICIT_DP_RANK_CONVERSATION_BINDING,
-    )
-except ImportError:  # pragma: no cover - depends on installed wheel
-    SUPPORTS_EXPLICIT_DP_RANK_CONVERSATION_BINDING = False
-
 CONVERSATION_PARAMS_AVAILABLE: bool = ConversationParams is not None
 
 
