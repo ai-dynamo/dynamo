@@ -92,6 +92,16 @@ class TestWorkerUpstream:
         url = command[command.index("--upstream-base-url") + 1]
         assert url == "http://127.0.0.1:30000/v1"
 
+    def test_abort_always_targets_engine(self):
+        from dynamo.openai_backend.launcher_common import build_worker_command
+
+        for upstream_port in (None, 30000):
+            command = build_worker_command(
+                _launcher_args(), upstream_port=upstream_port
+            )
+            abort_url = command[command.index("--abort-base-url") + 1]
+            assert abort_url == "http://127.0.0.1:30010"
+
 
 class TestUpstreamHeaders:
     def test_no_user_field(self):
@@ -114,3 +124,61 @@ class TestUpstreamHeaders:
         for value in (None, "", 7, {"id": "x"}):
             headers = _upstream_headers({"user": value})
             assert ROUTING_KEY_HEADER not in headers
+
+
+class TestEnsureRid:
+    def test_generates_and_injects_rid(self):
+        from dynamo.openai_backend.worker import _ensure_rid
+
+        request = {"model": "m"}
+        rid = _ensure_rid(request)
+        assert rid.startswith("dyn-")
+        assert request["rid"] == rid
+
+    def test_preserves_existing_rid(self):
+        from dynamo.openai_backend.worker import _ensure_rid
+
+        request = {"model": "m", "rid": "client-supplied"}
+        assert _ensure_rid(request) == "client-supplied"
+        assert request["rid"] == "client-supplied"
+
+    def test_replaces_non_string_rid(self):
+        from dynamo.openai_backend.worker import _ensure_rid
+
+        request = {"rid": 42}
+        rid = _ensure_rid(request)
+        assert rid.startswith("dyn-")
+        assert request["rid"] == rid
+
+
+class TestAbortBaseUrl:
+    def test_defaults_to_upstream_origin(self):
+        from dynamo.openai_backend.worker import Config, UpstreamClient
+
+        client = UpstreamClient(
+            Config(
+                model="m",
+                served_model_name=None,
+                upstream_base_url="http://127.0.0.1:30000/v1",
+                upstream_health_path="/health",
+                connect_timeout_seconds=1.0,
+                write_timeout_seconds=1.0,
+            )
+        )
+        assert client._abort_base_url == "http://127.0.0.1:30000"
+
+    def test_explicit_override_wins(self):
+        from dynamo.openai_backend.worker import Config, UpstreamClient
+
+        client = UpstreamClient(
+            Config(
+                model="m",
+                served_model_name=None,
+                upstream_base_url="http://127.0.0.1:30000/v1",
+                upstream_health_path="/health",
+                connect_timeout_seconds=1.0,
+                write_timeout_seconds=1.0,
+                abort_base_url="http://127.0.0.1:30010",
+            )
+        )
+        assert client._abort_base_url == "http://127.0.0.1:30010"

@@ -9,6 +9,7 @@ import contextlib
 import json
 import logging
 import os
+import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, AsyncGenerator, Awaitable, Optional, TypeVar
@@ -29,6 +30,7 @@ DEFAULT_UPSTREAM_HEALTH_PATH = "/health"
 DEFAULT_CONNECT_TIMEOUT_SECONDS = 30.0
 DEFAULT_WRITE_TIMEOUT_SECONDS = 100.0
 DEFAULT_MAX_KEEPALIVE_CONNECTIONS = 20
+DEFAULT_ABORT_TIMEOUT_SECONDS = 5.0
 ROUTING_KEY_HEADER = "x-smg-routing-key"
 
 _SHUTDOWN_EVENT = asyncio.Event()
@@ -44,6 +46,15 @@ def _upstream_headers(request: dict[str, Any]) -> dict[str, str]:
     return headers
 
 
+def _ensure_rid(request: dict[str, Any]) -> str:
+    rid = request.get("rid")
+    if isinstance(rid, str) and rid:
+        return rid
+    rid = f"dyn-{uuid.uuid4().hex}"
+    request["rid"] = rid
+    return rid
+
+
 @dataclass
 class Config:
     model: str
@@ -53,6 +64,7 @@ class Config:
     connect_timeout_seconds: float
     write_timeout_seconds: float
     priority_multiplier: Optional[int] = None
+    abort_base_url: Optional[str] = None
 
 
 @dataclass
@@ -256,6 +268,16 @@ def _build_parser() -> argparse.ArgumentParser:
             "upstream OpenAI request's top-level priority field."
         ),
     )
+    parser.add_argument(
+        "--abort-base-url",
+        default=None,
+        help=(
+            "Root URL (no API prefix) that serves POST /abort_request for "
+            "cancelled requests. Point this at the engine itself when a "
+            "router sits between the worker and the engine. Defaults to the "
+            "origin of --upstream-base-url."
+        ),
+    )
     return parser
 
 
@@ -270,6 +292,7 @@ def cmd_line_args(argv: Sequence[str] | None = None) -> Config:
         connect_timeout_seconds=args.connect_timeout_seconds,
         write_timeout_seconds=args.write_timeout_seconds,
         priority_multiplier=args.priority_multiplier,
+        abort_base_url=args.abort_base_url,
     )
 
 
@@ -366,8 +389,12 @@ class UpstreamClient:
         split_result = urlsplit(config.upstream_base_url)
         self._origin = f"{split_result.scheme}://{split_result.netloc}"
         self._api_prefix = split_result.path.rstrip("/")
+        self._abort_base_url = (config.abort_base_url or self._origin).rstrip("/")
+        self._abort_tasks: set[asyncio.Task[None]] = set()
 
     async def aclose(self) -> None:
+        if self._abort_tasks:
+            await asyncio.gather(*self._abort_tasks, return_exceptions=True)
         await self._client.aclose()
 
     async def wait_until_ready(self) -> None:
@@ -400,9 +427,11 @@ class UpstreamClient:
         request: dict[str, Any],
         context: Optional[Any] = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
+        rid: Optional[str] = None
         try:
             path = self._resolve_upstream_path(request)
             forwarded_request = dict(request)
+            rid = _ensure_rid(forwarded_request)
             forwarded_request["stream"] = True
             stream_options = forwarded_request.get("stream_options")
             if not isinstance(stream_options, dict):
@@ -430,8 +459,36 @@ class UpstreamClient:
                 for output_chunk in tool_call_coalescer.push(chunk):
                     yield output_chunk
         except asyncio.CancelledError:
-            LOGGER.info("Dropping cancelled request")
+            if rid is not None:
+                LOGGER.info(
+                    "Dropping cancelled request rid=%s; aborting upstream", rid
+                )
+                self._schedule_abort(rid)
+            else:
+                LOGGER.info("Dropping cancelled request")
             return
+
+    def _schedule_abort(self, rid: str) -> None:
+        task = asyncio.create_task(self._post_abort(rid))
+        self._abort_tasks.add(task)
+        task.add_done_callback(self._abort_tasks.discard)
+
+    async def _post_abort(self, rid: str) -> None:
+        try:
+            response = await self._client.post(
+                f"{self._abort_base_url}/abort_request",
+                json={"rid": rid},
+                timeout=DEFAULT_ABORT_TIMEOUT_SECONDS,
+            )
+            LOGGER.info(
+                "Aborted upstream request rid=%s status=%s",
+                rid,
+                response.status_code,
+            )
+        except Exception:
+            LOGGER.warning(
+                "Failed to abort upstream request rid=%s", rid, exc_info=True
+            )
 
     def _resolve_upstream_path(self, request: dict[str, Any]) -> str:
         if "messages" in request:

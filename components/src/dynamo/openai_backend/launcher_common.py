@@ -74,6 +74,8 @@ def build_worker_command(
         upstream_base_url,
         "--upstream-health-path",
         args.health_path,
+        "--abort-base-url",
+        f"http://{args.engine_host}:{args.engine_port}",
     ]
     if priority_multiplier is not None:
         command.extend(["--priority-multiplier", str(priority_multiplier)])
