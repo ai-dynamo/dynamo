@@ -357,6 +357,7 @@ fn validate_and_remove_vllm_tito(
                 | "prompt_logprobs"
                 | "skip_reading_prefix_cache"
                 | "skip_special_tokens"
+                | "return_token_ids"
         ) {
             return Err(client::invalid_argument(format!(
                 "extra_args.vllm_tito.sampling_params.{key} is not supported by vLLM gRPC v0.25.1"
@@ -369,6 +370,14 @@ fn validate_and_remove_vllm_tito(
     {
         return Err(client::invalid_argument(
             "extra_args.vllm_tito.sampling_params.skip_special_tokens must be a boolean",
+        ));
+    }
+    if sampling
+        .get("return_token_ids")
+        .is_some_and(|value| value != &serde_json::Value::Bool(true))
+    {
+        return Err(client::invalid_argument(
+            "extra_args.vllm_tito.sampling_params.return_token_ids must be true",
         ));
     }
 
