@@ -1,0 +1,4 @@
+interface:
+  display_name: "Slack Reviewers"
+  short_description: "Find and track PR reviewers from a Slack thread"
+  default_prompt: "Use $reviewers-slack on this Slack thread to request and track PR reviewers."
