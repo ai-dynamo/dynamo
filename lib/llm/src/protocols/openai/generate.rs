@@ -181,6 +181,14 @@ pub struct SamplingParams {
 }
 
 impl SamplingParams {
+    pub fn temperature(&self) -> Option<f32> {
+        self.temperature
+    }
+
+    pub fn top_p(&self) -> Option<f32> {
+        self.top_p
+    }
+
     pub fn max_tokens(&self) -> Option<u32> {
         self.max_tokens
     }
@@ -189,8 +197,32 @@ impl SamplingParams {
         self.top_k
     }
 
+    pub fn min_p(&self) -> Option<f32> {
+        self.min_p
+    }
+
+    pub fn seed(&self) -> Option<i64> {
+        self.seed
+    }
+
     pub fn min_tokens(&self) -> Option<u32> {
         self.min_tokens
+    }
+
+    pub fn frequency_penalty(&self) -> Option<f32> {
+        self.frequency_penalty
+    }
+
+    pub fn presence_penalty(&self) -> Option<f32> {
+        self.presence_penalty
+    }
+
+    pub fn repetition_penalty(&self) -> Option<f32> {
+        self.repetition_penalty
+    }
+
+    pub fn stop_token_ids(&self) -> Option<&[u32]> {
+        self.stop_token_ids.as_deref()
     }
 
     pub fn ignore_eos(&self) -> bool {
@@ -203,6 +235,10 @@ impl SamplingParams {
 
     pub fn prompt_logprobs(&self) -> Option<i32> {
         self.prompt_logprobs
+    }
+
+    pub fn skip_reading_prefix_cache(&self) -> Option<bool> {
+        self.skip_reading_prefix_cache
     }
 
     pub fn as_value(&self) -> &Value {

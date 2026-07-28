@@ -189,6 +189,7 @@ fn build_kv_parameters(
             return Err(client::invalid_argument("extra_args must be a JSON object"));
         }
     };
+    validate_and_remove_vllm_tito(extra.as_mut())?;
     if let Some(extra) = extra.as_ref() {
         for key in extra.keys() {
             if !matches!(
@@ -280,6 +281,98 @@ fn stringify_remote_port(params: &mut serde_json::Value) {
             serde_json::Value::String(port.to_string()),
         );
     }
+}
+
+fn validate_and_remove_vllm_tito(
+    extra: Option<&mut serde_json::Map<String, serde_json::Value>>,
+) -> Result<(), DynamoError> {
+    let Some(envelope) = extra.and_then(|extra| extra.remove("vllm_tito")) else {
+        return Ok(());
+    };
+    let serde_json::Value::Object(envelope) = envelope else {
+        return Err(client::invalid_argument(
+            "extra_args.vllm_tito must be a JSON object",
+        ));
+    };
+
+    for key in envelope.keys() {
+        if !matches!(
+            key.as_str(),
+            "request_id"
+                | "sampling_params"
+                | "model"
+                | "stream"
+                | "stream_options"
+                | "cache_salt"
+                | "priority"
+                | "kv_transfer_params"
+        ) {
+            return Err(client::invalid_argument(format!(
+                "extra_args.vllm_tito.{key} is not supported by vLLM gRPC v0.25.1"
+            )));
+        }
+    }
+
+    if envelope
+        .get("stream")
+        .is_some_and(|stream| stream != &serde_json::Value::Bool(false))
+    {
+        return Err(client::invalid_argument(
+            "extra_args.vllm_tito.stream must be false",
+        ));
+    }
+    if envelope
+        .get("stream_options")
+        .is_some_and(|options| !options.is_null())
+    {
+        return Err(client::invalid_argument(
+            "extra_args.vllm_tito.stream_options is not supported by vLLM gRPC v0.25.1",
+        ));
+    }
+
+    let sampling = envelope.get("sampling_params").ok_or_else(|| {
+        client::invalid_argument("extra_args.vllm_tito.sampling_params is required")
+    })?;
+    let serde_json::Value::Object(sampling) = sampling else {
+        return Err(client::invalid_argument(
+            "extra_args.vllm_tito.sampling_params must be a JSON object",
+        ));
+    };
+    for key in sampling.keys() {
+        if !matches!(
+            key.as_str(),
+            "temperature"
+                | "top_p"
+                | "top_k"
+                | "min_p"
+                | "seed"
+                | "max_tokens"
+                | "min_tokens"
+                | "presence_penalty"
+                | "frequency_penalty"
+                | "repetition_penalty"
+                | "stop_token_ids"
+                | "ignore_eos"
+                | "logprobs"
+                | "prompt_logprobs"
+                | "skip_reading_prefix_cache"
+                | "skip_special_tokens"
+        ) {
+            return Err(client::invalid_argument(format!(
+                "extra_args.vllm_tito.sampling_params.{key} is not supported by vLLM gRPC v0.25.1"
+            )));
+        }
+    }
+    if sampling
+        .get("skip_special_tokens")
+        .is_some_and(|value| !value.is_boolean())
+    {
+        return Err(client::invalid_argument(
+            "extra_args.vllm_tito.sampling_params.skip_special_tokens must be a boolean",
+        ));
+    }
+
+    Ok(())
 }
 
 fn bool_extra(

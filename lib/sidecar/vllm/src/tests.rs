@@ -433,6 +433,81 @@ fn oversized_logprob_counts_are_rejected() {
 }
 
 #[test]
+fn token_native_compatibility_envelope_is_accepted_when_fields_are_projected() {
+    let mut request = request();
+    request.extra_args = Some(json!({
+        "vllm_tito": {
+            "request_id": "request-1",
+            "sampling_params": {
+                "temperature": 0.2,
+                "top_p": 0.9,
+                "top_k": 4,
+                "min_p": 0.1,
+                "seed": 123,
+                "max_tokens": 1,
+                "min_tokens": 1,
+                "presence_penalty": 0.3,
+                "frequency_penalty": 0.4,
+                "repetition_penalty": 1.1,
+                "stop_token_ids": [2],
+                "ignore_eos": true,
+                "logprobs": 1,
+                "prompt_logprobs": 1,
+                "skip_special_tokens": false
+            },
+            "model": "served-model",
+            "stream": false,
+            "cache_salt": "cache-salt",
+            "priority": 0
+        },
+        "bypass_prefix_cache": true,
+        "kv_transfer_params": {
+            "connector_data": {"values": [1, true, null]}
+        }
+    }));
+
+    let wire = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("projected compatibility envelope");
+
+    assert_eq!(wire.temperature, Some(0.2));
+    assert_eq!(wire.stopping.as_ref().unwrap().stop_token_ids, [2]);
+    assert!(wire.response.as_ref().unwrap().output_logprobs);
+}
+
+#[test]
+fn token_native_compatibility_envelope_rejects_unprojected_fields() {
+    let mut request = request();
+    request.extra_args = Some(json!({
+        "vllm_tito": {
+            "request_id": "request-1",
+            "sampling_params": {
+                "max_tokens": 1,
+                "future_sampling_field": true
+            },
+            "stream": false,
+            "priority": 0
+        }
+    }));
+
+    let error = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect_err("unprojected compatibility fields must fail closed");
+
+    assert!(
+        error
+            .to_string()
+            .contains("extra_args.vllm_tito.sampling_params.future_sampling_field")
+    );
+}
+
+#[test]
 fn rl_metadata_accepts_only_engine_advertised_model_names() {
     let model = FakeControl::default().model_info;
     let default = rl_worker_metadata("http://worker:8120".to_string(), 2, &model, None).unwrap();

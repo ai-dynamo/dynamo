@@ -35,7 +35,7 @@ use super::{RouteDoc, service_v2};
 use crate::discovery::GenerateEngineSelection;
 use crate::protocols::common::preprocessor::{MmRoutingInfo, PreprocessedRequest};
 use crate::protocols::common::timing::RequestTracker;
-use crate::protocols::common::{SamplingOptions, StopConditions};
+use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
 use crate::protocols::openai::generate::{
     GenerateRequest, GenerateResponse, GenerateResponseOptions, SamplingParams, StreamOptions,
 };
@@ -490,6 +490,19 @@ fn preprocessed_from_generate(
     let max_tokens = sampling.max_tokens();
     let min_tokens = sampling.min_tokens();
     let ignore_eos = sampling.ignore_eos();
+    let top_k = sampling.top_k().and_then(|value| i32::try_from(value).ok());
+    let logprobs = sampling
+        .logprobs()
+        .and_then(|value| u32::try_from(value).ok());
+    let prompt_logprobs = sampling
+        .prompt_logprobs()
+        .and_then(|value| u32::try_from(value).ok());
+    let stop_token_ids_hidden = sampling.stop_token_ids().map(<[u32]>::to_vec);
+    let skip_reading_prefix_cache = sampling.skip_reading_prefix_cache();
+    let kv_transfer_params = request
+        .kv_transfer_params
+        .as_ref()
+        .map(|params| serde_json::Value::Object(params.clone()));
     let routing_priority = dynamo_routing_priority(request.priority);
     // With vLLM's default `enable_tower_connector_lora=false`, the vision tower
     // and connector stay on base weights, so MM identifiers are adapter-invariant.
@@ -513,6 +526,17 @@ fn preprocessed_from_generate(
         None
     };
     let vllm_tito = serde_json::to_value(VllmTitoEnvelope::new(&request, request_id))?;
+    let mut extra_args = serde_json::Map::new();
+    extra_args.insert("vllm_tito".to_string(), vllm_tito);
+    if let Some(skip_reading_prefix_cache) = skip_reading_prefix_cache {
+        extra_args.insert(
+            "skip_reading_prefix_cache".to_string(),
+            serde_json::Value::Bool(skip_reading_prefix_cache),
+        );
+    }
+    if let Some(kv_transfer_params) = kv_transfer_params {
+        extra_args.insert("kv_transfer_params".to_string(), kv_transfer_params);
+    }
     let tracker = Arc::new(RequestTracker::new());
     tracker.record_isl(request.token_ids.len(), None);
     let GenerateRequest {
@@ -528,13 +552,26 @@ fn preprocessed_from_generate(
             max_tokens,
             min_tokens,
             ignore_eos: Some(ignore_eos),
+            stop_token_ids_hidden,
             ..Default::default()
         })
         .sampling_options(SamplingOptions {
             n: Some(1),
+            temperature: sampling.temperature(),
+            top_p: sampling.top_p(),
+            top_k,
+            min_p: sampling.min_p(),
+            seed: sampling.seed(),
+            presence_penalty: sampling.presence_penalty(),
+            frequency_penalty: sampling.frequency_penalty(),
+            repetition_penalty: sampling.repetition_penalty(),
             ..Default::default()
         })
-        .output_options(Default::default())
+        .output_options(OutputOptions {
+            logprobs,
+            prompt_logprobs,
+            ..Default::default()
+        })
         .mm_routing_info(mm_routing_info)
         .routing(Some(crate::protocols::common::preprocessor::RoutingHints {
             dp_rank: data_parallel_rank,
@@ -547,11 +584,9 @@ fn preprocessed_from_generate(
             priority: Some(routing_priority),
             ..Default::default()
         }))
-        .extra_args(Some(serde_json::json!({
-            // Do not copy token_ids into this envelope. The worker must rebuild
-            // that field from PreprocessedRequest.token_ids after routing.
-            "vllm_tito": vllm_tito,
-        })))
+        // Do not copy token_ids into this envelope. The worker must rebuild
+        // that field from PreprocessedRequest.token_ids after routing.
+        .extra_args(Some(serde_json::Value::Object(extra_args)))
         .tracker(Some(tracker))
         .build()
         .map_err(|error| anyhow::anyhow!("failed to build PreprocessedRequest: {error}"))
@@ -1388,6 +1423,84 @@ mod tests {
         assert_eq!(expected_token_ids, serde_json::json!([1, 2]));
         assert_eq!(envelope, &expected_envelope);
         assert!(envelope.get("token_ids").is_none());
+    }
+
+    #[test]
+    fn native_grpc_fields_are_projected_without_losing_the_vllm_envelope() {
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [1, 2],
+            "sampling_params": {
+                "temperature": 0.7,
+                "top_p": 0.9,
+                "top_k": -1,
+                "min_p": 0.1,
+                "seed": 42,
+                "max_tokens": 8,
+                "min_tokens": 2,
+                "presence_penalty": 0.2,
+                "frequency_penalty": 0.3,
+                "repetition_penalty": 1.1,
+                "stop_token_ids": [99, 100],
+                "ignore_eos": true,
+                "logprobs": 1,
+                "prompt_logprobs": 2,
+                "skip_reading_prefix_cache": true,
+                "skip_special_tokens": false
+            },
+            "kv_transfer_params": {"connector": "opaque"}
+        }))
+        .expect("deserialize request");
+
+        let preprocessed = preprocessed_from_generate(
+            request,
+            "test-model",
+            None,
+            "resolved-request",
+            16,
+            false,
+            None,
+        )
+        .expect("build request");
+
+        assert_eq!(
+            (
+                preprocessed.sampling_options.temperature,
+                preprocessed.sampling_options.top_p,
+                preprocessed.sampling_options.top_k,
+                preprocessed.sampling_options.min_p,
+                preprocessed.sampling_options.seed,
+            ),
+            (Some(0.7), Some(0.9), Some(-1), Some(0.1), Some(42))
+        );
+        assert_eq!(
+            (
+                preprocessed.sampling_options.presence_penalty,
+                preprocessed.sampling_options.frequency_penalty,
+                preprocessed.sampling_options.repetition_penalty,
+            ),
+            (Some(0.2), Some(0.3), Some(1.1))
+        );
+        assert_eq!(preprocessed.stop_conditions.max_tokens, Some(8));
+        assert_eq!(preprocessed.stop_conditions.min_tokens, Some(2));
+        assert_eq!(
+            preprocessed.stop_conditions.stop_token_ids_hidden,
+            Some(vec![99, 100])
+        );
+        assert_eq!(preprocessed.stop_conditions.ignore_eos, Some(true));
+        assert_eq!(preprocessed.output_options.logprobs, Some(1));
+        assert_eq!(preprocessed.output_options.prompt_logprobs, Some(2));
+        assert_eq!(preprocessed.output_options.skip_special_tokens, None);
+
+        let extra = preprocessed.extra_args.as_ref().expect("extra args");
+        assert_eq!(extra["skip_reading_prefix_cache"], serde_json::json!(true));
+        assert_eq!(
+            extra["kv_transfer_params"],
+            serde_json::json!({"connector": "opaque"})
+        );
+        assert_eq!(
+            extra["vllm_tito"]["sampling_params"]["skip_special_tokens"],
+            serde_json::json!(false)
+        );
     }
 
     #[test]
