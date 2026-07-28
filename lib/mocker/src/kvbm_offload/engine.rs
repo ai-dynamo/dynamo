@@ -308,6 +308,7 @@ impl MockOffloadEngine {
             .pending_tracker(g1_to_g2_pending)
             .batch_size(config.offload_batch_size)
             .max_concurrent_transfers(config.offload_batch_size)
+            .ordered_transfer_starts(cfg!(feature = "replay-bench"))
             .build();
 
         let mut engine_builder = OffloadEngine::builder(leader.clone())
@@ -448,6 +449,11 @@ impl MockOffloadEngine {
                 }
             }
         }
+        #[cfg(feature = "replay-bench")]
+        router_events.sort_by_key(|event| match event {
+            G2RouterEvent::Stored(metadata) => metadata.seq_hash,
+            G2RouterEvent::Removed { seq_hash } => *seq_hash,
+        });
         router_events
     }
 
