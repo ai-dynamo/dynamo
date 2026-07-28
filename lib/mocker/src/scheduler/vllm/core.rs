@@ -12,8 +12,8 @@ use uuid::Uuid;
 
 use crate::common::handoff::HandoffId;
 use crate::common::protocols::{
-    DirectRequest, KvEventPublishers, MockEngineArgs, MoveBlock, OutputSignal, PreemptionMode,
-    PrefillCost, WorkerType,
+    DirectRequest, G1Backend, KvEventPublishers, MockEngineArgs, MoveBlock, OutputSignal,
+    PreemptionMode, PrefillCost, SchedulingPolicy, WorkerType,
 };
 use crate::common::sequence::ActiveSequence;
 use crate::common::speculative::{SpeculativeDecodeSampler, normalize_conditional_accept_rates};
@@ -549,6 +549,14 @@ impl VllmCore {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn request_uses_flat_tokens(&self, uuid: Uuid) -> bool {
+        self.state
+            .requests
+            .get(&uuid)
+            .is_some_and(|request| request.sequence.uses_flat_tokens())
+    }
+
     pub(crate) fn apply_command(
         &mut self,
         command: SchedulerCommand,
@@ -807,6 +815,28 @@ impl VllmCore {
         Ok(())
     }
 
+    /// Output tokens worth reserving storage for when materializing a request.
+    ///
+    /// This is only an allocation hint. The sequence retains the request's
+    /// logical `max_output_tokens`; scheduling separately enforces the model
+    /// and physical KV limits.
+    fn output_capacity_hint(&self, prompt_len: usize, max_output_tokens: usize) -> usize {
+        let kv_remaining = self
+            .args
+            .num_gpu_blocks
+            .saturating_mul(self.args.block_size)
+            .saturating_sub(prompt_len);
+        let model_remaining = if self.args.scheduling_policy() == SchedulingPolicy::Vllm {
+            self.args
+                .max_model_len
+                .map(|limit| limit.saturating_sub(prompt_len))
+                .unwrap_or(usize::MAX)
+        } else {
+            usize::MAX
+        };
+        max_output_tokens.min(kv_remaining).min(model_remaining)
+    }
+
     fn submit(&mut self, mut request: DirectRequest) -> anyhow::Result<Uuid> {
         let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
         request.uuid = Some(uuid);
@@ -827,6 +857,7 @@ impl VllmCore {
         status: RequestStatus,
     ) -> VllmRequestState {
         let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
+        let prompt_len = request.tokens.len();
         let mut max_output_tokens = request.max_output_tokens;
         let planned_output_ids = request.output_token_ids;
         if let Some(planned_output_ids) = planned_output_ids.as_ref()
@@ -842,7 +873,7 @@ impl VllmCore {
         }
         if let Some(clamped) = policy::normalize_max_output_tokens(
             self.args.scheduling_policy(),
-            request.tokens.len(),
+            prompt_len,
             max_output_tokens,
             self.args.num_gpu_blocks,
             self.args.block_size,
@@ -856,14 +887,27 @@ impl VllmCore {
         // The `None` case (a TRT-LLM prompt alone leaves no decode room) is
         // unchanged here. The waiting-admission policy owns terminal rejection
         // because that path can emit the lifecycle signal.
-        let sequence = ActiveSequence::new_with_planned_output_ids(
-            request.tokens,
-            max_output_tokens,
-            Some(self.args.block_size),
-            self.args.enable_prefix_caching,
-            self.args.zmq_kv_events_port.is_some(),
-            planned_output_ids,
-        );
+        let output_capacity_hint = self.output_capacity_hint(prompt_len, max_output_tokens);
+        let sequence = if self.args.g1_backend == G1Backend::Native {
+            ActiveSequence::new_flat_with_planned_output_ids(
+                request.tokens,
+                max_output_tokens,
+                output_capacity_hint,
+                self.args.block_size,
+                self.args.enable_prefix_caching,
+                self.args.zmq_kv_events_port.is_some(),
+                planned_output_ids,
+            )
+        } else {
+            ActiveSequence::new_with_planned_output_ids(
+                request.tokens,
+                max_output_tokens,
+                Some(self.args.block_size),
+                self.args.enable_prefix_caching,
+                self.args.zmq_kv_events_port.is_some(),
+                planned_output_ids,
+            )
+        };
         VllmRequestState {
             sequence,
             status,
@@ -1160,6 +1204,11 @@ impl VllmCore {
     /// releases the remaining swap-in resources.
     #[cfg(feature = "kvbm-offload")]
     fn complete_swap_in(&mut self, aws: AwaitingSwapIn) {
+        debug_assert_eq!(
+            self.args.g1_backend,
+            G1Backend::Kvbm,
+            "KVBM swap-in completion requires legacy sequence storage"
+        );
         let count = aws.handle.block_count();
         let skip = aws.skip_blocks;
         let entries: Vec<_> = {
