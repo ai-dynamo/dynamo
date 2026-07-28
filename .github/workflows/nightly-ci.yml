@@ -315,8 +315,8 @@ jobs:
 
   # ============================================================================
   # NIGHTLY K8S DEPLOYMENT
-  # Build the operator, copy the nightly SGLang image to the deploy registry,
-  # then validate a baseline profile on the Kubernetes deploy-test runner.
+  # Build the operator, copy the nightly runtime images to the deploy registry,
+  # then validate a baseline profile for each framework on the deploy-test runner.
   # ============================================================================
 
   operator:
@@ -336,7 +336,7 @@ jobs:
         uses: ./.github/actions/build-deploy-component
         with:
           component: operator
-          image_tag: ${{ needs.resolve-source-sha.outputs.source_sha }}-operator
+          image_tag: ${{ needs.resolve-source-sha.outputs.source_sha }}-operator-nightly
           builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
@@ -344,10 +344,21 @@ jobs:
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
           extra_tags: |
-            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.resolve-source-sha.outputs.source_sha }}-operator
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.resolve-source-sha.outputs.source_sha }}-operator-nightly
           diff_event_context: nightly
           diff_current_branch: ${{ github.ref_name }}
           gh_token: ${{ secrets.GITHUB_TOKEN }}
+
+  vllm-copy-to-acr:
+    name: vllm-runtime-nightly
+    needs: [compute-release-mode, vllm-build]
+    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
+    uses: ./.github/workflows/shared-copy.yml
+    with:
+      target_tag_plain: ${{ format('{0}-nightly', needs.vllm-build.outputs.target_tag_plain) }}
+      cuda_version: '["13.0"]'
+      copy_timeout_minutes: 20
+    secrets: inherit
 
   sglang-copy-to-acr:
     name: sglang-runtime-nightly
@@ -357,6 +368,17 @@ jobs:
     with:
       target_tag_plain: ${{ format('{0}-nightly', needs.sglang-build.outputs.target_tag_plain) }}
       cuda_version: '["13.0"]'
+      copy_timeout_minutes: 20
+    secrets: inherit
+
+  trtllm-copy-to-acr:
+    name: trtllm-runtime-nightly
+    needs: [compute-release-mode, trtllm-build]
+    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
+    uses: ./.github/workflows/shared-copy.yml
+    with:
+      target_tag_plain: ${{ format('{0}-nightly', needs.trtllm-build.outputs.target_tag_plain) }}
+      cuda_version: '["13.1"]'
       copy_timeout_minutes: 20
     secrets: inherit
 
@@ -377,6 +399,7 @@ jobs:
         id: setup
         uses: ./.github/actions/setup-dynamo-operator
         with:
+          vcluster_name: nightly-ci-${{ github.run_id }}
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
           operator_tag: ${{ needs.operator.outputs.operator_default_tag }}
           hf_token: ${{ secrets.HF_TOKEN }}
@@ -387,15 +410,43 @@ jobs:
           model_cache_server: ${{ vars.AZURE_MODEL_CACHE_SERVER }}
           model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
 
+  deploy-test-vllm:
+    name: vLLM Nightly Deploy Test
+    needs: [compute-release-mode, deploy-operator, vllm-build, vllm-copy-to-acr]
+    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
+    uses: ./.github/workflows/shared-deploy-test.yml
+    with:
+      framework: vllm
+      profiles: '["agg"]'
+      image_suffix: ${{ format('{0}-nightly', needs.vllm-build.outputs.target_tag_plain) }}
+      namespace: ${{ needs.deploy-operator.outputs.namespace }}
+      vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+      operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
+    secrets: inherit
+
   deploy-test-sglang:
     name: sglang Nightly Deploy Test
-    needs: [compute-release-mode, deploy-operator, sglang-copy-to-acr]
+    needs: [compute-release-mode, deploy-operator, sglang-build, sglang-copy-to-acr]
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     uses: ./.github/workflows/shared-deploy-test.yml
     with:
       framework: sglang
       profiles: '["agg"]'
-      image_suffix: sglang-runtime-nightly
+      image_suffix: ${{ format('{0}-nightly', needs.sglang-build.outputs.target_tag_plain) }}
+      namespace: ${{ needs.deploy-operator.outputs.namespace }}
+      vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+      operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
+    secrets: inherit
+
+  deploy-test-trtllm:
+    name: TensorRT-LLM Nightly Deploy Test
+    needs: [compute-release-mode, deploy-operator, trtllm-build, trtllm-copy-to-acr]
+    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
+    uses: ./.github/workflows/shared-deploy-test.yml
+    with:
+      framework: trtllm
+      profiles: '["agg"]'
+      image_suffix: ${{ format('{0}-nightly', needs.trtllm-build.outputs.target_tag_plain) }}
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
@@ -404,7 +455,7 @@ jobs:
   deploy-cleanup:
     name: Nightly Deploy Cleanup
     if: always()
-    needs: [deploy-operator, deploy-test-sglang]
+    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm]
     runs-on: prod-deploy-tester-v1
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
