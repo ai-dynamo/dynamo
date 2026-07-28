@@ -223,7 +223,6 @@ def _run_autoscale_sim(
         )
 
     local_or_hf_model = resolve_model_path(dgdr)
-    # AIC Task v2 requires role-specific fields for disaggregated serving.
     task = Task(
         serving_mode="disagg",
         prefill_model_path=local_or_hf_model,
@@ -240,8 +239,6 @@ def _run_autoscale_sim(
         request_latency=request_latency,
     )
     pareto_df = task.run(autoscale=True)
-    if pareto_df is None:
-        pareto_df = pd.DataFrame()
     best_latencies = {"ttft": 0.0, "tpot": 0.0, "request_latency": 0.0}
     if pareto_df is not None and not pareto_df.empty:
         row = pareto_df.iloc[0]

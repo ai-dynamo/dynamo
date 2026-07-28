@@ -5,8 +5,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import pandas as pd
-
 from .scoring import _pick_best_record
 from .search import optimize_dense_agg_with_replay, optimize_dense_disagg_with_replay
 from .specs import ReplayOptimizeSpec
@@ -30,7 +28,6 @@ def compare_aic_and_replay_disagg(
 
     # Deferred: aiconfigurator is optional, so the package must import without it
     # (mirrors aic._load_aiconfigurator_modules). Only this function needs AIC.
-    from aiconfigurator.cli.main import _execute_tasks
     from aiconfigurator.sdk.task_v2 import Task
 
     aic_task = Task(
@@ -46,13 +43,7 @@ def compare_aic_and_replay_disagg(
         osl=spec.workload.osl,
         **spec.sla.aic_task_kwargs(),
     )
-    try:
-        _, _, pareto_fronts, _, _ = _execute_tasks({"disagg": aic_task}, mode="default")
-        aic_df = pareto_fronts.get("disagg")
-        if aic_df is None:
-            aic_df = pd.DataFrame()
-    except SystemExit:
-        aic_df = pd.DataFrame()
+    aic_df = aic_task.run()
 
     replay_spec = spec.model_copy(
         update={"router": spec.router.model_copy(update={"mode": "round_robin"})}
