@@ -38,8 +38,6 @@ while [[ $# -gt 0 ]]; do
             echo "  CUDA_VISIBLE_DEVICES    GPU assignment (default: 0)"
             echo "  DYN_HTTP_PORT           Dynamo frontend port (default: 8000)"
             echo "  DYN_SYSTEM_PORT         Dynamo sidecar system port (default: 8081)"
-            echo "  DYN_SIDECAR_GRPC_STARTUP_DEADLINE_SECS"
-            echo "                          Sidecar connection deadline (default: 900)"
             echo "  TRTLLM_GRPC_PORT        TensorRT-LLM gRPC port (default: 50051)"
             echo "  TRTLLM_CONTEXT_LENGTH   Registered model context length (default: 4096)"
             exit 0
@@ -65,7 +63,6 @@ trap trtllm_exit_trap EXIT
 TRTLLM_PYTHON="${TRTLLM_PYTHON:-python3}"
 TRTLLM_GRPC_PORT="${TRTLLM_GRPC_PORT:-50051}"
 TRTLLM_CONTEXT_LENGTH="${TRTLLM_CONTEXT_LENGTH:-4096}"
-DYN_SIDECAR_GRPC_STARTUP_DEADLINE_SECS="${DYN_SIDECAR_GRPC_STARTUP_DEADLINE_SECS:-900}"
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
@@ -93,7 +90,6 @@ CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" \
     "${EXTRA_ARGS[@]}" &
 
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT:-8081}" \
-DYN_SIDECAR_GRPC_STARTUP_DEADLINE_SECS="$DYN_SIDECAR_GRPC_STARTUP_DEADLINE_SECS" \
     dynamo-trtllm-sidecar \
     --trtllm-endpoint "127.0.0.1:${TRTLLM_GRPC_PORT}" \
     --model-path "$MODEL" \
