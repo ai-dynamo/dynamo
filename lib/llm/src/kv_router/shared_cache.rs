@@ -410,13 +410,14 @@ impl SharedKvCache for HicacheSharedKvCache {
                 let hit = expand_actual_query_keys(page_hash, &config)
                     .iter()
                     .all(|key| self.present_keys.contains(key));
-                if hit && let Some((generation, _)) = generation {
-                    if let Some(mut state) = self.group_states.get_mut(&group_id) {
-                        // A concurrent stored event invalidates verification, not the physical
-                        // key check that already proved this request is a hit.
-                        if state.0 == generation {
-                            state.1 = true;
-                        }
+                if hit
+                    && let Some((generation, _)) = generation
+                    && let Some(mut state) = self.group_states.get_mut(&group_id)
+                {
+                    // A concurrent stored event invalidates verification, not the physical key
+                    // check that already proved this request is a hit.
+                    if state.0 == generation {
+                        state.1 = true;
                     }
                 }
                 hit
