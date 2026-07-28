@@ -54,7 +54,6 @@ def _make_omni_config(**overrides) -> OmniConfig:
         "event_plane": "nats",
         "connector": [],
         "enable_local_indexer": True,
-        "durable_kv_events": False,
         "dyn_tool_call_parser": None,
         "dyn_reasoning_parser": None,
         "custom_jinja_template": None,

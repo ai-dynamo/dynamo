@@ -122,6 +122,17 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--dpkg-root",
+        type=Path,
+        default=Path("/"),
+        help=(
+            "Filesystem root whose dpkg database and /usr/share/doc tree should "
+            "be scanned for dpkg components. Defaults to the current container "
+            "root. Use this when the licenses stage installs helper packages "
+            "that are not shipped in the final image."
+        ),
+    )
+    parser.add_argument(
         "--rust-licenses-dir",
         type=Path,
         default=None,
@@ -208,7 +219,9 @@ def main(argv: list[str] | None = None) -> int:
             elif eco == "dpkg":
                 from . import dpkg as gen  # type: ignore[no-redef]
 
-                comps = gen.generate(args.output_dir, subtract=subtract)
+                comps = gen.generate(
+                    args.output_dir, subtract=subtract, root=args.dpkg_root
+                )
             elif eco == "go":
                 if not args.go_sbom:
                     failures.append("go: at least one --go-sbom is required")

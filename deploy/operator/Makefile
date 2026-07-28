@@ -4,6 +4,8 @@ IMG ?= controller:latest
 
 # ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
 ENVTEST_K8S_VERSION = 1.30.0
+ENVTEST_PACKAGES ?= ./internal/controller ./internal/webhook/validation
+ENVTEST_ASSETS_CMD = $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -214,6 +216,8 @@ tilt-up: kubectl helm ## Start Tilt for local operator development.
 	tilt up
 
 
+HELM_MANAGER_RBAC_ROLE := ../helm/charts/platform/components/operator/files/manager-role.yaml
+
 .PHONY: manifests
 manifests: controller-gen yq ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
 	# Use a large maxDescLen to ensure all field comments are included as OpenAPI descriptions
@@ -260,9 +264,6 @@ manifests: controller-gen yq ## Generate WebhookConfiguration, ClusterRole and C
 			$(YQ) eval '.metadata.annotations."helm.sh/resource-policy" = "keep"' -i "$$file"; \
 		fi; \
 	done
-	echo "Copying CRD files to operator Helm chart crds/ directory"
-	mkdir -p ../helm/charts/platform/components/operator/crds/
-	cp config/crd/bases/*.yaml ../helm/charts/platform/components/operator/crds/
 	echo "Adding NVIDIA header to RBAC files"
 	for file in config/rbac/*.yaml; do \
 		if [ -f "$$file" ] && ! head -20 "$$file" | grep -q "NVIDIA CORPORATION"; then \
@@ -274,6 +275,9 @@ manifests: controller-gen yq ## Generate WebhookConfiguration, ClusterRole and C
 			} > "$$file.tmp" && mv "$$file.tmp" "$$file"; \
 		fi; \
 	done
+	echo "Copying generated manager RBAC role to the operator Helm chart"
+	mkdir -p $(dir $(HELM_MANAGER_RBAC_ROLE))
+	cp config/rbac/role.yaml $(HELM_MANAGER_RBAC_ROLE)
 
 .PHONY: generate
 generate: controller-gen generate-pydantic ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
@@ -296,8 +300,12 @@ vet: ## Run go vet against code.
 	go vet ./...
 
 .PHONY: test
-test: manifests generate fmt vet envtest ## Run tests.
-	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $$(go list ./... | grep -v /e2e | grep -v /test | grep -v /cmd) -coverprofile cover.out
+test: manifests generate fmt vet setup-envtest ## Run tests.
+	KUBEBUILDER_ASSETS="$$($(ENVTEST_ASSETS_CMD))" go test $$(go list ./... | grep -vE '/(e2e|test|cmd)($$|/)') -coverprofile cover.out
+
+.PHONY: envtest
+envtest: setup-envtest ## Run envtest-backed operator tests.
+	KUBEBUILDER_ASSETS="$$($(ENVTEST_ASSETS_CMD))" go test $(ENVTEST_PACKAGES)
 
 # Utilize Kind or modify the e2e tests to load the image locally, enabling compatibility with other vendors.
 .PHONY: test-e2e  # Run the e2e tests against a Kind k8s instance that is spun up.
@@ -602,8 +610,9 @@ controller-gen: $(CONTROLLER_GEN) ## Download controller-gen locally if necessar
 $(CONTROLLER_GEN): $(LOCALBIN)
 	$(call go-install-tool,$(CONTROLLER_GEN),sigs.k8s.io/controller-tools/cmd/controller-gen,$(CONTROLLER_TOOLS_VERSION))
 
-.PHONY: envtest
-envtest: $(ENVTEST) ## Download setup-envtest locally if necessary.
+.PHONY: setup-envtest
+setup-envtest: $(ENVTEST) ## Download setup-envtest and envtest Kubernetes assets locally if necessary.
+	$(ENVTEST_ASSETS_CMD) >/dev/null
 $(ENVTEST): $(LOCALBIN)
 	$(call go-install-tool,$(ENVTEST),sigs.k8s.io/controller-runtime/tools/setup-envtest,$(ENVTEST_VERSION))
 
@@ -659,12 +668,12 @@ generate-api-docs: crd-ref-docs ## Generate API reference documentation from CRD
 		--output-path=./docs/api_reference.md
 	@echo "✅ Generated API reference at ./docs/api_reference.md"
 	# concatenate header.md, api_reference.md, and footer.md
-	cat docs/header.md ./docs/api_reference.md docs/footer.md > ../../docs/kubernetes/api-reference.md
+	cat docs/header.md ./docs/api_reference.md docs/footer.md > ../../docs/fern/kubernetes/api-reference.md
 	rm ./docs/api_reference.md
 	@echo "✅ Concatenated header.md, api_reference.md, and footer.md"
 	# Fix duplicate anchors: crd-ref-docs generates identical anchors for same-named types
 	# across API versions; prepend "v1beta1 " to affected v1beta1 headings and links.
-	python3 docs/fix-api-anchors.py ../../docs/kubernetes/api-reference.md
+	python3 docs/fix-api-anchors.py ../../docs/fern/kubernetes/api-reference.md
 
 HELM_CHART_DIR := ../helm/charts/platform
 

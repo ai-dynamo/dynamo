@@ -121,8 +121,8 @@ impl MooncakeIndexerConfig {
         &self,
         block_size: u32,
         metrics: Arc<KvIndexerMetrics>,
-    ) -> Arc<dyn KvIndexerInterface + Send + Sync> {
-        match self.kind {
+    ) -> anyhow::Result<Arc<dyn KvIndexerInterface + Send + Sync>> {
+        let indexer: Arc<dyn KvIndexerInterface + Send + Sync> = match self.kind {
             MooncakeIndexerKind::RadixTree => Arc::new(KvIndexer::new(
                 CancellationToken::new(),
                 block_size,
@@ -167,7 +167,8 @@ impl MooncakeIndexerConfig {
                     block_size,
                 ))
             }
-        }
+        };
+        Ok(indexer)
     }
 
     pub fn build_approximate_with_prune_config(

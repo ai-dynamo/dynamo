@@ -73,7 +73,7 @@ func runCheckpoint(args []string) error {
 	if err != nil {
 		return err
 	}
-	snapshotctlLog.Info("Checkpoint completed", "job", result.CheckpointJob, "checkpoint_id", result.CheckpointID)
+	snapshotctlLog.Info("Checkpoint completed", "job", result.CheckpointJob, "checkpoint_id", result.CheckpointID, "pod_snapshot", result.PodSnapshot)
 
 	fmt.Printf("status=%s\n", result.Status)
 	fmt.Printf("namespace=%s\n", result.Namespace)
@@ -81,6 +81,10 @@ func runCheckpoint(args []string) error {
 	fmt.Printf("checkpoint_job=%s\n", result.CheckpointJob)
 	fmt.Printf("checkpoint_id=%s\n", result.CheckpointID)
 	fmt.Printf("checkpoint_location=%s\n", result.CheckpointLocation)
+	fmt.Printf("pod_snapshot=%s\n", result.PodSnapshot)
+	if result.BoundContent != "" {
+		fmt.Printf("bound_content=%s\n", result.BoundContent)
+	}
 	return nil
 }
 

@@ -164,7 +164,7 @@ mod tests {
 
                 // Emit a single combined request+response payload record.
                 let request = create_test_request("nemotron", true);
-                let handle = payload::create_handle(&request, "test-req-1")
+                let handle = payload::create_handle(&request, "test-req-1", None)
                     .expect("Failed to create payload handle");
                 handle.emit(Some(Arc::new(create_test_response(
                     "nemotron",
@@ -230,12 +230,12 @@ mod tests {
                 time::sleep(Duration::from_millis(100)).await;
 
                 let request_true = create_test_request("nemotron", true);
-                payload::create_handle(&request_true, "store-true")
+                payload::create_handle(&request_true, "store-true", None)
                     .expect("store=true handle")
                     .emit(None);
 
                 let request_false = create_test_request("nemotron", false);
-                payload::create_handle(&request_false, "store-false")
+                payload::create_handle(&request_false, "store-false", None)
                     .expect("store=false handle")
                     .emit(None);
 

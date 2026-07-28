@@ -16,7 +16,6 @@ import yaml
 from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
 
 import dynamo.sglang._compat as sglang_compat
-import dynamo.sglang.llm_engine as sglang_llm_engine
 from dynamo.common.constants import DisaggregationMode, EmbeddingTransferMode
 from dynamo.common.snapshot.constants import SNAPSHOT_CONTROL_DIR_ENV
 from dynamo.sglang._compat import (
@@ -475,6 +474,24 @@ async def test_custom_jinja_template_env_var_expansion(monkeypatch, mock_sglang_
     )
 
 
+@pytest.mark.asyncio
+async def test_multiple_served_model_names_register_primary_and_aliases(
+    mock_sglang_cli,
+):
+    """SGLang packed served names split into primary + Dynamo aliases."""
+    mock_sglang_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--served-model-name",
+        "primary,alias-one alias-two",
+    )
+
+    config = await parse_args(sys.argv[1:])
+
+    assert config.server_args.served_model_name == "primary"
+    assert config.dynamo_args.served_model_aliases == ["alias-one", "alias-two"]
+
+
 # --- Tool Call Parser Validation Tests ---
 
 
@@ -806,43 +823,6 @@ def test_trace_does_not_activate_fpm_during_snapshot_startup(
 
     assert source is None
     assert "SGLang snapshot workers do not create a Dynamo FPM relay" in caplog.text
-
-
-@pytest.mark.asyncio
-async def test_unified_from_args_marks_fpm_relay_unsupported(monkeypatch):
-    server_args = SimpleNamespace(
-        skip_tokenizer_init=True,
-        model_path="Qwen/Qwen3-0.6B",
-        served_model_name="Qwen/Qwen3-0.6B",
-    )
-    dynamo_args = SimpleNamespace(use_sglang_tokenizer=False)
-    config = SimpleNamespace(
-        server_args=server_args,
-        dynamo_args=dynamo_args,
-        serving_mode=DisaggregationMode.AGGREGATED,
-    )
-    worker_config = object()
-    parse_options = {}
-
-    async def fake_parse_args(argv, *, fpm_trace_relay_supported):
-        parse_options["fpm_trace_relay_supported"] = fpm_trace_relay_supported
-        return config
-
-    monkeypatch.delenv("DYN_ENABLE_TEST_LOGITS_PROCESSOR", raising=False)
-    monkeypatch.setattr(sglang_llm_engine, "parse_args", fake_parse_args)
-    monkeypatch.setattr(
-        sglang_llm_engine.WorkerConfig,
-        "from_runtime_config",
-        lambda *args, **kwargs: worker_config,
-    )
-
-    engine, result_worker_config = await sglang_llm_engine.SglangLLMEngine.from_args(
-        ["--model-path", "Qwen/Qwen3-0.6B"]
-    )
-
-    assert engine.server_args is server_args
-    assert result_worker_config is worker_config
-    assert parse_options["fpm_trace_relay_supported"] is False
 
 
 @pytest.mark.asyncio
@@ -1189,7 +1169,6 @@ async def test_lora_registration_model_type_gate(
     """
     from unittest.mock import AsyncMock, MagicMock
 
-    from dynamo.common.constants import DisaggregationMode
     from dynamo.sglang.request_handlers import handler_base
     from dynamo.sglang.request_handlers.handler_base import LoraMixin
 
