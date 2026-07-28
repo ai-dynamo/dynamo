@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use dynamo_backend_common::{
     DisaggregationMode, FinishReason, GenerateContext, LLMEngine, OutputOptions, PrefillResult,
@@ -22,13 +22,13 @@ use tonic::{Request, Response, Status};
 
 use crate::client::VllmClient;
 use crate::convert::{ResponseState, build_generate_request};
-use crate::engine::VllmSidecarEngine;
+use crate::engine::{VllmSidecarEngine, rl_worker_metadata};
 use crate::json::{json_to_struct, struct_to_json};
 use crate::model::ConfiguredModel;
 use crate::proto as pb;
 
 #[derive(Clone, Default)]
-struct FakeGenerate {
+struct FakeInference {
     requests: Arc<Mutex<Vec<pb::GenerateRequest>>>,
     peers: Arc<Mutex<Vec<SocketAddr>>>,
     reject: Arc<AtomicBool>,
@@ -48,7 +48,7 @@ impl Drop for DropSignal {
 }
 
 #[tonic::async_trait]
-impl pb::generate_server::Generate for FakeGenerate {
+impl pb::inference_server::Inference for FakeInference {
     type GenerateStreamStream =
         Pin<Box<dyn Stream<Item = Result<pb::GenerateResponse, Status>> + Send>>;
 
@@ -161,6 +161,126 @@ impl pb::generate_server::Generate for FakeGenerate {
     }
 }
 
+#[derive(Clone)]
+struct FakeControl {
+    server_info: pb::ServerInfo,
+    model_info: pb::ModelInfo,
+    server_info_calls: Arc<AtomicUsize>,
+    model_info_calls: Arc<AtomicUsize>,
+    hang_server_info: Arc<AtomicBool>,
+}
+
+impl Default for FakeControl {
+    fn default() -> Self {
+        Self {
+            server_info: pb::ServerInfo {
+                engine_version: "test".to_string(),
+                api_version: "vllm".to_string(),
+                instance_id: "instance-1".to_string(),
+                parallelism: Some(pb::ParallelismInfo {
+                    tensor_parallel_size: 1,
+                    pipeline_parallel_size: 1,
+                    data_parallel_size: 1,
+                    data_parallel_rank: 0,
+                    decode_context_parallel_size: 1,
+                    data_parallel_start_rank: 0,
+                    managed_data_parallel_size: 1,
+                }),
+                max_model_len: 4096,
+                kv_block_size: 16,
+                total_kv_blocks: 1024,
+                max_running_requests: 64,
+                max_batched_tokens: 8192,
+                max_loras: 0,
+                capabilities: vec![
+                    "generate.sampling.v2".to_string(),
+                    "generate.preprocessed_mm.v1".to_string(),
+                    "generate.routed_experts.v1".to_string(),
+                ],
+            },
+            model_info: pb::ModelInfo {
+                model_id: "model-source".to_string(),
+                served_model_name: "served-model".to_string(),
+                served_model_aliases: vec!["model-alias".to_string()],
+                tokenizer_modes: vec!["auto".to_string()],
+                supports_text_input: true,
+                supports_token_ids_input: true,
+                supports_lora: false,
+                supports_multimodal: false,
+                reasoning_parser: String::new(),
+                tool_call_parser: String::new(),
+            },
+            server_info_calls: Arc::new(AtomicUsize::new(0)),
+            model_info_calls: Arc::new(AtomicUsize::new(0)),
+            hang_server_info: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
+#[tonic::async_trait]
+impl pb::control_server::Control for FakeControl {
+    async fn get_server_info(
+        &self,
+        _request: Request<pb::GetServerInfoRequest>,
+    ) -> Result<Response<pb::ServerInfo>, Status> {
+        self.server_info_calls.fetch_add(1, Ordering::SeqCst);
+        if self.hang_server_info.load(Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
+        Ok(Response::new(self.server_info.clone()))
+    }
+
+    async fn get_model_info(
+        &self,
+        _request: Request<pb::GetModelInfoRequest>,
+    ) -> Result<Response<pb::ModelInfo>, Status> {
+        self.model_info_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(Response::new(self.model_info.clone()))
+    }
+
+    async fn abort(
+        &self,
+        _request: Request<pb::AbortRequest>,
+    ) -> Result<Response<pb::AbortResponse>, Status> {
+        Err(Status::unimplemented("abort"))
+    }
+
+    async fn drain(
+        &self,
+        _request: Request<pb::DrainRequest>,
+    ) -> Result<Response<pb::DrainResponse>, Status> {
+        Err(Status::unimplemented("drain"))
+    }
+
+    async fn load_lora(
+        &self,
+        _request: Request<pb::LoadLoraRequest>,
+    ) -> Result<Response<pb::LoadLoraResponse>, Status> {
+        Err(Status::unimplemented("load_lora"))
+    }
+
+    async fn unload_lora(
+        &self,
+        _request: Request<pb::UnloadLoraRequest>,
+    ) -> Result<Response<pb::UnloadLoraResponse>, Status> {
+        Err(Status::unimplemented("unload_lora"))
+    }
+
+    async fn list_loras(
+        &self,
+        _request: Request<pb::ListLorasRequest>,
+    ) -> Result<Response<pb::ListLorasResponse>, Status> {
+        Err(Status::unimplemented("list_loras"))
+    }
+
+    async fn get_kv_event_sources(
+        &self,
+        _request: Request<pb::GetKvEventSourcesRequest>,
+    ) -> Result<Response<pb::GetKvEventSourcesResponse>, Status> {
+        Err(Status::unimplemented("get_kv_event_sources"))
+    }
+}
+
 fn sequence_response(
     terminal: bool,
     logprobs: bool,
@@ -190,6 +310,7 @@ fn sequence_response(
                 stop_reason: Some(pb::finish_info::StopReason::StopTokenId(2)),
                 kv_transfer_params,
             }),
+            routed_experts: None,
         }),
     }
 }
@@ -311,25 +432,51 @@ fn oversized_logprob_counts_are_rejected() {
     assert!(prompt_error.to_string().contains("must fit in i32"));
 }
 
+#[test]
+fn rl_metadata_accepts_only_engine_advertised_model_names() {
+    let model = FakeControl::default().model_info;
+    let default = rl_worker_metadata("http://worker:8120".to_string(), 2, &model, None).unwrap();
+    assert_eq!(default.model, "model-source");
+
+    let alias = rl_worker_metadata(
+        "http://worker:8120".to_string(),
+        2,
+        &model,
+        Some("model-alias"),
+    )
+    .unwrap();
+    assert_eq!(alias.model, "model-alias");
+    assert!(
+        rl_worker_metadata("http://worker:8120".to_string(), 2, &model, Some("unknown"),).is_err()
+    );
+}
+
 struct FakeServer {
     endpoint: String,
-    service: FakeGenerate,
+    service: FakeInference,
+    control: FakeControl,
     shutdown: Option<oneshot::Sender<()>>,
 }
 
 impl FakeServer {
-    async fn start(service: FakeGenerate) -> Self {
+    async fn start(service: FakeInference) -> Self {
+        Self::start_with_control(service, FakeControl::default()).await
+    }
+
+    async fn start_with_control(service: FakeInference, control: FakeControl) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let address = listener.local_addr().expect("address");
         let (shutdown, shutdown_rx) = oneshot::channel();
         let server_service = service.clone();
+        let server_control = control.clone();
         tokio::spawn(async move {
             tonic::transport::Server::builder()
                 .add_service(
-                    pb::generate_server::GenerateServer::new(server_service)
+                    pb::inference_server::InferenceServer::new(server_service)
                         .max_encoding_message_size(64 * 1024 * 1024)
                         .max_decoding_message_size(64 * 1024 * 1024),
                 )
+                .add_service(pb::control_server::ControlServer::new(server_control))
                 .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async {
                     let _ = shutdown_rx.await;
                 })
@@ -339,6 +486,7 @@ impl FakeServer {
         Self {
             endpoint: format!("http://{address}"),
             service,
+            control,
             shutdown: Some(shutdown),
         }
     }
@@ -426,11 +574,13 @@ async fn collect(
 
 #[tokio::test]
 async fn aggregated_generation_converts_request_stream_and_usage() {
-    let server = FakeServer::start(FakeGenerate::default()).await;
+    let server = FakeServer::start(FakeInference::default()).await;
     let engine = engine(&server.endpoint, DisaggregationMode::Aggregated, 2);
     let config = engine.start(0).await.expect("start");
     assert_eq!(config.model, "model-source");
-    assert_eq!(config.served_model_name, None);
+    assert_eq!(config.served_model_name, Some("served-model".to_string()));
+    assert_eq!(server.control.server_info_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(server.control.model_info_calls.load(Ordering::SeqCst), 1);
 
     let outputs = collect(&engine, request()).await;
     assert_eq!(outputs.len(), 1);
@@ -451,7 +601,7 @@ async fn aggregated_generation_converts_request_stream_and_usage() {
     let sampling = sent.sampling.as_ref().unwrap();
     assert_eq!(
         (sampling.top_k, sampling.top_p, sampling.min_p),
-        (4, 0.9, 0.1)
+        (Some(4), Some(0.9), Some(0.1))
     );
     assert_eq!(sampling.seed, Some(123));
     let decoding = sent.decoding.as_ref().unwrap();
@@ -461,7 +611,7 @@ async fn aggregated_generation_converts_request_stream_and_usage() {
             decoding.frequency_penalty,
             decoding.repetition_penalty,
         ),
-        (0.3, 0.4, 1.1)
+        (Some(0.3), Some(0.4), Some(1.1))
     );
     assert!(matches!(
         decoding.structured_output,
@@ -483,7 +633,7 @@ async fn aggregated_generation_converts_request_stream_and_usage() {
 
 #[tokio::test]
 async fn grpc_request_errors_are_propagated() {
-    let service = FakeGenerate::default();
+    let service = FakeInference::default();
     service.reject.store(true, Ordering::SeqCst);
     let server = FakeServer::start(service).await;
     let engine = engine(&server.endpoint, DisaggregationMode::Aggregated, 1);
@@ -499,7 +649,7 @@ async fn grpc_request_errors_are_propagated() {
 
 #[tokio::test]
 async fn prefill_decode_handoff_is_opaque_and_repeatable() {
-    let server = FakeServer::start(FakeGenerate::default()).await;
+    let server = FakeServer::start(FakeInference::default()).await;
     let prefill = engine(&server.endpoint, DisaggregationMode::Prefill, 1);
     let decode = engine(&server.endpoint, DisaggregationMode::Decode, 1);
     prefill.start(0).await.expect("start prefill");
@@ -561,7 +711,7 @@ fn component_honors_config_for_aggregated_but_fixes_disagg_roles() {
 
 #[tokio::test]
 async fn pool_uses_each_configured_connection() {
-    let server = FakeServer::start(FakeGenerate::default()).await;
+    let server = FakeServer::start(FakeInference::default()).await;
     let transport = GrpcTransportConfig {
         connections: NonZeroUsize::new(2).unwrap(),
         ..Default::default()
@@ -596,8 +746,24 @@ async fn pool_uses_each_configured_connection() {
 }
 
 #[tokio::test]
+async fn control_discovery_respects_the_startup_deadline() {
+    let control = FakeControl::default();
+    control.hang_server_info.store(true, Ordering::SeqCst);
+    let server = FakeServer::start_with_control(FakeInference::default(), control).await;
+    let transport = GrpcTransportConfig {
+        connections: NonZeroUsize::new(1).unwrap(),
+        startup_deadline: std::time::Duration::from_millis(100),
+        ..Default::default()
+    };
+    let endpoint = GrpcEndpoint::parse(&server.endpoint, "--vllm-endpoint").unwrap();
+    let result = VllmClient::connect_and_discover(&endpoint, transport).await;
+    let error = result.err().expect("discovery must time out");
+    assert!(format!("{error}").contains("startup deadline"));
+}
+
+#[tokio::test]
 async fn cancellation_drops_the_remote_stream() {
-    let service = FakeGenerate::default();
+    let service = FakeInference::default();
     service.hang.store(true, Ordering::SeqCst);
     let server = FakeServer::start(service).await;
     let engine = engine(&server.endpoint, DisaggregationMode::Aggregated, 1);
@@ -626,7 +792,7 @@ async fn cancellation_drops_the_remote_stream() {
 
 #[tokio::test]
 async fn cancellation_interrupts_pending_response_headers() {
-    let service = FakeGenerate::default();
+    let service = FakeInference::default();
     service.hang_before_headers.store(true, Ordering::SeqCst);
     let server = FakeServer::start(service).await;
     let engine = engine(&server.endpoint, DisaggregationMode::Aggregated, 1);
@@ -657,7 +823,7 @@ async fn cancellation_interrupts_pending_response_headers() {
 
 #[tokio::test]
 async fn unsupported_features_fail_before_rpc_submission() {
-    let server = FakeServer::start(FakeGenerate::default()).await;
+    let server = FakeServer::start(FakeInference::default()).await;
     let engine = engine(&server.endpoint, DisaggregationMode::Aggregated, 1);
     engine.start(0).await.expect("start");
 

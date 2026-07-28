@@ -6,6 +6,7 @@
 mod args;
 mod client;
 mod convert;
+mod discovery;
 mod engine;
 mod json;
 mod model;

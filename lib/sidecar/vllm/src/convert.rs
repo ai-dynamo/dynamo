@@ -55,17 +55,21 @@ pub(crate) fn build_generate_request(
         sampling: Some(pb::RandomSampling {
             num_sequences: 1,
             top_k: normalize_top_k(sampling.top_k)?,
-            top_p: sampling.top_p.unwrap_or(0.0),
-            min_p: sampling.min_p.unwrap_or(0.0),
+            top_p: sampling.top_p,
+            min_p: sampling.min_p,
             seed: sampling.seed,
         }),
         decoding: Some(pb::DecodingParameters {
-            presence_penalty: sampling.presence_penalty.unwrap_or(0.0),
-            frequency_penalty: sampling.frequency_penalty.unwrap_or(0.0),
-            repetition_penalty: sampling.repetition_penalty.unwrap_or(0.0),
+            presence_penalty: sampling.presence_penalty,
+            frequency_penalty: sampling.frequency_penalty,
+            repetition_penalty: sampling.repetition_penalty,
             logit_bias: Default::default(),
             allowed_token_ids: Vec::new(),
             structured_output: structured_output(sampling.guided_decoding)?,
+            structured_output_disable_any_whitespace: false,
+            structured_output_disable_additional_properties: false,
+            structured_output_whitespace_pattern: None,
+            bad_words: Vec::new(),
         }),
         stopping: Some(pb::StoppingCriteria {
             max_new_tokens,
@@ -77,6 +81,7 @@ pub(crate) fn build_generate_request(
             stop_strings: stop_conditions.stop.unwrap_or_default(),
             include_stop_strings: sampling.include_stop_str_in_output.unwrap_or(false),
             ignore_eos: stop_conditions.ignore_eos.unwrap_or(false),
+            thinking_token_budget: None,
         }),
         response: Some(pb::ResponseOptions {
             prompt_token_ids: prompt_logprobs.is_some(),
@@ -90,6 +95,11 @@ pub(crate) fn build_generate_request(
         kv: Some(kv),
         truncate_prompt_tokens: 0,
         priority,
+        media: Vec::new(),
+        lora_name: String::new(),
+        vllm_xargs_json: None,
+        mm_features: Vec::new(),
+        routed_experts_prompt_start: 0,
     })
 }
 
@@ -104,10 +114,10 @@ fn top_n_candidates(count: u32) -> Result<pb::CandidateTokens, DynamoError> {
     })
 }
 
-fn normalize_top_k(top_k: Option<i32>) -> Result<u32, DynamoError> {
+fn normalize_top_k(top_k: Option<i32>) -> Result<Option<i32>, DynamoError> {
     match top_k {
-        None | Some(-1) | Some(0) => Ok(0),
-        Some(value) if value > 0 => Ok(value as u32),
+        None | Some(-1) | Some(0) => Ok(top_k),
+        Some(value) if value > 0 => Ok(Some(value)),
         Some(value) => Err(client::invalid_argument(format!(
             "top_k must be -1, 0, or positive; got {value}"
         ))),

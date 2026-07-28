@@ -7,7 +7,8 @@ use anyhow::Context;
 use clap::Parser;
 use dynamo_mocker::common::protocols::MockEngineArgs;
 use dynamo_vllm_mocker::{MockerServerConfig, ServerMode, VllmMockerService};
-use dynamo_vllm_sidecar::proto::generate_server::GenerateServer;
+use dynamo_vllm_sidecar::proto::control_server::ControlServer;
+use dynamo_vllm_sidecar::proto::inference_server::InferenceServer;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -82,7 +83,8 @@ async fn main() -> anyhow::Result<()> {
         "starting Mocker-backed vLLM gRPC server"
     );
     tonic::transport::Server::builder()
-        .add_service(GenerateServer::new(service))
+        .add_service(InferenceServer::new(service.clone()))
+        .add_service(ControlServer::new(service))
         .serve_with_shutdown(args.listen, async {
             let _ = tokio::signal::ctrl_c().await;
         })

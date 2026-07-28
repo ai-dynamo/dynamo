@@ -11,7 +11,7 @@ KV-capacity, prefix-cache, and timing behavior. Its primary purpose is fast,
 repeatable testing of `dynamo-vllm-sidecar` without a model or GPU.
 
 The mock server temporarily imports the generated types exposed by
-`dynamo-vllm-sidecar`, whose proto is vendored unchanged from vLLM v0.25.1.
+`dynamo-vllm-sidecar`, whose `Inference` and `Control` protos are vendored unchanged from the compatible vLLM source revision recorded in the sidecar proto README.
 Both consumers will move to vLLM's upstream package once it is published.
 
 ## Aggregated serving

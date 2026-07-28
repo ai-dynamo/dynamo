@@ -10,7 +10,8 @@ use dynamo_backend_common::{
 use dynamo_mocker::common::protocols::MockEngineArgs;
 use dynamo_vllm_mocker::{MockerServerConfig, ServerMode, VllmMockerService};
 use dynamo_vllm_sidecar::VllmSidecarEngine;
-use dynamo_vllm_sidecar::proto::generate_server::GenerateServer;
+use dynamo_vllm_sidecar::proto::control_server::ControlServer;
+use dynamo_vllm_sidecar::proto::inference_server::InferenceServer;
 use futures::StreamExt;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
@@ -38,7 +39,8 @@ impl RunningServer {
         let server_service = service.clone();
         tokio::spawn(async move {
             tonic::transport::Server::builder()
-                .add_service(GenerateServer::new(server_service))
+                .add_service(InferenceServer::new(server_service.clone()))
+                .add_service(ControlServer::new(server_service))
                 .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async {
                     let _ = shutdown_rx.await;
                 })
@@ -129,7 +131,7 @@ async fn collect(
         .await
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sidecar_streams_mocker_tokens_logprobs_and_usage() {
     let server = RunningServer::start(ServerMode::Aggregated, fast_engine_args()).await;
     let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated);
@@ -156,7 +158,7 @@ async fn sidecar_streams_mocker_tokens_logprobs_and_usage() {
     assert_eq!(server.service.active_request_count(), 0);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn prefill_handoff_round_trips_through_a_decode_server() {
     let prefill_server = RunningServer::start(ServerMode::Prefill, fast_engine_args()).await;
     let decode_server = RunningServer::start(ServerMode::Decode, fast_engine_args()).await;
@@ -194,7 +196,7 @@ async fn prefill_handoff_round_trips_through_a_decode_server() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dropping_sidecar_stream_cancels_mocker_work() {
     let mut args = fast_engine_args();
     args.speedup_ratio = 0.1;

@@ -125,7 +125,7 @@ impl VllmMockerService {
 }
 
 #[tonic::async_trait]
-impl pb::generate_server::Generate for VllmMockerService {
+impl pb::inference_server::Inference for VllmMockerService {
     type GenerateStreamStream =
         Pin<Box<dyn Stream<Item = Result<pb::GenerateResponse, Status>> + Send + 'static>>;
 
@@ -206,6 +206,100 @@ impl pb::generate_server::Generate for VllmMockerService {
             ))?;
         };
         Ok(Response::new(Box::pin(stream)))
+    }
+}
+
+#[tonic::async_trait]
+impl pb::control_server::Control for VllmMockerService {
+    async fn get_server_info(
+        &self,
+        _request: Request<pb::GetServerInfoRequest>,
+    ) -> Result<Response<pb::ServerInfo>, Status> {
+        Ok(Response::new(pb::ServerInfo {
+            engine_version: "dynamo-mocker".to_string(),
+            api_version: "vllm".to_string(),
+            instance_id: format!("mocker-{}", self.config.mode),
+            parallelism: Some(pb::ParallelismInfo {
+                tensor_parallel_size: 1,
+                pipeline_parallel_size: 1,
+                data_parallel_size: 1,
+                data_parallel_rank: 0,
+                decode_context_parallel_size: 1,
+                data_parallel_start_rank: 0,
+                managed_data_parallel_size: 1,
+            }),
+            max_model_len: 4096,
+            kv_block_size: 16,
+            total_kv_blocks: 4096,
+            max_running_requests: self.config.max_concurrent_requests as u64,
+            max_batched_tokens: 8192,
+            max_loras: 0,
+            capabilities: vec![
+                "generate.sampling.v2".to_string(),
+                "generate.preprocessed_mm.v1".to_string(),
+                "generate.routed_experts.v1".to_string(),
+            ],
+        }))
+    }
+
+    async fn get_model_info(
+        &self,
+        _request: Request<pb::GetModelInfoRequest>,
+    ) -> Result<Response<pb::ModelInfo>, Status> {
+        Ok(Response::new(pb::ModelInfo {
+            model_id: self.config.model.clone(),
+            served_model_name: self.config.model.clone(),
+            served_model_aliases: Vec::new(),
+            tokenizer_modes: vec!["auto".to_string()],
+            supports_text_input: true,
+            supports_token_ids_input: true,
+            supports_lora: false,
+            supports_multimodal: false,
+            reasoning_parser: String::new(),
+            tool_call_parser: String::new(),
+        }))
+    }
+
+    async fn abort(
+        &self,
+        _request: Request<pb::AbortRequest>,
+    ) -> Result<Response<pb::AbortResponse>, Status> {
+        Err(Status::unimplemented("abort"))
+    }
+
+    async fn drain(
+        &self,
+        _request: Request<pb::DrainRequest>,
+    ) -> Result<Response<pb::DrainResponse>, Status> {
+        Err(Status::unimplemented("drain"))
+    }
+
+    async fn load_lora(
+        &self,
+        _request: Request<pb::LoadLoraRequest>,
+    ) -> Result<Response<pb::LoadLoraResponse>, Status> {
+        Err(Status::unimplemented("load_lora"))
+    }
+
+    async fn unload_lora(
+        &self,
+        _request: Request<pb::UnloadLoraRequest>,
+    ) -> Result<Response<pb::UnloadLoraResponse>, Status> {
+        Err(Status::unimplemented("unload_lora"))
+    }
+
+    async fn list_loras(
+        &self,
+        _request: Request<pb::ListLorasRequest>,
+    ) -> Result<Response<pb::ListLorasResponse>, Status> {
+        Err(Status::unimplemented("list_loras"))
+    }
+
+    async fn get_kv_event_sources(
+        &self,
+        _request: Request<pb::GetKvEventSourcesRequest>,
+    ) -> Result<Response<pb::GetKvEventSourcesResponse>, Status> {
+        Err(Status::unimplemented("get_kv_event_sources"))
     }
 }
 
