@@ -71,60 +71,7 @@ class VllmResult:
     usage: dict[str, Any] | None
 
 
-def _optional_number(
-    request: Mapping[str, Any],
-    field_name: str,
-    *,
-    minimum: float,
-    maximum: float,
-) -> float | None:
-    value = request.get(field_name)
-    if value is None:
-        return None
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ValueError(f"{field_name} must be a number")
-    normalized = float(value)
-    if normalized < minimum or normalized > maximum:
-        raise ValueError(f"{field_name} must be between {minimum} and {maximum}")
-    return normalized
-
-
-def _normalize_stop(value: Any) -> str | list[str] | None:
-    if value is None:
-        return None
-    if isinstance(value, str):
-        if not value:
-            raise ValueError("stop must not be empty")
-        return value
-    if (
-        isinstance(value, list)
-        and 1 <= len(value) <= 4
-        and all(isinstance(item, str) and item for item in value)
-    ):
-        return list(value)
-    raise ValueError("stop must be a string or a list of one to four strings")
-
-
-def _normalize_max_tokens(request: Mapping[str, Any]) -> int:
-    max_tokens = request.get("max_tokens")
-    max_completion_tokens = request.get("max_completion_tokens")
-    if (
-        max_tokens is not None
-        and max_completion_tokens is not None
-        and max_tokens != max_completion_tokens
-    ):
-        raise ValueError(
-            "max_tokens and max_completion_tokens must match when both are set"
-        )
-    value = max_completion_tokens if max_completion_tokens is not None else max_tokens
-    if value is None:
-        return 64
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        raise ValueError("max_tokens must be a positive integer")
-    return value
-
-
-def _normalize_content(
+def _parse_content(
     *,
     role: str,
     content: Any,
@@ -222,7 +169,7 @@ def validate_chat_request(request: Mapping[str, Any]) -> ValidatedChatRequest:
         role = message.get("role")
         if role not in _ALLOWED_ROLES:
             raise ValueError(f"unsupported message role: {role!r}")
-        content, message_image_urls, message_text_count = _normalize_content(
+        content, message_image_urls, message_text_count = _parse_content(
             role=role,
             content=message.get("content"),
         )
@@ -237,13 +184,62 @@ def validate_chat_request(request: Mapping[str, Any]) -> ValidatedChatRequest:
             f"the request must contain exactly one image_url; got {len(image_urls)}"
         )
 
+    max_tokens = request.get("max_tokens")
+    max_completion_tokens = request.get("max_completion_tokens")
+    if (
+        max_tokens is not None
+        and max_completion_tokens is not None
+        and max_tokens != max_completion_tokens
+    ):
+        raise ValueError(
+            "max_tokens and max_completion_tokens must match when both are set"
+        )
+    max_tokens = (
+        max_completion_tokens if max_completion_tokens is not None else max_tokens
+    )
+    if max_tokens is None:
+        max_tokens = 64
+    if (
+        isinstance(max_tokens, bool)
+        or not isinstance(max_tokens, int)
+        or max_tokens < 1
+    ):
+        raise ValueError("max_tokens must be a positive integer")
+
+    temperature = request.get("temperature")
+    if temperature is not None and (
+        isinstance(temperature, bool)
+        or not isinstance(temperature, (int, float))
+        or not 0.0 <= temperature <= 2.0
+    ):
+        raise ValueError("temperature must be between 0.0 and 2.0")
+
+    top_p = request.get("top_p")
+    if top_p is not None and (
+        isinstance(top_p, bool)
+        or not isinstance(top_p, (int, float))
+        or not 0.0 <= top_p <= 1.0
+    ):
+        raise ValueError("top_p must be between 0.0 and 1.0")
+
+    stop = request.get("stop")
+    if isinstance(stop, str):
+        if not stop:
+            raise ValueError("stop must not be empty")
+    elif stop is not None and not (
+        isinstance(stop, list)
+        and 1 <= len(stop) <= 4
+        and all(isinstance(item, str) and item for item in stop)
+    ):
+        raise ValueError("stop must be a string or a list of one to four strings")
+
     return ValidatedChatRequest(
         processor_messages=processor_messages,
         image_url=image_urls[0],
-        max_tokens=_normalize_max_tokens(request),
-        temperature=_optional_number(request, "temperature", minimum=0.0, maximum=2.0),
-        top_p=_optional_number(request, "top_p", minimum=0.0, maximum=1.0),
-        stop=_normalize_stop(request.get("stop")),
+        max_tokens=max_tokens,
+        temperature=float(temperature) if temperature is not None else None,
+        top_p=float(top_p) if top_p is not None else None,
+        stop=stop,
         seed=seed,
     )
 

@@ -46,14 +46,6 @@ configure_dynamo_logging(service_name="multimodal-dag-vision-encoder")
 logger = logging.getLogger(__name__)
 
 
-def _normalize_token_ids(values: Any) -> list[int]:
-    if not isinstance(values, list) or any(
-        not isinstance(value, int) or isinstance(value, bool) for value in values
-    ):
-        raise ValueError("Qwen processor did not return a token-id list")
-    return values
-
-
 def render_unexpanded_prompt_token_ids(
     processor: Any,
     messages: list[dict[str, Any]],
@@ -67,9 +59,13 @@ def render_unexpanded_prompt_token_ids(
     )
     if not isinstance(prompt, str) or not prompt:
         raise ValueError("Qwen processor did not return a rendered prompt")
-    return _normalize_token_ids(
-        processor.tokenizer.encode(prompt, add_special_tokens=False)
-    )
+    token_ids = processor.tokenizer.encode(prompt, add_special_tokens=False)
+    if not isinstance(token_ids, list) or any(
+        not isinstance(token_id, int) or isinstance(token_id, bool)
+        for token_id in token_ids
+    ):
+        raise ValueError("Qwen tokenizer did not return token IDs")
+    return token_ids
 
 
 class CustomVisionEncoder:
@@ -107,8 +103,6 @@ class CustomVisionEncoder:
                 return_tensors="pt",
             ),
         )
-        token_ids = _normalize_token_ids(prompt_token_ids)
-
         embeddings = await asyncio.to_thread(
             encode_image_embeddings,
             model_name=self._model,
@@ -131,7 +125,7 @@ class CustomVisionEncoder:
 
         artifact = ExternalQwenArtifact.create(
             model=self._model,
-            prompt_token_ids=token_ids,
+            prompt_token_ids=prompt_token_ids,
             image_embeds=projected,
             image_grid_thw=grid,
         )

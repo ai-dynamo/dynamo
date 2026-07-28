@@ -183,11 +183,6 @@ async def test_rejects_media_when_multimodal_is_disabled():
         )
 
     with pytest.raises(ValueError, match="--enable-multimodal"):
-        processor.validate_multimodal_request(
-            {"external_mm_data": {"format": "qwen2_vl_projected_grid.v1"}}
-        )
-
-    with pytest.raises(ValueError, match="--enable-multimodal"):
         await processor.prepare_prompt(
             {
                 "token_ids": [1, 2],

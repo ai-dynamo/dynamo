@@ -49,20 +49,6 @@ configure_dynamo_logging(service_name="multimodal-dag-orchestrator")
 logger = logging.getLogger(__name__)
 
 
-def _normalize_eos_token_ids(value: int | Sequence[int] | None) -> list[int]:
-    if value is None:
-        return []
-    if isinstance(value, int) and not isinstance(value, bool):
-        return [value]
-    if isinstance(value, Sequence) and all(
-        isinstance(item, int) and not isinstance(item, bool) for item in value
-    ):
-        return list(value)
-    raise ValueError(
-        "generation config eos_token_id must be an integer or integer list"
-    )
-
-
 def _response_data(response: Any) -> Mapping[str, Any]:
     data = response.data()
     if not isinstance(data, Mapping):
@@ -257,10 +243,15 @@ async def worker(runtime: DistributedRuntime) -> None:
 
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     generation_config = GenerationConfig.from_pretrained(args.model)
+    eos_token_ids = generation_config.eos_token_id
+    if eos_token_ids is None:
+        eos_token_ids = []
+    elif isinstance(eos_token_ids, int):
+        eos_token_ids = [eos_token_ids]
     handler = OrchestratorHandler(
         backend_model=args.model,
         tokenizer=tokenizer,
-        eos_token_ids=_normalize_eos_token_ids(generation_config.eos_token_id),
+        eos_token_ids=eos_token_ids,
         encoder_client=encoder_client,
         classifier_client=classifier_client,
         vllm_client=vllm_client,
