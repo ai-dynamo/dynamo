@@ -16,7 +16,7 @@ Only the following contracts cross component boundaries:
 | `Replayer` ↔ `Generalized Mocker Engine` | `GeneralizedMockerEngine`, `EnginePassResult`, and `EngineEffects` |
 | `Live Mocker` ↔ `Generalized Mocker Engine` | `GeneralizedMockerEngine`, `EnginePassResult`, and `EngineEffects` |
 | `Replayer` ↔ `Router Adapter` | `PlacementPolicy<Request>` |
-| `Replayer` ↔ `Planner Adapter` | TODO |
+| `Replayer` ↔ `Planner Adapter` | `ScalingPolicy` |
 
 The contracts are owned by AISim. Dynamo implements the adapters and converts
 between Dynamo-specific and AISim-neutral types.
@@ -472,4 +472,166 @@ type.
 
 ## Planner Adapter API
 
-TODO: Hongkuan will add this section.
+The Planner adapter is an optional internal boundary between `Replayer` and a
+scaling policy. AISim Replay owns the neutral scaling contract. Dynamo Replay
+constructs and injects the Dynamo Planner adapter when Planner configuration is
+present.
+
+AISim Replay does not import Planner, interpret `PlannerConfig`, construct
+predictors, or implement Planner policy. Planner-disabled and Planner-enabled
+runs use the same `Replayer` event loop.
+
+The runtime boundary is:
+
+```rust
+trait ScalingPolicy {
+    fn initial_tick_ms(&mut self) -> Result<Option<f64>>;
+
+    fn on_tick(
+        &mut self,
+        observation: ScalingObservation,
+    ) -> Result<ScalingEffects>;
+}
+
+struct ScalingObservation {
+    now_ms: f64,
+    pools: Vec<WorkerPoolObservation>,
+    traffic: TrafficWindow,
+}
+
+struct WorkerPoolObservation {
+    role: WorkerRole,
+    active_worker_ids: Vec<usize>,
+    total_workers: usize,
+    fpm: Vec<WorkerFpmSnapshot>,
+}
+
+enum WorkerRole {
+    Aggregated,
+    Prefill,
+    Decode,
+}
+
+struct WorkerFpmSnapshot {
+    worker_id: usize,
+    dp_rank: u32,
+    snapshot: ForwardPassSnapshot,
+}
+
+struct ScalingEffects {
+    targets: Vec<WorkerPoolTarget>,
+    next_tick_ms: Option<f64>,
+}
+
+struct WorkerPoolTarget {
+    role: WorkerRole,
+    logical_workers: usize,
+}
+```
+
+`initial_tick_ms` returns the absolute simulated time of the first scaling tick.
+`None` disables scaling ticks. `on_tick` returns absolute logical-worker targets
+and the absolute simulated time of the next tick. Omitting a worker role leaves
+that pool unchanged; `next_tick_ms == None` stops the recurring tick.
+
+An aggregated replay exposes only the `Aggregated` pool. A disaggregated replay
+exposes `Prefill` and `Decode` pools. Scaling targets always refer to complete
+logical workers. A Planner adapter cannot add or remove individual attention-DP
+ranks.
+
+### Tick and scaling semantics
+
+`Replayer` owns the scaling tick as an event in its virtual event queue. At a
+tick timestamp, it first settles request arrivals, pass completions, engine
+internal work, worker readiness, placement releases, and worker removals at the
+same timestamp. The scaling policy therefore observes a consistent
+post-settlement snapshot.
+
+For each tick, `Replayer`:
+
+1. builds one `WorkerPoolObservation` for every configured worker role;
+2. drains the traffic window ending at `now_ms`;
+3. calls `ScalingPolicy::on_tick`;
+4. validates the returned targets;
+5. applies scale-up or scale-down through the existing worker lifecycle;
+6. schedules the next tick when requested.
+
+Scale-up constructs complete `GeneralizedMockerEngine` logical workers and
+honors the configured startup delay. Scale-down removes the selected workers
+from placement, marks them draining, and removes them only after they satisfy
+the normal drain conditions. The Planner adapter does not construct engines,
+mutate the event queue, or drive worker lifecycle directly.
+
+A policy error fails the replay candidate. Dynamo Replay is responsible for
+closing the adapter and preserving adapter-specific error context.
+
+### Observation and metric ownership
+
+The `Generalized Mocker Engine` produces rank-scoped FPM and neutral engine
+effects. `Replayer` owns the virtual-time aggregation required to build
+`ScalingObservation`:
+
+- FPM is keyed by logical worker and DP rank;
+- the latest FPM sample for each worker/rank since the previous tick is exposed;
+- active ranks with no forward pass may receive neutral idle samples at the
+  configured sampling cadence;
+- active worker IDs contain ready, non-draining workers;
+- total worker counts include workers represented in the current lifecycle,
+  including pending startup or removal as defined by replay scaling semantics;
+- `TrafficWindow` covers the interval since the previous scaling tick and
+  carries the counts needed to merge weighted averages exactly.
+
+Cache-hit and overlap information used by traffic metrics must be represented as
+neutral placement or admission observations. Dynamo `RouterEvent` and the
+current `PlannerCacheSample` type do not cross this boundary.
+
+Planner-specific interpretation remains in the Dynamo Planner adapter. This
+includes regression inputs, partial-window merging across different Planner
+cadences, load prediction, SLA evaluation, scaling-target calculation, GPU-hour
+accounting, and Planner diagnostics.
+
+Normal `TraceCollector` and replay-report metrics remain enabled independently
+of Planner. When no `ScalingPolicy` is attached, `Replayer` does not create
+scaling-tick events or maintain Planner-only FPM and traffic buffers.
+
+### Dynamo Planner composition
+
+Planner configuration in `ReplaySpec` is serializable data, not a Rust or
+Python policy object. When Planner is selected, Dynamo Replay:
+
+1. resolves the selected Planner runtime-hook descriptor;
+2. loads the Planner provider;
+3. constructs the Dynamo `ReplayPlannerAdapter`;
+4. wraps it in an in-process implementation of `ScalingPolicy`;
+5. injects that policy before invoking the same `Replayer::run` loop.
+
+For the current Python Planner, the PyO3 wrapper calls the adapter's
+`initial_tick_ms()` and `on_tick(observation)` methods. This wrapper implements
+only the neutral Rust contract; Planner configuration, predictor state, and
+decision logic remain in the Python Planner component.
+
+When Planner is not selected, Dynamo Replay does not resolve or import the
+Planner provider and runs `Replayer` without a scaling policy. Missing
+Planner-only optional dependencies therefore fail only when a Planner hook is
+requested.
+
+The scaling contract controls the replay only while it is running. After
+`Replayer` returns the base `TraceSimulationReport`, Dynamo Replay may ask the
+Planner adapter to finalize its scaling events and diagnostics and attach them
+to Dynamo-specific report metadata. Adapter finalization is not part of the
+AISim Replay contract.
+
+### Boundary constraints
+
+The Planner adapter:
+
+- does not receive a `GeneralizedMockerEngine` handle;
+- does not advance the virtual clock or pop replay events;
+- does not construct, start, drain, or remove workers directly;
+- does not select request placement;
+- does not write base `TraceCollector` state;
+- does not introduce a separate Planner replay entry point.
+
+AISim Replay depends only on the neutral `ScalingPolicy` contract. Dynamo
+Planner configuration, Python integration, predictor dependencies, and
+diagnostics remain on the Dynamo Replay side of the dependency boundary.
