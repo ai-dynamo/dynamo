@@ -83,7 +83,15 @@ impl Indexer {
     pub(crate) fn supports_router_hint_chain_retention(&self) -> bool {
         matches!(
             self,
-            Self::KvIndexer { approx: None, .. } | Self::Concurrent { approx: None, .. }
+            Self::KvIndexer {
+                approx: None,
+                primary_records_routing_decisions: false,
+                ..
+            } | Self::Concurrent {
+                approx: None,
+                primary_records_routing_decisions: false,
+                ..
+            }
         )
     }
 
@@ -479,6 +487,14 @@ mod tests {
         assert!(make_test_indexer().supports_overlap_refresh());
         assert!(make_test_concurrent_indexer().supports_overlap_refresh());
         assert!(!Indexer::None.supports_overlap_refresh());
+    }
+
+    #[test]
+    fn router_hint_chain_retention_requires_event_driven_primary() {
+        assert!(make_test_indexer().supports_router_hint_chain_retention());
+        assert!(make_test_concurrent_indexer().supports_router_hint_chain_retention());
+        assert!(!make_test_concurrent_approx_indexer().supports_router_hint_chain_retention());
+        assert!(!Indexer::None.supports_router_hint_chain_retention());
     }
 
     async fn flush_indexer(indexer: &Indexer) {
