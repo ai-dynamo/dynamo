@@ -344,10 +344,15 @@ jobs:
           # cuda13). EFA/frontend/snapshot are built by post-merge and other
           # workflows on release branches; for nightly we skip them so we
           # don't try to copy ECR tags that don't exist for the resolved SHA.
-          # Operator and planner carry no dev-versioned wheels, so nightly
-          # reuses the post-merge images at the same SHA (the exact images
-          # the RC path promotes below) and stages them into the dedicated
+          # Operator and planner are not rebuilt by the nightly: it reuses
+          # the post-merge images at the same SHA (the exact images the RC
+          # path promotes below) and stages them into the dedicated
           # kubernetes-operator-nightly / dynamo-planner-nightly repos.
+          # NOTE: the planner image bundles the dynamo wheels at the repo's
+          # plain version (post-merge passes no dev_version_suffix), so its
+          # embedded wheels differ from the dev-versioned wheels inside the
+          # runtime nightlies at the same tag. The operator (Go-only) truly
+          # carries no wheels.
           if [[ "${NIGHTLY}" != "true" ]]; then
             # ---- EFA runtime images ----
             # All EFA runtime images are multi-arch (amd64+arm64).
