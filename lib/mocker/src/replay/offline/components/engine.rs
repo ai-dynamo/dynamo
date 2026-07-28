@@ -33,10 +33,18 @@ where
 {
     stage: SimulationWorkerStage,
     pass_mode: EnginePassMode,
-    /// DP-rank schedulers keyed by stable ID (monotonic, never reused).
+    /// DP-rank schedulers indexed by stable ID (monotonic, never reused).
+    ///
+    /// Removed ranks leave unreclaimed tombstones so storage and scans scale
+    /// with the total number of ranks ever created, not only the live rank
+    /// count. This preserves stable IDs across autoscaling churn.
     workers: Vec<Option<OfflineWorkerState>>,
     /// Mocker worker IDs mapped to their per-rank scheduler IDs.
+    ///
+    /// Removed groups also leave tombstones to preserve stable IDs.
     worker_groups: Vec<Option<Vec<usize>>>,
+    /// Number of non-tombstoned worker groups.
+    live_group_count: usize,
     /// Logical workers that can start a pass, ordered by stable worker ID.
     ready_groups: BTreeSet<usize>,
     /// Ready groups that made no observable progress during the prior drive.
@@ -66,6 +74,13 @@ where
         workers: Vec<OfflineWorkerState>,
     ) -> Self {
         let count = workers.len();
+        debug_assert!(
+            workers
+                .iter()
+                .enumerate()
+                .all(|(worker_id, worker)| worker.rank_identity().0 == worker_id as u64),
+            "EngineComponent::new assumes worker_id equals its stable index"
+        );
         let workers = workers.into_iter().map(Some).collect();
         let worker_groups = (0..count).map(|id| Some(vec![id])).collect();
         let mut component = Self {
@@ -73,6 +88,7 @@ where
             pass_mode,
             workers,
             worker_groups,
+            live_group_count: count,
             ready_groups: BTreeSet::new(),
             deferred_ready_groups: BTreeSet::new(),
             next_id: count,
@@ -115,11 +131,12 @@ where
             debug_assert_eq!(worker_id, worker_groups.len());
             worker_groups.push(Some(rank_ids));
         }
-        Self {
+        let mut component = Self {
             stage,
             pass_mode,
             workers,
             worker_groups,
+            live_group_count: num_workers,
             ready_groups: BTreeSet::new(),
             deferred_ready_groups: BTreeSet::new(),
             next_id: num_workers.saturating_mul(dp_size),
@@ -129,7 +146,9 @@ where
             args,
             capture_raw: Observation::CAPTURE_RAW,
             observation: PhantomData,
-        }
+        };
+        component.refresh_all_groups();
+        component
     }
 
     /// Set the engine args used when adding workers dynamically.
@@ -150,17 +169,39 @@ where
         self.workers.get_mut(rank_id)?.as_mut()
     }
 
+    fn required_worker(
+        workers: &[Option<OfflineWorkerState>],
+        rank_id: usize,
+    ) -> &OfflineWorkerState {
+        workers
+            .get(rank_id)
+            .and_then(Option::as_ref)
+            .expect("live worker group referenced a missing rank")
+    }
+
+    fn required_worker_mut(
+        workers: &mut [Option<OfflineWorkerState>],
+        rank_id: usize,
+    ) -> &mut OfflineWorkerState {
+        workers
+            .get_mut(rank_id)
+            .and_then(Option::as_mut)
+            .expect("live worker group referenced a missing rank")
+    }
+
     fn group_is_ready(&self, worker_id: usize) -> bool {
         let Some(rank_ids) = self.worker_groups.get(worker_id).and_then(Option::as_ref) else {
             return false;
         };
-        !rank_ids.iter().any(|&rank_id| {
-            self.worker(rank_id)
-                .is_some_and(OfflineWorkerState::is_busy)
-        }) && rank_ids.iter().any(|&rank_id| {
-            self.worker(rank_id)
-                .is_some_and(OfflineWorkerState::is_ready)
-        })
+        // A ready rank is itself idle. The separate busy check enforces the
+        // sibling barrier for the rest of the logical worker's DP ranks.
+        let any_busy = rank_ids
+            .iter()
+            .any(|&rank_id| Self::required_worker(&self.workers, rank_id).is_busy());
+        let any_ready = rank_ids
+            .iter()
+            .any(|&rank_id| Self::required_worker(&self.workers, rank_id).is_ready());
+        !any_busy && any_ready
     }
 
     fn refresh_group(&mut self, worker_id: usize) {
@@ -188,6 +229,17 @@ where
         }
     }
 
+    #[cfg(debug_assertions)]
+    fn debug_assert_ready_frontier(&self) {
+        let expected = (0..self.worker_groups.len())
+            .filter(|&worker_id| self.group_is_ready(worker_id))
+            .collect::<BTreeSet<_>>();
+        debug_assert_eq!(
+            self.ready_groups, expected,
+            "readiness frontier drifted from a full scan"
+        );
+    }
+
     /// Add a new mocker worker and all of its DP-rank schedulers, returning
     /// the stable mocker worker ID.
     pub(in crate::replay::offline) fn add_worker(&mut self) -> usize {
@@ -210,7 +262,32 @@ where
         }
         debug_assert_eq!(worker_id, self.worker_groups.len());
         self.worker_groups.push(Some(rank_ids));
+        self.live_group_count += 1;
         worker_id
+    }
+
+    fn tombstone_group(&mut self, worker_id: usize) -> bool {
+        self.ready_groups.remove(&worker_id);
+        self.deferred_ready_groups.remove(&worker_id);
+        let Some(rank_ids) = self.worker_groups.get_mut(worker_id).and_then(Option::take) else {
+            return false;
+        };
+        for rank_id in rank_ids {
+            self.workers
+                .get_mut(rank_id)
+                .and_then(Option::take)
+                .expect("live worker group referenced a missing rank");
+        }
+        self.live_group_count = self
+            .live_group_count
+            .checked_sub(1)
+            .expect("live worker group count underflow");
+        debug_assert_eq!(
+            self.live_group_count,
+            self.worker_groups.iter().flatten().count(),
+            "live worker group count drifted from storage"
+        );
+        true
     }
 
     /// Mark a worker for removal. Round-robin routing skips marked workers;
@@ -244,15 +321,8 @@ where
             true // keep in pending set
         });
         for &id in &removed {
-            self.ready_groups.remove(&id);
-            self.deferred_ready_groups.remove(&id);
-            if let Some(rank_ids) = self.worker_groups.get_mut(id).and_then(Option::take) {
-                for rank_id in rank_ids {
-                    if let Some(worker) = self.workers.get_mut(rank_id) {
-                        worker.take();
-                    }
-                }
-            }
+            let tombstoned = self.tombstone_group(id);
+            debug_assert!(tombstoned);
         }
         removed
     }
@@ -298,15 +368,8 @@ where
                 .collect();
             for &id in &to_cancel {
                 self.pending_startup.remove(&id);
-                self.ready_groups.remove(&id);
-                self.deferred_ready_groups.remove(&id);
-                if let Some(rank_ids) = self.worker_groups.get_mut(id).and_then(Option::take) {
-                    for rank_id in rank_ids {
-                        if let Some(worker) = self.workers.get_mut(rank_id) {
-                            worker.take();
-                        }
-                    }
-                }
+                let tombstoned = self.tombstone_group(id);
+                debug_assert!(tombstoned);
             }
 
             // Mark active workers for removal if more excess remains.
@@ -407,24 +470,24 @@ where
 
     pub(in crate::replay::offline) fn dispatch(
         &mut self,
-        worker_id: usize,
+        rank_id: usize,
         request: DirectRequest,
     ) -> anyhow::Result<()> {
-        self.worker_mut(worker_id)
-            .ok_or_else(|| anyhow::anyhow!("offline replay selected unknown worker {worker_id}"))?
+        self.worker_mut(rank_id)
+            .ok_or_else(|| anyhow::anyhow!("offline replay selected unknown rank {rank_id}"))?
             .receive_request(request);
-        self.refresh_rank(worker_id);
+        self.refresh_rank(rank_id);
         Ok(())
     }
 
     pub(in crate::replay::offline) fn apply_command(
         &mut self,
-        worker_id: usize,
+        rank_id: usize,
         command: SchedulerCommand,
     ) -> anyhow::Result<ObservedCommandEffects<Observation::Batch>> {
         let mut effects = self
-            .worker_mut(worker_id)
-            .ok_or_else(|| anyhow::anyhow!("offline replay selected unknown worker {worker_id}"))?
+            .worker_mut(rank_id)
+            .ok_or_else(|| anyhow::anyhow!("offline replay selected unknown rank {rank_id}"))?
             .apply_command(command)?;
         let engine_events = Observation::take_command_events(&mut effects);
         let observed = ObservedCommandEffects {
@@ -432,17 +495,17 @@ where
             lifecycle_events: effects.lifecycle_events,
             engine_events,
         };
-        self.refresh_rank(worker_id);
+        self.refresh_rank(rank_id);
         Ok(observed)
     }
 
     pub(in crate::replay::offline) fn worker_is_busy(
         &self,
-        worker_id: usize,
+        rank_id: usize,
     ) -> anyhow::Result<bool> {
         let worker = self
-            .worker(worker_id)
-            .ok_or_else(|| anyhow::anyhow!("offline replay selected unknown worker {worker_id}"))?;
+            .worker(rank_id)
+            .ok_or_else(|| anyhow::anyhow!("offline replay selected unknown rank {rank_id}"))?;
         Ok(worker.is_busy())
     }
 
@@ -459,23 +522,27 @@ where
         for worker_id in deferred {
             self.refresh_group(worker_id);
         }
+        #[cfg(debug_assertions)]
+        self.debug_assert_ready_frontier();
 
         while let Some(worker_id) = self.ready_groups.pop_first() {
-            let Some(rank_ids) = self.worker_groups.get(worker_id).and_then(Option::as_ref) else {
-                continue;
-            };
+            let rank_ids = self
+                .worker_groups
+                .get(worker_id)
+                .and_then(Option::as_ref)
+                .expect("readiness frontier referenced a missing worker group");
             // A logical attention-DP worker advances in group-owned epochs.
             // A rank that received work mid-epoch must wait until every sibling
             // has crossed the prior completion boundary.
             if rank_ids
                 .iter()
-                .any(|&rank_id| self.workers[rank_id].as_ref().unwrap().is_busy())
+                .any(|&rank_id| Self::required_worker(&self.workers, rank_id).is_busy())
             {
                 continue;
             }
             if !rank_ids
                 .iter()
-                .any(|&rank_id| self.workers[rank_id].as_ref().unwrap().is_ready())
+                .any(|&rank_id| Self::required_worker(&self.workers, rank_id).is_ready())
             {
                 continue;
             }
@@ -483,7 +550,7 @@ where
             let mut executed_by_rank: SmallVec<[Option<EnginePassResult>; 1]> =
                 SmallVec::with_capacity(rank_ids.len());
             for &rank_id in rank_ids {
-                if !self.workers[rank_id].as_ref().unwrap().is_ready() {
+                if !Self::required_worker(&self.workers, rank_id).is_ready() {
                     executed_by_rank.push(None);
                     continue;
                 }
@@ -492,14 +559,10 @@ where
                         let Some(collector) = collector.as_deref_mut() else {
                             bail!("offline replay visible engine pass requires a collector");
                         };
-                        self.workers[rank_id]
-                            .as_mut()
-                            .unwrap()
+                        Self::required_worker_mut(&mut self.workers, rank_id)
                             .execute_pass(collector, now_ms)
                     }
-                    EnginePassMode::Hidden => self.workers[rank_id]
-                        .as_mut()
-                        .unwrap()
+                    EnginePassMode::Hidden => Self::required_worker_mut(&mut self.workers, rank_id)
                         .execute_hidden_pass(now_ms),
                 };
                 executed_by_rank.push(Some(executed));
@@ -518,7 +581,7 @@ where
                     if group_end_ms > now_ms {
                         // Empty ranks still participate in the barrier so work
                         // arriving mid-epoch cannot start ahead of a sibling.
-                        self.workers[rank_id].as_mut().unwrap().mark_busy();
+                        Self::required_worker_mut(&mut self.workers, rank_id).mark_busy();
                         effects
                             .scheduled_completions
                             .push(ScheduledWorkerCompletion {
@@ -591,7 +654,7 @@ where
                 };
 
                 if group_end_ms > now_ms {
-                    self.workers[rank_id].as_mut().unwrap().mark_busy();
+                    Self::required_worker_mut(&mut self.workers, rank_id).mark_busy();
                     effects
                         .scheduled_completions
                         .push(ScheduledWorkerCompletion {
@@ -618,6 +681,11 @@ where
             }
 
             if !effects.is_empty() {
+                if group_end_ms <= now_ms {
+                    // A zero-duration pass can remain ready. Re-arm it here
+                    // without depending on caller completion processing.
+                    self.refresh_group(worker_id);
+                }
                 return Ok(effects);
             }
             if self.group_is_ready(worker_id) {
@@ -673,7 +741,7 @@ where
     }
 
     pub(in crate::replay::offline) fn worker_count(&self) -> usize {
-        self.worker_groups.iter().flatten().count()
+        self.live_group_count
     }
 
     #[cfg(test)]
@@ -952,12 +1020,18 @@ mod tests {
             .dispatch(1, timed_request(Uuid::from_u128(52), 4))
             .unwrap();
 
-        let effects = engine
+        let first = engine
             .drive_ready(0.0, Some(&mut TraceCollector::default()))
             .unwrap();
-        let completion = take_only_completion(effects);
+        let first = take_only_completion(first);
+        assert_eq!(first.worker_idx, 0);
+        assert_eq!(engine.ready_groups, BTreeSet::from([1]));
 
-        assert_eq!(completion.worker_idx, 0);
+        let second = engine
+            .drive_ready(0.0, Some(&mut TraceCollector::default()))
+            .unwrap();
+        let second = take_only_completion(second);
+        assert_eq!(second.worker_idx, 1);
     }
 
     #[test]
@@ -1043,10 +1117,16 @@ mod tests {
         assert_eq!(engine.worker_count(), 4);
 
         // Scale down to 3 — should cancel 1 startup worker, not mark any active.
+        engine.ready_groups.insert(3);
+        engine.deferred_ready_groups.insert(3);
         let (_added, newly_marked, _) = engine.apply_target_count(3);
         assert!(newly_marked.is_empty());
         assert_eq!(engine.active_worker_ids().len(), 2);
         assert_eq!(engine.worker_count(), 3); // 2 active + 1 still starting
+        assert!(!engine.ready_groups.contains(&3));
+        assert!(!engine.deferred_ready_groups.contains(&3));
+        assert!(engine.worker_groups[3].is_none());
+        assert!(engine.workers[3].is_none());
 
         // Scale down to 2 — should cancel the remaining startup worker.
         let (_added, newly_marked, _) = engine.apply_target_count(2);
@@ -1075,8 +1155,14 @@ mod tests {
         let new_id = added[0];
 
         assert_eq!(engine.active_worker_ids().len(), 1);
+        engine
+            .worker_mut(new_id)
+            .unwrap()
+            .receive_request(timed_request(Uuid::from_u128(60), 4));
+        assert!(!engine.ready_groups.contains(&new_id));
         assert!(engine.mark_worker_ready(new_id));
         assert_eq!(engine.active_worker_ids().len(), 2);
+        assert!(engine.ready_groups.contains(&new_id));
     }
 
     #[test]
@@ -1111,6 +1197,7 @@ mod tests {
         assert_eq!(second.completed_requests, 0);
         assert!(second.output_signals.is_empty());
         assert!(second.lifecycle_events.is_empty());
+        assert_eq!(engine.ready_groups, BTreeSet::from([0]));
         engine.on_scheduled_completion(second).unwrap();
 
         let final_pass = engine.drive_ready(0.0, Some(&mut collector)).unwrap();
@@ -1264,8 +1351,14 @@ mod tests {
             .apply_command(0, SchedulerCommand::CancelDestination { handoff_id })
             .unwrap();
         assert_eq!(effects.result, SchedulerCommandResult::Applied);
+        engine.ready_groups.insert(0);
+        engine.deferred_ready_groups.insert(0);
         assert_eq!(engine.try_remove_drained(), vec![0]);
         assert_eq!(engine.worker_count(), 0);
+        assert!(!engine.ready_groups.contains(&0));
+        assert!(!engine.deferred_ready_groups.contains(&0));
+        assert!(engine.worker_groups[0].is_none());
+        assert!(engine.workers[0].is_none());
     }
 
     #[cfg(feature = "kvbm-offload")]
