@@ -56,8 +56,9 @@ Dynamo + vLLM deployment profiles for the GB300 and GB200 agentic workload:
    kubectl get crd | grep computedomain
    ```
    Each manifest creates its own `ComputeDomain` and the workers claim its channel. Names vary by profile — check the `metadata.name` fields in each `deploy.yaml`.
-3. **Hugging Face token** with access to `moonshotai/Kimi-K3`. The workers read the weights from the
-   `model-cache` PVC — see [Download the model](#3-download-the-model).
+3. **Hugging Face token** with access to `moonshotai/Kimi-K3`. **GB300 profiles** read weights from the
+   `model-cache` PVC; **GB200 profiles** use node-local storage. See
+   [Download the model](#3-download-the-model) for both paths.
 
 ## Cluster assumptions
 
@@ -157,7 +158,7 @@ resolve straight out of the cache. The frontend does not mount the PVC — see
 For GB200, either pre-stage the checkpoint at `<host-path>/model_weight` on every node in the
 deployment and adjust the `models` `hostPath` to match your cluster, or convert the manifest to the
 PVC flow: replace the `models` `hostPath` volume with `claimName: model-cache` mounted at
-`/model-cache`, add `HF_HOME=/model-cache`, and set `MODEL_PATH` to `moonshotai/Kimi-K3`.
+`/model-cache`, add `HF_HOME=/model-cache`, and set `MODEL_ID` to `moonshotai/Kimi-K3`.
 
 > [!NOTE]
 > The containers run as `runAsUser: 0` because the cached weight files are root-owned while the
@@ -263,10 +264,13 @@ naming San Francisco, and `finish_reason` is `tool_calls`.
 
 Non-obvious knobs, all already set in the manifests:
 
-- **Model resolution.** Each worker pod mounts the `model-cache` PVC at `/model-cache` with
+- **Model resolution (GB300).** Each worker pod mounts the `model-cache` PVC at `/model-cache` with
   `HF_HOME=/model-cache`, and the workers pass the repo id (`MODEL_ID=moonshotai/Kimi-K3`) to
   `--model`, so vLLM loads the checkpoint out of the PVC's Hugging Face cache instead of
   downloading it. `envFrom: hf-token-secret` on the workers covers the hub lookup at startup.
+- **Model resolution (GB200).** Worker pods mount node-local storage at `/models` and pass
+  `--model /models/model_weight` with `HF_HUB_OFFLINE=1`. Pre-stage weights on each node or
+  convert to the PVC flow described in [Download the model](#3-download-the-model).
 - **MNNVL all-reduce.** The aggregated profiles (GB300 and GB200) and the GB300 disaggregated profile use `VLLM_ALLREDUCE_USE_FLASHINFER=1` with `VLLM_FLASHINFER_ALLREDUCE_BACKEND=mnnvl`. Do not enable the NCCL symmetric-memory knobs alongside it — `VLLM_USE_NCCL_SYMM_MEM=0` is required because symmetric memory breaks CUDA-graph capture on this build. The GB200 disaggregated profile uses NCCL directly (MNNVL + NVLS) for all-reduce.
 - **Pod networking.** DGD pods use CNI networking, so `NCCL_SOCKET_IFNAME` and `GLOO_SOCKET_IFNAME`
   are pinned to `eth0`.

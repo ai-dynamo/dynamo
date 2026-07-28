@@ -24,6 +24,7 @@ def _make_connector():
         media_connector.DynamoMediaConnector
     )
 
+
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.gpu_0,
@@ -103,7 +104,9 @@ class TestClientErrorPassthrough:
         connector = _make_connector()
         connector._image_loader = SimpleNamespace(
             load_image=AsyncMock(
-                side_effect=HttpStatusError(415, "Unsupported Media Type", "https://x/y")
+                side_effect=HttpStatusError(
+                    415, "Unsupported Media Type", "https://x/y"
+                )
             )
         )
 

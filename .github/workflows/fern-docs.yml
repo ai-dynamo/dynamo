@@ -235,11 +235,22 @@ jobs:
         run: |
           cd docs-checkout/fern
 
-          # Save the full products[0] block from docs-website (versions, path, etc.)
-          yq '.products[0]' docs.yml > /tmp/preserved_product.yml
-
-          echo "Preserved products[0] block:"
-          cat /tmp/preserved_product.yml
+          # docs-website may use standalone top-level versions (current) or legacy
+          # products[0]. Preserve whichever release-managed shape exists.
+          if yq -e '.products[0] | type == "!!map"' docs.yml >/dev/null 2>&1; then
+            yq '.products[0]' docs.yml > /tmp/preserved_product.yml
+            PRESERVE_MODE=product
+            echo "Preserved products[0] block:"
+            cat /tmp/preserved_product.yml
+          elif yq -e '.versions | type == "!!seq"' docs.yml >/dev/null 2>&1; then
+            yq '.versions' docs.yml > /tmp/preserved_versions.yml
+            PRESERVE_MODE=versions
+            echo "Preserved versions block:"
+            cat /tmp/preserved_versions.yml
+          else
+            echo "::error::No release-managed navigation found in docs.yml"
+            exit 1
+          fi
 
           # Copy docs.yml from source to get config updates (redirects, layout, etc.)
           cp ../../source-checkout/fern/docs.yml docs.yml
@@ -248,8 +259,12 @@ jobs:
           # but on docs-website assets live at fern/assets/ so we need ./assets/
           sed -i 's|\.\./docs/assets/|./assets/|g' docs.yml
 
-          # Restore the preserved products[0] block
-          yq -i '.products[0] = load("/tmp/preserved_product.yml")' docs.yml
+          if [ "$PRESERVE_MODE" = product ]; then
+            yq -i '.products[0] = load("/tmp/preserved_product.yml")' docs.yml
+          else
+            yq -i 'del(.products)' docs.yml
+            yq -i '.versions = load("/tmp/preserved_versions.yml")' docs.yml
+          fi
 
           # Inject the private NVIDIA global theme for production builds only.
           # It is intentionally absent from the source repo's docs.yml so that
