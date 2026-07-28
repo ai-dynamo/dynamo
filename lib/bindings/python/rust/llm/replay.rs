@@ -182,7 +182,7 @@ impl MockEngineArgs {
 #[pymethods]
 impl MockEngineArgs {
     #[new]
-    #[pyo3(signature = (engine_type="vllm", num_gpu_blocks=None, block_size=0, max_num_seqs=Some(256), max_num_batched_tokens=Some(8192), enable_prefix_caching=true, enable_chunked_prefill=true, speedup_ratio=1.0, decode_speedup_ratio=1.0, dp_size=1, startup_time=None, worker_type="aggregated", planner_profile_data=None, aic_backend=None, aic_system=None, aic_backend_version=None, aic_tp_size=None, aic_model_path=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, aic_nextn=None, aic_nextn_accept_rates=None, aic_mtp_seed=42, aic_gemm_dtype=None, aic_moe_dtype=None, aic_fmha_dtype=None, aic_kv_cache_dtype=None, aic_comm_dtype=None, gpu_memory_utilization=None, mem_fraction_static=None, free_gpu_memory_fraction=None, enable_local_indexer=false, bootstrap_port=None, handoff_session_timeout_ms=300000, kv_bytes_per_token=None, kv_transfer_bandwidth=None, kv_transfer_timing_mode="full_prompt", reasoning=None, response_replay_trace_path=None, zmq_kv_events_port=None, zmq_replay_port=None, preemption_mode="lifo", router_queue_policy=None, sglang=None, trtllm=None, num_g2_blocks=None, num_g3_blocks=None, offload_batch_size=None, bandwidth_g1_to_g2_gbps=None, bandwidth_g2_to_g1_gbps=None, bandwidth_g2_to_g3_gbps=None, bandwidth_g3_to_g2_gbps=None, enable_g4_storage=false, bandwidth_g2_to_g4_gbps=None, bandwidth_g4_to_g2_gbps=None, max_model_len=None, g1_backend="kvbm"))]
+    #[pyo3(signature = (engine_type="vllm", num_gpu_blocks=None, block_size=0, max_num_seqs=Some(256), max_num_batched_tokens=Some(8192), enable_prefix_caching=true, enable_chunked_prefill=true, speedup_ratio=1.0, decode_speedup_ratio=1.0, dp_size=1, startup_time=None, worker_type="aggregated", planner_profile_data=None, aic_backend=None, aic_system=None, aic_backend_version=None, aic_tp_size=None, aic_model_path=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, aic_nextn=None, aic_nextn_accept_rates=None, aic_mtp_seed=42, aic_gemm_dtype=None, aic_moe_dtype=None, aic_fmha_dtype=None, aic_kv_cache_dtype=None, aic_comm_dtype=None, gpu_memory_utilization=None, mem_fraction_static=None, free_gpu_memory_fraction=None, enable_local_indexer=false, bootstrap_port=None, handoff_session_timeout_ms=300000, kv_bytes_per_token=None, kv_transfer_bandwidth=None, kv_transfer_timing_mode="full_prompt", reasoning=None, response_replay_trace_path=None, zmq_kv_events_port=None, zmq_replay_port=None, preemption_mode="lifo", router_queue_policy=None, sglang=None, trtllm=None, num_g2_blocks=None, num_g3_blocks=None, offload_batch_size=None, bandwidth_g1_to_g2_gbps=None, bandwidth_g2_to_g1_gbps=None, bandwidth_g2_to_g3_gbps=None, bandwidth_g3_to_g2_gbps=None, enable_g4_storage=false, bandwidth_g2_to_g4_gbps=None, bandwidth_g4_to_g2_gbps=None, max_model_len=None, g1_backend=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         engine_type: &str,
@@ -242,12 +242,12 @@ impl MockEngineArgs {
         bandwidth_g2_to_g4_gbps: Option<f64>,
         bandwidth_g4_to_g2_gbps: Option<f64>,
         max_model_len: Option<usize>,
-        g1_backend: &str,
+        g1_backend: Option<&str>,
     ) -> PyResult<Self> {
         let engine_type = parse_mocker_engine_type(engine_type)?;
         let worker_type = parse_worker_type(worker_type)?;
         let preemption_mode = parse_preemption_mode(preemption_mode)?;
-        let g1_backend = parse_g1_backend(g1_backend)?;
+        let g1_backend = g1_backend.map(parse_g1_backend).transpose()?;
         let kv_transfer_timing_mode = kv_transfer_timing_mode
             .parse()
             .map_err(|error: String| PyException::new_err(error))?;
@@ -266,7 +266,6 @@ impl MockEngineArgs {
             .max_num_seqs(max_num_seqs)
             .max_num_batched_tokens(max_num_batched_tokens)
             .enable_prefix_caching(enable_prefix_caching)
-            .g1_backend(g1_backend)
             .enable_chunked_prefill(enable_chunked_prefill)
             .speedup_ratio(speedup_ratio)
             .decode_speedup_ratio(decode_speedup_ratio)
@@ -320,6 +319,9 @@ impl MockEngineArgs {
         let num_gpu_blocks_explicit = num_gpu_blocks.is_some();
         if let Some(num_gpu_blocks) = num_gpu_blocks {
             builder = builder.num_gpu_blocks(num_gpu_blocks);
+        }
+        if let Some(g1_backend) = g1_backend {
+            builder = builder.g1_backend(g1_backend);
         }
 
         if let Some(npz_path) = planner_profile_data {
@@ -403,7 +405,7 @@ impl MockEngineArgs {
 
     #[getter]
     fn g1_backend(&self) -> &'static str {
-        match self.inner.g1_backend {
+        match self.inner.resolved_g1_backend() {
             RsG1Backend::Kvbm => "kvbm",
             RsG1Backend::Native => "native",
         }
@@ -929,11 +931,6 @@ pub fn run_mocker_trace_replay(
     )?;
     let router_config = load_replay_router_config(router_config, model_name)?;
     let replay_mode = replay_mode.to_owned();
-    if report_jsonl_path.is_some() && replay_mode != "offline" {
-        return Err(PyValueError::new_err(
-            "report_jsonl_path is only supported for replay_mode='offline'",
-        ));
-    }
     let jsonl_path_for_emit = report_jsonl_path.clone();
     let record_per_request = report_jsonl_path.is_some();
     if let Some(ms) = max_sim_time_ms {
@@ -948,21 +945,9 @@ pub fn run_mocker_trace_replay(
             ));
         }
     }
-    // Goodput SLA: when set, the collector classifies SLA-satisfying requests and
-    // the report carries goodput_* keys. Offline replay only (the online/live
-    // entrypoints don't take it) — reject it for non-offline modes rather than
-    // silently dropping it, matching report_jsonl_path / max_sim_time_ms. With none
-    // set, goodput is omitted as before.
     validate_sla_threshold("sla_ttft_ms", sla_ttft_ms)?;
     validate_sla_threshold("sla_itl_ms", sla_itl_ms)?;
     validate_sla_threshold("sla_e2e_ms", sla_e2e_ms)?;
-    if replay_mode != "offline"
-        && (sla_ttft_ms.is_some() || sla_itl_ms.is_some() || sla_e2e_ms.is_some())
-    {
-        return Err(PyValueError::new_err(
-            "sla_ttft_ms, sla_itl_ms, and sla_e2e_ms only support replay_mode='offline'",
-        ));
-    }
     let sla = dynamo_mocker::replay::SlaThresholds {
         ttft_ms: sla_ttft_ms,
         itl_ms: sla_itl_ms,
@@ -1039,7 +1024,7 @@ pub fn run_mocker_trace_replay(
                 )
             }
             ReplayDispatch::AggregatedOnlineConcurrency(args, max_in_flight) => {
-                dynamo_mocker::replay::simulate_concurrency_live_file_with_router_mode_and_format(
+                dynamo_mocker::replay::simulate_concurrency_live_file_with_router_mode_and_format_and_options(
                     *args,
                     router_config.clone(),
                     prefill_load_estimator.clone(),
@@ -1051,10 +1036,12 @@ pub fn run_mocker_trace_replay(
                     trace_format,
                     trace_shared_prefix_ratio,
                     trace_num_prefix_groups,
+                    record_per_request,
+                    sla,
                 )
             }
             ReplayDispatch::AggregatedOnline(args) => {
-                dynamo_mocker::replay::simulate_trace_live_file_with_router_mode_and_format(
+                dynamo_mocker::replay::simulate_trace_live_file_with_router_mode_and_format_and_options(
                     *args,
                     router_config.clone(),
                     prefill_load_estimator.clone(),
@@ -1066,6 +1053,8 @@ pub fn run_mocker_trace_replay(
                     trace_format,
                     trace_shared_prefix_ratio,
                     trace_num_prefix_groups,
+                    record_per_request,
+                    sla,
                 )
             }
             ReplayDispatch::DisaggOfflineConcurrency(config, max_in_flight) => {
@@ -1164,7 +1153,7 @@ fn run_loaded_dynamo_request_trace(
                     )
                 }
                 ReplayDispatch::AggregatedOnlineConcurrency(args, max_in_flight) => {
-                    dynamo_mocker::replay::simulate_concurrency_live_workload_with_router_mode(
+                    dynamo_mocker::replay::simulate_concurrency_live_workload_with_router_mode_and_options(
                         *args,
                         router_config,
                         prefill_load_estimator,
@@ -1172,10 +1161,12 @@ fn run_loaded_dynamo_request_trace(
                         max_in_flight,
                         num_workers,
                         router_mode,
+                        record_per_request,
+                        sla,
                     )
                 }
                 ReplayDispatch::AggregatedOnline(args) => {
-                    dynamo_mocker::replay::simulate_loaded_trace_live_with_router_mode(
+                    dynamo_mocker::replay::simulate_loaded_trace_live_with_router_mode_and_options(
                         *args,
                         router_config,
                         prefill_load_estimator,
@@ -1183,6 +1174,8 @@ fn run_loaded_dynamo_request_trace(
                         num_workers,
                         arrival_speedup_ratio,
                         router_mode,
+                        record_per_request,
+                        sla,
                     )
                 }
                 ReplayDispatch::DisaggOfflineConcurrency(config, max_in_flight) => {
@@ -1219,9 +1212,6 @@ fn run_loaded_dynamo_request_trace(
                     "agentic Dynamo request traces are not supported with replay_concurrency"
                 );
             }
-            if replay_mode != "offline" {
-                anyhow::bail!("agentic Dynamo request traces are not supported for online replay");
-            }
             let ReplayArgsSelection::Aggregated(args) = args_selection else {
                 anyhow::bail!(
                     "agentic Dynamo request traces are not supported for disaggregated replay"
@@ -1230,15 +1220,31 @@ fn run_loaded_dynamo_request_trace(
             let trace = trace
                 .normalize_starts()
                 .speed_up_timing(arrival_speedup_ratio)?;
-            dynamo_mocker::replay::simulate_agentic_trace_workload_with_router_mode(
-                *args,
-                router_config,
-                prefill_load_estimator,
-                trace,
-                num_workers,
-                router_mode,
-                sla,
-            )
+            match replay_mode {
+                "offline" => dynamo_mocker::replay::simulate_agentic_trace_workload_with_router_mode(
+                    *args,
+                    router_config,
+                    prefill_load_estimator,
+                    trace,
+                    num_workers,
+                    router_mode,
+                    sla,
+                ),
+                "online" => dynamo_mocker::replay::simulate_agentic_trace_live_workload_with_router_mode_and_options(
+                    *args,
+                    router_config,
+                    prefill_load_estimator,
+                    trace,
+                    num_workers,
+                    router_mode,
+                    record_per_request,
+                    sla,
+                ),
+                other => anyhow::bail!(
+                    "replay_mode must be either 'offline' or 'online', got '{}'",
+                    other
+                ),
+            }
         }
     }
 }
@@ -1308,16 +1314,6 @@ pub fn run_mocker_synthetic_trace_replay(
         itl_ms: sla_itl_ms,
         e2e_ms: sla_e2e_ms,
     };
-    // The online branches below don't thread `sla`, so reject SLA with a
-    // non-offline replay_mode rather than silently dropping goodput
-    // (mirrors run_mocker_trace_replay).
-    if replay_mode != "offline"
-        && (sla_ttft_ms.is_some() || sla_itl_ms.is_some() || sla_e2e_ms.is_some())
-    {
-        return Err(PyValueError::new_err(
-            "sla_ttft_ms, sla_itl_ms, and sla_e2e_ms only support replay_mode='offline'",
-        ));
-    }
     let args_selection = load_replay_args_selection(
         py,
         extra_engine_args,
@@ -1399,7 +1395,7 @@ pub fn run_mocker_synthetic_trace_replay(
                         )
                     }
                     ("online", Some(max_in_flight)) => {
-                        dynamo_mocker::replay::simulate_concurrency_live_workload_with_router_mode(
+                        dynamo_mocker::replay::simulate_concurrency_live_workload_with_router_mode_and_options(
                             *args,
                             router_config.clone(),
                             prefill_load_estimator.clone(),
@@ -1407,16 +1403,20 @@ pub fn run_mocker_synthetic_trace_replay(
                             max_in_flight,
                             num_workers,
                             router_mode,
+                            false,
+                            sla,
                         )
                     }
                     ("online", None) => {
-                        dynamo_mocker::replay::simulate_trace_live_workload_with_router_mode(
+                        dynamo_mocker::replay::simulate_trace_live_workload_with_router_mode_and_options(
                             *args,
                             router_config.clone(),
                             prefill_load_estimator.clone(),
                             trace,
                             num_workers,
                             router_mode,
+                            false,
+                            sla,
                         )
                     }
                     (other, _) => anyhow::bail!(
@@ -1490,7 +1490,7 @@ pub fn run_mocker_synthetic_trace_replay(
                     sla,
                 ),
                 ("online", Some(max_in_flight)) => {
-                    dynamo_mocker::replay::simulate_concurrency_live_requests_with_router_mode(
+                    dynamo_mocker::replay::simulate_concurrency_live_requests_with_router_mode_and_options(
                         *args,
                         router_config.clone(),
                         prefill_load_estimator.clone(),
@@ -1498,10 +1498,12 @@ pub fn run_mocker_synthetic_trace_replay(
                         max_in_flight,
                         num_workers,
                         router_mode,
+                        false,
+                        sla,
                     )
                 }
                 ("online", None) => {
-                    dynamo_mocker::replay::simulate_trace_live_requests_with_router_mode(
+                    dynamo_mocker::replay::simulate_trace_live_requests_with_router_mode_and_options(
                         *args,
                         router_config.clone(),
                         prefill_load_estimator.clone(),
@@ -1509,6 +1511,8 @@ pub fn run_mocker_synthetic_trace_replay(
                         num_workers,
                         arrival_speedup_ratio,
                         router_mode,
+                        false,
+                        sla,
                     )
                 }
                 (other, _) => anyhow::bail!(

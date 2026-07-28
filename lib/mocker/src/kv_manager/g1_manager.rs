@@ -223,6 +223,11 @@ impl G1Manager {
         sequence: &mut ActiveSequence,
     ) {
         if let G1ManagerBackend::Native(manager) = &mut self.backend {
+            // A single scheduling decision can complete several prompt blocks
+            // and the mutable tail together. Publish/cache the earlier full
+            // blocks first so the promoted tail never references a parent that
+            // is not cache-visible yet.
+            manager.finalize_computed_prefix(owner, computed_before, computed_after);
             if let Some(promote) = sequence.promote_computed_tail(computed_after) {
                 assert!(
                     matches!(
@@ -232,7 +237,6 @@ impl G1Manager {
                     "computed-tail promotion must be infallible"
                 );
             }
-            manager.finalize_computed_prefix(owner, computed_before, computed_after);
         }
     }
 
@@ -577,6 +581,8 @@ impl G1Manager {
 
 #[cfg(test)]
 mod tests {
+    use dynamo_kv_router::protocols::KvCacheEventData;
+
     use super::*;
 
     #[test]
@@ -593,5 +599,26 @@ mod tests {
         );
 
         let _ = manager.process_for_request(Uuid::from_u128(1), &event, 0);
+    }
+
+    #[test]
+    fn native_finalization_publishes_parent_before_promoted_tail() {
+        let stored = crate::replay::native_g1_parent_chain_artifact(4)
+            .kv_events
+            .into_iter()
+            .map(|event| match event.event.data {
+                KvCacheEventData::Stored(stored) => stored,
+                other => panic!("expected Stored event, got {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(stored.len(), 2);
+        assert_eq!(stored[0].blocks.len(), 2);
+        assert_eq!(stored[0].parent_hash, None);
+        assert_eq!(stored[1].blocks.len(), 1);
+        assert_eq!(
+            stored[1].parent_hash,
+            Some(stored[0].blocks[1].block_hash),
+            "the promoted tail must be published after its parent block"
+        );
     }
 }
