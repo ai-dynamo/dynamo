@@ -775,6 +775,7 @@ mod tests {
             "decode",
             false,
             policies,
+            None,
         )
         .unwrap();
 

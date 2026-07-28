@@ -512,6 +512,7 @@ impl SelectionCore {
             WORKER_TYPE,
             true,
             Default::default(),
+            None,
         )?;
         let entry = Arc::new(SelectionEntry {
             key: key.clone(),

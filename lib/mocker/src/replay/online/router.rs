@@ -175,6 +175,7 @@ impl KvReplayRouter {
             "replay",
             false,
             Default::default(),
+            None,
         )?);
         let (event_tx, mut event_rx) = mpsc::unbounded_channel();
         let indexer_clone = indexer.clone();

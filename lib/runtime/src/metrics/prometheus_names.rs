@@ -306,6 +306,9 @@ pub mod frontend_service {
     /// Number of requests pending in the router's scheduler queue (gauge per worker_type)
     pub const ROUTER_QUEUE_PENDING_REQUESTS: &str = "router_queue_pending_requests";
 
+    /// Time requests spend pending in the router's scheduler queue
+    pub const ROUTER_QUEUE_WAIT_SECONDS: &str = "router_queue_wait_seconds";
+
     /// Number of replicas allocated for a LoRA adapter (gauge per LoRA)
     pub const LORA_REPLICA_FACTOR: &str = "lora_replica_factor";
 

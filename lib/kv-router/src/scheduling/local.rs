@@ -15,7 +15,7 @@ use super::overlap::OverlapSignals;
 use super::overlap_refresh::{NoopOverlapScoresRefresh, OverlapScoresRefresh};
 use super::policy_config::PolicyProfile;
 use super::prefill_load::PrefillLoadEstimator;
-use super::queue::{ClassQueueStats, SchedulerQueue};
+use super::queue::{ClassQueueStats, RouterQueueWaitObserver, SchedulerQueue};
 use super::queue_admission::PolicyClassAdmissionPolicies;
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
@@ -112,6 +112,7 @@ where
             worker_type,
             monitor_worker_configs,
             PolicyClassAdmissionPolicies::new(),
+            None,
         )
         .expect("synthetic policy profile does not require admission policies")
     }
@@ -132,6 +133,7 @@ where
         worker_type: &'static str,
         monitor_worker_configs: bool,
         admission_policies: PolicyClassAdmissionPolicies,
+        queue_wait_observer: Option<RouterQueueWaitObserver>,
     ) -> Result<Self, KvSchedulerError> {
         let periodic_recheck_interval = admission_policies
             .values()
@@ -148,6 +150,7 @@ where
             overloaded_worker_provider,
             recheck_interval,
             admission_policies,
+            queue_wait_observer,
         )?);
 
         if monitor_worker_configs {
@@ -613,6 +616,7 @@ where
             worker_type,
             monitor_worker_configs,
             PolicyClassAdmissionPolicies::new(),
+            None,
         )
     }
 
@@ -1458,6 +1462,7 @@ mod tests {
             "test",
             false,
             policies,
+            None,
         )
         .unwrap();
         let mut response = scheduler
@@ -1515,6 +1520,7 @@ mod tests {
                 "test",
                 false,
                 policies,
+                None,
             )
             .unwrap(),
         );
