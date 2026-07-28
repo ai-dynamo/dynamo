@@ -55,10 +55,12 @@ def build_worker_command(
     args: argparse.Namespace,
     *,
     priority_multiplier: int | None = None,
+    upstream_port: int | None = None,
 ) -> list[str]:
     served_model_name = args.served_model_name or args.model
+    port = upstream_port if upstream_port is not None else args.engine_port
     upstream_base_url = (
-        f"http://{args.engine_host}:{args.engine_port}{args.api_prefix.rstrip('/')}"
+        f"http://{args.engine_host}:{port}{args.api_prefix.rstrip('/')}"
     )
     command = [
         sys.executable,
@@ -78,7 +80,11 @@ def build_worker_command(
     return command
 
 
-async def wait_for_health(health_url: str, stop_event: asyncio.Event) -> None:
+async def wait_for_health(
+    health_url: str,
+    stop_event: asyncio.Event,
+    name: str = "engine",
+) -> None:
     import httpx
 
     async with httpx.AsyncClient() as client:
@@ -86,14 +92,14 @@ async def wait_for_health(health_url: str, stop_event: asyncio.Event) -> None:
             try:
                 response = await client.get(health_url, timeout=5.0)
                 if response.is_success:
-                    LOGGER.info("Engine became healthy at %s", health_url)
+                    LOGGER.info("%s became healthy at %s", name.capitalize(), health_url)
                     return
             except httpx.HTTPError:
-                LOGGER.debug("Engine is not healthy yet", exc_info=True)
+                LOGGER.debug("%s is not healthy yet", name.capitalize(), exc_info=True)
 
             await asyncio.sleep(2.0)
 
-    raise asyncio.CancelledError("shutdown requested while waiting for engine health")
+    raise asyncio.CancelledError(f"shutdown requested while waiting for {name} health")
 
 
 async def terminate_process(
@@ -122,11 +128,50 @@ async def cancel_task(task: asyncio.Task[object]) -> None:
         await task
 
 
+async def _gate_until_healthy(
+    *,
+    name: str,
+    health_url: str,
+    process_wait_task: asyncio.Task[int],
+    stop_event: asyncio.Event,
+) -> int | None:
+    health_task = asyncio.create_task(wait_for_health(health_url, stop_event, name))
+    stop_task = asyncio.create_task(stop_event.wait())
+    done, pending = await asyncio.wait(
+        [health_task, process_wait_task, stop_task],
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+
+    if stop_task in done:
+        for task in pending:
+            if task is not process_wait_task:
+                await cancel_task(task)
+        LOGGER.info("Shutdown requested before %s became healthy", name)
+        return 0
+
+    if process_wait_task in done:
+        for task in pending:
+            await cancel_task(task)
+        return_code = process_wait_task.result()
+        LOGGER.error(
+            "%s exited with status %s before becoming healthy",
+            name.capitalize(),
+            return_code,
+        )
+        return return_code or 1
+
+    health_task.result()
+    await cancel_task(stop_task)
+    return None
+
+
 async def run_launcher(
     *,
     engine_command: list[str],
     worker_command: list[str],
     health_url: str,
+    router_command: list[str] | None = None,
+    router_health_url: str | None = None,
 ) -> int:
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -135,63 +180,61 @@ async def run_launcher(
         loop.add_signal_handler(signum, stop_event.set)
 
     engine_process = await asyncio.create_subprocess_exec(*engine_command)
+    router_process = None
     worker_process = None
 
     try:
-        health_task = asyncio.create_task(wait_for_health(health_url, stop_event))
-        engine_startup_task = asyncio.create_task(engine_process.wait())
-        stop_task = asyncio.create_task(stop_event.wait())
-        startup_done, startup_pending = await asyncio.wait(
-            [health_task, engine_startup_task, stop_task],
-            return_when=asyncio.FIRST_COMPLETED,
+        engine_wait_task = asyncio.create_task(engine_process.wait())
+        exit_code = await _gate_until_healthy(
+            name="engine",
+            health_url=health_url,
+            process_wait_task=engine_wait_task,
+            stop_event=stop_event,
         )
+        if exit_code is not None:
+            return exit_code
 
-        if stop_task in startup_done:
-            for task in startup_pending:
-                await cancel_task(task)
-            LOGGER.info("Shutdown requested before engine became healthy")
-            return 0
+        watchers = [("engine", engine_wait_task)]
 
-        if engine_startup_task in startup_done:
-            for task in startup_pending:
-                await cancel_task(task)
-            return_code = engine_startup_task.result()
-            LOGGER.error(
-                "Engine exited with status %s before becoming healthy",
-                return_code,
+        if router_command is not None:
+            router_process = await asyncio.create_subprocess_exec(*router_command)
+            router_wait_task = asyncio.create_task(router_process.wait())
+            exit_code = await _gate_until_healthy(
+                name="router",
+                health_url=router_health_url or health_url,
+                process_wait_task=router_wait_task,
+                stop_event=stop_event,
             )
-            return return_code or 1
+            if exit_code is not None:
+                return exit_code
+            watchers.append(("router", router_wait_task))
 
-        health_task.result()
-        await cancel_task(stop_task)
         worker_process = await asyncio.create_subprocess_exec(*worker_command)
+        watchers.append(("worker", asyncio.create_task(worker_process.wait())))
 
-        wait_tasks = [
-            engine_startup_task,
-            asyncio.create_task(worker_process.wait()),
-            asyncio.create_task(stop_event.wait()),
-        ]
+        stop_task = asyncio.create_task(stop_event.wait())
         done, pending = await asyncio.wait(
-            wait_tasks,
+            [task for _, task in watchers] + [stop_task],
             return_when=asyncio.FIRST_COMPLETED,
         )
 
         for task in pending:
             task.cancel()
 
-        if wait_tasks[2] in done:
+        if stop_task in done:
             LOGGER.info("Shutdown requested")
             return 0
 
-        if wait_tasks[0] in done:
-            return_code = wait_tasks[0].result()
-            LOGGER.error("Engine exited with status %s", return_code)
-            return return_code or 1
+        for name, task in watchers:
+            if task in done:
+                return_code = task.result()
+                LOGGER.error("%s exited with status %s", name.capitalize(), return_code)
+                return return_code or 1
 
-        return_code = wait_tasks[1].result()
-        LOGGER.error("Worker exited with status %s", return_code)
-        return return_code or 1
+        return 1
     finally:
         if worker_process is not None:
             await terminate_process(worker_process, "worker")
+        if router_process is not None:
+            await terminate_process(router_process, "router")
         await terminate_process(engine_process, "engine")

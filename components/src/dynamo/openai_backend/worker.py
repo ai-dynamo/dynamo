@@ -29,10 +29,19 @@ DEFAULT_UPSTREAM_HEALTH_PATH = "/health"
 DEFAULT_CONNECT_TIMEOUT_SECONDS = 30.0
 DEFAULT_WRITE_TIMEOUT_SECONDS = 100.0
 DEFAULT_MAX_KEEPALIVE_CONNECTIONS = 20
+ROUTING_KEY_HEADER = "x-smg-routing-key"
 
 _SHUTDOWN_EVENT = asyncio.Event()
 _WORKER_ARGV: list[str] | None = None
 T = TypeVar("T")
+
+
+def _upstream_headers(request: dict[str, Any]) -> dict[str, str]:
+    headers = {"Content-Type": "application/json"}
+    routing_key = request.get("user")
+    if isinstance(routing_key, str) and routing_key:
+        headers[ROUTING_KEY_HEADER] = routing_key
+    return headers
 
 
 @dataclass
@@ -517,7 +526,7 @@ class UpstreamClient:
             "POST",
             self._request_url(path),
             json=request,
-            headers={"Content-Type": "application/json"},
+            headers=_upstream_headers(request),
         )
         event_source = await self._await_with_runtime_cancellation(
             cm.__aenter__(),
