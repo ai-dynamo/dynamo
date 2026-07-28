@@ -322,8 +322,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--aic-perf-model",
         action="store_true",
         default=False,
-        help="Use aiconfigurator-core directly for latency prediction. "
-        "Requires aiconfigurator-core installed.",
+        help="Use direct AIC SDK calls for latency prediction. "
+        "Requires aiconfigurator SDK installed.",
     )
     parser.add_argument(
         "--gpu-memory-utilization",

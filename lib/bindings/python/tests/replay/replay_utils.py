@@ -342,23 +342,24 @@ def _aic_disagg_replay_args(
 
 
 def _run_aic_static_point(backend_name: str, isl: int, osl: int, batch_size: int):
-    aic_core = pytest.importorskip("aiconfigurator_core")
+    aiconfigurator = pytest.importorskip("aiconfigurator")
 
-    database = aic_core.sdk.perf_database.get_database(
+    database = aiconfigurator.sdk.perf_database.get_database(
         system=AIC_PARITY_SYSTEM,
         backend=backend_name,
         version=AIC_PARITY_VERSIONS[backend_name],
     )
-    backend = aic_core.sdk.backends.factory.get_backend(backend_name)
-    model = aic_core.sdk.models.get_model(
+    backend = aiconfigurator.sdk.backends.factory.get_backend(backend_name)
+    model = aiconfigurator.sdk.models.get_model(
         model_path=AIC_PARITY_MODEL,
-        model_config=aic_core.sdk.config.ModelConfig(tp_size=1),
+        model_config=aiconfigurator.sdk.config.ModelConfig(tp_size=1),
         backend_name=backend_name,
     )
-    summary = backend.run_static(
-        model=model,
-        database=database,
-        runtime_config=aic_core.sdk.config.RuntimeConfig(
+    session = aiconfigurator.sdk.inference_session.InferenceSession(
+        model, database, backend
+    )
+    summary = session.run_static(
+        runtime_config=aiconfigurator.sdk.config.RuntimeConfig(
             batch_size=batch_size,
             beam_width=1,
             isl=isl,
