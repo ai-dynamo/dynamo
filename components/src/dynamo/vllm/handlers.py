@@ -15,6 +15,7 @@ from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
+from enum import Enum, auto
 from typing import (
     Any,
     AsyncIterator,
@@ -322,9 +323,24 @@ async def _deferred_abort_guard(
                     registry.pop(request_id, None)
 
 
+class _ProcessCheckpointState(Enum):
+    IDLE = auto()
+    SLEPT = auto()
+    WOKE = auto()
+    RESTORED = auto()
+    TERMINAL = auto()
+
+
 class VllmEnginePauseController:
-    def __init__(self, engine_client: Any):
+    def __init__(
+        self,
+        engine_client: Any,
+        *,
+        prepare_for_process_checkpoint: bool = False,
+    ):
         self._engine_client = engine_client
+        self._prepare_for_process_checkpoint = prepare_for_process_checkpoint
+        self._checkpoint_state = _ProcessCheckpointState.IDLE
         self._is_paused = False
         self._generation_paused = False
 
@@ -337,6 +353,10 @@ class VllmEnginePauseController:
         return self._generation_paused
 
     async def pause(self, *args: object) -> bool:
+        if self._checkpoint_state is _ProcessCheckpointState.TERMINAL:
+            raise RuntimeError(
+                "vLLM process-checkpoint transition failed; worker restart required"
+            )
         if self._is_paused or self._generation_paused:
             return False
 
@@ -344,11 +364,27 @@ class VllmEnginePauseController:
         await self._engine_client.pause_generation()
         self._generation_paused = True
         try:
-            if level is None:
+            if self._prepare_for_process_checkpoint:
+                logger.info("Preparing vLLM communicators for process checkpoint")
+                await self._engine_client.checkpoint_prepare()
+                if level is None:
+                    await self._engine_client.sleep()
+                else:
+                    await self._engine_client.sleep(level)
+            elif level is None:
                 await self._engine_client.sleep()
             else:
                 await self._engine_client.sleep(level)
+            if self._prepare_for_process_checkpoint:
+                self._checkpoint_state = _ProcessCheckpointState.SLEPT
         except Exception:
+            if self._prepare_for_process_checkpoint:
+                self._checkpoint_state = _ProcessCheckpointState.TERMINAL
+                logger.exception(
+                    "vLLM process-checkpoint pause transition failed; "
+                    "worker restart required"
+                )
+                raise
             try:
                 await self._engine_client.resume_generation()
                 self._generation_paused = False
@@ -361,10 +397,48 @@ class VllmEnginePauseController:
         return True
 
     async def resume(self, tags: list[str] | None = None) -> bool:
+        if self._checkpoint_state is _ProcessCheckpointState.TERMINAL:
+            raise RuntimeError(
+                "vLLM process-checkpoint transition failed; worker restart required"
+            )
         if not self._is_paused and not self._generation_paused:
             return False
 
-        if self._is_paused:
+        if self._prepare_for_process_checkpoint:
+            if self._checkpoint_state is _ProcessCheckpointState.SLEPT:
+                try:
+                    if tags is None:
+                        await self._engine_client.wake_up()
+                    else:
+                        await self._engine_client.wake_up(tags)
+                except Exception:
+                    self._checkpoint_state = _ProcessCheckpointState.TERMINAL
+                    logger.exception(
+                        "vLLM wake failed during process-checkpoint restore; "
+                        "worker restart required"
+                    )
+                    raise
+                self._checkpoint_state = _ProcessCheckpointState.WOKE
+
+            if self._checkpoint_state is _ProcessCheckpointState.WOKE:
+                logger.info("Restoring vLLM communicators after process checkpoint")
+                try:
+                    await self._engine_client.checkpoint_restore()
+                except Exception:
+                    self._checkpoint_state = _ProcessCheckpointState.TERMINAL
+                    logger.exception(
+                        "vLLM communicator restore failed after process checkpoint; "
+                        "worker restart required"
+                    )
+                    raise
+                self._checkpoint_state = _ProcessCheckpointState.RESTORED
+
+            if self._checkpoint_state is not _ProcessCheckpointState.RESTORED:
+                raise RuntimeError(
+                    "vLLM process-checkpoint resume entered invalid state "
+                    f"{self._checkpoint_state.name}"
+                )
+        elif self._is_paused:
             if tags is None:
                 await self._engine_client.wake_up()
             else:
@@ -375,6 +449,17 @@ class VllmEnginePauseController:
         return True
 
     def mark_resumed(self) -> None:
+        if (
+            self._prepare_for_process_checkpoint
+            and self._checkpoint_state is not _ProcessCheckpointState.RESTORED
+        ):
+            raise RuntimeError(
+                "cannot mark vLLM process checkpoint resumed from state "
+                f"{self._checkpoint_state.name}"
+            )
+        if self._generation_paused:
+            raise RuntimeError("cannot mark vLLM resumed while generation is paused")
+        self._checkpoint_state = _ProcessCheckpointState.IDLE
         self._is_paused = False
         self._generation_paused = False
 

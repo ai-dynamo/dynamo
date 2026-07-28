@@ -3,7 +3,7 @@
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, call
 
 import pytest
 
@@ -96,6 +96,157 @@ async def test_pause_without_level_uses_vllm_default_sleep():
     assert changed is True
     engine_client.pause_generation.assert_awaited_once()
     engine_client.sleep.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_pause_prepares_and_restores_checkpoint_state_in_order():
+    engine_client = AsyncMock()
+    controller = VllmEnginePauseController(
+        engine_client,
+        prepare_for_process_checkpoint=True,
+    )
+
+    assert await controller.pause(None) is True
+    assert await controller.resume() is True
+
+    assert engine_client.mock_calls == [
+        call.pause_generation(),
+        call.checkpoint_prepare(),
+        call.sleep(),
+        call.wake_up(),
+        call.checkpoint_restore(),
+        call.resume_generation(),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_snapshot_sleep_failure_is_terminal():
+    engine_client = AsyncMock()
+    engine_client.sleep.side_effect = RuntimeError("sleep failed")
+    controller = VllmEnginePauseController(
+        engine_client,
+        prepare_for_process_checkpoint=True,
+    )
+
+    with pytest.raises(RuntimeError, match="sleep failed"):
+        await controller.pause(None)
+
+    assert engine_client.mock_calls == [
+        call.pause_generation(),
+        call.checkpoint_prepare(),
+        call.sleep(),
+    ]
+    assert controller.is_paused is False
+    assert controller.needs_resume_recovery is True
+
+    with pytest.raises(RuntimeError, match="worker restart required"):
+        await controller.resume()
+    assert engine_client.mock_calls == [
+        call.pause_generation(),
+        call.checkpoint_prepare(),
+        call.sleep(),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_snapshot_prepare_failure_is_terminal():
+    engine_client = AsyncMock()
+    engine_client.checkpoint_prepare.side_effect = RuntimeError("prepare failed")
+    controller = VllmEnginePauseController(
+        engine_client,
+        prepare_for_process_checkpoint=True,
+    )
+
+    with pytest.raises(RuntimeError, match="prepare failed"):
+        await controller.pause(None)
+
+    assert engine_client.mock_calls == [
+        call.pause_generation(),
+        call.checkpoint_prepare(),
+    ]
+    with pytest.raises(RuntimeError, match="worker restart required"):
+        await controller.resume()
+    engine_client.resume_generation.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_wake_failure_is_terminal():
+    engine_client = AsyncMock()
+    engine_client.wake_up.side_effect = RuntimeError("wake failed")
+    controller = VllmEnginePauseController(
+        engine_client,
+        prepare_for_process_checkpoint=True,
+    )
+    await controller.pause(None)
+
+    with pytest.raises(RuntimeError, match="wake failed"):
+        await controller.resume()
+
+    expected_calls = [
+        call.pause_generation(),
+        call.checkpoint_prepare(),
+        call.sleep(),
+        call.wake_up(),
+    ]
+    assert engine_client.mock_calls == expected_calls
+    with pytest.raises(RuntimeError, match="worker restart required"):
+        await controller.resume()
+    assert engine_client.mock_calls == expected_calls
+
+
+@pytest.mark.asyncio
+async def test_snapshot_checkpoint_restore_failure_is_terminal():
+    engine_client = AsyncMock()
+    engine_client.checkpoint_restore.side_effect = RuntimeError("restore failed")
+    controller = VllmEnginePauseController(
+        engine_client,
+        prepare_for_process_checkpoint=True,
+    )
+    await controller.pause(None)
+
+    with pytest.raises(RuntimeError, match="restore failed"):
+        await controller.resume()
+
+    expected_calls = [
+        call.pause_generation(),
+        call.checkpoint_prepare(),
+        call.sleep(),
+        call.wake_up(),
+        call.checkpoint_restore(),
+    ]
+    assert engine_client.mock_calls == expected_calls
+    with pytest.raises(RuntimeError, match="worker restart required"):
+        await controller.resume()
+    assert engine_client.mock_calls == expected_calls
+    engine_client.resume_generation.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_resume_generation_retry_does_not_replay_restore():
+    engine_client = AsyncMock()
+    engine_client.resume_generation.side_effect = [
+        RuntimeError("resume generation failed"),
+        None,
+    ]
+    controller = VllmEnginePauseController(
+        engine_client,
+        prepare_for_process_checkpoint=True,
+    )
+    await controller.pause(None)
+
+    with pytest.raises(RuntimeError, match="resume generation failed"):
+        await controller.resume()
+    assert await controller.resume() is True
+
+    assert engine_client.mock_calls == [
+        call.pause_generation(),
+        call.checkpoint_prepare(),
+        call.sleep(),
+        call.wake_up(),
+        call.checkpoint_restore(),
+        call.resume_generation(),
+        call.resume_generation(),
+    ]
 
 
 @pytest.mark.asyncio
