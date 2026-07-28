@@ -361,6 +361,16 @@ def collect_dpkg_sources(
 # of someone else's OSS, so we don't ship it in the OSRB sources archive.
 _FIRST_PARTY_RUST_PREFIXES = ("dynamo-", "kvbm-", "nixl-")
 
+# Only our own wheels are built from the vendored cargo workspaces, so only
+# their embedded SBOMs define the third-party Rust we must archive. Third-party
+# Rust-in-Python wheels (tokenizers, pydantic-core, cryptography, uv, …) now
+# ship CycloneDX SBOMs too, but we redistribute their prebuilt wheels — the
+# source of the crates THEY compile is the upstream project's redistribution
+# obligation, not ours, and could never come from our cargo vendor. Scope
+# discovery to first-party wheels so coverage measures what we actually vendor.
+# dist-info dir names are PEP 503-normalized (hyphens -> underscores).
+_FIRST_PARTY_WHEEL_PREFIXES = ("ai_dynamo", "kvbm", "nixl")
+
 
 def _shipped_rust_crates(site_packages_dirs: list[Path]) -> set[tuple[str, str]]:
     """Walk every installed wheel's embedded CycloneDX SBOM and return the
@@ -374,8 +384,22 @@ def _shipped_rust_crates(site_packages_dirs: list[Path]) -> set[tuple[str, str]]
     """
     crates: set[tuple[str, str]] = set()
     sbom_paths: list[Path] = []
+    skipped_wheels: set[str] = set()
     for site in site_packages_dirs:
-        sbom_paths.extend(site.glob("*.dist-info/sboms/*.cyclonedx.json"))
+        for sbom in site.glob("*.dist-info/sboms/*.cyclonedx.json"):
+            # sbom.parent.parent is "<name>-<version>.dist-info"
+            dist_stem = sbom.parent.parent.name.split(".dist-info")[0]
+            if dist_stem.lower().startswith(_FIRST_PARTY_WHEEL_PREFIXES):
+                sbom_paths.append(sbom)
+            else:
+                skipped_wheels.add(dist_stem)
+    if skipped_wheels:
+        logger.info(
+            "Skipped %d third-party wheel SBOM(s) — the Rust they compile is the "
+            "upstream project's redistribution obligation, not ours: %s",
+            len(skipped_wheels),
+            ", ".join(sorted(skipped_wheels)),
+        )
     for sbom in sbom_paths:
         try:
             doc = json.loads(sbom.read_text(encoding="utf-8"))
