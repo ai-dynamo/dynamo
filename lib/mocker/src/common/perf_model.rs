@@ -14,7 +14,6 @@ use ndarray_interp::interp1d::{Interp1DBuilder, Linear};
 use ndarray_interp::interp2d::{Bilinear, Interp2DBuilder};
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Trait to abstract over 1D interpolation for prefill timing
 pub trait PrefillInterpolator: Send + Sync {
@@ -88,12 +87,9 @@ pub enum PerfModel {
         prefill_interp: Arc<dyn PrefillInterpolator>,
         decode_interp: Arc<dyn DecodeInterpolator>,
     },
-    /// AI Configurator SDK calls via Python callback.
+    /// AI Configurator SDK calls through the configured callback.
     /// Passes the reduced prefill inputs (batch_size, effective_isl, prefix).
-    Aiconfigurator {
-        callback: Arc<dyn AicCallback>,
-        fallback_warned: Arc<AtomicBool>,
-    },
+    Aiconfigurator { callback: Arc<dyn AicCallback> },
 }
 
 impl Clone for PerfModel {
@@ -107,12 +103,8 @@ impl Clone for PerfModel {
                 prefill_interp: Arc::clone(prefill_interp),
                 decode_interp: Arc::clone(decode_interp),
             },
-            PerfModel::Aiconfigurator {
-                callback,
-                fallback_warned,
-            } => PerfModel::Aiconfigurator {
+            PerfModel::Aiconfigurator { callback } => PerfModel::Aiconfigurator {
                 callback: Arc::clone(callback),
-                fallback_warned: Arc::clone(fallback_warned),
             },
         }
     }
@@ -222,10 +214,7 @@ impl PerfModel {
 
     /// Create an Aiconfigurator perf model from a callback.
     pub fn from_aic_callback(callback: Arc<dyn AicCallback>) -> Self {
-        PerfModel::Aiconfigurator {
-            callback,
-            fallback_warned: Arc::new(AtomicBool::new(false)),
-        }
+        PerfModel::Aiconfigurator { callback }
     }
 
     /// Predict prefill time in milliseconds.
@@ -245,15 +234,9 @@ impl PerfModel {
                 let tokens = (batch_size * new_tokens_per_req) as f64;
                 prefill_interp.interp(tokens).unwrap_or(0.0)
             }
-            PerfModel::Aiconfigurator {
-                callback,
-                fallback_warned,
-            } => callback
+            PerfModel::Aiconfigurator { callback } => callback
                 .predict_prefill(batch_size, new_tokens_per_req, prefix)
-                .unwrap_or_else(|error| {
-                    warn_aic_fallback(fallback_warned, "prefill", &error);
-                    polynomial_prefill_time(batch_size, new_tokens_per_req)
-                }),
+                .unwrap_or_else(|error| panic!("AIC prefill prediction failed: {error}")),
         };
         time.max(0.0)
     }
@@ -279,15 +262,9 @@ impl PerfModel {
             PerfModel::Interpolated { decode_interp, .. } => decode_interp
                 .interp(active_kv_tokens as f64, context_length as f64)
                 .unwrap_or(0.0),
-            PerfModel::Aiconfigurator {
-                callback,
-                fallback_warned,
-            } => callback
+            PerfModel::Aiconfigurator { callback } => callback
                 .predict_decode(batch_size, context_length, 2)
-                .unwrap_or_else(|error| {
-                    warn_aic_fallback(fallback_warned, "decode", &error);
-                    polynomial_decode_time(active_kv_tokens, total_kv_tokens)
-                }),
+                .unwrap_or_else(|error| panic!("AIC decode prediction failed: {error}")),
         };
         // Token-emitting decode steps should not collapse onto the same timestamp.
         let result = time.max(1.0);
@@ -312,16 +289,6 @@ fn polynomial_decode_time(active_kv_tokens: usize, total_kv_tokens: usize) -> f6
         1.0
     };
     -25.74 * active_perc.powi(2) + 54.01 * active_perc + 5.74
-}
-
-fn warn_aic_fallback(warned: &AtomicBool, phase: &str, error: &anyhow::Error) {
-    if !warned.swap(true, Ordering::Relaxed) {
-        tracing::warn!(
-            phase,
-            error = %error,
-            "AIC timing prediction failed; falling back to the mocker polynomial model"
-        );
-    }
 }
 
 #[cfg(test)]
@@ -387,17 +354,8 @@ mod tests {
     }
 
     #[test]
-    fn aic_prediction_error_falls_back_without_panicking() {
-        let model = PerfModel::from_aic_callback(Arc::new(FailingCallback));
-        let polynomial = PerfModel::default();
-
-        assert_eq!(
-            model.predict_prefill_time(2, 128, 32),
-            polynomial.predict_prefill_time(2, 128, 32)
-        );
-        assert_eq!(
-            model.predict_decode_time(2, 64, 128, 256),
-            polynomial.predict_decode_time(2, 64, 128, 256)
-        );
+    #[should_panic(expected = "AIC prefill prediction failed")]
+    fn aic_prediction_errors_fail_fast() {
+        PerfModel::from_aic_callback(Arc::new(FailingCallback)).predict_prefill_time(2, 128, 32);
     }
 }
