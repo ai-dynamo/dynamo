@@ -22,9 +22,9 @@ use crate::replay::{ReplayRouterMode, ReplayTerminalStatus, SlaThresholds};
 
 use super::ReplayRouter;
 use super::entrypoints::{
-    OnlineReplayOptions, simulate_agentic_trace_workload, simulate_concurrency_requests_with_stats,
-    simulate_concurrency_workload_with_stats, simulate_trace_requests,
-    simulate_trace_requests_with_stats, simulate_trace_workload,
+    OnlineReplayConfig, OnlineReplayOptions, simulate_agentic_trace_workload,
+    simulate_concurrency_requests_with_stats, simulate_concurrency_workload_with_stats,
+    simulate_trace_requests, simulate_trace_requests_with_stats, simulate_trace_workload,
     simulate_trace_workload_with_stats,
 };
 use super::live_runtime::LiveRuntime;
@@ -40,6 +40,15 @@ fn replay_args() -> MockEngineArgs {
         .block_size(64)
         .build()
         .unwrap()
+}
+
+fn replay_config(
+    args: MockEngineArgs,
+    num_workers: usize,
+    router_mode: ReplayRouterMode,
+    options: OnlineReplayOptions,
+) -> OnlineReplayConfig {
+    OnlineReplayConfig::new(args, None, None, num_workers, router_mode, options)
 }
 
 fn sglang_replay_args() -> MockEngineArgs {
@@ -201,14 +210,14 @@ fn test_online_trace_replay_single_worker_completes() {
     let requests = vec![request(1, 11, Some(0.0)), request(2, 22, Some(1.0))];
 
     let report = simulate_trace_requests(
-        args,
-        None,
-        None,
+        replay_config(
+            args,
+            1,
+            ReplayRouterMode::RoundRobin,
+            OnlineReplayOptions::default(),
+        ),
         requests,
-        1,
         1.0,
-        ReplayRouterMode::RoundRobin,
-        OnlineReplayOptions::default(),
     )
     .unwrap();
 
@@ -240,20 +249,20 @@ fn online_report_options_populate_request_goodput_and_capacity_metrics() {
         .build()
         .unwrap();
     let report = simulate_trace_workload(
-        args,
-        None,
-        None,
-        multiturn_trace(),
-        2,
-        ReplayRouterMode::KvRouter,
-        true,
-        OnlineReplayOptions {
-            record_per_request: true,
-            sla: SlaThresholds {
-                e2e_ms: Some(1_000_000.0),
-                ..Default::default()
+        replay_config(
+            args,
+            2,
+            ReplayRouterMode::KvRouter,
+            OnlineReplayOptions {
+                record_per_request: true,
+                sla: SlaThresholds {
+                    e2e_ms: Some(1_000_000.0),
+                    ..Default::default()
+                },
             },
-        },
+        ),
+        multiturn_trace(),
+        true,
     )
     .unwrap();
 
@@ -305,16 +314,16 @@ fn online_agentic_trace_releases_dependency_after_parent_completion() {
         ],
     };
     let report = simulate_agentic_trace_workload(
-        replay_args(),
-        None,
-        None,
+        replay_config(
+            replay_args(),
+            2,
+            ReplayRouterMode::KvRouter,
+            OnlineReplayOptions {
+                record_per_request: true,
+                ..Default::default()
+            },
+        ),
         trace,
-        2,
-        ReplayRouterMode::KvRouter,
-        OnlineReplayOptions {
-            record_per_request: true,
-            ..Default::default()
-        },
     )
     .unwrap();
 
@@ -528,13 +537,14 @@ async fn test_online_concurrency_replay_reaches_but_does_not_exceed_cap() {
     ]);
     let (gate_tx, gate_rx) = watch::channel(false);
     let runtime = LiveRuntime::new_with_output_gate(
-        args,
-        None,
-        None,
+        replay_config(
+            args,
+            2,
+            ReplayRouterMode::KvRouter,
+            OnlineReplayOptions::default(),
+        ),
         requests,
-        2,
         LiveReplayMode::Concurrency { max_in_flight: 2 },
-        ReplayRouterMode::KvRouter,
         gate_rx,
         CancellationToken::new(),
     )
@@ -601,14 +611,14 @@ fn test_online_trace_replay_populates_admit_reuse_stats() {
     }
 
     let report = simulate_trace_requests(
-        args,
-        None,
-        None,
+        replay_config(
+            args,
+            1,
+            ReplayRouterMode::RoundRobin,
+            OnlineReplayOptions::default(),
+        ),
         requests,
-        1,
         1.0,
-        ReplayRouterMode::RoundRobin,
-        OnlineReplayOptions::default(),
     )
     .unwrap();
 
@@ -635,14 +645,14 @@ fn test_online_trace_replay_sglang_single_worker_completes() {
     let requests = vec![request(101, 7, Some(0.0)), request(102, 8, Some(1.0))];
 
     let report = simulate_trace_requests(
-        args,
-        None,
-        None,
+        replay_config(
+            args,
+            1,
+            ReplayRouterMode::RoundRobin,
+            OnlineReplayOptions::default(),
+        ),
         requests,
-        1,
         1.0,
-        ReplayRouterMode::RoundRobin,
-        OnlineReplayOptions::default(),
     )
     .unwrap();
 
@@ -775,14 +785,14 @@ fn test_online_replay_four_worker_stress_cleans_every_lifecycle() {
 async fn injected_cancellation_terminates_an_outer_arrival_wait() {
     let cancel = CancellationToken::new();
     let runtime = LiveRuntime::new(
-        replay_args(),
-        None,
-        None,
+        replay_config(
+            replay_args(),
+            1,
+            ReplayRouterMode::KvRouter,
+            OnlineReplayOptions::default(),
+        ),
         VecDeque::from(vec![request(700, 7, Some(60_000.0))]),
-        1,
         LiveReplayMode::Trace,
-        ReplayRouterMode::KvRouter,
-        OnlineReplayOptions::default(),
         cancel.clone(),
     )
     .unwrap();
@@ -802,14 +812,14 @@ async fn injected_cancellation_terminates_an_outer_arrival_wait() {
 #[tokio::test]
 async fn router_bookkeeping_failures_fail_replay_closed() {
     let mark_runtime = LiveRuntime::new(
-        replay_args(),
-        None,
-        None,
+        replay_config(
+            replay_args(),
+            1,
+            ReplayRouterMode::KvRouter,
+            OnlineReplayOptions::default(),
+        ),
         VecDeque::from(vec![request(900, 9, Some(0.0))]),
-        1,
         LiveReplayMode::Trace,
-        ReplayRouterMode::KvRouter,
-        OnlineReplayOptions::default(),
         CancellationToken::new(),
     )
     .unwrap();
@@ -825,14 +835,14 @@ async fn router_bookkeeping_failures_fail_replay_closed() {
     let mut zero_output = request(901, 9, Some(0.0));
     zero_output.max_output_tokens = 0;
     let free_runtime = LiveRuntime::new(
-        replay_args(),
-        None,
-        None,
+        replay_config(
+            replay_args(),
+            1,
+            ReplayRouterMode::KvRouter,
+            OnlineReplayOptions::default(),
+        ),
         VecDeque::from(vec![zero_output]),
-        1,
         LiveReplayMode::Trace,
-        ReplayRouterMode::KvRouter,
-        OnlineReplayOptions::default(),
         CancellationToken::new(),
     )
     .unwrap();

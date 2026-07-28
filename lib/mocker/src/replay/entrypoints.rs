@@ -89,6 +89,24 @@ fn online_replay_options(
     }
 }
 
+fn online_replay_config(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    num_workers: usize,
+    router_mode: ReplayRouterMode,
+    options: online::OnlineReplayOptions,
+) -> online::OnlineReplayConfig {
+    online::OnlineReplayConfig::new(
+        args,
+        router_config,
+        prefill_load_estimator,
+        num_workers,
+        router_mode,
+        options,
+    )
+}
+
 fn single_turn_trace_requests(
     trace_format: TraceFileFormat,
     trace: &Trace,
@@ -243,14 +261,16 @@ pub fn simulate_loaded_trace_live_with_router_mode_and_options(
         .speed_up_timing(arrival_speedup_ratio)?;
     trace.validate_for_trace_mode()?;
     online::simulate_trace_workload(
-        args,
-        router_config,
-        prefill_load_estimator,
+        online_replay_config(
+            args,
+            router_config,
+            prefill_load_estimator,
+            num_workers,
+            router_mode,
+            online_replay_options(record_per_request, sla),
+        ),
         trace,
-        num_workers,
-        router_mode,
         false,
-        online_replay_options(record_per_request, sla),
     )
 }
 
@@ -600,13 +620,15 @@ pub fn simulate_trace_live_file_with_router_mode_and_format_and_options(
         let trace =
             load_agentic_trace_from_file(trace_path, trace_block_size, arrival_speedup_ratio)?;
         return online::simulate_agentic_trace_workload(
-            args,
-            router_config,
-            prefill_load_estimator,
+            online_replay_config(
+                args,
+                router_config,
+                prefill_load_estimator,
+                num_workers,
+                router_mode,
+                online_replay_options(record_per_request, sla),
+            ),
             trace,
-            num_workers,
-            router_mode,
-            online_replay_options(record_per_request, sla),
         );
     }
     if trace_format == TraceFileFormat::AppliedComputeAgentic {
@@ -626,28 +648,18 @@ pub fn simulate_trace_live_file_with_router_mode_and_format_and_options(
     )?
     .normalize_session_starts()?
     .speed_up_timing(arrival_speedup_ratio)?;
+    let config = online_replay_config(
+        args,
+        router_config,
+        prefill_load_estimator,
+        num_workers,
+        router_mode,
+        online_replay_options(record_per_request, sla),
+    );
     if let Some(requests) = single_turn_trace_requests(trace_format, &trace)? {
-        online::simulate_trace_requests(
-            args,
-            router_config,
-            prefill_load_estimator,
-            requests,
-            num_workers,
-            1.0,
-            router_mode,
-            online_replay_options(record_per_request, sla),
-        )
+        online::simulate_trace_requests(config, requests, 1.0)
     } else {
-        online::simulate_trace_workload(
-            args,
-            router_config,
-            prefill_load_estimator,
-            trace,
-            num_workers,
-            router_mode,
-            true,
-            online_replay_options(record_per_request, sla),
-        )
+        online::simulate_trace_workload(config, trace, true)
     }
 }
 
@@ -788,14 +800,16 @@ pub fn simulate_trace_live_requests_with_router_mode_and_options(
     }
 
     online::simulate_trace_requests(
-        args,
-        router_config,
-        prefill_load_estimator,
+        online_replay_config(
+            args,
+            router_config,
+            prefill_load_estimator,
+            num_workers,
+            router_mode,
+            online_replay_options(record_per_request, sla),
+        ),
         requests,
-        num_workers,
         arrival_speedup_ratio,
-        router_mode,
-        online_replay_options(record_per_request, sla),
     )
 }
 
@@ -1087,14 +1101,16 @@ pub fn simulate_concurrency_live_file_with_router_mode_and_format_and_options(
         trace_num_prefix_groups,
     )?;
     online::simulate_concurrency_workload(
-        args,
-        router_config,
-        prefill_load_estimator,
+        online_replay_config(
+            args,
+            router_config,
+            prefill_load_estimator,
+            num_workers,
+            router_mode,
+            online_replay_options(record_per_request, sla),
+        ),
         trace,
         max_in_flight,
-        num_workers,
-        router_mode,
-        online_replay_options(record_per_request, sla),
     )
 }
 
@@ -1156,14 +1172,16 @@ pub fn simulate_concurrency_live_requests_with_router_mode_and_options(
     }
 
     online::simulate_concurrency_requests(
-        args,
-        router_config,
-        prefill_load_estimator,
+        online_replay_config(
+            args,
+            router_config,
+            prefill_load_estimator,
+            num_workers,
+            router_mode,
+            online_replay_options(record_per_request, sla),
+        ),
         requests,
         max_in_flight,
-        num_workers,
-        router_mode,
-        online_replay_options(record_per_request, sla),
     )
 }
 
@@ -1405,14 +1423,16 @@ pub fn simulate_trace_live_workload_with_router_mode_and_options(
     let args = args.normalized()?;
     validate_online_replay_args(&args, num_workers)?;
     online::simulate_trace_workload(
-        args,
-        router_config,
-        prefill_load_estimator,
+        online_replay_config(
+            args,
+            router_config,
+            prefill_load_estimator,
+            num_workers,
+            router_mode,
+            online_replay_options(record_per_request, sla),
+        ),
         trace,
-        num_workers,
-        router_mode,
         true,
-        online_replay_options(record_per_request, sla),
     )
 }
 
@@ -1574,13 +1594,15 @@ pub fn simulate_agentic_trace_live_workload_with_router_mode_and_options(
     let args = args.normalized()?;
     validate_online_replay_args(&args, num_workers)?;
     online::simulate_agentic_trace_workload(
-        args,
-        router_config,
-        prefill_load_estimator,
+        online_replay_config(
+            args,
+            router_config,
+            prefill_load_estimator,
+            num_workers,
+            router_mode,
+            online_replay_options(record_per_request, sla),
+        ),
         trace,
-        num_workers,
-        router_mode,
-        online_replay_options(record_per_request, sla),
     )
 }
 
@@ -1638,14 +1660,16 @@ pub fn simulate_concurrency_live_workload_with_router_mode_and_options(
     let args = args.normalized()?;
     validate_online_concurrency_args(&args, num_workers, max_in_flight)?;
     online::simulate_concurrency_workload(
-        args,
-        router_config,
-        prefill_load_estimator,
+        online_replay_config(
+            args,
+            router_config,
+            prefill_load_estimator,
+            num_workers,
+            router_mode,
+            online_replay_options(record_per_request, sla),
+        ),
         trace,
         max_in_flight,
-        num_workers,
-        router_mode,
-        online_replay_options(record_per_request, sla),
     )
 }
 

@@ -4,19 +4,18 @@
 use std::sync::Arc;
 
 use anyhow::{Result, bail};
-use dynamo_kv_router::config::KvRouterConfig;
 use tokio::sync::{Notify, Semaphore, mpsc, watch};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use crate::common::protocols::{DirectRequest, FpmPublisher, MockEngineArgs};
+use crate::common::protocols::{DirectRequest, FpmPublisher};
 use crate::live::{LiveEngine, LiveEngineOptions, ObservedAdmission};
 use crate::loadgen::WorkloadDriver;
-use crate::replay::{ReplayPrefillLoadEstimator, ReplayRouterMode, TraceSimulationReport};
+use crate::replay::TraceSimulationReport;
 
 use super::ReplayRouter;
-use super::entrypoints::OnlineReplayOptions;
+use super::entrypoints::OnlineReplayConfig;
 use super::recorder::{OnlineRecorderOptions, OnlineTraceRecorder, forward_admissions};
 use super::state::{
     LiveReplayMode, LiveRuntimeStats, SharedLiveRuntimeStats, WorkloadDispatchState, arrival_event,
@@ -146,70 +145,40 @@ impl LiveRunSession {
 impl LiveRuntime {
     /// Build the shared router and one request-scoped live engine per replay worker.
     pub(super) fn new(
-        args: MockEngineArgs,
-        router_config: Option<KvRouterConfig>,
-        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+        config: OnlineReplayConfig,
         pending: std::collections::VecDeque<DirectRequest>,
-        num_workers: usize,
         mode: LiveReplayMode,
-        router_mode: ReplayRouterMode,
-        options: OnlineReplayOptions,
         cancel: CancellationToken,
     ) -> Result<Self> {
-        Self::new_inner(
-            args,
-            router_config,
-            prefill_load_estimator,
-            pending,
-            num_workers,
-            mode,
-            router_mode,
-            None,
-            options,
-            cancel,
-        )
+        Self::new_inner(config, pending, mode, None, cancel)
     }
 
     #[cfg(test)]
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn new_with_output_gate(
-        args: MockEngineArgs,
-        router_config: Option<KvRouterConfig>,
-        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+        config: OnlineReplayConfig,
         pending: std::collections::VecDeque<DirectRequest>,
-        num_workers: usize,
         mode: LiveReplayMode,
-        router_mode: ReplayRouterMode,
         output_gate: watch::Receiver<bool>,
         cancel: CancellationToken,
     ) -> Result<Self> {
-        Self::new_inner(
+        Self::new_inner(config, pending, mode, Some(output_gate), cancel)
+    }
+
+    fn new_inner(
+        config: OnlineReplayConfig,
+        pending: std::collections::VecDeque<DirectRequest>,
+        mode: LiveReplayMode,
+        output_gate: Option<watch::Receiver<bool>>,
+        cancel: CancellationToken,
+    ) -> Result<Self> {
+        let OnlineReplayConfig {
             args,
             router_config,
             prefill_load_estimator,
-            pending,
             num_workers,
-            mode,
             router_mode,
-            Some(output_gate),
-            OnlineReplayOptions::default(),
-            cancel,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn new_inner(
-        args: MockEngineArgs,
-        router_config: Option<KvRouterConfig>,
-        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
-        pending: std::collections::VecDeque<DirectRequest>,
-        num_workers: usize,
-        mode: LiveReplayMode,
-        router_mode: ReplayRouterMode,
-        output_gate: Option<watch::Receiver<bool>>,
-        replay_options: OnlineReplayOptions,
-        cancel: CancellationToken,
-    ) -> Result<Self> {
+            options: replay_options,
+        } = config;
         let recorder_options = OnlineRecorderOptions {
             capture_per_request: replay_options.record_per_request,
             sla: replay_options.sla,
