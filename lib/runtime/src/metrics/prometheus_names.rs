@@ -749,6 +749,8 @@ pub mod transport {
         pub const BYTES_RECEIVED_TOTAL: &str = "tcp_bytes_received_total";
         pub const ERRORS_TOTAL: &str = "tcp_errors_total";
         pub const SERVER_QUEUE_DEPTH: &str = "tcp_server_queue_depth";
+        /// Times the response-server accept loop entered file-descriptor-exhaustion backoff
+        pub const ACCEPT_BACKOFF_TOTAL: &str = "tcp_accept_backoff_total";
     }
     pub mod nats {
         pub const ERRORS_TOTAL: &str = "nats_errors_total";
