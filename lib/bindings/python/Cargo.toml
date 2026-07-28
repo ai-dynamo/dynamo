@@ -45,7 +45,7 @@ mm-routing = ["dynamo-llm/mm-routing"]
 # AIC perf model: pure-Rust hot-path latency engine. Pinned to the matching
 # aiconfigurator-core 0.11 source revision. `extension-module` is
 # NOT enabled on aiconfigurator-core (its `default = []`), so this extension's
-# own interpreter is used; build_aic_engine() crosses into Python once at
+# own interpreter is used; AicEngineBuilder::build() crosses into Python once at
 # startup while AicEngine::{prefill,decode}_latency_ms() are pure Rust (no GIL)
 # on the predict hot path.
 aiconfigurator-core = { git = "https://github.com/ai-dynamo/aiconfigurator.git", rev = "f3b78eab442377b2693ee52dcdcdc6dd82c21f9e", package = "aiconfigurator-core", optional = true }

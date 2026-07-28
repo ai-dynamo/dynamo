@@ -24,7 +24,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 #[cfg(feature = "aic-forward-pass")]
-use aiconfigurator_core::{AicEngine, build_aic_engine};
+use aiconfigurator_core::{AicEngine, AicEngineBuilder, BackendKind};
 use dynamo_kv_router::PrefillLoadEstimator;
 use dynamo_mocker::common::perf_model::AicCallback;
 
@@ -210,8 +210,9 @@ impl PrefillLoadEstimator for RustAicCallback {
 }
 
 /// Build the pure-Rust AIC engine ONCE at startup and cache it per identity.
-/// `build_aic_engine` crosses into Python once here (shared pyo3 interpreter) to
-/// run `compile_engine`; the returned engine's predict hot path is pure Rust.
+/// `AicEngineBuilder::build` crosses into Python once here (shared pyo3
+/// interpreter) to run `compile_engine`; the returned engine's predict hot path
+/// is pure Rust.
 ///
 /// Once the compiled-engine SDK is available, a build failure is a HARD ERROR.
 /// The requested model/system/backend must be supported by the Rust engine
@@ -254,7 +255,7 @@ fn build_rust_engine(
     // exactly: it normalizes the vocabulary (`auto`/`none`/`null` -> default,
     // `int4` -> `int4_wo`) AND validates per field, rejecting unsupported
     // field/dtype combos (e.g. `kvcache=int4`) up front with a clear error
-    // instead of a generic failure from `build_aic_engine`. Done before the
+    // instead of a generic failure from `AicEngineBuilder::build`. Done before the
     // cache key so equivalent spellings share one compiled engine.
     let resolve_quant_mode = |field: &str, value: Option<&str>| -> PyResult<Option<String>> {
         aic_module
@@ -267,7 +268,7 @@ fn build_rust_engine(
     let kv_cache_dtype = resolve_quant_mode("kvcache", kv_cache_dtype)?;
     let comm_dtype = resolve_quant_mode("comm", comm_dtype)?;
 
-    // Cache the compiled engine per identity. build_aic_engine compiles the
+    // Cache the compiled engine per identity. AicEngineBuilder::build compiles the
     // model (Python) and loads the perf DB (Rust parquet) — a one-time startup
     // cost, but callers may construct several callbacks (per-worker,
     // prefill+decode). Mirror the Python `_cached_engine_handle` so the build is
@@ -280,35 +281,52 @@ fn build_rust_engine(
     if let Some(existing) = cache.lock().unwrap().get(&key) {
         return Ok(Arc::clone(existing));
     }
-    // Reuse aiconfigurator-core's own systems-path resolution: this sets
-    // AICONFIGURATOR_SYSTEMS_PATH in the process env, which build_aic_engine
-    // reads for the Rust-side perf-DB load.
-    if let Err(e) = py
-        .import("aiconfigurator_core.sdk.rust_engine_step")
-        .and_then(|m| m.call_method0("_configure_default_data_roots"))
-    {
-        tracing::warn!("AIC: could not configure data roots ({e}); relying on build-time default");
+    let backend = match backend_name {
+        "trtllm" => BackendKind::Trtllm,
+        "sglang" => BackendKind::Sglang,
+        "vllm" => BackendKind::Vllm,
+        _ => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "AIC: unsupported backend {backend_name:?}; expected trtllm, sglang, or vllm"
+            )));
+        }
+    };
+    let to_u32 = |field: &str, value: usize| {
+        u32::try_from(value).map_err(|_| {
+            pyo3::exceptions::PyValueError::new_err(format!("AIC: {field} does not fit in u32"))
+        })
+    };
+    let mut builder = AicEngineBuilder::new(model_path, system, backend)
+        .tp_size(to_u32("tp_size", tp_size)?)
+        .attention_dp_size(to_u32("attention_dp_size", attention_dp_size.unwrap_or(1))?)
+        .moe_parallelism(
+            moe_tp_size
+                .map(|value| to_u32("moe_tp_size", value))
+                .transpose()?,
+            moe_ep_size
+                .map(|value| to_u32("moe_ep_size", value))
+                .transpose()?,
+        )
+        .speculative_decoding(nextn);
+    if let Some(value) = backend_version {
+        builder = builder.backend_version(value);
     }
-    let engine = build_aic_engine(
-        model_path,
-        system,
-        backend_name,
-        backend_version,
-        tp_size as u32,
-        1, // pp_size
-        attention_dp_size.unwrap_or(1) as u32,
-        moe_tp_size.map(|x| x as u32),
-        moe_ep_size.map(|x| x as u32),
-        gemm_dtype.as_deref(),     // gemm_quant_mode
-        moe_dtype.as_deref(),      // moe_quant_mode
-        kv_cache_dtype.as_deref(), // kvcache_quant_mode
-        fmha_dtype.as_deref(),     // fmha_quant_mode
-        comm_dtype.as_deref(),     // comm_quant_mode
-        nextn,                     // speculative (MTP) tokens; 0 for dense
-        None,                      // kv_block_size
-        None,                      // systems_path (resolved via env above / build-time default)
-    )
-    .map_err(|e| {
+    if let Some(value) = gemm_dtype {
+        builder = builder.gemm_quant_mode(value);
+    }
+    if let Some(value) = moe_dtype {
+        builder = builder.moe_quant_mode(value);
+    }
+    if let Some(value) = kv_cache_dtype {
+        builder = builder.kvcache_quant_mode(value);
+    }
+    if let Some(value) = fmha_dtype {
+        builder = builder.fmha_quant_mode(value);
+    }
+    if let Some(value) = comm_dtype {
+        builder = builder.comm_quant_mode(value);
+    }
+    let engine = builder.build().map_err(|e| {
         pyo3::exceptions::PyRuntimeError::new_err(format!(
             "AIC: failed to build the Rust engine for {model_path} / {system} / {backend_name}: {e}"
         ))
