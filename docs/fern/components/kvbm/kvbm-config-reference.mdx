@@ -1,0 +1,259 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: KVBM Configuration Reference
+subtitle: Field reference for the KV Block Manager environment variables and the layered KVBM_* / TOML configuration system.
+---
+
+The KV Block Manager (KVBM) is configured through two layers:
+
+- **`DYN_KVBM_*` runtime environment variables** — the primary, user-facing controls for cache tier sizing, offload behavior, object storage, distributed (leader/worker) mode, and metrics. Set these in the worker container `env`. This is what most deployments use.
+- **The `KVBM_*` / TOML figment system** — a lower-level, layered configuration for the KVBM runtime (Tokio/Rayon threads, messenger transport, NixL backends, offload policies, event publishing). Used for advanced tuning and for vLLM's `kv_connector_extra_config`.
+
+For the conceptual model and worked examples, see the [KVBM Guide](kvbm-guide.md). Names and defaults on this page come from [`environment_names.rs`](https://github.com/ai-dynamo/dynamo/blob/main/lib/runtime/src/config/environment_names.rs) and the [`kvbm-config`](https://github.com/ai-dynamo/dynamo/tree/main/lib/kvbm-config) crate.
+
+## Cache tiers
+
+KVBM offloads KV blocks GPU (G1) → host/CPU (G2) → disk (G3) → object storage (G4). Enable a tier by giving it a size; each tier accepts either a size in GB or an explicit block count (the block-count override wins).
+
+<Warning>
+  Set the CPU cache larger than the engine's GPU KV cache — a good rule of thumb is `DYN_KVBM_CPU_CACHE_GB >= 100` and `DYN_KVBM_DISK_CACHE_GB >= DYN_KVBM_CPU_CACHE_GB`. If the CPU cache is smaller than the device cache, KVBM churns (offloading blocks after every forward pass) and you may see performance *degradation*. Consult your engine's KV-cache configuration for the minimum useful value.
+</Warning>
+
+<ParamField path="DYN_KVBM_CPU_CACHE_GB" type="integer" default="unset">
+  Size of the host (G2, pinned CPU memory) cache in GB. Setting this enables CPU offload.
+</ParamField>
+
+<ParamField path="DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS" type="integer" default="unset">
+  Host cache size as an explicit block count. Takes priority over `DYN_KVBM_CPU_CACHE_GB`.
+</ParamField>
+
+<ParamField path="DYN_KVBM_DISK_CACHE_GB" type="integer" default="unset">
+  Size of the disk (G3) cache in GB. Setting this enables disk offload.
+</ParamField>
+
+<ParamField path="DYN_KVBM_DISK_CACHE_OVERRIDE_NUM_BLOCKS" type="integer" default="unset">
+  Disk cache size as an explicit block count. Takes priority over `DYN_KVBM_DISK_CACHE_GB`.
+</ParamField>
+
+<ParamField path="DYN_KVBM_DISK_CACHE_DIR" type="string" default="unset">
+  Directory for disk cache files. When unset, a default path is used.
+</ParamField>
+
+## Offload and transfer
+
+<ParamField path="DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER" type="boolean" default="false">
+  Disable the disk offload filter, allowing all eligible blocks to offload to disk. The filter is not supported in disk-cache-only mode.
+</ParamField>
+
+<ParamField path="DYN_KVBM_HOST_OFFLOAD_PREFIX_MIN_PRIORITY" type="integer" default="unset">
+  Minimum prefix priority a block must have to be offloaded to the host tier. Raises the bar for what gets offloaded.
+</ParamField>
+
+<ParamField path="DYN_KVBM_TRANSFER_BATCH_SIZE" type="integer" default="unset">
+  Maximum number of blocks per transfer batch.
+</ParamField>
+
+<ParamField path="DYN_KVBM_MAX_TRANSFER_BATCH_SIZE" type="integer" default="unset">
+  Upper bound on the transfer batch size.
+</ParamField>
+
+<ParamField path="DYN_KVBM_MAX_CONCURRENT_TRANSFERS" type="integer" default="unset">
+  Maximum number of block transfers in flight at once.
+</ParamField>
+
+<ParamField path="DYN_KVBM_DISABLE_WRITE_COMBINED" type="boolean" default="false">
+  Disable write-combined memory for transfers.
+</ParamField>
+
+## Disk backend
+
+<ParamField path="DYN_KVBM_DISK_ALLOCATOR_TYPE" type="string" default="unset">
+  Disk allocator implementation. `open-direct` uses `O_DIRECT` I/O.
+</ParamField>
+
+<ParamField path="DYN_KVBM_DISK_DISABLE_O_DIRECT" type="boolean" default="false">
+  Disable `O_DIRECT` on disk I/O. Use on filesystems that do not support it.
+</ParamField>
+
+<ParamField path="DYN_KVBM_DISK_ZEROFILL_FALLBACK" type="boolean" default="false">
+  Fall back to zero-filling when preallocating disk cache files is not supported.
+</ParamField>
+
+## Object storage (G4)
+
+The G4 tier stores blocks in an S3-compatible object store. Enable it with `DYN_KVBM_OBJECT_ENABLED=1` and supply the bucket and credentials.
+
+<ParamField path="DYN_KVBM_OBJECT_ENABLED" type="boolean" default="false">
+  Enable object storage. Set to `1` to enable.
+</ParamField>
+
+<ParamField path="DYN_KVBM_OBJECT_BUCKET" type="string" default="unset">
+  Bucket name for the object-storage cache. Supports a `{worker_id}` template for per-worker buckets, for example `kv-cache-{worker_id}`.
+</ParamField>
+
+<ParamField path="DYN_KVBM_OBJECT_ENDPOINT" type="string" default="unset">
+  Endpoint URL for the object store. Set for S3-compatible services such as MinIO.
+</ParamField>
+
+<ParamField path="DYN_KVBM_OBJECT_REGION" type="string" default="unset">
+  Region for the object store.
+</ParamField>
+
+<ParamField path="DYN_KVBM_OBJECT_ACCESS_KEY" type="string" default="unset">
+  Access key for object-store authentication.
+</ParamField>
+
+<ParamField path="DYN_KVBM_OBJECT_SECRET_KEY" type="string" default="unset">
+  Secret key for object-store authentication.
+</ParamField>
+
+<ParamField path="DYN_KVBM_OBJECT_NUM_BLOCKS" type="integer" default="unset">
+  Number of blocks to store in object storage.
+</ParamField>
+
+## Distributed (leader/worker)
+
+In multi-worker deployments, one KVBM leader coordinates the worker cache tiers over ZMQ.
+
+<ParamField path="DYN_KVBM_LEADER_WORKER_INIT_TIMEOUT_SECS" type="integer" default="unset">
+  Timeout in seconds for KVBM leader and worker initialization. Raise it for large multi-node deployments that take longer to come up.
+</ParamField>
+
+<ParamField path="DYN_KVBM_LEADER_ZMQ_HOST" type="string" default="unset">
+  ZMQ host for the KVBM leader.
+</ParamField>
+
+<ParamField path="DYN_KVBM_LEADER_ZMQ_PUB_PORT" type="integer" default="56001">
+  ZMQ publish port for the KVBM leader. The TRT-LLM integration derives its port from this value.
+</ParamField>
+
+<ParamField path="DYN_KVBM_LEADER_ZMQ_ACK_PORT" type="string" default="unset">
+  ZMQ acknowledgment port for the KVBM leader.
+</ParamField>
+
+## MLA and NCCL
+
+<ParamField path="DYN_KVBM_NCCL_MLA_MODE" type="boolean" default="false">
+  Enable the NCCL broadcast optimization for Multi-head Latent Attention (MLA) models. When disabled, each GPU loads KV blocks independently. Set `true` when running MLA models with KVBM.
+</ParamField>
+
+<ParamField path="DYN_KVBM_NCCL_MAX_CTAS" type="integer" default="unset">
+  Maximum number of CTAs (cooperative thread arrays) NCCL may use for KVBM broadcasts.
+</ParamField>
+
+<ParamField path="DYN_KVBM_ENABLE_NUMA" type="boolean" default="false">
+  Enable NUMA-aware allocation for the host cache.
+</ParamField>
+
+## NixL backends
+
+Enable individual NixL transfer backends with the `DYN_KVBM_NIXL_BACKEND_<backend>` pattern.
+
+<ParamField path="DYN_KVBM_NIXL_BACKEND_<backend>" type="boolean" default="unset">
+  Enable or disable a specific NixL backend, for example `DYN_KVBM_NIXL_BACKEND_UCX=true` or `DYN_KVBM_NIXL_BACKEND_GDS=true`. Backend names are case-insensitive.
+</ParamField>
+
+## Metrics and debugging
+
+<ParamField path="DYN_KVBM_METRICS" type="boolean" default="false">
+  Enable the KVBM metrics endpoint.
+</ParamField>
+
+<ParamField path="DYN_KVBM_METRICS_PORT" type="integer" default="unset">
+  Port for the KVBM metrics endpoint.
+</ParamField>
+
+<ParamField path="DYN_KVBM_ENABLE_RECORD" type="boolean" default="false">
+  Enable KVBM event recording for debugging.
+</ParamField>
+
+<ParamField path="DYN_KVBM_CACHE_STATS_LOG_INTERVAL_SECS" type="integer" default="unset">
+  Interval in seconds between cache-statistics log lines.
+</ParamField>
+
+<ParamField path="DYN_KVBM_CACHE_STATS_MAX_REQUESTS" type="integer" default="unset">
+  Maximum number of requests to accumulate in cache statistics.
+</ParamField>
+
+## Advanced: the `KVBM_*` / TOML system
+
+Beyond the `DYN_KVBM_*` variables above, the KVBM runtime (crate [`kvbm-config`](https://github.com/ai-dynamo/dynamo/tree/main/lib/kvbm-config)) has a layered configuration system for low-level runtime tuning. Most deployments do not need it.
+
+### How it loads
+
+Sources are merged in priority order (lowest to highest):
+
+1. Code defaults
+2. System file `/opt/dynamo/etc/kvbm.toml`
+3. TOML file at the path in `KVBM_CONFIG_PATH`
+4. `KVBM_*` environment variables
+5. Programmatic JSON overrides (for example, vLLM's `kv_connector_extra_config`)
+
+Leader and worker roles can carry different values via figment profiles (`profile.leader.*`, `profile.worker.*` in TOML/JSON).
+
+<ParamField path="KVBM_CONFIG_PATH" type="string" default="unset">
+  Path to a TOML config file merged above the system file and below `KVBM_*` env vars.
+</ParamField>
+
+### Environment-variable groups
+
+Each config section maps to an env prefix. The suffix after the prefix is lowercased into the field name (for example, `KVBM_TOKIO_WORKER_THREADS` → `tokio.worker_threads`).
+
+| Env prefix | Section | Key fields (default) |
+|---|---|---|
+| `KVBM_TOKIO_` | Async runtime | `WORKER_THREADS` (1), `MAX_BLOCKING_THREADS` (Tokio default 512) |
+| `KVBM_RAYON_` | CPU thread pool | `NUM_THREADS` (logical CPUs) |
+| `KVBM_MESSENGER_BACKEND_` | TCP transport | `TCP_ADDR`, `TCP_INTERFACE`, `TCP_PORT` (0 = OS-assigned) |
+| `KVBM_MESSENGER_DISCOVERY_` | Peer discovery | `CLUSTER_ID`, plus etcd/p2p/filesystem fields |
+| `KVBM_NIXL_` | NixL backends | `BACKENDS` (default `UCX`, `POSIX`) |
+| `KVBM_CACHE_HOST_` | Host tier | `SIZE_GB`, `NUM_BLOCKS` |
+| `KVBM_CACHE_DISK_` | Disk tier | `SIZE_GB`, `NUM_BLOCKS`, `USE_GDS` (false), `STORAGE_PATH` |
+| `KVBM_CACHE_PARALLELISM` | Parallelism mode | `tensor_parallel` (default) or `replicated_data` |
+| `KVBM_EVENTS_` | Event publishing | `ENABLED` (false), `SUBJECT` (`kvbm.events`), `CHANNEL_CAPACITY` (1024), `POLICY` (`power_of_two`) |
+| `KVBM_EVENTS_BATCHING_` | Event batching | `WINDOW_DURATION_MS` (10), `MAX_BATCH_SIZE` (1024) |
+
+Nested sections without an env prefix (offload policies, onboard mode, object storage) are set through the TOML file or JSON overrides:
+
+- **Offload policies** (`offload.g1_to_g2`, `offload.g2_to_g3`): a `policies` list of `pass_all` / `presence` / `presence_lfu`, evaluated with AND logic. `presence_lfu.min_lfu_count` defaults to `8`.
+- **Onboard mode** (`onboard.mode`): `inter` (async, default) or `intra` (synchronous layer-wise).
+- **Object storage** (`object.client`): `s3` or `nixl` client; S3 fields `bucket` (`kvbm-blocks`), `region` (`us-east-1`), `endpoint_url`, `force_path_style`, `max_concurrent_requests` (16).
+
+### TOML example
+
+```toml
+[tokio]
+worker_threads = 4
+
+[cache.host]
+size_gb = 100.0
+
+[cache.disk]
+size_gb = 200.0
+use_gds = true
+storage_path = "/mnt/nvme/kv_cache"
+
+[events]
+enabled = true
+subject = "kvbm.events"
+
+[nixl.backends.UCX]
+# UCX with default parameters
+```
+
+## Related pages
+
+<CardGroup cols={2}>
+  <Card title="KVBM Guide" href="kvbm-guide.md" icon="book">
+    Concepts, cache-tier model, and worked deployment examples.
+  </Card>
+  <Card title="KVBM Design" href="../../design-docs/kvbm-design.md" icon="compass">
+    Architecture of the block manager and the offload/onboard pipeline.
+  </Card>
+  <Card title="Runtime Configuration" href="../../reference/runtime-config-reference.mdx" icon="gear">
+    Shared Dynamo runtime flags parsed by every component.
+  </Card>
+  <Card title="Observability Environment Variables" href="../../reference/observability/environment-variables.mdx" icon="gauge">
+    System-port and metrics environment variables.
+  </Card>
+</CardGroup>
