@@ -189,6 +189,12 @@ checkpoint:
 
 # Webhook configuration
 webhook:
+  service:
+    # -- Publish the webhook Service endpoint before the Pod Ready condition is true.
+    # Keep false for production; short-lived vCluster CI may enable this to tolerate
+    # stale host Pod readiness while admission smoke tests verify the webhook itself.
+    publishNotReadyAddresses: false
+
   # Certificate configuration
   certificateSecret:
     # Name of the Kubernetes Secret holding webhook TLS certificates.

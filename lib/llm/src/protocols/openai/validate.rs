@@ -190,8 +190,10 @@ pub fn validate_response_format(
                 anyhow::bail!("`response_format.json_schema.name` cannot be empty");
             }
 
-            // Validate schema presence
-            if json_schema.schema.is_none() {
+            // Validate schema presence. `schema` is a non-optional
+            // `serde_json::Value`, so an explicit `null` is the only way it
+            // can still arrive empty.
+            if json_schema.schema.is_null() {
                 anyhow::bail!(
                     "`response_format.json_schema.schema` is required when `response_format.type` is `json_schema`"
                 );
@@ -235,8 +237,8 @@ pub fn validate_top_p(top_p: Option<f32>) -> Result<(), anyhow::Error> {
 pub fn validate_top_k(top_k: Option<i32>) -> Result<(), anyhow::Error> {
     match top_k {
         None => Ok(()),
-        Some(k) if k == -1 || k >= 1 => Ok(()),
-        _ => anyhow::bail!("Top_k must be null, -1, or greater than or equal to 1"),
+        Some(k) if k >= -1 => Ok(()),
+        _ => anyhow::bail!("Top_k must be null or greater than or equal to -1"),
     }
 }
 

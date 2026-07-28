@@ -348,6 +348,7 @@ impl WorkerConfig {
         route_to_encoder = false,
         media_decoder = None,
         media_fetcher = None,
+        kv_state_endpoint = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -375,6 +376,7 @@ impl WorkerConfig {
         route_to_encoder: bool,
         media_decoder: Option<MediaDecoder>,
         media_fetcher: Option<MediaFetcher>,
+        kv_state_endpoint: Option<String>,
     ) -> PyResult<Self> {
         // Delegating to the same conversion used by `register_model`.
         let model_input_rs = match model_input {
@@ -434,6 +436,9 @@ impl WorkerConfig {
                 namespace,
                 component,
                 endpoint,
+                kv_state_endpoint: kv_state_endpoint
+                    .as_deref()
+                    .map(dynamo_runtime::protocols::EndpointId::from),
                 model_name,
                 served_model_name,
                 model_input: model_input_rs,

@@ -44,7 +44,6 @@ pytestmark = [
 
 def _make_config(
     model: str = "test-model",
-    is_prefill_worker: bool = False,
     enable_multimodal: bool = True,
     multimodal_embedding_cache_capacity_gb: float = 0,
     disaggregation_mode: str | None = None,
@@ -54,11 +53,8 @@ def _make_config(
 
     config = MagicMock()
     config.model = model
-    config.is_prefill_worker = is_prefill_worker
     if disaggregation_mode is not None:
         config.disaggregation_mode = getattr(DisaggregationMode, disaggregation_mode)
-    elif is_prefill_worker:
-        config.disaggregation_mode = DisaggregationMode.PREFILL
     else:
         config.disaggregation_mode = DisaggregationMode.AGGREGATED
     # NIXL_WRITE / NIXL_READ modes require GPU, the tests may run in CPU-only environments,
@@ -564,7 +560,7 @@ class TestGenerateDisagg:
     @pytest.mark.asyncio
     async def test_prefills_then_forwards_to_decode(self):
         """_generate_disagg prefills locally, then round-robins to decode worker."""
-        config = _make_config(model="test-model", is_prefill_worker=True)
+        config = _make_config(model="test-model", disaggregation_mode="PREFILL")
         decode_client = MagicMock()
         handler = _make_handler(config=config, decode_worker_client=decode_client)
         handler.engine_client = MagicMock()
@@ -747,7 +743,7 @@ class TestDecodeWorkerMultimodalBranching:
             disaggregation_mode="DECODE",
         )
         handler._build_prompt_from_request = MagicMock(
-            return_value=(None, None, {"status": "error", "message": "test stop"})
+            return_value=(None, {"status": "error", "message": "test stop"})
         )
         request = {
             "token_ids": [1, 2, 3],
@@ -780,7 +776,7 @@ class TestDecodeWorkerMultimodalBranching:
         # Return an error from _build_prompt_from_request so _generate_token_mode
         # yields it and returns early — no need to mock the engine.
         handler._build_prompt_from_request = MagicMock(
-            return_value=(None, None, {"status": "error", "message": "test stop"})
+            return_value=(None, {"status": "error", "message": "test stop"})
         )
 
         request = {
@@ -809,7 +805,7 @@ class TestDecodeWorkerMultimodalBranching:
     ):
         handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
 
-        prompt, _, error = handler._build_prompt_from_request(
+        prompt, error = handler._build_prompt_from_request(
             {"token_ids": [1, 2, 3]},
             "request-prompt",
             multi_modal_data=None,
@@ -840,7 +836,7 @@ async def test_prefill_delegates_mode_policy_to_shared_processor():
     )
     handler._multimodal_request_processor = processor
     handler._build_prompt_from_request = MagicMock(
-        return_value=(None, None, {"status": "error", "message": "stop"})
+        return_value=(None, {"status": "error", "message": "stop"})
     )
     context = MagicMock()
 
@@ -1133,9 +1129,7 @@ class TestDeferredAbort:
         handler.input_param_manager = MagicMock()
         handler.input_param_manager.get_input_param.return_value = [1, 2, 3]
         handler._resolve_lora_request = MagicMock(return_value=None)
-        handler._build_prompt_from_request = MagicMock(
-            return_value=(MagicMock(), None, None)
-        )
+        handler._build_prompt_from_request = MagicMock(return_value=(MagicMock(), None))
 
         # Capture the guard created inside the handler and wrap close() so
         # the test can assert that the handler awaited it.
