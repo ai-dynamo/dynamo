@@ -37,6 +37,12 @@ from dynamo.sglang.capacity import (
 SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"
 SPEC_DECODE_RUNTIME_KEY = "spec_decode"
 
+# `config.json` model_types whose per-image token the frontend has to be told,
+# because Dynamo renders them with a native Rust formatter instead of a chat
+# template. Everything else carries its per-image token in its own template and
+# needs no declaration -- see `_get_image_placeholder_token`.
+_NATIVE_IMAGE_TOKEN_MODEL_TYPES = frozenset({"kimi_k3"})
+
 
 def _register_model_source_path(engine: sgl.Engine, server_args: ServerArgs) -> str:
     """Pick the path passed to `register_model` for MDC construction.
@@ -353,43 +359,55 @@ def _get_image_placeholder_token(engine: Optional[sgl.Engine]) -> Optional[str]:
     multimodal processor builds an ``mm_tokens`` spec in its ``__init__`` (the
     Kimi ones declare ``<|media_pad|>``).
 
-    Runs for every model, so it must be total and quiet. "No image token" is a
-    normal answer, not a fault: text-only models have no ``mm_processor`` at
-    all, audio-only processors (``qwen_audio``, ``voxtral``, ``glmasr``, ...)
-    populate ``audio_token`` and leave ``image_token`` unset, and the EPD encode
-    worker registers with ``engine=None``. None of those are worth a warning.
+    Scoped to Kimi-K3 on purpose. It is the only family Dynamo renders with a
+    native Rust formatter that has to choose a per-image token; every other
+    model gets its per-image token from its own chat template, so the frontend
+    never reads a declaration for them.
 
-    This deliberately does not judge whether the absence matters. Only the
-    frontend knows that -- it is the side that picks a native formatter, and it
-    logs which token it resolved and whether a worker declared it.
+    The scope is also what makes reading ``mm_tokens.image_token`` sound.
+    That field is "the string this processor scans for", and its shape differs
+    per model -- one token for Kimi (``<|media_pad|>``), a three-token wrapper
+    for Qwen-VL (``<|vision_start|><|image_pad|><|vision_end|>``), a text
+    pattern for MiniCPM. Only for Kimi does it coincide with "the one token to
+    emit per image", so only for Kimi do we read it.
 
-    Reaches into SGLang internals (all plain instance attributes, no properties),
-    so it is defensive in the style of ``_compat.ensure_sglang_tensor_image_size``:
-    these move between releases. Any miss returns None, leaving the frontend on
-    the formatter's own default.
+    Reaches into SGLang internals (plain instance attributes, no properties),
+    which are pre-1.0 and move between releases -- so every miss returns None
+    and leaves the frontend on the formatter's own default.
     """
     try:
-        mm_processor = getattr(
-            getattr(engine, "tokenizer_manager", None), "mm_processor", None
+        tokenizer_manager = getattr(engine, "tokenizer_manager", None)
+        if tokenizer_manager is None:
+            return None  # engine=None (EPD encode worker), or renamed upstream
+
+        model_type = getattr(
+            getattr(
+                getattr(tokenizer_manager, "model_config", None), "hf_config", None
+            ),
+            "model_type",
+            None,
         )
-        if mm_processor is None:
-            # engine=None (EPD encode worker), text-only model, or an SGLang
-            # whose attribute names moved.
+        if model_type not in _NATIVE_IMAGE_TOKEN_MODEL_TYPES:
             return None
 
         # MultimodalSpecialTokens.image_token is Optional[Union[str, List[str]]];
         # `.build()` backfills the string form from image_token_id, so a plain
-        # str is the common case. Several spellings can't be reduced to the one
-        # token the renderer emits, so decline rather than guess.
+        # str is the common case.
         image_token = getattr(
-            getattr(mm_processor, "mm_tokens", None), "image_token", None
+            getattr(
+                getattr(tokenizer_manager, "mm_processor", None), "mm_tokens", None
+            ),
+            "image_token",
+            None,
         )
         if isinstance(image_token, str) and image_token:
             return image_token
-        logging.debug(
-            "SGLang processor %s declares no single image token (%r); not "
-            "declaring one to the frontend.",
-            type(mm_processor).__name__,
+
+        logging.warning(
+            "Could not read an image placeholder token from the SGLang processor "
+            "for model_type=%r (got %r); the frontend will fall back to its "
+            "default, which this engine does not consume.",
+            model_type,
             image_token,
         )
         return None

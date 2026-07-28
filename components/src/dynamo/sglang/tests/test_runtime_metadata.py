@@ -198,52 +198,46 @@ async def test_hicache_publish_failure_preserves_core_capacity(monkeypatch, capl
 # pre-commit hook's collection env.
 
 
+def _engine(model_type=None, mm_tokens=..., with_tm=True):
+    """Minimal stand-in for the attribute chain the probe walks."""
+    if not with_tm:
+        return SimpleNamespace()
+    mm_processor = None if mm_tokens is ... else SimpleNamespace(mm_tokens=mm_tokens)
+    return SimpleNamespace(
+        tokenizer_manager=SimpleNamespace(
+            model_config=SimpleNamespace(
+                hf_config=SimpleNamespace(model_type=model_type)
+            ),
+            mm_processor=mm_processor,
+        )
+    )
+
+
 @pytest.mark.parametrize(
     "engine",
     [
-        # Text-only model: no multimodal processor at all.
-        SimpleNamespace(tokenizer_manager=SimpleNamespace(mm_processor=None)),
-        # EPD encode worker: registers with engine=None.
         None,
-        # No tokenizer manager, or an SGLang whose attribute names moved.
-        SimpleNamespace(),
-        # Audio-only processor (qwen_audio, voxtral, glmasr, ...): populates
-        # audio_token and leaves image_token unset.
-        SimpleNamespace(
-            tokenizer_manager=SimpleNamespace(
-                mm_processor=SimpleNamespace(
-                    mm_tokens=SimpleNamespace(image_token=None, audio_token="<|audio|>")
-                )
-            )
+        _engine(with_tm=False),
+        _engine(
+            model_type="qwen3_vl",
+            mm_tokens=SimpleNamespace(
+                image_token="<|vision_start|><|image_pad|><|vision_end|>"
+            ),
         ),
-        # Multimodal processor we can't read (version drift).
-        SimpleNamespace(
-            tokenizer_manager=SimpleNamespace(mm_processor=SimpleNamespace())
+        _engine(
+            model_type="qwen2_audio",
+            mm_tokens=SimpleNamespace(image_token=None, audio_token="<|audio|>"),
         ),
-        # Several spellings can't be reduced to the one token the renderer emits.
-        SimpleNamespace(
-            tokenizer_manager=SimpleNamespace(
-                mm_processor=SimpleNamespace(
-                    mm_tokens=SimpleNamespace(image_token=["<|a|>", "<|b|>"])
-                )
-            )
-        ),
+        _engine(model_type="llama"),
     ],
-    ids=[
-        "text-only",
-        "no-engine",
-        "no-tokenizer-manager",
-        "audio-only",
-        "drift",
-        "multiple-spellings",
-    ],
+    ids=["no-engine", "no-tokenizer-manager", "qwen-vl", "audio-only", "text-only"],
 )
-def test_absent_image_token_is_quiet(engine, caplog):
-    """Every "no image token" shape returns None without shouting.
+def test_no_declaration_and_no_probe_for_non_k3_models(engine, caplog):
+    """The frontend only reads this for Kimi-K3, so nothing else is probed.
 
-    This runs for every SGLang model, so a spurious warning here would fire on
-    unrelated deployments -- audio-only workers in particular are perfectly
-    healthy and simply have no image token to declare.
+    Qwen-VL is the case that matters: its processor DOES expose an image_token,
+    but it is a three-token wrapper meaning something different, and its chat
+    template already emits it. Reading it would publish a value nobody consumes.
     """
     from dynamo.sglang.register import _get_image_placeholder_token
 
@@ -252,15 +246,21 @@ def test_absent_image_token_is_quiet(engine, caplog):
 
 
 def test_image_placeholder_token_comes_from_the_loaded_processor():
-    """The declaration must be read from the processor, not hardcoded per engine."""
+    """For K3 the declaration is read from the processor, never hardcoded."""
     from dynamo.sglang.register import _get_image_placeholder_token
 
-    engine = SimpleNamespace(
-        tokenizer_manager=SimpleNamespace(
-            mm_processor=SimpleNamespace(
-                mm_tokens=SimpleNamespace(image_token="<|media_pad|>")
-            )
-        )
+    engine = _engine(
+        model_type="kimi_k3", mm_tokens=SimpleNamespace(image_token="<|media_pad|>")
     )
 
     assert _get_image_placeholder_token(engine) == "<|media_pad|>"
+
+
+def test_unreadable_k3_processor_warns():
+    """Now that the probe only runs for K3, a miss IS actionable -- the engine
+    will not consume the formatter's default, so say so."""
+    from dynamo.sglang.register import _get_image_placeholder_token
+
+    engine = _engine(model_type="kimi_k3", mm_tokens=SimpleNamespace(image_token=None))
+
+    assert _get_image_placeholder_token(engine) is None
