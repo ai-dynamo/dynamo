@@ -37,8 +37,8 @@ static SERVED_MODEL: OnceLock<String> = OnceLock::new();
 /// Used until [`set_served_model`] runs, and in tests that never bind one.
 const UNKNOWN_MODEL: &str = "unknown";
 
-/// Bind the `model` label to the model this pool serves, read from the model
-/// card at startup.
+/// Bind the `model` label to the model this pool serves: the discovered model
+/// card in Dynamo-discovery mode, the configured model name in standalone mode.
 ///
 /// The label deliberately does not come from the request body. That string is
 /// unvalidated client input which the router never checks against the served
