@@ -139,7 +139,7 @@ fn flat_storage_capacity_is_bounded_by_realizable_output() {
     const BLOCK_SIZE: usize = 4;
     const MAX_OUTPUT_TOKENS: usize = 1_000_000;
 
-    for (prompt_len, expected_output_capacity) in [(10_usize, 2_usize), (17, 0)] {
+    for (prompt_len, expected_output_capacity) in [(8_usize, 4_usize), (10, 2), (17, 0)] {
         let args = MockEngineArgs::builder()
             .engine_type(EngineType::Vllm)
             .g1_backend(G1Backend::Native)

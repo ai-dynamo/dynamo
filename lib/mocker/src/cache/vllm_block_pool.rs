@@ -134,7 +134,7 @@ impl VllmBlockPool {
         candidates: impl IntoIterator<Item = SequenceHash>,
         total: usize,
     ) -> Option<ReserveOutcome> {
-        let mut hits = Vec::new();
+        let mut hits = Vec::with_capacity(total);
         for hash in candidates {
             assert!(hits.len() < total, "prefix candidates exceed layout");
             let Some(id) = self.first_copy(hash) else {
@@ -746,7 +746,10 @@ mod tests {
         pool.release(id);
 
         let mut activation = reserve(&mut pool, &[7], 0).reservation;
-        assert_eq!(pool.activate_prefix(&mut activation), vec![id]);
+        assert_eq!(
+            pool.activate_prefix(&mut activation).collect::<Vec<_>>(),
+            vec![(7, id)]
+        );
         pool.cancel(activation);
         assert_eq!(pool.num_inactive(), 0);
         pool.assert_lru_consistent();
