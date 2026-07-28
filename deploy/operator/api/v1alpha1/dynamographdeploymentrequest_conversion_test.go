@@ -137,12 +137,11 @@ func newV1beta1DGDR() *v1beta1.DynamoGraphDeploymentRequest {
 			},
 		},
 		Status: v1beta1.DynamoGraphDeploymentRequestStatus{
-			Phase:                   v1beta1.DGDRPhaseProfiling,
-			ObservedGeneration:      2,
-			ObservedSpecFingerprint: "test-spec-fingerprint",
-			DGDName:                 "hub-dgd",
-			ProfilingPhase:          v1beta1.ProfilingPhaseSweepingDecode,
-			ProfilingJobName:        "profiling-job-1",
+			Phase:              v1beta1.DGDRPhaseProfiling,
+			ObservedGeneration: 2,
+			DGDName:            "hub-dgd",
+			ProfilingPhase:     v1beta1.ProfilingPhaseSweepingDecode,
+			ProfilingJobName:   "profiling-job-1",
 			ProfilingResults: &v1beta1.ProfilingResultsStatus{
 				SelectedConfig: &runtime.RawExtension{Raw: rawDGD},
 			},

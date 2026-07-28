@@ -23,7 +23,6 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdrutil"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -253,18 +252,6 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			gpuDiscovery: true,
 		},
 		{
-			name:               "runtime version override repair does not require observed fingerprint",
-			seedWithoutWebhook: true,
-			oldRequest: betaDGDRForAdmissionWithoutFingerprint(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
-				request.Spec.RuntimeVersionOverride = ""
-				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseDeployed
-			}),
-			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
-				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseDeployed
-			}),
-			gpuDiscovery: true,
-		},
-		{
 			name: "newly introduced custom image without override is rejected on update",
 			oldRequest: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
 				request.Spec.Image = "test-profiler:1.1.0"
@@ -377,15 +364,6 @@ func betaDGDRForAdmission(
 	if mutate != nil {
 		mutate(request)
 	}
-	request.Status.ObservedSpecFingerprint, _ = dgdrutil.SpecFingerprint(&request.Spec)
-	return request
-}
-
-func betaDGDRForAdmissionWithoutFingerprint(
-	mutate func(*nvidiacomv1beta1.DynamoGraphDeploymentRequest),
-) *nvidiacomv1beta1.DynamoGraphDeploymentRequest {
-	request := betaDGDRForAdmission(mutate)
-	request.Status.ObservedSpecFingerprint = ""
 	return request
 }
 

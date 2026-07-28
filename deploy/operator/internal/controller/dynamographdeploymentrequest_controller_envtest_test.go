@@ -1386,26 +1386,12 @@ spec:
 				},
 			}
 
-			t.Log("Seed and reconcile the legacy request")
+			t.Log("Seed the legacy request without reconciling it")
 			Expect(admissionBypassClient.Create(ctx, dgdr)).Should(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
-			_, err := reconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: types.NamespacedName{Name: dgdrName, Namespace: namespace},
-			})
-			Expect(err).NotTo(HaveOccurred())
-
-			t.Log("Continue reconciliation after initialization")
-			result, err := reconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: types.NamespacedName{Name: dgdrName, Namespace: namespace},
-			})
-			Expect(err).NotTo(HaveOccurred())
-			Expect(result.IsZero()).Should(BeTrue())
-
-			t.Log("Read the initialized generation and fingerprint")
 			var current nvidiacomv1beta1.DynamoGraphDeploymentRequest
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &current)).Should(Succeed())
 			initialGeneration := current.Generation
-			Expect(current.Status.ObservedSpecFingerprint).ShouldNot(BeEmpty())
 
 			t.Log("Store legacy generated manifests and move the request into the ready phase")
 			generatedDGD := &nvidiacomv1beta1.DynamoGraphDeployment{
@@ -1431,6 +1417,7 @@ spec:
 			Expect(k8sClient.Update(ctx, &current)).Should(Succeed())
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &current)).Should(Succeed())
 			current.Status.Phase = nvidiacomv1beta1.DGDRPhaseReady
+			current.Status.ObservedGeneration = current.Generation
 			current.Status.ProfilingResults = &nvidiacomv1beta1.ProfilingResultsStatus{
 				SelectedConfig: &runtime.RawExtension{Raw: dgdJSON},
 			}
@@ -1442,7 +1429,7 @@ spec:
 			Expect(k8sClient.Update(ctx, &current)).Should(Succeed())
 
 			t.Log("Observe the admitted repair")
-			result, err = reconciler.Reconcile(ctx, reconcile.Request{
+			result, err := reconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: types.NamespacedName{Name: dgdrName, Namespace: namespace},
 			})
 			Expect(err).NotTo(HaveOccurred())
@@ -1467,21 +1454,6 @@ spec:
 			t.Log("Apply the repaired selected config through admission")
 			Expect(k8sClient.Create(ctx, selectedDGD)).Should(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, selectedDGD) }()
-
-			t.Log("Bypass admission with an unrelated spec change")
-			repairedGeneration := current.Status.ObservedGeneration
-			current.Spec.Model = "modified-model"
-			Expect(admissionBypassClient.Update(ctx, &current)).Should(Succeed())
-
-			t.Log("Verify that the fingerprint prevents observing the unrelated change")
-			result, err = reconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: types.NamespacedName{Name: dgdrName, Namespace: namespace},
-			})
-			Expect(err).NotTo(HaveOccurred())
-			Expect(result.IsZero()).Should(BeTrue())
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &current)).Should(Succeed())
-			Expect(current.Status.ObservedGeneration).Should(Equal(repairedGeneration))
-			Expect(current.Generation).Should(BeNumerically(">", repairedGeneration))
 		})
 	})
 

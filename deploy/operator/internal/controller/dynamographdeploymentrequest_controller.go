@@ -54,7 +54,6 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdrutil"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
@@ -128,7 +127,6 @@ const (
 	MessageDeploymentDegraded        = "DynamoGraphDeployment %s degraded from Ready to %s"
 	MessageDeploymentDeleted         = "DGD %s was deleted. DGDR will not recreate it. Delete this DGDR and create a new one to redeploy."
 	MessageInvalidState              = "Invalid state"
-	MessageSpecChangeRejected        = "Cannot modify spec in phase '%s'. DynamoGraphDeploymentRequest is immutable once profiling starts. Create a new resource with a different name instead."
 	MessageJobCreationFailed         = "JobCreationFailed"
 	MessageDeploymentCreationFailed  = "DeploymentCreationFailed"
 	MessageResultsRetrievalFailed    = "ResultsRetrievalFailed"
@@ -463,56 +461,26 @@ func (r *DynamoGraphDeploymentRequestReconciler) Reconcile(ctx context.Context, 
 		return ctrl.Result{}, nil
 	}
 
-	currentSpecFingerprint, err := dgdrutil.SpecFingerprint(&dgdr.Spec)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-
-	// Record the fingerprint for the spec associated with the observed generation.
-	if dgdr.Status.ObservedGeneration > 0 &&
-		dgdr.Status.ObservedGeneration == dgdr.Generation &&
-		dgdr.Status.ObservedSpecFingerprint != currentSpecFingerprint {
-		dgdr.Status.ObservedSpecFingerprint = currentSpecFingerprint
-		if err := r.Status().Update(ctx, dgdr); err != nil {
-			return ctrl.Result{}, fmt.Errorf("failed to record observed DGDR spec fingerprint: %w", err)
-		}
-		return ctrl.Result{Requeue: true}, nil
-	}
-
-	// Verify immutable-phase repairs against the last observed spec before resuming the phase machine.
+	// Admission is authoritative for immutable-phase spec updates. The only
+	// admitted generation change is a runtimeVersionOverride repair.
 	if dgdr.Status.ObservedGeneration > 0 && dgdr.Status.ObservedGeneration != dgdr.Generation {
 		if dgdr.Status.Phase == nvidiacomv1beta1.DGDRPhaseProfiling || dgdr.Status.Phase == nvidiacomv1beta1.DGDRPhaseDeploying ||
 			dgdr.Status.Phase == nvidiacomv1beta1.DGDRPhaseReady || dgdr.Status.Phase == nvidiacomv1beta1.DGDRPhaseDeployed {
-			repair, err := dgdrutil.IsRuntimeVersionOverrideRepair(&dgdr.Spec, dgdr.Status.ObservedSpecFingerprint)
-			if err != nil {
-				return ctrl.Result{}, err
-			}
-			if repair {
-				logger.Info("Observing verified runtime version override repair in immutable phase",
-					"phase", dgdr.Status.Phase,
-					"observedGeneration", dgdr.Status.ObservedGeneration,
-					"currentGeneration", dgdr.Generation)
-
-				// Repair generated manifests before acknowledging the new generation.
-				if err := r.repairGeneratedDGDArtifacts(ctx, dgdr); err != nil {
-					return ctrl.Result{}, err
-				}
-
-				dgdr.Status.ObservedGeneration = dgdr.Generation
-				dgdr.Status.ObservedSpecFingerprint = currentSpecFingerprint
-				if err := r.Status().Update(ctx, dgdr); err != nil {
-					return ctrl.Result{}, fmt.Errorf("failed to observe DGDR runtime version override repair: %w", err)
-				}
-				return ctrl.Result{Requeue: true}, nil
-			}
-
-			logger.Info("Spec change detected in immutable phase",
+			logger.Info("Observing admitted runtime version override repair in immutable phase",
 				"phase", dgdr.Status.Phase,
 				"observedGeneration", dgdr.Status.ObservedGeneration,
 				"currentGeneration", dgdr.Generation)
-			r.Recorder.Event(dgdr, corev1.EventTypeWarning, nvidiacomv1beta1.EventReasonSpecChangeRejected,
-				fmt.Sprintf(MessageSpecChangeRejected, dgdr.Status.Phase))
-			return ctrl.Result{}, nil
+
+			// Repair generated manifests before acknowledging the new generation.
+			if err := r.repairGeneratedDGDArtifacts(ctx, dgdr); err != nil {
+				return ctrl.Result{}, err
+			}
+
+			dgdr.Status.ObservedGeneration = dgdr.Generation
+			if err := r.Status().Update(ctx, dgdr); err != nil {
+				return ctrl.Result{}, fmt.Errorf("failed to observe DGDR runtime version override repair: %w", err)
+			}
+			return ctrl.Result{Requeue: true}, nil
 		}
 	}
 	// Phase machine: handle different phases
@@ -2430,9 +2398,7 @@ func setSucceededCondition(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest, 
 func (r *DynamoGraphDeploymentRequestReconciler) updatePhase(ctx context.Context, dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest, phase nvidiacomv1beta1.DGDRPhase, message string) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	logger.Info("Updating DGDR phase", "name", dgdr.Name, "phase", phase, "message", message)
-	if err := observeCurrentDGDRSpec(dgdr); err != nil {
-		return ctrl.Result{}, err
-	}
+	dgdr.Status.ObservedGeneration = dgdr.Generation
 	dgdr.Status.Phase = phase
 	setSucceededCondition(dgdr, phase)
 	if err := r.Status().Update(ctx, dgdr); err != nil {
@@ -2451,9 +2417,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) updatePhaseWithCondition(
 	reason string,
 	message string,
 ) (ctrl.Result, error) {
-	if err := observeCurrentDGDRSpec(dgdr); err != nil {
-		return ctrl.Result{}, err
-	}
+	dgdr.Status.ObservedGeneration = dgdr.Generation
 	dgdr.Status.Phase = phase
 
 	// Set the specific condition first so setSucceededCondition can surface it.
@@ -2472,16 +2436,6 @@ func (r *DynamoGraphDeploymentRequestReconciler) updatePhaseWithCondition(
 	}
 
 	return ctrl.Result{}, nil
-}
-
-func observeCurrentDGDRSpec(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) error {
-	specFingerprint, err := dgdrutil.SpecFingerprint(&dgdr.Spec)
-	if err != nil {
-		return err
-	}
-	dgdr.Status.ObservedGeneration = dgdr.Generation
-	dgdr.Status.ObservedSpecFingerprint = specFingerprint
-	return nil
 }
 
 // SetupWithManager sets up the controller with the Manager

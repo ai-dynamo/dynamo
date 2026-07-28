@@ -2313,7 +2313,6 @@ _Appears in:_
 | `profilingResults` _[ProfilingResultsStatus](#profilingresultsstatus)_ | ProfilingResults contains the selected deployment configuration produced by profiling.<br />Deprecated compatibility fields may remain on objects created by older releases. |  | Optional: \{\} <br /> |
 | `deploymentInfo` _[DeploymentInfoStatus](#deploymentinfostatus)_ | DeploymentInfo tracks the state of the deployed DynamoGraphDeployment.<br />Populated when a DGD has been created (either via autoApply or manually). |  | Optional: \{\} <br /> |
 | `observedGeneration` _integer_ | ObservedGeneration is the most recent generation observed by the controller. |  | Optional: \{\} <br /> |
-| `observedSpecFingerprint` _string_ | ObservedSpecFingerprint identifies the spec associated with ObservedGeneration.<br />The controller uses it to verify runtimeVersionOverride-only repairs. |  | Optional: \{\} <br /> |
 
 
 #### DynamoGraphDeploymentScalingAdapter
