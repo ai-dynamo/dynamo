@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -197,15 +198,57 @@ async def test_hicache_publish_failure_preserves_core_capacity(monkeypatch, capl
 # pre-commit hook's collection env.
 
 
-def test_image_placeholder_token_is_none_for_text_only_workers(caplog):
-    """No mm_processor means no images, so nothing to declare -- and this is
-    expected, so it must not look like the version-drift case below."""
+@pytest.mark.parametrize(
+    "engine",
+    [
+        # Text-only model: no multimodal processor at all.
+        SimpleNamespace(tokenizer_manager=SimpleNamespace(mm_processor=None)),
+        # EPD encode worker: registers with engine=None.
+        None,
+        # No tokenizer manager, or an SGLang whose attribute names moved.
+        SimpleNamespace(),
+        # Audio-only processor (qwen_audio, voxtral, glmasr, ...): populates
+        # audio_token and leaves image_token unset.
+        SimpleNamespace(
+            tokenizer_manager=SimpleNamespace(
+                mm_processor=SimpleNamespace(
+                    mm_tokens=SimpleNamespace(image_token=None, audio_token="<|audio|>")
+                )
+            )
+        ),
+        # Multimodal processor we can't read (version drift).
+        SimpleNamespace(
+            tokenizer_manager=SimpleNamespace(mm_processor=SimpleNamespace())
+        ),
+        # Several spellings can't be reduced to the one token the renderer emits.
+        SimpleNamespace(
+            tokenizer_manager=SimpleNamespace(
+                mm_processor=SimpleNamespace(
+                    mm_tokens=SimpleNamespace(image_token=["<|a|>", "<|b|>"])
+                )
+            )
+        ),
+    ],
+    ids=[
+        "text-only",
+        "no-engine",
+        "no-tokenizer-manager",
+        "audio-only",
+        "drift",
+        "multiple-spellings",
+    ],
+)
+def test_absent_image_token_is_quiet(engine, caplog):
+    """Every "no image token" shape returns None without shouting.
+
+    This runs for every SGLang model, so a spurious warning here would fire on
+    unrelated deployments -- audio-only workers in particular are perfectly
+    healthy and simply have no image token to declare.
+    """
     from dynamo.sglang.register import _get_image_placeholder_token
 
-    engine = SimpleNamespace(tokenizer_manager=SimpleNamespace(mm_processor=None))
-
     assert _get_image_placeholder_token(engine) is None
-    assert "exposes no" not in caplog.text
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
 
 def test_image_placeholder_token_comes_from_the_loaded_processor():
@@ -221,38 +264,3 @@ def test_image_placeholder_token_comes_from_the_loaded_processor():
     )
 
     assert _get_image_placeholder_token(engine) == "<|media_pad|>"
-
-
-def test_image_placeholder_token_declines_multiple_spellings():
-    """MultimodalSpecialTokens.image_token may be a list; the renderer emits one
-    token, so several spellings can't be reduced to a declaration."""
-    from dynamo.sglang.register import _get_image_placeholder_token
-
-    engine = SimpleNamespace(
-        tokenizer_manager=SimpleNamespace(
-            mm_processor=SimpleNamespace(
-                mm_tokens=SimpleNamespace(image_token=["<|a|>", "<|b|>"])
-            )
-        )
-    )
-
-    assert _get_image_placeholder_token(engine) is None
-
-
-def test_image_placeholder_token_warns_when_processor_has_no_mm_tokens(caplog):
-    """Version drift: a multimodal processor we can't read is worth a breadcrumb,
-    because K3 requests on this worker will then fail placeholder validation."""
-    from dynamo.sglang.register import _get_image_placeholder_token
-
-    engine = SimpleNamespace(
-        tokenizer_manager=SimpleNamespace(mm_processor=SimpleNamespace())
-    )
-
-    assert _get_image_placeholder_token(engine) is None
-    assert "exposes no `mm_tokens`" in caplog.text
-
-
-def test_image_placeholder_token_survives_an_engine_without_a_tokenizer_manager():
-    from dynamo.sglang.register import _get_image_placeholder_token
-
-    assert _get_image_placeholder_token(SimpleNamespace()) is None

@@ -353,72 +353,45 @@ def _get_image_placeholder_token(engine: Optional[sgl.Engine]) -> Optional[str]:
     multimodal processor builds an ``mm_tokens`` spec in its ``__init__`` (the
     Kimi ones declare ``<|media_pad|>``).
 
-    Reaches into SGLang internals, so it is defensive in the style of
-    ``_compat.ensure_sglang_tensor_image_size``: these attributes move between
-    releases. Every miss returns None, leaving the frontend on the formatter's
-    own default -- but the misses are logged at different levels, because
-    "text-only worker" and "SGLang renamed the attribute we read" are
-    indistinguishable by return value and very distinguishable in consequence.
+    Runs for every model, so it must be total and quiet. "No image token" is a
+    normal answer, not a fault: text-only models have no ``mm_processor`` at
+    all, audio-only processors (``qwen_audio``, ``voxtral``, ``glmasr``, ...)
+    populate ``audio_token`` and leave ``image_token`` unset, and the EPD encode
+    worker registers with ``engine=None``. None of those are worth a warning.
+
+    This deliberately does not judge whether the absence matters. Only the
+    frontend knows that -- it is the side that picks a native formatter, and it
+    logs which token it resolved and whether a worker declared it.
+
+    Reaches into SGLang internals (all plain instance attributes, no properties),
+    so it is defensive in the style of ``_compat.ensure_sglang_tensor_image_size``:
+    these move between releases. Any miss returns None, leaving the frontend on
+    the formatter's own default.
     """
     try:
-        # The EPD encode worker registers with engine=None (it owns the chat
-        # surface but delegates generation), so it can never declare. Expected,
-        # not drift.
-        if engine is None:
-            logging.debug(
-                "No engine supplied; not declaring an image placeholder token."
-            )
-            return None
-
-        tokenizer_manager = getattr(engine, "tokenizer_manager", None)
-        if tokenizer_manager is None:
-            logging.warning(
-                "SGLang engine %s exposes no `tokenizer_manager`; not declaring "
-                "an image placeholder token.",
-                type(engine).__name__,
-            )
-            return None
-
-        mm_processor = getattr(tokenizer_manager, "mm_processor", None)
+        mm_processor = getattr(
+            getattr(engine, "tokenizer_manager", None), "mm_processor", None
+        )
         if mm_processor is None:
-            logging.debug(
-                "No multimodal processor on this worker (text-only model); not "
-                "declaring an image placeholder token."
-            )
-            return None
-
-        mm_tokens = getattr(mm_processor, "mm_tokens", None)
-        if mm_tokens is None:
-            logging.error(
-                "SGLang multimodal processor %s exposes no `mm_tokens`; not "
-                "declaring an image placeholder token. Multimodal requests on "
-                "models rendered by a native Dynamo formatter (Kimi-K3) will "
-                "fail this worker's placeholder validation.",
-                type(mm_processor).__name__,
-            )
+            # engine=None (EPD encode worker), text-only model, or an SGLang
+            # whose attribute names moved.
             return None
 
         # MultimodalSpecialTokens.image_token is Optional[Union[str, List[str]]];
         # `.build()` backfills the string form from image_token_id, so a plain
         # str is the common case. Several spellings can't be reduced to the one
         # token the renderer emits, so decline rather than guess.
-        image_token = getattr(mm_tokens, "image_token", None)
+        image_token = getattr(
+            getattr(mm_processor, "mm_tokens", None), "image_token", None
+        )
         if isinstance(image_token, str) and image_token:
             return image_token
-        if isinstance(image_token, (list, tuple)):
-            logging.error(
-                "SGLang processor %s declares multiple image-token spellings "
-                "(%r); not declaring one to the frontend.",
-                type(mm_processor).__name__,
-                list(image_token),
-            )
-        else:
-            logging.error(
-                "SGLang processor %s declares no usable `image_token` (%r); not "
-                "declaring one to the frontend.",
-                type(mm_processor).__name__,
-                image_token,
-            )
+        logging.debug(
+            "SGLang processor %s declares no single image token (%r); not "
+            "declaring one to the frontend.",
+            type(mm_processor).__name__,
+            image_token,
+        )
         return None
     except Exception as e:
         logging.warning(
