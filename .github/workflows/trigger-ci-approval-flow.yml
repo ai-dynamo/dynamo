@@ -196,19 +196,24 @@ jobs:
           REPO_OWNER: ${{ github.repository_owner }}
           REPO_NAME: ${{ github.event.repository.name }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_SHA: ${{ github.event.pull_request.head.sha }}
           UNSIGNED_COMMITS: ${{ steps.signature_check.outputs.unsigned_commits }}
         run: |
           table=$(echo "$UNSIGNED_COMMITS" | jq -r '.[] | "| `\(.sha)` | \(.reason) |"')
           body="<!-- dynamo-ext-contributor: unsigned -->
-          ## Unsigned Commits Detected
+          ## Automatic CI Approval Skipped
 
-          The following commits are not GPG-signed and must be signed before CI can run:
+          This signature check applies only to the automatic CI approval path for internal or otherwise approved contributors, or to a PR head updated by a maintainer. That path requires every commit to have a signature that GitHub reports as verified.
+
+          The following commits do not meet that requirement:
 
           | Commit | Reason |
           |--------|--------|
           ${table}
 
-          Please sign your commits and push again. See the [GitHub docs on commit signature verification](https://docs.github.com/en/authentication/managing-commit-signature-verification/signing-commits) for help."
+          Commit signing is not required for a maintainer-approved CI run. External contributors do not need to rewrite their commit history. A maintainer can review the current head and comment \`/ok to test $PR_SHA\` instead. If that exact SHA has already been approved, no action is needed.
+
+          If you are eligible for automatic approval and want to use it, sign the listed commits and push again. See the [GitHub docs on signing commits](https://docs.github.com/en/authentication/managing-commit-signature-verification/signing-commits) for help."
 
           gh pr comment "$PR_NUMBER" \
             --repo "$REPO_OWNER/$REPO_NAME" \
