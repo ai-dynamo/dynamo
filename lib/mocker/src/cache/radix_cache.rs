@@ -27,17 +27,12 @@ impl KvPageId {
     pub(crate) fn first_token_index(self, page_size: usize) -> usize {
         self.0 * page_size
     }
-
-    pub(crate) fn terminal_token_index(self, page_size: usize) -> usize {
-        self.first_token_index(page_size) + page_size - 1
-    }
 }
 
 /// Manages free / allocated pages for the simulated SGLang KV cache.
 ///
-/// SGLang's paged allocator owns and frees whole pages even though its public
-/// interface returns flattened token indices. This pool preserves that
-/// ownership model and only expands page IDs while a request is active.
+/// SGLang's paged allocator owns and frees whole pages. Compatibility helpers
+/// can still flatten page IDs into token indices for existing callers.
 pub struct PagePool {
     next_fresh: usize,
     free: Vec<KvPageId>,
@@ -236,7 +231,7 @@ impl RadixCache {
         self.nodes.len()
     }
 
-    fn page_hashes(&self, tokens: &[u32]) -> Vec<LocalBlockHash> {
+    pub(crate) fn page_hashes(&self, tokens: &[u32]) -> Vec<LocalBlockHash> {
         compute_block_hash_for_seq(tokens, self.page_size as u32, BlockHashOptions::default())
     }
 
@@ -266,6 +261,11 @@ impl RadixCache {
 
     pub fn match_prefix(&mut self, key: &[u32]) -> (usize, NodeId) {
         let page_keys = self.page_hashes(key);
+        self.match_prefix_hashes(&page_keys)
+    }
+
+    /// Match a prefix using page hashes already owned by the request.
+    pub(crate) fn match_prefix_hashes(&mut self, page_keys: &[LocalBlockHash]) -> (usize, NodeId) {
         let now = Instant::now();
         self.nodes[self.root].last_access_time = now;
 
@@ -311,6 +311,11 @@ impl RadixCache {
     /// Used for LPM scheduling scoring.
     pub fn prefix_match_len(&self, key: &[u32]) -> usize {
         let page_keys = self.page_hashes(key);
+        self.prefix_match_hashes_len(&page_keys)
+    }
+
+    /// Read-only prefix match using page hashes already owned by the request.
+    pub(crate) fn prefix_match_hashes_len(&self, page_keys: &[LocalBlockHash]) -> usize {
         let mut current = self.root;
         let mut matched_pages: usize = 0;
 
@@ -341,7 +346,14 @@ impl RadixCache {
 
     /// Insert a token sequence into the tree. Key is page-aligned before insertion.
     pub fn insert(&mut self, key: &[u32], value: &[usize]) -> NodeId {
-        self.insert_from(self.root, 0, key, value, false)
+        let aligned_len = key.len() / self.page_size * self.page_size;
+        assert!(
+            value.len() >= aligned_len,
+            "not enough token indices: need {aligned_len}, got {}",
+            value.len()
+        );
+        let page_ids = self.page_ids(&value[..aligned_len], aligned_len / self.page_size);
+        self.insert_page_suffix(self.root, 0, key, &page_ids, false)
     }
 
     /// Insert only the suffix after a retained, page-aligned prefix.
@@ -356,15 +368,67 @@ impl RadixCache {
         key: &[u32],
         value: &[usize],
     ) -> NodeId {
-        self.insert_from(prefix_node, prefix_len, key, value, true)
+        let aligned_len = key.len() / self.page_size * self.page_size;
+        assert_eq!(
+            prefix_len % self.page_size,
+            0,
+            "prefix length must be page-aligned"
+        );
+        assert!(
+            prefix_len <= aligned_len,
+            "prefix length {prefix_len} exceeds aligned key length {aligned_len}"
+        );
+        assert!(
+            value.len() >= aligned_len,
+            "not enough token indices: need {aligned_len}, got {}",
+            value.len()
+        );
+        let page_ids = self.page_ids(
+            &value[prefix_len..aligned_len],
+            (aligned_len - prefix_len) / self.page_size,
+        );
+        self.insert_page_suffix(prefix_node, prefix_len, key, &page_ids, true)
     }
 
-    fn insert_from(
+    /// Insert page identities already materialized by the request lease.
+    pub(crate) fn insert_page_hashes_from_node(
+        &mut self,
+        prefix_node: NodeId,
+        prefix_len: usize,
+        page_keys: &[LocalBlockHash],
+        pages: &[KvPageId],
+    ) -> NodeId {
+        assert_eq!(
+            prefix_len % self.page_size,
+            0,
+            "prefix length must be page-aligned"
+        );
+        assert!(
+            pages.len() >= page_keys.len(),
+            "not enough KV pages: need {}, got {}",
+            page_keys.len(),
+            pages.len()
+        );
+        let prefix_pages = prefix_len / self.page_size;
+        assert!(
+            prefix_pages <= page_keys.len(),
+            "prefix pages {prefix_pages} exceed hashed pages {}",
+            page_keys.len()
+        );
+        self.insert_page_hash_suffix(
+            prefix_node,
+            &page_keys[prefix_pages..],
+            &pages[prefix_pages..page_keys.len()],
+            true,
+        )
+    }
+
+    fn insert_page_suffix(
         &mut self,
         start_node: NodeId,
         prefix_len: usize,
         key: &[u32],
-        value: &[usize],
+        page_ids: &[KvPageId],
         allow_locked_tail_extension: bool,
     ) -> NodeId {
         let aligned_len = key.len() / self.page_size * self.page_size;
@@ -380,18 +444,38 @@ impl RadixCache {
         if aligned_len == prefix_len {
             return start_node;
         }
+        let expected_pages = (aligned_len - prefix_len) / self.page_size;
         assert!(
-            value.len() >= aligned_len,
-            "not enough token indices: need {aligned_len}, got {}",
-            value.len()
+            page_ids.len() >= expected_pages,
+            "not enough KV pages: need {expected_pages}, got {}",
+            page_ids.len()
         );
-        // `start_node` already represents the retained prefix. Hashing and
-        // validating it again on every decode-page completion makes growth
-        // quadratic in sequence length; only the newly completed suffix is
-        // needed for insertion.
         let page_keys = self.page_hashes(&key[prefix_len..aligned_len]);
-        let page_ids = self.page_ids(&value[prefix_len..aligned_len], page_keys.len());
+        let page_ids = &page_ids[..page_keys.len()];
+        self.insert_page_hash_suffix(
+            start_node,
+            &page_keys,
+            page_ids,
+            allow_locked_tail_extension,
+        )
+    }
 
+    fn insert_page_hash_suffix(
+        &mut self,
+        start_node: NodeId,
+        page_keys: &[LocalBlockHash],
+        page_ids: &[KvPageId],
+        allow_locked_tail_extension: bool,
+    ) -> NodeId {
+        assert!(
+            page_ids.len() >= page_keys.len(),
+            "not enough KV pages: need {}, got {}",
+            page_keys.len(),
+            page_ids.len()
+        );
+        if page_keys.is_empty() {
+            return start_node;
+        }
         let now = Instant::now();
         self.touch_path(start_node, now);
 
