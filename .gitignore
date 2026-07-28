@@ -158,6 +158,8 @@ profiling_results*
 # Node.js
 node_modules/
 package-lock.json
+# Exception: the docs events generator pins its deps for npm ci in CI.
+!.github/scripts/events/package-lock.json
 
 # Compiled static libraries
 *.a

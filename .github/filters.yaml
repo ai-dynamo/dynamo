@@ -138,7 +138,7 @@ operator:
   - 'deploy/operator/.*'
   # Operator imports the local snapshot module.
   - 'deploy/snapshot/**'
-  - 'docs/kubernetes/api-reference.md'
+  - 'docs/fern/kubernetes/api-reference.md'
   - 'deploy/helm/charts/platform/**'
   # The operator check owns the real Go/Python DGD override contract test.
   - 'components/src/dynamo/profiler/utils/dgd_override.py'
@@ -179,6 +179,8 @@ planner:
   - 'components/src/dynamo/global_planner/**'
   - 'components/src/dynamo/profiler/**'
   - 'components/src/dynamo/global_router/**'
+  - 'aisimulate/**'
+  - 'examples/aisimulate/**'
   # Power-aware planner (PR #9369): per-node power agent component
   - 'deploy/power-agent/**'
   - 'deploy/helm/charts/power-agent/**'
