@@ -101,6 +101,30 @@ def text_diff():
     )
 
 
+def render_review(tmp_path, monkeypatch, spec, diff):
+    spec_path = tmp_path / "review.json"
+    diff_path = tmp_path / "review.diff"
+    output_path = tmp_path / "review.html"
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+    diff_path.write_text(diff, encoding="utf-8")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(RENDERER_PATH),
+            "--spec",
+            str(spec_path),
+            "--diff",
+            str(diff_path),
+            "--output",
+            str(output_path),
+        ],
+    )
+
+    assert renderer.main() == 0
+    return output_path.read_text(encoding="utf-8")
+
+
 def test_parse_diff_handles_metadata_and_binary_payloads():
     parsed = renderer.parse_diff(
         "diff --git a/mode.sh b/mode.sh\n"
@@ -193,35 +217,41 @@ def test_render_allows_placeholder_tokens_in_review_content(tmp_path, monkeypatc
     tokens = (
         "__REVIEW_DATA_JSON__ __CYTOSCAPE_JS__ " "__DAGRE_JS__ __CYTOSCAPE_DAGRE_JS__"
     )
-    spec_path = tmp_path / "review.json"
-    diff_path = tmp_path / "review.diff"
-    output_path = tmp_path / "review.html"
-    spec_path.write_text(json.dumps(base_spec()), encoding="utf-8")
-    diff_path.write_text(
+    rendered = render_review(
+        tmp_path,
+        monkeypatch,
+        base_spec(),
         "diff --git a/example.py b/example.py\n"
         "--- a/example.py\n"
         "+++ b/example.py\n"
         "@@ -0,0 +1 @@\n"
         f"+{tokens}\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            str(RENDERER_PATH),
-            "--spec",
-            str(spec_path),
-            "--diff",
-            str(diff_path),
-            "--output",
-            str(output_path),
-        ],
     )
 
-    assert renderer.main() == 0
-    rendered = output_path.read_text(encoding="utf-8")
     assert f'"text":"{tokens}"' in rendered
+
+
+def test_render_escapes_script_closers_in_review_content(tmp_path, monkeypatch):
+    closer = "</script>"
+    escaped_closer = r"<\/script>"
+    spec = base_spec()
+    spec["findings"][0]["summary"] = f"Review content {closer} remains inert."
+
+    rendered = render_review(
+        tmp_path,
+        monkeypatch,
+        spec,
+        "diff --git a/example.py b/example.py\n"
+        "--- a/example.py\n"
+        "+++ b/example.py\n"
+        "@@ -0,0 +1 @@\n"
+        "+new_call()\n",
+    )
+
+    assert f'"summary":"Review content {escaped_closer} remains inert."' in rendered
+    assert rendered.count(closer) == TEMPLATE_PATH.read_text(encoding="utf-8").count(
+        closer
+    )
 
 
 def test_validate_spec_rejects_boolean_line_numbers():
