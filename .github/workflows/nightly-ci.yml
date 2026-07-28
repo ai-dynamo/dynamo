@@ -316,7 +316,7 @@ jobs:
   # Compliance extract + verify now runs as an inline step INSIDE each build job
   # (inline_compliance: true above), on the same warm builder — a cache hit + small
   # scratch export instead of a cold full-image rebuild on the fresh builder. The
-  # build jobs set archive_sources: true, so the /sources tree is emitted
+  # build jobs set archive_sources: true, so sources.tar.gz is emitted
   # alongside /legal + /sboms. A compliance failure fails the build.
 
   # ============================================================================

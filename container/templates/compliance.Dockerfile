@@ -18,9 +18,8 @@
 #                           (Named *_artifact to avoid colliding with the
 #                           `compliance` build-context the deploy Dockerfiles use.)
 #   3. sources_collect   -- gated on ENABLE_SOURCE_ARCHIVAL; runs
-#                           compliance.collect_sources to fill /sources.
-#   4. sources_archive   -- FROM scratch; exposes the /sources tree. Exported
-#                           unpacked so CI's artifact zip is the only archive.
+#                           compliance.collect_sources to produce /sources.tar.gz.
+#   4. sources_archive   -- FROM scratch; exposes /sources.tar.gz.
 #
 # The caller (each per-framework runtime template) is expected to:
 #   - have defined `pre_runtime` already
@@ -163,6 +162,7 @@ RUN if [ "$ENABLE_SOURCE_ARCHIVAL" = "true" ]; then \
         {% if framework == "sglang" %}RUST_PKG_ARG="--rust-site-packages $(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"{% else %}if [ -n "${VIRTUAL_ENV:-}" ]; then RUST_PKG_ARG="--rust-venv ${VIRTUAL_ENV}"; else RUST_PKG_ARG="--rust-site-packages $(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; fi{% endif %} && \
         python3 -m compliance.collect_sources \
             {{ compliance_source_ecosystem_flags }} \
+            --output-tar /sources.tar.gz \
             --sources-root /sources \
             --native-source-dir /opt/native-sources \
             ${RUST_PKG_ARG} \
@@ -170,14 +170,14 @@ RUN if [ "$ENABLE_SOURCE_ARCHIVAL" = "true" ]; then \
             ${BASELINE_SBOM_FILE:+--baseline-sbom /opt/compliance/base_sboms/${BASELINE_SBOM_FILE}-${TARGETARCH}.cdx.json} \
             -v ; \
     else \
-        touch /sources/.placeholder ; \
+        tar czf /sources.tar.gz -T /dev/null ; \
     fi
 
 
-# Exports the tree itself, not an archive of it: CI extracts with
-# `--output type=local`, so the uploaded artifact holds these files directly.
-# The .placeholder above keeps this COPY valid when archival is off.
+# Exports one tarball per arch. The collected tree is ~1 GB per arch, so it is
+# packed here rather than exported file-by-file: `--output type=local` would
+# otherwise land all of it, unpacked, on the CI runner's local disk.
 FROM scratch AS sources_archive
-COPY --from=sources_collect /sources /
+COPY --from=sources_collect /sources.tar.gz /sources.tar.gz
 
 # === END templates/compliance.Dockerfile ===

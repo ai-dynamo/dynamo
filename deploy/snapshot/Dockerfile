@@ -306,7 +306,7 @@ COPY --from=licenses /legal/ /
 # =============================================================================
 # Collects source archives for dpkg deltas, third-party Go modules, and
 # preserved native source trees for OSRB submission. Output is a separate
-# unpacked tree cross-referenced in the OSRB bundle's build-provenance.json;
+# sources tarball cross-referenced in the OSRB bundle's build-provenance.json;
 # never COPY'd into the runtime.
 FROM agent_pre AS sources_collect
 WORKDIR /
@@ -323,7 +323,7 @@ COPY --from=builder /tmp/go-vendor/ /opt/go-vendor/
 #
 # These COPYs are unconditional (not gated on ENABLE_SOURCE_ARCHIVAL) by
 # design: sources_collect is its own stage that is NEVER COPY'd into the
-# runtime agent image — the runtime only consumes /sources via the
+# runtime agent image — the runtime only consumes /sources.tar.gz via the
 # `sources_archive` stage. So copying the source trees in here costs nothing
 # in the shipped image. Gating them would risk archive completeness (an ARG
 # flip would silently drop CRIU+cuda-checkpoint from the archive).
@@ -336,6 +336,7 @@ ARG TARGETARCH
 RUN if [ "$ENABLE_SOURCE_ARCHIVAL" = "true" ]; then \
         python3 -m compliance.collect_sources \
             --ecosystem dpkg --ecosystem go --ecosystem native \
+            --output-tar /sources.tar.gz \
             --sources-root /sources \
             --dpkg-root /runtime-root \
             --go-vendor-dir /opt/go-vendor \
@@ -343,12 +344,12 @@ RUN if [ "$ENABLE_SOURCE_ARCHIVAL" = "true" ]; then \
             ${BASELINE_SBOM_FILE:+--baseline-sbom /opt/compliance/base_sboms/${BASELINE_SBOM_FILE}-${TARGETARCH}.cdx.json} \
             -v ; \
     else \
-        touch /sources/.placeholder ; \
+        tar czf /sources.tar.gz -T /dev/null ; \
     fi
 
 
 FROM scratch AS sources_archive
-COPY --from=sources_collect /sources /
+COPY --from=sources_collect /sources.tar.gz /sources.tar.gz
 
 
 # =============================================================================

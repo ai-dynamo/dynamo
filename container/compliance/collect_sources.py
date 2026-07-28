@@ -39,13 +39,17 @@ Per-ecosystem strategy (matches the plan in
            site-packages); pip download --no-binary would
            duplicate ~GB for zero compliance value.
 
-Final output: an unpacked /sources tree carrying README.md,
-manifest.json (per-ecosystem declared/collected/missing) and
-CHECKSUMS.sha256. CI exports it with `--output type=local`, so the
-uploaded artifact holds the files directly instead of an archive
-nested inside GitHub's own artifact zip. The companion OSRB bundle
-(osrb/package.py) records a digest over the checksum manifest in
-build-provenance.json for cross-verification.
+Final output: /sources.tar.gz, packed deterministically (sorted
+members, pinned mtimes, neutral ownership) so the archive's sha256 is
+stable across rebuilds. It carries README.md, manifest.json
+(per-ecosystem declared/collected/missing) and CHECKSUMS.sha256
+alongside the sources. The companion OSRB bundle (osrb/package.py)
+records this archive's sha256 in build-provenance.json for
+cross-verification.
+
+The tree is packed rather than exported file-by-file because it runs
+to ~1 GB per architecture: exporting it unpacked puts that, plus tens
+of thousands of files, on the CI runner's local disk twice over.
 
 Gated on ENABLE_SOURCE_ARCHIVAL; callers opt in (nightly / RC /
 release) because the tree runs to hundreds of MB per image.
@@ -59,6 +63,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import gzip
 import hashlib
 import json
 import logging
@@ -67,6 +72,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tarfile
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -694,15 +700,16 @@ for a specific package, fetch it from PyPI's sdist (e.g.
 
 ## Verifying this archive
 
-`CHECKSUMS.sha256` lists every file in this tree:
+`CHECKSUMS.sha256` lists every file shipped here, so after extracting:
 
     sha256sum -c CHECKSUMS.sha256
 
-The companion OSRB bundle's `build-provenance.json` records a SHA-256
-taken over that checksum listing under `sources.sha256`, so tampering
-between bundle and sources is detectable:
+The companion OSRB bundle's `build-provenance.json` records the
+SHA-256 of the `sources.tar.gz` this tree was extracted from, under
+the `sources.sha256` field, so tampering between bundle and sources is
+detectable:
 
-    sha256sum CHECKSUMS.sha256
+    sha256sum sources.tar.gz
 """
 
 
@@ -765,6 +772,42 @@ def write_checksums(sources_root: Path) -> int:
     return len(lines)
 
 
+def pack_sources_tar(sources_root: Path, tar_path: Path) -> None:
+    """Pack sources_root as a deterministic gzip tarball.
+
+    Members are added in sorted order with pinned mtimes and neutral
+    ownership, and gzip's own mtime header is zeroed, so two builds of the
+    same sources produce the same bytes. That is what makes recording a
+    single sha256 in the OSRB bundle meaningful.
+    """
+    if not sources_root.is_dir():
+        raise FileNotFoundError(f"sources root missing: {sources_root}")
+
+    def _normalise(info: tarfile.TarInfo) -> tarfile.TarInfo:
+        info.uid = info.gid = 0
+        info.uname = info.gname = ""
+        info.mtime = 0
+        return info
+
+    paths = sorted(p for p in sources_root.rglob("*") if p.is_file())
+    # gzip's mtime header has to be pinned separately from the tar member
+    # mtimes, so drive GzipFile directly instead of tarfile's "w:gz" mode.
+    with (
+        tar_path.open("wb") as raw,
+        gzip.GzipFile(fileobj=raw, mode="wb", compresslevel=6, mtime=0) as gz,
+        tarfile.open(fileobj=gz, mode="w", format=tarfile.GNU_FORMAT) as tar,
+    ):
+        for path in paths:
+            arcname = path.relative_to(sources_root.parent).as_posix()
+            tar.add(path, arcname=arcname, filter=_normalise)
+    logger.info(
+        "Wrote %s (%.1f MB, %d files)",
+        tar_path,
+        tar_path.stat().st_size / 1e6,
+        len(paths),
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -775,14 +818,16 @@ def main(argv: list[str] | None = None) -> int:
         "Default: all applicable.",
     )
     parser.add_argument(
+        "--output-tar",
+        type=Path,
+        default=Path("/sources.tar.gz"),
+        help="Where to write the final sources tarball.",
+    )
+    parser.add_argument(
         "--sources-root",
         type=Path,
         default=Path("/sources"),
-        help=(
-            "Output directory for collected sources. Exported verbatim by the "
-            "`sources_archive` stage — there is no inner archive, so the CI "
-            "artifact holds these files directly."
-        ),
+        help="Working directory for collected sources, packed into --output-tar.",
     )
     parser.add_argument(
         "--baseline-sbom",
@@ -917,10 +962,10 @@ def main(argv: list[str] | None = None) -> int:
     write_readme(args.sources_root)
     write_manifest(args.sources_root, stats)
     file_count = write_checksums(args.sources_root)
+    pack_sources_tar(args.sources_root, args.output_tar)
     logger.info(
-        "Source archival complete: %d files under %s; %s",
+        "Source archival complete: %d files; %s",
         file_count,
-        args.sources_root,
         {
             eco: f"{s.get('collected', 0)}/{s.get('declared', 0)}"
             for eco, s in stats.items()

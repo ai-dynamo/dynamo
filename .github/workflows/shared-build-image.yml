@@ -89,8 +89,8 @@ on:
         default: ''
       archive_sources:
         description: |
-          Build with ENABLE_SOURCE_ARCHIVAL=true and extract the /sources
-          tree as a workflow artifact. Off by default — top-level callers
+          Build with ENABLE_SOURCE_ARCHIVAL=true and extract the sources
+          tarball as a workflow artifact. Off by default — top-level callers
           opt-in (post-merge-ci.yml sets true for push to release/*.*.*
           branches; nightly-ci.yml sets it true unconditionally; PR /
           on-demand callers leave it false). Source archives are
