@@ -365,8 +365,9 @@ where
         now_ms: f64,
         mut collector: Option<&mut TraceCollector>,
     ) -> anyhow::Result<EngineEffects<Observation::Batch>> {
-        let worker_groups: Vec<Vec<usize>> = self.worker_groups.values().cloned().collect();
-        for rank_ids in worker_groups {
+        // Iterating `self.worker_groups` in place relies on disjoint field borrows:
+        // the loop body only mutates `self.workers`, never the group map itself.
+        for rank_ids in self.worker_groups.values() {
             // A logical attention-DP worker advances in group-owned epochs.
             // A rank that received work mid-epoch must wait until every sibling
             // has crossed the prior completion boundary.
@@ -384,7 +385,7 @@ where
             }
 
             let mut executed_by_rank = BTreeMap::new();
-            for &rank_id in &rank_ids {
+            for &rank_id in rank_ids {
                 if !self.workers.get(&rank_id).unwrap().is_ready() {
                     continue;
                 }
@@ -414,7 +415,7 @@ where
             let group_wall_time_secs = (group_end_ms - now_ms).max(0.0) / 1000.0;
             let mut effects = EngineEffects::default();
 
-            for &rank_id in &rank_ids {
+            for &rank_id in rank_ids {
                 let Some(mut executed) = executed_by_rank.remove(&rank_id) else {
                     if group_end_ms > now_ms {
                         // Empty ranks still participate in the barrier so work
@@ -685,12 +686,22 @@ mod tests {
     struct LengthLatency;
 
     impl AicCallback for LengthLatency {
-        fn predict_prefill(&self, _batch_size: usize, effective_isl: usize, _prefix: usize) -> f64 {
-            effective_isl as f64
+        fn predict_prefill(
+            &self,
+            _batch_size: usize,
+            effective_isl: usize,
+            _prefix: usize,
+        ) -> anyhow::Result<f64> {
+            Ok(effective_isl as f64)
         }
 
-        fn predict_decode(&self, _batch_size: usize, _isl: usize, _osl: usize) -> f64 {
-            1.0
+        fn predict_decode(
+            &self,
+            _batch_size: usize,
+            _isl: usize,
+            _osl: usize,
+        ) -> anyhow::Result<f64> {
+            Ok(1.0)
         }
     }
 

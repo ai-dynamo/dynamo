@@ -55,7 +55,7 @@ Advanced disaggregated deployment with SLA-based automatic scaling.
 - `prefill`: Specialized prefill-only worker
 
 > [!NOTE]
-> This deployment can use native AIC estimates when available, optional pre-deployment profiling data, or live FPM observations after warmup. See [Pre-Deployment Profiling](../../../../docs/components/profiler/profiler-guide.md) for the optional bootstrap workflow.
+> This deployment can use native AIC estimates when available, optional pre-deployment profiling data, or live FPM observations after warmup. See [Pre-Deployment Profiling](../../../../docs/fern/components/profiler/profiler-guide.md) for the optional bootstrap workflow.
 
 ### 7. **Snapshot Restore Example** (`v1beta1/snapshot-restore.yaml`)
 Experimental Dynamo Snapshot restore example for Qwen3-0.6B with a single
@@ -115,7 +115,7 @@ extraPodSpec:
 
 Before using these templates, ensure you have:
 
-1. **Dynamo Kubernetes Platform installed** - See [Quickstart Guide](../../../../docs/kubernetes/README.md)
+1. **Dynamo Kubernetes Platform installed** - See [Quickstart Guide](../../../../docs/fern/kubernetes/quickstart.mdx)
 2. **Kubernetes cluster with GPU support**
 3. **Container registry access** for TensorRT-LLM runtime images
 4. **HuggingFace token secret** (referenced as `envFromSecret: hf-token-secret`)
@@ -133,7 +133,7 @@ docker build -f container/rendered.Dockerfile .
 
 The Dynamo TensorRT-LLM image is based on the upstream `nvcr.io/nvidia/tensorrt-llm/release` container, which publishes both `amd64` and `arm64` variants. To build for arm64, pass `--platform=linux/arm64` to `render.py` and `docker buildx build`.
 
-For more customization (pinning a different upstream TRT-LLM tag or using a TRT-LLM image you built from source), see the [Building a Custom Container](../../../../docs/backends/trtllm/trtllm-building-custom-container.md) guide.
+For more customization (pinning a different upstream TRT-LLM tag or using a TRT-LLM image you built from source), see the [Building a Custom Container](../../../../docs/fern/backends/trtllm/trtllm-building-custom-container.md) guide.
 
 ## Usage
 
@@ -161,7 +161,7 @@ args:
 
 ### 3. Deploy
 
-See the [Create Deployment Guide](../../../../docs/kubernetes/deployment/create-deployment.md) to learn how to deploy the deployment file.
+See [Deploy with DGD](../../../../docs/fern/kubernetes/dgd-guide.md) to learn how to apply and manage the deployment file.
 
 First, create a secret for the HuggingFace token.
 ```bash
@@ -225,7 +225,7 @@ TensorRT-LLM workers are configured through command-line arguments in the deploy
 
 ## Testing the Deployment
 
-Send a test request to verify your deployment. See the [client section](../../../../docs/backends/vllm/README.md#client) for detailed instructions.
+Send a test request to verify your deployment. See the [client section](../../../../docs/fern/backends/vllm/README.md#client) for detailed instructions.
 
 **Note:** For multi-node deployments, target the node running `python3 -m dynamo.frontend <args>`.
 
@@ -247,11 +247,11 @@ TensorRT-LLM supports two methods for KV cache transfer in disaggregated serving
 - **UCX** (default): Standard method for KV cache transfer
 - **NIXL** (experimental): Alternative transfer method
 
-For detailed configuration instructions, see the [KV cache transfer guide](../../../../docs/backends/trtllm/trtllm-kv-cache-transfer.md).
+For detailed configuration instructions, see the [KV cache transfer guide](../../../../docs/fern/backends/trtllm/trtllm-kv-cache-transfer.md).
 
 ## Request Migration
 
-You can enable [request migration](../../../../docs/fault-tolerance/request-migration.md) to handle worker failures gracefully by adding the migration limit argument to worker configurations:
+You can enable [request migration](../../../../docs/fern/fault-tolerance/request-migration.md) to handle worker failures gracefully by adding the migration limit argument to worker configurations:
 
 ```yaml
 args:
@@ -264,13 +264,13 @@ args:
 
 ## Further Reading
 
-- **Deployment Guide**: [Creating Kubernetes Deployments](../../../../docs/kubernetes/deployment/create-deployment.md)
-- **Quickstart**: [Deployment Quickstart](../../../../docs/kubernetes/README.md)
-- **Platform Setup**: [Dynamo Kubernetes Platform Installation](../../../../docs/kubernetes/installation-guide.md)
-- **Examples**: [Deployment Examples](../../../../docs/getting-started/examples.md)
-- **Architecture Docs**: [Disaggregated Serving](../../../../docs/design-docs/disagg-serving.md), [KV-Aware Routing](../../../../docs/components/router/README.md)
-- **Multinode Deployment**: [Multinode Examples](../../../../docs/backends/trtllm/multinode/trtllm-multinode-examples.md)
-- **Speculative Decoding**: [Llama 4 + Eagle Guide](../../../../docs/backends/trtllm/trtllm-llama4-plus-eagle.md)
+- **Deployment Guide**: [Deploy with DGD](../../../../docs/fern/kubernetes/dgd-guide.md)
+- **Quickstart**: [Deployment Quickstart](../../../../docs/fern/kubernetes/quickstart.mdx)
+- **Platform Setup**: [Dynamo Kubernetes Platform Installation](../../../../docs/fern/kubernetes/installation-guide.md)
+- **Kubernetes Templates**: [TensorRT-LLM Deployment Templates](../../../../docs/fern/templates/trtllm.mdx)
+- **Architecture Docs**: [Disaggregated Serving](../../../../docs/fern/design-docs/disagg-serving.md), [KV-Aware Routing](../../../../docs/fern/components/router/README.md)
+- **Multinode Deployment**: [Multinode Examples](../../../../docs/fern/backends/trtllm/multinode/trtllm-multinode-examples.md)
+- **Speculative Decoding**: [Llama 4 + Eagle Guide](../../../../docs/fern/backends/trtllm/trtllm-llama4-plus-eagle.md)
 - **Kubernetes CRDs**: [Custom Resources Documentation](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/)
 
 ## Troubleshooting
@@ -283,4 +283,4 @@ Common issues and solutions:
 4. **Out of memory**: Increase memory limits or reduce model batch size
 5. **Port forwarding issues**: Ensure correct pod UUID in port-forward command
 
-For additional support, refer to the [deployment troubleshooting guide](../../../../docs/kubernetes/README.md).
+For additional support, refer to the [deployment troubleshooting guide](../../../../docs/fern/kubernetes/quickstart.mdx).
