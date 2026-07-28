@@ -45,6 +45,8 @@ pytestmark = [
     pytest.mark.gpu_1,
     pytest.mark.vllm,
     pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME),
+    pytest.mark.profiled_vram_gib(3.8),
+    pytest.mark.requested_vllm_kv_cache_bytes(1_119_388_000),
     pytest.mark.timeout(600),
     pytest.mark.skipif(
         os.environ.get(_EXTERNAL_SERVER_ENV) != "1",
@@ -57,16 +59,22 @@ def _allocation_identity(socket_path: str) -> list[dict[str, object]]:
     allocations = list_allocations(socket_path).allocations
     if not allocations:
         raise AssertionError("weights GMS has no committed allocations")
-    return [
-        {
-            "allocation_id": allocation.allocation_id,
-            "size": allocation.size,
-            "aligned_size": allocation.aligned_size,
-            "tag": allocation.tag,
-            "layout_slot": allocation.layout_slot,
-        }
-        for allocation in allocations
-    ]
+    return sorted(
+        (
+            {
+                "allocation_id": allocation.allocation_id,
+                "size": allocation.size,
+                "aligned_size": allocation.aligned_size,
+                "tag": allocation.tag,
+                "layout_slot": allocation.layout_slot,
+            }
+            for allocation in allocations
+        ),
+        key=lambda allocation: (
+            int(allocation["layout_slot"]),
+            str(allocation["allocation_id"]),
+        ),
+    )
 
 
 def _write_identity(
@@ -180,7 +188,7 @@ def test_restored_gms_reconnects_fresh_vllm_engine(
             )
             assert allocations == expected_identity["allocations"]
 
-        # Keep the engine alive through every assertion so this proves the
-        # imported tensors are usable, not merely that startup returned.
-        assert engine.get_pid() is not None
         assert kv_cache_gms.get_runtime_state().allocation_count > 0
+        # Keep the engine alive through every GMS assertion so this proves the
+        # imported tensors are usable, not merely that startup returned.
+        assert engine.is_running()
