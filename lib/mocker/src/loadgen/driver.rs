@@ -10,8 +10,10 @@ use rand::rngs::StdRng;
 use rustc_hash::FxHashMap;
 use uuid::Uuid;
 
-use super::trace::{synthesize_trace_tokens, validate_synthesizable_prompt};
-use super::types::{AgenticTrace, ReadyTurn, ReplayRequestHashes, Trace};
+use super::trace::validate_synthesizable_prompt;
+use super::types::{
+    AgenticTrace, CompactReadyTurn, ReadyTurn, ReplayRequestHashes, ReplayRequestPayload, Trace,
+};
 use super::{SYNTHETIC_OUTPUT_SEED, planned_output_token_ids};
 use crate::common::protocols::DirectRequest;
 
@@ -93,14 +95,15 @@ impl PromptTokens {
         }
     }
 
-    fn materialize(&self, trace_block_size: usize) -> Vec<u32> {
+    fn take_deferred(&mut self) -> (usize, Vec<u32>) {
         match self {
             Self::Deferred {
                 input_length,
                 hash_ids,
-            } => synthesize_trace_tokens(*input_length, hash_ids, trace_block_size)
-                .expect("deferred prompt was validated when the workload driver was built"),
-            Self::Materialized(tokens) => tokens.clone(),
+            } => (*input_length, std::mem::take(hash_ids)),
+            Self::Materialized(_) => {
+                unreachable!("full-prompt turns must retain their deferred representation")
+            }
         }
     }
 
@@ -678,6 +681,13 @@ impl WorkloadDriver {
     }
 
     pub fn pop_ready(&mut self, now_ms: f64, limit: usize) -> Vec<ReadyTurn> {
+        self.pop_ready_compact(now_ms, limit)
+            .into_iter()
+            .map(CompactReadyTurn::into_ready_turn)
+            .collect()
+    }
+
+    pub(crate) fn pop_ready_compact(&mut self, now_ms: f64, limit: usize) -> Vec<CompactReadyTurn> {
         let effective_limit = self.policy.dispatch_limit(limit, self.in_flight.len());
         if effective_limit == 0 {
             return Vec::new();
@@ -715,15 +725,42 @@ impl WorkloadDriver {
             };
             let request_uuid = self.request_uuid(session_index, turn_index);
             let session = &mut self.sessions[session_index];
-            let turn = &session.turns[turn_index];
+            let turn = &mut session.turns[turn_index];
             let arrival_timestamp_ms = self.policy.arrival_timestamp_ms(scheduled_ready_at_ms);
-            let (request_tokens, replay_hashes) = match self.prompt_mode {
+            let (request, replay_hashes) = match self.prompt_mode {
                 PromptMode::Full => {
-                    let request_tokens = turn.prompt_tokens.materialize(self.trace_block_size);
+                    let (input_length, hash_ids) = turn.prompt_tokens.take_deferred();
+                    let request_metadata = DirectRequest {
+                        tokens: Vec::new(),
+                        max_output_tokens: turn.max_output_tokens,
+                        output_token_ids: turn.output_token_ids.take(),
+                        uuid: Some(request_uuid),
+                        dp_rank: 0,
+                        arrival_timestamp_ms,
+                        priority: turn.priority,
+                        strict_priority: turn.strict_priority,
+                        policy_class: turn.policy_class.clone(),
+                    };
+                    let request = ReplayRequestPayload::deferred(
+                        request_metadata,
+                        input_length,
+                        hash_ids,
+                        self.trace_block_size,
+                    );
+                    // The router needs engine-block hashes at arrival, but it
+                    // does not need to retain the expanded prompt. Materialize
+                    // once transiently for hashing, then keep only the compact
+                    // payload until a worker admission.
+                    // TODO: Derive engine-block hashes directly from the compact
+                    // trace blocks so immediate dispatch does not materialize
+                    // the prompt once for routing and again for admission.
+                    // Preserve `ReplayRequestHashes::from_tokens` semantics when
+                    // trace and engine block sizes differ.
                     let replay_hashes = self.include_replay_hashes.then(|| {
+                        let request_tokens = request.prompt_tokens();
                         ReplayRequestHashes::from_tokens(&request_tokens, self.engine_block_size)
                     });
-                    (request_tokens, replay_hashes)
+                    (request, replay_hashes)
                 }
                 PromptMode::DeltaCumulative => {
                     session
@@ -733,19 +770,19 @@ impl WorkloadDriver {
                     let replay_hashes = self.include_replay_hashes.then(|| {
                         ReplayRequestHashes::from_tokens(&request_tokens, self.engine_block_size)
                     });
-                    (request_tokens, replay_hashes)
+                    let request = ReplayRequestPayload::materialized(DirectRequest {
+                        tokens: request_tokens,
+                        max_output_tokens: turn.max_output_tokens,
+                        output_token_ids: turn.output_token_ids.clone(),
+                        uuid: Some(request_uuid),
+                        dp_rank: 0,
+                        arrival_timestamp_ms,
+                        priority: turn.priority,
+                        strict_priority: turn.strict_priority,
+                        policy_class: turn.policy_class.clone(),
+                    });
+                    (request, replay_hashes)
                 }
-            };
-            let request = DirectRequest {
-                tokens: request_tokens,
-                max_output_tokens: turn.max_output_tokens,
-                output_token_ids: turn.output_token_ids.clone(),
-                uuid: Some(request_uuid),
-                dp_rank: 0,
-                arrival_timestamp_ms,
-                priority: turn.priority,
-                strict_priority: turn.strict_priority,
-                policy_class: turn.policy_class.clone(),
             };
             session.in_flight = Some(request_uuid);
             session.next_ready_at_ms = None;
@@ -757,7 +794,7 @@ impl WorkloadDriver {
                     emitted_output_tokens: 0,
                 },
             );
-            emitted.push(ReadyTurn {
+            emitted.push(CompactReadyTurn {
                 request_uuid,
                 session_id: session.session_id.clone(),
                 turn_index,
@@ -1112,6 +1149,20 @@ mod tests {
         assert_eq!(ready.len(), 1);
         assert_eq!(ready[0].request.tokens, vec![1, 2]);
         assert!(ready[0].replay_hashes.is_some());
+    }
+
+    #[test]
+    fn compact_dispatch_does_not_retain_materialized_prompt() {
+        let mut driver = WorkloadDriver::new_trace(two_session_trace(), 1).unwrap();
+
+        let mut ready = driver.pop_ready_compact(0.0, 1);
+
+        assert_eq!(ready.len(), 1);
+        let request = ready.pop().expect("one compact request").request;
+        assert_eq!(request.input_length(), 2);
+        assert!(request.metadata().tokens.is_empty());
+        assert!(request.materialized_tokens().is_none());
+        assert_eq!(request.into_direct_request().tokens, vec![1, 2]);
     }
 
     #[test]

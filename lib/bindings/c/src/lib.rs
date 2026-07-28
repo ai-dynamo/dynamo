@@ -785,11 +785,12 @@ pub unsafe extern "C" fn create_routers(
 
         // Create decode router
         let decode_router = match model_manager
-            .kv_chooser_for(
+            .kv_chooser_for_with_worker_role(
                 &endpoint,
                 block_size,
                 Some(kv_router_config.clone()),
                 None,
+                card.worker_type,
                 WORKER_TYPE_DECODE,
                 Some(model_name.clone()),
                 enable_eagle,

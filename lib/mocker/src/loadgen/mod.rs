@@ -11,6 +11,7 @@ use rand::rngs::StdRng;
 
 pub use driver::WorkloadDriver;
 pub use trace::validate_trace_files;
+pub(crate) use types::ReplayRequestPayload;
 pub use types::{
     AgenticTrace, AgenticTurnTrace, ArrivalSpec, DelaySpec, DynamoRequestTrace, LengthSpec,
     OUTPUT_REPLAY_CONSUMER_RUNTIME_KEY, OUTPUT_REPLAY_ID_ANNOTATION_KEY, ReadyTurn,

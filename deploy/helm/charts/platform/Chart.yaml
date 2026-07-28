@@ -42,6 +42,6 @@ dependencies:
     condition: global.kai-scheduler.install
   - name: grove-charts
     alias: grove
-    version: v0.1.0-alpha.11
+    version: v0.1.0-alpha.12-rc1
     repository: oci://ghcr.io/ai-dynamo/grove
     condition: global.grove.install
