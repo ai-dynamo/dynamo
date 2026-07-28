@@ -306,15 +306,15 @@ impl RequestSequence {
 
     pub(crate) fn debug_assert_invariants(
         &self,
-        identities: impl ExactSizeIterator<Item = NativeBlockIdentity>,
+        _identities: impl ExactSizeIterator<Item = NativeBlockIdentity>,
     ) {
         #[cfg(debug_assertions)]
         {
-            let identity_count = identities.len();
+            let identity_count = _identities.len();
             let aligned = self.len().is_multiple_of(self.block_size);
             debug_assert_eq!(identity_count, self.current_known_blocks());
             debug_assert!(
-                identities
+                _identities
                     .enumerate()
                     .all(
                         |(position, identity)| position + 1 == identity_count && !aligned
