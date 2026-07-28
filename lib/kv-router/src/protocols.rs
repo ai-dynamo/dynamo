@@ -282,6 +282,12 @@ pub trait WorkerConfigLike {
         None
     }
 
+    /// Advertised peer-control endpoint for a specific global DP rank.
+    /// Defaults to the worker-level endpoint for backends with one endpoint per worker.
+    fn router_hint_source_control_endpoint_for_dp_rank(&self, _dp_rank: DpRank) -> Option<&str> {
+        self.router_hint_source_control_endpoint()
+    }
+
     /// Tokens retained by the backend's native KV offloading tier, if available.
     fn native_offloading_capacity_tokens(&self) -> Option<u64> {
         None

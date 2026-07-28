@@ -14,6 +14,7 @@ use dynamo_kv_router::{
     protocols::KvTransferEnforcement,
     router_hint::{
         ROUTER_HINT_RUNTIME_CAPABILITY_KEY, ROUTER_HINT_SOURCE_CONTROL_ENDPOINT_RUNTIME_KEY,
+        ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
     },
 };
 use dynamo_runtime::{config::is_truthy, protocols::EndpointId};
@@ -356,6 +357,20 @@ impl dynamo_kv_router::WorkerConfigLike for ModelRuntimeConfig {
             .get(ROUTER_HINT_SOURCE_CONTROL_ENDPOINT_RUNTIME_KEY)
             .and_then(serde_json::Value::as_str)
             .filter(|endpoint| !endpoint.is_empty())
+    }
+
+    fn router_hint_source_control_endpoint_for_dp_rank(&self, dp_rank: u32) -> Option<&str> {
+        if let Some(endpoints) = self
+            .runtime_data
+            .get(ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY)
+        {
+            return endpoints
+                .as_object()
+                .and_then(|endpoints| endpoints.get(&dp_rank.to_string()))
+                .and_then(serde_json::Value::as_str)
+                .filter(|endpoint| !endpoint.is_empty());
+        }
+        self.router_hint_source_control_endpoint()
     }
 
     fn native_offloading_capacity_tokens(&self) -> Option<u64> {

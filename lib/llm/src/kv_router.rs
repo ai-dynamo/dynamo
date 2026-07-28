@@ -663,13 +663,15 @@ where
                         && configs.get(&worker.worker_id).is_some_and(|config| {
                             config.supports_router_hints()
                                 && config
-                                    .router_hint_source_control_endpoint()
+                                    .router_hint_source_control_endpoint_for_dp_rank(worker.dp_rank)
                                     .is_some_and(|endpoint| !endpoint.is_empty())
                         })
                 })?;
             let source_control_endpoint = configs
                 .get(&source.worker_id)
-                .and_then(|config| config.router_hint_source_control_endpoint())?
+                .and_then(|config| {
+                    config.router_hint_source_control_endpoint_for_dp_rank(source.dp_rank)
+                })?
                 .to_string();
             (block_hashes, source_control_endpoint)
         };
@@ -2045,10 +2047,38 @@ mod tests {
         runtime_config
     }
 
+    fn router_hint_runtime_config_with_dp_endpoints(
+        endpoints: &[(u32, &str)],
+    ) -> ModelRuntimeConfig {
+        let mut runtime_config = router_hint_runtime_config(None);
+        runtime_config.runtime_data.insert(
+            dynamo_kv_router::router_hint::ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY
+                .to_string(),
+            serde_json::Value::Object(
+                endpoints
+                    .iter()
+                    .map(|(dp_rank, endpoint)| {
+                        (
+                            dp_rank.to_string(),
+                            serde_json::Value::String(endpoint.to_string()),
+                        )
+                    })
+                    .collect(),
+            ),
+        );
+        runtime_config
+    }
+
     #[tokio::test]
     async fn router_hint_allows_other_dp_ranks_of_selected_target_worker() {
         let mut workers = HashMap::new();
-        workers.insert(7, router_hint_runtime_config(Some("tcp://127.0.0.1:23280")));
+        workers.insert(
+            7,
+            router_hint_runtime_config_with_dp_endpoints(&[
+                (0, "tcp://127.0.0.1:23280"),
+                (1, "tcp://127.0.0.1:23281"),
+            ]),
+        );
         let router = make_test_router_with_workers(
             InspectingSelector {
                 expected_hits: None,
@@ -2072,7 +2102,7 @@ mod tests {
         assert_eq!(
             hint,
             Some(RouterHint {
-                source_control_endpoint: "tcp://127.0.0.1:23280".to_string(),
+                source_control_endpoint: "tcp://127.0.0.1:23281".to_string(),
                 block_hashes: vec![
                     ExternalSequenceBlockHash(101),
                     ExternalSequenceBlockHash(102)
