@@ -61,6 +61,7 @@ pub(crate) enum DisaggTransition {
     DestinationAccepted { uuid: Uuid },
     DestinationReserved { uuid: Uuid },
     TransferQueued { uuid: Uuid },
+    DecodeDriveQuiesced,
     DestinationActivated { uuid: Uuid },
     SourceReleased { uuid: Uuid },
     HandoffCompleted { uuid: Uuid },
@@ -1942,6 +1943,10 @@ where
                 .decode_engine
                 .drive_ready(self.now_ms, Some(&mut self.collector))?;
             if effects.is_empty() {
+                #[cfg(test)]
+                self.stats
+                    .transition_log
+                    .push(DisaggTransition::DecodeDriveQuiesced);
                 return Ok(changed);
             }
             changed = true;
