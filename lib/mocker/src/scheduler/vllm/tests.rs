@@ -26,6 +26,7 @@ use crate::scheduler::{
 
 use super::core::{RequestStatus, VllmCore, VllmRequestState};
 use super::live::{MockerMetrics, Scheduler};
+use super::request::RequestKvState;
 
 const ROUTER_TEST_WORKER_ID: WorkerId = 23;
 
@@ -164,18 +165,16 @@ fn flat_storage_capacity_is_bounded_by_realizable_output() {
 
         let sequence = &core.state().requests[&uuid].sequence;
         assert_eq!(sequence.max_output_tokens(), MAX_OUTPUT_TOKENS);
-        let (token_capacity, unique_capacity, hash_capacity, lineage_capacity) = sequence
-            .flat_storage_capacities()
-            .expect("native G1 must use flat storage");
+        let (token_capacity, lease_capacity) = sequence
+            .native_storage_capacities()
+            .expect("native G1 must use request-sequence storage");
         let bounded_blocks = (prompt_len + expected_output_capacity).div_ceil(BLOCK_SIZE);
         let unbounded_blocks = (prompt_len + MAX_OUTPUT_TOKENS).div_ceil(BLOCK_SIZE);
 
         assert!(token_capacity >= prompt_len + expected_output_capacity);
         assert!(token_capacity < prompt_len + MAX_OUTPUT_TOKENS);
-        for capacity in [unique_capacity, hash_capacity, lineage_capacity] {
-            assert!(capacity >= bounded_blocks);
-            assert!(capacity < unbounded_blocks);
-        }
+        assert!(lease_capacity >= bounded_blocks);
+        assert!(lease_capacity < unbounded_blocks);
     }
 }
 
@@ -1523,7 +1522,7 @@ mod core_behavior {
         core.state.requests.insert(
             uuid,
             VllmRequestState {
-                sequence,
+                sequence: RequestKvState::kvbm(sequence),
                 status: RequestStatus::Running,
                 num_computed_tokens: 9,
                 num_preemptions: 1,
@@ -2987,6 +2986,7 @@ mod offload {
     };
 
     use super::super::core::{RequestStatus, VllmCore, VllmRequestState};
+    use super::super::request::RequestKvState;
 
     /// Seed `g2` with each PLH by allocating a fresh slot, staging,
     /// registering, and dropping — so the block lands in the inactive
@@ -3035,7 +3035,7 @@ mod offload {
         core.state.requests.insert(
             uuid,
             VllmRequestState {
-                sequence,
+                sequence: RequestKvState::kvbm(sequence),
                 status: RequestStatus::Running,
                 num_computed_tokens,
                 num_preemptions: 0,
@@ -3702,6 +3702,8 @@ mod offload {
             (
                 request
                     .sequence
+                    .legacy()
+                    .expect("KVBM test request must use legacy storage")
                     .prepare_allocation(block_size * 2)
                     .expect("prefix allocation signal"),
                 request.sequence.positional_lineage_hashes().to_vec(),
@@ -3780,6 +3782,8 @@ mod offload {
             (
                 request
                     .sequence
+                    .legacy()
+                    .expect("KVBM test request must use legacy storage")
                     .prepare_allocation(block_size * 2)
                     .expect("prefix allocation signal"),
                 request.sequence.positional_lineage_hashes().to_vec(),

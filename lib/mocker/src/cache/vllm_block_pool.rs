@@ -124,6 +124,33 @@ impl VllmBlockPool {
             })
             .collect::<Vec<_>>();
 
+        self.reserve_hits(hits, fresh)
+    }
+
+    /// Resolve and pin the longest resident prefix from `candidates`, then
+    /// reserve the remaining entries as fresh capacity in one traversal.
+    pub(crate) fn reserve_resident_prefix(
+        &mut self,
+        candidates: impl IntoIterator<Item = SequenceHash>,
+        total: usize,
+    ) -> Option<ReserveOutcome> {
+        let mut hits = Vec::new();
+        for hash in candidates {
+            assert!(hits.len() < total, "prefix candidates exceed layout");
+            let Some(id) = self.first_copy(hash) else {
+                break;
+            };
+            hits.push((hash, id));
+        }
+        let fresh = total - hits.len();
+        self.reserve_hits(hits, fresh)
+    }
+
+    fn reserve_hits(
+        &mut self,
+        hits: Vec<(SequenceHash, BlockCopyId)>,
+        fresh: usize,
+    ) -> Option<ReserveOutcome> {
         let free = self.free_capacity();
         let needed_evictions = fresh.saturating_sub(free);
         if needed_evictions > 0 {
@@ -187,14 +214,12 @@ impl VllmBlockPool {
     pub(crate) fn activate_prefix(
         &mut self,
         reservation: &mut BlockReservation,
-    ) -> Vec<BlockCopyId> {
+    ) -> std::vec::IntoIter<(SequenceHash, BlockCopyId)> {
         let prefix = std::mem::take(&mut reservation.prefix);
-        let mut ids = Vec::with_capacity(prefix.len());
-        for (hash, id) in prefix {
+        for &(hash, id) in &prefix {
             self.activate_pin(id, hash);
-            ids.push(id);
         }
-        ids
+        prefix.into_iter()
     }
 
     pub(crate) fn allocate_private(&mut self, reservation: &mut BlockReservation) -> BlockCopyId {

@@ -25,7 +25,7 @@ use crate::common::protocols::{
     SglangArgs,
 };
 use crate::kv_manager::SglangKvManager;
-use crate::kv_manager::sglang_backend::ActiveKvLease;
+use crate::kv_manager::sglang_backend::RadixRequestLease;
 use crate::scheduler::test_utils::{
     CapturingFpmSink, RouterIndexerHarness, nth_stored_hashes, removed_event_count, stored_hashes,
 };
@@ -171,7 +171,7 @@ fn zero_output_completion_survives_decode_reservation_failure() {
 }
 
 #[test]
-fn fresh_prefill_tracks_cache_owned_prefix_indices() {
+fn fresh_prefill_tracks_cache_owned_prefix_pages() {
     let args = test_args(8, 4, 16);
     let config = SglangConfig::from_args(&args);
     let (buffer, sink) = capture_router_event_sink(ROUTER_TEST_WORKER_ID);
@@ -179,7 +179,7 @@ fn fresh_prefill_tracks_cache_owned_prefix_indices() {
     let prompt = vec![1, 2, 3, 4];
 
     let cached = kv_manager.allocate_for_request(&prompt).unwrap();
-    let cached_indices = cached.lease.indices().to_vec();
+    let cached_pages = cached.lease.pages().to_vec();
     kv_manager.finish(&prompt, cached.lease);
     let mut waiting = VecDeque::from([SglangRequest {
         uuid: Uuid::from_u128(90_002),
@@ -188,7 +188,7 @@ fn fresh_prefill_tracks_cache_owned_prefix_indices() {
         max_output_tokens: 1,
         planned_output_ids: None,
         materialized_tokens: 0,
-        kv_lease: ActiveKvLease::default(),
+        kv_lease: RadixRequestLease::default(),
         allocated_tokens: 0,
     }]);
     let req = get_new_batch_prefill(&mut waiting, &mut kv_manager, &config, 0.7, &[])
@@ -197,7 +197,7 @@ fn fresh_prefill_tracks_cache_owned_prefix_indices() {
         .unwrap();
 
     assert_eq!(req.cached_tokens(), prompt.len());
-    assert_eq!(req.kv_indices(), cached_indices);
+    assert_eq!(req.kv_pages(), cached_pages);
 
     // The three-token blocker owns a complete physical page. With two pages
     // total there is no free capacity, so the cache-hit request is retracted
@@ -728,9 +728,9 @@ mod destination_lifecycle {
         assert!(occupied_tokens(&destination) > usage_before_reservation);
         assert!(stored_hashes(&destination.drain_kv_events()).is_empty());
 
-        let reserved_indices = destination.destination_indices(handoff_id);
+        let reserved_pages = destination.destination_pages(handoff_id);
         let protected_before_activation = destination.kv_manager.cache().protected_size;
-        assert!(!reserved_indices.is_empty());
+        assert!(!reserved_pages.is_empty());
         assert_eq!(
             destination
                 .apply_command(SchedulerCommand::ActivateDestination { handoff_id })
@@ -740,7 +740,7 @@ mod destination_lifecycle {
         let ready = destination
             .prebuilt_request(logical_uuid)
             .expect("activated request must be prebuilt-ready");
-        assert_eq!(ready.kv_indices(), reserved_indices);
+        assert_eq!(ready.kv_pages(), reserved_pages);
         assert_eq!(destination.running.len(), 1);
         assert!(destination.kv_manager.cache().protected_size >= protected_before_activation);
         let activation_stores = stored_hashes(&destination.drain_kv_events());
@@ -765,7 +765,7 @@ mod destination_lifecycle {
         let ready = destination
             .prebuilt_request(logical_uuid)
             .expect("full running batch must keep request ready");
-        assert_eq!(ready.kv_indices(), reserved_indices);
+        assert_eq!(ready.kv_pages(), reserved_pages);
         assert_no_republished_stores(&activation_stores, &stored_hashes(&blocked.kv_events));
 
         let blocker_terminal = execute(&mut destination, blocked.end_ms);
@@ -796,7 +796,7 @@ mod destination_lifecycle {
             .iter()
             .find(|request| request.uuid == logical_uuid)
             .expect("prebuilt request must enter the running batch");
-        assert!(running.kv_indices().starts_with(&reserved_indices));
+        assert!(running.kv_pages().starts_with(&reserved_pages));
         assert_no_republished_stores(&activation_stores, &stored_hashes(&admitted.kv_events));
 
         let terminal = execute(&mut destination, admitted.end_ms);
@@ -1016,7 +1016,7 @@ mod scheduling {
                 max_output_tokens: 1,
                 planned_output_ids: None,
                 materialized_tokens: 0,
-                kv_lease: ActiveKvLease::default(),
+                kv_lease: RadixRequestLease::default(),
                 allocated_tokens: 0,
             },
             SglangRequest {
@@ -1026,7 +1026,7 @@ mod scheduling {
                 max_output_tokens: 1,
                 planned_output_ids: None,
                 materialized_tokens: 0,
-                kv_lease: ActiveKvLease::default(),
+                kv_lease: RadixRequestLease::default(),
                 allocated_tokens: 0,
             },
         ]);
@@ -1059,7 +1059,7 @@ mod scheduling {
                 max_output_tokens: 1,
                 planned_output_ids: None,
                 materialized_tokens: 0,
-                kv_lease: ActiveKvLease::default(),
+                kv_lease: RadixRequestLease::default(),
                 allocated_tokens: 0,
             });
         }
@@ -1071,7 +1071,7 @@ mod scheduling {
             max_output_tokens: 1,
             planned_output_ids: None,
             materialized_tokens: 0,
-            kv_lease: ActiveKvLease::default(),
+            kv_lease: RadixRequestLease::default(),
             allocated_tokens: 0,
         });
 
@@ -1137,7 +1137,7 @@ mod core_behavior {
             max_output_tokens: 3,
             planned_output_ids: None,
             materialized_tokens: 0,
-            kv_lease: ActiveKvLease::default(),
+            kv_lease: RadixRequestLease::default(),
             allocated_tokens: 0,
         }]);
 
@@ -1167,7 +1167,7 @@ mod core_behavior {
             max_output_tokens: 2,
             planned_output_ids: None,
             materialized_tokens: 0,
-            kv_lease: ActiveKvLease::default(),
+            kv_lease: RadixRequestLease::default(),
             allocated_tokens: 0,
         }]);
 
@@ -1200,7 +1200,7 @@ mod core_behavior {
                 max_output_tokens: 3,
                 planned_output_ids: None,
                 materialized_tokens: 0,
-                kv_lease: ActiveKvLease::default(),
+                kv_lease: RadixRequestLease::default(),
                 allocated_tokens: 0,
             },
             SglangRequest {
@@ -1210,7 +1210,7 @@ mod core_behavior {
                 max_output_tokens: 3,
                 planned_output_ids: None,
                 materialized_tokens: 0,
-                kv_lease: ActiveKvLease::default(),
+                kv_lease: RadixRequestLease::default(),
                 allocated_tokens: 0,
             },
         ]);
@@ -1339,8 +1339,8 @@ mod core_behavior {
                 .unwrap(),
         );
         let mut kv_manager = SglangKvManager::new(16, 4, KvEventPublishers::default(), 0);
-        let first = kv_manager.cache_mut().page_pool.allocate(8).unwrap();
-        let second = kv_manager.cache_mut().page_pool.allocate(5).unwrap();
+        let first = kv_manager.cache_mut().page_pool.allocate_pages(2).unwrap();
+        let second = kv_manager.cache_mut().page_pool.allocate_pages(2).unwrap();
 
         let mut running = vec![
             SglangRequest {
@@ -1349,7 +1349,7 @@ mod core_behavior {
                 prompt_len: 4,
                 max_output_tokens: 10,
                 planned_output_ids: None,
-                kv_lease: ActiveKvLease::from_parts(first, 4, kv_manager.cache().root()),
+                kv_lease: RadixRequestLease::from_parts(first, 8, 4, kv_manager.cache().root()),
                 materialized_tokens: 8,
                 allocated_tokens: 8,
             },
@@ -1359,7 +1359,7 @@ mod core_behavior {
                 prompt_len: 4,
                 max_output_tokens: 10,
                 planned_output_ids: None,
-                kv_lease: ActiveKvLease::from_parts(second, 4, kv_manager.cache().root()),
+                kv_lease: RadixRequestLease::from_parts(second, 5, 4, kv_manager.cache().root()),
                 materialized_tokens: 5,
                 allocated_tokens: 8,
             },
@@ -1369,7 +1369,7 @@ mod core_behavior {
         assert_eq!(retracted.len(), 1);
         assert_eq!(retracted[0].output_tokens(), &[21]);
         assert_eq!(retracted[0].materialized_tokens, 0);
-        assert!(retracted[0].kv_indices().is_empty());
+        assert!(retracted[0].kv_pages().is_empty());
     }
 
     #[test]
@@ -1687,11 +1687,11 @@ mod router_events {
             max_output_tokens: 2,
             planned_output_ids: None,
             materialized_tokens: 0,
-            kv_lease: ActiveKvLease::default(),
+            kv_lease: RadixRequestLease::default(),
             allocated_tokens: 0,
         };
         let first_output = expected_request.next_output_token();
-        expected_request.append_output_token(first_output);
+        expected_request.append_output_token(first_output, 4);
         let second_output = expected_request.next_output_token();
 
         let mut expected_tokens = prompt_tokens;
@@ -1799,7 +1799,7 @@ mod router_events {
             max_output_tokens: 3,
             planned_output_ids: None,
             materialized_tokens: 0,
-            kv_lease: ActiveKvLease::default(),
+            kv_lease: RadixRequestLease::default(),
             allocated_tokens: 0,
         }]);
 

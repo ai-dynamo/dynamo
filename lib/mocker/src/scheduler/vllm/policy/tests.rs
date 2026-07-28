@@ -17,6 +17,7 @@ use crate::common::protocols::{
 use crate::common::sequence::ActiveSequence;
 use crate::kv_manager::G1Acquire;
 use crate::kv_manager::G1Manager;
+use crate::scheduler::vllm::request::RequestKvState;
 use crate::scheduler::vllm::{RequestStatus, VllmCore};
 
 use super::{
@@ -119,47 +120,45 @@ mod vllm {
 
     #[test]
     fn preempted_non_aligned_prompt_uses_complete_known_context() {
-        for backend in [G1Backend::Kvbm, G1Backend::Native] {
-            let owner = Uuid::from_u128(700 + backend as u128);
-            let mut manager =
-                G1Manager::new_with_backend(8, 4, KvEventPublishers::default(), 0, backend);
-            // The six-token prompt is not block aligned. Retained generation
-            // extends the known context to nine tokens: two reusable full
-            // blocks plus one partial block.
-            let mut sequence = ActiveSequence::new((0..6).collect(), 8, Some(4), true, false);
-            let creation = sequence.take_creation_signal().unwrap();
-            assert!(matches!(
-                manager.process_for_request(owner, &creation, 0),
-                G1Acquire::Ready(_)
-            ));
-            assert!(sequence.push(6).is_none());
-            assert!(sequence.push(7).is_none());
-            for signal in sequence.push(8).unwrap() {
-                assert!(matches!(
-                    manager.process_for_request(owner, &signal, 0),
-                    G1Acquire::Ready(_)
-                ));
-            }
-            sequence.commit_allocation(sequence.len());
-            manager.finalize_computed_prefix(owner, 0, sequence.len(), &mut sequence);
-
-            for signal in sequence.reset_with_signal() {
-                assert!(matches!(
-                    manager.process_for_request(owner, &signal, 0),
-                    G1Acquire::Ready(_)
-                ));
-            }
-
-            let raw = manager.get_prefill_cost(&sequence);
-            assert_eq!(raw.cached_tokens, 8, "backend={backend:?}");
-            assert_eq!(raw.new_tokens, 1, "backend={backend:?}");
-            assert_eq!(raw.active_cached_tokens, 0, "backend={backend:?}");
-
-            let adjusted =
-                apply_prefix_recompute(SchedulingPolicy::Vllm, sequence.len(), 4, false, true, raw);
-            assert_eq!(adjusted.cached_tokens, 8, "backend={backend:?}");
-            assert_eq!(adjusted.new_tokens, 1, "backend={backend:?}");
+        let owner = Uuid::from_u128(700);
+        let mut manager =
+            G1Manager::new_with_backend(8, 4, KvEventPublishers::default(), 0, G1Backend::Native);
+        let mut request =
+            RequestKvState::native(owner, (0..6).collect(), 8, 8, 4, true, false, false, None);
+        let RequestKvState::Native { sequence: _, lease } = &mut request else {
+            unreachable!()
+        };
+        assert!(matches!(
+            manager.allocate_native(owner, lease, 6, 0),
+            G1Acquire::Ready(_)
+        ));
+        for _ in 0..2 {
+            request.generate_token();
         }
+        let RequestKvState::Native { sequence, lease } = &mut request else {
+            unreachable!()
+        };
+        manager.finalize_native_computed_prefix(owner, 0, 8, sequence, lease);
+        request.generate_token();
+        let RequestKvState::Native { sequence, lease } = &mut request else {
+            unreachable!()
+        };
+        assert!(matches!(
+            manager.allocate_native(owner, lease, 9, 0),
+            G1Acquire::Ready(_)
+        ));
+        manager.finalize_native_computed_prefix(owner, 8, 9, sequence, lease);
+        manager.preempt_native(owner, lease);
+
+        let raw = manager.get_native_prefill_cost(sequence, lease);
+        assert_eq!(raw.cached_tokens, 8);
+        assert_eq!(raw.new_tokens, 1);
+        assert_eq!(raw.active_cached_tokens, 0);
+
+        let adjusted =
+            apply_prefix_recompute(SchedulingPolicy::Vllm, sequence.len(), 4, false, true, raw);
+        assert_eq!(adjusted.cached_tokens, 8);
+        assert_eq!(adjusted.new_tokens, 1);
     }
 
     #[test]
@@ -343,12 +342,28 @@ mod vllm {
             ..Default::default()
         });
 
-        let probe = ActiveSequence::new((0..8).collect(), 1, Some(4), true, false);
+        let probe = RequestKvState::native(
+            Uuid::from_u128(104),
+            (0..8).collect(),
+            1,
+            1,
+            4,
+            true,
+            false,
+            false,
+            None,
+        );
         let mut collector = crate::replay::TraceCollector::default();
 
         let first = core.execute_pass(&mut collector, 0.0);
         assert_eq!(core.state().requests[&uuid].num_computed_tokens, 2);
-        assert_eq!(core.kv_manager.get_prefill_cost(&probe).cached_tokens, 0);
+        let (probe_sequence, probe_lease) = probe.native_parts().unwrap();
+        assert_eq!(
+            core.kv_manager
+                .get_native_prefill_cost(probe_sequence, probe_lease)
+                .cached_tokens,
+            0
+        );
         assert!(
             first
                 .kv_events
@@ -359,7 +374,12 @@ mod vllm {
 
         let second = core.execute_pass(&mut collector, first.end_ms);
         assert_eq!(core.state().requests[&uuid].num_computed_tokens, 4);
-        assert_eq!(core.kv_manager.get_prefill_cost(&probe).cached_tokens, 4);
+        assert_eq!(
+            core.kv_manager
+                .get_native_prefill_cost(probe_sequence, probe_lease)
+                .cached_tokens,
+            4
+        );
         let stored = second
             .kv_events
             .iter()

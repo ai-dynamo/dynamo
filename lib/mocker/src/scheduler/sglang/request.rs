@@ -6,8 +6,10 @@ use std::hash::{Hash, Hasher};
 
 use uuid::Uuid;
 
+#[cfg(test)]
+use crate::cache::radix_cache::KvPageId;
 use crate::common::protocols::DirectRequest;
-use crate::kv_manager::sglang_backend::ActiveKvLease;
+use crate::kv_manager::sglang_backend::RadixRequestLease;
 
 #[derive(Debug)]
 pub(super) struct SglangRequest {
@@ -16,7 +18,7 @@ pub(super) struct SglangRequest {
     pub(super) prompt_len: usize,
     pub(super) max_output_tokens: usize,
     pub(super) planned_output_ids: Option<Vec<u32>>,
-    pub(super) kv_lease: ActiveKvLease,
+    pub(super) kv_lease: RadixRequestLease,
     pub(super) materialized_tokens: usize,
     pub(super) allocated_tokens: usize,
 }
@@ -49,8 +51,8 @@ impl SglangRequest {
     }
 
     #[cfg(test)]
-    pub(super) fn kv_indices(&self) -> &[usize] {
-        self.kv_lease.indices()
+    pub(super) fn kv_pages(&self) -> &[KvPageId] {
+        self.kv_lease.pages()
     }
 
     #[cfg(debug_assertions)]
@@ -64,10 +66,6 @@ impl SglangRequest {
 
     pub(super) fn page_aligned_materialized_tokens(&self, block_size: usize) -> usize {
         self.materialized_tokens / block_size * block_size
-    }
-
-    pub(super) fn prompt_tokens(&self) -> &[u32] {
-        &self.sequence_tokens[..self.prompt_len]
     }
 
     pub(super) fn sequence_tokens(&self) -> &[u32] {
@@ -98,9 +96,22 @@ impl SglangRequest {
         hasher.finish() as u32
     }
 
-    pub(super) fn append_output_token(&mut self, token: u32) {
+    pub(super) fn append_output_token(&mut self, token: u32, block_size: usize) {
         self.sequence_tokens.push(token);
+        self.kv_lease
+            .ensure_page_hashes(&self.sequence_tokens, block_size);
         self.materialized_tokens += 1;
+    }
+
+    pub(super) fn prepare(&mut self, block_size: usize) {
+        let output_capacity = self.max_output_tokens.min(
+            self.planned_output_ids
+                .as_ref()
+                .map_or(self.max_output_tokens, Vec::len),
+        );
+        self.sequence_tokens.reserve_exact(output_capacity);
+        self.kv_lease
+            .ensure_page_hashes(&self.sequence_tokens, block_size);
     }
 
     pub(super) fn debug_assert_invariants(&self, _block_size: usize) {
@@ -130,10 +141,18 @@ impl SglangRequest {
             debug_assert_eq!(
                 self.kv_len(),
                 self.materialized_tokens,
-                "request {} has {} kv indices but {} materialized tokens",
+                "request {} owns KV for {} tokens but has {} materialized tokens",
                 self.uuid,
                 self.kv_len(),
                 self.materialized_tokens
+            );
+            debug_assert_eq!(
+                self.kv_lease.page_count() * block_size,
+                self.allocated_tokens,
+                "request {} owns {} KV pages but tracks {} allocated tokens",
+                self.uuid,
+                self.kv_lease.page_count(),
+                self.allocated_tokens
             );
             debug_assert!(
                 self.allocated_tokens >= self.materialized_tokens,
@@ -193,7 +212,7 @@ impl From<DirectRequest> for SglangRequest {
             prompt_len,
             max_output_tokens,
             planned_output_ids: req.output_token_ids,
-            kv_lease: ActiveKvLease::default(),
+            kv_lease: RadixRequestLease::default(),
             materialized_tokens: 0,
             allocated_tokens: 0,
         }
