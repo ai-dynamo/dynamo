@@ -16,6 +16,10 @@ not be mistaken for virtual-time progress or quiescence.
 - Stop same-time iteration when no observable state changed, but only after the
   owning subsystem can account for how unfinished work will wake.
 
+For now, preserve the current replay behavior and the balanced checks above.
+Changes to async settlement belong to DEP #11018; do not approximate them here
+with replay-level timing tricks or new hard assertions.
+
 ## Eager forward-pass execution
 
 Offline replay intentionally executes each non-preemptive forward pass eagerly,
@@ -38,7 +42,3 @@ pass-start visibility remain visible at the pass start.
   preemptive behavior. Do not add engine-core snapshotting, transactional
   rollback, or speculative-state recovery without a demonstrated semantic
   need.
-
-For now, preserve the current replay behavior and the balanced checks above.
-Changes to async settlement belong to DEP #11018; do not approximate them here
-with replay-level timing tricks or new hard assertions.
