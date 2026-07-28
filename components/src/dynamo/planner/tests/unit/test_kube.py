@@ -55,7 +55,15 @@ def mock_namespace():
 
 
 @pytest.fixture
-def k8s_api(mock_custom_api, mock_config, mock_namespace):
+def mock_core_api():
+    with patch(
+        "dynamo.planner.connectors.clients.kubernetes_api.client.CoreV1Api"
+    ) as mock:
+        yield mock.return_value
+
+
+@pytest.fixture
+def k8s_api(mock_custom_api, mock_core_api, mock_config, mock_namespace):
     return KubernetesAPI()
 
 
@@ -461,32 +469,38 @@ def _stable_worker_dgd(
     }
 
 
-def _ready_dcd(*, generation: int = 1, observed_generation: int = 1) -> Dict[str, Any]:
-    return {
-        "metadata": {"generation": generation},
-        "status": {
-            "observedGeneration": observed_generation,
-            "conditions": [{"type": "Available", "status": "True"}],
-        },
-    }
+def _make_pod(
+    name: str,
+    *,
+    phase: str = "Running",
+    annotation: "str | None" = "300",
+    deletion_timestamp=None,
+) -> MagicMock:
+    """Build a mock Pod object for pod-annotation settlement tests."""
+    pod = MagicMock()
+    pod.metadata.name = name
+    pod.metadata.annotations = (
+        {"dynamo.nvidia.com/gpu-power-limit": annotation}
+        if annotation is not None
+        else {}
+    )
+    pod.metadata.deletion_timestamp = deletion_timestamp
+    pod.status.phase = phase
+    return pod
 
 
-def _mock_dcd_lookup(
-    mock_custom_api, dcd: Dict[str, Any], dgd_name: str = "test-deployment"
-):
-    """Wire CustomObjectsApi to return ``dcd`` for the decode worker DCD name."""
+def _mock_pod_list(mock_core_api, pods: list, *, component: str = "VllmDecodeWorker"):
+    """Wire core_api.list_namespaced_pod to return ``pods`` for ``component``."""
 
-    def _lookup(*args, **kwargs):
-        plural = kwargs.get("plural")
-        name = kwargs.get("name")
-        if (
-            plural == "dynamocomponentdeployments"
-            and name == f"{dgd_name}-vllmdecodeworker"
-        ):
-            return dcd
-        raise client.ApiException(status=404)
+    def _list(*args, **kwargs):
+        label_selector = kwargs.get("label_selector", "")
+        result = MagicMock()
+        result.items = (
+            pods if f"nvidia.com/dynamo-component={component}" in label_selector else []
+        )
+        return result
 
-    mock_custom_api.get_namespaced_custom_object.side_effect = _lookup
+    mock_core_api.list_namespaced_pod.side_effect = _list
 
 
 def test_is_spec_generation_observed_requires_catch_up(k8s_api):
@@ -532,7 +546,7 @@ async def test_wait_exclude_planner_rejects_unobserved_generation(
 
 @pytest.mark.asyncio
 async def test_wait_exclude_planner_returns_observed_stable_snapshot(
-    k8s_api, mock_custom_api
+    k8s_api, mock_core_api
 ):
     """Gen-2 lower cap is adopted only after observedGeneration catches up."""
     lagging = _stable_worker_dgd(
@@ -541,7 +555,7 @@ async def test_wait_exclude_planner_returns_observed_stable_snapshot(
     settled = _stable_worker_dgd(
         generation=2, observed_generation=2, decode_watts="300"
     )
-    _mock_dcd_lookup(mock_custom_api, _ready_dcd(generation=2, observed_generation=2))
+    _mock_pod_list(mock_core_api, [_make_pod("pod-0", annotation="300")])
     with patch.object(k8s_api, "get_graph_deployment", side_effect=[lagging, settled]):
         got = await k8s_api.wait_for_graph_deployment_ready(
             "test-deployment",
@@ -562,327 +576,230 @@ async def test_wait_exclude_planner_returns_observed_stable_snapshot(
     )
 
 
-@pytest.mark.asyncio
-async def test_wait_exclude_planner_rejects_dgd_observed_while_dcd_lags(
-    k8s_api, mock_custom_api
-):
-    """DGD observedGeneration can advance before the worker DCD rolls Pods."""
-    dgd_observed = _stable_worker_dgd(
-        generation=2, observed_generation=2, decode_watts="300"
-    )
-    lagging_dcd = _ready_dcd(generation=2, observed_generation=1)
-    lagging_dcd["status"]["conditions"] = []
-    _mock_dcd_lookup(mock_custom_api, lagging_dcd)
-    with patch.object(k8s_api, "get_graph_deployment", return_value=dgd_observed):
-        with pytest.raises(TimeoutError):
-            await k8s_api.wait_for_graph_deployment_ready(
-                "test-deployment",
-                include_planner=False,
-                require_backing_settled=True,
-                require_prefill=False,
-                require_decode=True,
-                max_attempts=2,
-                delay_seconds=0.01,
-            )
+# ---------------------------------------------------------------------------
+# worker_pods_settled unit tests
+# ---------------------------------------------------------------------------
 
 
-def test_is_dcd_ready_requires_generation_and_available(k8s_api):
-    assert k8s_api.is_dcd_ready(_ready_dcd(generation=2, observed_generation=2))
-    assert not k8s_api.is_dcd_ready(_ready_dcd(generation=2, observed_generation=1))
-    missing_available = _ready_dcd(generation=2, observed_generation=2)
-    missing_available["status"]["conditions"] = []
-    assert not k8s_api.is_dcd_ready(missing_available)
-
-
-def test_worker_backing_resources_settled_rejects_lagging_dcd(k8s_api, mock_custom_api):
-    dgd = _stable_worker_dgd(generation=2, observed_generation=2)
-    _mock_dcd_lookup(
-        mock_custom_api,
-        _ready_dcd(generation=2, observed_generation=1),
-    )
-    settled, pending = k8s_api.worker_backing_resources_settled(
-        dgd, ["VllmDecodeWorker"]
-    )
-    assert settled is False
-    assert pending == [
-        "VllmDecodeWorker: DCD test-deployment-vllmdecodeworker not ready "
-        "(generation=2, observedGeneration=1)"
-    ]
-
-
-def test_worker_backing_resources_settled_rejects_lagging_pod_clique(
-    k8s_api, mock_custom_api
-):
-    """Grove path: DGD counters can look stable while PodClique gen still lags."""
-    dgd = _stable_worker_dgd(generation=2, observed_generation=2)
-    dgd["status"]["components"]["VllmDecodeWorker"] = {
-        "componentKind": "PodClique",
-        "componentNames": ["test-deployment-vllmdecodeworker"],
-        "readyReplicas": 2,
-        "updatedReplicas": 2,
-        "availableReplicas": 2,
-    }
-
-    def _lookup(*args, **kwargs):
-        if (
-            kwargs.get("plural") == "podcliques"
-            and kwargs.get("name") == "test-deployment-vllmdecodeworker"
-        ):
-            return {
-                "metadata": {"generation": 2},
-                "spec": {"replicas": 2},
-                "status": {
-                    "observedGeneration": 1,
-                    "replicas": 2,
-                    "updatedReplicas": 2,
-                    "readyReplicas": 2,
-                },
-            }
-        raise client.ApiException(status=404)
-
-    mock_custom_api.get_namespaced_custom_object.side_effect = _lookup
-    settled, pending = k8s_api.worker_backing_resources_settled(
-        dgd, ["VllmDecodeWorker"]
-    )
-    assert settled is False
-    assert pending == [
-        "VllmDecodeWorker: PodClique test-deployment-vllmdecodeworker "
-        "not generation-ready"
-    ]
-
-
-def test_worker_backing_rejects_inprogress_rollout_with_ready_old_dcd(
-    k8s_api, mock_custom_api
-):
-    """InProgress rollout: current-hash still names the ready old DCD.
-
-    DGD observedGeneration and replica counters can look settled while the
-    annotation points at the old revision and the new DCD is missing. The
-    wait must not treat the old DCD as proof the desired revision rolled.
-
-    Deployment componentNames use the real workload shape (``…-deployment``);
-    settlement never treats those strings as DCD names.
-    """
-    old_dcd = "test-deployment-vllmdecodeworker-oldhash1"
-    new_dcd = "test-deployment-vllmdecodeworker-newhash2"
+def test_worker_pods_settled_all_match(k8s_api, mock_core_api):
+    """All running pods carry the expected annotation → settled."""
     dgd = _stable_worker_dgd(generation=2, observed_generation=2, decode_watts="300")
-    dgd["metadata"]["annotations"] = {
-        "nvidia.com/current-worker-hash-v2": "oldhash1",
-    }
-    dgd["status"]["rollingUpdate"] = {"phase": "InProgress"}
-    dgd["status"]["components"]["VllmDecodeWorker"] = {
-        "componentKind": "Deployment",
-        "componentNames": [f"{new_dcd}-deployment", f"{old_dcd}-deployment"],
-        "readyReplicas": 2,
-        "updatedReplicas": 2,
-        "availableReplicas": 2,
-    }
-
-    def _lookup(*args, **kwargs):
-        if kwargs.get("plural") != "dynamocomponentdeployments":
-            raise client.ApiException(status=404)
-        if kwargs.get("name") == old_dcd:
-            return _ready_dcd(generation=1, observed_generation=1)
-        raise client.ApiException(status=404)
-
-    mock_custom_api.get_namespaced_custom_object.side_effect = _lookup
-    settled, pending = k8s_api.worker_backing_resources_settled(
-        dgd, ["VllmDecodeWorker"]
+    _mock_pod_list(
+        mock_core_api,
+        [_make_pod("pod-0", annotation="300"), _make_pod("pod-1", annotation="300")],
     )
+    settled, pending = k8s_api.worker_pods_settled(dgd, {"VllmDecodeWorker": "300"})
+    assert settled is True
+    assert pending == []
+
+
+def test_worker_pods_settled_differing_prefill_decode_caps(k8s_api, mock_core_api):
+    """Prefill 350 W/GPU and decode 300 W/GPU are independent — both must match."""
+    dgd = {
+        "metadata": {"name": "test-deployment"},
+        "spec": {
+            "components": [
+                {
+                    "name": "VllmPrefillWorker",
+                    "type": "prefill",
+                    "replicas": 2,
+                    "podTemplate": {
+                        "metadata": {
+                            "annotations": {"dynamo.nvidia.com/gpu-power-limit": "350"}
+                        },
+                        "spec": {
+                            "containers": [
+                                {
+                                    "name": "main",
+                                    "resources": {"limits": {"nvidia.com/gpu": "2"}},
+                                }
+                            ]
+                        },
+                    },
+                },
+                {
+                    "name": "VllmDecodeWorker",
+                    "type": "decode",
+                    "replicas": 2,
+                    "podTemplate": {
+                        "metadata": {
+                            "annotations": {"dynamo.nvidia.com/gpu-power-limit": "300"}
+                        },
+                        "spec": {
+                            "containers": [
+                                {
+                                    "name": "main",
+                                    "resources": {"limits": {"nvidia.com/gpu": "4"}},
+                                }
+                            ]
+                        },
+                    },
+                },
+            ]
+        },
+        "status": {
+            "observedGeneration": 2,
+            "components": {
+                "VllmPrefillWorker": {
+                    "readyReplicas": 2,
+                    "updatedReplicas": 2,
+                    "availableReplicas": 2,
+                },
+                "VllmDecodeWorker": {
+                    "readyReplicas": 2,
+                    "updatedReplicas": 2,
+                    "availableReplicas": 2,
+                },
+            },
+        },
+    }
+
+    def _list(*args, **kwargs):
+        label_selector = kwargs.get("label_selector", "")
+        result = MagicMock()
+        if "VllmPrefillWorker" in label_selector:
+            result.items = [
+                _make_pod("p-0", annotation="350"),
+                _make_pod("p-1", annotation="350"),
+            ]
+        elif "VllmDecodeWorker" in label_selector:
+            result.items = [
+                _make_pod("d-0", annotation="300"),
+                _make_pod("d-1", annotation="300"),
+            ]
+        else:
+            result.items = []
+        return result
+
+    mock_core_api.list_namespaced_pod.side_effect = _list
+    settled, pending = k8s_api.worker_pods_settled(
+        dgd, {"VllmPrefillWorker": "350", "VllmDecodeWorker": "300"}
+    )
+    assert settled is True
+    assert pending == []
+
+
+def test_worker_pods_settled_multi_gpu_replica_compares_per_gpu_annotation(
+    k8s_api, mock_core_api
+):
+    """4-GPU replica at 300 W/GPU: pod annotation is "300", not "1200"."""
+    dgd = _stable_worker_dgd(generation=2, observed_generation=2, decode_watts="300")
+    _mock_pod_list(mock_core_api, [_make_pod("pod-0", annotation="300")])
+    settled, pending = k8s_api.worker_pods_settled(dgd, {"VllmDecodeWorker": "300"})
+    assert settled is True
+    assert pending == []
+
+
+def test_worker_pods_settled_terminating_pod_stale_annotation_blocks(
+    k8s_api, mock_core_api
+):
+    """A terminating (DeletionTimestamp set) pod still in Running phase is non-terminal.
+
+    It still consumes GPU power and must block pod-annotation settlement until
+    it disappears.
+    """
+    from unittest.mock import sentinel
+
+    dgd = _stable_worker_dgd(generation=2, observed_generation=2, decode_watts="300")
+    terminating = _make_pod(
+        "pod-old",
+        phase="Running",
+        annotation="200",  # stale old cap
+        deletion_timestamp=sentinel.some_timestamp,
+    )
+    _mock_pod_list(mock_core_api, [terminating])
+    settled, pending = k8s_api.worker_pods_settled(dgd, {"VllmDecodeWorker": "300"})
+    assert settled is False
+    assert any("pod-old" in msg and "terminating" in msg for msg in pending)
+
+
+def test_worker_pods_settled_succeeded_pod_ignored(k8s_api, mock_core_api):
+    """A Succeeded pod is terminal and must not block settlement."""
+    dgd = _stable_worker_dgd(generation=2, observed_generation=2, decode_watts="300")
+    _mock_pod_list(
+        mock_core_api,
+        [
+            _make_pod("pod-ok", phase="Running", annotation="300"),
+            _make_pod(
+                "pod-done", phase="Succeeded", annotation="200"
+            ),  # stale but terminal
+        ],
+    )
+    settled, pending = k8s_api.worker_pods_settled(dgd, {"VllmDecodeWorker": "300"})
+    assert settled is True
+    assert pending == []
+
+
+def test_worker_pods_settled_zero_replicas_no_pods_is_settled(k8s_api, mock_core_api):
+    """Scale-to-zero with no pods: nothing enforcing a stale cap → settled."""
+    dgd = _stable_worker_dgd(generation=2, observed_generation=2, decode_watts="300")
+    dgd["spec"]["components"][0]["replicas"] = 0
+    _mock_pod_list(mock_core_api, [])
+    settled, pending = k8s_api.worker_pods_settled(dgd, {"VllmDecodeWorker": "300"})
+    assert settled is True
+    assert pending == []
+
+
+def test_worker_pods_settled_nonzero_replicas_no_pods_is_pending(
+    k8s_api, mock_core_api
+):
+    """Nonzero desired replicas but no pods yet: settlement must wait."""
+    dgd = _stable_worker_dgd(generation=2, observed_generation=2, decode_watts="300")
+    _mock_pod_list(mock_core_api, [])
+    settled, pending = k8s_api.worker_pods_settled(dgd, {"VllmDecodeWorker": "300"})
+    assert settled is False
+    assert any("no non-terminal pods" in msg for msg in pending)
+
+
+def test_worker_pods_settled_missing_annotation_on_running_pod_blocks(
+    k8s_api, mock_core_api
+):
+    """A running pod with no annotation must block settlement."""
+    dgd = _stable_worker_dgd(generation=2, observed_generation=2, decode_watts="300")
+    _mock_pod_list(mock_core_api, [_make_pod("pod-0", annotation=None)])
+    settled, pending = k8s_api.worker_pods_settled(dgd, {"VllmDecodeWorker": "300"})
+    assert settled is False
+    assert any("pod-0" in msg for msg in pending)
+
+
+def test_worker_pods_settled_inprogress_rollout_blocks_without_listing_pods(
+    k8s_api, mock_core_api
+):
+    """InProgress DGD rollingUpdate phase blocks settlement before listing pods."""
+    dgd = _stable_worker_dgd(generation=2, observed_generation=2, decode_watts="300")
+    dgd["status"]["rollingUpdate"] = {"phase": "InProgress"}
+    settled, pending = k8s_api.worker_pods_settled(dgd, {"VllmDecodeWorker": "300"})
     assert settled is False
     assert pending == ["rollingUpdate.phase=InProgress"]
+    mock_core_api.list_namespaced_pod.assert_not_called()
 
 
-def test_worker_backing_rejects_lagging_hash_derived_dcd_despite_workload_names(
-    k8s_api, mock_custom_api
-):
-    """Deployment componentNames are workload names; settlement uses hash-derived DCD.
-
-    Real operator status puts ``…-deployment`` into componentNames. A lagging
-    hash-derived DCD must still block settlement even when those workload
-    names are present (and even if they would 404 as DCD lookups).
-    """
-    old_dcd = "test-deployment-vllmdecodeworker-oldhash1"
-    new_dcd = "test-deployment-vllmdecodeworker-newhash2"
+def test_worker_pods_settled_exact_string_comparison_whitespace(k8s_api, mock_core_api):
+    """Exact string comparison: DGD '300' must match pod '300' but not ' 300 '."""
     dgd = _stable_worker_dgd(generation=2, observed_generation=2, decode_watts="300")
-    dgd["metadata"]["annotations"] = {
-        "nvidia.com/current-worker-hash-v2": "oldhash1",
-    }
-    dgd["status"]["components"]["VllmDecodeWorker"] = {
-        "componentKind": "Deployment",
-        "componentNames": [f"{new_dcd}-deployment", f"{old_dcd}-deployment"],
-        "readyReplicas": 2,
-        "updatedReplicas": 2,
-        "availableReplicas": 2,
-    }
 
-    def _lookup(*args, **kwargs):
-        if kwargs.get("plural") != "dynamocomponentdeployments":
-            raise client.ApiException(status=404)
-        if kwargs.get("name") == old_dcd:
-            return _ready_dcd(generation=2, observed_generation=1)
-        raise client.ApiException(status=404)
-
-    mock_custom_api.get_namespaced_custom_object.side_effect = _lookup
-    settled, pending = k8s_api.worker_backing_resources_settled(
-        dgd, ["VllmDecodeWorker"]
-    )
-    assert settled is False
-    assert pending == [
-        f"VllmDecodeWorker: DCD {old_dcd} not ready "
-        "(generation=2, observedGeneration=1)"
-    ]
-
-
-def test_worker_backing_prefers_v1_dcd_over_stale_ready_v2_dcd(
-    k8s_api, mock_custom_api
-):
-    """Dual-hash bridge generation: the v1 DCD is authoritative, not v2.
-
-    The operator keeps the v1 DCD active while both annotations are present
-    (``workerHashForDCDGeneration`` returns the v1 hash). A stale-but-ready v2
-    DCD must not short-circuit settlement while the active v1 DCD lags —
-    otherwise Planner caches the new power value before the live workload
-    adopted it.
-    """
-    v1_dcd = "test-deployment-vllmdecodeworker-v1hash"
-    v2_dcd = "test-deployment-vllmdecodeworker-v2hash"
-    dgd = _stable_worker_dgd(generation=2, observed_generation=2, decode_watts="300")
-    dgd["metadata"]["annotations"] = {
-        "nvidia.com/current-worker-hash": "v1hash",
-        "nvidia.com/current-worker-hash-v2": "v2hash",
-    }
-    dgd["status"]["components"]["VllmDecodeWorker"] = {
-        "componentKind": "Deployment",
-        "componentNames": [f"{v1_dcd}-deployment"],
-        "readyReplicas": 2,
-        "updatedReplicas": 2,
-        "availableReplicas": 2,
-    }
-
-    def _lookup(*args, **kwargs):
-        if kwargs.get("plural") != "dynamocomponentdeployments":
-            raise client.ApiException(status=404)
-        name = kwargs.get("name")
-        if name == v1_dcd:
-            return _ready_dcd(generation=2, observed_generation=1)
-        if name == v2_dcd:
-            return _ready_dcd(generation=2, observed_generation=2)
-        raise client.ApiException(status=404)
-
-    mock_custom_api.get_namespaced_custom_object.side_effect = _lookup
-    settled, pending = k8s_api.worker_backing_resources_settled(
-        dgd, ["VllmDecodeWorker"]
-    )
-    assert settled is False
-    assert pending == [
-        f"VllmDecodeWorker: DCD {v1_dcd} not ready "
-        "(generation=2, observedGeneration=1)"
-    ]
-
-
-def test_worker_backing_falls_back_to_v2_dcd_when_only_v2_annotated(
-    k8s_api, mock_custom_api
-):
-    """Converged v2-only generation still resolves through the v2 hash."""
-    v2_dcd = "test-deployment-vllmdecodeworker-v2hash"
-    dgd = _stable_worker_dgd(generation=2, observed_generation=2, decode_watts="300")
-    dgd["metadata"]["annotations"] = {
-        "nvidia.com/current-worker-hash-v2": "v2hash",
-    }
-    dgd["status"]["components"]["VllmDecodeWorker"] = {
-        "componentKind": "Deployment",
-        "componentNames": [f"{v2_dcd}-deployment"],
-        "readyReplicas": 2,
-        "updatedReplicas": 2,
-        "availableReplicas": 2,
-    }
-
-    def _lookup(*args, **kwargs):
-        if kwargs.get("plural") != "dynamocomponentdeployments":
-            raise client.ApiException(status=404)
-        if kwargs.get("name") == v2_dcd:
-            return _ready_dcd(generation=2, observed_generation=2)
-        raise client.ApiException(status=404)
-
-    mock_custom_api.get_namespaced_custom_object.side_effect = _lookup
-    settled, pending = k8s_api.worker_backing_resources_settled(
-        dgd, ["VllmDecodeWorker"]
-    )
+    # Matching: both "300"
+    _mock_pod_list(mock_core_api, [_make_pod("pod-0", annotation="300")])
+    settled, _ = k8s_api.worker_pods_settled(dgd, {"VllmDecodeWorker": "300"})
     assert settled is True
-    assert pending == []
 
-
-def test_worker_backing_ignores_deployment_workload_component_names(
-    k8s_api, mock_custom_api
-):
-    """Regression: Deployment componentNames must not be used as DCD names.
-
-    Operator status for a DCD-backed worker looks like
-    ``componentNames: [<dcd>-deployment]`` while the DCD itself is ``<dcd>``.
-    Settlement must GET the derived DCD, never the workload name.
-    """
-    dcd_name = "test-deployment-vllmdecodeworker"
-    workload_name = f"{dcd_name}-deployment"
-    dgd = _stable_worker_dgd(generation=2, observed_generation=2, decode_watts="300")
-    dgd["status"]["components"]["VllmDecodeWorker"] = {
-        "componentKind": "Deployment",
-        "componentNames": [workload_name],
-        "readyReplicas": 2,
-        "updatedReplicas": 2,
-        "availableReplicas": 2,
-    }
-
-    queried: list[str] = []
-
-    def _lookup(*args, **kwargs):
-        if kwargs.get("plural") != "dynamocomponentdeployments":
-            raise client.ApiException(status=404)
-        name = kwargs.get("name")
-        queried.append(name)
-        if name == dcd_name:
-            return _ready_dcd(generation=2, observed_generation=2)
-        raise client.ApiException(status=404)
-
-    mock_custom_api.get_namespaced_custom_object.side_effect = _lookup
-    settled, pending = k8s_api.worker_backing_resources_settled(
-        dgd, ["VllmDecodeWorker"]
-    )
-    assert settled is True
-    assert pending == []
-    assert dcd_name in queried
-    assert workload_name not in queried
+    # Mismatch: DGD "300", pod " 300 " (unexpected whitespace on pod side)
+    _mock_pod_list(mock_core_api, [_make_pod("pod-0", annotation=" 300 ")])
+    settled, pending = k8s_api.worker_pods_settled(dgd, {"VllmDecodeWorker": "300"})
+    assert settled is False
+    assert any("300" in msg for msg in pending)
 
 
 @pytest.mark.asyncio
-async def test_wait_exclude_planner_rejects_inprogress_rollout_ready_old_dcd(
-    k8s_api, mock_custom_api
+async def test_wait_exclude_planner_rejects_pods_with_stale_annotation(
+    k8s_api, mock_core_api
 ):
-    """End-to-end wait: InProgress + ready old DCD must not settle."""
-    old_dcd = "test-deployment-vllmdecodeworker-oldhash1"
-    new_dcd = "test-deployment-vllmdecodeworker-newhash2"
+    """DGD observed but pods still carry the old cap → settlement must block."""
     dgd = _stable_worker_dgd(generation=2, observed_generation=2, decode_watts="300")
-    dgd["metadata"]["annotations"] = {
-        "nvidia.com/current-worker-hash-v2": "oldhash1",
-    }
-    dgd["status"]["rollingUpdate"] = {"phase": "InProgress"}
-    dgd["status"]["components"]["VllmDecodeWorker"] = {
-        "componentKind": "Deployment",
-        "componentNames": [f"{new_dcd}-deployment", f"{old_dcd}-deployment"],
-        "readyReplicas": 2,
-        "updatedReplicas": 2,
-        "availableReplicas": 2,
-    }
-
-    def _lookup(*args, **kwargs):
-        if (
-            kwargs.get("plural") == "dynamocomponentdeployments"
-            and kwargs.get("name") == old_dcd
-        ):
-            return _ready_dcd(generation=1, observed_generation=1)
-        raise client.ApiException(status=404)
-
-    mock_custom_api.get_namespaced_custom_object.side_effect = _lookup
+    _mock_pod_list(
+        mock_core_api,
+        [_make_pod("pod-0", annotation="400")],  # old cap
+    )
     with patch.object(k8s_api, "get_graph_deployment", return_value=dgd):
         with pytest.raises(TimeoutError):
             await k8s_api.wait_for_graph_deployment_ready(
@@ -896,41 +813,68 @@ async def test_wait_exclude_planner_rejects_inprogress_rollout_ready_old_dcd(
             )
 
 
-def test_worker_backing_settles_untyped_named_worker(k8s_api, mock_custom_api):
-    """Explicit-name power workers without ``type`` must still be settlement-gated.
-
-    The power resolver matches untyped components by name
-    (``_can_use_explicit_component_name``). A type-only backing filter would
-    skip them and allow caching a lower gen-N cap while the DCD still
-    enforces gen-N-1.
-    """
+@pytest.mark.asyncio
+async def test_wait_exclude_planner_rejects_inprogress_rollout(k8s_api, mock_core_api):
+    """End-to-end: InProgress DGD rollingUpdate phase blocks settlement."""
     dgd = _stable_worker_dgd(generation=2, observed_generation=2, decode_watts="300")
-    # Drop type so only the explicit name resolves the role.
-    dgd["spec"]["components"][0].pop("type", None)
-    _mock_dcd_lookup(
-        mock_custom_api,
-        _ready_dcd(generation=2, observed_generation=1),
-    )
-    settled, pending = k8s_api.worker_backing_resources_settled(
-        dgd, ["VllmDecodeWorker"]
-    )
-    assert settled is False
-    assert pending == [
-        "VllmDecodeWorker: DCD test-deployment-vllmdecodeworker not ready "
-        "(generation=2, observedGeneration=1)"
-    ]
+    dgd["status"]["rollingUpdate"] = {"phase": "InProgress"}
+    _mock_pod_list(mock_core_api, [_make_pod("pod-0", annotation="300")])
+    with patch.object(k8s_api, "get_graph_deployment", return_value=dgd):
+        with pytest.raises(TimeoutError):
+            await k8s_api.wait_for_graph_deployment_ready(
+                "test-deployment",
+                include_planner=False,
+                require_backing_settled=True,
+                require_prefill=False,
+                require_decode=True,
+                max_attempts=2,
+                delay_seconds=0.01,
+            )
 
 
 @pytest.mark.asyncio
-async def test_wait_settled_rejects_untyped_named_worker_with_lagging_dcd(
-    k8s_api, mock_custom_api
+async def test_wait_missing_dgd_annotation_raises_immediately(k8s_api, mock_core_api):
+    """A missing DGD power annotation is a config error, not rollout lag.
+
+    It must raise PowerAnnotationMissingError immediately rather than timing
+    out after 30 minutes — the pod list must not even be consulted.
+    """
+    from dynamo.planner.errors import PowerAnnotationMissingError
+
+    dgd = _stable_worker_dgd(generation=2, observed_generation=2, decode_watts="300")
+    # Remove the annotation to simulate a misconfigured DGD.
+    del dgd["spec"]["components"][0]["podTemplate"]["metadata"]["annotations"][
+        "dynamo.nvidia.com/gpu-power-limit"
+    ]
+    with patch.object(k8s_api, "get_graph_deployment", return_value=dgd):
+        with pytest.raises(PowerAnnotationMissingError):
+            await k8s_api.wait_for_graph_deployment_ready(
+                "test-deployment",
+                include_planner=False,
+                require_backing_settled=True,
+                require_prefill=False,
+                require_decode=True,
+                max_attempts=5,
+                delay_seconds=0.01,
+            )
+    mock_core_api.list_namespaced_pod.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_wait_exclude_planner_settles_untyped_named_worker(
+    k8s_api, mock_core_api
 ):
-    """End-to-end settled wait: untyped named decode + lagging DCD must not pass."""
+    """Explicit-name power worker without ``type`` must still be settlement-gated.
+
+    The power resolver matches untyped components by name
+    (``_can_use_explicit_component_name``). An old cap on pods must block
+    settlement regardless of how the component was resolved.
+    """
     dgd = _stable_worker_dgd(generation=2, observed_generation=2, decode_watts="300")
     dgd["spec"]["components"][0].pop("type", None)
-    lagging_dcd = _ready_dcd(generation=2, observed_generation=1)
-    lagging_dcd["status"]["conditions"] = []
-    _mock_dcd_lookup(mock_custom_api, lagging_dcd)
+
+    # Old cap on pods → must block.
+    _mock_pod_list(mock_core_api, [_make_pod("pod-0", annotation="200")])
     with patch.object(k8s_api, "get_graph_deployment", return_value=dgd):
         with pytest.raises(TimeoutError):
             await k8s_api.wait_for_graph_deployment_ready(
@@ -946,17 +890,14 @@ async def test_wait_settled_rejects_untyped_named_worker_with_lagging_dcd(
 
 
 @pytest.mark.asyncio
-async def test_wait_legacy_exclude_planner_does_not_query_backing(
-    k8s_api, mock_custom_api
-):
-    """Power-off / legacy wait must not touch DCD or Grove CRs.
+async def test_wait_legacy_exclude_planner_does_not_list_pods(k8s_api, mock_core_api):
+    """Power-off / legacy wait must not touch Pods.
 
     ``include_planner=False`` without ``require_backing_settled`` restores the
     pre-power readiness contract: replica-count stability only. Generation lag
-    and backing CR readiness are power-settlement concerns.
+    and pod-annotation settlement are power-settlement concerns.
     """
-    # Replica-stable, but observedGeneration lags and no DCD is registered —
-    # legacy wait must still succeed without issuing a backing GET.
+    # Replica-stable, but observedGeneration lags — legacy wait must succeed.
     lagging = _stable_worker_dgd(
         generation=2, observed_generation=1, decode_watts="300"
     )
@@ -969,7 +910,7 @@ async def test_wait_legacy_exclude_planner_does_not_query_backing(
             delay_seconds=0.01,
         )
     assert got is lagging
-    mock_custom_api.get_namespaced_custom_object.assert_not_called()
+    mock_core_api.list_namespaced_pod.assert_not_called()
 
 
 def test_get_graph_deployment(k8s_api, mock_custom_api):

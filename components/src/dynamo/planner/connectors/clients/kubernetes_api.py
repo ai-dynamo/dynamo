@@ -15,10 +15,10 @@
 
 import asyncio
 import logging
-from typing import Optional, Sequence
+from collections.abc import Mapping
+from typing import Optional
 
 from kubernetes import client, config
-from kubernetes.client import ApiException
 from kubernetes.config.config_exception import ConfigException
 
 from dynamo.planner.errors import (
@@ -27,6 +27,7 @@ from dynamo.planner.errors import (
     SubComponentNotFoundError,
 )
 from dynamo.planner.monitoring.dgd_services import (
+    POWER_ANNOTATION_KEY,
     Service,
     get_component_type,
     get_components_by_name,
@@ -42,20 +43,13 @@ DYNAMO_API_VERSION = "v1beta1"
 DYNAMO_WORKER_METADATA_API_VERSION = "v1alpha1"
 DGD_PLURAL = "dynamographdeployments"
 DGDSA_PLURAL = "dynamographdeploymentscalingadapters"
-DCD_PLURAL = "dynamocomponentdeployments"
-GROVE_API_GROUP = "grove.io"
-GROVE_API_VERSION = "v1alpha1"
-POD_CLIQUE_PLURAL = "podcliques"
-PCSG_PLURAL = "podcliquescalinggroups"
-WORKER_HASH_V2_ANNOTATION = "nvidia.com/current-worker-hash-v2"
-WORKER_HASH_V1_ANNOTATION = "nvidia.com/current-worker-hash"
-WORKER_COMPONENT_TYPES = frozenset({"prefill", "decode", "worker"})
-DCD_AVAILABLE_CONDITION = "Available"
-# current-worker-hash annotations stay on the old revision until cutover, so
-# an InProgress/Pending/Failed rollout must block settlement even when the old
-# DCD still looks generation-ready.
+# During a rollout old Pods are still active and carry the previous cap, so
+# an InProgress/Pending/Failed phase must block pod-annotation settlement.
 ROLLING_UPDATE_BLOCKING_PHASES = frozenset({"Pending", "InProgress", "Failed"})
 JSON_PATCH_CONTENT_TYPE = "application/json-patch+json"
+# Stable labels the operator stamps on every worker Pod.
+DYNAMO_DGD_NAME_LABEL = "nvidia.com/dynamo-graph-deployment-name"
+DYNAMO_COMPONENT_LABEL = "nvidia.com/dynamo-component"
 
 
 def get_current_k8s_namespace() -> str:
@@ -77,6 +71,7 @@ class KubernetesAPI:
             config.load_kube_config()  # for out-of-cluster deployment
 
         self.custom_api = client.CustomObjectsApi()
+        self.core_api = client.CoreV1Api()
         self.current_namespace = k8s_namespace or get_current_k8s_namespace()
 
     def _get_graph_deployment_from_name(self, graph_deployment_name: str) -> dict:
@@ -341,136 +336,6 @@ class KubernetesAPI:
         return not not_ready, not_ready
 
     @staticmethod
-    def _worker_hash_candidates(deployment: dict) -> list[str]:
-        """Active worker-hash suffixes to probe, mirroring operator precedence.
-
-        During a v1/v2 compatibility generation both annotations are present and
-        the operator keeps the v1 DCD active, probing it first
-        (``activeWorkerHashCandidates`` -> ``workerHashForDCDGeneration``). Probe
-        v1 first too: a stale-but-ready v2 DCD must not short-circuit
-        settlement while the active v1 DCD still lags.
-        """
-        annotations = deployment.get("metadata", {}).get("annotations") or {}
-        candidates: list[str] = []
-        for key in (WORKER_HASH_V1_ANNOTATION, WORKER_HASH_V2_ANNOTATION):
-            value = annotations.get(key)
-            if value:
-                candidates.append(value)
-        candidates.append("")
-        seen: set[str] = set()
-        ordered: list[str] = []
-        for candidate in candidates:
-            if candidate not in seen:
-                seen.add(candidate)
-                ordered.append(candidate)
-        return ordered
-
-    @staticmethod
-    def _dcd_resource_name(
-        dgd_name: str,
-        component_name: str,
-        worker_suffix: str,
-        component_spec: dict,
-    ) -> str:
-        base = f"{dgd_name}-{component_name.lower()}"
-        if (
-            worker_suffix
-            and get_component_type(component_spec) in WORKER_COMPONENT_TYPES
-        ):
-            return f"{base}-{worker_suffix}"
-        return base
-
-    def _get_namespaced_custom_object(
-        self, *, group: str, version: str, plural: str, name: str
-    ) -> dict:
-        return self.custom_api.get_namespaced_custom_object(
-            group=group,
-            version=version,
-            namespace=self.current_namespace,
-            plural=plural,
-            name=name,
-        )
-
-    @staticmethod
-    def is_dcd_ready(dcd: dict) -> bool:
-        """Mirror ``checkDCDReady``: observed generation caught up + Available."""
-        generation = dcd.get("metadata", {}).get("generation")
-        observed = dcd.get("status", {}).get("observedGeneration", 0)
-        if generation is None:
-            return False
-        try:
-            if int(observed) < int(generation):
-                return False
-        except (TypeError, ValueError):
-            return False
-        for condition in dcd.get("status", {}).get("conditions") or []:
-            if (
-                condition.get("type") == DCD_AVAILABLE_CONDITION
-                and condition.get("status") == "True"
-            ):
-                return True
-        return False
-
-    @staticmethod
-    def is_pod_clique_ready(pod_clique: dict) -> bool:
-        """Mirror ``CheckPodCliqueReady`` generation + replica convergence."""
-        generation = pod_clique.get("metadata", {}).get("generation")
-        observed = pod_clique.get("status", {}).get("observedGeneration")
-        if generation is None or observed is None:
-            return False
-        try:
-            if int(observed) < int(generation):
-                return False
-        except (TypeError, ValueError):
-            return False
-        desired = pod_clique.get("spec", {}).get("replicas", 0)
-        if desired == 0:
-            return True
-        status = pod_clique.get("status", {})
-        replicas = status.get("replicas", 0)
-        updated = status.get("updatedReplicas", 0)
-        ready = status.get("readyReplicas", 0)
-        return replicas == desired == updated == ready
-
-    @staticmethod
-    def is_pod_clique_scaling_group_ready(pcsg: dict) -> bool:
-        """Mirror ``CheckPCSGReady`` generation + available convergence."""
-        generation = pcsg.get("metadata", {}).get("generation")
-        observed = pcsg.get("status", {}).get("observedGeneration")
-        if generation is None or observed is None:
-            return False
-        try:
-            if int(observed) < int(generation):
-                return False
-        except (TypeError, ValueError):
-            return False
-        desired = pcsg.get("spec", {}).get("replicas", 0)
-        if desired == 0:
-            return True
-        status = pcsg.get("status", {})
-        replicas = status.get("replicas", 0)
-        updated = status.get("updatedReplicas", 0)
-        available = status.get("availableReplicas", 0)
-        return replicas == desired == updated == available
-
-    def _is_grove_backing_ready(self, component_kind: str, resource_name: str) -> bool:
-        if component_kind == "PodCliqueScalingGroup":
-            resource = self._get_namespaced_custom_object(
-                group=GROVE_API_GROUP,
-                version=GROVE_API_VERSION,
-                plural=PCSG_PLURAL,
-                name=resource_name,
-            )
-            return self.is_pod_clique_scaling_group_ready(resource)
-        resource = self._get_namespaced_custom_object(
-            group=GROVE_API_GROUP,
-            version=GROVE_API_VERSION,
-            plural=POD_CLIQUE_PLURAL,
-            name=resource_name,
-        )
-        return self.is_pod_clique_ready(resource)
-
-    @staticmethod
     def is_rolling_update_blocking_settlement(deployment: dict) -> tuple[bool, str]:
         """True while an operator-managed worker rollout is not yet cut over."""
         rolling = deployment.get("status", {}).get("rollingUpdate") or {}
@@ -479,110 +344,76 @@ class KubernetesAPI:
             return True, f"rollingUpdate.phase={phase}"
         return False, ""
 
-    def _dcd_ready_or_reason(self, dcd_name: str) -> tuple[bool, str]:
-        try:
-            dcd = self._get_namespaced_custom_object(
-                group=NVIDIA_API_GROUP,
-                version=DYNAMO_API_VERSION,
-                plural=DCD_PLURAL,
-                name=dcd_name,
-            )
-        except ApiException as exc:
-            if exc.status == 404:
-                return False, f"DCD {dcd_name} not found"
-            raise
-        if self.is_dcd_ready(dcd):
-            return True, ""
-        generation = dcd.get("metadata", {}).get("generation")
-        observed = dcd.get("status", {}).get("observedGeneration")
+    def _list_pods_for_component(self, dgd_name: str, component_name: str) -> list:
+        """List all pods (any phase) for the given DGD + component label pair."""
+        label_selector = (
+            f"{DYNAMO_DGD_NAME_LABEL}={dgd_name},"
+            f"{DYNAMO_COMPONENT_LABEL}={component_name}"
+        )
         return (
-            False,
-            f"DCD {dcd_name} not ready "
-            f"(generation={generation}, observedGeneration={observed})",
+            self.core_api.list_namespaced_pod(
+                namespace=self.current_namespace, label_selector=label_selector
+            ).items
+            or []
         )
 
-    def _is_dcd_backing_ready(
+    def worker_pods_settled(
         self,
         deployment: dict,
-        component_name: str,
-        component_spec: dict,
-    ) -> tuple[bool, str]:
-        # Deployment/LWS status.componentNames are underlying workload names
-        # (e.g. <dcd>-deployment), not DCD names. Derive the DCD from
-        # DGD + component + current-worker-hash. Rolling updates are already
-        # gated by is_rolling_update_blocking_settlement() before this runs.
-        # Grove kinds keep using componentNames in is_worker_backing_settled.
-        dgd_name = deployment.get("metadata", {}).get("name", "")
-        last_reason = "resource not found"
-        for suffix in self._worker_hash_candidates(deployment):
-            dcd_name = self._dcd_resource_name(
-                dgd_name, component_name, suffix, component_spec
-            )
-            ready, reason = self._dcd_ready_or_reason(dcd_name)
-            if ready:
-                return True, ""
-            last_reason = reason
-            if reason.endswith("not found"):
-                continue
-            # Found the annotated revision but it is not ready yet.
-            return False, reason
-        return False, last_reason
-
-    def is_worker_backing_settled(
-        self, deployment: dict, component_name: str
-    ) -> tuple[bool, str]:
-        """True when the worker's backing CR has adopted the current template."""
-        components = get_components_by_name(deployment)
-        component_spec = components.get(component_name)
-        if component_spec is None:
-            return False, "component missing from DGD spec"
-
-        status_entry = (
-            deployment.get("status", {}).get("components", {}).get(component_name) or {}
-        )
-        component_kind = status_entry.get("componentKind", "")
-        component_names = status_entry.get("componentNames") or []
-
-        if component_kind in ("PodClique", "PodCliqueScalingGroup"):
-            if not component_names:
-                return False, "backing resource name missing from DGD status"
-            for resource_name in component_names:
-                try:
-                    if not self._is_grove_backing_ready(component_kind, resource_name):
-                        return (
-                            False,
-                            f"{component_kind} {resource_name} not generation-ready",
-                        )
-                except ApiException as exc:
-                    if exc.status == 404:
-                        return False, f"{component_kind} {resource_name} not found"
-                    raise
-            return True, ""
-
-        return self._is_dcd_backing_ready(deployment, component_name, component_spec)
-
-    def worker_backing_resources_settled(
-        self,
-        deployment: dict,
-        component_names: Sequence[str],
+        expected_power_by_component: Mapping[str, str],
     ) -> tuple[bool, list[str]]:
-        """Return ``(all_settled, pending)`` for the named power-relevant workers.
+        """True when all non-terminal pods carry the expected per-GPU annotation.
 
-        ``component_names`` must be the roles selected by the power resolver
-        (:func:`~dynamo.planner.monitoring.dgd_services.resolve_power_component_names`),
-        including untyped workers matched by explicit name. A type-only filter
-        would skip those workers and allow caching a newer cap while their
-        DCD/Pods still enforce the previous one.
+        ``expected_power_by_component`` maps each power-relevant component name
+        to the raw ``dynamo.nvidia.com/gpu-power-limit`` string from the DGD
+        snapshot (verbatim, for exact propagation verification).
+
+        Terminal means phase Succeeded or Failed. Terminating pods
+        (DeletionTimestamp set) in Running/Pending/Unknown are non-terminal:
+        they still consume GPU power and block annotation convergence.
+
+        A component with zero desired replicas and no pods is settled; there is
+        nothing currently enforcing a stale cap, and future pods will be created
+        from the current DGD intent.
         """
         blocking, reason = self.is_rolling_update_blocking_settlement(deployment)
         if blocking:
             return False, [reason]
 
+        dgd_name = deployment.get("metadata", {}).get("name", "")
+        components_by_name = get_components_by_name(deployment)
         pending: list[str] = []
-        for component_name in component_names:
-            settled, reason = self.is_worker_backing_settled(deployment, component_name)
-            if not settled:
-                pending.append(f"{component_name}: {reason}")
+
+        for component_name, expected_raw in expected_power_by_component.items():
+            all_pods = self._list_pods_for_component(dgd_name, component_name)
+            non_terminal = [
+                p
+                for p in all_pods
+                if p.status is None or p.status.phase not in ("Succeeded", "Failed")
+            ]
+            if not non_terminal:
+                desired = Service(
+                    name=component_name,
+                    service=components_by_name.get(component_name, {}),
+                ).number_replicas()
+                if desired > 0:
+                    pending.append(
+                        f"{component_name}: no non-terminal pods (desired={desired})"
+                    )
+                continue
+
+            for pod in non_terminal:
+                actual = (pod.metadata.annotations or {}).get(POWER_ANNOTATION_KEY)
+                if actual != expected_raw:
+                    phase = (pod.status.phase if pod.status else None) or "?"
+                    terminating = pod.metadata.deletion_timestamp is not None
+                    suffix = ", terminating" if terminating else ""
+                    pending.append(
+                        f"{component_name}/{pod.metadata.name}"
+                        f" (phase={phase}{suffix}):"
+                        f" annotation {actual!r} != {expected_raw!r}"
+                    )
+
         return not pending, pending
 
     async def wait_for_graph_deployment_ready(
@@ -691,15 +522,34 @@ class KubernetesAPI:
                 )
                 continue
 
-            backing_ok, backing_pending = self.worker_backing_resources_settled(
-                graph_deployment, power_names
+            # Build per-component expected annotation strings from the same
+            # DGD snapshot. A missing or malformed annotation is invalid
+            # configuration — raise immediately rather than retrying.
+            components_map = get_components_by_name(graph_deployment)
+            expected_power: dict[str, str] = {}
+            for name in power_names:
+                svc = Service(name=name, service=components_map.get(name, {}))
+                # Raises PowerAnnotationMissingError / PowerAnnotationInvalidError
+                # on bad config; let those propagate as a fail-fast startup error.
+                svc.get_gpu_power_limit_watts()
+                raw_annotations = (
+                    svc.service.get("podTemplate", {})
+                    .get("metadata", {})
+                    .get("annotations")
+                    or {}
+                )
+                expected_power[name] = str(raw_annotations[POWER_ANNOTATION_KEY])
+
+            pods_ok, pods_pending = self.worker_pods_settled(
+                graph_deployment, expected_power
             )
-            if not backing_ok:
+            if not pods_ok:
                 logger.info(
-                    "[Attempt %d/%d] Waiting for worker backing resources: %s",
+                    "[Attempt %d/%d] Waiting for pods to reflect current power"
+                    " annotation: %s",
                     attempt + 1,
                     max_attempts,
-                    backing_pending,
+                    pods_pending,
                 )
                 continue
 

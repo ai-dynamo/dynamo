@@ -306,12 +306,12 @@ async def test_initialize_caches_caps_from_settled_snapshot_not_lagging_get():
 
 @pytest.mark.asyncio
 async def test_initialize_power_disabled_skips_settled_backing_wait():
-    """Power-off init must not take the DCD/Grove settled path.
+    """Power-off init must not take the pod-annotation settled path.
 
     Every real Kubernetes connector exposes wait_for_settled_graph_deployment;
-    using it when enable_power_awareness=False would query
-    dynamocomponentdeployments / Grove CRs and can 403 or time out for
-    custom service accounts that only had the pre-power RBAC surface.
+    using it when enable_power_awareness=False would list Pods for annotation
+    verification and can 403 or time out for custom service accounts that only
+    had the pre-power RBAC surface.
     """
     backing_lookups = []
 

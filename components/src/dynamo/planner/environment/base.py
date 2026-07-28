@@ -199,10 +199,9 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
     async def _wait_for_startup_dgd_snapshot(self) -> Optional[dict]:
         """Wait for readiness; when power is on, return a settled DGD snapshot.
 
-        The settled wait (observedGeneration + DCD/Grove backing readiness) is
+        The settled wait (observedGeneration + pod annotation convergence) is
         only required to permanently cache DGD-owned power caps. Power-disabled
-        planners keep ``wait_for_deployment_ready`` so existing service accounts
-        without dynamocomponentdeployments / Grove RBAC stay compatible.
+        planners keep the standard ``wait_for_deployment_ready`` path.
         """
         if self.config.enable_power_awareness:
             wait_settled = getattr(

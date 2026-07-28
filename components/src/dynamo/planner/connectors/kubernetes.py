@@ -508,21 +508,21 @@ class KubernetesConnector(PlannerConnector):
         When ``include_planner`` is False, the snapshot has:
         - non-planner worker replica counts stable (desired == updated == ready)
         - ``status.observedGeneration >= metadata.generation``
-        - each power-relevant worker's backing CR (DCD / Grove PodClique)
-          generation-ready, so Pods have adopted the current template
+        - every non-terminal worker Pod carries the expected
+          ``dynamo.nvidia.com/gpu-power-limit`` annotation from the current
+          DGD snapshot, confirming the running hardware enforces the cap
+          that will be cached at startup
 
         Power-relevant workers are selected with the same role/name resolution
         as :meth:`get_component_power_configs` (typed roles, explicit-name
-        fallback for untyped workers, unique generic ``type: worker`` for agg)
-        so a named untyped worker cannot be skipped while its DCD still lags.
+        fallback for untyped workers, unique generic ``type: worker`` for agg).
 
         Callers that permanently cache fields from the DGD (power caps) must
         use this snapshot rather than issuing a later GET, so an
         annotation-only generation bump cannot be adopted before workers
         have rolled onto that generation. Active rolling updates
         (``status.rollingUpdate.phase`` Pending/InProgress/Failed) also
-        block settlement so a still-annotated old DCD cannot satisfy the
-        gate while the new revision is missing.
+        block settlement because old Pods still carry the previous cap.
         """
         return await self.kube_api.wait_for_graph_deployment_ready(
             self.graph_deployment_name,

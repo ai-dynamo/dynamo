@@ -149,10 +149,14 @@ def test_resolve_project_clamp_never_patches_pods(k8s):
     assert (new_p, new_d) != (4, 4)  # proportional clamp actually ran
     assert new_p * 700 + new_d * 1200 <= 5000  # clamped to fit
 
-    # 4. HARD GATE: the connector never even instantiates a CoreV1 (Pod) client
-    #    across the whole flow — it categorically cannot patch a Pod — and the
-    #    write surface does not exist to be called.
-    core_v1_cls.assert_not_called()
+    # 4. HARD GATE: the write surface does not exist and was not called.
+    #    CoreV1Api is instantiated (it is present in the implementation for
+    #    pod-annotation startup settlement), but this flow does not exercise
+    #    settlement, so list is not asserted here. The gate proves only that
+    #    the forbidden patch surface is absent and was never invoked.
+    core_v1_cls.assert_called_once()
+    core_v1_instance = core_v1_cls.return_value
+    core_v1_instance.patch_namespaced_pod.assert_not_called()
+    core_v1_instance.patch_namespaced_pod_status.assert_not_called()
     assert not hasattr(connector.kube_api, "patch_pod_annotation")
     assert not hasattr(connector.kube_api, "remove_pod_annotation")
-    assert not hasattr(connector, "get_component_pods")
