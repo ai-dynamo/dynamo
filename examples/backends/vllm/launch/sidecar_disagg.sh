@@ -12,7 +12,7 @@ source "$SCRIPT_DIR/../../../common/gpu_utils.sh"   # build_vllm_gpu_mem_args
 # shellcheck disable=SC1091 # Resolved relative to this script at runtime.
 source "$SCRIPT_DIR/../../../common/launch_utils.sh" # print_launch_banner, wait_any_exit
 
-MODEL="Qwen/Qwen3-0.6B"
+MODEL="${MODEL:-Qwen/Qwen3-0.6B}"
 
 EXTRA_ARGS=()
 while [[ $# -gt 0 ]]; do
@@ -32,6 +32,7 @@ while [[ $# -gt 0 ]]; do
             echo "Additional options are passed to both managed vLLM engines."
             echo
             echo "Environment overrides:"
+            echo "  MODEL                           Model to serve (default: Qwen/Qwen3-0.6B)"
             echo "  DYN_HTTP_PORT                   Dynamo frontend port (default: 8000)"
             echo "  DYN_SYSTEM_PORT1                Decode sidecar system port (default: 8081)"
             echo "  DYN_SYSTEM_PORT2                Prefill sidecar system port (default: 8082)"
@@ -46,6 +47,7 @@ while [[ $# -gt 0 ]]; do
             echo "  VLLM_PREFILL_GPU                Prefill GPU index (default: 1)"
             echo "  MAX_MODEL_LEN                   Maximum model length (default: 4096)"
             echo "  MAX_CONCURRENT_SEQS             Maximum concurrent sequences (default: 2)"
+            echo "  DEFAULT_KV_CACHE_BYTES          KV cache cap when not profiling (default: 1119388000)"
             exit 0
             ;;
         *)
@@ -70,9 +72,13 @@ VLLM_PREFILL_NIXL_SIDE_CHANNEL_PORT="${VLLM_PREFILL_NIXL_SIDE_CHANNEL_PORT:-2009
 VLLM_PREFILL_KV_EVENT_PORT="${VLLM_PREFILL_KV_EVENT_PORT:-20081}"
 
 # Default KV cache cap from profiling (2x safety over min=560 MiB); ~3.8 GiB
-# peak VRAM per engine. The profiler/test framework can override this value.
-: "${_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES:=1119388000}"
+# peak VRAM per engine. The profiler/test framework takes precedence through
+# _PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES.
+DEFAULT_KV_CACHE_BYTES="${DEFAULT_KV_CACHE_BYTES:-1119388000}"
 GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
+if [[ -z "$GPU_MEM_ARGS" ]]; then
+    GPU_MEM_ARGS="--kv-cache-memory-bytes $DEFAULT_KV_CACHE_BYTES --gpu-memory-utilization 0.01"
+fi
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner "Launching vLLM Native-gRPC Sidecar Disaggregated Serving (2 GPUs)" "$MODEL" "$HTTP_PORT" \
