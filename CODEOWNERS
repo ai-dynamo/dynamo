@@ -290,10 +290,8 @@
 
 # === docs  (@ai-dynamo/dynamo-docs-codeowners) ===
 /docs/                                                                       @ai-dynamo/dynamo-docs-codeowners
-/fern/                                                                       @ai-dynamo/dynamo-docs-codeowners
 /README.md                                                                   @ai-dynamo/dynamo-docs-codeowners
 /README.zh-CN.md                                                             @ai-dynamo/dynamo-docs-codeowners
-/fern/components/                                                            @ai-dynamo/dynamo-docs-codeowners
 /examples/README.md                                                          @ai-dynamo/dynamo-docs-codeowners
 /components/README.md                                                        @ai-dynamo/dynamo-docs-codeowners
 /examples/__init__.py                                                        @ai-dynamo/dynamo-docs-codeowners
@@ -594,8 +592,8 @@
 
 # --- Shared ownership: multi-team (any one approves; wins via last-match) ---
 /.agents/                                                                    @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-agents-codeowners
-/docs/agents/                                                                @ai-dynamo/dynamo-docs-codeowners @ai-dynamo/dynamo-agents-codeowners
 /tests/deploy/                                                               @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-operator-codeowners
+/docs/fern/agents/                                                           @ai-dynamo/dynamo-docs-codeowners @ai-dynamo/dynamo-agents-codeowners
 /benchmarks/router/                                                          @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-router-codeowners
 /deploy/power-agent/                                                         @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-planner-codeowners
 /lib/llm/src/mocker/                                                         @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-performance-codeowners
@@ -612,8 +610,6 @@
 /lib/llm/src/fpm_publisher.rs                                                @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
 /lib/mocker/src/kvbm_offload/                                                @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/kvbm-logical/src/metrics/                                               @ai-dynamo/dynamo-kv-memory-codeowners @ai-dynamo/dynamo-observability-codeowners
-/docs/backends/sglang/agents.md                                              @ai-dynamo/dynamo-docs-codeowners @ai-dynamo/dynamo-agents-codeowners
-/docs/digest/agentic-inference/                                              @ai-dynamo/dynamo-docs-codeowners @ai-dynamo/dynamo-agents-codeowners
 /lib/llm/src/protocols/agents.rs                                             @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-agents-codeowners
 /lib/runtime/src/health_check.rs                                             @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
 /components/src/dynamo/vllm/omni/                                            @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-multimodal-codeowners
@@ -625,6 +621,8 @@
 /components/src/dynamo/vllm/main.py                                          @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-kv-memory-codeowners @ai-dynamo/dynamo-observability-codeowners
 /deploy/inference-gateway/ext-proc/                                          @ai-dynamo/dynamo-epp-codeowners @ai-dynamo/dynamo-router-codeowners
 /lib/kvbm-engine/src/pubsub/nats.rs                                          @ai-dynamo/dynamo-kv-memory-codeowners @ai-dynamo/dynamo-runtime-codeowners
+/docs/fern/backends/sglang/agents.md                                         @ai-dynamo/dynamo-docs-codeowners @ai-dynamo/dynamo-agents-codeowners
+/docs/fern/digest/agentic-inference/                                         @ai-dynamo/dynamo-docs-codeowners @ai-dynamo/dynamo-agents-codeowners
 /lib/backend-common/src/telemetry.rs                                         @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
 /lib/llm/src/http/service/metrics.rs                                         @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-observability-codeowners
 /lib/llm/src/protocols/openai/audios/                                        @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-multimodal-codeowners
