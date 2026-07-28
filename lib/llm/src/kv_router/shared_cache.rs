@@ -464,6 +464,8 @@ mod tests {
     use std::{collections::HashMap, ops::Range};
 
     use super::*;
+    use mockito::Server;
+    use reqwest::Url;
     use tokio::sync::watch;
 
     fn mooncake_config() -> SglangHicacheMooncakeConfig {
@@ -627,7 +629,7 @@ mod tests {
             }],
         );
         let hits = cache
-            .check_blocks(&[1, 2, 3, 4, 5, 6, 7, 8], 4)
+            .check_blocks(&[1, 2, 3, 4, 5, 6, 7, 8], 4, None)
             .await
             .unwrap();
         assert_eq!(hits.total_hits, 0);
@@ -656,7 +658,7 @@ mod tests {
             ],
         );
 
-        let hits = cache.check_blocks(&[1, 2, 3, 4], 4).await.unwrap();
+        let hits = cache.check_blocks(&[1, 2, 3, 4], 4, None).await.unwrap();
         assert_eq!(hits.total_hits, 1);
         assert!(cache.group_states.get(&group_id).is_some_and(|v| v.1));
 
@@ -669,7 +671,7 @@ mod tests {
                 group_id: Some(group_id),
             }],
         );
-        let hits = cache.check_blocks(&[1, 2, 3, 4], 4).await.unwrap();
+        let hits = cache.check_blocks(&[1, 2, 3, 4], 4, None).await.unwrap();
         assert_eq!(hits.total_hits, 0);
     }
 
