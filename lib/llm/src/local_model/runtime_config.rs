@@ -171,22 +171,16 @@ pub struct ModelRuntimeConfig {
     #[serde(default = "default_local_indexer")]
     pub enable_local_indexer: bool,
 
-    /// Literal token this worker's multimodal processor expects to see exactly
-    /// once per image in the prompt it receives.
+    /// Literal token this worker's multimodal processor expects once per image,
+    /// read from the processor the worker actually loaded.
     ///
-    /// Read from the processor the worker actually loaded, so it reflects that
-    /// engine's real contract rather than an assumption about it. Engines
-    /// disagree: SGLang's processors consume `<|media_pad|>` and repeat it to
-    /// the feature count, while vLLM consumes the checkpoint's
-    /// `<|kimi_image_placeholder|>` and builds the native media sequence itself.
+    /// Consumed only by native formatters that render images as discrete
+    /// segments (currently Kimi-K3, via `kimi_k3_formatter_for`). `None` leaves
+    /// the renderer on its own default.
     ///
-    /// `None` (the default) leaves the renderer on its own per-family default.
-    ///
-    /// Consumed only by native formatters that emit image placeholders as
-    /// discrete segments — currently Kimi-K3, via `kimi_k3_formatter_for`. No
-    /// Jinja-templated family has a way to receive it, so declaring one is
-    /// inert for every other model. Also not consulted on the `use_raw_prompt`
-    /// path, which bypasses the formatter entirely.
+    /// Only one worker's declaration takes effect per model: `mdcsum` does not
+    /// cover `runtime_config`, so a model served by workers that disagree gets
+    /// whichever card registered first.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_placeholder_token: Option<String>,
 

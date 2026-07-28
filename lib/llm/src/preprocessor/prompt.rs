@@ -188,9 +188,6 @@ pub fn prompt_formatter_from_mdc(mdc: &ModelDeploymentCard) -> Result<PromptForm
         .filter(|s| !s.is_empty());
     let display_name_lower = mdc.display_name.to_lowercase();
 
-    // `image_placeholder_token` is threaded only into native formatters that
-    // emit per-image segments. The Jinja path below has no parameter to
-    // receive it, so a worker declaring one for some other family is inert.
     if let Some(formatter) = kimi_k3_formatter_for(
         &model_type_lower,
         &display_name_lower,

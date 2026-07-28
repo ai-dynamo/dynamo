@@ -344,7 +344,7 @@ def _eagle_enabled_for(speculative_algorithm: Optional[str]) -> bool:
         return False
 
 
-def _get_image_placeholder_token(engine: sgl.Engine) -> Optional[str]:
+def _get_image_placeholder_token(engine: Optional[sgl.Engine]) -> Optional[str]:
     """Literal token this worker's multimodal processor expects, one per image.
 
     The frontend renders whatever we report here rather than assuming a token
@@ -355,18 +355,41 @@ def _get_image_placeholder_token(engine: sgl.Engine) -> Optional[str]:
 
     Reaches into SGLang internals, so it is defensive in the style of
     ``_compat.ensure_sglang_tensor_image_size``: these attributes move between
-    releases. Any miss returns None, which leaves the frontend on the
-    formatter's own default.
+    releases. Every miss returns None, leaving the frontend on the formatter's
+    own default -- but the misses are logged at different levels, because
+    "text-only worker" and "SGLang renamed the attribute we read" are
+    indistinguishable by return value and very distinguishable in consequence.
     """
     try:
+        # The EPD encode worker registers with engine=None (it owns the chat
+        # surface but delegates generation), so it can never declare. Expected,
+        # not drift.
+        if engine is None:
+            logging.debug(
+                "No engine supplied; not declaring an image placeholder token."
+            )
+            return None
+
         tokenizer_manager = getattr(engine, "tokenizer_manager", None)
+        if tokenizer_manager is None:
+            logging.warning(
+                "SGLang engine %s exposes no `tokenizer_manager`; not declaring "
+                "an image placeholder token.",
+                type(engine).__name__,
+            )
+            return None
+
         mm_processor = getattr(tokenizer_manager, "mm_processor", None)
         if mm_processor is None:
-            return None  # text-only model, or no tokenizer manager
+            logging.debug(
+                "No multimodal processor on this worker (text-only model); not "
+                "declaring an image placeholder token."
+            )
+            return None
 
         mm_tokens = getattr(mm_processor, "mm_tokens", None)
         if mm_tokens is None:
-            logging.warning(
+            logging.error(
                 "SGLang multimodal processor %s exposes no `mm_tokens`; not "
                 "declaring an image placeholder token. Multimodal requests on "
                 "models rendered by a native Dynamo formatter (Kimi-K3) will "
@@ -383,11 +406,18 @@ def _get_image_placeholder_token(engine: sgl.Engine) -> Optional[str]:
         if isinstance(image_token, str) and image_token:
             return image_token
         if isinstance(image_token, (list, tuple)):
-            logging.info(
+            logging.error(
                 "SGLang processor %s declares multiple image-token spellings "
                 "(%r); not declaring one to the frontend.",
                 type(mm_processor).__name__,
                 list(image_token),
+            )
+        else:
+            logging.error(
+                "SGLang processor %s declares no usable `image_token` (%r); not "
+                "declaring one to the frontend.",
+                type(mm_processor).__name__,
+                image_token,
             )
         return None
     except Exception as e:
@@ -398,7 +428,7 @@ def _get_image_placeholder_token(engine: sgl.Engine) -> Optional[str]:
 
 
 async def _get_runtime_config(
-    engine: sgl.Engine, server_args: ServerArgs, dynamo_args: DynamoConfig
+    engine: Optional[sgl.Engine], server_args: ServerArgs, dynamo_args: DynamoConfig
 ) -> Optional[ModelRuntimeConfig]:
     """Extract runtime configuration from SGLang engine and args.
 

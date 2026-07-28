@@ -197,13 +197,15 @@ async def test_hicache_publish_failure_preserves_core_capacity(monkeypatch, capl
 # pre-commit hook's collection env.
 
 
-def test_image_placeholder_token_is_none_for_text_only_workers():
-    """No mm_processor means no images, so nothing to declare."""
+def test_image_placeholder_token_is_none_for_text_only_workers(caplog):
+    """No mm_processor means no images, so nothing to declare -- and this is
+    expected, so it must not look like the version-drift case below."""
     from dynamo.sglang.register import _get_image_placeholder_token
 
     engine = SimpleNamespace(tokenizer_manager=SimpleNamespace(mm_processor=None))
 
     assert _get_image_placeholder_token(engine) is None
+    assert "exposes no" not in caplog.text
 
 
 def test_image_placeholder_token_comes_from_the_loaded_processor():
