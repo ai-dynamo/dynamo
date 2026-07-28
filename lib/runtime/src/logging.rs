@@ -2544,6 +2544,26 @@ pub mod tests {
     }
 
     #[test]
+    fn extension_request_span_uses_extension_target() {
+        // Core `set_default` (not `SubscriberInitExt::set_default`) to avoid
+        // installing the global `log` LogTracer, which would poison a later
+        // `logging::init()` with SetLoggerError.
+        let _guard = tracing::subscriber::set_default(tracing_subscriber::registry());
+        let req = Request::builder()
+            .uri("/test/frontend-route")
+            .body(())
+            .unwrap();
+        // The target is an operator-facing contract: `DYN_LOG=extension_span=trace`
+        // must select extension traffic and nothing else.
+        assert_eq!(
+            make_extension_request_span(&req)
+                .metadata()
+                .map(|m| m.target()),
+            Some("extension_span")
+        );
+    }
+
+    #[test]
     fn root_context_uses_otel_unsampled_decision() {
         let provider = SdkTracerProvider::builder()
             .with_sampler(opentelemetry_sdk::trace::Sampler::AlwaysOff)
