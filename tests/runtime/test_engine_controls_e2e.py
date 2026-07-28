@@ -5,7 +5,6 @@ import asyncio
 import dataclasses
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import Mock
 
 import httpx
 import pytest
@@ -77,35 +76,30 @@ async def test_engine_routes_http_contract(
         decode: PhaseConfig
         prefill: PhaseConfig
 
-    async def get_internal_state() -> list[dict[str, Any]]:
-        return [
-            {
-                "dp_rank": 0,
-                "tp_size": 4,
-                "pp_size": 2,
-                "dp_size": 8,
-                "cuda_graph_config": CudaGraphConfig(
-                    decode=PhaseConfig("full", 32, [1, 2, 4, 8], "eager"),
-                    prefill=PhaseConfig(
-                        "breakable", None, [1], "eager", full_prefill_max_req=4
-                    ),
+    def get_server_info() -> dict[str, Any]:
+        return {
+            "dp_rank": 0,
+            "tp_size": 4,
+            "pp_size": 2,
+            "dp_size": 8,
+            "cuda_graph_config": CudaGraphConfig(
+                decode=PhaseConfig("full", 32, [1, 2, 4, 8], "eager"),
+                prefill=PhaseConfig(
+                    "breakable", None, [1], "eager", full_prefill_max_req=4
                 ),
-                "tp_rank_ids": (0, 1, 2, 3),
-                "active_batch_ids": {7, 9},
-            }
-        ]
+            ),
+            "tp_rank_ids": (0, 1, 2, 3),
+            "active_batch_ids": {7, 9},
+        }
 
     engine = SimpleNamespace(
-        tokenizer_manager=SimpleNamespace(
-            auto_create_handle_loop=Mock(),
-            get_internal_state=get_internal_state,
-        )
+        loop=asyncio.get_running_loop(),
+        tokenizer_manager=SimpleNamespace(),
+        get_server_info=get_server_info,
     )
     handler = dict(
-        resolve_configured_engine_routes(
-            engine, ["internal_state=get_internal_state:tm"]
-        )
-    )["internal_state"]
+        resolve_configured_engine_routes(engine, ["server_info=get_server_info"])
+    )["server_info"]
 
     # Keep this local-only test independent of ambient CI NATS_SERVER settings.
     runtime = DistributedRuntime(
@@ -113,7 +107,7 @@ async def test_engine_routes_http_contract(
     )
     runtime.register_engine_route("control/sleep", sleep_control)
     runtime.register_engine_route("configured", configured_route)
-    runtime.register_engine_route("internal_state", handler)
+    runtime.register_engine_route("server_info", handler)
 
     try:
         base_url = f"http://127.0.0.1:{system_port}/engine"
@@ -180,10 +174,11 @@ async def test_engine_routes_http_contract(
                 assert response.json()["error"] == "Route not found"
 
             response = await _request_with_retry(
-                client, "POST", f"{base_url}/internal_state"
+                client, "POST", f"{base_url}/server_info"
             )
             assert response.status_code == 200
-            state = response.json()["result"][0]
+            state = response.json()
+            assert "result" not in state
             assert state["tp_size"] == 4
             assert state["pp_size"] == 2
             assert state["dp_size"] == 8

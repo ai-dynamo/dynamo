@@ -7,6 +7,7 @@ import argparse
 import asyncio
 import dataclasses
 import json
+import threading
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -123,7 +124,12 @@ class FakeEngine:
         return {"async": value}
 
     async def _server_info(self):
-        return {"version": "test"}
+        return {
+            "tp_size": 4,
+            "pp_size": 2,
+            "dp_size": 1,
+            "disaggregation_mode": "null",
+        }
 
     def get_server_info(self):
         return self.loop.run_until_complete(self._server_info())
@@ -265,7 +271,14 @@ async def test_compatibility_engine_methods_dispatch():
         ],
     )
 
-    assert await routes["server_info"]({}) == {"version": "test"}
+    server_info = await routes["server_info"]({})
+    assert server_info == {
+        "tp_size": 4,
+        "pp_size": 2,
+        "dp_size": 1,
+        "disaggregation_mode": "null",
+    }
+    assert "result" not in server_info
     assert await routes["flush_cache"]({}) == {"timeout_s": None}
     assert await routes["init_weights_update_group"]({"group_name": "trainer"}) == {
         "success": True,
@@ -307,7 +320,12 @@ async def test_sync_engine_wrapper_bridges_to_the_running_owner_loop():
     engine = FakeEngine(asyncio.get_running_loop())
     routes = _resolved_handlers(engine, ["server_info=get_server_info"])
 
-    assert await routes["server_info"]({}) == {"version": "test"}
+    assert await routes["server_info"]({}) == {
+        "tp_size": 4,
+        "pp_size": 2,
+        "dp_size": 1,
+        "disaggregation_mode": "null",
+    }
     assert engine.loop is asyncio.get_running_loop()
 
 
@@ -316,6 +334,59 @@ async def test_async_engine_method_is_awaited():
     routes = _resolved_handlers(FakeEngine(), ["custom=async_custom_method"])
 
     assert await routes["custom"]({"value": 5}) == {"async": 5}
+
+
+@pytest.mark.asyncio
+async def test_cancelled_sync_engine_route_keeps_engine_routes_serialized():
+    owner_loop = asyncio.get_running_loop()
+    sync_started = threading.Event()
+    release_sync = threading.Event()
+    async_engine_started = asyncio.Event()
+
+    class ConcurrentEngine(FakeEngine):
+        def blocking_method(self):
+            sync_started.set()
+            if not release_sync.wait(timeout=2):
+                raise TimeoutError("test did not release sync Engine method")
+            return {"sync": "done"}
+
+        async def observe_loop(self):
+            async_engine_started.set()
+            return {"loop_restored": self.loop is owner_loop}
+
+    engine = ConcurrentEngine(owner_loop)
+    routes = _resolved_handlers(
+        engine,
+        [
+            "blocking=blocking_method",
+            "observe=observe_loop",
+            "tm_flush=flush_cache:tm",
+        ],
+    )
+    sync_task = asyncio.create_task(routes["blocking"]({}))
+    async with asyncio.timeout(1):
+        while not sync_started.is_set():
+            await asyncio.sleep(0.001)
+
+    sync_task.cancel()
+    async_engine_task = asyncio.create_task(routes["observe"]({}))
+    try:
+        assert await asyncio.wait_for(routes["tm_flush"]({}), timeout=1) == {
+            "timeout_s": None
+        }
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(async_engine_started.wait(), timeout=0.1)
+    finally:
+        release_sync.set()
+        sync_outcome, async_engine_outcome = await asyncio.gather(
+            sync_task,
+            async_engine_task,
+            return_exceptions=True,
+        )
+
+    assert isinstance(sync_outcome, asyncio.CancelledError)
+    assert async_engine_outcome == {"loop_restored": True}
+    assert engine.loop is owner_loop
 
 
 @pytest.mark.asyncio

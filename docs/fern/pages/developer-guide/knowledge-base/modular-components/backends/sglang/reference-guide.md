@@ -142,7 +142,7 @@ SGLang workers expose operational endpoints via Dynamo's system server:
 
 ### Configurable SGLang Method Routes
 
-Set `--engine-route` or `DYN_SGLANG_ENGINE_ROUTES` to expose additional SGLang methods without changing Dynamo. Each descriptor uses this grammar:
+Set `--engine-route` or `DYN_SGLANG_ENGINE_ROUTES` to expose additional SGLang methods on a worker's system server without changing Dynamo. Each descriptor uses this grammar:
 
 ```text
 <path>[=<method>][:engine|tm]
@@ -153,14 +153,20 @@ Set `--engine-route` or `DYN_SGLANG_ENGINE_ROUTES` to expose additional SGLang m
 - The target defaults to the `sgl.Engine` instance. Set `:tm` to target its tokenizer manager.
 - Repeat `--engine-route` for multiple routes. Separate multiple `DYN_SGLANG_ENGINE_ROUTES` descriptors with whitespace.
 
-For example, this allowlist exposes common reinforcement learning (RL) controls and server information:
+For streaming rollouts with NVIDIA Collective Communications Library (NCCL) weight updates, expose this allowlist:
 
 ```bash
-export DYN_SGLANG_ENGINE_ROUTES="server_info=get_server_info flush_cache pause_generation:tm continue_generation:tm init_weights_update_group update_weights_from_distributed:tm destroy_weights_update_group"
+export DYN_SGLANG_ENGINE_ROUTES="server_info=get_server_info pause_generation:tm flush_cache init_weights_update_group update_weights_from_distributed:tm destroy_weights_update_group continue_generation:tm"
 python -m dynamo.sglang --model-path Qwen/Qwen3-0.6B
 ```
 
+Call these routes on each worker's system-server address. A control client can use `/engine` as its `engine_api_prefix`; native SGLang uses an empty prefix. Keep rollout generation on the Dynamo frontend's `/generate` endpoint.
+
+SGLang 0.5.15 exposes `get_internal_state` only on the tokenizer manager, where it returns a list with one state dictionary per data-parallel rank. The Engine `get_server_info` adapter merges the server arguments and scheduler topology into the top-level dictionary expected by control clients, so `/engine/server_info` returns that dictionary directly without a `result` envelope.
+
 The `update_weights_from_distributed:tm` form accepts SGLang's tokenizer-manager request schema, including `weight_version`. The public SGLang Engine wrapper omits that field. This configurable `/engine/update_weights_from_distributed` route is separate from Dynamo's fixed `/engine/control/update_weights_from_distributed` route.
+
+If Slime fault tolerance is enabled and the installed SGLang runtime provides matching Engine or tokenizer-manager callables, add `post_process_weights` or `health_generate` to the allowlist. Omit them otherwise. This rollout configuration does not expose disk or tensor weight updates, profiling, memory offload, or weight-checker APIs.
 
 Configured Engine methods receive JSON object keys as keyword arguments. For tokenizer-manager methods with an annotated dataclass or msgspec request, Dynamo constructs the request object from the JSON body and supplies `None` for an HTTP request parameter when the SGLang signature requires one. Async methods are awaited, sync Engine wrappers run outside the server loop, and nested results are converted to JSON. Empty request bodies become `{}`. Configured routes accept the ordinary HTTP methods handled by the Dynamo system server.
 

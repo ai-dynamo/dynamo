@@ -863,31 +863,28 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
             self.engine,
             getattr(getattr(self.config, "dynamo_args", None), "engine_routes", None),
         )
+        built_in_routes = {
+            "control/start_profile": self.start_profile,
+            "control/stop_profile": self.stop_profile,
+            "control/release_memory_occupation": self.release_memory_occupation,
+            "control/resume_memory_occupation": self.resume_memory_occupation,
+            "control/update_weights_from_disk": self.update_weights_from_disk,
+            "control/update_weights_from_tensor": self.update_weights_from_tensor,
+            "control/update_weights_from_distributed": (
+                self.update_weights_from_distributed
+            ),
+            "control/update_weights_from_ipc": self.update_weights_from_ipc,
+            "control/update_weight_version": self.update_weight_version,
+        }
+        for path, _ in configured_routes:
+            if path in built_in_routes:
+                raise ValueError(
+                    f"Configured SGLang engine route /engine/{path} collides "
+                    "with a built-in route"
+                )
 
-        runtime.register_engine_route("control/start_profile", self.start_profile)
-        runtime.register_engine_route("control/stop_profile", self.stop_profile)
-        runtime.register_engine_route(
-            "control/release_memory_occupation", self.release_memory_occupation
-        )
-        runtime.register_engine_route(
-            "control/resume_memory_occupation", self.resume_memory_occupation
-        )
-        runtime.register_engine_route(
-            "control/update_weights_from_disk", self.update_weights_from_disk
-        )
-        runtime.register_engine_route(
-            "control/update_weights_from_tensor", self.update_weights_from_tensor
-        )
-        runtime.register_engine_route(
-            "control/update_weights_from_distributed",
-            self.update_weights_from_distributed,
-        )
-        runtime.register_engine_route(
-            "control/update_weights_from_ipc", self.update_weights_from_ipc
-        )
-        runtime.register_engine_route(
-            "control/update_weight_version", self.update_weight_version
-        )
+        for path, handler in built_in_routes.items():
+            runtime.register_engine_route(path, handler)
         for path, handler in configured_routes:
             runtime.register_engine_route(path, handler)
 

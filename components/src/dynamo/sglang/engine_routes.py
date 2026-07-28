@@ -317,11 +317,18 @@ async def _run_in_thread(
         daemon=True,
     )
     thread.start()
+    cancellation: asyncio.CancelledError | None = None
     while thread.is_alive():
-        await asyncio.sleep(0.01)
+        try:
+            await asyncio.sleep(0.01)
+        except asyncio.CancelledError as error:
+            if cancellation is None:
+                cancellation = error
     thread.join()
     if not result.done():
         raise RuntimeError("SGLang engine route thread terminated without a result")
+    if cancellation is not None:
+        raise cancellation
     return result.result()
 
 
@@ -407,13 +414,13 @@ class _ConfiguredEngineRoute:
         engine: Any,
         target: Any,
         method: Callable[..., Any],
-        engine_sync_lock: asyncio.Lock,
+        engine_state_lock: asyncio.Lock,
     ) -> None:
         self.descriptor = descriptor
         self._engine = engine
         self._target = target
         self._method = method
-        self._engine_sync_lock = engine_sync_lock
+        self._engine_state_lock = engine_state_lock
         self._tm_call_plan = (
             _TokenizerManagerCallPlan.from_method(method, target)
             if descriptor.target == "tm"
@@ -437,6 +444,15 @@ class _ConfiguredEngineRoute:
                 auto_create_handle_loop()
             args, kwargs = self._tm_call_plan.prepare(body)
 
+        if self.descriptor.target == "engine":
+            async with self._engine_state_lock:
+                result = await self._invoke(args, kwargs)
+        else:
+            result = await self._invoke(args, kwargs)
+
+        return normalize_engine_route_result(result)
+
+    async def _invoke(self, args: list[Any], kwargs: dict[str, Any]) -> Any:
         if inspect.iscoroutinefunction(self._method):
             result = await self._method(*args, **kwargs)
         elif self.descriptor.target == "engine":
@@ -446,17 +462,16 @@ class _ConfiguredEngineRoute:
 
         if inspect.isawaitable(result):
             result = await result
-        return normalize_engine_route_result(result)
+        return result
 
     async def _call_sync_engine(self, args: list[Any], kwargs: dict[str, Any]) -> Any:
         owner_loop = asyncio.get_running_loop()
-        async with self._engine_sync_lock:
-            return await _run_in_thread(
-                self._call_sync_engine_in_thread,
-                args,
-                kwargs,
-                owner_loop,
-            )
+        return await _run_in_thread(
+            self._call_sync_engine_in_thread,
+            args,
+            kwargs,
+            owner_loop,
+        )
 
     def _call_sync_engine_in_thread(
         self,
@@ -486,7 +501,7 @@ def resolve_configured_engine_routes(
     """Resolve every configured route and callable without registering any."""
 
     descriptors = parse_engine_route_descriptors(values)
-    engine_sync_lock = asyncio.Lock()
+    engine_state_lock = asyncio.Lock()
     resolved: list[
         tuple[str, Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]]
     ] = []
@@ -522,7 +537,7 @@ def resolve_configured_engine_routes(
                 engine=engine,
                 target=target,
                 method=method,
-                engine_sync_lock=engine_sync_lock,
+                engine_state_lock=engine_state_lock,
             )
         except ValueError as error:
             raise ValueError(
