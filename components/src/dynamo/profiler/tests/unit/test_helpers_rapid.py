@@ -262,7 +262,7 @@ class TestRunDefaultSim:
         """Build a fake _execute_tasks return value."""
         best_df = pd.DataFrame([{"tp(p)": 1}])
         latencies = {"ttft": ttft, "tpot": tpot, "request_latency": 0.0}
-        return chosen, {chosen: best_df}, None, None, {chosen: latencies}
+        return chosen, {chosen: best_df}, None, None, {chosen: latencies}, {}
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
@@ -444,6 +444,7 @@ class TestRunDefaultSimForceDisagg:
             None,
             None,
             {"agg": latencies, "disagg": latencies},
+            {},
         )
 
     @pytest.mark.pre_merge
@@ -477,6 +478,6 @@ class TestRunDefaultSimForceDisagg:
         dgdr = _make_dgdr(features=FeaturesSpec(mocker=MockerSpec(enabled=True)))
         agg_df = pd.DataFrame([{"tp(p)": 1}])
         latencies = {"ttft": 100.0, "tpot": 10.0, "request_latency": 0.0}
-        agg_only = ("agg", {"agg": agg_df}, None, None, {"agg": latencies})
+        agg_only = ("agg", {"agg": agg_df}, None, None, {"agg": latencies}, {})
         result = self._call_default_sim(dgdr, agg_only)
         assert result["chosen_exp"] == "agg"

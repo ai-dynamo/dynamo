@@ -171,10 +171,10 @@ class TestRapidResolvesModelPath:
 
     @staticmethod
     def _execute_return(chosen="disagg"):
-        """A fake _execute_tasks return value (chosen, configs, _, _, latencies)."""
+        """A fake _execute_tasks return value."""
         best_df = pd.DataFrame([{"tp(p)": 1}])
         latencies = {"ttft": 100.0, "tpot": 10.0, "request_latency": 0.0}
-        return chosen, {chosen: best_df}, None, None, {chosen: latencies}
+        return chosen, {chosen: best_df}, None, None, {chosen: latencies}, {}
 
     def test_default_sim_uses_local_path_when_pvc_mounted(self, tmp_path):
         """_run_default_sim -> build_default_tasks gets the local PVC path."""

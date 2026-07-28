@@ -81,9 +81,7 @@ sglang = [
 ]
 
 mocker = [
-    # Published wheel metadata must remain index-resolvable. Container builds
-    # provide the source-pinned wheel through their wheelhouse.
-    "aiconfigurator-core==0.11.0",
+    "aiconfigurator-core==0.11.0.dev20260728",
 ]
 
 [project.entry-points.pytest11]
