@@ -13,10 +13,9 @@ use crate::common::protocols::{
     DirectRequest, FpmPublisher, KvEventPublishers, MockEngineArgs, OutputSignal,
 };
 use crate::scheduler::{
-    AdmissionEvent, LiveBoundaryCore, LivePassExecution, LiveSchedulerState,
-    SchedulerCancellationEnvelope, SchedulerCommand, SchedulerCommandEffects,
-    SchedulerCommandEnvelope, SchedulerHandle, SchedulerLifecycleEvent, SchedulerOutputSender,
-    spawn_live_scheduler,
+    LiveBoundaryCore, LivePassExecution, LiveSchedulerState, SchedulerCancellationEnvelope,
+    SchedulerCommand, SchedulerCommandEffects, SchedulerCommandEnvelope, SchedulerEventSender,
+    SchedulerHandle, SchedulerLifecycleEvent, SchedulerOutputSender, spawn_live_scheduler,
 };
 
 use super::core::VllmCore;
@@ -105,58 +104,41 @@ impl Scheduler {
         cancellation_token: Option<CancellationToken>,
         fpm_publisher: FpmPublisher,
     ) -> Self {
-        Self::new_internal(
+        Self::new_with_event_sender(
             args,
             dp_rank,
-            output_tx,
+            output_tx.map(SchedulerEventSender::from),
             kv_event_publishers,
             cancellation_token,
-            None,
             fpm_publisher,
         )
     }
 
-    pub(crate) fn new_with_admission(
+    pub(crate) fn new_with_event_sender(
         args: MockEngineArgs,
         dp_rank: u32,
-        output_tx: Option<mpsc::UnboundedSender<Vec<OutputSignal>>>,
+        event_tx: Option<SchedulerEventSender>,
         kv_event_publishers: KvEventPublishers,
         cancellation_token: Option<CancellationToken>,
-        admission_tx: Option<mpsc::UnboundedSender<AdmissionEvent>>,
-        fpm_publisher: FpmPublisher,
-    ) -> Self {
-        Self::new_internal(
-            args,
-            dp_rank,
-            output_tx.map(SchedulerOutputSender::from),
-            kv_event_publishers,
-            cancellation_token,
-            admission_tx,
-            fpm_publisher,
-        )
-    }
-
-    fn new_internal(
-        args: MockEngineArgs,
-        dp_rank: u32,
-        output_tx: Option<SchedulerOutputSender>,
-        kv_event_publishers: KvEventPublishers,
-        cancellation_token: Option<CancellationToken>,
-        admission_tx: Option<mpsc::UnboundedSender<AdmissionEvent>>,
         fpm_publisher: FpmPublisher,
     ) -> Self {
         Self {
             inner: spawn_live_scheduler(
                 args,
                 dp_rank,
-                output_tx,
+                event_tx,
                 kv_event_publishers,
                 cancellation_token,
-                admission_tx,
                 fpm_publisher,
                 VllmCore::new_with_sink,
             ),
         }
+    }
+
+    pub(crate) fn take_actor_handle(
+        &mut self,
+    ) -> Option<tokio::task::JoinHandle<anyhow::Result<()>>> {
+        self.inner.take_actor_handle()
     }
 }
 

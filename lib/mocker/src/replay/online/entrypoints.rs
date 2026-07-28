@@ -5,15 +5,23 @@ use std::collections::VecDeque;
 
 use anyhow::{Result, anyhow, bail};
 use dynamo_kv_router::config::KvRouterConfig;
+use tokio_util::sync::CancellationToken;
 
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
-use crate::loadgen::{Trace, WorkloadDriver};
+use crate::loadgen::{AgenticTrace, Trace, WorkloadDriver};
 use crate::replay::{
-    ReplayPrefillLoadEstimator, ReplayRouterMode, TraceSimulationReport, normalize_trace_requests,
+    ReplayPrefillLoadEstimator, ReplayRouterMode, SlaThresholds, TraceSimulationReport,
+    normalize_trace_requests,
 };
 
 use super::live_runtime::LiveRuntime;
 use super::state::{LiveReplayMode, LiveRuntimeStats};
+
+#[derive(Clone, Copy, Default)]
+pub(crate) struct OnlineReplayOptions {
+    pub(crate) record_per_request: bool,
+    pub(crate) sla: SlaThresholds,
+}
 
 fn total_turns(trace: &Trace) -> usize {
     trace
@@ -31,6 +39,8 @@ fn run_live_runtime(
     num_workers: usize,
     mode: LiveReplayMode,
     router_mode: ReplayRouterMode,
+    options: OnlineReplayOptions,
+    cancel: CancellationToken,
 ) -> Result<(TraceSimulationReport, LiveRuntimeStats)> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -46,6 +56,8 @@ fn run_live_runtime(
             num_workers,
             mode,
             router_mode,
+            options,
+            cancel,
         )?
         .run()
         .await
@@ -62,6 +74,8 @@ fn run_live_workload_runtime(
     num_workers: usize,
     mode: LiveReplayMode,
     router_mode: ReplayRouterMode,
+    options: OnlineReplayOptions,
+    cancel: CancellationToken,
 ) -> Result<(TraceSimulationReport, LiveRuntimeStats)> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -77,6 +91,8 @@ fn run_live_workload_runtime(
             num_workers,
             mode,
             router_mode,
+            options,
+            cancel,
         )?
         .run_workload(driver, total_turns)
         .await
@@ -91,6 +107,7 @@ pub(crate) fn simulate_trace_requests(
     num_workers: usize,
     arrival_speedup_ratio: f64,
     router_mode: ReplayRouterMode,
+    options: OnlineReplayOptions,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
     let pending = normalize_trace_requests(requests, arrival_speedup_ratio)?;
@@ -102,6 +119,8 @@ pub(crate) fn simulate_trace_requests(
         num_workers,
         LiveReplayMode::Trace,
         router_mode,
+        options,
+        CancellationToken::new(),
     )?;
     Ok(report)
 }
@@ -114,6 +133,7 @@ pub(crate) fn simulate_concurrency_requests(
     max_in_flight: usize,
     num_workers: usize,
     router_mode: ReplayRouterMode,
+    options: OnlineReplayOptions,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
     if requests.is_empty() {
@@ -129,6 +149,8 @@ pub(crate) fn simulate_concurrency_requests(
         num_workers,
         LiveReplayMode::Concurrency { max_in_flight },
         router_mode,
+        options,
+        CancellationToken::new(),
     )?;
     Ok(report)
 }
@@ -140,19 +162,27 @@ pub(crate) fn simulate_trace_workload(
     trace: Trace,
     num_workers: usize,
     router_mode: ReplayRouterMode,
+    emit_session_metadata: bool,
+    options: OnlineReplayOptions,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
     let engine_block_size = args.block_size;
     let total_turns = total_turns(&trace);
+    let mut driver = trace.into_trace_driver_with_block_size(engine_block_size)?;
+    if !emit_session_metadata {
+        driver = driver.without_session_metadata();
+    }
     let (report, _) = run_live_workload_runtime(
         args,
         router_config,
         prefill_load_estimator,
-        trace.into_trace_driver_with_block_size(engine_block_size)?,
+        driver,
         total_turns,
         num_workers,
         LiveReplayMode::Trace,
         router_mode,
+        options,
+        CancellationToken::new(),
     )?;
     Ok(report)
 }
@@ -165,6 +195,7 @@ pub(crate) fn simulate_concurrency_workload(
     max_in_flight: usize,
     num_workers: usize,
     router_mode: ReplayRouterMode,
+    options: OnlineReplayOptions,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
     let engine_block_size = args.block_size;
@@ -178,6 +209,35 @@ pub(crate) fn simulate_concurrency_workload(
         num_workers,
         LiveReplayMode::Concurrency { max_in_flight },
         router_mode,
+        options,
+        CancellationToken::new(),
+    )?;
+    Ok(report)
+}
+
+pub(crate) fn simulate_agentic_trace_workload(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace: AgenticTrace,
+    num_workers: usize,
+    router_mode: ReplayRouterMode,
+    options: OnlineReplayOptions,
+) -> Result<TraceSimulationReport> {
+    let args = args.normalized()?;
+    let engine_block_size = args.block_size;
+    let total_turns = trace.turns.len();
+    let (report, _) = run_live_workload_runtime(
+        args,
+        router_config,
+        prefill_load_estimator,
+        trace.into_trace_driver_with_block_size(engine_block_size)?,
+        total_turns,
+        num_workers,
+        LiveReplayMode::Trace,
+        router_mode,
+        options,
+        CancellationToken::new(),
     )?;
     Ok(report)
 }
@@ -200,6 +260,8 @@ pub(super) fn simulate_trace_requests_with_stats(
         num_workers,
         LiveReplayMode::Trace,
         router_mode,
+        OnlineReplayOptions::default(),
+        CancellationToken::new(),
     )
 }
 
@@ -221,6 +283,8 @@ pub(super) fn simulate_concurrency_requests_with_stats(
         num_workers,
         LiveReplayMode::Concurrency { max_in_flight },
         router_mode,
+        OnlineReplayOptions::default(),
+        CancellationToken::new(),
     )
 }
 
@@ -243,6 +307,8 @@ pub(super) fn simulate_trace_workload_with_stats(
         num_workers,
         LiveReplayMode::Trace,
         router_mode,
+        OnlineReplayOptions::default(),
+        CancellationToken::new(),
     )
 }
 
@@ -266,5 +332,7 @@ pub(super) fn simulate_concurrency_workload_with_stats(
         num_workers,
         LiveReplayMode::Concurrency { max_in_flight },
         router_mode,
+        OnlineReplayOptions::default(),
+        CancellationToken::new(),
     )
 }
