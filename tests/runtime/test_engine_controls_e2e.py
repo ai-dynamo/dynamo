@@ -2,7 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import dataclasses
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import Mock
 
 import httpx
 import pytest
@@ -10,6 +13,7 @@ import pytest
 pytest.importorskip("dynamo._core", reason="dynamo Rust Python bindings are required")
 
 from dynamo.runtime import DistributedRuntime  # noqa: E402
+from dynamo.sglang.engine_routes import resolve_configured_engine_routes  # noqa: E402
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -19,13 +23,20 @@ pytestmark = [
 ]
 
 
-async def _post_with_retry(
-    client: httpx.AsyncClient, url: str, body: dict[str, Any]
+_NO_BODY = object()
+
+
+async def _request_with_retry(
+    client: httpx.AsyncClient,
+    method: str,
+    url: str,
+    body: object = _NO_BODY,
 ) -> httpx.Response:
     last_error: Exception | None = None
     for _ in range(30):
         try:
-            return await client.post(url, json=body)
+            kwargs = {} if body is _NO_BODY else {"json": body}
+            return await client.request(method, url, **kwargs)
         except httpx.ConnectError as exc:
             last_error = exc
             await asyncio.sleep(0.1)
@@ -34,41 +45,165 @@ async def _post_with_retry(
 
 
 @pytest.mark.asyncio
-async def test_engine_control_route_invokes_registered_callback(
+@pytest.mark.timeout(30)
+async def test_engine_routes_http_contract(
     monkeypatch: pytest.MonkeyPatch, dynamo_dynamic_ports
 ):
     system_port = dynamo_dynamic_ports.system_ports[0]
     monkeypatch.setenv("DYN_SYSTEM_PORT", str(system_port))
 
-    # Keep this local-only test independent of ambient CI NATS_SERVER settings.
-    runtime = DistributedRuntime(
-        asyncio.get_running_loop(),
-        "mem",
-        "tcp",
-        event_plane="zmq",
-    )
-    calls: list[dict[str, Any]] = []
+    control_calls: list[dict[str, Any]] = []
 
     async def sleep_control(body: dict[str, Any]) -> dict[str, Any]:
-        calls.append(body)
+        control_calls.append(body)
         return {"status": "ok", "control": "sleep", "body": body}
 
+    configured_calls: list[dict[str, Any]] = []
+
+    async def configured_route(body: dict[str, Any]) -> dict[str, Any]:
+        configured_calls.append(body)
+        return {"body": body}
+
+    @dataclasses.dataclass
+    class PhaseConfig:
+        backend: str
+        max_bs: int | None
+        bs: list[int] | None
+        tc_compiler: str
+        full_prefill_max_req: int | None = None
+
+    @dataclasses.dataclass
+    class CudaGraphConfig:
+        decode: PhaseConfig
+        prefill: PhaseConfig
+
+    async def get_internal_state() -> list[dict[str, Any]]:
+        return [
+            {
+                "dp_rank": 0,
+                "tp_size": 4,
+                "pp_size": 2,
+                "dp_size": 8,
+                "cuda_graph_config": CudaGraphConfig(
+                    decode=PhaseConfig("full", 32, [1, 2, 4, 8], "eager"),
+                    prefill=PhaseConfig(
+                        "breakable", None, [1], "eager", full_prefill_max_req=4
+                    ),
+                ),
+                "tp_rank_ids": (0, 1, 2, 3),
+                "active_batch_ids": {7, 9},
+            }
+        ]
+
+    engine = SimpleNamespace(
+        tokenizer_manager=SimpleNamespace(
+            auto_create_handle_loop=Mock(),
+            get_internal_state=get_internal_state,
+        )
+    )
+    handler = dict(
+        resolve_configured_engine_routes(
+            engine, ["internal_state=get_internal_state:tm"]
+        )
+    )["internal_state"]
+
+    # Keep this local-only test independent of ambient CI NATS_SERVER settings.
+    runtime = DistributedRuntime(
+        asyncio.get_running_loop(), "mem", "tcp", event_plane="zmq"
+    )
     runtime.register_engine_route("control/sleep", sleep_control)
+    runtime.register_engine_route("configured", configured_route)
+    runtime.register_engine_route("internal_state", handler)
 
     try:
+        base_url = f"http://127.0.0.1:{system_port}/engine"
         async with httpx.AsyncClient(timeout=5.0) as client:
-            response = await _post_with_retry(
+            response = await _request_with_retry(
                 client,
-                f"http://127.0.0.1:{system_port}/engine/control/sleep",
+                "POST",
+                f"{base_url}/control/sleep",
                 {"level": 1},
             )
+            assert response.status_code == 200
+            assert response.json() == {
+                "status": "ok",
+                "control": "sleep",
+                "body": {"level": 1},
+            }
+            assert control_calls == [{"level": 1}]
 
-        assert response.status_code == 200
-        assert response.json() == {
-            "status": "ok",
-            "control": "sleep",
-            "body": {"level": 1},
-        }
-        assert calls == [{"level": 1}]
+            for method in (
+                "GET",
+                "POST",
+                "PUT",
+                "PATCH",
+                "DELETE",
+                "OPTIONS",
+                "HEAD",
+                "TRACE",
+            ):
+                response = await _request_with_retry(
+                    client, method, f"{base_url}/configured"
+                )
+                assert response.status_code == 200
+                assert configured_calls[-1] == {}
+                if method != "HEAD":
+                    assert response.json() == {"body": {}}
+
+            response = await _request_with_retry(
+                client,
+                "PUT",
+                f"{base_url}/configured",
+                {"value": 3},
+            )
+            assert response.status_code == 200
+            assert response.json() == {"body": {"value": 3}}
+            assert configured_calls[-1] == {"value": 3}
+
+            response = await _request_with_retry(
+                client,
+                "POST",
+                f"{base_url}/configured",
+                {"method": "dangerous"},
+            )
+            assert response.status_code == 200
+            assert response.json() == {"body": {"method": "dangerous"}}
+
+            for unconfigured in ("call_tokenizer_manager", "dangerous"):
+                response = await _request_with_retry(
+                    client,
+                    "POST",
+                    f"{base_url}/{unconfigured}",
+                    {"method": unconfigured},
+                )
+                assert response.status_code == 404
+                assert response.json()["error"] == "Route not found"
+
+            response = await _request_with_retry(
+                client, "POST", f"{base_url}/internal_state"
+            )
+            assert response.status_code == 200
+            state = response.json()["result"][0]
+            assert state["tp_size"] == 4
+            assert state["pp_size"] == 2
+            assert state["dp_size"] == 8
+            assert state["cuda_graph_config"] == {
+                "decode": {
+                    "backend": "full",
+                    "max_bs": 32,
+                    "bs": [1, 2, 4, 8],
+                    "tc_compiler": "eager",
+                    "full_prefill_max_req": None,
+                },
+                "prefill": {
+                    "backend": "breakable",
+                    "max_bs": None,
+                    "bs": [1],
+                    "tc_compiler": "eager",
+                    "full_prefill_max_req": 4,
+                },
+            }
+            assert state["tp_rank_ids"] == [0, 1, 2, 3]
+            assert set(state["active_batch_ids"]) == {7, 9}
     finally:
         runtime.shutdown()
