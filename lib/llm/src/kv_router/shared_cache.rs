@@ -33,6 +33,7 @@ use dynamo_runtime::{component::Component, traits::DistributedRuntimeProvider};
 
 use crate::{
     discovery::RuntimeConfigWatch,
+    kv_router::metrics::RoutingOverheadMetrics,
     local_model::runtime_config::ModelRuntimeConfig,
     utils::zmq::{connect_sub_socket, multipart_message},
 };
@@ -56,7 +57,7 @@ struct SglangHicacheMooncakeConfig {
     kv_events_endpoint: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct MooncakeObjectEvent {
     event_type: String,
     #[serde(default)]
@@ -67,6 +68,8 @@ struct MooncakeObjectEvent {
     group_id: Option<String>,
 }
 
+/// Mooncake KV publisher payload: `(timestamp_ms, events, dp_rank)` after the empty-topic and
+/// big-endian sequence ZMQ frames.
 type MooncakeEventBatch = (i64, Vec<MooncakeObjectEvent>, u32);
 
 #[derive(Debug, Clone, Copy)]
@@ -125,6 +128,11 @@ impl HicacheSharedKvCache {
         Some(first.clone())
     }
 
+    fn kv_events_endpoint(&self) -> Option<String> {
+        self.resolve_mooncake_config()
+            .and_then(|config| config.kv_events_endpoint)
+    }
+
     fn apply_batch(&self, sequence: u64, events: Vec<MooncakeObjectEvent>) {
         let has_previous = self.has_sequence.swap(true, Ordering::AcqRel);
         let previous = self.last_sequence.swap(sequence, Ordering::AcqRel);
@@ -180,30 +188,34 @@ impl HicacheSharedKvCache {
         self.has_sequence.store(false, Ordering::Release);
     }
 
-    async fn run_subscriber(mut self, cancellation_token: CancellationToken) {
-        let endpoint = loop {
-            if let Some(endpoint) = self
-                .resolve_mooncake_config()
-                .and_then(|config| config.kv_events_endpoint)
-            {
-                break endpoint;
-            }
+    fn record_subscriber_error(&self) {
+        if let Some(metrics) = RoutingOverheadMetrics::get() {
+            metrics.inc_shared_cache_errors();
+        }
+    }
 
-            tokio::select! {
-                _ = cancellation_token.cancelled() => return,
-                result = self.runtime_configs.changed() => {
-                    if result.is_err() {
-                        return;
+    async fn run_subscriber(mut self, cancellation_token: CancellationToken) {
+        loop {
+            let endpoint = loop {
+                if let Some(endpoint) = self.kv_events_endpoint() {
+                    break endpoint;
+                }
+
+                tokio::select! {
+                    _ = cancellation_token.cancelled() => return,
+                    result = self.runtime_configs.changed() => {
+                        if result.is_err() {
+                            return;
+                        }
                     }
                 }
-            }
-        };
+            };
 
-        loop {
             self.clear();
             let mut socket = match connect_sub_socket(&endpoint, None).await {
                 Ok(socket) => socket,
                 Err(error) => {
+                    self.record_subscriber_error();
                     tracing::warn!(%endpoint, %error, "Failed to connect to Mooncake KV events; retrying");
                     tokio::select! {
                         _ = cancellation_token.cancelled() => return,
@@ -216,28 +228,35 @@ impl HicacheSharedKvCache {
             loop {
                 tokio::select! {
                     _ = cancellation_token.cancelled() => return,
+                    result = self.runtime_configs.changed() => {
+                        if result.is_err() {
+                            return;
+                        }
+                        let next_endpoint = self.kv_events_endpoint();
+                        if next_endpoint.as_deref() != Some(endpoint.as_str()) {
+                            tracing::info!(%endpoint, next_endpoint = ?next_endpoint, "Mooncake KV event endpoint changed; reconnecting");
+                            break;
+                        }
+                    }
                     message = socket.next() => {
                         let frames = match message {
                             Some(Ok(frames)) => multipart_message(frames),
                             Some(Err(error)) => {
+                                self.record_subscriber_error();
                                 tracing::warn!(%endpoint, %error, "Mooncake KV event stream failed; reconnecting");
                                 break;
                             }
                             None => {
+                                self.record_subscriber_error();
                                 tracing::warn!(%endpoint, "Mooncake KV event stream ended; reconnecting");
                                 break;
                             }
                         };
-                        if frames.len() != 3 || frames[1].len() != 8 {
-                            tracing::warn!(frame_count = frames.len(), "Invalid Mooncake KV event frame; reconnecting");
-                            break;
-                        }
-                        let sequence = u64::from_be_bytes(frames[1].as_slice().try_into().unwrap());
-                        match rmp_serde::from_slice::<MooncakeEventBatch>(&frames[2]) {
-                            Ok((_, events, _)) => self.apply_batch(sequence, events),
+                        match parse_mooncake_event_frames(&frames) {
+                            Ok((sequence, events)) => self.apply_batch(sequence, events),
                             Err(error) => {
-                                tracing::warn!(%error, "Failed to decode Mooncake KV event batch; reconnecting");
-                                break;
+                                self.record_subscriber_error();
+                                tracing::warn!(%error, "Dropping invalid Mooncake KV event frame");
                             }
                         }
                     }
@@ -250,6 +269,22 @@ impl HicacheSharedKvCache {
             }
         }
     }
+}
+
+fn parse_mooncake_event_frames(
+    frames: &[Vec<u8>],
+) -> anyhow::Result<(u64, Vec<MooncakeObjectEvent>)> {
+    let [_, sequence, payload] = frames else {
+        anyhow::bail!("expected three frames, got {}", frames.len());
+    };
+    let sequence = u64::from_be_bytes(
+        sequence
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("expected an 8-byte sequence frame"))?,
+    );
+    let (_, events, _) = rmp_serde::from_slice::<MooncakeEventBatch>(payload)?;
+    Ok((sequence, events))
 }
 
 #[async_trait]
@@ -507,7 +542,12 @@ mod tests {
         }
     }
 
-    fn runtime_watch_with_config(config: SglangHicacheMooncakeConfig) -> RuntimeConfigWatch {
+    fn runtime_watch_with_config_and_sender(
+        config: SglangHicacheMooncakeConfig,
+    ) -> (
+        RuntimeConfigWatch,
+        watch::Sender<HashMap<WorkerId, ModelRuntimeConfig>>,
+    ) {
         let mut runtime_config = ModelRuntimeConfig::new();
         runtime_config
             .set_engine_specific(SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY, config)
@@ -516,8 +556,12 @@ mod tests {
         let mut workers = HashMap::new();
         workers.insert(1, runtime_config);
 
-        let (_tx, rx) = watch::channel(workers);
-        rx
+        let (tx, rx) = watch::channel(workers);
+        (rx, tx)
+    }
+
+    fn runtime_watch_with_config(config: SglangHicacheMooncakeConfig) -> RuntimeConfigWatch {
+        runtime_watch_with_config_and_sender(config).0
     }
 
     #[test]
@@ -613,6 +657,52 @@ mod tests {
         };
 
         assert_eq!(sglang_group_id("hash", &config), "sglang-hicache:tag_hash");
+    }
+
+    #[test]
+    fn test_parse_mooncake_event_frames() {
+        let payload = rmp_serde::to_vec(&(
+            0_i64,
+            vec![MooncakeObjectEvent {
+                event_type: "stored".to_string(),
+                object_key: Some("key-0".to_string()),
+                tenant_id: "default".to_string(),
+                group_id: Some("group-0".to_string()),
+            }],
+            0_u32,
+        ))
+        .unwrap();
+
+        let (sequence, events) =
+            parse_mooncake_event_frames(&[Vec::new(), 7_u64.to_be_bytes().to_vec(), payload])
+                .unwrap();
+
+        assert_eq!(sequence, 7);
+        assert_eq!(events[0].object_key.as_deref(), Some("key-0"));
+        assert_eq!(events[0].group_id.as_deref(), Some("group-0"));
+    }
+
+    #[test]
+    fn test_kv_events_endpoint_tracks_runtime_config_updates() {
+        let (runtime_configs, tx) = runtime_watch_with_config_and_sender(mooncake_config());
+        let cache = HicacheSharedKvCache::new(runtime_configs);
+        assert_eq!(
+            cache.kv_events_endpoint().as_deref(),
+            Some("tcp://127.0.0.1:5557")
+        );
+
+        let mut updated = mooncake_config();
+        updated.kv_events_endpoint = Some("tcp://127.0.0.1:5558".to_string());
+        let mut runtime_config = ModelRuntimeConfig::new();
+        runtime_config
+            .set_engine_specific(SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY, updated)
+            .unwrap();
+        tx.send(HashMap::from([(1, runtime_config)])).unwrap();
+
+        assert_eq!(
+            cache.kv_events_endpoint().as_deref(),
+            Some("tcp://127.0.0.1:5558")
+        );
     }
 
     #[tokio::test]
@@ -781,7 +871,8 @@ mod tests {
     async fn test_subscriber_retries_failed_connection_until_cancelled() {
         let mut config = mooncake_config();
         config.kv_events_endpoint = Some("invalid://mooncake-events".to_string());
-        let cache = HicacheSharedKvCache::new(runtime_watch_with_config(config));
+        let (runtime_configs, _tx) = runtime_watch_with_config_and_sender(config);
+        let cache = HicacheSharedKvCache::new(runtime_configs);
         let cancellation_token = CancellationToken::new();
         let task = tokio::spawn(cache.run_subscriber(cancellation_token.clone()));
 
