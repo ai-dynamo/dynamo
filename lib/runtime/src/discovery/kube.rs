@@ -16,7 +16,7 @@ use utils::{KubeDiscoveryMode, PodInfo};
 use crate::CancellationToken;
 use crate::discovery::{
     Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryMetadata,
-    DiscoveryQuery, DiscoverySpec, DiscoveryStream, MetadataSnapshot,
+    DiscoveryQuery, DiscoverySpec, DiscoveryStream, MAX_JSON_SAFE_PUBLISHER_ID, MetadataSnapshot,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -26,8 +26,11 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 fn validate_kubernetes_publisher_id(publisher_id: u64) -> Result<()> {
-    if i64::try_from(publisher_id).is_err() {
-        anyhow::bail!("Kubernetes discovery publisher ID {publisher_id} exceeds i64::MAX");
+    if publisher_id > MAX_JSON_SAFE_PUBLISHER_ID {
+        anyhow::bail!(
+            "Kubernetes discovery publisher ID {publisher_id} exceeds the JSON-safe maximum \
+             {MAX_JSON_SAFE_PUBLISHER_ID}"
+        );
     }
 
     Ok(())
@@ -524,8 +527,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn publisher_ids_must_fit_kubernetes_integer_range() {
-        assert!(validate_kubernetes_publisher_id(i64::MAX as u64).is_ok());
-        assert!(validate_kubernetes_publisher_id((i64::MAX as u64) + 1).is_err());
+    fn publisher_ids_must_fit_kubernetes_json_safe_range() {
+        assert!(validate_kubernetes_publisher_id(MAX_JSON_SAFE_PUBLISHER_ID).is_ok());
+        assert!(validate_kubernetes_publisher_id(MAX_JSON_SAFE_PUBLISHER_ID + 1).is_err());
+        assert!(validate_kubernetes_publisher_id(u64::MAX).is_err());
     }
 }
