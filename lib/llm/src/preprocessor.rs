@@ -3292,43 +3292,39 @@ impl OpenAIPreprocessor {
             // <tool_call> markup — callers that require strict "no tool tags in content"
             // must filter on finish_reason=length.
             let mut recoveries: Vec<Annotated<NvCreateChatCompletionStreamResponse>> = Vec::new();
-            if is_glm47 {
-                if let Some(ref data) = nv_chunk.data {
-                    let mut cr = choice_recovery.lock().expect("choice recovery poisoned");
-                    for choice in &data.inner.choices {
-                        let state = cr.entry(choice.index).or_default();
-                        if matches!(
-                            choice.finish_reason,
-                            Some(dynamo_protocols::types::FinishReason::Length)
-                        ) {
-                            let recovered =
-                                state.input_text.rfind("<tool_call>").and_then(|start| {
-                                    let tail = &state.input_text[start..];
-                                    if !tail.contains("</tool_call>") {
-                                        Some(tail.to_string())
-                                    } else {
-                                        None
-                                    }
-                                });
-                            if let Some(recovered) = recovered {
-                                tracing::warn!(
-                                    choice_index = choice.index,
-                                    recovered_bytes = recovered.len(),
-                                    "glm47 streaming: partial <tool_call> emitted as content \
-                                     on length finish (TRT-LLM parity; raw markup in content)"
-                                );
-                                let mut rec = nv_chunk.clone();
-                                if let Some(ref mut rd) = rec.data {
-                                    rd.inner.usage = None;
-                                    rd.llm_metrics = None;
-                                    rd.inner.choices.retain(|c| c.index == choice.index);
-                                    for rc in &mut rd.inner.choices {
-                                        rc.delta.content = Some(
-                                            ChatCompletionMessageContent::Text(recovered.clone()),
-                                        );
-                                        rc.delta.tool_calls = None;
-                                        rc.finish_reason = None;
-                                    }
+            if is_glm47 && let Some(ref data) = nv_chunk.data {
+                let mut cr = choice_recovery.lock().expect("choice recovery poisoned");
+                for choice in &data.inner.choices {
+                    let state = cr.entry(choice.index).or_default();
+                    if matches!(
+                        choice.finish_reason,
+                        Some(dynamo_protocols::types::FinishReason::Length)
+                    ) {
+                        let recovered = state.input_text.rfind("<tool_call>").and_then(|start| {
+                            let tail = &state.input_text[start..];
+                            if !tail.contains("</tool_call>") {
+                                Some(tail.to_string())
+                            } else {
+                                None
+                            }
+                        });
+                        if let Some(recovered) = recovered {
+                            tracing::warn!(
+                                choice_index = choice.index,
+                                recovered_bytes = recovered.len(),
+                                "glm47 streaming: partial <tool_call> emitted as content \
+                                 on length finish"
+                            );
+                            let mut rec = nv_chunk.clone();
+                            if let Some(ref mut rd) = rec.data {
+                                rd.inner.usage = None;
+                                rd.llm_metrics = None;
+                                rd.inner.choices.retain(|c| c.index == choice.index);
+                                for rc in &mut rd.inner.choices {
+                                    rc.delta.content =
+                                        Some(ChatCompletionMessageContent::Text(recovered.clone()));
+                                    rc.delta.tool_calls = None;
+                                    rc.finish_reason = None;
                                 }
                                 recoveries.push(rec);
                             }
