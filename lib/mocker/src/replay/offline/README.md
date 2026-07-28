@@ -4,9 +4,7 @@ This directory contains the in-process offline replay harness used by `dynamo_mo
 
 The goal is to simulate trace execution without spinning up async runtimes, network planes, or real worker tasks. Instead, the harness advances a logical clock, steps mock engine cores directly, and records request/token timing into `TraceCollector` in `lib/mocker/src/replay/collector.rs`.
 
-For the workload-to-report flow and operator-facing CLI docs, see
-[`docs/dynosim/runs.md`](../../../../../docs/dynosim/runs.md). This README covers the
-offline-specific internals: logical clock, event queue, and per-worker state machine.
+For the harness-level picture (load driver → harness → SES/MES → trace collector) and operator-facing CLI docs, see [`docs/dynosim/runs.md`](../../../../../docs/fern/dynosim/runs.mdx). This README dives into the offline-specific internals: logical clock, event queue, per-worker state machine.
 
 ## Where It Sits
 
@@ -39,21 +37,19 @@ Offline replay starts in `lib/mocker/src/replay/offline/mod.rs`.
   Per-worker wrapper around `EngineCore`, including optional KV event capture.
 - `lib/mocker/src/replay/offline/events.rs`
   `SimulationEvent` + `SimulationEventKind` priority-queue types used by the multi-worker harness.
-- `lib/mocker/src/replay/offline/core/`
-  Router-neutral placement, admission, and topology contracts.
+- `lib/mocker/src/replay/offline/core.rs`
+  Small `ReplayWorkerCore` wrapper used by the single-worker path.
 - `lib/mocker/src/replay/offline/runtime_utils.rs`
   Shared helpers used by `agg.rs` and `disagg.rs`: `WorkerCompletionPayload`, event scheduling, `next_timestamp`.
 - `lib/mocker/src/replay/offline/progress.rs`
   `ReplayProgress`, the indicatif-based progress bar used by the harnesses.
 - `lib/mocker/src/replay/offline/components/`
   Shared abstractions split out from the runtimes:
+  - `router.rs` — `OfflineReplayRouter` (synchronous in-process router, KV + round-robin modes) and `OfflineRouterSnapshot`.
   - `engine.rs` — `EngineComponent`, `EngineEffects`, `EnginePassMode` wrappers around `EngineCore`.
-  - `worker_core.rs` — `ReplayWorkerCore`, the direct engine wrapper used by replay.
   - `admission.rs` — admission queue and trace/workload request gating.
   - `types.rs` — `WorkerAdmission`, `RouterEffects`, `ScheduledWorkerCompletion`, `TrafficAccumulator`, `TrafficStats`, `ReplayMode`.
   - `mod.rs` — re-exports.
-- `lib/mocker/src/replay/offline/extensions/kv_router/`
-  `OfflineReplayRouter`, its snapshots, and aggregated/disaggregated runtime composition.
 
 ## Single-Worker Fast Path
 
@@ -170,8 +166,7 @@ Offline replay can run in:
 - `round_robin`
 - `kv_router`
 
-The router implementation for offline mode lives under
-`lib/mocker/src/replay/offline/extensions/kv_router/` (`OfflineReplayRouter`).
+The router implementation for offline mode lives in `lib/mocker/src/replay/offline/components/router.rs` (`OfflineReplayRouter`).
 
 This router is synchronous and in-process:
 

@@ -13,7 +13,7 @@ Production-ready deployments for **Qwen3-235B-A22B** (MoE model with 22B active 
 
 ## Prerequisites
 
-1. **Dynamo Platform installed** — See [Kubernetes Deployment Guide](../../docs/kubernetes/README.md)
+1. **Dynamo Platform installed** — See [Kubernetes Deployment Guide](../../docs/fern/kubernetes/quickstart.mdx)
 2. **GPU cluster** with H100/H200 (Hopper) or B100/B200 (Blackwell) GPUs — see [Hardware Requirements](#hardware-requirements)
 3. **HuggingFace token** with access to Qwen models
 
