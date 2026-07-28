@@ -8,7 +8,7 @@ It directly reuses AIConfigurator:
 
 - ``check_is_moe``                  -> is_moe
 - ``_estimate_model_weight_bytes``  -> model weight size (-> wideEP heuristic)
-- ``_get_system_config``            -> the SKU's VRAM / GPUs-per-node
+- ``load_system_spec``              -> the SKU's VRAM / GPUs-per-node
 
 Validity is **KV-cache based**: :func:`parallel_configs_for` enumerates shapes
 from 1 GPU/worker and keeps a shape iff its estimated KV capacity exceeds the

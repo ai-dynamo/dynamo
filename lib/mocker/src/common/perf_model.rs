@@ -26,7 +26,7 @@ pub trait DecodeInterpolator: Send + Sync {
 }
 
 /// Callback trait for direct AIC SDK calls.
-/// Implementors call the Python AIC SDK via PyO3 GIL.
+/// Implementors call the Rust AIC core API.
 pub trait AicCallback: Send + Sync {
     /// Predict prefill latency in ms.
     /// Parameters: (batch_size, effective_isl, prefix)
@@ -223,10 +223,15 @@ impl PerfModel {
     /// - Polynomial/Interpolated: uses total new tokens across the batch
     ///   (`batch_size * (isl - prefix)`), modeling GPU processing total tokens in parallel
     /// - Aiconfigurator: passes (batch_size, isl - prefix, prefix) to the AIC SDK
-    pub fn predict_prefill_time(&self, batch_size: usize, isl: usize, prefix: usize) -> f64 {
+    pub fn predict_prefill_time(
+        &self,
+        batch_size: usize,
+        isl: usize,
+        prefix: usize,
+    ) -> Result<f64> {
         let new_tokens_per_req = isl.saturating_sub(prefix);
         if batch_size == 0 || new_tokens_per_req == 0 {
-            return 0.0;
+            return Ok(0.0);
         }
         let time = match self {
             PerfModel::Polynomial => polynomial_prefill_time(batch_size, new_tokens_per_req),
@@ -236,9 +241,9 @@ impl PerfModel {
             }
             PerfModel::Aiconfigurator { callback } => callback
                 .predict_prefill(batch_size, new_tokens_per_req, prefix)
-                .unwrap_or_else(|error| panic!("AIC prefill prediction failed: {error}")),
+                .context("AIC prefill prediction failed")?,
         };
-        time.max(0.0)
+        Ok(time.max(0.0))
     }
 
     /// Predict decode time in milliseconds.
@@ -253,9 +258,9 @@ impl PerfModel {
         active_kv_tokens: usize,
         context_length: usize,
         total_kv_tokens: usize,
-    ) -> f64 {
+    ) -> Result<f64> {
         if batch_size == 0 {
-            return 0.0;
+            return Ok(0.0);
         }
         let time = match self {
             PerfModel::Polynomial => polynomial_decode_time(active_kv_tokens, total_kv_tokens),
@@ -264,14 +269,14 @@ impl PerfModel {
                 .unwrap_or(0.0),
             PerfModel::Aiconfigurator { callback } => callback
                 .predict_decode(batch_size, context_length, 2)
-                .unwrap_or_else(|error| panic!("AIC decode prediction failed: {error}")),
+                .context("AIC decode prediction failed")?,
         };
         // Token-emitting decode steps should not collapse onto the same timestamp.
         let result = time.max(1.0);
         tracing::trace!(
             "Decode time prediction: batch_size={batch_size}, active_kv_tokens={active_kv_tokens}, context_length={context_length}, time={result:.2}ms"
         );
-        result
+        Ok(result)
     }
 }
 
@@ -342,20 +347,39 @@ mod tests {
 
     #[test]
     fn fully_cached_prompt_skips_prefill() {
-        assert_eq!(PerfModel::default().predict_prefill_time(1, 128, 128), 0.0);
+        assert_eq!(
+            PerfModel::default()
+                .predict_prefill_time(1, 128, 128)
+                .unwrap(),
+            0.0
+        );
     }
 
     #[test]
     fn aic_forwards_scheduler_local_batch() {
         let model = PerfModel::from_aic_callback(Arc::new(EchoBatchCallback));
 
-        assert_eq!(model.predict_prefill_time(7, 128, 0), 7.0);
-        assert_eq!(model.predict_decode_time(9, 0, 128, 0), 9.0);
+        assert_eq!(model.predict_prefill_time(7, 128, 0).unwrap(), 7.0);
+        assert_eq!(model.predict_decode_time(9, 0, 128, 0).unwrap(), 9.0);
     }
 
     #[test]
-    #[should_panic(expected = "AIC prefill prediction failed")]
-    fn aic_prediction_errors_fail_fast() {
-        PerfModel::from_aic_callback(Arc::new(FailingCallback)).predict_prefill_time(2, 128, 32);
+    fn aic_prefill_prediction_errors_propagate() {
+        let error = PerfModel::from_aic_callback(Arc::new(FailingCallback))
+            .predict_prefill_time(2, 128, 32)
+            .unwrap_err();
+
+        assert_eq!(error.to_string(), "AIC prefill prediction failed");
+        assert_eq!(error.root_cause().to_string(), "missing AIC prefill point");
+    }
+
+    #[test]
+    fn aic_decode_prediction_errors_propagate() {
+        let error = PerfModel::from_aic_callback(Arc::new(FailingCallback))
+            .predict_decode_time(2, 64, 128, 1024)
+            .unwrap_err();
+
+        assert_eq!(error.to_string(), "AIC decode prediction failed");
+        assert_eq!(error.root_cause().to_string(), "missing AIC decode point");
     }
 }

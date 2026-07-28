@@ -30,6 +30,7 @@ from aisimulate.spica.sample import unroll_sample
 from aisimulate.spica.score import objective_value
 from aisimulate.spica.search import run_smart_search
 from aisimulate.spica.search_space import enumerate_branches
+from dynamo import _core
 
 # FilterPy 1.4.5 contains non-raw math docstrings that Python 3.12 reports while
 # importing the planner predictors.
@@ -129,6 +130,9 @@ def test_static_path_emits_goodput():
 def test_static_path_runs_with_kvbm_host_offload():
     """The planner wheel must initialize and run replay with Spica's G2 knobs."""
 
+    assert (
+        _core.MOCKER_KVBM_OFFLOAD_ENABLED
+    ), "planner wheel must enable mocker-kvbm-offload"
     cfg = _config()
     cfg = cfg.model_copy(
         update={

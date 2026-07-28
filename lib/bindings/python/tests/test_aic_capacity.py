@@ -72,6 +72,27 @@ def test_runtime_loader_does_not_import_upper_aiconfigurator(monkeypatch):
     }
 
 
+def test_runtime_loader_propagates_internal_missing_module(monkeypatch):
+    import dynamo._internal.aic as aic_mod
+
+    real_import = builtins.__import__
+    missing_internal = ModuleNotFoundError(
+        name="aiconfigurator_core.sdk.internal_dependency"
+    )
+
+    def broken_core_module(name, *args, **kwargs):
+        if name == "aiconfigurator_core.sdk":
+            raise missing_internal
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", broken_core_module)
+
+    with pytest.raises(ModuleNotFoundError) as exc_info:
+        aic_mod._load_aiconfigurator()
+
+    assert exc_info.value is missing_internal
+
+
 def test_estimate_num_gpu_blocks_maps_vllm_to_total_fraction(monkeypatch):
     calls = _patch_memory(monkeypatch, 45)
 

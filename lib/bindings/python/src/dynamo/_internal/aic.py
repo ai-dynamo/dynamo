@@ -141,9 +141,9 @@ def _load_aiconfigurator():
             get_database,
             get_supported_databases,
         )
-    except (
-        ImportError
-    ) as exc:  # pragma: no cover - exercised in integration environments
+    except ModuleNotFoundError as exc:
+        if exc.name != "aiconfigurator_core":
+            raise
         raise RuntimeError(
             "aiconfigurator-core is required for AIC perf modeling but is not installed"
         ) from exc
