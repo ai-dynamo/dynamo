@@ -108,6 +108,7 @@ pub const PASSTHROUGH_EXTRA_FIELDS: &[&str] = &[
     "detokenize",
     "allowed_token_ids",
     "bad_words_token_ids",
+    "logprob_token_ids",
 ];
 
 static IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS: LazyLock<bool> =
@@ -870,6 +871,12 @@ mod tests {
 
         let err = validate_response_format(&Some(response_format)).unwrap_err();
         assert!(err.to_string().contains("schema` is required"));
+    }
+
+    #[test]
+    fn validate_no_unsupported_fields_accepts_logprob_token_ids() {
+        let fields = HashMap::from([("logprob_token_ids".to_string(), json!([14, 15]))]);
+        validate_no_unsupported_fields_with_ignore(&fields, false).unwrap();
     }
 
     #[test]
