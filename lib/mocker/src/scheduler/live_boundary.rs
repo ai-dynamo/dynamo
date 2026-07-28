@@ -100,19 +100,7 @@ pub(crate) struct LiveSchedulerState {
     cancellation_tx: mpsc::Sender<SchedulerCancellationEnvelope>,
     lifecycle_rx: Arc<Mutex<Option<mpsc::Receiver<SchedulerLifecycleEvent>>>>,
     metrics_rx: watch::Receiver<MockerMetrics>,
-    actor_handle: Arc<Mutex<Option<tokio::task::JoinHandle<anyhow::Result<()>>>>>,
     _cancel_guard: Arc<LiveCancelGuard>,
-}
-
-impl LiveSchedulerState {
-    pub(crate) fn take_actor_handle(
-        &mut self,
-    ) -> Option<tokio::task::JoinHandle<anyhow::Result<()>>> {
-        self.actor_handle
-            .lock()
-            .expect("scheduler actor handle mutex poisoned")
-            .take()
-    }
 }
 
 impl SchedulerHandle for LiveSchedulerState {
@@ -153,7 +141,10 @@ pub(crate) fn spawn_live_scheduler<C>(
     cancellation_token: Option<CancellationToken>,
     fpm_publisher: FpmPublisher,
     make_core: impl FnOnce(MockEngineArgs, u32, KvEventPublishers) -> C + Send + 'static,
-) -> LiveSchedulerState
+) -> (
+    LiveSchedulerState,
+    tokio::task::JoinHandle<anyhow::Result<()>>,
+)
 where
     C: LiveBoundaryCore + Send + 'static,
 {
@@ -194,15 +185,17 @@ where
         .await
     });
 
-    LiveSchedulerState {
-        request_tx,
-        command_tx,
-        cancellation_tx,
-        lifecycle_rx: Arc::new(Mutex::new(Some(lifecycle_rx))),
-        metrics_rx,
-        actor_handle: Arc::new(Mutex::new(Some(actor_handle))),
-        _cancel_guard: cancel_guard,
-    }
+    (
+        LiveSchedulerState {
+            request_tx,
+            command_tx,
+            cancellation_tx,
+            lifecycle_rx: Arc::new(Mutex::new(Some(lifecycle_rx))),
+            metrics_rx,
+            _cancel_guard: cancel_guard,
+        },
+        actor_handle,
+    )
 }
 
 async fn run_live_scheduler<C: LiveBoundaryCore>(
@@ -569,7 +562,7 @@ impl LiveEffectsPublisher {
             self.record(PublishedEffect::Admissions);
         }
         if let Err(SchedulerEventSendError::OrderedLaneClosed) =
-            tx.send_admissions(admissions.to_vec()).await
+            tx.send_admissions(admissions).await
         {
             anyhow::bail!("live Mocker ordered event lane closed while publishing admissions");
         }

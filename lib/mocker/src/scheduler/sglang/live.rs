@@ -50,41 +50,36 @@ impl SglangScheduler {
         cancellation_token: Option<CancellationToken>,
         fpm_publisher: FpmPublisher,
     ) -> Self {
-        Self::new_with_event_sender(
+        let (scheduler, actor) = Self::spawn_with_event_sender(
             args,
             dp_rank,
             output_tx.map(SchedulerEventSender::from),
             kv_event_publishers,
             cancellation_token,
             fpm_publisher,
-        )
+        );
+        drop(actor);
+        scheduler
     }
 
-    pub(crate) fn new_with_event_sender(
+    pub(crate) fn spawn_with_event_sender(
         args: MockEngineArgs,
         dp_rank: u32,
         event_tx: Option<SchedulerEventSender>,
         kv_event_publishers: KvEventPublishers,
         cancellation_token: Option<CancellationToken>,
         fpm_publisher: FpmPublisher,
-    ) -> Self {
-        Self {
-            inner: spawn_live_scheduler(
-                args,
-                dp_rank,
-                event_tx,
-                kv_event_publishers,
-                cancellation_token,
-                fpm_publisher,
-                SglangCore::new_with_sink,
-            ),
-        }
-    }
-
-    pub(crate) fn take_actor_handle(
-        &mut self,
-    ) -> Option<tokio::task::JoinHandle<anyhow::Result<()>>> {
-        self.inner.take_actor_handle()
+    ) -> (Self, tokio::task::JoinHandle<anyhow::Result<()>>) {
+        let (inner, actor) = spawn_live_scheduler(
+            args,
+            dp_rank,
+            event_tx,
+            kv_event_publishers,
+            cancellation_token,
+            fpm_publisher,
+            SglangCore::new_with_sink,
+        );
+        (Self { inner }, actor)
     }
 }
 

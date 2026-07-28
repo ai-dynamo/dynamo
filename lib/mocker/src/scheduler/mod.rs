@@ -381,7 +381,7 @@ pub(crate) enum SchedulerEventSendError {
 impl SchedulerEventSender {
     pub(crate) async fn send_admissions(
         &self,
-        admissions: Vec<AdmissionEvent>,
+        admissions: &[AdmissionEvent],
     ) -> Result<(), SchedulerEventSendError> {
         if admissions.is_empty() {
             return Ok(());
@@ -392,7 +392,7 @@ impl SchedulerEventSender {
                 Ok(())
             }
             Self::Ordered(tx) => tx
-                .send(LiveEngineEvent::Admissions(admissions))
+                .send(LiveEngineEvent::Admissions(admissions.to_vec()))
                 .await
                 .map_err(|_| SchedulerEventSendError::OrderedLaneClosed),
         }

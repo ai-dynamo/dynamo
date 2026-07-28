@@ -30,8 +30,6 @@ pub(super) struct RequestTaskContext {
 }
 
 /// Releases a `WorkloadDriver` cap slot on drop if `mark_completed` was not called.
-/// Preserves the drop-safety of the old `OwnedSemaphorePermit` so a cancelled
-/// request task cannot leak capacity.
 pub(super) struct InFlightGuard {
     dispatch: Arc<WorkloadDispatchState>,
     uuid: Uuid,

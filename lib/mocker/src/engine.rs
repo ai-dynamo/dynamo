@@ -73,7 +73,7 @@ pub(crate) fn create_engine_with_event_sender(
         // TRT-LLM reuses the vLLM scheduler core; the GUARANTEED_NO_EVICT
         // policy is carried in `args` and read by the core per pass.
         EngineType::Vllm | EngineType::Trtllm => {
-            let mut scheduler = Scheduler::new_with_event_sender(
+            let (scheduler, actor) = Scheduler::spawn_with_event_sender(
                 args,
                 dp_rank,
                 event_tx,
@@ -81,13 +81,10 @@ pub(crate) fn create_engine_with_event_sender(
                 cancellation_token,
                 fpm_publisher,
             );
-            let actor = scheduler
-                .take_actor_handle()
-                .expect("live vLLM scheduler must own its actor handle");
             (Box::new(scheduler), actor)
         }
         EngineType::Sglang => {
-            let mut scheduler = SglangScheduler::new_with_event_sender(
+            let (scheduler, actor) = SglangScheduler::spawn_with_event_sender(
                 args,
                 dp_rank,
                 event_tx,
@@ -95,9 +92,6 @@ pub(crate) fn create_engine_with_event_sender(
                 cancellation_token,
                 fpm_publisher,
             );
-            let actor = scheduler
-                .take_actor_handle()
-                .expect("live SGLang scheduler must own its actor handle");
             (Box::new(scheduler), actor)
         }
     };

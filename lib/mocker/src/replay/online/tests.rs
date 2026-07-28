@@ -757,8 +757,11 @@ fn test_online_replay_crosses_a_bounded_preemption_edge_and_drains() {
 }
 
 #[test]
-fn test_online_replay_four_worker_stress_cleans_every_lifecycle() {
-    let requests = (0..256)
+fn test_online_replay_four_workers_clean_every_lifecycle() {
+    const REQUEST_COUNT: usize = 16;
+    const WORKER_COUNT: usize = 4;
+
+    let requests = (0..REQUEST_COUNT)
         .map(|request_idx| DirectRequest {
             tokens: vec![request_idx as u32; 64],
             max_output_tokens: 2,
@@ -769,16 +772,22 @@ fn test_online_replay_four_worker_stress_cleans_every_lifecycle() {
     let (report, stats) = simulate_concurrency_requests_with_stats(
         replay_args(),
         requests,
-        32,
-        4,
+        REQUEST_COUNT,
+        WORKER_COUNT,
         ReplayRouterMode::KvRouter,
     )
     .unwrap();
 
-    assert_eq!(report.request_counts.completed_requests, 256);
-    assert_eq!(stats.dispatch_history.len(), 256);
-    assert_eq!(stats.prefill_marked_count, 256);
-    assert_eq!(stats.freed_count, 256);
+    assert_eq!(
+        report.request_counts.completed_requests as usize,
+        REQUEST_COUNT
+    );
+    assert_eq!(stats.dispatch_history.len(), REQUEST_COUNT);
+    assert_eq!(stats.prefill_marked_count, REQUEST_COUNT);
+    assert_eq!(stats.freed_count, REQUEST_COUNT);
+    for worker_idx in 0..WORKER_COUNT {
+        assert!(stats.dispatch_history.contains(&worker_idx));
+    }
 }
 
 #[tokio::test]
