@@ -11,7 +11,6 @@ from dynamo._internal.aic import (
     DEFAULT_FREE_GPU_MEMORY_FRACTION,
     DEFAULT_MEM_FRACTION_STATIC,
     AicMemoryEstimatorUnavailableError,
-    _nextn_accepted_from_accept_rates,
     _normalize_aic_quant_mode,
     _pad_nextn_accept_rates,
     _resolve_quant_mode,
@@ -242,22 +241,6 @@ def test_pad_nextn_accept_rates_rejects_invalid(bad):
         _pad_nextn_accept_rates(bad)
 
 
-def test_nextn_accepted_folds_conditional_accept_rates():
-    assert _nextn_accepted_from_accept_rates(1, "0.85,0.3") == pytest.approx(0.85)
-    assert _nextn_accepted_from_accept_rates(2, "0.85,0.3") == pytest.approx(
-        0.85 + 0.85 * 0.3
-    )
-    assert _nextn_accepted_from_accept_rates(3, "1,0.5,0.25") == pytest.approx(
-        1.0 + 0.5 + 0.125
-    )
-
-
-@pytest.mark.parametrize("nextn", [0, 6])
-def test_nextn_accepted_rejects_unsupported_mocker_depth(nextn):
-    with pytest.raises(ValueError, match=r"nextn must be 1\.\.=5"):
-        _nextn_accepted_from_accept_rates(nextn, None)
-
-
 @pytest.mark.parametrize(
     "value,expected",
     [
@@ -387,7 +370,5 @@ def test_aic_session_forwards_quant_modes_to_model_config(monkeypatch):
     assert "kvcache_quant_mode" not in captured
     assert captured["comm_quant_mode"] == common.CommQuantMode.fp8
     assert captured["nextn"] == 2
-    assert captured["nextn_accept_rates"] == pytest.approx(
-        [0.85, 0.3, 0.0, 0.0, 0.0]
-    )
+    assert captured["nextn_accept_rates"] == pytest.approx([0.85, 0.3, 0.0, 0.0, 0.0])
     assert "nextn_accepted" not in captured

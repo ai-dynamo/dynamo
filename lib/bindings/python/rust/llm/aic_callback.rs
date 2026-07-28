@@ -109,29 +109,28 @@ fn build_rust_engine(
     nextn: Option<usize>,
     nextn_accept_rates: Option<&str>,
 ) -> PyResult<Arc<AicEngine>> {
-    // Speculative (MTP) decoding: Dynamo's mocker still accepts per-position
-    // conditional rates so it can sample integer burst lengths. AIC now accepts
-    // their scalar expectation instead. Fold at this boundary to preserve the
-    // mocker contract while consuming AIC's new build API.
+    // Speculative (MTP) decoding: forward the mocker's nextn / accept-rates to
+    // AIC 0.10's released per-position conditional-rate contract.
     let raw_nextn = nextn.unwrap_or(0);
     let nextn = u32::try_from(raw_nextn).map_err(|_| {
         pyo3::exceptions::PyValueError::new_err(format!(
             "AIC: nextn exceeds u32 range: {raw_nextn}"
         ))
     })?;
-    let aic_module = py.import("dynamo._internal.aic")?;
-    let nextn_accepted: Option<f64> = if nextn > 0 {
-        Some(
-            aic_module
-                .call_method1(
-                    "_nextn_accepted_from_accept_rates",
-                    (nextn, nextn_accept_rates),
-                )?
-                .extract()?,
-        )
-    } else {
-        None
+    let nextn_accept_rates: Option<Vec<f64>> = match nextn_accept_rates {
+        Some(s) if !s.trim().is_empty() => Some(
+            s.split(',')
+                .map(|x| x.trim().parse::<f64>())
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| {
+                    pyo3::exceptions::PyValueError::new_err(format!(
+                        "AIC: invalid nextn_accept_rates {s:?}: {e}"
+                    ))
+                })?,
+        ),
+        _ => None,
     };
+    let aic_module = py.import("dynamo._internal.aic")?;
     // Resolve each quant-mode string through the single Python source of truth
     // (`dynamo._internal.aic._resolve_quant_mode_name`) so this latency-engine
     // path matches the Python paths (`create_session`/`estimate_num_gpu_blocks`)
@@ -158,7 +157,7 @@ fn build_rust_engine(
     // paid once per unique config (speculative config included).
     static CACHE: OnceLock<Mutex<HashMap<String, Arc<AicEngine>>>> = OnceLock::new();
     let key = format!(
-        "{backend_name}|{system}|{backend_version:?}|{model_path}|{tp_size}|{moe_tp_size:?}|{moe_ep_size:?}|{attention_dp_size:?}|{gemm_dtype:?}|{moe_dtype:?}|{fmha_dtype:?}|{kv_cache_dtype:?}|{comm_dtype:?}|{nextn}|{nextn_accepted:?}"
+        "{backend_name}|{system}|{backend_version:?}|{model_path}|{tp_size}|{moe_tp_size:?}|{moe_ep_size:?}|{attention_dp_size:?}|{gemm_dtype:?}|{moe_dtype:?}|{fmha_dtype:?}|{kv_cache_dtype:?}|{comm_dtype:?}|{nextn}|{nextn_accept_rates:?}"
     );
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Some(existing) = cache.lock().unwrap().get(&key) {
@@ -189,7 +188,7 @@ fn build_rust_engine(
         fmha_dtype.as_deref(),     // fmha_quant_mode
         comm_dtype.as_deref(),     // comm_quant_mode
         nextn,                     // speculative (MTP) tokens; 0 for dense
-        nextn_accepted,            // average accepted draft tokens per step
+        nextn_accept_rates,        // per-position conditional accept rates
         None,                      // kv_block_size
         None,                      // systems_path (resolved via env above / build-time default)
     )
