@@ -1455,6 +1455,107 @@ spec:
 			Expect(k8sClient.Create(ctx, selectedDGD)).Should(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, selectedDGD) }()
 		})
+
+		It("Should repair a missing runtime version override on an existing managed DGD", func() {
+			ctx := context.Background()
+			dgdrName := "test-dgdr-live-dgd-runtime-version-repair"
+			dgdName := dgdrName + "-dgd"
+			namespace := envtestNamespace
+
+			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      dgdrName,
+					Namespace: namespace,
+				},
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+					Model:   "test-model",
+					Backend: "vllm",
+					Image:   "test-profiler:custom",
+					Hardware: &nvidiacomv1beta1.HardwareSpec{
+						NumGPUsPerNode: ptr.To[int32](8),
+						GPUSKU:         nvidiacomv1beta1.GPUSKUTypeH100SXM,
+						VRAMMB:         ptr.To(81920.0),
+						TotalGPUs:      ptr.To[int32](128),
+					},
+					SLA: &nvidiacomv1beta1.SLASpec{
+						TTFT: ptr.To(100.0),
+						ITL:  ptr.To(1500.0),
+					},
+					AutoApply: ptr.To(true),
+				},
+			}
+
+			Expect(admissionBypassClient.Create(ctx, dgdr)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
+			var current nvidiacomv1beta1.DynamoGraphDeploymentRequest
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &current)).Should(Succeed())
+			current.Status.Phase = nvidiacomv1beta1.DGDRPhaseDeployed
+			current.Status.DGDName = dgdName
+			current.Status.ObservedGeneration = current.Generation
+			Expect(k8sClient.Status().Update(ctx, &current)).Should(Succeed())
+
+			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      dgdName,
+					Namespace: namespace,
+					Labels: map[string]string{
+						nvidiacomv1beta1.LabelDGDRName:      dgdrName,
+						nvidiacomv1beta1.LabelDGDRNamespace: namespace,
+						nvidiacomv1beta1.LabelManagedBy:     nvidiacomv1beta1.LabelValueDynamoOperator,
+					},
+				},
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
+					BackendFramework: "vllm",
+					Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{
+						ComponentName: "worker",
+						ComponentType: nvidiacomv1beta1.ComponentTypeWorker,
+						Replicas:      ptr.To[int32](1),
+						PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/runtime:custom"}},
+						}},
+					}},
+				},
+			}
+			Expect(admissionBypassClient.Create(ctx, dgd)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, dgd) }()
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &current)).Should(Succeed())
+			current.Spec.RuntimeVersionOverride = "1.1.0"
+			Expect(k8sClient.Update(ctx, &current)).Should(Succeed())
+
+			result, err := reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: dgdrName, Namespace: namespace},
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.IsZero()).Should(BeFalse())
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdName, Namespace: namespace}, dgd)).Should(Succeed())
+			Expect(dgd.Spec.Components).Should(HaveLen(1))
+			Expect(dgd.Spec.Components[0].RuntimeVersionOverride).Should(Equal("1.1.0"))
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &current)).Should(Succeed())
+			Expect(current.Status.ObservedGeneration).Should(Equal(current.Generation))
+		})
+
+		It("Should not replace an existing DGD runtime version override", func() {
+			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+					RuntimeVersionOverride: "1.1.0",
+				},
+			}
+			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
+					Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{
+						ComponentName:          "worker",
+						RuntimeVersionOverride: "1.2.0",
+					}},
+				},
+			}
+
+			changed, err := applyDGDRRuntimeVersionOverride(dgdr, dgd)
+			Expect(err).Should(MatchError(ContainSubstring("cannot replace it")))
+			Expect(changed).Should(BeFalse())
+			Expect(dgd.Spec.Components[0].RuntimeVersionOverride).Should(Equal("1.2.0"))
+		})
 	})
 
 	Context("When handling DGD deletion", func() {
