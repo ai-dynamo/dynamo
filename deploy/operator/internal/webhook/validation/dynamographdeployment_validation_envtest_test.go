@@ -70,18 +70,18 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDGDForAdmission(nil),
 		},
 		{
-			name: "beta component pod template is required on create",
+			name: "beta component main image is required when pod template is absent on create",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				betaWorkerComponent(dgd).PodTemplate = nil
 			}),
-			wantCELErr: "spec.components[1]: Invalid value: podTemplate is required for new components and cannot be removed once set",
+			wantWebhookErrs: []string{"spec.components[1].podTemplate.spec.containers: Required value: is required"},
 		},
 		{
-			name: "alpha service extra pod spec is required on create",
+			name: "alpha service main image is required when extra pod spec is absent on create",
 			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				dgd.Spec.Services[dgdAdmissionWorkerName].ExtraPodSpec = nil
 			}),
-			wantCELErr: "spec.services[worker]: Invalid value: extraPodSpec is required for new components and cannot be removed once set",
+			wantWebhookErrs: []string{"spec.services[worker].extraPodSpec.mainContainer.image: Required value: is required"},
 		},
 		{
 			name: "component custom image requires runtime version override",

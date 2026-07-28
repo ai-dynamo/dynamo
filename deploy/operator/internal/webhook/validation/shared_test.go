@@ -139,59 +139,6 @@ func admissionSourceVersion(t *testing.T, object runtime.Object) string {
 	}
 }
 
-func TestComponentPodConfigurationCELRatcheting(t *testing.T) {
-	dcdValidators := requestValidatorsFromCRD(t, "nvidia.com_dynamocomponentdeployments.yaml")
-	dgdValidators := requestValidatorsFromCRD(t, "nvidia.com_dynamographdeployments.yaml")
-	tests := []struct {
-		name       string
-		deployment runtime.Object
-		validators map[string]*crdRequestValidator
-	}{
-		{
-			name: "v1beta1 DCD",
-			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
-				dcd.Spec.PodTemplate = nil
-			}),
-			validators: dcdValidators,
-		},
-		{
-			name: "v1alpha1 DCD",
-			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
-				dcd.Spec.ExtraPodSpec = nil
-			}),
-			validators: dcdValidators,
-		},
-		{
-			name: "v1beta1 DGD",
-			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				betaWorkerComponent(dgd).PodTemplate = nil
-			}),
-			validators: dgdValidators,
-		},
-		{
-			name: "v1alpha1 DGD",
-			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
-				dgd.Spec.Services[dgdAdmissionWorkerName].ExtraPodSpec = nil
-			}),
-			validators: dgdValidators,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			old := admissionUnstructured(t, tt.deployment)
-			current := admissionUnstructured(t, tt.deployment.DeepCopyObject())
-			current["metadata"].(map[string]any)["labels"] = map[string]any{"updated": "true"}
-
-			version := admissionSourceVersion(t, tt.deployment)
-			errs := tt.validators[version].celValidator(current, old)
-			if len(errs) != 0 {
-				t.Fatalf("CEL errors = %v, want unchanged legacy pod configuration absence to be allowed", errs)
-			}
-		})
-	}
-}
-
 func TestRuntimeVersionImageAbsenceRatcheting(t *testing.T) {
 	t.Run("v1beta1", func(t *testing.T) {
 		validation := &sharedValidation{runtimeVersionSource: runtimeVersionSourceV1Beta1}

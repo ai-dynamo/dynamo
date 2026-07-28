@@ -11543,9 +11543,6 @@ spec:
                   rule: '!has(self.minAvailable) || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)'
                 - message: minAvailable is immutable after creation
                   rule: '!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)'
-                - message: extraPodSpec is required for new components and cannot be removed once set
-                  optionalOldSelf: true
-                  rule: has(self.extraPodSpec) || (oldSelf.hasValue() && !has(oldSelf.value().extraPodSpec))
             status:
               description: Status reflects the current observed state of the component deployment.
               properties:
@@ -20485,9 +20482,6 @@ spec:
                   rule: '!has(self.minAvailable) || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)'
                 - message: minAvailable is immutable after creation
                   rule: '!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)'
-                - message: podTemplate is required for new components and cannot be removed once set
-                  optionalOldSelf: true
-                  rule: has(self.podTemplate) || (oldSelf.hasValue() && !has(oldSelf.value().podTemplate))
             status:
               description: status reflects the current observed state of the component deployment.
               properties:

@@ -69,34 +69,34 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
-			name: "v1beta1 pod template is required on create",
+			name: "v1beta1 main image is required when pod template is absent on create",
 			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 				dcd.Spec.PodTemplate = nil
 			}),
-			wantCELErr: "spec: Invalid value: podTemplate is required for new components and cannot be removed once set",
+			wantWebhookErrs: []string{"spec.podTemplate.spec.containers: Required value: is required"},
 		},
 		{
-			name: "v1alpha1 extra pod spec is required on create",
+			name: "v1alpha1 main image is required when extra pod spec is absent on create",
 			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
 				dcd.Spec.ExtraPodSpec = nil
 			}),
-			wantCELErr: "spec: Invalid value: extraPodSpec is required for new components and cannot be removed once set",
+			wantWebhookErrs: []string{"spec.extraPodSpec.mainContainer.image: Required value: is required"},
 		},
 		{
-			name:          "v1beta1 pod template cannot be removed",
+			name:          "v1beta1 main image cannot be removed by removing pod template",
 			oldDeployment: betaDCDForAdmission(nil),
 			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 				dcd.Spec.PodTemplate = nil
 			}),
-			wantCELErr: "spec: Invalid value: podTemplate is required for new components and cannot be removed once set",
+			wantWebhookErrs: []string{"spec.podTemplate.spec.containers: Required value: is required"},
 		},
 		{
-			name:          "v1alpha1 extra pod spec cannot be removed",
+			name:          "v1alpha1 main image cannot be removed by removing extra pod spec",
 			oldDeployment: alphaDCDForAdmission(nil),
 			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
 				dcd.Spec.ExtraPodSpec = nil
 			}),
-			wantCELErr: "spec: Invalid value: extraPodSpec is required for new components and cannot be removed once set",
+			wantWebhookErrs: []string{"spec.extraPodSpec.mainContainer.image: Required value: is required"},
 		},
 		{
 			name: "v1beta1 main image is required",

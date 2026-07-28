@@ -11843,9 +11843,6 @@ spec:
                         rule: '!has(self.minAvailable) || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)'
                       - message: minAvailable is immutable after creation
                         rule: '!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)'
-                      - message: extraPodSpec is required for new components and cannot be removed once set
-                        optionalOldSelf: true
-                        rule: has(self.extraPodSpec) || (oldSelf.hasValue() && !has(oldSelf.value().extraPodSpec))
                   description: Services are the services to deploy as part of this deployment.
                   maxProperties: 25
                   type: object
@@ -20944,9 +20941,6 @@ spec:
                         rule: '!has(self.minAvailable) || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)'
                       - message: minAvailable is immutable after creation
                         rule: '!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)'
-                      - message: podTemplate is required for new components and cannot be removed once set
-                        optionalOldSelf: true
-                        rule: has(self.podTemplate) || (oldSelf.hasValue() && !has(oldSelf.value().podTemplate))
                   maxItems: 25
                   type: array
                   x-kubernetes-list-map-keys:
