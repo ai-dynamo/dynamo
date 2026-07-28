@@ -604,6 +604,34 @@ navigation:
                     path: ../pages-dev/components/profiler/profiler-guide.md
                   - page: Profiler Examples
                     path: ../pages-dev/components/profiler/profiler-examples.md
+              - section: AI Simulate (Experimental)
+                slug: ai-simulate
+                collapsed: true
+                contents:
+                  - page: Overview
+                    path: ../pages-dev/components/aisimulate/README.md
+                  - section: Spica (Experimental)
+                    slug: spica
+                    collapsed: true
+                    contents:
+                      - page: Overview
+                        path: ../pages-dev/components/aisimulate/spica/README.md
+                      - page: Search Flow
+                        path: ../pages-dev/components/aisimulate/spica/overview.md
+                      - page: Optimization Goals
+                        path: ../pages-dev/components/aisimulate/spica/optimization-goal.md
+                      - page: Traffic
+                        path: ../pages-dev/components/aisimulate/spica/traffic.md
+                      - page: Search Space
+                        path: ../pages-dev/components/aisimulate/spica/search-space.md
+                      - page: Unrolled Samples
+                        path: ../pages-dev/components/aisimulate/spica/sample.md
+                      - page: GLM-5-FP8 Pareto Sweep
+                        path: ../pages-dev/components/aisimulate/spica/examples/glm5-disagg-pareto-frontier-sweep.md
+                      - page: Planner Goodput-per-GPU Sweep
+                        path: ../pages-dev/components/aisimulate/spica/examples/planner-goodput-per-gpu-sweep.md
+                      - page: Router End-to-End Latency Sweep
+                        path: ../pages-dev/components/aisimulate/spica/examples/router-e2e-latency-sweep.md
               - section: KVBM
                 collapsed: true
                 contents:
