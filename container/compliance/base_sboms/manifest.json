@@ -70,16 +70,6 @@
       "platform": "linux/arm64"
     },
     {
-      "baseline_digest": "sha256:22b2291f0d515dbffde9d9f2333d82051b72781149fb5c2664076224dd8c53de",
-      "baseline_image": "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo",
-      "baseline_sbom": "vllm-ci-test-repo@22b2291f-amd64.cdx.json",
-      "baseline_tag": "ee0da84ab9e04ac7610e28580af62c365e898389-xpu",
-      "from_digest": "sha256:22b2291f0d515dbffde9d9f2333d82051b72781149fb5c2664076224dd8c53de",
-      "from_image": "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo",
-      "from_tag": "ee0da84ab9e04ac7610e28580af62c365e898389-xpu",
-      "platform": "linux/amd64"
-    },
-    {
       "baseline_digest": "sha256:043085f9298b5da0d79bfd91e162b04c0661f3cb2f03202c5b912037cf6c1ba6",
       "baseline_image": "nvcr.io/nvidia/distroless/python",
       "baseline_sbom": "python@043085f9-amd64.cdx.json",
