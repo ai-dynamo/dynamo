@@ -63,13 +63,6 @@ const CHANNELS = [
     icon: "discord",
   },
   {
-    name: "CNCF Slack",
-    label: "Find us in #ai-dynamo",
-    href: "https://slack.cncf.io",
-    tone: "slack",
-    icon: "slack",
-  },
-  {
     name: "AI Dynamo Slack",
     label: "Join the dedicated Dynamo workspace",
     href: "http://ai-dynamo.org/slack",
