@@ -2282,7 +2282,7 @@ func TestDynamoGraphDeploymentReconciler_isGrovePathway(t *testing.T) {
 	}
 }
 
-func Test_reconcileGroveResources(t *testing.T) {
+func TestGroveProgram_ReconcileWorkloads(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
@@ -2639,7 +2639,10 @@ func Test_reconcileGroveResources(t *testing.T) {
 				},
 			}
 
-			result, err := reconciler.reconcileGroveResources(ctx, dgd, nil, nil)
+			result, err := (&groveProgram{reconciler: reconciler}).reconcileWorkloads(
+				ctx,
+				workloadReconcileRequest{DGD: dgd},
+			)
 			if tt.wantErrSubstring != "" {
 				g.Expect(err).To(gomega.HaveOccurred())
 				g.Expect(err.Error()).To(gomega.ContainSubstring(tt.wantErrSubstring))
@@ -2652,7 +2655,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 	}
 }
 
-func Test_reconcileGroveResources_UsesPreservedAlphaServiceIngress(t *testing.T) {
+func TestGroveProgram_ReconcileWorkloadsUsesPreservedAlphaServiceIngress(t *testing.T) {
 	ctx := context.Background()
 	g := gomega.NewGomegaWithT(t)
 
@@ -2709,7 +2712,10 @@ func Test_reconcileGroveResources_UsesPreservedAlphaServiceIngress(t *testing.T)
 		},
 	}
 
-	_, err := reconciler.reconcileGroveResources(ctx, dgd, nil, nil)
+	_, err := (&groveProgram{reconciler: reconciler}).reconcileWorkloads(
+		ctx,
+		workloadReconcileRequest{DGD: dgd},
+	)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 
 	ingress := &networkingv1.Ingress{}

@@ -194,15 +194,6 @@ func workloadProgramFailureReason(err error) (Reason, bool) {
 	return failure.reason, true
 }
 
-// groveReconcileFunc is the temporary strangler seam around the existing Grove
-// pathway. It disappears when Grove reconciliation moves into groveProgram.
-type groveReconcileFunc func(
-	context.Context,
-	*nvidiacomv1beta1.DynamoGraphDeployment,
-	*dynamo.RestartState,
-	map[string]*checkpoint.CheckpointInfo,
-) (ReconcileResult, error)
-
 type componentProgram struct {
 	// The DGD reconciler temporarily supplies shared controller dependencies and
 	// managed rolling-update helpers. Later extractions can narrow this without
@@ -594,89 +585,12 @@ func (p *componentProgram) preserveExistingBackendFramework(
 	return nil
 }
 
-type groveProgram struct {
-	reconciler *DynamoGraphDeploymentReconciler
-	reconcile  groveReconcileFunc
-	lwsEnabled bool
-}
-
-// Reconcile composes the current Grove pathway around its temporary workload
-// adapter while keeping shared resource ordering and result publication
-// identical to the component program.
-func (p *groveProgram) Reconcile(
-	ctx context.Context,
-	req workloadProgramRequest,
-) (programResult workloadProgramResult, retErr error) {
-	programResult = newWorkloadProgramResult(req.DGD)
-	defer func() {
-		if retErr != nil {
-			reason := reasonFailedToReconcileResources
-			if classified, ok := workloadProgramFailureReason(retErr); ok {
-				reason = classified
-			}
-			programResult.Fail(req.DGD.Generation, reason, retErr)
-		}
-		p.reconciler.propagateTopologyCondition(ctx, req.DGD, &programResult)
-	}()
-	log.FromContext(ctx).Info(
-		"Reconciling Grove resources",
-		"hasMultinode", req.DGD.HasAnyMultinodeComponent(),
-		"lwsEnabled", p.lwsEnabled,
-	)
-
-	if err := p.reconciler.migrateCurrentWorkerHashIfNeeded(ctx, req.DGD); err != nil {
-		log.FromContext(ctx).Error(err, "Failed to migrate worker hash")
-		return programResult, failWorkloadProgram(reasonFailedToMigrateWorkerHash, err)
-	}
-	if err := reconcileUnsupportedWorkerRollout(ctx, p.reconciler, req.DGD, true); err != nil {
-		return programResult, err
-	}
-	inputs, err := p.reconciler.reconcileProgramInputs(ctx, req.DGD)
-	if inputs.CheckpointStatuses != nil {
-		programResult.Status.Checkpoints = inputs.CheckpointStatuses
-	}
-	if err != nil {
-		return programResult, err
-	}
-	restart := p.reconciler.resolveProgramRestartState(ctx, req.DGD, &programResult.Status, &programResult)
-	programResult.Status.Restart = restart.Status
-
-	result, err := p.reconcileWorkloads(ctx, workloadReconcileRequest{
-		DGD:             req.DGD,
-		RestartState:    restart.State,
-		CheckpointInfos: inputs.CheckpointInfos,
-	})
-	if err != nil {
-		return programResult, fmt.Errorf("failed to reconcile Grove workloads: %w", err)
-	}
-	result, err = p.reconciler.reconcileProgramResult(ctx, req.DGD, inputs, restart, result)
-	if err != nil {
-		return programResult, err
-	}
-
-	programResult.applyReconcileResult(req.DGD.Generation, result)
-	return programResult, nil
-}
-
-func (p *groveProgram) reconcileWorkloads(
-	ctx context.Context,
-	req workloadReconcileRequest,
-) (ReconcileResult, error) {
-	return p.reconcile(
-		ctx,
-		req.DGD,
-		req.RestartState,
-		req.CheckpointInfos,
-	)
-}
-
 func (r *DynamoGraphDeploymentReconciler) selectWorkloadProgram(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) workloadProgram {
 	if r.isGrovePathway(dgd) {
 		return &groveProgram{
 			reconciler: r,
-			reconcile:  r.reconcileGroveResources,
 			lwsEnabled: r.RuntimeConfig.Gate.Enabled(features.LWS),
 		}
 	}

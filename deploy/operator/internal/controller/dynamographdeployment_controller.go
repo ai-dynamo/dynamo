@@ -36,7 +36,6 @@ import (
 
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	corev1 "k8s.io/api/core/v1"
-	networkingv1 "k8s.io/api/networking/v1"
 	resourcev1 "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -581,7 +580,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGrovePodCliqueSet(
 		func() (bool, string, map[string]nvidiacomv1beta1.ComponentReplicaStatus) {
 			// Grove readiness: all underlying PodCliques and PodCliqueScalingGroups have replicas == availableReplicas.
 			// A transient (non-NotFound) read error is handled authoritatively by
-			// reconcileGroveResources, which re-evaluates and returns the error so
+			// groveProgram, which re-evaluates and returns the error so
 			// the reconcile retries; here we defensively treat it as not-ready so a
 			// read blip can never surface as "ready".
 			allComponentsReady, reason, componentStatuses, readErr := dynamo.GetComponentReadinessAndServiceReplicaStatuses(ctx, r.Client, dynamoDeployment)
@@ -991,200 +990,6 @@ func findPodTemplateContainer(podTemplate *corev1.PodTemplateSpec, containerName
 		}
 	}
 	return nil, fmt.Errorf("checkpoint job pod template: pod spec has no container named %q", containerName)
-}
-
-func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Context, dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment, restartState *dynamo.RestartState, checkpointInfos map[string]*checkpoint.CheckpointInfo) (ReconcileResult, error) {
-	logger := log.FromContext(ctx)
-
-	renderDeployment, existingPodCliqueSet, err := r.prepareGroveRenderDeployment(ctx, dynamoDeployment)
-	if err != nil {
-		return ReconcileResult{}, err
-	}
-
-	grovePodCliqueSetAsResource, err := r.reconcileGrovePodCliqueSet(ctx, dynamoDeployment, renderDeployment, existingPodCliqueSet, restartState, checkpointInfos)
-	if err != nil {
-		logger.Error(err, "failed to reconcile the Grove PodClique Set")
-		return ReconcileResult{}, fmt.Errorf("failed to reconcile the Grove PodClique Set: %w", err)
-	}
-
-	// Handle Grove scaling operations after structural changes
-	if err := r.reconcileGroveScaling(ctx, dynamoDeployment, checkpointInfos); err != nil {
-		logger.Error(err, "failed to reconcile Grove scaling")
-		return ReconcileResult{}, fmt.Errorf("failed to reconcile Grove scaling: %w", err)
-	}
-
-	// Reconcile headless services for model endpoint discovery
-	if err := dynamo.ReconcileModelServicesForComponents(
-		ctx,
-		r,
-		dynamoDeployment,
-		dynamo.ComponentsByName(dynamoDeployment),
-		dynamoDeployment.Namespace,
-	); err != nil {
-		logger.Error(err, "failed to reconcile model services")
-		return ReconcileResult{}, fmt.Errorf("failed to reconcile model services: %w", err)
-	}
-
-	resources := []Resource{grovePodCliqueSetAsResource}
-	for i := range renderDeployment.Spec.Components {
-		component := &renderDeployment.Spec.Components[i]
-		componentName := component.ComponentName
-
-		// if k8s discovery is enabled, create a service for each component
-		// else, only create for the frontend component
-		isK8sDiscoveryEnabled := commoncontroller.IsK8sDiscoveryEnabled(r.Config.Discovery.Backend, dynamoDeployment.Annotations)
-		if isK8sDiscoveryEnabled || string(component.ComponentType) == consts.ComponentTypeFrontend {
-			dynamoNamespace := renderDeployment.GetDynamoNamespaceForComponent(component)
-			mainComponentService, err := dynamo.GenerateComponentService(dynamo.ComponentServiceParams{
-				ServiceName:     dynamo.GetDCDResourceName(dynamoDeployment, componentName, ""),
-				Namespace:       dynamoDeployment.Namespace,
-				ComponentType:   string(component.ComponentType),
-				DynamoNamespace: dynamoNamespace,
-				ComponentName:   componentName,
-				Labels:          dynamo.GetDGDComponentResourceLabels(renderDeployment, componentName, component),
-				Annotations:     dynamo.GetDGDComponentResourceAnnotations(renderDeployment, componentName, component),
-				IsK8sDiscovery:  isK8sDiscoveryEnabled,
-			})
-			if err != nil {
-				logger.Error(err, "failed to generate the main component service")
-				return ReconcileResult{}, fmt.Errorf("failed to generate the main component service: %w", err)
-			}
-			_, syncedMainComponentService, err := commoncontroller.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*corev1.Service, bool, error) {
-				return mainComponentService, false, nil
-			})
-			if err != nil {
-				logger.Error(err, "failed to sync the main component service")
-				return ReconcileResult{}, fmt.Errorf("failed to sync the main component service: %w", err)
-			}
-			if syncedMainComponentService != nil {
-				if syncedMainComponentService.Annotations == nil {
-					syncedMainComponentService.Annotations = make(map[string]string)
-				}
-				desiredAnnotations := dynamo.GetDGDComponentResourceAnnotations(renderDeployment, componentName, component)
-				var updateAnnotations bool
-				for key, value := range desiredAnnotations {
-					if val, ok := syncedMainComponentService.Annotations[key]; !ok || val != value {
-						syncedMainComponentService.Annotations[key] = value
-						updateAnnotations = true
-					}
-				}
-				if updateAnnotations {
-					err = r.Update(ctx, syncedMainComponentService)
-					if err != nil {
-						logger.Error(err, fmt.Sprintf("Failed to update main component service %s.", componentName))
-						r.GetRecorder().Eventf(dynamoDeployment, corev1.EventTypeWarning, "UpdateService", "Failed to update Service %s: %s", componentName, err)
-						return ReconcileResult{}, fmt.Errorf("failed to update main component service %s: %w", componentName, err)
-					}
-				}
-				mainComponentServiceAsResource, err := commoncontroller.NewResource(syncedMainComponentService,
-					func() (bool, string) {
-						return true, ""
-					})
-				if err != nil {
-					return ReconcileResult{}, fmt.Errorf("failed to sync the main component service: %w", err)
-				}
-				resources = append(resources, mainComponentServiceAsResource)
-			}
-		}
-
-		if string(component.ComponentType) == consts.ComponentTypeFrontend {
-			// generate the main component ingress
-			ingressSpec := dynamo.GenerateDefaultIngressSpec(dynamoDeployment, r.Config.Ingress)
-			if preservedIngressSpec, ok := dynamo.GetDGDComponentPreservedIngressSpec(dynamoDeployment, componentName); ok {
-				ingressSpec = preservedIngressSpec
-			}
-			mainComponentIngress := dynamo.GenerateComponentIngress(ctx, dynamo.GetDCDResourceName(dynamoDeployment, componentName, ""), dynamoDeployment.Namespace, ingressSpec)
-			_, syncedMainComponentIngress, err := commoncontroller.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*networkingv1.Ingress, bool, error) {
-				if !ingressSpec.Enabled || ingressSpec.IngressControllerClassName == nil {
-					logger.Info("Ingress is not enabled")
-					return mainComponentIngress, true, nil
-				}
-				return mainComponentIngress, false, nil
-			})
-			if err != nil {
-				logger.Error(err, "failed to sync the main component ingress")
-				return ReconcileResult{}, fmt.Errorf("failed to sync the main component ingress: %w", err)
-			}
-			if syncedMainComponentIngress != nil {
-				mainComponentIngressAsResource, err := commoncontroller.NewResource(syncedMainComponentIngress,
-					func() (bool, string) {
-						return true, ""
-					})
-				if err != nil {
-					return ReconcileResult{}, fmt.Errorf("failed to create the main component ingress resource: %w", err)
-				}
-				resources = append(resources, mainComponentIngressAsResource)
-			}
-			// generate the main component virtual service
-			if r.Config.Ingress.UseVirtualService() {
-				mainComponentVirtualService := dynamo.GenerateComponentVirtualService(ctx, dynamo.GetDCDResourceName(dynamoDeployment, componentName, ""), dynamoDeployment.Namespace, ingressSpec)
-				_, syncedMainComponentVirtualService, err := commoncontroller.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*networkingv1beta1.VirtualService, bool, error) {
-					if !ingressSpec.IsVirtualServiceEnabled() {
-						logger.Info("VirtualService is not enabled")
-						return mainComponentVirtualService, true, nil
-					}
-					return mainComponentVirtualService, false, nil
-				})
-				if err != nil {
-					logger.Error(err, "failed to sync the main component virtual service")
-					return ReconcileResult{}, fmt.Errorf("failed to sync the main component virtual service: %w", err)
-				}
-				if syncedMainComponentVirtualService != nil {
-					mainComponentVirtualServiceAsResource, err := commoncontroller.NewResource(syncedMainComponentVirtualService,
-						func() (bool, string) {
-							return true, ""
-						})
-					if err != nil {
-						return ReconcileResult{}, fmt.Errorf("failed to create the main component virtual service resource: %w", err)
-					}
-					resources = append(resources, mainComponentVirtualServiceAsResource)
-				}
-			}
-		}
-	}
-
-	// Check resource readiness and overlay the Grove-specific Ready reason.
-	// Extracted to keep this function's cyclomatic complexity within the
-	// gocyclo limit.
-	return r.checkGroveResourcesReadiness(ctx, dynamoDeployment, resources)
-}
-
-// checkGroveResourcesReadiness computes the readiness result for the synced
-// Grove resources and overlays the Grove-specific Ready reason
-// classification on a not-ready result. A transient Grove read error is
-// returned (not folded into the result) so the reconcile retries and does not
-// advance ObservedGeneration on a blip.
-func (r *DynamoGraphDeploymentReconciler) checkGroveResourcesReadiness(ctx context.Context, dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment, resources []Resource) (ReconcileResult, error) {
-	result := r.checkResourcesReadiness(resources)
-	if err := r.applyGroveReadyClassification(ctx, dynamoDeployment, &result); err != nil {
-		return ReconcileResult{}, err
-	}
-	return result, nil
-}
-
-// applyGroveReadyClassification replaces the generic not-ready reason on result
-// with a Grove-specific classification (insufficient_capacity / pods_not_ready /
-// updating / mixed_not_ready_reasons / some_resources_are_not_ready) computed
-// from Grove PodClique / PodCliqueScalingGroup status (REQ 1). It only overrides
-// when the result is not successful; the ready path keeps checkResourcesReadiness's
-// success result.
-//
-// A non-nil error is a transient (non-NotFound) Grove read failure: the caller
-// should return it so the reconcile retries rather than publishing a possibly
-// wrong not-ready diagnosis and advancing ObservedGeneration. NotFound is not an
-// error and is classified as a legitimate not-ready state.
-func (r *DynamoGraphDeploymentReconciler) applyGroveReadyClassification(ctx context.Context, dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment, result *ReconcileResult) error {
-	if result.State == nvidiacomv1beta1.DGDStateSuccessful {
-		return nil
-	}
-	classification, err := dynamo.ClassifyGroveReadiness(ctx, r.Client, dynamoDeployment)
-	if err != nil {
-		return err
-	}
-	if classification != "" {
-		result.Reason = Reason(classification)
-	}
-	return nil
 }
 
 // isNewRestartRequest checks if the current spec.restart.id represents a new restart request

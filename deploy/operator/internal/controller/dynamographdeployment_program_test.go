@@ -27,7 +27,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	"github.com/stretchr/testify/assert"
@@ -247,77 +246,6 @@ func TestWorkloadProgramResultOwnsReadyAndObservedGeneration(t *testing.T) {
 	})
 }
 
-func TestGroveProgram_ReconcileWorkloadsAdapter(t *testing.T) {
-	reconcileErr := errors.New("reconcile failed")
-	tests := []struct {
-		name         string
-		returned     ReconcileResult
-		reconcileErr error
-		wantResult   ReconcileResult
-		wantErr      error
-	}{
-		{
-			name: "Grove program records a successful result",
-			returned: ReconcileResult{
-				State:  nvidiacomv1beta1.DGDStatePending,
-				Reason: "grove_pending",
-			},
-			wantResult: ReconcileResult{
-				State:  nvidiacomv1beta1.DGDStatePending,
-				Reason: "grove_pending",
-			},
-		},
-		{
-			name: "Grove program preserves prior state on error",
-			returned: ReconcileResult{
-				State:  nvidiacomv1beta1.DGDStateSuccessful,
-				Reason: "must_not_be_committed",
-			},
-			reconcileErr: reconcileErr,
-			wantErr:      reconcileErr,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Log("Build typed workload inputs that must be passed unchanged")
-			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{}
-			restartState := &dynamo.RestartState{Timestamp: "restart"}
-			checkpointInfos := map[string]*checkpoint.CheckpointInfo{
-				"worker": {CheckpointName: "checkpoint"},
-			}
-			req := workloadReconcileRequest{
-				DGD:             dgd,
-				RestartState:    restartState,
-				CheckpointInfos: checkpointInfos,
-			}
-			called := false
-			reconcile := func(
-				_ context.Context,
-				gotDGD *nvidiacomv1beta1.DynamoGraphDeployment,
-				gotRestartState *dynamo.RestartState,
-				gotCheckpointInfos map[string]*checkpoint.CheckpointInfo,
-			) (ReconcileResult, error) {
-				called = true
-				require.Same(t, dgd, gotDGD)
-				require.Same(t, restartState, gotRestartState)
-				require.Equal(t, checkpointInfos, gotCheckpointInfos)
-				return tt.returned, tt.reconcileErr
-			}
-
-			t.Log("Run the temporary Grove workload adapter")
-			result, err := (&groveProgram{reconcile: reconcile}).reconcileWorkloads(context.Background(), req)
-
-			t.Log("Verify the adapter forwards inputs and outputs unchanged")
-			require.True(t, called)
-			require.ErrorIs(t, err, tt.wantErr)
-			if tt.reconcileErr == nil {
-				assert.Equal(t, tt.wantResult, result)
-			}
-		})
-	}
-}
-
 func TestComponentProgram_ReconcilePreservesResultOnError(t *testing.T) {
 	t.Log("Inject a component-path API failure before new status is produced")
 	reconcileErr := errors.New("reconcile failed")
@@ -378,15 +306,6 @@ func TestGroveProgram_ReconcilePreservesResultOnError(t *testing.T) {
 		reconciler: &DynamoGraphDeploymentReconciler{
 			Client:   kubeClient,
 			Recorder: record.NewFakeRecorder(10),
-		},
-		reconcile: func(
-			context.Context,
-			*nvidiacomv1beta1.DynamoGraphDeployment,
-			*dynamo.RestartState,
-			map[string]*checkpoint.CheckpointInfo,
-		) (ReconcileResult, error) {
-			t.Fatal("Grove workload reconciliation must not run after rollout preparation fails")
-			return ReconcileResult{}, nil
 		},
 	}
 	dgd.Status = nvidiacomv1beta1.DynamoGraphDeploymentStatus{
