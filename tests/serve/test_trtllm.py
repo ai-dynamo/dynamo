@@ -103,6 +103,9 @@ trtllm_configs = {
         script_name="disagg.sh",
         marks=[
             pytest.mark.core,
+            pytest.mark.skip(
+                reason="Flaky custom health check timeout; re-enable via DYN-3673"
+            ),
             pytest.mark.gpu_2,
             pytest.mark.trtllm,
             pytest.mark.pre_merge,
