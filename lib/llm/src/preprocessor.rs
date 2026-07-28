@@ -636,7 +636,6 @@ impl OpenAIPreprocessor {
     ) -> Result<Arc<Self>> {
         let mdcsum = mdc.mdcsum().to_string();
         let tokenizer: Arc<dyn Tokenizer> = (*tokenizer).clone();
-        Self::warn_if_image_placeholder_token_is_not_atomic(&mdc, tokenizer.as_ref());
         let lora_name = mdc.lora.as_ref().map(|l| l.name.clone());
         let Some(ref model_info) = mdc.model_info else {
             anyhow::bail!(
@@ -1276,46 +1275,6 @@ impl OpenAIPreprocessor {
             Ok(Some(formatted_prompt))
         } else {
             Ok(None)
-        }
-    }
-
-    /// Warn when a worker-declared image token does not encode to exactly one
-    /// token id.
-    ///
-    /// The renderer emits the declaration as a segment with `allow_special`,
-    /// but that only selects tiktoken's special-aware method — it is not a
-    /// membership check. A token the checkpoint never registered silently
-    /// BPE-shatters, so one image becomes several ids and the worker's
-    /// one-token-per-image expectation breaks with no error anywhere. Nothing
-    /// downstream re-checks this, so say it once at construction.
-    ///
-    /// Diagnostic only: the declaration is still honored. A worker that knows
-    /// its own processor is a better authority than this heuristic, and
-    /// silently overriding it would be harder to debug than a loud log.
-    fn warn_if_image_placeholder_token_is_not_atomic(
-        mdc: &ModelDeploymentCard,
-        tokenizer: &dyn Tokenizer,
-    ) {
-        let Some(token) = mdc.runtime_config.image_placeholder_token.as_deref() else {
-            return;
-        };
-        match tokenizer.encode(token) {
-            Ok(encoding) if encoding.token_ids().len() == 1 => {}
-            Ok(encoding) => tracing::warn!(
-                image_placeholder_token = %token,
-                token_ids = ?encoding.token_ids(),
-                model = %mdc.display_name,
-                "Worker-declared image placeholder token does not encode to a \
-                 single token id; each image will expand to {} ids and the \
-                 worker's per-image count will not match",
-                encoding.token_ids().len(),
-            ),
-            Err(err) => tracing::warn!(
-                image_placeholder_token = %token,
-                error = %err,
-                model = %mdc.display_name,
-                "Worker-declared image placeholder token failed to encode",
-            ),
         }
     }
 
