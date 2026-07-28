@@ -58,7 +58,7 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 COPY --from=dynamo_base /usr/local/bin/nats-server /usr/local/bin/nats-server
 COPY --from=dynamo_base /usr/local/bin/etcd /usr/local/bin/etcd
 COPY --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
-COPY --chown=dynamo:0 --from=wheel_builder /opt/dynamo/aiconfigurator/verify_installed_package_layers.py /tmp/verify_installed_package_layers.py
+COPY --chown=dynamo:0 --from=runtime_wheel_builder /opt/dynamo/aiconfigurator/verify_installed_package_layers.py /tmp/verify_installed_package_layers.py
 
 USER dynamo
 
