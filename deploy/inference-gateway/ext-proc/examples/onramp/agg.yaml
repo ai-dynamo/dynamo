@@ -20,11 +20,14 @@
 # has an empty KV index and re-warms from live traffic + replay.)
 #
 # Prerequisites:
-#   - A GAIE-compatible Gateway named `inference-gateway` in this namespace.
+#   - A GAIE-compatible Gateway named `inference-gateway` in the
+#     `agentgateway-system` namespace (the installer script deploys it there),
+#     with a listener that allows routes from other namespaces
+#     (allowedRoutes.namespaces.from: All).
 #   - A secret `hf-token-secret` with key `HF_TOKEN` for the vLLM worker.
 # Apply with: kubectl apply -n <ns> -f agg.yaml
 # Test:
-#   GW=$(kubectl get gateway inference-gateway -o jsonpath='{.status.addresses[0].value}')
+#   GW=$(kubectl get gateway inference-gateway -n agentgateway-system -o jsonpath='{.status.addresses[0].value}')
 #   curl http://$GW/v1/chat/completions -H 'content-type: application/json' -d '{
 #     "model": "Qwen/Qwen3-0.6B",   # MUST match DYN_MODEL_NAME below
 #     "messages": [{"role":"user","content":"hello"}]
@@ -69,12 +72,33 @@ spec:
               containerPort: 8000
             - name: kv-events
               containerPort: 5557
+          # vLLM's /health returns 200 only once the model is loaded and :8000
+          # accepts requests. Without this probe, kubelet marks the pod Ready as
+          # soon as the container starts, and the standalone EPP (which registers
+          # Ready=True pods) would advertise this worker and the renderer Service
+          # before it can serve. The pod stays NotReady until /health passes, so
+          # arbitrarily long model loads are handled without a large initial delay.
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
           env:
             - name: HF_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: hf-token-secret
                   key: HF_TOKEN
+            # As non-root (UID 1000) the image's default HOME is not writable, so
+            # point HOME and the HF/model cache at world-writable /tmp — the worker
+            # can then download the model without a mounted volume for this example.
+            - name: HOME
+              value: /tmp
+            - name: HF_HOME
+              value: /tmp/huggingface
           resources:
             limits:
               nvidia.com/gpu: "1"
@@ -82,6 +106,12 @@ spec:
               nvidia.com/gpu: "1"
           securityContext:
             allowPrivilegeEscalation: false
+            # allowPrivilegeEscalation=false + dropped caps still permit UID 0, so
+            # enforce non-root explicitly: pin a non-root UID/GID and require it
+            # (kubelet refuses to start the container if the image would run as root).
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
             capabilities:
               drop:
                 - ALL
@@ -149,7 +179,7 @@ metadata:
   labels:
     app: dynamo-epp
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app: dynamo-epp
@@ -161,7 +191,7 @@ spec:
       serviceAccountName: dynamo-epp
       containers:
         - name: epp
-          image: docker.io/lambda108/rust-epp:st_1
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:latest
           imagePullPolicy: IfNotPresent
           env:
             # Standalone mode: runtime-free selector in-process (no Dynamo

@@ -11,7 +11,7 @@ pods. It does not install the Dynamo operator, create a `DynamoGraphDeployment`,
 NATS/JetStream event plane.
 
 For the user-facing walkthrough, start with
-[Vanilla vLLM GAIE On-ramp](../../../../../docs/kubernetes/gateway-api/vanilla-vllm-onramp.mdx).
+[Vanilla vLLM GAIE On-ramp](../../../../../docs/fern/kubernetes/vanilla-vllm-onramp.mdx).
 
 ## How the on-ramp works
 
@@ -20,11 +20,11 @@ This on-ramp is available for Aggregated serving only at this time.
 The aggregated on-ramp uses the public `vllm/vllm-openai:latest` image. Replace it with the vLLM
 image your platform standardizes on if you need a pinned or internally mirrored image.
 KV-aware selection is provided by the runtime-free
-[selection service](../../../../../docs/components/router/standalone-selection.md),
+[selection service](../../../../../docs/fern/components/router/standalone-selection.md),
 which the EPP runs **in-process**: the EPP and the selection service are compiled
 into one binary, so there is no separate selector Deployment and no HTTP hop. The
 EPP can run single-replica, or **replicated** with cross-replica active-load sync
-between EPP pods (see [Replicated mode](../../../../../docs/kubernetes/gateway-api/vanilla-vllm-onramp.mdx#replicated-mode)).
+between EPP pods (see [Replicated mode](../../../../../docs/fern/kubernetes/vanilla-vllm-onramp.mdx#replicated-mode)).
 
 No special EPP image is needed. Use the EPP image provided with Dynamo releases.
 Whether EPP uses the Dynamo runtime or not is controlled with the `DYN_EPP_MODE` env var: dynamo vs standalone
@@ -56,9 +56,9 @@ flowchart LR
 ## What Dynamo-managed GAIE adds
 
 
-- Disaggregated prefill/decode (Aggregated  serving is planned follow-up in the standalone mode.)
+- Disaggregated prefill/decode (Disaggregated serving is planned follow-up in the standalone mode.)
 - Operator-managed lifecycle for Workers, Services, `InferencePool`, and EPP resources.
-- Request migration, rejection, cancellation - overall admission control 
+- Request migration, rejection, cancellation - overall admission control
 - Data parallelism (The standalone mode which targets DP=1.)
 - Cross-replica KV-index warm-up when new replica re-warms from live traffic + replay.
 - Initial worker cache-state synchronization instead of rebuilding the index only from live traffic.
@@ -67,10 +67,10 @@ flowchart LR
 - Dropped events / gaps management. The `SelectionCore` indexer does seq-watermark gap detection and replays missed events from the worker's replay socket when `DYN_EPP_KV_EVENT_REPLAY_PORT` is configured. Without a replay socket, gaps are dropped and the index re-warms from new traffic.
 - Multi-modal support
 - Topology / Zone aware routing
-- Speculative Decoding awareness 
-- Session affinity 
+- Speculative Decoding awareness
+- Session affinity
 - Full list of OpenAI HTTP endpoints
-- Metrics/observability 
+- Metrics/observability
 
 ## How it works
 
