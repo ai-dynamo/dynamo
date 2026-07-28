@@ -22,6 +22,7 @@ from pathlib import Path
 
 PYPROJECT_TARGETS = [
     "pyproject.toml",
+    "aisimulate/pyproject.toml",
     "lib/bindings/python/pyproject.toml",
     "lib/bindings/kvbm/pyproject.toml",
     "lib/gpu_memory_service/pyproject.toml",

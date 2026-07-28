@@ -76,6 +76,7 @@ jobs:
       ngc_version_tag: ${{ steps.rc_tag.outputs.ngc_version_tag }}
       helm_chart_version: ${{ steps.rc_tag.outputs.helm_chart_version }}
       wheel_version: ${{ steps.rc_tag.outputs.wheel_version }}
+      aisimulate_wheel_version: ${{ steps.rc_tag.outputs.aisimulate_wheel_version }}
     steps:
       - name: Extract version and validate inputs
         id: extract
@@ -142,6 +143,11 @@ jobs:
             echo "Error: cannot parse base version from pyproject.toml (got '${BASE_VERSION}')"
             exit 1
           fi
+          AISIMULATE_BASE_VERSION=$(awk '/^version = / {gsub(/"/, "", $3); print $3; exit}' aisimulate/pyproject.toml)
+          if [[ ! "${AISIMULATE_BASE_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Error: cannot parse base version from aisimulate/pyproject.toml (got '${AISIMULATE_BASE_VERSION}')"
+            exit 1
+          fi
 
           if [[ "${NIGHTLY}" == "true" ]]; then
             DATE_UTC=$(date -u +%Y%m%d)
@@ -151,12 +157,15 @@ jobs:
             # the bare date+sha (e.g. 20260520-abc1234).
             NGC_VERSION_TAG="${DATE_UTC}-${SHORT_SHA}"
             WHEEL_VERSION="${BASE_VERSION}.dev${DATE_UTC}"
+            AISIMULATE_WHEEL_VERSION="${AISIMULATE_BASE_VERSION}.dev${DATE_UTC}"
             echo "rc_number=" >> $GITHUB_OUTPUT
             echo "ngc_version_tag=${NGC_VERSION_TAG}" >> $GITHUB_OUTPUT
             echo "helm_chart_version=" >> $GITHUB_OUTPUT
             echo "wheel_version=${WHEEL_VERSION}" >> $GITHUB_OUTPUT
+            echo "aisimulate_wheel_version=${AISIMULATE_WHEEL_VERSION}" >> $GITHUB_OUTPUT
             echo "Nightly NGC tag: ${NGC_VERSION_TAG}"
-            echo "Nightly wheel version: ${WHEEL_VERSION}"
+            echo "Nightly Dynamo wheel version: ${WHEEL_VERSION}"
+            echo "Nightly AI Simulate wheel version: ${AISIMULATE_WHEEL_VERSION}"
             exit 0
           fi
 
@@ -190,14 +199,17 @@ jobs:
           HELM_CHART_VERSION="${SEMVER_VERSION}-rc${NEXT_RC}"
 
           WHEEL_VERSION="${BASE_VERSION}"
+          AISIMULATE_WHEEL_VERSION="${AISIMULATE_BASE_VERSION}"
 
           echo "rc_number=${NEXT_RC}" >> $GITHUB_OUTPUT
           echo "ngc_version_tag=${VERSION}rc${NEXT_RC}" >> $GITHUB_OUTPUT
           echo "helm_chart_version=${HELM_CHART_VERSION}" >> $GITHUB_OUTPUT
           echo "wheel_version=${WHEEL_VERSION}" >> $GITHUB_OUTPUT
+          echo "aisimulate_wheel_version=${AISIMULATE_WHEEL_VERSION}" >> $GITHUB_OUTPUT
           echo "RC number: ${NEXT_RC}"
           echo "Helm chart version: ${HELM_CHART_VERSION}"
-          echo "RC wheel version: ${WHEEL_VERSION}"
+          echo "RC Dynamo wheel version: ${WHEEL_VERSION}"
+          echo "RC AI Simulate wheel version: ${AISIMULATE_WHEEL_VERSION}"
 
   # ============================================================================
   # NGC PUBLISH: crane copy to NGC, Helm chart push
@@ -583,6 +595,7 @@ jobs:
           crane export --platform=linux/amd64 "${ECR_IMAGE}" - \
             | tar -x -C "${STAGE}/amd64" \
                 --wildcards \
+                'opt/dynamo/wheelhouse/aisimulate-*py3-none-any.whl' \
                 'opt/dynamo/wheelhouse/ai_dynamo-*py3-none-any.whl' \
                 'opt/dynamo/wheelhouse/ai_dynamo_runtime-*x86_64*.whl' \
                 'opt/dynamo/wheelhouse/kvbm-*x86_64*.whl'
@@ -622,23 +635,26 @@ jobs:
       - name: Verify wheel versions match prepare-release expected tag
         env:
           EXPECTED_WHEEL_VERSION: ${{ needs.prepare-release.outputs.wheel_version }}
+          EXPECTED_AISIMULATE_WHEEL_VERSION: ${{ needs.prepare-release.outputs.aisimulate_wheel_version }}
           UPLOAD_DIR: ${{ steps.extract.outputs.upload_dir }}
         run: |
           set -euo pipefail
 
           # Catches UTC-midnight drift between the build-time version stamp and
-          # prepare-release's wheel_version; ai_dynamo and ai_dynamo_runtime must agree.
+          # prepare-release's expected versions.
           shopt -s nullglob
+          AISIMULATE_WHEELS=("${UPLOAD_DIR}"/aisimulate-*-py3-none-any.whl)
           AI_DYNAMO_WHEELS=("${UPLOAD_DIR}"/ai_dynamo-*-py3-none-any.whl)
           AI_DYNAMO_RUNTIME_WHEELS=("${UPLOAD_DIR}"/ai_dynamo_runtime-*.whl)
           shopt -u nullglob
 
-          if [ ${#AI_DYNAMO_WHEELS[@]} -eq 0 ] || [ ${#AI_DYNAMO_RUNTIME_WHEELS[@]} -eq 0 ]; then
-            echo "::error::Missing ai_dynamo or ai_dynamo_runtime wheel in ${UPLOAD_DIR}"
+          if [ ${#AISIMULATE_WHEELS[@]} -eq 0 ] || [ ${#AI_DYNAMO_WHEELS[@]} -eq 0 ] || [ ${#AI_DYNAMO_RUNTIME_WHEELS[@]} -eq 0 ]; then
+            echo "::error::Missing aisimulate, ai_dynamo, or ai_dynamo_runtime wheel in ${UPLOAD_DIR}"
             exit 1
           fi
 
-          echo "Expected wheel version: ${EXPECTED_WHEEL_VERSION}"
+          echo "Expected Dynamo wheel version: ${EXPECTED_WHEEL_VERSION}"
+          echo "Expected AI Simulate wheel version: ${EXPECTED_AISIMULATE_WHEEL_VERSION}"
 
           mismatch=0
           for path in "${AI_DYNAMO_WHEELS[@]}" "${AI_DYNAMO_RUNTIME_WHEELS[@]}"; do
@@ -655,9 +671,22 @@ jobs:
               mismatch=1
             fi
           done
+          for path in "${AISIMULATE_WHEELS[@]}"; do
+            file="$(basename "${path}")"
+            rest="${file#*-}"
+            version="${rest%%-*}"
+            if [ -z "${version}" ]; then
+              echo "::error::Empty version parsed from ${file}"
+              exit 1
+            fi
+            echo "  ${file} -> ${version}"
+            if [ "${version}" != "${EXPECTED_AISIMULATE_WHEEL_VERSION}" ]; then
+              mismatch=1
+            fi
+          done
 
           if [ "${mismatch}" -ne 0 ]; then
-            echo "::error::Wheel version mismatch — expected '${EXPECTED_WHEEL_VERSION}' for all wheels above. dynamo-pipeline and prepare-release likely computed dev_suffix on different UTC days."
+            echo "::error::Wheel version mismatch. dynamo-pipeline and prepare-release likely computed dev_suffix on different UTC days."
             exit 1
           fi
 
@@ -734,6 +763,7 @@ jobs:
           ART_RESULT:       ${{ needs.stage-wheels-artifactory.result }}
           NGC_VERSION_TAG:  ${{ needs.prepare-release.outputs.ngc_version_tag }}
           WHEEL_VERSION:    ${{ needs.prepare-release.outputs.wheel_version }}
+          AISIMULATE_WHEEL_VERSION: ${{ needs.prepare-release.outputs.aisimulate_wheel_version }}
           RUN_URL:          ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         shell: bash
         run: |
@@ -767,6 +797,7 @@ jobs:
             --arg art_result "${ART_RESULT}" \
             --arg ngc_tag    "${NGC_VERSION_TAG}" \
             --arg wheel      "${WHEEL_VERSION}" \
+            --arg aisimulate "${AISIMULATE_WHEEL_VERSION}" \
             --arg run_url    "${RUN_URL}" \
             '{
               channel: $channel,
@@ -780,7 +811,7 @@ jobs:
                     { type: "mrkdwn",
                       text: ($ngc_emoji + " *NGC publish:* " + $ngc_result + "\n`" + $ngc_tag + "`") },
                     { type: "mrkdwn",
-                      text: ($art_emoji + " *Artifactory wheels:* " + $art_result + "\n`" + $wheel + "`") }
+                      text: ($art_emoji + " *Artifactory wheels:* " + $art_result + "\nDynamo `" + $wheel + "`, AI Simulate `" + $aisimulate + "`") }
                   ] },
                 { type: "context",
                   elements: [ { type: "mrkdwn", text: ("<" + $run_url + "|GitHub Actions run>") } ] }
@@ -830,6 +861,7 @@ jobs:
           VERSION:              ${{ needs.prepare-release.outputs.version }}
           NGC_VERSION_TAG:      ${{ needs.prepare-release.outputs.ngc_version_tag }}
           WHEEL_VERSION:        ${{ needs.prepare-release.outputs.wheel_version }}
+          AISIMULATE_WHEEL_VERSION: ${{ needs.prepare-release.outputs.aisimulate_wheel_version }}
           COMMIT_SHA:           ${{ needs.prepare-release.outputs.commit_sha }}
           NIGHTLY:              ${{ needs.prepare-release.outputs.nightly }}
           RC_NUMBER:            ${{ needs.prepare-release.outputs.rc_number }}
@@ -878,6 +910,7 @@ jobs:
             --form "variables[NIGHTLY_TAG]=${NIGHTLY_TAG}" \
             --form "variables[RC_TAG]=${RC_TAG}" \
             --form "variables[WHEEL_VERSION]=${WHEEL_VERSION}" \
+            --form "variables[AISIMULATE_WHEEL_VERSION]=${AISIMULATE_WHEEL_VERSION}" \
             --form "variables[CONTAINER_TAG]=${NGC_VERSION_TAG}" \
             --form "variables[COMMIT_SHA]=${COMMIT_SHA}" \
             --form "variables[GITHUB_RUN_ID]=${GITHUB_RUN_ID}" \
@@ -916,6 +949,8 @@ jobs:
             echo "| PIPELINE_TYPE | ${PIPELINE_TYPE} |"
             echo "| RELEASE_TYPE | ${RELEASE_TYPE} |"
             echo "| Version | ${VERSION} |"
+            echo "| Dynamo wheel version | ${WHEEL_VERSION} |"
+            echo "| AI Simulate wheel version | ${AISIMULATE_WHEEL_VERSION} |"
             echo "| NGC tag | ${NGC_VERSION_TAG} |"
             echo "| Commit | ${COMMIT_SHA} |"
             echo "| Artifacts | ${ARTIFACTS} |"

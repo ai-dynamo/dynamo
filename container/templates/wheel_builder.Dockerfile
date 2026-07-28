@@ -589,10 +589,11 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     fi && \
     /tmp/use-sccache.sh show-stats "Dynamo Runtime"
 
-{% if target == "planner" %}
-# AI Simulate is a separate Python distribution. Build it only for the planner
-# image, after the Dynamo wheels so Python-only changes do not invalidate the
-# expensive Rust build layers above.
+{% if framework == "dynamo" and target in ("planner", "runtime") %}
+# AI Simulate is a separate Python distribution. Build it for the Planner image
+# and the Dynamo runtime image used to stage release wheels. Keep it after the
+# Dynamo wheels so Python-only changes do not invalidate the expensive Rust
+# build layers above.
 COPY aisimulate/ /opt/dynamo/aisimulate/
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=shared \
     export UV_CACHE_DIR=/root/.cache/uv && \
