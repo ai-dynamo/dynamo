@@ -17,7 +17,7 @@
 # A fork PR can reach the signature check through any of these approval paths:
 #
 # 1. The PR author has write, maintain, or admin access to this repository. This path applies when
-#    the PR is opened, synchronized, or reopened.
+#    the PR is opened or reopened. A synchronized update must also be pushed by a maintainer.
 # 2. The PR author is listed in the `APPROVED_EXTERNAL_CONTRIBUTORS` environment secret. This path
 #    applies when the PR is opened, synchronized, or reopened.
 # 3. A user with write, maintain, or admin access to this repository synchronizes the PR branch.
@@ -116,7 +116,7 @@ jobs:
           esac
       - name: Validate triggering actor
         id: actor_check
-        if: github.event.action == 'synchronize' && steps.author_check.outputs.is_approved != 'true' && steps.author_permission_check.outputs.is_maintainer != 'true'
+        if: github.event.action == 'synchronize' && steps.author_check.outputs.is_approved != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO_OWNER: ${{ github.repository_owner }}
@@ -150,8 +150,13 @@ jobs:
           AUTHOR_APPROVED: ${{ steps.author_check.outputs.is_approved }}
           AUTHOR_MAINTAINER: ${{ steps.author_permission_check.outputs.is_maintainer }}
           ACTOR_APPROVED: ${{ steps.actor_check.outputs.is_approved }}
+          EVENT_ACTION: ${{ github.event.action }}
         run: |
-          if [[ "$AUTHOR_APPROVED" == "true" || "$AUTHOR_MAINTAINER" == "true" || "$ACTOR_APPROVED" == "true" ]]; then
+          if [[ "$AUTHOR_APPROVED" == "true" ]]; then
+            echo "is_approved=true" >> "$GITHUB_OUTPUT"
+          elif [[ "$EVENT_ACTION" == "synchronize" && "$ACTOR_APPROVED" == "true" ]]; then
+            echo "is_approved=true" >> "$GITHUB_OUTPUT"
+          elif [[ "$EVENT_ACTION" != "synchronize" && "$AUTHOR_MAINTAINER" == "true" ]]; then
             echo "is_approved=true" >> "$GITHUB_OUTPUT"
           else
             echo "is_approved=false" >> "$GITHUB_OUTPUT"
