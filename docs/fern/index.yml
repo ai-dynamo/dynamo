@@ -158,6 +158,9 @@ navigation:
                     path: kubernetes/dgd-kv-routing.md
                   - page: Gateway API
                     path: kubernetes/inference-gateway.mdx
+                  - page: Vanilla vLLM On-ramp
+                    path: kubernetes/vanilla-vllm-onramp.mdx
+                    slug: vanilla-vllm-onramp
               - page: Disaggregated Serving
                 path: features/disaggregated-serving/README.md
               - page: Sizing with AIConfigurator
