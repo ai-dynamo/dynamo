@@ -39,6 +39,18 @@ pub static TCP_ERRORS_TOTAL: Lazy<Counter> = Lazy::new(|| {
     .expect("tcp_errors_total counter")
 });
 
+/// Incremented once per transition into the accept-loop backoff state, i.e. each time
+/// `listener.accept()` fails with `EMFILE`/`ENFILE` while the process is at its
+/// file-descriptor ceiling. Alertable signal for the condition described in
+/// <https://github.com/ai-dynamo/dynamo/issues/11822>.
+pub static TCP_ACCEPT_BACKOFF_TOTAL: Lazy<Counter> = Lazy::new(|| {
+    Counter::new(
+        transport_metric_name(transport::tcp::ACCEPT_BACKOFF_TOTAL),
+        "Total TCP accept failures caused by file-descriptor exhaustion (EMFILE/ENFILE)",
+    )
+    .expect("tcp_accept_backoff_total counter")
+});
+
 // --- NATS counters ---
 
 /// `error_type` label values: "request_failed"
@@ -66,6 +78,7 @@ pub fn ensure_transport_metrics_registered_prometheus(
                 registry.register(Box::new(TCP_BYTES_SENT_TOTAL.clone()))?;
                 registry.register(Box::new(TCP_BYTES_RECEIVED_TOTAL.clone()))?;
                 registry.register(Box::new(TCP_ERRORS_TOTAL.clone()))?;
+                registry.register(Box::new(TCP_ACCEPT_BACKOFF_TOTAL.clone()))?;
                 registry.register(Box::new(NATS_ERRORS_TOTAL.clone()))?;
                 Ok(())
             })()
