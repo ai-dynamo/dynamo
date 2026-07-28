@@ -3,8 +3,11 @@
 
 //! vLLM G1 manager over a minimal physical block-pool model.
 //!
-//! The manager owns request block tables and KV-event metadata. The pool owns
-//! physical occupancy, duplicate copies, prefix pins, and LRU eviction.
+//! [`VllmKvManager`] is the coordinator. It owns one manager per KV cache group,
+//! sizes every allocation as a single reservation against the shared pool, and
+//! reconciles per-group prefix hits the way vLLM's `HybridKVCacheCoordinator`
+//! does. Per-group request block tables live in the group managers; the pool
+//! owns physical occupancy, duplicate copies, prefix pins, and LRU eviction.
 
 use dynamo_kv_router::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
@@ -12,38 +15,18 @@ use dynamo_kv_router::protocols::{
 };
 use dynamo_tokens::blocks::UniqueBlock;
 use dynamo_tokens::{BlockHash, SequenceHash};
-use rustc_hash::{FxHashMap, FxHashSet};
 use uuid::Uuid;
 
-use crate::cache::vllm_block_pool::{BlockCopyId, BlockReservation, ReserveOutcome, VllmBlockPool};
+use crate::cache::vllm_block_pool::{
+    BlockReservation, GroupedHash, KvCacheGroupId, ReserveOutcome, VllmBlockPool,
+};
 use crate::common::kv_cache_trace;
 use crate::common::protocols::{KvEventPublishers, PrefillCost};
 use crate::common::sequence::ActiveSequence;
 
-struct PendingStore {
-    parent_hash: Option<SequenceHash>,
-    local_hash: Option<BlockHash>,
-    token_ids: Option<Vec<u32>>,
-}
-
-struct FullBlock {
-    copy: BlockCopyId,
-    hash: SequenceHash,
-    /// Whether a freshly allocated full block still needs to become cache-visible.
-    pending_cache: bool,
-    /// Event metadata retained until `pending_cache` is finalized.
-    pending_store: Option<PendingStore>,
-}
-
-enum OwnedBlock {
-    Partial { copy: BlockCopyId, uuid: Uuid },
-    Full(FullBlock),
-}
-
-struct StoredBlock {
-    hash: SequenceHash,
-    metadata: PendingStore,
-}
+use super::vllm_groups::{
+    CacheHit, FullAttentionGroup, GroupAllocation, GroupManager, PendingStore, StoredBlock,
+};
 
 struct StoreGroup {
     parent_hash: Option<SequenceHash>,
@@ -82,7 +65,6 @@ impl StoreGroup {
         }
     }
 }
-
 pub(crate) struct NativeDecodeBlockReservation {
     pool: BlockReservation,
 }
@@ -97,11 +79,16 @@ pub(crate) struct NativeDestinationReservation {
     request_id: Uuid,
     pool: BlockReservation,
     layout: Option<VllmBlockLayout>,
+    /// Used to count missing prompt tokens for transfer timing (`attention_fresh * block_size`).
+    attention_fresh: usize,
+    /// Attention reusable prefix length fixed at reserve time and replayed at activate.
+    attention_prefix: usize,
 }
 
 impl NativeDestinationReservation {
     pub(crate) fn transferable_prompt_tokens(&self, block_size: usize) -> usize {
-        self.pool.fresh_len().saturating_mul(block_size)
+        // only looking at attention layers so we don't double count
+        self.attention_fresh.saturating_mul(block_size)
     }
 
     #[cfg(test)]
@@ -140,8 +127,7 @@ impl VllmBlockLayout {
 
 pub(crate) struct VllmKvManager {
     pool: VllmBlockPool,
-    request_blocks: FxHashMap<Uuid, Vec<OwnedBlock>>,
-    partial_uuids: FxHashSet<Uuid>,
+    groups: Vec<GroupManager>,
     block_size: usize,
     enable_prefix_caching: bool,
     kv_event_publishers: KvEventPublishers,
@@ -163,14 +149,50 @@ impl VllmKvManager {
         }
         Self {
             pool: VllmBlockPool::new(max_capacity),
-            request_blocks: FxHashMap::default(),
-            partial_uuids: FxHashSet::default(),
+            groups: vec![GroupManager::FullAttention(FullAttentionGroup::new(
+                KvCacheGroupId(0),
+                block_size,
+                enable_prefix_caching,
+            ))],
             block_size,
             enable_prefix_caching,
             kv_event_publishers,
             dp_rank,
             next_event_id: 0,
         }
+    }
+
+    /// The main attention group, which every request has a dense block table in.
+    ///
+    /// vLLM's hybrid coordinator singles this group out the same way: it is the
+    /// dense reference for cross-group cache-hit reconciliation, and the only
+    /// group whose blocks the router's single namespace can describe.
+    fn attention(&self) -> &FullAttentionGroup {
+        self.groups
+            .iter()
+            .find_map(|group| group.as_full_attention())
+            .expect("a model has a main attention group")
+    }
+
+    /// Disjoint borrows of the pool and the attention group, which the group
+    /// needs together to move blocks in or out of the pool.
+    fn attention_mut(&mut self) -> (&mut VllmBlockPool, &mut FullAttentionGroup) {
+        let Self { pool, groups, .. } = self;
+        let attention = groups
+            .iter_mut()
+            .find_map(|group| group.as_full_attention_mut())
+            .expect("a model has a main attention group");
+        (pool, attention)
+    }
+
+    fn attention_id(&self) -> KvCacheGroupId {
+        self.attention().id()
+    }
+
+    fn other_groups(&self) -> impl Iterator<Item = &GroupManager> {
+        self.groups
+            .iter()
+            .filter(|group| !group.is_full_attention())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -183,19 +205,34 @@ impl VllmKvManager {
         parent: Option<&UniqueBlock>,
         reusable_prefix_blocks: usize,
     ) -> VllmAcquire<usize> {
-        self.process_use(
+        let alloc = GroupAllocation {
             request_id,
             blocks,
             local_hashes,
             token_ids,
             parent,
             reusable_prefix_blocks,
-            None,
-        )
+            cache_fresh: false,
+        };
+        self.process_use(&alloc, None)
     }
 
+    /// Release a request's blocks from every group.
     pub(super) fn deref_for_request(&mut self, request_id: Uuid, blocks: &[UniqueBlock]) {
-        self.process_deref(request_id, blocks);
+        // TODO: trimming a live request is a real vLLM operation — `remove_skipped_blocks` — 
+        // that this mocker does not model yet, so a partial release is rejected before any group mutates.
+        // Unknown requests (`held == 0`) skip the partial-release check and let
+        // attention's `release` panic with "owns no block table" instead.
+        let held = self.attention().block_count(request_id);
+        assert!(
+            held == 0 || blocks.len() == held,
+            "releasing {} of a request's {held} blocks is not modeled yet",
+            blocks.len()
+        );
+        let Self { pool, groups, .. } = self;
+        for group in groups.iter_mut() {
+            group.release(pool, request_id, blocks);
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -208,7 +245,23 @@ impl VllmKvManager {
         local_hash: Option<BlockHash>,
         token_ids: Option<Vec<u32>>,
     ) {
-        self.process_promote(request_id, uuid, hash, parent_hash, local_hash, token_ids);
+        let materialize_store_events = self.materialize_store_events();
+        let (pool, attention) = self.attention_mut();
+        let stored = attention.promote(
+            pool,
+            request_id,
+            uuid,
+            hash,
+            PendingStore {
+                parent_hash,
+                local_hash,
+                token_ids,
+            },
+            materialize_store_events,
+        );
+        if let Some(stored) = stored {
+            self.publish_store_sequence(vec![Some(stored)]);
+        }
     }
 
     /// Publish full blocks completed by this scheduling decision.
@@ -231,50 +284,28 @@ impl VllmKvManager {
             computed_before <= computed_after,
             "computed token count cannot move backwards during one scheduling decision"
         );
-        let first_new_block = computed_before / self.block_size;
-        let completed_blocks = computed_after / self.block_size;
-        if first_new_block == completed_blocks {
-            return;
-        }
 
         let materialize_store_events = self.materialize_store_events();
-        let Some(blocks) = self.request_blocks.get_mut(&request_id) else {
-            panic!("request {request_id} owns no block table")
-        };
-        let completed_blocks = completed_blocks.min(blocks.len());
-        if first_new_block >= completed_blocks {
-            return;
-        }
-        let mut stores = materialize_store_events
-            .then(|| Vec::with_capacity(completed_blocks - first_new_block));
-        for block in &mut blocks[first_new_block..completed_blocks] {
-            match block {
-                OwnedBlock::Full(full) => {
-                    if !full.pending_cache {
-                        if let Some(stores) = &mut stores {
-                            stores.push(None);
-                        }
-                        continue;
-                    }
-                    full.pending_cache = false;
-                    let metadata = full.pending_store.take();
-                    let became_visible = self.pool.cache_private(full.copy, full.hash);
-                    if let Some(stores) = &mut stores {
-                        stores.push(became_visible.then(|| {
-                            StoredBlock {
-                                hash: full.hash,
-                                metadata: metadata.expect(
-                                    "materialized pending store must retain event metadata",
-                                ),
-                            }
-                        }));
-                    } else {
-                        debug_assert!(metadata.is_none());
-                    }
+        let stores = {
+            let Self { pool, groups, .. } = self;
+            let mut stores = None;
+            for group in groups.iter_mut() {
+                let group_stores = group.finalize_computed_prefix(
+                    pool,
+                    request_id,
+                    computed_before,
+                    computed_after,
+                    materialize_store_events,
+                );
+                if let Some(group_stores) = group_stores {
+                    assert!(
+                        stores.replace(group_stores).is_none(),
+                        "only one group's blocks can be reported"
+                    );
                 }
-                OwnedBlock::Partial { .. } => break,
             }
-        }
+            stores
+        };
         if let Some(stores) = stores {
             self.publish_store_sequence(stores);
         }
@@ -307,15 +338,16 @@ impl VllmKvManager {
         parent: Option<&UniqueBlock>,
         reservation: &mut NativeDecodeBlockReservation,
     ) {
-        let outcome = self.process_use(
+        let alloc = GroupAllocation {
             request_id,
             blocks,
             local_hashes,
             token_ids,
             parent,
-            0,
-            Some(&mut reservation.pool),
-        );
+            reusable_prefix_blocks: 0,
+            cache_fresh: false,
+        };
+        let outcome = self.process_use(&alloc, Some(&mut reservation.pool));
         assert!(
             matches!(outcome, VllmAcquire::Ready(allocated) if allocated == blocks.len()),
             "reserved decode allocation must be infallible"
@@ -329,28 +361,26 @@ impl VllmKvManager {
         _eviction_now_ms: Option<f64>,
     ) -> VllmAcquire<NativeDestinationReservation> {
         assert!(
-            !self.request_blocks.contains_key(&request_id),
+            !self.attention().holds_request(request_id),
             "destination request already owns a block table"
         );
-        let (prefix, fresh) = match layout.as_ref() {
-            Some(VllmBlockLayout {
-                blocks,
-                local_hashes,
-                token_ids,
-                parent,
-            }) => {
-                Self::validate_use_metadata(
-                    blocks,
-                    local_hashes,
-                    token_ids.as_deref(),
-                    parent.as_ref(),
-                );
-                self.validate_fresh_partials(blocks);
-                let prefix = self.resident_prefix(blocks);
-                let fresh = blocks.len() - prefix.len();
-                (prefix, fresh)
+        let (prefix, fresh, attention_fresh, attention_prefix) = match layout.as_ref() {
+            Some(layout) => {
+                let alloc = Self::destination_alloc(request_id, layout, 0, false);
+                alloc.validate();
+                self.attention().validate_fresh_partials(alloc.blocks);
+                // No prior lookup authorized this transfer's reusable prefix, so
+                // the attention group discovers it here; every group then sizes
+                // itself against the prefix the request will keep.
+                let attention_prefix = self
+                    .attention()
+                    .resident_prefix_len(&self.pool, &layout.blocks);
+                let alloc = Self::destination_alloc(request_id, layout, attention_prefix, false);
+                let (prefix, fresh) = self.group_demand(&alloc);
+                let attention_fresh = self.attention().fresh_blocks(&alloc);
+                (prefix, fresh, attention_fresh, attention_prefix)
             }
-            None => (Vec::new(), 0),
+            None => (Vec::new(), 0, 0, 0),
         };
         let Some(outcome) = self.pool.reserve(&prefix, fresh) else {
             return VllmAcquire::CapacityExhausted;
@@ -360,7 +390,28 @@ impl VllmKvManager {
             request_id,
             pool: outcome.reservation,
             layout,
+            attention_fresh,
+            attention_prefix,
         })
+    }
+
+    /// Destination transfers arrive as one already-computed prefix, so their
+    /// allocation covers the whole layout at once.
+    fn destination_alloc(
+        request_id: Uuid,
+        layout: &VllmBlockLayout,
+        reusable_prefix_blocks: usize,
+        cache_fresh: bool,
+    ) -> GroupAllocation<'_> {
+        GroupAllocation {
+            request_id,
+            blocks: &layout.blocks,
+            local_hashes: &layout.local_hashes,
+            token_ids: layout.token_ids.as_deref(),
+            parent: layout.parent.as_ref(),
+            reusable_prefix_blocks,
+            cache_fresh,
+        }
     }
 
     pub(crate) fn activate_destination(&mut self, reservation: NativeDestinationReservation) {
@@ -368,37 +419,26 @@ impl VllmKvManager {
             request_id,
             mut pool,
             layout,
+            attention_prefix,
+            ..
         } = reservation;
         assert!(
-            !self.request_blocks.contains_key(&request_id),
+            !self.attention().holds_request(request_id),
             "destination request already owns a block table"
         );
-        let Some(VllmBlockLayout {
-            blocks,
-            local_hashes,
-            token_ids,
-            parent,
-        }) = layout
-        else {
+        let Some(layout) = layout else {
             self.pool.cancel(pool);
             return;
         };
-        Self::validate_use_metadata(
-            &blocks,
-            &local_hashes,
-            token_ids.as_deref(),
-            parent.as_ref(),
-        );
-        self.validate_fresh_partials(&blocks);
-        self.commit_layout(
+        let alloc = Self::destination_alloc(
             request_id,
-            &blocks,
-            &local_hashes,
-            token_ids.as_deref(),
-            parent.as_ref(),
-            &mut pool,
+            &layout,
+            attention_prefix,
             self.enable_prefix_caching,
         );
+        alloc.validate();
+        self.attention().validate_fresh_partials(alloc.blocks);
+        self.commit_groups(&alloc, &mut pool);
         assert_eq!(pool.len(), 0, "destination reservation was not consumed");
         self.pool.cancel(pool);
     }
@@ -407,44 +447,22 @@ impl VllmKvManager {
         self.pool.cancel(reservation.pool);
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn process_use(
         &mut self,
-        request_id: Uuid,
-        blocks: &[UniqueBlock],
-        local_hashes: &[BlockHash],
-        token_ids: Option<&[Vec<u32>]>,
-        parent: Option<&UniqueBlock>,
-        reusable_prefix_blocks: usize,
+        alloc: &GroupAllocation,
         reservation: Option<&mut BlockReservation>,
     ) -> VllmAcquire<usize> {
-        Self::validate_use_metadata(blocks, local_hashes, token_ids, parent);
-        self.validate_fresh_partials(blocks);
-        assert!(reusable_prefix_blocks <= blocks.len());
-        assert!(self.enable_prefix_caching || reusable_prefix_blocks == 0);
+        alloc.validate();
+        self.attention().validate_fresh_partials(alloc.blocks);
+        assert!(alloc.reusable_prefix_blocks <= alloc.blocks.len());
+        assert!(self.enable_prefix_caching || alloc.reusable_prefix_blocks == 0);
         assert!(
-            reusable_prefix_blocks == 0
-                || self
-                    .request_blocks
-                    .get(&request_id)
-                    .is_none_or(Vec::is_empty),
+            alloc.reusable_prefix_blocks == 0
+                || self.attention().block_count(alloc.request_id) == 0,
             "only a request's first allocation may reuse a prefix"
         );
 
-        let prefix = if reusable_prefix_blocks == 0 {
-            Vec::new()
-        } else {
-            blocks[..reusable_prefix_blocks]
-                .iter()
-                .map(|block| match block {
-                    UniqueBlock::FullBlock(hash) => *hash,
-                    UniqueBlock::PartialBlock(_) => {
-                        panic!("a reusable prefix can contain only full blocks")
-                    }
-                })
-                .collect::<Vec<_>>()
-        };
-        let fresh = blocks.len() - reusable_prefix_blocks;
+        let (prefix, fresh) = self.group_demand(alloc);
 
         match reservation {
             Some(reservation) => {
@@ -452,15 +470,7 @@ impl VllmKvManager {
                 if reservation.fresh_len() < fresh {
                     return VllmAcquire::CapacityExhausted;
                 }
-                self.commit_layout(
-                    request_id,
-                    blocks,
-                    local_hashes,
-                    token_ids,
-                    parent,
-                    reservation,
-                    false,
-                );
+                self.commit_groups(alloc, reservation);
             }
             None => {
                 let Some(ReserveOutcome {
@@ -471,270 +481,62 @@ impl VllmKvManager {
                     return VllmAcquire::CapacityExhausted;
                 };
                 self.publish_removed(removed);
-                self.commit_layout(
-                    request_id,
-                    blocks,
-                    local_hashes,
-                    token_ids,
-                    parent,
-                    &mut reservation,
-                    false,
-                );
+                self.commit_groups(alloc, &mut reservation);
                 assert_eq!(reservation.len(), 0, "Use reservation was not consumed");
                 self.pool.cancel(reservation);
             }
         }
-        VllmAcquire::Ready(blocks.len())
+        VllmAcquire::Ready(alloc.blocks.len())
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn commit_layout(
-        &mut self,
-        request_id: Uuid,
-        blocks: &[UniqueBlock],
-        local_hashes: &[BlockHash],
-        token_ids: Option<&[Vec<u32>]>,
-        parent: Option<&UniqueBlock>,
-        reservation: &mut BlockReservation,
-        cache_fresh: bool,
-    ) {
-        let prefix_len = reservation.len() - reservation.fresh_len();
-        let prefix_copies = self.pool.activate_prefix(reservation);
-        assert_eq!(prefix_copies.len(), prefix_len);
-        let mut prefix_copies = prefix_copies.into_iter();
-        let mut cursor = match parent {
-            None => None,
-            Some(UniqueBlock::FullBlock(hash)) => Some(*hash),
-            Some(UniqueBlock::PartialBlock(_)) => unreachable!("validated above"),
-        };
-        let mut full_idx = 0;
+    /// Prefix pins and fresh pool blocks every group needs for `alloc`.
+    ///
+    /// Groups are visited in coordinator order, which fixes the order the pins
+    /// are reserved in and so the order [`Self::commit_groups`] activates them.
+    fn group_demand(&self, alloc: &GroupAllocation) -> (Vec<GroupedHash>, usize) {
+        let mut prefix = Vec::new();
+        let mut fresh = 0;
+        for group in &self.groups {
+            prefix.extend(group.prefix_keys(alloc));
+            fresh += group.fresh_blocks(alloc);
+        }
+        (prefix, fresh)
+    }
+
+    /// Commit every group against the shared reservation, publishing only the
+    /// main attention group's store events.
+    fn commit_groups(&mut self, alloc: &GroupAllocation, reservation: &mut BlockReservation) {
         let materialize_store_events = self.materialize_store_events();
-        let owned = self.request_blocks.entry(request_id).or_default();
-        owned.reserve(blocks.len());
-        let mut stores =
-            (cache_fresh && materialize_store_events).then(|| Vec::with_capacity(blocks.len()));
-
-        for (block_idx, block) in blocks.iter().enumerate() {
-            match block {
-                UniqueBlock::FullBlock(hash) => {
-                    let local_hash = local_hashes.get(full_idx).copied();
-                    full_idx += 1;
-
-                    if block_idx < prefix_len {
-                        let Some(copy) = prefix_copies.next() else {
-                            panic!("prefix reservation returned too few copies")
-                        };
-                        owned.push(OwnedBlock::Full(FullBlock {
-                            copy,
-                            hash: *hash,
-                            pending_cache: false,
-                            pending_store: None,
-                        }));
-                        cursor = Some(*hash);
-                        continue;
-                    }
-
-                    if cache_fresh {
-                        let (copy, became_visible) = self.pool.allocate_cached(reservation, *hash);
-                        owned.push(OwnedBlock::Full(FullBlock {
-                            copy,
-                            hash: *hash,
-                            pending_cache: false,
-                            pending_store: None,
-                        }));
-                        if let Some(stores) = &mut stores {
-                            let metadata = PendingStore {
-                                parent_hash: cursor,
-                                local_hash,
-                                token_ids: token_ids.and_then(|ids| ids.get(full_idx - 1).cloned()),
-                            };
-                            stores.push(became_visible.then_some(StoredBlock {
-                                hash: *hash,
-                                metadata,
-                            }));
-                        }
-                    } else {
-                        let copy = self.pool.allocate_private(reservation);
-                        let pending_cache = self.enable_prefix_caching;
-                        let pending_store =
-                            (pending_cache && materialize_store_events).then(|| PendingStore {
-                                parent_hash: cursor,
-                                local_hash,
-                                token_ids: token_ids.and_then(|ids| ids.get(full_idx - 1).cloned()),
-                            });
-                        owned.push(OwnedBlock::Full(FullBlock {
-                            copy,
-                            hash: *hash,
-                            pending_cache,
-                            pending_store,
-                        }));
-                    }
-                    cursor = Some(*hash);
-                }
-                UniqueBlock::PartialBlock(uuid) => {
-                    let copy = self.pool.allocate_private(reservation);
+        let stores = {
+            let Self { pool, groups, .. } = self;
+            // Pins come back in the order [`Self::group_demand`] reserved them,
+            // which is the order the groups drain them here.
+            let activated = pool.activate_prefix(reservation);
+            let mut prefix_copies = activated.iter().copied();
+            let mut stores = None;
+            for group in groups.iter_mut() {
+                let group_stores = group.commit(
+                    pool,
+                    reservation,
+                    alloc,
+                    &mut prefix_copies,
+                    materialize_store_events,
+                );
+                if let Some(group_stores) = group_stores {
                     assert!(
-                        self.partial_uuids.insert(*uuid),
-                        "partial block {uuid} is already allocated"
+                        stores.replace(group_stores).is_none(),
+                        "only one group's blocks can be reported"
                     );
-                    owned.push(OwnedBlock::Partial { copy, uuid: *uuid });
-                    if let Some(stores) = &mut stores {
-                        stores.push(None);
-                    }
                 }
             }
-        }
-        assert!(prefix_copies.next().is_none());
+            assert!(
+                prefix_copies.next().is_none(),
+                "prefix reservation was not consumed"
+            );
+            stores
+        };
         if let Some(stores) = stores {
             self.publish_store_sequence(stores);
-        }
-    }
-
-    fn validate_use_metadata(
-        blocks: &[UniqueBlock],
-        local_hashes: &[BlockHash],
-        token_ids: Option<&[Vec<u32>]>,
-        parent: Option<&UniqueBlock>,
-    ) {
-        let full_blocks = blocks
-            .iter()
-            .filter(|block| matches!(block, UniqueBlock::FullBlock(_)))
-            .count();
-        assert!(
-            local_hashes.is_empty() || local_hashes.len() == full_blocks,
-            "local hashes must be empty or align with full blocks"
-        );
-        assert!(
-            token_ids.is_none_or(|ids| ids.len() == full_blocks),
-            "token IDs must align with full blocks"
-        );
-        assert!(!matches!(parent, Some(UniqueBlock::PartialBlock(_))));
-    }
-
-    fn validate_fresh_partials(&self, blocks: &[UniqueBlock]) {
-        let mut first_partial = None;
-        for (index, uuid) in blocks
-            .iter()
-            .enumerate()
-            .filter_map(|(index, block)| match block {
-                UniqueBlock::PartialBlock(uuid) => Some((index, uuid)),
-                UniqueBlock::FullBlock(_) => None,
-            })
-        {
-            let repeated_in_layout = first_partial.is_some_and(|first| {
-                first == *uuid
-                    || blocks[..index].iter().any(
-                        |block| matches!(block, UniqueBlock::PartialBlock(seen) if seen == uuid),
-                    )
-            });
-            assert!(
-                !self.partial_uuids.contains(uuid) && !repeated_in_layout,
-                "partial block {uuid} is already allocated"
-            );
-            first_partial.get_or_insert(*uuid);
-        }
-    }
-
-    fn resident_prefix(&self, blocks: &[UniqueBlock]) -> Vec<SequenceHash> {
-        if !self.enable_prefix_caching {
-            return Vec::new();
-        }
-        blocks
-            .iter()
-            .map_while(|block| match block {
-                UniqueBlock::FullBlock(hash) if self.pool.prefix_hit(*hash).is_some() => {
-                    Some(*hash)
-                }
-                _ => None,
-            })
-            .collect()
-    }
-
-    /// Release request blocks in caller-provided eviction-priority order.
-    ///
-    /// Like vLLM's `BlockPool::free_blocks`, the physical pool is lineage-agnostic:
-    /// reversing the request-owned table here makes suffix/leaf blocks older LRU
-    /// candidates than their parents, so capacity pressure evicts the leaf first.
-    fn process_deref(&mut self, request_id: Uuid, blocks: &[UniqueBlock]) {
-        let released = {
-            let Some(owned) = self.request_blocks.get_mut(&request_id) else {
-                panic!("request {request_id} owns no block table")
-            };
-            assert!(
-                blocks.len() <= owned.len(),
-                "request releases too many blocks"
-            );
-            let start = owned.len() - blocks.len();
-            for (expected, actual) in blocks.iter().zip(owned[start..].iter().rev()) {
-                match (expected, actual) {
-                    (UniqueBlock::FullBlock(expected), OwnedBlock::Full(full)) => {
-                        assert_eq!(*expected, full.hash, "full-block Deref mismatch");
-                    }
-                    (UniqueBlock::PartialBlock(expected), OwnedBlock::Partial { uuid, .. }) => {
-                        assert_eq!(expected, uuid, "partial Deref mismatch")
-                    }
-                    _ => panic!("Deref block kind disagrees with request table"),
-                }
-            }
-            owned.split_off(start)
-        };
-        if self.request_blocks[&request_id].is_empty() {
-            self.request_blocks.remove(&request_id);
-        }
-
-        for block in released.into_iter().rev() {
-            match block {
-                OwnedBlock::Partial { copy, uuid } => {
-                    assert!(self.partial_uuids.remove(&uuid));
-                    self.pool.release(copy);
-                }
-                OwnedBlock::Full(full) => self.pool.release(full.copy),
-            }
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn process_promote(
-        &mut self,
-        request_id: Uuid,
-        uuid: Uuid,
-        hash: SequenceHash,
-        parent_hash: Option<SequenceHash>,
-        local_hash: Option<BlockHash>,
-        token_ids: Option<Vec<u32>>,
-    ) {
-        let materialize_store_events = self.materialize_store_events();
-        let Some(blocks) = self.request_blocks.get_mut(&request_id) else {
-            panic!("request {request_id} owns no block table")
-        };
-        let Some(last) = blocks.last_mut() else {
-            panic!("Promote requires a request-owned partial tail")
-        };
-        let copy = match last {
-            OwnedBlock::Partial { copy, uuid: actual } => {
-                assert_eq!(*actual, uuid, "Promote partial UUID mismatch");
-                *copy
-            }
-            OwnedBlock::Full(_) => panic!("Promote requires a partial tail"),
-        };
-        assert!(self.partial_uuids.remove(&uuid));
-
-        let became_visible = self.enable_prefix_caching && self.pool.cache_private(copy, hash);
-        *last = OwnedBlock::Full(FullBlock {
-            copy,
-            hash,
-            pending_cache: false,
-            pending_store: None,
-        });
-        if became_visible && materialize_store_events {
-            self.publish_store_sequence(vec![Some(StoredBlock {
-                hash,
-                metadata: PendingStore {
-                    parent_hash,
-                    local_hash,
-                    token_ids,
-                },
-            })]);
         }
     }
 
@@ -776,7 +578,17 @@ impl VllmKvManager {
         );
     }
 
-    fn publish_removed(&mut self, hashes: Vec<SequenceHash>) {
+    /// Publish evictions for the main attention group only.
+    ///
+    /// `KvCacheEvent` has no group field and the router indexes a single block
+    /// namespace, so non-attention groups' evictions are not reported
+    fn publish_removed(&mut self, keys: Vec<GroupedHash>) {
+        let attention = self.attention_id();
+        let hashes = keys
+            .into_iter()
+            .filter(|key| key.group == attention)
+            .map(|key| key.hash)
+            .collect::<Vec<_>>();
         if !hashes.is_empty() {
             self.publish_kv_event(hashes, &[], None, false, None);
         }
@@ -884,33 +696,33 @@ impl VllmKvManager {
 
     #[cfg(test)]
     pub(crate) fn request_block_count(&self, request_id: Uuid) -> usize {
-        self.request_blocks.get(&request_id).map_or(0, Vec::len)
+        self.attention().block_count(request_id)
     }
 
     pub(crate) fn get_prefill_cost(&self, sequence: &ActiveSequence) -> PrefillCost {
-        let (overlap_blocks, active_overlap_blocks) =
-            if self.enable_prefix_caching && sequence.enable_prefix_caching() {
-                let mut overlap = 0;
-                let mut active = 0;
-                for block in sequence.unique_blocks() {
-                    let UniqueBlock::FullBlock(hash) = block else {
-                        break;
-                    };
-                    let Some(hit) = self.pool.prefix_hit(*hash) else {
-                        break;
-                    };
-                    overlap += 1;
-                    active += usize::from(hit.is_active);
-                }
-                (overlap, active)
-            } else {
-                (0, 0)
+        let blocks = sequence.unique_blocks();
+
+        // vLLM's hybrid coordinator seeds the candidate with the dense
+        // full-attention hit and reduces it until every group agrees on one boundary.
+        let attention = if self.enable_prefix_caching && sequence.enable_prefix_caching() {
+            self.attention().longest_cache_hit(&self.pool, blocks)
+        } else {
+            CacheHit::default()
+        };
+
+        let mut reconciled = attention.tokens;
+        for group in self.other_groups() {
+            let Some(hit) = group.longest_cache_hit(&self.pool, blocks) else {
+                continue;
             };
-        let new_blocks = sequence.unique_blocks().len() - overlap_blocks;
-        let cached_tokens = (overlap_blocks * self.block_size).min(sequence.len());
-        let active_cached_tokens = (active_overlap_blocks * self.block_size).min(sequence.len());
+            reconciled = reconciled.min(hit.tokens);
+        }
+
+        let overlap_blocks = reconciled / self.block_size;
+        let cached_tokens = reconciled.min(sequence.len());
+        let active_cached_tokens = attention.active_tokens.min(cached_tokens);
         PrefillCost {
-            new_blocks,
+            new_blocks: blocks.len() - overlap_blocks,
             new_tokens: sequence.len() - cached_tokens,
             cached_tokens,
             active_cached_tokens,
@@ -943,6 +755,18 @@ mod tests {
         }
     }
 
+    const BLOCK_SIZE: usize = 4;
+
+    fn attention_manager(capacity: usize) -> VllmKvManager {
+        VllmKvManager::new_with_event_sink(
+            capacity,
+            BLOCK_SIZE,
+            true,
+            KvEventPublishers::default(),
+            0,
+        )
+    }
+
     fn use_full(
         manager: &mut VllmKvManager,
         owner: Uuid,
@@ -972,10 +796,37 @@ mod tests {
         }
     }
 
+    fn attention_hit(manager: &VllmKvManager, hash: SequenceHash) -> bool {
+        manager
+            .pool
+            .prefix_hit(GroupedHash::new(manager.attention_id(), hash))
+            .is_some()
+    }
+
+    /// Groups other than attention drop a request's whole state on release, so a
+    /// release that would leave the request holding blocks has to be rejected
+    /// before any group runs: the groups release one at a time, so a half-applied
+    /// release cannot be undone. Trimming a live request is vLLM's
+    /// `remove_skipped_blocks`, which the mocker does not model.
+    #[test]
+    fn deref_rejects_a_partial_release_before_mutating() {
+        let mut manager = attention_manager(4);
+        let owner = Uuid::from_u128(1);
+        ready(use_full(&mut manager, owner, &[7, 8], 0));
+        let active_before = manager.num_active_blocks();
+
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            manager.deref_for_request(owner, &[UniqueBlock::FullBlock(8)])
+        }));
+
+        assert!(outcome.is_err(), "partial release must be rejected");
+        assert_eq!(manager.request_block_count(owner), 2);
+        assert_eq!(manager.num_active_blocks(), active_before);
+    }
+
     #[test]
     fn duplicate_full_hashes_consume_physical_capacity() {
-        let mut manager =
-            VllmKvManager::new_with_event_sink(2, 4, true, KvEventPublishers::default(), 0);
+        let mut manager = attention_manager(2);
         for owner in [Uuid::from_u128(1), Uuid::from_u128(2)] {
             ready(use_full(&mut manager, owner, &[7], 0));
             manager.finalize_computed_prefix(owner, 0, 4);
@@ -989,8 +840,7 @@ mod tests {
 
     #[test]
     fn authorized_prefix_reuses_one_physical_copy() {
-        let mut manager =
-            VllmKvManager::new_with_event_sink(2, 4, true, KvEventPublishers::default(), 0);
+        let mut manager = attention_manager(2);
         let first = Uuid::from_u128(1);
         ready(use_full(&mut manager, first, &[7], 0));
         manager.finalize_computed_prefix(first, 0, 4);
@@ -1003,47 +853,43 @@ mod tests {
 
     #[test]
     fn full_block_is_hidden_until_computed() {
-        let mut manager =
-            VllmKvManager::new_with_event_sink(2, 4, true, KvEventPublishers::default(), 0);
+        let mut manager = attention_manager(2);
         let owner = Uuid::from_u128(1);
         ready(use_full(&mut manager, owner, &[7], 0));
-        assert!(manager.pool.prefix_hit(7).is_none());
+        assert!(!attention_hit(&manager, 7));
         manager.finalize_computed_prefix(owner, 0, 4);
-        assert!(manager.pool.prefix_hit(7).is_some());
+        assert!(attention_hit(&manager, 7));
     }
 
     #[test]
     fn finalization_only_visits_blocks_completed_by_this_decision() {
-        let mut manager =
-            VllmKvManager::new_with_event_sink(2, 4, true, KvEventPublishers::default(), 0);
+        let mut manager = attention_manager(2);
         let owner = Uuid::from_u128(1);
         ready(use_full(&mut manager, owner, &[7, 8], 0));
 
         manager.finalize_computed_prefix(owner, 0, 4);
-        assert!(manager.pool.prefix_hit(7).is_some());
-        assert!(manager.pool.prefix_hit(8).is_none());
+        assert!(attention_hit(&manager, 7));
+        assert!(!attention_hit(&manager, 8));
 
         manager.finalize_computed_prefix(owner, 4, 8);
-        assert!(manager.pool.prefix_hit(8).is_some());
+        assert!(attention_hit(&manager, 8));
     }
 
     #[test]
     fn finalization_handles_unaligned_decision_boundaries() {
-        let mut manager =
-            VllmKvManager::new_with_event_sink(3, 4, true, KvEventPublishers::default(), 0);
+        let mut manager = attention_manager(3);
         let owner = Uuid::from_u128(1);
         ready(use_full(&mut manager, owner, &[7, 8, 9], 0));
 
         manager.finalize_computed_prefix(owner, 3, 9);
-        assert!(manager.pool.prefix_hit(7).is_some());
-        assert!(manager.pool.prefix_hit(8).is_some());
-        assert!(manager.pool.prefix_hit(9).is_none());
+        assert!(attention_hit(&manager, 7));
+        assert!(attention_hit(&manager, 8));
+        assert!(!attention_hit(&manager, 9));
     }
 
     #[test]
     fn cached_prefix_watermark_finalizes_only_the_fresh_suffix() {
-        let mut manager =
-            VllmKvManager::new_with_event_sink(2, 4, true, KvEventPublishers::default(), 0);
+        let mut manager = attention_manager(2);
         let seed = Uuid::from_u128(1);
         ready(use_full(&mut manager, seed, &[7], 0));
         manager.finalize_computed_prefix(seed, 0, 4);
@@ -1052,14 +898,13 @@ mod tests {
         let owner = Uuid::from_u128(2);
         ready(use_full(&mut manager, owner, &[7, 8], 1));
         manager.finalize_computed_prefix(owner, 4, 8);
-        assert!(manager.pool.prefix_hit(7).is_some());
-        assert!(manager.pool.prefix_hit(8).is_some());
+        assert!(attention_hit(&manager, 7));
+        assert!(attention_hit(&manager, 8));
     }
 
     #[test]
     fn request_release_evicts_leaf_before_parent() {
-        let mut manager =
-            VllmKvManager::new_with_event_sink(2, 4, true, KvEventPublishers::default(), 0);
+        let mut manager = attention_manager(2);
         let owner = Uuid::from_u128(1);
         ready(use_full(&mut manager, owner, &[7, 8], 0));
         manager.finalize_computed_prefix(owner, 0, 8);
@@ -1071,21 +916,15 @@ mod tests {
         );
         ready(use_full(&mut manager, Uuid::from_u128(2), &[9], 0));
 
-        assert!(
-            manager.pool.prefix_hit(7).is_some(),
-            "parent should remain resident"
-        );
-        assert!(
-            manager.pool.prefix_hit(8).is_none(),
-            "leaf should be evicted first"
-        );
+        assert!(attention_hit(&manager, 7), "parent should remain resident");
+        assert!(!attention_hit(&manager, 8), "leaf should be evicted first");
     }
 
     #[test]
     fn event_enabled_finalization_preserves_store_payload() {
         let sink = Arc::new(CapturingRawSink::default());
         let publishers = KvEventPublishers::new(None, Some(sink.clone()));
-        let mut manager = VllmKvManager::new_with_event_sink(2, 4, true, publishers, 3);
+        let mut manager = VllmKvManager::new_with_event_sink(2, BLOCK_SIZE, true, publishers, 3);
         let owner = Uuid::from_u128(1);
         let token_ids = vec![vec![1, 2, 3, 4]];
         let parent = UniqueBlock::FullBlock(6);
@@ -1113,5 +952,33 @@ mod tests {
         assert_eq!(stored.blocks.len(), 1);
         assert_eq!(stored.blocks[0].block_hash, ExternalSequenceBlockHash(7));
         assert_eq!(stored.blocks[0].tokens_hash, LocalBlockHash(107));
+    }
+
+    /// Removals are published per group, so an attention eviction must still
+    /// reach the router.
+    #[test]
+    fn attention_eviction_is_published_as_a_removal() {
+        let sink = Arc::new(CapturingRawSink::default());
+        let publishers = KvEventPublishers::new(None, Some(sink.clone()));
+        let mut manager = VllmKvManager::new_with_event_sink(1, BLOCK_SIZE, true, publishers, 0);
+
+        let owner = Uuid::from_u128(1);
+        ready(use_full(&mut manager, owner, &[7], 0));
+        manager.finalize_computed_prefix(owner, 0, 4);
+        manager.deref_for_request(owner, &[UniqueBlock::FullBlock(7)]);
+        sink.take();
+
+        // The next request needs the pool's only block back.
+        ready(use_full(&mut manager, Uuid::from_u128(2), &[8], 0));
+        let removed = sink
+            .take()
+            .into_iter()
+            .filter_map(|event| match event.event.data {
+                KvCacheEventData::Removed(removed) => Some(removed.block_hashes),
+                _ => None,
+            })
+            .flatten()
+            .collect::<Vec<_>>();
+        assert_eq!(removed, vec![ExternalSequenceBlockHash(7)]);
     }
 }

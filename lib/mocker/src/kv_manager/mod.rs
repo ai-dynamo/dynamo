@@ -60,6 +60,7 @@ pub mod sglang_backend;
 mod vllm_backend;
 #[cfg(test)]
 mod vllm_firewall_tests;
+mod vllm_groups;
 
 pub(crate) use g1_manager::DestinationReservation;
 pub use g1_manager::G1Manager;
