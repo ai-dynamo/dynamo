@@ -110,6 +110,13 @@ impl SglangRequest {
                 .map_or(self.max_output_tokens, Vec::len),
         );
         self.sequence_tokens.reserve_exact(output_capacity);
+        let completion_pages = self
+            .sequence_tokens
+            .len()
+            .checked_add(output_capacity)
+            .expect("SGLang request completion length overflow")
+            / block_size;
+        self.kv_lease.reserve_page_hashes(completion_pages);
         self.kv_lease
             .ensure_page_hashes(&self.sequence_tokens, block_size);
     }

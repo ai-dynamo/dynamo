@@ -44,16 +44,15 @@ pub(crate) struct BlockRequestLease {
 
 impl BlockRequestLease {
     pub(crate) fn new(owner: Uuid, identities: Vec<NativeBlockIdentity>) -> Self {
+        let mut entries = Vec::with_capacity(identities.capacity());
+        entries.extend(identities.into_iter().map(|identity| BlockLeaseEntry {
+            identity,
+            copy: None,
+            pending_cache: false,
+        }));
         Self {
             owner,
-            entries: identities
-                .into_iter()
-                .map(|identity| BlockLeaseEntry {
-                    identity,
-                    copy: None,
-                    pending_cache: false,
-                })
-                .collect(),
+            entries,
             allocated_tokens: 0,
         }
     }
