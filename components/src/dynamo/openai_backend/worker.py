@@ -371,6 +371,26 @@ def _normalize_reasoning_content(payload: dict[str, Any]) -> None:
                 delta["reasoning_content"] = reasoning
 
 
+def _normalize_usage_reasoning_tokens(payload: dict[str, Any]) -> None:
+    # sglang reports the reasoning split as a top-level `usage.reasoning_tokens`;
+    # every typed OpenAI-schema parser downstream (frontend, control layer) only
+    # preserves the standard `completion_tokens_details.reasoning_tokens` location.
+    usage = payload.get("usage")
+    if not isinstance(usage, dict):
+        return
+
+    reasoning_tokens = usage.get("reasoning_tokens")
+    if not isinstance(reasoning_tokens, int) or isinstance(reasoning_tokens, bool):
+        return
+
+    usage.pop("reasoning_tokens")
+    details = usage.get("completion_tokens_details")
+    if not isinstance(details, dict):
+        details = {}
+        usage["completion_tokens_details"] = details
+    details.setdefault("reasoning_tokens", reasoning_tokens)
+
+
 class UpstreamClient:
     def __init__(self, config: Config):
         timeout = httpx.Timeout(
@@ -647,6 +667,7 @@ class UpstreamClient:
             )
 
         _normalize_reasoning_content(decoded)
+        _normalize_usage_reasoning_tokens(decoded)
         return decoded
 
     async def _as_http_error(self, response: httpx.Response) -> HttpError:
