@@ -7,10 +7,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dynamo_kv_router::identity::PoolId;
-use dynamo_kv_router::indexer::cuckoo::{CkfConfig, ProducerIdentity};
+use dynamo_kv_router::indexer::cuckoo::{CkfBuildError, CkfConfig, DcCkfState, ProducerIdentity};
 use dynamo_runtime::protocols::EndpointId;
 use parking_lot::Mutex;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{Semaphore, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 use super::actor::{ActorFault, KvDcRelayHandle, StreamScope};
@@ -18,6 +18,8 @@ use super::host::KvDcRelayError;
 use super::identity::{
     CanonicalModelId, CanonicalModelRegistration, DcPoolCatalog, DcPoolDescriptor, ModelAlias,
 };
+
+const DEFAULT_CKF_ALLOCATION_CONCURRENCY: usize = 2;
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct PoolActorConfig {
@@ -61,6 +63,36 @@ struct PoolReservation {
     layout_generation: u64,
 }
 
+struct PoolReservationGuard<'a> {
+    state: &'a Mutex<PoolRegistryState>,
+    pool_id: PoolId,
+    layout_generation: u64,
+    is_armed: bool,
+}
+
+impl<'a> PoolReservationGuard<'a> {
+    fn new(state: &'a Mutex<PoolRegistryState>, pool_id: PoolId, layout_generation: u64) -> Self {
+        Self {
+            state,
+            pool_id,
+            layout_generation,
+            is_armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.is_armed = false;
+    }
+}
+
+impl Drop for PoolReservationGuard<'_> {
+    fn drop(&mut self) {
+        if self.is_armed {
+            rollback_reservation(&mut self.state.lock(), self.pool_id, self.layout_generation);
+        }
+    }
+}
+
 struct PoolRegistryState {
     pools: HashMap<PoolId, PoolEntry>,
     reservations: HashMap<PoolId, PoolReservation>,
@@ -93,6 +125,7 @@ pub(super) struct PoolAttachment {
 pub(super) struct PoolRegistry {
     process_incarnation: u64,
     actor_config: PoolActorConfig,
+    ckf_allocation_permits: Arc<Semaphore>,
     state: Mutex<PoolRegistryState>,
     catalog_tx: watch::Sender<DcPoolCatalog>,
 }
@@ -104,6 +137,7 @@ impl PoolRegistry {
         Self {
             process_incarnation,
             actor_config,
+            ckf_allocation_permits: Arc::new(Semaphore::new(DEFAULT_CKF_ALLOCATION_CONCURRENCY)),
             state: Mutex::new(PoolRegistryState::default()),
             catalog_tx,
         }
@@ -113,6 +147,17 @@ impl PoolRegistry {
         &self,
         request: PoolAttachRequest,
     ) -> anyhow::Result<PoolAttachment> {
+        self.attach_with_builder(request, DcCkfState::new).await
+    }
+
+    async fn attach_with_builder<Builder>(
+        &self,
+        request: PoolAttachRequest,
+        builder: Builder,
+    ) -> anyhow::Result<PoolAttachment>
+    where
+        Builder: FnOnce(CkfConfig) -> Result<DcCkfState, CkfBuildError> + Send + 'static,
+    {
         anyhow::ensure!(
             !request.registrations.is_empty(),
             "pool {} requires at least one canonical model binding",
@@ -144,32 +189,26 @@ impl PoolRegistry {
             );
             layout_generation
         };
+        let mut reservation =
+            PoolReservationGuard::new(&self.state, request.pool_id, layout_generation);
 
-        // Keep allocation outside the registry mutex. There is deliberately no `.await` between
-        // reservation and commit, so task cancellation cannot strand a live reservation.
         let mut config = CkfConfig::new(self.actor_config.expected_unique_blocks);
         config.publish_every_n_events = self.actor_config.publication_threshold;
-        let actor = KvDcRelayHandle::spawn_with_publication_delay(
-            config,
-            StreamScope {
-                process_incarnation: self.process_incarnation,
-                layout_generation,
-                pool_id: request.pool_id,
-            },
-            self.actor_config.publication_delay,
-        );
-        let (handle, faults) = match actor {
-            Ok(actor) => actor,
-            Err(error) => {
-                let mut state = self.state.lock();
-                rollback_reservation(&mut state, request.pool_id, layout_generation);
-                return Err(error.into());
-            }
-        };
-        let identity = handle.identity();
+        let permit = self
+            .ckf_allocation_permits
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| anyhow::anyhow!("KV DC Relay pool registry is shutting down"))?;
+        let ckf_state = tokio::task::spawn_blocking(move || {
+            let result = builder(config);
+            drop(permit);
+            result
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("KV DC Relay CKF allocation task failed: {error}"))??;
+
         let registrations: Arc<[CanonicalModelRegistration]> = request.registrations.into();
-        let descriptor =
-            DcPoolDescriptor::new(identity, request.endpoint.clone(), registrations.clone());
         let cancel = CancellationToken::new();
 
         let mut state = self.state.lock();
@@ -177,14 +216,24 @@ impl PoolRegistry {
             .reservations
             .get(&request.pool_id)
             .is_some_and(|reservation| reservation.layout_generation == layout_generation);
-        if !state.accepting || !reservation_matches {
-            rollback_reservation(&mut state, request.pool_id, layout_generation);
-            anyhow::bail!(
-                "pool {} generation {} reservation was retired before commit",
-                request.pool_id,
-                layout_generation
-            );
-        }
+        anyhow::ensure!(
+            state.accepting && reservation_matches,
+            "pool {} generation {} reservation was retired before commit",
+            request.pool_id,
+            layout_generation
+        );
+        let (handle, faults) = KvDcRelayHandle::spawn_with_state_and_publication_delay(
+            ckf_state,
+            StreamScope {
+                process_incarnation: self.process_incarnation,
+                layout_generation,
+                pool_id: request.pool_id,
+            },
+            self.actor_config.publication_delay,
+        );
+        let identity = handle.identity();
+        let descriptor =
+            DcPoolDescriptor::new(identity, request.endpoint.clone(), registrations.clone());
         state.reservations.remove(&request.pool_id);
         debug_assert!(!state.pools.contains_key(&request.pool_id));
         state.pools.insert(
@@ -200,6 +249,7 @@ impl PoolRegistry {
             },
         );
         publish_catalog_upsert(&mut state, &self.catalog_tx, descriptor);
+        reservation.disarm();
 
         Ok(PoolAttachment {
             pool_id: request.pool_id,
@@ -321,6 +371,7 @@ impl PoolRegistry {
         let entries = {
             let mut state = self.state.lock();
             state.accepting = false;
+            self.ckf_allocation_permits.close();
             state.reservations.clear();
             let entries = state.pools.drain().collect::<Vec<_>>();
             publish_catalog_clear(&mut state, &self.catalog_tx);
@@ -468,12 +519,24 @@ fn validate_registrations(registrations: &[CanonicalModelRegistration]) -> anyho
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, mpsc as std_mpsc};
+
     use dynamo_kv_router::identity::{
         CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, RoutingScopeId,
     };
 
     use super::*;
     use crate::kv_dc_relay::identity::ModelTarget;
+
+    type TestCkfBuilder =
+        Box<dyn FnOnce(CkfConfig) -> Result<DcCkfState, CkfBuildError> + Send + 'static>;
+
+    struct GatedBuilder {
+        builder: TestCkfBuilder,
+        started: tokio::sync::oneshot::Receiver<()>,
+        release: std_mpsc::Sender<()>,
+        finished: tokio::sync::oneshot::Receiver<()>,
+    }
 
     fn pool(seed: u8) -> PoolId {
         PoolId::new(
@@ -505,6 +568,27 @@ mod tests {
             pool_id,
             endpoint: EndpointId::from(endpoint),
             registrations: vec![registration(model)],
+        }
+    }
+
+    fn gated_builder() -> GatedBuilder {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std_mpsc::channel();
+        let (finished_tx, finished_rx) = tokio::sync::oneshot::channel();
+        let builder = move |config| {
+            let _ = started_tx.send(());
+            release_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("test must release the CKF builder");
+            let result = DcCkfState::new(config);
+            let _ = finished_tx.send(());
+            result
+        };
+        GatedBuilder {
+            builder: Box::new(builder),
+            started: started_rx,
+            release: release_tx,
+            finished: finished_rx,
         }
     }
 
@@ -675,6 +759,101 @@ mod tests {
             .unwrap();
         assert!(error.to_string().contains("already owned"));
 
+        registry.detach(attachment).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelled_allocation_rolls_back_and_allows_reattach() {
+        let registry = Arc::new(PoolRegistry::new(7, config()));
+        let pool_id = pool(1);
+        let GatedBuilder {
+            builder,
+            started: started_rx,
+            release: release_tx,
+            finished: finished_rx,
+        } = gated_builder();
+        let task_registry = registry.clone();
+        let attach = tokio::spawn(async move {
+            task_registry
+                .attach_with_builder(request(pool_id, "first.router.generate", "llama"), builder)
+                .await
+        });
+
+        started_rx.await.unwrap();
+        attach.abort();
+        assert!(matches!(attach.await, Err(error) if error.is_cancelled()));
+        assert!(registry.state.lock().reservations.is_empty());
+
+        release_tx.send(()).unwrap();
+        finished_rx.await.unwrap();
+        let attachment = registry
+            .attach(request(pool_id, "second.router.generate", "llama"))
+            .await
+            .unwrap();
+        registry.detach(attachment).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_during_allocation_never_publishes_the_pool() {
+        let registry = Arc::new(PoolRegistry::new(7, config()));
+        let GatedBuilder {
+            builder,
+            started: started_rx,
+            release: release_tx,
+            finished: finished_rx,
+        } = gated_builder();
+        let task_registry = registry.clone();
+        let attach = tokio::spawn(async move {
+            task_registry
+                .attach_with_builder(request(pool(1), "first.router.generate", "llama"), builder)
+                .await
+        });
+
+        started_rx.await.unwrap();
+        registry.shutdown().await;
+        assert!(registry.state.lock().reservations.is_empty());
+        assert!(registry.catalog().pools().is_empty());
+
+        release_tx.send(()).unwrap();
+        finished_rx.await.unwrap();
+        let Err(error) = attach.await.unwrap() else {
+            panic!("pool attached after registry shutdown");
+        };
+        assert!(error.to_string().contains("retired before commit"));
+        assert_eq!(registry.pool_count().await, 0);
+        assert!(registry.catalog().pools().is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ckf_allocation_does_not_block_the_async_executor() {
+        let registry = Arc::new(PoolRegistry::new(7, config()));
+        let GatedBuilder {
+            builder,
+            started: started_rx,
+            release: release_tx,
+            finished: finished_rx,
+        } = gated_builder();
+        let task_registry = registry.clone();
+        let attach = tokio::spawn(async move {
+            task_registry
+                .attach_with_builder(request(pool(1), "first.router.generate", "llama"), builder)
+                .await
+        });
+
+        tokio::time::timeout(Duration::from_millis(500), started_rx)
+            .await
+            .expect("blocking CKF allocation did not start")
+            .unwrap();
+        tokio::time::timeout(
+            Duration::from_millis(500),
+            tokio::time::sleep(Duration::from_millis(1)),
+        )
+        .await
+        .expect("CKF allocation blocked the async executor");
+
+        release_tx.send(()).unwrap();
+        finished_rx.await.unwrap();
+        let attachment = attach.await.unwrap().unwrap();
         registry.detach(attachment).await.unwrap();
     }
 

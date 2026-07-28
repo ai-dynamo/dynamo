@@ -12,13 +12,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(feature = "ckf-diagnostics")]
 use std::time::Instant;
 
+#[cfg(test)]
+use dynamo_kv_router::indexer::cuckoo::CkfConfig;
 #[cfg(any(test, feature = "ckf-diagnostics"))]
 use dynamo_kv_router::indexer::cuckoo::DcCkfStats;
 #[cfg(feature = "ckf-diagnostics")]
 use dynamo_kv_router::indexer::cuckoo::PublisherEmitOutcome;
 use dynamo_kv_router::indexer::cuckoo::{
-    CkfConfig, CkfFailureAction, CkfFailureDisposition, CkfFailurePoint, DcCkfDelta,
-    DcCkfDeltaSink, DcCkfPublisher, DcCkfSnapshot, DcCkfState, LaneLease, ProducerIdentity,
+    CkfFailureAction, CkfFailureDisposition, CkfFailurePoint, DcCkfDelta, DcCkfDeltaSink,
+    DcCkfPublisher, DcCkfSnapshot, DcCkfState, LaneLease, ProducerIdentity,
 };
 use dynamo_kv_router::protocols::{
     DpRank, ExternalSequenceBlockHash, KvCacheEventData, KvCacheEventError, RouterEvent,
@@ -309,6 +311,7 @@ impl KvDcRelayHandle {
         )
     }
 
+    #[cfg(test)]
     pub(super) fn spawn_with_publication_delay(
         config: CkfConfig,
         scope: StreamScope,
@@ -316,6 +319,19 @@ impl KvDcRelayHandle {
     ) -> Result<(Self, mpsc::Receiver<ActorFault>), KvDcRelayError> {
         Self::spawn_with_capacity_and_delay(
             config,
+            scope,
+            DEFAULT_MAILBOX_CAPACITY,
+            publication_delay,
+        )
+    }
+
+    pub(super) fn spawn_with_state_and_publication_delay(
+        state: DcCkfState,
+        scope: StreamScope,
+        publication_delay: Duration,
+    ) -> (Self, mpsc::Receiver<ActorFault>) {
+        Self::spawn_with_state_capacity_and_delay(
+            state,
             scope,
             DEFAULT_MAILBOX_CAPACITY,
             publication_delay,
@@ -331,6 +347,7 @@ impl KvDcRelayHandle {
         Self::spawn_with_capacity_and_delay(config, scope, capacity, DEFAULT_PUBLICATION_DELAY)
     }
 
+    #[cfg(test)]
     fn spawn_with_capacity_and_delay(
         config: CkfConfig,
         scope: StreamScope,
@@ -338,6 +355,20 @@ impl KvDcRelayHandle {
         publication_delay: Duration,
     ) -> Result<(Self, mpsc::Receiver<ActorFault>), KvDcRelayError> {
         let state = DcCkfState::new(config)?;
+        Ok(Self::spawn_with_state_capacity_and_delay(
+            state,
+            scope,
+            capacity,
+            publication_delay,
+        ))
+    }
+
+    fn spawn_with_state_capacity_and_delay(
+        state: DcCkfState,
+        scope: StreamScope,
+        capacity: usize,
+        publication_delay: Duration,
+    ) -> (Self, mpsc::Receiver<ActorFault>) {
         let (sender, receiver) = mpsc::channel(capacity);
         let (publication_tx, _) = broadcast::channel(DEFAULT_PUBLICATION_CAPACITY);
         let identity = ProducerIdentity::new(
@@ -367,7 +398,7 @@ impl KvDcRelayHandle {
             fence.clone(),
             stopped.clone(),
         ));
-        Ok((
+        (
             Self {
                 sender,
                 identity,
@@ -378,7 +409,7 @@ impl KvDcRelayHandle {
                 diagnostics,
             },
             fault_rx,
-        ))
+        )
     }
 
     pub(super) const fn identity(&self) -> ProducerIdentity {
