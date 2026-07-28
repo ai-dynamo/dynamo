@@ -43,9 +43,7 @@ static NVTX_ENABLED: AtomicBool = AtomicBool::new(false);
 pub fn init() {
     #[cfg(feature = "nvtx")]
     {
-        let enabled = std::env::var("DYN_ENABLE_RUST_NVTX")
-            .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-            .unwrap_or(false);
+        let enabled = crate::config::env_is_truthy("DYN_ENABLE_RUST_NVTX");
         NVTX_ENABLED.store(enabled, Ordering::Relaxed);
         if enabled {
             tracing::info!("NVTX annotations enabled (DYN_ENABLE_RUST_NVTX)");

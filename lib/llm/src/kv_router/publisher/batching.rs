@@ -4,10 +4,9 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use dynamo_kv_router::RouterEventSink;
 use dynamo_kv_router::indexer::LocalKvIndexer;
 use dynamo_kv_router::protocols::{
-    KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData, StorageTier,
+    KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData, RouterEvent, StorageTier,
 };
 
 use super::dedup::EventDedupFilter;
@@ -71,12 +70,12 @@ impl BatchingState {
         self.remaining_timeout(timeout_ms) == Duration::ZERO
     }
 
-    pub(super) async fn flush<P: RouterEventSink + Send + Sync + 'static>(
+    pub(super) async fn flush(
         &mut self,
-        publisher: &P,
         local_indexer: &Option<Arc<LocalKvIndexer>>,
         worker_id: u64,
         dedup: &mut EventDedupFilter,
+        output: &mut Vec<RouterEvent>,
     ) {
         if !self.has_pending() {
             return;
@@ -87,7 +86,6 @@ impl BatchingState {
             && let Some(filtered) = dedup.filter_remove(dp_rank, self.last_storage_tier, data)
         {
             emit(
-                publisher,
                 local_indexer,
                 worker_id,
                 self.last_storage_tier,
@@ -96,6 +94,7 @@ impl BatchingState {
                     data: KvCacheEventData::Removed(filtered),
                     dp_rank,
                 },
+                output,
             )
             .await;
             emitted = true;
@@ -103,7 +102,6 @@ impl BatchingState {
         if let Some(data) = self.pending_stored.take() {
             dedup.track_store(dp_rank, self.last_storage_tier, &data);
             emit(
-                publisher,
                 local_indexer,
                 worker_id,
                 self.last_storage_tier,
@@ -112,6 +110,7 @@ impl BatchingState {
                     data: KvCacheEventData::Stored(data),
                     dp_rank,
                 },
+                output,
             )
             .await;
             emitted = true;

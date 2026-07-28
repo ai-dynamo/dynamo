@@ -108,8 +108,9 @@ Python engine authors keep the split API.)
   `Worker` or a shared utility, not in a hook system.
 
 - **Parallel path.** The existing `main.py` / `worker_factory.py` / `init_llm.py`
-  entry points remain untouched. The `unified_main.py` files are a separate
-  path. Do not break or modify existing backends when changing this module.
+  entry points remain untouched. The `common/backend/` entry points (e.g.
+  `sample_main.py`) are a separate path. Do not break or modify existing
+  backends when changing this module.
 
 ## Request / Response Contract
 
@@ -129,11 +130,14 @@ Build the `completion_usage` dict inline. Finish reason normalization
 
 ## Adding a New Engine
 
-1. Create `<backend>/llm_engine.py` subclassing `LLMEngine`
+This is the in-process route. Sidecar-based integration for SGLang, vLLM, and
+TRT-LLM is under development.
+
+1. Create `<backend>/<backend>_engine.py` subclassing `LLMEngine`
 2. Implement `from_args()`, `start()`, `generate()`, `cleanup()` (required)
    and `abort()` (optional)
 3. `from_args()` must parse args and return `(engine, WorkerConfig)`
-4. Create `<backend>/unified_main.py` calling `run(<YourEngine>)`
+4. Create `<backend>/<backend>_main.py` calling `run(<YourEngine>)`
 5. Use `sample_engine.py` as the reference implementation
 
 ## Disaggregated Serving
@@ -296,8 +300,8 @@ spans should be.
 | `publisher.py` | `ComponentSnapshot` dataclass (the push payload). The `SnapshotPublisher` itself is a Rust-owned object exposed as `dynamo._core.backend.SnapshotPublisher`. |
 | `metrics.py` | Prometheus integration helpers. `register_global_registry` / `register_engine_registry` are engine-facing (vendor-registry bridge inside `register_prometheus`). `ensure_prometheus_multiproc_dir` / `gather_with_labels` remain engine-side utilities. |
 | `worker.py` | `Worker` -- thin shim over `dynamo._core.backend.Worker`; lifecycle state machine and signal handling live in Rust (`lib/backend-common`) |
-| `run.py` | Common entry point -- `run(engine_cls)` used by all `unified_main.py` files |
-| `logprobs.py` | Shared logprob helpers: `parse_logprob_options`, `extract_from_completion_output` (vLLM/TRT-LLM shape), `extract_from_sglang_meta` + `build_sglang_logprob_kwargs` (SGLang cumulative-array shape). Both unified engines and the legacy handlers delegate here. |
+| `run.py` | Common entry point -- `run(engine_cls)` used by each backend's main (e.g. `sample_main.py`) |
+| `logprobs.py` | Shared logprob helpers: `parse_logprob_options`, `extract_from_completion_output` (vLLM/TRT-LLM shape), `extract_from_sglang_meta` + `build_sglang_logprob_kwargs` (SGLang cumulative-array shape). The backend request handlers delegate here. |
 | `sample_engine.py` | Reference engine -- use as template and for testing |
 
 The Rust `Worker` (in `lib/backend-common/src/worker.rs`) owns:

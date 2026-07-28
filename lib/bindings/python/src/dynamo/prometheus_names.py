@@ -120,6 +120,8 @@ class frontend_service:
     VIDEOS_PER_REQUEST = "videos_per_request"
     # Number of `audio_url` content parts per request (histogram)
     AUDIO_PER_REQUEST = "audio_per_request"
+    # Calculated image-placeholder token count per image-bearing request (histogram)
+    IMAGE_TOKENS_PER_REQUEST = "image_tokens_per_request"
     # Model configuration metrics
     # Runtime config metrics (from ModelRuntimeConfig):
     # Total KV blocks available for a worker serving the model
@@ -349,8 +351,10 @@ class request_plane:
 
 
 class router:
-    """Router request metrics (component-scoped aggregate histograms + counter)"""
+    """Router request metrics (component-scoped aggregate histograms + counters)"""
 
+    # Total number of requests admitted by the router scheduler
+    REQUESTS_STARTED_TOTAL = "router_requests_started_total"
     # Total number of requests processed by the router
     REQUESTS_TOTAL = "router_requests_total"
     # Total number of remote indexer overlap queries that failed

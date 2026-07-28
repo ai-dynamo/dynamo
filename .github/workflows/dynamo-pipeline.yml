@@ -151,7 +151,20 @@ jobs:
           rustup component add rustfmt clippy
           cargo fmt -- --check
           cargo clippy --features block-manager,media-ffmpeg,testing-nixl,integration --no-deps --all-targets -- -D warnings
-          cargo test --locked --all-targets --features=block-manager,media-ffmpeg,testing-nixl,integration -- --nocapture
+          # dynamo_llm lib unit tests mutate process env via `temp_env`
+          # (std::env::set_var/remove_var); in a multi-threaded libtest binary that
+          # write reallocates `environ` while another test thread (a parallel test's
+          # std::env::var, or a native UCX/CUDA thread) is inside getenv() -> teardown
+          # SIGSEGV after all tests pass (~14% under CI node contention). getenv/setenv
+          # aren't thread-safe and serial_test can't serialize the readers, so run the
+          # libtest binaries single-threaded via RUST_TEST_THREADS=1. Use the env var,
+          # NOT `-- --test-threads=1`: under --all-targets the CLI flag is also handed
+          # to the criterion `--bench` targets, which reject it ("unexpected argument")
+          # and fail the run; RUST_TEST_THREADS is read by libtest and ignored by
+          # criterion. (Verified on the GPU tester: whole command runs green with
+          # benches; lib suite 7s -> 35s single-threaded, other targets sub-second; and
+          # under 12x contention 3/3 parallel shards segfault vs 0/3 single-threaded.)
+          RUST_TEST_THREADS=1 cargo test --locked --all-targets --features=block-manager,media-ffmpeg,testing-nixl,integration -- --nocapture
           cargo clippy -p kvbm-physical --no-deps --all-targets -- -D warnings
           cargo test --locked -p kvbm-physical --features testing-kvbm -- --nocapture --test-threads=4
           /workspace/container/use-sccache.sh show-stats "Rust Checks"

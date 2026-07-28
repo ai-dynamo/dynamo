@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import logging
 import os
 import sys
 from collections.abc import Sequence
@@ -20,6 +21,7 @@ if TYPE_CHECKING:
 from dynamo._internal.aic import (
     DEFAULT_GPU_MEMORY_UTILIZATION,
     DEFAULT_MEM_FRACTION_STATIC,
+    AicMemoryEstimatorUnavailableError,
     _normalize_aic_quant_mode,
     estimate_num_gpu_blocks,
 )
@@ -33,12 +35,15 @@ from dynamo.mocker.utils.kv_cache import compute_kv_bytes_per_token
 from dynamo.replay import run_synthetic_trace_replay, run_trace_replay
 from dynamo.replay.reporting import format_report_table, write_report_json
 
+logger = logging.getLogger(__name__)
+
 
 class PlannerProfileDataResult(Protocol):
     npz_path: Path | None
 
 
 _DEFAULT_AIC_SYSTEM = "h200_sxm"
+_DEFAULT_NUM_GPU_BLOCKS = 16384
 _DEFAULT_MAX_NUM_BATCHED_TOKENS = 8192
 _DEFAULT_VLLM_BLOCK_SIZE = 64
 
@@ -108,6 +113,20 @@ def _aic_quant_mode(raw: dict, name: str) -> str | None:
 
 
 def _resolve_aic_num_gpu_blocks(raw: dict) -> None:
+    attention_dp = raw.get("aic_attention_dp_size")
+    dp = attention_dp or 1
+    configured_dp = raw.get("dp_size") or 1
+    has_aic_config = raw.get("aic_backend") is not None or attention_dp is not None
+    if has_aic_config and configured_dp > 1 and configured_dp != dp:
+        raise ValueError(
+            "dp_size must match aic_attention_dp_size for AIC-backed replay "
+            f"(got dp_size={configured_dp}, aic_attention_dp_size={dp})"
+        )
+    if attention_dp is not None and dp > 1:
+        # AIC attention-DP describes the silicon scheduler topology, independent
+        # of whether KV capacity is explicit or estimated.
+        raw["dp_size"] = dp
+
     if raw.get("num_gpu_blocks") is not None:
         return
 
@@ -127,50 +146,58 @@ def _resolve_aic_num_gpu_blocks(raw: dict) -> None:
     mem_fraction_static = raw.get("mem_fraction_static")
     free_gpu_memory_fraction = raw.get("free_gpu_memory_fraction")
 
-    per_rank_blocks = estimate_num_gpu_blocks(
-        backend_name=aic_backend,
-        system=raw.get("aic_system") or _DEFAULT_AIC_SYSTEM,
-        model_path=aic_model_path,
-        tp_size=cast(int, tp_size if tp_size is not None else 1),
-        block_size=_resolve_block_size_for_capacity(raw),
-        max_num_batched_tokens=cast(
-            int,
-            max_num_batched_tokens
-            if max_num_batched_tokens is not None
-            else _DEFAULT_MAX_NUM_BATCHED_TOKENS,
-        ),
-        gpu_memory_utilization=cast(
-            float,
-            gpu_memory_utilization
-            if gpu_memory_utilization is not None
-            else DEFAULT_GPU_MEMORY_UTILIZATION,
-        ),
-        mem_fraction_static=cast(
-            float,
-            mem_fraction_static
-            if mem_fraction_static is not None
-            else DEFAULT_MEM_FRACTION_STATIC,
-        ),
-        # None -> aic.py applies the TRT-LLM default (0.9).
-        free_gpu_memory_fraction=free_gpu_memory_fraction,
-        backend_version=raw.get("aic_backend_version"),
-        moe_tp_size=raw.get("aic_moe_tp_size"),
-        moe_ep_size=raw.get("aic_moe_ep_size"),
-        attention_dp_size=raw.get("aic_attention_dp_size"),
-        gemm_dtype=_aic_quant_mode(raw, "aic_gemm_dtype"),
-        moe_dtype=_aic_quant_mode(raw, "aic_moe_dtype"),
-        fmha_dtype=_aic_quant_mode(raw, "aic_fmha_dtype"),
-        kv_cache_dtype=_aic_quant_mode(raw, "aic_kv_cache_dtype"),
-        comm_dtype=_aic_quant_mode(raw, "aic_comm_dtype"),
-    )
-    # AIC returns a per-rank (per-GPU) block count. Offline replay models a single KV
-    # pool per engine, so under DP-attention -- where each of the `dp` ranks holds a full
-    # KV replica for its slice of the batch -- the engine-wide pool is per_rank * dp. The
-    # live mocker instead replicates one scheduler per dp rank (lib/llm/src/mocker.rs), so
-    # it keeps the per-rank count; this scaling lives on the offline-replay path, not in
-    # estimate_num_gpu_blocks itself.
-    dp = raw.get("aic_attention_dp_size") or 1
-    raw["num_gpu_blocks"] = per_rank_blocks * dp
+    try:
+        per_rank_blocks = estimate_num_gpu_blocks(
+            backend_name=aic_backend,
+            system=raw.get("aic_system") or _DEFAULT_AIC_SYSTEM,
+            model_path=aic_model_path,
+            tp_size=cast(int, tp_size if tp_size is not None else 1),
+            block_size=_resolve_block_size_for_capacity(raw),
+            max_num_batched_tokens=cast(
+                int,
+                max_num_batched_tokens
+                if max_num_batched_tokens is not None
+                else _DEFAULT_MAX_NUM_BATCHED_TOKENS,
+            ),
+            gpu_memory_utilization=cast(
+                float,
+                gpu_memory_utilization
+                if gpu_memory_utilization is not None
+                else DEFAULT_GPU_MEMORY_UTILIZATION,
+            ),
+            mem_fraction_static=cast(
+                float,
+                mem_fraction_static
+                if mem_fraction_static is not None
+                else DEFAULT_MEM_FRACTION_STATIC,
+            ),
+            # None -> aic.py applies the TRT-LLM default (0.9).
+            free_gpu_memory_fraction=free_gpu_memory_fraction,
+            backend_version=raw.get("aic_backend_version"),
+            moe_tp_size=raw.get("aic_moe_tp_size"),
+            moe_ep_size=raw.get("aic_moe_ep_size"),
+            attention_dp_size=raw.get("aic_attention_dp_size"),
+            gemm_dtype=_aic_quant_mode(raw, "aic_gemm_dtype"),
+            moe_dtype=_aic_quant_mode(raw, "aic_moe_dtype"),
+            fmha_dtype=_aic_quant_mode(raw, "aic_fmha_dtype"),
+            kv_cache_dtype=_aic_quant_mode(raw, "aic_kv_cache_dtype"),
+            comm_dtype=_aic_quant_mode(raw, "aic_comm_dtype"),
+        )
+    except AicMemoryEstimatorUnavailableError as exc:
+        logger.warning(
+            "AIC KV-cache capacity estimation is unavailable during replay: %s. "
+            "Falling back to default num_gpu_blocks=%d; upgrade aiconfigurator "
+            "or set num_gpu_blocks explicitly.",
+            exc,
+            _DEFAULT_NUM_GPU_BLOCKS,
+        )
+        raw["num_gpu_blocks"] = _DEFAULT_NUM_GPU_BLOCKS
+        return
+    # AIC returns a per-rank (per-GPU) block count. Under attention-DP the offline runtime
+    # mirrors the live path (lib/llm/src/mocker.rs): each mocker worker owns `dp`
+    # independent per-rank schedulers and KV pools. Keep the per-rank count; engine-wide
+    # capacity stays per_rank * dp, partitioned by rank as on real hardware.
+    raw["num_gpu_blocks"] = per_rank_blocks
 
 
 def _resolve_kv_bytes_per_token(raw: dict) -> None:
@@ -290,9 +317,10 @@ def _engine_caps(args: MockEngineArgs) -> EngineCapabilities:
     """Derive EngineCapabilities from MockEngineArgs."""
     from dynamo.planner.core.types import EngineCapabilities
 
-    max_kv_tokens = args.num_gpu_blocks * args.block_size
+    dp_size = max(args.dp_size, 1)
+    max_kv_tokens = args.num_gpu_blocks * args.block_size * dp_size
     return EngineCapabilities(
-        num_gpu=1,
+        num_gpu=(args.aic_tp_size or 1) * dp_size,
         max_num_batched_tokens=args.max_num_batched_tokens,
         max_num_seqs=args.max_num_seqs,
         context_length=args.max_model_len,
@@ -381,7 +409,9 @@ class SyntheticWorkload:
     input_tokens: int
     output_tokens: int
     request_count: int
-    arrival_interval_ms: float = 1.0
+    request_rate: float | None = None
+    arrival_interval_ms: float | None = None
+    arrival_seed: int = 42
     turns_per_session: int = 1
     shared_prefix_ratio: float = 0.0
     num_prefix_groups: int = 0
@@ -452,7 +482,9 @@ def _run_planner_replay(
                 model_name=model_name,
                 replay_concurrency=replay_concurrency,
                 arrival_speedup_ratio=arrival_speedup_ratio,
+                request_rate=synthetic.request_rate,
                 arrival_interval_ms=synthetic.arrival_interval_ms,
+                arrival_seed=synthetic.arrival_seed,
                 turns_per_session=synthetic.turns_per_session,
                 shared_prefix_ratio=synthetic.shared_prefix_ratio,
                 num_prefix_groups=synthetic.num_prefix_groups,
@@ -499,7 +531,9 @@ def _run_planner_replay(
                 model_name=model_name,
                 replay_concurrency=replay_concurrency,
                 arrival_speedup_ratio=arrival_speedup_ratio,
+                request_rate=synthetic.request_rate,
                 arrival_interval_ms=synthetic.arrival_interval_ms,
+                arrival_seed=synthetic.arrival_seed,
                 turns_per_session=synthetic.turns_per_session,
                 shared_prefix_ratio=synthetic.shared_prefix_ratio,
                 num_prefix_groups=synthetic.num_prefix_groups,
@@ -757,7 +791,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         type=int,
         help="number of synthetic requests; when --turns-per-session > 1, this is the number of sessions",
     )
-    parser.add_argument("--arrival-interval-ms", type=float, default=1.0)
+    parser.add_argument(
+        "--request-rate",
+        type=float,
+        help="Poisson open-loop request rate in requests per second",
+    )
+    parser.add_argument(
+        "--arrival-interval-ms",
+        type=float,
+        help="fixed open-loop interval between synthetic requests in milliseconds",
+    )
+    parser.add_argument(
+        "--arrival-seed",
+        type=int,
+        default=42,
+        help="seed for synthetic open-loop arrival timestamps",
+    )
     parser.add_argument("--turns-per-session", type=int, default=1)
     parser.add_argument("--shared-prefix-ratio", type=float, default=0.0)
     parser.add_argument("--num-prefix-groups", type=int, default=0)
@@ -893,6 +942,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error(
             "synthetic replay requires --input-tokens, --output-tokens, and --request-count"
         )
+    if using_synthetic:
+        load_controllers = (
+            args.replay_concurrency,
+            args.request_rate,
+            args.arrival_interval_ms,
+        )
+        if sum(value is not None for value in load_controllers) != 1:
+            parser.error(
+                "synthetic replay requires exactly one of --replay-concurrency, "
+                "--request-rate, or --arrival-interval-ms"
+            )
+    elif args.request_rate is not None or args.arrival_interval_ms is not None:
+        parser.error(
+            "--request-rate and --arrival-interval-ms only apply to synthetic replay"
+        )
     if (
         using_trace_file
         and args.trace_format == "applied_compute_agentic"
@@ -951,7 +1015,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 input_tokens=args.input_tokens,
                 output_tokens=args.output_tokens,
                 request_count=args.request_count,
+                request_rate=args.request_rate,
                 arrival_interval_ms=args.arrival_interval_ms,
+                arrival_seed=args.arrival_seed,
                 turns_per_session=args.turns_per_session,
                 shared_prefix_ratio=args.shared_prefix_ratio,
                 num_prefix_groups=args.num_prefix_groups,
@@ -1046,7 +1112,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             replay_mode=args.replay_mode,
             router_mode=args.router_mode,
             arrival_speedup_ratio=args.arrival_speedup_ratio,
+            request_rate=args.request_rate,
             arrival_interval_ms=args.arrival_interval_ms,
+            arrival_seed=args.arrival_seed,
             turns_per_session=args.turns_per_session,
             shared_prefix_ratio=args.shared_prefix_ratio,
             num_prefix_groups=args.num_prefix_groups,

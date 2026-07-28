@@ -152,6 +152,7 @@ async def _register_model_with_runtime_config(
         else None
     )
 
+    aliases = list(getattr(dynamo_args, "served_model_aliases", []) or [])
     try:
         await register_model(
             input_type,
@@ -168,6 +169,7 @@ async def _register_model_with_runtime_config(
             needs=needs,
             ignore_weights=use_modelexpress_remote_instance(server_args),
             max_gpu_lora_count=max_gpu_lora_count,
+            model_aliases=aliases or None,
         )
         logging.info("Successfully registered LLM with runtime config")
         return True
@@ -356,6 +358,7 @@ async def _get_runtime_config(
         ModelRuntimeConfig with extracted values, or None if extraction fails.
     """
     runtime_config = ModelRuntimeConfig()
+    runtime_config.kv_state_endpoint = dynamo_args.kv_state_endpoint
     runtime_config.context_length = server_args.context_length
     # set reasoning parser and tool call parser
     runtime_config.reasoning_parser = dynamo_args.dyn_reasoning_parser
@@ -373,6 +376,7 @@ async def _get_runtime_config(
     runtime_config.enable_local_indexer = (
         dynamo_args.enable_local_indexer and not is_decode_worker
     )
+    runtime_config.kv_event_publishing_enabled = dynamo_args.use_kv_events
 
     start_dp_rank, end_dp_rank = model_card_dp_rank_bounds(server_args)
     registered_dp_size = end_dp_rank - start_dp_rank

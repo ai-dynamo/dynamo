@@ -697,7 +697,7 @@ impl DistributedConfig {
         let event_transport_kind = discovery_backend.resolve_event_transport_kind();
 
         // NATS is used for more than just NATS request-plane RPC:
-        // - KV router events (JetStream or NATS core + local indexer)
+        // - KV router events (NATS core event plane)
         // - inter-router replica sync (NATS core)
         //
         // Enable the NATS client when any of these hold:
