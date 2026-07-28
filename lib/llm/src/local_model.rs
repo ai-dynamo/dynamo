@@ -77,6 +77,7 @@ pub struct LocalModelBuilder {
     namespace_prefix: Option<String>,
     media_decoder: Option<MediaDecoder>,
     media_fetcher: Option<MediaFetcher>,
+    default_thinking: Option<bool>,
 }
 
 impl Default for LocalModelBuilder {
@@ -109,6 +110,7 @@ impl Default for LocalModelBuilder {
             namespace_prefix: Default::default(),
             media_decoder: Default::default(),
             media_fetcher: Default::default(),
+            default_thinking: Default::default(),
         }
     }
 }
@@ -274,6 +276,13 @@ impl LocalModelBuilder {
         self
     }
 
+    /// Deployment-level default for the chat-template `thinking` flag. See
+    /// `ModelDeploymentCard::default_thinking` for precedence semantics.
+    pub fn default_thinking(&mut self, default_thinking: Option<bool>) -> &mut Self {
+        self.default_thinking = default_thinking;
+        self
+    }
+
     pub fn tokenizer_backend(&mut self, tokenizer_backend: Option<TokenizerBackend>) -> &mut Self {
         if let Some(tokenizer_backend) = tokenizer_backend {
             self.runtime_config.tokenizer_backend = Some(tokenizer_backend);
@@ -340,6 +349,7 @@ impl LocalModelBuilder {
             card.media_decoder = self.media_decoder.clone();
             card.media_fetcher = self.media_fetcher.clone();
             card.router_config = self.router_config.clone();
+            card.default_thinking = self.default_thinking;
             if !self.model_aliases.is_empty() {
                 card.set_aliases(self.model_aliases.clone());
             }
@@ -396,6 +406,7 @@ impl LocalModelBuilder {
         card.media_decoder = self.media_decoder.clone();
         card.media_fetcher = self.media_fetcher.clone();
         card.router_config = self.router_config.clone();
+        card.default_thinking = self.default_thinking;
         if !self.model_aliases.is_empty() {
             card.set_aliases(self.model_aliases.clone());
         }

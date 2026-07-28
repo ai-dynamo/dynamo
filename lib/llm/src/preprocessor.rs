@@ -428,6 +428,10 @@ pub struct OpenAIPreprocessor {
     lora_name: Option<String>,
     /// Per-model runtime configuration propagated to response generator (e.g., reasoning/tool parser)
     runtime_config: crate::local_model::runtime_config::ModelRuntimeConfig,
+    /// Deployment-level default for the chat-template `thinking` flag, from
+    /// `ModelDeploymentCard::default_thinking` (a static deployment knob, kept
+    /// off `ModelRuntimeConfig` — see `local_model/CLAUDE.md`).
+    default_thinking: Option<bool>,
     /// KV cache block size published in the model deployment card.
     kv_cache_block_size: usize,
     tool_call_parser: Option<String>,
@@ -799,6 +803,7 @@ impl OpenAIPreprocessor {
 
         // // Initialize runtime config from the ModelDeploymentCard
         let runtime_config = mdc.runtime_config.clone();
+        let default_thinking = mdc.default_thinking;
         let kv_cache_block_size = mdc.kv_cache_block_size as usize;
 
         // Capture MM-routing inputs before mdc is partially moved into MediaLoader.
@@ -982,6 +987,7 @@ impl OpenAIPreprocessor {
             mdcsum,
             lora_name,
             runtime_config,
+            default_thinking,
             kv_cache_block_size,
             tool_call_parser,
             media_loader,
@@ -3662,7 +3668,7 @@ impl
         Self::normalize_thinking_arg(
             &mut request,
             self.runtime_config.reasoning_parser.as_deref(),
-            self.runtime_config.default_thinking,
+            self.default_thinking,
         );
 
         // create a response generator

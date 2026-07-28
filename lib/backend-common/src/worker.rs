@@ -1664,7 +1664,6 @@ async fn build_local_model(
         tool_call_parser: config.tool_call_parser.clone(),
         reasoning_parser: config.reasoning_parser.clone(),
         exclude_tools_when_tool_choice_none: config.exclude_tools_when_tool_choice_none,
-        default_thinking: config.default_thinking,
         structural_tag_mode: config.structural_tag_mode,
         structural_tag_scope: config.structural_tag_scope,
         structural_tag_schema: config.structural_tag_schema,
@@ -1682,6 +1681,7 @@ async fn build_local_model(
         .custom_template_path(config.custom_jinja_template.clone())
         .media_decoder(config.media_decoder.clone())
         .media_fetcher(config.media_fetcher.clone())
+        .default_thinking(config.default_thinking)
         .runtime_config(rt_cfg);
 
     // Resolve model_name to a local path. Empty string or a raw media engine

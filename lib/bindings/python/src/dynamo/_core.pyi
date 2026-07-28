@@ -864,7 +864,6 @@ class ModelRuntimeConfig:
     reasoning_parser: str | None
     tokenizer_backend: str | None
     exclude_tools_when_tool_choice_none: bool
-    default_thinking: bool | None
     data_parallel_start_rank: int
     data_parallel_size: int
     enable_local_indexer: bool
@@ -2380,6 +2379,7 @@ async def register_model(
     ignore_weights: bool = False,
     max_gpu_lora_count: Optional[int] = None,
     model_aliases: Optional[List[str]] = None,
+    default_thinking: Optional[bool] = None,
 ) -> None:
     """
     Attach the model at path to the given endpoint, and advertise it as model_type.

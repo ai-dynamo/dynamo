@@ -859,6 +859,18 @@ pub struct ModelDeploymentCard {
     #[builder(default)]
     pub architectural_max_context_length: Option<u32>,
 
+    /// Deployment-level default for the chat-template `thinking` flag, applied
+    /// when the request sets neither `thinking`, `enable_thinking`, nor
+    /// `thinking_mode`. `None` keeps the model family's built-in default
+    /// (e.g. deepseek_v4 renders thinking ON); `Some(false)` enforces a
+    /// default-off contract. Operator-supplied via `--dyn-default-thinking`;
+    /// deliberately kept off `ModelRuntimeConfig`, which is reserved for facts
+    /// resolved authoritatively after the engine starts (see
+    /// `local_model/CLAUDE.md`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    pub default_thinking: Option<bool>,
+
     /// Size of a KV cache block.
     /// Passed to the engine, KV router, and trace replay hash path.
     pub kv_cache_block_size: u32,
@@ -1708,6 +1720,7 @@ impl ModelDeploymentCard {
             chat_template_file,
             prompt_context: None, // TODO - auto-detect prompt context
             architectural_max_context_length,
+            default_thinking: None,
             kv_cache_block_size: 0, // set later
             migration_limit: 0,
             model_type: Default::default(),  // set later

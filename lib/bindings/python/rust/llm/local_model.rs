@@ -176,16 +176,6 @@ impl ModelRuntimeConfig {
     }
 
     #[setter]
-    fn set_default_thinking(&mut self, default_thinking: Option<bool>) {
-        self.inner.default_thinking = default_thinking;
-    }
-
-    #[getter]
-    fn default_thinking(&self) -> Option<bool> {
-        self.inner.default_thinking
-    }
-
-    #[setter]
     fn set_enable_eagle(&mut self, enable_eagle: bool) {
         self.inner.enable_eagle = enable_eagle;
     }

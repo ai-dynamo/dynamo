@@ -698,15 +698,17 @@ async def register_vllm_model(
     # Add tool/reasoning parsers for decode/aggregated workers. Prefill
     # workers have no OpenAI surface and don't run a parser — key off
     # `worker_type` to skip them.
+    default_thinking = None
     if worker_type != WorkerType.Prefill:
         runtime_config.tool_call_parser = config.dyn_tool_call_parser
         runtime_config.reasoning_parser = config.dyn_reasoning_parser
         # Deployment default for the chat-template `thinking` flag; the
         # frontend preprocessor seeds it when the request is silent. CLI
-        # surface is tri-state ("on"/"off"/unset) -> Option<bool>.
-        runtime_config.default_thinking = resolve_tri_state_bool(
-            config.dyn_default_thinking
-        )
+        # surface is tri-state ("on"/"off"/unset) -> Option<bool>. Passed to
+        # register_model() below rather than set on runtime_config: it's a
+        # static deployment knob that belongs on the ModelDeploymentCard, not
+        # ModelRuntimeConfig (see lib/llm/src/local_model/CLAUDE.md).
+        default_thinking = resolve_tri_state_bool(config.dyn_default_thinking)
     runtime_config.exclude_tools_when_tool_choice_none = (
         config.exclude_tools_when_tool_choice_none
     )
@@ -757,6 +759,7 @@ async def register_vllm_model(
         needs=needs,
         ignore_weights=should_register_model_ignore_weights(config),
         model_aliases=config.served_model_aliases or None,
+        default_thinking=default_thinking,
         # Advertise LoRA capacity on the BASE card so the frontend can place the first
         # adapter onto an idle worker. Decode, aggregated, and prefill workers all serve
         # lifecycle registration; embeddings still do not.
