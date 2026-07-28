@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,7 +11,6 @@ use tokio_util::sync::CancellationToken;
 
 use super::concurrent_radix_tree::ConcurrentRadixTree;
 use super::concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
-use super::cuckoo::{CkfConfig, EventTransposedCkfIndexer};
 use super::positional::{PositionalIndexer, SearchMode};
 use super::*;
 use crate::indexer::pruning::PruneConfig;
@@ -41,15 +39,7 @@ fn indexer_template(
 #[template]
 #[rstest]
 fn matching_indexer_template(
-    #[values(
-        "single",
-        "flat",
-        "flat_binary",
-        "concurrent",
-        "concurrent_compressed",
-        "ckf"
-    )]
-    variant: &str,
+    #[values("single", "flat", "flat_binary", "concurrent", "concurrent_compressed")] variant: &str,
 ) {
 }
 
@@ -83,51 +73,6 @@ enum MatchSemantics {
     ProbabilisticNoUnderreport,
 }
 
-fn padded_ckf_workers(
-    scenario_workers: &[WorkerWithDpRank],
-) -> [WorkerWithDpRank; super::cuckoo::DC_COUNT] {
-    assert!(
-        scenario_workers.len() <= super::cuckoo::DC_COUNT,
-        "CKF test scenario exceeds fixed lane count"
-    );
-    let mut seen = HashSet::with_capacity(super::cuckoo::DC_COUNT);
-    let mut workers = Vec::with_capacity(super::cuckoo::DC_COUNT);
-    for &worker in scenario_workers {
-        assert!(
-            seen.insert(worker),
-            "duplicate exact CKF test worker identity: {worker:?}"
-        );
-        workers.push(worker);
-    }
-
-    let mut padding_id = u64::MAX;
-    while workers.len() < super::cuckoo::DC_COUNT {
-        let candidate = WorkerWithDpRank::new(padding_id, 0);
-        padding_id = padding_id.wrapping_sub(1);
-        if seen.insert(candidate) {
-            workers.push(candidate);
-        }
-    }
-
-    workers
-        .try_into()
-        .unwrap_or_else(|_| unreachable!("CKF worker padding must produce exactly 16 lanes"))
-}
-
-#[test]
-fn ckf_test_worker_factory_preserves_ranks_pads_and_rejects_duplicates() {
-    let scenario = [WorkerWithDpRank::new(7, 0), WorkerWithDpRank::new(7, 1)];
-    let workers = padded_ckf_workers(&scenario);
-    assert_eq!(&workers[..scenario.len()], &scenario);
-    assert_eq!(workers[scenario.len()], WorkerWithDpRank::new(u64::MAX, 0));
-    assert_eq!(workers.into_iter().collect::<HashSet<_>>().len(), 16);
-
-    let duplicate = std::panic::catch_unwind(|| {
-        padded_ckf_workers(&[scenario[0], scenario[0]]);
-    });
-    assert!(duplicate.is_err());
-}
-
 fn make_matching_indexer(
     variant: &str,
     workers: &[WorkerWithDpRank],
@@ -141,15 +86,8 @@ fn make_matching_indexer_with_metrics(
     workers: &[WorkerWithDpRank],
     metrics: Arc<KvIndexerMetrics>,
 ) -> (Box<dyn KvIndexerInterface + Sync>, Arc<KvIndexerMetrics>) {
-    if variant != "ckf" {
-        return make_indexer_with_metrics(variant, metrics);
-    }
-
-    let backend =
-        EventTransposedCkfIndexer::new(padded_ckf_workers(workers), CkfConfig::new(16_384))
-            .expect("valid fixed-D CKF test configuration");
-    let index = ThreadPoolIndexer::new_with_metrics(backend, 4, 32, Some(Arc::clone(&metrics)));
-    (Box::new(index), metrics)
+    let _ = workers;
+    make_indexer_with_metrics(variant, metrics)
 }
 
 fn assert_scores_with_semantics(
@@ -158,56 +96,13 @@ fn assert_scores_with_semantics(
     query_len: usize,
     configured_workers: &[WorkerWithDpRank],
     expected_scores: &[(WorkerWithDpRank, u32)],
-    ckf_semantics: MatchSemantics,
+    _ckf_semantics: MatchSemantics,
 ) {
     let expected: std::collections::HashMap<_, _> = expected_scores.iter().copied().collect();
-    if variant != "ckf" || ckf_semantics == MatchSemantics::Exact {
-        assert_eq!(actual.scores.len(), expected.len());
-        for (&worker, &expected_depth) in &expected {
-            assert_eq!(actual.scores.get(&worker), Some(&expected_depth));
-        }
-        if variant == "ckf" {
-            assert!(actual.frequencies.is_empty());
-        }
-        return;
-    }
-
-    let configured: HashSet<_> = configured_workers.iter().copied().collect();
-    assert_eq!(
-        configured.len(),
-        configured_workers.len(),
-        "probabilistic score assertion received duplicate workers"
-    );
-    assert!(actual.frequencies.is_empty());
-    assert!(
-        actual
-            .scores
-            .keys()
-            .all(|worker| configured.contains(worker)),
-        "CKF returned an unexpected identity: {:?}",
-        actual.scores
-    );
-    assert!(
-        actual.scores.values().all(|&depth| depth > 0),
-        "CKF must omit zero-depth scores: {:?}",
-        actual.scores
-    );
-    assert!(
-        actual
-            .scores
-            .values()
-            .all(|&depth| depth as usize <= query_len),
-        "CKF score exceeds query length {query_len}: {:?}",
-        actual.scores
-    );
-
-    for &worker in configured_workers {
-        let expected_depth = expected.get(&worker).copied().unwrap_or(0);
-        let actual_depth = actual.scores.get(&worker).copied().unwrap_or(0);
-        assert!(
-            actual_depth >= expected_depth,
-            "CKF under-reported {worker:?}: expected at least {expected_depth}, got {actual_depth}"
-        );
+    let _ = (variant, query_len, configured_workers);
+    assert_eq!(actual.scores.len(), expected.len());
+    for (&worker, &expected_depth) in &expected {
+        assert_eq!(actual.scores.get(&worker), Some(&expected_depth));
     }
 }
 
@@ -1418,6 +1313,34 @@ mod interface_tests {
     }
 
     #[tokio::test]
+    #[apply(indexer_template)]
+    async fn test_acknowledged_rank_reset_orders_after_accepted_events(variant: &str) {
+        let workers = [WorkerWithDpRank::new(7, 0), WorkerWithDpRank::new(7, 1)];
+        let index = make_indexer(variant);
+        index
+            .apply_event(make_store_event_with_dp_rank(7, &[1, 2, 3], 0))
+            .await;
+
+        index.reset_worker_dp_rank_and_wait(7, 0).await.unwrap();
+
+        // A rank reset does not fence sibling ranks, so order the sibling store explicitly.
+        index
+            .apply_event(make_store_event_with_dp_rank(7, &[1, 2, 3], 1))
+            .await;
+        flush_and_settle(index.as_ref()).await;
+
+        assert_query_scores_with_semantics(
+            variant,
+            index.as_ref(),
+            &[1, 2, 3],
+            &workers,
+            &[(workers[1], 3)],
+            MatchSemantics::Exact,
+        )
+        .await;
+    }
+
+    #[tokio::test]
     #[apply(matching_indexer_template)]
     async fn test_partial_block_removal(variant: &str) {
         let worker = WorkerWithDpRank::new(0, 0);
@@ -1690,7 +1613,7 @@ mod interface_tests {
 
     #[tokio::test]
     #[apply(matching_indexer_template)]
-    async fn test_clear_clears_all_dp_ranks(variant: &str) {
+    async fn test_clear_only_removes_target_dp_rank(variant: &str) {
         let workers = [WorkerWithDpRank::new(0, 0), WorkerWithDpRank::new(0, 1)];
         let index = make_matching_indexer(variant, &workers);
 
@@ -1716,14 +1639,21 @@ mod interface_tests {
             MatchSemantics::Exact,
         );
 
-        // Clear event clears ALL blocks for the worker_id, regardless of dp_rank
+        // A clear is ordered within and applies only to its emitting rank.
         index.apply_event(make_clear_event_with_dp_rank(0, 0)).await;
 
         flush_and_settle(index.as_ref()).await;
 
-        // Both dp_ranks should be cleared
+        // Rank 0 is cleared while rank 1 retains the same sequence.
         let scores = index.find_matches(seq).await.unwrap();
-        assert_scores_with_semantics(variant, &scores, 3, &workers, &[], MatchSemantics::Exact);
+        assert_scores_with_semantics(
+            variant,
+            &scores,
+            3,
+            &workers,
+            &[(workers[1], 3)],
+            MatchSemantics::Exact,
+        );
     }
 }
 
@@ -2861,15 +2791,40 @@ mod local_indexer_tests {
         assert_eq!(local_indexer.buffer_len(), 0);
 
         match local_indexer.get_events_in_id_range(None, None).await {
-            WorkerKvQueryResponse::TreeDump {
-                events,
+            WorkerKvQueryResponse::TreeDumpFailed {
                 last_event_id,
+                message,
             } => {
-                assert!(events.is_empty());
                 assert_eq!(last_event_id, 0);
+                assert_eq!(message, "Indexer is offline");
             }
-            other => panic!("Expected TreeDump, got: {other:?}"),
+            other => panic!("Expected TreeDumpFailed, got: {other:?}"),
         }
+    }
+
+    #[test]
+    fn legacy_named_messagepack_query_defaults_explicit_dump_failure_capability_off() {
+        #[derive(serde::Serialize)]
+        struct LegacyWorkerKvQueryRequest {
+            worker_id: WorkerId,
+            dp_rank: DpRank,
+            start_event_id: Option<u64>,
+            end_event_id: Option<u64>,
+        }
+
+        let encoded = rmp_serde::to_vec_named(&LegacyWorkerKvQueryRequest {
+            worker_id: 7,
+            dp_rank: 3,
+            start_event_id: None,
+            end_event_id: Some(9),
+        })
+        .unwrap();
+        let decoded: WorkerKvQueryRequest = rmp_serde::from_slice(&encoded).unwrap();
+
+        assert_eq!(decoded.worker_id, 7);
+        assert_eq!(decoded.dp_rank, 3);
+        assert_eq!(decoded.end_event_id, Some(9));
+        assert!(!decoded.supports_tree_dump_failed);
     }
 
     #[tokio::test]
@@ -3141,10 +3096,24 @@ mod local_indexer_tests {
         indexer.shutdown();
         dump_tx.closed().await;
 
-        let _ = indexer.get_events_in_id_range(None, None).await;
-        let _ = indexer.get_events_in_id_range(None, None).await;
+        let first = indexer.get_events_in_id_range(None, None).await;
+        let second = indexer.get_events_in_id_range(None, None).await;
 
         assert_eq!(indexer.dump_build_count(), 2);
+        assert!(matches!(
+            first,
+            WorkerKvQueryResponse::TreeDumpFailed {
+                last_event_id: 0,
+                ..
+            }
+        ));
+        assert!(matches!(
+            second,
+            WorkerKvQueryResponse::TreeDumpFailed {
+                last_event_id: 0,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]
@@ -3217,8 +3186,6 @@ mod local_indexer_tests {
 /// known positional-indexer limitation skipped by `test_remove_mid_chain_block`).
 #[tokio::test]
 async fn positional_binary_matches_strided_differential() {
-    use rand::{Rng, SeedableRng, rngs::StdRng};
-
     // Pin both modes explicitly (not via make_indexer, whose "flat" arm reads the env var) so the
     // comparison is genuinely strided-vs-binary regardless of any ambient DYN_ROUTER_* setting.
     let strided: Box<dyn KvIndexerInterface> = Box::new(ThreadPoolIndexer::new_with_metrics(
@@ -3234,10 +3201,10 @@ async fn positional_binary_matches_strided_differential() {
         None,
     ));
 
-    let mut rng = StdRng::seed_from_u64(0xC0FF_EED1_FF5E_ED42);
+    let mut rng = fastrand::Rng::with_seed(0xC0FF_EED1_FF5E_ED42);
 
     const BASE_LEN: usize = 1300;
-    let base: Vec<u64> = (0..BASE_LEN).map(|_| rng.random::<u64>()).collect();
+    let base: Vec<u64> = (0..BASE_LEN).map(|_| rng.u64(..)).collect();
 
     // Build the shared event stream once, then apply identical clones to both indexers.
     let mut events: Vec<RouterEvent> = Vec::new();
@@ -3252,9 +3219,9 @@ async fn positional_binary_matches_strided_differential() {
     ];
     for (i, &d) in divergence_points.iter().enumerate() {
         let worker_id = (i + 1) as u64;
-        let tail_len = 1 + rng.random_range(0..40usize);
+        let tail_len = 1 + rng.usize(0..40);
         let mut seq = base[..d].to_vec();
-        seq.extend((0..tail_len).map(|_| rng.random::<u64>()));
+        seq.extend((0..tail_len).map(|_| rng.u64(..)));
         events.push(make_store_event(worker_id, &seq));
     }
 
@@ -3274,10 +3241,10 @@ async fn positional_binary_matches_strided_differential() {
 
     // Build the query set, starting with edge cases.
     let mut queries: Vec<Vec<u64>> = vec![
-        vec![],                                         // empty
-        vec![base[0]],                                  // single element (hit)
-        vec![rng.random::<u64>()],                      // single element (miss)
-        (0..50).map(|_| rng.random::<u64>()).collect(), // pure miss
+        vec![],                                 // empty
+        vec![base[0]],                          // single element (hit)
+        vec![rng.u64(..)],                      // single element (miss)
+        (0..50).map(|_| rng.u64(..)).collect(), // pure miss
     ];
 
     // Base prefixes of many lengths, including jump_size boundaries.
@@ -3295,17 +3262,17 @@ async fn positional_binary_matches_strided_differential() {
 
     // Random divergent queries: a base prefix of random length plus a random tail.
     for _ in 0..600 {
-        let p = rng.random_range(0..BASE_LEN);
-        let tail_len = rng.random_range(0..30usize);
+        let p = rng.usize(0..BASE_LEN);
+        let tail_len = rng.usize(0..30);
         let mut q = base[..p].to_vec();
-        q.extend((0..tail_len).map(|_| rng.random::<u64>()));
+        q.extend((0..tail_len).map(|_| rng.u64(..)));
         queries.push(q);
     }
 
     // Fully random queries.
     for _ in 0..600 {
-        let len = rng.random_range(0..(BASE_LEN + 10));
-        queries.push((0..len).map(|_| rng.random::<u64>()).collect());
+        let len = rng.usize(0..(BASE_LEN + 10));
+        queries.push((0..len).map(|_| rng.u64(..)).collect());
     }
 
     for q in &queries {

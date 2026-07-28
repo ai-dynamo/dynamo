@@ -26,6 +26,9 @@ tcp-low-latency = [] # Enable Linux-specific TCP optimizations (TCP_QUICKACK, SO
 nvtx = ["dep:cudarc"]
 
 [dependencies]
+# repo
+dynamo-truthy = { workspace = true }
+
 # Use workspace dependencies where available
 anyhow = { workspace = true }
 async-nats = { workspace = true }

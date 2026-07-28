@@ -76,6 +76,26 @@ pub struct ModelReadiness {
     pub namespaces: std::collections::BTreeMap<String, NamespaceReadiness>,
 }
 
+/// More than one endpoint leaf for a P/D role is trying to use the
+/// namespace-level prefill rendezvous.
+///
+/// DynamoGraphDeployment convention gives one model topology a namespace and
+/// advertises one prefill endpoint plus one decode endpoint within it.
+/// [`EndpointId`](dynamo_runtime::protocols::EndpointId) identifies each leaf;
+/// it is deliberately not also treated as implicit pairing metadata. Multiple
+/// endpoint leaves for either role are therefore ambiguous, rather than being
+/// paired by discovery arrival order.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "model {model:?} namespace {namespace:?} has ambiguous endpoint-scoped P/D topology (prefill={prefill_endpoints:?}, decode={decode_endpoints:?})"
+)]
+pub(crate) struct AmbiguousPrefillRouterTopology {
+    model: String,
+    namespace: String,
+    prefill_endpoints: Vec<String>,
+    decode_endpoints: Vec<String>,
+}
+
 /// Readiness facts for one namespace, from [`Model::evaluate_namespace`].
 /// Shared by the serving gate and the `/ready` endpoint so they can't diverge.
 struct NamespaceReadinessEval {
@@ -144,6 +164,117 @@ impl Model {
         self.worker_sets
             .get(namespace)
             .map(|entry| entry.value().clone())
+    }
+
+    /// Return the decode WorkerSet for the only complete typed P/D topology in
+    /// a namespace.
+    ///
+    /// The rendezvous remains intentionally keyed by `(model, namespace)`: a
+    /// namespace denotes one P/D topology, while exact EndpointIds denote its
+    /// leaves. More than one typed Prefill endpoint or more than one
+    /// typed Decode endpoint is ambiguous, whether or not its prefill router
+    /// has already been attached. Aggregated and Encode WorkerSets do not
+    /// participate and continue serving normally.
+    pub(crate) fn unique_prefill_routed_worker_set_in_namespace(
+        &self,
+        namespace: &str,
+    ) -> Result<Option<Arc<WorkerSet>>, AmbiguousPrefillRouterTopology> {
+        self.prefill_router_topology_in_namespace(namespace, None)
+    }
+
+    pub(crate) fn prefill_router_topology_with_decode_candidate(
+        &self,
+        namespace: &str,
+        decode_endpoint: &dynamo_runtime::protocols::EndpointId,
+    ) -> Result<Option<Arc<WorkerSet>>, AmbiguousPrefillRouterTopology> {
+        self.prefill_router_topology_in_namespace(namespace, Some(decode_endpoint))
+    }
+
+    fn prefill_router_topology_in_namespace(
+        &self,
+        namespace: &str,
+        decode_candidate: Option<&dynamo_runtime::protocols::EndpointId>,
+    ) -> Result<Option<Arc<WorkerSet>>, AmbiguousPrefillRouterTopology> {
+        use crate::worker_type::WorkerType;
+
+        let mut prefill_endpoints = self
+            .worker_sets
+            .iter()
+            .filter(|entry| {
+                entry.value().namespace() == namespace
+                    && entry.value().card().worker_type == Some(WorkerType::Prefill)
+            })
+            .map(|entry| Self::worker_set_identity(entry.key(), entry.value()))
+            .collect::<Vec<_>>();
+        prefill_endpoints.sort();
+
+        let mut decode_worker_sets = self
+            .worker_sets
+            .iter()
+            .filter(|entry| {
+                entry.value().namespace() == namespace
+                    && entry.value().card().worker_type == Some(WorkerType::Decode)
+            })
+            .map(|entry| {
+                let identity = Self::worker_set_identity(entry.key(), entry.value());
+                (identity, entry.value().clone())
+            })
+            .collect::<Vec<_>>();
+        decode_worker_sets.sort_by(|(left, _), (right, _)| left.cmp(right));
+
+        let mut decode_endpoints = decode_worker_sets
+            .iter()
+            .map(|(identity, _)| identity.clone())
+            .collect::<Vec<_>>();
+        if let Some(candidate) = decode_candidate
+            && !decode_endpoints
+                .iter()
+                .any(|identity| identity == &candidate.to_string())
+        {
+            decode_endpoints.push(candidate.to_string());
+        }
+        decode_endpoints.sort();
+
+        if prefill_endpoints.len() > 1 || decode_endpoints.len() > 1 {
+            return Err(AmbiguousPrefillRouterTopology {
+                model: self.name.clone(),
+                namespace: namespace.to_string(),
+                prefill_endpoints,
+                decode_endpoints,
+            });
+        }
+
+        if prefill_endpoints.len() == 1 && decode_endpoints.len() == 1 {
+            Ok(decode_worker_sets.pop().and_then(|(_, worker_set)| {
+                worker_set.prefill_router.is_some().then_some(worker_set)
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn worker_set_identity(key: &str, worker_set: &WorkerSet) -> String {
+        worker_set
+            .endpoint_id()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| format!("worker-set-key={key}"))
+    }
+
+    pub(crate) fn prefill_routed_decode_worker_sets_in_namespace(
+        &self,
+        namespace: &str,
+    ) -> Vec<Arc<WorkerSet>> {
+        use crate::worker_type::WorkerType;
+
+        self.worker_sets
+            .iter()
+            .filter(|entry| {
+                entry.value().namespace() == namespace
+                    && entry.value().card().worker_type == Some(WorkerType::Decode)
+                    && entry.value().prefill_router.is_some()
+            })
+            .map(|entry| entry.value().clone())
+            .collect()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1048,6 +1179,86 @@ mod tests {
         pr.deactivate();
         ws.prefill_router = Some(pr);
         Arc::new(ws)
+    }
+
+    fn endpoint_id(
+        namespace: &str,
+        component: &str,
+        name: &str,
+    ) -> dynamo_runtime::protocols::EndpointId {
+        dynamo_runtime::protocols::EndpointId {
+            namespace: namespace.to_string(),
+            component: component.to_string(),
+            name: name.to_string(),
+        }
+    }
+
+    fn make_endpoint_worker_set(
+        namespace: &str,
+        component: &str,
+        endpoint: &str,
+        worker_type: crate::worker_type::WorkerType,
+        with_prefill_router: bool,
+    ) -> Arc<WorkerSet> {
+        let mut card = ModelDeploymentCard::default();
+        card.worker_type = Some(worker_type);
+        let mut worker_set = WorkerSet::new(
+            namespace.to_string(),
+            format!("{component}-{endpoint}"),
+            card,
+        );
+        worker_set.set_endpoint_id(endpoint_id(namespace, component, endpoint));
+        if with_prefill_router {
+            let router = PrefillRouter::disabled(
+                Arc::new(crate::discovery::ModelManager::new()),
+                dynamo_runtime::pipeline::RouterMode::RoundRobin,
+                None,
+            );
+            router.mark_active_for_test();
+            worker_set.prefill_router = Some(router);
+        }
+        Arc::new(worker_set)
+    }
+
+    #[test]
+    fn one_endpoint_scoped_prefill_decode_pair_is_unambiguous() {
+        use crate::worker_type::WorkerType;
+
+        let model = Model::new("llama".to_string());
+        let decode = make_endpoint_worker_set(
+            "deployment-a",
+            "decode",
+            "generate",
+            WorkerType::Decode,
+            true,
+        );
+        model.add_worker_set("decode-leaf".to_string(), decode.clone());
+        model.add_worker_set(
+            "prefill-leaf".to_string(),
+            make_endpoint_worker_set(
+                "deployment-a",
+                "prefill",
+                "generate",
+                WorkerType::Prefill,
+                false,
+            ),
+        );
+        model.add_worker_set(
+            "unrelated-aggregated".to_string(),
+            make_endpoint_worker_set(
+                "deployment-a",
+                "aggregated",
+                "generate",
+                WorkerType::Aggregated,
+                false,
+            ),
+        );
+
+        let selected = model
+            .unique_prefill_routed_worker_set_in_namespace("deployment-a")
+            .expect("one P/D pair is unambiguous")
+            .expect("decode leaf is present");
+        assert!(Arc::ptr_eq(&selected, &decode));
     }
 
     /// Baseline: a WorkerSet without a PrefillRouter is always displayable

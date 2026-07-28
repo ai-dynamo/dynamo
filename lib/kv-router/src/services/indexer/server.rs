@@ -14,6 +14,7 @@ use prometheus::Encoder;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
+use crate::identity::{RoutingPartitionId, default_routing_group};
 #[cfg(feature = "metrics")]
 use crate::indexer::KvIndexerMetrics;
 use crate::indexer::TieredMatchDetails;
@@ -21,7 +22,7 @@ use crate::protocols::{BlockHashOptions, LocalBlockHash, WorkerId, compute_block
 use crate::services::overlap::{MooncakeOverlapSummary, build_mooncake_overlap_summaries};
 
 use super::backend::Indexer;
-use super::registry::{IndexerKey, ListenerControlError, WorkerRegistry};
+use super::registry::{ListenerControlError, WorkerRegistry};
 
 /// We need to fit one million tokens as JSON text, this should do it.
 const QUERY_REQUEST_BODY_LIMIT_BYTES: usize = 8 * 1024 * 1024;
@@ -31,14 +32,7 @@ const QUERY_REQUEST_BODY_LIMIT_BYTES: usize = 8 * 1024 * 1024;
 const DYN_KV_INDEXER_TEST_ENDPOINTS: &str = "DYN_KV_INDEXER_TEST_ENDPOINTS";
 
 fn test_endpoints_enabled() -> bool {
-    matches!(
-        std::env::var(DYN_KV_INDEXER_TEST_ENDPOINTS)
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase()
-            .as_str(),
-        "1" | "true" | "yes" | "on"
-    )
+    dynamo_truthy::env_is_truthy(DYN_KV_INDEXER_TEST_ENDPOINTS)
 }
 
 use super::logging::{AccessLogModel, AccessLogSink};
@@ -84,10 +78,6 @@ impl AppState {
             access_log_sink: None,
         })
     }
-}
-
-fn default_routing_group() -> String {
-    "default".to_string()
 }
 
 #[derive(Deserialize)]
@@ -323,10 +313,7 @@ async fn run_tiered_query(
 
 async fn query(State(state): State<Arc<AppState>>, Json(req): Json<QueryRequest>) -> Response {
     let model = req.model_name.clone();
-    let key = IndexerKey {
-        model_name: req.model_name,
-        routing_group: req.routing_group,
-    };
+    let key = RoutingPartitionId::new(req.model_name, req.routing_group);
     let Some(ie) = state.registry.get_indexer(&key) else {
         let mut resp = (
             StatusCode::NOT_FOUND,
@@ -377,10 +364,7 @@ async fn query_by_hash(
         return resp;
     }
 
-    let key = IndexerKey {
-        model_name: req.model_name,
-        routing_group: req.routing_group,
-    };
+    let key = RoutingPartitionId::new(req.model_name, req.routing_group);
     let Some(ie) = state.registry.get_indexer(&key) else {
         let mut resp = (
             StatusCode::NOT_FOUND,

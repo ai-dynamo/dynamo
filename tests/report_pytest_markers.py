@@ -146,7 +146,9 @@ STUB_MODULES = [
     "gpu_memory_service.client.torch.tensor",
     "gpu_memory_service.common",
     "gpu_memory_service.common.locks",
-    "gpu_memory_service.common.cuda_utils",
+    "gpu_memory_service.common.vmm",
+    "gpu_memory_service.common.vmm.device",
+    "gpu_memory_service.common.vmm.cuda_utils",
     "gpu_memory_service.common.protocol",
     "gpu_memory_service.common.protocol.messages",
     "gpu_memory_service.common.protocol.wire",
@@ -272,8 +274,13 @@ STUB_MODULES = [
     "nixl._api",
     "nixl._bindings",
     "aiohttp.web",
+    "aiconfigurator.generator",
+    "aiconfigurator.generator.naive",
     "aiconfigurator.sdk",
+    "aiconfigurator.sdk.models",
+    "aiconfigurator.sdk.perf_database",
     "aiconfigurator.sdk.task",
+    "aiconfigurator.sdk.utils",
     "plotly",
     "plotly.graph_objects",
     "plotly.subplots",
@@ -286,6 +293,7 @@ STUB_MODULES = [
 # Project paths for local imports
 PROJECT_PATHS = [
     os.getcwd(),
+    os.path.join(os.getcwd(), "aisimulate", "src"),
     os.path.join(os.getcwd(), "components", "src"),
     os.path.join(os.getcwd(), "lib", "bindings", "python", "src"),
 ]
@@ -601,8 +609,8 @@ def parse_args():
     parser.add_argument(
         "--tests",
         nargs="*",
-        default=["tests", "components/src"],
-        help="Paths to test directories (default: tests components/src)",
+        default=["tests", "components/src", "aisimulate/tests"],
+        help="Paths to test directories (default: tests components/src aisimulate/tests)",
     )
     parser.add_argument(
         "--verbose",

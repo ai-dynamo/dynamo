@@ -19,11 +19,9 @@ print_launch_banner --no-curl "Launching Aggregated + KV Routing + Replicas (2 G
     "Frontend R2: http://localhost:$HTTP_PORT_R2"
 
 # run two routers (different HTTP + system ports)
-# Note: use --router-reset-states only on one router to avoid wiping shared state twice.
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT_R1:-8091} \
 python -m dynamo.frontend \
     --router-mode kv \
-    --router-reset-states \
     --http-port ${DYN_HTTP_PORT_R1:-8000} &
 
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT_R2:-8092} \

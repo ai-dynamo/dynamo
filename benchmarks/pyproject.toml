@@ -41,7 +41,6 @@ classifiers = [
 
 dependencies = [
     "aiconfigurator>=0.9.0",
-    "aiperf==0.10.0",
     "matplotlib",
     "networkx",
     "numpy",

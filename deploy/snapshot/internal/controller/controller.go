@@ -16,17 +16,23 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/google/uuid"
-	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/dynamic/dynamicinformer"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/client-go/util/retry"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/executor"
 	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/runtime"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
@@ -34,16 +40,26 @@ import (
 )
 
 // NodeController watches local-node pods with checkpoint metadata and reconciles
-// snapshot execution for checkpoint and restore requests.
+// snapshot execution for checkpoint and restore requests. The restore path is
+// driven by a client-go pod informer; the capture path is driven by a dynamic
+// informer over PodSnapshotContent work orders filtered to this node, with typed
+// reads/writes via an uncached controller-runtime client.
 type NodeController struct {
-	config    *types.AgentConfig
-	clientset kubernetes.Interface
-	runtime   snapshotruntime.Runtime
-	log       logr.Logger
-	holderID  string
+	config       *types.AgentConfig
+	clientset    kubernetes.Interface
+	client       client.Client
+	dynClient    dynamic.Interface
+	runtime      snapshotruntime.Runtime
+	log          logr.Logger
+	holderID     string
+	checkpointFn func(ctx context.Context, params CheckpointParams) error
 
 	inFlight   map[string]struct{}
 	inFlightMu sync.Mutex
+
+	// contentIndexer is the PodSnapshotContent informer's indexer, indexed by source pod
+	// (podRefIndex). The source-pod informer uses it to map a pod event back to its work order.
+	contentIndexer cache.Indexer
 
 	stopCh chan struct{}
 }
@@ -57,7 +73,14 @@ const (
 	containerResolveAttemptTimeout  = 1 * time.Second
 	restoreContainerResolveInterval = 50 * time.Millisecond
 	restoreContainerResolveTimeout  = 30 * time.Second
+
+	// snapshotContentResyncInterval re-drives every PodSnapshotContent work order so a
+	// not-yet-Ready source pod is re-checked for quiesce without a busy loop.
+	snapshotContentResyncInterval = 10 * time.Second
 )
+
+// podSnapshotContentGVR is the cluster-scoped resource the capture informer watches.
+var podSnapshotContentGVR = nvidiacomv1alpha1.GroupVersion.WithResource("podsnapshotcontents")
 
 // NewNodeController creates the node-local controller that runs inside snapshot-agent.
 func NewNodeController(
@@ -75,19 +98,39 @@ func NewNodeController(
 		return nil, fmt.Errorf("failed to create kubernetes client: %w", err)
 	}
 
-	return &NodeController{
+	scheme := runtime.NewScheme()
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(nvidiacomv1alpha1.AddToScheme(scheme))
+
+	typedClient, err := client.New(restConfig, client.Options{Scheme: scheme})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create typed client: %w", err)
+	}
+
+	dynClient, err := dynamic.NewForConfig(restConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create dynamic client: %w", err)
+	}
+
+	w := &NodeController{
 		config:    cfg,
 		clientset: clientset,
+		client:    typedClient,
+		dynClient: dynClient,
 		runtime:   rt,
 		log:       log,
 		holderID:  "snapshot-agent/" + uuid.NewString(),
 		inFlight:  make(map[string]struct{}),
 		stopCh:    make(chan struct{}),
-	}, nil
+	}
+	w.checkpointFn = w.executorCheckpoint
+	return w, nil
 }
 
 // Run starts the local pod informers and processes checkpoint/restore events.
 func (w *NodeController) Run(ctx context.Context) error {
+	// Seed the agent logger onto ctx so the capture path resolves it via log.FromContext.
+	ctx = logr.NewContext(ctx, w.log)
 	w.log.Info("Starting snapshot node controller",
 		"node", w.config.NodeName,
 		"checkpoint_source_label", snapshotprotocol.CheckpointSourceLabel,
@@ -103,43 +146,6 @@ func (w *NodeController) Run(ctx context.Context) error {
 	}
 
 	var syncFuncs []cache.InformerSynced
-
-	// Checkpoint informer
-	checkpointSelector := labels.SelectorFromSet(labels.Set{
-		snapshotprotocol.CheckpointSourceLabel: "true",
-	}).String()
-
-	ckptFactoryOpts := append([]informers.SharedInformerOption{
-		informers.WithTweakListOptions(func(opts *metav1.ListOptions) {
-			opts.LabelSelector = checkpointSelector
-		}),
-	}, nsOptions...)
-
-	ckptFactory := informers.NewSharedInformerFactoryWithOptions(
-		w.clientset, 30*time.Second, ckptFactoryOpts...,
-	)
-
-	ckptInformer := ckptFactory.Core().V1().Pods().Informer()
-	if _, err := ckptInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj interface{}) {
-			pod, ok := podFromInformerObj(obj)
-			if !ok {
-				return
-			}
-			w.reconcileCheckpointPod(ctx, pod)
-		},
-		UpdateFunc: func(_, newObj interface{}) {
-			pod, ok := podFromInformerObj(newObj)
-			if !ok {
-				return
-			}
-			w.reconcileCheckpointPod(ctx, pod)
-		},
-	}); err != nil {
-		return fmt.Errorf("failed to add checkpoint informer handler: %w", err)
-	}
-	go ckptFactory.Start(w.stopCh)
-	syncFuncs = append(syncFuncs, ckptInformer.HasSynced)
 
 	// Restore pods carry a checkpoint ID but are not checkpoint sources.
 	restoreSel, err := labels.Parse(snapshotprotocol.CheckpointIDLabel + ",!" + snapshotprotocol.CheckpointSourceLabel)
@@ -180,119 +186,94 @@ func (w *NodeController) Run(ctx context.Context) error {
 	go restoreFactory.Start(w.stopCh)
 	syncFuncs = append(syncFuncs, restoreInformer.HasSynced)
 
+	// Capture path: a dynamic informer over PodSnapshotContent work orders, filtered at
+	// the list/watch level to this node's mirror label. The node-label filter is the
+	// node scoping; reconcilePodSnapshotContent keeps a defensive nodeName check.
+	nodeContentSelector := labels.SelectorFromSet(labels.Set{snapshotprotocol.SnapshotNodeLabel: w.config.NodeName}).String()
+	dynFactory := dynamicinformer.NewFilteredDynamicSharedInformerFactory(
+		w.dynClient, snapshotContentResyncInterval, metav1.NamespaceAll,
+		func(opts *metav1.ListOptions) {
+			opts.LabelSelector = nodeContentSelector
+		},
+	)
+	contentInformer := dynFactory.ForResource(podSnapshotContentGVR).Informer()
+	// Index work orders by their source pod so a source-pod event maps back to its
+	// PodSnapshotContent in O(1). Must be registered before the informer starts.
+	if err := contentInformer.AddIndexers(cache.Indexers{podRefIndex: podRefIndexFunc}); err != nil {
+		return fmt.Errorf("failed to add snapshot-content podRef indexer: %w", err)
+	}
+	w.contentIndexer = contentInformer.GetIndexer()
+	if _, err := contentInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj interface{}) {
+			if name, ok := contentNameFromInformerObj(obj); ok {
+				w.reconcilePodSnapshotContent(ctx, name)
+			}
+		},
+		UpdateFunc: func(_, newObj interface{}) {
+			if name, ok := contentNameFromInformerObj(newObj); ok {
+				w.reconcilePodSnapshotContent(ctx, name)
+			}
+		},
+	}); err != nil {
+		return fmt.Errorf("failed to add snapshot-content informer handler: %w", err)
+	}
+	go dynFactory.Start(w.stopCh)
+	syncFuncs = append(syncFuncs, contentInformer.HasSynced)
+
+	// Source-pod informer: keyed on CaptureEligibleLabel, the promotion label the pre-bind gate
+	// (reconcilePodSnapshotContent) adds only after a source pod passes validation. Keying on the
+	// gate-applied label (not CheckpointSourceLabel) means only gate-validated pods drive the capture
+	// path. A pod status change (a checkpoint container crashing, or the target becoming ready) does
+	// not touch the PodSnapshotContent, so without this trigger it would only be acted on at the
+	// content informer's resync. It needs its own factory: its selector is disjoint from the restore
+	// informer's.
+	sourceSelector := labels.SelectorFromSet(labels.Set{snapshotprotocol.CaptureEligibleLabel: "true"}).String()
+	sourceFactoryOpts := append([]informers.SharedInformerOption{
+		informers.WithTweakListOptions(func(opts *metav1.ListOptions) {
+			opts.LabelSelector = sourceSelector
+		}),
+	}, nsOptions...)
+	sourceFactory := informers.NewSharedInformerFactoryWithOptions(
+		w.clientset, 30*time.Second, sourceFactoryOpts...,
+	)
+	sourceInformer := sourceFactory.Core().V1().Pods().Informer()
+	if _, err := sourceInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj interface{}) {
+			if pod, ok := podFromInformerObj(obj); ok {
+				if err := w.reconcileSourcePod(ctx, pod); err != nil {
+					w.log.Error(err, "Failed to reconcile source pod", "pod", fmt.Sprintf("%s/%s", pod.Namespace, pod.Name))
+				}
+			}
+		},
+		UpdateFunc: func(_, newObj interface{}) {
+			if pod, ok := podFromInformerObj(newObj); ok {
+				if err := w.reconcileSourcePod(ctx, pod); err != nil {
+					w.log.Error(err, "Failed to reconcile source pod", "pod", fmt.Sprintf("%s/%s", pod.Namespace, pod.Name))
+				}
+			}
+		},
+	}); err != nil {
+		return fmt.Errorf("failed to add source-pod informer handler: %w", err)
+	}
+	go sourceFactory.Start(w.stopCh)
+	syncFuncs = append(syncFuncs, sourceInformer.HasSynced)
+
+	// Close stopCh on cancellation so a stalled cache sync (below) is unblocked by ctx, not only on
+	// the happy path.
+	var stopOnce sync.Once
+	go func() {
+		<-ctx.Done()
+		stopOnce.Do(func() { close(w.stopCh) })
+	}()
+
 	if !cache.WaitForCacheSync(w.stopCh, syncFuncs...) {
 		return fmt.Errorf("failed to sync informer caches")
 	}
 
-	w.log.Info("Snapshot node controller started and caches synced")
+	w.log.Info("PodSnapshot node controller started and caches synced")
 	<-ctx.Done()
-	close(w.stopCh)
+	stopOnce.Do(func() { close(w.stopCh) })
 	return nil
-}
-
-func (w *NodeController) reconcileCheckpointPod(ctx context.Context, pod *corev1.Pod) {
-	if pod.Spec.NodeName != w.config.NodeName {
-		return
-	}
-
-	podKey := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
-
-	checkpointID, ok := pod.Labels[snapshotprotocol.CheckpointIDLabel]
-	if !ok || checkpointID == "" {
-		w.log.Info("Pod has checkpoint label but no checkpoint-id label", "pod", podKey)
-		return
-	}
-
-	job, err := getCheckpointJob(ctx, w.clientset, pod)
-	if err != nil {
-		w.log.Error(err, "Failed to resolve checkpoint job", "pod", podKey)
-		return
-	}
-
-	jobStatus := job.Annotations[snapshotprotocol.CheckpointStatusAnnotation]
-	if jobStatus == snapshotprotocol.CheckpointStatusFailed {
-		return
-	}
-
-	for i := range pod.Status.ContainerStatuses {
-		failed := &pod.Status.ContainerStatuses[i]
-		term := failed.State.Terminated
-		if term == nil || term.ExitCode == 0 {
-			continue
-		}
-		message := fmt.Sprintf("Checkpoint container %q terminated with exit code %d", failed.Name, term.ExitCode)
-		if term.Reason != "" {
-			message = fmt.Sprintf("%s: %s", message, term.Reason)
-		}
-		opLog := w.log.WithValues("pod", podKey, "checkpoint_id", checkpointID, "container", failed.Name)
-		opLog.Info("Checkpoint pod container failed", "exit_code", term.ExitCode, "reason", term.Reason)
-		emitPodEvent(ctx, w.clientset, opLog, pod, "snapshot", corev1.EventTypeWarning, "CheckpointFailed", message)
-		if err := annotateJob(ctx, w.clientset, opLog, job, map[string]string{
-			snapshotprotocol.CheckpointStatusAnnotation: snapshotprotocol.CheckpointStatusFailed,
-		}); err != nil {
-			opLog.Error(err, "Failed to mark checkpoint job failed")
-		}
-		reason := fmt.Sprintf("checkpoint container %s failed", failed.Name)
-		for _, status := range pod.Status.ContainerStatuses {
-			if status.State.Running == nil || status.ContainerID == "" {
-				continue
-			}
-			containerID := snapshotruntime.StripCRIScheme(status.ContainerID)
-			resolveCtx, cancel := context.WithTimeout(ctx, containerResolveAttemptTimeout)
-			pid, _, err := w.runtime.ResolveContainer(resolveCtx, containerID)
-			cancel()
-			if err != nil {
-				opLog.Error(err, "Failed to resolve running checkpoint container", "container", status.Name)
-				continue
-			}
-			if err := snapshotruntime.SendSignalToPID(opLog, pid, syscall.SIGKILL, reason); err != nil {
-				opLog.Error(err, "Failed to signal running checkpoint container", "container", status.Name)
-			}
-		}
-		return
-	}
-
-	if jobStatus == snapshotprotocol.CheckpointStatusCompleted {
-		return
-	}
-
-	// Checkpoint contract: exactly one target container per job.
-	targets, err := snapshotprotocol.TargetContainersFromAnnotations(pod.Annotations, 1, 1)
-	if err != nil {
-		w.log.Error(err, "Checkpoint pod missing target-containers annotation", "pod", podKey)
-		return
-	}
-	containerName := targets[0]
-	if !isContainerReady(pod, containerName) {
-		return
-	}
-
-	if !w.tryAcquire(podKey) {
-		return
-	}
-
-	acquiredLease, err := acquireCheckpointLease(ctx, w.clientset, w.log, job, w.holderID)
-	if err != nil {
-		w.release(podKey)
-		w.log.Error(err, "Failed to acquire checkpoint lease", "pod", podKey, "checkpoint_id", checkpointID)
-		return
-	}
-	if !acquiredLease {
-		w.release(podKey)
-		return
-	}
-
-	startedAt := time.Now()
-	w.log.Info("Checkpoint target detected, triggering checkpoint", "pod", podKey, "checkpoint_id", checkpointID)
-	emitPodEvent(ctx, w.clientset, w.log, pod, "snapshot", corev1.EventTypeNormal, "CheckpointRequested", fmt.Sprintf("Checkpoint requested: %s", checkpointID))
-
-	go func() {
-		if err := w.runCheckpoint(ctx, pod, job, checkpointID, containerName, podKey, startedAt); err != nil {
-			opLog := w.log.WithValues("pod", podKey, "checkpoint_id", checkpointID)
-			opLog.Error(err, "Checkpoint controller worker failed")
-			emitPodEvent(ctx, w.clientset, opLog, pod, "snapshot", corev1.EventTypeWarning, "CheckpointWorkerFailed", err.Error())
-		}
-	}()
 }
 
 func (w *NodeController) reconcileRestorePod(ctx context.Context, pod *corev1.Pod) {
@@ -530,201 +511,6 @@ func (w *NodeController) startRestoreForContainer(
 	}()
 }
 
-// runCheckpoint runs the full checkpoint workflow for a pod:
-//  1. Hold and renew the checkpoint lease
-//  2. Resolve the container ID and host PID
-//  3. Call executor.Checkpoint (inspect → configure → CUDA lock/checkpoint → CRIU dump → rootfs diff)
-//  4. Write a snapshot-complete sentinel into the pod's snapshot-control
-//     volume on success (observed by the workload via polling), or SIGKILL
-//     on failure (unrecoverable CUDA-locked process)
-//  5. Mark job as completed or failed
-func (w *NodeController) runCheckpoint(ctx context.Context, pod *corev1.Pod, job *batchv1.Job, checkpointID, containerName, podKey string, startedAt time.Time) error {
-	releasePodOnExit := true
-	defer func() {
-		if releasePodOnExit {
-			w.release(podKey)
-		}
-	}()
-	log := w.log.WithValues("pod", podKey, "checkpoint_id", checkpointID)
-	leaseCtx, stopLease := context.WithCancelCause(ctx)
-	defer stopLease(nil)
-
-	releaseLeaseOnExit := true
-	defer func() {
-		if !releaseLeaseOnExit {
-			return
-		}
-		releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := releaseCheckpointLease(releaseCtx, w.clientset, log, job, w.holderID); err != nil {
-			log.Error(err, "Failed to release checkpoint lease")
-		}
-	}()
-
-	go w.renewCheckpointLease(leaseCtx, log, job, stopLease)
-
-	setCheckpointStatus := func(value string) (bool, error) {
-		if value != snapshotprotocol.CheckpointStatusCompleted {
-			if err := annotateJob(ctx, w.clientset, log, job, map[string]string{
-				snapshotprotocol.CheckpointStatusAnnotation: value,
-			}); err != nil {
-				releasePodOnExit = false
-				releaseLeaseOnExit = false
-				return false, fmt.Errorf("failed to persist terminal checkpoint status %q: %w", value, err)
-			}
-			return true, nil
-		}
-
-		updated := false
-		jobClient := w.clientset.BatchV1().Jobs(job.Namespace)
-		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-			current, err := jobClient.Get(ctx, job.Name, metav1.GetOptions{})
-			if err != nil {
-				return fmt.Errorf("failed to get current checkpoint job %s/%s: %w", job.Namespace, job.Name, err)
-			}
-			if current.Annotations[snapshotprotocol.CheckpointStatusAnnotation] == snapshotprotocol.CheckpointStatusFailed {
-				updated = false
-				return nil
-			}
-			if current.Annotations == nil {
-				current.Annotations = map[string]string{}
-			}
-			current.Annotations[snapshotprotocol.CheckpointStatusAnnotation] = value
-			if _, err := jobClient.Update(ctx, current, metav1.UpdateOptions{}); err != nil {
-				return err
-			}
-			updated = true
-			return nil
-		})
-		if err != nil {
-			releasePodOnExit = false
-			releaseLeaseOnExit = false
-			return false, fmt.Errorf("failed to persist terminal checkpoint status %q: %w", value, err)
-		}
-		if !updated {
-			log.Info("Skipping checkpoint completion because checkpoint job is already failed",
-				"job", fmt.Sprintf("%s/%s", job.Namespace, job.Name),
-			)
-		}
-		return updated, nil
-	}
-
-	// Resolve the target container ID from pod status.
-	var containerID string
-	for _, cs := range pod.Status.ContainerStatuses {
-		if cs.Name == containerName {
-			containerID = snapshotruntime.StripCRIScheme(cs.ContainerID)
-			break
-		}
-	}
-	if containerID == "" {
-		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "CheckpointFailed", fmt.Sprintf("Could not resolve container %q ID", containerName))
-		if _, statusErr := setCheckpointStatus(snapshotprotocol.CheckpointStatusFailed); statusErr != nil {
-			return statusErr
-		}
-		return nil
-	}
-
-	// Resolve the container's host PID (needed for signaling after checkpoint)
-	containerPID, _, err := w.runtime.ResolveContainer(ctx, containerID)
-	if err != nil {
-		log.Error(err, "Failed to resolve container")
-		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "CheckpointFailed", fmt.Sprintf("Container resolve failed: %v", err))
-		if _, statusErr := setCheckpointStatus(snapshotprotocol.CheckpointStatusFailed); statusErr != nil {
-			return statusErr
-		}
-		return nil
-	}
-
-	checkpointLocation, err := w.checkpointLocationsFromPod(pod, checkpointID, containerPID)
-	if err != nil {
-		log.Error(err, "Checkpoint pod is missing storage metadata")
-		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "CheckpointFailed", err.Error())
-		if _, statusErr := setCheckpointStatus(snapshotprotocol.CheckpointStatusFailed); statusErr != nil {
-			return statusErr
-		}
-		return nil
-	}
-	if err := w.validatePodMountContainerPID(ctx, containerID, containerPID); err != nil {
-		log.Error(err, "Checkpoint container changed before storage access")
-		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "CheckpointFailed", err.Error())
-		if _, statusErr := setCheckpointStatus(snapshotprotocol.CheckpointStatusFailed); statusErr != nil {
-			return statusErr
-		}
-		return nil
-	}
-
-	// Step 1: Run the checkpoint orchestrator
-	req := executor.CheckpointRequest{
-		ContainerID:        containerID,
-		ContainerName:      containerName,
-		CheckpointID:       checkpointID,
-		CheckpointLocation: checkpointLocation.HostPath,
-		StartedAt:          startedAt,
-		NodeName:           w.config.NodeName,
-		PodName:            pod.Name,
-		PodNamespace:       pod.Namespace,
-		PodIP:              pod.Status.PodIP,
-		Clientset:          w.clientset,
-	}
-	if err := executor.Checkpoint(leaseCtx, w.runtime, log, req, w.config); err != nil {
-		if cause := context.Cause(leaseCtx); cause != nil && cause != context.Canceled {
-			err = fmt.Errorf("checkpoint lease lost: %w", cause)
-		}
-		log.Error(err, "Checkpoint failed")
-		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "CheckpointFailed", err.Error())
-		// SIGKILL on failure: process is unrecoverable (CUDA locked), terminate immediately
-		if signalErr := snapshotruntime.SendSignalToPID(log, containerPID, syscall.SIGKILL, "checkpoint failed"); signalErr != nil {
-			log.Error(signalErr, "Failed to signal checkpoint failure to runtime process")
-		}
-		if _, statusErr := setCheckpointStatus(snapshotprotocol.CheckpointStatusFailed); statusErr != nil {
-			return statusErr
-		}
-		return nil
-	}
-
-	info, err := os.Stat(checkpointLocation.HostPath)
-	if err != nil || !info.IsDir() {
-		if err == nil {
-			err = fmt.Errorf("published checkpoint path %s is not a directory", checkpointLocation.HostPath)
-		} else {
-			err = fmt.Errorf("published checkpoint path %s is missing: %w", checkpointLocation.HostPath, err)
-		}
-		log.Error(err, "Checkpoint failed verification")
-		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "CheckpointFailed", err.Error())
-		if signalErr := snapshotruntime.SendSignalToPID(log, containerPID, syscall.SIGKILL, "checkpoint verification failed"); signalErr != nil {
-			log.Error(signalErr, "Failed to signal checkpoint verification failure to runtime process")
-		}
-		if _, statusErr := setCheckpointStatus(snapshotprotocol.CheckpointStatusFailed); statusErr != nil {
-			return statusErr
-		}
-		return nil
-	}
-	// Step 2: Sentinel on success. Workload observes via polling on the
-	// snapshot-control volume; containerPID is a PID inside the container's
-	// mount namespace, which is all the /host/proc/<pid>/root write path
-	// requires. The Succeeded event is emitted only after the sentinel has
-	// been written and the terminal status has been persisted so failures don't
-	// produce conflicting Succeeded+Failed events for the same operation.
-	if err := snapshotruntime.WriteControlSentinel(containerPID, snapshotprotocol.SnapshotCompleteFile); err != nil {
-		log.Error(err, "Failed to write snapshot-complete sentinel")
-		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "CheckpointFailed", err.Error())
-		if _, statusErr := setCheckpointStatus(snapshotprotocol.CheckpointStatusFailed); statusErr != nil {
-			return statusErr
-		}
-		return nil
-	}
-
-	updated, err := setCheckpointStatus(snapshotprotocol.CheckpointStatusCompleted)
-	if err != nil {
-		return err
-	}
-	if updated {
-		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeNormal, "CheckpointSucceeded", fmt.Sprintf("Checkpoint completed: %s", checkpointID))
-	}
-	return nil
-}
-
 // runRestore runs the full restore workflow for one target container:
 //  1. Annotate the pod with restore in_progress
 //  2. Call executor.Restore (inspect placeholder → nsrestore inside namespace)
@@ -850,6 +636,64 @@ func (w *NodeController) release(podKey string) {
 	w.inFlightMu.Lock()
 	defer w.inFlightMu.Unlock()
 	delete(w.inFlight, podKey)
+}
+
+// podRefIndex is the PodSnapshotContent informer index keyed by source pod ("<namespace>/<name>").
+const podRefIndex = "byPodRef"
+
+// podRefIndexFunc indexes a PodSnapshotContent by its source pod ("<snapshotRef.namespace>/<source.podRef.name>").
+// It runs against the dynamic informer's *unstructured.Unstructured objects; an unexpected type or a
+// missing field yields no index entry (nil) rather than an error, so it never poisons the index.
+func podRefIndexFunc(obj interface{}) ([]string, error) {
+	u, ok := obj.(*unstructured.Unstructured)
+	if !ok {
+		return nil, nil
+	}
+	ns, _, _ := unstructured.NestedString(u.Object, "spec", "snapshotRef", "namespace")
+	name, _, _ := unstructured.NestedString(u.Object, "spec", "source", "podRef", "name")
+	if ns == "" || name == "" {
+		return nil, nil
+	}
+	return []string{ns + "/" + name}, nil
+}
+
+// contentFromInformerObj converts a dynamic informer object (or its DeletedFinalStateUnknown
+// tombstone) to a typed PodSnapshotContent. It returns false on an unexpected type.
+func contentFromInformerObj(obj interface{}) (*nvidiacomv1alpha1.PodSnapshotContent, bool) {
+	if tombstone, ok := obj.(cache.DeletedFinalStateUnknown); ok {
+		obj = tombstone.Obj
+	}
+	u, ok := obj.(*unstructured.Unstructured)
+	if !ok {
+		return nil, false
+	}
+	content := &nvidiacomv1alpha1.PodSnapshotContent{}
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(u.Object, content); err != nil {
+		return nil, false
+	}
+	return content, true
+}
+
+// chooseActiveContent returns the name of the oldest non-terminal PodSnapshotContent among the indexed
+// objects (oldest first by CreationTimestamp, ties broken by Name), or "" when none are active.
+// Driving the oldest until it finishes gives deterministic, stable selection across pod events.
+func chooseActiveContent(objs []interface{}) string {
+	var chosen *nvidiacomv1alpha1.PodSnapshotContent
+	for _, obj := range objs {
+		content, ok := contentFromInformerObj(obj)
+		if !ok || isContentTerminal(content) {
+			continue
+		}
+		if chosen == nil ||
+			content.CreationTimestamp.Before(&chosen.CreationTimestamp) ||
+			(content.CreationTimestamp.Equal(&chosen.CreationTimestamp) && content.Name < chosen.Name) {
+			chosen = content
+		}
+	}
+	if chosen == nil {
+		return ""
+	}
+	return chosen.Name
 }
 
 func (w *NodeController) checkpointLocationsFromPod(pod *corev1.Pod, checkpointID string, hostPID int) (checkpointLocations, error) {

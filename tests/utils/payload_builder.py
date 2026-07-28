@@ -18,6 +18,7 @@ from tests.utils.payloads import (
     EmbeddingPayload,
     GuidedDecodingChatPayload,
     ImagesPayload,
+    ImageTokenMetricsPayload,
     KvEventMetricsPayload,
     LMCacheMetricsPayload,
     MetricsPayload,
@@ -346,6 +347,20 @@ def metric_payload_default(
     else:
         # Default to base MetricsPayload for unknown backends
         return MetricsPayload(**common_args)
+
+
+def image_token_metrics_payload(
+    min_num_requests: int = 1,
+    expected_log: Optional[List[str]] = None,
+) -> ImageTokenMetricsPayload:
+    """Create a frontend image-token aggregate metrics check."""
+    return ImageTokenMetricsPayload(
+        body={},
+        repeat_count=1,
+        expected_log=expected_log or [],
+        expected_response=[],
+        min_num_requests=min_num_requests,
+    )
 
 
 def kv_events_metrics_payload(

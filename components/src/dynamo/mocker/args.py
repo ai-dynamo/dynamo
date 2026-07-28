@@ -211,8 +211,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         dest="num_gpu_blocks",  # Maps to num_gpu_blocks in MockEngineArgs
         default=None,
-        help="Explicit number of GPU blocks for KV cache. When unset, AIC-backed "
-        "mocker estimates the value; non-AIC mocker uses 16384.",
+        help="Explicit usable GPU-block capacity for the mock KV cache. When "
+        "unset, AIC-backed mocker estimates the value; non-AIC mocker uses 16384.",
     )
     parser.add_argument(
         "--block-size",
@@ -253,6 +253,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         dest="enable_prefix_caching",
         default=None,
         help="Disable automatic prefix caching",
+    )
+    parser.add_argument(
+        "--g1-backend",
+        choices=["kvbm", "native"],
+        default="kvbm",
+        help="G1 manager for the shared vLLM/TRT-LLM scheduler (default: "
+        "kvbm). Use 'native' for the self-contained physical block-pool model.",
     )
     parser.add_argument(
         "--enable-chunked-prefill",
@@ -526,12 +533,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=False,
         help="DEPRECATED: use --disaggregation-mode=decode. "
         "Mark this as a decode worker which does not publish KV events (default: False)",
-    )
-    parser.add_argument(
-        "--durable-kv-events",
-        action="store_true",
-        default=os.environ.get("DYN_DURABLE_KV_EVENTS", "false").lower() == "true",
-        help="[Deprecated] Enable durable KV events using NATS JetStream. This option will be removed in a future release. The event-plane subscriber (local_indexer mode) is now the recommended path.",
     )
     parser.add_argument(
         "--zmq-kv-events-ports",

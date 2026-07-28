@@ -4,7 +4,7 @@ This directory contains the in-process offline replay harness used by `dynamo_mo
 
 The goal is to simulate trace execution without spinning up async runtimes, network planes, or real worker tasks. Instead, the harness advances a logical clock, steps mock engine cores directly, and records request/token timing into `TraceCollector` in `lib/mocker/src/replay/collector.rs`.
 
-For the harness-level picture (load driver → harness → SES/MES → trace collector) and operator-facing CLI docs, see [`docs/dynosim/runs.md`](../../../../../docs/dynosim/runs.md). This README dives into the offline-specific internals: logical clock, event queue, per-worker state machine.
+For the harness-level picture (load driver → harness → SES/MES → trace collector) and operator-facing CLI docs, see [`docs/dynosim/runs.md`](../../../../../docs/fern/dynosim/runs.mdx). This README dives into the offline-specific internals: logical clock, event queue, per-worker state machine.
 
 ## Where It Sits
 
@@ -19,7 +19,7 @@ Offline replay starts in `lib/mocker/src/replay/offline/mod.rs`.
 
 `offline/mod.rs` chooses between three implementations:
 
-- `lib/mocker/src/replay/offline/single.rs` for aggregated replay with `num_workers == 1`
+- `lib/mocker/src/replay/offline/single.rs` for aggregated replay with `num_workers == 1` and `dp_size == 1`
 - `lib/mocker/src/replay/offline/agg.rs` for everything else, including aggregated multi-worker replay and `kv_router` replay
 - `lib/mocker/src/replay/offline/disagg.rs` for offline disaggregated prefill/decode replay
 
@@ -54,7 +54,10 @@ Offline replay starts in `lib/mocker/src/replay/offline/mod.rs`.
 ## Single-Worker Fast Path
 
 The single-worker path is intentionally simple and used when `num_workers == 1`
-for vLLM, SGLang, and TRT-LLM engine modes.
+and `dp_size == 1` for vLLM, SGLang, and TRT-LLM engine modes. Multi-rank
+attention-DP uses the general harness so each rank has an independent scheduler
+and KV pool while all ranks still share one deterministic event loop and a
+group-owned iteration clock.
 
 That path avoids the cluster event queue and router machinery entirely, but it now supports both:
 
@@ -90,9 +93,17 @@ The general aggregated harness lives in `lib/mocker/src/replay/offline/agg.rs`. 
 
 - a logical clock `now_ms`
 - a pending request queue
-- one [`OfflineWorkerState`](/Users/peabrane/Documents/codes/dynamo/lib/mocker/src/replay/offline/state.rs) per worker
+- one [`OfflineWorkerState`](state.rs) per worker
 - a binary heap of future completion events
 - an optional synchronous offline router
+
+For `dp_size > 1`, each mocker worker owns one `OfflineWorkerState` per DP rank.
+The router retains the live `(worker_id, dp_rank)` identity; planner scaling and
+worker accounting continue to count mocker workers rather than rank schedulers.
+At each iteration, every ready rank forms its scheduler-local pass and the logical
+worker completes at the maximum rank latency. Completion-visible tokens, KV events,
+and FPM timing share that boundary; empty ranks also wait at the barrier so arrivals
+during an epoch cannot start early.
 
 ### Main Loop
 
@@ -206,6 +217,11 @@ The disaggregated runtime in `lib/mocker/src/replay/offline/disagg.rs` models tw
 
 - a prefill router and prefill worker pool
 - a decode router and decode worker pool
+
+Attention-DP is currently supported only by aggregated offline replay. Disaggregated replay
+requires both prefill and decode `dp_size` to be `1`; ranked prefill/decode routing and handoff
+semantics are not yet modeled, so larger values are rejected explicitly instead of using the old
+aggregate approximation.
 
 It keeps one logical clock and one completion-event heap, but request ownership moves through a
 two-stage state machine instead of the aggregated single-pool lifecycle.
