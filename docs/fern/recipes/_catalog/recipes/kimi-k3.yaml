@@ -92,6 +92,5 @@ targets:
 related_benchmarks: []
 maintainer: null
 gaps:
-- Recipe source tree ships on the release/1.4.0-kimi-k3-dev.1 branch; catalog asset paths resolve on main once that branch merges
 - GB200 manifests mount weights via node-local hostPath (GKE pattern); all four targets pin the public NGC image (1.4.0-kimi-k3-dev.1)
 - No perf assets in the recipe tree; no validated expected-performance numbers (Day-0)
