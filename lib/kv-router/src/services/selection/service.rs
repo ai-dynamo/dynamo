@@ -11,9 +11,11 @@ use crate::scheduling::PotentialLoad;
 use crate::services::common::replica_sync::{
     PeerManager, ReplicaPeerError, ReplicaSyncRuntime, setup_replica_sync,
 };
+use crate::tracking_hash::TrackingHashContext;
 
 use super::core::{SelectionCore, SelectionServiceConfig};
 use super::error::SelectionError;
+use super::pending::SelectionCacheConfig;
 use super::types::{
     ModelLoadResponse, OverlapScoresRequest, OverlapScoresResponse, PotentialLoadsRequest,
     ReadyResponse, ReservationRequest, ReservationResponse, SelectAndReserveRequest, SelectRequest,
@@ -26,6 +28,7 @@ pub struct SelectionServiceBuilder {
     indexer_peers: Vec<String>,
     replica_sync_port: Option<u16>,
     replica_sync_peers: Vec<String>,
+    selection_cache: SelectionCacheConfig,
 }
 
 impl SelectionServiceBuilder {
@@ -36,6 +39,7 @@ impl SelectionServiceBuilder {
             indexer_peers: Vec::new(),
             replica_sync_port: None,
             replica_sync_peers: Vec::new(),
+            selection_cache: SelectionCacheConfig::default(),
         }
     }
 
@@ -55,7 +59,16 @@ impl SelectionServiceBuilder {
         self
     }
 
+    pub fn selection_cache(mut self, config: SelectionCacheConfig) -> Self {
+        self.selection_cache = config;
+        self
+    }
+
     pub async fn build(self) -> anyhow::Result<SelectionService> {
+        self.kv_router_config
+            .validate_config()
+            .map_err(anyhow::Error::msg)?;
+        let tracking_hash = Arc::new(TrackingHashContext::from_config(&self.kv_router_config)?);
         let cancel_token = CancellationToken::new();
         let mut startup_guard = StartupGuard::new(cancel_token.clone());
         let replica_runtime = setup_replica_sync(
@@ -63,12 +76,21 @@ impl SelectionServiceBuilder {
             &self.replica_sync_peers,
             cancel_token.child_token(),
         )?;
+        if replica_runtime.is_some() {
+            tracing::info!(
+                router_tracking_hash = %tracking_hash.algorithm(),
+                router_tracking_key_id = ?tracking_hash.key_id(),
+                "Selection replica synchronization initialized"
+            );
+        }
         let replica_config = replica_runtime.as_ref().map(ReplicaSyncRuntime::config);
         let core = Arc::new(SelectionCore::new_managed(
             self.kv_router_config,
             self.indexer_threads,
             cancel_token.clone(),
             replica_config,
+            self.selection_cache,
+            tracking_hash,
         ));
 
         if !self.indexer_peers.is_empty() {
@@ -115,7 +137,8 @@ impl SelectionServiceConfig {
     pub fn service_builder(&self) -> SelectionServiceBuilder {
         let mut builder = SelectionServiceBuilder::new(self.kv_router_config.clone())
             .indexer_threads(self.threads)
-            .indexer_peers(self.indexer_peers.clone());
+            .indexer_peers(self.indexer_peers.clone())
+            .selection_cache(self.selection_cache.clone());
         if let Some(port) = self.replica_sync_port {
             builder = builder.replica_sync(port, self.replica_sync_peers.clone());
         }
@@ -168,6 +191,7 @@ impl SelectionService {
                 kv_router_config,
                 indexer_threads,
                 cancel_token.clone(),
+                SelectionCacheConfig::default(),
             )),
             peer_manager: None,
             replica_runtime: None,
@@ -200,9 +224,9 @@ impl SelectionService {
     pub fn list_workers(
         &self,
         model_name: Option<&str>,
-        tenant_id: Option<&str>,
+        routing_group: Option<&str>,
     ) -> Vec<WorkerCatalogRecord> {
-        self.core.list_workers(model_name, tenant_id)
+        self.core.list_workers(model_name, routing_group)
     }
 
     pub async fn select(&self, req: SelectRequest) -> Result<SelectResponse, SelectionError> {
@@ -241,20 +265,20 @@ impl SelectionService {
         self.core.create_reservation(req).await
     }
 
-    pub async fn prefill_complete(&self, reservation_id: &str) -> Result<(), SelectionError> {
-        self.core.prefill_complete(reservation_id).await
+    pub async fn prefill_complete(&self, selection_id: &str) -> Result<(), SelectionError> {
+        self.core.prefill_complete(selection_id).await
     }
 
     pub fn add_output_block(
         &self,
-        reservation_id: &str,
+        selection_id: &str,
         decay_fraction: Option<f64>,
     ) -> Result<(), SelectionError> {
-        self.core.add_output_block(reservation_id, decay_fraction)
+        self.core.add_output_block(selection_id, decay_fraction)
     }
 
-    pub async fn free_reservation(&self, reservation_id: &str) -> Result<(), SelectionError> {
-        self.core.free_reservation(reservation_id).await
+    pub async fn free_reservation(&self, selection_id: &str) -> Result<(), SelectionError> {
+        self.core.free_reservation(selection_id).await
     }
 
     pub fn ready(&self) -> ReadyResponse {
@@ -264,9 +288,9 @@ impl SelectionService {
     pub fn loads(
         &self,
         model_name: Option<&str>,
-        tenant_id: Option<&str>,
+        routing_group: Option<&str>,
     ) -> Vec<ModelLoadResponse> {
-        self.core.loads(model_name, tenant_id)
+        self.core.loads(model_name, routing_group)
     }
 
     pub async fn potential_loads(

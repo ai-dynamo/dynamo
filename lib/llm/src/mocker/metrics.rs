@@ -404,11 +404,12 @@ impl NativeMockerMetrics {
 
                 handles.num_running_reqs.set(clamp_u64_to_i64(running));
                 handles.num_queue_reqs.set(clamp_u64_to_i64(queued));
-                handles.cache_hit_rate.set(if cache_total == 0 {
-                    0.0
-                } else {
-                    cache_hits as f64 / cache_total as f64
-                });
+                // No prefill tokens means no new observation, not a 0% cache hit rate.
+                if cache_total > 0 {
+                    handles
+                        .cache_hit_rate
+                        .set(cache_hits as f64 / cache_total as f64);
+                }
             }
             None => {}
         }
@@ -979,6 +980,35 @@ mod tests {
             metric_labels(request_metric),
             HashSet::from(["model_name".to_string(), "engine_type".to_string()])
         );
+    }
+
+    #[tokio::test]
+    async fn sglang_cache_hit_rate_ignores_passes_without_prefill_tokens() {
+        let registry = MetricsRegistry::new();
+        let metrics = NativeMockerMetrics::new(EngineType::Sglang, 1).unwrap();
+        metrics.register(&registry).unwrap();
+        let _ = metrics
+            .request_timing("llama", 0, false, Instant::now())
+            .await;
+        let cache_hit_rate = || {
+            gather_family(&registry, "sglang:cache_hit_rate")
+                .get_metric()
+                .first()
+                .unwrap()
+                .gauge
+                .as_ref()
+                .unwrap()
+                .value()
+        };
+
+        metrics.update_scheduler_snapshot(&MockerMetrics::from_parts(0, 0, 10, 0, 0, 0, 5, 10));
+        assert_eq!(cache_hit_rate(), 0.5);
+
+        metrics.update_scheduler_snapshot(&MockerMetrics::from_parts(0, 0, 10, 0, 0, 0, 0, 0));
+        assert_eq!(cache_hit_rate(), 0.5);
+
+        metrics.update_scheduler_snapshot(&MockerMetrics::from_parts(0, 0, 10, 0, 0, 0, 0, 10));
+        assert_eq!(cache_hit_rate(), 0.0);
     }
 
     #[tokio::test]

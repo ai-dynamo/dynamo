@@ -119,8 +119,8 @@ def run_trace_replay(
         report_jsonl_path=report_jsonl_path,
         max_sim_time_ms=max_sim_time_ms,
         model_name=model_name,
-        # Goodput SLA (offline replay only): when set, the report carries
-        # goodput_* keys classifying SLA-satisfying requests.
+        # Goodput SLA: when set, the report carries goodput_* keys classifying
+        # SLA-satisfying requests.
         sla_ttft_ms=sla_ttft_ms,
         sla_itl_ms=sla_itl_ms,
         sla_e2e_ms=sla_e2e_ms,
@@ -144,7 +144,9 @@ def run_synthetic_trace_replay(
     replay_mode="offline",
     router_mode="round_robin",
     arrival_speedup_ratio=1.0,
-    arrival_interval_ms=1.0,
+    request_rate=None,
+    arrival_interval_ms=None,
+    arrival_seed=42,
     turns_per_session=1,
     shared_prefix_ratio=0.0,
     num_prefix_groups=0,
@@ -186,7 +188,9 @@ def run_synthetic_trace_replay(
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 request_count=request_count,
+                request_rate=request_rate,
                 arrival_interval_ms=arrival_interval_ms,
+                arrival_seed=arrival_seed,
                 turns_per_session=turns_per_session,
                 shared_prefix_ratio=shared_prefix_ratio,
                 num_prefix_groups=num_prefix_groups,
@@ -209,13 +213,15 @@ def run_synthetic_trace_replay(
         replay_mode=replay_mode,
         router_mode=router_mode,
         arrival_speedup_ratio=arrival_speedup_ratio,
+        request_rate=request_rate,
         arrival_interval_ms=arrival_interval_ms,
+        arrival_seed=arrival_seed,
         turns_per_session=turns_per_session,
         shared_prefix_ratio=shared_prefix_ratio,
         num_prefix_groups=num_prefix_groups,
         inter_turn_delay_ms=inter_turn_delay_ms,
         model_name=model_name,
-        # Goodput SLA for synthetic-static (offline): emits goodput_* in the report.
+        # Goodput SLA: emits goodput_* in the report.
         sla_ttft_ms=sla_ttft_ms,
         sla_itl_ms=sla_itl_ms,
         sla_e2e_ms=sla_e2e_ms,

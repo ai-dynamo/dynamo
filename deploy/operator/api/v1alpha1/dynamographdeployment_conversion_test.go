@@ -912,6 +912,10 @@ func TestDGD_RoundTrip_Status(t *testing.T) {
 		Status: v1beta1.DynamoGraphDeploymentStatus{
 			ObservedGeneration: 7,
 			State:              v1beta1.DGDStateSuccessful,
+			Placement: &v1beta1.PlacementStatus{
+				Score: ptr.To(0.87),
+				State: v1beta1.PlacementScoreStateReported,
+			},
 			Conditions: []metav1.Condition{
 				{
 					Type:               "Ready",
@@ -925,6 +929,7 @@ func TestDGD_RoundTrip_Status(t *testing.T) {
 				"worker": {
 					ComponentKind:     v1beta1.ComponentKindDeployment,
 					ComponentNames:    []string{"dgd-worker-0", "dgd-worker-1"},
+					RuntimeNamespace:  "ns-status-worker-abc123",
 					Replicas:          2,
 					UpdatedReplicas:   2,
 					ReadyReplicas:     ptr.To(int32(2)),

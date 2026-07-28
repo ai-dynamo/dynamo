@@ -17,8 +17,7 @@ The deploy directory contains several key components:
 ├── discovery # How to use Dynamo kubernetes discovery backend
 ├── helm
 │   └── charts
-│       ├── crds # Dynamo CRD helm chart
-│       ├── platform # Dynamo platform helm chart
+│       └── platform # Dynamo platform helm chart
 ├── inference-gateway # Dynamo intregration with inference gateway
 ├── observability # Observability tools for Dynamo k8s
 ├── operator # Source code for the Dynamo operator
@@ -46,16 +45,6 @@ The deploy directory contains several key components:
 
 ```bash
 commit -S
-```
-
-- Every time you modify `deploy/helm/charts/crds/templates/*.yaml`, please bump up the version of the CRD helm chart in
-    1. deploy/helm/charts/platform/components/operator/Chart.yaml
-    2. deploy/helm/charts/platform/Chart.yaml
-then
-
-```bash
-deploy/helm/charts/platform
-helm dependency update
 ```
 
 #### Commit Message Guidelines

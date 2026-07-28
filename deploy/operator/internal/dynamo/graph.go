@@ -36,6 +36,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/discovery"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	gms "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/imdario/mergo"
@@ -1021,7 +1022,7 @@ func GenerateEPPDestinationRule(serviceName, namespace string, meshConfig config
 		},
 	}
 
-	if !meshConfig.IsEnabled() || meshConfig.Istio == nil {
+	if configv1alpha1.ServiceMeshProvider(meshConfig.Provider) != configv1alpha1.ServiceMeshProviderIstio || meshConfig.Istio == nil {
 		return dr
 	}
 
@@ -1434,11 +1435,9 @@ func AddStandardEnvVars(container *corev1.Container, operatorConfig *configv1alp
 func applyCheckpointProbeCadence(
 	container *corev1.Container,
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,
-	operatorConfig *configv1alpha1.OperatorConfiguration,
 	checkpointInfo *checkpoint.CheckpointInfo,
 ) {
-	if operatorConfig.Checkpoint.Enabled &&
-		checkpointInfo != nil &&
+	if checkpointInfo != nil &&
 		checkpointInfo.Enabled &&
 		checkpointInfo.Ready &&
 		IsWorkerComponent(string(component.ComponentType)) {
@@ -1532,7 +1531,7 @@ func GenerateBasePodSpec(
 		return nil, fmt.Errorf("unsupported backend framework: %s", backendFramework)
 	}
 	backend.UpdateContainer(&container, numberOfNodes, role, component, serviceName, multinodeDeployer)
-	applyCheckpointProbeCadence(&container, component, operatorConfig, checkpointInfo)
+	applyCheckpointProbeCadence(&container, component, checkpointInfo)
 
 	// get base podspec from component
 	podSpec, err := componentDefaults.GetBasePodSpec(componentContext)
@@ -1868,8 +1867,8 @@ func generateComponentContext(component *v1beta1.DynamoComponentDeploymentShared
 	dynamoNamespace := v1beta1.ComputeDynamoNamespace(component.GlobalDynamoNamespace, namespace, parentGraphDeploymentName)
 	var workerHashSuffix string
 	labels := GetPodTemplateLabels(component)
-	if IsWorkerComponent(string(component.ComponentType)) && labels[commonconsts.KubeLabelDynamoWorkerHash] != "" {
-		workerHashSuffix = labels[commonconsts.KubeLabelDynamoWorkerHash]
+	if workerHash := labels[commonconsts.KubeLabelDynamoWorkerHash]; IsWorkerComponent(string(component.ComponentType)) && workerHash != "" {
+		workerHashSuffix = workerHash
 	}
 
 	componentContext := ComponentContext{
@@ -2158,12 +2157,13 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 	}
 
 	// GMS weight servers load weights fresh from disk and are not CRIU targets.
-	shouldUseAdmissionRestore := p.operatorConfig.Checkpoint.Enabled &&
+	checkpointEnabled := p.runtimeConfig.Gate.Enabled(features.Checkpoint)
+	shouldUseAdmissionRestore := checkpointEnabled &&
 		p.r.Role != RoleGMS &&
 		p.checkpointInfo != nil &&
 		(p.checkpointInfo.StartupPolicy == "" ||
 			p.checkpointInfo.StartupPolicy == v1alpha1.CheckpointStartupPolicyImmediate)
-	if p.operatorConfig.Checkpoint.Enabled && p.r.Role != RoleGMS && !shouldUseAdmissionRestore {
+	if checkpointEnabled && p.r.Role != RoleGMS && !shouldUseAdmissionRestore {
 		if err := checkpoint.InjectCheckpointIntoPodSpecWithStorageConfig(
 			p.ctx, p.kubeClient, p.dynamoDeployment.Namespace, podSpec, p.checkpointInfo,
 			p.operatorConfig.Checkpoint.Storage,
@@ -2211,7 +2211,10 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 	}
 
 	if !p.usesPCSG {
-		clique.TopologyConstraint = toGroveTopologyConstraint(p.component.TopologyConstraint)
+		clique.TopologyConstraint = toGroveTopologyConstraint(
+			p.component.TopologyConstraint,
+			p.dynamoDeployment.Spec.TopologyConstraint,
+		)
 	}
 
 	labels, err := generateLabels(p.component, p.dynamoDeployment, p.componentName, p.discoveryContext)
@@ -2327,10 +2330,10 @@ func topologyDomainsContain(domains []v1beta1.TopologyDomain, want v1beta1.Topol
 }
 
 func resolveGroveSchedulerQueue(ctx context.Context, annotations map[string]string, runtimeConfig *controller_common.RuntimeConfig) (string, error) {
-	if runtimeConfig.GroveEnabled && runtimeConfig.KaiSchedulerEnabled && runtimeConfig.VolcanoSchedulerEnabled {
+	if runtimeConfig.Gate.Enabled(features.Grove) && runtimeConfig.Gate.Enabled(features.KaiScheduler) && runtimeConfig.Gate.Enabled(features.VolcanoScheduler) {
 		return "", fmt.Errorf("kai-scheduler and volcano scheduler integrations cannot both be enabled for Grove")
 	}
-	if !runtimeConfig.GroveEnabled || !runtimeConfig.KaiSchedulerEnabled {
+	if !runtimeConfig.Gate.Enabled(features.Grove) || !runtimeConfig.Gate.Enabled(features.KaiScheduler) {
 		return "", nil
 	}
 
@@ -2482,28 +2485,15 @@ func GenerateGrovePodCliqueSet(
 		}
 
 		if usesPCSG {
-			replicas := component.Replicas
-			minAvailable := ptr.To(int32(1))
-			if component.MinAvailable != nil {
-				minAvailable = ptr.To(*component.MinAvailable)
-			}
-			if checkpointInfo != nil &&
-				checkpointInfo.Enabled &&
-				checkpointInfo.StartupPolicy == v1alpha1.CheckpointStartupPolicyWaitForCheckpoint &&
-				!checkpointInfo.Ready {
-				replicas = ptr.To(int32(0))
-			}
-			pcsg := grovev1alpha1.PodCliqueScalingGroupConfig{
-				Name:               strings.ToLower(componentName),
-				CliqueNames:        cliqueNames,
-				Replicas:           replicas,
-				MinAvailable:       minAvailable,
-				TopologyConstraint: toGroveTopologyConstraint(component.TopologyConstraint),
-			}
-			if isInterPodGMS {
-				pcsg.ResourceSharing = gmsResourceSharingEntries(componentName, roles)
-			}
-			scalingGroups = append(scalingGroups, pcsg)
+			scalingGroups = append(scalingGroups, buildGroveScalingGroupConfig(
+				componentName,
+				component,
+				dynamoDeployment.Spec.TopologyConstraint,
+				roles,
+				cliqueNames,
+				checkpointInfo,
+				isInterPodGMS,
+			))
 		}
 	}
 	if len(scalingGroups) > 0 {
@@ -2514,6 +2504,43 @@ func GenerateGrovePodCliqueSet(
 	}
 
 	return gangSet, nil
+}
+
+func buildGroveScalingGroupConfig(
+	componentName string,
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+	deploymentTopologyConstraint *v1beta1.SpecTopologyConstraint,
+	roles []ServiceRole,
+	cliqueNames []string,
+	checkpointInfo *checkpoint.CheckpointInfo,
+	isInterPodGMS bool,
+) grovev1alpha1.PodCliqueScalingGroupConfig {
+	replicas := component.Replicas
+	minAvailable := ptr.To(int32(1))
+	if component.MinAvailable != nil {
+		minAvailable = ptr.To(*component.MinAvailable)
+	}
+	if shouldGateGroveScalingGroupReplicas(checkpointInfo) {
+		replicas = ptr.To(int32(0))
+	}
+	pcsg := grovev1alpha1.PodCliqueScalingGroupConfig{
+		Name:               strings.ToLower(componentName),
+		CliqueNames:        cliqueNames,
+		Replicas:           replicas,
+		MinAvailable:       minAvailable,
+		TopologyConstraint: toGroveTopologyConstraint(component.TopologyConstraint, deploymentTopologyConstraint),
+	}
+	if isInterPodGMS {
+		pcsg.ResourceSharing = gmsResourceSharingEntries(componentName, roles)
+	}
+	return pcsg
+}
+
+func shouldGateGroveScalingGroupReplicas(checkpointInfo *checkpoint.CheckpointInfo) bool {
+	return checkpointInfo != nil &&
+		checkpointInfo.Enabled &&
+		checkpointInfo.StartupPolicy == v1alpha1.CheckpointStartupPolicyWaitForCheckpoint &&
+		!checkpointInfo.Ready
 }
 
 func groveUpdateStrategyFromAnnotations(annotations map[string]string) (*grovev1alpha1.UpdateStrategyType, error) {
@@ -2743,8 +2770,8 @@ func generateAnnotations(component *v1beta1.DynamoComponentDeploymentSharedSpec,
 	return annotations, nil
 }
 
-// detectBackendFrameworkFromArgs detects the backend framework from command/args
-func detectBackendFrameworkFromArgs(command []string, args []string) (BackendFramework, error) {
+// DetectBackendFrameworkFromArgs detects the backend framework from command/args.
+func DetectBackendFrameworkFromArgs(command []string, args []string) (BackendFramework, error) {
 	// Combine command and args to search through all parts
 	allParts := append(command, args...)
 	fullCommand := strings.Join(allParts, " ")
@@ -2793,7 +2820,7 @@ func determineBackendFramework(
 
 	// Try to detect from command/args
 	if len(command) > 0 || len(args) > 0 {
-		detected, err := detectBackendFrameworkFromArgs(command, args)
+		detected, err := DetectBackendFrameworkFromArgs(command, args)
 		if err == nil {
 			detectedFramework = detected
 		} else {
@@ -2906,7 +2933,7 @@ func GenerateBasePodSpecForController(
 	if options.WorkloadComponentType != "" {
 		componentSpec.ComponentType = options.WorkloadComponentType
 	}
-	if workerHash := dynComponent.GetLabels()[commonconsts.KubeLabelDynamoWorkerHash]; workerHash != "" && IsWorkerComponent(string(componentSpec.ComponentType)) {
+	if workerHash := GetDCDEffectiveWorkerHash(dynComponent); workerHash != "" && IsWorkerComponent(string(componentSpec.ComponentType)) {
 		ensurePodTemplate(componentSpec).Labels[commonconsts.KubeLabelDynamoWorkerHash] = workerHash
 	}
 

@@ -2,7 +2,27 @@
 # SPDX-License-Identifier: Apache-2.0
 
 {{- if .Values.rbac.create }}
+---
+# Bind agent to the cluster-scoped PodSnapshotContent ClusterRole (capture work orders).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "snapshot.fullname" . }}-agent-podsnapshotcontents
+  labels:
+    {{- include "snapshot.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "snapshot.fullname" . }}-agent-podsnapshotcontents
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "snapshot.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
+
+{{- if .Values.rbac.create }}
 {{- if .Values.rbac.namespaceRestricted }}
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
@@ -35,6 +55,7 @@ subjects:
     name: {{ include "snapshot.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
 {{- else }}
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:

@@ -679,9 +679,8 @@ impl PyKvConnectorLeader {
         // Initialize logging for the vLLM connector
         dynamo_runtime::logging::init();
 
-        let enable_kvbm_record = std::env::var(env_kvbm::DYN_KVBM_ENABLE_RECORD)
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
+        let enable_kvbm_record =
+            dynamo_runtime::config::env_is_truthy(env_kvbm::DYN_KVBM_ENABLE_RECORD);
 
         let connector_leader: Box<dyn Leader> = if enable_kvbm_record {
             Box::new(recorder::KvConnectorLeaderRecorder::new(
@@ -756,9 +755,7 @@ impl PyKvConnectorLeader {
 }
 
 pub fn kvbm_metrics_endpoint_enabled() -> bool {
-    std::env::var(env_kvbm::DYN_KVBM_METRICS)
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+    dynamo_runtime::config::env_is_truthy(env_kvbm::DYN_KVBM_METRICS)
 }
 
 pub fn parse_kvbm_metrics_port() -> u16 {

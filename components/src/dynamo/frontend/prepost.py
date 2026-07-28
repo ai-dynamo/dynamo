@@ -17,7 +17,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     DeltaToolCall,
 )
 from vllm.reasoning import ReasoningParser
-from vllm.renderers import ChatParams
+from vllm.renderers import ChatParams, merge_kwargs
 from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
@@ -93,6 +93,7 @@ def _prepare_request(
     tool_parser_class: type[ToolParser] | None,
     exclude_tools_when_tool_choice_none: bool = True,
     enable_auto_tool_choice: bool = False,
+    default_chat_template_kwargs: dict[str, Any] | None = None,
 ) -> tuple[ChatCompletionRequest, ToolParser | None, dict[str, Any], Any, ChatParams]:
     """Validate request and build arguments for template rendering.
 
@@ -136,8 +137,25 @@ def _prepare_request(
         )
         else None
     )
-    chat_template_kwargs = dict(request_for_sampling.chat_template_kwargs or {})
-    chat_template_kwargs["reasoning_effort"] = request_for_sampling.reasoning_effort
+    # serde's `alias` is deserialize-only, so pythonize emits the Rust field
+    # name `chat_template_args`; read it too or client kwargs are dropped.
+    raw_template_args = (
+        request.get("chat_template_args") if isinstance(request, dict) else None
+    )
+    # Reuse vLLM's merge so unset request values (None/"auto") keep the server
+    # default; copy the result since the default dict is shared across requests
+    # and we mutate reasoning_effort below.
+    chat_template_kwargs = dict(
+        merge_kwargs(
+            default_chat_template_kwargs,
+            request_for_sampling.chat_template_kwargs or raw_template_args or {},
+        )
+    )
+    # Don't let an absent top-level field clobber a nested reasoning_effort.
+    if request_for_sampling.reasoning_effort is not None:
+        chat_template_kwargs["reasoning_effort"] = request_for_sampling.reasoning_effort
+    else:
+        chat_template_kwargs.setdefault("reasoning_effort", None)
 
     # Mistral warns that tokenize=False is unsafe for chat templates.
     is_mistral_tokenizer = (
@@ -154,14 +172,15 @@ def _prepare_request(
     chat_params = ChatParams(
         chat_template=request_for_sampling.chat_template,
         chat_template_content_format="auto",
-        chat_template_kwargs=dict(
-            add_generation_prompt=request_for_sampling.add_generation_prompt,
-            continue_final_message=request_for_sampling.continue_final_message,
-            tools=tool_dicts,
-            documents=request_for_sampling.documents,
-            tokenize=tokenize_in_template,
+        # Renderer-managed keys last so a nested duplicate can't raise TypeError.
+        chat_template_kwargs={
             **chat_template_kwargs,
-        ),
+            "add_generation_prompt": request_for_sampling.add_generation_prompt,
+            "continue_final_message": request_for_sampling.continue_final_message,
+            "tools": tool_dicts,
+            "documents": request_for_sampling.documents,
+            "tokenize": tokenize_in_template,
+        },
     )
 
     return (
@@ -181,6 +200,7 @@ async def preprocess_chat_request(
     tool_parser_class: type[ToolParser] | None,
     exclude_tools_when_tool_choice_none: bool = True,
     enable_auto_tool_choice: bool = False,
+    default_chat_template_kwargs: dict[str, Any] | None = None,
 ) -> PreprocessResult:
     (
         request_for_sampling,
@@ -194,6 +214,7 @@ async def preprocess_chat_request(
         tool_parser_class=tool_parser_class,
         exclude_tools_when_tool_choice_none=exclude_tools_when_tool_choice_none,
         enable_auto_tool_choice=enable_auto_tool_choice,
+        default_chat_template_kwargs=default_chat_template_kwargs,
     )
 
     _, engine_prompt = await renderer.render_messages_async(messages, chat_params)

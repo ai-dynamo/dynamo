@@ -26,6 +26,7 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	admissionv1 "k8s.io/api/admission/v1"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -37,7 +38,7 @@ import (
 
 func TestDynamoGraphDeploymentV1Alpha1Handler(t *testing.T) {
 	handler := &dynamoGraphDeploymentV1Alpha1Handler{
-		handler: NewDynamoGraphDeploymentHandler(newGroveTopologyTestManager(t), "", false),
+		handler: NewDynamoGraphDeploymentHandler(newGroveTopologyTestManager(t), ""),
 	}
 
 	t.Run("create", func(t *testing.T) {
@@ -84,7 +85,7 @@ func TestDynamoGraphDeploymentV1Alpha1Handler(t *testing.T) {
 }
 
 func TestDynamoGraphDeploymentHandlerValidateCreate(t *testing.T) {
-	handler := NewDynamoGraphDeploymentHandler(newGroveTopologyTestManager(t), "system:serviceaccount:dynamo:dynamo-operator", false)
+	handler := NewDynamoGraphDeploymentHandler(newGroveTopologyTestManager(t), "system:serviceaccount:dynamo:dynamo-operator")
 	dgd := newBetaDGDForValidation()
 
 	warnings, err := handler.ValidateCreate(dgdAdmissionContext(admissionv1.Create, nvidiacomv1beta1.DynamoGraphDeploymentGVK), dgd)
@@ -118,7 +119,7 @@ func TestDynamoGraphDeploymentHandlerValidateCreate(t *testing.T) {
 }
 
 func TestDynamoGraphDeploymentHandlerValidateUpdate(t *testing.T) {
-	handler := NewDynamoGraphDeploymentHandler(newGroveTopologyTestManager(t), "system:serviceaccount:dynamo:dynamo-operator", false)
+	handler := NewDynamoGraphDeploymentHandler(newGroveTopologyTestManager(t), "system:serviceaccount:dynamo:dynamo-operator")
 	ctx := dgdAdmissionContext(admissionv1.Update, nvidiacomv1beta1.DynamoGraphDeploymentGVK)
 
 	t.Run("valid", func(t *testing.T) {
@@ -175,7 +176,7 @@ func TestDynamoGraphDeploymentHandlerValidateUpdate(t *testing.T) {
 }
 
 func TestDynamoGraphDeploymentHandlerValidateDelete(t *testing.T) {
-	handler := NewDynamoGraphDeploymentHandler(newGroveTopologyTestManager(t), "", false)
+	handler := NewDynamoGraphDeploymentHandler(newGroveTopologyTestManager(t), "")
 	ctx := dgdAdmissionContext(admissionv1.Delete, nvidiacomv1beta1.DynamoGraphDeploymentGVK)
 
 	warnings, err := handler.ValidateDelete(ctx, newBetaDGDForValidation())
@@ -215,8 +216,8 @@ func TestDynamoGraphDeploymentHandlerRegisterWithManager(t *testing.T) {
 
 	server := ctrlwebhook.NewServer(ctrlwebhook.Options{})
 	mgr := &fakeManager{scheme: scheme, webhookServer: server}
-	handler := NewDynamoGraphDeploymentHandler(mgr, "", false)
-	if err := handler.RegisterWithManager(mgr); err != nil {
+	handler := NewDynamoGraphDeploymentHandler(mgr, "")
+	if err := handler.RegisterWithManager(mgr, features.Defaults()); err != nil {
 		t.Fatalf("RegisterWithManager() error = %v", err)
 	}
 
@@ -245,7 +246,7 @@ func dgdAdmissionContextWithUserInfo(
 	if userInfo != nil {
 		requestUserInfo = *userInfo.DeepCopy()
 	}
-	return admission.NewContextWithRequest(context.Background(), admission.Request{
+	ctx := admission.NewContextWithRequest(context.Background(), admission.Request{
 		AdmissionRequest: admissionv1.AdmissionRequest{
 			Operation: operation,
 			UserInfo:  requestUserInfo,
@@ -256,4 +257,5 @@ func dgdAdmissionContextWithUserInfo(
 			},
 		},
 	})
+	return features.WithGate(ctx, features.Defaults())
 }

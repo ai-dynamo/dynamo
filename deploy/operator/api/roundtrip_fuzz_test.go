@@ -100,43 +100,6 @@ func scrubReservedAnnotations(m map[string]string) map[string]string {
 	return m
 }
 
-// DGDR still writes legacy nvidia.com/dgdr-* annotations for downgrade
-// compatibility with Dynamo 1.1. Direct round-trip fuzzing compares live API
-// fields and ignores those intentionally re-emitted compatibility annotations.
-var legacyDGDRCompatibilityAnnotations = []string{
-	"nvidia.com/dgdr-config-map-ref",
-	"nvidia.com/dgdr-output-pvc",
-	"nvidia.com/dgdr-enable-gpu-discovery",
-	"nvidia.com/dgdr-deployment-overrides",
-	"nvidia.com/dgdr-profiling-config",
-	"nvidia.com/dgdr-status-backend",
-	"nvidia.com/dgdr-profiling-results",
-	"nvidia.com/dgdr-deployment-status",
-	"nvidia.com/dgdr-profiling-job-name",
-}
-
-var ignoreDGDRCompatibilityAnnotations = cmpopts.AcyclicTransformer(
-	"ignoreDGDRCompatibilityAnnotations",
-	func(m metav1.ObjectMeta) metav1.ObjectMeta {
-		if len(m.Annotations) == 0 {
-			return m
-		}
-		annotations := make(map[string]string, len(m.Annotations))
-		for k, v := range m.Annotations {
-			annotations[k] = v
-		}
-		for _, k := range legacyDGDRCompatibilityAnnotations {
-			delete(annotations, k)
-		}
-		if len(annotations) == 0 {
-			m.Annotations = nil
-		} else {
-			m.Annotations = annotations
-		}
-		return m
-	},
-)
-
 // dynamoFuzzerFuncs constrains generated values so that random objects on
 // either side represent shapes the conversion is expected to round-trip
 // losslessly.
@@ -216,6 +179,28 @@ func dynamoFuzzerFuncs(_ runtimeserializer.CodecFactory) []any {
 		fuzzAlphaDGDRStatus,
 		fuzzBetaDGDRSpec,
 		fuzzBetaDGDRStatus,
+		// PlacementStatus (v1alpha1 + v1beta1): pick admissible values so the
+		// round-trip fuzzer exercises Placement without producing shapes the CRD
+		// schema rejects. State draws from the enum; Score draws either nil or a
+		// value inside the [0, 1] bounds enforced by the CRD.
+		func(p *v1beta1.PlacementStatus, c randfill.Continue) {
+			p.State = oneOf(c,
+				v1beta1.PlacementScoreStateReported,
+				v1beta1.PlacementScoreStatePartial,
+				v1beta1.PlacementScoreStateUnsupported,
+				v1beta1.PlacementScoreStateUnknown,
+			)
+			p.Score = oneOfPtr(c, 0.0, 0.25, 0.5, 0.75, 1.0)
+		},
+		func(p *v1alpha1.PlacementStatus, c randfill.Continue) {
+			p.State = oneOf(c,
+				v1alpha1.PlacementScoreStateReported,
+				v1alpha1.PlacementScoreStatePartial,
+				v1alpha1.PlacementScoreStateUnsupported,
+				v1alpha1.PlacementScoreStateUnknown,
+			)
+			p.Score = oneOfPtr(c, 0.0, 0.25, 0.5, 0.75, 1.0)
+		},
 		// v1beta1 Components: the listMapKey marker requires name
 		// to be non-empty and unique; MaxItems caps the length at 25.
 		// Enforce both so the input is admissible.
@@ -343,6 +328,17 @@ func newRoundTripFiller(seed int64) *randfill.Filler {
 
 func oneOf[T any](c randfill.Continue, values ...T) T {
 	return values[c.Intn(len(values))]
+}
+
+// oneOfPtr returns nil roughly half the time; otherwise a pointer to one of
+// values. Useful for optional API fields that must either be unset or draw
+// from a constrained value set.
+func oneOfPtr[T any](c randfill.Continue, values ...T) *T {
+	if c.Bool() {
+		return nil
+	}
+	v := oneOf(c, values...)
+	return &v
 }
 
 func fuzzJSONValue(c randfill.Continue, depth int) any {
@@ -515,14 +511,12 @@ func TestFuzzRoundTrip_DCD_SpokeHubSpoke(t *testing.T) {
 func TestFuzzRoundTrip_DGDR_HubSpokeHub(t *testing.T) {
 	fuzzHubSpokeHub[*v1beta1.DynamoGraphDeploymentRequest, v1alpha1.DynamoGraphDeploymentRequest](t, "DGDR",
 		func() *v1beta1.DynamoGraphDeploymentRequest { return &v1beta1.DynamoGraphDeploymentRequest{} },
-		ignoreDGDRCompatibilityAnnotations,
 	)
 }
 
 func TestFuzzRoundTrip_DGDR_SpokeHubSpoke(t *testing.T) {
 	fuzzSpokeHubSpoke[*v1beta1.DynamoGraphDeploymentRequest, v1alpha1.DynamoGraphDeploymentRequest](t, "DGDR",
 		func() *v1beta1.DynamoGraphDeploymentRequest { return &v1beta1.DynamoGraphDeploymentRequest{} },
-		ignoreDGDRCompatibilityAnnotations,
 	)
 }
 

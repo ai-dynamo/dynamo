@@ -1,26 +1,28 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{collections::HashSet, sync::Arc, time::Instant};
+use std::{collections::HashSet, fmt, sync::Arc, time::Instant};
 
 use anyhow::Result;
 use dynamo_kv_router::{
-    KvSchedulerError, PrefillLoadEstimator, SharedKvCache,
+    DEFAULT_ROUTING_GROUP, KvSchedulerError, PrefillLoadEstimator, RoutingPartitionRef,
+    SharedKvCache, TrackingHashAlgorithm, TrackingHashContext, TrackingHashScope,
     config::{KvRouterConfig, RouterConfigOverride, min_initial_workers_from_env},
     indexer::{KvRouterError, RoutingDecisionHashes},
     protocols::KV_EVENT_SUBJECT,
     protocols::{
-        BlockExtraInfo, BlockHashOptions, DpRank, LocalBlockHash, PrefillLoadHint, RouterEvent,
+        BlockExtraInfo, BlockHashOptions, LocalBlockHash, PrefillLoadHint, RouterEvent,
         RouterRequest, RouterResponse, RoutingConstraints, TokensWithHashes, WorkerConfigLike,
         WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
     },
     scheduling::{
-        CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider, ScheduleMode,
-        ScheduleRequest, TieredOverlapRefresher, effective_prefill_tokens,
-        overlap::cache_hit_estimates_from_tiered_matches,
+        CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider, RequestLifecycleLease,
+        RequestProgressUpdater, ScheduleMode, ScheduleRequest, TieredOverlapRefresher,
+        effective_prefill_tokens, overlap::cache_hit_estimates_from_tiered_matches,
     },
 };
 use dynamo_runtime::{
+    CancellationToken,
     component::{Client, Endpoint},
     discovery::DiscoveryQuery,
     error::{DynamoError, ErrorType},
@@ -34,7 +36,6 @@ use dynamo_runtime::{
 };
 use futures::stream;
 use tracing::Instrument;
-use validator::Validate;
 
 // Re-export from dynamo-kv-router crate
 pub use dynamo_kv_router::approx;
@@ -42,6 +43,7 @@ pub use dynamo_kv_router::protocols;
 pub use dynamo_kv_router::scheduling;
 pub use dynamo_kv_router::selector;
 
+pub mod encoder_router;
 pub mod indexer;
 pub mod metrics;
 pub mod prefill_router;
@@ -55,19 +57,77 @@ pub mod shared_cache;
 pub use dynamo_kv_router::scheduling::{
     OverlapScoresResponse, SharedCacheOverlapScore, WorkerOverlapScore,
 };
+pub use encoder_router::EncoderRouter;
 pub use indexer::{Indexer, ServedIndexerHandle, ServedIndexerMode, ensure_served_indexer_service};
 pub use prefill_router::PrefillRouter;
 pub use push_router::{DirectRoutingRouter, KvPushRouter};
 
 use crate::{
-    discovery::RuntimeConfigWatch,
+    discovery::{KvSourceMembershipWatch, RuntimeConfigWatch},
     kv_router::{
         scheduler::{DefaultWorkerSelector, KvScheduler, PotentialLoad},
         sequence::{SequenceError, SequenceRequest},
     },
     local_model::runtime_config::ModelRuntimeConfig,
+    worker_type::WorkerType,
 };
 use route_lookup::{TieredLookupResult, query_tiered_matches, split_retained_block_hashes};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KvEventSourceRequirement {
+    NotRequired,
+    CacheAwareRouting,
+    ConditionalDisaggDecodeCache,
+    Unknown,
+}
+
+impl KvEventSourceRequirement {
+    pub(crate) fn derive(worker_role: Option<WorkerType>, config: &KvRouterConfig) -> Self {
+        let Some(worker_role) = worker_role else {
+            return Self::Unknown;
+        };
+        if config.use_remote_indexer || !config.should_subscribe_to_kv_events() {
+            return Self::NotRequired;
+        }
+
+        match worker_role {
+            WorkerType::Prefill | WorkerType::Aggregated => Self::CacheAwareRouting,
+            WorkerType::Decode if config.conditional_disagg_enabled => {
+                Self::ConditionalDisaggDecodeCache
+            }
+            WorkerType::Decode | WorkerType::Encode => Self::NotRequired,
+        }
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::NotRequired => "not_required",
+            Self::CacheAwareRouting => "cache_aware_routing",
+            Self::ConditionalDisaggDecodeCache => "conditional_disagg_decode_cache",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    pub(crate) fn requires_source(self) -> bool {
+        matches!(
+            self,
+            Self::CacheAwareRouting | Self::ConditionalDisaggDecodeCache
+        )
+    }
+
+    pub(crate) fn should_subscribe(self, config: &KvRouterConfig) -> bool {
+        match self {
+            Self::Unknown => !config.use_remote_indexer && config.should_subscribe_to_kv_events(),
+            requirement => requirement.requires_source(),
+        }
+    }
+}
+
+impl fmt::Display for KvEventSourceRequirement {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
 
 pub enum FindBestMatchOutcome {
     Routed {
@@ -150,20 +210,6 @@ fn cancelled_error(context_id: &str) -> anyhow::Error {
         .into()
 }
 
-/// Generates a dp_rank-specific endpoint name for the worker KV indexer query service.
-/// Each dp_rank has its own LocalKvIndexer and query endpoint to ensure per-dp_rank monotonicity.
-pub fn worker_kv_indexer_query_endpoint(dp_rank: DpRank) -> String {
-    format!("worker_kv_indexer_query_dp{dp_rank}")
-}
-
-/// Generates a query endpoint name for a dp_rank whose events are attributed to `worker_id`.
-pub fn worker_kv_indexer_query_endpoint_for_worker(worker_id: WorkerId, dp_rank: DpRank) -> String {
-    format!(
-        "{}_worker{worker_id}",
-        worker_kv_indexer_query_endpoint(dp_rank)
-    )
-}
-
 fn log_routing_input_hashes(
     request_id: Option<&str>,
     block_size: u32,
@@ -219,9 +265,12 @@ where
     block_size: u32,
     kv_router_config: KvRouterConfig,
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
-    cancellation_token: tokio_util::sync::CancellationToken,
+    cancellation_token: CancellationToken,
     client: Client,
     is_eagle: bool,
+    kv_event_subscription: Option<indexer::KvEventSubscriptionHandle>,
+    tracking_hash: TrackingHashContext,
+    tracking_model_name: String,
     _served_indexer_handle: Option<ServedIndexerHandle>,
     /// Optional external shared KV cache pool. When present, `find_best_match`
     /// queries it in parallel with the indexer and factors shared hits into scoring.
@@ -230,6 +279,21 @@ where
     /// narrowed to the LoRA's allocated/loaded replicas inside `find_best_match_details`,
     /// covering both the decode and prefill routers (both built via `kv_chooser_for`).
     lora_filter: Option<Arc<crate::lora::LoraFilter>>,
+}
+
+fn resolve_tracking_model_name(
+    algorithm: TrackingHashAlgorithm,
+    model_name: Option<&str>,
+) -> Result<String> {
+    if algorithm == TrackingHashAlgorithm::KeyedXxh3V1 {
+        return model_name
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                anyhow::anyhow!("model_name is required for keyed router tracking hashes")
+            });
+    }
+    Ok(model_name.unwrap_or_default().to_owned())
 }
 
 impl<Sel> KvRouter<Sel>
@@ -241,20 +305,64 @@ where
         endpoint: Endpoint,
         client: Client,
         workers_with_configs: RuntimeConfigWatch,
+        kv_source_membership: Option<KvSourceMembershipWatch>,
         block_size: u32,
         selector: Sel,
         kv_router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
-        worker_type: &'static str,
+        metric_worker_type: &'static str,
+        model_name: Option<String>,
+        is_eagle: bool,
+        shared_cache: Option<Box<dyn SharedKvCache>>,
+        lora_filter: Option<Arc<crate::lora::LoraFilter>>,
+    ) -> Result<Self> {
+        Self::new_with_worker_role(
+            endpoint,
+            client,
+            workers_with_configs,
+            kv_source_membership,
+            block_size,
+            selector,
+            kv_router_config,
+            prefill_load_estimator,
+            None,
+            metric_worker_type,
+            model_name,
+            is_eagle,
+            shared_cache,
+            lora_filter,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn new_with_worker_role(
+        endpoint: Endpoint,
+        client: Client,
+        workers_with_configs: RuntimeConfigWatch,
+        kv_source_membership: Option<KvSourceMembershipWatch>,
+        block_size: u32,
+        selector: Sel,
+        kv_router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        worker_role: Option<WorkerType>,
+        metric_worker_type: &'static str,
         model_name: Option<String>,
         is_eagle: bool,
         shared_cache: Option<Box<dyn SharedKvCache>>,
         lora_filter: Option<Arc<crate::lora::LoraFilter>>,
     ) -> Result<Self> {
         let kv_router_config = kv_router_config.unwrap_or_default();
-        kv_router_config.validate()?;
+        kv_router_config.validate().map_err(anyhow::Error::msg)?;
+        let tracking_hash = TrackingHashContext::from_config(&kv_router_config)?;
+        let tracking_model_name =
+            resolve_tracking_model_name(tracking_hash.algorithm(), model_name.as_deref())?;
+        let kv_event_source_requirement =
+            KvEventSourceRequirement::derive(worker_role, &kv_router_config);
         let component = endpoint.component();
-        let cancellation_token = component.drt().primary_token();
+        // Router-owned tasks derive from this token so a rebuild cannot cancel the runtime.
+        let cancellation_token = component.drt().child_token();
+        let cancellation_guard = cancellation_token.clone().drop_guard();
         let min_initial_workers = min_initial_workers_from_env()?;
 
         let indexer = Indexer::new(
@@ -262,6 +370,7 @@ where
             &kv_router_config,
             block_size,
             model_name.as_deref(),
+            cancellation_token.child_token(),
         )
         .await?;
 
@@ -290,7 +399,7 @@ where
             Arc::new(move || client_for_overload.overloaded_instance_ids());
 
         let scheduler = KvScheduler::start(
-            component.clone(),
+            endpoint.clone(),
             block_size,
             workers_with_configs.clone(),
             selector,
@@ -299,30 +408,44 @@ where
             overlap_scores_refresh,
             Some(overloaded_worker_provider),
             model_name.as_deref(),
-            worker_type,
+            metric_worker_type,
+            cancellation_token.child_token(),
+            Default::default(),
         )
         .await?;
 
         // Start KV event subscription if needed — skip when using a remote indexer.
-        if kv_router_config.use_remote_indexer {
-            tracing::info!("Skipping KV event subscription (using remote indexer)");
-        } else if kv_router_config.should_subscribe_to_kv_events() {
-            indexer::start_subscriber(
-                component.clone(),
-                &kv_router_config,
-                indexer.clone(),
-                workers_with_configs.clone(),
-                model_name.clone().unwrap_or_else(|| "unknown".to_string()),
-                worker_type,
+        let kv_event_subscription = if kv_event_source_requirement
+            .should_subscribe(&kv_router_config)
+        {
+            let membership_watch = kv_source_membership.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "KV source membership watch is required when local KV event subscription is enabled"
+                )
+            })?;
+            Some(
+                indexer::start_subscriber(
+                    endpoint.clone(),
+                    indexer.clone(),
+                    membership_watch,
+                    model_name.clone().unwrap_or_else(|| "unknown".to_string()),
+                    worker_role,
+                    kv_event_source_requirement,
+                    metric_worker_type,
+                    cancellation_token.child_token(),
+                )
+                .await?,
             )
-            .await?;
         } else {
             tracing::info!(
-                "Skipping KV event subscription (use_kv_events={}, overlap_score_credit={})",
+                requirement = %kv_event_source_requirement,
+                "Skipping KV event subscription (use_kv_events={}, overlap_score_credit={}, use_remote_indexer={})",
                 kv_router_config.use_kv_events,
                 kv_router_config.overlap_score_credit,
+                kv_router_config.use_remote_indexer,
             );
-        }
+            None
+        };
 
         let served_indexer_handle = if kv_router_config.serve_indexer {
             let model_name = model_name.clone().ok_or_else(|| {
@@ -342,6 +465,7 @@ where
         };
 
         tracing::info!("KV Routing initialized");
+        let cancellation_token = cancellation_guard.disarm();
         Ok(Self {
             indexer,
             scheduler,
@@ -352,6 +476,9 @@ where
             cancellation_token,
             client,
             is_eagle,
+            kv_event_subscription,
+            tracking_hash,
+            tracking_model_name,
             _served_indexer_handle: served_indexer_handle,
             shared_cache,
             lora_filter,
@@ -371,8 +498,23 @@ where
         &self.kv_router_config
     }
 
+    /// Cancel background work and wait for KV event ingestion to stop.
+    pub async fn shutdown(mut self) {
+        self.cancellation_token.cancel();
+        if let Some(subscription) = self.kv_event_subscription.take() {
+            subscription.shutdown().await;
+        }
+    }
+
     pub fn is_eagle(&self) -> bool {
         self.is_eagle
+    }
+
+    fn tracking_hash_scope(&self) -> TrackingHashScope<'_> {
+        TrackingHashScope {
+            partition: RoutingPartitionRef::new(&self.tracking_model_name, DEFAULT_ROUTING_GROUP),
+            block_size: self.block_size,
+        }
     }
 
     fn cache_hit_estimates_from_tiered_matches(
@@ -527,12 +669,63 @@ where
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
     ) -> anyhow::Result<FindBestMatchOutcome> {
+        self.find_best_match_details_with_policy_class_inner(
+            context_id,
+            tokens,
+            block_mm_infos,
+            router_config_override,
+            update_states,
+            return_routing_hashes,
+            lora_name,
+            cache_namespace,
+            priority_jump,
+            strict_priority,
+            policy_class,
+            session_id,
+            expected_output_tokens,
+            pinned_worker,
+            allowed_worker_ids,
+            routing_constraints,
+            false,
+        )
+        .await
+        .map(|(outcome, _)| outcome)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn find_best_match_details_with_policy_class_inner(
+        &self,
+        context_id: Option<&str>,
+        tokens: &[u32],
+        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
+        router_config_override: Option<&RouterConfigOverride>,
+        update_states: bool,
+        return_routing_hashes: bool,
+        lora_name: Option<String>,
+        cache_namespace: Option<String>,
+        priority_jump: f64,
+        strict_priority: u32,
+        policy_class: Option<String>,
+        session_id: Option<String>,
+        expected_output_tokens: Option<u32>,
+        pinned_worker: Option<WorkerWithDpRank>,
+        allowed_worker_ids: Option<HashSet<WorkerId>>,
+        routing_constraints: RoutingConstraints,
+        track_lifecycle: bool,
+    ) -> anyhow::Result<(
+        FindBestMatchOutcome,
+        Option<(RequestProgressUpdater, RequestLifecycleLease)>,
+    )> {
         let start = Instant::now();
 
         if update_states && context_id.is_none() {
             anyhow::bail!("context_id must be provided if update_states is true");
         }
-        let mode = if update_states {
+        let mode = if update_states && track_lifecycle {
+            ScheduleMode::TrackedWithLifecycle {
+                request_id: context_id.expect("validated above").to_string(),
+            }
+        } else if update_states {
             ScheduleMode::Tracked {
                 request_id: context_id.expect("validated above").to_string(),
             }
@@ -556,13 +749,15 @@ where
         let hash_elapsed = start.elapsed();
         // Compute seq_hashes only if scheduler needs it for active blocks tracking
         let maybe_seq_hashes = tracing::info_span!("kv_router.compute_seq_hashes").in_scope(|| {
-            self.kv_router_config.compute_seq_hashes_for_tracking(
-                tokens,
-                self.block_size,
-                router_config_override,
-                hash_options,
-                Some(&block_hashes),
-            )
+            self.kv_router_config
+                .compute_seq_hashes_for_tracking_with_context(
+                    &self.tracking_hash,
+                    self.tracking_hash_scope(),
+                    tokens,
+                    router_config_override,
+                    hash_options,
+                    Some(&block_hashes),
+                )
         });
         let seq_hash_elapsed = start.elapsed();
 
@@ -642,7 +837,7 @@ where
         {
             Ok(response) => response,
             Err(KvSchedulerError::QueueRejected(rejection)) => {
-                return Ok(FindBestMatchOutcome::QueueRejected { rejection });
+                return Ok((FindBestMatchOutcome::QueueRejected { rejection }, None));
             }
             Err(error) => return Err(map_scheduler_error(error)),
         };
@@ -683,13 +878,21 @@ where
             "find_best_match completed"
         );
 
-        Ok(FindBestMatchOutcome::Routed {
-            worker: response.best_worker,
-            overlap_blocks: response.effective_overlap_blocks.round() as u32,
-            effective_overlap_blocks: response.effective_overlap_blocks,
-            cached_tokens: response.cached_tokens,
-            routing_hashes,
-        })
+        debug_assert_eq!(
+            response.request_progress.is_some(),
+            response.lifecycle_lease.is_some()
+        );
+        let lifecycle = response.request_progress.zip(response.lifecycle_lease);
+        Ok((
+            FindBestMatchOutcome::Routed {
+                worker: response.best_worker,
+                overlap_blocks: response.effective_overlap_blocks.round() as u32,
+                effective_overlap_blocks: response.effective_overlap_blocks,
+                cached_tokens: response.cached_tokens,
+                routing_hashes,
+            },
+            lifecycle,
+        ))
     }
 
     /// Give these tokens, find the worker with the best match in its KV cache.
@@ -764,13 +967,16 @@ where
             is_eagle: Some(self.is_eagle),
         };
 
-        let maybe_seq_hashes = self.kv_router_config.compute_seq_hashes_for_tracking(
-            tokens,
-            self.block_size,
-            router_config_override,
-            hash_options,
-            None,
-        );
+        let maybe_seq_hashes = self
+            .kv_router_config
+            .compute_seq_hashes_for_tracking_with_context(
+                &self.tracking_hash,
+                self.tracking_hash_scope(),
+                tokens,
+                router_config_override,
+                hash_options,
+                None,
+            );
         let track_prefill_tokens = self
             .kv_router_config
             .track_prefill_tokens(router_config_override);
@@ -798,6 +1004,7 @@ where
         self.scheduler.mark_prefill_completed(request_id).await
     }
 
+    /// Legacy slot cleanup. Lifecycle-tracked requests use their `RequestLifecycleLease`.
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
         self.scheduler.free(request_id).await
     }
@@ -963,13 +1170,16 @@ where
         };
         let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, hash_options);
 
-        let maybe_seq_hashes = self.kv_router_config.compute_seq_hashes_for_tracking(
-            tokens,
-            self.block_size,
-            router_config_override,
-            hash_options,
-            Some(&block_hashes),
-        );
+        let maybe_seq_hashes = self
+            .kv_router_config
+            .compute_seq_hashes_for_tracking_with_context(
+                &self.tracking_hash,
+                self.tracking_hash_scope(),
+                tokens,
+                router_config_override,
+                hash_options,
+                Some(&block_hashes),
+            );
         let track_prefill_tokens = self
             .kv_router_config
             .track_prefill_tokens(router_config_override);
@@ -1209,6 +1419,123 @@ mod tests {
     use crate::local_model::runtime_config::ModelRuntimeConfig;
 
     #[test]
+    fn keyed_tracking_requires_nonempty_model_name() {
+        assert!(resolve_tracking_model_name(TrackingHashAlgorithm::KeyedXxh3V1, None).is_err());
+        assert!(resolve_tracking_model_name(TrackingHashAlgorithm::KeyedXxh3V1, Some("")).is_err());
+        assert_eq!(
+            resolve_tracking_model_name(TrackingHashAlgorithm::KeyedXxh3V1, Some("model-a"))
+                .unwrap(),
+            "model-a"
+        );
+    }
+
+    #[test]
+    fn public_tracking_preserves_optional_model_name() {
+        assert_eq!(
+            resolve_tracking_model_name(TrackingHashAlgorithm::PublicXxh3V1, None).unwrap(),
+            ""
+        );
+        assert_eq!(
+            resolve_tracking_model_name(TrackingHashAlgorithm::PublicXxh3V1, Some("")).unwrap(),
+            ""
+        );
+    }
+
+    #[test]
+    fn kv_event_source_requirement_matrix() {
+        let default = KvRouterConfig::default();
+        let mut cases = vec![
+            (
+                Some(WorkerType::Prefill),
+                default.clone(),
+                KvEventSourceRequirement::CacheAwareRouting,
+                true,
+            ),
+            (
+                Some(WorkerType::Aggregated),
+                default.clone(),
+                KvEventSourceRequirement::CacheAwareRouting,
+                true,
+            ),
+            (
+                Some(WorkerType::Decode),
+                default.clone(),
+                KvEventSourceRequirement::NotRequired,
+                false,
+            ),
+            (
+                Some(WorkerType::Encode),
+                default.clone(),
+                KvEventSourceRequirement::NotRequired,
+                false,
+            ),
+            (
+                None,
+                default.clone(),
+                KvEventSourceRequirement::Unknown,
+                true,
+            ),
+        ];
+        for policy in [
+            dynamo_kv_router::ConditionalDisaggPolicyKind::IslBounding,
+            dynamo_kv_router::ConditionalDisaggPolicyKind::PrefillLoad,
+            dynamo_kv_router::ConditionalDisaggPolicyKind::IslOrLoad,
+        ] {
+            cases.push((
+                Some(WorkerType::Decode),
+                KvRouterConfig {
+                    conditional_disagg_enabled: true,
+                    conditional_disagg_policy: policy,
+                    ..default.clone()
+                },
+                KvEventSourceRequirement::ConditionalDisaggDecodeCache,
+                true,
+            ));
+        }
+        for config in [
+            KvRouterConfig {
+                use_remote_indexer: true,
+                ..Default::default()
+            },
+            KvRouterConfig {
+                use_kv_events: false,
+                ..Default::default()
+            },
+            KvRouterConfig {
+                overlap_score_credit: 0.0,
+                ..Default::default()
+            },
+        ] {
+            cases.extend([
+                (
+                    None,
+                    config.clone(),
+                    KvEventSourceRequirement::Unknown,
+                    false,
+                ),
+                (
+                    Some(WorkerType::Aggregated),
+                    config.clone(),
+                    KvEventSourceRequirement::NotRequired,
+                    false,
+                ),
+                (
+                    Some(WorkerType::Decode),
+                    config,
+                    KvEventSourceRequirement::NotRequired,
+                    false,
+                ),
+            ]);
+        }
+
+        for (role, config, expected, should_subscribe) in cases {
+            let requirement = KvEventSourceRequirement::derive(role, &config);
+            assert_eq!(requirement, expected);
+            assert_eq!(requirement.should_subscribe(&config), should_subscribe);
+        }
+    }
+
+    #[test]
     fn weighted_cache_hit_estimates_include_lower_tiers() {
         let worker_1 = WorkerWithDpRank::new(1, 0);
         let worker_2 = WorkerWithDpRank::new(2, 0);
@@ -1323,6 +1650,54 @@ mod tests {
             .unwrap()
     }
 
+    async fn make_router_without_membership(worker_role: Option<WorkerType>) -> Result<KvRouter> {
+        let component = make_test_component("role-aware-subscription").await;
+        let endpoint = component.endpoint("backend");
+        let client = endpoint.client().await?;
+        let (_tx, workers) = watch::channel(HashMap::from([(7, ModelRuntimeConfig::default())]));
+        let config = KvRouterConfig {
+            skip_initial_worker_wait: true,
+            router_event_threads: 1,
+            ..Default::default()
+        };
+
+        KvRouter::new_with_worker_role(
+            endpoint,
+            client,
+            workers,
+            None,
+            16,
+            DefaultWorkerSelector::new(Some(config.clone()), "decode"),
+            Some(config),
+            None,
+            worker_role,
+            "decode",
+            None,
+            false,
+            None,
+            None,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn constructor_skips_sources_for_decode_but_preserves_unknown_behavior() {
+        let router = make_router_without_membership(Some(WorkerType::Decode))
+            .await
+            .expect("ordinary decode must not require KV source membership");
+        assert!(router.kv_event_subscription.is_none());
+
+        let error = make_router_without_membership(None)
+            .await
+            .err()
+            .expect("unknown role must preserve config-driven subscription");
+        assert!(
+            error
+                .to_string()
+                .contains("KV source membership watch is required")
+        );
+    }
+
     async fn make_test_router(
         selector: impl dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig>
         + Send
@@ -1351,13 +1726,15 @@ mod tests {
             ..Default::default()
         };
 
-        KvRouter::new(
+        KvRouter::new_with_worker_role(
             endpoint,
             client,
             rx,
+            None,
             2,
             selector,
             Some(config),
+            None,
             None,
             "decode",
             None,
