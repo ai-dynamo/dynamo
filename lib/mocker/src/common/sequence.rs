@@ -80,6 +80,80 @@ pub struct ActiveSequence {
 }
 
 impl ActiveSequence {
+    /// Promote the mutable tail after its last token has actually been
+    /// computed.
+    ///
+    /// A generated block is represented as partial until the scheduler has
+    /// computed every token in it.  The historical path promotes that block
+    /// when the first token of the following block is appended.  Native vLLM
+    /// prefix caching needs the earlier boundary: `allocate_slots()` caches a
+    /// just-completed block before considering the next waiting request in the
+    /// same scheduling pass.
+    pub(crate) fn promote_computed_tail(
+        &mut self,
+        cumulative_computed_tokens: usize,
+    ) -> Option<MoveBlock> {
+        if cumulative_computed_tokens == 0
+            || cumulative_computed_tokens != self.len()
+            || !cumulative_computed_tokens.is_multiple_of(self.block_size)
+        {
+            return None;
+        }
+        self.promote_last_partial()
+    }
+
+    fn promote_last_partial(&mut self) -> Option<MoveBlock> {
+        let UniqueBlock::PartialBlock(uuid) = self.unique_blocks.last().cloned()? else {
+            return None;
+        };
+
+        let last_complete = self.tokens.last_complete_block().unwrap_or_else(|| {
+            panic!("partial sequence tail cannot be promoted without a complete token block")
+        });
+        let last_seq_hash = if self.enable_prefix_caching {
+            last_complete.sequence_hash()
+        } else {
+            random::<u64>()
+        };
+        let last_block_hash = self
+            .enable_prefix_caching
+            .then(|| last_complete.block_hash());
+        // With prefix caching off, the sequence hash and PLH must both remain
+        // request-unique so another identical prompt cannot reuse this slot.
+        let last_plh = if self.enable_prefix_caching {
+            last_complete.positional_lineage_hash()
+        } else {
+            PositionalLineageHash::new(random::<u64>(), None, self.plhs.len() as u64)
+        };
+        let promote_token_ids = if self.emit_token_ids {
+            Some(last_complete.tokens().to_vec())
+        } else {
+            None
+        };
+        if let Some(last_block_hash) = last_block_hash {
+            self.block_hashes.push(last_block_hash);
+        }
+        self.plhs.push(last_plh);
+        self.unique_blocks.pop();
+
+        // After pop, the last element is the parent block.
+        let parent_hash = self.unique_blocks.last().map(|block| match block {
+            UniqueBlock::FullBlock(hash) => *hash,
+            UniqueBlock::PartialBlock(_) => panic!("partial block cannot be a parent"),
+        });
+        self.unique_blocks
+            .push(UniqueBlock::FullBlock(last_seq_hash));
+
+        Some(MoveBlock::Promote(
+            uuid,
+            last_seq_hash,
+            parent_hash,
+            last_block_hash,
+            last_plh,
+            promote_token_ids,
+        ))
+    }
+
     /// Create a new ActiveSequence instance with the provided tokens
     pub fn new(
         tokens: Vec<u32>,
@@ -265,53 +339,10 @@ impl ActiveSequence {
         // Send Use signal (to allocate space for this new generation block)
         let mut signals = Vec::new();
 
-        // Replace last partial block with full block if it exists
-        if let Some(UniqueBlock::PartialBlock(uuid)) = self.unique_blocks.last().cloned() {
-            let last_complete = self.tokens.last_complete_block().unwrap();
-            let last_seq_hash = if self.enable_prefix_caching {
-                last_complete.sequence_hash()
-            } else {
-                random::<u64>()
-            };
-            let last_block_hash = self
-                .enable_prefix_caching
-                .then(|| last_complete.block_hash());
-            // Same randomization story as `last_seq_hash`: with prefix caching off,
-            // two identical prompts must not share blocks, so the PLH we promote
-            // with must also be unique — otherwise `process_promote`'s
-            // `match_blocks(&[plh])` lookup would reuse another request's block.
-            let last_plh = if self.enable_prefix_caching {
-                last_complete.positional_lineage_hash()
-            } else {
-                PositionalLineageHash::new(random::<u64>(), None, self.plhs.len() as u64)
-            };
-            let promote_token_ids = if self.emit_token_ids {
-                Some(last_complete.tokens().to_vec())
-            } else {
-                None
-            };
-            if let Some(last_block_hash) = last_block_hash {
-                self.block_hashes.push(last_block_hash);
-            }
-            self.plhs.push(last_plh);
-            self.unique_blocks.pop();
-
-            // After pop, the last element is the parent block
-            let second_to_last_hash = self.unique_blocks.last().map(|block| match block {
-                UniqueBlock::FullBlock(hash) => *hash,
-                UniqueBlock::PartialBlock(_) => panic!("Cannot have a partial block as parent"),
-            });
-
-            self.unique_blocks
-                .push(UniqueBlock::FullBlock(last_seq_hash));
-            signals.push(MoveBlock::Promote(
-                uuid,
-                last_seq_hash,
-                second_to_last_hash,
-                last_block_hash,
-                last_plh,
-                promote_token_ids,
-            ));
+        // The scheduler may already have promoted this block at its computed
+        // boundary. Retain this fallback for callers that have not.
+        if let Some(promote) = self.promote_last_partial() {
+            signals.push(promote);
         }
 
         let new_partial_block = UniqueBlock::default();
@@ -331,7 +362,7 @@ impl ActiveSequence {
     /// This function:
     /// - Generates a random token and adds it to the current sequence
     /// - Acquires a new partial block if needed or promotes an existing partial block to a full block
-    /// - Returns appropriate signals for the KvManager to process
+    /// - Returns appropriate signals for the G1 manager to process
     ///
     /// # Panics
     ///

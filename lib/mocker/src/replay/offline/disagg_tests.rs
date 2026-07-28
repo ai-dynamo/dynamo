@@ -707,6 +707,61 @@ fn test_source_release_waits_for_destination_activation() {
     }
 }
 
+#[test]
+fn same_timestamp_destination_activation_precedes_next_decode_drive() {
+    let config = disagg_config();
+    let uuid = Uuid::from_u128(1);
+    let pending =
+        crate::replay::normalize_trace_requests(vec![request(1, 128, 2, 0.0)], 1.0).unwrap();
+    let (collector, stats) = DisaggRuntime::new(
+        &config,
+        None,
+        None,
+        pending,
+        ReplayMode::Trace,
+        ReplayRouterMode::RoundRobin,
+    )
+    .unwrap()
+    .with_per_request_records(true)
+    .run()
+    .unwrap();
+
+    let transitions = &stats.transition_log;
+    let reserved = transition_index(transitions, DisaggTransition::DestinationReserved { uuid });
+    let activated = transition_index(transitions, DisaggTransition::DestinationActivated { uuid });
+    let admitted = transition_index(transitions, DisaggTransition::DecodeAdmitted { uuid });
+    let next_quiesced = transitions
+        .iter()
+        .enumerate()
+        .skip(activated + 1)
+        .find_map(|(index, transition)| {
+            (*transition == DisaggTransition::DecodeDriveQuiesced).then_some(index)
+        })
+        .expect("decode coordinator must quiesce after processing activated work");
+    let completed = transition_index(transitions, DisaggTransition::RequestMarkedDone { uuid });
+    assert!(
+        !transitions[reserved + 1..activated].contains(&DisaggTransition::DecodeDriveQuiesced),
+        "same-timestamp activation must be drained before the next decode drive: {transitions:?}"
+    );
+    assert!(reserved < activated);
+    assert!(activated < admitted);
+    assert!(admitted < next_quiesced);
+    assert!(admitted < completed);
+
+    let report = collector.finish();
+    assert_eq!(report.request_counts.completed_requests, 1);
+    assert_eq!(report.per_request.len(), 1);
+    assert_eq!(
+        report.per_request[0].destination_reserved_ms,
+        report.per_request[0].destination_activated_ms,
+        "destination activation must wake the decode coordinator at the same timestamp"
+    );
+    assert_eq!(
+        report.per_request[0].terminal_status,
+        ReplayTerminalStatus::Completed
+    );
+}
+
 #[rstest::rstest]
 #[case(EngineType::Vllm)]
 #[case(EngineType::Sglang)]
@@ -1059,7 +1114,10 @@ fn source_only_reuse_does_not_reduce_destination_missing_transfer() {
     for engine_type in [EngineType::Vllm, EngineType::Sglang] {
         let report = run_trace_with_details(
             &transfer_timing_config(engine_type, KvTransferTimingMode::DestinationMissing, 2),
-            vec![request(1, 64, 1, 0.0), request(2, 64, 2, 1_000.0)],
+            // Two full blocks leave one reusable block after vLLM's required
+            // final-block recompute. A one-block prompt correctly reports
+            // zero reuse and would not exercise this test's source-hit path.
+            vec![request(1, 128, 1, 0.0), request(2, 128, 2, 1_000.0)],
             None,
             ReplayRouterMode::RoundRobin,
         );
@@ -1073,7 +1131,7 @@ fn source_only_reuse_does_not_reduce_destination_missing_transfer() {
 
         assert!(measured.reused_input_tokens > 0);
         assert_eq!(measured.decode_reused_input_tokens, Some(0));
-        assert!(transfer_span >= 64.0 && transfer_span - 64.0 < 1.0);
+        assert!(transfer_span >= 128.0 && transfer_span - 128.0 < 1.0);
     }
 }
 

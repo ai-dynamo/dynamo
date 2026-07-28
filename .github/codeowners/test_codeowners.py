@@ -1238,10 +1238,12 @@ class TestRealPolicyRoutingContracts:
                 "tests/router/test_router_e2e_with_vllm_xpu.py",
                 ("router", "backend-vllm", "xpu"),
             ),
-            (
-                "docs/backends/vllm/README.md",
-                ("docs", "backend-vllm"),
-            ),
+            # NOTE: the docs/backends/vllm/ case was dropped here when the
+            # docs restructure (#10855) moved these pages under docs/fern/.
+            # The move did not carry the backend teams' co-ownership across,
+            # so docs/fern/backends/* is currently docs-only. That is an open
+            # ownership question, not a contract to pin -- deliberately not
+            # re-added at the new path until the owning teams decide.
             (
                 "recipes/qwen3-32b/vllm/agg-round-robin/deploy.yaml",
                 ("performance", "backend-vllm"),
