@@ -173,7 +173,8 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
 RUN set -eux; \
     apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        jq; \
+        jq \
+        patch; \
     rm -rf /var/lib/apt/lists/*
 
 # Layer the released vLLM-Omni package matching the pinned upstream ref while
@@ -269,6 +270,36 @@ RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/
     export UV_CACHE_DIR=/root/.cache/uv && \
     uv pip install {{ pip_target }} --reinstall-package imageio-ffmpeg --no-deps \
         --requirement /tmp/requirements.vllm.txt
+
+{% if device == "cuda" and target not in ("dev", "local-dev") %}
+# Test-only composition of vLLM #50036 onto the pinned nightly. Verify both
+# sides so this cannot silently apply to a different vLLM source tree.
+COPY container/deps/vllm/pr-50036.patch /tmp/vllm-pr-50036.patch
+RUN set -eux; \
+    cd "${SITE_PACKAGES}"; \
+    printf '%s  %s\n' \
+        f1ed3a3f02ddd6a11bf931443a697bb9d92a0e01882bd4f6beddf9ebb959f67e vllm/v1/engine/async_llm.py \
+        dacaa2707d45fb3b32394bb4f6dde0bbe73f94f24e3e331bf4a05e47ea68a324 vllm/v1/engine/core.py \
+        c7c03eb2d7feb3968dfc26331f712f774ef5691b45e9a40011adc90f4327bfd7 vllm/v1/engine/core_client.py \
+        | sha256sum --check --strict; \
+    echo 'a9d946b605e3a1d71be21fbd3f5986fafe0f5703eac35680ccb63d37b10764b3  /tmp/vllm-pr-50036.patch' \
+        | sha256sum --check --strict; \
+    patch --batch --forward --strip=1 < /tmp/vllm-pr-50036.patch; \
+    printf '%s  %s\n' \
+        1bfe2265159a49c77adc0b3c0361a850b48e4ab558b048073197bc462309dcb6 vllm/v1/engine/async_llm.py \
+        3aba2d0e60fc13ca2478559e48d868cc0696b3b613612daa26ec62889fc76f8c vllm/v1/engine/core.py \
+        3da984f2c88a85ef5cd2bc0099fcfd6a2b9953e63a7ce1923564d7df23a8c245 vllm/v1/engine/core_client.py \
+        | sha256sum --check --strict; \
+    mkdir -p /opt/dynamo/provenance; \
+    printf '%s\n' \
+        'base_image=docker.io/vllm/vllm-openai:nightly-49f31d7cee425a6d38f8c5bc76877986daf832ed@sha256:b45385d52745213da398706b822ecb88bf58fc6f80d709f6678a054006bf0ffc' \
+        'base=49f31d7cee425a6d38f8c5bc76877986daf832ed' \
+        'pr=50036' \
+        'head=cf24c4fb6084fbd9eff3f575b6f5cf361d0785c0' \
+        'patch_sha256=a9d946b605e3a1d71be21fbd3f5986fafe0f5703eac35680ccb63d37b10764b3' \
+        > /opt/dynamo/provenance/vllm-pr-50036; \
+    rm /tmp/vllm-pr-50036.patch
+{% endif %}
 
 # Remove the vLLM source tree shipped in the base image to avoid pytest
 # collection conflicts (duplicate conftest plugin registration) and stale
