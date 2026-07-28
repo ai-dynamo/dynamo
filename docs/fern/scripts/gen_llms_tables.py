@@ -641,6 +641,82 @@ def group_by_minor_line(data: dict, versions: set[str]) -> dict[str, set[str]]:
     return groups
 
 
+def parse_driver_floor(min_driver: str) -> int:
+    """'580.xx+' -> 580.
+
+    Numeric on purpose. These are compared, and comparing them as strings is
+    only accidentally right while every floor has the same digit count -- the
+    bug the retired RunsWhereWizard shipped with.
+    """
+    match = re.match(r"\s*(\d+)", min_driver)
+    if not match:
+        raise TSParseError(
+            f"minDriver {min_driver!r} does not start with a number -- the "
+            "driver-floor table cannot place it"
+        )
+    return int(match.group(1))
+
+
+def driver_floor_table(data: dict) -> str:
+    """Driver floor -> the newest release each backend can run on that driver.
+
+    Read a row as "if my driver is at least this version": a 580 driver also
+    satisfies the 575 and 570 floors, so each cell is the newest release whose
+    requirement that driver meets, not the newest release that requires
+    exactly that floor.
+
+    Floors and backends both come from CUDA_HISTORY, so a fourth floor or a
+    fourth backend appears here the moment it is added to the data.
+    """
+    versions = released_versions(data)
+    rows = [row for row in data["CUDA_HISTORY"] if row["version"] in versions]
+    if not rows:
+        raise TSParseError(
+            "no CUDA_HISTORY row matches a released RELEASES version -- the "
+            "driver-floor table would render with no rows"
+        )
+
+    floors = sorted({parse_driver_floor(row["minDriver"]) for row in rows})
+    backends = sorted({row["backend"] for row in rows})
+    # CUDA_HISTORY is maintained newest-first, so the first matching row for a
+    # backend is its newest release -- the same ordering the matrix relies on.
+    labels = {parse_driver_floor(row["minDriver"]): row["minDriver"] for row in rows}
+
+    table_rows = []
+    for floor in floors:
+        cells = [labels[floor]]
+        for backend in backends:
+            runnable = next(
+                (
+                    row["version"]
+                    for row in rows
+                    if row["backend"] == backend
+                    and parse_driver_floor(row["minDriver"]) <= floor
+                ),
+                None,
+            )
+            cells.append(runnable or "None")
+        table_rows.append(cells)
+    return md_table(["Driver", *backends], table_rows)
+
+
+def render_driver_floors(data: dict) -> str:
+    """The driver-first view of the support matrix.
+
+    The matrix answers "what does this release need". A reader who already has
+    a driver installed is asking the inverse, and answering it from the matrix
+    means scanning every row for the floors their driver clears.
+    """
+    return "\n\n".join(
+        [
+            "Driver already installed? Read across from your version — each "
+            "cell is the newest release that backend can run on it. A driver "
+            "meeting a higher floor also runs everything below it.",
+            driver_floor_table(data),
+        ]
+    )
+
+
 def render_support_matrix(data: dict) -> str:
     """Human-facing collapsed CUDA/driver matrix for the released lines.
 
@@ -1053,6 +1129,7 @@ class Block(NamedTuple):
 # human-facing support-matrix accordion at a fixed spot in the page.
 PAGES: dict[str, tuple[Block, ...]] = {
     "compatibility.mdx": (
+        Block("driver-floors", render_driver_floors, False, False),
         Block("support-matrix", render_support_matrix, False, False),
         Block("llms-tables", render_compatibility, True, True),
     ),
