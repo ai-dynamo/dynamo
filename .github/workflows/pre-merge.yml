@@ -80,6 +80,7 @@ jobs:
     - name: Install Fern CLI
       run: npm install -g fern-api
     - name: Validate Fern configuration
+      working-directory: docs/fern
       run: fern check
 
   fern-broken-links:
@@ -97,6 +98,7 @@ jobs:
     - name: Install Fern CLI
       run: npm install -g fern-api
     - name: Check for broken links
+      working-directory: docs/fern
       run: fern docs broken-links
 
   operator:
@@ -187,7 +189,9 @@ jobs:
     - name: Run KVBM offload Mooncake trace test
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}
-      run: cargo test --locked -p dynamo-bench --test mooncake_trace --features mocker-kvbm-offload g2 -- --nocapture
+      run: |
+        cargo test --locked -p dynamo-mocker --features replay-bench,kvbm-offload replay_forces_g1_to_g2 -- --nocapture
+        cargo test --locked -p dynamo-bench --test mooncake_trace --features mocker-kvbm-offload g2 -- --nocapture
     - name: Compile feature-gated benchmark entrypoints
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}

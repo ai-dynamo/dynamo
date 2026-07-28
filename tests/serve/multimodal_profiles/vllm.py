@@ -15,9 +15,14 @@ from tests.utils.multimodal import (
     make_image_payload,
     make_image_payload_b64,
     make_image_payload_cached_tokens,
+    make_image_payload_uuid_passthrough,
     make_video_payload,
 )
-from tests.utils.payload_builder import chat_payload, chat_payload_default
+from tests.utils.payload_builder import (
+    chat_payload,
+    chat_payload_default,
+    image_token_metrics_payload,
+)
 
 # LLaVA 1.5 color-identification reference set: the model legitimately
 # emits these colors (though the order/subset varies across CUDA backends
@@ -268,7 +273,10 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 requested_vllm_kv_cache_bytes=920_126_000,  # 2x safety over min=460_062_720
                 tests=[
                     # HTTP-URL color test on hybrid Mamba/full-attention VL.
-                    MmCase(payload=make_image_payload(["green"])),
+                    MmCase(
+                        payload=make_image_payload(["green"]),
+                        followup_payloads=[image_token_metrics_payload()],
+                    ),
                     # Inline-base64 + --frontend-decoding (NIXL RDMA path).
                     # post_merge for the NIXL-stub reason — local pre-merge
                     # builds outside Docker ship a NIXL stub that errors on
@@ -338,7 +346,31 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 timeout_s=670,
                 profiled_vram_gib=12.0,
                 requested_vllm_kv_cache_bytes=922_354_000,
-                tests=[MmCase(payload=make_image_payload(["green"]))],
+                tests=[
+                    MmCase(payload=make_image_payload(["green"])),
+                    MmCase(
+                        suffix="uuid_passthrough",
+                        payload=make_image_payload_uuid_passthrough(
+                            ["green"], exercise_embedding_cache=True
+                        ),
+                        extra_script_args=[
+                            "--mm-processor-cache-gb",
+                            "4",
+                            "--multimodal-embedding-cache-capacity-gb",
+                            "1",
+                            # Gemma 4 budgets 280 embeddings per image; the
+                            # 512x512 fixture emits 256. A 280-slot GPU cache can
+                            # retain only one, so the second fill evicts the first.
+                            "--max-num-batched-tokens",
+                            "280",
+                            "--limit-mm-per-prompt",
+                            '{"image": 1, "video": 0, "audio": 0}',
+                        ],
+                        # The connector runs in vLLM's spawned EngineCore, so
+                        # its debug hit diagnostic uses vLLM's logger level.
+                        env={"VLLM_LOGGING_LEVEL": "DEBUG"},
+                    ),
+                ],
             ),
         },
         extra_vllm_args=["--dtype", "bfloat16"],

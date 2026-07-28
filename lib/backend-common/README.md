@@ -19,7 +19,7 @@ SPDX-License-Identifier: Apache-2.0
 > is a thin shim over this crate.
 
 > **Looking for a walkthrough?** Start with
-> [Writing Unified Backends](../../docs/development/unified-backends.md)
+> [Writing Unified Backends](../../docs/fern/development/unified-backends.md)
 > and choose the Rust tab.
 > This README is the in-tree reference: trait shape, file layout,
 > disaggregation contract, error taxonomy, and the conformance kit.
@@ -94,7 +94,7 @@ lives at
 cargo run --release -- --help
 ```
 
-See the [walkthrough](../../docs/development/unified-backends.md) and choose
+See the [walkthrough](../../docs/fern/development/unified-backends.md) and choose
 the Rust tab for how to set up the crate (Cargo.toml, `tokio_unstable` cfg
 flag, toolchain pin) and write the engine.
 
@@ -150,7 +150,7 @@ fn main() -> anyhow::Result<()> {
 
 See [`examples/mocker/src/engine.rs`](examples/mocker/src/engine.rs)
 for a complete, runnable reference and the
-[walkthrough](../../docs/development/unified-backends.md) for the
+[walkthrough](../../docs/fern/development/unified-backends.md) for the
 Rust step-by-step including Cargo.toml, `tokio_unstable` cfg, and the
 conformance kit.
 
@@ -256,7 +256,7 @@ Mid-stream errors have two equivalent terminal forms:
   pure message-level failures. Loses the typed `BackendError` variant.
 
 A tiny helper per backend keeps call sites clean — see the
-[guide's Rust Step 6](../../docs/development/unified-backends.md) for the
+[guide's Rust Step 6](../../docs/fern/development/unified-backends.md) for the
 `invalid_arg` pattern.
 
 ## Conformance Kit
@@ -421,7 +421,7 @@ The Python `Worker` shim that drives this crate from a backend's entry point
 
 ## See Also
 
-- [Writing Unified Backends](../../docs/development/unified-backends.md)
+- [Writing Unified Backends](../../docs/fern/development/unified-backends.md)
   — step-by-step walkthrough; choose the Rust tab.
 - [`CLAUDE.md`](CLAUDE.md) — design notes (rationale, invariants,
   Phase 2 PyO3 plans).

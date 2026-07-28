@@ -2,25 +2,35 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::marker::PhantomData;
 
 use anyhow::bail;
 
+use super::super::core::{EngineEventBatch, EngineProgress, NoEngineEvents, WorkerTopology};
 use super::super::events::SimulationWorkerStage;
 use super::super::runtime_utils::WorkerCompletionPayload;
 #[cfg(test)]
 use super::super::state::OfflineWorkerSnapshot;
 use super::super::state::OfflineWorkerState;
-use super::{EngineEffects, EnginePassMode, ScheduledWorkerCompletion};
+#[cfg(feature = "kvbm-offload")]
+use super::ObservedOffloadEffects;
+use super::{
+    EngineEffects, EnginePassMode, ObservedCommandEffects, ReplayEngineObservation,
+    ScheduledWorkerCompletion,
+};
 use crate::common::protocols::{DirectRequest, ForwardPassSnapshot, MockEngineArgs};
 use crate::replay::TraceCollector;
 use crate::scheduler::RouterEventVisibility;
-use crate::scheduler::{SchedulerCommand, SchedulerCommandEffects};
+use crate::scheduler::SchedulerCommand;
 
 fn fpm_has_scheduled_work(snapshot: &ForwardPassSnapshot) -> bool {
     snapshot.num_prefill_requests > 0 || snapshot.num_decode_requests > 0
 }
 
-pub(in crate::replay::offline) struct EngineComponent {
+pub(in crate::replay::offline) struct EngineComponent<Observation = NoEngineEvents>
+where
+    Observation: ReplayEngineObservation,
+{
     stage: SimulationWorkerStage,
     pass_mode: EnginePassMode,
     /// DP-rank schedulers keyed by stable ID (monotonic, never reused).
@@ -37,11 +47,15 @@ pub(in crate::replay::offline) struct EngineComponent {
     pending_startup: BTreeSet<usize>,
     /// Engine args used to construct new DP-rank schedulers during scale-up.
     args: MockEngineArgs,
-    /// Whether new workers should capture KV events (true when a router is present).
-    capture_kv_events: bool,
+    /// Whether dynamically added workers capture raw engine/router events.
+    capture_raw: bool,
+    observation: PhantomData<Observation>,
 }
 
-impl EngineComponent {
+impl<Observation> EngineComponent<Observation>
+where
+    Observation: ReplayEngineObservation,
+{
     pub(in crate::replay::offline) fn new(
         stage: SimulationWorkerStage,
         pass_mode: EnginePassMode,
@@ -60,7 +74,8 @@ impl EngineComponent {
             pending_removal: BTreeSet::new(),
             pending_startup: BTreeSet::new(),
             args: MockEngineArgs::default(),
-            capture_kv_events: false,
+            capture_raw: Observation::CAPTURE_RAW,
+            observation: PhantomData,
         }
     }
 
@@ -71,7 +86,6 @@ impl EngineComponent {
         pass_mode: EnginePassMode,
         args: MockEngineArgs,
         num_workers: usize,
-        capture_kv_events: bool,
     ) -> Self {
         let dp_size = args.dp_size.max(1) as usize;
         let mut workers = BTreeMap::new();
@@ -87,7 +101,7 @@ impl EngineComponent {
                         worker_id as u64,
                         dp_rank as u32,
                         args.clone(),
-                        capture_kv_events,
+                        Observation::CAPTURE_RAW,
                     ),
                 );
                 rank_ids.push(rank_id);
@@ -104,18 +118,19 @@ impl EngineComponent {
             pending_removal: BTreeSet::new(),
             pending_startup: BTreeSet::new(),
             args,
-            capture_kv_events,
+            capture_raw: Observation::CAPTURE_RAW,
+            observation: PhantomData,
         }
     }
 
-    /// Set the engine args and KV capture flag used when adding workers dynamically.
+    /// Set the engine args used when adding workers dynamically.
     pub(in crate::replay::offline) fn set_scaling_args(
         &mut self,
         args: MockEngineArgs,
-        capture_kv_events: bool,
+        capture_raw: bool,
     ) {
         self.args = args;
-        self.capture_kv_events = capture_kv_events;
+        self.capture_raw = capture_raw;
     }
 
     /// Add a new mocker worker and all of its DP-rank schedulers, returning
@@ -132,7 +147,7 @@ impl EngineComponent {
                 worker_id as u64,
                 dp_rank,
                 self.args.clone(),
-                self.capture_kv_events,
+                self.capture_raw,
             );
             self.workers.insert(rank_id, worker);
             rank_ids.push(rank_id);
@@ -239,15 +254,6 @@ impl EngineComponent {
         (added, newly_marked, removed)
     }
 
-    /// Return stable scheduler IDs of all active DP ranks — excludes ranks in
-    /// mocker workers pending removal or startup.
-    pub(in crate::replay::offline) fn active_worker_ids(&self) -> Vec<usize> {
-        self.active_group_ids()
-            .into_iter()
-            .flat_map(|worker_id| self.worker_groups[&worker_id].iter().copied())
-            .collect()
-    }
-
     /// Return stable mocker worker IDs that are active for new admissions.
     pub(in crate::replay::offline) fn active_group_ids(&self) -> Vec<usize> {
         self.worker_groups
@@ -257,19 +263,33 @@ impl EngineComponent {
             .collect()
     }
 
-    pub(in crate::replay::offline) fn dp_size(&self) -> u32 {
-        self.args.dp_size.max(1)
+    #[cfg(test)]
+    pub(in crate::replay::offline) fn active_worker_ids(&self) -> Vec<usize> {
+        self.active_group_ids()
+            .into_iter()
+            .flat_map(|worker_id| self.worker_groups[&worker_id].iter().copied())
+            .collect()
     }
 
-    pub(in crate::replay::offline) fn rank_id(
+    pub(in crate::replay::offline) fn worker_topology(
         &self,
         worker_id: usize,
-        dp_rank: u32,
-    ) -> Option<usize> {
-        self.worker_groups
-            .get(&worker_id)
-            .and_then(|rank_ids| rank_ids.get(dp_rank as usize))
-            .copied()
+    ) -> Option<WorkerTopology> {
+        Some(WorkerTopology {
+            worker_id,
+            scheduler_ids: self.worker_groups.get(&worker_id)?.clone(),
+        })
+    }
+
+    pub(in crate::replay::offline) fn active_topology(&self) -> Vec<WorkerTopology> {
+        self.active_group_ids()
+            .into_iter()
+            .filter_map(|worker_id| self.worker_topology(worker_id))
+            .collect()
+    }
+
+    pub(in crate::replay::offline) fn dp_size(&self) -> u32 {
+        self.args.dp_size.max(1)
     }
 
     /// Return the logical mocker worker and DP rank represented by a stable
@@ -315,12 +335,18 @@ impl EngineComponent {
         &mut self,
         worker_id: usize,
         command: SchedulerCommand,
-    ) -> anyhow::Result<SchedulerCommandEffects> {
+    ) -> anyhow::Result<ObservedCommandEffects<Observation::Batch>> {
         let worker = self
             .workers
             .get_mut(&worker_id)
             .ok_or_else(|| anyhow::anyhow!("offline replay selected unknown worker {worker_id}"))?;
-        worker.apply_command(command)
+        let mut effects = worker.apply_command(command)?;
+        let engine_events = Observation::take_command_events(&mut effects);
+        Ok(ObservedCommandEffects {
+            result: effects.result,
+            lifecycle_events: effects.lifecycle_events,
+            engine_events,
+        })
     }
 
     pub(in crate::replay::offline) fn worker_is_busy(
@@ -338,9 +364,10 @@ impl EngineComponent {
         &mut self,
         now_ms: f64,
         mut collector: Option<&mut TraceCollector>,
-    ) -> anyhow::Result<EngineEffects> {
-        let worker_groups: Vec<Vec<usize>> = self.worker_groups.values().cloned().collect();
-        for rank_ids in worker_groups {
+    ) -> anyhow::Result<EngineEffects<Observation::Batch>> {
+        // Iterating `self.worker_groups` in place relies on disjoint field borrows:
+        // the loop body only mutates `self.workers`, never the group map itself.
+        for rank_ids in self.worker_groups.values() {
             // A logical attention-DP worker advances in group-owned epochs.
             // A rank that received work mid-epoch must wait until every sibling
             // has crossed the prior completion boundary.
@@ -358,7 +385,7 @@ impl EngineComponent {
             }
 
             let mut executed_by_rank = BTreeMap::new();
-            for &rank_id in &rank_ids {
+            for &rank_id in rank_ids {
                 if !self.workers.get(&rank_id).unwrap().is_ready() {
                     continue;
                 }
@@ -388,7 +415,7 @@ impl EngineComponent {
             let group_wall_time_secs = (group_end_ms - now_ms).max(0.0) / 1000.0;
             let mut effects = EngineEffects::default();
 
-            for &rank_id in &rank_ids {
+            for &rank_id in rank_ids {
                 let Some(mut executed) = executed_by_rank.remove(&rank_id) else {
                     if group_end_ms > now_ms {
                         // Empty ranks still participate in the barrier so work
@@ -404,7 +431,8 @@ impl EngineComponent {
                                     completed_requests: 0,
                                     output_signals: Vec::new(),
                                     lifecycle_events: Vec::new(),
-                                    kv_events: Vec::new(),
+                                    engine_events: Observation::Batch::default(),
+                                    progress: EngineProgress::default(),
                                     fpm: Some(ForwardPassSnapshot {
                                         wall_time_secs: group_wall_time_secs,
                                         ..Default::default()
@@ -428,16 +456,25 @@ impl EngineComponent {
                 }
 
                 let admitted_requests = !executed.admissions.is_empty();
-                effects.admissions.extend(executed.admissions);
+                let had_raw_observations = !executed.kv_events.is_empty();
                 let published_pass_start_kv = executed.router_event_visibility
                     == RouterEventVisibility::PassStart
-                    && !executed.kv_events.is_empty();
-                let completion_kv_events =
+                    && had_raw_observations;
+                let made_progress = admitted_requests
+                    || published_pass_start_kv
+                    || executed.completed_requests > 0
+                    || !executed.output_signals.is_empty()
+                    || !executed.lifecycle_events.is_empty()
+                    || had_raw_observations
+                    || executed.fpm.as_ref().is_some_and(fpm_has_scheduled_work);
+                let observed_events = Observation::take_pass_events(&mut executed);
+                effects.admissions.extend(executed.admissions);
+                let completion_events =
                     if executed.router_event_visibility == RouterEventVisibility::PassStart {
-                        effects.pass_start_kv_events.extend(executed.kv_events);
-                        Vec::new()
+                        effects.pass_start_events.append(observed_events);
+                        Observation::Batch::default()
                     } else {
-                        executed.kv_events
+                        observed_events
                     };
                 let payload = WorkerCompletionPayload {
                     stage: self.stage,
@@ -445,7 +482,11 @@ impl EngineComponent {
                     completed_requests: executed.completed_requests,
                     output_signals: executed.output_signals,
                     lifecycle_events: executed.lifecycle_events,
-                    kv_events: completion_kv_events,
+                    engine_events: completion_events,
+                    progress: EngineProgress {
+                        made_progress,
+                        had_raw_observations,
+                    },
                     fpm: executed.fpm,
                     accept_length_output_tokens: executed.accept_length_output_tokens,
                     accept_length_decode_forwards: executed.accept_length_decode_forwards,
@@ -471,14 +512,9 @@ impl EngineComponent {
                 // same-time iteration when no observable state changed, but only after
                 // the owning subsystem can account for every unfinished request's
                 // future wakeup; an empty event queue alone is not quiescence.
-                let made_progress = admitted_requests
-                    || published_pass_start_kv
-                    || payload.completed_requests > 0
-                    || !payload.output_signals.is_empty()
-                    || !payload.lifecycle_events.is_empty()
-                    || !payload.kv_events.is_empty()
-                    || payload.fpm.as_ref().is_some_and(fpm_has_scheduled_work);
                 if made_progress {
+                    effects.progress.made_progress = true;
+                    effects.progress.had_raw_observations |= had_raw_observations;
                     effects.immediate_completions.push(payload);
                 }
             }
@@ -493,8 +529,8 @@ impl EngineComponent {
 
     pub(in crate::replay::offline) fn on_scheduled_completion(
         &mut self,
-        payload: WorkerCompletionPayload,
-    ) -> anyhow::Result<WorkerCompletionPayload> {
+        payload: WorkerCompletionPayload<Observation::Batch>,
+    ) -> anyhow::Result<WorkerCompletionPayload<Observation::Batch>> {
         if payload.stage != self.stage {
             bail!(
                 "offline replay completion stage mismatch: expected {:?}, got {:?}",
@@ -514,7 +550,10 @@ impl EngineComponent {
         payload
             .lifecycle_events
             .extend(worker.retry_pending_destinations());
-        payload.kv_events.extend(worker.drain_kv_events());
+        let observed = Observation::drain_worker_events(worker);
+        payload.progress.had_raw_observations |= observed.had_raw_observations;
+        payload.progress.made_progress |= observed.had_raw_observations;
+        payload.engine_events.append(observed.events);
         Ok(payload)
     }
 
@@ -550,18 +589,23 @@ impl EngineComponent {
     pub(in crate::replay::offline) fn tick_offload_engines(
         &mut self,
         now_ms: f64,
-    ) -> crate::scheduler::OffloadTickEffects {
-        let mut effects = crate::scheduler::OffloadTickEffects {
-            kv_events: Vec::new(),
+    ) -> ObservedOffloadEffects<Observation::Batch> {
+        let mut effects = ObservedOffloadEffects {
+            engine_events: Observation::Batch::default(),
             lifecycle_events: Vec::new(),
+            progress: EngineProgress::default(),
         };
         for worker in self.workers.values_mut() {
-            let worker_effects = if worker.is_busy() {
+            let mut worker_effects = if worker.is_busy() {
                 worker.tick_offload_transport_only(now_ms)
             } else {
                 worker.tick_offload_only(now_ms)
             };
-            effects.kv_events.extend(worker_effects.kv_events);
+            let had_raw_observations = !worker_effects.kv_events.is_empty();
+            let engine_events = Observation::take_offload_events(&mut worker_effects);
+            effects.engine_events.append(engine_events);
+            effects.progress.had_raw_observations |= had_raw_observations;
+            effects.progress.made_progress |= had_raw_observations;
             effects
                 .lifecycle_events
                 .extend(worker_effects.lifecycle_events);
@@ -586,12 +630,13 @@ mod tests {
     use crate::common::protocols::{
         DirectRequest, EngineType, MockEngineArgs, SglangArgs, WorkerType,
     };
+    use crate::replay::offline::extensions::kv_events::RouterEventObservation;
     use crate::scheduler::{SchedulerCommand, SchedulerCommandResult, SchedulerLifecycleEvent};
     use std::sync::Arc;
     use uuid::Uuid;
 
     #[cfg(feature = "kvbm-offload")]
-    use dynamo_kv_router::protocols::StorageTier;
+    use crate::replay::offline::extensions::kv_events::StorageTier;
 
     fn engine_with_startup(num_workers: usize, startup_time: Option<f64>) -> EngineComponent {
         let args = MockEngineArgs {
@@ -601,7 +646,7 @@ mod tests {
         let workers: Vec<_> = (0..num_workers)
             .map(|i| OfflineWorkerState::new(i, args.clone(), false))
             .collect();
-        let mut engine = EngineComponent::new(
+        let mut engine = EngineComponent::<NoEngineEvents>::new(
             SimulationWorkerStage::Aggregated,
             EnginePassMode::Visible,
             workers,
@@ -610,7 +655,9 @@ mod tests {
         engine
     }
 
-    fn take_only_completion(mut effects: EngineEffects) -> WorkerCompletionPayload {
+    fn take_only_completion<Events: EngineEventBatch>(
+        mut effects: EngineEffects<Events>,
+    ) -> WorkerCompletionPayload<Events> {
         if let Some(payload) = effects.immediate_completions.pop() {
             assert!(effects.scheduled_completions.is_empty());
             return payload;
@@ -629,7 +676,7 @@ mod tests {
             .worker_type(WorkerType::Decode)
             .build()
             .unwrap();
-        EngineComponent::new(
+        EngineComponent::<NoEngineEvents>::new(
             SimulationWorkerStage::Decode,
             EnginePassMode::Visible,
             vec![OfflineWorkerState::new(0, args, false)],
@@ -639,12 +686,22 @@ mod tests {
     struct LengthLatency;
 
     impl AicCallback for LengthLatency {
-        fn predict_prefill(&self, _batch_size: usize, effective_isl: usize, _prefix: usize) -> f64 {
-            effective_isl as f64
+        fn predict_prefill(
+            &self,
+            _batch_size: usize,
+            effective_isl: usize,
+            _prefix: usize,
+        ) -> anyhow::Result<f64> {
+            Ok(effective_isl as f64)
         }
 
-        fn predict_decode(&self, _batch_size: usize, _isl: usize, _osl: usize) -> f64 {
-            1.0
+        fn predict_decode(
+            &self,
+            _batch_size: usize,
+            _isl: usize,
+            _osl: usize,
+        ) -> anyhow::Result<f64> {
+            Ok(1.0)
         }
     }
 
@@ -667,7 +724,6 @@ mod tests {
             EnginePassMode::Visible,
             args,
             1,
-            false,
         )
     }
 
@@ -789,7 +845,7 @@ mod tests {
                 }))
                 .build()
                 .unwrap();
-            EngineComponent::new(
+            EngineComponent::<RouterEventObservation>::new(
                 SimulationWorkerStage::Decode,
                 EnginePassMode::Visible,
                 vec![OfflineWorkerState::new(0, args, true)],
@@ -806,17 +862,17 @@ mod tests {
         let mut vllm = make_engine(EngineType::Vllm);
         vllm.dispatch(0, request(Uuid::from_u128(10))).unwrap();
         let vllm_start = vllm.drive_ready(0.0, Some(&mut collector)).unwrap();
-        assert!(!vllm_start.pass_start_kv_events.is_empty());
+        assert!(!vllm_start.pass_start_events.0.is_empty());
         let vllm_end = take_only_completion(vllm_start);
-        assert!(vllm_end.kv_events.is_empty());
+        assert!(vllm_end.engine_events.0.is_empty());
         assert!(vllm_end.fpm.is_some());
 
         let mut sglang = make_engine(EngineType::Sglang);
         sglang.dispatch(0, request(Uuid::from_u128(11))).unwrap();
         let sglang_start = sglang.drive_ready(0.0, Some(&mut collector)).unwrap();
-        assert!(sglang_start.pass_start_kv_events.is_empty());
+        assert!(sglang_start.pass_start_events.0.is_empty());
         let sglang_end = take_only_completion(sglang_start);
-        assert!(!sglang_end.kv_events.is_empty());
+        assert!(!sglang_end.engine_events.0.is_empty());
         assert!(sglang_end.fpm.is_some());
     }
 
@@ -915,7 +971,6 @@ mod tests {
 
         let second = engine.drive_ready(0.0, Some(&mut collector)).unwrap();
         assert!(second.admissions.is_empty());
-        assert!(second.pass_start_kv_events.is_empty());
         assert_eq!(second.immediate_completions.len(), 1);
         assert!(second.scheduled_completions.is_empty());
         let second = take_only_completion(second);
@@ -923,7 +978,6 @@ mod tests {
         assert_eq!(second.completed_requests, 0);
         assert!(second.output_signals.is_empty());
         assert!(second.lifecycle_events.is_empty());
-        assert!(second.kv_events.is_empty());
         engine.on_scheduled_completion(second).unwrap();
 
         let final_pass = engine.drive_ready(0.0, Some(&mut collector)).unwrap();
@@ -1008,7 +1062,7 @@ mod tests {
             .build()
             .unwrap();
         let worker = OfflineWorkerState::new(0, args.clone(), false);
-        let mut engine = EngineComponent::new(
+        let mut engine = EngineComponent::<NoEngineEvents>::new(
             SimulationWorkerStage::Decode,
             EnginePassMode::Visible,
             vec![worker],
@@ -1095,7 +1149,7 @@ mod tests {
             .build()
             .unwrap();
         let worker = OfflineWorkerState::new(0, args, true);
-        let mut engine = EngineComponent::new(
+        let mut engine = EngineComponent::<RouterEventObservation>::new(
             SimulationWorkerStage::Decode,
             EnginePassMode::Visible,
             vec![worker],
@@ -1114,7 +1168,8 @@ mod tests {
         let mut collector = TraceCollector::default();
         let mut seed = engine.drive_ready(0.0, Some(&mut collector)).unwrap();
         assert!(
-            seed.pass_start_kv_events
+            seed.pass_start_events
+                .0
                 .iter()
                 .any(|event| { event.storage_tier == StorageTier::Device })
         );
@@ -1160,7 +1215,8 @@ mod tests {
         assert!(transport.lifecycle_events.is_empty());
         assert!(
             transport
-                .kv_events
+                .engine_events
+                .0
                 .iter()
                 .any(|event| event.storage_tier == StorageTier::HostPinned)
         );

@@ -101,8 +101,6 @@ pub fn prepare_dc_ckf_corpus(spec: &DcCkfCorpusSpec) -> anyhow::Result<PreparedD
             .flat_map(|turn| &turn.hash_ids)
             .copied()
         {
-            let hash = u32::try_from(hash)
-                .context("prepared Mooncake hash unexpectedly exceeds the u32 namespace")?;
             source_hashes.insert(hash);
             pool_hashes[dc_ordinal].insert(hash);
             global_hashes.insert(hash);
@@ -265,7 +263,7 @@ fn checked_expand_and_duplicate(
     prefix_depth_factor: usize,
     copies: usize,
 ) -> anyhow::Result<Trace> {
-    let factor = u64::try_from(prefix_depth_factor).context("prefix depth does not fit in u64")?;
+    let factor = u32::try_from(prefix_depth_factor).context("prefix depth does not fit in u32")?;
     for session in &mut trace.sessions {
         for turn in &mut session.turns {
             turn.input_length = turn
@@ -286,7 +284,6 @@ fn checked_expand_and_duplicate(
                     let expanded_hash = base
                         .checked_add(offset)
                         .context("Mooncake hash prefix expansion overflow")?;
-                    ensure_u32_hash(expanded_hash)?;
                     expanded.push(expanded_hash);
                 }
             }
@@ -311,11 +308,9 @@ fn checked_expand_and_duplicate(
         .checked_mul(copies)
         .context("Mooncake duplicated session count overflow")?;
     let mut sessions = Vec::with_capacity(duplicated_count);
-    let mut narrowed = FxHashMap::<u64, u32>::default();
-    let mut effective_hashes = FxHashSet::default();
 
     for copy_index in 0..copies {
-        let copy_index = u64::try_from(copy_index).context("copy index does not fit in u64")?;
+        let copy_index = u32::try_from(copy_index).context("copy index does not fit in u32")?;
         let offset = offset_base
             .checked_mul(copy_index)
             .context("Mooncake hash duplication offset overflow")?;
@@ -329,21 +324,6 @@ fn checked_expand_and_duplicate(
                     *hash = hash
                         .checked_add(offset)
                         .context("Mooncake duplicated hash overflow")?;
-                    let narrowed_hash = ensure_u32_hash(*hash)?;
-                    match narrowed.entry(*hash) {
-                        std::collections::hash_map::Entry::Occupied(entry) => {
-                            debug_assert_eq!(*entry.get(), narrowed_hash);
-                        }
-                        std::collections::hash_map::Entry::Vacant(entry) => {
-                            if !effective_hashes.insert(narrowed_hash) {
-                                bail!(
-                                    "Mooncake hash duplication aliases after u32 narrowing at {}",
-                                    *hash
-                                );
-                            }
-                            entry.insert(narrowed_hash);
-                        }
-                    }
                 }
             }
             sessions.push(duplicated);
@@ -351,11 +331,6 @@ fn checked_expand_and_duplicate(
     }
     trace.sessions = sessions;
     Ok(trace)
-}
-
-fn ensure_u32_hash(hash: u64) -> anyhow::Result<u32> {
-    u32::try_from(hash)
-        .with_context(|| format!("Mooncake hash {hash} exceeds the effective u32 token namespace"))
 }
 
 fn stable_member(
@@ -596,7 +571,7 @@ mod tests {
     }
 
     #[test]
-    fn preparation_rejects_hashes_that_alias_in_effective_u32_namespace() -> anyhow::Result<()> {
+    fn preparation_canonicalizes_raw_hashes_before_duplication() -> anyhow::Result<()> {
         let file = write_trace(&[serde_json::json!({
             "timestamp": 0,
             "input_length": 1,
@@ -606,8 +581,15 @@ mod tests {
         let mut spec = DcCkfCorpusSpec::new(file.path(), 1, 1);
         spec.trace_block_size = 1;
         spec.trace_duplication_factor = 2;
-        let error = prepare_dc_ckf_corpus(&spec).unwrap_err();
-        assert!(error.to_string().contains("effective u32 token namespace"));
+        let prepared = prepare_dc_ckf_corpus(&spec)?;
+        let hashes = prepared.worker_traces[0]
+            .sessions
+            .iter()
+            .flat_map(|session| &session.turns)
+            .flat_map(|turn| &turn.hash_ids)
+            .copied()
+            .collect::<FxHashSet<_>>();
+        assert_eq!(hashes, FxHashSet::from_iter([0, 1]));
         Ok(())
     }
 
