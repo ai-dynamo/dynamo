@@ -261,8 +261,31 @@ KVBM-based G1-G4 paths.
 
 ## Replayer API
 
-`Replayer` is the replay entrypoint used by Spica. One Spica candidate produces
-one `ReplaySpec`; `Replayer` executes it and returns one report:
+There are two replay compositions:
+
+| Replay | Composition |
+| --- | --- |
+| **AISim Replay** | The standalone replay implementation in the AISim repo. It owns `Replayer`, uses the `Generalized Mocker Engine`, and includes built-in round-robin placement. It has no Dynamo dependency. |
+| **Dynamo Replay** | The Dynamo-side composition. It depends on AISim Replay and adds Dynamo adapters such as `KvRouterPlacement` and the Planner adapter. |
+
+Unless explicitly qualified, `Replayer` and `replay` in this document refer to
+**AISim Replay**. Dynamo Replay reuses this Replayer rather than implementing a
+second replay event loop.
+
+The dependency direction is:
+
+```text
+Dynamo Replay -> AISim Replay -> Generalized Mocker Engine
+       |
+       +------> Dynamo Router and Planner adapters
+```
+
+Every replay has a `PlacementPolicy`; AISim Replay uses its built-in
+round-robin policy by default. Dynamo Replay may keep that default or select
+`KvRouterPlacement`.
+
+One Spica candidate produces one `ReplaySpec`; the selected replay composition
+invokes `Replayer` and returns one report:
 
 ```rust
 pub fn replay(spec: ReplaySpec) -> Result<TraceSimulationReport>;
@@ -280,6 +303,17 @@ Trace-file parsing, candidate generation, and adapter search-space generation
 happen before this call. Their configuration is materialized through the
 corresponding adapter boundaries; Spica does not construct Rust engine or
 placement-policy objects.
+
+Router and Planner fields in `ReplaySpec` are serializable policy
+configuration, not Rust or Python policy objects. AISim Replay constructs its
+built-in policies from this configuration. Dynamo Replay constructs the
+selected Dynamo adapters before driving the same Replayer.
+
+This is static source-level composition; it does not require a dynamic plugin,
+shared-object ABI, or RPC boundary. After repo extraction, the AISim Replay
+manifest has no direct Dynamo workspace dependencies. `dynamo-kv-router` and
+other Dynamo integration dependencies remain in Dynamo Replay, while
+`kvbm-logical` is removed rather than added back.
 
 Inside the call, `Replayer` owns the virtual clock, event queue, logical-worker
 fleet, worker lifecycle, `TraceCollector`, and adapter observations. It creates
