@@ -154,8 +154,13 @@ navigation:
                 path: kubernetes/dgd-aiconfigurator.mdx
               - page: Multinode Deployments
                 path: kubernetes/deployment/multinode-deployment.md
-              - page: Model Caching
-                path: kubernetes/model-caching.mdx
+              - section: Model Loading
+                collapsed: open-by-default
+                contents:
+                  - page: Model Caching
+                    path: kubernetes/model-caching.mdx
+                  - page: Fast Model Loading
+                    path: kubernetes/fast-model-loading.mdx
               - page: KV Cache Offloading
                 path: kubernetes/dgd-kv-offloading.mdx
 
@@ -546,6 +551,47 @@ navigation:
         contents:
           - page: Overview
             path: design-docs/architecture.md
+          - section: Concepts
+            collapsed: open-by-default
+            contents:
+              - section: System Architecture
+                collapsed: true
+                contents:
+                  - page: Architecture Flow
+                    path: design-docs/dynamo-flow.md
+                  - page: Distributed Runtime
+                    path: design-docs/distributed-runtime.md
+                  - page: Disaggregated Serving
+                    path: design-docs/disagg-serving.md
+              - section: Communication Planes
+                collapsed: true
+                contents:
+                  - page: Discovery Plane
+                    path: design-docs/discovery-plane.md
+                  - page: Request Plane
+                    path: design-docs/request-plane.md
+                  - page: Event Plane
+                    path: design-docs/event-plane.md
+              - page: Observability Architecture
+                path: design-docs/observability.md
+              - section: Simulation
+                collapsed: true
+                contents:
+                  - page: DynoSim Architecture
+                    path: design-docs/dynosim-architecture.md
+              - section: Fault Tolerance
+                collapsed: true
+                contents:
+                  - page: Request Migration Architecture
+                    path: design-docs/request-migration.md
+                  - page: Request Cancellation Architecture
+                    path: design-docs/request-cancellation.md
+                  - page: Request Rejection Architecture
+                    path: design-docs/request-rejection.md
+                  - page: Graceful Shutdown Architecture
+                    path: design-docs/graceful-shutdown.md
+                  - page: Fault Tolerance Testing
+                    path: design-docs/fault-tolerance-testing.md
           - section: Modular Components
             collapsed: open-by-default
             contents:
@@ -719,6 +765,13 @@ navigation:
                       - page: Multimodal
                         slug: vllm-multimodal
                         path: features/multimodal/multimodal-vllm.md
+                      - page: vLLM-Omni Disaggregated Serving
+                        path: design-docs/vllm-omni-disaggregated.md
+                  - section: Mocker
+                    collapsed: true
+                    contents:
+                      - page: Mocker Engine Architecture
+                        path: design-docs/mocker-architecture.md
           - section: Kubernetes
             collapsed: true
             contents:
@@ -750,6 +803,8 @@ navigation:
                     path: kubernetes/shadow-engine-failover.md
                   - page: Disagg Communication
                     path: kubernetes/disagg-communication-guide.md
+                  - page: Gateway API Routing
+                    path: design-docs/gateway-api-routing.md
               - section: Multinode
                 collapsed: true
                 contents:
@@ -763,47 +818,6 @@ navigation:
                     path: kubernetes/topology-aware-kv-transfer.md
                   - page: LWS
                     path: kubernetes/lws.md
-          - section: Design Documents
-            collapsed: true
-            contents:
-              - page: Architecture Flow
-                path: design-docs/dynamo-flow.md
-              - page: Disaggregated Serving
-                path: design-docs/disagg-serving.md
-              - page: vLLM-Omni Disaggregated Serving
-                path: design-docs/vllm-omni-disaggregated.md
-              - page: Distributed Runtime
-                path: design-docs/distributed-runtime.md
-              - page: Gateway API Routing
-                path: design-docs/gateway-api-routing.md
-              - page: Observability Architecture
-                path: design-docs/observability.md
-              - page: DynoSim Architecture
-                path: design-docs/dynosim-architecture.md
-              - page: Mocker Engine Architecture
-                path: design-docs/mocker-architecture.md
-              - section: Communication Planes
-                collapsed: true
-                contents:
-                  - page: Discovery Plane
-                    path: design-docs/discovery-plane.md
-                  - page: Request Plane
-                    path: design-docs/request-plane.md
-                  - page: Event Plane
-                    path: design-docs/event-plane.md
-              - section: Fault Tolerance
-                collapsed: true
-                contents:
-                  - page: Request Migration Architecture
-                    path: design-docs/request-migration.md
-                  - page: Request Cancellation Architecture
-                    path: design-docs/request-cancellation.md
-                  - page: Request Rejection Architecture
-                    path: design-docs/request-rejection.md
-                  - page: Graceful Shutdown Architecture
-                    path: design-docs/graceful-shutdown.md
-                  - page: Fault Tolerance Testing
-                    path: design-docs/fault-tolerance-testing.md
       - section: Contributing
         icon: code-pull-request
         contents:

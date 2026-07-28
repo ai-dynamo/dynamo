@@ -795,9 +795,9 @@ footer: ./components/CustomFooter.tsx
 
 layout:
   searchbar-placement: header
-  page-width: 1376px # Formerly 1376 px
+  page-width: 1376px
   sidebar-width: 272px
-  content-width: 912px # Formerly 812 px
+  content-width: 912px
   tabs-placement: header
   hide-feedback: true
 
