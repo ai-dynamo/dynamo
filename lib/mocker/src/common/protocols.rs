@@ -708,6 +708,7 @@ pub struct MockEngineArgs {
     /// scheduler. `None` selects native unless legacy offload requires KVBM.
     /// Ignored by the SGLang scheduler, which uses `SglangKvManager`.
     #[builder(default = "None", setter(strip_option))]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub g1_backend: Option<G1Backend>,
 
     #[builder(default = true)]
@@ -1003,6 +1004,14 @@ fn validate_mock_engine_args(args: &MockEngineArgs) -> Result<(), ValidationErro
         return Err(mock_engine_args_validation_error(
             "block_size_zero",
             "block_size must be greater than 0".to_string(),
+        ));
+    }
+
+    if args.g1_backend == Some(G1Backend::Native) && args.requires_kvbm_g1() {
+        return Err(mock_engine_args_validation_error(
+            "native_g1_legacy_offload_conflict",
+            "g1_backend=native cannot be combined with KVBM G2/G3/G4 offload; omit g1_backend to select KVBM automatically or set g1_backend=kvbm explicitly"
+                .to_string(),
         ));
     }
 
@@ -1420,31 +1429,33 @@ impl MockEngineArgs {
         }
     }
 
-    fn resolve_g1_backend(&mut self) {
-        let requires_kvbm = matches!(self.engine_type, EngineType::Vllm | EngineType::Trtllm)
-            && (self.num_g2_blocks.is_some()
-                || self.num_g3_blocks.is_some()
-                || self.enable_g4_storage);
-
-        self.g1_backend = Some(match (self.g1_backend, requires_kvbm) {
-            (Some(G1Backend::Native), true) => {
-                tracing::info!(
-                    requested_g1_backend = "native",
-                    selected_g1_backend = "kvbm",
-                    "KVBM offload requires the KVBM G1 backend; overriding explicit selection"
-                );
-                G1Backend::Kvbm
-            }
-            (Some(backend), _) => backend,
-            (None, true) => G1Backend::Kvbm,
-            (None, false) => G1Backend::Native,
-        });
+    fn requires_kvbm_g1(&self) -> bool {
+        matches!(self.engine_type, EngineType::Vllm | EngineType::Trtllm)
+            && (self.num_g2_blocks.is_some_and(|blocks| blocks > 0)
+                || self.num_g3_blocks.is_some_and(|blocks| blocks > 0)
+                || self.enable_g4_storage)
     }
 
-    /// Return the resolved backend, using the native default for raw,
-    /// unnormalized arguments.
+    fn resolve_g1_backend(&mut self) {
+        if self.g1_backend.is_none() {
+            self.g1_backend = Some(if self.requires_kvbm_g1() {
+                G1Backend::Kvbm
+            } else {
+                G1Backend::Native
+            });
+        }
+    }
+
+    /// Return the selected backend, resolving an unset raw configuration from
+    /// its engine and lower-tier offload settings.
     pub fn resolved_g1_backend(&self) -> G1Backend {
-        self.g1_backend.unwrap_or_default()
+        self.g1_backend.unwrap_or_else(|| {
+            if self.requires_kvbm_g1() {
+                G1Backend::Kvbm
+            } else {
+                G1Backend::Native
+            }
+        })
     }
 
     fn validate_config(&mut self) -> anyhow::Result<()> {
@@ -1664,6 +1675,14 @@ mod tests {
             restored.kv_transfer_timing_mode,
             KvTransferTimingMode::FullPrompt
         );
+    }
+
+    #[test]
+    fn test_mock_engine_args_json_omits_unset_g1_backend() {
+        let args = MockEngineArgs::builder().build().unwrap();
+        let serialized = serde_json::to_value(args).unwrap();
+
+        assert!(serialized.get("g1_backend").is_none());
     }
 
     #[test]
@@ -1888,22 +1907,45 @@ mod tests {
         ];
 
         for config in configs {
+            assert_eq!(config.resolved_g1_backend(), G1Backend::Kvbm);
             let args = config.normalized().unwrap();
             assert_eq!(args.g1_backend, Some(G1Backend::Kvbm));
         }
     }
 
     #[test]
-    fn test_explicit_native_g1_with_offload_selects_kvbm() {
+    fn test_explicit_native_g1_with_offload_is_rejected() {
+        for engine_type in [EngineType::Vllm, EngineType::Trtllm] {
+            let error = MockEngineArgs::builder()
+                .engine_type(engine_type)
+                .g1_backend(G1Backend::Native)
+                .num_g2_blocks(Some(8))
+                .build()
+                .unwrap()
+                .normalized()
+                .unwrap_err();
+
+            assert!(
+                error.to_string().contains("omit g1_backend"),
+                "unexpected error for {engine_type:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_explicit_native_g1_accepts_disabled_offload() {
         let args = MockEngineArgs::builder()
             .g1_backend(G1Backend::Native)
-            .num_g2_blocks(Some(8))
+            .num_g2_blocks(Some(0))
+            .num_g3_blocks(Some(0))
             .build()
             .unwrap()
             .normalized()
             .unwrap();
 
-        assert_eq!(args.g1_backend, Some(G1Backend::Kvbm));
+        assert_eq!(args.g1_backend, Some(G1Backend::Native));
+        assert_eq!(args.num_g2_blocks, None);
+        assert_eq!(args.num_g3_blocks, None);
     }
 
     #[test]

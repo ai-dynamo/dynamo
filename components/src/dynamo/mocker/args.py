@@ -259,9 +259,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=["kvbm", "native"],
         default=None,
         help="G1 manager for the shared vLLM/TRT-LLM scheduler. When unset, "
-        "native is used unless KVBM G2/G3/G4 offloading selects KVBM. An "
-        "explicit native selection is also overridden when offloading requires "
-        "KVBM. Ignored for SGLang.",
+        "native is used unless KVBM G2/G3/G4 offloading selects KVBM. Explicit "
+        "native cannot be combined with KVBM offloading. Ignored for SGLang.",
     )
     parser.add_argument(
         "--enable-chunked-prefill",
@@ -701,6 +700,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
 
     args = parser.parse_args(argv)
+
+    kvbm_offload_enabled = (
+        (args.num_g2_blocks or 0) > 0
+        or (args.num_g3_blocks or 0) > 0
+        or args.enable_g4_storage
+    )
+    if (
+        args.engine_type in ("vllm", "trtllm")
+        and args.g1_backend == "native"
+        and kvbm_offload_enabled
+    ):
+        parser.error(
+            "--g1-backend native cannot be combined with KVBM G2/G3/G4 "
+            "offload; omit --g1-backend to select KVBM automatically or set "
+            "--g1-backend kvbm explicitly"
+        )
+
     validate_worker_type_args(args)
 
     # Validate num_workers

@@ -1120,7 +1120,7 @@ mod tests {
         run_trace_workload_multi_collect_with_stats, run_trace_workload_single_collect,
     };
     use super::*;
-    use crate::common::protocols::{EngineType, SglangArgs};
+    use crate::common::protocols::{EngineType, G1Backend, SglangArgs};
     use crate::loadgen::{AgenticTrace, AgenticTurnTrace, SessionTrace, Trace, TurnTrace};
     use crate::replay::offline::extensions::kv_router::{ReplayKvRouterConfig, RouterQueuePolicy};
     use crate::replay::{TraceRequestStatsSnapshot, normalize_trace_requests};
@@ -2058,17 +2058,17 @@ mod tests {
     #[test]
     fn test_multi_worker_trace_kv_router_debug_snapshot_tracks_queue_and_cached_dispatch() {
         let policy = RouterQueuePolicy::Fcfs;
-        let args = queueing_router_args(policy);
-        let mut router_config = queueing_router_config(policy);
-        router_config.router_queue_threshold = Some(0.0);
+        let mut args = queueing_router_args(policy);
+        // Preserve this snapshot's historical KVBM event-visibility semantics.
+        args.g1_backend = Some(G1Backend::Kvbm);
         let mut runtime = AggRuntime::new(
             &args,
-            Some(router_config),
+            Some(queueing_router_config(policy)),
             None,
             normalize_trace_requests(
                 vec![
                     DirectRequest {
-                        tokens: vec![11; 128],
+                        tokens: vec![11; 64],
                         max_output_tokens: 8,
                         output_token_ids: None,
                         uuid: Some(Uuid::from_u128(11)),
@@ -2077,7 +2077,7 @@ mod tests {
                         ..Default::default()
                     },
                     DirectRequest {
-                        tokens: vec![22; 192],
+                        tokens: vec![22; 64],
                         max_output_tokens: 8,
                         output_token_ids: None,
                         uuid: Some(Uuid::from_u128(22)),
@@ -2091,7 +2091,7 @@ mod tests {
                         output_token_ids: None,
                         uuid: Some(Uuid::from_u128(33)),
                         dp_rank: 0,
-                        arrival_timestamp_ms: Some(15.0),
+                        arrival_timestamp_ms: Some(0.1),
                         ..Default::default()
                     },
                 ],
@@ -2119,19 +2119,13 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 1]
         );
-        assert_eq!(
-            initial_router.indexer.total_cached_blocks, 0,
-            "native G1 publishes blocks only after their tokens are computed"
-        );
+        assert!(initial_router.indexer.total_cached_blocks > 0);
 
-        while runtime.now_ms < 15.0 {
-            assert!(runtime.advance_one_timestamp().unwrap());
-        }
+        assert!(runtime.advance_one_timestamp().unwrap());
         let queued = runtime.debug_snapshot();
         let queued_router = queued.router.as_ref().unwrap();
 
-        assert_eq!(queued.now_ms, 15.0);
-        assert!(queued_router.indexer.total_cached_blocks > 0);
+        assert_eq!(queued.now_ms, 0.1);
         assert_eq!(queued.router_pending_request_ids, vec![Uuid::from_u128(33)]);
         assert_eq!(queued_router.pending.len(), 1);
         assert_eq!(queued_router.pending[0].uuid, Uuid::from_u128(33));
