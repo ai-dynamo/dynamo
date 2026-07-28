@@ -1090,6 +1090,9 @@ impl ModelWatcher {
                 && eid.component == *worker_component
                 && worker_set_key(eid, other_card.model_type, other_card.worker_type) == ws_key
         });
+        let endpoint_has_instances = active_instances.iter().any(|(eid, _)| {
+            eid.namespace == *worker_namespace && eid.component == *worker_component
+        });
 
         if !component_has_instances {
             // No more workers of this component in this namespace — remove its WorkerSet
@@ -1109,6 +1112,11 @@ impl ModelWatcher {
                         self.manager.unregister_alias_if_empty(alias, &model_name);
                     }
                 }
+            }
+
+            if !endpoint_has_instances {
+                self.manager
+                    .remove_hicache_caches(worker_namespace, worker_component);
             }
 
             // Activator-state cleanup depends on which component just went away.

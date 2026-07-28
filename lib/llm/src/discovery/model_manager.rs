@@ -148,8 +148,8 @@ pub struct ModelManager {
     /// Per-endpoint runtime config watchers. Keyed by EndpointId (includes namespace).
     runtime_configs: DashMap<EndpointId, RuntimeConfigWatch>,
 
-    /// Per-component HiCache state and its one Mooncake event subscriber.
-    hicache_caches: DashMap<String, HicacheSharedKvCache>,
+    /// Per-endpoint HiCache state and its one Mooncake event subscriber.
+    hicache_caches: DashMap<EndpointId, HicacheSharedKvCache>,
 
     /// Shared KV-source membership coordinators, scoped by exact serving endpoint.
     /// Weak ownership lets the discovery loop stop when its last consumer goes away.
@@ -1060,13 +1060,33 @@ impl ModelManager {
         runtime_configs: RuntimeConfigWatch,
     ) -> HicacheSharedKvCache {
         self.hicache_caches
-            .entry(endpoint.component().to_string())
+            .entry(endpoint.id())
             .or_insert_with(|| {
-                let cache = HicacheSharedKvCache::new(runtime_configs);
-                cache.start_subscriber(endpoint.component());
+                let cache = HicacheSharedKvCache::new_with_cancellation(
+                    runtime_configs,
+                    endpoint.component().drt().child_token(),
+                );
+                cache.start_subscriber();
                 cache
             })
             .clone()
+    }
+
+    pub fn remove_hicache_caches(&self, namespace: &str, component: &str) {
+        let endpoint_ids = self
+            .hicache_caches
+            .iter()
+            .filter(|entry| {
+                entry.key().namespace == namespace && entry.key().component == component
+            })
+            .map(|entry| entry.key().clone())
+            .collect::<Vec<_>>();
+
+        for endpoint_id in endpoint_ids {
+            if let Some((_, cache)) = self.hicache_caches.remove(&endpoint_id) {
+                cache.shutdown();
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2395,6 +2415,38 @@ mod tests {
 
         // Model should still exist (ns1 still there)
         assert!(mm.get_model("llama").is_some());
+    }
+
+    #[test]
+    fn remove_hicache_caches_cancels_only_the_removed_component() {
+        let manager = ModelManager::new();
+        let (_tx, runtime_configs) =
+            tokio::sync::watch::channel(HashMap::<WorkerId, ModelRuntimeConfig>::new());
+        let cancelled = tokio_util::sync::CancellationToken::new();
+        let retained = tokio_util::sync::CancellationToken::new();
+        manager.hicache_caches.insert(
+            EndpointId::from("ns.worker.generate"),
+            HicacheSharedKvCache::new_with_cancellation(runtime_configs.clone(), cancelled.clone()),
+        );
+        manager.hicache_caches.insert(
+            EndpointId::from("ns.other.generate"),
+            HicacheSharedKvCache::new_with_cancellation(runtime_configs, retained.clone()),
+        );
+
+        manager.remove_hicache_caches("ns", "worker");
+
+        assert!(cancelled.is_cancelled());
+        assert!(!retained.is_cancelled());
+        assert!(
+            !manager
+                .hicache_caches
+                .contains_key(&EndpointId::from("ns.worker.generate"))
+        );
+        assert!(
+            manager
+                .hicache_caches
+                .contains_key(&EndpointId::from("ns.other.generate"))
+        );
     }
 
     #[test]

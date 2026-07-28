@@ -24,18 +24,16 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
-use dynamo_kv_router::{
-    SharedKvCache,
-    indexer::KvRouterError,
-    protocols::{SharedCacheHits, WorkerId},
-};
-use dynamo_runtime::{component::Component, traits::DistributedRuntimeProvider};
-
 use crate::{
     discovery::RuntimeConfigWatch,
     kv_router::metrics::RoutingOverheadMetrics,
     local_model::runtime_config::ModelRuntimeConfig,
     utils::zmq::{connect_sub_socket, multipart_message},
+};
+use dynamo_kv_router::{
+    SharedKvCache,
+    indexer::KvRouterError,
+    protocols::{SharedCacheHits, WorkerId},
 };
 
 const SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY: &str = "sglang_hicache_mooncake";
@@ -86,23 +84,37 @@ pub struct HicacheSharedKvCache {
     group_states: Arc<DashMap<String, (u64, bool)>>,
     last_sequence: Arc<AtomicU64>,
     has_sequence: Arc<AtomicBool>,
+    cancellation_token: CancellationToken,
 }
 
 impl HicacheSharedKvCache {
     pub fn new(runtime_configs: RuntimeConfigWatch) -> Self {
+        Self::new_with_cancellation(runtime_configs, CancellationToken::new())
+    }
+
+    pub fn new_with_cancellation(
+        runtime_configs: RuntimeConfigWatch,
+        cancellation_token: CancellationToken,
+    ) -> Self {
         Self {
             runtime_configs,
             present_keys: Arc::new(DashSet::new()),
             group_states: Arc::new(DashMap::new()),
             last_sequence: Arc::new(AtomicU64::new(0)),
             has_sequence: Arc::new(AtomicBool::new(false)),
+            cancellation_token,
         }
     }
 
-    pub fn start_subscriber(&self, component: &Component) {
+    pub fn start_subscriber(&self) {
         let cache = self.clone();
-        let cancellation_token = component.drt().child_token();
+        let cancellation_token = self.cancellation_token.clone();
         tokio::spawn(async move { cache.run_subscriber(cancellation_token).await });
+    }
+
+    pub fn shutdown(&self) {
+        self.cancellation_token.cancel();
+        self.clear();
     }
 
     fn resolve_mooncake_config(&self) -> Option<SglangHicacheMooncakeConfig> {
