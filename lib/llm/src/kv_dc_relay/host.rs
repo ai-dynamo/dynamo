@@ -13,7 +13,8 @@
 //! dedicated Relay campaign before changing this ownership model; further producer optimization
 //! will likely be needed for substantially larger DC-scale pools.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -27,6 +28,7 @@ use dynamo_runtime::component::Component;
 use dynamo_runtime::protocols::EndpointId;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use parking_lot::Mutex;
+use rand::TryRngCore;
 use serde::Serialize;
 use tokio::sync::{RwLock, Semaphore, watch};
 use tokio::task::{JoinHandle, JoinSet};
@@ -37,10 +39,11 @@ use super::discovery::{
     DcMembershipView, DcMembershipWatch, EndpointMembership, KvCacheDomainKey,
     KvDcRelayDiscoveryConfig, MaterializationConflict,
 };
-use super::identity::{
-    CanonicalModelRegistration, DcPoolCatalog, ModelAliasBinding, ModelPoolBinding,
+use super::identity::{CanonicalModelRegistration, DcPoolCatalog};
+use super::pool_registry::{
+    PoolActorConfig, PoolAttachRequest, PoolAttachment, PoolRegistry, PoolRetirementMode,
+    drain_faults_while,
 };
-use super::pool_registry::{PoolActorConfig, PoolAttachRequest, PoolAttachment, PoolRegistry};
 use super::resolution::stable_dc_id;
 use crate::discovery::{KvSourceMembershipCoordinator, KvSourceMembershipWatch};
 #[cfg(feature = "ckf-diagnostics")]
@@ -387,7 +390,7 @@ impl KvDcRelay {
         let membership_rx = membership.subscribe();
         let statuses = Arc::new(RwLock::new(HashMap::new()));
         let dc_id: Arc<str> = Arc::from(dc_id);
-        let process_incarnation = component.drt().connection_id();
+        let process_incarnation = new_relay_incarnation()?;
         let ckf_dc_id = stable_dc_id(dc_id.as_ref());
         let pools = Arc::new(PoolRegistry::new(
             process_incarnation,
@@ -417,18 +420,6 @@ impl KvDcRelay {
             statuses,
             pools,
         })
-    }
-
-    pub async fn model_pool_bindings(&self) -> Vec<ModelPoolBinding> {
-        self.pools.model_pool_bindings().await
-    }
-
-    pub async fn model_alias_bindings(&self) -> Vec<ModelAliasBinding> {
-        self.pools.model_alias_bindings().await
-    }
-
-    pub async fn model_pool_bindings_for(&self, requested_model: &str) -> Vec<ModelPoolBinding> {
-        self.pools.model_pool_bindings_for(requested_model).await
     }
 
     pub fn pool_catalog(&self) -> DcPoolCatalog {
@@ -550,6 +541,13 @@ impl KvDcRelay {
         }
         Ok(())
     }
+}
+
+fn new_relay_incarnation() -> anyhow::Result<u64> {
+    let random_id = rand::rngs::OsRng
+        .try_next_u64()
+        .map_err(|error| anyhow::anyhow!("failed to generate Relay incarnation: {error}"))?;
+    Ok(random_id & (i64::MAX as u64))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -748,6 +746,7 @@ async fn run_endpoint_slot(
     let mut retry_delay = Duration::from_millis(100);
     let mut start_failures = 0u64;
     let mut registration_refresh_failures = 0u64;
+    let mut pending_faults = VecDeque::new();
 
     loop {
         let membership = metadata_rx.borrow_and_update().clone();
@@ -760,9 +759,10 @@ async fn run_endpoint_slot(
             }
         }
 
+        let mut runtime_config_changed = false;
         if let Some(membership) = &membership {
             if let Some(sender) = &config_tx {
-                sender.send_if_modified(|current| {
+                runtime_config_changed = sender.send_if_modified(|current| {
                     if current == &membership.runtime_configs {
                         return false;
                     }
@@ -778,38 +778,6 @@ async fn run_endpoint_slot(
                 );
                 source_watch = Some(coordinator.subscribe());
                 config_tx = Some(sender);
-            }
-        }
-
-        if let (Some(active), Some(membership)) = (runtime.as_mut(), membership.as_ref())
-            && membership.is_materializable()
-            && active.registrations != membership.registrations
-        {
-            match pools
-                .replace_registrations(&mut active.attachment, membership.registrations.clone())
-                .await
-            {
-                Ok(()) => {
-                    registration_refresh_failures = 0;
-                    active.registrations.clone_from(&membership.registrations);
-                }
-                Err(error) => {
-                    registration_refresh_failures = registration_refresh_failures.saturating_add(1);
-                    if registration_refresh_failures == 1 {
-                        tracing::warn!(
-                            %endpoint,
-                            %error,
-                            "Failed to refresh KV DC Relay model bindings"
-                        );
-                    } else {
-                        tracing::debug!(
-                            %endpoint,
-                            %error,
-                            registration_refresh_failures,
-                            "KV DC Relay model binding refresh failed again"
-                        );
-                    }
-                }
             }
         }
 
@@ -853,6 +821,7 @@ async fn run_endpoint_slot(
                 } else {
                     stop_endpoint_pool(active, &pools).await;
                 }
+                pending_faults.clear();
                 let mut current = status.write().await;
                 current.actor = None;
                 current.lifecycle = lifecycle;
@@ -869,7 +838,47 @@ async fn run_endpoint_slot(
             }
         }
 
+        if let (Some(active), Some(membership)) = (runtime.as_mut(), membership.as_ref())
+            && membership.is_materializable()
+            && active.registrations != membership.registrations
+        {
+            match refresh_pool_registrations(
+                &pools,
+                &mut active.attachment,
+                &active.binding,
+                desired_binding.as_ref(),
+                runtime_config_changed,
+                &membership.registrations,
+            )
+            .await
+            {
+                Ok(RegistrationRefresh::Skipped) => {}
+                Ok(RegistrationRefresh::Published) => {
+                    registration_refresh_failures = 0;
+                    active.registrations.clone_from(&membership.registrations);
+                }
+                Err(error) => {
+                    registration_refresh_failures = registration_refresh_failures.saturating_add(1);
+                    if registration_refresh_failures == 1 {
+                        tracing::warn!(
+                            %endpoint,
+                            %error,
+                            "Failed to refresh KV DC Relay model bindings"
+                        );
+                    } else {
+                        tracing::debug!(
+                            %endpoint,
+                            %error,
+                            registration_refresh_failures,
+                            "KV DC Relay model binding refresh failed again"
+                        );
+                    }
+                }
+            }
+        }
+
         if runtime.is_none()
+            && !runtime_config_changed
             && let (Some(binding), Some(membership), Some(membership_watch)) = (
                 desired_binding.clone(),
                 membership.clone(),
@@ -952,6 +961,9 @@ async fn run_endpoint_slot(
                 if changed.is_ok() { SlotInput::Source } else { SlotInput::SourceClosed }
             }
             fault = async {
+                if let Some(fault) = pending_faults.pop_front() {
+                    return Some(fault);
+                }
                 let Some(runtime) = runtime.as_mut() else {
                     return std::future::pending().await;
                 };
@@ -985,8 +997,9 @@ async fn run_endpoint_slot(
                 tracing::warn!(%endpoint, "KV DC Relay pool generation became unavailable; restarting pool actor");
                 status.write().await.lifecycle = SlotLifecycle::Fenced;
                 if let Some(active) = runtime.take() {
-                    stop_endpoint_pool(active, &pools).await;
+                    fence_endpoint_pool(active, &pools).await;
                 }
+                pending_faults.clear();
                 let mut current = status.write().await;
                 current.actor = None;
             }
@@ -1003,38 +1016,44 @@ async fn run_endpoint_slot(
                 match fault.disposition.action {
                     CkfFailureAction::ContinueCapacityOmission => {}
                     CkfFailureAction::ReportResourceFailure => {
-                        if let Some(active) = runtime.as_ref() {
-                            let disposition = active
-                                .recovery
-                                .client()
-                                .handle_target_fault(
+                        let mut retirement_mode = None;
+                        if let Some(active) = runtime.as_mut() {
+                            let client = active.recovery.client().clone();
+                            let disposition = collect_pending_while(
+                                &mut active.attachment.faults,
+                                &mut pending_faults,
+                                client.handle_target_fault(
                                     fault.worker_id,
                                     fault.dp_rank,
                                     fault.source_epoch,
                                     false,
-                                )
-                                .await;
-                            if disposition == TargetFaultDisposition::Fenced {
-                                active
-                                    .recovery
-                                    .client()
-                                    .reject_source(
-                                        fault.worker_id,
-                                        fault.dp_rank,
-                                        fault.source_epoch,
-                                    )
-                                    .await;
-                                status.write().await.lifecycle = SlotLifecycle::Fenced;
+                                ),
+                            )
+                            .await;
+                            retirement_mode = target_fault_retirement_mode(disposition);
+                        }
+                        if let Some(mode) = retirement_mode {
+                            status.write().await.lifecycle = SlotLifecycle::Fenced;
+                            if let Some(active) = runtime.take() {
+                                retire_endpoint_pool(active, &pools, mode).await;
                             }
+                            pending_faults.clear();
+                            status.write().await.actor = None;
                         }
                     }
                     CkfFailureAction::RejectSource => {
-                        if let Some(active) = runtime.as_ref() {
-                            active
-                                .recovery
-                                .client()
-                                .reject_source(fault.worker_id, fault.dp_rank, fault.source_epoch)
-                                .await;
+                        if let Some(active) = runtime.as_mut() {
+                            let client = active.recovery.client().clone();
+                            collect_pending_while(
+                                &mut active.attachment.faults,
+                                &mut pending_faults,
+                                client.reject_source(
+                                    fault.worker_id,
+                                    fault.dp_rank,
+                                    fault.source_epoch,
+                                ),
+                            )
+                            .await;
                         }
                     }
                     CkfFailureAction::FenceAndRebuildProducer => {
@@ -1044,6 +1063,7 @@ async fn run_endpoint_slot(
                         if let Some(active) = runtime.take() {
                             fence_endpoint_pool(active, &pools).await;
                         }
+                        pending_faults.clear();
                         status.write().await.actor = None;
                     }
                     CkfFailureAction::DeactivateAndSnapshot | CkfFailureAction::RetrySnapshot => {
@@ -1145,31 +1165,127 @@ async fn start_endpoint_pool(
 }
 
 async fn stop_endpoint_pool(active: EndpointPoolRuntime, pools: &PoolRegistry) {
-    active.recovery.shutdown().await;
-    let pool_id = active.attachment.pool_id;
-    let endpoint = active.binding.kv_state_endpoint.clone();
-    // Keep this await inline: `detach` owns the actor fault receiver and must complete its
-    // actor round-trip before the endpoint-slot task exits. The host joins every slot during
-    // retirement and shutdown rather than aborting it.
-    if let Err(error) = pools.detach(active.attachment).await {
-        tracing::warn!(%error, %pool_id, %endpoint, "Failed to detach KV DC Relay pool actor");
-    }
+    retire_endpoint_pool(active, pools, PoolRetirementMode::Graceful).await;
 }
 
 async fn fence_endpoint_pool(active: EndpointPoolRuntime, pools: &PoolRegistry) {
-    // Stop publication first. Recovery shutdown may attempt rank resets, but a producer whose
-    // exact state is suspect must not emit another apparently valid delta while being retired.
-    let pool_id = active.attachment.pool_id;
-    if let Err(error) = pools.fence(pool_id).await {
-        tracing::warn!(%error, %pool_id, "Failed to fence KV DC Relay pool generation cleanly");
+    retire_endpoint_pool(active, pools, PoolRetirementMode::Fenced).await;
+}
+
+async fn retire_endpoint_pool(
+    active: EndpointPoolRuntime,
+    pools: &PoolRegistry,
+    mode: PoolRetirementMode,
+) {
+    let EndpointPoolRuntime {
+        attachment,
+        recovery,
+        binding,
+        ..
+    } = active;
+    let PoolAttachment {
+        pool_id,
+        layout_generation,
+        handle,
+        mut faults,
+        ..
+    } = attachment;
+    let teardown = async {
+        match mode {
+            PoolRetirementMode::Graceful => {
+                recovery.shutdown().await;
+                handle.shutdown().await
+            }
+            PoolRetirementMode::Fenced => {
+                let ((), result) = tokio::join!(recovery.shutdown(), handle.fence());
+                result
+            }
+        }
+    };
+    let result = withdraw_drain_and_remove_pool(
+        pools,
+        pool_id,
+        layout_generation,
+        mode,
+        &mut faults,
+        teardown,
+    )
+    .await;
+    if let Err(error) = result {
+        tracing::warn!(
+            %error,
+            %pool_id,
+            endpoint = %binding.kv_state_endpoint,
+            ?mode,
+            "Failed to retire KV DC Relay pool actor"
+        );
     }
-    active.recovery.shutdown().await;
-    // Even though the pool is already fenced and absent from the catalog, drive detach to
-    // completion so its fault route is retired with the actor. The host joins
-    // this endpoint-slot task and never aborts the detach future.
-    if let Err(error) = pools.detach(active.attachment).await {
-        tracing::warn!(%error, %pool_id, "Failed to detach fenced KV DC Relay pool actor");
+}
+
+async fn withdraw_drain_and_remove_pool<T>(
+    pools: &PoolRegistry,
+    pool_id: PoolId,
+    layout_generation: u64,
+    mode: PoolRetirementMode,
+    faults: &mut tokio::sync::mpsc::Receiver<ActorFault>,
+    teardown: impl Future<Output = T>,
+) -> T {
+    if !pools.withdraw(pool_id, layout_generation, mode).await {
+        tracing::warn!(
+            %pool_id,
+            layout_generation,
+            ?mode,
+            "KV DC Relay pool generation was already absent during retirement"
+        );
     }
+    let result = drain_faults_while(pool_id, faults, teardown).await;
+    pools.remove(pool_id, layout_generation).await;
+    result
+}
+
+async fn collect_pending_while<T, U>(
+    receiver: &mut tokio::sync::mpsc::Receiver<U>,
+    pending: &mut VecDeque<U>,
+    future: impl Future<Output = T>,
+) -> T {
+    tokio::pin!(future);
+    loop {
+        tokio::select! {
+            result = &mut future => return result,
+            item = receiver.recv() => match item {
+                Some(item) => pending.push_back(item),
+                None => return future.await,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegistrationRefresh {
+    Skipped,
+    Published,
+}
+
+async fn refresh_pool_registrations(
+    pools: &PoolRegistry,
+    attachment: &mut PoolAttachment,
+    active_binding: &ActorBinding,
+    desired_binding: Option<&ActorBinding>,
+    runtime_config_changed: bool,
+    desired_registrations: &[CanonicalModelRegistration],
+) -> anyhow::Result<RegistrationRefresh> {
+    if runtime_config_changed || Some(active_binding) != desired_binding {
+        return Ok(RegistrationRefresh::Skipped);
+    }
+
+    pools
+        .replace_registrations(attachment, desired_registrations.to_vec())
+        .await?;
+    Ok(RegistrationRefresh::Published)
+}
+
+fn target_fault_retirement_mode(disposition: TargetFaultDisposition) -> Option<PoolRetirementMode> {
+    (disposition == TargetFaultDisposition::Fenced).then_some(PoolRetirementMode::Fenced)
 }
 
 #[cfg(feature = "ckf-diagnostics")]
@@ -1349,8 +1465,15 @@ fn actor_health(handle: &KvDcRelayHandle) -> KvDcRelayActorStats {
 
 #[cfg(test)]
 mod tests {
-    use dynamo_kv_router::identity::{
-        CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, RoutingScopeId,
+    use dynamo_kv_router::{
+        identity::{CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, RoutingScopeId},
+        protocols::{KV_EVENT_SUBJECT, WorkerWithDpRank},
+    };
+    use dynamo_runtime::{
+        DistributedRuntime, Runtime,
+        discovery::{DiscoveryInstance, DiscoverySpec, EventTransportKind},
+        distributed::DistributedConfig,
+        transports::event_plane::{EventPublisher, EventScope},
     };
 
     use super::*;
@@ -1371,6 +1494,124 @@ mod tests {
             runtime_configs: HashMap::new(),
             conflicts: Vec::new(),
         }
+    }
+
+    fn domain(seed: u8, artifact: &str) -> KvCacheDomainKey {
+        KvCacheDomainKey {
+            id: IndexerDomainId::new(
+                CacheSemanticsId::new([seed; 16], IdentitySource::Explicit),
+                RoutingScopeId::new([seed.wrapping_add(1); 16], IdentitySource::Explicit),
+            ),
+            diagnostic_model_artifact: artifact.to_string(),
+            kv_block_size: 64,
+            event_hash_format: 1,
+        }
+    }
+
+    fn registry() -> PoolRegistry {
+        PoolRegistry::new(
+            7,
+            PoolActorConfig {
+                expected_unique_blocks: 32,
+                publication_threshold: 1,
+                publication_delay: Duration::from_millis(1),
+            },
+        )
+    }
+
+    async fn test_component(name: &str) -> Component {
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime, DistributedConfig::process_local())
+            .await
+            .unwrap();
+        drt.namespace(format!("kv-dc-relay-{name}"))
+            .unwrap()
+            .component("relay")
+            .unwrap()
+    }
+
+    async fn register_live_source(
+        component: &Component,
+        endpoint: &EndpointId,
+        worker: WorkerWithDpRank,
+    ) -> EventPublisher {
+        let publisher = EventPublisher::for_endpoint_id_with_transport(
+            component.drt(),
+            endpoint,
+            KV_EVENT_SUBJECT,
+            EventTransportKind::Zmq,
+        )
+        .await
+        .unwrap();
+        let source = crate::discovery::KvEventSource {
+            kv_state_endpoint: endpoint.clone(),
+            worker,
+            publisher_id: publisher.publisher_id(),
+            recovery_target: None,
+        };
+        component
+            .drt()
+            .discovery()
+            .register(DiscoverySpec::EventSource {
+                scope: EventScope::Endpoint {
+                    endpoint: endpoint.clone(),
+                },
+                topic: KV_EVENT_SUBJECT.to_string(),
+                publisher_id: publisher.publisher_id(),
+                metadata: serde_json::to_value(source).unwrap(),
+            })
+            .await
+            .unwrap();
+        publisher
+    }
+
+    fn projected_membership(
+        endpoint: &EndpointId,
+        worker_id: WorkerId,
+        model: &str,
+        artifact: &str,
+        kv_state_endpoint: EndpointId,
+    ) -> EndpointMembership {
+        let mut card = crate::model_card::ModelDeploymentCard::with_name_only(model);
+        card.source_path = Some(artifact.to_string());
+        card.kv_cache_block_size = 64;
+        card.runtime_config = ModelRuntimeConfig {
+            data_parallel_start_rank: 0,
+            data_parallel_size: 1,
+            enable_local_indexer: true,
+            kv_state_endpoint: Some(kv_state_endpoint),
+            ..ModelRuntimeConfig::default()
+        };
+        let instance = DiscoveryInstance::Model {
+            namespace: endpoint.namespace.clone(),
+            component: endpoint.component.clone(),
+            endpoint: endpoint.name.clone(),
+            instance_id: worker_id,
+            card_json: serde_json::to_value(card).unwrap(),
+            model_suffix: None,
+        };
+        super::super::discovery::project_instances_for_test(vec![instance])
+            .endpoints
+            .get(endpoint)
+            .cloned()
+            .unwrap()
+    }
+
+    async fn wait_for_catalog(
+        receiver: &mut watch::Receiver<DcPoolCatalog>,
+        predicate: impl Fn(&DcPoolCatalog) -> bool,
+    ) -> DcPoolCatalog {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let catalog = receiver.borrow_and_update().clone();
+                if predicate(&catalog) {
+                    return catalog;
+                }
+                receiver.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("Relay catalog transition timed out")
     }
 
     #[tokio::test]
@@ -1401,16 +1642,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repeated_relay_start_on_one_component_uses_a_new_process_incarnation() {
+        let component = test_component("incarnation").await;
+        let first = KvDcRelay::start(
+            component.clone(),
+            "test-dc".to_string(),
+            KvDcRelayConfig::default(),
+        )
+        .await
+        .unwrap();
+        let first_incarnation = first.pool_catalog().process_incarnation();
+        first.shutdown().await.unwrap();
+
+        let second = KvDcRelay::start(component, "test-dc".to_string(), KvDcRelayConfig::default())
+            .await
+            .unwrap();
+        let second_incarnation = second.pool_catalog().process_incarnation();
+        second.shutdown().await.unwrap();
+
+        assert_ne!(first_incarnation, second_incarnation);
+    }
+
+    #[tokio::test]
     async fn duplicate_pool_owners_are_all_fenced_and_make_health_unhealthy() {
-        let domain = KvCacheDomainKey {
-            id: IndexerDomainId::new(
-                CacheSemanticsId::new([1; 16], IdentitySource::Explicit),
-                RoutingScopeId::new([2; 16], IdentitySource::Explicit),
-            ),
-            diagnostic_model_artifact: "meta/llama".to_string(),
-            kv_block_size: 64,
-            event_hash_format: 1,
-        };
+        let domain = domain(1, "meta/llama");
         let first = membership("prod.backend.fast", domain.clone());
         let second = membership("prod.backend.slow", domain);
         let mut view = DcMembershipView {
@@ -1448,19 +1703,285 @@ mod tests {
             membership: Mutex::new(None),
             supervisor: Mutex::new(None),
             statuses,
-            pools: Arc::new(PoolRegistry::new(
-                7,
-                PoolActorConfig {
-                    expected_unique_blocks: 32,
-                    publication_threshold: 1,
-                    publication_delay: Duration::from_millis(1),
-                },
-            )),
+            pools: Arc::new(registry()),
         };
 
         let health = relay.health().await;
         assert!(!health.healthy);
         assert_eq!(health.fenced_endpoint_count, 2);
         assert_eq!(health.active_endpoint_count, 0);
+    }
+
+    #[tokio::test]
+    async fn binding_change_never_publishes_new_model_with_old_producer() {
+        let registry = registry();
+        let mut catalog_rx = registry.watch_catalog();
+        let old_domain = domain(1, "meta/llama");
+        let new_domain = domain(3, "meta/llama-v2");
+        let old_binding = ActorBinding {
+            domain: old_domain.clone(),
+            kv_state_endpoint: EndpointId::from("prod.backend.old-kv"),
+        };
+        let desired_binding = ActorBinding {
+            domain: new_domain,
+            kv_state_endpoint: EndpointId::from("prod.backend.new-kv"),
+        };
+        let mut old_attachment = registry
+            .attach(PoolAttachRequest {
+                pool_id: PoolId::new(old_domain.id, DcId::new(7)),
+                endpoint: EndpointId::from("prod.backend.generate"),
+                registrations: vec![CanonicalModelRegistration::new(
+                    super::super::identity::CanonicalModelId::new("llama").unwrap(),
+                    Vec::new(),
+                )],
+            })
+            .await
+            .unwrap();
+        catalog_rx.changed().await.unwrap();
+        let old_catalog = catalog_rx.borrow_and_update().clone();
+        let old_producer = old_catalog.pools()[0].producer();
+        let new_registrations = vec![CanonicalModelRegistration::new(
+            super::super::identity::CanonicalModelId::new("llama-v2").unwrap(),
+            Vec::new(),
+        )];
+
+        assert_eq!(
+            refresh_pool_registrations(
+                &registry,
+                &mut old_attachment,
+                &old_binding,
+                Some(&desired_binding),
+                false,
+                &new_registrations,
+            )
+            .await
+            .unwrap(),
+            RegistrationRefresh::Skipped
+        );
+        assert!(!catalog_rx.has_changed().unwrap());
+        assert_eq!(
+            old_catalog.pools()[0].registrations()[0].model().as_str(),
+            "llama"
+        );
+
+        registry.detach(old_attachment).await.unwrap();
+        catalog_rx.changed().await.unwrap();
+        let withdrawn_catalog = catalog_rx.borrow_and_update().clone();
+        assert!(withdrawn_catalog.pools().is_empty());
+
+        let new_attachment = registry
+            .attach(PoolAttachRequest {
+                pool_id: PoolId::new(desired_binding.domain.id, DcId::new(7)),
+                endpoint: EndpointId::from("prod.backend.generate"),
+                registrations: new_registrations,
+            })
+            .await
+            .unwrap();
+        catalog_rx.changed().await.unwrap();
+        let new_catalog = catalog_rx.borrow_and_update().clone();
+        assert_ne!(new_catalog.pools()[0].producer(), old_producer);
+        assert_eq!(
+            new_catalog.pools()[0].registrations()[0].model().as_str(),
+            "llama-v2"
+        );
+
+        for catalog in [&old_catalog, &withdrawn_catalog, &new_catalog] {
+            assert!(!catalog.pools().iter().any(|descriptor| {
+                descriptor.producer() == old_producer
+                    && descriptor
+                        .registrations()
+                        .iter()
+                        .any(|registration| registration.model().as_str() == "llama-v2")
+            }));
+        }
+
+        registry.detach(new_attachment).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn mdc_binding_transition_never_publishes_new_model_with_old_producer() {
+        let component = test_component("mdc-transition").await;
+        let worker_id = component.drt().connection_id();
+        let worker = WorkerWithDpRank::new(worker_id, 0);
+        let serving_endpoint = EndpointId::from("relay-test.backend.generate");
+        let old_kv_endpoint = EndpointId::from("relay-test.backend.kv-old");
+        let new_kv_endpoint = EndpointId::from("relay-test.backend.kv-new");
+        let _old_publisher = register_live_source(&component, &old_kv_endpoint, worker).await;
+        let _new_publisher = register_live_source(&component, &new_kv_endpoint, worker).await;
+        let old_membership = projected_membership(
+            &serving_endpoint,
+            worker_id,
+            "llama",
+            "meta/llama",
+            old_kv_endpoint,
+        );
+        let new_membership = projected_membership(
+            &serving_endpoint,
+            worker_id,
+            "llama-v2",
+            "meta/llama-v2",
+            new_kv_endpoint,
+        );
+        let (metadata_tx, metadata_rx) = watch::channel(Some(old_membership));
+        let status = Arc::new(RwLock::new(EndpointSlotStatus::default()));
+        let registry = Arc::new(registry());
+        let mut catalog_rx = registry.watch_catalog();
+        let slot_cancel = CancellationToken::new();
+        let slot = tokio::spawn(run_endpoint_slot(
+            component,
+            DcId::new(7),
+            serving_endpoint,
+            metadata_rx,
+            status,
+            Arc::new(Semaphore::new(1)),
+            Arc::new(Semaphore::new(1)),
+            registry,
+            Duration::from_secs(1),
+            slot_cancel.clone(),
+        ));
+
+        let old_catalog = wait_for_catalog(&mut catalog_rx, |catalog| {
+            catalog
+                .pools()
+                .iter()
+                .any(|descriptor| descriptor.registrations()[0].model().as_str() == "llama")
+        })
+        .await;
+        let old_producer = old_catalog.pools()[0].producer();
+
+        metadata_tx.send_replace(Some(new_membership));
+        let new_catalog =
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    catalog_rx.changed().await.unwrap();
+                    let catalog = catalog_rx.borrow_and_update().clone();
+                    assert!(!catalog.pools().iter().any(|descriptor| {
+                        descriptor.producer() == old_producer
+                            && descriptor
+                                .registrations()
+                                .iter()
+                                .any(|registration| registration.model().as_str() == "llama-v2")
+                    }));
+                    if catalog.pools().iter().any(|descriptor| {
+                        descriptor.registrations()[0].model().as_str() == "llama-v2"
+                    }) {
+                        return catalog;
+                    }
+                }
+            })
+            .await
+            .expect("replacement Relay catalog generation timed out");
+        assert_ne!(new_catalog.pools()[0].producer(), old_producer);
+
+        slot_cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(5), slot)
+            .await
+            .expect("endpoint slot shutdown timed out")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn pool_is_withdrawn_before_recovery_teardown_completes() {
+        let registry = Arc::new(registry());
+        let attachment = registry
+            .attach(PoolAttachRequest {
+                pool_id: PoolId::new(domain(1, "meta/llama").id, DcId::new(7)),
+                endpoint: EndpointId::from("prod.backend.generate"),
+                registrations: vec![CanonicalModelRegistration::new(
+                    super::super::identity::CanonicalModelId::new("llama").unwrap(),
+                    Vec::new(),
+                )],
+            })
+            .await
+            .unwrap();
+        let PoolAttachment {
+            pool_id,
+            layout_generation,
+            handle,
+            mut faults,
+            ..
+        } = attachment;
+        let (teardown_started, teardown_started_rx) = tokio::sync::oneshot::channel();
+        let (release_teardown, release_teardown_rx) = tokio::sync::oneshot::channel();
+        let retirement_registry = registry.clone();
+        let retirement = tokio::spawn(async move {
+            withdraw_drain_and_remove_pool(
+                &retirement_registry,
+                pool_id,
+                layout_generation,
+                PoolRetirementMode::Graceful,
+                &mut faults,
+                async move {
+                    let _ = teardown_started.send(());
+                    let _ = release_teardown_rx.await;
+                    handle.shutdown().await
+                },
+            )
+            .await
+        });
+
+        teardown_started_rx.await.unwrap();
+        assert!(registry.catalog().pools().is_empty());
+        assert_eq!(registry.pool_count().await, 1);
+
+        release_teardown.send(()).unwrap();
+        retirement.await.unwrap().unwrap();
+        assert_eq!(registry.pool_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn recovery_wait_drains_pending_faults_in_order() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
+        sender.send(1u8).await.unwrap();
+        sender.send(2u8).await.unwrap();
+        let capacity_sender = sender.clone();
+        let mut pending = VecDeque::new();
+
+        let result = collect_pending_while(&mut receiver, &mut pending, async move {
+            while capacity_sender.capacity() != 2 {
+                tokio::task::yield_now().await;
+            }
+            7
+        })
+        .await;
+
+        assert_eq!(result, 7);
+        assert_eq!(pending, VecDeque::from([1, 2]));
+    }
+
+    #[tokio::test]
+    async fn fenced_target_disposition_withdraws_the_pool_generation() {
+        let registry = registry();
+        let domain = domain(1, "meta/llama");
+        let attachment = registry
+            .attach(PoolAttachRequest {
+                pool_id: PoolId::new(domain.id, DcId::new(7)),
+                endpoint: EndpointId::from("prod.backend.generate"),
+                registrations: vec![CanonicalModelRegistration::new(
+                    super::super::identity::CanonicalModelId::new("llama").unwrap(),
+                    Vec::new(),
+                )],
+            })
+            .await
+            .unwrap();
+        let mode = target_fault_retirement_mode(TargetFaultDisposition::Fenced).unwrap();
+        assert!(
+            registry
+                .withdraw(attachment.pool_id, attachment.layout_generation, mode)
+                .await
+        );
+        assert!(registry.catalog().pools().is_empty());
+
+        let PoolAttachment {
+            pool_id,
+            layout_generation,
+            handle,
+            mut faults,
+            ..
+        } = attachment;
+        drain_faults_while(pool_id, &mut faults, handle.fence())
+            .await
+            .unwrap();
+        assert!(registry.remove(pool_id, layout_generation).await);
     }
 }

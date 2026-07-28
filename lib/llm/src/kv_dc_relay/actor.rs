@@ -252,6 +252,18 @@ fn actor_fault_category(disposition: CkfFailureDisposition) -> ActorFaultCategor
     }
 }
 
+async fn send_actor_fault(
+    sender: &mpsc::Sender<ActorFault>,
+    fence: &CancellationToken,
+    fault: ActorFault,
+) -> bool {
+    tokio::select! {
+        biased;
+        _ = fence.cancelled() => false,
+        result = sender.send(fault) => result.is_ok(),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct StreamScope {
     pub(super) process_incarnation: u64,
@@ -933,8 +945,10 @@ async fn run_actor(
                         source_epoch.get()
                     );
                     diagnostics.record_error(&message);
-                    if fault_tx
-                        .send(ActorFault {
+                    if !send_actor_fault(
+                        &fault_tx,
+                        &fence,
+                        ActorFault {
                             worker_id,
                             dp_rank,
                             source_epoch,
@@ -942,10 +956,11 @@ async fn run_actor(
                             category: actor_fault_category(disposition),
                             disposition,
                             message,
-                        })
-                        .await
-                        .is_err()
+                        },
+                    )
+                    .await
                     {
+                        discard_tail = fence.is_cancelled();
                         break;
                     }
                     diagnostics.finish_command();
@@ -1026,8 +1041,10 @@ async fn run_actor(
                     let message = error.to_string();
                     let category = actor_fault_category(disposition);
                     diagnostics.record_error(&message);
-                    if fault_tx
-                        .send(ActorFault {
+                    if !send_actor_fault(
+                        &fault_tx,
+                        &fence,
+                        ActorFault {
                             worker_id,
                             dp_rank,
                             source_epoch,
@@ -1035,10 +1052,11 @@ async fn run_actor(
                             category,
                             disposition,
                             message,
-                        })
-                        .await
-                        .is_err()
+                        },
+                    )
+                    .await
                     {
+                        discard_tail = fence.is_cancelled();
                         break;
                     }
                 }
@@ -1587,6 +1605,37 @@ mod tests {
                 .await,
             Err(KvDcRelayError::ShuttingDown)
         ));
+    }
+
+    #[tokio::test]
+    async fn producer_fence_interrupts_a_full_fault_channel() {
+        let worker = WorkerWithDpRank::new(1, 0);
+        let (handle, faults) =
+            KvDcRelayHandle::spawn(CkfConfig::new(32), scope("fault-backpressure")).unwrap();
+        handle
+            .admit_event(SourceEpoch::new(0), stored(worker, 1, &[1]))
+            .await
+            .unwrap();
+        handle.flush().await.unwrap();
+
+        for event_id in 2..=(DEFAULT_FAULT_CAPACITY as u64 + 2) {
+            handle
+                .admit_event(SourceEpoch::new(1), stored(worker, event_id, &[event_id]))
+                .await
+                .unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while faults.len() != DEFAULT_FAULT_CAPACITY || handle.mailbox_depth() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("actor must block after filling the fault channel");
+
+        tokio::time::timeout(Duration::from_secs(1), handle.fence())
+            .await
+            .expect("fence must interrupt a blocked fault send")
+            .unwrap();
     }
 
     #[tokio::test]

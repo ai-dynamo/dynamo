@@ -190,6 +190,18 @@ struct ProjectedBaseCard<'a> {
     aliases: Vec<ModelAlias>,
 }
 
+#[derive(Debug)]
+struct StoredModelCard {
+    card: ModelDeploymentCard,
+    serialized: serde_json::Value,
+}
+
+impl PartialEq for StoredModelCard {
+    fn eq(&self, other: &Self) -> bool {
+        self.serialized == other.serialized
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct BindingIdentity {
     model: CanonicalModelId,
@@ -299,12 +311,14 @@ impl DcMembershipWatch {
 }
 
 struct MembershipState {
-    cards: HashMap<ModelCardInstanceId, ModelDeploymentCard>,
+    cards: HashMap<ModelCardInstanceId, StoredModelCard>,
     next_membership_generation: u64,
     previous: Arc<HashMap<EndpointId, EndpointMembership>>,
     warned_invalid_models: HashSet<ModelCardInstanceId>,
     warned_invalid_aliases: HashSet<(ModelCardInstanceId, String)>,
     warned_orphan_adapters: HashSet<ModelCardInstanceId>,
+    #[cfg(test)]
+    projection_count: usize,
 }
 
 impl Default for MembershipState {
@@ -316,12 +330,18 @@ impl Default for MembershipState {
             warned_invalid_models: HashSet::new(),
             warned_invalid_aliases: HashSet::new(),
             warned_orphan_adapters: HashSet::new(),
+            #[cfg(test)]
+            projection_count: 0,
         }
     }
 }
 
 impl MembershipState {
-    fn replace_all(&mut self, instances: Vec<DiscoveryInstance>, filter: &DcDiscoveryFilter) {
+    fn replace_all(
+        &mut self,
+        instances: Vec<DiscoveryInstance>,
+        filter: &DcDiscoveryFilter,
+    ) -> bool {
         let mut next = HashMap::new();
         for instance in instances {
             let Some((id, card)) = decode_card(instance) else {
@@ -331,27 +351,40 @@ impl MembershipState {
                 next.insert(id, card);
             }
         }
+        if self.cards == next {
+            return false;
+        }
         self.cards = next;
+        true
     }
 
-    fn apply(&mut self, event: DiscoveryEvent, filter: &DcDiscoveryFilter) {
+    fn apply(&mut self, event: DiscoveryEvent, filter: &DcDiscoveryFilter) -> bool {
         match event {
             DiscoveryEvent::Added(instance) => {
                 let Some((id, card)) = decode_card(instance) else {
-                    return;
+                    return false;
                 };
                 if filter.matches(&endpoint_id(&id)) {
+                    if self.cards.get(&id) == Some(&card) {
+                        return false;
+                    }
                     self.cards.insert(id, card);
+                    return true;
                 }
+                false
             }
             DiscoveryEvent::Removed(DiscoveryInstanceId::Model(id)) => {
-                self.cards.remove(&id);
+                self.cards.remove(&id).is_some()
             }
-            DiscoveryEvent::Removed(_) => {}
+            DiscoveryEvent::Removed(_) => false,
         }
     }
 
     fn view(&mut self, filter: &DcDiscoveryFilter) -> DcMembershipView {
+        #[cfg(test)]
+        {
+            self.projection_count = self.projection_count.saturating_add(1);
+        }
         let mut diagnostics = ProjectionDiagnostics::new(
             &self.warned_invalid_models,
             &self.warned_invalid_aliases,
@@ -359,10 +392,13 @@ impl MembershipState {
         );
         let mut grouped: HashMap<EndpointId, Vec<(&ModelCardInstanceId, &ModelDeploymentCard)>> =
             HashMap::new();
-        for (id, card) in &self.cards {
+        for (id, stored) in &self.cards {
             let endpoint = endpoint_id(id);
             if filter.matches(&endpoint) {
-                grouped.entry(endpoint).or_default().push((id, card));
+                grouped
+                    .entry(endpoint)
+                    .or_default()
+                    .push((id, &stored.card));
             }
         }
 
@@ -623,6 +659,14 @@ impl MembershipState {
     }
 }
 
+#[cfg(test)]
+pub(super) fn project_instances_for_test(instances: Vec<DiscoveryInstance>) -> DcMembershipView {
+    let filter = DcDiscoveryFilter::default();
+    let mut state = MembershipState::default();
+    state.replace_all(instances, &filter);
+    state.view(&filter)
+}
+
 async fn run_membership_watch(
     discovery: Arc<dyn Discovery>,
     queries: Vec<DiscoveryQuery>,
@@ -672,8 +716,9 @@ async fn run_membership_watch(
                     Some(Ok(Some(event))) => {
                         watch_failures = 0;
                         retry_delay = Duration::from_millis(100);
-                        state.apply(event, &filter);
-                        publish_membership_if_changed(&sender, state.view(&filter));
+                        if state.apply(event, &filter) {
+                            publish_membership_if_changed(&sender, state.view(&filter));
+                        }
                     }
                     Some(Err(error)) => {
                         watch_failures = watch_failures.saturating_add(1);
@@ -705,8 +750,9 @@ async fn run_membership_watch(
                         watch_failures = 0;
                         reconcile_failures = 0;
                         retry_delay = Duration::from_millis(100);
-                        state.replace_all(instances, &filter);
-                        publish_membership_if_changed(&sender, state.view(&filter));
+                        if state.replace_all(instances, &filter) {
+                            publish_membership_if_changed(&sender, state.view(&filter));
+                        }
                     }
                     Err(error) => {
                         reconcile_failures = reconcile_failures.saturating_add(1);
@@ -780,12 +826,21 @@ async fn retry_or_cancel(delay: Duration, cancel: &CancellationToken) -> bool {
     }
 }
 
-fn decode_card(instance: DiscoveryInstance) -> Option<(ModelCardInstanceId, ModelDeploymentCard)> {
+fn decode_card(instance: DiscoveryInstance) -> Option<(ModelCardInstanceId, StoredModelCard)> {
     let DiscoveryInstanceId::Model(id) = instance.id() else {
         return None;
     };
+    let DiscoveryInstance::Model { card_json, .. } = &instance else {
+        return None;
+    };
     match instance.deserialize_model::<ModelDeploymentCard>() {
-        Ok(card) => Some((id, card)),
+        Ok(card) => Some((
+            id,
+            StoredModelCard {
+                card,
+                serialized: card_json.clone(),
+            },
+        )),
         Err(error) => {
             tracing::warn!(instance = %id.to_path(), %error, "Ignoring malformed KV DC Relay model card");
             None
@@ -925,22 +980,46 @@ mod tests {
     fn unchanged_membership_does_not_advance_the_watch_version() {
         let filter = DcDiscoveryFilter::default();
         let mut state = MembershipState::default();
-        state.apply(
-            DiscoveryEvent::Added(instance(
-                "generate",
-                1,
-                None,
-                card("llama", "meta/llama", 64),
-            )),
-            &filter,
-        );
+        let first = instance("generate", 1, None, card("llama", "meta/llama", 64));
+        assert!(state.apply(DiscoveryEvent::Added(first.clone()), &filter));
         let initial = state.view(&filter);
         let (sender, mut receiver) = watch::channel(initial.clone());
+        let projection_count = state.projection_count;
 
-        publish_membership_if_changed(&sender, state.view(&filter));
+        let changed = state.apply(DiscoveryEvent::Added(first.clone()), &filter);
+        if changed {
+            publish_membership_if_changed(&sender, state.view(&filter));
+        }
+        assert!(!changed);
+        assert_eq!(state.projection_count, projection_count);
         assert!(!receiver.has_changed().unwrap());
 
-        state.apply(
+        let changed = state.replace_all(vec![first], &filter);
+        if changed {
+            publish_membership_if_changed(&sender, state.view(&filter));
+        }
+        assert!(!changed);
+        assert_eq!(state.projection_count, projection_count);
+        assert!(!receiver.has_changed().unwrap());
+
+        let changed = state.apply(
+            DiscoveryEvent::Removed(DiscoveryInstanceId::Model(ModelCardInstanceId {
+                namespace: "prod".to_string(),
+                component: "backend".to_string(),
+                endpoint: "generate".to_string(),
+                instance_id: 999,
+                model_suffix: None,
+            })),
+            &filter,
+        );
+        if changed {
+            publish_membership_if_changed(&sender, state.view(&filter));
+        }
+        assert!(!changed);
+        assert_eq!(state.projection_count, projection_count);
+        assert!(!receiver.has_changed().unwrap());
+
+        let changed = state.apply(
             DiscoveryEvent::Added(instance(
                 "generate",
                 2,
@@ -949,7 +1028,11 @@ mod tests {
             )),
             &filter,
         );
-        publish_membership_if_changed(&sender, state.view(&filter));
+        if changed {
+            publish_membership_if_changed(&sender, state.view(&filter));
+        }
+        assert!(changed);
+        assert_eq!(state.projection_count, projection_count + 1);
         assert!(receiver.has_changed().unwrap());
         assert_ne!(*receiver.borrow_and_update(), initial);
     }
