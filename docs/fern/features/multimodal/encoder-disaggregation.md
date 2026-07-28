@@ -47,6 +47,9 @@ For simple deployments or development/testing, the aggregated (EPD) pattern is e
 ## Launching
 
 <Tabs>
+<Tab title="NVIDIA GPU">
+
+<Tabs>
   <Tab title="vLLM" language="vllm">
     ```bash
     cd $DYNAMO_HOME/examples/backends/vllm
@@ -82,12 +85,42 @@ For simple deployments or development/testing, the aggregated (EPD) pattern is e
   </Tab>
 </Tabs>
 
+</Tab>
+<Tab title="Intel GPU">
+
+The vLLM XPU E/P/D launcher selects `ZE_AFFINITY_MASK` and configures vLLM's NIXL connector for XPU buffers:
+
+```bash
+cd $DYNAMO_HOME/examples/backends/vllm
+DEVICE_PLATFORM=xpu VLLM_TARGET_DEVICE=xpu \
+  bash launch/xpu/disagg_multimodal_epd_xpu.sh \
+  --model Qwen/Qwen3-VL-2B-Instruct
+```
+
+</Tab>
+</Tabs>
+
 See the backend-specific documentation ([vLLM](multimodal-vllm.md), [TRT-LLM](multimodal-trtllm.md), [SGLang](multimodal-sglang.md)) for full configuration details and component flags.
 
 ## Support Matrix
+
+<Tabs>
+<Tab title="NVIDIA GPU">
 
 | Backend | E/PD | E/P/D | Notes |
 |---------|------|-------|-------|
 | **vLLM** | <Badge intent="success" minimal>Yes</Badge> | <Badge intent="success" minimal>Yes</Badge> | Separate encode worker currently handles `image_url` inputs; `video_url` inputs stay on the prefill/PD path |
 | **TensorRT-LLM** | — | <Badge intent="success" minimal>Yes</Badge> | Supports image URLs (via `MultimodalEncoder`) and pre-computed embeddings (via NIXL) |
 | **SGLang** | <Badge intent="success" minimal>Yes</Badge> | <Badge intent="success" minimal>Yes</Badge> | NIXL for embeddings; bootstrap mechanism for P/D KV transfer |
+
+</Tab>
+<Tab title="Intel GPU">
+
+| Backend | E/PD | E/P/D |
+|---------|------|-------|
+| **vLLM** | — | <Badge intent="success" minimal>Yes</Badge> |
+| **SGLang** | — | — |
+| **TensorRT-LLM** | — | — |
+
+</Tab>
+</Tabs>

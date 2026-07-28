@@ -6,6 +6,9 @@ title: TensorRT-LLM Multimodal
 
 This document provides a comprehensive guide for multimodal inference using TensorRT-LLM backend in Dynamo.
 
+> [!IMPORTANT]
+> TensorRT-LLM multimodal serving requires an NVIDIA GPU. Intel GPU deployments should use the supported vLLM XPU paths described in [vLLM Multimodal](multimodal-vllm.md).
+
 You can provide multimodal inputs in the following ways:
 - By sending image URLs
 - By providing paths to pre-computed embedding files

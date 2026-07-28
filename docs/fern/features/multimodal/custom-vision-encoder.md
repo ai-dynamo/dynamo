@@ -28,6 +28,9 @@ process and GPU, and no embedding transfer occurs.
 | Cross-request batching | Yes |
 | CUDA graph bucket selection | Reserved for future support; current dispatch is eager |
 
+> [!IMPORTANT]
+> The custom encoder contract lets an implementation choose its compute device, but the included `agg_custom.sh` launcher and example backend are currently wired for NVIDIA GPU through `CUDA_VISIBLE_DEVICES`. An Intel XPU custom-encoder launcher is not available.
+
 The custom-encoder path requires `--enable-multimodal` and
 `--enable-prompt-embeds`. It is incompatible with frontend decoding, the vLLM
 tokenizer mode, legacy multimodal worker roles, and non-aggregated disaggregation

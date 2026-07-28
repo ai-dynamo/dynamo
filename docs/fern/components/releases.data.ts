@@ -1017,3 +1017,145 @@ export const RELEASE_STATS: Record<string, ReleaseStats> = {
 
 export const NIGHTLIES_NOTE =
   "ai-dynamo and ai-dynamo-runtime nightly builds from main publish wheels tagged *.devYYYYMMDD (since Apr 24, 2026). Install with pip or uv using --pre and the NVIDIA extra-index pattern shown above.";
+
+export const INTEL_MAIN_TOT: BackendPins = {
+  sglang: "0.5.11",
+  vllm: "0.24.0",
+  nixlSglang: "1.1.0",
+  nixlVllm: "1.1.0",
+};
+
+export const INTEL_RELEASES: Release[] = [
+  {
+    version: "v1.3.0",
+    notesHref: "/dynamo/dev/reference/releases/v1-3-0",
+    date: "Jul 20, 2026",
+    kind: "stable",
+    github: `${GH}v1.3.0`,
+    pins: {
+      sglang: "0.5.11",
+      vllm: "0.24.0",
+      nixlSglang: "1.1.0",
+      nixlVllm: "1.1.0",
+    },
+    ucx: "1.20.x",
+  },
+];
+
+export interface XpuRow {
+  version: string;
+  backend: "SGLang" | "vLLM";
+  oneapi: string;
+  minDriver: string;
+}
+
+export const XPU_HISTORY: XpuRow[] = [
+  {
+    version: "1.3.0",
+    backend: "SGLang",
+    oneapi: "2025.3",
+    minDriver: "25.48.36300.8",
+  },
+  {
+    version: "1.3.0",
+    backend: "vLLM",
+    oneapi: "2025.3",
+    minDriver: "26.18.38308.1",
+  },
+];
+
+export interface IntelFeature {
+  name: string;
+  sglang: FeatureCell;
+  vllm: FeatureCell;
+}
+
+export const INTEL_FEATURES: IntelFeature[] = [
+  {
+    name: "Disaggregated Serving",
+    sglang: { status: "yes" },
+    vllm: {
+      status: "yes",
+      note: "Prefill/decode separation with NIXL over UCX",
+    },
+  },
+  {
+    name: "KV-Aware Routing",
+    sglang: { status: "yes" },
+    vllm: { status: "yes" },
+  },
+  {
+    name: "SLA-Based Planner",
+    sglang: { status: "yes" },
+    vllm: { status: "yes" },
+  },
+  {
+    name: "KV Block Manager",
+    sglang: { status: "no" },
+    vllm: { status: "no" },
+  },
+  {
+    name: "Multimodal (Image)",
+    sglang: { status: "yes" },
+    vllm: { status: "yes" },
+  },
+  {
+    name: "Multimodal (Video)",
+    sglang: { status: "yes" },
+    vllm: { status: "yes" },
+  },
+  {
+    name: "Multimodal (Audio)",
+    sglang: { status: "no" },
+    vllm: { status: "no" },
+  },
+  {
+    name: "Request Migration",
+    sglang: { status: "yes" },
+    vllm: { status: "yes" },
+  },
+  {
+    name: "Request Cancellation",
+    sglang: {
+      status: "wip",
+      note: "Remote-prefill-phase cancellation is not supported in disaggregated mode",
+    },
+    vllm: { status: "yes" },
+  },
+  {
+    name: "LoRA",
+    sglang: { status: "yes" },
+    vllm: { status: "no" },
+  },
+  {
+    name: "Tool Calling",
+    sglang: { status: "yes" },
+    vllm: { status: "yes" },
+  },
+  {
+    name: "Speculative Decoding",
+    sglang: {
+      status: "wip",
+      note: "Only runtime metadata hooks are implemented",
+    },
+    vllm: {
+      status: "yes",
+      note: "The vLLM XPU build includes N-gram speculative decoding support",
+    },
+  },
+  {
+    name: "Dynamo Snapshot",
+    sglang: { status: "no" },
+    vllm: { status: "no" },
+  },
+];
+
+export const INTEL_PLATFORM = {
+  gpus: ["Arc Pro", "Data Center GPU Max Series"],
+  os: [
+    { name: "Ubuntu", version: "24.04", arch: "x86_64", status: "Supported", chip: "ubuntu" },
+  ],
+  arch: ["x86_64"],
+  wheelsNote: "Intel XPU runtime images are built from source.",
+  csp: [],
+};

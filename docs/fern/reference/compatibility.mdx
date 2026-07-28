@@ -14,7 +14,7 @@ import { RunsWhereWizard } from "@/components/RunsWhereWizard";
 
 <CompatibilityHero />
 
-For extended driver compatibility beyond the listed minimums, including forward compatibility and `cuda-compat` packages, see the [CUDA Compatibility documentation](https://docs.nvidia.com/deploy/cuda-compatibility/).
+For NVIDIA GPUs, see the [CUDA Compatibility documentation](https://docs.nvidia.com/deploy/cuda-compatibility/) for extended driver compatibility beyond the listed minimums, including forward compatibility and `cuda-compat` packages.
 
 <Note>
 See [Release Artifacts](release-artifacts.mdx) for the full artifact inventory — container images, wheels, Helm charts, and crates — and [Model Early Access Builds](model-early-access-builds.mdx) for per-model early access container builds.
@@ -22,23 +22,39 @@ See [Release Artifacts](release-artifacts.mdx) for the full artifact inventory �
 
 ## Find a Compatible Release
 
-Pick your backend and the CUDA generation your host driver supports to see which Dynamo releases you can run — and what to pull for the current one.
+Pick your accelerator, backend, and supported driver generation to see which Dynamo releases you can run — and what to pull for the current one.
 
 <RunsWhereWizard />
 
 ## Platform Notes
 
-Dynamo ships multi-arch (x86_64 + ARM64) container images. Wheels are built in a manylinux_2_28-compatible environment and validated on CentOS Stream 9 and Ubuntu 22.04/24.04; other Linux distributions are expected to work but are not officially verified.
+<Tabs>
+  <Tab title="NVIDIA GPU">
 
-### Cloud Service Providers
+    Dynamo ships multi-arch (x86_64 + ARM64) NVIDIA GPU container images. Wheels are built in a manylinux_2_28-compatible environment and validated on CentOS Stream 9 and Ubuntu 22.04/24.04; other Linux distributions are expected to work but are not officially verified.
 
-**Amazon Linux 2023** (AWS) · x86_64 · Supported
+    ### Cloud Service Providers
 
-<Warning>
-**AL2023 TensorRT-LLM limitation:** there is a known issue with the TensorRT-LLM framework when running the AL2023 container locally with `docker run --network host ...` due to a [bug](https://github.com/mpi4py/mpi4py/discussions/491#discussioncomment-12660609) in mpi4py. Replace the `--network host` flag with precise networking configuration by mapping only the necessary ports (4222 for NATS, 2379/2380 for etcd, 8000 for the frontend).
-</Warning>
+    **Amazon Linux 2023** (AWS) · x86_64 · Supported
+
+    <Warning>
+    **AL2023 TensorRT-LLM limitation:** there is a known issue with the TensorRT-LLM framework when running the AL2023 container locally with `docker run --network host ...` due to a [bug](https://github.com/mpi4py/mpi4py/discussions/491#discussioncomment-12660609) in mpi4py. Replace the `--network host` flag with precise networking configuration by mapping only the necessary ports (4222 for NATS, 2379/2380 for etcd, 8000 for the frontend).
+    </Warning>
+
+  </Tab>
+  <Tab title="Intel GPU">
+
+    Dynamo supports Intel Arc Pro and Intel Data Center GPU Max Series on Ubuntu 24.04 x86_64. Build the SGLang or vLLM XPU runtime image from source; Intel XPU runtime images and wheels are not published as release artifacts.
+
+    For Kubernetes requirements and deployment steps, see the [Kubernetes Quickstart](../kubernetes/quickstart.mdx).
+
+  </Tab>
+</Tabs>
 
 ## Feature Support
+
+<Tabs>
+  <Tab title="NVIDIA GPU">
 
 <FeatureHeatmap />
 
@@ -99,7 +115,7 @@ TensorRT-LLM delivers maximum inference performance and optimization, with full 
 | **KV Block Manager**      | <span className="dynref-badge dynref-badge--green">✓</span> |                                                                                                                                                                               |
 | **Multimodal**            | <span className="dynref-badge dynref-badge--green">✓</span> | Image only (URLs + pre-computed embeddings). Disagg: EP/D + E/P/D. With KV-aware routing, via dedicated MM Router Worker (requires KV event publishing) ([Source][mm-trtllm]) |
 | **Request Migration**     | <span className="dynref-badge dynref-badge--green">✓</span> | Work in progress with multimodal                                                                                                                                                             |
-| **Request Cancellation**  | <span className="dynref-badge dynref-badge--amber">!</span> | Engine temporarily not notified of cancellations — resources for cancelled requests are not freed (known issue)                                                               |
+| **Request Cancellation**  | <span className="dynref-badge dynref-badge--amber dynref-badge--bang" aria-label="Caveat"></span> | Engine temporarily not notified of cancellations — resources for cancelled requests are not freed (known issue)                                                               |
 | **LoRA**                  | <span className="dynref-badge dynref-badge--gray">—</span> | Not supported                                                                                                                                                                 |
 | **Tool Calling**          | <span className="dynref-badge dynref-badge--green">✓</span> |                                                                                                                                                                               |
 | **Speculative Decoding**  | <span className="dynref-badge dynref-badge--green">✓</span> |                                                                                                                                                                               |
@@ -175,6 +191,16 @@ Pairwise feature-by-feature compatibility within each backend. Each cell reports
 > 1. **Multimodal Disaggregation**: Supports **EP/D** (Traditional) and **E/P/D** (Full Disaggregation) image flows, including image URLs and pre-computed embeddings. ([Source][mm-trtllm])
 > 2. **Multimodal + KV-Aware Routing**: The native Rust frontend routes supported models using image-aware KV overlap. TRT-LLM workers must publish KV events with block reuse enabled. ([Source][mm-kv-routing])
 > 3. **Request Cancellation**: Due to known issues, the TensorRT-LLM engine is temporarily not notified of request cancellations, meaning allocated resources for cancelled requests are not freed.
+
+  </Tab>
+  <Tab title="Intel GPU">
+
+<FeatureHeatmap accelerator="intel" />
+
+Intel GPU statuses reflect the current XPU container builds, launch scripts, and implementation paths. Missing XPU-specific tests do not reduce support for accelerator-independent features.
+
+  </Tab>
+</Tabs>
 
 [vllm-readme]: ../backends/vllm/README.md
 [sglang-readme]: ../backends/sglang/README.md
