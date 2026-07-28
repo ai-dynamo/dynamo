@@ -465,7 +465,7 @@ mod tests {
                 let json = r#"{
                     "default": {"tokio": {"worker_threads": 4}},
                     "leader": {"tokio": {"worker_threads": 2}},
-                    "worker": {"tokio": {"worker_threads": 8}}
+                    "worker": {"tokio": {"worker_threads": 3}}
                 }"#;
 
                 // Leader should get 2 threads (from leader profile)
@@ -476,11 +476,11 @@ mod tests {
                     "Leader should get leader profile's tokio.worker_threads"
                 );
 
-                // Worker should get 8 threads (from worker profile)
+                // Worker should get 3 threads (from worker profile)
                 let worker_config = KvbmConfig::from_figment_with_json_for_worker(json).unwrap();
                 assert_eq!(
                     worker_config.tokio.worker_threads,
-                    Some(8),
+                    Some(3),
                     "Worker should get worker profile's tokio.worker_threads"
                 );
             },

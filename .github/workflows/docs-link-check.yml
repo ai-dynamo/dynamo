@@ -38,6 +38,9 @@ jobs:
             --exclude-path ".*ATTRIBUTIONS.*"
             --exclude-path "./lib/llm/tests/data/.*"
             --exclude-path "./container/compliance/spdx_licenses/.*"
+            --exclude "^https://kubernetes\\.io/docs/"
+            --exclude "^https://cert-manager\\.io/docs/"
+            --exclude "^https://book\\.kubebuilder\\.io/"
             --accept "200..=299, 403, 429"
             --exclude-all-private
             --exclude 0.0.0.0

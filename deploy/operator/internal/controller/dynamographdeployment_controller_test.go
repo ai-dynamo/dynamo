@@ -1547,6 +1547,8 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpointsSyncsExistingAutoLi
 }
 
 func TestDynamoGraphDeploymentReconciler_createCheckpointCR_disablesServiceMeshInjection(t *testing.T) {
+	const trueAnnotationValue = "true"
+
 	ctx := context.Background()
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
 	identity := v1alpha1.DynamoCheckpointIdentity{
@@ -1573,8 +1575,8 @@ func TestDynamoGraphDeploymentReconciler_createCheckpointCR_disablesServiceMeshI
 					ComponentType: string(commonconsts.ComponentTypeWorker),
 					Annotations: map[string]string{
 						"linkerd.io/inject":       "enabled",
-						"sidecar.istio.io/inject": "true",
-						"example.com/keep":        "true",
+						"sidecar.istio.io/inject": trueAnnotationValue,
+						"example.com/keep":        trueAnnotationValue,
 					},
 					Checkpoint: &v1alpha1.ServiceCheckpointConfig{
 						Enabled: true,
@@ -1611,7 +1613,7 @@ func TestDynamoGraphDeploymentReconciler_createCheckpointCR_disablesServiceMeshI
 	if got := annotations["sidecar.istio.io/inject"]; got != "false" {
 		t.Fatalf("checkpoint job istio annotation = %q, want false", got)
 	}
-	if got := annotations["example.com/keep"]; got != "true" {
+	if got := annotations["example.com/keep"]; got != trueAnnotationValue {
 		t.Fatalf("checkpoint job did not preserve user annotation, got %q", got)
 	}
 

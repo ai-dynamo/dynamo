@@ -99,7 +99,7 @@ Frontend (round-robin) → MM Router Worker → Backend Workers
                               └─ KvRouter selects best worker
 ```
 
-For TRT-LLM, a dedicated MM Router Worker sits between the frontend and backend workers. See the [TRT-LLM MM Router README](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/mm_router_worker/README.md) for setup instructions.
+For TRT-LLM, a dedicated MM Router Worker sits between the frontend and backend workers. See the [TRT-LLM MM Router README](../../../examples/backends/trtllm/mm_router_worker/README.md) for setup instructions.
 
 ### SGLang
 
@@ -199,7 +199,7 @@ cd $DYNAMO_HOME/examples/backends/trtllm/mm_router_worker
 ./launch.sh
 ```
 
-See the [TRT-LLM MM Router README](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/mm_router_worker/README.md) for full setup instructions and configuration options.
+See the [TRT-LLM MM Router README](../../../examples/backends/trtllm/mm_router_worker/README.md) for full setup instructions and configuration options.
 
 ### SGLang
 
@@ -267,4 +267,3 @@ The default Rust frontend path doesn't run the HF processor or pre-render `mm_kw
 - **`shm`** (default): POSIX shared memory via a `/dev/shm` segment. Intended for same-node deployments, where frontend and backend share the host filesystem. If the backend can't access the segment (e.g., running on a different node), it falls back to re-processing the image from the URL.
 - **`nixl`**: NIXL RDMA transfer. Required for cross-node deployments where `/dev/shm` is not shared between frontend and backend. Works across nodes over InfiniBand or TCP (whichever UCX selects).
 - **`DYNAMO_DISABLE_NIXL_MM=1`**: Disables pre-processed mm_kwargs transfer entirely. The backend downloads and processes images itself from the original URLs. Useful for debugging or when transfer overhead exceeds re-processing cost.
-

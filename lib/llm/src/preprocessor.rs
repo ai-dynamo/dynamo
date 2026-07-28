@@ -1047,9 +1047,7 @@ impl OpenAIPreprocessor {
                 expected_output_tokens: hints.and_then(|h| h.osl),
                 priority_jump,
                 strict_priority,
-                priority: Some(
-                    priority.unwrap_or(DEFAULT_ROUTING_PRIORITY),
-                ),
+                priority: Some(priority.unwrap_or(DEFAULT_ROUTING_PRIORITY)),
                 lora_name,
                 allowed_worker_ids: None,
                 routing_constraints: nvext

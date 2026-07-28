@@ -626,7 +626,7 @@ helm upgrade <release> dynamo-platform -n <namespace>
 
 - [Kubernetes Admission Webhooks](https://kubernetes.io/docs/reference/access-authn-authz/extensible-admission-controllers/)
 - [cert-manager Documentation](https://cert-manager.io/docs/)
-- [Kubebuilder Webhook Tutorial](https://book.kubebuilder.io/cronjob-tutorial/webhook-implementation.html)
+- [Kubebuilder Webhook Tutorial](https://book.kubebuilder.io/cronjob-tutorial/webhook-implementation)
 - [CEL Validation Rules](https://kubernetes.io/docs/reference/using-api/cel/)
 
 ---
