@@ -71,6 +71,24 @@ RUN cd /tmp \
  && install -m755 etcd-*/etcd etcd-*/etcdctl /usr/local/bin/ \
  && rm -rf nats-server-* etcd-*
 
+# Register TRT-LLM's native library paths with the dynamic loader. The release
+# image sets these only for interactive shells (/etc/shinit_v2), not for K8s /
+# bare `python3` launches, so `import tensorrt` / `import tensorrt_llm` fail with
+# "libnvonnxparser.so.10: cannot open shared object file". This does NOT rebuild
+# or reconfigure nixl/ucx — ldconfig only indexes the .so files already shipped
+# in the image. Mirrors container/templates/trtllm_runtime.Dockerfile.
+RUN ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64") \
+ && printf '%s\n' \
+        "/usr/local/tensorrt/lib" \
+        "/usr/local/cuda/lib64" \
+        "/usr/local/ucx/lib" \
+        "/opt/hpcx/ompi/lib" \
+        "/opt/hpcx/ucc/lib" \
+        "/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu" \
+        "/opt/nvidia/nvda_nixl/lib64" \
+        > /etc/ld.so.conf.d/00-dynamo-trtllm.conf \
+ && ldconfig
+
 # uv — used to install into the Dynamo venv below.
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 
@@ -84,27 +102,34 @@ RUN python3 -m venv --system-site-packages /opt/dynamo/venv
 ENV VIRTUAL_ENV=/opt/dynamo/venv \
     PATH=/opt/dynamo/venv/bin:${PATH}
 
-# Install dynamo wheels and the extra deps the TRT-LLM image omits.
-# EVERYTHING is --no-deps: the release image already carries the full package
-# solve (torch, tensorrt_llm, its bundled nixl/ucx, fastapi, transformers, ...).
-# A dependency-resolving install would let uv pull nixl-cu13's UCX 1.20.0 wheel
-# and re-pin transitive packages, reconfiguring the upstream nixl/ucx we rely on.
-# --no-deps installs only the explicitly-listed packages, leaving the native
-# libnixl/libucx that TRT-LLM ships untouched (LD_PRELOAD below keeps them active).
+# Install dynamo wheels and ONLY the extra deps the TRT-LLM image omits.
+# EVERYTHING is --no-deps: the release image already carries a consistent solve
+# (torch, tensorrt_llm, its bundled nixl/ucx, pydantic+pydantic-core, fastapi,
+# transformers, ...). We must NOT install requirements.common.txt/frontend.txt
+# here — pinning e.g. pydantic without its matching pydantic-core shadows the
+# upstream pair in the venv and breaks at import. requirements.trtllm.txt is the
+# curated set of packages the release image genuinely lacks (msgspec, uvloop,
+# imageio, nixl bindings). --no-deps also stops nixl-cu13 from pulling its UCX
+# 1.20.0 wheel, so TRT-LLM's native libnixl/libucx stay untouched (LD_PRELOAD
+# below keeps them active). Mirrors container/templates/trtllm_runtime.Dockerfile.
 RUN --mount=type=bind,source=./container/deps/requirements.trtllm.txt,target=/tmp/requirements.trtllm.txt \
-    --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tmp/requirements.common.txt \
-    --mount=type=bind,source=./container/deps/requirements.frontend.txt,target=/tmp/requirements.frontend.txt \
     uv pip install --no-deps /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl && \
     uv pip install --no-deps /opt/dynamo/wheelhouse/ai_dynamo*any.whl && \
-    uv pip install --no-deps \
-        --requirement /tmp/requirements.trtllm.txt \
-        --requirement /tmp/requirements.common.txt \
-        --requirement /tmp/requirements.frontend.txt
+    uv pip install --no-deps --requirement /tmp/requirements.trtllm.txt
 
-# LD_PRELOAD forces TRT-LLM's bundled libnixl over the nixl-cu13 PyPI copy,
-# which bundles UCX 1.20.0 and hangs in uct_md_query_tl_resources (nixl#1668).
+# MPI/HPC-X: TRT-LLM launches its runtime via OpenMPI (from HPC-X). OpenMPI bakes
+# in its build prefix (/build-result/hpcx-.../ompi4) and needs OPAL_PREFIX to
+# relocate to the real install, or MPI_Init_thread aborts on a NULL communicator.
+# OMPI_MCA_coll_ucc_enable=0 skips the UCC collective (avoids a hard HPC-X UCC
+# dependency). Mirrors container/dev/50-framework-paths.sh, which the release
+# image only applies to interactive shells (not bare `python3` launches).
+#
+# LD_PRELOAD forces TRT-LLM's bundled libnixl over the nixl-cu13 PyPI copy, which
+# bundles UCX 1.20.0 and hangs in uct_md_query_tl_resources (nixl#1668).
 ENV DYNAMO_HOME=/workspace \
-    PATH=/usr/local/bin/etcd:${PATH} \
+    OPAL_PREFIX=/opt/hpcx/ompi \
+    OMPI_MCA_coll_ucc_enable=0 \
+    PATH=/opt/hpcx/ompi/bin:/usr/local/bin/etcd:${PATH} \
     LD_PRELOAD=/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so \
     NIXL_PLUGIN_DIR=/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/plugins
 
