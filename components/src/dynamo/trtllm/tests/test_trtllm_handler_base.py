@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import logging
 import re as re_mod
 from copy import deepcopy
 from dataclasses import dataclass
@@ -1195,6 +1196,11 @@ class TestConversationAffinity:
             "dynamo.trtllm.conversation_affinity.ConversationParams",
             _FakeConversationParams,
         )
+        monkeypatch.setattr(
+            "dynamo.trtllm.request_handlers.handler_base."
+            "SUPPORTS_EXPLICIT_DP_RANK_CONVERSATION_BINDING",
+            True,
+        )
         handler = self._make_handler(
             conversation_affinity=True,
             dp_rank_source="dynamo",
@@ -1216,6 +1222,41 @@ class TestConversationAffinity:
         conv_params = kwargs["conversation_params"]
         assert conv_params is not None
         assert conv_params.conversation_id == "run-42:agent-0"
+
+    @pytest.mark.asyncio
+    async def test_unsupported_dynamo_rank_source_warns_and_falls_back(
+        self, monkeypatch, caplog
+    ):
+        """An older engine safely falls back instead of losing later-turn affinity."""
+        monkeypatch.setattr(
+            "dynamo.trtllm.conversation_affinity.ConversationParams",
+            _FakeConversationParams,
+        )
+        monkeypatch.setattr(
+            "dynamo.trtllm.request_handlers.handler_base."
+            "SUPPORTS_EXPLICIT_DP_RANK_CONVERSATION_BINDING",
+            False,
+        )
+        handler = self._make_handler(
+            conversation_affinity=True,
+            dp_rank_source="dynamo",
+        )
+        with caplog.at_level(logging.WARNING):
+            kwargs = await self._drive(
+                handler,
+                {
+                    "token_ids": [1, 2, 3],
+                    "stop_conditions": {"max_tokens": 10},
+                    "sampling_options": {"temperature": 0.7},
+                    "routing": {"dp_rank": 3},
+                    "agent_context": {"session_id": "run-42:agent-0"},
+                },
+            )
+
+        assert kwargs["scheduling_params"] is None
+        assert kwargs["conversation_params"].conversation_id == "run-42:agent-0"
+        assert handler._conversation_affinity_dp_rank_source == "engine"
+        assert "falling back to engine-owned initial placement" in caplog.text
 
     @pytest.mark.asyncio
     async def test_affinity_on_with_dynamo_rank_source_and_no_session_suppresses_rank(
