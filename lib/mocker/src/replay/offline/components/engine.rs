@@ -1,10 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::marker::PhantomData;
 
 use anyhow::bail;
+use smallvec::SmallVec;
 
 use super::super::core::{EngineEventBatch, EngineProgress, NoEngineEvents, WorkerTopology};
 use super::super::events::SimulationWorkerStage;
@@ -20,8 +21,7 @@ use super::{
 };
 use crate::common::protocols::{DirectRequest, ForwardPassSnapshot, MockEngineArgs};
 use crate::replay::TraceCollector;
-use crate::scheduler::RouterEventVisibility;
-use crate::scheduler::SchedulerCommand;
+use crate::scheduler::{EnginePassResult, RouterEventVisibility, SchedulerCommand};
 
 fn fpm_has_scheduled_work(snapshot: &ForwardPassSnapshot) -> bool {
     snapshot.num_prefill_requests > 0 || snapshot.num_decode_requests > 0
@@ -34,9 +34,13 @@ where
     stage: SimulationWorkerStage,
     pass_mode: EnginePassMode,
     /// DP-rank schedulers keyed by stable ID (monotonic, never reused).
-    workers: BTreeMap<usize, OfflineWorkerState>,
+    workers: Vec<Option<OfflineWorkerState>>,
     /// Mocker worker IDs mapped to their per-rank scheduler IDs.
-    worker_groups: BTreeMap<usize, Vec<usize>>,
+    worker_groups: Vec<Option<Vec<usize>>>,
+    /// Logical workers that can start a pass, ordered by stable worker ID.
+    ready_groups: BTreeSet<usize>,
+    /// Ready groups that made no observable progress during the prior drive.
+    deferred_ready_groups: BTreeSet<usize>,
     /// Counter for generating the next stable scheduler ID.
     next_id: usize,
     /// Counter for generating the next stable mocker worker ID.
@@ -62,13 +66,15 @@ where
         workers: Vec<OfflineWorkerState>,
     ) -> Self {
         let count = workers.len();
-        let map: BTreeMap<usize, OfflineWorkerState> = workers.into_iter().enumerate().collect();
-        let worker_groups = (0..count).map(|id| (id, vec![id])).collect();
-        Self {
+        let workers = workers.into_iter().map(Some).collect();
+        let worker_groups = (0..count).map(|id| Some(vec![id])).collect();
+        let mut component = Self {
             stage,
             pass_mode,
-            workers: map,
+            workers,
             worker_groups,
+            ready_groups: BTreeSet::new(),
+            deferred_ready_groups: BTreeSet::new(),
             next_id: count,
             next_worker_id: count,
             pending_removal: BTreeSet::new(),
@@ -76,7 +82,9 @@ where
             args: MockEngineArgs::default(),
             capture_raw: Observation::CAPTURE_RAW,
             observation: PhantomData,
-        }
+        };
+        component.refresh_all_groups();
+        component
     }
 
     /// Build one scheduler core per DP rank while retaining the live mocker's
@@ -88,31 +96,32 @@ where
         num_workers: usize,
     ) -> Self {
         let dp_size = args.dp_size.max(1) as usize;
-        let mut workers = BTreeMap::new();
-        let mut worker_groups = BTreeMap::new();
+        let mut workers = Vec::with_capacity(num_workers.saturating_mul(dp_size));
+        let mut worker_groups = Vec::with_capacity(num_workers);
         for worker_id in 0..num_workers {
             let mut rank_ids = Vec::with_capacity(dp_size);
             for dp_rank in 0..dp_size {
                 let rank_id = worker_id * dp_size + dp_rank;
-                workers.insert(
+                debug_assert_eq!(rank_id, workers.len());
+                workers.push(Some(OfflineWorkerState::new_with_rank(
                     rank_id,
-                    OfflineWorkerState::new_with_rank(
-                        rank_id,
-                        worker_id as u64,
-                        dp_rank as u32,
-                        args.clone(),
-                        Observation::CAPTURE_RAW,
-                    ),
-                );
+                    worker_id as u64,
+                    dp_rank as u32,
+                    args.clone(),
+                    Observation::CAPTURE_RAW,
+                )));
                 rank_ids.push(rank_id);
             }
-            worker_groups.insert(worker_id, rank_ids);
+            debug_assert_eq!(worker_id, worker_groups.len());
+            worker_groups.push(Some(rank_ids));
         }
         Self {
             stage,
             pass_mode,
             workers,
             worker_groups,
+            ready_groups: BTreeSet::new(),
+            deferred_ready_groups: BTreeSet::new(),
             next_id: num_workers.saturating_mul(dp_size),
             next_worker_id: num_workers,
             pending_removal: BTreeSet::new(),
@@ -133,6 +142,52 @@ where
         self.capture_raw = capture_raw;
     }
 
+    fn worker(&self, rank_id: usize) -> Option<&OfflineWorkerState> {
+        self.workers.get(rank_id)?.as_ref()
+    }
+
+    fn worker_mut(&mut self, rank_id: usize) -> Option<&mut OfflineWorkerState> {
+        self.workers.get_mut(rank_id)?.as_mut()
+    }
+
+    fn group_is_ready(&self, worker_id: usize) -> bool {
+        let Some(rank_ids) = self.worker_groups.get(worker_id).and_then(Option::as_ref) else {
+            return false;
+        };
+        !rank_ids.iter().any(|&rank_id| {
+            self.worker(rank_id)
+                .is_some_and(OfflineWorkerState::is_busy)
+        }) && rank_ids.iter().any(|&rank_id| {
+            self.worker(rank_id)
+                .is_some_and(OfflineWorkerState::is_ready)
+        })
+    }
+
+    fn refresh_group(&mut self, worker_id: usize) {
+        self.deferred_ready_groups.remove(&worker_id);
+        if self.group_is_ready(worker_id) {
+            self.ready_groups.insert(worker_id);
+        } else {
+            self.ready_groups.remove(&worker_id);
+        }
+    }
+
+    fn refresh_rank(&mut self, rank_id: usize) {
+        let Some(worker_id) = self
+            .worker(rank_id)
+            .and_then(|worker| usize::try_from(worker.rank_identity().0).ok())
+        else {
+            return;
+        };
+        self.refresh_group(worker_id);
+    }
+
+    fn refresh_all_groups(&mut self) {
+        for worker_id in 0..self.worker_groups.len() {
+            self.refresh_group(worker_id);
+        }
+    }
+
     /// Add a new mocker worker and all of its DP-rank schedulers, returning
     /// the stable mocker worker ID.
     pub(in crate::replay::offline) fn add_worker(&mut self) -> usize {
@@ -149,10 +204,12 @@ where
                 self.args.clone(),
                 self.capture_raw,
             );
-            self.workers.insert(rank_id, worker);
+            debug_assert_eq!(rank_id, self.workers.len());
+            self.workers.push(Some(worker));
             rank_ids.push(rank_id);
         }
-        self.worker_groups.insert(worker_id, rank_ids);
+        debug_assert_eq!(worker_id, self.worker_groups.len());
+        self.worker_groups.push(Some(rank_ids));
         worker_id
     }
 
@@ -167,11 +224,14 @@ where
     /// Remove all marked workers that have fully drained, returning their IDs.
     pub(in crate::replay::offline) fn try_remove_drained(&mut self) -> Vec<usize> {
         let mut removed = Vec::new();
+        let worker_groups = &self.worker_groups;
+        let workers = &self.workers;
         self.pending_removal.retain(|&id| {
-            if let Some(rank_ids) = self.worker_groups.get(&id) {
+            if let Some(rank_ids) = worker_groups.get(id).and_then(Option::as_ref) {
                 if rank_ids.iter().all(|rank_id| {
-                    self.workers
-                        .get(rank_id)
+                    workers
+                        .get(*rank_id)
+                        .and_then(Option::as_ref)
                         .is_none_or(OfflineWorkerState::is_drained)
                 }) {
                     removed.push(id);
@@ -184,9 +244,13 @@ where
             true // keep in pending set
         });
         for &id in &removed {
-            if let Some(rank_ids) = self.worker_groups.remove(&id) {
+            self.ready_groups.remove(&id);
+            self.deferred_ready_groups.remove(&id);
+            if let Some(rank_ids) = self.worker_groups.get_mut(id).and_then(Option::take) {
                 for rank_id in rank_ids {
-                    self.workers.remove(&rank_id);
+                    if let Some(worker) = self.workers.get_mut(rank_id) {
+                        worker.take();
+                    }
                 }
             }
         }
@@ -234,9 +298,13 @@ where
                 .collect();
             for &id in &to_cancel {
                 self.pending_startup.remove(&id);
-                if let Some(rank_ids) = self.worker_groups.remove(&id) {
+                self.ready_groups.remove(&id);
+                self.deferred_ready_groups.remove(&id);
+                if let Some(rank_ids) = self.worker_groups.get_mut(id).and_then(Option::take) {
                     for rank_id in rank_ids {
-                        self.workers.remove(&rank_id);
+                        if let Some(worker) = self.workers.get_mut(rank_id) {
+                            worker.take();
+                        }
                     }
                 }
             }
@@ -257,9 +325,14 @@ where
     /// Return stable mocker worker IDs that are active for new admissions.
     pub(in crate::replay::offline) fn active_group_ids(&self) -> Vec<usize> {
         self.worker_groups
-            .keys()
-            .filter(|id| !self.pending_removal.contains(id) && !self.pending_startup.contains(id))
-            .copied()
+            .iter()
+            .enumerate()
+            .filter(|(id, group)| {
+                group.is_some()
+                    && !self.pending_removal.contains(id)
+                    && !self.pending_startup.contains(id)
+            })
+            .map(|(id, _)| id)
             .collect()
     }
 
@@ -267,7 +340,13 @@ where
     pub(in crate::replay::offline) fn active_worker_ids(&self) -> Vec<usize> {
         self.active_group_ids()
             .into_iter()
-            .flat_map(|worker_id| self.worker_groups[&worker_id].iter().copied())
+            .flat_map(|worker_id| {
+                self.worker_groups[worker_id]
+                    .as_deref()
+                    .into_iter()
+                    .flatten()
+                    .copied()
+            })
             .collect()
     }
 
@@ -277,7 +356,7 @@ where
     ) -> Option<WorkerTopology> {
         Some(WorkerTopology {
             worker_id,
-            scheduler_ids: self.worker_groups.get(&worker_id)?.clone(),
+            scheduler_ids: self.worker_groups.get(worker_id)?.as_ref()?.clone(),
         })
     }
 
@@ -295,7 +374,7 @@ where
     /// Return the logical mocker worker and DP rank represented by a stable
     /// scheduler ID.
     pub(in crate::replay::offline) fn rank_identity(&self, rank_id: usize) -> Option<(usize, u32)> {
-        let (worker_id, dp_rank) = self.workers.get(&rank_id)?.rank_identity();
+        let (worker_id, dp_rank) = self.worker(rank_id)?.rank_identity();
         Some((usize::try_from(worker_id).ok()?, dp_rank))
     }
 
@@ -315,7 +394,15 @@ where
     /// was actually pending startup (and is now active), `false` if the worker
     /// was already cancelled or unknown (stale event).
     pub(in crate::replay::offline) fn mark_worker_ready(&mut self, worker_id: usize) -> bool {
-        self.pending_startup.remove(&worker_id) && self.worker_groups.contains_key(&worker_id)
+        let ready = self.pending_startup.remove(&worker_id)
+            && self
+                .worker_groups
+                .get(worker_id)
+                .is_some_and(Option::is_some);
+        if ready {
+            self.refresh_group(worker_id);
+        }
+        ready
     }
 
     pub(in crate::replay::offline) fn dispatch(
@@ -323,11 +410,10 @@ where
         worker_id: usize,
         request: DirectRequest,
     ) -> anyhow::Result<()> {
-        let worker = self
-            .workers
-            .get_mut(&worker_id)
-            .ok_or_else(|| anyhow::anyhow!("offline replay selected unknown worker {worker_id}"))?;
-        worker.receive_request(request);
+        self.worker_mut(worker_id)
+            .ok_or_else(|| anyhow::anyhow!("offline replay selected unknown worker {worker_id}"))?
+            .receive_request(request);
+        self.refresh_rank(worker_id);
         Ok(())
     }
 
@@ -336,17 +422,18 @@ where
         worker_id: usize,
         command: SchedulerCommand,
     ) -> anyhow::Result<ObservedCommandEffects<Observation::Batch>> {
-        let worker = self
-            .workers
-            .get_mut(&worker_id)
-            .ok_or_else(|| anyhow::anyhow!("offline replay selected unknown worker {worker_id}"))?;
-        let mut effects = worker.apply_command(command)?;
+        let mut effects = self
+            .worker_mut(worker_id)
+            .ok_or_else(|| anyhow::anyhow!("offline replay selected unknown worker {worker_id}"))?
+            .apply_command(command)?;
         let engine_events = Observation::take_command_events(&mut effects);
-        Ok(ObservedCommandEffects {
+        let observed = ObservedCommandEffects {
             result: effects.result,
             lifecycle_events: effects.lifecycle_events,
             engine_events,
-        })
+        };
+        self.refresh_rank(worker_id);
+        Ok(observed)
     }
 
     pub(in crate::replay::offline) fn worker_is_busy(
@@ -354,8 +441,7 @@ where
         worker_id: usize,
     ) -> anyhow::Result<bool> {
         let worker = self
-            .workers
-            .get(&worker_id)
+            .worker(worker_id)
             .ok_or_else(|| anyhow::anyhow!("offline replay selected unknown worker {worker_id}"))?;
         Ok(worker.is_busy())
     }
@@ -365,28 +451,40 @@ where
         now_ms: f64,
         mut collector: Option<&mut TraceCollector>,
     ) -> anyhow::Result<EngineEffects<Observation::Batch>> {
-        // Iterating `self.worker_groups` in place relies on disjoint field borrows:
-        // the loop body only mutates `self.workers`, never the group map itself.
-        for rank_ids in self.worker_groups.values() {
+        // The serial coordinator may make another component observable at the
+        // same virtual timestamp. Match the former full scan by retrying
+        // effect-free groups on the next coordinator drive, but not again
+        // within this call.
+        let deferred = std::mem::take(&mut self.deferred_ready_groups);
+        for worker_id in deferred {
+            self.refresh_group(worker_id);
+        }
+
+        while let Some(worker_id) = self.ready_groups.pop_first() {
+            let Some(rank_ids) = self.worker_groups.get(worker_id).and_then(Option::as_ref) else {
+                continue;
+            };
             // A logical attention-DP worker advances in group-owned epochs.
             // A rank that received work mid-epoch must wait until every sibling
             // has crossed the prior completion boundary.
             if rank_ids
                 .iter()
-                .any(|rank_id| self.workers.get(rank_id).unwrap().is_busy())
+                .any(|&rank_id| self.workers[rank_id].as_ref().unwrap().is_busy())
             {
                 continue;
             }
             if !rank_ids
                 .iter()
-                .any(|rank_id| self.workers.get(rank_id).unwrap().is_ready())
+                .any(|&rank_id| self.workers[rank_id].as_ref().unwrap().is_ready())
             {
                 continue;
             }
 
-            let mut executed_by_rank = BTreeMap::new();
+            let mut executed_by_rank: SmallVec<[Option<EnginePassResult>; 1]> =
+                SmallVec::with_capacity(rank_ids.len());
             for &rank_id in rank_ids {
-                if !self.workers.get(&rank_id).unwrap().is_ready() {
+                if !self.workers[rank_id].as_ref().unwrap().is_ready() {
+                    executed_by_rank.push(None);
                     continue;
                 }
                 let executed = match self.pass_mode {
@@ -394,33 +492,33 @@ where
                         let Some(collector) = collector.as_deref_mut() else {
                             bail!("offline replay visible engine pass requires a collector");
                         };
-                        self.workers
-                            .get_mut(&rank_id)
+                        self.workers[rank_id]
+                            .as_mut()
                             .unwrap()
                             .execute_pass(collector, now_ms)
                     }
-                    EnginePassMode::Hidden => self
-                        .workers
-                        .get_mut(&rank_id)
+                    EnginePassMode::Hidden => self.workers[rank_id]
+                        .as_mut()
                         .unwrap()
                         .execute_hidden_pass(now_ms),
                 };
-                executed_by_rank.insert(rank_id, executed);
+                executed_by_rank.push(Some(executed));
             }
 
             let group_end_ms = executed_by_rank
-                .values()
+                .iter()
+                .filter_map(Option::as_ref)
                 .map(|executed| executed.end_ms)
                 .fold(now_ms, f64::max);
             let group_wall_time_secs = (group_end_ms - now_ms).max(0.0) / 1000.0;
             let mut effects = EngineEffects::default();
 
-            for &rank_id in rank_ids {
-                let Some(mut executed) = executed_by_rank.remove(&rank_id) else {
+            for (&rank_id, executed) in rank_ids.iter().zip(executed_by_rank) {
+                let Some(mut executed) = executed else {
                     if group_end_ms > now_ms {
                         // Empty ranks still participate in the barrier so work
                         // arriving mid-epoch cannot start ahead of a sibling.
-                        self.workers.get_mut(&rank_id).unwrap().mark_busy();
+                        self.workers[rank_id].as_mut().unwrap().mark_busy();
                         effects
                             .scheduled_completions
                             .push(ScheduledWorkerCompletion {
@@ -493,7 +591,7 @@ where
                 };
 
                 if group_end_ms > now_ms {
-                    self.workers.get_mut(&rank_id).unwrap().mark_busy();
+                    self.workers[rank_id].as_mut().unwrap().mark_busy();
                     effects
                         .scheduled_completions
                         .push(ScheduledWorkerCompletion {
@@ -522,6 +620,9 @@ where
             if !effects.is_empty() {
                 return Ok(effects);
             }
+            if self.group_is_ready(worker_id) {
+                self.deferred_ready_groups.insert(worker_id);
+            }
         }
 
         Ok(EngineEffects::default())
@@ -538,11 +639,9 @@ where
                 payload.stage
             );
         }
-        let worker = self.workers.get_mut(&payload.worker_idx).ok_or_else(|| {
-            anyhow::anyhow!(
-                "offline replay completion for unknown worker {}",
-                payload.worker_idx
-            )
+        let rank_id = payload.worker_idx;
+        let worker = self.worker_mut(rank_id).ok_or_else(|| {
+            anyhow::anyhow!("offline replay completion for unknown worker {}", rank_id)
         })?;
         worker.mark_idle();
         worker.mark_completed(payload.completed_requests);
@@ -554,22 +653,27 @@ where
         payload.progress.had_raw_observations |= observed.had_raw_observations;
         payload.progress.made_progress |= observed.had_raw_observations;
         payload.engine_events.append(observed.events);
+        self.refresh_rank(rank_id);
         Ok(payload)
     }
 
     pub(in crate::replay::offline) fn in_flight(&self) -> usize {
         self.workers
-            .values()
+            .iter()
+            .filter_map(Option::as_ref)
             .map(OfflineWorkerState::in_flight)
             .sum()
     }
 
     pub(in crate::replay::offline) fn is_drained(&self) -> bool {
-        self.workers.values().all(OfflineWorkerState::is_drained)
+        self.workers
+            .iter()
+            .filter_map(Option::as_ref)
+            .all(OfflineWorkerState::is_drained)
     }
 
     pub(in crate::replay::offline) fn worker_count(&self) -> usize {
-        self.worker_groups.len()
+        self.worker_groups.iter().flatten().count()
     }
 
     #[cfg(test)]
@@ -580,7 +684,8 @@ where
     #[cfg(feature = "kvbm-offload")]
     pub(in crate::replay::offline) fn earliest_offload_deadline(&self) -> Option<f64> {
         self.workers
-            .values()
+            .iter()
+            .filter_map(Option::as_ref)
             .filter_map(OfflineWorkerState::earliest_offload_deadline)
             .reduce(f64::min)
     }
@@ -595,7 +700,7 @@ where
             lifecycle_events: Vec::new(),
             progress: EngineProgress::default(),
         };
-        for worker in self.workers.values_mut() {
+        for worker in self.workers.iter_mut().filter_map(Option::as_mut) {
             let mut worker_effects = if worker.is_busy() {
                 worker.tick_offload_transport_only(now_ms)
             } else {
@@ -610,13 +715,15 @@ where
                 .lifecycle_events
                 .extend(worker_effects.lifecycle_events);
         }
+        self.refresh_all_groups();
         effects
     }
 
     #[cfg(test)]
     pub(crate) fn debug_snapshots(&self) -> Vec<OfflineWorkerSnapshot> {
         self.workers
-            .values()
+            .iter()
+            .filter_map(Option::as_ref)
             .map(OfflineWorkerState::debug_snapshot)
             .collect()
     }
@@ -828,6 +935,32 @@ mod tests {
     }
 
     #[test]
+    fn ready_groups_preserve_lowest_worker_id_order() {
+        let args = MockEngineArgs::default();
+        let workers = (0..2)
+            .map(|rank_id| OfflineWorkerState::new(rank_id, args.clone(), false))
+            .collect();
+        let mut engine = EngineComponent::<NoEngineEvents>::new(
+            SimulationWorkerStage::Aggregated,
+            EnginePassMode::Visible,
+            workers,
+        );
+        engine
+            .dispatch(0, timed_request(Uuid::from_u128(51), 4))
+            .unwrap();
+        engine
+            .dispatch(1, timed_request(Uuid::from_u128(52), 4))
+            .unwrap();
+
+        let effects = engine
+            .drive_ready(0.0, Some(&mut TraceCollector::default()))
+            .unwrap();
+        let completion = take_only_completion(effects);
+
+        assert_eq!(completion.worker_idx, 0);
+    }
+
+    #[test]
     fn kv_visibility_follows_backend_contract_and_fpm_waits_for_completion() {
         let make_engine = |engine_type| {
             let args = MockEngineArgs::builder()
@@ -1011,6 +1144,8 @@ mod tests {
 
         let first = engine.drive_ready(0.0, Some(&mut collector)).unwrap();
         assert!(first.is_empty());
+        assert!(engine.ready_groups.is_empty());
+        assert_eq!(engine.deferred_ready_groups, BTreeSet::from([0]));
         assert_eq!(
             engine.debug_snapshots(),
             vec![OfflineWorkerSnapshot {
@@ -1023,6 +1158,7 @@ mod tests {
 
         let retry = engine.drive_ready(0.0, Some(&mut collector)).unwrap();
         assert!(retry.is_empty());
+        assert_eq!(engine.deferred_ready_groups, BTreeSet::from([0]));
     }
 
     #[test]
@@ -1186,7 +1322,7 @@ mod tests {
         });
         // Model a reservation attempt at the t=0 boundary, before the GPU
         // compute interval becomes externally busy.
-        engine.workers.get_mut(&0).unwrap().mark_idle();
+        engine.worker_mut(0).unwrap().mark_idle();
 
         let handoff_id = HandoffId::from(Uuid::from_u128(102));
         let reserve = engine
@@ -1209,7 +1345,7 @@ mod tests {
             .expect("reservation eviction should start G1 to G2 DMA");
         assert!((deadline - 20.0).abs() < 0.01);
 
-        engine.workers.get_mut(&0).unwrap().mark_busy();
+        engine.worker_mut(0).unwrap().mark_busy();
         assert_eq!(engine.earliest_offload_deadline(), Some(deadline));
         let transport = engine.tick_offload_engines(deadline);
         assert!(transport.lifecycle_events.is_empty());
