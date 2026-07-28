@@ -1130,54 +1130,6 @@ The default model is `Qwen/Qwen3-VL-2B-Instruct`.
 ### Aggregated
 
 <AccordionGroup>
-<Accordion title="LoRA Adapters with KV-Aware Routing">
-
-Runs LoRA-capable vLLM workers on Intel XPU devices behind the KV router.
-
-The script expects MinIO at `http://localhost:9000` and loads adapters from the `my-loras` bucket.
-Run `launch/lora/setup_minio.sh --start` first to start MinIO and upload the example adapter.
-
-The default model is `Qwen/Qwen3-0.6B`.
-
-**Configuration**
-
-| Variable | Default | Description |
-| --- | --- | --- |
-| `DYN_SYSTEM_PORT1` | `8081` | System and metrics port for the first worker. |
-| `DYN_SYSTEM_PORT2` | `8082` | System and metrics port for the second worker. |
-| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
-
-```bash
-./launch/lora/xpu/agg_lora_router_xpu.sh
-```
-
-[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/lora/xpu/agg_lora_router_xpu.sh)
-</Accordion>
-<Accordion title="Dynamic LoRA Adapter Serving">
-
-Runs one LoRA-capable vLLM worker on an Intel XPU device.
-
-The script expects MinIO at `http://localhost:9000` and loads adapters from the `my-loras` bucket.
-Run `launch/lora/setup_minio.sh --start` first to start MinIO and upload the example adapter.
-
-The default model is `Qwen/Qwen3-0.6B`.
-
-**Configuration**
-
-| Variable | Default | Description |
-| --- | --- | --- |
-| `DYN_SYSTEM_PORT1` | `8081` | System and metrics port for the first worker. |
-| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
-| `MAX_MODEL_LEN` | `4096` | Maximum model context length. |
-| `MAX_CONCURRENT_SEQS` | `2` | Maximum number of sequences scheduled concurrently. |
-| `BLOCK_SIZE` | `64` | KV-cache block size; it must match the backend block size for KV routing. |
-
-```bash
-./launch/lora/xpu/agg_lora_xpu.sh
-```
-
-[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/lora/xpu/agg_lora_xpu.sh)
-</Accordion>
 <Accordion title="LMCache with Multiprocess Metrics">
 
 Runs LMCache on Intel XPU while configuring the Prometheus multiprocess directory used by

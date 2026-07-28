@@ -27,6 +27,9 @@ If your workload consists entirely of unique multimodal content, the cache provi
 ## Configuration
 
 <Tabs>
+<Tab title="NVIDIA GPU">
+
+<Tabs>
   <Tab title="vLLM" language="vllm">
     Launch a disaggregated multimodal deployment with the embedding cache enabled:
 
@@ -57,6 +60,21 @@ If your workload consists entirely of unique multimodal content, the cache provi
   </Tab>
 </Tabs>
 
+</Tab>
+<Tab title="Intel GPU">
+
+Use the vLLM aggregated cache connector. The connector detects the XPU device and moves cached embeddings between XPU memory and its CPU-side LRU store:
+
+```bash
+cd $DYNAMO_HOME
+bash examples/backends/vllm/launch/xpu/agg_multimodal_xpu.sh \
+  --model Qwen/Qwen3-VL-2B-Instruct \
+  --multimodal-embedding-cache-capacity-gb 10
+```
+
+</Tab>
+</Tabs>
+
 Set `--multimodal-embedding-cache-capacity-gb` based on your expected working set of unique multimodal content. A larger cache holds more embeddings but consumes more host memory.
 
 See the backend-specific documentation ([vLLM](multimodal-vllm.md#embedding-cache), [TRT-LLM](multimodal-trtllm.md#embedding-cache)) for more details.
@@ -79,10 +97,25 @@ flowchart LR
 
 ## Support Matrix
 
+<Tabs>
+<Tab title="NVIDIA GPU">
+
 | Backend | Aggregated | Disaggregated (E/PD) | Notes |
 |---------|------------|----------------------|-------|
 | **vLLM** | <Badge intent="success" minimal>Yes</Badge> | <Badge intent="success" minimal>Yes</Badge> | Aggregated uses vLLM-native `ec_both`; disaggregated uses Dynamo `EmbeddingCacheManager` |
 | **TensorRT-LLM** | — | <Badge intent="success" minimal>Yes</Badge> | Dynamo `MultimodalEmbeddingCacheManager` in PD worker |
 | **SGLang** | — | <Badge intent="success" minimal>Yes</Badge> | Dynamo `MultimodalEmbeddingCacheManager` in the encode worker |
+
+</Tab>
+<Tab title="Intel GPU">
+
+| Backend | Aggregated | Disaggregated |
+|---------|------------|---------------|
+| **vLLM** | <Badge intent="success" minimal>Yes</Badge> | — |
+| **SGLang** | — | — |
+| **TensorRT-LLM** | — | — |
+
+</Tab>
+</Tabs>
 
 This support requires vLLM `0.17.0` or newer.

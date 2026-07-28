@@ -59,6 +59,9 @@ The routing flow in general has three steps:
 ## Launch
 
 <Tabs>
+<Tab title="NVIDIA GPU">
+
+<Tabs>
   <Tab title="vLLM" language="vllm">
     Use the Python chat processor when you need vLLM's model-native multimodal processor or want to transfer processed multimodal inputs from the frontend. Otherwise, use the default Rust frontend.
 
@@ -100,7 +103,33 @@ The routing flow in general has three steps:
   </Tab>
 </Tabs>
 
+</Tab>
+<Tab title="Intel GPU">
+
+<Tabs>
+  <Tab title="vLLM — Rust frontend">
+    ```bash
+    cd $DYNAMO_HOME
+    ZE_AFFINITY_MASK=0,1 \
+      bash examples/backends/vllm/launch/xpu/agg_multimodal_router_xpu.sh
+    ```
+  </Tab>
+  <Tab title="vLLM — Python chat processor">
+    ```bash
+    cd $DYNAMO_HOME
+    ZE_AFFINITY_MASK=0,1 \
+      bash examples/backends/vllm/launch/xpu/agg_multimodal_router_chat_processor_xpu.sh
+    ```
+  </Tab>
+</Tabs>
+
+</Tab>
+</Tabs>
+
 ## Support Matrix
+
+<Tabs>
+<Tab title="NVIDIA GPU">
 
 | Backend | Routing Path | Status | Notes |
 |---------|--------------|--------|-------|
@@ -108,3 +137,16 @@ The routing flow in general has three steps:
 | [vLLM](multimodal-vllm.md#multimodal-kv-routing) | Python chat processor | <Badge intent="success" minimal>Yes</Badge> | Uses vLLM’s own multimodal processor — supports any VLM that vLLM supports. |
 | [SGLang](multimodal-sglang.md#multimodal-kv-routing) | Rust frontend (default) | <Badge intent="success" minimal>Yes</Badge> | Dynamo's SGLang image includes hash-forwarding support; custom installations must add it. |
 | [TensorRT-LLM](multimodal-trtllm.md#multimodal-kv-routing) | Rust frontend (default) | <Badge intent="success" minimal>Yes</Badge> | Supported model scope is the Qwen2-VL family (Qwen2-VL / Qwen2.5-VL / Qwen3-VL) and Kimi (Kimi-K2.5 / Kimi-K2.6). Other multimodal models fall back to text-prefix routing. |
+
+</Tab>
+<Tab title="Intel GPU">
+
+| Backend | Routing Path | Status |
+|---------|--------------|--------|
+| [vLLM](multimodal-vllm.md#multimodal-kv-routing) | Rust frontend (default) | <Badge intent="success" minimal>Yes</Badge> |
+| [vLLM](multimodal-vllm.md#multimodal-kv-routing) | Python chat processor | <Badge intent="success" minimal>Yes</Badge> |
+| SGLang | — | — |
+| TensorRT-LLM | — | — |
+
+</Tab>
+</Tabs>

@@ -55,6 +55,8 @@ The built-in backends expose OpenAI-compatible endpoints for images (`/v1/images
       <Card title="vLLM-Omni">
         <Badge intent="info" minimal>Broadest modality coverage</Badge>
 
+        **Accelerators:** NVIDIA GPU and Intel GPU.
+
         **Best for:** Mixed media workloads, text-to-audio, or disaggregated multi-stage serving.
 
         **Supports:** Text-to-image, text-to-video, image-to-video, and text-to-audio.
@@ -63,6 +65,8 @@ The built-in backends expose OpenAI-compatible endpoints for images (`/v1/images
       </Card>
       <Card title="SGLang">
         <Badge intent="info" minimal>LLM diffusion</Badge>
+
+        **Accelerator:** NVIDIA GPU.
 
         **Best for:** Diffusion alongside an existing SGLang deployment or text-to-text diffusion models.
 
@@ -73,6 +77,8 @@ The built-in backends expose OpenAI-compatible endpoints for images (`/v1/images
       <Card title="TensorRT-LLM">
         <Badge intent="warning" minimal>Experimental</Badge>
 
+        **Accelerator:** NVIDIA GPU.
+
         **Best for:** NVIDIA-optimized image and video generation when experimental status is acceptable.
 
         **Supports:** Text-to-image and text-to-video.
@@ -81,6 +87,8 @@ The built-in backends expose OpenAI-compatible endpoints for images (`/v1/images
       </Card>
       <Card title="FastVideo">
         <Badge intent="success" minimal>Kubernetes</Badge>
+
+        **Accelerator:** NVIDIA GPU.
 
         **Best for:** Fast, production-oriented text-to-video generation on Kubernetes.
 
@@ -101,6 +109,7 @@ The built-in backends expose OpenAI-compatible endpoints for images (`/v1/images
         **Prerequisites**
 
         - A working [vLLM backend setup](../../backends/vllm/README.md).
+        - A supported NVIDIA GPU or Intel GPU vLLM runtime.
         - An `amd64` host. Dynamo container builds do not install vLLM-Omni on `arm64`.
 
         Dynamo container images include vLLM-Omni. A PyPI installation of `ai-dynamo[vllm]` does not include it automatically. For a source installation, pin the vLLM-Omni release that matches your vLLM version:
@@ -128,6 +137,7 @@ The built-in backends expose OpenAI-compatible endpoints for images (`/v1/images
         **Prerequisites**
 
         - A working [SGLang backend setup](../../backends/sglang/README.md).
+        - An NVIDIA GPU runtime.
 
         No separate installation is required. Select the worker mode for your workload:
 
@@ -202,6 +212,9 @@ The built-in backends expose OpenAI-compatible endpoints for images (`/v1/images
 
 ## Support Matrix
 
+<Tabs>
+<Tab title="NVIDIA GPU">
+
 | Workflow | vLLM-Omni | SGLang | TensorRT-LLM | FastVideo |
 |----------|-----------|--------|--------------|-----------|
 | Text-to-Image | <Badge intent="success" minimal>Yes</Badge> | <Badge intent="success" minimal>Yes</Badge> | <Badge intent="warning" minimal>Experimental</Badge> | — |
@@ -209,3 +222,17 @@ The built-in backends expose OpenAI-compatible endpoints for images (`/v1/images
 | Image-to-Video | <Badge intent="success" minimal>Yes</Badge> | <Badge intent="success" minimal>Yes</Badge> | — | — |
 | Text-to-Audio | <Badge intent="success" minimal>Yes</Badge> | — | — | — |
 | Text-to-Text | — | <Badge intent="success" minimal>Yes</Badge> | — | — |
+
+</Tab>
+<Tab title="Intel GPU">
+
+| Workflow | vLLM-Omni | SGLang | TensorRT-LLM | FastVideo |
+|----------|-----------|--------|--------------|-----------|
+| Text-to-Image | <Badge intent="success" minimal>Yes</Badge> | — | — | — |
+| Text-to-Video | <Badge intent="success" minimal>Yes</Badge> | — | — | — |
+| Image-to-Video | <Badge intent="success" minimal>Yes</Badge> | — | — | — |
+| Text-to-Audio | — | — | — | — |
+| Text-to-Text | — | — | — | — |
+
+</Tab>
+</Tabs>

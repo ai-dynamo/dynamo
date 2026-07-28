@@ -13,16 +13,22 @@ import { useEffect, useMemo, useState } from "react";
 
 import {
   RELEASES,
+  INTEL_RELEASES,
   MAIN_TOT,
+  INTEL_MAIN_TOT,
   CURRENT_VERSION,
   CUDA_HISTORY,
+  XPU_HISTORY,
   PLATFORM,
+  INTEL_PLATFORM,
   type BackendPins,
   type Release,
 } from "./releases.data";
 
 const VERSION_PARAM = "compat-version";
+const HARDWARE_PARAM = "compat-hardware";
 const MAIN_VALUE = "main";
+type Hardware = "nvidia" | "intel";
 
 const HERO_CSS = `
 .dynref-hero-header {
@@ -50,6 +56,56 @@ const HERO_CSS = `
     display: grid;
     gap: 5px;
     min-width: min(100%, 220px);
+}
+
+.dynref-hero-selectors {
+    display: flex;
+    flex-wrap: nowrap;
+    align-items: flex-end;
+    justify-content: flex-end;
+    gap: 10px;
+}
+
+.dynref-hero-hardware {
+    display: grid;
+    gap: 5px;
+}
+
+.dynref-hero-hardware-rail {
+    display: flex;
+    flex-wrap: nowrap;
+    gap: 8px;
+}
+
+.dynref-hero-hardware-pill {
+    display: inline-flex;
+    align-items: center;
+    min-height: 30px;
+    padding: 6px 10px;
+    border: 1px solid var(--border, var(--grayscale-a5));
+    border-radius: 999px;
+    background: transparent;
+    color: var(--pst-color-text-base);
+    font: inherit;
+    font-size: 12.5px;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.dynref-hero-hardware-pill:hover {
+    border-color: var(--nv-color-green, #76B900);
+}
+
+.dynref-hero-hardware-pill[aria-pressed="true"] {
+    border-color: var(--nv-color-green, #76B900);
+    box-shadow: 0 0 0 1px var(--nv-color-green, #76B900);
+    background: rgba(118, 185, 0, 0.08);
+    font-weight: 700;
+}
+
+.dynref-hero-hardware-pill:focus-visible {
+    outline: 2px solid var(--nv-color-green, #76B900);
+    outline-offset: 1px;
 }
 
 .dynref-hero-selector {
@@ -148,6 +204,8 @@ const HERO_CSS = `
 }
 
 @media (max-width: 520px) {
+    .dynref-hero-selectors { flex-wrap: wrap; width: 100%; }
+    .dynref-hero-hardware-rail { flex-wrap: wrap; }
     .dynref-hero-selector-wrap { width: 100%; }
     .dynref-hero-reqs { grid-template-columns: 1fr; gap: 4px; }
 }
@@ -181,11 +239,49 @@ function optionLabel(release: Release): string {
   return `${release.version} — ${suffix}`;
 }
 
+function HardwareSelector({
+  hardware,
+  onChange,
+}: {
+  hardware: Hardware;
+  onChange: (hardware: Hardware) => void;
+}) {
+  return (
+    <div className="dynref-hero-hardware">
+      <span className="dynref-label">Accelerator</span>
+      <div className="dynref-hero-hardware-rail" role="group" aria-label="Accelerator">
+        <button
+          className="dynref-hero-hardware-pill"
+          type="button"
+          aria-pressed={hardware === "nvidia"}
+          onClick={() => onChange("nvidia")}
+        >
+          NVIDIA GPU
+        </button>
+        <button
+          className="dynref-hero-hardware-pill"
+          type="button"
+          aria-pressed={hardware === "intel"}
+          onClick={() => onChange("intel")}
+        >
+          Intel GPU
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export function CompatibilityHero() {
+  const [hardware, setHardware] = useState<Hardware>("nvidia");
   const [selectedVersion, setSelectedVersion] = useState(CURRENT_VERSION);
 
   useEffect(() => {
-    const requested = new URLSearchParams(window.location.search).get(VERSION_PARAM);
+    const params = new URLSearchParams(window.location.search);
+    const requestedHardware = params.get(HARDWARE_PARAM);
+    const requested = params.get(VERSION_PARAM);
+    if (requestedHardware === "intel" || requestedHardware === "nvidia") {
+      setHardware(requestedHardware);
+    }
     if (requested === MAIN_VALUE || RELEASES.some((release) => release.version === requested)) {
       setSelectedVersion(requested);
     }
@@ -211,6 +307,33 @@ export function CompatibilityHero() {
     window.history.replaceState({}, "", url);
   }
 
+  function selectHardware(nextHardware: Hardware) {
+    const nextVersion =
+      nextHardware === "intel" &&
+      selectedVersion !== MAIN_VALUE &&
+      !INTEL_RELEASES.some((release) => release.version === selectedVersion)
+        ? CURRENT_VERSION
+        : selectedVersion;
+    setHardware(nextHardware);
+    setSelectedVersion(nextVersion);
+    const url = new URL(window.location.href);
+    if (nextHardware === "nvidia") url.searchParams.delete(HARDWARE_PARAM);
+    else url.searchParams.set(HARDWARE_PARAM, nextHardware);
+    if (nextVersion === CURRENT_VERSION) url.searchParams.delete(VERSION_PARAM);
+    else url.searchParams.set(VERSION_PARAM, nextVersion);
+    window.history.replaceState({}, "", url);
+  }
+
+  if (hardware === "intel") {
+    return (
+      <IntelCompatibilityHero
+        selectedVersion={selectedVersion}
+        onVersionChange={selectVersion}
+        onHardwareChange={selectHardware}
+      />
+    );
+  }
+
   return (
     <>
       <style>{HERO_CSS}</style>
@@ -224,21 +347,24 @@ export function CompatibilityHero() {
             </div>
           </div>
 
-          <label className="dynref-hero-selector-wrap">
-            <span className="dynref-label">Dynamo version</span>
-            <select
-              className="dynref-hero-selector"
-              value={selectedVersion}
-              onChange={(event) => selectVersion(event.target.value)}
-            >
-              <option value={MAIN_VALUE}>main branch — development</option>
-              {RELEASES.map((release) => (
-                <option value={release.version} key={release.version}>
-                  {optionLabel(release)}
-                </option>
-              ))}
-            </select>
-          </label>
+          <div className="dynref-hero-selectors">
+            <HardwareSelector hardware={hardware} onChange={selectHardware} />
+            <label className="dynref-hero-selector-wrap">
+              <span className="dynref-label">Dynamo version</span>
+              <select
+                className="dynref-hero-selector"
+                value={selectedVersion}
+                onChange={(event) => selectVersion(event.target.value)}
+              >
+                <option value={MAIN_VALUE}>main branch — development</option>
+                {RELEASES.map((release) => (
+                  <option value={release.version} key={release.version}>
+                    {optionLabel(release)}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
         </div>
 
         <p className="dynref-muted dynref-hero-meta">
@@ -340,6 +466,152 @@ export function CompatibilityHero() {
         <p className="dynref-muted dynref-grid-note">
           Backend versions listed are the versions tested and supported for the selected release.
           TensorRT-LLM does not support Python 3.11.
+        </p>
+      </section>
+    </>
+  );
+}
+
+function IntelCompatibilityHero({
+  selectedVersion,
+  onVersionChange,
+  onHardwareChange,
+}: {
+  selectedVersion: string;
+  onVersionChange: (version: string) => void;
+  onHardwareChange: (hardware: Hardware) => void;
+}) {
+  const isMain = selectedVersion === MAIN_VALUE;
+  const selectedRelease = isMain
+    ? undefined
+    : INTEL_RELEASES.find((candidate) => candidate.version === selectedVersion);
+  const pins: BackendPins = isMain ? INTEL_MAIN_TOT : (selectedRelease?.pins ?? {});
+  const badge = releaseType(selectedRelease);
+  const xpuVersion = selectedVersion.replace(/^v/, "");
+
+  return (
+    <>
+      <style>{HERO_CSS}</style>
+      <section className="dynref-panel" aria-labelledby="intel-compatibility-selection-title">
+        <div className="dynref-hero-header">
+          <div>
+            <p className="dynref-eyebrow">Compatibility by version</p>
+            <div className="dynref-hero-title" id="intel-compatibility-selection-title">
+              {isMain
+                ? "Dynamo main branch"
+                : `Dynamo ${selectedRelease?.version ?? selectedVersion}`}
+              <span className={`dynref-badge dynref-badge--${badge.variant}`}>{badge.label}</span>
+            </div>
+          </div>
+
+          <div className="dynref-hero-selectors">
+            <HardwareSelector hardware="intel" onChange={onHardwareChange} />
+            <label className="dynref-hero-selector-wrap">
+              <span className="dynref-label">Dynamo version</span>
+              <select
+                className="dynref-hero-selector"
+                value={selectedVersion}
+                onChange={(event) => onVersionChange(event.target.value)}
+              >
+                <option value={MAIN_VALUE}>main branch — development</option>
+                {INTEL_RELEASES.map((candidate) => (
+                  <option value={candidate.version} key={candidate.version}>
+                    {optionLabel(candidate)}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+        </div>
+
+        <p className="dynref-muted dynref-hero-meta">
+          {isMain ? (
+            "Unreleased dependency pins from the tip of the main branch."
+          ) : selectedRelease ? (
+            <>
+              Released {selectedRelease.date ?? "date unavailable"}
+              {selectedRelease.github && (
+                <>
+                  {" · "}
+                  <a href={selectedRelease.github}>Release notes</a>
+                </>
+              )}
+              {selectedRelease.ucx && (
+                <>
+                  {" · "}UCX <span className="dynref-mono">{selectedRelease.ucx}</span>
+                </>
+              )}
+            </>
+          ) : (
+            "Release data unavailable."
+          )}
+        </p>
+
+        <div className="dynref-hero-backends">
+          {BACKENDS.filter((backend) => pins[backend.key]).map((backend) => {
+            const xpuRows = XPU_HISTORY.filter(
+              (row) => row.version === xpuVersion && row.backend === backend.label,
+            );
+            return (
+              <div className="dynref-hero-backend" key={backend.label}>
+                <span className="dynref-hero-backend-name">{backend.label}</span>
+                <span className="dynref-mono dynref-hero-pin">{pins[backend.key]}</span>
+                <div className="dynref-hero-dependency">
+                  <span className="dynref-label">NIXL</span>
+                  <span className="dynref-mono">{pins[backend.nixlKey] ?? "—"}</span>
+                </div>
+                {xpuRows.map((row) => (
+                  <div
+                    className="dynref-hero-cuda-row"
+                    key={`${row.version}-${row.backend}`}
+                  >
+                    <span className="dynref-chip dynref-chip--cuda">
+                      oneAPI {row.oneapi}
+                    </span>
+                    <span className="dynref-muted">
+                      Driver <span className="dynref-mono">{row.minDriver}</span>
+                    </span>
+                  </div>
+                ))}
+                {xpuRows.length === 0 && (
+                  <p className="dynref-hero-empty">
+                    oneAPI and driver requirements are published at release.
+                  </p>
+                )}
+              </div>
+            );
+          })}
+        </div>
+
+        {!isMain && (
+          <div className="dynref-hero-reqs">
+          <span className="dynref-label">GPU</span>
+          <div className="dynref-hero-req-values">
+            {INTEL_PLATFORM.gpus.map((gpu) => (
+              <span className="dynref-chip dynref-chip--gpu" key={gpu}>{gpu}</span>
+            ))}
+          </div>
+
+          <span className="dynref-label">OS</span>
+          <div className="dynref-hero-req-values">
+            {INTEL_PLATFORM.os.map((row) => (
+              <span className={`dynref-chip dynref-chip--${row.chip}`} key={`${row.name} ${row.version}`}>
+                {row.name} {row.version}
+              </span>
+            ))}
+          </div>
+
+          <span className="dynref-label">Arch</span>
+          <div className="dynref-hero-req-values">
+            {INTEL_PLATFORM.arch.map((arch) => (
+              <span className="dynref-chip dynref-chip--arch" key={arch}>{arch}</span>
+            ))}
+          </div>
+          </div>
+        )}
+
+        <p className="dynref-muted dynref-grid-note">
+          Backend versions listed are the versions tested and supported for the selected release.
         </p>
       </section>
     </>

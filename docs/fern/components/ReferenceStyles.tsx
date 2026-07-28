@@ -275,6 +275,10 @@ const REFERENCE_CSS = `
     border-color: var(--dynref-amber-border);
 }
 
+.dynref-badge--bang::before {
+    content: "\\21";
+}
+
 
 .dynref-badge--gray {
     background: rgba(120, 120, 120, 0.1);

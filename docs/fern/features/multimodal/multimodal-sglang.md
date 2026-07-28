@@ -6,6 +6,9 @@ title: SGLang Multimodal
 
 This document provides a comprehensive guide for multimodal inference using SGLang backend in Dynamo. SGLang multimodal supports native **EPD** and **EP/D** flows where the SGLang engine performs media encoding, plus explicit encode-worker **E/PD** and **E/P/D** flows with NIXL (RDMA) for zero-copy tensor transfer.
 
+> [!IMPORTANT]
+> The Dynamo SGLang multimodal path currently supports NVIDIA GPU only. Its encode and worker handlers use CuPy and CUDA device APIs, and the provided launchers assign workers with `CUDA_VISIBLE_DEVICES`.
+
 ## Support Matrix
 
 | Modality | Input Format | Aggregated | Disaggregated | Notes |
