@@ -782,10 +782,10 @@ def kvbm_zmq_ports():
 @pytest.mark.e2e
 @pytest.mark.gpu_4
 @pytest.mark.model("Qwen/Qwen3-0.6B")
-@pytest.mark.profiled_vram_gib(3.8)  # per GPU; existing KVBM profile with this cap
-@pytest.mark.requested_vllm_kv_cache_bytes(1_119_388_000)
-@pytest.mark.timeout(900)
-@pytest.mark.pre_merge
+@pytest.mark.profiled_vram_gib(10.0)  # per GPU; bounds the 0.4 KVBM allocation on L4
+@pytest.mark.requested_vllm_kv_cache_bytes(1_119_388_000)  # decode workers only
+@pytest.mark.timeout(1200)  # engine harness times out and dumps logs after 900s
+@pytest.mark.nightly
 @pytest.mark.parametrize("num_system_ports", [4], indirect=True)
 def test_disaggregated_kvbm_router(
     request,

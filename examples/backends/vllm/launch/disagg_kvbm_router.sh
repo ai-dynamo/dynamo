@@ -18,16 +18,19 @@ MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
 DEFAULT_KV_CACHE_BYTES="${DEFAULT_KV_CACHE_BYTES:-1119388000}"
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 
-# Use a deterministic per-worker KV cache budget. The test harness overrides
-# this through _PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES when a marker supplies a
-# measured value.
-GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
-if [[ -z "$GPU_MEM_ARGS" ]]; then
-    GPU_MEM_ARGS="--kv-cache-memory-bytes $DEFAULT_KV_CACHE_BYTES --gpu-memory-utilization 0.01"
+# Decode workers use a deterministic KV cache budget. KVBM prefill workers
+# manage their own device-side blocks and use the established utilization path
+# instead of vLLM's --kv-cache-memory-bytes override.
+DECODE_GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
+if [[ -z "$DECODE_GPU_MEM_ARGS" ]]; then
+    DECODE_GPU_MEM_ARGS="--kv-cache-memory-bytes $DEFAULT_KV_CACHE_BYTES --gpu-memory-utilization 0.01"
 fi
+KVBM_GPU_MEMORY_UTILIZATION="${KVBM_GPU_MEMORY_UTILIZATION:-0.4}"
 
 print_launch_banner "Launching Disaggregated + KVBM + KV Routing (4 GPUs)" "$MODEL" "$HTTP_PORT" \
-    "Workers:     4 (2 decode + 2 KVBM prefill)"
+    "Workers:     4 (2 decode + 2 KVBM prefill)" \
+    "Decode VRAM: $DECODE_GPU_MEM_ARGS" \
+    "KVBM VRAM:   --gpu-memory-utilization $KVBM_GPU_MEMORY_UTILIZATION"
 
 
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
@@ -44,7 +47,7 @@ python3 -m dynamo.vllm \
     --enforce-eager \
     --disaggregation-mode decode \
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
-    $GPU_MEM_ARGS \
+    $DECODE_GPU_MEM_ARGS \
     --max-model-len "$MAX_MODEL_LEN" \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" &
 
@@ -56,7 +59,7 @@ python3 -m dynamo.vllm \
     --enforce-eager \
     --disaggregation-mode decode \
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
-    $GPU_MEM_ARGS \
+    $DECODE_GPU_MEM_ARGS \
     --max-model-len "$MAX_MODEL_LEN" \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" &
 
@@ -73,7 +76,7 @@ python3 -m dynamo.vllm \
     --enforce-eager \
     --disaggregation-mode prefill \
     --kv-transfer-config '{"kv_connector":"PdConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"},{"kv_connector":"NixlConnector","kv_role":"kv_both"}]},"kv_connector_module_path":"kvbm.vllm_integration.connector"}' \
-    $GPU_MEM_ARGS \
+    --gpu-memory-utilization "$KVBM_GPU_MEMORY_UTILIZATION" \
     --max-model-len "$MAX_MODEL_LEN" \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" \
     --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${DYN_VLLM_KV_EVENT_PORT1:-20081}\",\"enable_kv_cache_events\":true}" &
@@ -89,7 +92,7 @@ python3 -m dynamo.vllm \
     --enforce-eager \
     --disaggregation-mode prefill \
     --kv-transfer-config '{"kv_connector":"PdConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"},{"kv_connector":"NixlConnector","kv_role":"kv_both"}]},"kv_connector_module_path":"kvbm.vllm_integration.connector"}' \
-    $GPU_MEM_ARGS \
+    --gpu-memory-utilization "$KVBM_GPU_MEMORY_UTILIZATION" \
     --max-model-len "$MAX_MODEL_LEN" \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" \
     --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${DYN_VLLM_KV_EVENT_PORT2:-20082}\",\"enable_kv_cache_events\":true}" &
