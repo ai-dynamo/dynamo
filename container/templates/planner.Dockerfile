@@ -78,18 +78,25 @@ RUN --mount=type=bind,source=./container/deps/requirements.planner.txt,target=/t
         --requirement /tmp/requirements.planner.txt \
         --requirement /tmp/requirements.benchmark.txt \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
-        /opt/dynamo/wheelhouse/ai_dynamo*any.whl
+        /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
+        /opt/dynamo/wheelhouse/aisimulate*.whl
 
 # Copy only the subset of the repository needed for planner/profiler service
-# startup and the component-local planner-family test suites.
+# startup and the component-local planner-family test suites. AI Simulate
+# runtime code comes from the wheel installed above; copy only its tests.
 COPY --chmod=664 --chown=dynamo:0 pyproject.toml /workspace/pyproject.toml
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/planner /workspace/components/src/dynamo/planner
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/profiler /workspace/components/src/dynamo/profiler
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/global_planner /workspace/components/src/dynamo/global_planner
+COPY --chmod=775 --chown=dynamo:0 aisimulate/tests /workspace/aisimulate/tests
 COPY --chmod=775 --chown=dynamo:0 deploy /workspace/deploy
 COPY --chmod=775 --chown=dynamo:0 dev /workspace/dev
 COPY --chmod=775 --chown=dynamo:0 examples /workspace/examples
-COPY --chmod=664 --chown=dynamo:0 ATTRIBUTION* LICENSE /workspace/
+COPY --chmod=664 --chown=dynamo:0 LICENSE /workspace/
+
+
+{% include "templates/compliance.Dockerfile" %}
+
 
 FROM ${PLANNER_RUNTIME_IMAGE}:${PLANNER_RUNTIME_IMAGE_TAG} AS planner
 
@@ -102,6 +109,7 @@ COPY --from=planner_builder /usr/lib/*-linux-gnu/libgomp.so.1* /opt/dynamo/lib/
 COPY --from=planner_builder /usr/local/bin/etcd /usr/local/bin/etcd
 COPY --from=planner_builder /usr/local/bin/nats-server /usr/local/bin/nats-server
 COPY --chown=1000:0 --from=planner_builder /workspace /workspace
+COPY --from=licenses /legal /legal
 
 ARG DYNAMO_COMMIT_SHA
 ENV DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA} \

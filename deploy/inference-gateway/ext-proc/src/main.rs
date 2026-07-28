@@ -13,7 +13,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use dynamo_ext_proc::{ExtProcServer, Router};
+use dynamo_ext_proc::{EppMode, EppStandaloneConfig, ExtProcServer, Router};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 
@@ -35,7 +35,6 @@ const TLS_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 struct Config {
     namespace: String,
     component: String,
-    enforce_disagg: bool,
 }
 
 impl Config {
@@ -44,10 +43,15 @@ impl Config {
             .or_else(|| env_or("DYN_NAMESPACE", ""))
             .unwrap_or_else(|| "vllm-agg".to_string());
 
+        if parse_env("DYN_ENFORCE_DISAGG", false) {
+            tracing::warn!(
+                "DYN_ENFORCE_DISAGG is deprecated and ignored; routing topology and readiness are determined from registered worker types"
+            );
+        }
+
         Self {
             namespace,
             component: env_or("DYN_COMPONENT_NAME", "").unwrap_or_else(|| "backend".to_string()),
-            enforce_disagg: parse_env("DYN_ENFORCE_DISAGG", false),
         }
     }
 }
@@ -119,6 +123,8 @@ async fn main() -> Result<()> {
         )
         .init();
 
+    let standalone = matches!(EppMode::from_env()?, EppMode::Standalone);
+
     let config = Config::from_env();
 
     tracing::info!(
@@ -126,9 +132,21 @@ async fn main() -> Result<()> {
         health_port = HEALTH_PORT,
         namespace = %config.namespace,
         component = %config.component,
-        enforce_disagg = config.enforce_disagg,
+        standalone,
         "Starting Dynamo Rust EPP"
     );
+
+    // Standalone (selector) mode to be supported in a follow-up PR.
+    if standalone {
+        let selector_cfg = EppStandaloneConfig::from_env()?;
+        tracing::info!(
+            inference_pool_name = %selector_cfg.inference_pool_name,
+            model_name = %selector_cfg.model_name,
+            block_size = selector_cfg.block_size,
+            "Parsed standalone selector configuration"
+        );
+        anyhow::bail!("DYN_EPP_MODE=standalone is not yet supported");
+    }
 
     // Start plaintext gRPC health server immediately (NOT_SERVING until router ready).
     let (health_reporter, health_service) = tonic_health::server::health_reporter();
@@ -145,8 +163,7 @@ async fn main() -> Result<()> {
     );
 
     tracing::info!("Initializing KV-aware router from discovery...");
-    let router =
-        Router::from_discovery(&config.namespace, &config.component, config.enforce_disagg).await?;
+    let router = Router::from_discovery(&config.namespace, &config.component).await?;
 
     // Gate SERVING on pod-reflector readiness. `from_discovery` returns once
     // worker discovery and the model card are ready, but the K8s pod reflector's

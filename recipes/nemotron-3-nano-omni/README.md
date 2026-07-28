@@ -21,7 +21,7 @@ source build, no Rust toolchain.
 
 ## Prerequisites
 
-- A Kubernetes cluster with the [Dynamo Operator](../../docs/kubernetes/README.md) installed
+- A Kubernetes cluster with the [Dynamo Operator](../../docs/fern/kubernetes/quickstart.mdx) installed
 - One NVIDIA GPU per worker replica
 - Shared PVC storage for the Hugging Face model cache
 - Hugging Face access to `nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4`

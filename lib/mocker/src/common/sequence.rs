@@ -64,6 +64,8 @@ pub struct ActiveSequence {
     #[getter(copy)]
     generated_tokens: usize,
 
+    planned_output_ids: Option<Vec<u32>>,
+
     #[getter(copy)]
     num_input_tokens: usize,
 
@@ -78,6 +80,80 @@ pub struct ActiveSequence {
 }
 
 impl ActiveSequence {
+    /// Promote the mutable tail after its last token has actually been
+    /// computed.
+    ///
+    /// A generated block is represented as partial until the scheduler has
+    /// computed every token in it.  The historical path promotes that block
+    /// when the first token of the following block is appended.  Native vLLM
+    /// prefix caching needs the earlier boundary: `allocate_slots()` caches a
+    /// just-completed block before considering the next waiting request in the
+    /// same scheduling pass.
+    pub(crate) fn promote_computed_tail(
+        &mut self,
+        cumulative_computed_tokens: usize,
+    ) -> Option<MoveBlock> {
+        if cumulative_computed_tokens == 0
+            || cumulative_computed_tokens != self.len()
+            || !cumulative_computed_tokens.is_multiple_of(self.block_size)
+        {
+            return None;
+        }
+        self.promote_last_partial()
+    }
+
+    fn promote_last_partial(&mut self) -> Option<MoveBlock> {
+        let UniqueBlock::PartialBlock(uuid) = self.unique_blocks.last().cloned()? else {
+            return None;
+        };
+
+        let last_complete = self.tokens.last_complete_block().unwrap_or_else(|| {
+            panic!("partial sequence tail cannot be promoted without a complete token block")
+        });
+        let last_seq_hash = if self.enable_prefix_caching {
+            last_complete.sequence_hash()
+        } else {
+            random::<u64>()
+        };
+        let last_block_hash = self
+            .enable_prefix_caching
+            .then(|| last_complete.block_hash());
+        // With prefix caching off, the sequence hash and PLH must both remain
+        // request-unique so another identical prompt cannot reuse this slot.
+        let last_plh = if self.enable_prefix_caching {
+            last_complete.positional_lineage_hash()
+        } else {
+            PositionalLineageHash::new(random::<u64>(), None, self.plhs.len() as u64)
+        };
+        let promote_token_ids = if self.emit_token_ids {
+            Some(last_complete.tokens().to_vec())
+        } else {
+            None
+        };
+        if let Some(last_block_hash) = last_block_hash {
+            self.block_hashes.push(last_block_hash);
+        }
+        self.plhs.push(last_plh);
+        self.unique_blocks.pop();
+
+        // After pop, the last element is the parent block.
+        let parent_hash = self.unique_blocks.last().map(|block| match block {
+            UniqueBlock::FullBlock(hash) => *hash,
+            UniqueBlock::PartialBlock(_) => panic!("partial block cannot be a parent"),
+        });
+        self.unique_blocks
+            .push(UniqueBlock::FullBlock(last_seq_hash));
+
+        Some(MoveBlock::Promote(
+            uuid,
+            last_seq_hash,
+            parent_hash,
+            last_block_hash,
+            last_plh,
+            promote_token_ids,
+        ))
+    }
+
     /// Create a new ActiveSequence instance with the provided tokens
     pub fn new(
         tokens: Vec<u32>,
@@ -85,6 +161,24 @@ impl ActiveSequence {
         block_size: Option<usize>,
         enable_prefix_caching: bool,
         emit_token_ids: bool,
+    ) -> Self {
+        Self::new_with_planned_output_ids(
+            tokens,
+            max_output_tokens,
+            block_size,
+            enable_prefix_caching,
+            emit_token_ids,
+            None,
+        )
+    }
+
+    pub fn new_with_planned_output_ids(
+        tokens: Vec<u32>,
+        max_output_tokens: usize,
+        block_size: Option<usize>,
+        enable_prefix_caching: bool,
+        emit_token_ids: bool,
+        planned_output_ids: Option<Vec<u32>>,
     ) -> Self {
         let block_size = block_size.unwrap_or(64);
         let num_input_tokens = tokens.len();
@@ -101,6 +195,7 @@ impl ActiveSequence {
             block_size,
             max_output_tokens,
             generated_tokens: 0,
+            planned_output_ids,
             num_input_tokens,
             num_allocated_tokens: 0,
             enable_prefix_caching,
@@ -244,53 +339,10 @@ impl ActiveSequence {
         // Send Use signal (to allocate space for this new generation block)
         let mut signals = Vec::new();
 
-        // Replace last partial block with full block if it exists
-        if let Some(UniqueBlock::PartialBlock(uuid)) = self.unique_blocks.last().cloned() {
-            let last_complete = self.tokens.last_complete_block().unwrap();
-            let last_seq_hash = if self.enable_prefix_caching {
-                last_complete.sequence_hash()
-            } else {
-                random::<u64>()
-            };
-            let last_block_hash = self
-                .enable_prefix_caching
-                .then(|| last_complete.block_hash());
-            // Same randomization story as `last_seq_hash`: with prefix caching off,
-            // two identical prompts must not share blocks, so the PLH we promote
-            // with must also be unique — otherwise `process_promote`'s
-            // `match_blocks(&[plh])` lookup would reuse another request's block.
-            let last_plh = if self.enable_prefix_caching {
-                last_complete.positional_lineage_hash()
-            } else {
-                PositionalLineageHash::new(random::<u64>(), None, self.plhs.len() as u64)
-            };
-            let promote_token_ids = if self.emit_token_ids {
-                Some(last_complete.tokens().to_vec())
-            } else {
-                None
-            };
-            if let Some(last_block_hash) = last_block_hash {
-                self.block_hashes.push(last_block_hash);
-            }
-            self.plhs.push(last_plh);
-            self.unique_blocks.pop();
-
-            // After pop, the last element is the parent block
-            let second_to_last_hash = self.unique_blocks.last().map(|block| match block {
-                UniqueBlock::FullBlock(hash) => *hash,
-                UniqueBlock::PartialBlock(_) => panic!("Cannot have a partial block as parent"),
-            });
-
-            self.unique_blocks
-                .push(UniqueBlock::FullBlock(last_seq_hash));
-            signals.push(MoveBlock::Promote(
-                uuid,
-                last_seq_hash,
-                second_to_last_hash,
-                last_block_hash,
-                last_plh,
-                promote_token_ids,
-            ));
+        // The scheduler may already have promoted this block at its computed
+        // boundary. Retain this fallback for callers that have not.
+        if let Some(promote) = self.promote_last_partial() {
+            signals.push(promote);
         }
 
         let new_partial_block = UniqueBlock::default();
@@ -310,7 +362,7 @@ impl ActiveSequence {
     /// This function:
     /// - Generates a random token and adds it to the current sequence
     /// - Acquires a new partial block if needed or promotes an existing partial block to a full block
-    /// - Returns appropriate signals for the KvManager to process
+    /// - Returns appropriate signals for the G1 manager to process
     ///
     /// # Panics
     ///
@@ -318,14 +370,24 @@ impl ActiveSequence {
     /// Always check `generated_tokens < max_output_tokens` before calling this method.
     #[cfg_attr(feature = "profile", inline(never))]
     pub fn generate(&mut self) -> Vec<MoveBlock> {
+        self.generate_token().1
+    }
+
+    /// Generate the next output token, push it to the sequence, and return the
+    /// token alongside any KV movement signals.
+    #[cfg_attr(feature = "profile", inline(never))]
+    pub fn generate_token(&mut self) -> (u32, Vec<MoveBlock>) {
         // Assert that we haven't reached the maximum output tokens
         assert!(
             self.generated_tokens < self.max_output_tokens,
             "Cannot generate more tokens: reached max_output_tokens limit"
         );
 
-        // Generate a random token
-        let token = random::<u32>();
+        let token = self
+            .planned_output_ids
+            .as_ref()
+            .and_then(|ids| ids.get(self.generated_tokens).copied())
+            .unwrap_or_else(random::<u32>);
 
         // Collect signals
         let mut signals = Vec::new();
@@ -337,30 +399,34 @@ impl ActiveSequence {
 
         // Check if we've reached the limit after pushing
         if self.generated_tokens != self.max_output_tokens {
-            return signals;
+            return (token, signals);
         }
 
         // Free all blocks when we reach max tokens
-        signals.extend(self.free_signal_for_tokens(self.len()));
-        signals
+        signals.extend(self.terminal_signals());
+        (token, signals)
+    }
+
+    /// Release the full sequence footprint after an independent terminal
+    /// condition, such as the model context-length limit, is reached.
+    pub(crate) fn terminal_signals(&self) -> Vec<MoveBlock> {
+        self.free_signal_for_tokens(self.len())
     }
 
     fn free_signal_for_tokens(&self, active_tokens: usize) -> Vec<MoveBlock> {
         let active_blocks = active_tokens
             .div_ceil(self.block_size)
             .min(self.unique_blocks.len());
-        self.unique_blocks[..active_blocks]
+        if active_blocks == 0 {
+            return Vec::new();
+        }
+
+        let blocks = self.unique_blocks[..active_blocks]
             .iter()
             .rev()
-            .map(|block| match block {
-                UniqueBlock::PartialBlock(uuid) => {
-                    MoveBlock::Deref(vec![UniqueBlock::PartialBlock(*uuid)])
-                }
-                UniqueBlock::FullBlock(hash) => {
-                    MoveBlock::Deref(vec![UniqueBlock::FullBlock(*hash)])
-                }
-            })
-            .collect()
+            .cloned()
+            .collect();
+        vec![MoveBlock::Deref(blocks)]
     }
 
     /// Free the currently active allocation footprint.
@@ -454,23 +520,12 @@ mod tests {
         }
     }
 
-    fn assert_deref_partial(signal: &MoveBlock) {
+    fn assert_deref_blocks(signal: &MoveBlock, expected: &[UniqueBlock]) {
         match signal {
             MoveBlock::Deref(blocks) => {
-                assert_eq!(blocks.len(), 1);
-                assert!(matches!(blocks[0], UniqueBlock::PartialBlock(_)));
+                assert_eq!(blocks, expected);
             }
-            _ => panic!("Expected MoveBlock::Deref for partial block"),
-        }
-    }
-
-    fn assert_deref_full(signal: &MoveBlock) {
-        match signal {
-            MoveBlock::Deref(blocks) => {
-                assert_eq!(blocks.len(), 1);
-                assert!(matches!(blocks[0], UniqueBlock::FullBlock(_)));
-            }
-            _ => panic!("Expected MoveBlock::Deref for full block"),
+            _ => panic!("Expected MoveBlock::Deref"),
         }
     }
 
@@ -583,9 +638,40 @@ mod tests {
 
         let free_signals = seq.reset_with_signal();
 
-        assert!(!free_signals.is_empty());
+        assert_eq!(free_signals.len(), 1);
+        let expected = seq
+            .unique_blocks()
+            .iter()
+            .rev()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_deref_blocks(&free_signals[0], &expected);
         assert_eq!(seq.num_allocated_tokens(), 0);
         assert_eq!(seq.generated_tokens(), 2);
+    }
+
+    #[test]
+    fn test_free_signal_is_empty_without_an_active_allocation() {
+        let seq = ActiveSequence::new((0..10).collect(), 4, Some(4), true, false);
+
+        assert!(seq.free_signal().is_empty());
+    }
+
+    #[test]
+    fn test_free_signal_batches_allocated_blocks_in_reverse_order() {
+        let mut seq = ActiveSequence::new((0..10).collect(), 4, Some(4), true, false);
+        seq.commit_allocation(seq.len());
+
+        let expected = seq
+            .unique_blocks()
+            .iter()
+            .rev()
+            .cloned()
+            .collect::<Vec<_>>();
+        let signals = seq.free_signal();
+
+        assert_eq!(signals.len(), 1);
+        assert_deref_blocks(&signals[0], &expected);
     }
 
     #[test]
@@ -616,15 +702,17 @@ mod tests {
         let signals_third = seq.generate();
         assert_eq!(signals_third.len(), 0);
 
-        // Generate last token - we reach max_output_tokens, should trigger Deref signals
+        // Generate last token - we reach max_output_tokens, so all blocks should
+        // be dereferenced in one reverse-ordered batch.
+        let expected = seq
+            .unique_blocks()
+            .iter()
+            .rev()
+            .cloned()
+            .collect::<Vec<_>>();
         let signals_last = seq.generate();
-        assert_eq!(signals_last.len(), 2);
-
-        // First signal should be Deref for the partial block
-        assert_deref_partial(&signals_last[0]);
-
-        // Second signal should be Deref for the full block
-        assert_deref_full(&signals_last[1]);
+        assert_eq!(signals_last.len(), 1);
+        assert_deref_blocks(&signals_last[0], &expected);
     }
 
     #[test]

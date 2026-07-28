@@ -190,6 +190,7 @@ impl DeltaGenerator {
                 service_tier: self.service_tier.clone(),
             },
             nvext: None, // Will be populated by router layer if needed
+            llm_metrics: None,
         }
     }
 
@@ -213,6 +214,7 @@ impl DeltaGenerator {
                 service_tier: self.service_tier.clone(),
             },
             nvext: None,
+            llm_metrics: None,
         }
     }
 
@@ -266,6 +268,11 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
             // Propagate prompt token details if provided
             if let Some(prompt_details) = completion_usage.prompt_tokens_details.as_ref() {
                 self.usage.prompt_tokens_details = Some(prompt_details.clone());
+            }
+
+            // Propagate completion token details if provided, including reasoning tokens.
+            if let Some(completion_details) = completion_usage.completion_tokens_details.as_ref() {
+                self.usage.completion_tokens_details = Some(completion_details.clone());
             }
         }
 
@@ -379,7 +386,8 @@ mod tests {
     use crate::protocols::openai::DeltaGeneratorExt;
     use dynamo_protocols::types::{
         ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
-        ChatCompletionRequestUserMessageContent, CreateChatCompletionRequest,
+        ChatCompletionRequestUserMessageContent, CompletionTokensDetails, CompletionUsage,
+        CreateChatCompletionRequest,
     };
 
     fn create_test_request() -> NvCreateChatCompletionRequest {
@@ -470,8 +478,38 @@ mod tests {
             engine_data: Some(serde_json::json!({
                 "routed_experts": {"layer_0": [1, 3]}
             })),
+            encoder_result: None,
             routing_data: None,
         }
+    }
+
+    #[test]
+    fn test_completion_token_details_are_propagated_from_backend_usage() {
+        let request = create_test_request();
+        let mut generator = request.response_generator("req-token-details".to_string());
+
+        let mut backend_output = final_backend_output();
+        backend_output.completion_usage = Some(CompletionUsage {
+            prompt_tokens: 5,
+            completion_tokens: 1,
+            total_tokens: 6,
+            prompt_tokens_details: None,
+            completion_tokens_details: Some(CompletionTokensDetails {
+                reasoning_tokens: Some(3),
+                ..Default::default()
+            }),
+        });
+
+        generator
+            .choice_from_postprocessor(backend_output)
+            .expect("choice generation");
+
+        let usage = generator.get_usage();
+        let completion_details = usage
+            .completion_tokens_details
+            .expect("completion token details should be propagated");
+
+        assert_eq!(completion_details.reasoning_tokens, Some(3));
     }
 
     fn create_test_request_with_extra_fields(fields: Vec<String>) -> NvCreateChatCompletionRequest {
@@ -519,6 +557,7 @@ mod tests {
             index: Some(0),
             completion_usage: None,
             disaggregated_params: None,
+            encoder_result: None,
             worker_trace_link: None,
             engine_data: Some(serde_json::json!({
                 "kv_transfer_time_ms": 12.3,
@@ -734,6 +773,7 @@ mod tests {
             index: Some(0),
             completion_usage: None,
             disaggregated_params: None,
+            encoder_result: None,
             worker_trace_link: None,
             engine_data: None, // engine didn't provide any data
             routing_data: None,

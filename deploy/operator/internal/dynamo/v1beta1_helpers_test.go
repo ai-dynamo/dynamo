@@ -7,6 +7,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
@@ -140,6 +141,168 @@ func TestDCDAlphaCompatibilityHelpersReadThroughAPIConversion(t *testing.T) {
 	}
 	if !ok || !ingressSpec.Enabled || ingressSpec.Host != "canonical.example.com" || ingressSpec.IngressControllerClassName == nil || *ingressSpec.IngressControllerClassName != "nginx" {
 		t.Fatalf("GetDCDPreservedAlphaIngressSpec() = (%#v, %v), want canonical ingress", ingressSpec, ok)
+	}
+}
+
+func TestComponentRuntimeNamespace(t *testing.T) {
+	tests := []struct {
+		name             string
+		componentType    string
+		workerHashSuffix string
+		want             string
+	}{
+		{
+			name:             "worker appends hash suffix",
+			componentType:    commonconsts.ComponentTypeWorker,
+			workerHashSuffix: "abc123",
+			want:             "base-abc123",
+		},
+		{
+			name:             "decode appends hash suffix",
+			componentType:    commonconsts.ComponentTypeDecode,
+			workerHashSuffix: "abc123",
+			want:             "base-abc123",
+		},
+		{
+			name:             "frontend ignores hash suffix",
+			componentType:    commonconsts.ComponentTypeFrontend,
+			workerHashSuffix: "abc123",
+			want:             "base",
+		},
+		{
+			name:             "legacy worker hash remains active suffix",
+			componentType:    commonconsts.ComponentTypeWorker,
+			workerHashSuffix: commonconsts.LegacyWorkerHash,
+			want:             "base-legacy",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ComponentRuntimeNamespace("base", tt.componentType, tt.workerHashSuffix)
+			if got != tt.want {
+				t.Fatalf("ComponentRuntimeNamespace() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGetDCDRuntimeNamespaceUsesMetadataWorkerHashBeforePodTemplate(t *testing.T) {
+	dcd := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "dcd",
+			Namespace: "k8s",
+			Labels: map[string]string{
+				commonconsts.KubeLabelDynamoNamespace:  "base",
+				commonconsts.KubeLabelDynamoWorkerHash: "abc123",
+			},
+		},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeWorker,
+				PodTemplate: &corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{
+						Labels: map[string]string{
+							commonconsts.KubeLabelDynamoWorkerHash: "pod-template-hash",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	if got := GetDCDEffectiveWorkerHash(dcd); got != "abc123" {
+		t.Fatalf("GetDCDEffectiveWorkerHash() = %q, want abc123", got)
+	}
+	if got := GetDCDRuntimeNamespace(dcd); got != "base-abc123" {
+		t.Fatalf("GetDCDRuntimeNamespace() = %q, want base-abc123", got)
+	}
+}
+
+func TestGetDCDRuntimeNamespaceUsesPodTemplateWorkerHashWhenMetadataMissing(t *testing.T) {
+	dcd := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "dcd",
+			Namespace: "k8s",
+			Labels: map[string]string{
+				commonconsts.KubeLabelDynamoNamespace: "base",
+			},
+		},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeWorker,
+				PodTemplate: &corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{
+						Labels: map[string]string{
+							commonconsts.KubeLabelDynamoWorkerHash: "abc123",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	if got := GetDCDEffectiveWorkerHash(dcd); got != "abc123" {
+		t.Fatalf("GetDCDEffectiveWorkerHash() = %q, want abc123", got)
+	}
+	if got := GetDCDRuntimeNamespace(dcd); got != "base-abc123" {
+		t.Fatalf("GetDCDRuntimeNamespace() = %q, want base-abc123", got)
+	}
+}
+
+func TestGetDCDRuntimeNamespaceUsesLegacyMetadataOnlyHash(t *testing.T) {
+	dcd := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "dcd",
+			Namespace: "k8s",
+			Labels: map[string]string{
+				commonconsts.KubeLabelDynamoNamespace:  "base",
+				commonconsts.KubeLabelDynamoWorkerHash: commonconsts.LegacyWorkerHash,
+			},
+		},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeWorker,
+			},
+		},
+	}
+
+	if got := GetDCDEffectiveWorkerHash(dcd); got != commonconsts.LegacyWorkerHash {
+		t.Fatalf("GetDCDEffectiveWorkerHash() = %q, want legacy", got)
+	}
+	if got := GetDCDRuntimeNamespace(dcd); got != "base-legacy" {
+		t.Fatalf("GetDCDRuntimeNamespace() = %q, want base-legacy", got)
+	}
+}
+
+func TestGetDCDRuntimeNamespaceUsesLegacyPodTemplateHash(t *testing.T) {
+	dcd := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "dcd",
+			Namespace: "k8s",
+			Labels: map[string]string{
+				commonconsts.KubeLabelDynamoNamespace: "base",
+			},
+		},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeWorker,
+				PodTemplate: &corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{
+						Labels: map[string]string{
+							commonconsts.KubeLabelDynamoWorkerHash: commonconsts.LegacyWorkerHash,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	if got := GetDCDEffectiveWorkerHash(dcd); got != commonconsts.LegacyWorkerHash {
+		t.Fatalf("GetDCDEffectiveWorkerHash() = %q, want legacy", got)
+	}
+	if got := GetDCDRuntimeNamespace(dcd); got != "base-legacy" {
+		t.Fatalf("GetDCDRuntimeNamespace() = %q, want base-legacy", got)
 	}
 }
 

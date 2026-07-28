@@ -26,7 +26,8 @@ pub use dynamo_llm::protocols::common::llm_backend::{
     LLMEngineOutput, LogProbs, TopLogprob, TopLogprobs,
 };
 pub use dynamo_llm::protocols::common::preprocessor::{
-    BootstrapInfo, PrefillResult, PreprocessedRequest,
+    BootstrapInfo, MultimodalData, MultimodalDataMap, PrefillResult, PreprocessedRequest,
+    RoutingHints,
 };
 pub use dynamo_llm::protocols::common::{
     FinishReason, GuidedDecodingOptions, OutputOptions, SamplingOptions, StopConditions,
@@ -592,6 +593,17 @@ pub trait LLMEngineOutputExt: Sized {
     fn with_tokens(self, tokens: Vec<u32>) -> Self;
     /// Attach usage stats.
     fn with_usage(self, usage: CompletionUsage) -> Self;
+    /// Attach an `encoder_result` handoff payload.
+    ///
+    /// Signature takes `serde_json::Map<String, serde_json::Value>` (not
+    /// bare `Value`) so the object-only Wire Shape invariant is
+    /// type-enforced and the setter stays infallible -- there is no way
+    /// to pass an array or scalar through this API. The setter wraps the
+    /// `Map` in `Value::Object(...)` internally.
+    fn with_encoder_result(
+        self,
+        encoder_result: serde_json::Map<String, serde_json::Value>,
+    ) -> Self;
 }
 
 impl LLMEngineOutputExt for LLMEngineOutput {
@@ -601,6 +613,13 @@ impl LLMEngineOutputExt for LLMEngineOutput {
     }
     fn with_usage(mut self, usage: CompletionUsage) -> Self {
         self.completion_usage = Some(usage);
+        self
+    }
+    fn with_encoder_result(
+        mut self,
+        encoder_result: serde_json::Map<String, serde_json::Value>,
+    ) -> Self {
+        self.encoder_result = Some(serde_json::Value::Object(encoder_result));
         self
     }
 }
@@ -650,5 +669,27 @@ mod tests {
     fn usage_saturates_on_overflow() {
         let u = usage(u32::MAX, 10);
         assert_eq!(u.total_tokens, u32::MAX);
+    }
+
+    /// `with_encoder_result` takes `Map<String, Value>` (object-only by
+    /// type) and stores it as `Value::Object(_)` so the Wire Shape
+    /// invariant holds end-to-end. Round-trip: input Map -> stored
+    /// Value::Object -> as_object() returns the same Map.
+    #[test]
+    fn ext_with_encoder_result_round_trips_map() {
+        let mut input = serde_json::Map::new();
+        input.insert(
+            "embedding_handle".into(),
+            serde_json::json!({"uri": "nixl://encoder/0", "shape": [1, 1024]}),
+        );
+        input.insert("aux".into(), serde_json::Value::String("extra".into()));
+
+        let chunk = LLMEngineOutput::stop().with_encoder_result(input.clone());
+        let stored = chunk
+            .encoder_result
+            .as_ref()
+            .expect("encoder_result must be set after with_encoder_result");
+        assert!(stored.is_object(), "encoder_result must be Value::Object");
+        assert_eq!(stored.as_object().unwrap(), &input);
     }
 }

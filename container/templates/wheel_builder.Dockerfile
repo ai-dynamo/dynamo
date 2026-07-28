@@ -71,15 +71,14 @@ COPY --from=dynamo_base $CARGO_HOME $CARGO_HOME
 
 {% if device == "xpu" %}
 RUN wget -O- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | tee /usr/share/keyrings/oneapi-archive-keyring.gpg > /dev/null && \
-    echo "deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main" | tee /etc/apt/sources.list.d/oneAPI.list && \
-    add-apt-repository -y ppa:kobuk-team/intel-graphics
+    echo "deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main" | tee /etc/apt/sources.list.d/oneAPI.list
 
 # Fetch UCX patch
 RUN wget --tries=3 --waitretry=5 https://raw.githubusercontent.com/intel/llm-scaler/35a14cbc08d714f460a29b7a7328df5620c8530f/vllm/patches/ai-dynamo-xpu/patches/ucx-v1.12.0.patch -O /tmp/ucx.patch
 
 # Install Intel GPU runtime packages
-RUN apt update -y && apt upgrade -y && \
-    apt-get install -y libze1 libze-dev libze-intel-gpu1 intel-opencl-icd  \
+RUN apt update -y && \
+    apt-get install -y intel-opencl-icd  \
     libze-intel-gpu-raytracing intel-ocloc intel-oneapi-compiler-dpcpp-cpp-2025.3 && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 {% endif %}
@@ -220,10 +219,12 @@ ENV CUDA_PATH=/usr/local/cuda \
 ARG PYTHON_VERSION
 ENV VIRTUAL_ENV=/workspace/.venv
 # Cache uv downloads; uv handles its own locking for this cache.
+# pyyaml: needed by the compliance NOTICES-bundling steps below (overrides.py
+# imports yaml at module scope); the system python3 doesn't ship it.
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=shared \
     export UV_CACHE_DIR=/root/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv venv ${VIRTUAL_ENV} --python $PYTHON_VERSION && \
-    uv pip install --upgrade meson pybind11 patchelf maturin[patchelf] tomlkit
+    uv pip install --upgrade meson pybind11 patchelf maturin[patchelf] tomlkit pyyaml
 
 ARG NIXL_UCX_REF
 
@@ -520,11 +521,22 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     uv build --wheel --out-dir /opt/dynamo/dist && \
     cd /opt/dynamo/lib/bindings/python && \
     if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
-        maturin build --release --features "media-ffmpeg,kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass" --out /opt/dynamo/dist; \
+        maturin build --release --features "media-ffmpeg,kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass{% if target == "planner" %},mocker-kvbm-offload{% endif %}" --out /opt/dynamo/dist; \
     else \
-        maturin build --release --features "kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass" --out /opt/dynamo/dist; \
+        maturin build --release --features "kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass{% if target == "planner" %},mocker-kvbm-offload{% endif %}" --out /opt/dynamo/dist; \
     fi && \
     /tmp/use-sccache.sh show-stats "Dynamo Runtime"
+
+{% if target == "planner" %}
+# AI Simulate is a separate Python distribution. Build it only for the planner
+# image, after the Dynamo wheels so Python-only changes do not invalidate the
+# expensive Rust build layers above.
+COPY aisimulate/ /opt/dynamo/aisimulate/
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=shared \
+    export UV_CACHE_DIR=/root/.cache/uv && \
+    source ${VIRTUAL_ENV}/bin/activate && \
+    uv build --wheel --out-dir /opt/dynamo/dist /opt/dynamo/aisimulate
+{% endif %}
 
 # Compliance: harvest each crate's real LICENSE files from the cargo registry
 # source cache so the rust NOTICES generator can inline upstream license text
@@ -552,11 +564,14 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
 # machine-readable inventory); this adds the texts the redistributed wheel's
 # MIT/BSD/Apache attribution clauses require. Best-effort + non-fatal: a failure
 # leaves the wheel with its SBOM intact rather than breaking the build.
+# Must run with the build venv's python: bundle_wheel_notices imports
+# compliance.overrides, which needs pyyaml (installed in the venv above);
+# the bare system python3 lacks it and the step would no-op with a warning.
 COPY container/compliance /opt/compliance
 RUN set -u; injected=0; \
     for whl in /opt/dynamo/dist/ai_dynamo_runtime*.whl; do \
         [ -e "$whl" ] || continue; \
-        PYTHONPATH=/opt python3 -m compliance.bundle_wheel_notices \
+        PYTHONPATH=/opt ${VIRTUAL_ENV}/bin/python3 -m compliance.bundle_wheel_notices \
             --wheel "$whl" --licenses-dir /opt/dynamo/rust-licenses -v \
             && injected=$((injected+1)) || echo "::warning::wheel NOTICES bundling failed for $whl (SBOM retained)"; \
     done; \
@@ -755,6 +770,8 @@ COPY --from=runtime_wheel_builder /opt/dynamo/dist/ /opt/dynamo/dist/
 # stage (the ai-dynamo-runtime wheel was already bundled in runtime_wheel_builder
 # and arrives consolidated above). Harvest kvbm's crate licenses from the cargo
 # registry, then inject into its auditwheel-repaired wheel. Best-effort/non-fatal.
+# Venv python required: compliance.overrides needs pyyaml, absent from the
+# system python3 (see the runtime_wheel_builder bundling step).
 COPY container/compliance /opt/compliance
 RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
     set -u; \
@@ -769,7 +786,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
     done; \
     for whl in /opt/dynamo/dist/kvbm*.whl; do \
         [ -e "$whl" ] || continue; \
-        PYTHONPATH=/opt python3 -m compliance.bundle_wheel_notices \
+        PYTHONPATH=/opt ${VIRTUAL_ENV}/bin/python3 -m compliance.bundle_wheel_notices \
             --wheel "$whl" --licenses-dir /opt/dynamo/rust-licenses -v \
             || echo "::warning::kvbm wheel NOTICES bundling failed (SBOM retained)"; \
     done; \

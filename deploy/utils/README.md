@@ -6,7 +6,7 @@ This directory contains utilities and manifests for Dynamo benchmarking and prof
 
 **Before using these utilities, you must first set up Dynamo Kubernetes Platform following the main installation guide:**
 
-👉 **[Follow the Dynamo Kubernetes Platform installation guide](/docs/kubernetes/installation-guide.md) to install the Dynamo Kubernetes Platform first.**
+👉 **[Follow the Dynamo Kubernetes Platform installation guide](../../docs/fern/kubernetes/installation-guide.md) to install the Dynamo Kubernetes Platform first.**
 
 This includes:
 1. Installing the Dynamo CRDs
@@ -144,9 +144,30 @@ kubectl delete pod pvc-access-pod -n $NAMESPACE
 #### Next Steps
 
 For complete benchmarking and profiling workflows:
-- **Benchmarking Guide**: See [docs/benchmarks/benchmarking.md](../../docs/benchmarks/benchmarking.md) for comparing DynamoGraphDeployments and external endpoints
-- **Pre-Deployment Profiling**: See [docs/components/profiler/profiler-guide.md](../../docs/components/profiler/profiler-guide.md) for optimizing configurations before deployment
+- **Benchmarking Guide**: See [docs/benchmarks/benchmarking.md](../../docs/fern/benchmarks/benchmarking.md) for comparing DynamoGraphDeployments and external endpoints
+- **Pre-Deployment Profiling**: See [docs/components/profiler/profiler-guide.md](../../docs/fern/components/profiler/profiler-guide.md) for optimizing configurations before deployment
 
 ## Notes
 
 - This setup is focused on benchmarking and profiling resources only - the main Dynamo platform must be installed separately.
+
+## convert_api_version.py — nvidia.com apiVersion converter
+
+Converts Dynamo CRD manifests (DynamoGraphDeployment, DynamoComponentDeployment,
+DynamoGraphDeploymentRequest, DynamoGraphDeploymentScalingAdapter) between served
+apiVersions by driving the operator's conversion webhook — no conversion logic is
+duplicated, so output always matches the operator.
+
+**Requirements:** `kubectl` configured against a cluster running the Dynamo
+operator (the conversion webhook must be installed). Multi-document files and
+non-nvidia.com documents (passed through unchanged) are supported.
+
+```bash
+python deploy/utils/convert_api_version.py -i my-dgd.v1alpha1.yaml -o my-dgd.v1beta1.yaml
+# explicit target version:
+python deploy/utils/convert_api_version.py -i in.yaml -o out.yaml --to nvidia.com/v1beta1
+```
+
+The converter POSTs an `apiextensions.k8s.io/v1` ConversionReview to the CRD's
+conversion webhook through the API server service proxy. Nothing is created in
+the cluster (no reconcile, no pods, no cleanup).

@@ -10,7 +10,10 @@
 
 mod cache;
 pub mod config;
+pub mod controller;
 mod downloader;
+pub mod filter;
+pub mod filtered_router;
 pub mod load_estimator;
 pub mod predictor;
 pub mod routing;
@@ -18,12 +21,26 @@ mod source;
 pub mod state_tracker;
 
 pub use cache::LoRACache;
-pub use config::LoraAllocationConfig;
+pub use config::{LoraAllocationConfig, McfConfig};
+pub use controller::LoraController;
 pub use downloader::LoRADownloader;
+pub use filter::LoraFilter;
+pub use filtered_router::LoraFilteredRouter;
 pub use load_estimator::{LoadEstimator, LoadEstimatorConfig};
 pub use routing::{
-    AllocationAlgorithmType, LoraAllocator, LoraReplicaConfig, LoraRoutingTable, RendezvousHasher,
+    AllocationAlgorithmType, LoraAllocator, LoraReplicaConfig, LoraRoutingTable,
+    McfPlacementResult, McfPlacementSolver, McfSolveParams, RendezvousHasher,
     create_lora_allocator,
 };
-pub use source::{LoRASource, LocalLoRASource, S3LoRASource};
+pub use source::{HuggingFaceLoRASource, LoRASource, LocalLoRASource, S3LoRASource};
 pub use state_tracker::LoraStateTracker;
+
+/// Returns true when LoRA serving is enabled via a truthy `DYN_LORA_ENABLED` env var
+/// (`1`/`true`/`on`/`yes`, case-insensitive). This gates the request-time LoRA filter on
+/// both the KV and non-KV routing paths, so non-LoRA deployments keep the unmodified
+/// routing path with zero added overhead.
+pub fn lora_serving_enabled() -> bool {
+    dynamo_runtime::config::env_is_truthy(
+        dynamo_runtime::config::environment_names::llm::DYN_LORA_ENABLED,
+    )
+}

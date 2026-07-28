@@ -64,6 +64,7 @@ class OmniParallelKwargs:
     ring_degree: int = 1
     cfg_parallel_size: int = 1
     vae_patch_parallel_size: int = 1
+    vae_parallel_mode: str = "tile"
     use_hsdp: bool = False
     hsdp_shard_size: int = -1
     hsdp_replicate_size: int = 1
@@ -268,6 +269,14 @@ class OmniArgGroup(ArgGroup):
             arg_type=int,
             help="Number of ranks used for VAE patch/tile parallelism during decode/encode.",
         )
+        add_argument(
+            g,
+            flag_name="--vae-parallel-mode",
+            env_var="DYN_OMNI_VAE_PARALLEL_MODE",
+            default="tile",
+            arg_type=str,
+            help=("VAE parallelism mode for diffusion stages (for example: tile)."),
+        )
         add_negatable_bool_argument(
             g,
             flag_name="--use-hsdp",
@@ -318,6 +327,17 @@ class OmniArgGroup(ArgGroup):
                 "Requires --stage-configs-path. Mutually exclusive with --stage-id."
             ),
         )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--realtime",
+            env_var="DYN_OMNI_REALTIME",
+            default=False,
+            help=(
+                "Serve a ModelType.Realtime bidirectional endpoint (OpenAI "
+                "Realtime API) backed by vLLM-Omni streaming generation, instead "
+                "of the unary multimodal endpoint."
+            ),
+        )
 
 
 class OmniConfig(DynamoRuntimeConfig):
@@ -349,6 +369,9 @@ class OmniConfig(DynamoRuntimeConfig):
     # Disaggregated stage worker fields
     stage_id: Optional[int] = None
     omni_router: bool = False
+
+    # Realtime (bidirectional) serving mode
+    realtime: bool = False
 
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace) -> "OmniConfig":
@@ -390,6 +413,10 @@ class OmniConfig(DynamoRuntimeConfig):
             raise ValueError("--stage-id must be >= 0")
         if self.stage_id is not None and self.omni_router:
             raise ValueError("--stage-id and --omni-router are mutually exclusive")
+        if self.realtime and (self.stage_id is not None or self.omni_router):
+            raise ValueError(
+                "--realtime cannot be combined with --stage-id or --omni-router"
+            )
 
 
 def parse_omni_args() -> OmniConfig:

@@ -801,6 +801,7 @@ impl<S: AsyncShardHandle> KvIndexerInterface for BranchShardedIndexer<S> {
         &self,
         tokens: &[u32],
         lora_name: Option<&str>,
+        cache_namespace: Option<&str>,
         is_eagle: Option<bool>,
     ) -> Result<OverlapScores, KvRouterError> {
         let sequence = compute_block_hash_for_seq(
@@ -808,6 +809,7 @@ impl<S: AsyncShardHandle> KvIndexerInterface for BranchShardedIndexer<S> {
             self.kv_block_size,
             BlockHashOptions {
                 lora_name,
+                cache_namespace,
                 is_eagle,
                 block_mm_infos: None,
             },
@@ -820,10 +822,10 @@ impl<S: AsyncShardHandle> KvIndexerInterface for BranchShardedIndexer<S> {
             KvCacheEventData::Stored(_) => self.apply_stored(event).await,
             KvCacheEventData::Removed(_) => self.apply_removed(event).await,
             KvCacheEventData::Cleared => {
-                let worker_id = event.worker_id;
-                for worker in self.tracked_workers_for_worker_id(worker_id) {
-                    self.remove_worker_entries(worker);
-                }
+                self.remove_worker_entries(WorkerWithDpRank::new(
+                    event.worker_id,
+                    event.event.dp_rank,
+                ));
                 for shard in &self.shards {
                     shard.as_ref().apply_event(event.clone()).await;
                 }
@@ -961,16 +963,21 @@ impl<S: AsyncShardHandle> KvIndexerInterface for BranchShardedIndexer<S> {
 
             let timing = {
                 let calls = self.metrics.timing.calls.load(Ordering::Relaxed);
-                let avg_routing_ns = if calls > 0 {
-                    self.metrics.timing.routing_ns.load(Ordering::Relaxed) / calls
-                } else {
-                    0
-                };
-                let avg_shard_us = if calls > 0 {
-                    self.metrics.timing.shard_ns.load(Ordering::Relaxed) / calls / 1000
-                } else {
-                    0
-                };
+                let avg_routing_ns = self
+                    .metrics
+                    .timing
+                    .routing_ns
+                    .load(Ordering::Relaxed)
+                    .checked_div(calls)
+                    .unwrap_or(0);
+                let avg_shard_us = self
+                    .metrics
+                    .timing
+                    .shard_ns
+                    .load(Ordering::Relaxed)
+                    .checked_div(calls)
+                    .unwrap_or(0)
+                    / 1000;
                 format!("\n  avg routing = {avg_routing_ns}ns\n  avg shard = {avg_shard_us}µs")
             };
 
@@ -1072,8 +1079,8 @@ mod tests {
         )
     }
 
-    fn clear_event(worker_id: u64) -> RouterEvent {
-        router_event(worker_id, 0, 0, KvCacheEventData::Cleared)
+    fn clear_event(worker_id: u64, dp_rank: u32) -> RouterEvent {
+        router_event(worker_id, 0, dp_rank, KvCacheEventData::Cleared)
     }
 
     fn child(parent: &Arc<RoutingNode>, key: u64) -> Arc<RoutingNode> {
@@ -1561,25 +1568,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cleanup_updates_router_state() {
-        let index = make_indexer(2, 4);
-        index
-            .apply_event(store_event_with_dp_rank(0, 0, &[1, 2, 3]))
-            .await;
-        index
-            .apply_event(store_event_with_dp_rank(0, 1, &[1, 2, 4]))
-            .await;
-
-        index.remove_worker_dp_rank(0, 0).await;
-        let after_dp_remove = index.find_matches(local_hashes(&[1, 2, 3])).await.unwrap();
-        assert_eq!(score(&after_dp_remove, WorkerWithDpRank::new(0, 0)), None);
-
-        index.apply_event(clear_event(0)).await;
-        let after_clear = index.find_matches(local_hashes(&[1, 2])).await.unwrap();
-        assert!(after_clear.scores.is_empty());
-    }
-
-    #[tokio::test]
     async fn worker_wide_cleanup_scans_block_and_anchor_worker_keys() {
         let index = make_indexer(2, 3);
         let dp0 = WorkerWithDpRank::new(7, 0);
@@ -1599,7 +1587,7 @@ mod tests {
         assert!(has_anchor_for_worker(&index, dp0));
         assert!(has_anchor_for_worker(&index, dp1));
 
-        index.apply_event(clear_event(7)).await;
+        index.remove_worker(7).await;
         assert!(index.tracked_workers_for_worker_id(7).is_empty());
         assert!(!has_anchor_for_worker(&index, dp0));
         assert!(!has_anchor_for_worker(&index, dp1));
@@ -1626,9 +1614,14 @@ mod tests {
         assert!(!has_anchor_for_worker(&index, dp0));
         assert!(has_anchor_for_worker(&index, dp1));
 
-        index.apply_event(clear_event(0)).await;
+        index.apply_event(clear_event(0, 0)).await;
         assert!(!has_anchor_for_worker(&index, dp0));
-        assert!(!has_anchor_for_worker(&index, dp1));
+        assert!(has_anchor_for_worker(&index, dp1));
+        let sibling_scores = index
+            .find_matches(local_hashes(&[1, 2, 5, 6]))
+            .await
+            .unwrap();
+        assert_eq!(score(&sibling_scores, dp1), Some(4));
 
         index
             .apply_event(store_event_with_dp_rank(0, 0, &[1, 2, 3, 4]))

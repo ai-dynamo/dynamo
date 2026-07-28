@@ -43,6 +43,14 @@ class GenerateRequest(TypedDict, total=False):
     are set by the frontend's PrefillRouter on decode requests; engines
     read them via ``dynamo.common.backend.disagg`` helpers.
 
+    Multimodal keys (``multi_modal_data``, ``mm_processor_kwargs``,
+    ``mm_routing_info``) are populated by the frontend preprocessor when
+    the request carries media. ``encoder_result`` is set by the
+    frontend when forwarding a request from an Encode worker
+    to a downstream Prefill/Aggregated peer; engines read it via
+    :func:`dynamo.common.backend.multimodal.require_encoder_result`. All
+    four are object-shaped (``dict``) by contract.
+
     ``model`` carries the requested model name (set by the Rust
     preprocessor). Engines that support dynamic LoRA read it to route a
     request to a loaded adapter.
@@ -53,8 +61,13 @@ class GenerateRequest(TypedDict, total=False):
     sampling_options: dict[str, Any]
     stop_conditions: dict[str, Any]
     output_options: dict[str, Any]
+    require_reasoning: bool
     prefill_result: dict[str, Any]
     bootstrap_info: dict[str, Any]
+    multi_modal_data: dict[str, Any]
+    mm_processor_kwargs: dict[str, Any]
+    mm_routing_info: dict[str, Any]
+    encoder_result: dict[str, Any]
     extra_args: dict[str, Any]
 
 
@@ -63,19 +76,29 @@ class GenerateChunk(TypedDict, total=False):
 
     Every chunk must include ``token_ids`` and ``index``.
     Use ``index=0`` for single-choice responses. The final chunk must
-    additionally include ``finish_reason`` and ``completion_usage``.
+    additionally include ``finish_reason``; ``completion_usage`` is
+    optional (the OpenAI frontend aggregates it when present, and
+    matches the Rust ``Option<CompletionUsage>`` /
+    ``skip_serializing_if = "Option::is_none"`` semantics).
+
     Prefill terminals carry ``disaggregated_params`` for the
     PrefillRouter to forward to the decode peer. When the caller
     requested logprobs, chunks may also carry ``log_probs`` and
     ``top_logprobs`` aligned to ``token_ids`` — see
     :mod:`dynamo.common.backend.logprobs`.
+
+    Encode terminals carry ``encoder_result`` (an opaque object the
+    frontend forwards onto the downstream
+    ``PreprocessedRequest.encoder_result``). Construct with
+    :func:`dynamo.common.backend.multimodal.encoder_terminal_chunk`.
     """
 
     token_ids: Required[list[int]]
     index: Required[int]
     finish_reason: str
-    completion_usage: dict[str, int]
+    completion_usage: dict[str, Any]
     disaggregated_params: dict[str, Any]
+    encoder_result: dict[str, Any]
     log_probs: list[float]
     top_logprobs: list[list[dict[str, Any]]]
     # Forwarded verbatim to Rust `LLMEngineOutput.engine_data` as a

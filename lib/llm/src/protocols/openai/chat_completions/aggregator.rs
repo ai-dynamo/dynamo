@@ -381,20 +381,33 @@ impl DeltaAggregator {
                     continue;
                 }
 
-                let (tool_calls, content) =
-                    match try_tool_call_parse_aggregate_finalize(&choice.text, Some(parser), None)
-                        .await
-                    {
-                        Ok(result) => result,
-                        Err(error) => {
-                            tracing::debug!(
-                                error = %error,
-                                parser,
-                                "failed to parse aggregated chat tool calls"
-                            );
-                            continue;
-                        }
-                    };
+                // With DYN_ENABLE_EXPERIMENTAL_PARSERS_V2, supported families use the
+                // v2 parser for batch too (no jail / no aggregate-finalize):
+                // parse_complete drops a value truncated at EOF instead of guessing it.
+                // Other families, the flag off, and guided-decoded requests
+                // (tool_choice=required/named or structural-tag, gated by
+                // experimental_v2_batch_eligible — see tool_parser_v2::batch_tool_choice_eligible)
+                // keep the v1 finalize path.
+                let parse_result = if super::tool_parser_v2::enabled()
+                    && super::tool_parser_v2::supports_family(parser)
+                    && parsing_options.experimental_v2_batch_eligible
+                {
+                    super::tool_parser_v2::parse_complete(&choice.text, None, parser)
+                        .map(|(calls, normal)| (calls, Some(normal)))
+                } else {
+                    try_tool_call_parse_aggregate_finalize(&choice.text, Some(parser), None).await
+                };
+                let (tool_calls, content) = match parse_result {
+                    Ok(result) => result,
+                    Err(error) => {
+                        tracing::debug!(
+                            error = %error,
+                            parser,
+                            "failed to parse aggregated chat tool calls"
+                        );
+                        continue;
+                    }
+                };
 
                 if !tool_calls.is_empty() {
                     choice.tool_calls = Some(
@@ -417,7 +430,7 @@ impl DeltaAggregator {
             .map(dynamo_protocols::types::ChatChoice::from)
             .collect();
 
-        choices.sort_by(|a, b| a.index.cmp(&b.index));
+        choices.sort_by_key(|a| a.index);
 
         // Construct the final response object.
         let response = NvCreateChatCompletionResponse {
@@ -555,8 +568,8 @@ mod tests {
         let tool_calls: Option<serde_json::Value> =
             tool_calls.map(|tool_calls| serde_json::from_str(tool_calls).unwrap());
 
-        let tool_call_chunks = if let Some(tool_calls) = tool_calls {
-            Some(vec![
+        let tool_call_chunks = tool_calls.map(|tool_calls| {
+            vec![
                 dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
                     index: 0,
                     id: Some("test_id".to_string()),
@@ -566,10 +579,8 @@ mod tests {
                         arguments: Some(serde_json::to_string(&tool_calls["arguments"]).unwrap()),
                     }),
                 },
-            ])
-        } else {
-            None
-        };
+            ]
+        });
 
         let delta = dynamo_protocols::types::ChatCompletionStreamResponseDelta {
             content: Some(ChatCompletionMessageContent::Text(text.to_string())),
@@ -610,6 +621,7 @@ mod tests {
                 object: "chat.completion".to_string(),
             },
             nvext: None,
+            llm_metrics: None,
         };
 
         Annotated {
@@ -658,6 +670,7 @@ mod tests {
                 object: "chat.completion".to_string(),
             },
             nvext: None,
+            llm_metrics: None,
         };
         Annotated {
             data: Some(data),
@@ -1173,6 +1186,7 @@ mod tests {
                 object: "chat.completion".to_string(),
             },
             nvext: None,
+            llm_metrics: None,
         };
 
         // Wrap it in Annotated and create a stream
@@ -1194,7 +1208,7 @@ mod tests {
 
         // Verify the response fields
         assert_eq!(response.inner.choices.len(), 2);
-        response.inner.choices.sort_by(|a, b| a.index.cmp(&b.index)); // Ensure the choices are ordered
+        response.inner.choices.sort_by_key(|a| a.index); // Ensure the choices are ordered
         let choice0 = &response.inner.choices[0];
         assert_eq!(choice0.index, 0);
         assert_eq!(

@@ -25,11 +25,11 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-var _ = Describe("DGDR Lifecycle", Label("gpu_0", "nightly", "integration", "k8s"), func() {
+var _ = Describe("DGDR Lifecycle", Label("nightly", "e2e", "integration", "k8s"), func() {
 
-	Context("Rapid profiling", func() {
+	Context("Rapid profiling", Label("rapid"), func() {
 
-		It("should reach Ready with autoApply=false", func() {
+		It("should reach Ready with autoApply=false", Label("gpu_0"), func() {
 			name := uniqueName("lifecycle-ready")
 			dgdr := newDGDR(name, withAutoApply(false))
 			createAndCleanup(dgdr)
@@ -45,7 +45,7 @@ var _ = Describe("DGDR Lifecycle", Label("gpu_0", "nightly", "integration", "k8s
 			verifyProfilingJobCompleted(result.Status.ProfilingJobName)
 		})
 
-		It("should reach Deployed with autoApply=true (non-mocker only)", func() {
+		It("should reach Deployed with autoApply=true (non-mocker only)", Label("gpu_1"), func() {
 			if useMocker() {
 				Skip("In mocker mode, autoApply=true can race on generated DGD; " +
 					"lifecycle deployment coverage is run with --dgdr-no-mocker")

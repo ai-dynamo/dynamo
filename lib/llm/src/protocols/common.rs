@@ -25,6 +25,7 @@ const MAX_GRAMMAR_NESTING_DEPTH: usize = 500;
 
 pub mod extensions;
 pub mod llm_backend;
+pub mod metrics;
 pub mod postprocessor;
 pub mod preprocessor;
 pub mod timing;

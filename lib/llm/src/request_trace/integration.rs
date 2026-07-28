@@ -64,7 +64,7 @@ pub(crate) fn build_request_end_trace_state(
         tracker,
         context,
         trace_block_size,
-        super::is_enabled(),
+        super::policy().emit_request_end_records(),
     )
 }
 
@@ -86,7 +86,7 @@ fn build_request_end_trace_state_for_policy(
         tracing::warn!(
             %request_id,
             reason,
-            "request trace skipped because the request cannot be represented as one Mooncake row"
+            "request trace skipped because the request cannot be represented as one replay request"
         );
         return None;
     }

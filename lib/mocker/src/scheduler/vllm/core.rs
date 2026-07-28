@@ -4,19 +4,13 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
-#[cfg(feature = "kvbm-offload")]
-use dynamo_kv_router::protocols::RouterEvent;
 use dynamo_kv_router::protocols::WorkerId;
 use dynamo_tokens::blocks::UniqueBlock;
-#[cfg(feature = "kvbm-offload")]
-use kvbm_logical::{ImmutableBlock, MutableBlock};
 use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::common::handoff::HandoffId;
-#[cfg(feature = "kvbm-offload")]
-use crate::common::protocols::G1;
 use crate::common::protocols::{
     DirectRequest, KvEventPublishers, MockEngineArgs, MoveBlock, OutputSignal, PreemptionMode,
     PrefillCost, WorkerType,
@@ -24,10 +18,12 @@ use crate::common::protocols::{
 use crate::common::sequence::ActiveSequence;
 use crate::common::speculative::{SpeculativeDecodeSampler, normalize_conditional_accept_rates};
 use crate::common::utils::{compute_prefill_handoff_delay_ms, prefill_handoff_transfer_timing};
-use crate::kv_manager::KvManager;
+use crate::kv_manager::G1Manager;
 #[cfg(feature = "kvbm-offload")]
 use crate::kv_manager::kvbm_backend::SwapInRegistrationBlock;
-use crate::kv_manager::kvbm_backend::VllmDestinationReservation;
+use crate::kv_manager::{DestinationReservation, G1Acquire, OffloadDependency};
+#[cfg(feature = "kvbm-offload")]
+use crate::kvbm_offload::coordinator::SwapInTerminal;
 use crate::replay::TraceCollector;
 use crate::scheduler::vllm::policy::{self, AdmissionDecision};
 use crate::scheduler::{
@@ -51,6 +47,7 @@ pub(crate) struct VllmRequestState {
     pub(crate) status: RequestStatus,
     pub(crate) num_computed_tokens: usize,
     pub(crate) num_preemptions: usize,
+    pub(crate) offload_dependency: Option<OffloadDependency>,
 }
 
 impl VllmRequestState {
@@ -112,6 +109,7 @@ struct ScheduledWork {
     total_tokens: usize,
     prompt_tokens: usize,
     prefix_tokens: usize,
+    terminal_after_schedule: bool,
     /// Full prompt length, captured at schedule time for FPM variance calculation.
     prompt_len: usize,
     /// Total sequence length (prompt + generated) at schedule time, used for
@@ -126,6 +124,8 @@ enum ScheduleOutcome {
         admission: Option<AdmissionEvent>,
     },
     Blocked,
+    /// This request cannot progress yet, but later running requests may.
+    DependencyBlocked,
     CurrentPreempted,
 }
 
@@ -247,25 +247,24 @@ impl SchedulerState {
             .map(|request| &mut request.sequence)
     }
 
-    pub(super) fn preempt(&mut self, mode: PreemptionMode) -> Option<PreemptedRequest> {
-        let uuid = loop {
-            let candidate = match mode {
-                PreemptionMode::Lifo => self.running.pop_back(),
-                PreemptionMode::Fifo => self.running.pop_front(),
-            }?;
-            let is_running = self.running_members.contains(&candidate)
-                && self
-                    .requests
-                    .get(&candidate)
-                    .is_some_and(|request| request.status == RequestStatus::Running);
-            if is_running {
-                break candidate;
-            }
-            self.running_members.remove(&candidate);
-        };
+    pub(super) fn preempt_uuid(&mut self, uuid: Uuid) -> Option<PreemptedRequest> {
+        let is_running = self.running_members.contains(&uuid)
+            && self
+                .requests
+                .get(&uuid)
+                .is_some_and(|request| request.status == RequestStatus::Running);
+        if !is_running {
+            return None;
+        }
+        let position = self
+            .running
+            .iter()
+            .position(|candidate| *candidate == uuid)?;
+        self.running.remove(position);
         self.running_members.remove(&uuid);
         let request = self.requests.get_mut(&uuid)?;
         request.status = RequestStatus::Preempted;
+        request.offload_dependency = None;
         request.num_computed_tokens = 0;
         request.num_preemptions += 1;
         self.preemptions_total += 1;
@@ -365,14 +364,12 @@ impl SchedulerState {
 /// cached in G1 at park time; the swap-in covers the next
 /// `handle.block_count()` blocks starting at that offset. We need this
 /// to register the right slice of the request's PLHs into G1 inactive
-/// after the transfer completes. `_prefix_pins` keeps that cached prefix
-/// resident until the suffix can publish Device-tier Stored events against it.
+/// after the transfer completes. The coordinator keeps that cached prefix
+/// resident until the suffix publishes Device-tier Stored events.
 #[cfg(feature = "kvbm-offload")]
 pub(crate) struct AwaitingSwapIn {
     pub(crate) uuid: Uuid,
     pub(crate) handle: crate::kvbm_offload::SwapInHandle,
-    pub(crate) destination_slots: Vec<MutableBlock<G1>>,
-    pub(crate) _prefix_pins: Vec<ImmutableBlock<G1>>,
     pub(crate) skip_blocks: usize,
 }
 
@@ -387,7 +384,7 @@ pub(crate) struct VllmCore {
     pub(super) args: MockEngineArgs,
     dp_rank: u32,
     pub(super) state: SchedulerState,
-    pub(super) kv_manager: KvManager,
+    pub(super) kv_manager: G1Manager,
     speculative_sampler: Option<SpeculativeDecodeSampler>,
     kv_event_buffer: Option<CapturedRouterEventBuffer>,
     source_holds: SourceHolds<HeldVllmPrefill>,
@@ -412,17 +409,18 @@ pub(crate) struct VllmCore {
 }
 
 struct HeldVllmPrefill {
+    request_id: Uuid,
     request: VllmRequestState,
     deferred_deref: Vec<MoveBlock>,
 }
 
 struct ReservedVllmDecode {
     request: VllmRequestState,
-    kv: VllmDestinationReservation,
+    kv: DestinationReservation,
 }
 
 impl ReservedVllmDecode {
-    fn activate(self, kv_manager: &mut KvManager) -> VllmRequestState {
+    fn activate(self, kv_manager: &mut G1Manager) -> VllmRequestState {
         let Self { mut request, kv } = self;
         kv_manager.activate_destination(kv);
         let prompt_len = request.sequence.num_input_tokens();
@@ -432,9 +430,9 @@ impl ReservedVllmDecode {
         request
     }
 
-    fn cancel(self, _kv_manager: &mut KvManager) {
+    fn cancel(self, kv_manager: &mut G1Manager) {
         let Self { request: _, kv } = self;
-        drop(kv);
+        kv_manager.cancel_destination(kv);
     }
 }
 
@@ -448,19 +446,24 @@ impl VllmCore {
         Self::new_internal(args, 0, 0, None, KvEventPublishers::default())
     }
 
-    pub(crate) fn new_with_worker_id(args: MockEngineArgs, worker_id: WorkerId) -> Self {
-        Self::new_internal(args, 0, worker_id, None, KvEventPublishers::default())
+    pub(crate) fn new_with_kv_capture(args: MockEngineArgs, worker_id: WorkerId) -> Self {
+        Self::new_with_worker_rank(args, worker_id, 0, worker_id, true)
     }
 
-    pub(crate) fn new_with_kv_capture(args: MockEngineArgs, worker_id: WorkerId) -> Self {
-        let (buffer, sink) = capture_router_event_sink(worker_id);
-        Self::new_internal(
-            args,
-            0,
-            worker_id,
-            Some(buffer),
-            KvEventPublishers::new(Some(sink), None),
-        )
+    pub(crate) fn new_with_worker_rank(
+        args: MockEngineArgs,
+        worker_id: WorkerId,
+        dp_rank: u32,
+        seed_offset: u64,
+        capture_kv_events: bool,
+    ) -> Self {
+        let (buffer, publishers) = if capture_kv_events {
+            let (buffer, sink) = capture_router_event_sink(worker_id);
+            (Some(buffer), KvEventPublishers::new(Some(sink), None))
+        } else {
+            (None, KvEventPublishers::default())
+        };
+        Self::new_internal(args, dp_rank, seed_offset, buffer, publishers)
     }
 
     pub(super) fn new_with_sink(
@@ -474,7 +477,7 @@ impl VllmCore {
     fn new_internal(
         args: MockEngineArgs,
         dp_rank: u32,
-        worker_id: WorkerId,
+        seed_offset: u64,
         kv_event_buffer: Option<CapturedRouterEventBuffer>,
         kv_event_publishers: KvEventPublishers,
     ) -> Self {
@@ -488,14 +491,16 @@ impl VllmCore {
             let rates =
                 normalize_conditional_accept_rates(nextn, args.aic_nextn_accept_rates.as_deref())
                     .expect("normalized MTP acceptance rates");
-            SpeculativeDecodeSampler::new(rates, args.aic_mtp_seed.wrapping_add(worker_id))
+            SpeculativeDecodeSampler::new(rates, args.aic_mtp_seed.wrapping_add(seed_offset))
         });
         Self {
-            kv_manager: KvManager::new_with_event_sink(
+            kv_manager: G1Manager::new_with_backend_and_caching(
                 args.num_gpu_blocks,
                 args.block_size,
                 kv_event_publishers,
                 dp_rank,
+                args.g1_backend,
+                args.enable_prefix_caching,
             ),
             args,
             dp_rank,
@@ -516,7 +521,7 @@ impl VllmCore {
     }
 
     /// Wire a live-mode (`ClockSource::Real`) offload engine onto this
-    /// core's `KvManager`. No-op when `args.kv_bytes_per_token` is
+    /// core's G1 manager. No-op when `args.kv_bytes_per_token` is
     /// unset. Caller must be inside an ambient tokio runtime.
     #[cfg(feature = "kvbm-offload")]
     pub(crate) async fn init_offload_live(&mut self) -> anyhow::Result<()> {
@@ -525,7 +530,7 @@ impl VllmCore {
     }
 
     /// Wire an offline-mode (`ClockSource::Virtual`) offload engine
-    /// onto this core's `KvManager`. No-op when
+    /// onto this core's G1 manager. No-op when
     /// `args.kv_bytes_per_token` is unset. Sync entry — owns the
     /// internal tokio runtime via `attach_runtime`.
     #[cfg(feature = "kvbm-offload")]
@@ -573,6 +578,19 @@ impl VllmCore {
                 Ok(SchedulerCommandEffects::new(
                     SchedulerCommandResult::Submitted(self.submit(request)?),
                 ))
+            }
+            SchedulerCommand::CancelRequest { request_id } => {
+                let result = if self.state.requests.contains_key(&request_id) {
+                    self.drop_request(request_id);
+                    SchedulerCommandResult::Applied
+                } else {
+                    SchedulerCommandResult::Noop
+                };
+                if allow_destination_admission {
+                    Ok(self.effects_after_capacity_change(result, reservation_now_ms))
+                } else {
+                    Ok(SchedulerCommandEffects::new(result))
+                }
             }
             SchedulerCommand::SubmitHandoffPrefill {
                 handoff_id,
@@ -713,30 +731,47 @@ impl VllmCore {
             return Vec::new();
         }
 
-        let Some((_, _, request)) = self.pending_destinations.front_due(generation) else {
+        let Some((_, request_id, request)) = self.pending_destinations.front_due_mut(generation)
+        else {
             return Vec::new();
         };
+        if let Some(dependency) = request.offload_dependency {
+            request.offload_dependency = self.kv_manager.refresh_offload_dependency(dependency);
+            if request.offload_dependency.is_some() {
+                return Vec::new();
+            }
+        }
         #[cfg(test)]
         {
             self.destination_reservation_attempts += 1;
         }
-        let reservation = self
-            .kv_manager
-            .reserve_destination_at(&request.sequence, reservation_now_ms);
-        #[cfg(feature = "kvbm-offload")]
-        let reservation =
-            if reservation.is_none() && self.kv_manager.earliest_offload_deadline().is_none() {
-                // Presence-filtered evictions can release G1 capacity without a
-                // DMA completion that would otherwise trigger another retry.
-                self.kv_manager
-                    .reserve_destination_at(&request.sequence, reservation_now_ms)
-            } else {
-                reservation
-            };
-        self.pending_destinations.mark_front_attempted(generation);
-        let Some(kv) = reservation else {
-            return Vec::new();
+        let reservation = self.kv_manager.reserve_destination_at(
+            request_id,
+            &request.sequence,
+            reservation_now_ms,
+        );
+        let kv = match reservation {
+            G1Acquire::Ready(kv) => kv,
+            G1Acquire::BlockedOnOffload {
+                offload_id,
+                deadline_ms,
+            } => {
+                request.offload_dependency = Some(OffloadDependency {
+                    offload_id,
+                    deadline_ms,
+                });
+                self.pending_destinations.mark_front_attempted(generation);
+                return Vec::new();
+            }
+            G1Acquire::CapacityExhausted => {
+                self.pending_destinations.mark_front_attempted(generation);
+                return Vec::new();
+            }
+            G1Acquire::RetryNow { .. } => {
+                panic!("destination reservation must consume bounded RetryNow internally")
+            }
         };
+        self.pending_destinations.mark_front_attempted(generation);
         let transferable_prompt_tokens = kv.transferable_prompt_tokens(self.args.block_size);
         let (handoff_id, request_id, request) = self
             .pending_destinations
@@ -793,6 +828,18 @@ impl VllmCore {
     ) -> VllmRequestState {
         let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
         let mut max_output_tokens = request.max_output_tokens;
+        let planned_output_ids = request.output_token_ids;
+        if let Some(planned_output_ids) = planned_output_ids.as_ref()
+            && planned_output_ids.len() != max_output_tokens
+        {
+            tracing::warn!(
+                %uuid,
+                requested = max_output_tokens,
+                planned = planned_output_ids.len(),
+                "planned output token count differs from max_output_tokens; using planned count"
+            );
+            max_output_tokens = planned_output_ids.len();
+        }
         if let Some(clamped) = policy::normalize_max_output_tokens(
             self.args.scheduling_policy(),
             request.tokens.len(),
@@ -809,18 +856,20 @@ impl VllmCore {
         // The `None` case (a TRT-LLM prompt alone leaves no decode room) is
         // unchanged here. The waiting-admission policy owns terminal rejection
         // because that path can emit the lifecycle signal.
-        let sequence = ActiveSequence::new(
+        let sequence = ActiveSequence::new_with_planned_output_ids(
             request.tokens,
             max_output_tokens,
             Some(self.args.block_size),
             self.args.enable_prefix_caching,
             self.args.zmq_kv_events_port.is_some(),
+            planned_output_ids,
         );
         VllmRequestState {
             sequence,
             status,
             num_computed_tokens: 0,
             num_preemptions: 0,
+            offload_dependency: None,
         }
     }
 
@@ -865,6 +914,7 @@ impl VllmCore {
             .take_completed(&uuid)
             .expect("completed request must remain scheduler-owned");
         let payload = HeldVllmPrefill {
+            request_id: uuid,
             request,
             deferred_deref,
         };
@@ -890,11 +940,18 @@ impl VllmCore {
 
     fn cleanup_completed_prefill(&mut self, payload: HeldVllmPrefill) {
         let HeldVllmPrefill {
+            request_id,
             request,
             deferred_deref,
         } = payload;
         for signal in deferred_deref {
-            self.kv_manager.process(&signal);
+            assert!(
+                matches!(
+                    self.kv_manager.process_for_request(request_id, &signal, 0),
+                    G1Acquire::Ready(_)
+                ),
+                "terminal prefill cleanup must be infallible"
+            );
         }
         drop(request);
     }
@@ -946,20 +1003,20 @@ impl VllmCore {
     }
 
     #[cfg(test)]
-    pub(crate) fn destination_block_ids(&self, handoff_id: HandoffId) -> Vec<usize> {
+    pub(crate) fn destination_block_count(&self, handoff_id: HandoffId) -> usize {
         self.destination_holds
             .get(handoff_id)
-            .map(|reservation| reservation.kv.block_ids())
-            .unwrap_or_default()
+            .map(|reservation| reservation.kv.len())
+            .unwrap_or(0)
     }
 
     #[cfg(test)]
-    pub(crate) fn request_block_ids(&self, uuid: Uuid) -> Vec<usize> {
+    pub(crate) fn request_block_count(&self, uuid: Uuid) -> usize {
         self.state
             .requests
             .get(&uuid)
-            .map(|request| self.kv_manager.active_block_ids(&request.sequence))
-            .unwrap_or_default()
+            .map(|request| self.kv_manager.request_block_count(uuid, &request.sequence))
+            .unwrap_or(0)
     }
 
     pub(crate) fn drain_kv_events(&self) -> Vec<dynamo_kv_router::protocols::RouterEvent> {
@@ -1025,10 +1082,13 @@ impl VllmCore {
         let mut pending = Vec::with_capacity(awaiting.len());
 
         for aws in awaiting {
-            if aws.handle.is_complete() {
-                completed.push(aws);
-            } else {
-                pending.push(aws);
+            match aws.handle.terminal() {
+                SwapInTerminal::Pending => pending.push(aws),
+                SwapInTerminal::Completed => completed.push(aws),
+                SwapInTerminal::Cancelled => {}
+                SwapInTerminal::Failed(context) => {
+                    panic!("mocker swap-in failed for request {}: {context}", aws.uuid)
+                }
             }
         }
 
@@ -1095,9 +1155,9 @@ impl VllmCore {
     /// `[skip_blocks .. skip_blocks + count]` of the request's block
     /// sequence — we skip the G1-cached prefix the request already had
     /// and register only the uncached-remainder blocks that the engine
-    /// actually onboarded from G2. `aws` drops at the end →
-    /// `SwapInHandle` drops → pinned G2 blocks release to kvbm-engine's
-    /// inactive pool.
+    /// actually onboarded from G2. `register_completed_swap_in` consumes
+    /// the coordinator lease, registers its retained G1 destinations, and
+    /// releases the remaining swap-in resources.
     #[cfg(feature = "kvbm-offload")]
     fn complete_swap_in(&mut self, aws: AwaitingSwapIn) {
         let count = aws.handle.block_count();
@@ -1145,7 +1205,7 @@ impl VllmCore {
         let entries_len = entries.len();
         let outcome =
             self.kv_manager
-                .register_swapped_in_blocks(entries, parent_hash, aws.destination_slots);
+                .register_completed_swap_in(aws.handle.id(), entries, parent_hash);
         debug_assert_eq!(
             outcome.consumed_entries, entries_len,
             "reserved destination slots should cover every swapped-in block"
@@ -1168,7 +1228,7 @@ impl VllmCore {
         &mut self,
         uuid: Uuid,
         now_ms: f64,
-        prefill_cost: &PrefillCost,
+        g1_cached_tokens: usize,
     ) -> SwapInAdmissionAttempt {
         use crate::kv_manager::kvbm_backend::BatchSwapInOutcome;
         if !self.kv_manager.has_offload_engine() {
@@ -1182,13 +1242,16 @@ impl VllmCore {
         if !matches!(request.status, RequestStatus::Waiting) {
             return SwapInAdmissionAttempt::NoHit;
         }
+        // Lower-tier lookup starts after the physical G1 prefix. MTP may
+        // recompute the final matched block, but that changes compute
+        // accounting rather than which blocks are resident in G1.
         let block_size = request.sequence.block_size();
-        let skip_blocks = prefill_cost.cached_tokens / block_size;
+        let skip_blocks = g1_cached_tokens / block_size;
         let plhs = request.sequence.positional_lineage_hashes();
         tracing::trace!(
             %uuid,
             now_ms,
-            cached_tokens = prefill_cost.cached_tokens,
+            cached_tokens = g1_cached_tokens,
             skip_blocks,
             plhs_len = plhs.len(),
             "kvbm-offload: swap-in admission probe"
@@ -1219,50 +1282,54 @@ impl VllmCore {
                 return SwapInAdmissionAttempt::NoHit;
             }
         };
-        let (handle, destination_slots) = match self
-            .kv_manager
-            .try_batch_swap_in(remaining_plhs, Some(now_ms))
-        {
-            BatchSwapInOutcome::Scheduled {
-                handle,
-                destination_slots,
-            } => {
-                tracing::debug!(
-                    %uuid,
-                    now_ms,
-                    skip_blocks,
-                    remaining_blocks = remaining_plhs.len(),
-                    "kvbm-offload: swap-in admission parked"
-                );
-                (handle, destination_slots)
-            }
-            BatchSwapInOutcome::BlockedOnG1Offload => {
-                tracing::debug!(
-                    %uuid,
-                    now_ms,
-                    skip_blocks,
-                    remaining_blocks = remaining_plhs.len(),
-                    "kvbm-offload: swap-in blocked on G1 offload"
-                );
-                return SwapInAdmissionAttempt::BlockedOnG1Offload;
-            }
-            BatchSwapInOutcome::NoHits => {
-                tracing::trace!(
-                    %uuid,
-                    now_ms,
-                    skip_blocks,
-                    remaining_blocks = remaining_plhs.len(),
-                    "kvbm-offload: swap-in lower-tier miss"
-                );
-                return SwapInAdmissionAttempt::NoHit;
-            }
-        };
+        let handle =
+            match self
+                .kv_manager
+                .try_batch_swap_in(remaining_plhs, prefix_pins, Some(now_ms))
+            {
+                BatchSwapInOutcome::Scheduled { handle } => {
+                    tracing::debug!(
+                        %uuid,
+                        now_ms,
+                        skip_blocks,
+                        remaining_blocks = remaining_plhs.len(),
+                        "kvbm-offload: swap-in admission parked"
+                    );
+                    handle
+                }
+                BatchSwapInOutcome::BlockedOnG1Offload(dependency) => {
+                    tracing::debug!(
+                        %uuid,
+                        now_ms,
+                        offload_id = ?dependency.offload_id,
+                        deadline_ms = ?dependency.deadline_ms,
+                        skip_blocks,
+                        remaining_blocks = remaining_plhs.len(),
+                        "kvbm-offload: swap-in blocked on G1 offload"
+                    );
+                    let request = self
+                        .state
+                        .requests
+                        .get_mut(&uuid)
+                        .expect("swap-in dependency request must remain active");
+                    request.offload_dependency = Some(dependency);
+                    return SwapInAdmissionAttempt::BlockedOnG1Offload;
+                }
+                BatchSwapInOutcome::NoHits => {
+                    tracing::trace!(
+                        %uuid,
+                        now_ms,
+                        skip_blocks,
+                        remaining_blocks = remaining_plhs.len(),
+                        "kvbm-offload: swap-in lower-tier miss"
+                    );
+                    return SwapInAdmissionAttempt::NoHit;
+                }
+            };
         self.state.remove_from_waiting(uuid);
         self.requests_awaiting_swap_in.push(AwaitingSwapIn {
             uuid,
             handle,
-            destination_slots,
-            _prefix_pins: prefix_pins,
             skip_blocks,
         });
         SwapInAdmissionAttempt::Parked
@@ -1323,6 +1390,7 @@ impl VllmCore {
                     }
                     req_index += 1;
                 }
+                ScheduleOutcome::DependencyBlocked => req_index += 1,
                 ScheduleOutcome::Blocked => break,
                 ScheduleOutcome::CurrentPreempted => {}
             }
@@ -1340,6 +1408,9 @@ impl VllmCore {
             let Some(uuid) = self.state.next_waiting_uuid(prefer_materialized) else {
                 break;
             };
+            if self.refresh_request_offload_dependency(uuid).is_some() {
+                break;
+            }
             let decision = {
                 let request = self
                     .state
@@ -1352,30 +1423,48 @@ impl VllmCore {
                     .iter()
                     .filter_map(|running_uuid| self.state.requests.get(running_uuid))
                     .map(|request| &request.sequence);
-                let prompt_is_prebuilt = request.prompt_is_prebuilt();
-                match admission.stage_for(prompt_is_prebuilt) {
-                    AdmissionStage::Materialized => AdmissionDecision::Admit {
-                        prefill_cost: PrefillCost {
-                            new_blocks: 0,
-                            new_tokens: 0,
-                            cached_tokens: request.sequence.num_input_tokens(),
-                            active_cached_tokens: request.sequence.num_input_tokens(),
+                if policy::should_reject_for_model_len(
+                    scheduling_policy,
+                    &request.sequence,
+                    self.args.max_model_len,
+                ) {
+                    AdmissionDecision::Reject
+                } else {
+                    let prompt_is_prebuilt = request.prompt_is_prebuilt();
+                    match admission.stage_for(prompt_is_prebuilt) {
+                        AdmissionStage::Materialized => AdmissionDecision::Admit {
+                            prefill_cost: PrefillCost {
+                                new_blocks: 0,
+                                new_tokens: 0,
+                                cached_tokens: request.sequence.num_input_tokens(),
+                                active_cached_tokens: request.sequence.num_input_tokens(),
+                            },
+                            g1_cached_tokens: request.sequence.num_input_tokens(),
                         },
-                    },
-                    AdmissionStage::PendingDestinationHead => break,
-                    AdmissionStage::FreshKv => policy::decide_waiting_admission(
-                        scheduling_policy,
-                        &request.sequence,
-                        request.status == RequestStatus::Waiting,
-                        running_seqs,
-                        self.args.num_gpu_blocks,
-                        self.args.block_size,
-                        &self.kv_manager,
-                    ),
+                        AdmissionStage::PendingDestinationHead => break,
+                        AdmissionStage::FreshKv => {
+                            let is_fresh = request.status == RequestStatus::Waiting;
+                            policy::decide_waiting_admission(
+                                policy::WaitingAdmissionConfig {
+                                    policy: scheduling_policy,
+                                    num_gpu_blocks: self.args.num_gpu_blocks,
+                                    block_size: self.args.block_size,
+                                    mtp_enabled: self.args.aic_nextn.is_some(),
+                                },
+                                &request.sequence,
+                                is_fresh,
+                                running_seqs,
+                                &self.kv_manager,
+                            )
+                        }
+                    }
                 }
             };
-            let prefill_cost = match decision {
-                AdmissionDecision::Admit { prefill_cost } => prefill_cost,
+            let (prefill_cost, _g1_cached_tokens) = match decision {
+                AdmissionDecision::Admit {
+                    prefill_cost,
+                    g1_cached_tokens,
+                } => (prefill_cost, g1_cached_tokens),
                 AdmissionDecision::Wait => {
                     break;
                 }
@@ -1383,8 +1472,14 @@ impl VllmCore {
                     tracing::warn!(
                         %uuid,
                         ?scheduling_policy,
+                        prompt_tokens = self
+                            .state
+                            .requests
+                            .get(&uuid)
+                            .map(|request| request.sequence.num_input_tokens()),
+                        max_model_len = self.args.max_model_len,
                         num_gpu_blocks = self.args.num_gpu_blocks,
-                        "rejecting request whose admission footprint exceeds the entire KV pool"
+                        "rejecting request that exceeds a worker admission limit"
                     );
                     rejected_uuids.push(uuid);
                     self.drop_request(uuid);
@@ -1392,7 +1487,7 @@ impl VllmCore {
                 }
             };
             #[cfg(feature = "kvbm-offload")]
-            match self.try_park_for_swap_in(uuid, now_ms, &prefill_cost) {
+            match self.try_park_for_swap_in(uuid, now_ms, _g1_cached_tokens) {
                 SwapInAdmissionAttempt::Parked => continue,
                 SwapInAdmissionAttempt::BlockedOnG1Offload => break,
                 SwapInAdmissionAttempt::NoHit => {}
@@ -1429,7 +1524,9 @@ impl VllmCore {
                         break;
                     }
                 }
-                ScheduleOutcome::Blocked | ScheduleOutcome::CurrentPreempted => break,
+                ScheduleOutcome::Blocked
+                | ScheduleOutcome::DependencyBlocked
+                | ScheduleOutcome::CurrentPreempted => break,
             }
         }
 
@@ -1442,6 +1539,7 @@ impl VllmCore {
         for uuid in rejected_uuids {
             output_signals.push(OutputSignal {
                 uuid,
+                token_id: None,
                 completed: true,
                 rejected: true,
                 handoff_delay_ms: None,
@@ -1491,8 +1589,19 @@ impl VllmCore {
     pub(super) fn drop_request(&mut self, uuid: Uuid) {
         let active_blocks_before = self.kv_manager.num_active_blocks();
         #[cfg(feature = "kvbm-offload")]
-        self.requests_awaiting_swap_in
-            .retain(|request| request.uuid != uuid);
+        {
+            let awaiting = std::mem::take(&mut self.requests_awaiting_swap_in);
+            for request in awaiting {
+                if request.uuid == uuid {
+                    assert!(
+                        self.kv_manager.cancel_swap_in(request.handle.id()),
+                        "parked swap-in must retain a coordinator lease"
+                    );
+                } else {
+                    self.requests_awaiting_swap_in.push(request);
+                }
+            }
+        }
 
         let Some(request) = self.state.requests.get(&uuid) else {
             if self.kv_manager.num_active_blocks() < active_blocks_before {
@@ -1504,7 +1613,13 @@ impl VllmCore {
             || self.state.running_members.contains(&uuid)
             || self.kv_manager.num_active_blocks() < active_blocks_before;
         for signal in request.sequence.free_signal() {
-            self.kv_manager.process(&signal);
+            assert!(
+                matches!(
+                    self.kv_manager.process_for_request(uuid, &signal, 0),
+                    G1Acquire::Ready(_)
+                ),
+                "request drop cleanup must be infallible"
+            );
         }
         self.source_holds.remove_request(uuid);
         self.active_destination_handoffs.remove_request(uuid);
@@ -1525,11 +1640,52 @@ impl VllmCore {
             policy::report_no_preemption_violation();
             return None;
         }
-        let preempted = self.state.preempt(self.args.preemption_mode);
-        if preempted.is_some() {
+        let running_len = self.state.running.len();
+        let mut selected = None;
+        for offset in 0..running_len {
+            let index = match self.args.preemption_mode {
+                PreemptionMode::Fifo => offset,
+                PreemptionMode::Lifo => running_len - offset - 1,
+            };
+            let Some(uuid) = self.state.running.get(index).copied() else {
+                continue;
+            };
+            let is_running = self.state.running_members.contains(&uuid)
+                && self
+                    .state
+                    .requests
+                    .get(&uuid)
+                    .is_some_and(|request| request.status == RequestStatus::Running);
+            if !is_running || self.refresh_request_offload_dependency(uuid).is_some() {
+                continue;
+            }
+            selected = Some(uuid);
+            break;
+        }
+        let preempted = selected.and_then(|uuid| self.state.preempt_uuid(uuid));
+        if let Some(preempted) = preempted.as_ref() {
             self.bump_capacity_generation();
+            tracing::debug!(
+                worker_id = self.dp_rank,
+                request_id = %preempted.uuid,
+                preemptions_total = self.state.preemptions_total,
+                "vLLM scheduler preempted and requeued request"
+            );
         }
         preempted
+    }
+
+    fn refresh_request_offload_dependency(&mut self, uuid: Uuid) -> Option<OffloadDependency> {
+        let dependency = self
+            .state
+            .requests
+            .get(&uuid)
+            .and_then(|request| request.offload_dependency)?;
+        let refreshed = self.kv_manager.refresh_offload_dependency(dependency);
+        if let Some(request) = self.state.requests.get_mut(&uuid) {
+            request.offload_dependency = refreshed;
+        }
+        refreshed
     }
 
     /// Compute a forward pass metrics snapshot from the just-completed pass.
@@ -1553,9 +1709,10 @@ impl VllmCore {
             ))
         });
 
-        let scheduled_decodes = scheduled
-            .values()
-            .filter_map(|work| (work.prompt_tokens == 0).then_some(work.sequence_len as u64));
+        let scheduled_decodes = scheduled.values().filter_map(|work| {
+            (work.prompt_tokens == 0 && !work.terminal_after_schedule)
+                .then_some(work.sequence_len as u64)
+        });
 
         let queued_prefills = self.state.waiting.iter().filter_map(|uuid| {
             let request = self.state.requests.get(uuid)?;
@@ -1617,9 +1774,15 @@ impl VllmCore {
             prefill_cost
                 .map(|cost| cost.cached_tokens)
                 .unwrap_or_else(|| {
-                    self.kv_manager
-                        .get_prefill_cost(&request.sequence)
-                        .cached_tokens
+                    policy::apply_prefix_recompute(
+                        self.args.scheduling_policy(),
+                        request.sequence.len(),
+                        self.args.block_size,
+                        self.args.aic_nextn.is_some(),
+                        !policy::generation_complete(&request.sequence, self.args.max_model_len),
+                        self.kv_manager.get_prefill_cost(&request.sequence),
+                    )
+                    .cached_tokens
                 })
         } else {
             0
@@ -1647,6 +1810,10 @@ impl VllmCore {
         let desired_computed_after = effective_computed_before + desired_tokens;
         let mut actual_computed_after = desired_computed_after;
 
+        if self.refresh_request_offload_dependency(uuid).is_some() {
+            return ScheduleOutcome::DependencyBlocked;
+        }
+
         loop {
             let allocation = {
                 let request = self.state.requests.get_mut(&uuid).unwrap_or_else(|| {
@@ -1659,10 +1826,10 @@ impl VllmCore {
                     None
                 } else {
                     let maybe_signal = request.sequence.prepare_allocation(allocation_target);
-                    Some((allocation_target, prev_allocated_tokens, maybe_signal))
+                    Some((allocation_target, maybe_signal))
                 }
             };
-            let Some((allocation_target, prev_allocated_tokens, maybe_signal)) = allocation else {
+            let Some((allocation_target, maybe_signal)) = allocation else {
                 break;
             };
             let Some(signal) = maybe_signal else {
@@ -1674,39 +1841,57 @@ impl VllmCore {
                 break;
             };
 
-            let expected = match &signal {
-                MoveBlock::Use(blocks, ..) => blocks.len(),
-                _ => unreachable!(),
-            };
-            let allocated = self.kv_manager.process(&signal);
-            let (_committed_tokens, current_computed_tokens) = {
-                let request = self.state.requests.get_mut(&uuid).unwrap_or_else(|| {
-                    panic!("schedule_request: {uuid} removed mid-pass (post-process commit)")
-                });
-                let committed_tokens = if allocated == expected {
-                    allocation_target
-                } else {
-                    let prev_blocks = prev_allocated_tokens
-                        .div_ceil(request.sequence.block_size())
-                        .min(request.sequence.unique_blocks().len());
-                    (prev_blocks + allocated) * request.sequence.block_size()
-                };
-                request
-                    .sequence
-                    .commit_allocation(committed_tokens.min(allocation_target));
-                request.num_computed_tokens = actual_computed_after.min(committed_tokens);
-                (committed_tokens, request.num_computed_tokens)
-            };
-            if allocated == expected {
-                break;
+            match self.kv_manager.process_for_request(
+                uuid,
+                &signal,
+                cached_prefix_tokens / self.args.block_size,
+            ) {
+                G1Acquire::Ready(allocated) => {
+                    let expected = match &signal {
+                        MoveBlock::Use(blocks, ..) => blocks.len(),
+                        _ => unreachable!(),
+                    };
+                    assert_eq!(allocated, expected, "Use commit must be all-or-nothing");
+                    let request = self.state.requests.get_mut(&uuid).unwrap_or_else(|| {
+                        panic!("schedule_request: {uuid} removed mid-pass (post-process commit)")
+                    });
+                    request.sequence.commit_allocation(allocation_target);
+                    request.num_computed_tokens = actual_computed_after;
+                    request.offload_dependency = None;
+                    break;
+                }
+                G1Acquire::BlockedOnOffload {
+                    offload_id,
+                    deadline_ms,
+                } => {
+                    let request = self.state.requests.get_mut(&uuid).unwrap_or_else(|| {
+                        panic!("schedule_request: {uuid} removed while attaching dependency")
+                    });
+                    request.offload_dependency = Some(OffloadDependency {
+                        offload_id,
+                        deadline_ms,
+                    });
+                    return ScheduleOutcome::DependencyBlocked;
+                }
+                G1Acquire::RetryNow { .. } => {
+                    panic!("process_use must consume its bounded RetryNow internally")
+                }
+                G1Acquire::CapacityExhausted => {}
             }
 
             let Some(preempted) = self.policy_preempt() else {
-                actual_computed_after = current_computed_tokens;
+                actual_computed_after = effective_computed_before;
                 break;
             };
             for signal in preempted.signals {
-                self.kv_manager.process(&signal);
+                assert!(
+                    matches!(
+                        self.kv_manager
+                            .process_for_request(preempted.uuid, &signal, 0),
+                        G1Acquire::Ready(_)
+                    ),
+                    "preemption cleanup must be infallible"
+                );
             }
             *preempted_any = true;
             if let Some(undone) = scheduled.remove(&preempted.uuid) {
@@ -1731,6 +1916,23 @@ impl VllmCore {
             return ScheduleOutcome::Blocked;
         }
 
+        // vLLM's allocate_slots() caches full blocks through this request's
+        // newly scheduled token boundary before scheduling the next request.
+        // Keep over-allocated future blocks owner-scoped, while making blocks
+        // completed by this scheduling decision visible in deterministic
+        // scheduler order (including to later requests in the same pass).
+        {
+            let request = self.state.requests.get_mut(&uuid).unwrap_or_else(|| {
+                panic!("schedule_request: {uuid} removed before prefix finalization")
+            });
+            self.kv_manager.finalize_computed_prefix(
+                uuid,
+                effective_computed_before,
+                actual_computed_after,
+                &mut request.sequence,
+            );
+        }
+
         let prompt_after = actual_computed_after.min(prompt_len);
         let prompt_tokens = prompt_after.saturating_sub(prompt_before);
         let sequence_len = self
@@ -1739,12 +1941,16 @@ impl VllmCore {
             .get(&uuid)
             .map(|r| r.sequence.len())
             .unwrap_or(0);
+        let terminal_after_schedule = self.state.requests.get(&uuid).is_some_and(|request| {
+            policy::generation_complete(&request.sequence, self.args.max_model_len)
+        });
         scheduled.insert(
             uuid,
             ScheduledWork {
                 total_tokens: tokens_used,
                 prompt_tokens,
                 prefix_tokens: prompt_before,
+                terminal_after_schedule,
                 prompt_len,
                 sequence_len,
             },
@@ -1781,25 +1987,63 @@ impl VllmCore {
         decode_start_ms: f64,
     ) -> (Duration, Vec<OutputSignal>) {
         let mut ready = Vec::with_capacity(self.state.running.len());
+        let mut already_complete = Vec::new();
         let mut total_length = 0usize;
         for uuid in self.state.running.iter().copied() {
             let Some(request) = self.state.requests.get(&uuid) else {
                 continue;
             };
-            if request.num_computed_tokens < request.sequence.len()
-                || request.sequence.generated_tokens() >= request.sequence.max_output_tokens()
-            {
+            if request.num_computed_tokens < request.sequence.len() {
+                continue;
+            }
+            if policy::generation_complete(&request.sequence, self.args.max_model_len) {
+                let handoff_delay_ms = compute_prefill_handoff_delay_ms(
+                    self.args.worker_type,
+                    true,
+                    request.sequence.num_input_tokens(),
+                    self.args.kv_transfer_bandwidth,
+                    self.args.kv_bytes_per_token,
+                );
+                let effects = split_terminal_effects(request.sequence.terminal_signals());
+                debug_assert!(effects.immediate.is_empty());
+                already_complete.push((uuid, handoff_delay_ms, effects.cleanup));
                 continue;
             }
             ready.push(uuid);
             total_length += request.sequence.len();
         }
+
+        // Requests already terminal after prefill must release their running slots
+        // without manufacturing an output token.
+        let mut output_signals = Vec::with_capacity(already_complete.len() + ready.len());
+        for (uuid, handoff_delay_ms, cleanup) in already_complete {
+            self.complete_source(uuid, cleanup);
+            output_signals.push(OutputSignal {
+                uuid,
+                token_id: None,
+                completed: true,
+                rejected: false,
+                handoff_delay_ms,
+            });
+        }
+
         if ready.is_empty() {
-            return (Duration::ZERO, Vec::new());
+            if !output_signals.is_empty() {
+                self.state.compact_running();
+            }
+            return (Duration::ZERO, output_signals);
         }
 
         if self.speculative_sampler.is_some() {
-            return self.emit_speculative_ready_tokens(ready, collector, decode_start_ms);
+            if output_signals.is_empty() {
+                return self.emit_speculative_ready_tokens(ready, collector, decode_start_ms);
+            }
+
+            self.state.compact_running();
+            let (decode_time, mut speculative_signals) =
+                self.emit_speculative_ready_tokens(ready, collector, decode_start_ms);
+            output_signals.append(&mut speculative_signals);
+            return (decode_time, output_signals);
         }
 
         // For prefill workers, the first decode token is produced as part of
@@ -1820,19 +2064,35 @@ impl VllmCore {
             (dt, decode_start_ms + dt.as_secs_f64() * 1000.0)
         };
 
-        let mut output_signals = Vec::with_capacity(ready.len());
-        let mut running_changed = false;
+        let mut running_changed = !output_signals.is_empty();
         for uuid in ready {
             let mut emitted = false;
+            let mut emitted_token_id = None;
             let mut completed = false;
             let mut deferred_deref = Vec::new();
             loop {
+                if self.refresh_request_offload_dependency(uuid).is_some() {
+                    break;
+                }
                 self.state.debug_assert_ready_to_decode(uuid);
                 let Some(sequence) = self.state.running_sequence_mut(uuid) else {
                     break;
                 };
-                let signals = sequence.generate();
-                completed = sequence.generated_tokens() >= sequence.max_output_tokens();
+                let (token_id, mut signals) = sequence.generate_token();
+                completed = policy::generation_complete(sequence, self.args.max_model_len);
+                // A sampled token is dangling until the next scheduling
+                // iteration. Upstream vLLM calls allocate_slots() for it only
+                // when that iteration schedules the token for computation, so
+                // generation never acquires its newly crossed block.
+                signals.retain(|signal| !matches!(signal, MoveBlock::Use(..)));
+                if completed {
+                    // A terminal dangling token is never computed. Preserve
+                    // any preceding full-block promotion, then replace the
+                    // logical terminal Deref with cleanup for only the
+                    // footprint allocated before this sample.
+                    signals.retain(|signal| !matches!(signal, MoveBlock::Deref(_)));
+                    signals.extend(sequence.free_signal());
+                }
                 let effects = if completed {
                     split_terminal_effects(signals)
                 } else {
@@ -1841,15 +2101,38 @@ impl VllmCore {
                         cleanup: Vec::new(),
                     }
                 };
-                if effects.immediate.is_empty()
-                    || process_signals(&mut self.kv_manager, &effects.immediate)
-                {
-                    if !effects.immediate.is_empty() && !completed {
-                        sequence.commit_allocation(sequence.len());
+                let signal_outcome = if effects.immediate.is_empty() {
+                    G1Acquire::Ready(())
+                } else {
+                    process_signals(&mut self.kv_manager, uuid, &effects.immediate)
+                };
+                match signal_outcome {
+                    G1Acquire::Ready(()) => {
+                        emitted = true;
+                        emitted_token_id = Some(token_id);
+                        deferred_deref = effects.cleanup;
+                        break;
                     }
-                    emitted = true;
-                    deferred_deref = effects.cleanup;
-                    break;
+                    G1Acquire::BlockedOnOffload {
+                        offload_id,
+                        deadline_ms,
+                    } => {
+                        sequence.pop();
+                        let request = self
+                            .state
+                            .requests
+                            .get_mut(&uuid)
+                            .expect("decode dependency request must remain active");
+                        request.offload_dependency = Some(OffloadDependency {
+                            offload_id,
+                            deadline_ms,
+                        });
+                        break;
+                    }
+                    G1Acquire::RetryNow { .. } => {
+                        panic!("decode Use must consume its bounded RetryNow internally")
+                    }
+                    G1Acquire::CapacityExhausted => {}
                 }
                 sequence.pop();
 
@@ -1858,7 +2141,14 @@ impl VllmCore {
                 };
                 running_changed = true;
                 for signal in preempted.signals {
-                    self.kv_manager.process(&signal);
+                    assert!(
+                        matches!(
+                            self.kv_manager
+                                .process_for_request(preempted.uuid, &signal, 0),
+                            G1Acquire::Ready(_)
+                        ),
+                        "decode preemption cleanup must be infallible"
+                    );
                 }
                 if preempted.uuid == uuid {
                     break;
@@ -1880,6 +2170,7 @@ impl VllmCore {
             });
             let output_signal = OutputSignal {
                 uuid,
+                token_id: emitted_token_id,
                 completed,
                 rejected: false,
                 handoff_delay_ms,
@@ -1921,16 +2212,21 @@ impl VllmCore {
                 .expect("speculative sampler requires nextn")
                 + 1
         };
+        for uuid in ready.iter().copied() {
+            if self.refresh_request_offload_dependency(uuid).is_some() {
+                return (Duration::ZERO, Vec::new());
+            }
+        }
         let mut running_changed = false;
         let mut reservation = loop {
             let required_blocks = ready
                 .iter()
                 .filter_map(|uuid| self.state.requests.get(uuid))
                 .map(|request| {
-                    let remaining = request
-                        .sequence
-                        .max_output_tokens()
-                        .saturating_sub(request.sequence.generated_tokens());
+                    let remaining = policy::remaining_generation_tokens(
+                        &request.sequence,
+                        self.args.max_model_len,
+                    );
                     let burst = max_burst.min(remaining);
                     let current_blocks = request.sequence.len().div_ceil(self.args.block_size);
                     let target_blocks =
@@ -1939,8 +2235,30 @@ impl VllmCore {
                 })
                 .sum();
 
-            if let Some(reservation) = self.kv_manager.reserve_decode_blocks(required_blocks) {
-                break reservation;
+            match self.kv_manager.reserve_decode_blocks(required_blocks) {
+                G1Acquire::Ready(reservation) => break reservation,
+                G1Acquire::BlockedOnOffload {
+                    offload_id,
+                    deadline_ms,
+                } => {
+                    let dependency = Some(OffloadDependency {
+                        offload_id,
+                        deadline_ms,
+                    });
+                    for uuid in &ready {
+                        let request = self
+                            .state
+                            .requests
+                            .get_mut(uuid)
+                            .expect("speculative dependency request must remain active");
+                        request.offload_dependency = dependency;
+                    }
+                    return (Duration::ZERO, Vec::new());
+                }
+                G1Acquire::RetryNow { .. } => {
+                    panic!("speculative reservation must consume bounded RetryNow internally")
+                }
+                G1Acquire::CapacityExhausted => {}
             }
 
             let Some(preempted) = self.policy_preempt() else {
@@ -1951,7 +2269,14 @@ impl VllmCore {
             };
             running_changed = true;
             for signal in preempted.signals {
-                self.kv_manager.process(&signal);
+                assert!(
+                    matches!(
+                        self.kv_manager
+                            .process_for_request(preempted.uuid, &signal, 0),
+                        G1Acquire::Ready(_)
+                    ),
+                    "speculative preemption cleanup must be infallible"
+                );
             }
 
             ready.clear();
@@ -1960,7 +2285,7 @@ impl VllmCore {
                     continue;
                 };
                 if request.num_computed_tokens == request.sequence.len()
-                    && request.sequence.generated_tokens() < request.sequence.max_output_tokens()
+                    && !policy::generation_complete(&request.sequence, self.args.max_model_len)
                 {
                     ready.push(uuid);
                 }
@@ -2009,10 +2334,10 @@ impl VllmCore {
                         .requests
                         .get(uuid)
                         .expect("ready request must remain active");
-                    let remaining = request
-                        .sequence
-                        .max_output_tokens()
-                        .saturating_sub(request.sequence.generated_tokens());
+                    let remaining = policy::remaining_generation_tokens(
+                        &request.sequence,
+                        self.args.max_model_len,
+                    );
                     let burst = if self.args.worker_type == WorkerType::Prefill {
                         remaining.min(1)
                     } else {
@@ -2029,16 +2354,22 @@ impl VllmCore {
             let mut completed = false;
             let mut deferred_deref = Vec::new();
             for _ in 0..burst {
-                let (signals, is_complete) = {
+                let (token_id, signals, is_complete) = {
                     let request = self
                         .state
                         .requests
                         .get_mut(&uuid)
                         .expect("sampled request must remain active");
-                    let signals = request.sequence.generate();
+                    let (token_id, mut signals) = request.sequence.generate_token();
                     let is_complete =
-                        request.sequence.generated_tokens() >= request.sequence.max_output_tokens();
-                    (signals, is_complete)
+                        policy::generation_complete(&request.sequence, self.args.max_model_len);
+                    if is_complete
+                        && request.sequence.generated_tokens()
+                            < request.sequence.max_output_tokens()
+                    {
+                        signals.extend(request.sequence.terminal_signals());
+                    }
+                    (token_id, signals, is_complete)
                 };
                 let effects = if is_complete {
                     split_terminal_effects(signals)
@@ -2049,25 +2380,27 @@ impl VllmCore {
                     }
                 };
                 for signal in &effects.immediate {
-                    self.kv_manager
-                        .process_decode_signal(signal, &mut reservation);
+                    self.kv_manager.process_decode_signal_for_request(
+                        uuid,
+                        signal,
+                        &mut reservation,
+                    );
                 }
 
-                let (is_complete, prompt_tokens) = {
+                let prompt_tokens = {
                     let request = self
                         .state
                         .requests
                         .get_mut(&uuid)
                         .expect("sampled request must remain active");
-                    let is_complete =
-                        request.sequence.generated_tokens() >= request.sequence.max_output_tokens();
                     if !is_complete {
                         request.sequence.commit_allocation(request.sequence.len());
                     }
-                    (is_complete, request.sequence.num_input_tokens())
+                    request.sequence.num_input_tokens()
                 };
                 output_signals.push(OutputSignal {
                     uuid,
+                    token_id: Some(token_id),
                     completed: is_complete,
                     rejected: false,
                     handoff_delay_ms: compute_prefill_handoff_delay_ms(
@@ -2104,6 +2437,8 @@ impl VllmCore {
                 "nonterminal speculative decode must leave exactly one dangling token"
             );
         }
+
+        self.kv_manager.release_decode_reservation(reservation);
 
         if let Some(collector) = collector {
             for signal in &output_signals {
@@ -2156,25 +2491,47 @@ fn split_terminal_effects(signals: Vec<MoveBlock>) -> VllmTerminalEffects {
     VllmTerminalEffects { immediate, cleanup }
 }
 
-fn process_signals(kv_manager: &mut KvManager, signals: &[MoveBlock]) -> bool {
+fn process_signals(
+    kv_manager: &mut G1Manager,
+    owner: Uuid,
+    signals: &[MoveBlock],
+) -> G1Acquire<()> {
     for signal in signals {
-        if kv_manager.process(signal) > 0 {
-            continue;
+        match kv_manager.process_for_request(owner, signal, 0) {
+            G1Acquire::Ready(_) => continue,
+            G1Acquire::BlockedOnOffload {
+                offload_id,
+                deadline_ms,
+            } => {
+                validate_decode_allocation_failure(signal);
+                return G1Acquire::BlockedOnOffload {
+                    offload_id,
+                    deadline_ms,
+                };
+            }
+            G1Acquire::CapacityExhausted => {
+                validate_decode_allocation_failure(signal);
+                return G1Acquire::CapacityExhausted;
+            }
+            G1Acquire::RetryNow { .. } => {
+                panic!("process_use must consume its bounded RetryNow internally")
+            }
         }
-
-        let MoveBlock::Use(blocks, ..) = signal else {
-            panic!("Failed signal is invalid. Expected decode allocation failure, got {signal:?}");
-        };
-        if blocks.len() != 1 {
-            panic!(
-                "Failed signal is invalid. Tried to allocate {} blocks during decode.",
-                blocks.len()
-            );
-        }
-        if !matches!(blocks[0], UniqueBlock::PartialBlock(_)) {
-            panic!("Failed signal is invalid. Decode allocation must use a partial block.");
-        }
-        return false;
     }
-    true
+    G1Acquire::Ready(())
+}
+
+fn validate_decode_allocation_failure(signal: &MoveBlock) {
+    let MoveBlock::Use(blocks, ..) = signal else {
+        panic!("Failed signal is invalid. Expected decode allocation failure, got {signal:?}");
+    };
+    if blocks.len() != 1 {
+        panic!(
+            "Failed signal is invalid. Tried to allocate {} blocks during decode.",
+            blocks.len()
+        );
+    }
+    if !matches!(blocks[0], UniqueBlock::PartialBlock(_)) {
+        panic!("Failed signal is invalid. Decode allocation must use a partial block.");
+    }
 }

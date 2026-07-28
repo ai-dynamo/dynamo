@@ -40,7 +40,7 @@ use axum::{
         ws::{CloseFrame, Message, Utf8Bytes, WebSocket, WebSocketUpgrade, close_code},
     },
     http::Method,
-    response::Response,
+    response::{IntoResponse, Response},
     routing::get,
 };
 use dynamo_runtime::engine::AsyncEngineContextProvider;
@@ -84,10 +84,26 @@ async fn realtime_ws_handler(
     State(state): State<Arc<service_v2::State>>,
     upgrade: WebSocketUpgrade,
 ) -> Response {
-    upgrade.on_upgrade(move |socket| handle_socket(socket, state))
+    let permit = state.acquire_inflight();
+    // Count the upgrade attempt before the readiness gate so shutdown cannot
+    // observe zero inflight while this WebSocket admission is in progress.
+    if !state.is_ready() {
+        drop(permit);
+        return super::openai::ErrorMessage::_service_unavailable().into_response();
+    }
+
+    upgrade
+        .on_upgrade(move |socket| handle_socket(socket, state, permit))
+        .into_response()
 }
 
-async fn handle_socket(socket: WebSocket, state: Arc<service_v2::State>) {
+async fn handle_socket(
+    socket: WebSocket,
+    state: Arc<service_v2::State>,
+    // Held for the full WebSocket task lifetime so realtime sessions are
+    // visible to graceful shutdown after the 101 upgrade response completes.
+    _permit: service_v2::InflightPermit,
+) {
     // Inbound writes a non-NORMAL close message to `close_reason` on protocol errors
     // before cancelling the engine; the ScopedWsWriter takes it on Drop.
     // Empty slot ⇒ NORMAL completion.

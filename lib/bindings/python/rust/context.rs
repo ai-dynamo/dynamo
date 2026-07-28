@@ -239,8 +239,7 @@ impl Context {
         if tc.trace_id.is_empty() || tc.span_id.is_empty() {
             return None;
         }
-        // Assumes sampled — inbound `DistributedTraceContext` doesn't carry flags.
-        Some(format!("00-{}-{}-01", tc.trace_id, tc.span_id))
+        Some(tc.create_traceparent())
     }
 }
 
@@ -259,6 +258,23 @@ impl Context {
             first_token: None,
             metadata: Arc::new(Mutex::new(metadata.unwrap_or_default())),
             span: None,
+        }
+    }
+
+    /// Create a context with a fresh cancellation controller and request id.
+    ///
+    /// The detached context keeps the trace context, captured span, and a
+    /// snapshot of metadata so disaggregated handoffs keep observability
+    /// parentage without sharing cancellation ownership. The first-token
+    /// signal is intentionally dropped.
+    #[pyo3(signature = (id))]
+    fn detached(&self, id: String) -> Self {
+        Self {
+            inner: Arc::new(Controller::new(id)),
+            trace_context: self.trace_context.clone(),
+            first_token: None,
+            metadata: Arc::new(Mutex::new(self.metadata_snapshot())),
+            span: self.span.clone(),
         }
     }
 

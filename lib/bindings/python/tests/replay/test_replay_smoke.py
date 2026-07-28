@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import importlib
+from pathlib import Path
 
 import pytest
 
@@ -175,6 +176,24 @@ def test_run_trace_replay_rejects_applied_compute_agentic_format_without_concurr
         )
 
 
+def test_direct_agentic_dynamo_trace_rejects_replay_concurrency():
+    trace_path = (
+        Path(__file__).resolve().parents[5]
+        / "lib"
+        / "bench"
+        / "testdata"
+        / "pi_request_trace.jsonl.gz"
+    )
+
+    with pytest.raises(Exception, match="not supported with replay_concurrency"):
+        run_trace_replay(
+            trace_path,
+            extra_engine_args=_vllm_args(),
+            replay_concurrency=2,
+            trace_format="dynamo",
+        )
+
+
 @pytest.mark.parametrize("replay_mode", ["offline", "online"])
 def test_run_trace_replay_supports_distinct_trace_and_engine_block_sizes(
     tmp_path, replay_mode
@@ -303,6 +322,7 @@ def test_run_synthetic_trace_replay_supports_multiturn_workloads(tmp_path, repla
         num_workers=2,
         replay_mode=replay_mode,
         router_mode="kv_router",
+        arrival_interval_ms=1.0,
         turns_per_session=2,
         inter_turn_delay_ms=5.0,
         shared_prefix_ratio=0.5,
@@ -336,6 +356,7 @@ def test_run_synthetic_trace_replay_workload_validates_zero_token_lengths(
             num_workers=2,
             replay_mode="offline",
             router_mode="kv_router",
+            arrival_interval_ms=1.0,
             turns_per_session=2,
         )
 
@@ -501,6 +522,7 @@ def test_run_synthetic_trace_replay_disagg_preserves_expected_output_tokens(
         num_decode_workers=2,
         replay_mode="offline",
         router_mode=router_mode,
+        arrival_interval_ms=1.0,
     )
 
     _assert_basic_report_counts(

@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoComponentDeployment
+metadata:
+  name: deployment-manifest
+spec:
+  backendFramework: vllm
+  name: decode
+  type: decode
+  replicas: 2
+  podTemplate:
+    spec:
+      containers:
+        - name: main
+          image: registry.example/dynamo-worker:test

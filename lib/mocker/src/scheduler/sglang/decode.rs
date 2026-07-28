@@ -20,6 +20,22 @@ pub(super) struct DecodeResult {
     pub(super) end_ms: f64,
 }
 
+fn decode_page_growth_needed(
+    running: &[SglangRequest],
+    block_size: usize,
+    max_burst: usize,
+) -> usize {
+    running
+        .iter()
+        .map(|req| {
+            let burst = max_burst.min(req.remaining_output_tokens());
+            let target =
+                super::config::ceil_to_block(req.current_sequence_len() + burst, block_size);
+            target.saturating_sub(req.allocated_tokens)
+        })
+        .sum()
+}
+
 fn decode_capacity_state(
     running: &[SglangRequest],
     kv_manager: &SglangKvManager,
@@ -28,20 +44,10 @@ fn decode_capacity_state(
 ) -> (usize, usize, usize) {
     let actual_available =
         kv_manager.cache().available_tokens() + kv_manager.cache().evictable_size;
-    let reserved_tokens = running
-        .iter()
-        .map(SglangRequest::extra_reserved_tokens)
-        .sum::<usize>();
-    let logical_available = actual_available.saturating_sub(reserved_tokens);
-    let page_growth_needed = running
-        .iter()
-        .map(|req| {
-            let burst = max_burst.min(req.remaining_output_tokens());
-            let target =
-                super::config::ceil_to_block(req.current_sequence_len() + burst, config.block_size);
-            target.saturating_sub(req.allocated_tokens)
-        })
-        .sum();
+    // Full partial pages are already owned by PagePool and excluded from
+    // `actual_available`; subtracting their slack again would double-charge it.
+    let logical_available = actual_available;
+    let page_growth_needed = decode_page_growth_needed(running, config.block_size, max_burst);
 
     (actual_available, logical_available, page_growth_needed)
 }
@@ -52,26 +58,19 @@ pub(super) fn cache_materialized_prefix(
     config: &SglangConfig,
 ) {
     let aligned_tokens = req.page_aligned_materialized_tokens(config.block_size);
-    if aligned_tokens == 0 || aligned_tokens <= req.cached_tokens {
+    if aligned_tokens == 0 || aligned_tokens <= req.cached_tokens() {
         return;
     }
 
-    let last_node = req.last_node.unwrap_or_else(|| {
+    if !req.kv_lease.is_active() {
         panic!(
-            "cache_materialized_prefix: request {} has aligned_tokens={aligned_tokens} but last_node is None",
+            "cache_materialized_prefix: request {} has aligned_tokens={aligned_tokens} but no active KV lease",
             req.uuid
-        )
-    });
+        );
+    }
 
-    let sequence = req.sequence_prefix(aligned_tokens);
-    let new_last = kv_manager.cache_unfinished_req(
-        &sequence,
-        &req.kv_indices[..aligned_tokens],
-        last_node,
-        req.cached_tokens,
-    );
-    req.last_node = Some(new_last);
-    req.cached_tokens = aligned_tokens;
+    let sequence = &req.sequence_tokens[..aligned_tokens];
+    kv_manager.extend_cached_prefix(sequence, &mut req.kv_lease);
     req.debug_assert_invariants(config.block_size);
 }
 
@@ -93,13 +92,9 @@ fn check_decode_mem_for_burst(
     let mut retracted = Vec::new();
 
     loop {
-        let (actual_available, logical_available, page_growth_needed) =
+        let (_actual_available, logical_available, page_growth_needed) =
             decode_capacity_state(running, kv_manager, config, max_burst);
-        let needed = running
-            .iter()
-            .map(|req| max_burst.min(req.remaining_output_tokens()))
-            .sum::<usize>();
-        if actual_available >= needed && logical_available >= page_growth_needed {
+        if logical_available >= page_growth_needed {
             break;
         }
         if running.len() <= 1 {
@@ -115,22 +110,16 @@ fn check_decode_mem_for_burst(
         };
 
         let mut req = running.remove(idx);
-        kv_manager.free_indices(&req.kv_indices[req.cached_tokens..]);
-        if let Some(last_node) = req.last_node.take() {
-            kv_manager.free_request(last_node);
-        }
+        kv_manager.retract(std::mem::take(&mut req.kv_lease));
         req.reset_for_retract();
         req.debug_assert_invariants(config.block_size);
         retracted.push(req);
     }
 
-    let available = kv_manager.cache().token_pool.available();
-    let needed = running
-        .iter()
-        .map(|req| max_burst.min(req.remaining_output_tokens()))
-        .sum::<usize>();
-    if available < needed {
-        kv_manager.evict(needed - available);
+    let available = kv_manager.cache().available_tokens();
+    let page_growth_needed = decode_page_growth_needed(running, config.block_size, max_burst);
+    if available < page_growth_needed {
+        kv_manager.evict(page_growth_needed - available);
     }
 
     if !retracted.is_empty() {
@@ -171,25 +160,12 @@ pub(super) fn cleanup_completed_request(
     kv_manager: &mut SglangKvManager,
     block_size: usize,
 ) {
-    let sequence = request.sequence_tokens();
-    let tokens_to_cache = floor_to_block(sequence.len(), block_size);
-    if request.kv_indices.len() > tokens_to_cache {
-        kv_manager.free_indices(&request.kv_indices[tokens_to_cache..]);
-    }
-
-    let Some(last_node) = request.last_node.take() else {
+    let tokens_to_cache = floor_to_block(request.current_sequence_len(), block_size);
+    if !request.kv_lease.is_active() {
         return;
-    };
-    if tokens_to_cache > 0 {
-        kv_manager.cache_finished_req(
-            &sequence[..tokens_to_cache],
-            &request.kv_indices[..tokens_to_cache],
-            last_node,
-            request.cached_tokens,
-        );
-    } else {
-        kv_manager.free_request(last_node);
     }
+    let lease = std::mem::take(&mut request.kv_lease);
+    kv_manager.finish(request.sequence_prefix(tokens_to_cache), lease);
 }
 
 pub(super) fn simulate_decode_step_with_sampler(
@@ -207,6 +183,47 @@ pub(super) fn simulate_decode_step_with_sampler(
         };
     }
 
+    // Terminal requests have no decode work and otherwise remain in `running` forever.
+    let already_completed_indices = running
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, req)| (req.remaining_output_tokens() == 0).then_some(idx))
+        .collect::<Vec<_>>();
+    let mut output_signals = already_completed_indices
+        .iter()
+        .map(|&idx| {
+            let req = &running[idx];
+            OutputSignal {
+                uuid: req.uuid,
+                token_id: None,
+                completed: true,
+                rejected: false,
+                handoff_delay_ms: compute_prefill_handoff_delay_ms(
+                    config.worker_type,
+                    true,
+                    req.prompt_len(),
+                    config.kv_transfer_bandwidth,
+                    config.kv_bytes_per_token,
+                ),
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut completed_requests = already_completed_indices
+        .iter()
+        .rev()
+        .map(|&idx| running.remove(idx))
+        .collect::<Vec<_>>();
+    completed_requests.reverse();
+
+    if running.is_empty() {
+        return DecodeResult {
+            completed_requests,
+            output_signals,
+            end_ms: current_time_ms,
+            ..DecodeResult::default()
+        };
+    }
+
     let max_burst = if config.worker_type == crate::common::protocols::WorkerType::Prefill {
         1
     } else {
@@ -216,10 +233,11 @@ pub(super) fn simulate_decode_step_with_sampler(
     let retracted_any = !retracted.is_empty();
     if running.is_empty() {
         return DecodeResult {
+            completed_requests,
+            output_signals,
             requests: retracted,
             retracted_any,
             end_ms: current_time_ms,
-            ..DecodeResult::default()
         };
     }
 
@@ -243,60 +261,48 @@ pub(super) fn simulate_decode_step_with_sampler(
         unscaled_time
     };
 
-    let reserved_tokens = running
-        .iter()
-        .map(|req| max_burst.min(req.remaining_output_tokens()))
-        .sum();
-    let Some(mut reservation) = kv_manager.reserve_decode_tokens(reserved_tokens) else {
+    let reserved_page_tokens = decode_page_growth_needed(running, config.block_size, max_burst);
+    let reserved_pages = reserved_page_tokens / config.block_size;
+    let Some(mut reservation) = kv_manager.reserve_decode_pages(reserved_pages) else {
         tracing::warn!(
-            reserved_tokens,
-            "Failed to reserve speculative decode tokens after capacity preflight"
+            reserved_pages,
+            "Failed to reserve speculative decode pages after capacity preflight"
         );
         return DecodeResult {
+            completed_requests,
+            output_signals,
             requests: retracted,
             retracted_any,
             end_ms: current_time_ms,
-            ..DecodeResult::default()
         };
     };
 
-    let sampled_bursts = running
-        .iter()
-        .map(|req| {
-            let remaining = req.remaining_output_tokens();
-            if config.worker_type == crate::common::protocols::WorkerType::Prefill {
-                remaining.min(1)
-            } else if let Some(sampler) = sampler.as_deref_mut() {
-                sampler.sample_output_tokens(remaining)
-            } else {
-                remaining.min(1)
-            }
-        })
-        .collect::<Vec<_>>();
-    let mut output_signals = Vec::with_capacity(sampled_bursts.iter().copied().sum::<usize>());
+    output_signals.reserve(running.len());
     let mut completed_indices = Vec::new();
 
-    for (idx, (req, burst)) in running
-        .iter_mut()
-        .zip(sampled_bursts.into_iter())
-        .enumerate()
-    {
+    for (idx, req) in running.iter_mut().enumerate() {
+        let remaining = req.remaining_output_tokens();
+        let burst = if config.worker_type == crate::common::protocols::WorkerType::Prefill {
+            remaining.min(1)
+        } else if let Some(sampler) = sampler.as_deref_mut() {
+            sampler.sample_output_tokens(remaining)
+        } else {
+            remaining.min(1)
+        };
         for _ in 0..burst {
             let crossing_page_boundary = req.current_sequence_len() + 1 > req.allocated_tokens;
-            let last_idx = req.kv_indices.last().copied();
-            let new_idx = reservation.take();
-            kv_manager.publish_decode_token(new_idx, last_idx);
-
-            req.kv_indices.push(new_idx);
+            kv_manager.extend_decode(&mut req.kv_lease, &mut reservation);
             if crossing_page_boundary {
                 req.allocated_tokens += config.block_size;
             }
-            req.append_output_token(req.next_output_token());
+            let token_id = req.next_output_token();
+            req.append_output_token(token_id);
             req.debug_assert_invariants(config.block_size);
 
             let is_complete = req.output_len() >= req.max_output_tokens;
             output_signals.push(OutputSignal {
                 uuid: req.uuid,
+                token_id: Some(token_id),
                 completed: is_complete,
                 rejected: false,
                 handoff_delay_ms: compute_prefill_handoff_delay_ms(
@@ -318,17 +324,15 @@ pub(super) fn simulate_decode_step_with_sampler(
         }
     }
 
-    debug_assert_eq!(
-        reservation.len(),
-        reserved_tokens.saturating_sub(output_signals.len())
-    );
+    debug_assert!(reservation.len() <= reserved_pages);
     kv_manager.release_decode_reservation(reservation);
 
-    let mut completed_requests = Vec::with_capacity(completed_indices.len());
+    let mut newly_completed_requests = Vec::with_capacity(completed_indices.len());
     for &idx in completed_indices.iter().rev() {
-        completed_requests.push(running.remove(idx));
+        newly_completed_requests.push(running.remove(idx));
     }
-    completed_requests.reverse();
+    newly_completed_requests.reverse();
+    completed_requests.extend(newly_completed_requests);
 
     DecodeResult {
         requests: retracted,

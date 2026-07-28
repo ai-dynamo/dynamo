@@ -2,9 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_llm::model_card::{ModelDeploymentCard, PromptFormatterArtifact, TokenizerKind};
+use dynamo_llm::tokenizers::{TikTokenTokenizer, traits::Encoder};
 use tempfile::tempdir;
 
 const HF_PATH: &str = "tests/data/sample-models/TinyLlama_v1.1";
+const TIKTOKEN_PATH: &str = "tests/data/sample-models/mock-tiktoken";
 
 #[tokio::test]
 async fn test_model_info_from_hf_like_local_repo() {
@@ -35,6 +37,52 @@ async fn test_tokenizer_from_hf_like_local_repo() {
         TokenizerKind::HfTokenizerJson(_) => (),
         TokenizerKind::TikTokenModel(_) => panic!("Expected HfTokenizerJson, got TikTokenModel"),
     }
+}
+
+#[test]
+fn test_tiktoken_model_card_cache_matches_direct_tokenizer_and_records_tokens() {
+    let model = "model-card-tiktoken-cache-integration";
+    let mut mdc = ModelDeploymentCard::load_from_disk(TIKTOKEN_PATH, None).unwrap();
+    mdc.set_name(model);
+
+    let production = mdc.tokenizer().unwrap();
+    let direct =
+        TikTokenTokenizer::from_file_auto(&format!("{TIKTOKEN_PATH}/tiktoken.model")).unwrap();
+
+    let cached_tokens = dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_CACHED_TOKENS_TOTAL
+        .with_label_values(&[model]);
+    let uncached_tokens =
+        dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_UNCACHED_TOKENS_TOTAL
+            .with_label_values(&[model]);
+    let cached_before = cached_tokens.get();
+    let uncached_before = uncached_tokens.get();
+
+    let prompts = [
+        "<|im_start|>system\nYou are concise.<|im_end|><|im_start|>user\nExplain prefix caching.<|im_end|>",
+        "<|im_start|>system\nYou are concise.<|im_end|><|im_start|>user\nNow include Unicode: 北京 😀.<|im_end|>",
+    ];
+    let mut returned_tokens = 0_u64;
+    for prompt in prompts {
+        let actual = production.encode(prompt).unwrap().token_ids().to_vec();
+        let expected = direct.encode(prompt).unwrap().token_ids().to_vec();
+        assert_eq!(
+            actual, expected,
+            "cached production path must remain token-exact"
+        );
+        returned_tokens += actual.len() as u64;
+    }
+
+    let cached_delta = cached_tokens.get() - cached_before;
+    let uncached_delta = uncached_tokens.get() - uncached_before;
+    assert!(
+        cached_delta > 0,
+        "the second request should reuse the shared chat prefix"
+    );
+    assert_eq!(
+        cached_delta + uncached_delta,
+        returned_tokens,
+        "cache token accounting must cover every returned token"
+    );
 }
 
 #[tokio::test]
