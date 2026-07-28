@@ -113,7 +113,12 @@ fn build_rust_engine(
     // conditional rates so it can sample integer burst lengths. AIC now accepts
     // their scalar expectation instead. Fold at this boundary to preserve the
     // mocker contract while consuming AIC's new build API.
-    let nextn = nextn.unwrap_or(0) as u32;
+    let raw_nextn = nextn.unwrap_or(0);
+    let nextn = u32::try_from(raw_nextn).map_err(|_| {
+        pyo3::exceptions::PyValueError::new_err(format!(
+            "AIC: nextn exceeds u32 range: {raw_nextn}"
+        ))
+    })?;
     let aic_module = py.import("dynamo._internal.aic")?;
     let nextn_accepted: Option<f64> = if nextn > 0 {
         Some(

@@ -254,7 +254,7 @@ def test_nextn_accepted_folds_conditional_accept_rates():
 
 @pytest.mark.parametrize("nextn", [0, 6])
 def test_nextn_accepted_rejects_unsupported_mocker_depth(nextn):
-    with pytest.raises(ValueError, match="nextn must be 1..=5"):
+    with pytest.raises(ValueError, match=r"nextn must be 1\.\.=5"):
         _nextn_accepted_from_accept_rates(nextn, None)
 
 
@@ -387,5 +387,7 @@ def test_aic_session_forwards_quant_modes_to_model_config(monkeypatch):
     assert "kvcache_quant_mode" not in captured
     assert captured["comm_quant_mode"] == common.CommQuantMode.fp8
     assert captured["nextn"] == 2
-    assert captured["nextn_accepted"] == pytest.approx(0.85 + 0.85 * 0.3)
-    assert "nextn_accept_rates" not in captured
+    assert captured["nextn_accept_rates"] == pytest.approx(
+        [0.85, 0.3, 0.0, 0.0, 0.0]
+    )
+    assert "nextn_accepted" not in captured

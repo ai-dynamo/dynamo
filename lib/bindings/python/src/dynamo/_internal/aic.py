@@ -105,10 +105,10 @@ def _resolve_quant_mode_name(field: str, value: str | None) -> str | None:
 def _pad_nextn_accept_rates(
     nextn_accept_rates: list[float] | str | None,
 ) -> list[float]:
-    """Normalize Dynamo's legacy conditional accept-rate input.
+    """Normalize accept-rates for the released ``aiconfigurator`` wheel.
 
-    Mocker burst sampling still uses at most five conditional probabilities.
-    When rates are omitted entirely, preserve Dynamo's historical AIC default;
+    The upper AIC wheel still accepts the fixed length-5 conditional-rate
+    contract. When rates are omitted entirely we preserve its CLI default;
     shorter lists are zero-padded and longer lists are truncated.
     """
     if isinstance(nextn_accept_rates, str):
@@ -248,9 +248,13 @@ class AicSession:
             if quant_mode is not None:
                 model_config_kwargs[cfg_key] = quant_mode
         if nextn:
+            if not 1 <= nextn <= _NEXTN_ACCEPT_RATES_LEN:
+                raise ValueError(
+                    f"nextn must be 1..={_NEXTN_ACCEPT_RATES_LEN} when set, got {nextn}"
+                )
             model_config_kwargs["nextn"] = nextn
-            model_config_kwargs["nextn_accepted"] = _nextn_accepted_from_accept_rates(
-                nextn, nextn_accept_rates
+            model_config_kwargs["nextn_accept_rates"] = _pad_nextn_accept_rates(
+                nextn_accept_rates
             )
         model_config = aic["config"].ModelConfig(**model_config_kwargs)
         model = aic["get_model"](

@@ -153,6 +153,9 @@ impl AicEngineConfig {
 fn aic_config_for_raw_iteration_time(mut config: EngineConfig) -> EngineConfig {
     // Raw iteration metrics already describe one scheduler iteration. Preserve
     // the MTP verification cost (`nextn`) but remove the accepted-token benefit.
+    // TODO: If RustEnginePerfModel begins consuming Dynamo's logical MTP
+    // telemetry, pack decode-request and KV counts by (nextn + 1), or switch to
+    // an AIC API that accepts raw logical counts before enabling that path.
     if let Some(speculative) = config.speculative.as_mut() {
         speculative.nextn_accepted = Some(RAW_AIC_NEXTN_ACCEPTED);
     }
@@ -1135,6 +1138,7 @@ pub fn aic_config_from_mock_engine_args(args: &MockEngineArgs) -> Result<Option<
         },
         speculative: args
             .aic_nextn
+            .filter(|nextn| *nextn > 0)
             .map(|nextn| -> Result<SpeculativeConfig> {
                 Ok(SpeculativeConfig {
                     nextn: Some(to_u32(nextn, "aic_nextn")?),
@@ -1652,6 +1656,20 @@ mod tests {
         let speculative = config.speculative.expect("MTP config");
         assert_eq!(speculative.nextn, Some(2));
         assert_eq!(speculative.nextn_accepted, Some(RAW_AIC_NEXTN_ACCEPTED));
+    }
+
+    #[test]
+    fn mock_engine_args_aic_config_ignores_zero_nextn() {
+        let args = MockEngineArgs::builder()
+            .aic_backend(Some("vllm".to_string()))
+            .aic_model_path(Some("model".to_string()))
+            .aic_nextn(Some(0))
+            .build()
+            .unwrap();
+
+        let config = aic_config_from_mock_engine_args(&args).unwrap().unwrap();
+
+        assert!(config.speculative.is_none());
     }
 
     #[test]
