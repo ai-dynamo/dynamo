@@ -1343,7 +1343,7 @@ async fn handler_chat_completions(
     body: Bytes,
 ) -> Result<Response, ErrorResponse> {
     ensure_json_content_type(&headers)?;
-    let mut request = parse_chat_completion_request(&body)?;
+    let mut request: NvCreateChatCompletionRequest = parse_json_request("chat completions", &body)?;
     if *FORCE_INCLUDE_USAGE && request.inner.stream.unwrap_or(false) {
         delta_common::force_include_usage(&mut request.inner.stream_options);
     }
@@ -1438,39 +1438,6 @@ where
             }
         }
     }
-}
-
-fn parse_chat_completion_request(
-    body: &[u8],
-) -> Result<NvCreateChatCompletionRequest, ErrorResponse> {
-    parse_json_request("chat completions", body).or_else(|original_error| {
-        let request = normalize_empty_uuid_image_urls(body).ok_or(original_error)?;
-        serde_json::from_value(request).map_err(json_deserialize_error)
-    })
-}
-
-/// Treat the empty URL emitted by UUID-cache clients as a cache-only image.
-fn normalize_empty_uuid_image_urls(body: &[u8]) -> Option<serde_json::Value> {
-    let mut request: serde_json::Value = parse_json_request("chat completions", body).ok()?;
-    let mut changed = false;
-
-    for part in request
-        .get_mut("messages")?
-        .as_array_mut()?
-        .iter_mut()
-        .filter_map(|message| message.get_mut("content")?.as_array_mut())
-        .flatten()
-    {
-        if part["type"] == "image_url"
-            && part["uuid"].as_str().is_some_and(|uuid| !uuid.is_empty())
-            && part["image_url"]["url"] == ""
-        {
-            part["image_url"] = serde_json::Value::Null;
-            changed = true;
-        }
-    }
-
-    changed.then_some(request)
 }
 
 fn parse_json_request_lossy<T>(endpoint: &'static str, body: &[u8]) -> Result<T, serde_json::Error>
@@ -3833,7 +3800,8 @@ mod tests {
     fn test_parse_chat_completion_request_accepts_empty_image_url_with_uuid() {
         let body = br#"{"model":"test-model","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":""},"uuid":"image-42"}]}]}"#;
 
-        let request = parse_chat_completion_request(body).expect("request should parse");
+        let request: NvCreateChatCompletionRequest =
+            parse_json_request("chat completions", body).expect("request should parse");
         let request = serde_json::to_value(request).expect("request should serialize");
         assert_eq!(request["messages"][0]["content"][0]["uuid"], "image-42");
         assert_eq!(
@@ -3843,10 +3811,11 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_chat_completion_request_normalizes_empty_uuid_url_after_tolerant_parse() {
+    fn test_parse_chat_completion_request_accepts_empty_uuid_url_after_tolerant_parse() {
         let body = b"{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"raw \xff \x1b data\"},{\"type\":\"image_url\",\"image_url\":{\"url\":\"\"},\"uuid\":\"image-42\"}]}]}";
 
-        let request = parse_chat_completion_request(body).expect("request should parse");
+        let request: NvCreateChatCompletionRequest =
+            parse_json_request("chat completions", body).expect("request should parse");
         let request = serde_json::to_value(request).expect("request should serialize");
         assert_eq!(
             request["messages"][0]["content"][0]["text"],
@@ -3857,15 +3826,6 @@ mod tests {
             serde_json::Value::Null
         );
         assert_eq!(request["messages"][0]["content"][1]["uuid"], "image-42");
-    }
-
-    #[test]
-    fn test_parse_chat_completion_request_rejects_empty_image_url_without_uuid() {
-        let body = br#"{"model":"test-model","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":""}}]}]}"#;
-
-        let error =
-            parse_chat_completion_request(body).expect_err("empty URL without UUID must fail");
-        assert_eq!(error.0, StatusCode::BAD_REQUEST);
     }
 
     #[test]
