@@ -102,7 +102,7 @@ def _router_command(args: argparse.Namespace) -> list[str] | None:
 def _router_health_url(args: argparse.Namespace) -> str | None:
     if args.router_port is None:
         return None
-    return f"http://{args.engine_host}:{args.router_port}{args.health_path}"
+    return f"http://{args.engine_host}:{args.router_port}/health"
 
 
 def _worker_command(args: argparse.Namespace) -> list[str]:

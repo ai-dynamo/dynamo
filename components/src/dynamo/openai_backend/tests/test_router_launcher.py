@@ -63,6 +63,15 @@ class TestRouterCommand:
             "min_load",
         ]
 
+    def test_router_health_gate_polls_router_health(self):
+        from dynamo.openai_backend.sglang import _router_health_url
+
+        assert _router_health_url(_launcher_args()) is None
+        assert (
+            _router_health_url(_launcher_args(router_port=30000))
+            == "http://127.0.0.1:30000/health"
+        )
+
     def test_missing_package_raises(self, monkeypatch):
         from dynamo.openai_backend import sglang as sglang_launcher
 
