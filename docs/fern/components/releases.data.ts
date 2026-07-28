@@ -69,7 +69,7 @@ export const CURRENT_WHEEL = "1.3.0.post1";
 
 export const MAIN_TOT: BackendPins = {
   sglang: "0.5.15",
-  trtllm: "1.3.0rc21",
+  trtllm: "1.3.0rc22",
   vllm: "0.25.1",
   nixlSglang: "1.3.0",
   nixlTrtllm: "1.0.1",

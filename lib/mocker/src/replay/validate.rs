@@ -111,7 +111,8 @@ pub(super) fn validate_offline_concurrency_args(
 }
 
 pub(super) fn validate_online_replay_args(args: &MockEngineArgs, num_workers: usize) -> Result<()> {
-    validate_replay_args(args, num_workers, "online replay", false)
+    validate_replay_args(args, num_workers, "online replay", false)?;
+    validate_online_kv_offload(args)
 }
 
 pub(super) fn validate_online_concurrency_args(
@@ -123,7 +124,17 @@ pub(super) fn validate_online_concurrency_args(
         bail!("online concurrency replay requires max_in_flight >= 1");
     }
 
-    validate_replay_args(args, num_workers, "online replay", false)
+    validate_replay_args(args, num_workers, "online replay", false)?;
+    validate_online_kv_offload(args)
+}
+
+fn validate_online_kv_offload(args: &MockEngineArgs) -> Result<()> {
+    if args.num_g3_blocks.is_some() || args.enable_g4_storage {
+        bail!(
+            "online replay does not support G3 or G4 KV offload; only G1/G2 offload is supported"
+        );
+    }
+    Ok(())
 }
 
 fn validate_disagg_args(config: &OfflineDisaggReplayConfig, mode: &str) -> Result<()> {
