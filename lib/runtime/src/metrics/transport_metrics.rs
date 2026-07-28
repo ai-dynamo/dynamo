@@ -39,9 +39,10 @@ pub static TCP_ERRORS_TOTAL: Lazy<Counter> = Lazy::new(|| {
     .expect("tcp_errors_total counter")
 });
 
-/// Incremented once per transition into the accept-loop backoff state, i.e. each time
-/// `listener.accept()` fails with `EMFILE`/`ENFILE` while the process is at its
-/// file-descriptor ceiling. Alertable signal for the condition described in
+/// Incremented once per `listener.accept()` failure with `EMFILE`/`ENFILE` that triggers
+/// a backoff sleep — one increment per failed accept while the process is at its
+/// file-descriptor ceiling, not one per backoff episode, so the counter's rate tracks the
+/// pressure itself. Alertable signal for the condition described in
 /// <https://github.com/ai-dynamo/dynamo/issues/11822>.
 pub static TCP_ACCEPT_BACKOFF_TOTAL: Lazy<Counter> = Lazy::new(|| {
     Counter::new(
