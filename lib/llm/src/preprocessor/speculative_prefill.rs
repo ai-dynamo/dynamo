@@ -52,7 +52,8 @@ impl OAIChatLikeRequest for SpeculativePrefillRequest {
     }
 
     fn messages(&self) -> Value {
-        let json = serde_json::to_value(&self.messages).unwrap();
+        let mut json = serde_json::to_value(&self.messages).unwrap();
+        crate::preprocessor::prompt::normalize_tool_call_arguments(&mut json);
         Value::from_serialize(&json)
     }
 

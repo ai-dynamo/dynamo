@@ -36,13 +36,63 @@ pub trait MediaRequestExt {
     fn media_io_kwargs(&self) -> Option<&MediaDecoder>;
 }
 
+/// Parse `tool_calls[*].function.arguments` from JSON string to object before
+/// handing messages to MiniJinja. Some chat templates (e.g. GLM-5.2) call
+/// `.items()` on arguments and require a dict; the OpenAI wire format carries
+/// arguments as a JSON string. This matches TRT-LLM's chat_utils.py behaviour.
+pub(crate) fn normalize_tool_call_arguments(messages_json: &mut serde_json::Value) {
+    let Some(messages) = messages_json.as_array_mut() else {
+        return;
+    };
+    for message in messages {
+        let Some(tool_calls) = message
+            .get_mut("tool_calls")
+            .and_then(serde_json::Value::as_array_mut)
+        else {
+            continue;
+        };
+        for tc in tool_calls.iter_mut() {
+            let Some(args_str) = tc.pointer("/function/arguments").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let value = match serde_json::from_str::<serde_json::Value>(args_str) {
+                Ok(v) if v.is_object() => v,
+                Ok(_) => {
+                    // Scalar or array — GLM's .items() would panic at render time.
+                    tracing::warn!(
+                        args_len = args_str.len(),
+                        "tool_call arguments parsed to a non-object; \
+                         substituting {{}} for template safety"
+                    );
+                    serde_json::Value::Object(serde_json::Map::new())
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        args_len = args_str.len(),
+                        "tool_call arguments are not valid JSON; \
+                         substituting {{}} for template safety"
+                    );
+                    serde_json::Value::Object(serde_json::Map::new())
+                }
+            };
+            if let Some(obj) = tc
+                .get_mut("function")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                obj.insert("arguments".to_string(), value);
+            }
+        }
+    }
+}
+
 impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
     fn model(&self) -> String {
         self.inner.model.clone()
     }
 
     fn messages(&self) -> Value {
-        let messages_json = serde_json::to_value(&self.inner.messages).unwrap();
+        let mut messages_json = serde_json::to_value(&self.inner.messages).unwrap();
+        normalize_tool_call_arguments(&mut messages_json);
         Value::from_serialize(&messages_json)
     }
 
