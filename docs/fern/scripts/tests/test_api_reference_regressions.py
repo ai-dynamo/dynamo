@@ -469,6 +469,11 @@ def test_pre_merge_gates_every_api_generator_input() -> None:
         "components/src/dynamo/**",
         "**/Cargo.toml",
         "docs/fern/kubernetes/api-reference.md",
+        # Navigation and the operator footer are read by the tests this job
+        # runs, so an edit that touches only them still has to gate the job.
+        "docs/fern/index.yml",
+        "docs/fern/docs.yml",
+        "deploy/operator/docs/footer.md",
     ):
         assert source_path in filters
     assert "api_docs:" in action
@@ -671,6 +676,37 @@ def test_mdx_prose_escapes_jsx_but_spares_inline_code() -> None:
     assert "`map<string, int>`" in rendered
     assert "&#123;opts&#125;" in rendered
     assert "&lt;Widget&gt;" in rendered
+
+
+def test_mdx_prose_drops_sphinx_role_prefixes() -> None:
+    """Markdown has no cross-reference roles, so a surviving ``:class:``
+    prefix would reach the reader as literal text before the code span."""
+    rendered = markdown_rendering.escape_mdx_prose(
+        "See :class:`RawEngine`, :meth:`generate`, :func:`f`, "
+        ":attr:`Cfg.llm`, and :mod:`dynamo.common`."
+    )
+
+    assert ":class:" not in rendered
+    assert ":meth:" not in rendered
+    assert "`RawEngine`" in rendered
+    assert "`dynamo.common`" in rendered
+
+
+def test_mdx_prose_keeps_unknown_colon_pairs_intact() -> None:
+    """Only the known Sphinx roles are stripped; ordinary prose that happens
+    to sit next to a code span is left exactly as authored."""
+    rendered = markdown_rendering.escape_mdx_prose("Timeout:30: `seconds` applies")
+
+    assert "Timeout:30:" in rendered
+
+
+def test_generated_python_pages_carry_no_sphinx_roles() -> None:
+    """Guards the published output, not just the helper: every curated page
+    is regenerated from docstrings that mix Google and Sphinx styles."""
+    for page in sorted((FERN_ROOT / "reference" / "api" / "python").glob("*.mdx")):
+        text = page.read_text(encoding="utf-8")
+        for role in (":class:`", ":meth:`", ":func:`", ":attr:`", ":mod:`"):
+            assert role not in text, f"{page.name} still carries {role}"
 
 
 def test_kubernetes_attributes_escape_source_metacharacters() -> None:

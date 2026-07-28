@@ -122,9 +122,9 @@ from dynamo.common.backend import BaseEngine
 ```
 
 ``Worker`` drives every engine through the same lifecycle regardless of
-modality; only the request/response shape of :meth:`generate` differs.
+modality; only the request/response shape of `generate` differs.
 That method is therefore declared on the modality-specific subclasses
-(:class:`LLMEngine` for token-based inference, :class:`RawEngine` for
+(`LLMEngine` for token-based inference, `RawEngine` for
 raw non-token media generation), not here.
 
 Lifecycle:
@@ -144,12 +144,12 @@ immediately after start().
 - `from_args(cls, argv: list[str] | None = None) -> tuple[BaseEngine, WorkerConfig]` — Parse CLI args and construct the engine (not yet started). ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L173))
 - `start(worker_id: int) -> EngineConfig` — Start the engine and return registration metadata. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L188))
 - `abort(context: Context) -> None` — Abort an in-flight request (optional, default no-op). ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L207))
-- `is_quiescent() -> Optional[bool]` — Whether in-flight KV transfers are done, so :meth:`cleanup` may ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L219))
+- `is_quiescent() -> Optional[bool]` — Whether in-flight KV transfers are done, so `cleanup` may ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L219))
 - `cleanup() -> None` — Release all engine resources. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L234))
 - `register_prometheus(metrics: 'EngineMetrics') -> None` — Bridge a vendor-prefixed Prometheus registry into the runtime's ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L260))
 - `component_metrics_dp_ranks() -> list[int]` — Declare the data-parallel ranks this engine publishes ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L271))
 - `attach_snapshot_publisher(publisher: Any) -> None` — Framework hands the engine the Rust-owned ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L286))
-- `health_check_payload() -> Optional[dict[str, Any]]` — Canary payload the runtime sends through :meth:`generate` when ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L297))
+- `health_check_payload() -> Optional[dict[str, Any]]` — Canary payload the runtime sends through `generate` when ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L297))
 - `supported_controls() -> set[str]` — Return the set of engine-control capability keys this engine supports. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L305))
 - `engine_control(control: str, body: dict[str, Any]) -> dict[str, Any]` — Handle one advertised engine-control request. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L313))
 - `supported_updates() -> set[str]` — Return the set of engine-update capability keys this engine supports. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L322))
@@ -158,7 +158,7 @@ immediately after start().
 </Accordion>
 
 <Accordion id="api-dynamo-common-backend-engine-diffusionengine" title="DiffusionEngine (class)">
-A :class:`RawEngine` for diffusion-family generation (image/video via VisualGen, DiffGenerator). Names the family only — non-diffusion raw modalities (e.g. TTS audio) subclass :class:`RawEngine` directly. Routing keys off :class:`RawEngine`, so any subclass uses the raw adapter.
+A `RawEngine` for diffusion-family generation (image/video via VisualGen, DiffGenerator). Names the family only — non-diffusion raw modalities (e.g. TTS audio) subclass `RawEngine` directly. Routing keys off `RawEngine`, so any subclass uses the raw adapter.
 
 ```python
 from dynamo.common.backend import DiffusionEngine
@@ -188,7 +188,7 @@ from dynamo.common.constants import EmbeddingTransferMode
 </Accordion>
 
 <Accordion id="api-dynamo-common-backend-engine-engineconfig" title="EngineConfig (class)">
-Registration metadata returned by an engine's :meth:`start`.
+Registration metadata returned by an engine's `start`.
 
 ```python
 from dynamo.common.backend import EngineConfig
@@ -200,7 +200,7 @@ EngineConfig(model: str, served_model_name: Optional[str] = None, runtime_data: 
 
 The neutral fields (``model``, ``served_model_name``, ``runtime_data``)
 apply to every modality; token-pipeline metadata lives in the optional
-:attr:`llm` sub-record, which raw media engines leave ``None``.
+`llm` sub-record, which raw media engines leave ``None``.
 
 [`components/src/dynamo/common/backend/engine.py#L136`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L136)
 
@@ -260,12 +260,12 @@ Prefill terminals carry ``disaggregated_params`` for the
 PrefillRouter to forward to the decode peer. When the caller
 requested logprobs, chunks may also carry ``log_probs`` and
 ``top_logprobs`` aligned to ``token_ids`` — see
-:mod:`dynamo.common.backend.logprobs`.
+`dynamo.common.backend.logprobs`.
 
 Encode terminals carry ``encoder_result`` (an opaque object the
 frontend forwards onto the downstream
 ``PreprocessedRequest.encoder_result``). Construct with
-:func:`dynamo.common.backend.multimodal.encoder_terminal_chunk`.
+`dynamo.common.backend.multimodal.encoder_terminal_chunk`.
 
 [`components/src/dynamo/common/backend/engine.py#L74`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L74)
 </Accordion>
@@ -290,7 +290,7 @@ Multimodal keys (``multi_modal_data``, ``mm_processor_kwargs``,
 the request carries media. ``encoder_result`` is set by the
 frontend when forwarding a request from an Encode worker
 to a downstream Prefill/Aggregated peer; engines read it via
-:func:`dynamo.common.backend.multimodal.require_encoder_result`. All
+`dynamo.common.backend.multimodal.require_encoder_result`. All
 four are object-shaped (``dict``) by contract.
 
 ``model`` carries the requested model name (set by the Rust
@@ -312,7 +312,7 @@ HttpClient(config: Optional[HttpConfigBase] = None) -> None
 ```
 
 Subclasses own a backend-specific session/client singleton on the
-instance. Callers reach the public surface via :meth:`fetch_bytes`
+instance. Callers reach the public surface via `fetch_bytes`
 and the unified exception classes above; the concrete backend type
 is invisible past instantiation.
 
@@ -420,7 +420,7 @@ from dynamo.common.backend import LLMEngine
 ```
 
 The token pipeline: the Rust preprocessor tokenizes the prompt and sets
-``token_ids`` on the request; :meth:`generate` yields token chunks that
+``token_ids`` on the request; `generate` yields token chunks that
 the Rust postprocessor detokenizes. Registered with
 ``ModelInput.Tokens`` and served through the token request adapter.
 
@@ -434,7 +434,7 @@ the Rust postprocessor detokenizes. Registered with
 </Accordion>
 
 <Accordion id="api-dynamo-common-backend-engine-llmregistration" title="LlmRegistration (class)">
-Token-pipeline registration metadata (KV cache, data-parallel layout, disaggregation bootstrap). Set by :class:`LLMEngine`s; :class:`RawEngine`s leave :attr:`EngineConfig.llm` ``None``. A ``None`` field isn't advertised (the router falls back to its defaults).
+Token-pipeline registration metadata (KV cache, data-parallel layout, disaggregation bootstrap). Set by `LLMEngine`s; `RawEngine`s leave `EngineConfig.llm` ``None``. A ``None`` field isn't advertised (the router falls back to its defaults).
 
 ```python
 from dynamo.common.backend import LlmRegistration
@@ -803,15 +803,15 @@ Engines for raw, non-token generation (image, video, audio).
 from dynamo.common.backend import RawEngine
 ```
 
-Named for the *contract*, not a use case: unlike :class:`LLMEngine` there
+Named for the *contract*, not a use case: unlike `LLMEngine` there
 is no token pipeline — the frontend forwards the OpenAI-shaped request as a
-JSON object and :meth:`generate` yields the response object(s) directly.
+JSON object and `generate` yields the response object(s) directly.
 Registered with ``ModelInput.Text`` and served through the raw request
 adapter (no tokenization or KV cache). The ``dict`` contract is
 modality-neutral, so a new media modality is a new engine, not a new
 framework path; one engine may serve several modalities. Yield one
 (terminal) object, or intermediate progress objects ending with a terminal
-one. Subclasses like :class:`DiffusionEngine` add no contract.
+one. Subclasses like `DiffusionEngine` add no contract.
 
 [`components/src/dynamo/common/backend/engine.py#L405`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L405)
 
@@ -923,8 +923,8 @@ from dynamo.common.backend import Worker
 Worker(engine: BaseEngine, config: WorkerConfig)
 ```
 
-Accepts any :class:`BaseEngine` — an :class:`LLMEngine` (token pipeline)
-or a :class:`DiffusionEngine` (raw media pipeline). The request adapter is
+Accepts any `BaseEngine` — an `LLMEngine` (token pipeline)
+or a `DiffusionEngine` (raw media pipeline). The request adapter is
 selected from the engine kind (``raw=isinstance(engine, RawEngine)``);
 ``WorkerConfig.model_input`` is validated against that kind.
 
@@ -1065,7 +1065,7 @@ env_bool(name: str, default: bool = False) -> bool
 </Accordion>
 
 <Accordion id="api-dynamo-common-http-fetch-bytes" title="fetch_bytes (function)">
-Singleton-backed convenience wrapper over :meth:`HttpClient.fetch_bytes`.
+Singleton-backed convenience wrapper over `HttpClient.fetch_bytes`.
 
 ```python
 from dynamo.common.http import fetch_bytes

@@ -309,9 +309,9 @@ If ``sglang_tools`` is provided, reuses them; otherwise converts from
 the request's ``tools`` field.
 
 For ``tool_choice="required"`` or a named function, uses
-:class:`JsonArrayParser` (matching native SGLang) since guided decoding
+`JsonArrayParser` (matching native SGLang) since guided decoding
 constrains the output to a JSON array.  Otherwise uses the model-specific
-:class:`FunctionCallParser`.
+`FunctionCallParser`.
 
 [`components/src/dynamo/frontend/sglang_prepost.py#L265`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L265)
 </Accordion>
@@ -511,7 +511,7 @@ preprocess_chat_request(request: dict[str, Any], *, tokenizer, tool_call_parser_
 ```
 
 ``template_force_reasoning`` is the static per-server flag derived from
-the chat template (see :func:`detect_force_reasoning_from_template`);
+the chat template (see `detect_force_reasoning_from_template`);
 the effective per-request value combines it with the configured parser and
 request-level thinking controls.
 

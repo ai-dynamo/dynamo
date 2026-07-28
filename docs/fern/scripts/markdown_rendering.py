@@ -12,6 +12,20 @@ import re
 # span between them as the code and escape the literal text itself.
 _CODE_SPAN_RE = re.compile(r"(`+[^`]*`+)")
 
+# Dynamo's Python docstrings mix Google style with Sphinx cross-reference
+# roles (``:class:`Foo```). Markdown has no such construct, so the role prefix
+# would reach the reader as literal text in front of an otherwise correct code
+# span. Dropping the prefix keeps the referenced name as inline code, which is
+# how the same names already read everywhere else on the page. Only roles that
+# actually appear in the curated modules are listed; an unknown ``:word:`` is
+# left alone rather than guessed at.
+_REST_ROLE_RE = re.compile(r":(?:class|meth|func|attr|mod|data|obj|exc):(?=`)")
+
+
+def strip_rest_roles(text: str) -> str:
+    """Drop Sphinx cross-reference role prefixes, keeping the code span."""
+    return _REST_ROLE_RE.sub("", text)
+
 
 def escape_mdx_prose(text: str) -> str:
     """Escape JSX-significant characters in generated Markdown prose.
@@ -23,7 +37,7 @@ def escape_mdx_prose(text: str) -> str:
     Both single-backtick Markdown spans and double-backtick reST literals
     count as code.
     """
-    parts = _CODE_SPAN_RE.split(text)
+    parts = _CODE_SPAN_RE.split(strip_rest_roles(text))
     return "".join(
         part if index % 2 else _escape_jsx(part) for index, part in enumerate(parts)
     ).strip()
