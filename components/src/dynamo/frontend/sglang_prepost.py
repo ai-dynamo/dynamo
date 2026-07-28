@@ -116,6 +116,63 @@ def _normalize_sglang_parser_name(parser_name: str | None) -> str | None:
     return _SGLANG_PARSER_NAME_ALIASES.get(parser_name, parser_name)
 
 
+@lru_cache(maxsize=64)
+def _sglang_reasoning_default(parser_name: str) -> str | None:
+    """Return SGLang's own ``reasoning_default`` for ``parser_name``.
+
+    ``_THINKING_BY_DEFAULT`` / ``_THINKING_OPT_IN`` below duplicate a table that
+    SGLang already publishes: every reasoning detector declares a
+    ``reasoning_default`` and ``serving_chat._get_reasoning_from_request`` reads
+    it. Duplicating it means each new SGLang model silently gets the wrong
+    answer here until someone remembers to update the sets -- and the failure is
+    quiet, because an unlisted parser falls through to ``template_default``,
+    which is ``False`` for any model that ships no Jinja chat template.
+
+    Kimi-K3 hit exactly that: ``reasoning_default='thinking'`` (thinking on
+    unless ``chat_template_kwargs.thinking is False``), but it was in neither
+    set and has no chat template, so reasoning was never enabled -- the parser
+    stayed off, ``reasoning_content`` came back null, and the raw
+    ``<|close|>think<|sep|>`` marker leaked into ``content``.
+
+    Ask SGLang instead. Returns None when the parser is unknown to this SGLang
+    build, in which case the caller falls back to the static tables.
+    """
+    try:
+        detector = ReasoningParser(model_type=parser_name).detector
+    except Exception:
+        # Unknown to this SGLang build: ReasoningParser raises on an
+        # unrecognised model_type. Fall back to the static tables rather than
+        # failing the request.
+        return None
+    return getattr(detector, "reasoning_default", None)
+
+
+def _force_reasoning_from_sglang_default(
+    mode: str | None, kwargs: dict[str, Any], request: dict[str, Any]
+) -> bool | None:
+    """Apply SGLang's ``reasoning_default`` semantics; None if not applicable.
+
+    Mirrors the mode dispatch in
+    ``serving_chat._get_reasoning_from_request``.
+    """
+    if mode is None:
+        return None
+    if mode == "always":
+        return True
+    if mode == "mistral":
+        reasoning_effort = request.get("reasoning_effort")
+        if reasoning_effort is None:
+            reasoning_effort = kwargs.get("reasoning_effort")
+        return reasoning_effort is not None and reasoning_effort != "none"
+    if mode in ("thinking", "enable_thinking"):
+        # on by default; the matching kwarg set to False opts out
+        return kwargs.get(mode) is not False
+    if mode in ("explicit_thinking", "explicit_enable_thinking"):
+        toggle = mode.replace("explicit_", "")
+        return kwargs.get(toggle) is True
+    return None
+
+
 def resolve_request_force_reasoning(
     request: dict[str, Any],
     reasoning_parser_name: str | None,
@@ -137,6 +194,13 @@ def resolve_request_force_reasoning(
       * opt-in families (``deepseek-v3``/``gemma4``): off by default,
         enabled by ``chat_template_kwargs.{thinking,enable_thinking}=True``.
       * anything else: follow the statically-detected template default.
+
+    The opt-out/opt-in families are resolved from SGLang's own
+    ``reasoning_default`` where this SGLang build exposes the parser, so a model
+    SGLang knows about does not need to be added to the tables below. The tables
+    remain as the fallback for parsers this build does not expose. ``minimax-m3``
+    and ``mistral`` keep their explicit handling above, so their behaviour is
+    unaffected.
     """
     reasoning_parser_name = _normalize_sglang_parser_name(reasoning_parser_name)
     if not reasoning_parser_name:
@@ -154,6 +218,12 @@ def resolve_request_force_reasoning(
         if reasoning_effort is None:
             reasoning_effort = kwargs.get("reasoning_effort")
         return reasoning_effort is not None and reasoning_effort != "none"
+
+    resolved = _force_reasoning_from_sglang_default(
+        _sglang_reasoning_default(reasoning_parser_name), kwargs, request
+    )
+    if resolved is not None:
+        return resolved
 
     if reasoning_parser_name in _THINKING_BY_DEFAULT:
         flag_key = (
