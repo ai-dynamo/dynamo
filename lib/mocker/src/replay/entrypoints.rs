@@ -260,6 +260,7 @@ pub fn simulate_loaded_trace_live_with_router_mode_and_options(
         .normalize_session_starts()?
         .speed_up_timing(arrival_speedup_ratio)?;
     trace.validate_for_trace_mode()?;
+    let emit_session_metadata = !trace.is_single_turn();
     online::simulate_trace_workload(
         online_replay_config(
             args,
@@ -270,7 +271,7 @@ pub fn simulate_loaded_trace_live_with_router_mode_and_options(
             online_replay_options(record_per_request, sla),
         ),
         trace,
-        false,
+        emit_session_metadata,
     )
 }
 
@@ -1759,6 +1760,32 @@ mod tests {
         }
     }
 
+    fn multi_turn_dynamo_trace() -> Trace {
+        Trace {
+            block_size: 4,
+            sessions: vec![SessionTrace {
+                session_id: "session_1".to_string(),
+                first_arrival_timestamp_ms: Some(0.0),
+                turns: vec![
+                    TurnTrace {
+                        input_length: 4,
+                        max_output_tokens: 1,
+                        hash_ids: vec![1],
+                        delay_after_previous_ms: 0.0,
+                        ..Default::default()
+                    },
+                    TurnTrace {
+                        input_length: 8,
+                        max_output_tokens: 1,
+                        hash_ids: vec![1, 2],
+                        delay_after_previous_ms: 0.0,
+                        ..Default::default()
+                    },
+                ],
+            }],
+        }
+    }
+
     #[test]
     fn loaded_dynamo_trace_preserves_request_metadata_contract() {
         let report = simulate_loaded_trace_with_router_mode_and_options(
@@ -1799,6 +1826,34 @@ mod tests {
         assert_eq!(report.per_request[0].session_id, None);
         assert_eq!(report.per_request[0].turn_index, None);
         assert!(report.per_request[0].decode_worker_idx.is_some());
+    }
+
+    #[test]
+    fn loaded_multi_turn_dynamo_online_trace_preserves_session_metadata() {
+        let report = simulate_loaded_trace_live_with_router_mode_and_options(
+            replay_test_args(),
+            None,
+            None,
+            multi_turn_dynamo_trace(),
+            2,
+            1.0,
+            ReplayRouterMode::RoundRobin,
+            true,
+            SlaThresholds::default(),
+        )
+        .unwrap();
+
+        assert_eq!(report.per_request.len(), 2);
+        assert_eq!(
+            report.per_request[0].session_id.as_deref(),
+            Some("session_1")
+        );
+        assert_eq!(report.per_request[0].turn_index, Some(0));
+        assert_eq!(
+            report.per_request[1].session_id.as_deref(),
+            Some("session_1")
+        );
+        assert_eq!(report.per_request[1].turn_index, Some(1));
     }
 
     #[test]

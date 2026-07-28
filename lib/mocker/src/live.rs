@@ -532,13 +532,13 @@ impl LiveEngine {
             }
         }
         shutdown_routes(&self.inner.routes);
+        if let Some(error) = first_error {
+            return Err(error);
+        }
         anyhow::ensure!(
             self.inner.routes.by_client.is_empty() && self.inner.routes.by_scheduler.is_empty(),
             "live Mocker shutdown left active request routes"
         );
-        if let Some(error) = first_error {
-            return Err(error);
-        }
         Ok(())
     }
 }

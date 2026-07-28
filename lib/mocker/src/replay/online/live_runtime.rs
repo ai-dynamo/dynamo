@@ -101,12 +101,12 @@ impl LiveRunSession {
             ..
         } = self;
         let wall_time_ms = now_ms(task_ctx.start);
-        let mut stats_snapshot = task_ctx.stats.snapshot();
-        stats_snapshot.vllm_preemptions_total = task_ctx
+        let vllm_preemptions_total = task_ctx
             .engines
             .iter()
             .map(|engine| engine.metrics_receiver().borrow().vllm_preemptions_total)
             .sum();
+        let stats_snapshot = task_ctx.stats.snapshot(vllm_preemptions_total);
         let engines = Arc::clone(&task_ctx.engines);
         let router = Arc::clone(&task_ctx.router);
         let cancel = task_ctx.cancel.clone();

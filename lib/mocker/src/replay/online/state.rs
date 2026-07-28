@@ -55,13 +55,13 @@ impl SharedLiveRuntimeStats {
         self.freed_count.fetch_add(1, Ordering::AcqRel);
     }
 
-    pub(super) fn snapshot(&self) -> LiveRuntimeStats {
+    pub(super) fn snapshot(&self, vllm_preemptions_total: u64) -> LiveRuntimeStats {
         LiveRuntimeStats {
             dispatch_history: self.dispatch_history.lock().unwrap().clone(),
             max_in_flight_seen: self.max_in_flight_seen.load(Ordering::Acquire),
             prefill_marked_count: self.prefill_marked_count.load(Ordering::Acquire),
             freed_count: self.freed_count.load(Ordering::Acquire),
-            vllm_preemptions_total: 0,
+            vllm_preemptions_total,
         }
     }
 }

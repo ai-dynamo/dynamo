@@ -387,7 +387,10 @@ impl SchedulerEventSender {
             return Ok(());
         }
         match self {
-            Self::Outputs(_) => Ok(()),
+            Self::Outputs(_) => {
+                // Legacy output-only consumers do not have an admission event sink.
+                Ok(())
+            }
             Self::Ordered(tx) => tx
                 .send(LiveEngineEvent::Admissions(admissions))
                 .await
