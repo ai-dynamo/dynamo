@@ -39,13 +39,13 @@ def make_args(**overrides):
         "max_num_seqs": 256,
         "max_num_batched_tokens": 8192,
         "enable_prefix_caching": True,
+        "g1_backend": "kvbm",
         "enable_chunked_prefill": True,
         "preemption_mode": "lifo",
         "speedup_ratio": 1.0,
         "decode_speedup_ratio": 1.0,
         "dp_size": 1,
         "startup_time": None,
-        "durable_kv_events": False,
         "kv_transfer_bandwidth": 64.0,
         "kv_transfer_timing_mode": "full_prompt",
         "reasoning": None,
@@ -133,6 +133,29 @@ def test_build_mocker_engine_args_trtllm_accepts_guaranteed_no_evict():
     )
 
     assert engine_args.block_size == 32
+
+
+def test_build_mocker_engine_args_trtllm_accepts_native_g1():
+    engine_args = CONFIG.build_mocker_engine_args(
+        make_args(engine_type="trtllm", g1_backend="native")
+    )
+
+    assert engine_args.g1_backend == "native"
+    assert engine_args.block_size == 32
+
+
+@pytest.mark.parametrize("engine_type", ["vllm", "trtllm"])
+def test_build_mocker_engine_args_accepts_native_g1_with_mtp(engine_type):
+    engine_args = CONFIG.build_mocker_engine_args(
+        make_args(
+            engine_type=engine_type,
+            g1_backend="native",
+            aic_nextn=1,
+        )
+    )
+
+    assert engine_args.g1_backend == "native"
+    assert engine_args.aic_nextn == 1
 
 
 def test_build_mocker_engine_args_trtllm_rejects_unsupported_policy():
@@ -225,9 +248,7 @@ def test_g4_args_allow_kv_bytes_per_token_worker_override():
 
 
 def test_runtime_config_disables_local_indexer_for_decode_worker():
-    engine_args = CONFIG.build_mocker_engine_args(
-        make_args(is_decode_worker=True, durable_kv_events=False)
-    )
+    engine_args = CONFIG.build_mocker_engine_args(make_args(is_decode_worker=True))
 
     _, runtime_config = CONFIG.build_runtime_config(engine_args)
 
@@ -274,7 +295,6 @@ def test_build_mocker_engine_args_preserves_cli_mapped_fields(tmp_path):
         planner_profile_data=planner_profile_data,
         is_prefill_worker=True,
         is_decode_worker=False,
-        durable_kv_events=False,
         kv_bytes_per_token=131072,
         kv_transfer_bandwidth=123.0,
         kv_transfer_timing_mode="destination_missing",
@@ -396,6 +416,13 @@ def test_mocker_cli_accepts_mtp_configuration():
     assert args.aic_nextn == 3
     assert args.aic_nextn_accept_rates == "1,0.5"
     assert args.aic_mtp_seed == 99
+
+
+def test_mocker_cli_accepts_native_g1_for_trtllm():
+    args = parse_args(["--engine-type", "trtllm", "--g1-backend", "native"])
+
+    assert args.engine_type == "trtllm"
+    assert args.g1_backend == "native"
 
 
 def test_mocker_cli_accepts_max_model_len():

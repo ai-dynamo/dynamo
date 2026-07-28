@@ -10,7 +10,12 @@ import logging
 import warnings
 from typing import Optional
 
-from tensorrt_llm.llmapi import BuildConfig
+# trtllm >= 1.3.0rc21 removed BuildConfig; its fields moved to BaseLlmArgs
+# Remove this try-except once we bump trtllm version to >= 1.3.0rc21
+try:
+    from tensorrt_llm.llmapi import BuildConfig
+except ImportError:
+    from tensorrt_llm.llmapi.llm_args import BaseLlmArgs as BuildConfig
 
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase

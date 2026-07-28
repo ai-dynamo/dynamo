@@ -23,7 +23,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 )
@@ -62,47 +61,6 @@ func TestNamespaceAllowed(t *testing.T) {
 			}
 			got := NamespaceAllowed(config, runtimeConfig, &corev1.Pod{}, tt.namespace)
 			assert.Equal(t, tt.want, got)
-		})
-	}
-}
-
-func TestAPIGroupServesVersion(t *testing.T) {
-	apiGroups := &metav1.APIGroupList{
-		Groups: []metav1.APIGroup{
-			{
-				Name: "resource.k8s.io",
-				Versions: []metav1.GroupVersionForDiscovery{
-					{GroupVersion: "resource.k8s.io/v1beta1", Version: "v1beta1"},
-					{GroupVersion: "resource.k8s.io/v1beta2", Version: "v1beta2"},
-				},
-			},
-			{
-				Name: "apps",
-				Versions: []metav1.GroupVersionForDiscovery{
-					{GroupVersion: "apps/v1", Version: "v1"},
-				},
-			},
-		},
-	}
-
-	tests := []struct {
-		name      string
-		groupName string
-		version   string
-		want      bool
-	}{
-		{name: "group exists when version omitted", groupName: "resource.k8s.io", want: true},
-		{name: "served beta version exists", groupName: "resource.k8s.io", version: "v1beta2", want: true},
-		{name: "unserved v1 version is unavailable", groupName: "resource.k8s.io", version: "v1", want: false},
-		{name: "different group with v1 exists", groupName: "apps", version: "v1", want: true},
-		{name: "missing group is unavailable", groupName: "missing.example.com", version: "v1", want: false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := apiGroupServesVersion(apiGroups, tt.groupName, tt.version); got != tt.want {
-				t.Fatalf("apiGroupServesVersion() = %v, want %v", got, tt.want)
-			}
 		})
 	}
 }

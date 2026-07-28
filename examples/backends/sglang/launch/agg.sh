@@ -15,7 +15,6 @@ source "$SCRIPT_DIR/../../../common/launch_utils.sh" # print_launch_banner, wait
 # Default values
 MODEL="Qwen/Qwen3-0.6B"
 ENABLE_OTEL=false
-USE_UNIFIED=false
 
 # Parse command line arguments
 EXTRA_ARGS=()
@@ -29,16 +28,11 @@ while [[ $# -gt 0 ]]; do
             ENABLE_OTEL=true
             shift
             ;;
-        --unified)
-            USE_UNIFIED=true
-            shift
-            ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo "Options:"
             echo "  --model-path <name>  Specify model (default: $MODEL)"
             echo "  --enable-otel        Enable OpenTelemetry tracing"
-            echo "  --unified            Use unified_main entry point (Worker)"
             echo "  -h, --help           Show this help message"
             echo ""
             echo "Additional SGLang/Dynamo flags can be passed and will be forwarded"
@@ -73,9 +67,6 @@ python3 -m dynamo.frontend &
 
 # run worker with metrics enabled
 WORKER_MODULE="dynamo.sglang"
-if [ "$USE_UNIFIED" = true ]; then
-    WORKER_MODULE="dynamo.sglang.unified_main"
-fi
 OTEL_SERVICE_NAME=dynamo-worker DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
 python3 -m "$WORKER_MODULE" \
   --model-path "$MODEL" \

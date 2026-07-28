@@ -8,8 +8,11 @@ use std::sync::Arc;
 
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
+use dynamo_llm::protocols::openai::ParsingOptions;
+use dynamo_llm::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
 use dynamo_llm::protocols::openai::chat_completions::{
-    NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
+    NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
+    NvCreateChatCompletionStreamResponse,
 };
 use dynamo_protocols::types::{
     ChatCompletionMessageContent, ChatCompletionNamedToolChoice, ChatCompletionTool,
@@ -715,6 +718,105 @@ async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_strips_start_to
 
     assert_eq!(reasoning, "");
     assert_eq!(content, "This is plain content");
+}
+
+/// Non-streaming parity for the Nemotron `force_nonempty_content` flag.
+///
+/// A `stream=false` request is not a separate code path: the engine always runs
+/// internally in streaming mode, and the HTTP layer folds the resulting deltas
+/// into a single response. The leading-`<think>` strip that
+/// `postprocessor_parsing_stream` applies must therefore survive that fold.
+///
+/// This test exercises the full non-streaming path: `postprocessor_parsing_stream`
+/// (where the `force_nonempty_content` strip lives), then
+/// `NvCreateChatCompletionResponse::from_annotated_stream` (the entrypoint the
+/// non-streaming handler uses). It asserts the aggregated message has non-empty,
+/// `<think>`-stripped `content` and empty `reasoning_content` — the guarantee
+/// clients that require non-empty content depend on.
+#[tokio::test]
+async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_aggregated_strips_start_token() {
+    let preprocessor = build_preprocessor(Some("nemotron_v3"), None);
+
+    let mut request: NvCreateChatCompletionRequest = serde_json::from_str(REQUEST_JSON).unwrap();
+    request.chat_template_args = Some(
+        serde_json::from_value(serde_json::json!({
+            "force_nonempty_content": true
+        }))
+        .unwrap(),
+    );
+
+    // Leading `<think>` arrives split across chunks (same input as the streaming
+    // test), then a terminal stop chunk closes the choice.
+    let input_chunks = vec![
+        mock_content_chunk("<thi"),
+        mock_content_chunk("nk>This is plain content"),
+        mock_final_chunk(),
+    ];
+    let input_stream = stream::iter(input_chunks.into_iter().map(Annotated::from_data));
+
+    // Step 1: the shared postprocessor stream (reasoning gate + `<think>` strip).
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .expect("postprocessor_parsing_stream should build");
+
+    // Step 2: the non-streaming fold, identical to the `stream=false` HTTP path.
+    let response = NvCreateChatCompletionResponse::from_annotated_stream(
+        output_stream,
+        ParsingOptions::default(),
+    )
+    .await
+    .expect("aggregation should succeed");
+
+    let choice = &response.inner.choices[0];
+    assert_eq!(
+        choice.message.content.as_ref().map(get_text),
+        Some("This is plain content"),
+        "aggregated content must be non-empty with the leading <think> stripped"
+    );
+    assert_eq!(
+        choice.message.reasoning_content, None,
+        "reasoning_content must stay empty when force_nonempty_content=true"
+    );
+}
+
+/// Non-streaming parity, EOF-flush case: when the stream ends after only a
+/// partial `<think>` prefix, those bytes are valid content that the strip
+/// flushes on the terminal chunk. This confirms the non-streaming fold keeps
+/// that flushed content instead of dropping it.
+#[tokio::test]
+async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_aggregated_flushes_partial_prefix()
+{
+    let preprocessor = build_preprocessor(Some("nemotron_v3"), None);
+
+    let mut request: NvCreateChatCompletionRequest = serde_json::from_str(REQUEST_JSON).unwrap();
+    request.chat_template_args = Some(
+        serde_json::from_value(serde_json::json!({
+            "force_nonempty_content": true
+        }))
+        .unwrap(),
+    );
+
+    let input_chunks = vec![mock_content_chunk("<thi"), mock_final_chunk()];
+    let input_stream = stream::iter(input_chunks.into_iter().map(Annotated::from_data));
+
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .expect("postprocessor_parsing_stream should build");
+
+    let response = NvCreateChatCompletionResponse::from_annotated_stream(
+        output_stream,
+        ParsingOptions::default(),
+    )
+    .await
+    .expect("aggregation should succeed");
+
+    let choice = &response.inner.choices[0];
+    assert_eq!(
+        choice.message.content.as_ref().map(get_text),
+        Some("<thi"),
+        "a partial <think> prefix is valid content and must survive aggregation"
+    );
+    assert_eq!(choice.message.reasoning_content, None);
 }
 
 /// Regression: if the stream ends after a partial `<think>` prefix, those bytes
@@ -2231,9 +2333,7 @@ async fn tool_calls_qwen3_coder_auto_routes_through_experimental_gate() {
         ..
     } = drain_stream(output_stream).await;
 
-    let path = if std::env::var("DYN_ENABLE_EXPERIMENTAL_PARSERS_V2")
-        .is_ok_and(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"))
-    {
+    let path = if dynamo_runtime::config::env_is_truthy("DYN_ENABLE_EXPERIMENTAL_PARSERS_V2") {
         "qwen3_coder auto -> dynamo-parsers-v2 (DYN_ENABLE_EXPERIMENTAL_PARSERS_V2 on)"
     } else {
         "qwen3_coder auto -> v1 jail (flag off)"

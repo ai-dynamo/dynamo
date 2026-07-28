@@ -523,7 +523,7 @@ mod race_tests {
         use super::super::*;
 
         #[tokio::test]
-        async fn clear_sweeps_split_suffixes_across_event_threads_and_dp_ranks() {
+        async fn clear_sweeps_only_its_rank_across_split_suffixes() {
             let index = ThreadPoolIndexer::new(ConcurrentRadixTreeCompressed::new(), 2, 32);
             let worker_a0 = WorkerWithDpRank::new(1, 0);
             let worker_a1 = WorkerWithDpRank::new(1, 1);
@@ -555,7 +555,7 @@ mod race_tests {
             flush_and_settle(&index).await;
 
             assert_score(&index, &[1, 2], worker_a0, 1).await;
-            assert_score(&index, &[1, 2], worker_a1, 1).await;
+            assert_score(&index, &[1, 2], worker_a1, 2).await;
             assert_score(&index, &[1, 2], worker_b, 2).await;
             assert_score(&index, &[1, 3], worker_b, 2).await;
         }
@@ -1308,4 +1308,74 @@ mod remove_cleanup_tests {
         assert_edge_lengths(index.backend(), &[2, 3]);
         assert_score(&index, &[1, 2, 3, 8, 9], WorkerWithDpRank::new(0, 0), 5).await;
     }
+}
+
+/// Deterministic reproduction of per-worker lookup-entry leakage under the
+/// split + children-clear + lazy-repair interplay (ai-dynamo/dynamo#10774,
+/// production signature: prefill tracked_blocks climbing ~2x the physical
+/// pool while RSS stays modest).
+///
+/// Two lookup maps emulate two event threads (sticky worker routing means a
+/// worker's events are serialized, but its lookup is never repaired by other
+/// threads' splits except lazily on access):
+///
+/// 1. w1 stores [1,2,3,4] -> node N; w1's lookup has 4 entries -> N.
+/// 2. w2 stores [1,2,9] -> splits N into N=[1,2] with children S=[3,4], X=[9].
+///    w1's entries for the 3,4 externals now point at N but live in S (stale
+///    by design; lazy repair).
+/// 3. w1 removes the head external -> w1 dropped from N, entries for N's edge
+///    scrubbed. w1's stale entries for S's hashes remain.
+/// 4. w2 removes the head external -> N's full_edge_workers empties ->
+///    clear_children_if_unreachable DROPS S and X from N.
+/// 5. w1's removes for the 3,4 externals arrive (the engine evicted them and
+///    the producer is correct): resolve_lookup finds N, N no longer contains
+///    the hashes, and the subtree scan fails because S was detached. The
+///    remove is skipped WITHOUT scrubbing the lookup entries -> they leak
+///    forever and block_count never returns to zero.
+#[test]
+fn remove_after_split_and_children_clear_scrubs_lookup() {
+    let index = ConcurrentRadixTreeCompressed::new();
+    let w1 = worker(1);
+    let w2 = worker(2);
+    let mut l1 = direct_lookup();
+    let mut l2 = direct_lookup();
+
+    // 1. w1 stores the 4-block chain.
+    apply_direct(&index, &mut l1, make_store_event(1, &[1, 2, 3, 4]));
+    assert_eq!(worker_lookup_len(&l1, w1), Some(4));
+
+    // 2. w2 stores a chain sharing the [1,2] prefix, splitting N at pos 2.
+    apply_direct(&index, &mut l2, make_store_event(2, &[1, 2, 9]));
+
+    // 3+4. Remove the shared head block for both workers. This empties N's
+    // full-edge coverage and drops its children (S=[3,4], X=[9]) from the
+    // live tree. (Each remove of the head hash cuts that worker's coverage
+    // of N to zero and eagerly scrubs N's own edge hashes.)
+    let head = remove_hashes_with_parent(&[], &[1, 2]);
+    apply_direct(
+        &index,
+        &mut l1,
+        remove_event(1, 100, 0, vec![head[0], head[1]]),
+    );
+    apply_direct(
+        &index,
+        &mut l2,
+        remove_event(2, 101, 0, vec![head[0], head[1]]),
+    );
+
+    // w1 still holds stale entries for the [3,4] suffix externals.
+    assert_eq!(worker_lookup_len(&l1, w1), Some(2));
+
+    // 5. The engine evicts the suffix blocks; correct producer emits removes.
+    let suffix = remove_hashes_with_parent(&[1, 2], &[3, 4]);
+    apply_direct(&index, &mut l1, remove_event(1, 102, 0, suffix));
+
+    // Every stored block has now been removed for w1: its lookup must be
+    // empty, or tracked_blocks counts phantom blocks forever.
+    assert_eq!(worker_lookup_len(&l1, w1), Some(0));
+
+    // And w2's cleanup path must also drain fully.
+    let w2_leaf = remove_hashes_with_parent(&[1, 2], &[9]);
+    apply_direct(&index, &mut l2, remove_event(2, 103, 0, w2_leaf));
+    assert_eq!(worker_lookup_len(&l2, w2), Some(0));
 }

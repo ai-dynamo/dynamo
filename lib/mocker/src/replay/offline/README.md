@@ -4,7 +4,7 @@ This directory contains the in-process offline replay harness used by `dynamo_mo
 
 The goal is to simulate trace execution without spinning up async runtimes, network planes, or real worker tasks. Instead, the harness advances a logical clock, steps mock engine cores directly, and records request/token timing into `TraceCollector` in `lib/mocker/src/replay/collector.rs`.
 
-For the harness-level picture (load driver → harness → SES/MES → trace collector) and operator-facing CLI docs, see [`docs/dynosim/runs.md`](../../../../../docs/dynosim/runs.md). This README dives into the offline-specific internals: logical clock, event queue, per-worker state machine.
+For the harness-level picture (load driver → harness → SES/MES → trace collector) and operator-facing CLI docs, see [`docs/dynosim/runs.md`](../../../../../docs/fern/dynosim/runs.mdx). This README dives into the offline-specific internals: logical clock, event queue, per-worker state machine.
 
 ## Where It Sits
 
@@ -93,7 +93,7 @@ The general aggregated harness lives in `lib/mocker/src/replay/offline/agg.rs`. 
 
 - a logical clock `now_ms`
 - a pending request queue
-- one [`OfflineWorkerState`](/Users/peabrane/Documents/codes/dynamo/lib/mocker/src/replay/offline/state.rs) per worker
+- one [`OfflineWorkerState`](state.rs) per worker
 - a binary heap of future completion events
 - an optional synchronous offline router
 

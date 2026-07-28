@@ -44,6 +44,7 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 )
 
@@ -65,7 +66,8 @@ func makeSnapshotReconcilerWithInterceptor(s *runtime.Scheme, funcs interceptor.
 		Client: fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).
 			WithStatusSubresource(&nvidiacomv1alpha1.PodSnapshot{}, &nvidiacomv1alpha1.PodSnapshotContent{}).
 			WithInterceptorFuncs(funcs).Build(),
-		Recorder: record.NewFakeRecorder(10),
+		RuntimeConfig: &commonController.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
+		Recorder:      record.NewFakeRecorder(10),
 	}
 }
 
@@ -153,6 +155,24 @@ func TestSnapshotReconciler_BuildsWorkOrderAndBinds(t *testing.T) {
 	// absent — don't deref a nil condition); conditions appear on the next bound-path reconcile.
 	assert.False(t, meta.IsStatusConditionTrue(updated.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionReady))
 	assert.Nil(t, meta.FindStatusCondition(updated.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionFailed))
+}
+
+func TestSnapshotReconciler_DisabledCheckpointGateDoesNotCreateContent(t *testing.T) {
+	s := snapshotReconcilerScheme()
+	snap := makeSnapshotForReconcile()
+	r := makeSnapshotReconciler(s, snap, scheduledPod("abc123"))
+	r.RuntimeConfig = &commonController.RuntimeConfig{Gate: features.Gates{}}
+
+	reconcileSnapshot(t, r, snap.Name)
+
+	var contents nvidiacomv1alpha1.PodSnapshotContentList
+	require.NoError(t, r.List(context.Background(), &contents))
+	assert.Empty(t, contents.Items)
+	updated := &nvidiacomv1alpha1.PodSnapshot{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "inference", Name: snap.Name}, updated))
+	condition := meta.FindStatusCondition(updated.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionReady)
+	require.NotNil(t, condition)
+	assert.Equal(t, "CheckpointDisabled", condition.Reason)
 }
 
 func TestSnapshotReconciler_StalePodReferenceFails(t *testing.T) {
@@ -440,6 +460,7 @@ func TestSnapshotReconciler_DeleteWithNilBoundDropsFinalizer(t *testing.T) {
 	snap.DeletionTimestamp = &now
 	// status.BoundPodSnapshotContentName is unset → nothing was bound → finalizer is dropped.
 	r := makeSnapshotReconciler(s, snap)
+	r.RuntimeConfig = &commonController.RuntimeConfig{Gate: features.Gates{}}
 
 	reconcileSnapshot(t, r, snap.Name)
 

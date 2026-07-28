@@ -24,8 +24,8 @@ import (
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	controllercommon "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/epp"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	corev1 "k8s.io/api/core/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 )
@@ -63,7 +63,7 @@ func invalidVLLMDistributedExecutorBackendAnnotation(annotations map[string]stri
 // inferencePoolAvailabilityError checks the InferencePool API.
 // ctx and mgr must not be nil.
 func inferencePoolAvailabilityError(ctx context.Context, mgr ctrl.Manager) error {
-	if controllercommon.DetectInferencePoolAvailability(ctx, mgr) {
+	if features.DetectInferencePoolAvailability(ctx, mgr) {
 		return nil
 	}
 	return fmt.Errorf(

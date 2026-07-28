@@ -17,10 +17,15 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/dynamic"
 	ctrl "sigs.k8s.io/controller-runtime"
 )
+
+// legacyGroveConditionReasonInsufficientScheduledPCSGReplicas can remain on
+// persisted PCSG status after upgrading from Grove versions that emitted it.
+const legacyGroveConditionReasonInsufficientScheduledPCSGReplicas = "InsufficientScheduledPodCliqueScalingGroupReplicas"
 
 type GroveMultinodeDeployer struct {
 	MultinodeDeployer
@@ -364,7 +369,7 @@ func CheckPCSGReady(ctx context.Context, client client.Client, resourceName, nam
 	// *availability* reason (InsufficientAvailablePodCliqueScalingGroupReplicas).
 	if cond := meta.FindStatusCondition(pcsg.Status.Conditions, groveconstants.ConditionTypeMinAvailableBreached); cond != nil &&
 		cond.Status == metav1.ConditionFalse &&
-		cond.Reason == groveconstants.ConditionReasonInsufficientScheduledPCSGReplicas {
+		cond.Reason == legacyGroveConditionReasonInsufficientScheduledPCSGReplicas {
 		logger.V(1).Info("PodCliqueScalingGroup MinAvailableBreached reports insufficient capacity", "resourceName", resourceName, "reason", cond.Reason, "message", cond.Message)
 		return false, fmt.Sprintf("min-available breached (%s): %s", cond.Reason, cond.Message), serviceStatus, v1beta1.DGDReadyReasonInsufficientCapacity, nil
 	}
@@ -502,7 +507,7 @@ func injectKaiSchedulerIfEnabled(
 	validatedQueueName string,
 ) {
 	// Only proceed if grove is enabled, kai-scheduler is enabled, and no manual schedulerName is set
-	if !runtimeConfig.GroveEnabled || !runtimeConfig.KaiSchedulerEnabled {
+	if !runtimeConfig.Gate.Enabled(features.Grove) || !runtimeConfig.Gate.Enabled(features.KaiScheduler) {
 		return
 	}
 
@@ -529,7 +534,7 @@ func injectVolcanoSchedulerIfEnabled(
 	clique *grovev1alpha1.PodCliqueTemplateSpec,
 	runtimeConfig *controller_common.RuntimeConfig,
 ) {
-	if !runtimeConfig.GroveEnabled || !runtimeConfig.VolcanoSchedulerEnabled {
+	if !runtimeConfig.Gate.Enabled(features.Grove) || !runtimeConfig.Gate.Enabled(features.VolcanoScheduler) {
 		return
 	}
 
@@ -548,7 +553,7 @@ func injectVolcanoQueueAnnotation(
 	annotations map[string]string,
 	runtimeConfig *controller_common.RuntimeConfig,
 ) {
-	if !runtimeConfig.GroveEnabled || !runtimeConfig.VolcanoSchedulerEnabled {
+	if !runtimeConfig.Gate.Enabled(features.Grove) || !runtimeConfig.Gate.Enabled(features.VolcanoScheduler) {
 		return
 	}
 

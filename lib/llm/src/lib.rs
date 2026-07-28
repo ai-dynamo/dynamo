@@ -8,6 +8,7 @@
 
 pub mod backend;
 pub mod common;
+mod direct_zmq_fan_in;
 pub mod discovery;
 pub mod endpoint_type;
 pub mod engines;
@@ -19,6 +20,7 @@ pub mod grpc;
 pub mod http;
 pub mod hub;
 // pub mod key_value_store;
+pub mod kv_dc_relay;
 pub mod kv_router;
 pub mod local_model;
 pub mod lora;
