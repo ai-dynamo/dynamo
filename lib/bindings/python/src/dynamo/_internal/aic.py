@@ -16,7 +16,7 @@ _NEXTN_ACCEPT_RATES_LEN = 5
 # AIC CLI default when accept-rates are omitted (``cli/main.py:795``).
 _DEFAULT_NEXTN_ACCEPT_RATES = [0.85, 0.3, 0.0, 0.0, 0.0]
 
-# Default backend versions match the AIC v0.9.0 perf DB.
+# Default backend versions match the AIC v0.10.0 perf DB.
 DEFAULT_BACKEND_VERSIONS = {
     "vllm": "0.19.0",
     "sglang": "0.5.10",
@@ -135,31 +135,6 @@ def _pad_nextn_accept_rates(
     elif len(rates) > _NEXTN_ACCEPT_RATES_LEN:
         rates = rates[:_NEXTN_ACCEPT_RATES_LEN]
     return rates
-
-
-def _nextn_accepted_from_accept_rates(
-    nextn: int,
-    nextn_accept_rates: list[float] | str | None,
-) -> float:
-    """Fold legacy conditional rates into AIC's scalar acceptance contract.
-
-    Draft token ``i`` can be accepted only when every earlier draft token was
-    accepted, so the expected accepted-token count is the sum of the cumulative
-    products. This is the same expectation formerly computed by AIC's
-    ``calc_expectation`` and lets Dynamo keep its stochastic mocker input while
-    consuming AIC's new ``nextn_accepted`` API.
-    """
-    if not 1 <= nextn <= _NEXTN_ACCEPT_RATES_LEN:
-        raise ValueError(
-            f"nextn must be 1..={_NEXTN_ACCEPT_RATES_LEN} when set, got {nextn}"
-        )
-    rates = _pad_nextn_accept_rates(nextn_accept_rates)
-    probability = 1.0
-    expected = 0.0
-    for rate in rates[:nextn]:
-        probability *= rate
-        expected += probability
-    return expected
 
 
 def _load_aiconfigurator():

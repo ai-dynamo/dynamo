@@ -10,7 +10,7 @@ from typing import Any
 def _load_aiconfigurator_modules() -> tuple[Any, Any, Any]:
     try:
         common = importlib.import_module("aiconfigurator.sdk.common")
-        task = importlib.import_module("aiconfigurator.sdk.task")
+        task = importlib.import_module("aiconfigurator.sdk.task_v2")
         utils = importlib.import_module("aiconfigurator.sdk.utils")
     except ModuleNotFoundError as exc:
         raise RuntimeError(
@@ -29,6 +29,9 @@ def _enumerate_dense_tp_candidates(
         prefill_system=system,
         decode_system=system,
         is_moe=False,
+        prefill_enable_wideep=False,
+        decode_enable_wideep=False,
+        moe_backend=None,
         should_enable_pp=False,
     )
 
