@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pandas as pd
+
 from .scoring import _pick_best_record
 from .search import optimize_dense_agg_with_replay, optimize_dense_disagg_with_replay
 from .specs import ReplayOptimizeSpec
@@ -28,22 +30,20 @@ def compare_aic_and_replay_disagg(
 
     # Deferred: aiconfigurator is optional, so the package must import without it
     # (mirrors aic._load_aiconfigurator_modules). Only this function needs AIC.
-    from aiconfigurator.sdk.task_v2 import Task
+    from aiconfigurator.sdk.task import TaskConfig, TaskRunner
 
-    aic_task = Task(
+    aic_task = TaskConfig(
         serving_mode="disagg",
-        prefill_model_path=spec.engine.model,
-        decode_model_path=spec.engine.model,
-        prefill_system_name=str(spec.hardware.gpuSku),
-        decode_system_name=str(spec.hardware.gpuSku),
-        prefill_backend_name=spec.engine.backend.value,
-        decode_backend_name=spec.engine.backend.value,
+        model_path=spec.engine.model,
+        system_name=str(spec.hardware.gpuSku),
+        backend_name=spec.engine.backend.value,
         total_gpus=spec.hardware.totalGpus,
         isl=spec.workload.isl,
         osl=spec.workload.osl,
         **spec.sla.aic_task_kwargs(),
     )
-    aic_df = aic_task.run()
+    aic_result = TaskRunner().run(aic_task)
+    aic_df = aic_result.get("pareto_df", pd.DataFrame())
 
     replay_spec = spec.model_copy(
         update={"router": spec.router.model_copy(update={"mode": "round_robin"})}

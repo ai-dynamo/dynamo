@@ -275,12 +275,7 @@ STUB_MODULES = [
     "nixl._bindings",
     "aiohttp.web",
     "aiconfigurator.sdk",
-    "aiconfigurator.sdk.task_v2",
-    "aiconfigurator.cli",
-    "aiconfigurator.cli.main",
-    "aiconfigurator_core.sdk",
-    "aiconfigurator_core.sdk.engine",
-    "aiconfigurator_core.sdk.memory",
+    "aiconfigurator.sdk.task",
     "plotly",
     "plotly.graph_objects",
     "plotly.subplots",
@@ -289,16 +284,6 @@ STUB_MODULES = [
     "zmq.asyncio",
     "blake3",
 ]
-
-# These APIs define the AIC 0.11 upper/core contract. The marker-report
-# environment may contain an older, otherwise importable AIC release, so force
-# stubs for these versioned modules during marker-only collection.
-FORCE_STUB_MODULES = {
-    "aiconfigurator.sdk.task_v2",
-    "aiconfigurator.cli.main",
-    "aiconfigurator_core.sdk.engine",
-    "aiconfigurator_core.sdk.memory",
-}
 
 # Project paths for local imports
 PROJECT_PATHS = [
@@ -426,9 +411,9 @@ class DependencyStubber:
         stub.__package__ = name.rsplit(".", 1)[0] if "." in name else name
         return stub
 
-    def ensure_available(self, module_name: str, *, force: bool = False) -> ModuleType:
+    def ensure_available(self, module_name: str) -> ModuleType:
         """Ensure a module is available, stubbing it if not installed."""
-        if module_name in sys.modules and not force:
+        if module_name in sys.modules:
             return sys.modules[module_name]
 
         parts = module_name.split(".")
@@ -436,7 +421,7 @@ class DependencyStubber:
             ".".join(parts[:i]) in self.stubbed for i in range(1, len(parts))
         )
 
-        if not force and not parent_stubbed:
+        if not parent_stubbed:
             try:
                 return importlib.import_module(module_name)
             except (ImportError, AttributeError):
@@ -456,11 +441,6 @@ class DependencyStubber:
         stub = self._create_module_stub(module_name)
         sys.modules[module_name] = stub
         self.stubbed.add(module_name)
-        if "." in module_name:
-            parent_name, child_name = module_name.rsplit(".", 1)
-            parent = sys.modules.get(parent_name)
-            if parent is not None:
-                setattr(parent, child_name, stub)
         return stub
 
 
@@ -643,7 +623,7 @@ def run_collection(test_paths: list[str], use_stubbing: bool) -> tuple[int, Repo
 
         stubber = DependencyStubber()
         for module in STUB_MODULES:
-            stubber.ensure_available(module, force=module in FORCE_STUB_MODULES)
+            stubber.ensure_available(module)
 
         # Special case: pytest-benchmark needs a real Warning subclass
         try:
