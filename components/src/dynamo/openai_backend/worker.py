@@ -41,8 +41,10 @@ T = TypeVar("T")
 def _upstream_headers(request: dict[str, Any]) -> dict[str, str]:
     headers = {"Content-Type": "application/json"}
     routing_key = request.get("user")
-    if isinstance(routing_key, str) and routing_key:
-        headers[ROUTING_KEY_HEADER] = routing_key
+    if isinstance(routing_key, str):
+        routing_key = routing_key.strip()
+        if routing_key and routing_key.isascii() and routing_key.isprintable():
+            headers[ROUTING_KEY_HEADER] = routing_key
     return headers
 
 
@@ -460,9 +462,7 @@ class UpstreamClient:
                     yield output_chunk
         except asyncio.CancelledError:
             if rid is not None:
-                LOGGER.info(
-                    "Dropping cancelled request rid=%s; aborting upstream", rid
-                )
+                LOGGER.info("Dropping cancelled request rid=%s; aborting upstream", rid)
                 self._schedule_abort(rid)
             else:
                 LOGGER.info("Dropping cancelled request")

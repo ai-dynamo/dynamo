@@ -52,9 +52,7 @@ class TestRouterCommand:
         assert command is not None
         assert command[1:3] == ["-m", "sglang_router.launch_router"]
         assert command[command.index("--port") + 1] == "30000"
-        assert (
-            command[command.index("--worker-urls") + 1] == "http://127.0.0.1:30010"
-        )
+        assert command[command.index("--worker-urls") + 1] == "http://127.0.0.1:30010"
         assert command[-5:] == [
             "--dp-aware",
             "--policy",
@@ -116,9 +114,7 @@ class TestUpstreamHeaders:
     def test_no_user_field(self):
         from dynamo.openai_backend.worker import _upstream_headers
 
-        assert _upstream_headers({"model": "m"}) == {
-            "Content-Type": "application/json"
-        }
+        assert _upstream_headers({"model": "m"}) == {"Content-Type": "application/json"}
 
     def test_user_field_sets_routing_key(self):
         from dynamo.openai_backend.worker import ROUTING_KEY_HEADER, _upstream_headers
@@ -131,6 +127,19 @@ class TestUpstreamHeaders:
         from dynamo.openai_backend.worker import ROUTING_KEY_HEADER, _upstream_headers
 
         for value in (None, "", 7, {"id": "x"}):
+            headers = _upstream_headers({"user": value})
+            assert ROUTING_KEY_HEADER not in headers
+
+    def test_surrounding_whitespace_stripped(self):
+        from dynamo.openai_backend.worker import ROUTING_KEY_HEADER, _upstream_headers
+
+        headers = _upstream_headers({"user": "  glmload03-17\n"})
+        assert headers[ROUTING_KEY_HEADER] == "glmload03-17"
+
+    def test_header_unsafe_values_ignored(self):
+        from dynamo.openai_backend.worker import ROUTING_KEY_HEADER, _upstream_headers
+
+        for value in ("bad\r\nkey", "tab\tkey", "emoji-🚀", "café", "\x00", "   "):
             headers = _upstream_headers({"user": value})
             assert ROUTING_KEY_HEADER not in headers
 

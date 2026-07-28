@@ -59,9 +59,7 @@ def build_worker_command(
 ) -> list[str]:
     served_model_name = args.served_model_name or args.model
     port = upstream_port if upstream_port is not None else args.engine_port
-    upstream_base_url = (
-        f"http://{args.engine_host}:{port}{args.api_prefix.rstrip('/')}"
-    )
+    upstream_base_url = f"http://{args.engine_host}:{port}{args.api_prefix.rstrip('/')}"
     command = [
         sys.executable,
         "-m",
@@ -94,7 +92,9 @@ async def wait_for_health(
             try:
                 response = await client.get(health_url, timeout=5.0)
                 if response.is_success:
-                    LOGGER.info("%s became healthy at %s", name.capitalize(), health_url)
+                    LOGGER.info(
+                        "%s became healthy at %s", name.capitalize(), health_url
+                    )
                     return
             except httpx.HTTPError:
                 LOGGER.debug("%s is not healthy yet", name.capitalize(), exc_info=True)
