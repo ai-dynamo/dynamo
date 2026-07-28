@@ -1062,9 +1062,13 @@ impl ModelManager {
         self.hicache_caches
             .entry(endpoint.id())
             .or_insert_with(|| {
-                let cache = HicacheSharedKvCache::new_with_cancellation(
+                let frontend_kv_events_endpoint = std::env::var("DYN_MOONCAKE_KV_EVENTS_ENDPOINT")
+                    .ok()
+                    .filter(|endpoint| !endpoint.is_empty());
+                let cache = HicacheSharedKvCache::new_with_cancellation_and_endpoint(
                     runtime_configs,
                     endpoint.component().drt().child_token(),
+                    frontend_kv_events_endpoint,
                 );
                 cache.start_subscriber();
                 cache

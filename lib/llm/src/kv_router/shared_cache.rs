@@ -39,7 +39,7 @@ use dynamo_kv_router::{
 const SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY: &str = "sglang_hicache_mooncake";
 const MOONCAKE_EVENT_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct SglangHicacheMooncakeConfig {
     backend: String,
     page_size: u32,
@@ -47,12 +47,27 @@ struct SglangHicacheMooncakeConfig {
     pp_size: u32,
     is_mla_model: bool,
     is_eagle: bool,
+    #[serde(default)]
     tp_lcm_size: Option<u32>,
     should_split_heads: bool,
+    #[serde(default)]
     extra_backend_tag: Option<String>,
-    master_server_address: Option<String>,
-    master_metrics_port: u16,
+    #[serde(default)]
     kv_events_endpoint: Option<String>,
+}
+
+impl SglangHicacheMooncakeConfig {
+    fn has_same_layout(&self, other: &Self) -> bool {
+        self.backend == other.backend
+            && self.page_size == other.page_size
+            && self.tp_size == other.tp_size
+            && self.pp_size == other.pp_size
+            && self.is_mla_model == other.is_mla_model
+            && self.is_eagle == other.is_eagle
+            && self.tp_lcm_size == other.tp_lcm_size
+            && self.should_split_heads == other.should_split_heads
+            && self.extra_backend_tag == other.extra_backend_tag
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -85,16 +100,25 @@ pub struct HicacheSharedKvCache {
     last_sequence: Arc<AtomicU64>,
     has_sequence: Arc<AtomicBool>,
     cancellation_token: CancellationToken,
+    frontend_kv_events_endpoint: Option<String>,
 }
 
 impl HicacheSharedKvCache {
     pub fn new(runtime_configs: RuntimeConfigWatch) -> Self {
-        Self::new_with_cancellation(runtime_configs, CancellationToken::new())
+        Self::new_with_cancellation_and_endpoint(runtime_configs, CancellationToken::new(), None)
     }
 
     pub fn new_with_cancellation(
         runtime_configs: RuntimeConfigWatch,
         cancellation_token: CancellationToken,
+    ) -> Self {
+        Self::new_with_cancellation_and_endpoint(runtime_configs, cancellation_token, None)
+    }
+
+    pub fn new_with_cancellation_and_endpoint(
+        runtime_configs: RuntimeConfigWatch,
+        cancellation_token: CancellationToken,
+        frontend_kv_events_endpoint: Option<String>,
     ) -> Self {
         Self {
             runtime_configs,
@@ -103,6 +127,7 @@ impl HicacheSharedKvCache {
             last_sequence: Arc::new(AtomicU64::new(0)),
             has_sequence: Arc::new(AtomicBool::new(false)),
             cancellation_token,
+            frontend_kv_events_endpoint,
         }
     }
 
@@ -129,7 +154,10 @@ impl HicacheSharedKvCache {
 
         let (_, first) = configs.first()?;
 
-        if configs.iter().any(|(_, config)| config != first) {
+        if configs
+            .iter()
+            .any(|(_, config)| !config.has_same_layout(first))
+        {
             tracing::warn!(
                 workers = ?configs.iter().map(|(worker_id, _)| *worker_id).collect::<Vec<_>>(),
                 "SGLang Mooncake HiCache runtime configs differ across workers; skipping shared-cache lookup"
@@ -141,8 +169,25 @@ impl HicacheSharedKvCache {
     }
 
     fn kv_events_endpoint(&self) -> Option<String> {
-        self.resolve_mooncake_config()
-            .and_then(|config| config.kv_events_endpoint)
+        self.resolve_mooncake_config()?;
+        if let Some(endpoint) = &self.frontend_kv_events_endpoint {
+            return Some(endpoint.clone());
+        }
+
+        let workers = self.runtime_configs.borrow();
+        let mut endpoints = workers.iter().filter_map(|(worker_id, runtime_config)| {
+            mooncake_config_from_runtime(*worker_id, runtime_config)
+                .and_then(|config| config.kv_events_endpoint)
+                .filter(|endpoint| !endpoint.is_empty())
+        });
+        let endpoint = endpoints.next()?;
+        if endpoints.any(|candidate| candidate != endpoint) {
+            tracing::warn!(
+                "SGLang Mooncake KV event endpoints differ across workers; skipping shared-cache lookup"
+            );
+            return None;
+        }
+        Some(endpoint)
     }
 
     fn apply_batch(&self, sequence: u64, events: Vec<MooncakeObjectEvent>) {
@@ -343,7 +388,7 @@ impl SharedKvCache for HicacheSharedKvCache {
             return Ok(SharedCacheHits::default());
         }
 
-        if config.kv_events_endpoint.is_none() {
+        if self.kv_events_endpoint().is_none() {
             tracing::debug!("Mooncake KV event endpoint is unavailable");
             return Ok(SharedCacheHits::default());
         }
@@ -548,8 +593,6 @@ mod tests {
             tp_lcm_size: None,
             should_split_heads: false,
             extra_backend_tag: None,
-            master_server_address: Some("127.0.0.1:50051".to_string()),
-            master_metrics_port: 9003,
             kv_events_endpoint: Some("tcp://127.0.0.1:5557".to_string()),
         }
     }
@@ -714,6 +757,48 @@ mod tests {
         assert_eq!(
             cache.kv_events_endpoint().as_deref(),
             Some("tcp://127.0.0.1:5558")
+        );
+    }
+
+    #[test]
+    fn test_kv_events_endpoint_tolerates_worker_metadata_omission() {
+        let mut advertised = mooncake_config();
+        advertised.kv_events_endpoint = Some("tcp://127.0.0.1:5557".to_string());
+        let mut missing = advertised.clone();
+        missing.kv_events_endpoint = None;
+        let mut advertised_runtime = ModelRuntimeConfig::new();
+        advertised_runtime
+            .set_engine_specific(SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY, advertised)
+            .unwrap();
+        let mut missing_runtime = ModelRuntimeConfig::new();
+        missing_runtime
+            .set_engine_specific(SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY, missing)
+            .unwrap();
+        let (_tx, runtime_configs) = watch::channel(HashMap::from([
+            (1, advertised_runtime),
+            (2, missing_runtime),
+        ]));
+        let cache = HicacheSharedKvCache::new(runtime_configs);
+
+        assert_eq!(
+            cache.kv_events_endpoint().as_deref(),
+            Some("tcp://127.0.0.1:5557")
+        );
+    }
+
+    #[test]
+    fn test_frontend_kv_events_endpoint_overrides_worker_metadata() {
+        let mut worker_config = mooncake_config();
+        worker_config.kv_events_endpoint = None;
+        let cache = HicacheSharedKvCache::new_with_cancellation_and_endpoint(
+            runtime_watch_with_config(worker_config),
+            CancellationToken::new(),
+            Some("tcp://frontend-config:5557".to_string()),
+        );
+
+        assert_eq!(
+            cache.kv_events_endpoint().as_deref(),
+            Some("tcp://frontend-config:5557")
         );
     }
 
