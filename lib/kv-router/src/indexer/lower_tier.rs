@@ -31,8 +31,7 @@ use crate::protocols::{
 type WorkerSet = FxHashSet<WorkerWithDpRank>;
 type FrontierBuckets = FxHashMap<Option<ExternalSequenceBlockHash>, WorkerSet>;
 type FinalStates = FxHashMap<WorkerWithDpRank, (usize, Option<ExternalSequenceBlockHash>)>;
-type WorkerBlockIndex =
-    FxHashMap<WorkerWithDpRank, FxHashMap<ExternalSequenceBlockHash, TransitionKey>>;
+type WorkerBlockIndex = FxHashMap<WorkerWithDpRank, WorkerBlockState>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct TransitionKey {
@@ -40,7 +39,34 @@ struct TransitionKey {
     local_hash: LocalBlockHash,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkerBlockEntry {
+    transition_key: TransitionKey,
+    /// Number of recorded chunk tails whose `members` include this block. The
+    /// block and its shared edge are dropped when this reaches zero.
+    ref_cnt: u32,
+    /// Non-empty only on a tail block: the chunk's constituent hashes in order,
+    /// tail included. Empty on non-tail blocks. The lower-tier block size equals
+    /// the GPU block size, so today every block is its own tail and
+    /// `members == [self]`; the field carries the real constituent list unchanged
+    /// if that ratio ever grows.
+    members: Vec<ExternalSequenceBlockHash>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct WorkerBlockState {
+    entries: FxHashMap<ExternalSequenceBlockHash, WorkerBlockEntry>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct LowerTierRemovalStats {
+    /// Removal keys that matched a recorded tail and dropped its chunk.
+    removed_deleted: u64,
+    /// Removal keys that matched no recorded tail: an idempotent no-op.
+    removed_unknown: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum EdgeOwnersEntry {
     Single {
         child_hash: ExternalSequenceBlockHash,
@@ -195,7 +221,8 @@ impl LowerTierIndexer {
                 Ok(())
             }
             KvCacheEventData::Removed(remove_data) => {
-                self.remove_blocks_impl(worker_blocks, worker, &remove_data.block_hashes)
+                let _ = self.remove_blocks_impl(worker_blocks, worker, &remove_data.block_hashes);
+                Ok(())
             }
             KvCacheEventData::Cleared => {
                 self.remove_worker_dp_rank_impl(worker_blocks, worker);
@@ -210,8 +237,26 @@ impl LowerTierIndexer {
         worker: WorkerWithDpRank,
         store_data: KvCacheStoreData,
     ) {
+        let Some(tail_hash) = store_data.blocks.last().map(|block| block.block_hash) else {
+            // Placeholder stores normalize to an empty block list. Keep the
+            // existing behavior: they do not create lower-tier index state.
+            return;
+        };
+
+        let worker_state = worker_blocks.entry(worker).or_default();
+
+        // Idempotent re-store: the tail already records this chunk's members, so
+        // its reference counts are already booked. Skip without touching state.
+        if worker_state
+            .entries
+            .get(&tail_hash)
+            .is_some_and(|entry| !entry.members.is_empty())
+        {
+            return;
+        }
+
         let mut parent_hash = store_data.parent_hash;
-        let worker_map = worker_blocks.entry(worker).or_default();
+        let mut members = Vec::with_capacity(store_data.blocks.len());
 
         for block in store_data.blocks {
             let key = TransitionKey {
@@ -223,9 +268,10 @@ impl LowerTierIndexer {
             // block_hash, or if the shared edge is owned by a conflicting
             // child_hash, stop the walk: any further blocks in this chain would
             // hang off an edge this index never accepted for the worker.
-            if worker_map
+            if worker_state
+                .entries
                 .get(&block.block_hash)
-                .is_some_and(|existing_key| *existing_key != key)
+                .is_some_and(|entry| entry.transition_key != key)
             {
                 break;
             }
@@ -244,38 +290,97 @@ impl LowerTierIndexer {
                 break;
             }
 
-            worker_map.insert(block.block_hash, key);
+            worker_state
+                .entries
+                .entry(block.block_hash)
+                .or_insert_with(|| WorkerBlockEntry {
+                    transition_key: key,
+                    ref_cnt: 0,
+                    members: Vec::new(),
+                });
+            members.push(block.block_hash);
             parent_hash = Some(block.block_hash);
+        }
+
+        // Only record a fully accepted chunk. A mid-chunk conflict breaks the
+        // walk before the announced tail; install no members for it, matching
+        // the pre-existing conflict-ignore behavior. The accepted prefix stays
+        // as `ref_cnt == 0` entries until a worker reset. Partial-conflict
+        // record growth is out of scope.
+        if members.last() != Some(&tail_hash) {
+            return;
+        }
+
+        for member in &members {
+            if let Some(entry) = worker_state.entries.get_mut(member) {
+                entry.ref_cnt += 1;
+            }
+        }
+        // The tail block was touched in the loop above, so its entry exists.
+        if let Some(tail_entry) = worker_state.entries.get_mut(&tail_hash) {
+            tail_entry.members = members;
         }
     }
 
+    /// Key-only removal. Each event hash is a chunk/tail key. Producers send
+    /// only tail keys, and an upstream per-tier dedup filter forwards a removal
+    /// exactly once, so a hash this index does not hold is a legitimate
+    /// idempotent no-op rather than an error.
     fn remove_blocks_impl(
         &self,
         worker_blocks: &mut WorkerBlockIndex,
         worker: WorkerWithDpRank,
         block_hashes: &[ExternalSequenceBlockHash],
-    ) -> Result<(), KvCacheEventError> {
+    ) -> LowerTierRemovalStats {
+        let mut stats = LowerTierRemovalStats::default();
+        let unique_hashes: FxHashSet<_> = block_hashes.iter().copied().collect();
+
         let remove_worker_entry = {
-            let Some(worker_map) = worker_blocks.get_mut(&worker) else {
-                return Err(KvCacheEventError::BlockNotFound);
+            let Some(worker_state) = worker_blocks.get_mut(&worker) else {
+                stats.removed_unknown = unique_hashes.len() as u64;
+                return stats;
             };
 
-            for block_hash in block_hashes {
-                let Some(key) = worker_map.remove(block_hash) else {
-                    return Err(KvCacheEventError::BlockNotFound);
+            for tail_hash in unique_hashes {
+                // A recorded tail carries its member list; an absent hash or a
+                // non-tail block (empty members) is a no-op.
+                let members = match worker_state.entries.get_mut(&tail_hash) {
+                    Some(entry) if !entry.members.is_empty() => std::mem::take(&mut entry.members),
+                    _ => {
+                        stats.removed_unknown += 1;
+                        continue;
+                    }
                 };
+                stats.removed_deleted += 1;
 
-                self.remove_worker_from_edge(key, worker);
+                // Drop one reference from each member (the tail is in its own
+                // member list, so it is decremented here too) and evict any
+                // block whose count reaches zero.
+                for member in members {
+                    let Some((transition_key, evict)) =
+                        worker_state.entries.get_mut(&member).map(|entry| {
+                            entry.ref_cnt = entry.ref_cnt.saturating_sub(1);
+                            (entry.transition_key, entry.ref_cnt == 0)
+                        })
+                    else {
+                        continue;
+                    };
+
+                    if evict {
+                        worker_state.entries.remove(&member);
+                        self.remove_worker_from_edge(transition_key, worker);
+                    }
+                }
             }
 
-            worker_map.is_empty()
+            worker_state.entries.is_empty()
         };
 
         if remove_worker_entry {
             worker_blocks.remove(&worker);
         }
 
-        Ok(())
+        stats
     }
 
     fn clear_worker_impl(&self, worker_blocks: &mut WorkerBlockIndex, worker_id: u64) {
@@ -295,12 +400,12 @@ impl LowerTierIndexer {
         worker_blocks: &mut WorkerBlockIndex,
         worker: WorkerWithDpRank,
     ) {
-        let Some(worker_map) = worker_blocks.remove(&worker) else {
+        let Some(worker_state) = worker_blocks.remove(&worker) else {
             return;
         };
 
-        for (_, key) in worker_map {
-            self.remove_worker_from_edge(key, worker);
+        for (_, entry) in worker_state.entries {
+            self.remove_worker_from_edge(entry.transition_key, worker);
         }
     }
 
@@ -335,27 +440,52 @@ impl LowerTierIndexer {
             .unwrap_or_default()
     }
 
-    /// Reconstruct store events from the per-worker block index. Each block
-    /// becomes a single-block `Stored` event with the correct parent hash,
-    /// suitable for replaying into a fresh indexer to recreate the same state.
-    fn dump_events(worker_blocks: &WorkerBlockIndex) -> Vec<RouterEvent> {
+    /// Reconstruct store events from the per-worker block index for peer replay.
+    ///
+    /// Emits one store event per recorded chunk — an entry with a non-empty
+    /// `members` list — so replaying through the guarded store path rebuilds the
+    /// same entries, reference counts, and member lists. Non-tail members ride
+    /// inside their tail's event, and `ref_cnt == 0` conflict remnants (empty
+    /// members) are dropped. Events carry the default tier; the caller retags
+    /// each with the indexer's registry storage tier before peer replay.
+    fn dump_events(worker_blocks: &WorkerBlockIndex) -> anyhow::Result<Vec<RouterEvent>> {
         let mut events = Vec::new();
         let mut event_id = 0u64;
 
-        for (worker, block_map) in worker_blocks {
-            for (block_hash, key) in block_map {
+        for (worker, worker_state) in worker_blocks {
+            for (tail_hash, tail_entry) in &worker_state.entries {
+                if tail_entry.members.is_empty() {
+                    continue;
+                }
+
+                let mut blocks = Vec::with_capacity(tail_entry.members.len());
+                for member in &tail_entry.members {
+                    let Some(entry) = worker_state.entries.get(member) else {
+                        anyhow::bail!(
+                            "cannot dump lower-tier chunk with a missing member for worker {worker:?}: tail {tail_hash:?}"
+                        );
+                    };
+                    blocks.push(KvCacheStoredBlockData {
+                        block_hash: *member,
+                        tokens_hash: entry.transition_key.local_hash,
+                        mm_extra_info: None,
+                    });
+                }
+
+                let parent_hash = tail_entry
+                    .members
+                    .first()
+                    .and_then(|hash| worker_state.entries.get(hash))
+                    .and_then(|entry| entry.transition_key.parent_hash);
+
                 events.push(RouterEvent::new(
                     worker.worker_id,
                     KvCacheEvent {
                         event_id,
                         data: KvCacheEventData::Stored(KvCacheStoreData {
-                            parent_hash: key.parent_hash,
+                            parent_hash,
                             start_position: None,
-                            blocks: vec![KvCacheStoredBlockData {
-                                block_hash: *block_hash,
-                                tokens_hash: key.local_hash,
-                                mm_extra_info: None,
-                            }],
+                            blocks,
                         }),
                         dp_rank: worker.dp_rank,
                     },
@@ -364,7 +494,7 @@ impl LowerTierIndexer {
             }
         }
 
-        events
+        Ok(events)
     }
 
     pub fn query_contiguous_hits<S>(
@@ -572,13 +702,13 @@ impl SyncIndexer for LowerTierIndexer {
                     self.remove_worker_dp_rank(&mut worker_blocks, worker_id, dp_rank);
                 }
                 WorkerTask::DumpEvents(sender) => {
-                    let _ = sender.send(Ok(Self::dump_events(&worker_blocks)));
+                    let _ = sender.send(Self::dump_events(&worker_blocks));
                 }
                 WorkerTask::Stats(sender) => {
                     let stats = WorkerLookupStats::from_worker_block_counts(
                         worker_blocks
                             .iter()
-                            .map(|(worker, worker_map)| (*worker, worker_map.len())),
+                            .map(|(worker, worker_state)| (*worker, worker_state.entries.len())),
                     );
                     let _ = sender.send(stats);
                 }
@@ -806,7 +936,7 @@ fn finalize_workers(
 
 #[cfg(test)]
 mod tests {
-    use super::{LowerTierContinuation, LowerTierIndexer, WorkerBlockIndex};
+    use super::{LowerTierContinuation, LowerTierIndexer, LowerTierRemovalStats, WorkerBlockIndex};
     use rustc_hash::FxHashMap;
 
     use crate::indexer::{KvIndexerInterface, ThreadPoolIndexer};
@@ -900,7 +1030,59 @@ mod tests {
         }
 
         fn dump_events(&self) -> Vec<crate::protocols::RouterEvent> {
+            self.try_dump_events().expect("dump events")
+        }
+
+        fn try_dump_events(&self) -> anyhow::Result<Vec<crate::protocols::RouterEvent>> {
             LowerTierIndexer::dump_events(&self.worker_blocks)
+        }
+
+        fn removal_stats(
+            &mut self,
+            worker_id: u64,
+            dp_rank: u32,
+            hashes: &[u64],
+        ) -> LowerTierRemovalStats {
+            self.index.remove_blocks_impl(
+                &mut self.worker_blocks,
+                WorkerWithDpRank::new(worker_id, dp_rank),
+                &hashes
+                    .iter()
+                    .copied()
+                    .map(ExternalSequenceBlockHash)
+                    .collect::<Vec<_>>(),
+            )
+        }
+
+        fn has_entry(&self, worker_id: u64, dp_rank: u32, hash: u64) -> bool {
+            self.worker_blocks
+                .get(&WorkerWithDpRank::new(worker_id, dp_rank))
+                .is_some_and(|state| state.entries.contains_key(&ExternalSequenceBlockHash(hash)))
+        }
+
+        fn ref_count(&self, worker_id: u64, dp_rank: u32, hash: u64) -> u32 {
+            self.worker_blocks
+                .get(&WorkerWithDpRank::new(worker_id, dp_rank))
+                .and_then(|state| state.entries.get(&ExternalSequenceBlockHash(hash)))
+                .map(|entry| entry.ref_cnt)
+                .unwrap_or(0)
+        }
+
+        fn tail_count(&self, worker_id: u64, dp_rank: u32) -> usize {
+            self.worker_blocks
+                .get(&WorkerWithDpRank::new(worker_id, dp_rank))
+                .map(|state| {
+                    state
+                        .entries
+                        .values()
+                        .filter(|entry| !entry.members.is_empty())
+                        .count()
+                })
+                .unwrap_or(0)
+        }
+
+        fn is_clean(&self) -> bool {
+            self.worker_blocks.is_empty() && self.index.edges.is_empty()
         }
     }
 
@@ -1228,35 +1410,6 @@ mod tests {
     }
 
     #[test]
-    fn remove_stops_contiguous_walk_at_missing_edge() {
-        let mut index = TestLowerTierIndex::new();
-        index
-            .apply_event(store_event(
-                17,
-                0,
-                0,
-                Some(900),
-                &[71, 72, 73],
-                &[701, 702, 703],
-            ))
-            .unwrap();
-
-        index
-            .apply_event(remove_event(17, 1, 0, vec![ExternalSequenceBlockHash(702)]))
-            .unwrap();
-
-        let query = local_hashes(&[71, 72, 73]);
-        let mut continuations = FxHashMap::default();
-        continuations.insert(
-            WorkerWithDpRank::new(17, 0),
-            LowerTierContinuation::new(0, ExternalSequenceBlockHash(900)),
-        );
-
-        let hits = index.query_contiguous_hits(&query, &continuations);
-        assert_eq!(hits.get(&WorkerWithDpRank::new(17, 0)), Some(&1));
-    }
-
-    #[test]
     fn unknown_last_matched_hash_returns_zero() {
         let mut index = TestLowerTierIndex::new();
         index
@@ -1398,6 +1551,7 @@ mod tests {
         let hits = index.query_contiguous_hits(&local_hashes(&[1]), &continuations);
         assert_eq!(hits.get(&WorkerWithDpRank::new(41, 0)), Some(&0));
         assert_eq!(hits.get(&WorkerWithDpRank::new(41, 1)), Some(&0));
+        assert!(index.is_clean());
     }
 
     #[test]
@@ -1424,48 +1578,6 @@ mod tests {
         let hits = index.query_contiguous_hits(&local_hashes(&[2]), &continuations);
         assert_eq!(hits.get(&WorkerWithDpRank::new(43, 0)), Some(&0));
         assert_eq!(hits.get(&WorkerWithDpRank::new(43, 1)), Some(&1));
-    }
-
-    #[test]
-    fn removing_parent_block_keeps_child_continuation_edge() {
-        let mut index = TestLowerTierIndex::new();
-        index
-            .apply_event(store_event(
-                31,
-                0,
-                0,
-                Some(1300),
-                &[111, 112],
-                &[1101, 1102],
-            ))
-            .unwrap();
-
-        index
-            .apply_event(remove_event(
-                31,
-                1,
-                0,
-                vec![ExternalSequenceBlockHash(1101)],
-            ))
-            .unwrap();
-
-        let root_query = local_hashes(&[111, 112]);
-        let mut root_continuations = FxHashMap::default();
-        root_continuations.insert(
-            WorkerWithDpRank::new(31, 0),
-            LowerTierContinuation::new(0, ExternalSequenceBlockHash(1300)),
-        );
-        let root_hits = index.query_contiguous_hits(&root_query, &root_continuations);
-        assert_eq!(root_hits.get(&WorkerWithDpRank::new(31, 0)), Some(&0));
-
-        let child_query = local_hashes(&[111, 112]);
-        let mut child_continuations = FxHashMap::default();
-        child_continuations.insert(
-            WorkerWithDpRank::new(31, 0),
-            LowerTierContinuation::new(1, ExternalSequenceBlockHash(1101)),
-        );
-        let child_hits = index.query_contiguous_hits(&child_query, &child_continuations);
-        assert_eq!(child_hits.get(&WorkerWithDpRank::new(31, 0)), Some(&1));
     }
 
     #[test]
@@ -1824,6 +1936,186 @@ mod tests {
         assert_eq!(details.hits.get(&WorkerWithDpRank::new(111, 0)), Some(&0));
     }
 
+    // --- Chunk-keyed lower-tier removal tests ---
+
+    #[test]
+    fn single_block_store_then_key_removal_deletes_entry_and_edge() {
+        let mut index = TestLowerTierIndex::new();
+        index
+            .apply_event(store_event(210, 0, 0, Some(100), &[1], &[101]))
+            .unwrap();
+        assert!(index.has_entry(210, 0, 101));
+        assert_eq!(index.ref_count(210, 0, 101), 1);
+        assert_eq!(index.tail_count(210, 0), 1);
+
+        let stats = index.removal_stats(210, 0, &[101]);
+        assert_eq!(stats.removed_deleted, 1);
+        assert_eq!(stats.removed_unknown, 0);
+        assert!(index.is_clean());
+    }
+
+    #[test]
+    fn duplicate_store_is_idempotent() {
+        let mut index = TestLowerTierIndex::new();
+        let store = store_event(209, 0, 0, None, &[1], &[101]);
+        index.apply_event(store.clone()).unwrap();
+        index.apply_event(store).unwrap();
+
+        // The tail guard skips the re-store, so the reference count is booked once.
+        assert_eq!(index.tail_count(209, 0), 1);
+        assert_eq!(index.ref_count(209, 0, 101), 1);
+
+        let stats = index.removal_stats(209, 0, &[101]);
+        assert_eq!(stats.removed_deleted, 1);
+        assert!(index.is_clean());
+    }
+
+    #[test]
+    fn unknown_key_removal_is_infallible_noop() {
+        let mut index = TestLowerTierIndex::new();
+
+        // Applying a removal for a hash the index does not hold returns Ok, not
+        // an error, even when the worker is entirely unknown.
+        index
+            .apply_event(remove_event(
+                208,
+                0,
+                0,
+                vec![ExternalSequenceBlockHash(999)],
+            ))
+            .unwrap();
+
+        let first = index.removal_stats(208, 0, &[999]);
+        let second = index.removal_stats(208, 0, &[999]);
+        assert_eq!(first.removed_deleted, 0);
+        assert_eq!(first.removed_unknown, 1);
+        assert_eq!(first, second);
+        assert!(index.is_clean());
+    }
+
+    #[test]
+    fn known_and_unknown_keys_share_one_removal_event() {
+        let mut index = TestLowerTierIndex::new();
+        index
+            .apply_event(store_event(214, 0, 0, None, &[1], &[102]))
+            .unwrap();
+
+        let stats = index.removal_stats(214, 0, &[102, 999]);
+        assert_eq!(stats.removed_deleted, 1);
+        assert_eq!(stats.removed_unknown, 1);
+        assert!(index.is_clean());
+    }
+
+    #[test]
+    fn non_tail_key_removal_is_noop() {
+        // A two-block store makes 1101 a non-tail member of the chunk whose tail
+        // is 1102. A key-only removal of the non-tail 1101 is a no-op: the chunk
+        // stays intact and queryable, and 1101 is tallied as unknown.
+        let mut index = TestLowerTierIndex::new();
+        index
+            .apply_event(store_event(
+                31,
+                0,
+                0,
+                Some(1300),
+                &[111, 112],
+                &[1101, 1102],
+            ))
+            .unwrap();
+
+        let stats = index.removal_stats(31, 0, &[1101]);
+        assert_eq!(stats.removed_deleted, 0);
+        assert_eq!(stats.removed_unknown, 1);
+        assert!(index.has_entry(31, 0, 1101));
+        assert!(index.has_entry(31, 0, 1102));
+
+        let mut continuations = FxHashMap::default();
+        continuations.insert(
+            WorkerWithDpRank::new(31, 0),
+            LowerTierContinuation::new(0, ExternalSequenceBlockHash(1300)),
+        );
+        assert_eq!(
+            index
+                .query_contiguous_hits(&local_hashes(&[111, 112]), &continuations)
+                .get(&WorkerWithDpRank::new(31, 0)),
+            Some(&2)
+        );
+
+        // Removing the real tail cleans the whole chunk.
+        let stats = index.removal_stats(31, 0, &[1102]);
+        assert_eq!(stats.removed_deleted, 1);
+        assert!(index.is_clean());
+    }
+
+    #[test]
+    fn batched_key_removal_drops_multiple_chunks() {
+        let mut index = TestLowerTierIndex::new();
+        index
+            .apply_event(store_event(206, 0, 0, None, &[1], &[101]))
+            .unwrap();
+        index
+            .apply_event(store_event(206, 0, 1, None, &[2], &[102]))
+            .unwrap();
+        assert_eq!(index.tail_count(206, 0), 2);
+
+        let stats = index.removal_stats(206, 0, &[101, 102]);
+        assert_eq!(stats.removed_deleted, 2);
+        assert_eq!(stats.removed_unknown, 0);
+        assert!(index.is_clean());
+    }
+
+    #[test]
+    fn store_remove_restore_cycle_leaves_no_residue() {
+        let mut index = TestLowerTierIndex::new();
+        let store = store_event(213, 0, 0, None, &[1], &[101]);
+
+        for _ in 0..2 {
+            index.apply_event(store.clone()).unwrap();
+            assert_eq!(index.tail_count(213, 0), 1);
+            let stats = index.removal_stats(213, 0, &[101]);
+            assert_eq!(stats.removed_deleted, 1);
+            assert!(index.is_clean());
+        }
+    }
+
+    #[test]
+    fn per_tier_indexer_instances_are_independent() {
+        // The lower-tier index is allocated per storage tier via backend
+        // get_or_create(tier), so the same block hash lives independently in
+        // separate instances; removing it from one leaves the other intact.
+        let mut host = TestLowerTierIndex::new();
+        let mut disk = TestLowerTierIndex::new();
+        for index in [&mut host, &mut disk] {
+            index
+                .apply_event(store_event(211, 0, 0, None, &[1], &[101]))
+                .unwrap();
+        }
+
+        host.removal_stats(211, 0, &[101]);
+        assert!(host.is_clean());
+        assert!(disk.has_entry(211, 0, 101));
+
+        disk.removal_stats(211, 0, &[101]);
+        assert!(disk.is_clean());
+    }
+
+    #[test]
+    fn clear_drops_all_worker_state() {
+        let mut index = TestLowerTierIndex::new();
+        index
+            .apply_event(store_event(216, 0, 0, None, &[1], &[101]))
+            .unwrap();
+        index
+            .apply_event(store_event(216, 0, 1, Some(101), &[2], &[102]))
+            .unwrap();
+        assert_eq!(index.tail_count(216, 0), 2);
+
+        index
+            .apply_event(router_event(216, 2, 0, KvCacheEventData::Cleared))
+            .unwrap();
+        assert!(index.is_clean());
+    }
+
     // --- dump_events tests ---
 
     /// Helper: replay dumped events into a fresh indexer and return it.
@@ -1846,7 +2138,7 @@ mod tests {
             .unwrap();
 
         let events = index.dump_events();
-        assert_eq!(events.len(), 4);
+        assert_eq!(events.len(), 2);
 
         let restored = replay_dump(events);
 
@@ -1885,9 +2177,8 @@ mod tests {
             .unwrap();
 
         let events = index.dump_events();
-        // 2 blocks * 2 workers = 4 events (each worker's blocks are dumped
-        // independently even if they share the same underlying edges).
-        assert_eq!(events.len(), 4);
+        // One chunk event per worker, even when the underlying edges are shared.
+        assert_eq!(events.len(), 2);
 
         let restored = replay_dump(events);
 
@@ -1911,19 +2202,18 @@ mod tests {
     fn dump_after_removal_excludes_removed_blocks() {
         let mut index = TestLowerTierIndex::new();
         index
-            .apply_event(store_event(
-                5,
-                0,
-                0,
-                Some(800),
-                &[31, 32, 33],
-                &[301, 302, 303],
-            ))
+            .apply_event(store_event(5, 0, 0, Some(800), &[31], &[301]))
+            .unwrap();
+        index
+            .apply_event(store_event(5, 0, 1, Some(301), &[32], &[302]))
+            .unwrap();
+        index
+            .apply_event(store_event(5, 0, 2, Some(302), &[33], &[303]))
             .unwrap();
 
         // Remove the middle block.
         index
-            .apply_event(remove_event(5, 1, 0, vec![ExternalSequenceBlockHash(302)]))
+            .apply_event(remove_event(5, 3, 0, vec![ExternalSequenceBlockHash(302)]))
             .unwrap();
 
         let events = index.dump_events();
@@ -1957,7 +2247,7 @@ mod tests {
             .unwrap();
 
         let events = index.dump_events();
-        assert_eq!(events.len(), 4);
+        assert_eq!(events.len(), 2);
 
         let restored = replay_dump(events);
 
@@ -1984,6 +2274,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn dump_round_trip_removes_whole_chunk_on_replay() {
+        let mut index = TestLowerTierIndex::new();
+        index
+            .apply_event(store_event(
+                12,
+                0,
+                0,
+                Some(800),
+                &[31, 32, 33],
+                &[301, 302, 303],
+            ))
+            .unwrap();
+
+        let events = index.dump_events();
+        assert_eq!(events.len(), 1);
+        let mut restored = replay_dump(events);
+
+        let stats = restored.removal_stats(12, 0, &[303]);
+        assert_eq!(stats.removed_deleted, 1);
+        assert!(restored.is_clean());
+    }
+
     #[tokio::test]
     async fn thread_pool_dump_events_round_trip() {
         let index = ThreadPoolIndexer::new(LowerTierIndexer::new(), 2, 1);
@@ -1994,7 +2307,7 @@ mod tests {
             .await;
 
         let events = index.dump_events().await.unwrap();
-        assert_eq!(events.len(), 3);
+        assert_eq!(events.len(), 1);
 
         // Replay into a fresh ThreadPoolIndexer.
         let restored = ThreadPoolIndexer::new(LowerTierIndexer::new(), 2, 1);
