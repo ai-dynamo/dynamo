@@ -2911,7 +2911,7 @@ spec:
 
 			// Transition to Profiling
 			dgdr.Status.Phase = nvidiacomv1beta1.DGDRPhaseProfiling
-			Expect(observeCurrentDGDRSpec(dgdr)).Should(Succeed())
+			dgdr.Status.ObservedGeneration = dgdr.Generation
 			Expect(k8sClient.Status().Update(ctx, dgdr)).Should(Succeed())
 
 			// Create completed job
