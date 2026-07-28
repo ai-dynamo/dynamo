@@ -125,7 +125,8 @@ The net result depends on the operating point:
 - When decode KV capacity is the bottleneck, adding prefill replicas can reduce total serving
   capacity unless the latency benefit compensates for the GPUs removed from decode.
 
-The router and Planner use runtime load and capacity signals to make or automate these decisions.
+The Planner can use runtime load and capacity signals to automate pool redistribution, while the
+router uses those signals to route requests within the current prefill and decode pools.
 User-facing measurement and adjustment steps belong in
 [Advanced Performance Tuning](../performance/tuning.md); configuration fields belong in the
 component and backend references.

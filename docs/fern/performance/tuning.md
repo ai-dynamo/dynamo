@@ -45,9 +45,10 @@ KV block size affects both transfer efficiency and prefix-cache reuse:
 - Larger blocks improve transfer efficiency but can reduce the prefix-cache hit ratio by rounding
   reusable prefixes to coarser boundaries.
 
-A block size of 128 is a useful starting point for many dense-model disaggregated deployments, but it
-is not a universal optimum. Benchmark nearby supported values with the same prefix distribution and
-make sure prefill and decode workers use compatible KV layouts.
+A KV block size of 128 tokens is a useful starting point for many dense-model disaggregated
+deployments, but the exact option name and supported values are backend-specific and 128 is not a
+universal optimum. Benchmark nearby supported values with the same prefix distribution and make sure
+prefill and decode workers use compatible KV layouts.
 
 ## Tune prefill capacity
 

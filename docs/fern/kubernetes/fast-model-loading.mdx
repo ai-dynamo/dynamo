@@ -162,9 +162,10 @@ lfs setstripe -c -1 -S 4M /mnt/model-cache/hub/models--<org>--<model>
 lfs setstripe -c -1 -S 4M /mnt/model-cache/hub/models--<org>--<model>/blobs
 
 # Restripe the existing blob data in place (idempotent: skips already-wide files)
+osts=$(lfs df /mnt/model-cache | awk '/OST:/ {n++} END {print n+0}')
 for f in /mnt/model-cache/hub/models--<org>--<model>/blobs/*; do
   c=$(lfs getstripe -c "$f")
-  [ "$c" = "1" ] && lfs migrate -c -1 -S 4M "$f"
+  [ "$c" -lt "$osts" ] && lfs migrate -c -1 -S 4M "$f"
 done
 ```
 
@@ -173,13 +174,20 @@ done
 HuggingFace LFS blob **filenames are the file's SHA-256**. After migrating you can confirm the data is bit-identical at zero extra bookkeeping cost:
 
 ```bash
+bad=0
 for f in /mnt/model-cache/hub/models--<org>--<model>/blobs/*; do
   name=$(basename "$f")
   # Only LFS blobs are named by sha256 (64 hex chars); skip small git-hash metadata blobs
   echo "$name" | grep -qE '^[0-9a-f]{64}$' || continue
   calc=$(sha256sum "$f" | awk '{print $1}')
-  [ "$calc" = "$name" ] && echo "OK   $name" || echo "BAD  $name"
+  if [ "$calc" = "$name" ]; then
+    echo "OK   $name"
+  else
+    echo "BAD  $name"
+    bad=1
+  fi
 done
+exit "$bad"
 ```
 
 `lfs migrate` is non-destructive (it writes a new layout and swaps only on success), and the mount typically carries a client-side `checksum` option, so corruption is already unlikely — the SHA-256 sweep is a cheap final gate before you reload the model on top of the restriped data.
@@ -214,6 +222,6 @@ The larger share of the win came from the loader flag (the access pattern was th
 ## See also
 
 - [Model Caching](model-caching.mdx) — get the weights onto a shared PVC once (download Job, mount config, ModelExpress)
-- [Azure Lustre CSI Driver](cloud-providers/aks/azure-lustre-csi.md) — provision AMLFS and the striping recommendation for it
+- [Azure Lustre CSI Driver](cloud-providers/aks/azure-lustre-csi.mdx) — provision AMLFS and the striping recommendation for it
 - [Storage for Model Caching on AKS](cloud-providers/aks/storage.md) — choosing a storage class per cache type
-- [Cold Start and Resiliency](cold-start-and-resiliency.md) — snapshot/restore and warm-start options for repeated restarts
+- [Snapshotting GPU Workers](snapshot.md) — checkpoint/restore and warm-start options for repeated restarts
