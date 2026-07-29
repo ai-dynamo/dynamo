@@ -48,16 +48,12 @@ async def init_omni_realtime(
 
     sampling_params_list = streaming_sampling_params(base.engine_client)
     model_name = config.served_model_name or config.model
-    serving_realtime = build_realtime_serving(
-        engine_client=base.engine_client,
-        model_name=model_name,
-        model_path=config.model,
-    )
+    streaming_input_factory = build_streaming_input_factory(config, base.engine_client)
 
     handler = RealtimeOmniHandler(
         engine_client=base.engine_client,
         model_name=model_name,
-        streaming_input_factory=serving_realtime.transcribe_realtime,
+        streaming_input_factory=streaming_input_factory,
         default_sampling_params_list=sampling_params_list,
     )
 
@@ -107,6 +103,17 @@ async def init_omni_realtime(
     finally:
         logger.debug("Cleaning up realtime Omni worker")
         base.cleanup()
+
+
+def build_streaming_input_factory(config: OmniConfig, engine_client):
+    """Build the audio-to-streaming-input adapter from vLLM's realtime serving."""
+    model_name = config.served_model_name or config.model
+    serving_realtime = build_realtime_serving(
+        engine_client=engine_client,
+        model_name=model_name,
+        model_path=config.model,
+    )
+    return serving_realtime.transcribe_realtime
 
 
 def streaming_sampling_params(engine_client) -> list | None:

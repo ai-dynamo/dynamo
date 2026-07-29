@@ -113,23 +113,6 @@ def _default_sampling_params() -> Any:
     )
 
 
-def _resample(waveform: np.ndarray, input_rate: int, output_rate: int) -> np.ndarray:
-    if input_rate == output_rate:
-        return waveform
-
-    # scipy is already a vLLM audio dependency. Polyphase resampling preserves
-    # speech bandwidth when adapting OpenAI's fixed 24 kHz PCM stream to the
-    # model's native rate (commonly 16 kHz).
-    from scipy.signal import resample_poly
-
-    divisor = math.gcd(input_rate, output_rate)
-    return resample_poly(
-        waveform,
-        output_rate // divisor,
-        input_rate // divisor,
-    ).astype(np.float32, copy=False)
-
-
 def decode_pcm16(audio_b64: str) -> np.ndarray:
     if not isinstance(audio_b64, str):
         raise ValueError("audio must be a base64 string")
@@ -158,6 +141,22 @@ class _Turn(RealtimeTurn):
         self.received_samples = 0
         self.audio: asyncio.Queue[np.ndarray | None] = asyncio.Queue()
 
+    def _resample(self, waveform: np.ndarray) -> np.ndarray:
+        if self.input_rate == self.model_sample_rate:
+            return waveform
+
+        # scipy is already a vLLM audio dependency. Polyphase resampling preserves
+        # speech bandwidth when adapting OpenAI's fixed 24 kHz PCM stream to the
+        # model's native rate (commonly 16 kHz).
+        from scipy.signal import resample_poly
+
+        divisor = math.gcd(self.input_rate, self.model_sample_rate)
+        return resample_poly(
+            waveform,
+            self.model_sample_rate // divisor,
+            self.input_rate // divisor,
+        ).astype(np.float32, copy=False)
+
     def append_audio(self, waveform: np.ndarray) -> np.ndarray | None:
         received_samples = self.received_samples + len(waveform)
         if received_samples > self.input_rate * MAX_UTTERANCE_SECONDS:
@@ -169,14 +168,14 @@ class _Turn(RealtimeTurn):
         if not ready_size:
             return None
         ready, self.pending_audio = np.split(self.pending_audio, [ready_size])
-        return _resample(ready, self.input_rate, self.model_sample_rate)
+        return self._resample(ready)
 
     def flush_audio(self) -> np.ndarray | None:
         if not len(self.pending_audio):
             return None
         ready = self.pending_audio
         self.pending_audio = np.empty(0, dtype=np.float32)
-        return _resample(ready, self.input_rate, self.model_sample_rate)
+        return self._resample(ready)
 
     async def audio_stream(self) -> AsyncGenerator[np.ndarray, None]:
         while True:
