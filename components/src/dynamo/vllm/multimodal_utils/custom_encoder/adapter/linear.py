@@ -200,7 +200,10 @@ class LinearEmbedsAdapter(CustomEncoderAdapter[torch.Tensor]):
         self,
         token_ids: list[int],
         artifacts: Sequence[torch.Tensor],
+        *,
+        mm_processor_kwargs: dict[str, Any] | None = None,
     ) -> EmbedsPrompt | TokensPrompt:
+        del mm_processor_kwargs
         rows = list(artifacts)
         for index, tensor in enumerate(rows):
             if not isinstance(tensor, torch.Tensor):

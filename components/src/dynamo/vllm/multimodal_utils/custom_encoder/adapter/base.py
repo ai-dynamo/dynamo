@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Generic, Sequence
+from typing import Any, Generic, Sequence
 
 from vllm.inputs import EmbedsPrompt, TokensPrompt
 
@@ -21,5 +21,7 @@ class CustomEncoderAdapter(ABC, Generic[ArtifactT]):
         self,
         token_ids: list[int],
         artifacts: Sequence[ArtifactT],
+        *,
+        mm_processor_kwargs: dict[str, Any] | None = None,
     ) -> EmbedsPrompt | TokensPrompt:
         """Validate encoder artifacts and build the final vLLM prompt."""
