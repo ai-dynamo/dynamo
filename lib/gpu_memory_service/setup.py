@@ -98,11 +98,6 @@ setup(
     ],
     package_dir={
         "gpu_memory_service": ".",
-        "gpu_memory_service.core": "core",
-        "gpu_memory_service.core.client": "core/client",
-        "gpu_memory_service.core.client.torch": "core/client/torch",
-        "gpu_memory_service.core.client.torch.extensions": "core/client/torch/extensions",
-        "gpu_memory_service.core.server": "core/server",
         "gpu_memory_service.cli": "cli",
         "gpu_memory_service.cli.snapshot": "cli/snapshot",
         "gpu_memory_service.common": "common",
@@ -121,14 +116,10 @@ setup(
         "gpu_memory_service.integrations.vllm": "integrations/vllm",
         "gpu_memory_service.snapshot": "snapshot",
         "gpu_memory_service.snapshot.backends": "snapshot/backends",
-        "gpu_memory_service.v1": "v1",
-        "gpu_memory_service.v1.integrations": "v1/integrations",
-        "gpu_memory_service.v1.integrations.vllm": "v1/integrations/vllm",
     },
     package_data={
         "gpu_memory_service.client.torch.extensions": ["*.cpp"],
         "gpu_memory_service.core.client.torch.extensions": ["*.cpp"],
-        "gpu_memory_service.v1": ["README.md"],
     },
     entry_points={
         "console_scripts": [

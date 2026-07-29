@@ -12,9 +12,8 @@ from __future__ import annotations
 
 from contextlib import AbstractContextManager
 
+from gpu_memory_service.v1.integrations.vllm.backend import BACKEND_NAME
 from vllm.v1.worker.gpu_worker import Worker
-
-from .backend import BACKEND_NAME
 
 
 class GMSV1Worker(Worker):
