@@ -24,11 +24,16 @@ use crate::sequences::WorkerLoadProjection;
 pub type OverloadedWorkerProvider =
     Arc<dyn Fn() -> Option<HashSet<WorkerId>> + Send + Sync + 'static>;
 
-/// supplies the set of fenced (dead/deregistered) workers at
-/// selection time. Same shape as [`OverloadedWorkerProvider`], but a fenced
-/// worker is rejected on every eligibility path (availability overrides
-/// cache affinity), whereas overload is ignored by the affinity path.
-pub type FencedWorkerProvider = Arc<dyn Fn() -> Option<HashSet<WorkerId>> + Send + Sync + 'static>;
+/// Supplies the authoritative set of workers available for selection.
+///
+/// Note the polarity: this is an *inclusion* set, unlike
+/// [`OverloadedWorkerProvider`]'s exclusion set. `None` means no availability
+/// source is attached; `Some` is authoritative, so an empty set rejects every
+/// candidate. An unavailable worker is rejected on every eligibility path —
+/// availability overrides cache affinity — whereas overload is ignored by the
+/// affinity path.
+pub type WorkerAvailabilityProvider =
+    Arc<dyn Fn() -> Option<Arc<HashSet<WorkerId>>> + Send + Sync + 'static>;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TierOverlapBlocks {

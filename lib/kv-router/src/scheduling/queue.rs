@@ -27,8 +27,8 @@ use super::queue_admission::{
 };
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
-    FencedWorkerProvider, KvSchedulerError, OverloadedWorkerProvider, SchedulingContext,
-    SchedulingRequest, SchedulingResponse,
+    KvSchedulerError, OverloadedWorkerProvider, SchedulingContext, SchedulingRequest,
+    SchedulingResponse, WorkerAvailabilityProvider,
 };
 use crate::protocols::{
     LocalBlockHash, PrefillLoadHint, WorkerConfigLike, WorkerId, WorkerWithDpRank,
@@ -227,8 +227,9 @@ struct SchedulerQueueActor<
     overlap_scores_refresh: Option<Arc<RF>>,
     overlap_refresh_after: Option<Duration>,
     overloaded_worker_provider: Option<OverloadedWorkerProvider>,
-    // fenced (dead) workers, rejected on every eligibility path.
-    fenced_worker_provider: Option<FencedWorkerProvider>,
+    // Authoritative availability; an unavailable worker is rejected on every
+    // eligibility path.
+    available_worker_provider: Option<WorkerAvailabilityProvider>,
 }
 
 /// Queue that gates scheduling requests behind a capacity check.
@@ -304,7 +305,7 @@ impl<
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         overlap_scores_refresh: Option<Arc<RF>>,
         overloaded_worker_provider: Option<OverloadedWorkerProvider>,
-        fenced_worker_provider: Option<FencedWorkerProvider>,
+        available_worker_provider: Option<WorkerAvailabilityProvider>,
         queue_recheck_interval: Duration,
         admission_policies: PolicyClassAdmissionPolicies,
     ) -> Result<Self, KvSchedulerError> {
@@ -317,7 +318,7 @@ impl<
             prefill_load_estimator,
             overlap_scores_refresh,
             overloaded_worker_provider,
-            fenced_worker_provider,
+            available_worker_provider,
             queue_recheck_interval,
             admission_policies,
             ADMISSION_CHANNEL_CAPACITY,
@@ -334,7 +335,7 @@ impl<
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         overlap_scores_refresh: Option<Arc<RF>>,
         overloaded_worker_provider: Option<OverloadedWorkerProvider>,
-        fenced_worker_provider: Option<FencedWorkerProvider>,
+        available_worker_provider: Option<WorkerAvailabilityProvider>,
         queue_recheck_interval: Duration,
         admission_policies: PolicyClassAdmissionPolicies,
         admission_channel_capacity: usize,
@@ -411,7 +412,7 @@ impl<
             overlap_scores_refresh,
             overlap_refresh_after,
             overloaded_worker_provider,
-            fenced_worker_provider,
+            available_worker_provider,
         };
         tokio::spawn(actor.run(admission_rx));
         Ok(Self {
@@ -829,13 +830,13 @@ impl<
             let routing_constraints = request.routing_constraints.clone();
             let workers = self.workers_with_configs.clone();
             let overloaded_worker_provider = self.overloaded_worker_provider.clone();
-            let fenced_worker_provider = self.fenced_worker_provider.clone();
+            let available_worker_provider = self.available_worker_provider.clone();
             let worker_eligibility = WorkerEligibility::new(move || {
                 let workers = workers.borrow();
                 let overloaded_worker_ids = overloaded_worker_provider
                     .as_ref()
                     .and_then(|provider| provider());
-                let fenced_worker_ids = fenced_worker_provider
+                let available_worker_ids = available_worker_provider
                     .as_ref()
                     .and_then(|provider| provider());
                 let structural_eligibility = RoutingEligibility::new(
@@ -848,10 +849,10 @@ impl<
                 structural_eligibility.for_each_eligible_worker_rank(&workers, |worker, _| {
                     structural_workers.insert(worker);
                 });
-                // Availability drops both overloaded and fenced (dead) workers so
-                // a policy cannot place an exact request on a worker that final
+                // Availability drops overloaded and unavailable workers so a
+                // policy cannot place an exact request on a worker that final
                 // selection will reject. Structural legality is unchanged.
-                if overloaded_worker_ids.is_none() && fenced_worker_ids.is_none() {
+                if overloaded_worker_ids.is_none() && available_worker_ids.is_none() {
                     return WorkerEligibilitySnapshot::new(structural_workers);
                 }
                 let mut available_workers = structural_workers.clone();
@@ -859,9 +860,9 @@ impl<
                     !overloaded_worker_ids
                         .as_ref()
                         .is_some_and(|ids| ids.contains(&worker.worker_id))
-                        && !fenced_worker_ids
+                        && available_worker_ids
                             .as_ref()
-                            .is_some_and(|ids| ids.contains(&worker.worker_id))
+                            .is_none_or(|ids| ids.contains(&worker.worker_id))
                 });
                 WorkerEligibilitySnapshot::with_availability(structural_workers, available_workers)
             });
@@ -1440,13 +1441,13 @@ impl<
                 .overloaded_worker_provider
                 .as_ref()
                 .and_then(|provider| provider());
-            let fenced_worker_ids = self
-                .fenced_worker_provider
+            let available_worker_ids = self
+                .available_worker_provider
                 .as_ref()
                 .and_then(|provider| provider());
             let eligibility = request
                 .eligibility_with_overloaded(overloaded_worker_ids.as_ref())
-                .with_fenced_workers(fenced_worker_ids.as_ref());
+                .with_available_workers(available_worker_ids.as_ref());
             self.selector
                 .select_worker(&workers, &request, eligibility, self.block_size)
                 .map(|selection| {

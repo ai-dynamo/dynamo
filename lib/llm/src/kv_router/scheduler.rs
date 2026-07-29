@@ -7,8 +7,8 @@ pub use dynamo_kv_router::scheduling::overlap_refresh::{
     NoopOverlapScoresRefresh, OverlapScoresRefresh, RefreshedOverlap,
 };
 pub use dynamo_kv_router::scheduling::{
-    FencedWorkerProvider, KvSchedulerError, LocalScheduler, OverloadedWorkerProvider,
-    PotentialLoad, ScheduleRequest, SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
+    KvSchedulerError, LocalScheduler, OverloadedWorkerProvider, PotentialLoad, ScheduleRequest,
+    SchedulingRequest, SchedulingResponse, TierOverlapBlocks, WorkerAvailabilityProvider,
 };
 pub use dynamo_kv_router::selector::DefaultWorkerSelector;
 use dynamo_kv_router::selector::WorkerSelector as WorkerSelectorTrait;
@@ -60,7 +60,7 @@ where
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         overlap_scores_refresh: Option<Arc<RF>>,
         overloaded_worker_provider: Option<OverloadedWorkerProvider>,
-        fenced_worker_provider: Option<FencedWorkerProvider>,
+        available_worker_provider: Option<WorkerAvailabilityProvider>,
         model_name: Option<&str>,
         worker_type: &'static str,
         cancellation_token: CancellationToken,
@@ -112,7 +112,7 @@ where
             prefill_load_estimator,
             overlap_scores_refresh,
             overloaded_worker_provider,
-            fenced_worker_provider,
+            available_worker_provider,
             queue_recheck_interval,
             kv_router_config.router_track_prefill_tokens,
             cancellation_token.child_token(),

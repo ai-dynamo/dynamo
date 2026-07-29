@@ -19,8 +19,8 @@ use super::queue::{ClassQueueStats, SchedulerQueue};
 use super::queue_admission::PolicyClassAdmissionPolicies;
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
-    FencedWorkerProvider, KvSchedulerError, OverloadedWorkerProvider, PotentialLoad, ScheduleMode,
-    ScheduleRequest, SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
+    KvSchedulerError, OverloadedWorkerProvider, PotentialLoad, ScheduleMode, ScheduleRequest,
+    SchedulingRequest, SchedulingResponse, TierOverlapBlocks, WorkerAvailabilityProvider,
 };
 use crate::protocols::RoutingConstraints;
 use crate::protocols::{LocalBlockHash, WorkerConfigLike, WorkerId, WorkerWithDpRank};
@@ -90,7 +90,7 @@ where
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         overlap_scores_refresh: Option<Arc<RF>>,
         overloaded_worker_provider: Option<OverloadedWorkerProvider>,
-        fenced_worker_provider: Option<FencedWorkerProvider>,
+        available_worker_provider: Option<WorkerAvailabilityProvider>,
         recheck_interval: Duration,
         track_prefill_tokens_default: bool,
         cancellation_token: CancellationToken,
@@ -107,7 +107,7 @@ where
             prefill_load_estimator,
             overlap_scores_refresh,
             overloaded_worker_provider,
-            fenced_worker_provider,
+            available_worker_provider,
             recheck_interval,
             track_prefill_tokens_default,
             cancellation_token,
@@ -128,7 +128,7 @@ where
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         overlap_scores_refresh: Option<Arc<RF>>,
         overloaded_worker_provider: Option<OverloadedWorkerProvider>,
-        fenced_worker_provider: Option<FencedWorkerProvider>,
+        available_worker_provider: Option<WorkerAvailabilityProvider>,
         recheck_interval: Duration,
         track_prefill_tokens_default: bool,
         cancellation_token: CancellationToken,
@@ -149,7 +149,7 @@ where
             prefill_load_estimator,
             overlap_scores_refresh,
             overloaded_worker_provider,
-            fenced_worker_provider,
+            available_worker_provider,
             recheck_interval,
             admission_policies,
         )?);

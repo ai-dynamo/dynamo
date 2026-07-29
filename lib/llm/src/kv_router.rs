@@ -15,9 +15,9 @@ use dynamo_kv_router::{
         WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
     },
     scheduling::{
-        CacheHitEstimates, FencedWorkerProvider, OverlapAnalysis, OverloadedWorkerProvider,
-        RequestLifecycleLease, RequestProgressUpdater, ScheduleMode, ScheduleRequest,
-        TieredOverlapRefresher, effective_prefill_tokens,
+        CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider, RequestLifecycleLease,
+        RequestProgressUpdater, ScheduleMode, ScheduleRequest, TieredOverlapRefresher,
+        WorkerAvailabilityProvider, effective_prefill_tokens,
         overlap::cache_hit_estimates_from_tiered_matches,
     },
 };
@@ -283,11 +283,12 @@ where
         let overloaded_worker_provider: OverloadedWorkerProvider =
             Arc::new(move || client_for_overload.overloaded_instance_ids());
 
-        // fenced (dead) workers, populated by the worker monitor on
-        // discovery removal and read at selection to reject them everywhere.
-        let client_for_fence = client.clone();
-        let fenced_worker_provider: FencedWorkerProvider =
-            Arc::new(move || client_for_fence.fenced_instance_ids());
+        // Hard availability, read straight off the router Client's discovery
+        // snapshot. A departed worker leaves this set in the same task that
+        // observes the removal, so there is no mirrored state to fall behind.
+        let client_for_avail = client.clone();
+        let available_worker_provider: WorkerAvailabilityProvider =
+            Arc::new(move || client_for_avail.available_instance_ids());
 
         let scheduler = KvScheduler::start(
             endpoint.clone(),
@@ -298,7 +299,7 @@ where
             prefill_load_estimator.clone(),
             overlap_scores_refresh,
             Some(overloaded_worker_provider),
-            Some(fenced_worker_provider),
+            Some(available_worker_provider),
             model_name.as_deref(),
             worker_type,
             cancellation_token.child_token(),
@@ -1691,5 +1692,94 @@ mod tests {
             assert_eq!(worker.shared_beyond_device_blocks, Some(2));
             assert!((worker.router_credit_blocks - 1.0).abs() < f64::EPSILON);
         }
+    }
+
+    /// Lifecycle regression for the decode/prefill availability split
+    /// (requested in review on #11646).
+    ///
+    /// Two routers use two different `Client`s. Removing a worker from one must
+    /// not affect the other — the previous fence mirrored prefill removals onto
+    /// the decode `Client`, so a departed prefill worker stayed selectable.
+    ///
+    /// It also pins the two properties the availability rework buys over a
+    /// mirrored fence: an affinity-pinned worker is rejected while the scheduler
+    /// candidate map is still stale, and restoring it is eligible immediately
+    /// rather than after a TTL.
+    #[tokio::test]
+    async fn prefill_removal_does_not_affect_decode_availability() {
+        use std::collections::HashSet;
+
+        use dynamo_kv_router::protocols::RoutingConstraints;
+        use dynamo_kv_router::scheduling::{RoutingEligibility, WorkerEligibilityError};
+
+        const DECODE_WORKER: u64 = 1;
+        const PREFILL_WORKER: u64 = 2;
+        const PREFILL_PEER: u64 = 3;
+
+        let component = make_test_component("availability-split").await;
+        let decode = component.endpoint("decode").client().await.unwrap();
+        let prefill = component.endpoint("prefill").client().await.unwrap();
+
+        decode.override_discovered_instances(vec![DECODE_WORKER]);
+        prefill.override_discovered_instances(vec![PREFILL_WORKER, PREFILL_PEER]);
+
+        // Scheduler candidates deliberately stay stale: every worker remains in
+        // the config map for the whole test, so each assertion is about
+        // availability alone.
+        let workers = HashMap::from([
+            (DECODE_WORKER, ModelRuntimeConfig::default()),
+            (PREFILL_WORKER, ModelRuntimeConfig::default()),
+            (PREFILL_PEER, ModelRuntimeConfig::default()),
+        ]);
+        let constraints = RoutingConstraints::default();
+        let pinned = WorkerWithDpRank::from_worker_id(PREFILL_WORKER);
+
+        // Pinned to the prefill worker, as a sticky cache affinity would be.
+        fn check(
+            workers: &HashMap<WorkerId, ModelRuntimeConfig>,
+            available: &Arc<HashSet<WorkerId>>,
+            pinned: WorkerWithDpRank,
+            constraints: &RoutingConstraints,
+        ) -> Result<(), WorkerEligibilityError> {
+            RoutingEligibility::new(None, None, Some(pinned), constraints)
+                .with_available_workers(Some(available))
+                .validate_worker_rank(workers, pinned)
+                .map(|_| ())
+        }
+
+        let available = prefill.available_instance_ids().unwrap();
+        assert!(
+            check(&workers, &available, pinned, &constraints).is_ok(),
+            "prefill worker is eligible on its own client while discovered"
+        );
+
+        // The pinned prefill worker departs; its peer remains, so this is a
+        // partial removal rather than the degenerate empty-discovery case.
+        prefill.override_discovered_instances(vec![PREFILL_PEER]);
+
+        let available = prefill.available_instance_ids().unwrap();
+        assert_eq!(
+            check(&workers, &available, pinned, &constraints).err(),
+            Some(WorkerEligibilityError::WorkerNotRoutable {
+                worker_id: PREFILL_WORKER
+            }),
+            "a departed worker must be rejected even on the affinity pin, and \
+             even though the scheduler candidate map still lists it"
+        );
+
+        // The decode client never saw that removal.
+        let decode_available = decode.available_instance_ids().unwrap();
+        assert!(
+            decode_available.contains(&DECODE_WORKER),
+            "removing a prefill worker must not disturb decode availability"
+        );
+
+        // Restoring is effective immediately — no TTL to wait out.
+        prefill.override_discovered_instances(vec![PREFILL_WORKER, PREFILL_PEER]);
+        let available = prefill.available_instance_ids().unwrap();
+        assert!(
+            check(&workers, &available, pinned, &constraints).is_ok(),
+            "a returning worker is eligible immediately"
+        );
     }
 }
