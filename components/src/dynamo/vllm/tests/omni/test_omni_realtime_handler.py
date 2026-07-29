@@ -22,7 +22,7 @@ try:
     # logic itself is vllm-free, but the package import is not.
     # The handler reads audio off a vLLM-Omni MultimodalPayload (``mm.tensors``),
     # so the fake engine outputs below must use the real type, not a plain dict.
-    from vllm_omni.engine.mm_outputs import MultimodalPayload
+    from vllm_omni.outputs.mm_outputs import MultimodalPayload
 
     from dynamo.vllm.omni.realtime_handler import RealtimeOmniHandler
 except (ImportError, ModuleNotFoundError):
