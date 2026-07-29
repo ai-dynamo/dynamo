@@ -136,18 +136,6 @@ async fn main() -> Result<()> {
         "Starting Dynamo Rust EPP"
     );
 
-    // Standalone (selector) mode to be supported in a follow-up PR.
-    if standalone {
-        let selector_cfg = EppStandaloneConfig::from_env()?;
-        tracing::info!(
-            inference_pool_name = %selector_cfg.inference_pool_name,
-            model_name = %selector_cfg.model_name,
-            block_size = selector_cfg.block_size,
-            "Parsed standalone selector configuration"
-        );
-        anyhow::bail!("DYN_EPP_MODE=standalone is not yet supported");
-    }
-
     // Start plaintext gRPC health server immediately (NOT_SERVING until router ready).
     let (health_reporter, health_service) = tonic_health::server::health_reporter();
     health_reporter
@@ -162,44 +150,68 @@ async fn main() -> Result<()> {
             .serve(health_addr),
     );
 
-    tracing::info!("Initializing KV-aware router from discovery...");
-    let router = Router::from_discovery(&config.namespace, &config.component).await?;
-
-    // Gate SERVING on pod-reflector readiness. `from_discovery` returns once
-    // worker discovery and the model card are ready, but the K8s pod reflector's
-    // initial LIST may still be in flight (it has a bounded startup timeout and
-    // then finishes in the background). `pick()` returns 503 until the reflector
-    // is ready, so reporting SERVING here unconditionally would advertise a
-    // healthy pod that rejects every request. Flip to SERVING only once the
-    // reflector cache is usable; in the common path this is already true and the
-    // transition is immediate.
-    let pod_store_ready = router.pod_store_ready();
-    if pod_store_ready.load(std::sync::atomic::Ordering::Acquire) {
-        health_reporter
-            .set_service_status(HEALTH_SERVICE_NAME, tonic_health::ServingStatus::Serving)
-            .await;
-        tracing::info!("Router initialized, health status set to SERVING");
-    } else {
-        tracing::warn!(
-            "Router initialized but pod reflector cache not ready yet; \
-             keeping health NOT_SERVING until the initial LIST completes"
+    if standalone {
+        let selector_cfg = EppStandaloneConfig::from_env()?;
+        tracing::info!(
+            inference_pool_name = %selector_cfg.inference_pool_name,
+            model_name = %selector_cfg.model_name,
+            block_size = selector_cfg.block_size,
+            "Initializing standalone selector mode (no Dynamo runtime)..."
         );
+        let router = Arc::new(dynamo_ext_proc::EppRouter::from_selector(selector_cfg).await?);
+        let ready_router = router.clone();
+        serve(router, move || ready_router.is_ready(), health_reporter).await
+    } else {
+        tracing::info!("Initializing KV-aware router from discovery...");
+        let router = Router::from_discovery(&config.namespace, &config.component).await?;
+        let ready = router.pod_store_ready();
+        serve(
+            Arc::new(router),
+            move || ready.load(std::sync::atomic::Ordering::Acquire),
+            health_reporter,
+        )
+        .await
+    }
+}
+
+/// Mirror the picker's live readiness onto the gRPC health status, then serve
+/// the ext_proc endpoint. Shared by both Dynamo-discovery and standalone modes.
+async fn serve<P: dynamo_ext_proc::EndpointPicker>(
+    picker: Arc<P>,
+    is_ready: impl Fn() -> bool + Send + 'static,
+    health_reporter: tonic_health::server::HealthReporter,
+) -> Result<()> {
+    // Continuously mirror readiness onto the health status. `is_ready()` is a
+    // *live* signal that can flip both ways — standalone discovery clears it when
+    // the InferencePool is deleted/invalid (nothing routable), and in replicated
+    // mode it stays false until the peer set finishes its initial sync. A latch
+    // (set SERVING once) would strand those states, so a background task tracks
+    // transitions and moves the health status in lock-step, dropping out of
+    // SERVING when readiness drops and recovering when it returns. Health starts
+    // NOT_SERVING (set in `main`); the mirror polls a cheap closure (atomic loads).
+    {
         let health_reporter = health_reporter.clone();
         tokio::spawn(async move {
-            // Poll the readiness flag; the background reflector task flips it
-            // once the initial LIST lands. Cheap and bounded — the flag is set
-            // exactly once and the loop exits immediately after.
-            while !pod_store_ready.load(std::sync::atomic::Ordering::Acquire) {
+            let mut last: Option<bool> = None;
+            loop {
+                let now = is_ready();
+                if last != Some(now) {
+                    let status = if now {
+                        tonic_health::ServingStatus::Serving
+                    } else {
+                        tonic_health::ServingStatus::NotServing
+                    };
+                    health_reporter
+                        .set_service_status(HEALTH_SERVICE_NAME, status)
+                        .await;
+                    tracing::info!(ready = now, "EPP readiness changed; health status updated");
+                    last = Some(now);
+                }
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             }
-            health_reporter
-                .set_service_status(HEALTH_SERVICE_NAME, tonic_health::ServingStatus::Serving)
-                .await;
-            tracing::info!("Pod reflector now ready, health status set to SERVING");
         });
     }
 
-    let picker = Arc::new(router);
     let server = ExtProcServer::new(picker);
     // Default to TLS to match the Go EPP behavior. Verified working with
     // kGateway (`appProtocol: http2` upstreams negotiate h2 over TLS via ALPN
@@ -268,7 +280,6 @@ async fn main() -> Result<()> {
             .add_service(server.into_service())
             .serve(addr)
             .await?;
+        Ok(())
     }
-
-    Ok(())
 }

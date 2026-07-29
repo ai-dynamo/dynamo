@@ -19,3 +19,27 @@ not be mistaken for virtual-time progress or quiescence.
 For now, preserve the current replay behavior and the balanced checks above.
 Changes to async settlement belong to DEP #11018; do not approximate them here
 with replay-level timing tricks or new hard assertions.
+
+## Eager forward-pass execution
+
+Starting an epoch commits one non-preemptive batch. Here, non-preemptive means
+later arrivals or commands cannot interrupt that batch or change its outcome;
+they may affect only queued or post-pass state, or be deferred.
+
+Offline replay executes the committed batch eagerly at epoch start, finalizing
+its participating `EngineCore` state changes and scheduled completion payload
+before virtual time reaches the completion timestamp. Visibility is split:
+
+- Admission observations and `PassStart` events are visible at epoch start.
+- Request outputs, lifecycle events, FPM publications, and `PassEnd` events
+  wait for the shared completion boundary.
+- All ranks in an attention-DP group, including ranks with no work in the
+  current epoch, share the slowest-rank completion boundary.
+- Do not generalize this guarantee to the whole `EngineComponent` or to other
+  replay components. KVBM transport, disaggregated handoffs, worker startup,
+  planner actions, and router queues may have independent deadlines or
+  explicitly revocable events.
+- Preserve eager pass execution unless the modeled engine gains genuinely
+  preemptive behavior. Do not add engine-core snapshotting, transactional
+  rollback, or speculative-state recovery without a demonstrated semantic
+  need.
