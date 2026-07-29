@@ -165,12 +165,12 @@ def build_mixed_embeds(
     return prompt_embeds, out_token_ids, is_token_ids
 
 
-class LinearEmbedsAdapter(CustomEncoderAdapter):
+class LinearEmbedsAdapter(CustomEncoderAdapter[torch.Tensor]):
     """Build mixed ``EmbedsPrompt`` inputs for a text-only decoder."""
 
     def __init__(
         self,
-        backend: VisionEncoderBackend,
+        backend: VisionEncoderBackend[Any, Any, torch.Tensor],
         model_config: Any,
         engine_args: Any,
     ) -> None:
@@ -199,9 +199,9 @@ class LinearEmbedsAdapter(CustomEncoderAdapter):
     def prepare_prompt(
         self,
         token_ids: list[int],
-        encodings: Sequence[torch.Tensor],
+        artifacts: Sequence[torch.Tensor],
     ) -> EmbedsPrompt | TokensPrompt:
-        rows = list(encodings)
+        rows = list(artifacts)
         for index, tensor in enumerate(rows):
             if not isinstance(tensor, torch.Tensor):
                 raise TypeError(

@@ -6,19 +6,20 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Sequence
+from typing import Generic, Sequence
 
-import torch
 from vllm.inputs import EmbedsPrompt, TokensPrompt
 
+from dynamo.vllm.multimodal_utils.custom_encoder.backend import ArtifactT
 
-class CustomEncoderAdapter(ABC):
+
+class CustomEncoderAdapter(ABC, Generic[ArtifactT]):
     """Translate encoder artifacts for one resolved downstream decoder."""
 
     @abstractmethod
     def prepare_prompt(
         self,
         token_ids: list[int],
-        encodings: Sequence[torch.Tensor],
+        artifacts: Sequence[ArtifactT],
     ) -> EmbedsPrompt | TokensPrompt:
         """Validate encoder artifacts and build the final vLLM prompt."""
