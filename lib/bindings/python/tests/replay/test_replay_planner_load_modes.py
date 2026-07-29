@@ -14,7 +14,6 @@ multi-worker runtime, so a bare run drives every request to completion.
 
 import copy
 import threading
-import time
 
 import pytest
 
@@ -197,24 +196,35 @@ def test_scaling_policy_rejects_online_replay_before_dispatch():
 
 
 def test_normal_replay_releases_gil_for_background_python_thread():
-    progressed = threading.Event()
+    started = threading.Event()
+    stop = threading.Event()
+    progress = 0
 
-    def run_after_delay():
-        time.sleep(0.02)
-        progressed.set()
+    def run_background():
+        nonlocal progress
+        started.set()
+        while not stop.is_set():
+            progress += 1
 
-    thread = threading.Thread(target=run_after_delay)
+    thread = threading.Thread(target=run_background)
     thread.start()
-    run_mocker_synthetic_trace_replay(
-        64,
-        16,
-        50_000,
-        extra_engine_args=MockEngineArgs(block_size=64, speedup_ratio=1000.0),
-        num_workers=2,
-        replay_concurrency=16,
-        scaling_policy=None,
-    )
-    progressed_during_replay = progressed.is_set()
-    thread.join(timeout=1.0)
+    assert started.wait(timeout=1.0)
+    progress_before_replay = progress
 
-    assert progressed_during_replay
+    try:
+        run_mocker_synthetic_trace_replay(
+            64,
+            16,
+            50_000,
+            extra_engine_args=MockEngineArgs(block_size=64, speedup_ratio=1000.0),
+            num_workers=2,
+            replay_concurrency=16,
+            scaling_policy=None,
+        )
+        progress_during_replay = progress - progress_before_replay
+    finally:
+        stop.set()
+        thread.join(timeout=1.0)
+
+    assert progress_during_replay > 0
+    assert not thread.is_alive()

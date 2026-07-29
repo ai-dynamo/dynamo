@@ -263,7 +263,6 @@ where
         self
     }
 
-    /// Set the SLA thresholds used to classify goodput in the final report.
     /// Attach a scaling policy and enable tick-scoped FPM collection.
     pub(in crate::replay) fn with_scaling_policy(
         mut self,

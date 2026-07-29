@@ -2598,6 +2598,10 @@ def run_mocker_trace_replay(
     ``sla_ttft_ms`` / ``sla_itl_ms`` / ``sla_e2e_ms`` are the goodput SLA bounds
     (offline replay only). When any is set, the report carries ``goodput_*`` keys
     classifying SLA-satisfying requests; with none set, goodput is omitted.
+
+    ``scaling_policy`` is an optional offline callback implementing
+    ``initial_tick_ms() -> float`` and ``on_tick(snapshot) -> dict``. Passing a
+    policy in online mode raises ``ValueError``.
     """
     ...
 
@@ -2635,6 +2639,10 @@ def run_mocker_synthetic_trace_replay(
     ``sla_ttft_ms`` / ``sla_itl_ms`` / ``sla_e2e_ms`` are the goodput SLA bounds
     (offline replay only); when any is set the report carries ``goodput_*`` keys
     classifying SLA-satisfying requests.
+
+    ``scaling_policy`` is an optional offline callback implementing
+    ``initial_tick_ms() -> float`` and ``on_tick(snapshot) -> dict``. Passing a
+    policy in online mode raises ``ValueError``.
     """
     ...
 

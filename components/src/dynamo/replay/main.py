@@ -897,8 +897,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.trace_files,
                 trace_block_size=args.trace_block_size,
                 trace_format=args.trace_format,
-                trace_shared_prefix_ratio=args.shared_prefix_ratio,
-                trace_num_prefix_groups=args.num_prefix_groups,
+                trace_shared_prefix_ratio=args.trace_shared_prefix_ratio,
+                trace_num_prefix_groups=args.trace_num_prefix_groups,
                 **replay_options,
             )
         else:
