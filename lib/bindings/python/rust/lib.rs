@@ -219,7 +219,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_class::<llm::engine_perf::RustEnginePerfModel>()?;
         m.add_class::<llm::engine_perf::RustEnginePerfOptions>()?;
     }
-    m.add_class::<llm::replay::PlannerReplayBridge>()?;
     #[cfg(feature = "select-service")]
     m.add_class::<llm::kv::SelectionService>()?;
     #[cfg(feature = "select-service")]
