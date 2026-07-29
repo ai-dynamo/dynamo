@@ -4,7 +4,8 @@
 use std::time::Duration;
 
 use super::*;
-use crate::common::protocols::EngineType;
+use crate::common::handoff::HandoffId;
+use crate::common::protocols::{EngineType, WorkerType};
 use dynamo_kv_router::protocols::StorageTier;
 
 struct NoopKvSink;
@@ -26,6 +27,20 @@ impl crate::common::protocols::KvCacheEventSink for NoopKvSink {
 fn args(engine_type: EngineType) -> MockEngineArgs {
     MockEngineArgs::builder()
         .engine_type(engine_type)
+        .block_size(4)
+        .num_gpu_blocks(128)
+        .max_num_seqs(Some(8))
+        .max_num_batched_tokens(Some(64))
+        .speedup_ratio(1000.0)
+        .dp_size(1)
+        .build()
+        .unwrap()
+}
+
+fn handoff_args(engine_type: EngineType, worker_type: WorkerType) -> MockEngineArgs {
+    MockEngineArgs::builder()
+        .engine_type(engine_type)
+        .worker_type(worker_type)
         .block_size(4)
         .num_gpu_blocks(128)
         .max_num_seqs(Some(8))
@@ -139,6 +154,117 @@ async fn duplicate_request_id_does_not_replace_the_original_stream() {
     assert_eq!(engine.active_request_count(), 1);
     original.cancel().await.unwrap();
     assert_eq!(engine.active_request_count(), 0);
+}
+
+#[tokio::test]
+async fn dropping_prepared_registration_closes_route_and_allows_id_reuse() {
+    let engine = LiveEngine::start(args(EngineType::Vllm), 0).unwrap();
+    let uuid = Uuid::from_u128(30);
+    let (registration, mut prepared) = engine
+        .prepare_request(DirectRequest {
+            tokens: vec![1, 2, 3],
+            max_output_tokens: 1,
+            uuid: Some(uuid),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(engine.active_request_count(), 1);
+
+    drop(registration);
+    assert!(prepared.recv().await.is_none());
+    assert_eq!(engine.active_request_count(), 0);
+
+    let replacement = engine
+        .submit(DirectRequest {
+            tokens: vec![4, 5, 6],
+            max_output_tokens: 100,
+            uuid: Some(uuid),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    replacement.cancel().await.unwrap();
+    assert_eq!(engine.active_request_count(), 0);
+}
+
+#[tokio::test]
+async fn typed_handoff_routes_output_and_lifecycle_for_supported_engines() {
+    for engine_type in [EngineType::Vllm, EngineType::Sglang] {
+        let source = LiveEngine::start(handoff_args(engine_type, WorkerType::Prefill), 0).unwrap();
+        let source_handoff = HandoffId::from(Uuid::new_v4());
+        let (source_control, mut source_events) = source.register_handoff(source_handoff).unwrap();
+        let duplicate = source.register_handoff(source_handoff);
+        assert!(matches!(
+            duplicate,
+            Err(error) if error.to_string().contains("already has a lifecycle route")
+        ));
+        let (source_registration, mut source_request) = source
+            .prepare_request(DirectRequest {
+                tokens: vec![1, 2, 3],
+                max_output_tokens: 1,
+                output_token_ids: Some(vec![41]),
+                uuid: Some(Uuid::new_v4()),
+                ..Default::default()
+            })
+            .unwrap();
+        source_control
+            .submit_prefill(source_registration)
+            .await
+            .unwrap();
+
+        let source_output = tokio::time::timeout(Duration::from_secs(1), source_request.recv())
+            .await
+            .expect("source output timed out")
+            .expect("source output stream closed");
+        assert_eq!(source_output.token_id, Some(41));
+        assert!(source_output.completed);
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), source_events.recv())
+                .await
+                .expect("source lifecycle event timed out"),
+            Some(LiveHandoffEvent::SourceHeld { .. })
+        ));
+        source_control.release_source().await.unwrap();
+        source.shutdown().await.unwrap();
+        assert!(source_events.recv().await.is_none());
+
+        let destination =
+            LiveEngine::start(handoff_args(engine_type, WorkerType::Decode), 0).unwrap();
+        let destination_handoff = HandoffId::from(Uuid::new_v4());
+        let (destination_control, mut destination_events) =
+            destination.register_handoff(destination_handoff).unwrap();
+        let (destination_registration, mut destination_request) = destination
+            .prepare_request(DirectRequest {
+                tokens: vec![1, 2, 3, 4],
+                max_output_tokens: 1,
+                output_token_ids: Some(vec![42]),
+                uuid: Some(Uuid::new_v4()),
+                ..Default::default()
+            })
+            .unwrap();
+        destination_control
+            .reserve_destination(destination_registration)
+            .await
+            .unwrap();
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), destination_events.recv())
+                .await
+                .expect("destination lifecycle event timed out"),
+            Some(LiveHandoffEvent::DestinationReserved {
+                transferable_prompt_tokens,
+            }) if transferable_prompt_tokens > 0
+        ));
+        destination_control.activate_destination().await.unwrap();
+        let destination_output =
+            tokio::time::timeout(Duration::from_secs(1), destination_request.recv())
+                .await
+                .expect("destination output timed out")
+                .expect("destination output stream closed");
+        assert_eq!(destination_output.token_id, Some(42));
+        assert!(destination_output.completed);
+        destination.shutdown().await.unwrap();
+        assert!(destination_events.recv().await.is_none());
+    }
 }
 
 #[tokio::test]
@@ -494,12 +620,12 @@ async fn replay_options_allow_zero_output_and_full_response_buffering() {
 async fn shutdown_waits_for_scheduler_owned_publishers_to_drop() {
     let sink: Arc<dyn crate::common::protocols::KvCacheEventSink> = Arc::new(NoopKvSink);
     let sink_weak = Arc::downgrade(&sink);
-    let engine = LiveEngine::start_with_options(
+    let engine = LiveEngine::start_with_config(
         args(EngineType::Vllm),
         0,
-        LiveEngineOptions {
+        LiveEngineConfig {
             kv_event_publishers: KvEventPublishers::new(Some(sink), None),
-            ..LiveEngineOptions::default()
+            ..LiveEngineConfig::default()
         },
     )
     .unwrap();
