@@ -267,6 +267,16 @@ pub struct PreprocessedRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub migration_link: Option<TraceLink>,
 
+    /// Zero on the original attempt, incremented per migration re-dispatch.
+    ///
+    /// The scheduler uses this to tell a re-dispatch from an accidental duplicate
+    /// request id. Do not substitute [`Self::migration_link`]: that is a tracing
+    /// link also stamped by `PrefillRouter` on every disaggregated decode, so it
+    /// does not imply a re-dispatch. Framework-owned.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub migration_attempt: u32,
+
     /// Bootstrap info for disaggregated serving
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -328,6 +338,11 @@ pub struct PreprocessedRequest {
         skip_serializing_if = "std::ops::Not::not"
     )]
     pub is_probe: bool,
+}
+
+/// Keep the common (non-migrated) case off the wire entirely.
+fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
 }
 
 /// Enforce the object-only `encoder_result` contract at the serde boundary.

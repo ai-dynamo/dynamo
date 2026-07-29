@@ -78,7 +78,14 @@ PolicyClassQueue("agents")
 
 ## Guardrails
 
-- A request ID identifies at most one active scheduler request. Do not reuse it until the prior request has been cleaned up; cancellation and admission state are keyed by request ID.
+- A request ID identifies at most one active scheduler request. Do not reuse it until the prior request has been cleaned up; cancellation and admission state are keyed by request ID. **Migration re-dispatch is the single exception**, and it is explicit rather than implicit — see below.
+- Migration re-dispatch rebinds a request ID rather than duplicating it:
+  - same ID + same worker → conflict (`DuplicateRequest`; `409` at the public API)
+  - same ID + *different* worker → state-changing rebind: the stale booking on the old worker is released and the ID is re-bound to the new one
+  - Retrying an ambiguous `/add` against a different worker is therefore **not idempotent**. Callers that may retry must target the same worker or treat the call as state-changing.
+  - At the admission layer the rebind is not inferred. `ScheduleRequest::redispatch` — set only by the migration `RetryManager` via `PreprocessedRequest::migration_attempt` — authorizes retiring the in-flight admission. Without it a colliding ID is still rejected, so accidental ID reuse stays an error.
+  - Correctness relies on **serialized re-dispatch**: at most one migration state machine per request ID, issuing one attempt at a time. Concurrent re-dispatches of the same ID are out of contract.
+- Cleanup must be conditional on the identity that acquired the resource. A cleanup armed for a specific worker uses `free_if_worker` (ownership mismatch = no-op), never `free`, which re-resolves the ID and would release a replacement attempt's booking. The same rule applies to replica `Free` events (honor `event_worker`) and admission cleanup (compare the ticket).
 - `SchedulerQueueActor::admit_one` is the required admission path: compute projected
   load, select a worker, skip the capacity reservation if the response receiver
   is closed, then reserve capacity before responding. Failed response delivery

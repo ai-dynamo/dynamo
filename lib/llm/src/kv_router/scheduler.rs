@@ -345,6 +345,20 @@ where
         Ok(())
     }
 
+    /// Release `request_id` only if it is still booked on `worker`.
+    ///
+    /// See [`LocalScheduler::free_if_worker`]: cleanup armed against a specific
+    /// worker must not release a booking that a same-id re-dispatch has moved.
+    pub async fn free_if_worker(
+        &self,
+        request_id: &str,
+        worker: WorkerWithDpRank,
+    ) -> Result<(), SequenceError> {
+        self.inner.free_if_worker(request_id, worker).await?;
+        self.update_queue_metrics();
+        Ok(())
+    }
+
     pub fn pending_count(&self) -> usize {
         self.inner.pending_count()
     }

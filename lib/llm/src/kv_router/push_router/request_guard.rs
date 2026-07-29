@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use dynamo_kv_router::protocols::WorkerWithDpRank;
 use dynamo_kv_router::scheduling::{RequestLifecycleLease, RequestProgressUpdater};
 use dynamo_runtime::{
     metrics::frontend_perf::{STAGE_DISPATCH, StageGuard},
@@ -24,9 +25,14 @@ use crate::{
 /// selection and before backend dispatch. The lifecycle lease moves directly
 /// from the scheduling response into this guard and remains responsible for
 /// cleanup until the request ends.
+///
+/// `worker` is captured at construction so cleanup targets the booking this
+/// guard acquired: migration re-dispatches the same id to a replacement worker
+/// while a failed attempt's guard is still unwinding.
 struct RequestCleanup {
     chooser: Arc<KvRouter>,
     context_id: String,
+    worker: WorkerWithDpRank,
     scheduler_tracked: bool,
     lifecycle: Option<(RequestProgressUpdater, RequestLifecycleLease)>,
     freed: bool,
@@ -36,13 +42,19 @@ impl RequestCleanup {
     fn new(
         chooser: Arc<KvRouter>,
         context_id: String,
+        worker: WorkerWithDpRank,
         scheduler_tracked: bool,
-        lifecycle: Option<(RequestProgressUpdater, RequestLifecycleLease)>,
+        mut lifecycle: Option<(RequestProgressUpdater, RequestLifecycleLease)>,
     ) -> Self {
         debug_assert!(lifecycle.is_none() || scheduler_tracked);
+        // First point where both the lease and the selection are in hand.
+        if let Some((_progress, lease)) = lifecycle.as_mut() {
+            lease.set_worker(worker);
+        }
         Self {
             chooser,
             context_id,
+            worker,
             scheduler_tracked,
             lifecycle,
             freed: false,
@@ -55,10 +67,14 @@ impl RequestCleanup {
             // The scheduler actor remains the sole owner of booking and queue cleanup.
             drop(lease);
         } else if self.scheduler_tracked
-            && let Err(error) = self.chooser.free(&self.context_id).await
+            && let Err(error) = self
+                .chooser
+                .free_if_worker(&self.context_id, self.worker)
+                .await
         {
             tracing::warn!(
                 request_id = %self.context_id,
+                worker = ?self.worker,
                 %error,
                 "Failed to free request"
             );
@@ -83,11 +99,15 @@ impl Drop for RequestCleanup {
 
         let chooser = self.chooser.clone();
         let context_id = self.context_id.clone();
+        let worker = self.worker;
         handle.spawn(async move {
-            let result = chooser.free(&context_id).await;
+            // Targeted at the captured worker: this drop can land after a
+            // migration re-dispatch has already re-bound the id elsewhere.
+            let result = chooser.free_if_worker(&context_id, worker).await;
             if let Err(error) = result {
                 tracing::warn!(
                     request_id = %context_id,
+                    ?worker,
                     %error,
                     "Failed to free request from drop guard"
                 );
@@ -290,6 +310,7 @@ impl RequestGuard {
         chooser: Arc<KvRouter>,
         request_metrics: Arc<RouterRequestMetrics>,
         context_id: String,
+        worker: WorkerWithDpRank,
         request: &PreprocessedRequest,
         scheduler_tracked: bool,
         lifecycle: Option<(RequestProgressUpdater, RequestLifecycleLease)>,
@@ -310,7 +331,7 @@ impl RequestGuard {
         }
 
         Self {
-            cleanup: RequestCleanup::new(chooser, context_id, scheduler_tracked, lifecycle),
+            cleanup: RequestCleanup::new(chooser, context_id, worker, scheduler_tracked, lifecycle),
             observability: RequestObservability::new(request.tracker.clone(), request_metrics),
             output_blocks: OutputBlockTracker::new(
                 track_output_blocks,

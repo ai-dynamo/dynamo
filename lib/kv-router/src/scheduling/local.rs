@@ -271,6 +271,7 @@ where
             session_id,
             overlap,
             shared_cache_hits,
+            is_redispatch,
         } = request;
         let request = SchedulingRequest {
             mode,
@@ -289,6 +290,7 @@ where
             session_id,
             overlap,
             shared_cache_hits,
+            is_redispatch,
             worker_loads: FxHashMap::default(),
             resp_tx: Some(resp_tx),
         };
@@ -448,6 +450,9 @@ where
             pinned_worker,
             allowed_worker_ids,
             shared_cache_hits,
+            // Legacy scheduling API: callers of this path do not perform
+            // migration re-dispatch.
+            is_redispatch: false,
         })
         .await
     }
@@ -482,6 +487,10 @@ where
     }
 
     /// Legacy slot cleanup. Lifecycle-tracked requests use their `RequestLifecycleLease`.
+    ///
+    /// Resolves the current owner of `request_id`. Cleanup armed against a
+    /// specific worker must use [`Self::free_if_worker`] instead, or it will
+    /// release a booking that a same-id re-dispatch has since moved elsewhere.
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
         let request_id = request_id.to_string();
         let worker = self.slots.request_worker(&request_id);
@@ -490,6 +499,23 @@ where
             Some(worker) => self.queue.update_worker(worker).await,
             None => self.queue.update().await,
         }
+        Ok(())
+    }
+
+    /// Legacy slot cleanup targeted at the worker the caller booked.
+    ///
+    /// Unlike [`Self::free`], an ownership mismatch is a harmless no-op, so the
+    /// cleanup of a failed attempt cannot release the booking of the attempt
+    /// that replaced it.
+    pub async fn free_if_worker(
+        &self,
+        request_id: &str,
+        worker: WorkerWithDpRank,
+    ) -> Result<(), SequenceError> {
+        let request_id = request_id.to_string();
+        self.slots
+            .free_if_worker(&request_id, worker, Instant::now())?;
+        self.queue.update_worker(worker).await;
         Ok(())
     }
 
@@ -848,6 +874,7 @@ mod tests {
             session_id: None,
             overlap: OverlapSignals::default(),
             shared_cache_hits: None,
+            is_redispatch: false,
         }
     }
 

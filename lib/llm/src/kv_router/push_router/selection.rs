@@ -68,6 +68,9 @@ struct BestMatchArgs<'a> {
     pinned_worker: Option<WorkerWithDpRank>,
     allowed_worker_ids: Option<HashSet<WorkerId>>,
     routing_constraints: RoutingConstraints,
+    /// Propagated from `PreprocessedRequest::migration_attempt`: non-zero means
+    /// the migration `RetryManager` is re-dispatching this request id.
+    is_redispatch: bool,
 }
 
 impl KvPushRouter {
@@ -92,6 +95,7 @@ impl KvPushRouter {
                 args.allowed_worker_ids,
                 args.routing_constraints,
                 true,
+                args.is_redispatch,
             )
             .await?;
         match outcome {
@@ -169,6 +173,7 @@ impl KvPushRouter {
                     pinned_worker: None,
                     allowed_worker_ids,
                     routing_constraints: routing_constraints.clone(),
+                    is_redispatch: request.migration_attempt > 0,
                 })
                 .await?;
 
@@ -241,6 +246,7 @@ impl KvPushRouter {
             pinned_worker: Some(pinned_worker),
             allowed_worker_ids,
             routing_constraints,
+            is_redispatch: request.migration_attempt > 0,
         })
         .await
     }

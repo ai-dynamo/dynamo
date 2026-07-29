@@ -814,13 +814,14 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         }
     }
 
-    /// Release a stale booking left on a specific `worker` by a failed dispatch of
-    /// `request_id` (migration failover). Unlike [`Self::free`], this targets the
-    /// captured worker directly instead of re-resolving `request_id`'s mapping —
-    /// a fresh lookup could free a different worker under a concurrent
-    /// re-dispatch. The index mapping is dropped only if it still points at
-    /// `worker`, so a re-dispatch that already re-bound the id is preserved.
-    fn free_stale_booking(
+    /// Release `request_id`'s booking on `worker`, and only that worker.
+    ///
+    /// Unlike [`Self::free`], which re-resolves `request_id` to its current
+    /// owner, this targets the worker the caller booked. Cleanup for a failed
+    /// attempt must use this, or a same-id re-dispatch (migration failover) will
+    /// see the old attempt release the new one's booking. Ownership mismatch, or
+    /// an already-freed request, is a no-op.
+    pub(crate) fn free_if_worker(
         &self,
         request_id: &RequestId,
         worker: WorkerWithDpRank,
@@ -1183,10 +1184,8 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                     drop(table);
                     released_stale_booking = true;
                     // Free the specific stale worker the duplicate maps to, not
-                    // whatever a fresh lookup resolves — see free_stale_booking.
-                    if let Err(err) =
-                        self.free_stale_booking(&request_id, existing_worker, decay_now)
-                    {
+                    // whatever a fresh lookup resolves — see free_if_worker.
+                    if let Err(err) = self.free_if_worker(&request_id, existing_worker, decay_now) {
                         tracing::debug!(%request_id, ?existing_worker, %err, "failed to release stale booking on migration re-dispatch");
                     }
                     continue;
@@ -1962,6 +1961,84 @@ mod tests {
         );
     }
 
+    /// The lifecycle boundary the rebind creates: after ownership moves A -> B,
+    /// the *old* attempt's cleanup still runs. It is armed against A, so it must
+    /// leave B's booking and B's index mapping untouched.
+    ///
+    /// This is the regression for the bug where cleanup re-resolved the request
+    /// id and released whichever worker currently owned it — namely B.
+    #[tokio::test]
+    async fn stale_cleanup_for_old_worker_cannot_release_new_worker() {
+        let sequences = make_multi_sequences(); // workers 1 and 2
+        let decay_now = Instant::now();
+        let old_worker = WorkerWithDpRank::new(1, 0);
+        let new_worker = WorkerWithDpRank::new(2, 0);
+
+        let req = |worker| SequenceRequest {
+            request_id: "req-1".to_string(),
+            token_sequence: Some(vec![1, 2, 3]),
+            track_prefill_tokens: false,
+            expected_output_tokens: None,
+            prefill_load_hint: None,
+            worker,
+            lora_name: None,
+        };
+
+        sequences.add_request(req(old_worker), decay_now).unwrap();
+        sequences.add_request(req(new_worker), decay_now).unwrap();
+        assert_eq!(active_request_count(&sequences, new_worker), 1);
+
+        // A's guard finally unwinds and releases against the worker it captured.
+        sequences
+            .free_if_worker(&"req-1".to_string(), old_worker, decay_now)
+            .expect("releasing an already-released worker must be a no-op");
+
+        assert_eq!(
+            active_request_count(&sequences, new_worker),
+            1,
+            "cleanup armed against the old worker must not release the new one"
+        );
+        assert_eq!(
+            sequences.request_worker(&"req-1".to_string()),
+            Some(new_worker),
+            "the R -> B mapping must survive A's cleanup"
+        );
+
+        // Contrast: an untargeted free does resolve to the current owner, which
+        // is exactly why cleanup must be worker-targeted.
+        sequences.free(&"req-1".to_string(), decay_now).unwrap();
+        assert_eq!(active_request_count(&sequences, new_worker), 0);
+    }
+
+    /// The rebind is scoped to a *different* worker. A same-id, same-worker add
+    /// is still a conflict, so the duplicate-id contract is unchanged there.
+    #[tokio::test]
+    async fn same_id_same_worker_still_conflicts() {
+        let sequences = make_multi_sequences();
+        let decay_now = Instant::now();
+        let worker = WorkerWithDpRank::new(1, 0);
+
+        let req = || SequenceRequest {
+            request_id: "req-1".to_string(),
+            token_sequence: Some(vec![1, 2, 3]),
+            track_prefill_tokens: false,
+            expected_output_tokens: None,
+            prefill_load_hint: None,
+            worker,
+            lora_name: None,
+        };
+
+        sequences.add_request(req(), decay_now).unwrap();
+        let err = sequences
+            .add_request(req(), decay_now)
+            .expect_err("same id on the same worker must remain a duplicate");
+        assert!(
+            matches!(err, SequenceError::DuplicateRequest { .. }),
+            "expected DuplicateRequest, got {err:?}"
+        );
+        assert_eq!(active_request_count(&sequences, worker), 1);
+    }
+
     #[test]
     fn modeled_remaining_prefill_time_loads_follow_multi_worker_projection() {
         let sequences = make_multi_sequences();
@@ -2658,18 +2735,56 @@ mod tests {
         assert_eq!(sequences.remote_state_update_count(), wake_count_before + 1);
     }
 
+    /// A replica `Free(R, A)` must release A's booking and nothing else.
+    ///
+    /// Supersedes `replica_sync_free_uses_canonical_worker_for_collapsed_load`,
+    /// which asserted the old behavior of ignoring the event's worker and
+    /// freeing whichever worker the index resolved. Under implicit migration the
+    /// event worker is an ownership constraint: a peer emits `Free(R, A)` while
+    /// ownership moves A -> B, so trusting the index would drop B's booking.
     #[tokio::test(start_paused = true)]
-    async fn replica_sync_free_uses_canonical_worker_for_collapsed_load() {
-        let worker = WorkerWithDpRank::new(1, 0);
-        let wrong_payload_worker = WorkerWithDpRank::new(2, 0);
-        let (sequences, publisher) = make_recording_sequences(HashMap::from([
+    async fn replica_sync_free_targets_event_worker() {
+        let worker_a = WorkerWithDpRank::new(1, 0);
+        let worker_b = WorkerWithDpRank::new(2, 0);
+        let (sequences, _publisher) = make_recording_sequences(HashMap::from([
             (1_u64, (0_u32, 1_u32)),
             (2_u64, (0_u32, 1_u32)),
         ]));
         let subscriber = VecSubscriber {
             events: VecDeque::from(vec![
+                // Ownership moves A -> B on the peer, then A's late cleanup lands.
+                Ok(replica_add("req-1", worker_a, vec![1, 2, 3])),
+                Ok(replica_add("req-1", worker_b, vec![1, 2, 3])),
+                Ok(replica_free("req-1", worker_a)),
+            ]),
+        };
+
+        sequences
+            .run_replica_sync(subscriber, CancellationToken::new())
+            .await
+            .unwrap();
+
+        // A is released; B — the current owner — keeps its booking and its index
+        // mapping, because the Free named A.
+        assert_eq!(sequences.active_blocks().get(&worker_a).copied(), Some(0));
+        assert_eq!(
+            sequences.request_worker(&"req-1".to_string()),
+            Some(worker_b),
+            "Free(R, A) must not remove the newer R -> B mapping"
+        );
+    }
+
+    /// The mirror case: `Free(R, A)` when A really is the current owner still
+    /// releases the booking and clears the index mapping.
+    #[tokio::test(start_paused = true)]
+    async fn replica_sync_free_releases_current_owner() {
+        let worker = WorkerWithDpRank::new(1, 0);
+        let (sequences, publisher) =
+            make_recording_sequences(HashMap::from([(1_u64, (0_u32, 1_u32))]));
+        let subscriber = VecSubscriber {
+            events: VecDeque::from(vec![
                 Ok(replica_add("req-1", worker, vec![1, 2, 3])),
-                Ok(replica_free("req-1", wrong_payload_worker)),
+                Ok(replica_free("req-1", worker)),
             ]),
         };
 
@@ -2685,13 +2800,7 @@ mod tests {
         assert_eq!(batches[0][0].dp_rank, worker.dp_rank);
         assert_eq!(batches[0][0].active_decode_blocks, Some(0));
         assert_eq!(sequences.active_blocks().get(&worker).copied(), Some(0));
-        assert_eq!(
-            sequences
-                .active_blocks()
-                .get(&wrong_payload_worker)
-                .copied(),
-            Some(0)
-        );
+        assert_eq!(sequences.request_worker(&"req-1".to_string()), None);
     }
 
     #[tokio::test(start_paused = true)]

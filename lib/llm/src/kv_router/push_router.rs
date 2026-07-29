@@ -247,10 +247,12 @@ impl KvPushRouter {
         let request_context = request.context().clone();
         let routing_parts = RoutingRequestParts::new(request);
         let block_size = self.chooser.block_size() as usize;
+        let selected_worker = WorkerWithDpRank::new(selection.instance_id, selection.dp_rank);
         let mut guard = RequestGuard::new(
             self.chooser.clone(),
             self.request_metrics.clone(),
             context_id.clone(),
+            selected_worker,
             request,
             !is_query_only,
             selection.lifecycle.take(),
@@ -258,7 +260,7 @@ impl KvPushRouter {
 
         let record_result: Result<(), Error> = async {
             if !is_query_only && self.chooser.indexer().records_routing_decisions() {
-                let worker = WorkerWithDpRank::new(selection.instance_id, selection.dp_rank);
+                let worker = selected_worker;
                 let record_result = if let Some(hashes) = selection.routing_hashes.take() {
                     cancel_on_stop(
                         request_context.as_ref(),
@@ -796,6 +798,7 @@ mod tests {
                     pinned_worker: None,
                     allowed_worker_ids: None,
                     routing_constraints: RoutingConstraints::default(),
+                    is_redispatch: false,
                     router_config_override: None,
                     priority_jump: 0.0,
                     strict_priority: 0,
@@ -811,6 +814,7 @@ mod tests {
                 Arc::clone(&router.chooser),
                 Arc::clone(&router.request_metrics),
                 request_id.clone(),
+                worker,
                 &request(),
                 true,
                 response
@@ -893,6 +897,7 @@ mod tests {
             Arc::clone(&router.chooser),
             Arc::clone(&router.request_metrics),
             "terminal-drain".to_string(),
+            WorkerWithDpRank::from_worker_id(0),
             &request(),
             false,
             None,

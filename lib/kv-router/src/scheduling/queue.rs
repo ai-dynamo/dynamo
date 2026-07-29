@@ -102,6 +102,7 @@ struct AdmissionCleanupEntry {
     ticket: Option<AdmissionTicket>,
     request_id: String,
     context_tokens: Option<usize>,
+    worker: Option<WorkerWithDpRank>,
     dispatched: bool,
 }
 
@@ -150,6 +151,10 @@ pub struct RequestLifecycleLease {
     ticket: Option<AdmissionTicket>,
     request_id: Option<String>,
     context_tokens: Option<usize>,
+    /// Worker this request was booked on, set by the response-stream guard once
+    /// selection is known, so cleanup releases the booking it acquired rather
+    /// than whichever worker currently owns the id.
+    worker: Option<WorkerWithDpRank>,
     dispatched: bool,
 }
 
@@ -181,6 +186,12 @@ impl RequestLifecycleLease {
             .await;
     }
 
+    /// Set by the response-stream guard after selection — the actor arms the
+    /// lease before it selects, so this is the first point both are in hand.
+    pub fn set_worker(&mut self, worker: WorkerWithDpRank) {
+        self.worker = Some(worker);
+    }
+
     pub(crate) fn disarm(&mut self) {
         self.request_id = None;
     }
@@ -195,6 +206,7 @@ impl Drop for RequestLifecycleLease {
             ticket: self.ticket,
             request_id,
             context_tokens: self.context_tokens,
+            worker: self.worker,
             dispatched: self.dispatched,
         }) {
             let _ = self.actor_tx.try_send(AdmissionCommand::Cleanup);
@@ -584,6 +596,7 @@ impl<
             ticket: None,
             request_id: None,
             context_tokens: None,
+            worker: None,
             dispatched: false,
         }))
     }
@@ -794,13 +807,27 @@ impl<
             (class_index, Some(snapshot))
         };
         let mut queue_class_index = admission_class_index;
+        // Only a migration re-dispatch may replace an in-flight admission; an
+        // accidental id reuse must still be rejected.
+        let mut retired_ready = false;
         if let Some(request_id) = request.mode.lifecycle_request_id()
             && self.tracked_admissions.contains_key(request_id)
         {
-            request.respond(Err(KvSchedulerError::BookingFailed(format!(
-                "request {request_id} already has an active admission"
-            ))));
-            return (false, false);
+            let request_id = request_id.to_owned();
+            let retired = if request.is_redispatch {
+                self.retire_admission_for_redispatch(&request_id)
+            } else {
+                None
+            };
+            match retired {
+                Some(made_ready) => retired_ready = made_ready,
+                None => {
+                    request.respond(Err(KvSchedulerError::BookingFailed(format!(
+                        "request {request_id} already has an active admission"
+                    ))));
+                    return (false, false);
+                }
+            }
         }
 
         let has_admission_policy = self.pending.has_admission_policy(admission_class_index);
@@ -812,7 +839,7 @@ impl<
                 "policy class {:?} requires lifecycle-tracked scheduling",
                 self.profile.class(admission_class_index).name
             ))));
-            return (false, false);
+            return (retired_ready, false);
         }
 
         let mut admission = if request.mode.lifecycle_request_id().is_some() && has_admission_policy
@@ -865,7 +892,10 @@ impl<
                 AdmissionDecision::Ready(placement) => {
                     if let Err(error) = apply_admission_placement(&mut request, *placement) {
                         request.respond(Err(error));
-                        return (self.abort_admission(request_admission.ticket), false);
+                        return (
+                            retired_ready | self.abort_admission(request_admission.ticket),
+                            false,
+                        );
                     }
                     if matches!(placement, WorkerPlacement::Exact(_)) {
                         let exact_snapshot = self.snapshot_for(&request);
@@ -950,7 +980,7 @@ impl<
                 .is_some_and(|admission| self.abort_admission(admission.ticket));
             let mut request = queued.request;
             request.respond(Err(KvSchedulerError::QueueRejected(rejection)));
-            return (made_ready, false);
+            return (retired_ready | made_ready, false);
         }
         if let Some((request_id, ticket)) = tracked_admission {
             self.tracked_admissions.insert(
@@ -967,7 +997,7 @@ impl<
         self.pending_isl_tokens
             .fetch_add(snapshot.raw_isl_tokens, AtomicOrdering::Relaxed);
         self.add_class_counters(queue_class_index, snapshot);
-        (false, true)
+        (retired_ready, true)
     }
 
     fn should_queue(
@@ -1037,11 +1067,25 @@ impl<
                 made_ready |= self.handle_dispatched(request_id, ticket);
             }
 
+            // Release the booking this attempt acquired, not whichever worker
+            // currently owns the id — after a re-dispatch that is the replacement.
+            let booked_worker = tracked
+                .and_then(|tracked| tracked.worker)
+                .or(cleanup.worker);
             if tracked.is_none_or(|tracked| tracked.worker.is_some())
                 && self.slots.request_worker(request_id).is_some()
             {
-                if let Err(error) = self.slots.free(request_id, Instant::now()) {
-                    tracing::error!(%request_id, %error, "Failed to release dropped scheduler booking");
+                let release = match booked_worker {
+                    Some(worker) => self
+                        .slots
+                        .free_if_worker(request_id, worker, Instant::now()),
+                    // A bypassed handoff records no worker but still holds a
+                    // booking. It never re-dispatches, so untargeted is safe here
+                    // and skipping the release would leak.
+                    None => self.slots.free(request_id, Instant::now()),
+                };
+                if let Err(error) = release {
+                    tracing::error!(%request_id, ?booked_worker, %error, "Failed to release dropped scheduler booking");
                 }
                 made_ready = true;
             }
@@ -1120,6 +1164,36 @@ impl<
                 queued.request.eligibility(),
             )
         })
+    }
+
+    /// Retire a tracked admission so a re-dispatch of the same id can be
+    /// admitted. Returns whether capacity was freed.
+    ///
+    /// `None` when the admission never reached a worker: only a dispatched
+    /// attempt can have had a stream fail, so that collision is a real duplicate.
+    /// Aborts rather than completes — the attempt produced no terminal result.
+    fn retire_admission_for_redispatch(&mut self, request_id: &String) -> Option<bool> {
+        let tracked = self.tracked_admissions.get(request_id).copied()?;
+        let worker = tracked.worker?;
+        self.tracked_admissions.remove(request_id);
+
+        let mut made_ready = false;
+        if self.slots.request_worker(request_id).is_some() {
+            if let Err(error) = self
+                .slots
+                .free_if_worker(request_id, worker, Instant::now())
+            {
+                tracing::error!(%request_id, ?worker, %error, "Failed to release booking for migration re-dispatch");
+            }
+            made_ready = true;
+        }
+        tracing::debug!(
+            %request_id,
+            ?worker,
+            "Retired admission for migration re-dispatch"
+        );
+        made_ready |= self.abort_admission(tracked.ticket);
+        Some(made_ready)
     }
 
     fn finish_admission(&mut self, ticket: AdmissionTicket, context_tokens: Option<usize>) -> bool {
@@ -2259,6 +2333,7 @@ mod tests {
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints::default(),
             shared_cache_hits: None,
+            is_redispatch: false,
             resp_tx: Some(tx),
         };
         (req, rx)
@@ -2277,6 +2352,22 @@ mod tests {
         request.mode = ScheduleMode::TrackedWithLifecycle {
             request_id: request_id.to_owned(),
         };
+        (request, response)
+    }
+
+    /// A migration re-dispatch: same lifecycle id, but flagged so the actor
+    /// retires the failed attempt's admission instead of rejecting the id.
+    fn make_redispatch_request(
+        request_id: &str,
+        isl_tokens: usize,
+    ) -> (
+        SchedulingRequest,
+        tokio::sync::oneshot::Receiver<
+            Result<SchedulingResponse, crate::scheduling::types::KvSchedulerError>,
+        >,
+    ) {
+        let (mut request, response) = make_admission_request(request_id, isl_tokens);
+        request.is_redispatch = true;
         (request, response)
     }
 
@@ -2658,6 +2749,7 @@ policy_classes:
             }),
             request_id: Some(request_id.to_owned()),
             context_tokens: None,
+            worker: None,
             dispatched: false,
         };
 
@@ -2672,6 +2764,7 @@ policy_classes:
                 }),
                 request_id: "fast-path".to_owned(),
                 context_tokens: None,
+                worker: None,
                 dispatched: false,
             }]
         );
@@ -2690,6 +2783,7 @@ policy_classes:
                     }),
                     request_id: "first".to_owned(),
                     context_tokens: None,
+                    worker: None,
                     dispatched: false,
                 },
                 AdmissionCleanupEntry {
@@ -2699,10 +2793,67 @@ policy_classes:
                     }),
                     request_id: "coalesced".to_owned(),
                     context_tokens: None,
+                    worker: None,
                     dispatched: false,
                 },
             ]
         );
+    }
+
+    /// The migration counterpart to
+    /// `duplicate_request_id_does_not_replace_active_admission`: a re-dispatch of
+    /// the same id is admitted, and the failed attempt's admission is retired
+    /// (aborted, booking released) rather than left to leak.
+    ///
+    /// Without this the queue actor rejects the retry before it reaches the
+    /// slot-level rebind, so migration cannot work under any admission policy.
+    #[tokio::test]
+    async fn migration_redispatch_replaces_active_admission() {
+        let state = Arc::new(StdMutex::new(GateState::default()));
+        let (queue, slots) = make_queue_with_admission_policy(Box::new(ReadyGate {
+            state: Arc::clone(&state),
+        }));
+        let (mut first, first_response) = make_admission_request("migrating", 64);
+        first.policy_class = Some("agents".to_owned());
+        let first_lease = enqueue_with_lease(&queue, first).await;
+        first_response.await.unwrap().unwrap();
+
+        // The backend stream failed; the RetryManager re-dispatches the same id
+        // while the failed attempt's lease is still alive.
+        let (mut redispatch, redispatch_response) = make_redispatch_request("migrating", 64);
+        redispatch.policy_class = Some("agents".to_owned());
+        let redispatch_lease = enqueue_with_lease(&queue, redispatch).await;
+        redispatch_response
+            .await
+            .unwrap()
+            .expect("migration re-dispatch must be admitted, not rejected as a duplicate");
+
+        // The original admission was retired as an abort, and exactly one
+        // booking is held — the replacement's.
+        assert_eq!(state.lock().unwrap().aborted, vec![AdmissionId::new(0)]);
+        assert_eq!(
+            slots
+                .active_request_counts()
+                .get(&WorkerWithDpRank::new(0, 0))
+                .copied(),
+            Some(1)
+        );
+
+        // The failed attempt's lease now drops. Its ticket no longer matches the
+        // tracked admission, so it must not disturb the replacement's booking.
+        drop(first_lease);
+        queue.update().await;
+        assert_eq!(
+            slots
+                .active_request_counts()
+                .get(&WorkerWithDpRank::new(0, 0))
+                .copied(),
+            Some(1),
+            "stale lease cleanup must not release the replacement's booking"
+        );
+
+        drop(redispatch_lease);
+        queue.update().await;
     }
 
     #[tokio::test]

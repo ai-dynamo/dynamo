@@ -559,6 +559,7 @@ where
             allowed_worker_ids,
             routing_constraints,
             false,
+            false,
         )
         .await
         .map(|(outcome, _)| outcome)
@@ -584,6 +585,9 @@ where
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
         track_lifecycle: bool,
+        // Set only on a migration re-dispatch; authorizes the scheduler to retire
+        // a stale admission still held for this same request id.
+        is_redispatch: bool,
     ) -> anyhow::Result<(
         FindBestMatchOutcome,
         Option<(RequestProgressUpdater, RequestLifecycleLease)>,
@@ -701,6 +705,7 @@ where
                 allowed_worker_ids,
                 routing_constraints,
                 shared_cache_hits,
+                is_redispatch,
             })
             .instrument(tracing::info_span!("kv_router.schedule"))
             .await
@@ -872,8 +877,25 @@ where
     }
 
     /// Legacy slot cleanup. Lifecycle-tracked requests use their `RequestLifecycleLease`.
+    ///
+    /// Resolves the current owner of `request_id`. Prefer [`Self::free_if_worker`]
+    /// whenever the caller knows which worker it booked.
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
         self.scheduler.free(request_id).await
+    }
+
+    /// Legacy slot cleanup targeted at the worker the caller booked.
+    ///
+    /// A same-id re-dispatch (migration failover) re-binds `request_id` to a new
+    /// worker while the failed attempt's cleanup is still in flight. Targeting the
+    /// captured worker keeps that late cleanup from releasing the replacement's
+    /// booking; an ownership mismatch is a harmless no-op.
+    pub async fn free_if_worker(
+        &self,
+        request_id: &str,
+        worker: WorkerWithDpRank,
+    ) -> Result<(), SequenceError> {
+        self.scheduler.free_if_worker(request_id, worker).await
     }
 
     /// Number of requests currently parked in the scheduler queue.

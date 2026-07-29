@@ -163,6 +163,10 @@ pub struct ScheduleRequest {
     pub session_id: Option<String>,
     pub overlap: OverlapSignals,
     pub shared_cache_hits: Option<SharedCacheHits>,
+    /// True when this is a migration re-dispatch of a request id that may still
+    /// have an admission in flight. It authorizes the scheduler to retire that
+    /// stale admission instead of rejecting the id as a duplicate.
+    pub is_redispatch: bool,
 }
 
 /// Actor-owned admission request.
@@ -192,6 +196,9 @@ pub struct SchedulingRequest {
     // Overlap and cache signals.
     pub overlap: OverlapSignals,
     pub shared_cache_hits: Option<SharedCacheHits>,
+
+    /// See [`ScheduleRequest::is_redispatch`].
+    pub is_redispatch: bool,
 
     // Load state computed during admission.
     pub worker_loads: FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
