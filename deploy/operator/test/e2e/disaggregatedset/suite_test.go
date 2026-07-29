@@ -58,10 +58,25 @@ var (
 func init() {
 	flag.StringVar(&flagNamespace, "disaggregatedset-namespace", "", "namespace for test resources (required)")
 	flag.StringVar(&flagLWSVersion, "disaggregatedset-lws-version", "v0.9.0", "required LWS controller image version")
-	flag.StringVar(&flagVolcanoVersion, "disaggregatedset-volcano-version", "v1.14.0", "required Volcano scheduler image version")
+	flag.StringVar(
+		&flagVolcanoVersion,
+		"disaggregatedset-volcano-version",
+		"v1.14.0",
+		"required Volcano scheduler image version",
+	)
 	flag.StringVar(&flagWorkloadImage, "disaggregatedset-workload-image", "busybox:1.36", "CPU-only test workload image")
-	flag.StringVar(&flagKubeconfig, "disaggregatedset-kubeconfig", "", "path to kubeconfig (uses the default loading rules when empty)")
-	flag.DurationVar(&flagReadyTimeout, "disaggregatedset-ready-timeout", 5*time.Minute, "maximum wait for each rollout step")
+	flag.StringVar(
+		&flagKubeconfig,
+		"disaggregatedset-kubeconfig",
+		"",
+		"path to kubeconfig (uses the default loading rules when empty)",
+	)
+	flag.DurationVar(
+		&flagReadyTimeout,
+		"disaggregatedset-ready-timeout",
+		5*time.Minute,
+		"maximum wait for each rollout step",
+	)
 }
 
 func TestDisaggregatedSet(t *testing.T) {
@@ -115,7 +130,11 @@ var _ = BeforeSuite(func() {
 
 	By("verifying the requested Volcano scheduler version is running")
 	Eventually(func() string { return findReadyControllerImage("/vc-scheduler") }, time.Minute, 2*time.Second).
-		Should(ContainSubstring(":"+flagVolcanoVersion), "no running Volcano scheduler image uses version %s", flagVolcanoVersion)
+		Should(
+			ContainSubstring(":"+flagVolcanoVersion),
+			"no running Volcano scheduler image uses version %s",
+			flagVolcanoVersion,
+		)
 
 	By("ensuring the test namespace exists")
 	namespace := &corev1.Namespace{}

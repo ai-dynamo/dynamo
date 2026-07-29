@@ -42,7 +42,10 @@ const (
 func newTestDGD(name string) *nvidiacomv1beta1.DynamoGraphDeployment {
 	replicas := int32(1)
 	modelName := name + "-model"
-	component := func(name string, componentType nvidiacomv1beta1.ComponentType) nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec {
+	component := func(
+		name string,
+		componentType nvidiacomv1beta1.ComponentType,
+	) nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec {
 		return nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
 			ComponentName: name,
 			ComponentType: componentType,
@@ -104,9 +107,8 @@ func waitForDisaggregatedSet(dgd *nvidiacomv1beta1.DynamoGraphDeployment) *disag
 	return result
 }
 
-func waitForCurrentLeaderWorkerSets(ds *disaggregatedsetv1.DisaggregatedSet) []leaderworkersetv1.LeaderWorkerSet {
+func waitForCurrentLeaderWorkerSets(ds *disaggregatedsetv1.DisaggregatedSet) {
 	revision := disaggregatedsetutils.ComputeRevision(ds.Spec.Roles)
-	var current []leaderworkersetv1.LeaderWorkerSet
 	Eventually(func(g Gomega) {
 		list := &leaderworkersetv1.LeaderWorkerSetList{}
 		g.Expect(k8sClient.List(
@@ -129,9 +131,7 @@ func waitForCurrentLeaderWorkerSets(ds *disaggregatedsetv1.DisaggregatedSet) []l
 			g.Expect(lws.Status.ReadyReplicas).To(Equal(int32(1)))
 		}
 		g.Expect(roles).To(Equal(map[string]bool{"prefill": true, "decode": true}))
-		current = list.Items
 	}, flagReadyTimeout, time.Second).Should(Succeed())
-	return current
 }
 
 func waitForDGDSuccessful(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
@@ -143,7 +143,10 @@ func waitForDGDSuccessful(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 	}, flagReadyTimeout, time.Second).Should(Succeed())
 }
 
-func waitForRoleMetadata(dgd *nvidiacomv1beta1.DynamoGraphDeployment, value string) *disaggregatedsetv1.DisaggregatedSet {
+func waitForRoleMetadata(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	value string,
+) *disaggregatedsetv1.DisaggregatedSet {
 	var result *disaggregatedsetv1.DisaggregatedSet
 	Eventually(func(g Gomega) {
 		current := &disaggregatedsetv1.DisaggregatedSet{}
@@ -153,16 +156,23 @@ func waitForRoleMetadata(dgd *nvidiacomv1beta1.DynamoGraphDeployment, value stri
 			role := &current.Spec.Roles[i]
 			g.Expect(role.Spec.LeaderWorkerTemplate.LeaderTemplate).NotTo(BeNil())
 			g.Expect(role.Spec.LeaderWorkerTemplate.LeaderTemplate.Labels).To(HaveKeyWithValue(testMetadataLabel, value))
-			g.Expect(role.Spec.LeaderWorkerTemplate.LeaderTemplate.Annotations).To(HaveKeyWithValue(testMetadataAnnotation, value))
+			g.Expect(role.Spec.LeaderWorkerTemplate.LeaderTemplate.Annotations).To(
+				HaveKeyWithValue(testMetadataAnnotation, value),
+			)
 			g.Expect(role.Spec.LeaderWorkerTemplate.WorkerTemplate.Labels).To(HaveKeyWithValue(testMetadataLabel, value))
-			g.Expect(role.Spec.LeaderWorkerTemplate.WorkerTemplate.Annotations).To(HaveKeyWithValue(testMetadataAnnotation, value))
+			g.Expect(role.Spec.LeaderWorkerTemplate.WorkerTemplate.Annotations).To(
+				HaveKeyWithValue(testMetadataAnnotation, value),
+			)
 		}
 		result = current
 	}, flagReadyTimeout, time.Second).Should(Succeed())
 	return result
 }
 
-func waitForRestartRevision(dgd *nvidiacomv1beta1.DynamoGraphDeployment, oldRevision string) *disaggregatedsetv1.DisaggregatedSet {
+func waitForRestartRevision(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	oldRevision string,
+) *disaggregatedsetv1.DisaggregatedSet {
 	var result *disaggregatedsetv1.DisaggregatedSet
 	Eventually(func(g Gomega) {
 		current := &disaggregatedsetv1.DisaggregatedSet{}
