@@ -24,6 +24,36 @@ pub(super) struct SglangRequest {
 }
 
 impl SglangRequest {
+    pub(super) fn new(req: DirectRequest, block_size: usize) -> Self {
+        let prompt_len = req.tokens.len();
+        let max_output_tokens = req
+            .output_token_ids
+            .as_ref()
+            .map_or(req.max_output_tokens, Vec::len);
+        let output_capacity = max_output_tokens;
+        let mut sequence_tokens = req.tokens;
+        sequence_tokens.reserve_exact(output_capacity);
+        let completion_pages = sequence_tokens
+            .len()
+            .checked_add(output_capacity)
+            .expect("SGLang request completion length overflow")
+            / block_size;
+        let mut kv_lease = RadixRequestLease::default();
+        kv_lease.reserve_page_hashes(completion_pages);
+        kv_lease.ensure_page_hashes(&sequence_tokens, block_size);
+
+        Self {
+            uuid: req.uuid.unwrap_or_else(Uuid::new_v4),
+            sequence_tokens,
+            prompt_len,
+            max_output_tokens,
+            planned_output_ids: req.output_token_ids,
+            kv_lease,
+            materialized_tokens: 0,
+            allocated_tokens: 0,
+        }
+    }
+
     pub(super) fn prompt_len(&self) -> usize {
         self.prompt_len
     }
@@ -101,24 +131,6 @@ impl SglangRequest {
         self.kv_lease
             .ensure_page_hashes(&self.sequence_tokens, block_size);
         self.materialized_tokens += 1;
-    }
-
-    pub(super) fn prepare(&mut self, block_size: usize) {
-        let output_capacity = self.max_output_tokens.min(
-            self.planned_output_ids
-                .as_ref()
-                .map_or(self.max_output_tokens, Vec::len),
-        );
-        self.sequence_tokens.reserve_exact(output_capacity);
-        let completion_pages = self
-            .sequence_tokens
-            .len()
-            .checked_add(output_capacity)
-            .expect("SGLang request completion length overflow")
-            / block_size;
-        self.kv_lease.reserve_page_hashes(completion_pages);
-        self.kv_lease
-            .ensure_page_hashes(&self.sequence_tokens, block_size);
     }
 
     pub(super) fn debug_assert_invariants(&self, _block_size: usize) {
@@ -202,26 +214,5 @@ impl SglangRequest {
         debug_assert!(!self.kv_lease.is_active());
         self.materialized_tokens = 0;
         self.allocated_tokens = 0;
-    }
-}
-
-impl From<DirectRequest> for SglangRequest {
-    fn from(req: DirectRequest) -> Self {
-        let prompt_len = req.tokens.len();
-        let max_output_tokens = req
-            .output_token_ids
-            .as_ref()
-            .map_or(req.max_output_tokens, Vec::len);
-        let sequence_tokens = req.tokens;
-        Self {
-            uuid: req.uuid.unwrap_or_else(Uuid::new_v4),
-            sequence_tokens,
-            prompt_len,
-            max_output_tokens,
-            planned_output_ids: req.output_token_ids,
-            kv_lease: RadixRequestLease::default(),
-            materialized_tokens: 0,
-            allocated_tokens: 0,
-        }
     }
 }

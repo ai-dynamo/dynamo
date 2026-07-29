@@ -125,6 +125,7 @@ pub struct SglangKvManager {
 pub struct DecodeTokenReservation {
     pages: Vec<KvPageId>,
     next: usize,
+    #[cfg(test)]
     page_size: usize,
 }
 
@@ -163,6 +164,7 @@ impl DecodeTokenReservation {
         page
     }
 
+    #[cfg(test)]
     fn take(&mut self, last_idx: Option<usize>) -> usize {
         if let Some(last_idx) = last_idx
             && (last_idx + 1) % self.page_size != 0
@@ -233,8 +235,7 @@ impl SglangKvManager {
         if required_tokens > available {
             self.evict(required_tokens - available);
         }
-        let mut pages = self.collect_path_pages(last_node);
-        debug_assert_eq!(pages.len(), prefix_len / page_size);
+        let mut pages = self.collect_path_pages_through(last_node, prefix_len);
 
         let available_before = self.cache.available_tokens();
         let Some(mut new_pages) = self.cache.page_pool.allocate_pages(required_pages) else {
@@ -456,6 +457,7 @@ impl SglangKvManager {
 
     /// Allocate a decode token, consuming a new page only at a page boundary.
     /// Router-visible BlockStored events are published once a full block exists.
+    #[cfg(test)]
     pub fn allocate_decode_token(&mut self, last_idx: Option<usize>) -> Option<usize> {
         let mut reservation = self.reserve_decode_pages(usize::from(
             last_idx.is_none_or(|idx| (idx + 1) % self.cache.page_size() == 0),
@@ -472,6 +474,7 @@ impl SglangKvManager {
         Some(DecodeTokenReservation {
             pages,
             next: 0,
+            #[cfg(test)]
             page_size: self.cache.page_size(),
         })
     }
@@ -482,8 +485,7 @@ impl SglangKvManager {
         token_count: usize,
     ) -> Option<SglangDestinationReservation> {
         let (prefix_len, last_node) = self.cache.match_prefix_hashes(page_hashes);
-        let mut prefix_pages = self.collect_path_pages(last_node);
-        prefix_pages.truncate(prefix_len / self.cache.page_size());
+        let prefix_pages = self.collect_path_pages_through(last_node, prefix_len);
         self.cache.inc_lock_ref(last_node);
 
         let allocated_tokens = if token_count == 0 {
@@ -544,7 +546,7 @@ impl SglangKvManager {
         } = reservation;
         prefix_pages.append(&mut unpublished_pages);
         let new_last_node = self.cache_unfinished_hashes(
-            lease.page_hashes(),
+            lease.page_hashes_through(token_count, self.cache.page_size()),
             &mut prefix_pages,
             last_node,
             prefix_len,
@@ -631,6 +633,23 @@ impl SglangKvManager {
         for node_id in path {
             pages.extend_from_slice(&self.cache.node(node_id).value);
         }
+        pages
+    }
+
+    fn collect_path_pages_through(&self, last_node: NodeId, prefix_len: usize) -> Vec<KvPageId> {
+        assert_eq!(
+            prefix_len % self.cache.page_size(),
+            0,
+            "matched SGLang prefix must be page-aligned"
+        );
+        let expected_pages = prefix_len / self.cache.page_size();
+        let mut pages = self.collect_path_pages(last_node);
+        assert!(
+            pages.len() >= expected_pages,
+            "SGLang radix path returned {} pages for a {expected_pages}-page prefix",
+            pages.len()
+        );
+        pages.truncate(expected_pages);
         pages
     }
 
@@ -1186,6 +1205,52 @@ mod tests {
         assert_eq!(mgr.cache().protected_size, 0);
         assert_eq!(mgr.cache().evictable_size, 4);
         assert_eq!(mgr.cache().prefix_match_len(&[1, 2, 3, 4]), 4);
+    }
+
+    #[test]
+    fn destination_activation_bounds_hashes_to_materialized_tokens() {
+        let mut mgr = SglangKvManager::new(8, 4, KvEventPublishers::default(), 0);
+        let tokens = [1, 2, 3, 4, 5, 6, 7, 8];
+        let mut lease = RadixRequestLease::default();
+        lease.ensure_page_hashes(&tokens, 4);
+
+        let reservation = mgr
+            .reserve_destination_lease(lease.page_hashes(), 4)
+            .unwrap();
+        assert_eq!(
+            mgr.activate_destination_lease(reservation, 4, &mut lease),
+            0
+        );
+
+        assert_eq!(lease.page_count(), 1);
+        assert_eq!(lease.cached_tokens(), 4);
+        assert_eq!(mgr.cache().prefix_match_len(&tokens[..4]), 4);
+        assert_eq!(mgr.cache().prefix_match_len(&tokens), 4);
+        mgr.abort(lease);
+    }
+
+    #[test]
+    fn retract_and_readmit_reuses_cached_page_hashes() {
+        let mut mgr = SglangKvManager::new(8, 4, KvEventPublishers::default(), 0);
+        let tokens = [1, 2, 3, 4, 5, 6, 7, 8];
+        let mut lease = RadixRequestLease::default();
+        assert_eq!(mgr.allocate_for_request_lease(&tokens, &mut lease), Some(0));
+        mgr.extend_cached_prefix(&tokens, &mut lease);
+
+        let hashes = lease.page_hashes().to_vec();
+        let hash_storage = lease.page_hashes().as_ptr();
+        let hash_capacity = lease.page_hashes.capacity();
+        assert!(mgr.retract_in_place(&mut lease));
+        assert_eq!(lease.page_hashes(), hashes);
+
+        assert_eq!(
+            mgr.allocate_for_request_lease(&tokens, &mut lease),
+            Some(tokens.len())
+        );
+        assert_eq!(lease.page_hashes(), hashes);
+        assert_eq!(lease.page_hashes().as_ptr(), hash_storage);
+        assert_eq!(lease.page_hashes.capacity(), hash_capacity);
+        mgr.abort(lease);
     }
 
     #[test]

@@ -20,10 +20,12 @@ new_key_type! {
 pub struct KvPageId(usize);
 
 impl KvPageId {
+    #[cfg(test)]
     pub(crate) fn from_token_index(index: usize, page_size: usize) -> Self {
         Self(index / page_size)
     }
 
+    #[cfg(test)]
     pub(crate) fn first_token_index(self, page_size: usize) -> usize {
         self.0 * page_size
     }
@@ -31,8 +33,7 @@ impl KvPageId {
 
 /// Manages free / allocated pages for the simulated SGLang KV cache.
 ///
-/// SGLang's paged allocator owns and frees whole pages. Compatibility helpers
-/// can still flatten page IDs into token indices for existing callers.
+/// SGLang's paged allocator owns and frees whole pages in production.
 pub struct PagePool {
     next_fresh: usize,
     free: Vec<KvPageId>,
@@ -74,6 +75,7 @@ impl PagePool {
 
     /// Append flattened indices for `new_tokens`, allocating whole pages only
     /// when the request's current final page has no remaining slots.
+    #[cfg(test)]
     pub fn allocate_indices_into(&mut self, new_tokens: usize, indices: &mut Vec<usize>) -> bool {
         if new_tokens == 0 {
             return true;
@@ -109,6 +111,7 @@ impl PagePool {
         true
     }
 
+    #[cfg(test)]
     pub fn expand_pages(&self, pages: &[KvPageId], token_count: usize) -> Vec<usize> {
         assert!(
             token_count <= pages.len() * self.page_size,
@@ -132,6 +135,7 @@ impl PagePool {
     }
 
     /// Free every distinct page represented by a contiguous request-index list.
+    #[cfg(test)]
     pub fn free_indices(&mut self, indices: &[usize]) -> Vec<KvPageId> {
         let mut pages = Vec::with_capacity(indices.len().div_ceil(self.page_size));
         for &index in indices {
@@ -235,6 +239,7 @@ impl RadixCache {
         compute_block_hash_for_seq(tokens, self.page_size as u32, BlockHashOptions::default())
     }
 
+    #[cfg(test)]
     fn page_ids(&self, indices: &[usize], page_count: usize) -> Vec<KvPageId> {
         assert!(
             indices.len() >= page_count * self.page_size,
@@ -345,6 +350,7 @@ impl RadixCache {
     }
 
     /// Insert a token sequence into the tree. Key is page-aligned before insertion.
+    #[cfg(test)]
     pub fn insert(&mut self, key: &[u32], value: &[usize]) -> NodeId {
         let aligned_len = key.len() / self.page_size * self.page_size;
         assert!(
@@ -361,6 +367,7 @@ impl RadixCache {
     /// `prefix_node` must be the locked terminal node for `prefix_len`. Keeping
     /// that handle lets decode growth avoid walking the full sequence from the
     /// root on every completed page.
+    #[cfg(test)]
     pub fn insert_from_node(
         &mut self,
         prefix_node: NodeId,
@@ -423,6 +430,7 @@ impl RadixCache {
         )
     }
 
+    #[cfg(test)]
     fn insert_page_suffix(
         &mut self,
         start_node: NodeId,
@@ -444,14 +452,7 @@ impl RadixCache {
         if aligned_len == prefix_len {
             return start_node;
         }
-        let expected_pages = (aligned_len - prefix_len) / self.page_size;
-        assert!(
-            page_ids.len() >= expected_pages,
-            "not enough KV pages: need {expected_pages}, got {}",
-            page_ids.len()
-        );
         let page_keys = self.page_hashes(&key[prefix_len..aligned_len]);
-        let page_ids = &page_ids[..page_keys.len()];
         self.insert_page_hash_suffix(
             start_node,
             &page_keys,

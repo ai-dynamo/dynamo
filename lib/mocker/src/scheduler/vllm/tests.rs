@@ -2380,11 +2380,15 @@ mod live_scheduler {
         assert_scheduler_idle(&metrics);
     }
 
+    #[rstest]
+    #[case::kvbm(G1Backend::Kvbm)]
+    #[case::native(G1Backend::Native)]
     #[tokio::test]
-    async fn test_live_scheduler_forwards_buffered_kv_token_ids() {
+    async fn raw_sink_emits_token_ids_for_both_g1_backends(#[case] backend: G1Backend) {
         let sink = Arc::new(CapturingKvSink::default());
         let (output_tx, mut output_rx) = mpsc::unbounded_channel::<Vec<OutputSignal>>();
         let args = MockEngineArgs::builder()
+            .g1_backend(backend)
             .block_size(4)
             .num_gpu_blocks(12)
             .max_num_batched_tokens(Some(8))
@@ -2392,7 +2396,6 @@ mod live_scheduler {
             .enable_chunked_prefill(true)
             .enable_prefix_caching(true)
             .speedup_ratio(1000.0)
-            .zmq_kv_events_port(Some(12345))
             .build()
             .unwrap();
         let scheduler = Scheduler::new(
@@ -2433,8 +2436,7 @@ mod live_scheduler {
                 _ => None,
             })
             .expect("live scheduler should forward stored KV event token ids");
-        assert!(!stored.is_empty());
-        assert!(stored.iter().all(|block| !block.is_empty()));
+        assert_eq!(stored, vec![vec![0, 1, 2, 3], vec![4, 5, 6, 7]]);
     }
 
     #[tokio::test]
