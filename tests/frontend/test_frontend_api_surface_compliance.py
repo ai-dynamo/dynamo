@@ -12,8 +12,8 @@ sequentially against one server:
    validator against zod schemas generated from the OpenAPI spec).
 2. `codex exec` smoke — forces the shell tool-call path through
    `/v1/responses`.
-3. Codex child-header smoke — sends the stable `thread-id` and
-   `x-codex-parent-thread-id` pair through `/v1/responses`.
+3. `codex exec` subagent smoke — requires a real Codex child request through
+   `/v1/responses`.
 4. `claude -p` smoke — forces the Bash tool-call path through
    `/v1/messages` (Anthropic Messages API).
 5. `opencode run --command ...` smoke — forces an OpenCode subtask request
@@ -51,6 +51,7 @@ from tests.frontend.agent_smoke_inputs import (
     LIST_DIRECTORY_PROMPT,
     claude_subagent_definition,
     claude_subagent_prompt,
+    codex_subagent_prompt,
     write_codex_config,
     write_opencode_config,
 )
@@ -463,11 +464,11 @@ def _opencode_cli(_tools_cache, _node_bin) -> Path:
 @pytest.mark.requested_sglang_kv_tokens(49152)
 # Budget: tool-install fixtures (~30-60s first session run, near-zero on
 # cache hit) + sglang cold start (30-60s) + bun compliance (up to 180s) +
-# codex exec (up to 180s) + Codex child request (up to 60s) + claude exec
+# codex exec (up to 180s) + Codex child process (up to 180s) + claude exec
 # (up to 180s) + optional claude subagent probe (up to 45s) + opencode run
 # (up to 180s) + inter-suite health checks + teardown. 975s leaves headroom
 # for CI variance without masking real hangs.
-@pytest.mark.timeout(975)
+@pytest.mark.timeout(1095)
 @pytest.mark.frontend_api_surface_compliance
 @pytest.mark.pre_merge
 @pytest.mark.flaky(reruns=2, only_rerun=["did not report the marker file"])
@@ -577,18 +578,14 @@ def test_frontend_api_surface_compliance(
         )
         _assert_agent_context_in_trace(request_trace_path, "codex", codex_trace_start)
         _wait_for_frontend_healthy(frontend_port)
-        codex_child_trace_start = _request_trace_record_count(request_trace_path)
-        codex_parent_thread_id = f"codex-parent-{uuid.uuid4().hex}"
-        codex_child_thread_id = f"codex-child-{uuid.uuid4().hex}"
-        _run_codex_child_header_smoke(
-            frontend_port, codex_child_thread_id, codex_parent_thread_id
-        )
-        _assert_agent_context_in_trace(
+        codex_subagent_trace_start = _request_trace_record_count(request_trace_path)
+        _run_codex_subagent_smoke(
+            _codex_cli,
+            _node_bin,
+            codex_home,
+            agent_cwd,
             request_trace_path,
-            "codex child",
-            codex_child_trace_start,
-            expected_session_id=codex_child_thread_id,
-            expected_parent_session_id=codex_parent_thread_id,
+            codex_subagent_trace_start,
         )
         _wait_for_frontend_healthy(frontend_port)
         claude_trace_start = _request_trace_record_count(request_trace_path)
@@ -965,29 +962,54 @@ def _run_codex_exec_smoke(
         )
 
 
-def _run_codex_child_header_smoke(
-    frontend_port: int, child_thread_id: str, parent_thread_id: str
+def _run_codex_subagent_smoke(
+    codex_cli: Path,
+    node_bin: Path,
+    codex_home: Path,
+    cwd: Path,
+    request_trace_path: Path,
+    trace_start_index: int,
 ) -> None:
-    """Exercise Codex child headers without model-mediated delegation."""
-    response = requests.post(
-        f"http://localhost:{frontend_port}/v1/responses",
-        headers={
-            "Authorization": "Bearer sk-compliance-dummy",
-            "thread-id": child_thread_id,
-            "x-codex-parent-thread-id": parent_thread_id,
-        },
-        json={
-            "model": COMPLIANCE_MODEL,
-            "input": "Reply with exactly OK.",
-            "max_output_tokens": 32,
-        },
-        timeout=60,
+    """Require Codex to invoke a child agent through the Responses API."""
+    logger.info("Running Codex subagent smoke test against CODEX_HOME=%s", codex_home)
+    extra_env = {
+        "CODEX_HOME": str(codex_home),
+        "HOME": str(codex_home),
+        "LOCAL_API_KEY": "sk-none",
+    }
+    cmd = [
+        str(codex_cli),
+        "-m",
+        COMPLIANCE_MODEL,
+        "-c",
+        "model_provider=local",
+        "exec",
+        codex_subagent_prompt(),
+        "--dangerously-bypass-approvals-and-sandbox",
+    ]
+    result = subprocess.run(
+        cmd,
+        env=_agent_subprocess_env(extra_env, path_prepend=[node_bin]),
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        timeout=180,
     )
-    if not response.ok:
+    _attach_subprocess_log(
+        name="codex_subagent_smoke.log",
+        cmd=cmd,
+        result=result,
+        extra_env=extra_env,
+        cwd=str(cwd),
+    )
+    if result.returncode != 0:
         pytest.fail(
-            "Codex child-header smoke failed "
-            f"(status={response.status_code}): {response.text}"
+            f"codex subagent smoke failed (exit={result.returncode}).\n"
+            f"stdout:\n{result.stdout}\n\nstderr:\n{result.stderr}"
         )
+    _assert_agent_parent_context_in_trace(
+        request_trace_path, "codex subagent", trace_start_index
+    )
 
 
 def _run_claude_exec_smoke(
