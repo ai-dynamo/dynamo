@@ -6,13 +6,13 @@ pub mod stream_converter;
 use std::collections::HashMap;
 
 use dynamo_protocols::types::responses::{
-    AssistantRole, FunctionCallOutput, FunctionToolCall, IncludeEnum, InputContent, InputItem,
-    InputOutputMessageContent, InputParam, InputRole, InputTokenDetails, Instructions, Item,
-    MessageItem, OutputItem, OutputMessage, OutputMessageContent, OutputStatus, OutputTextContent,
-    OutputTokenDetails, PromptCacheRetention, Reasoning, ReasoningItem, Response,
-    ResponseTextParam, ResponseUsage, Role as ResponseRole, ServiceTier, Status, SummaryPart,
-    SummaryTextContent, TextResponseFormatConfiguration, Tool, ToolChoiceOptions, ToolChoiceParam,
-    Truncation,
+    AssistantRole, CreateResponse, FunctionCallOutput, FunctionToolCall, IncludeEnum, InputContent,
+    InputItem, InputOutputMessageContent, InputParam, InputRole, InputTokenDetails, Instructions,
+    Item, MessageItem, NamespaceToolParamTool, OutputItem, OutputMessage, OutputMessageContent,
+    OutputStatus, OutputTextContent, OutputTokenDetails, PromptCacheRetention, Reasoning,
+    ReasoningItem, Response, ResponseTextParam, ResponseUsage, Role as ResponseRole, ServiceTier,
+    Status, SummaryPart, SummaryTextContent, TextResponseFormatConfiguration, Tool,
+    ToolChoiceOptions, ToolChoiceParam, Truncation,
 };
 use dynamo_protocols::types::{
     ChatCompletionMessageToolCall, ChatCompletionNamedToolChoice,
@@ -37,15 +37,8 @@ use super::chat_completions::{NvCreateChatCompletionRequest, NvCreateChatComplet
 use super::{OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider};
 use crate::protocols::common::extensions::{NvExt, NvExtProvider};
 
-/// Request body for `POST /v1/responses`. Uses a plain
-/// `#[derive(Deserialize)]` — the relaxed input shapes are handled by
-/// Dynamo-owning the input chain in `dynamo_protocols::types::responses`,
-/// not by a custom pre-parse JSON patcher.
-/// An earlier iteration of this type carried a hand-written `impl Deserialize`
-/// that walked `serde_json::Value` to inject synthetic defaults for missing
-/// `id` / `status` / `annotations`; that was replaced by typed ownership for
-/// correctness and to avoid the double-deserialize cost.
-#[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
+/// Request body for `POST /v1/responses`.
+#[derive(ToSchema, Serialize, Validate, Debug, Clone)]
 pub struct NvCreateResponse {
     /// Flattened CreateResponse fields (model, input, temperature, etc.).
     ///
@@ -58,11 +51,91 @@ pub struct NvCreateResponse {
     /// `dynamo_protocols::types::responses` for the full rationale.
     #[serde(flatten)]
     #[schema(value_type = Object)]
-    pub inner: dynamo_protocols::types::responses::CreateResponse,
+    pub inner: CreateResponse,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Object)]
     pub nvext: Option<NvExt>,
+}
+
+#[derive(Deserialize)]
+struct NvCreateResponseWire {
+    #[serde(flatten)]
+    inner: CreateResponse,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nvext: Option<NvExt>,
+}
+
+impl<'de> Deserialize<'de> for NvCreateResponse {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let mut value = serde_json::Value::deserialize(deserializer)?;
+        normalize_codex_agent_messages(&mut value);
+        let wire = NvCreateResponseWire::deserialize(value).map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            inner: wire.inner,
+            nvext: wire.nvext,
+        })
+    }
+}
+
+/// Convert Codex's thread-to-thread task envelope into a standard input message.
+/// `agent_message` is a Codex Responses extension, not an OpenResponses item.
+fn normalize_codex_agent_messages(body: &mut serde_json::Value) {
+    let Some(items) = body
+        .get_mut("input")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return;
+    };
+
+    for item in items {
+        let Some(agent_message) = item.as_object() else {
+            continue;
+        };
+        if agent_message
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            != Some("agent_message")
+        {
+            continue;
+        }
+
+        let author = agent_message
+            .get("author")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown agent");
+        let recipient = agent_message
+            .get("recipient")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown recipient");
+        let content = agent_message
+            .get("content")
+            .and_then(serde_json::Value::as_array)
+            .map(|parts| {
+                parts
+                    .iter()
+                    .filter_map(|part| {
+                        (part.get("type").and_then(serde_json::Value::as_str) == Some("input_text"))
+                            .then(|| part.get("text").and_then(serde_json::Value::as_str))
+                            .flatten()
+                    })
+                    .collect::<Vec<_>>()
+                    .join("")
+            })
+            .unwrap_or_default();
+
+        *item = serde_json::json!({
+            "type": "message",
+            "role": "user",
+            "content": [{
+                "type": "input_text",
+                "text": format!("Message from {author} to {recipient}:\n{content}"),
+            }],
+        });
+    }
 }
 
 #[derive(ToSchema, Deserialize, Validate, Debug, Clone)]
@@ -603,10 +676,10 @@ fn convert_input_items_to_messages(
 
 /// Convert Responses API Tool to ChatCompletionTool.
 fn convert_tools(tools: &[Tool]) -> Vec<ChatCompletionTool> {
-    tools
-        .iter()
-        .filter_map(|tool| match tool {
-            Tool::Function(f) => Some(ChatCompletionTool {
+    let mut converted = Vec::new();
+    for tool in tools {
+        match tool {
+            Tool::Function(f) => converted.push(ChatCompletionTool {
                 r#type: ChatCompletionToolType::Function,
                 function: FunctionObject {
                     name: f.name.clone(),
@@ -615,9 +688,25 @@ fn convert_tools(tools: &[Tool]) -> Vec<ChatCompletionTool> {
                     strict: f.strict,
                 },
             }),
-            _ => None, // Only function tools are forwarded to chat completions
-        })
-        .collect()
+            Tool::Namespace(namespace) => {
+                for tool in &namespace.tools {
+                    if let NamespaceToolParamTool::Function(f) = tool {
+                        converted.push(ChatCompletionTool {
+                            r#type: ChatCompletionToolType::Function,
+                            function: FunctionObject {
+                                name: f.name.clone(),
+                                description: f.description.clone(),
+                                parameters: f.parameters.clone(),
+                                strict: f.strict,
+                            },
+                        });
+                    }
+                }
+            }
+            _ => {} // Only function tools are forwarded to chat completions
+        }
+    }
+    converted
 }
 
 /// Convert Responses API ToolChoiceParam to ChatCompletionToolChoiceOption.
@@ -934,6 +1023,34 @@ impl ResponseParams {
             .and_then(|reasoning| reasoning.summary)
             .is_some()
     }
+
+    /// Recover the namespace after the chat backend has flattened tool calls.
+    /// A bare name is ambiguous when it was also declared directly or in more
+    /// than one namespace, so preserve it only when there is one namespace.
+    fn namespace_for_function(&self, name: &str) -> Option<String> {
+        let tools = self.tools.as_deref()?;
+        if tools
+            .iter()
+            .any(|tool| matches!(tool, Tool::Function(function) if function.name == name))
+        {
+            return None;
+        }
+
+        let mut namespaces = tools.iter().filter_map(|tool| {
+            let Tool::Namespace(namespace) = tool else {
+                return None;
+            };
+            namespace
+                .tools
+                .iter()
+                .any(|tool| matches!(tool, NamespaceToolParamTool::Function(function) if function.name == name))
+                .then_some(namespace.name.as_str())
+        });
+        let namespace = namespaces.next()?;
+        namespaces
+            .all(|other_namespace| other_namespace == namespace)
+            .then(|| namespace.to_owned())
+    }
 }
 
 /// Normalize tools so that `FunctionTool.strict` is always set.
@@ -972,11 +1089,11 @@ fn make_text_message(id: String, text: String) -> OutputItem {
 }
 
 /// Build a function call output item with generated IDs.
-fn make_function_call(name: String, arguments: String) -> OutputItem {
+fn make_function_call(name: String, arguments: String, namespace: Option<String>) -> OutputItem {
     OutputItem::FunctionCall(FunctionToolCall {
         arguments,
         call_id: format!("call_{}", Uuid::new_v4().simple()),
-        namespace: None,
+        namespace,
         name,
         id: Some(format!("fc_{}", Uuid::new_v4().simple())),
         status: Some(OutputStatus::Completed),
@@ -1005,7 +1122,7 @@ pub fn chat_completion_to_response(
                 output.push(OutputItem::FunctionCall(FunctionToolCall {
                     arguments: tc.function.arguments.clone(),
                     call_id: tc.id.clone(),
-                    namespace: None,
+                    namespace: params.namespace_for_function(&tc.function.name),
                     name: tc.function.name.clone(),
                     id: Some(format!("fc_{}", Uuid::new_v4().simple())),
                     status: Some(OutputStatus::Completed),
@@ -1047,7 +1164,8 @@ pub fn chat_completion_to_response(
             let parsed_calls = parse_tool_call_text(&content_text);
             if !parsed_calls.is_empty() {
                 for (name, arguments) in parsed_calls {
-                    output.push(make_function_call(name, arguments));
+                    let namespace = params.namespace_for_function(&name);
+                    output.push(make_function_call(name, arguments, namespace));
                 }
                 let remaining = strip_tool_call_text(&content_text);
                 if !remaining.trim().is_empty() {
@@ -2506,6 +2624,65 @@ mod tests {
         }
     }
 
+    #[allow(deprecated)]
+    #[test]
+    fn test_response_with_namespaced_tool_call() {
+        let chat_resp = NvCreateChatCompletionResponse {
+            inner: dynamo_protocols::types::CreateChatCompletionResponse {
+                id: "chatcmpl-xyz".into(),
+                choices: vec![dynamo_protocols::types::ChatChoice {
+                    index: 0,
+                    message: dynamo_protocols::types::ChatCompletionResponseMessage {
+                        content: None,
+                        refusal: None,
+                        tool_calls: Some(vec![ChatCompletionMessageToolCall {
+                            id: "call_abc".into(),
+                            r#type: FunctionType::Function,
+                            function: dynamo_protocols::types::FunctionCall {
+                                name: "spawn_agent".into(),
+                                arguments: r#"{"agent_type":"worker"}"#.into(),
+                            },
+                        }]),
+                        role: dynamo_protocols::types::Role::Assistant,
+                        function_call: None,
+                        audio: None,
+                        reasoning_content: None,
+                    },
+                    finish_reason: None,
+                    logprobs: None,
+                }],
+                created: 0,
+                model: "test-model".into(),
+                service_tier: None,
+                system_fingerprint: None,
+                object: "chat.completion".into(),
+                usage: None,
+            },
+            nvext: None,
+        };
+        let params = ResponseParams {
+            tools: Some(
+                serde_json::from_value(serde_json::json!([{
+                    "type": "namespace",
+                    "name": "agents",
+                    "description": "Subagent tools",
+                    "tools": [{"type": "function", "name": "spawn_agent"}],
+                }]))
+                .unwrap(),
+            ),
+            ..Default::default()
+        };
+
+        let wrapped = chat_completion_to_response(chat_resp, &params, None).unwrap();
+        match &wrapped.inner.output[0] {
+            OutputItem::FunctionCall(fc) => {
+                assert_eq!(fc.namespace.as_deref(), Some("agents"));
+                assert_eq!(fc.name, "spawn_agent");
+            }
+            _ => panic!("Expected FunctionCall output"),
+        }
+    }
+
     #[test]
     fn test_convert_top_logprobs_clamped() {
         assert_eq!(convert_top_logprobs(Some(5)), Some(5));
@@ -2847,6 +3024,35 @@ thinking
                 assert_eq!(out.role, AssistantRole::Assistant);
             }
             other => panic!("expected MessageItem::Output, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_nvcreate_response_normalizes_codex_agent_message() {
+        let body = serde_json::json!({
+            "model": "m",
+            "input": [{
+                "type": "agent_message",
+                "author": "/root",
+                "recipient": "/root/dynamo_subagent_smoke",
+                "content": [{"type": "input_text", "text": "Return exactly OK."}],
+            }],
+        });
+
+        let req: NvCreateResponse =
+            serde_json::from_value(body).expect("Codex agent message should deserialize");
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        match &chat_req.inner.messages[..] {
+            [ChatCompletionRequestMessage::User(message)] => {
+                assert_eq!(
+                    message.content,
+                    ChatCompletionRequestUserMessageContent::Text(
+                        "Message from /root to /root/dynamo_subagent_smoke:\nReturn exactly OK."
+                            .to_string()
+                    )
+                );
+            }
+            messages => panic!("expected one user message, got {messages:?}"),
         }
     }
 
