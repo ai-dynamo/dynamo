@@ -77,9 +77,6 @@ ADD --checksum=sha256:f60e802b6f41350393e34b24793db888a8be514054769bd17e7a6e9c0c
     https://github.com/intel/xpumanager/releases/download/v1.3.6/xpu-smi_1.3.6_20260206.143628.1004f6cb.u24.04_amd64.deb \
     /tmp/xpu-smi.deb
 
-# Fetch UCX patch
-RUN wget --tries=3 --waitretry=5 https://raw.githubusercontent.com/intel/llm-scaler/35a14cbc08d714f460a29b7a7328df5620c8530f/vllm/patches/ai-dynamo-xpu/patches/ucx-v1.12.0.patch -O /tmp/ucx.patch
-
 # Install xpu-smi without explicitly changing the Intel compute runtime stack.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends /tmp/xpu-smi.deb && \
@@ -376,9 +373,9 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     git clone https://github.com/openucx/ucx.git && \
     cd ucx &&  \
     git checkout $NIXL_UCX_REF &&	 \
-    if [ "$DEVICE" = "xpu" ]; then \
-    git apply --ignore-whitespace /tmp/ucx.patch; \
-    fi && \
+    # The intel/llm-scaler xe-GDR patch (ucx-v1.12.0.patch) is upstream since
+    # UCX v1.21.0 (ib_md.c xe srcversion check, ze_copy_md.c HOST bit); restore
+    # the fetch + git apply for DEVICE=xpu if this ref ever drops below v1.21.0.
     ./autogen.sh &&      \
     if [ "$DEVICE" = "xpu" ]; then \
      ./contrib/configure-release     \
