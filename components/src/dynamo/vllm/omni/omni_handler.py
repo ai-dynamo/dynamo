@@ -420,13 +420,18 @@ class OmniHandler(BaseOmniHandler):
     ) -> AsyncIterator[Any]:
         """Yield engine outputs after atomically admitting a LoRA request.
 
-        For preloaded adapters, AsyncOmni does not lazily activate like vLLM.
-        However, a concurrent unload_lora could race and call remove_lora while
-        this request is in-flight. Holding the per-adapter lock through the first
-        result ensures the adapter cannot be removed mid-operation.
+        For all adapter requests, holding the per-adapter lock through the first
+        result ensures that concurrent unload_lora cannot call remove_lora while
+        generation is in-flight. This is critical because:
 
-        This mirrors handlers.py:_generate_with_lora_admission_lock pattern:
-        - Hold lock through first result to ensure vLLM admission completes
+        - For lazy-activated adapters (PREFILL mode): Lock protects vLLM's lazy
+          activation bookkeeping from being deleted during admission.
+        - For preloaded adapters (AGGREGATED/DECODE mode): Lock prevents the engine
+          from removing an adapter while this request is actively using it, which
+          could cause generation to fail or produce incorrect results.
+
+        Pattern:
+        - Hold lock through first result to ensure safe admission
         - Re-resolve adapter under lock in case it was unloaded while waiting
         - Yield remaining results after lock is released
 
@@ -435,13 +440,15 @@ class OmniHandler(BaseOmniHandler):
             create_generator: Factory that creates an async result iterator for
                 the admitted adapter.
         """
-        if lora_request is None or self._preload_lora_into_engine():
-            # Base model or preloaded adapters: no lock needed
+        if lora_request is None:
+            # Base model: no lock needed
             async for result in create_generator(lora_request):
                 yield result
             return
 
-        # Hold lock through first result to prevent concurrent unload
+        # Hold lock through first result to prevent concurrent unload_lora from
+        # calling remove_lora while this request is in-flight. This applies to
+        # all adapter modes: lazy-activated (PREFILL) and preloaded (AGGREGATED).
         lock = self._get_lora_lock(lora_request.lora_name)
         async with lock:
             # Re-resolve adapter while holding lock; may have been unloaded/reloaded

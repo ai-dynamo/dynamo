@@ -62,6 +62,9 @@ class BaseOmniHandler(BaseWorkerHandler[Dict[str, Any], Dict[str, Any]]):
         # - list_loras() - query currently loaded adapters
         # BaseWorkerHandler.load_lora() depends on these methods when
         # _preload_lora_into_engine() is True (default for AGGREGATED mode).
+        # NOTE: OmniHandler._generate_with_lora_admission_lock holds the per-adapter
+        # lock through the first result for all adapter requests (including preloaded),
+        # ensuring remove_lora cannot execute while generation is in-flight.
 
         # TODO: Kv publishers not supported yet
         # TODO: Adopt to baseworker initialization pattern
