@@ -37,7 +37,9 @@ pub fn convert_event(
     // No consumer exists for a shared/global index yet (dynamo #10457), so
     // REMOTE and any unrecognized locality fail closed. Absent or LOCAL keeps
     // the event worker-local, matching legacy CPU-offload events that never
-    // carried a locality field.
+    // carried a locality field. The normalizer's preprocess step classifies
+    // these as filtered first; this guard is a defensive backstop for direct
+    // convert_event callers that bypass preprocess.
     if matches!(locality, Some(Locality::Remote | Locality::Unknown)) {
         tracing::trace!(event_id, "Dropping non-local KV event (locality != LOCAL)");
         return None;

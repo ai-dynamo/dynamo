@@ -1066,6 +1066,43 @@ fn test_convert_event_gates_on_locality_and_storage_tier() {
     }
 }
 
+/// Non-local events must be classified as filtered in `preprocess_with_reason`
+/// (so the listener never burns an event id on them). The gate runs before the
+/// lower-tier bypass, so it fires for every tier — Disk/External (which would
+/// otherwise bypass) and Device (GPU) alike.
+#[test]
+fn test_preprocess_rejects_non_local_locality_for_every_tier() {
+    let worker = WorkerWithDpRank::new(3, 0);
+
+    let rejected = [
+        (Some("STORAGE"), Locality::Remote),
+        (Some("STORAGE"), Locality::Unknown),
+        (Some("GPU"), Locality::Remote),
+        (None, Locality::Remote),
+    ];
+    for event_kind in [TestEventKind::BlockStored, TestEventKind::BlockRemoved] {
+        for (medium, locality) in rejected {
+            let mut normalizer = ZmqEventNormalizer::new(2);
+            let raw = raw_placement_event(event_kind, medium, Some(locality));
+            assert_eq!(
+                normalizer.preprocess_with_reason(raw, worker).unwrap_err(),
+                ZmqEventFilterReason::NonLocalLocality,
+                "medium={medium:?} locality={locality:?} must filter as non-local"
+            );
+        }
+    }
+
+    // LOCAL / absent locality still pass preprocess (STORAGE takes the bypass).
+    for locality in [Some(Locality::Local), None] {
+        let mut normalizer = ZmqEventNormalizer::new(2);
+        let raw = raw_placement_event(TestEventKind::BlockStored, Some("STORAGE"), locality);
+        assert!(
+            normalizer.preprocess_with_reason(raw, worker).is_ok(),
+            "STORAGE locality={locality:?} must pass preprocess"
+        );
+    }
+}
+
 /// Mixed-case locality (`"local"`, `"Remote"`) is not UPPERCASE, so it folds to
 /// `Unknown` and the event is dropped — it never decodes to a local placement.
 #[test]

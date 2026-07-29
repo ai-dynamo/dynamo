@@ -65,6 +65,7 @@ struct KvCacheGroupMetadata {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ZmqEventFilterReason {
     IgnoredEvent,
+    NonLocalLocality,
     AmbiguousCacheNamespace,
     NonMainAttentionKind,
     UnknownKind,
@@ -76,6 +77,7 @@ impl ZmqEventFilterReason {
     pub fn as_label(self) -> &'static str {
         match self {
             Self::IgnoredEvent => "ignored_event",
+            Self::NonLocalLocality => "non_local_locality",
             Self::AmbiguousCacheNamespace => "ambiguous_cache_namespace",
             Self::NonMainAttentionKind => "non_main_attention_kind",
             Self::UnknownKind => "unknown_kind",
@@ -125,6 +127,16 @@ impl ZmqEventNormalizer {
     ) -> Result<RawKvEvent, ZmqEventFilterReason> {
         if raw.is_ignored() {
             return Err(ZmqEventFilterReason::IgnoredEvent);
+        }
+
+        // Non-local events are dropped by policy (no shared-index consumer yet).
+        // Classify them here, before the lower-tier bypass, so the gate covers
+        // every tier (including Disk/External). Otherwise the listener would
+        // accept the event, burn a next_event_id, and only drop it in
+        // conversion, leaving an id gap the event processor mistakes for an
+        // engine drop (engines_dropped_events).
+        if matches!(raw.locality(), Some(Locality::Remote | Locality::Unknown)) {
+            return Err(ZmqEventFilterReason::NonLocalLocality);
         }
 
         // Hash-only lower-tier events (STORAGE -> Disk, and External) carry no
