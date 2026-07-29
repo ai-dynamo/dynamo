@@ -564,6 +564,14 @@ shared:
   owners:
   - process
   - agents
+- glob: .github/workflows/fern-docs.yml
+  owners:
+  - ops
+  - docs
+- glob: .lycheeignore
+  owners:
+  - ops
+  - docs
 - glob: lib/llm/src/protocols/agents.rs
   owners:
   - frontend

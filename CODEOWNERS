@@ -594,6 +594,7 @@
 
 # --- Shared ownership: multi-team (any one approves; wins via last-match) ---
 /.agents/                                                                    @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-agents-codeowners
+/.lycheeignore                                                               @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-docs-codeowners
 /tests/deploy/                                                               @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-operator-codeowners
 /docs/fern/agents/                                                           @ai-dynamo/dynamo-docs-codeowners @ai-dynamo/dynamo-agents-codeowners
 /benchmarks/router/                                                          @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-router-codeowners
@@ -612,6 +613,7 @@
 /lib/llm/src/fpm_publisher.rs                                                @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
 /lib/mocker/src/kvbm_offload/                                                @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/kvbm-logical/src/metrics/                                               @ai-dynamo/dynamo-kv-memory-codeowners @ai-dynamo/dynamo-observability-codeowners
+/.github/workflows/fern-docs.yml                                             @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-docs-codeowners
 /lib/llm/src/protocols/agents.rs                                             @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-agents-codeowners
 /lib/runtime/src/health_check.rs                                             @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
 /components/src/dynamo/vllm/omni/                                            @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-multimodal-codeowners
