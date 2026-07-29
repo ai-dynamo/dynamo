@@ -33,7 +33,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from dynamo.common.forward_pass_metrics import (
     ForwardPassMetrics,
@@ -243,7 +243,7 @@ class ReplayPlannerAdapter:
     def __enter__(self) -> ReplayPlannerAdapter:
         return self
 
-    def __exit__(self, exc_type, exc_value, traceback) -> bool:
+    def __exit__(self, exc_type, exc_value, traceback) -> Literal[False]:
         try:
             self.close()
         except BaseException:

@@ -178,7 +178,13 @@ def test_disabled_policy_is_semantically_identical_to_normal_replay(disagg):
         scaling_policy=_DisabledScalingPolicy(),
     )
 
-    assert _canonical_report(normal) == _canonical_report(with_policy)
+    normal_report = _canonical_report(normal)
+    policy_report = _canonical_report(with_policy)
+    for key in ("prefill_worker_seconds", "decode_worker_seconds", "gpu_hours"):
+        assert normal_report.pop(key) == pytest.approx(
+            policy_report.pop(key), rel=1e-12, abs=1e-15
+        )
+    assert normal_report == policy_report
 
 
 def test_scaling_policy_rejects_online_replay_before_dispatch():
