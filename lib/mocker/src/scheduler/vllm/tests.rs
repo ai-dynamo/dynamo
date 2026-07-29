@@ -135,6 +135,50 @@ fn flat_tokens_cover_every_native_g1_configuration() {
 }
 
 #[test]
+fn unset_g1_backend_constructs_native_request_state() {
+    let mut args = router_args();
+    args.g1_backend = None;
+    let mut core = VllmCore::new(args);
+    let uuid = Uuid::from_u128(80_100);
+    core.receive(DirectRequest {
+        tokens: (0..8).collect(),
+        max_output_tokens: 2,
+        uuid: Some(uuid),
+        ..Default::default()
+    });
+
+    assert!(core.request_uses_flat_tokens(uuid));
+}
+
+#[test]
+#[should_panic(expected = "native decode never rolls back a sampled token")]
+fn native_request_state_rejects_decode_rollback() {
+    let mut request = RequestKvState::native(
+        Uuid::from_u128(80_101),
+        vec![1, 2],
+        1,
+        1,
+        4,
+        true,
+        false,
+        false,
+        None,
+    );
+    request.pop();
+}
+
+#[test]
+fn kvbm_request_state_preserves_decode_rollback() {
+    let mut request =
+        RequestKvState::kvbm(ActiveSequence::new(vec![1, 2], 1, Some(4), true, false));
+    let original_len = request.len();
+    request.generate_token();
+    request.pop();
+
+    assert_eq!(request.len(), original_len);
+}
+
+#[test]
 fn flat_storage_capacity_is_bounded_by_realizable_output() {
     const BLOCK_SIZE: usize = 4;
     const MAX_OUTPUT_TOKENS: usize = 1_000_000;

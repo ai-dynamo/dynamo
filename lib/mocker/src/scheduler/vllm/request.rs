@@ -142,10 +142,8 @@ impl RequestKvState {
 
     pub(super) fn pop(&mut self) {
         match self {
-            Self::Native { sequence, lease } => {
-                if sequence.pop_generated_token() {
-                    lease.rollback_partial();
-                }
+            Self::Native { .. } => {
+                unreachable!("native decode never rolls back a sampled token")
             }
             Self::Kvbm(sequence) => sequence.pop(),
         }

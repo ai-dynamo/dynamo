@@ -502,6 +502,68 @@ mod vllm {
     }
 
     #[test]
+    fn same_pass_admission_recomputes_prefix_after_earlier_eviction() {
+        let args = MockEngineArgs::builder()
+            .engine_type(EngineType::Vllm)
+            .g1_backend(G1Backend::Native)
+            .block_size(4)
+            .num_gpu_blocks(3)
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(2))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(true)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new(args);
+        let seed = Uuid::from_u128(105_001);
+        core.receive(DirectRequest {
+            tokens: (100..104).collect(),
+            max_output_tokens: 0,
+            uuid: Some(seed),
+            ..Default::default()
+        });
+        let mut collector = crate::replay::TraceCollector::default();
+        let seed_pass = core.execute_pass(&mut collector, 0.0);
+        assert_eq!(seed_pass.completed_requests, 1);
+        assert!(!core.state().requests.contains_key(&seed));
+
+        let evictor = Uuid::from_u128(105_002);
+        let former_hit = Uuid::from_u128(105_003);
+        core.receive(DirectRequest {
+            tokens: (0..12).collect(),
+            max_output_tokens: 0,
+            uuid: Some(evictor),
+            ..Default::default()
+        });
+        core.receive(DirectRequest {
+            tokens: (100..104).collect(),
+            max_output_tokens: 0,
+            uuid: Some(former_hit),
+            ..Default::default()
+        });
+
+        let pass = core.execute_pass(&mut collector, seed_pass.end_ms);
+        assert_eq!(pass.admissions.len(), 1);
+        assert_eq!(pass.admissions[0].uuid, evictor);
+        assert_eq!(
+            core.state().requests[&former_hit].status,
+            RequestStatus::Waiting
+        );
+        let (sequence, lease) = core.state().requests[&former_hit]
+            .sequence
+            .native_parts()
+            .unwrap();
+        assert_eq!(
+            core.kv_manager
+                .get_native_prefill_cost(sequence, lease)
+                .cached_tokens,
+            0,
+            "the later waiting decision must observe the earlier allocation's eviction"
+        );
+    }
+
+    #[test]
     fn native_g1_exposes_generated_block_at_computed_boundary_in_same_pass() {
         let args = MockEngineArgs::builder()
             .engine_type(EngineType::Vllm)

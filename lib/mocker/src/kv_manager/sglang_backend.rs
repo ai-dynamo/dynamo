@@ -57,6 +57,11 @@ impl RadixRequestLease {
             .reserve_exact(complete_pages.saturating_sub(self.page_hashes.len()));
     }
 
+    #[cfg(test)]
+    pub(crate) fn page_hash_capacity(&self) -> usize {
+        self.page_hashes.capacity()
+    }
+
     pub(crate) fn ensure_page_hashes(&mut self, token_ids: &[u32], page_size: usize) {
         let complete_pages = token_ids.len() / page_size;
         if self.page_hashes.len() >= complete_pages {
@@ -125,8 +130,6 @@ pub struct SglangKvManager {
 pub struct DecodeTokenReservation {
     pages: Vec<KvPageId>,
     next: usize,
-    #[cfg(test)]
-    page_size: usize,
 }
 
 pub struct SglangDestinationReservation {
@@ -162,17 +165,6 @@ impl DecodeTokenReservation {
             .expect("reserved decode page allocation must be infallible");
         self.next += 1;
         page
-    }
-
-    #[cfg(test)]
-    fn take(&mut self, last_idx: Option<usize>) -> usize {
-        if let Some(last_idx) = last_idx
-            && (last_idx + 1) % self.page_size != 0
-        {
-            return last_idx + 1;
-        }
-        let page = self.take_page();
-        page.first_token_index(self.page_size)
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -455,28 +447,12 @@ impl SglangKvManager {
         new_last_node
     }
 
-    /// Allocate a decode token, consuming a new page only at a page boundary.
-    /// Router-visible BlockStored events are published once a full block exists.
-    #[cfg(test)]
-    pub fn allocate_decode_token(&mut self, last_idx: Option<usize>) -> Option<usize> {
-        let mut reservation = self.reserve_decode_pages(usize::from(
-            last_idx.is_none_or(|idx| (idx + 1) % self.cache.page_size() == 0),
-        ))?;
-        let idx = reservation.take(last_idx);
-        Some(idx)
-    }
-
     pub fn reserve_decode_pages(&mut self, count: usize) -> Option<DecodeTokenReservation> {
         let pages = self.cache.page_pool.allocate_pages(count)?;
         if !pages.is_empty() {
             self.log_trace("allocation", pages.len() * self.cache.page_size());
         }
-        Some(DecodeTokenReservation {
-            pages,
-            next: 0,
-            #[cfg(test)]
-            page_size: self.cache.page_size(),
-        })
+        Some(DecodeTokenReservation { pages, next: 0 })
     }
 
     pub(crate) fn reserve_destination_lease(
@@ -518,15 +494,6 @@ impl SglangKvManager {
             missing_tokens: token_count.saturating_sub(prefix_len),
             allocated_tokens,
         })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn reserve_destination(
-        &mut self,
-        token_ids: &[u32],
-    ) -> Option<SglangDestinationReservation> {
-        let hashes = self.cache.page_hashes(token_ids);
-        self.reserve_destination_lease(&hashes, token_ids.len())
     }
 
     pub(crate) fn activate_destination_lease(
@@ -579,11 +546,6 @@ impl SglangKvManager {
         }
         self.cache.page_pool.free_pages(&pages);
         self.log_trace("release_unpublished", pages.len() * self.cache.page_size());
-    }
-
-    #[cfg(test)]
-    fn free_request(&mut self, last_node: NodeId) {
-        self.cache.dec_lock_ref(last_node);
     }
 
     fn release_active_lease(&mut self, lease: &mut RadixRequestLease) -> bool {
@@ -931,42 +893,6 @@ impl SglangKvManager {
         hashed_blocks
     }
 
-    #[cfg(test)]
-    fn publish_stored_event(
-        &mut self,
-        token_ids: &[u32],
-        pages: &[KvPageId],
-        num_tokens: usize,
-        first_new_token: usize,
-    ) -> usize {
-        let page_hashes = self.cache.page_hashes(token_ids);
-        self.publish_stored_hashes(&page_hashes, pages, num_tokens, first_new_token)
-    }
-
-    #[cfg(test)]
-    fn cache_finished_req(
-        &mut self,
-        token_ids: &[u32],
-        pages: &[KvPageId],
-        last_node: NodeId,
-        first_new_token: usize,
-    ) {
-        let page_hashes = self.cache.page_hashes(token_ids);
-        self.cache_finished_hashes(&page_hashes, pages, last_node, first_new_token);
-    }
-
-    #[cfg(test)]
-    fn cache_unfinished_req(
-        &mut self,
-        token_ids: &[u32],
-        pages: &mut [KvPageId],
-        last_node: NodeId,
-        first_new_token: usize,
-    ) -> NodeId {
-        let page_hashes = self.cache.page_hashes(token_ids);
-        self.cache_unfinished_hashes(&page_hashes, pages, last_node, first_new_token)
-    }
-
     fn publish_removed_pages(&mut self, evicted_pages: &[KvPageId]) {
         if self.kv_event_publishers.is_empty() {
             return;
@@ -1018,6 +944,12 @@ mod tests {
     use dynamo_kv_router::protocols::{RouterEvent, WorkerId, compute_seq_hash_for_block};
 
     const ROUTER_TEST_WORKER_ID: WorkerId = 31;
+
+    fn lease_with_hashes(tokens: &[u32], page_size: usize) -> RadixRequestLease {
+        let mut lease = RadixRequestLease::default();
+        lease.ensure_page_hashes(tokens, page_size);
+        lease
+    }
 
     struct MockSink {
         events: Mutex<Vec<KvCacheEvent>>,
@@ -1171,7 +1103,7 @@ mod tests {
     fn partially_consumed_decode_reservation_releases_only_unused_slots() {
         let mut mgr = SglangKvManager::new(4, 1, KvEventPublishers::default(), 0);
         let mut reservation = mgr.reserve_decode_pages(3).unwrap();
-        let consumed = reservation.take(None);
+        let consumed = reservation.take_page();
         assert_eq!(reservation.len(), 2);
         let mut expected_unused = reservation.pages[reservation.next..].to_vec();
 
@@ -1187,7 +1119,7 @@ mod tests {
         reallocated.sort_unstable();
         assert_eq!(reallocated, expected_unused);
         assert!(reallocated.windows(2).all(|pair| pair[0] != pair[1]));
-        assert!(!reallocated.contains(&KvPageId::from_token_index(consumed, 1)));
+        assert!(!reallocated.contains(&consumed));
     }
 
     #[test]
@@ -1315,7 +1247,7 @@ mod tests {
         // First request: allocate and cache
         let r1 = mgr.allocate_for_request(&[1, 2, 3, 4, 5]).unwrap();
         assert_eq!(r1.lease.pages.len(), 5);
-        mgr.cache_finished_req(&[1, 2, 3, 4, 5], &r1.lease.pages, r1.lease.last_node(), 0);
+        mgr.finish(&[1, 2, 3, 4, 5], r1.lease);
 
         // Second request with shared prefix
         let r2 = mgr.allocate_for_request(&[1, 2, 3, 4, 5, 6, 7]).unwrap();
@@ -1329,8 +1261,9 @@ mod tests {
         let mut mgr = SglangKvManager::new(64, 4, KvEventPublishers::default(), 0);
         let prompt = (0..10).collect::<Vec<_>>();
 
+        let cold_lease = lease_with_hashes(&prompt, 4);
         let cold = mgr
-            .reserve_destination(&prompt)
+            .reserve_destination_lease(cold_lease.page_hashes(), prompt.len())
             .expect("cold destination reservation should fit");
         assert_eq!(cold.transferable_prompt_tokens(), 12);
         mgr.cancel_destination(cold);
@@ -1339,14 +1272,10 @@ mod tests {
         let prefix = mgr
             .allocate_for_request(prefix_tokens)
             .expect("prefix allocation should fit");
-        mgr.cache_finished_req(
-            prefix_tokens,
-            &prefix.lease.pages,
-            prefix.lease.last_node(),
-            prefix.prefix_len,
-        );
+        mgr.finish(prefix_tokens, prefix.lease);
+        let partial_lease = lease_with_hashes(&prompt, 4);
         let partial = mgr
-            .reserve_destination(&prompt)
+            .reserve_destination_lease(partial_lease.page_hashes(), prompt.len())
             .expect("partially cached destination reservation should fit");
         assert_eq!(partial.transferable_prompt_tokens(), 8);
         mgr.cancel_destination(partial);
@@ -1355,14 +1284,10 @@ mod tests {
         let aligned = mgr
             .allocate_for_request(&aligned_tokens)
             .expect("aligned prompt allocation should fit");
-        mgr.cache_finished_req(
-            &aligned_tokens,
-            &aligned.lease.pages,
-            aligned.lease.last_node(),
-            aligned.prefix_len,
-        );
+        mgr.finish(&aligned_tokens, aligned.lease);
+        let full_hit_lease = lease_with_hashes(&aligned_tokens, 4);
         let full_hit = mgr
-            .reserve_destination(&aligned_tokens)
+            .reserve_destination_lease(full_hit_lease.page_hashes(), aligned_tokens.len())
             .expect("fully cached destination reservation should fit");
         assert_eq!(full_hit.transferable_prompt_tokens(), 0);
     }
@@ -1372,9 +1297,9 @@ mod tests {
         let mut mgr = SglangKvManager::new(100, 1, KvEventPublishers::default(), 0);
 
         let result = mgr.allocate_for_request(&[1, 2, 3]).unwrap();
-        mgr.free_request(result.lease.last_node());
+        assert!(mgr.abort(result.lease));
 
-        // Path is unlocked, tokens still allocated in pool
+        // The request path is unlocked and its private pages are returned.
         assert_eq!(mgr.cache().protected_size, 0);
     }
 
@@ -1387,7 +1312,7 @@ mod tests {
         let r = mgr.allocate_for_request(&[1, 2, 3]).unwrap();
         assert_eq!(sink.event_count(), 1); // BlockStored for 3 new pages
 
-        mgr.cache_finished_req(&[1, 2, 3], &r.lease.pages, r.lease.last_node(), 0);
+        mgr.finish(&[1, 2, 3], r.lease);
 
         // Second request with full cache hit → no new events
         let r2 = mgr.allocate_for_request(&[1, 2, 3]).unwrap();
@@ -1402,7 +1327,7 @@ mod tests {
             SglangKvManager::new(100, 4, KvEventPublishers::new(Some(sink.clone()), None), 0);
 
         let r = mgr.allocate_for_request(&[1, 2, 3, 4, 5, 6]).unwrap();
-        mgr.cache_finished_req(&[1, 2, 3, 4, 5, 6], &r.lease.pages, r.lease.last_node(), 0);
+        mgr.finish(&[1, 2, 3, 4, 5, 6], r.lease);
 
         let events = sink.clone_events();
         assert_eq!(events.len(), 1);
@@ -1428,10 +1353,20 @@ mod tests {
             SglangKvManager::new(16, 4, KvEventPublishers::new(Some(sink.clone()), None), 0);
         let tokens = [1, 2, 3, 4, 5, 6, 7, 8];
         let pages = mgr.cache_mut().page_pool.allocate_pages(2).unwrap();
+        let lease = lease_with_hashes(&tokens, 4);
 
-        assert_eq!(mgr.publish_stored_event(&tokens[..4], &pages[..1], 4, 0), 1);
-        assert_eq!(mgr.publish_stored_event(&tokens, &pages, 8, 0), 1);
-        assert_eq!(mgr.publish_stored_event(&tokens, &pages, 8, 0), 0);
+        assert_eq!(
+            mgr.publish_stored_hashes(lease.page_hashes_through(4, 4), &pages[..1], 4, 0),
+            1
+        );
+        assert_eq!(
+            mgr.publish_stored_hashes(lease.page_hashes_through(8, 4), &pages, 8, 0),
+            1
+        );
+        assert_eq!(
+            mgr.publish_stored_hashes(lease.page_hashes_through(8, 4), &pages, 8, 0),
+            0
+        );
 
         let events = sink.clone_events();
         assert_eq!(events.len(), 2);
@@ -1453,16 +1388,11 @@ mod tests {
         let tokens = [1, 2, 3, 4, 5, 6];
 
         let mut alloc = mgr.allocate_for_request(&tokens[..2]).unwrap();
-        let alloc_last_node = alloc.lease.last_node();
-        let first_last_node =
-            mgr.cache_unfinished_req(&tokens[..2], &mut alloc.lease.pages, alloc_last_node, 0);
-
-        let mut pages = alloc.lease.pages;
-        pages.extend_from_slice(&mgr.cache_mut().page_pool.allocate_pages(2).unwrap());
+        mgr.extend_cached_prefix(&tokens[..2], &mut alloc.lease);
         mgr.kv_event_publishers = KvEventPublishers::new(Some(sink.clone()), None);
 
-        let last_after_first_cache =
-            mgr.cache_unfinished_req(&tokens[..4], &mut pages[..2], first_last_node, 2);
+        assert!(mgr.extend_allocation(&tokens[..4], &mut alloc.lease));
+        mgr.extend_cached_prefix(&tokens[..4], &mut alloc.lease);
         let events = sink.clone_events();
         assert_eq!(events.len(), 1);
         let KvCacheEventData::Stored(first_store) = &events[0].data else {
@@ -1474,7 +1404,8 @@ mod tests {
             "first unfinished cache should store only the newly completed block"
         );
 
-        mgr.cache_finished_req(&tokens, &pages, last_after_first_cache, 4);
+        assert!(mgr.extend_allocation(&tokens, &mut alloc.lease));
+        mgr.finish(&tokens, alloc.lease);
         let events = sink.clone_events();
         assert_eq!(events.len(), 2);
         let KvCacheEventData::Stored(final_store) = &events[1].data else {
@@ -1540,7 +1471,7 @@ mod tests {
         assert_eq!(query_hashes.len(), tokens.len());
         harness.apply_events(allocation_events).await;
 
-        mgr.cache_finished_req(&tokens, &req1.lease.pages, req1.lease.last_node(), 0);
+        mgr.finish(&tokens, req1.lease);
         let req1_completion_events = buffer.drain();
         assert_eq!(
             stored_event_count(&req1_completion_events),
@@ -1558,7 +1489,7 @@ mod tests {
             "canonical completion should retain the first request's slots"
         );
 
-        mgr.cache_finished_req(&tokens, &req2.lease.pages, req2.lease.last_node(), 0);
+        mgr.finish(&tokens, req2.lease);
         let req2_completion_events = buffer.drain();
         assert_eq!(
             stored_event_count(&req2_completion_events),
@@ -1742,9 +1673,10 @@ mod tests {
         let mut alloc = mgr.allocate_for_request(&tokens).unwrap();
         let events_before = sink.event_count();
         let last_node = alloc.lease.last_node();
+        let page_hashes = alloc.lease.page_hashes().to_vec();
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            mgr.cache_unfinished_req(&tokens, &mut alloc.lease.pages, last_node, 2)
+            mgr.cache_unfinished_hashes(&page_hashes, &mut alloc.lease.pages, last_node, 2)
         }));
 
         assert!(result.is_err());
@@ -1761,9 +1693,10 @@ mod tests {
         alloc.lease.pages.truncate(1);
         let events_before = sink.event_count();
         let last_node = alloc.lease.last_node();
+        let page_hashes = alloc.lease.page_hashes().to_vec();
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            mgr.cache_unfinished_req(&tokens, &mut alloc.lease.pages, last_node, 0)
+            mgr.cache_unfinished_hashes(&page_hashes, &mut alloc.lease.pages, last_node, 0)
         }));
 
         assert!(result.is_err());
@@ -1790,16 +1723,10 @@ mod tests {
         let chunk2_len = 6;
 
         let mut alloc1 = mgr.allocate_for_request(&tokens[..chunk1_len]).unwrap();
-        let previous_last = alloc1.lease.last_node();
-        let new_last = mgr.cache_unfinished_req(
-            &tokens[..chunk1_len],
-            &mut alloc1.lease.pages,
-            previous_last,
-            0,
-        );
+        mgr.extend_cached_prefix(&tokens[..chunk1_len], &mut alloc1.lease);
 
         let alloc2 = mgr.allocate_for_request(&tokens[..chunk2_len]).unwrap();
-        mgr.free_request(new_last);
+        assert!(mgr.abort(alloc1.lease));
 
         let events = sink.events.lock().unwrap();
         assert_eq!(events.len(), 2, "expected two stored events");

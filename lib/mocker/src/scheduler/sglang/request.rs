@@ -24,13 +24,13 @@ pub(super) struct SglangRequest {
 }
 
 impl SglangRequest {
-    pub(super) fn new(req: DirectRequest, block_size: usize) -> Self {
+    pub(super) fn new(req: DirectRequest, block_size: usize, output_storage_hint: usize) -> Self {
         let prompt_len = req.tokens.len();
         let max_output_tokens = req
             .output_token_ids
             .as_ref()
             .map_or(req.max_output_tokens, Vec::len);
-        let output_capacity = max_output_tokens;
+        let output_capacity = output_storage_hint.min(max_output_tokens);
         let mut sequence_tokens = req.tokens;
         sequence_tokens.reserve_exact(output_capacity);
         let completion_pages = sequence_tokens
@@ -109,6 +109,14 @@ impl SglangRequest {
     #[cfg(test)]
     pub(super) fn output_tokens(&self) -> &[u32] {
         &self.sequence_tokens[self.prompt_len..]
+    }
+
+    #[cfg(test)]
+    pub(super) fn storage_capacities(&self) -> (usize, usize) {
+        (
+            self.sequence_tokens.capacity(),
+            self.kv_lease.page_hash_capacity(),
+        )
     }
 
     pub(super) fn next_output_token(&self) -> u32 {

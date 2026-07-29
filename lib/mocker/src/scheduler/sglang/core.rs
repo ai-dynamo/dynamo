@@ -243,7 +243,7 @@ impl SglangCore {
                 {
                     anyhow::bail!("destination handoff {handoff_id:?} is already active");
                 }
-                let request = SglangRequest::new(request, self.config.block_size);
+                let request = self.build_request(request);
                 let prompt_footprint = request
                     .prompt_len()
                     .div_ceil(self.config.block_size)
@@ -366,7 +366,7 @@ impl SglangCore {
     }
 
     fn submit(&mut self, request: DirectRequest) -> anyhow::Result<Uuid> {
-        let request = SglangRequest::new(request, self.config.block_size);
+        let request = self.build_request(request);
         if self.request_is_active(request.uuid) {
             anyhow::bail!("request {} is already active", request.uuid);
         }
@@ -374,6 +374,19 @@ impl SglangCore {
         let uuid = request.uuid;
         self.waiting.push_back(request);
         Ok(uuid)
+    }
+
+    fn build_request(&self, request: DirectRequest) -> SglangRequest {
+        let max_output_tokens = request
+            .output_token_ids
+            .as_ref()
+            .map_or(request.max_output_tokens, Vec::len);
+        let output_storage_hint = self.config.output_storage_hint(
+            request.tokens.len(),
+            max_output_tokens,
+            request.output_token_ids.is_some(),
+        );
+        SglangRequest::new(request, self.config.block_size, output_storage_hint)
     }
 
     fn complete_source(&mut self, request: SglangRequest) {
@@ -546,6 +559,27 @@ impl SglangCore {
         self.prebuilt_ready
             .iter()
             .find(|request| request.uuid == uuid)
+    }
+
+    #[cfg(test)]
+    pub(super) fn request_storage_capacities(&self, uuid: Uuid) -> Option<(usize, usize)> {
+        self.waiting
+            .iter()
+            .chain(&self.prebuilt_ready)
+            .chain(&self.running)
+            .find(|request| request.uuid == uuid)
+            .or_else(|| {
+                self.pending_destinations
+                    .payloads()
+                    .find(|request| request.uuid == uuid)
+            })
+            .or_else(|| {
+                self.destination_holds
+                    .payloads()
+                    .map(|reservation| &reservation.request)
+                    .find(|request| request.uuid == uuid)
+            })
+            .map(SglangRequest::storage_capacities)
     }
 
     fn bump_capacity_generation(&mut self) {

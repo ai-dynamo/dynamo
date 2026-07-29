@@ -91,17 +91,6 @@ impl BlockRequestLease {
         });
     }
 
-    pub(crate) fn rollback_partial(&mut self) {
-        let entry = self
-            .entries
-            .pop()
-            .expect("native rollback requires a partial tail");
-        assert!(
-            entry.identity.sequence_hash.is_none() && entry.copy.is_none(),
-            "native rollback may remove only an unallocated partial tail"
-        );
-    }
-
     fn debug_assert_owner(&self, owner: Uuid) {
         debug_assert_eq!(self.owner, owner, "native lease owner mismatch");
     }
@@ -239,7 +228,10 @@ impl VllmKvManager {
             reusable_prefix_blocks == 0 || previous_blocks == 0,
             "only a request's first allocation may reuse a prefix"
         );
-        assert!(reusable_prefix_blocks <= target_blocks - previous_blocks);
+        assert!(
+            reusable_prefix_blocks <= target_blocks - previous_blocks,
+            "reusable prefix exceeds the newly allocated block range"
+        );
         assert!(self.enable_prefix_caching || reusable_prefix_blocks == 0);
 
         let count = target_blocks - previous_blocks;
@@ -332,7 +324,8 @@ impl VllmKvManager {
             return;
         }
 
-        let materialize_store_events = self.materialize_store_events();
+        let materialize_store_events =
+            self.enable_prefix_caching && self.materialize_store_events();
         let mut stores = materialize_store_events
             .then(|| Vec::with_capacity(completed_blocks - first_new_block));
         for position in first_new_block..completed_blocks {
@@ -835,6 +828,29 @@ mod tests {
         ready(manager.allocate_lease(second, &mut second_lease, 4, 1));
         assert_eq!(manager.num_active_blocks(), 1);
         assert_eq!(manager.num_inactive_blocks(), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "only a request's first allocation may reuse a prefix")]
+    fn later_native_allocation_rejects_prefix_reuse() {
+        let mut manager =
+            VllmKvManager::new_with_event_sink(2, 4, true, KvEventPublishers::default(), 0);
+        let owner = Uuid::from_u128(3);
+        let (_, mut lease) = request(owner, &[7, 8], false);
+        ready(manager.allocate_lease(owner, &mut lease, 4, 0));
+
+        let _ = manager.allocate_lease(owner, &mut lease, 8, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "reusable prefix exceeds the newly allocated block range")]
+    fn native_allocation_rejects_excessive_reusable_prefix() {
+        let mut manager =
+            VllmKvManager::new_with_event_sink(2, 4, true, KvEventPublishers::default(), 0);
+        let owner = Uuid::from_u128(4);
+        let (_, mut lease) = request(owner, &[7, 8], false);
+
+        let _ = manager.allocate_lease(owner, &mut lease, 4, 2);
     }
 
     #[test]
