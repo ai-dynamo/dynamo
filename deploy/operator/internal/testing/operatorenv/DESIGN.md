@@ -79,5 +79,6 @@ cycle.
 ## Scope
 
 `operatorenv` owns API-server, namespace, webhook, and controller-manager
-lifecycle. It does not own YAML fixture loading or expected-manifest matching.
-Those APIs should be introduced with the first controller test that uses them.
+lifecycle. It does not own YAML fixture loading or expected-manifest matching;
+the separate `internal/testing/golden` package provides that API for both
+`operatorenv` and `clusterenv` clients.

@@ -1,13 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# TODO(DIS-2240): Remove deprecated multimodal flags across engine
-
 """Dynamo TRT-LLM backend configuration ArgGroup."""
 
 import argparse
-import logging
-import warnings
 from typing import Optional
 
 # trtllm >= 1.3.0rc21 removed BuildConfig; its fields moved to BaseLlmArgs
@@ -30,13 +26,6 @@ from .constants import DisaggregationMode, Modality
 DEFAULT_MODEL = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 CANONICAL_AGGREGATED_MODE = "agg"
 PREFILL_DECODE_DISAGGREGATION_MODE = "pd"
-
-logger = logging.getLogger(__name__)
-
-
-def _warn_deprecated(message: str) -> None:
-    logger.warning(message)
-    warnings.warn(message, DeprecationWarning, stacklevel=3)
 
 
 class DynamoTrtllmArgGroup(ArgGroup):
@@ -216,13 +205,16 @@ class DynamoTrtllmArgGroup(ArgGroup):
             choices=[
                 CANONICAL_AGGREGATED_MODE,
                 PREFILL_DECODE_DISAGGREGATION_MODE,
-                *[mode.value for mode in DisaggregationMode],
+                *[
+                    mode.value
+                    for mode in DisaggregationMode
+                    if mode != DisaggregationMode.AGGREGATED
+                ],
             ],
             help=(
                 "Worker disaggregation mode. Use 'agg' for aggregated serving, "
                 "'pd' for a combined prefill+decode worker, 'prefill', "
-                "'decode', or 'encode'. The legacy "
-                "'prefill_and_decode' value remains accepted temporarily."
+                "'decode', or 'encode'."
             ),
         )
         add_negatable_bool_argument(
@@ -532,20 +524,18 @@ class DynamoTrtllmConfig(ConfigBase):
 
     def validate(self) -> None:
         if isinstance(self.disaggregation_mode, str):
+            if self.disaggregation_mode == DisaggregationMode.AGGREGATED.value:
+                raise ValueError(
+                    "--disaggregation-mode=prefill_and_decode is no longer supported; "
+                    "use --disaggregation-mode=agg for aggregated serving or "
+                    "--disaggregation-mode=pd for a combined prefill+decode worker."
+                )
             if self.disaggregation_mode in {
                 CANONICAL_AGGREGATED_MODE,
                 PREFILL_DECODE_DISAGGREGATION_MODE,
             }:
                 self.disaggregation_mode = DisaggregationMode.AGGREGATED
             else:
-                if self.disaggregation_mode == DisaggregationMode.AGGREGATED.value:
-                    _warn_deprecated(
-                        "--disaggregation-mode=prefill_and_decode is deprecated; "
-                        "use --disaggregation-mode=agg for aggregated serving or "
-                        "--disaggregation-mode=pd for a combined prefill+decode "
-                        "worker. This release will map the legacy value to the "
-                        "new argument."
-                    )
                 self.disaggregation_mode = DisaggregationMode(self.disaggregation_mode)
         if isinstance(self.modality, str):
             self.modality = Modality(self.modality)

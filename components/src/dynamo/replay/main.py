@@ -867,10 +867,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--report-jsonl",
         default=None,
-        help="optional path to emit one JSON object per request (offline disagg replay only). "
+        help="optional path to emit one JSON object per request for trace-file replay. "
         "Useful for per-request analysis (TTFT vs ISL scatter, ITL trace per request, "
         "worker-residency analysis). Each line carries arrival/admit/token timestamps, "
-        "input/output lengths, full ITL series, and prefill/decode worker indices "
+        "input/output lengths, full ITL series, and available prefill/decode worker indices "
         "(prefill_worker_idx=None indicates a conditional-prefill bypass).",
     )
     parser.add_argument(
@@ -967,8 +967,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
 
     if args.report_jsonl is not None:
-        if args.replay_mode != "offline":
-            parser.error("--report-jsonl only supports --replay-mode=offline")
         if args.planner_config is not None:
             parser.error("--report-jsonl is not supported with --planner-config")
         if not using_trace_file:
@@ -982,14 +980,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             parser.error(
                 "--max-sim-time-seconds currently only supports trace-file replay"
             )
-    if (
-        any(v is not None for v in (args.sla_ttft_ms, args.sla_itl_ms, args.sla_e2e_ms))
-        and args.planner_config is None
-    ):
-        parser.error(
-            "goodput SLA (--sla-ttft-ms/--sla-itl-ms/--sla-e2e-ms) currently requires --planner-config"
-        )
-
     extra_engine_args = _load_engine_args(args.extra_engine_args)
     prefill_engine_args = _load_engine_args(args.prefill_engine_args)
     decode_engine_args = _load_engine_args(args.decode_engine_args)
@@ -1094,6 +1084,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             report_jsonl_path=args.report_jsonl,
             max_sim_time_ms=max_sim_time_ms,
             model_name=args.model_name,
+            sla_ttft_ms=args.sla_ttft_ms,
+            sla_itl_ms=args.sla_itl_ms,
+            sla_e2e_ms=args.sla_e2e_ms,
         )
     else:
         report = run_synthetic_trace_replay(
@@ -1120,6 +1113,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             num_prefix_groups=args.num_prefix_groups,
             inter_turn_delay_ms=args.inter_turn_delay_ms,
             model_name=args.model_name,
+            sla_ttft_ms=args.sla_ttft_ms,
+            sla_itl_ms=args.sla_itl_ms,
+            sla_e2e_ms=args.sla_e2e_ms,
         )
 
     report_path = write_report_json(report, args.report_json)

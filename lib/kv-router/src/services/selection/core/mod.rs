@@ -736,13 +736,13 @@ impl SelectionCore {
                 request_id: selection_id.clone(),
             }
         };
+        let track_prefill_tokens = router_config_override
+            .as_ref()
+            .and_then(|cfg| cfg.track_prefill_tokens)
+            .unwrap_or(self.kv_router_config.router_track_prefill_tokens);
         // `select` (book == false) with a selection_id caches the booking inputs
         // so a follow-up `create_reservation` can replay them by that id.
         let cached_inputs = (!book).then(|| selection_id.clone()).flatten().map(|id| {
-            let track_prefill_tokens = router_config_override
-                .as_ref()
-                .and_then(|cfg| cfg.track_prefill_tokens)
-                .unwrap_or(self.kv_router_config.router_track_prefill_tokens);
             (
                 id,
                 sequence_hashes.clone(),
@@ -750,6 +750,10 @@ impl SelectionCore {
                 track_prefill_tokens,
             )
         });
+        let response_sequence_hashes =
+            book.then(|| sequence_hashes.iter().map(|hash| *hash as i64).collect());
+        let response_isl_tokens = book.then_some(isl_tokens);
+        let response_track_prefill_tokens = book.then_some(track_prefill_tokens);
         let schedule_request = ScheduleRequest {
             mode,
             token_seq: Some(sequence_hashes),
@@ -810,6 +814,9 @@ impl SelectionCore {
 
         Ok(SelectResponse {
             selection_id,
+            sequence_hashes: response_sequence_hashes,
+            isl_tokens: response_isl_tokens,
+            track_prefill_tokens: response_track_prefill_tokens,
             model_name: key.model_name,
             routing_group: key.routing_group,
             worker_id: response.best_worker.worker_id,
@@ -949,12 +956,14 @@ impl SelectionCore {
             .transpose()?;
         let worker = WorkerWithDpRank::new(worker_id, req.dp_rank.unwrap_or(0));
         let endpoint = self.schedulable_endpoint(worker.worker_id, &key)?;
-        let track_prefill_tokens = req.effective_prefill_tokens.is_some()
-            || req
-                .router_config_override
-                .as_ref()
-                .and_then(|cfg| cfg.track_prefill_tokens)
-                .unwrap_or(self.kv_router_config.router_track_prefill_tokens);
+        let track_prefill_tokens = req.track_prefill_tokens.unwrap_or_else(|| {
+            req.effective_prefill_tokens.is_some()
+                || req
+                    .router_config_override
+                    .as_ref()
+                    .and_then(|cfg| cfg.track_prefill_tokens)
+                    .unwrap_or(self.kv_router_config.router_track_prefill_tokens)
+        });
 
         self.finalize_reservation(
             entry,
@@ -1493,6 +1502,7 @@ mod tests {
                 router_config_override: None,
                 expected_output_tokens: None,
                 effective_prefill_tokens: None,
+                track_prefill_tokens: None,
             })
             .await
             .expect_err("reservation should fail after shutdown");
@@ -1586,6 +1596,7 @@ mod tests {
                 router_config_override: None,
                 expected_output_tokens: None,
                 effective_prefill_tokens: Some(8),
+                track_prefill_tokens: None,
             })
             .await
             .expect("occupy worker");
