@@ -268,6 +268,41 @@ async fn typed_handoff_routes_output_and_lifecycle_for_supported_engines() {
 }
 
 #[tokio::test]
+async fn stale_handoff_control_cannot_mutate_a_replacement_registration() {
+    let engine = LiveEngine::start(handoff_args(EngineType::Vllm, WorkerType::Decode), 0).unwrap();
+    let handoff_id = HandoffId::from(Uuid::new_v4());
+    let (stale_control, stale_events) = engine.register_handoff(handoff_id).unwrap();
+    drop(stale_events);
+
+    let (current_control, mut current_events) = engine.register_handoff(handoff_id).unwrap();
+    let (registration, mut request) = engine
+        .prepare_request(DirectRequest {
+            tokens: vec![1, 2, 3, 4],
+            max_output_tokens: 1,
+            output_token_ids: Some(vec![43]),
+            uuid: Some(Uuid::new_v4()),
+            ..Default::default()
+        })
+        .unwrap();
+    current_control
+        .reserve_destination(registration)
+        .await
+        .unwrap();
+    assert!(matches!(
+        current_events.recv().await,
+        Some(LiveHandoffEvent::DestinationReserved { .. })
+    ));
+
+    let error = stale_control.cancel_destination().await.unwrap_err();
+    assert!(error.to_string().contains("earlier registration"));
+    current_control.activate_destination().await.unwrap();
+    let output = request.recv().await.unwrap();
+    assert_eq!(output.token_id, Some(43));
+    assert!(output.completed);
+    engine.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn queued_output_does_not_reach_a_reused_request_id() {
     let (gate_tx, gate_rx) = watch::channel(false);
     let engine =
@@ -666,5 +701,10 @@ async fn shutdown_surfaces_admission_forwarding_failure() {
     assert!(
         format!("{error:#}").contains("admission receiver closed"),
         "{error:#}"
+    );
+    let repeated_error = engine.shutdown().await.unwrap_err();
+    assert!(
+        format!("{repeated_error:#}").contains("admission receiver closed"),
+        "{repeated_error:#}"
     );
 }
