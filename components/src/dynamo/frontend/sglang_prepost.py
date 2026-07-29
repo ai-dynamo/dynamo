@@ -116,6 +116,21 @@ def _normalize_sglang_parser_name(parser_name: str | None) -> str | None:
     return _SGLANG_PARSER_NAME_ALIASES.get(parser_name, parser_name)
 
 
+# SGLang ``reasoning_default`` modes this frontend implements, mirroring the
+# dispatch in ``serving_chat._get_reasoning_from_request``. A mode outside this
+# set is reported rather than silently ignored -- see _sglang_reasoning_default.
+_SGLANG_REASONING_MODES = frozenset(
+    {
+        "always",
+        "mistral",
+        "thinking",
+        "enable_thinking",
+        "explicit_thinking",
+        "explicit_enable_thinking",
+    }
+)
+
+
 @lru_cache(maxsize=64)
 def _sglang_reasoning_default(parser_name: str) -> str | None:
     """Return SGLang's own ``reasoning_default`` for ``parser_name``.
@@ -135,16 +150,38 @@ def _sglang_reasoning_default(parser_name: str) -> str | None:
     ``<|close|>think<|sep|>`` marker leaked into ``content``.
 
     Ask SGLang instead. Returns None when the parser is unknown to this SGLang
-    build, in which case the caller falls back to the static tables.
+    build, or declares a mode this dispatch does not implement, in which case
+    the caller falls back to the static tables.
     """
     try:
         detector = ReasoningParser(model_type=parser_name).detector
-    except Exception:
-        # Unknown to this SGLang build: ReasoningParser raises on an
-        # unrecognised model_type. Fall back to the static tables rather than
-        # failing the request.
+    except ValueError:
+        # The parser is unknown to this SGLang build: ReasoningParser raises
+        # ValueError("Unsupported model type: ...") for a name outside its
+        # DetectorMap. That is the expected fallback path, so it is not logged.
+        # Any other exception is a genuine SGLang failure and must propagate.
         return None
-    return getattr(detector, "reasoning_default", None)
+
+    # Deliberately a direct attribute access, not getattr(..., None): every
+    # detector inherits reasoning_default from BaseReasoningFormatDetector, so
+    # its absence means the detector contract has changed and we want the
+    # AttributeError rather than a silent fallback.
+    mode = detector.reasoning_default
+
+    if mode not in _SGLANG_REASONING_MODES:
+        # SGLang knows this parser but declares a mode we do not implement --
+        # a new mode added upstream. Falling back to the static tables here
+        # would silently reintroduce exactly the miss this function exists to
+        # prevent, so say so. lru_cache keeps this to once per parser.
+        logger.warning(
+            "sglang reasoning parser %r declares reasoning_default=%r, which "
+            "this frontend does not implement; falling back to the static "
+            "thinking tables. Reasoning enablement may be wrong for this model.",
+            parser_name,
+            mode,
+        )
+        return None
+    return mode
 
 
 def _force_reasoning_from_sglang_default(
@@ -153,7 +190,9 @@ def _force_reasoning_from_sglang_default(
     """Apply SGLang's ``reasoning_default`` semantics; None if not applicable.
 
     Mirrors the mode dispatch in
-    ``serving_chat._get_reasoning_from_request``.
+    ``serving_chat._get_reasoning_from_request``. ``mode`` is None when the
+    parser is unknown to this SGLang build or declares an unimplemented mode;
+    both mean "fall back to the static tables".
     """
     if mode is None:
         return None
@@ -170,7 +209,10 @@ def _force_reasoning_from_sglang_default(
     if mode in ("explicit_thinking", "explicit_enable_thinking"):
         toggle = mode.replace("explicit_", "")
         return kwargs.get(toggle) is True
-    return None
+    # Unreachable: _sglang_reasoning_default only returns a mode in
+    # _SGLANG_REASONING_MODES, and every member is handled above. Kept so the
+    # two stay honest if a mode is ever added to the set without a branch here.
+    raise AssertionError(f"unhandled sglang reasoning_default mode: {mode!r}")
 
 
 def resolve_request_force_reasoning(

@@ -14,9 +14,13 @@ template, so ``reasoning_content`` came back null and the raw
 ``<|close|>think<|sep|>`` marker leaked into ``content``.
 """
 
+import logging
+
 import pytest
+from sglang.srt.parser.reasoning_parser import ReasoningParser
 
 from dynamo.frontend.sglang_prepost import (
+    _SGLANG_REASONING_MODES,
     _sglang_reasoning_default,
     resolve_request_force_reasoning,
 )
@@ -121,3 +125,67 @@ class TestFallback:
 
     def test_no_parser_disables_reasoning(self):
         assert _resolve(None, {}, template_default=True) is False
+
+
+class TestModeCoverage:
+    """Guard the assumption that the dispatch covers what SGLang declares.
+
+    Without this, SGLang adding a new ``reasoning_default`` value would silently
+    route every affected model back to the static tables -- reintroducing the
+    exact silent miss this change exists to remove. This test fails loudly
+    instead.
+    """
+
+    def test_every_registered_detector_mode_is_implemented(self):
+        detector_map = getattr(ReasoningParser, "DetectorMap", None)
+        if not detector_map:
+            pytest.skip("this sglang build exposes no DetectorMap")
+
+        unimplemented = {}
+        for name in sorted(detector_map):
+            try:
+                mode = ReasoningParser(model_type=name).detector.reasoning_default
+            except Exception:  # pragma: no cover - detector needs extra deps
+                continue
+            if mode not in _SGLANG_REASONING_MODES:
+                unimplemented[name] = mode
+
+        assert not unimplemented, (
+            "sglang declares reasoning_default values this frontend does not "
+            f"implement: {unimplemented}. Add them to _SGLANG_REASONING_MODES "
+            "and give each a branch in _force_reasoning_from_sglang_default."
+        )
+
+    def test_unimplemented_mode_warns_and_falls_back(self, monkeypatch, caplog):
+        """A mode outside the implemented set must be reported, not swallowed."""
+
+        class _Detector:
+            reasoning_default = "some_future_mode"
+
+        class _Parser:
+            def __init__(self, *args, **kwargs):
+                self.detector = _Detector()
+
+        monkeypatch.setattr("dynamo.frontend.sglang_prepost.ReasoningParser", _Parser)
+        _sglang_reasoning_default.cache_clear()
+        try:
+            with caplog.at_level(logging.WARNING):
+                assert _sglang_reasoning_default("pretend-parser") is None
+            assert "some_future_mode" in caplog.text
+        finally:
+            _sglang_reasoning_default.cache_clear()
+
+    def test_non_valueerror_propagates(self, monkeypatch):
+        """Only ValueError means 'unknown parser'; other failures must surface."""
+
+        class _Parser:
+            def __init__(self, *args, **kwargs):
+                raise RuntimeError("sglang is broken")
+
+        monkeypatch.setattr("dynamo.frontend.sglang_prepost.ReasoningParser", _Parser)
+        _sglang_reasoning_default.cache_clear()
+        try:
+            with pytest.raises(RuntimeError, match="sglang is broken"):
+                _sglang_reasoning_default("pretend-parser-2")
+        finally:
+            _sglang_reasoning_default.cache_clear()
