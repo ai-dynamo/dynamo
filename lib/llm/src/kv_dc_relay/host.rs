@@ -39,7 +39,7 @@ use super::discovery::{
     DcMembershipView, DcMembershipWatch, EndpointMembership, KvCacheDomainKey,
     KvDcRelayDiscoveryConfig, MaterializationConflict,
 };
-use super::identity::{CanonicalModelRegistration, DcPoolCatalog};
+use super::identity::{CanonicalModelRegistration, DcPoolCatalog, DcRelayIdentity};
 use super::pool_registry::{
     PoolActorConfig, PoolAttachRequest, PoolAttachment, PoolRegistry, PoolRetirementMode,
     drain_faults_while,
@@ -132,7 +132,8 @@ pub struct KvDcRelayStats {
 #[non_exhaustive]
 pub struct KvDcRelayIdentityStats {
     pub dc_id: String,
-    pub process_incarnation: u64,
+    pub drt_instance_id: u64,
+    pub relay_incarnation: u64,
 }
 
 #[cfg(feature = "ckf-diagnostics")]
@@ -255,7 +256,8 @@ pub struct KvDcRelayHealth {
 #[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
 pub struct KvDcRelayDiagnosticSnapshot {
-    pub process_incarnation: u64,
+    pub drt_instance_id: u64,
+    pub relay_incarnation: u64,
     pub dc_id: String,
     pub serving_endpoint: String,
     pub layout_generation: u64,
@@ -343,7 +345,7 @@ pub struct KvDcRelay {
     #[cfg(feature = "ckf-diagnostics")]
     dc_id: Arc<str>,
     #[cfg(feature = "ckf-diagnostics")]
-    process_incarnation: u64,
+    relay_identity: DcRelayIdentity,
     cancel: CancellationToken,
     membership: Mutex<Option<DcMembershipWatch>>,
     supervisor: Mutex<Option<JoinHandle<()>>>,
@@ -390,10 +392,11 @@ impl KvDcRelay {
         let membership_rx = membership.subscribe();
         let statuses = Arc::new(RwLock::new(HashMap::new()));
         let dc_id: Arc<str> = Arc::from(dc_id);
-        let process_incarnation = new_relay_incarnation()?;
+        let relay_identity =
+            DcRelayIdentity::new(component.drt().connection_id(), new_relay_incarnation()?);
         let ckf_dc_id = stable_dc_id(dc_id.as_ref());
         let pools = Arc::new(PoolRegistry::new(
-            process_incarnation,
+            relay_identity,
             PoolActorConfig {
                 expected_unique_blocks: DEFAULT_EXPECTED_UNIQUE_BLOCKS,
                 publication_threshold: publication.threshold,
@@ -413,7 +416,7 @@ impl KvDcRelay {
             #[cfg(feature = "ckf-diagnostics")]
             dc_id,
             #[cfg(feature = "ckf-diagnostics")]
-            process_incarnation,
+            relay_identity,
             cancel,
             membership: Mutex::new(Some(membership)),
             supervisor: Mutex::new(Some(supervisor)),
@@ -448,7 +451,8 @@ impl KvDcRelay {
         Ok(KvDcRelayStats {
             identity: KvDcRelayIdentityStats {
                 dc_id: self.dc_id.to_string(),
-                process_incarnation: self.process_incarnation,
+                drt_instance_id: self.relay_identity.drt_instance_id(),
+                relay_incarnation: self.relay_identity.relay_incarnation(),
             },
             endpoints,
         })
@@ -477,7 +481,8 @@ impl KvDcRelay {
         let format = actor_snapshot.identity.format();
         let aggregation = actor_snapshot.stats.aggregation();
         Ok(KvDcRelayDiagnosticSnapshot {
-            process_incarnation: self.process_incarnation,
+            drt_instance_id: self.relay_identity.drt_instance_id(),
+            relay_incarnation: self.relay_identity.relay_incarnation(),
             dc_id: self.dc_id.to_string(),
             serving_endpoint: endpoint.to_string(),
             layout_generation,
@@ -759,10 +764,9 @@ async fn run_endpoint_slot(
             }
         }
 
-        let mut runtime_config_changed = false;
         if let Some(membership) = &membership {
             if let Some(sender) = &config_tx {
-                runtime_config_changed = sender.send_if_modified(|current| {
+                sender.send_if_modified(|current| {
                     if current == &membership.runtime_configs {
                         return false;
                     }
@@ -782,6 +786,11 @@ async fn run_endpoint_slot(
         }
 
         let source_view = source_watch.as_ref().map(|watch| watch.borrow().clone());
+        let source_binding_pending = membership.as_ref().zip(source_view.as_ref()).is_some_and(
+            |(membership, source_view)| {
+                !source_view.matches_binding_inputs(&membership.runtime_configs)
+            },
+        );
         let desired_binding = membership.as_ref().and_then(|membership| {
             if !membership.is_materializable() {
                 return None;
@@ -847,7 +856,7 @@ async fn run_endpoint_slot(
                 &mut active.attachment,
                 &active.binding,
                 desired_binding.as_ref(),
-                runtime_config_changed,
+                source_binding_pending,
                 &membership.registrations,
             )
             .await
@@ -878,7 +887,7 @@ async fn run_endpoint_slot(
         }
 
         if runtime.is_none()
-            && !runtime_config_changed
+            && !source_binding_pending
             && let (Some(binding), Some(membership), Some(membership_watch)) = (
                 desired_binding.clone(),
                 membership.clone(),
@@ -1271,10 +1280,10 @@ async fn refresh_pool_registrations(
     attachment: &mut PoolAttachment,
     active_binding: &ActorBinding,
     desired_binding: Option<&ActorBinding>,
-    runtime_config_changed: bool,
+    source_binding_pending: bool,
     desired_registrations: &[CanonicalModelRegistration],
 ) -> anyhow::Result<RegistrationRefresh> {
-    if runtime_config_changed || Some(active_binding) != desired_binding {
+    if source_binding_pending || Some(active_binding) != desired_binding {
         return Ok(RegistrationRefresh::Skipped);
     }
 
@@ -1513,7 +1522,7 @@ mod tests {
 
     fn registry() -> PoolRegistry {
         PoolRegistry::new(
-            7,
+            DcRelayIdentity::new(11, 7),
             PoolActorConfig {
                 expected_unique_blocks: 32,
                 publication_threshold: 1,
@@ -1575,10 +1584,32 @@ mod tests {
         artifact: &str,
         kv_state_endpoint: EndpointId,
     ) -> EndpointMembership {
+        projected_membership_with_metadata(
+            endpoint,
+            worker_id,
+            model,
+            artifact,
+            kv_state_endpoint,
+            Vec::new(),
+            None,
+        )
+    }
+
+    fn projected_membership_with_metadata(
+        endpoint: &EndpointId,
+        worker_id: WorkerId,
+        model: &str,
+        artifact: &str,
+        kv_state_endpoint: EndpointId,
+        aliases: Vec<String>,
+        context_length: Option<u32>,
+    ) -> EndpointMembership {
         let mut card = crate::model_card::ModelDeploymentCard::with_name_only(model);
         card.source_path = Some(artifact.to_string());
         card.kv_cache_block_size = 64;
+        card.aliases = aliases;
         card.runtime_config = ModelRuntimeConfig {
+            context_length,
             data_parallel_start_rank: 0,
             data_parallel_size: 1,
             enable_local_indexer: true,
@@ -1645,7 +1676,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn repeated_relay_start_on_one_component_uses_a_new_process_incarnation() {
+    async fn repeated_relay_start_separates_drt_identity_from_relay_incarnation() {
         let component = test_component("incarnation").await;
         let first = KvDcRelay::start(
             component.clone(),
@@ -1654,16 +1685,23 @@ mod tests {
         )
         .await
         .unwrap();
-        let first_incarnation = first.pool_catalog().process_incarnation();
+        let first_identity = first.pool_catalog().identity();
         first.shutdown().await.unwrap();
 
         let second = KvDcRelay::start(component, "test-dc".to_string(), KvDcRelayConfig::default())
             .await
             .unwrap();
-        let second_incarnation = second.pool_catalog().process_incarnation();
+        let second_identity = second.pool_catalog().identity();
         second.shutdown().await.unwrap();
 
-        assert_ne!(first_incarnation, second_incarnation);
+        assert_eq!(
+            first_identity.drt_instance_id(),
+            second_identity.drt_instance_id()
+        );
+        assert_ne!(
+            first_identity.relay_incarnation(),
+            second_identity.relay_incarnation()
+        );
     }
 
     #[tokio::test]
@@ -1701,7 +1739,7 @@ mod tests {
             #[cfg(feature = "ckf-diagnostics")]
             dc_id: Arc::from("test-dc"),
             #[cfg(feature = "ckf-diagnostics")]
-            process_incarnation: 7,
+            relay_identity: DcRelayIdentity::new(11, 7),
             cancel: CancellationToken::new(),
             membership: Mutex::new(None),
             supervisor: Mutex::new(None),
@@ -1875,6 +1913,88 @@ mod tests {
             .await
             .expect("replacement Relay catalog generation timed out");
         assert_ne!(new_catalog.pools()[0].producer(), old_producer);
+
+        slot_cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(5), slot)
+            .await
+            .expect("endpoint slot shutdown timed out")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn alias_and_context_change_refreshes_the_active_pool_catalog() {
+        let component = test_component("metadata-transition").await;
+        let worker_id = component.drt().connection_id();
+        let worker = WorkerWithDpRank::new(worker_id, 0);
+        let serving_endpoint = EndpointId::from("relay-test.backend.generate");
+        let kv_endpoint = EndpointId::from("relay-test.backend.kv");
+        let _publisher = register_live_source(&component, &kv_endpoint, worker).await;
+        let old_membership = projected_membership_with_metadata(
+            &serving_endpoint,
+            worker_id,
+            "llama",
+            "meta/llama",
+            kv_endpoint.clone(),
+            vec!["old-alias".to_string()],
+            Some(4096),
+        );
+        let new_membership = projected_membership_with_metadata(
+            &serving_endpoint,
+            worker_id,
+            "llama",
+            "meta/llama",
+            kv_endpoint,
+            vec!["new-alias".to_string()],
+            Some(8192),
+        );
+        let (metadata_tx, metadata_rx) = watch::channel(Some(old_membership));
+        let status = Arc::new(RwLock::new(EndpointSlotStatus::default()));
+        let registry = Arc::new(registry());
+        let mut catalog_rx = registry.watch_catalog();
+        let slot_cancel = CancellationToken::new();
+        let slot = tokio::spawn(run_endpoint_slot(
+            component,
+            DcId::new(7),
+            serving_endpoint,
+            metadata_rx,
+            status,
+            Arc::new(Semaphore::new(1)),
+            Arc::new(Semaphore::new(1)),
+            registry,
+            Duration::from_secs(1),
+            slot_cancel.clone(),
+        ));
+
+        let old_catalog = wait_for_catalog(&mut catalog_rx, |catalog| {
+            catalog.pools().iter().any(|descriptor| {
+                descriptor.registrations()[0]
+                    .aliases()
+                    .iter()
+                    .any(|alias| alias.as_str() == "old-alias")
+            })
+        })
+        .await;
+        let producer = old_catalog.pools()[0].producer();
+
+        metadata_tx.send_replace(Some(new_membership));
+        let new_catalog = wait_for_catalog(&mut catalog_rx, |catalog| {
+            catalog.pools().iter().any(|descriptor| {
+                descriptor.producer() == producer
+                    && descriptor.registrations()[0]
+                        .aliases()
+                        .iter()
+                        .any(|alias| alias.as_str() == "new-alias")
+            })
+        })
+        .await;
+        assert!(new_catalog.pools().iter().all(|descriptor| {
+            descriptor.registrations().iter().all(|registration| {
+                registration
+                    .aliases()
+                    .iter()
+                    .all(|alias| alias.as_str() != "old-alias")
+            })
+        }));
 
         slot_cancel.cancel();
         tokio::time::timeout(Duration::from_secs(5), slot)

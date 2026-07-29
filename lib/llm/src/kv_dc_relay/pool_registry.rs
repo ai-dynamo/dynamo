@@ -16,7 +16,8 @@ use tokio_util::sync::CancellationToken;
 use super::actor::{ActorFault, KvDcRelayHandle, StreamScope};
 use super::host::KvDcRelayError;
 use super::identity::{
-    CanonicalModelId, CanonicalModelRegistration, DcPoolCatalog, DcPoolDescriptor, ModelAlias,
+    CanonicalModelId, CanonicalModelRegistration, DcPoolCatalog, DcPoolDescriptor, DcRelayIdentity,
+    ModelAlias,
 };
 
 const DEFAULT_CKF_ALLOCATION_CONCURRENCY: usize = 2;
@@ -123,7 +124,7 @@ pub(super) struct PoolAttachment {
 }
 
 pub(super) struct PoolRegistry {
-    process_incarnation: u64,
+    relay_identity: DcRelayIdentity,
     actor_config: PoolActorConfig,
     ckf_allocation_permits: Arc<Semaphore>,
     state: Mutex<PoolRegistryState>,
@@ -131,11 +132,10 @@ pub(super) struct PoolRegistry {
 }
 
 impl PoolRegistry {
-    pub(super) fn new(process_incarnation: u64, actor_config: PoolActorConfig) -> Self {
-        let (catalog_tx, _) =
-            watch::channel(DcPoolCatalog::new(process_incarnation, 0, Vec::new()));
+    pub(super) fn new(relay_identity: DcRelayIdentity, actor_config: PoolActorConfig) -> Self {
+        let (catalog_tx, _) = watch::channel(DcPoolCatalog::new(relay_identity, 0, Vec::new()));
         Self {
-            process_incarnation,
+            relay_identity,
             actor_config,
             ckf_allocation_permits: Arc::new(Semaphore::new(DEFAULT_CKF_ALLOCATION_CONCURRENCY)),
             state: Mutex::new(PoolRegistryState::default()),
@@ -225,7 +225,7 @@ impl PoolRegistry {
         let (handle, faults) = KvDcRelayHandle::spawn_with_state_and_publication_delay(
             ckf_state,
             StreamScope {
-                process_incarnation: self.process_incarnation,
+                relay_incarnation: self.relay_identity.relay_incarnation(),
                 layout_generation,
                 pool_id: request.pool_id,
             },
@@ -556,6 +556,10 @@ mod tests {
         }
     }
 
+    fn relay_identity() -> DcRelayIdentity {
+        DcRelayIdentity::new(11, 7)
+    }
+
     fn registration(model: &str) -> CanonicalModelRegistration {
         CanonicalModelRegistration::new(
             CanonicalModelId::new(model).unwrap(),
@@ -623,7 +627,7 @@ mod tests {
 
     #[tokio::test]
     async fn one_model_binds_to_independent_pools() {
-        let registry = PoolRegistry::new(7, config());
+        let registry = PoolRegistry::new(relay_identity(), config());
         let first = registry
             .attach(request(pool(1), "fast.router.generate", "llama"))
             .await
@@ -635,7 +639,8 @@ mod tests {
 
         assert_eq!(registry.pool_count().await, 2);
         let catalog = registry.catalog();
-        assert_eq!(catalog.process_incarnation(), 7);
+        assert_eq!(catalog.drt_instance_id(), 11);
+        assert_eq!(catalog.relay_incarnation(), 7);
         assert_eq!(catalog.pools().len(), 2);
         assert_eq!(
             descriptor(&catalog, pool(1)).serving_endpoint(),
@@ -654,7 +659,7 @@ mod tests {
 
     #[tokio::test]
     async fn burst_attach_defers_catalog_materialization_until_observed() {
-        let registry = PoolRegistry::new(7, config());
+        let registry = PoolRegistry::new(relay_identity(), config());
         let catalog_rx = registry.watch_catalog();
         let mut attachments = Vec::new();
 
@@ -683,7 +688,9 @@ mod tests {
         assert!(catalog.is_materialized());
         assert!(pool_ids.windows(2).all(|pair| pair[0] < pair[1]));
         let serialized = serde_json::to_value(&catalog).unwrap();
-        assert_eq!(serialized["process_incarnation"], 7);
+        assert_eq!(serialized["drt_instance_id"], 11);
+        assert_eq!(serialized["relay_incarnation"], 7);
+        assert!(serialized.get("process_incarnation").is_none());
         assert_eq!(serialized["revision"], 32);
         assert_eq!(serialized["pools"].as_array().unwrap().len(), 32);
 
@@ -694,7 +701,7 @@ mod tests {
 
     #[tokio::test]
     async fn registration_updates_remain_pool_local() {
-        let registry = PoolRegistry::new(7, config());
+        let registry = PoolRegistry::new(relay_identity(), config());
         let mut first = registry
             .attach(request(pool(1), "fast.router.generate", "llama"))
             .await
@@ -745,7 +752,7 @@ mod tests {
 
     #[tokio::test]
     async fn one_pool_cannot_be_owned_by_two_endpoints() {
-        let registry = PoolRegistry::new(7, config());
+        let registry = PoolRegistry::new(relay_identity(), config());
         let pool_id = pool(1);
         let attachment = registry
             .attach(request(pool_id, "first.router.generate", "llama"))
@@ -764,7 +771,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancelled_allocation_rolls_back_and_allows_reattach() {
-        let registry = Arc::new(PoolRegistry::new(7, config()));
+        let registry = Arc::new(PoolRegistry::new(relay_identity(), config()));
         let pool_id = pool(1);
         let GatedBuilder {
             builder,
@@ -795,7 +802,7 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_during_allocation_never_publishes_the_pool() {
-        let registry = Arc::new(PoolRegistry::new(7, config()));
+        let registry = Arc::new(PoolRegistry::new(relay_identity(), config()));
         let GatedBuilder {
             builder,
             started: started_rx,
@@ -826,7 +833,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn ckf_allocation_does_not_block_the_async_executor() {
-        let registry = Arc::new(PoolRegistry::new(7, config()));
+        let registry = Arc::new(PoolRegistry::new(relay_identity(), config()));
         let GatedBuilder {
             builder,
             started: started_rx,
@@ -860,7 +867,7 @@ mod tests {
     #[tokio::test]
     async fn failed_actor_build_rolls_back_the_pool_reservation() {
         let registry = PoolRegistry::new(
-            7,
+            relay_identity(),
             PoolActorConfig {
                 expected_unique_blocks: 0,
                 publication_threshold: 1,
@@ -888,7 +895,7 @@ mod tests {
 
     #[tokio::test]
     async fn reattaching_a_pool_allocates_a_new_layout_generation() {
-        let registry = PoolRegistry::new(7, config());
+        let registry = PoolRegistry::new(relay_identity(), config());
         let pool_id = pool(1);
         let first = registry
             .attach(request(pool_id, "fast.router.generate", "llama"))
@@ -907,8 +914,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn relay_incarnation_fences_an_identical_pool_layout() {
+        let first_registry = PoolRegistry::new(DcRelayIdentity::new(11, 7), config());
+        let second_registry = PoolRegistry::new(DcRelayIdentity::new(11, 8), config());
+        let pool_id = pool(1);
+        let first = first_registry
+            .attach(request(pool_id, "fast.router.generate", "llama"))
+            .await
+            .unwrap();
+        let second = second_registry
+            .attach(request(pool_id, "fast.router.generate", "llama"))
+            .await
+            .unwrap();
+
+        assert_ne!(first.handle.identity(), second.handle.identity());
+        assert_eq!(first.layout_generation, second.layout_generation);
+
+        first_registry.detach(first).await.unwrap();
+        second_registry.detach(second).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn withdraw_removes_catalog_before_actor_retirement() {
-        let registry = PoolRegistry::new(7, config());
+        let registry = PoolRegistry::new(relay_identity(), config());
         let attachment = registry
             .attach(request(pool(1), "fast.router.generate", "llama"))
             .await
@@ -931,7 +959,7 @@ mod tests {
 
     #[tokio::test]
     async fn adapter_registration_changes_without_replacing_pool_generation() {
-        let registry = PoolRegistry::new(7, config());
+        let registry = PoolRegistry::new(relay_identity(), config());
         let mut attachment = registry
             .attach(request(pool(1), "fast.router.generate", "llama"))
             .await
@@ -970,7 +998,7 @@ mod tests {
 
     #[tokio::test]
     async fn one_lora_target_binds_to_independent_pools() {
-        let registry = PoolRegistry::new(7, config());
+        let registry = PoolRegistry::new(relay_identity(), config());
         let base = CanonicalModelId::new("llama").unwrap();
         let adapter = CanonicalModelId::new("tenant-a").unwrap();
         let registrations = || {
@@ -1021,7 +1049,7 @@ mod tests {
 
     #[tokio::test]
     async fn fencing_withdraws_pool_from_catalog() {
-        let registry = PoolRegistry::new(7, config());
+        let registry = PoolRegistry::new(relay_identity(), config());
         let attachment = registry
             .attach(request(pool(1), "fast.router.generate", "llama"))
             .await
@@ -1032,7 +1060,7 @@ mod tests {
 
     #[tokio::test]
     async fn fencing_withdraws_only_the_target_pool_descriptor() {
-        let registry = PoolRegistry::new(7, config());
+        let registry = PoolRegistry::new(relay_identity(), config());
         let with_alias = registry
             .attach(request(pool(1), "fast.router.generate", "llama"))
             .await

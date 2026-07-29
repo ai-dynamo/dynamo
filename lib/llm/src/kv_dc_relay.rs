@@ -22,5 +22,6 @@ pub use host::{
 };
 pub use identity::{
     CanonicalModelId, CanonicalModelIdError, CanonicalModelRegistration, DcPoolCatalog,
-    DcPoolDescriptor, ModelAlias, ModelAliasError, ModelTarget, PoolIdentitySources,
+    DcPoolDescriptor, DcRelayIdentity, ModelAlias, ModelAliasError, ModelTarget,
+    PoolIdentitySources,
 };

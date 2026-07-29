@@ -217,6 +217,36 @@ impl DcPoolDescriptor {
     }
 }
 
+/// Identity of one DC Relay runtime.
+///
+/// `drt_instance_id` identifies the backing Dynamo runtime and can remain stable across an
+/// in-process Relay restart. `relay_incarnation` is generated for every [`KvDcRelay::start`]
+/// and fences producer generations created by different Relay lifetimes.
+///
+/// [`KvDcRelay::start`]: super::KvDcRelay::start
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+pub struct DcRelayIdentity {
+    drt_instance_id: u64,
+    relay_incarnation: u64,
+}
+
+impl DcRelayIdentity {
+    pub const fn new(drt_instance_id: u64, relay_incarnation: u64) -> Self {
+        Self {
+            drt_instance_id,
+            relay_incarnation,
+        }
+    }
+
+    pub const fn drt_instance_id(self) -> u64 {
+        self.drt_instance_id
+    }
+
+    pub const fn relay_incarnation(self) -> u64 {
+        self.relay_incarnation
+    }
+}
+
 #[derive(Debug)]
 struct DcPoolCatalogPools {
     by_id: BTreeMap<PoolId, DcPoolDescriptor>,
@@ -234,14 +264,14 @@ impl Clone for DcPoolCatalogPools {
 
 #[derive(Clone)]
 pub struct DcPoolCatalog {
-    process_incarnation: u64,
+    identity: DcRelayIdentity,
     revision: u64,
     pools: DcPoolCatalogPools,
 }
 
 impl DcPoolCatalog {
     pub(crate) fn new(
-        process_incarnation: u64,
+        identity: DcRelayIdentity,
         revision: u64,
         pools: Vec<DcPoolDescriptor>,
     ) -> Self {
@@ -250,7 +280,7 @@ impl DcPoolCatalog {
             .map(|descriptor| (descriptor.pool_id(), descriptor))
             .collect();
         Self {
-            process_incarnation,
+            identity,
             revision,
             pools: DcPoolCatalogPools {
                 by_id,
@@ -277,8 +307,16 @@ impl DcPoolCatalog {
         self.pools.ordered.take();
     }
 
-    pub const fn process_incarnation(&self) -> u64 {
-        self.process_incarnation
+    pub const fn identity(&self) -> DcRelayIdentity {
+        self.identity
+    }
+
+    pub const fn drt_instance_id(&self) -> u64 {
+        self.identity.drt_instance_id()
+    }
+
+    pub const fn relay_incarnation(&self) -> u64 {
+        self.identity.relay_incarnation()
     }
 
     pub const fn revision(&self) -> u64 {
@@ -301,7 +339,7 @@ impl fmt::Debug for DcPoolCatalog {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("DcPoolCatalog")
-            .field("process_incarnation", &self.process_incarnation)
+            .field("identity", &self.identity)
             .field("revision", &self.revision)
             .field("pools", &self.pools())
             .finish()
@@ -310,7 +348,7 @@ impl fmt::Debug for DcPoolCatalog {
 
 impl PartialEq for DcPoolCatalog {
     fn eq(&self, other: &Self) -> bool {
-        self.process_incarnation == other.process_incarnation
+        self.identity == other.identity
             && self.revision == other.revision
             && self.pools.by_id == other.pools.by_id
     }
@@ -325,13 +363,15 @@ impl Serialize for DcPoolCatalog {
     {
         #[derive(Serialize)]
         struct Catalog<'a> {
-            process_incarnation: u64,
+            drt_instance_id: u64,
+            relay_incarnation: u64,
             revision: u64,
             pools: &'a [DcPoolDescriptor],
         }
 
         Catalog {
-            process_incarnation: self.process_incarnation,
+            drt_instance_id: self.identity.drt_instance_id(),
+            relay_incarnation: self.identity.relay_incarnation(),
             revision: self.revision,
             pools: self.pools(),
         }

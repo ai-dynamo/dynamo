@@ -268,7 +268,7 @@ async fn send_actor_fault(
 
 #[derive(Debug, Clone)]
 pub(super) struct StreamScope {
-    pub(super) process_incarnation: u64,
+    pub(super) relay_incarnation: u64,
     pub(super) layout_generation: u64,
     pub(super) pool_id: dynamo_kv_router::identity::PoolId,
 }
@@ -373,7 +373,7 @@ impl KvDcRelayHandle {
         let (publication_tx, _) = broadcast::channel(DEFAULT_PUBLICATION_CAPACITY);
         let identity = ProducerIdentity::new(
             scope.pool_id,
-            scope.process_incarnation,
+            scope.relay_incarnation,
             scope.layout_generation,
             state.format(),
         );
@@ -1376,7 +1376,7 @@ mod tests {
             RoutingScopeId::new([3; 16], IdentitySource::Explicit),
         );
         StreamScope {
-            process_incarnation: 1,
+            relay_incarnation: 1,
             layout_generation: 1,
             pool_id: PoolId::new(domain, dc_id),
         }
