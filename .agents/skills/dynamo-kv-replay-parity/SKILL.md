@@ -150,6 +150,20 @@ or concurrency minimally and identically for baseline and candidate within the r
 family, and back off rather than accepting a preemption flood. Never tune the revisions
 separately.
 
+### Start from qualified internal-polynomial seeds
+
+For the canonical 5,000-row Mooncake window with the internal polynomial mocker, read
+[internal-polynomial golden points](references/internal-polynomial-golden-points.md)
+before searching for capacity edges. Treat those configurations and observed counters as
+suggested starting points, not universal constants or substitutes for qualification on the
+pinned baseline. Requalify one frozen configuration identically on both revisions.
+
+Use the reference's expected preemption, retraction, queue, reuse, worker, and handoff
+signals as drift detectors. For KVBM rows, also require deterministic nonzero G1-to-G2 and
+G2-to-G1 activity. Matching lifecycle counts do not waive an unstable canonical digest;
+stop correctness and performance work for that row until both internal determinism and
+cross-revision parity are established.
+
 ## Stage 4: Run byte parity
 
 Run the 5,000-request corpus for this authoritative matrix:
