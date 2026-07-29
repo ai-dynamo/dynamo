@@ -174,8 +174,19 @@ where
         self.workers.get(rank_id)?.as_ref()
     }
 
-    fn worker_mut(&mut self, rank_id: usize) -> Option<&mut OfflineWorkerState> {
-        self.workers.get_mut(rank_id)?.as_mut()
+    fn update_worker<T>(
+        &mut self,
+        rank_id: usize,
+        update: impl FnOnce(&mut OfflineWorkerState) -> T,
+    ) -> Option<T> {
+        let (result, before, after) = {
+            let worker = self.workers.get_mut(rank_id)?.as_mut()?;
+            let before = worker.in_flight();
+            let result = update(worker);
+            (result, before, worker.in_flight())
+        };
+        self.record_in_flight_change(before, after);
+        Some(result)
     }
 
     fn required_worker(
@@ -531,15 +542,8 @@ where
         rank_id: usize,
         request: DirectRequest,
     ) -> anyhow::Result<()> {
-        let (before, after) = {
-            let worker = self
-                .worker_mut(rank_id)
-                .ok_or_else(|| anyhow::anyhow!("offline replay selected unknown rank {rank_id}"))?;
-            let before = worker.in_flight();
-            worker.receive_request(request);
-            (before, worker.in_flight())
-        };
-        self.record_in_flight_change(before, after);
+        self.update_worker(rank_id, |worker| worker.receive_request(request))
+            .ok_or_else(|| anyhow::anyhow!("offline replay selected unknown rank {rank_id}"))?;
         self.refresh_rank(rank_id);
         Ok(())
     }
@@ -549,15 +553,9 @@ where
         rank_id: usize,
         command: SchedulerCommand,
     ) -> anyhow::Result<ObservedCommandEffects<Observation::Batch>> {
-        let (mut effects, before, after) = {
-            let worker = self
-                .worker_mut(rank_id)
-                .ok_or_else(|| anyhow::anyhow!("offline replay selected unknown rank {rank_id}"))?;
-            let before = worker.in_flight();
-            let effects = worker.apply_command(command)?;
-            (effects, before, worker.in_flight())
-        };
-        self.record_in_flight_change(before, after);
+        let mut effects = self
+            .update_worker(rank_id, |worker| worker.apply_command(command))
+            .ok_or_else(|| anyhow::anyhow!("offline replay selected unknown rank {rank_id}"))??;
         let engine_events = Observation::take_command_events(&mut effects);
         let observed = ObservedCommandEffects {
             result: effects.result,
@@ -578,7 +576,7 @@ where
         Ok(worker.is_busy())
     }
 
-    #[inline(always)]
+    #[cfg_attr(feature = "profile", inline(never))]
     fn lower_executed_pass(
         workers: &mut [Option<OfflineWorkerState>],
         stage: SimulationWorkerStage,
@@ -711,7 +709,16 @@ where
                     EnginePassMode::Hidden => Self::required_worker_mut(&mut self.workers, rank_id)
                         .try_execute_hidden_pass(now_ms),
                 }?;
-                let group_end_ms = executed.end_ms;
+                let group_end_ms = executed.end_ms.max(now_ms);
+                let align_collector = if self.pass_mode == EnginePassMode::Visible {
+                    Some(
+                        collector
+                            .as_deref_mut()
+                            .expect("visible pass collector checked before execution"),
+                    )
+                } else {
+                    None
+                };
                 Self::lower_executed_pass(
                     &mut self.workers,
                     self.stage,
@@ -721,7 +728,7 @@ where
                         end_ms: group_end_ms,
                     },
                     executed,
-                    None,
+                    align_collector,
                     &mut effects,
                 );
 
@@ -849,20 +856,18 @@ where
         }
         let rank_id = payload.worker_idx;
         let mut payload = payload;
-        let (observed, before, after) = {
-            let worker = self.worker_mut(rank_id).ok_or_else(|| {
+        let observed = self
+            .update_worker(rank_id, |worker| {
+                worker.mark_idle();
+                worker.mark_completed(payload.completed_requests);
+                payload
+                    .lifecycle_events
+                    .extend(worker.retry_pending_destinations());
+                Observation::drain_worker_events(worker)
+            })
+            .ok_or_else(|| {
                 anyhow::anyhow!("offline replay completion for unknown worker {}", rank_id)
             })?;
-            let before = worker.in_flight();
-            worker.mark_idle();
-            worker.mark_completed(payload.completed_requests);
-            payload
-                .lifecycle_events
-                .extend(worker.retry_pending_destinations());
-            let observed = Observation::drain_worker_events(worker);
-            (observed, before, worker.in_flight())
-        };
-        self.record_in_flight_change(before, after);
         payload.progress.had_raw_observations |= observed.had_raw_observations;
         payload.progress.made_progress |= observed.had_raw_observations;
         payload.engine_events.append(observed.events);
@@ -1131,18 +1136,38 @@ mod tests {
     }
 
     #[test]
-    fn single_rank_group_keeps_local_completion_time() {
-        let mut engine = ranked_timing_engine(1);
-        let uuid = Uuid::from_u128(50);
-        engine.dispatch(0, timed_request(uuid, 4)).unwrap();
-        let mut collector = TraceCollector::default();
-        collector.on_arrival(uuid, 0.0, 4, 1);
+    fn single_rank_visible_timeline_matches_grouped_path() {
+        fn run(dp_size: u32, uuid: Uuid) -> (f64, f64) {
+            let mut engine = ranked_timing_engine(dp_size);
+            let mut request = timed_request(uuid, 4);
+            request.max_output_tokens = 3;
+            engine.dispatch(0, request).unwrap();
+            let mut collector = TraceCollector::default();
+            collector.on_arrival(uuid, 0.0, 4, 3);
 
-        let effects = engine.drive_ready(0.0, Some(&mut collector)).unwrap();
+            let mut now_ms = 0.0;
+            while engine.in_flight() > 0 {
+                let effects = engine.drive_ready(now_ms, Some(&mut collector)).unwrap();
+                assert!(effects.immediate_completions.is_empty());
+                assert_eq!(effects.scheduled_completions.len(), dp_size as usize);
+                now_ms = effects.scheduled_completions[0].at_ms;
+                assert!(
+                    effects
+                        .scheduled_completions
+                        .iter()
+                        .all(|completion| completion.at_ms == now_ms)
+                );
+                for completion in effects.scheduled_completions {
+                    engine.on_scheduled_completion(completion.payload).unwrap();
+                }
+            }
+            collector.request_latencies(uuid).unwrap()
+        }
 
-        assert_eq!(effects.scheduled_completions.len(), 1);
-        assert_eq!(effects.scheduled_completions[0].at_ms, 5.0);
-        assert_eq!(collector.request_latencies(uuid).unwrap().0, 5.0);
+        let singleton = run(1, Uuid::from_u128(50));
+        let grouped = run(2, Uuid::from_u128(51));
+        assert_eq!(singleton, grouped);
+        assert_eq!(singleton, (5.0, 1.0));
     }
 
     #[test]
@@ -1394,9 +1419,11 @@ mod tests {
 
         assert_eq!(engine.active_worker_ids().len(), 1);
         engine
-            .worker_mut(new_id)
-            .unwrap()
-            .receive_request(timed_request(Uuid::from_u128(60), 4));
+            .update_worker(new_id, |worker| {
+                worker.receive_request(timed_request(Uuid::from_u128(60), 4))
+            })
+            .unwrap();
+        assert_eq!(engine.in_flight(), 1);
         assert!(!engine.ready_groups.contains(&new_id));
         assert!(engine.mark_worker_ready(new_id));
         assert_eq!(engine.active_worker_ids().len(), 2);
@@ -1653,7 +1680,9 @@ mod tests {
         });
         // Model a reservation attempt at the t=0 boundary, before the GPU
         // compute interval becomes externally busy.
-        engine.worker_mut(0).unwrap().mark_idle();
+        engine
+            .update_worker(0, OfflineWorkerState::mark_idle)
+            .unwrap();
 
         let handoff_id = HandoffId::from(Uuid::from_u128(102));
         let reserve = engine
@@ -1676,7 +1705,9 @@ mod tests {
             .expect("reservation eviction should start G1 to G2 DMA");
         assert!((deadline - 20.0).abs() < 0.01);
 
-        engine.worker_mut(0).unwrap().mark_busy();
+        engine
+            .update_worker(0, OfflineWorkerState::mark_busy)
+            .unwrap();
         assert_eq!(engine.earliest_offload_deadline(), Some(deadline));
         let transport = engine.tick_offload_engines(deadline);
         assert!(transport.lifecycle_events.is_empty());

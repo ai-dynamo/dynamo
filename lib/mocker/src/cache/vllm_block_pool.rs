@@ -10,7 +10,7 @@
 use dynamo_tokens::SequenceHash;
 use rustc_hash::{FxHashMap, FxHashSet};
 use slotmap::{SlotMap, new_key_type};
-use std::collections::VecDeque;
+use std::collections::{VecDeque, hash_map::Entry};
 
 new_key_type! {
     pub(crate) struct BlockCopyId;
@@ -44,6 +44,12 @@ struct HashCopies {
     duplicates: Option<Box<VecDeque<BlockCopyId>>>,
 }
 
+enum CopyRemoval {
+    Last,
+    Remaining,
+    Missing,
+}
+
 impl HashCopies {
     fn new(primary: BlockCopyId) -> Self {
         Self {
@@ -58,11 +64,10 @@ impl HashCopies {
             .push_back(id);
     }
 
-    /// Remove `id`, returning whether the hash no longer has any copies.
-    fn remove(&mut self, id: BlockCopyId) -> Option<bool> {
+    fn remove(&mut self, id: BlockCopyId) -> CopyRemoval {
         if self.primary == id {
             let Some(duplicates) = self.duplicates.as_mut() else {
-                return Some(true);
+                return CopyRemoval::Last;
             };
             self.primary = duplicates
                 .pop_front()
@@ -70,16 +75,20 @@ impl HashCopies {
             if duplicates.is_empty() {
                 self.duplicates = None;
             }
-            return Some(false);
+            return CopyRemoval::Remaining;
         }
 
-        let duplicates = self.duplicates.as_mut()?;
-        let position = duplicates.iter().position(|candidate| *candidate == id)?;
+        let Some(duplicates) = self.duplicates.as_mut() else {
+            return CopyRemoval::Missing;
+        };
+        let Some(position) = duplicates.iter().position(|candidate| *candidate == id) else {
+            return CopyRemoval::Missing;
+        };
         duplicates.remove(position);
         if duplicates.is_empty() {
             self.duplicates = None;
         }
-        Some(false)
+        CopyRemoval::Remaining
     }
 
     #[cfg(test)]
@@ -354,12 +363,15 @@ impl VllmBlockPool {
             inactive_prev: None,
             inactive_next: None,
         };
-        if let Some(copies) = self.by_hash.get_mut(&hash) {
-            copies.push(id);
-            false
-        } else {
-            self.by_hash.insert(hash, HashCopies::new(id));
-            true
+        match self.by_hash.entry(hash) {
+            Entry::Occupied(mut entry) => {
+                entry.get_mut().push(id);
+                false
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(HashCopies::new(id));
+                true
+            }
         }
     }
 
@@ -728,10 +740,13 @@ impl VllmBlockPool {
             let Some(copies) = self.by_hash.get_mut(&hash) else {
                 panic!("evicted cached hash is missing from its index")
             };
-            let Some(remove_hash) = copies.remove(id) else {
-                panic!("evicted copy is missing from its hash index")
-            };
-            remove_hash
+            match copies.remove(id) {
+                CopyRemoval::Last => true,
+                CopyRemoval::Remaining => false,
+                CopyRemoval::Missing => {
+                    panic!("evicted copy is missing from its hash index")
+                }
+            }
         };
         if remove_hash {
             self.by_hash.remove(&hash);

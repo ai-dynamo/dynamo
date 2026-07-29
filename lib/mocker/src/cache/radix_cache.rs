@@ -270,7 +270,7 @@ impl RadixCache {
         }
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(test)]
     fn debug_assert_evictable_index(&self) {
         let expected = self
             .nodes
@@ -363,7 +363,7 @@ impl RadixCache {
             self.touch_node(current, now);
         }
 
-        #[cfg(debug_assertions)]
+        #[cfg(test)]
         self.debug_assert_evictable_index();
         (matched_pages * self.page_size, current)
     }
@@ -416,7 +416,7 @@ impl RadixCache {
         );
         let page_ids = self.page_ids(&value[..aligned_len], aligned_len / self.page_size);
         let inserted = self.insert_page_suffix(self.root, 0, key, &page_ids, false);
-        #[cfg(debug_assertions)]
+        #[cfg(test)]
         self.debug_assert_evictable_index();
         inserted
     }
@@ -454,7 +454,7 @@ impl RadixCache {
             (aligned_len - prefix_len) / self.page_size,
         );
         let inserted = self.insert_page_suffix(prefix_node, prefix_len, key, &page_ids, true);
-        #[cfg(debug_assertions)]
+        #[cfg(test)]
         self.debug_assert_evictable_index();
         inserted
     }
@@ -490,7 +490,7 @@ impl RadixCache {
             &pages[prefix_pages..page_keys.len()],
             true,
         );
-        #[cfg(debug_assertions)]
+        #[cfg(test)]
         self.debug_assert_evictable_index();
         inserted
     }
@@ -738,7 +738,7 @@ impl RadixCache {
             }
             current = self.nodes[id].parent;
         }
-        #[cfg(debug_assertions)]
+        #[cfg(test)]
         self.debug_assert_evictable_index();
     }
 
@@ -764,7 +764,7 @@ impl RadixCache {
             }
             current = self.nodes[id].parent;
         }
-        #[cfg(debug_assertions)]
+        #[cfg(test)]
         self.debug_assert_evictable_index();
     }
 
@@ -831,7 +831,7 @@ impl RadixCache {
                 }
             }
         }
-        #[cfg(debug_assertions)]
+        #[cfg(test)]
         self.debug_assert_evictable_index();
         (evicted, evicted_indices)
     }
