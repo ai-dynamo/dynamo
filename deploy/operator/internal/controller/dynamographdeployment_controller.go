@@ -1531,7 +1531,7 @@ func (r *DynamoGraphDeploymentReconciler) computeSequentialRestartStatus(
 	logger.Info("Component restart completed", "component", currentComponent)
 
 	// Find the next component.
-	nextComponent, currentFound := getNextComponentInOrder(order, currentComponent)
+	nextComponent, currentFound := r.getNextSequentialRestartComponent(dgd, order, currentComponent)
 	if !currentFound {
 		logger.Info("Current restart component is no longer in order, restarting sequence from first component", "component", currentComponent, "firstComponent", order[0])
 		return &nvidiacomv1beta1.RestartStatus{
@@ -1557,6 +1557,40 @@ func (r *DynamoGraphDeploymentReconciler) computeSequentialRestartStatus(
 		Phase:      nvidiacomv1beta1.RestartPhaseRestarting,
 		InProgress: []string{nextComponent},
 	}
+}
+
+// getNextSequentialRestartComponent skips selected DisaggregatedSet roles after
+// one of them completes. Those roles share one DisaggregatedSet revision and
+// are restarted together, even when the DGD restart strategy is sequential.
+func (r *DynamoGraphDeploymentReconciler) getNextSequentialRestartComponent(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	order []string,
+	currentComponent string,
+) (string, bool) {
+	nextComponent, currentFound := getNextComponentInOrder(order, currentComponent)
+	if !currentFound || nextComponent == "" {
+		return nextComponent, currentFound
+	}
+
+	useDisaggregatedSet, _ := r.shouldUseDisaggregatedSet(dgd)
+	if !useDisaggregatedSet || r.isGrovePathway(dgd) {
+		return nextComponent, currentFound
+	}
+	selection, reason := selectDisaggregatedSetComponents(dgd)
+	if reason != "" {
+		return nextComponent, currentFound
+	}
+	if _, selected := selection.componentToRole[currentComponent]; !selected {
+		return nextComponent, currentFound
+	}
+
+	for nextComponent != "" {
+		if _, selected := selection.componentToRole[nextComponent]; !selected {
+			return nextComponent, true
+		}
+		nextComponent, _ = getNextComponentInOrder(order, nextComponent)
+	}
+	return "", true
 }
 
 // getNextComponentInOrder returns the component after the current component.

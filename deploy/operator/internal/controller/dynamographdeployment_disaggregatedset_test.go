@@ -883,6 +883,49 @@ func TestDisaggregatedSetRestartCoalescingRespectsGrovePrecedence(t *testing.T) 
 	require.True(t, dsState.ShouldAnnotateComponent("decode"), "the active DS path must restart selected roles as one unit")
 }
 
+func TestSequentialRestartSkipsAlreadyRestartedDisaggregatedSetRoles(t *testing.T) {
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+			consts.KubeAnnotationEnableDisaggregatedSet: consts.KubeLabelValueTrue,
+			consts.KubeAnnotationEnableGrove:            consts.KubeLabelValueFalse,
+		}},
+		Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
+			Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+				{ComponentName: "prefill", ComponentType: nvidiacomv1beta1.ComponentTypePrefill, Multinode: &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}},
+				{ComponentName: "decode", ComponentType: nvidiacomv1beta1.ComponentTypeDecode, Multinode: &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}},
+				{ComponentName: "frontend", ComponentType: nvidiacomv1beta1.ComponentTypeFrontend},
+			},
+		},
+	}
+	reconciler := &DynamoGraphDeploymentReconciler{RuntimeConfig: &commoncontroller.RuntimeConfig{
+		Gate: features.Gates{LWS: true, DisaggregatedSet: true},
+	}}
+
+	next, found := reconciler.getNextSequentialRestartComponent(
+		dgd,
+		[]string{"prefill", "decode", "frontend"},
+		"prefill",
+	)
+	require.True(t, found)
+	require.Equal(t, "frontend", next, "decode was restarted in the same DisaggregatedSet revision")
+
+	next, found = reconciler.getNextSequentialRestartComponent(
+		dgd,
+		[]string{"frontend", "prefill", "decode"},
+		"frontend",
+	)
+	require.True(t, found)
+	require.Equal(t, "prefill", next, "non-DisaggregatedSet components retain sequential ordering")
+
+	next, found = reconciler.getNextSequentialRestartComponent(
+		dgd,
+		[]string{"prefill", "decode"},
+		"prefill",
+	)
+	require.True(t, found)
+	require.Empty(t, next, "the restart completes after the shared DisaggregatedSet revision")
+}
+
 func TestDisaggregatedSetRestartAnnotationsSurviveConsecutiveRequests(t *testing.T) {
 	dgd := newDSHappyPathDGD()
 	dgd.Spec.BackendFramework = string(dynamo.BackendFrameworkVLLM)
