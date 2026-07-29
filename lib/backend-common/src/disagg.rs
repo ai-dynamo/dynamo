@@ -18,12 +18,6 @@ use serde::{Deserialize, Serialize};
 use crate::error::{BackendError, DynamoError, ErrorType};
 
 /// Disaggregation role this worker is playing.
-///
-/// `Aggregated` is the default: the worker handles prefill and decode in the
-/// same engine. `Prefill` and `Decode` workers split the two phases across
-/// processes / GPUs and exchange KV cache via the engine-specific transport.
-/// `Encode` workers run a multimodal encoder upstream of Prefill/Aggregated
-/// and emit an opaque `encoder_result` payload on their terminal chunk.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum DisaggregationMode {
@@ -68,17 +62,14 @@ impl DisaggregationMode {
         }
     }
 
-    /// `true` when this worker only runs the prefill phase.
     pub fn is_prefill(&self) -> bool {
         matches!(self, Self::Prefill)
     }
 
-    /// `true` when this worker only runs the decode phase.
     pub fn is_decode(&self) -> bool {
         matches!(self, Self::Decode)
     }
 
-    /// `true` when this worker runs the encoder phase.
     pub fn is_encode(&self) -> bool {
         matches!(self, Self::Encode)
     }
