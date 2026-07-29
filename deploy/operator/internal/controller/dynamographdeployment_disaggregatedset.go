@@ -912,6 +912,7 @@ func (r *DynamoGraphDeploymentReconciler) restoreDisaggregatedSetServiceOwnershi
 	sort.Slice(dcds.Items, func(i, j int) bool { return dcds.Items[i].Name < dcds.Items[j].Name })
 
 	serviceOwners := map[string]*nvidiacomv1beta1.DynamoComponentDeployment{}
+	modelServiceOwners := map[string]*nvidiacomv1beta1.DynamoComponentDeployment{}
 	componentOwners := map[string]*nvidiacomv1beta1.DynamoComponentDeployment{}
 	for i := range dcds.Items {
 		dcd := &dcds.Items[i]
@@ -933,6 +934,7 @@ func (r *DynamoGraphDeploymentReconciler) restoreDisaggregatedSetServiceOwnershi
 			modelServiceName := dynamo.GenerateServiceName(component.ModelRef.Name)
 			if serviceOwners[modelServiceName] == nil {
 				serviceOwners[modelServiceName] = owner
+				modelServiceOwners[modelServiceName] = owner
 			}
 		}
 	}
@@ -946,6 +948,23 @@ func (r *DynamoGraphDeploymentReconciler) restoreDisaggregatedSetServiceOwnershi
 		service := &corev1.Service{}
 		if err := r.Get(ctx, types.NamespacedName{Name: serviceName, Namespace: dgd.Namespace}, service); err != nil {
 			if apierrors.IsNotFound(err) {
+				// A component Service is already reconciled by its replacement
+				// DCD. A shared model Service can still be DGD-owned at this
+				// point, so only the DGD watches its deletion until handoff.
+				if modelServiceOwner := modelServiceOwners[serviceName]; modelServiceOwner != nil {
+					componentName := dynamo.GetDCDComponentName(modelServiceOwner)
+					if err := dynamo.ReconcileModelServicesForComponents(
+						ctx,
+						r,
+						modelServiceOwner,
+						map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+							componentName: &modelServiceOwner.Spec.DynamoComponentDeploymentSharedSpec,
+						},
+						dgd.Namespace,
+					); err != nil {
+						return fmt.Errorf("failed to recreate replacement model Service %s/%s: %w", dgd.Namespace, serviceName, err)
+					}
+				}
 				continue
 			}
 			return fmt.Errorf("failed to get replacement Service %s/%s: %w", dgd.Namespace, serviceName, err)

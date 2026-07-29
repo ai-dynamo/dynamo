@@ -183,6 +183,100 @@ var _ = Describe("DisaggregatedSet", func() {
 		Expect(modelOwner.Kind).To(Equal("DynamoComponentDeployment"))
 		Expect(fallbackDCDNames).To(HaveKey(modelOwner.Name))
 	})
+
+	It("recreates a missing shared model Service before completing DisaggregatedSet fallback", func() {
+		ctx := context.Background()
+
+		By("creating a DisaggregatedSet deployment with component and shared model Services")
+		dgd := newDSHappyPathDGD()
+		dgd.Name = "demo-ds-missing-services"
+		dgd.UID = ""
+		for i := range dgd.Spec.Components {
+			dgd.Spec.Components[i].ModelRef = &nvidiacomv1beta1.ModelReference{Name: "shared-missing-model"}
+		}
+		Expect(k8sClient.Create(ctx, dgd)).To(Succeed())
+		DeferCleanup(func() {
+			_ = k8sClient.Delete(ctx, dgd)
+		})
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgd.Name, Namespace: dgd.Namespace}, dgd)).To(Succeed())
+
+		runtimeConfig := &commoncontroller.RuntimeConfig{Gate: features.Gates{LWS: true, DisaggregatedSet: true}}
+		reconciler := &DynamoGraphDeploymentReconciler{
+			Client:   k8sClient,
+			Recorder: record.NewFakeRecorder(100),
+			Config: &configv1alpha1.OperatorConfiguration{
+				Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
+			},
+			RuntimeConfig: runtimeConfig,
+		}
+
+		result, err := reconciler.reconcileWorkloadResources(ctx, dgd, true, true, "", nil, nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(result.State).To(Equal(nvidiacomv1beta1.DGDStatePending))
+
+		By("creating replacement DCDs and their component Services")
+		dgd.Annotations = nil
+		Expect(k8sClient.Update(ctx, dgd)).To(Succeed())
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgd.Name, Namespace: dgd.Namespace}, dgd)).To(Succeed())
+		result, err = reconciler.reconcileWorkloadResources(ctx, dgd, true, false, "", nil, nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(result.State).To(Equal(nvidiacomv1beta1.DGDStatePending))
+
+		replacementDCDs := ownedCutoverDCDs(ctx, dgd)
+		Expect(replacementDCDs).To(HaveLen(2))
+		dcdReconciler := &DynamoComponentDeploymentReconciler{
+			Client:        k8sClient,
+			Recorder:      record.NewFakeRecorder(100),
+			Config:        reconciler.Config,
+			RuntimeConfig: runtimeConfig,
+		}
+		for i := range replacementDCDs {
+			modified, err := dcdReconciler.createOrUpdateOrDeleteServices(ctx, generateResourceOption{
+				dynamoComponentDeployment: &replacementDCDs[i],
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(modified).To(BeTrue())
+		}
+
+		By("deleting the DGD-owned shared model Service before ownership handoff")
+		modelServiceName := dynamo.GenerateServiceName("shared-missing-model")
+		modelService := &corev1.Service{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: modelServiceName, Namespace: dgd.Namespace}, modelService)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, modelService)).To(Succeed())
+		markCutoverDCDsReady(ctx, dgd)
+
+		By("recreating the missing model Service under a replacement DCD owner before deleting the DisaggregatedSet")
+		result, err = reconciler.reconcileWorkloadResources(ctx, dgd, true, false, "", nil, nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(result.State).To(Equal(nvidiacomv1beta1.DGDStateSuccessful))
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{
+			Name:      disaggregatedSetName(dgd),
+			Namespace: dgd.Namespace,
+		}, newDisaggregatedSetObject()))).To(BeTrue())
+
+		replacementDCDNames := map[string]struct{}{}
+		for i := range replacementDCDs {
+			dcd := &replacementDCDs[i]
+			replacementDCDNames[dcd.Name] = struct{}{}
+			service := &corev1.Service{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name:      dynamo.NormalizeKubeResourceName(dcd.Name),
+				Namespace: dgd.Namespace,
+			}, service)).To(Succeed())
+			owner := metav1.GetControllerOf(service)
+			Expect(owner).NotTo(BeNil())
+			Expect(owner.Kind).To(Equal("DynamoComponentDeployment"))
+			Expect(owner.Name).To(Equal(dcd.Name))
+		}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{
+			Name:      modelServiceName,
+			Namespace: dgd.Namespace,
+		}, modelService)).To(Succeed())
+		modelOwner := metav1.GetControllerOf(modelService)
+		Expect(modelOwner).NotTo(BeNil())
+		Expect(modelOwner.Kind).To(Equal("DynamoComponentDeployment"))
+		Expect(replacementDCDNames).To(HaveKey(modelOwner.Name))
+	})
 })
 
 func ownedCutoverDCDs(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment) []nvidiacomv1beta1.DynamoComponentDeployment {
