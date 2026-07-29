@@ -681,7 +681,10 @@ jobs:
       run_cpu_only_tests: true
       cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0'  # TEMP-11836: post_merge validation, revert to pre_merge before merge
       gpu_test_markers: '(pre_merge or post_merge) and vllm and gpu_1'  # TEMP-11836
-      gpu_test_timeout_minutes: 45
+      # TEMP-11836: bumped 45->90 while this job runs the doubled (pre_merge or
+      # post_merge) suite; the parallel GPU stage overran 45m. Revert to 45 with
+      # the marker set before merge.
+      gpu_test_timeout_minutes: 90
       # Profiled tests run in the parallel stage; unprofiled fall through to sequential.
       # 24 GiB admits all currently profiled vLLM tests (max is ~20.4 GiB) on a 48 GiB GPU.
       run_gpu_parallel_tests: true
