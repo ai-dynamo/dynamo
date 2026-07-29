@@ -17,6 +17,14 @@ MULTIMODAL_IMG_URL = f"http://localhost:{IMAGE_SERVER_PORT}/llm-graphic.png"
 MULTIMODAL_VIDEO_PATH = os.path.join(
     WORKSPACE_DIR, "lib/llm/tests/data/media/240p_10.mp4"
 )
+# H.264/H.265 clips (same content as 240p_10.mp4) for the NVDEC hardware-decode
+# path. They MUST be fetched over http(s): the backends only route http(s) video
+# through NVDEC (file:// video isn't hardware-decoded, and the shipped images
+# carry no software H.264/H.265 decoder). Served by the image_server fixture.
+_MEDIA_DIR = os.path.join(WORKSPACE_DIR, "lib/llm/tests/data/media")
+_HTTP_SERVED_VIDEOS = ("240p_10.mp4", "240p_10_h264.mp4", "240p_10_h265.mp4")
+MULTIMODAL_VIDEO_H264_URL = f"http://localhost:{IMAGE_SERVER_PORT}/240p_10_h264.mp4"
+MULTIMODAL_VIDEO_H265_URL = f"http://localhost:{IMAGE_SERVER_PORT}/240p_10_h265.mp4"
 
 
 def get_multimodal_test_image_bytes() -> bytes:
@@ -93,14 +101,19 @@ def image_server(httpserver: HTTPServer):
 
     httpserver.expect_request("/llm-graphic.png").respond_with_handler(_handler)
 
-    # Serve video file for multimodal video tests (guard against LFS pointers)
-    if os.path.isfile(MULTIMODAL_VIDEO_PATH):
-        with open(MULTIMODAL_VIDEO_PATH, "rb") as vf:
+    # Serve the video fixtures over http (VP9 + the H.264/H.265 NVDEC clips) for
+    # multimodal video tests. Guard against unpulled Git-LFS pointer files.
+    for _fname in _HTTP_SERVED_VIDEOS:
+        _fpath = os.path.join(_MEDIA_DIR, _fname)
+        if not os.path.isfile(_fpath):
+            continue
+        with open(_fpath, "rb") as vf:
             video_data = vf.read()
-        if not video_data.startswith(b"version "):
-            httpserver.expect_request("/240p_10.mp4").respond_with_data(
-                video_data, content_type="video/mp4"
-            )
+        if video_data.startswith(b"version "):  # unresolved LFS pointer
+            continue
+        httpserver.expect_request(f"/{_fname}").respond_with_data(
+            video_data, content_type="video/mp4"
+        )
 
     return httpserver
 

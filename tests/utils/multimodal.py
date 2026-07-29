@@ -12,7 +12,12 @@ from typing import Any, Optional, Type
 import pytest
 
 from dynamo.common.utils.paths import WORKSPACE_DIR
-from tests.serve.conftest import MULTIMODAL_IMG_URL, get_multimodal_test_image_bytes
+from tests.serve.conftest import (
+    MULTIMODAL_IMG_URL,
+    MULTIMODAL_VIDEO_H264_URL,
+    MULTIMODAL_VIDEO_H265_URL,
+    get_multimodal_test_image_bytes,
+)
 from tests.utils.engine_process import EngineConfig
 from tests.utils.payload_builder import chat_payload
 from tests.utils.payloads import BasePayload, CachedTokensChatPayload, ChatPayload
@@ -363,6 +368,30 @@ def make_video_payload(expected_response: list[str]) -> ChatPayload:
         temperature=0.0,
         max_tokens=100,
     )
+
+
+def _make_http_video_payload(url: str, expected_response: list[str]) -> ChatPayload:
+    return chat_payload(
+        [
+            {"type": "text", "text": "Describe the video in detail"},
+            {"type": "video_url", "video_url": {"url": url}},
+        ],
+        repeat_count=1,
+        expected_response=expected_response,
+        temperature=0.0,
+        max_tokens=100,
+    )
+
+
+def make_h264_video_payload(expected_response: list[str]) -> ChatPayload:
+    """Video payload whose clip is fetched over http so the request exercises the
+    NVDEC hardware-decode path (H.264). file:// video is not hardware-decoded."""
+    return _make_http_video_payload(MULTIMODAL_VIDEO_H264_URL, expected_response)
+
+
+def make_hevc_video_payload(expected_response: list[str]) -> ChatPayload:
+    """H.265/HEVC counterpart of make_h264_video_payload (NVDEC hardware decode)."""
+    return _make_http_video_payload(MULTIMODAL_VIDEO_H265_URL, expected_response)
 
 
 def make_audio_payload(expected_response: list[str]) -> ChatPayload:

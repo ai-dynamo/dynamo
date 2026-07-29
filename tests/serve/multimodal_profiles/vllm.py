@@ -12,6 +12,8 @@ from tests.utils.multimodal import (
     TopologyConfig,
     make_audio_payload,
     make_custom_encoder_payload,
+    make_h264_video_payload,
+    make_hevc_video_payload,
     make_image_payload,
     make_image_payload_b64,
     make_image_payload_cached_tokens,
@@ -49,6 +51,8 @@ _LLAVA_EXPECTED_COLORS = [
 VLLM_TOPOLOGY_SCRIPTS: dict[str, str] = {
     "agg": "agg_multimodal.sh",
     "agg_video": "agg_multimodal.sh",
+    # H.264/H.265 (NVDEC hardware decode) reuse the same aggregated script.
+    "agg_video_nvdec": "agg_multimodal.sh",
     # Aggregated MM-aware router. Default uses the Rust frontend with the
     # `mm-routing` feature; the `_chat_processor` variant uses the vLLM
     # Python preprocessor (`--dyn-chat-processor=vllm`) to enable the
@@ -116,6 +120,29 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 # it for this test only. See common._install_test_only_packages.
                 env={"DYN_TEST_ONLY_PIP_INSTALL": "opencv-python-headless"},
                 tests=[MmCase(payload=make_video_payload(["red", "static", "still"]))],
+            ),
+            # NVDEC hardware-decode path: H.264/H.265 video input decoded on the
+            # GPU (PyNvVideoCodec, baked into the image) — no per-test decoder
+            # install, unlike the VP9 agg_video case above. Clips are served over
+            # http so the NVDEC route triggers (file:// video is not
+            # hardware-decoded). post_merge until CI is confirmed to expose the
+            # driver "video" capability that libnvcuvid requires.
+            "agg_video_nvdec": TopologyConfig(
+                marks=[pytest.mark.post_merge],
+                timeout_s=600,
+                delayed_start=60,
+                profiled_vram_gib=8.2,
+                requested_vllm_kv_cache_bytes=1_719_075_000,
+                tests=[
+                    MmCase(
+                        suffix="h264",
+                        payload=make_h264_video_payload(["red", "static", "still"]),
+                    ),
+                    MmCase(
+                        suffix="h265",
+                        payload=make_hevc_video_payload(["red", "static", "still"]),
+                    ),
+                ],
             ),
             # Post_merge MM-routing coverage for the Qwen3-VL family — the
             # smaller Qwen3.5-0.8B (`agg_router` below) is the pre_merge gater.
