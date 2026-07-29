@@ -2416,11 +2416,8 @@ fn materialize_replay_mocker_args(
             .aic_model_path
             .clone()
             .ok_or_else(|| PyException::new_err("--aic-perf-model requires --model-path"))?;
-        let backend_version = resolve_aic_backend_version(
-            py,
-            &backend,
-            args.aic_backend_version.as_deref(),
-        )?;
+        let backend_version =
+            resolve_aic_backend_version(py, &backend, args.aic_backend_version.as_deref())?;
         args.aic_backend_version = Some(backend_version.clone());
         let backend_version = Some(backend_version);
         let tp_size = args.aic_tp_size.unwrap_or(1);

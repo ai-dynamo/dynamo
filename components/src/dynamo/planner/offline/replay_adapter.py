@@ -50,7 +50,6 @@ from dynamo.planner.core.types import (
     FpmObservations,
     PlannerEffects,
     ScheduledTick,
-    TickDiagnostics,
     TickInput,
     TrafficObservation,
     WorkerCapabilities,
@@ -304,7 +303,6 @@ class ReplayPlannerAdapter:
         self._bootstrap_orchestrator_if_needed()
         self._pending_tick: ScheduledTick = self._engine.initial_tick(0.0)
         self._scaling_events: list[ScalingEvent] = []
-        self._diagnostics_log: list[TickDiagnostics] = []
         self._ticks: list[dict[str, Any]] = []
         self._total_ticks = 0
 
@@ -322,8 +320,6 @@ class ReplayPlannerAdapter:
         tick_input = self._build_tick_input(tick, result)
         effects: PlannerEffects = self._run_sync(self._engine.tick(tick, tick_input))
         emit_diagnostics = self._should_emit_tick_diagnostics(tick, effects)
-        if emit_diagnostics:
-            self._diagnostics_log.append(effects.diagnostics)
         self._total_ticks += 1
         self._record_diagnostics(tick_input, effects, result, emit_diagnostics)
 
