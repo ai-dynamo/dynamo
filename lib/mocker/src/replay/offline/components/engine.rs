@@ -389,6 +389,18 @@ where
             .collect()
     }
 
+    pub(in crate::replay::offline) fn starting_group_ids(&self) -> Vec<usize> {
+        self.pending_startup.iter().copied().collect()
+    }
+
+    pub(in crate::replay::offline) fn draining_group_ids(&self) -> Vec<usize> {
+        self.pending_removal.iter().copied().collect()
+    }
+
+    pub(in crate::replay::offline) fn non_draining_group_count(&self) -> usize {
+        self.active_group_ids().len() + self.pending_startup.len()
+    }
+
     #[cfg(test)]
     pub(in crate::replay::offline) fn active_worker_ids(&self) -> Vec<usize> {
         self.active_group_ids()
@@ -1145,6 +1157,37 @@ mod tests {
         let (_added, newly_marked, _) = engine.apply_target_count(1);
         assert_eq!(newly_marked.len(), 2);
         assert_eq!(engine.active_worker_ids().len(), 1);
+    }
+
+    #[test]
+    fn test_scale_up_during_drain_creates_replacement_capacity() {
+        let mut engine = engine_with_startup(2, None);
+        let mut collector = TraceCollector::default();
+        engine
+            .dispatch(
+                1,
+                DirectRequest {
+                    tokens: vec![1; 64],
+                    max_output_tokens: 8,
+                    uuid: Some(Uuid::from_u128(99)),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let effects = engine.drive_ready(0.0, Some(&mut collector)).unwrap();
+        assert_eq!(effects.scheduled_completions.len(), 1);
+
+        let (_, newly_marked, _) = engine.apply_target_count(1);
+        assert_eq!(newly_marked, vec![1]);
+        assert_eq!(engine.active_group_ids(), vec![0]);
+        assert_eq!(engine.draining_group_ids(), vec![1]);
+
+        let (added, _, _) = engine.apply_target_count(2);
+        assert_eq!(added, vec![2]);
+        assert_eq!(engine.active_group_ids(), vec![0, 2]);
+        assert_eq!(engine.draining_group_ids(), vec![1]);
+        assert_eq!(engine.non_draining_group_count(), 2);
+        assert_eq!(engine.worker_count(), 3);
     }
 
     #[test]
