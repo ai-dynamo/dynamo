@@ -13,10 +13,6 @@ pub const ROUTER_HINT_EXTRA_ARGS_KEY: &str = "router_hint";
 /// Worker runtime_data key. Boolean true means the worker can consume router_hint extra args.
 pub const ROUTER_HINT_RUNTIME_CAPABILITY_KEY: &str = "router_hint";
 
-/// Worker runtime_data key for the advertised KVCC control endpoint.
-pub const ROUTER_HINT_SOURCE_CONTROL_ENDPOINT_RUNTIME_KEY: &str =
-    "router_hint_source_control_endpoint";
-
 /// Worker runtime_data key for per-global-DP-rank advertised KVCC control endpoints.
 pub const ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY: &str =
     "router_hint_source_control_endpoints";

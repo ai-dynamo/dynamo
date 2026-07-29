@@ -9,8 +9,9 @@ import pytest
 
 from dynamo.common.constants import (
     ROUTER_HINT_RUNTIME_CAPABILITY_KEY,
-    ROUTER_HINT_SOURCE_CONTROL_ENDPOINT_RUNTIME_KEY,
+    ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
 )
+from dynamo.llm import WorkerType
 from dynamo.vllm.router_hints import enable_router_hint_support
 
 pytestmark = [
@@ -21,7 +22,7 @@ pytestmark = [
 ]
 
 
-def test_enable_router_hint_support_extracts_router_hint_endpoint():
+def test_enable_router_hint_support_publishes_single_dp_rank_endpoint():
     runtime_config = MagicMock()
     engine_args = SimpleNamespace(
         kv_transfer_config=SimpleNamespace(
@@ -39,14 +40,42 @@ def test_enable_router_hint_support_extracts_router_hint_endpoint():
         )
     )
 
-    enable_router_hint_support(runtime_config, engine_args)
+    enable_router_hint_support(runtime_config, engine_args, WorkerType.Prefill)
 
     runtime_config.set_engine_specific.assert_any_call(
         ROUTER_HINT_RUNTIME_CAPABILITY_KEY, "true"
     )
     runtime_config.set_engine_specific.assert_any_call(
-        ROUTER_HINT_SOURCE_CONTROL_ENDPOINT_RUNTIME_KEY,
-        json.dumps("tcp://127.0.0.1:23280"),
+        ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
+        json.dumps({"0": "tcp://127.0.0.1:23280"}),
+    )
+
+
+def test_enable_router_hint_support_publishes_dp_rank_endpoints():
+    runtime_config = MagicMock()
+    engine_args = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(
+            kv_connector_extra_config={
+                "secondary_tiers": [
+                    {
+                        "type": "custom",
+                        "router_capabilities": ["router_hint"],
+                        "control_host": "0.0.0.0",
+                        "control_advertise_host": "worker-a",
+                        "control_port": "23280",
+                    }
+                ]
+            }
+        )
+    )
+
+    enable_router_hint_support(
+        runtime_config, engine_args, WorkerType.Prefill, dp_range=(4, 2)
+    )
+
+    runtime_config.set_engine_specific.assert_any_call(
+        ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
+        json.dumps({"4": "tcp://worker-a:23280", "5": "tcp://worker-a:23281"}),
     )
 
 
@@ -74,7 +103,30 @@ def test_enable_router_hint_support_fails_with_multiple_router_hint_tiers():
     )
 
     with pytest.raises(ValueError, match="exactly one router-hint-capable"):
-        enable_router_hint_support(runtime_config, engine_args)
+        enable_router_hint_support(runtime_config, engine_args, WorkerType.Prefill)
+
+    runtime_config.set_engine_specific.assert_not_called()
+
+
+def test_enable_router_hint_support_skips_for_non_prefill_workers():
+    runtime_config = MagicMock()
+    engine_args = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(
+            kv_connector_extra_config={
+                "secondary_tiers": [
+                    {
+                        "type": "kvcc",
+                        "router_capabilities": ["router_hint"],
+                        "control_host": "0.0.0.0",
+                        "control_advertise_host": "127.0.0.1",
+                        "control_port": "23280",
+                    }
+                ]
+            }
+        )
+    )
+
+    enable_router_hint_support(runtime_config, engine_args, WorkerType.Decode)
 
     runtime_config.set_engine_specific.assert_not_called()
 
@@ -96,7 +148,7 @@ def test_enable_router_hint_support_skips_without_router_hint_capability():
         )
     )
 
-    enable_router_hint_support(runtime_config, engine_args)
+    enable_router_hint_support(runtime_config, engine_args, WorkerType.Prefill)
 
     runtime_config.set_engine_specific.assert_not_called()
 
@@ -119,6 +171,6 @@ def test_enable_router_hint_support_fails_without_advertisable_endpoint():
     )
 
     with pytest.raises(ValueError, match="router_hint support requires"):
-        enable_router_hint_support(runtime_config, engine_args)
+        enable_router_hint_support(runtime_config, engine_args, WorkerType.Prefill)
 
     runtime_config.set_engine_specific.assert_not_called()

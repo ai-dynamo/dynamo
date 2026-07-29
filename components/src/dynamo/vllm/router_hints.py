@@ -8,7 +8,7 @@ from typing import Any
 
 from dynamo.common.constants import (
     ROUTER_HINT_RUNTIME_CAPABILITY_KEY,
-    ROUTER_HINT_SOURCE_CONTROL_ENDPOINT_RUNTIME_KEY,
+    ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
 )
 
 
@@ -40,9 +40,9 @@ def _router_hint_tiers(engine_args: Any) -> list[Any]:
     ]
 
 
-def _router_hint_source_control_endpoint(tier: Any) -> str | None:
+def _router_hint_source_control_endpoint(tier: Any, port_offset: int = 0) -> str | None:
     try:
-        control_port = int(_get(tier, "control_port"))
+        control_port = int(_get(tier, "control_port")) + port_offset
     except (TypeError, ValueError):
         return None
     if control_port <= 0:
@@ -53,7 +53,32 @@ def _router_hint_source_control_endpoint(tier: Any) -> str | None:
     return f"tcp://{host}:{control_port}"
 
 
-def enable_router_hint_support(runtime_config: Any, engine_args: Any) -> None:
+def _router_hint_source_control_endpoints(
+    tier: Any, dp_range: tuple[int, int]
+) -> dict[str, str] | None:
+    dp_start, dp_size = dp_range
+    endpoints: dict[str, str] = {}
+    for local_dp_rank in range(dp_size):
+        endpoint = _router_hint_source_control_endpoint(tier, local_dp_rank)
+        if endpoint is None:
+            return None
+        endpoints[str(dp_start + local_dp_rank)] = endpoint
+    return endpoints
+
+
+def _is_prefill_worker(worker_type: Any) -> bool:
+    return getattr(worker_type, "value", worker_type) == "prefill"
+
+
+def enable_router_hint_support(
+    runtime_config: Any,
+    engine_args: Any,
+    worker_type: Any,
+    dp_range: tuple[int, int] = (0, 1),
+) -> None:
+    if not _is_prefill_worker(worker_type):
+        return
+
     router_hint_tiers = _router_hint_tiers(engine_args)
     if not router_hint_tiers:
         return
@@ -63,16 +88,15 @@ def enable_router_hint_support(runtime_config: Any, engine_args: Any) -> None:
             "secondary tier; found multiple tiers advertising router_hint"
         )
 
-    control_endpoint = _router_hint_source_control_endpoint(router_hint_tiers[0])
-    if control_endpoint is None:
+    endpoints = _router_hint_source_control_endpoints(router_hint_tiers[0], dp_range)
+    if endpoints is None:
         raise ValueError(
-            "router_hint support requires an advertisable source control endpoint; "
-            "set control_advertise_host and a positive control_port on the "
-            "router_hint secondary tier"
+            "router_hint support requires advertisable source control endpoints "
+            "for all managed DP ranks"
         )
 
     runtime_config.set_engine_specific(ROUTER_HINT_RUNTIME_CAPABILITY_KEY, "true")
     runtime_config.set_engine_specific(
-        ROUTER_HINT_SOURCE_CONTROL_ENDPOINT_RUNTIME_KEY,
-        json.dumps(control_endpoint),
+        ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
+        json.dumps(endpoints),
     )

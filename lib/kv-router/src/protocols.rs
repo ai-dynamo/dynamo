@@ -276,16 +276,11 @@ pub trait WorkerConfigLike {
         false
     }
 
-    /// Advertised peer-control endpoint used when this worker is selected as a router_hint source.
-    /// Backends that advertise router-hint support are responsible for publishing a usable endpoint.
-    fn router_hint_source_control_endpoint(&self) -> Option<&str> {
-        None
-    }
-
     /// Advertised peer-control endpoint for a specific global DP rank.
-    /// Defaults to the worker-level endpoint for backends with one endpoint per worker.
-    fn router_hint_source_control_endpoint_for_dp_rank(&self, _dp_rank: DpRank) -> Option<&str> {
-        self.router_hint_source_control_endpoint()
+    /// Backends that advertise router-hint support are responsible for publishing
+    /// a usable endpoint for each managed DP rank.
+    fn router_hint_source_control_endpoint_for_dp_rank(&self, _dp_rank: DpRank) -> Option<String> {
+        None
     }
 
     /// Tokens retained by the backend's native KV offloading tier, if available.
