@@ -25,7 +25,10 @@ import (
 	"github.com/google/go-cmp/cmp"
 
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -234,6 +237,90 @@ func TestBugDGDRProfilingConfigPreservesUnprojectableTypedKeys(t *testing.T) {
 		t.Fatal("profilingConfig.config = nil, want preserved opaque JSON")
 	}
 	assertDGDRJSONEqual(t, config, restored.Spec.ProfilingConfig.Config.Raw)
+}
+
+func TestBugDGDRProfilingJobResourcesFollowContainerName(t *testing.T) {
+	sidecarResources := corev1.ResourceRequirements{
+		Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m")},
+	}
+	profilerResources := corev1.ResourceRequirements{
+		Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
+	}
+	updatedProfilerResources := corev1.ResourceRequirements{
+		Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")},
+	}
+	tests := []struct {
+		name               string
+		containers         []corev1.Container
+		wantSpokeResources *corev1.ResourceRequirements
+		wantRestored       []corev1.Container
+	}{
+		{
+			name: "sidecar only",
+			containers: []corev1.Container{{
+				Name:      dgdrOutputCopierContainerName,
+				Resources: sidecarResources,
+			}},
+			wantRestored: []corev1.Container{
+				{Name: dgdrOutputCopierContainerName, Resources: sidecarResources},
+				{Name: dgdrProfilerContainerName, Resources: updatedProfilerResources},
+			},
+		},
+		{
+			name: "sidecar before profiler",
+			containers: []corev1.Container{
+				{Name: dgdrOutputCopierContainerName, Resources: sidecarResources},
+				{Name: dgdrProfilerContainerName, Resources: profilerResources},
+			},
+			wantSpokeResources: &profilerResources,
+			wantRestored: []corev1.Container{
+				{Name: dgdrOutputCopierContainerName, Resources: sidecarResources},
+				{Name: dgdrProfilerContainerName, Resources: updatedProfilerResources},
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Convert named v1beta1 profiling overrides to v1alpha1")
+			hub := &v1beta1.DynamoGraphDeploymentRequest{
+				Spec: v1beta1.DynamoGraphDeploymentRequestSpec{
+					Overrides: &v1beta1.OverridesSpec{
+						ProfilingJob: &batchv1.JobSpec{
+							Template: corev1.PodTemplateSpec{
+								Spec: corev1.PodSpec{Containers: test.containers},
+							},
+						},
+					},
+				},
+			}
+			spoke := &DynamoGraphDeploymentRequest{}
+			if err := spoke.ConvertFrom(hub); err != nil {
+				t.Fatalf("ConvertFrom() error = %v", err)
+			}
+
+			t.Log("Verify only profiler resources are projected into the legacy field")
+			if diff := cmp.Diff(test.wantSpokeResources, spoke.Spec.ProfilingConfig.Resources); diff != "" {
+				t.Fatalf("profilingConfig.resources mismatch (-want +got):\n%s", diff)
+			}
+
+			t.Log("Update legacy profiler resources and convert back to v1beta1")
+			spoke.Spec.ProfilingConfig.Resources = &updatedProfilerResources
+			restored := &v1beta1.DynamoGraphDeploymentRequest{}
+			if err := spoke.ConvertTo(restored); err != nil {
+				t.Fatalf("ConvertTo() error = %v", err)
+			}
+
+			t.Log("Verify resources remain attached to their named containers")
+			if restored.Spec.Overrides == nil || restored.Spec.Overrides.ProfilingJob == nil {
+				t.Fatal("profilingJob override = nil, want restored named containers")
+			}
+			got := restored.Spec.Overrides.ProfilingJob.Template.Spec.Containers
+			if diff := cmp.Diff(test.wantRestored, got); diff != "" {
+				t.Fatalf("profiling containers mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
 }
 
 func mustDGDRHubStatusAnnotation(t *testing.T, status v1beta1.DynamoGraphDeploymentRequestStatus) string {

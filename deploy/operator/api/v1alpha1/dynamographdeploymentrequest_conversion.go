@@ -58,8 +58,10 @@ import (
 )
 
 const (
-	annDGDRSpec   = "nvidia.com/dgdr-spec"
-	annDGDRStatus = "nvidia.com/dgdr-status"
+	annDGDRSpec                   = "nvidia.com/dgdr-spec"
+	annDGDRStatus                 = "nvidia.com/dgdr-status"
+	dgdrProfilerContainerName     = "profiler"
+	dgdrOutputCopierContainerName = "output-copier"
 )
 
 // Retired per-field annotations are no longer decoded, but must still be
@@ -486,10 +488,12 @@ func projectProfilingConfigToProfilingJob(src *ProfilingConfigSpec, dst *v1beta1
 	podSpec := &dst.Overrides.ProfilingJob.Template.Spec
 
 	if src.Resources != nil {
-		if len(podSpec.Containers) == 0 {
-			podSpec.Containers = []corev1.Container{{}}
+		idx := dgdrProfilerContainerIndex(podSpec.Containers)
+		if idx < 0 {
+			podSpec.Containers = append(podSpec.Containers, corev1.Container{Name: dgdrProfilerContainerName})
+			idx = len(podSpec.Containers) - 1
 		}
-		podSpec.Containers[0].Resources = *src.Resources
+		podSpec.Containers[idx].Resources = *src.Resources
 	}
 	if len(src.Tolerations) > 0 {
 		podSpec.Tolerations = src.Tolerations
@@ -758,10 +762,15 @@ func dgdrHubOnlyProfilingJob(src *batchv1.JobSpec) *batchv1.JobSpec {
 		return nil
 	}
 	save := src.DeepCopy()
-	if len(save.Template.Spec.Containers) > 0 {
-		save.Template.Spec.Containers[0].Resources = corev1.ResourceRequirements{}
-		if len(save.Template.Spec.Containers) == 1 && apiequality.Semantic.DeepEqual(save.Template.Spec.Containers[0], corev1.Container{}) {
-			save.Template.Spec.Containers = slices.Delete(save.Template.Spec.Containers, 0, 1)
+	if idx := dgdrProfilerContainerIndex(save.Template.Spec.Containers); idx >= 0 {
+		save.Template.Spec.Containers[idx].Resources = corev1.ResourceRequirements{}
+		// A container that only carries the synthetic profiler name (from
+		// projecting v1alpha1 profilingConfig.resources) is not hub-only
+		// state — treat it as empty so spoke→hub does not emit dgdr-spec.
+		c := save.Template.Spec.Containers[idx]
+		if apiequality.Semantic.DeepEqual(c, corev1.Container{}) ||
+			apiequality.Semantic.DeepEqual(c, corev1.Container{Name: dgdrProfilerContainerName}) {
+			save.Template.Spec.Containers = slices.Delete(save.Template.Spec.Containers, idx, idx+1)
 		}
 	}
 	save.Template.Spec.Tolerations = nil
@@ -776,16 +785,18 @@ func mergeDGDRHubOnlyProfilingJob(dst *batchv1.JobSpec, restored *batchv1.JobSpe
 	if dst == nil || restored == nil {
 		return
 	}
-	resources, hasResources := dgdrFirstContainerResources(dst)
+	resources, hasResources := dgdrProfilerContainerResources(dst)
 	tolerations := slices.Clone(dst.Template.Spec.Tolerations)
 	nodeSelector := maps.Clone(dst.Template.Spec.NodeSelector)
 
 	*dst = *restored.DeepCopy()
 	if hasResources {
-		if len(dst.Template.Spec.Containers) == 0 {
-			dst.Template.Spec.Containers = []corev1.Container{{}}
+		idx := dgdrProfilerContainerIndex(dst.Template.Spec.Containers)
+		if idx < 0 {
+			dst.Template.Spec.Containers = append(dst.Template.Spec.Containers, corev1.Container{Name: dgdrProfilerContainerName})
+			idx = len(dst.Template.Spec.Containers) - 1
 		}
-		dst.Template.Spec.Containers[0].Resources = resources
+		dst.Template.Spec.Containers[idx].Resources = resources
 	}
 	if len(tolerations) > 0 {
 		dst.Template.Spec.Tolerations = tolerations
@@ -795,12 +806,32 @@ func mergeDGDRHubOnlyProfilingJob(dst *batchv1.JobSpec, restored *batchv1.JobSpe
 	}
 }
 
-func dgdrFirstContainerResources(job *batchv1.JobSpec) (corev1.ResourceRequirements, bool) {
-	if job == nil || len(job.Template.Spec.Containers) == 0 {
+func dgdrProfilerContainerResources(job *batchv1.JobSpec) (corev1.ResourceRequirements, bool) {
+	if job == nil {
 		return corev1.ResourceRequirements{}, false
 	}
-	res := job.Template.Spec.Containers[0].Resources
+	idx := dgdrProfilerContainerIndex(job.Template.Spec.Containers)
+	if idx < 0 {
+		return corev1.ResourceRequirements{}, false
+	}
+	res := job.Template.Spec.Containers[idx].Resources
 	return res, !apiequality.Semantic.DeepEqual(res, corev1.ResourceRequirements{})
+}
+
+// dgdrProfilerContainerIndex matches the controller's named selection while
+// retaining the legacy first-non-sidecar fallback.
+func dgdrProfilerContainerIndex(containers []corev1.Container) int {
+	for i := range containers {
+		if containers[i].Name == dgdrProfilerContainerName {
+			return i
+		}
+	}
+	for i := range containers {
+		if containers[i].Name != dgdrOutputCopierContainerName {
+			return i
+		}
+	}
+	return -1
 }
 
 // projectSLAAndWorkloadToProfilingConfigBlob writes SLA and Workload structured fields back into the JSON blob.
@@ -906,8 +937,8 @@ func projectProfilingJobToProfilingConfig(src *v1beta1.DynamoGraphDeploymentRequ
 		return
 	}
 	podSpec := &src.Overrides.ProfilingJob.Template.Spec
-	if len(podSpec.Containers) > 0 {
-		res := podSpec.Containers[0].Resources
+	if idx := dgdrProfilerContainerIndex(podSpec.Containers); idx >= 0 {
+		res := podSpec.Containers[idx].Resources
 		if !apiequality.Semantic.DeepEqual(res, corev1.ResourceRequirements{}) {
 			dst.ProfilingConfig.Resources = &res
 		}
