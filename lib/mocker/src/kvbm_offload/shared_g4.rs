@@ -10,13 +10,13 @@ use anyhow::{Result, bail};
 use kvbm_engine::SequenceHash;
 use kvbm_engine::offload::PendingTracker;
 
+use super::KvbmDriveMode;
 use super::bandwidth_sharing_model::TransferId;
 use super::config::KvbmOffloadConfig;
 use super::worker::{
     CompletedTransfer, CompletionAction, DeferredOwnerDrain, DrainResult, SharedDrainCounts,
     TransferDirection, TransferState,
 };
-use super::KvbmDriveMode;
 
 struct DeferredOwnerCompletions {
     actions: Vec<CompletionAction>,

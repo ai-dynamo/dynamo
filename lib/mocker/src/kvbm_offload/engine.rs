@@ -13,11 +13,11 @@
 //! the caller — live replay feeds wall-clock time, offline replay feeds
 //! virtual time.
 
+use std::cell::{Cell, RefCell};
 #[cfg(feature = "replay-bench")]
 use std::cmp::Reverse;
 #[cfg(feature = "replay-bench")]
 use std::collections::BinaryHeap;
-use std::cell::{Cell, RefCell};
 use std::future::Future;
 use std::net::TcpListener;
 use std::pin::Pin;
@@ -52,6 +52,7 @@ use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 use crate::common::protocols::G1 as MockerG1;
 
+use super::KvbmDriveMode;
 use super::capacity_reservation::{
     CapacityReservationGuard, CapacityReservationPolicy, CapacityReservations,
 };
@@ -63,7 +64,6 @@ use super::coordinator::{
 use super::shared_g3::SharedG3Pool;
 use super::shared_g4::SharedG4Store;
 use super::worker::{CompletedTransfer, MockWorker, TransferDirection};
-use super::KvbmDriveMode;
 
 // Successful offline barriers wake via watch channels. The timeout is only a
 // hang guard for pipeline bugs.
@@ -82,10 +82,7 @@ enum G2EventStream {
         Pin<
             Box<
                 dyn Stream<
-                        Item = std::result::Result<
-                            LogicalKvCacheEvent,
-                            BroadcastStreamRecvError,
-                        >,
+                        Item = std::result::Result<LogicalKvCacheEvent, BroadcastStreamRecvError>,
                     > + Send,
             >,
         >,
@@ -368,9 +365,9 @@ impl MockOffloadEngine {
             KvbmDriveMode::Live => {
                 G2EventStream::BestEffort(Box::pin(g2_events_manager.subscribe()))
             }
-            KvbmDriveMode::OfflineDeterministic => G2EventStream::LossAware(Box::pin(
-                g2_events_manager.subscribe_loss_aware(),
-            )),
+            KvbmDriveMode::OfflineDeterministic => {
+                G2EventStream::LossAware(Box::pin(g2_events_manager.subscribe_loss_aware()))
+            }
         };
         let registry = Arc::new(build_registry(g2_events_manager));
         let g2_manager = Arc::new(build_g2_block_manager(
@@ -1131,10 +1128,7 @@ impl MockOffloadEngine {
                 AdvancePhase::Idle => {}
                 AdvancePhase::Prepared(pending) => return pending.clone(),
                 AdvancePhase::Committing(acknowledgement) => {
-                    panic!(
-                        "offload advance {:?} is still committing",
-                        acknowledgement
-                    )
+                    panic!("offload advance {:?} is still committing", acknowledgement)
                 }
             }
         }
@@ -1154,14 +1148,10 @@ impl MockOffloadEngine {
                             .expect("G1→G2 settlement target overflow");
                         let mut target = SettlementTarget::new();
                         target
-                            .add_completed_batches(
-                                PipelineLane::G1ToG2,
-                                local_completed_batches,
-                            )
+                            .add_completed_batches(PipelineLane::G1ToG2, local_completed_batches)
                             .expect("G1→G2 settlement target overflow");
                         self.settle_or_panic(local_token.clone(), target);
-                        expected_g2_registrations
-                            .set(Self::tier_registrations(&self.g2_manager));
+                        expected_g2_registrations.set(Self::tier_registrations(&self.g2_manager));
                     }
                     ordered_router_events
                         .borrow_mut()
@@ -1170,9 +1160,8 @@ impl MockOffloadEngine {
                 |completion| {
                     match completion.direction {
                         TransferDirection::G2ToG3 => {
-                            if let Some(settlement) = self
-                                .coordinator
-                                .shared_settlement(PipelineLane::G2ToG3, 1)
+                            if let Some(settlement) =
+                                self.coordinator.shared_settlement(PipelineLane::G2ToG3, 1)
                             {
                                 self.settle_or_panic(settlement.token, settlement.target);
                             }
@@ -1187,10 +1176,7 @@ impl MockOffloadEngine {
                                 .expect("G2 registration target overflow");
                             expected_g2_registrations.set(target);
                             assert!(
-                                self.wait_for_tier_registrations(
-                                    self.g2_manager.clone(),
-                                    target,
-                                ),
+                                self.wait_for_tier_registrations(self.g2_manager.clone(), target,),
                                 "offline G3→G2 completion did not publish its G2 registrations"
                             );
                             expected_g2_registrations
@@ -1205,9 +1191,8 @@ impl MockOffloadEngine {
                 |completion| {
                     match completion.direction {
                         TransferDirection::G2ToG4 => {
-                            if let Some(settlement) = self
-                                .coordinator
-                                .shared_settlement(PipelineLane::G2ToG4, 1)
+                            if let Some(settlement) =
+                                self.coordinator.shared_settlement(PipelineLane::G2ToG4, 1)
                             {
                                 self.settle_or_panic(settlement.token, settlement.target);
                             }
@@ -1222,10 +1207,7 @@ impl MockOffloadEngine {
                                 .expect("G2 registration target overflow");
                             expected_g2_registrations.set(target);
                             assert!(
-                                self.wait_for_tier_registrations(
-                                    self.g2_manager.clone(),
-                                    target,
-                                ),
+                                self.wait_for_tier_registrations(self.g2_manager.clone(), target,),
                                 "offline G4→G2 completion did not publish its G2 registrations"
                             );
                             expected_g2_registrations
@@ -1422,10 +1404,7 @@ impl MockOffloadEngine {
             AdvancePhase::Committing(actual) => *actual,
             _ => panic!("prepared offload advance changed phase during acknowledgement"),
         };
-        assert_eq!(
-            actual,
-            acknowledgement
-        );
+        assert_eq!(actual, acknowledgement);
         state.phase = AdvancePhase::Idle;
         Ok(released)
     }

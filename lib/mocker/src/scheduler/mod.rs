@@ -488,8 +488,8 @@ pub async fn init_kvbm_live(
     };
     let engine =
         std::thread::spawn(move || build_owned_offload_engine(config, KvbmDriveMode::Live))
-        .join()
-        .map_err(|_| anyhow::anyhow!("kvbm-offload live init thread panicked"))??;
+            .join()
+            .map_err(|_| anyhow::anyhow!("kvbm-offload live init thread panicked"))??;
     Ok(Some(kv_manager.attach_new_offload_engine(engine)))
 }
 
@@ -538,9 +538,9 @@ fn build_owned_offload_engine(
         .worker_threads(1)
         .enable_all()
         .build()?;
-    let mut engine = rt.block_on(
-        crate::kvbm_offload::MockOffloadEngine::new_with_drive_mode(config, drive_mode),
-    )?;
+    let mut engine = rt.block_on(crate::kvbm_offload::MockOffloadEngine::new_with_drive_mode(
+        config, drive_mode,
+    ))?;
     engine.attach_runtime(rt);
     Ok(engine)
 }

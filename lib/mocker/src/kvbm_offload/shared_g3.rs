@@ -13,13 +13,13 @@ use kvbm_logical::manager::{BlockManager, FrequencyTrackingCapacity};
 use kvbm_logical::pools::BlockDuplicationPolicy;
 use kvbm_logical::registry::BlockRegistry;
 
+use super::KvbmDriveMode;
 use super::capacity_reservation::CapacityReservations;
 use super::config::KvbmOffloadConfig;
 use super::worker::{
     CompletedTransfer, CompletionAction, DeferredOwnerDrain, DrainResult, SharedDrainCounts,
     TransferDirection, TransferState, fire_completion_actions_with,
 };
-use super::KvbmDriveMode;
 
 struct DeferredOwnerCompletions {
     actions: Vec<CompletionAction>,
@@ -165,8 +165,7 @@ impl SharedG3Pool {
         let Some(pending) = pending else {
             return SharedDrainCounts::default();
         };
-        let result =
-            fire_completion_actions_with(pending.actions, after_pipeline_completion);
+        let result = fire_completion_actions_with(pending.actions, after_pipeline_completion);
         SharedDrainCounts {
             counts: result.by_owner.get(&owner_id).copied().unwrap_or_default(),
             deferred_onboard_blocks: 0,
@@ -201,9 +200,9 @@ impl SharedG3Pool {
             .lock()
             .expect("shared G3 ordered completion map poisoned");
         for (owner_id, actions) in by_owner {
-            let has_offload = actions.iter().any(|action| {
-                action.completed_transfer().direction == TransferDirection::G2ToG3
-            });
+            let has_offload = actions
+                .iter()
+                .any(|action| action.completed_transfer().direction == TransferDirection::G2ToG3);
             match pending.entry(owner_id) {
                 std::collections::hash_map::Entry::Occupied(mut entry) => {
                     let pending = entry.get_mut();

@@ -37,11 +37,11 @@ use kvbm_physical::transfer::{PhysicalLayout, TransferCompleteNotification, Tran
 use tokio::sync::watch;
 use velo::{Event, EventManager};
 
+use super::KvbmDriveMode;
 use super::bandwidth_sharing_model::{BandwidthSharingModel, TransferId};
 use super::coordinator::SwapInStatus;
 use super::shared_g3::SharedG3Pool;
 use super::shared_g4::SharedG4Store;
-use super::KvbmDriveMode;
 
 /// Direction of a G1↔G2/G2↔G3/G2↔G4 transfer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -574,9 +574,7 @@ impl MockWorker {
         if self.drive_mode == KvbmDriveMode::OfflineDeterministic {
             return self.drain_completions_summary_ordered(now_ms, |_| {}, |_| {}, |_| {});
         }
-        let local = self
-            .drain_local_completions_with(now_ms, |_| {})
-            .total;
+        let local = self.drain_local_completions_with(now_ms, |_| {}).total;
         let shared_g3 = self
             .shared_g3
             .as_ref()
@@ -1426,24 +1424,16 @@ mod tests {
             .unwrap();
 
         let mut b_completions = 0;
-        let b_drained = worker_b.drain_completions_summary_ordered(
-            2.0,
-            |_| {},
-            |_| b_completions += 1,
-            |_| {},
-        );
+        let b_drained =
+            worker_b.drain_completions_summary_ordered(2.0, |_| {}, |_| b_completions += 1, |_| {});
         assert_eq!(b_drained.shared_g3.counts.offload_blocks, 1);
         assert_eq!(b_completions, 1);
         assert!(a.could_yield());
         b.await.expect("worker B completion");
 
         let mut a_completions = 0;
-        let a_drained = worker_a.drain_completions_summary_ordered(
-            2.0,
-            |_| {},
-            |_| a_completions += 1,
-            |_| {},
-        );
+        let a_drained =
+            worker_a.drain_completions_summary_ordered(2.0, |_| {}, |_| a_completions += 1, |_| {});
         assert_eq!(a_drained.shared_g3.counts.offload_blocks, 1);
         assert_eq!(a_completions, 1);
         a.await.expect("worker A completion");
