@@ -846,23 +846,16 @@ where
             changed |= self.release_ready_arrivals()?;
             changed |= self.drive_ready_workers()?;
             let removed = self.engine.try_remove_drained();
-            let mut removal_releases = Vec::new();
             for worker_id in &removed {
-                removal_releases.extend(self.placement.worker_removed(
+                self.placement.worker_removed(
                     WorkerTopology {
                         worker_id: *worker_id,
                         scheduler_ids: Vec::new(),
                     },
                     self.now_ms,
-                )?);
+                )?;
             }
             if !removed.is_empty() {
-                removal_releases.extend(self.placement.topology_settled(self.now_ms)?);
-                let released = removal_releases
-                    .iter()
-                    .map(|placement| placement.request_id)
-                    .collect();
-                self.dispatch_placements(removal_releases)?;
                 let origin = common_origin(
                     removed
                         .iter()
@@ -886,7 +879,7 @@ where
                         })
                         .collect(),
                     self.lifecycle_state(),
-                    released,
+                    Vec::new(),
                 );
             }
             changed |= !removed.is_empty();

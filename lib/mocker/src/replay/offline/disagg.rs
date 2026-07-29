@@ -2292,9 +2292,6 @@ where
                 self.dispatch_prefill_placements(placements)?;
             }
             if !removed_prefill.is_empty() {
-                let placements = self.prefill_placement.topology_settled(self.now_ms)?;
-                prefill_releases.extend(placements.iter().map(|placement| placement.request_id));
-                self.dispatch_prefill_placements(placements)?;
                 let origin = common_origin(
                     removed_prefill
                         .iter()
@@ -2336,9 +2333,6 @@ where
                 self.dispatch_decode_placements(placements)?;
             }
             if !removed_decode.is_empty() {
-                let placements = self.decode_placement.topology_settled(self.now_ms)?;
-                decode_releases.extend(placements.iter().map(|placement| placement.request_id));
-                self.dispatch_decode_placements(placements)?;
                 let origin = common_origin(
                     removed_decode
                         .iter()
