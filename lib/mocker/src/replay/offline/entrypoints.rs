@@ -400,6 +400,7 @@ pub(crate) fn simulate_trace_workload_without_session_metadata(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_agentic_trace_workload(
     args: MockEngineArgs,
     router_config: Option<ReplayKvRouterConfig>,
@@ -1311,6 +1312,7 @@ fn simulate_trace_workload_multi_with_scaling_policy(
     Ok(finish_with_replay_wall_time(collector, started_at, sla))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_agentic_trace_workload_multi(
     args: MockEngineArgs,
     router_config: Option<ReplayKvRouterConfig>,

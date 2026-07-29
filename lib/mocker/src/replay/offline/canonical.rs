@@ -700,8 +700,10 @@ mod tests {
 
     #[test]
     fn canonical_engine_identity_rejects_non_finite_configuration() {
-        let mut args = MockEngineArgs::default();
-        args.speedup_ratio = f64::INFINITY;
+        let args = MockEngineArgs {
+            speedup_ratio: f64::INFINITY,
+            ..Default::default()
+        };
 
         let error = canonical_engine_pool_metadata(&args).unwrap_err();
 
