@@ -146,7 +146,7 @@ pub(super) fn pop_ready_worker_completion<Events: EngineEventBatch>(
         ),
         SimulationEventKind::TransferComplete { .. }
         | SimulationEventKind::WorkerReady { .. }
-        | SimulationEventKind::PlannerTick => {
+        | SimulationEventKind::ScalingTick => {
             unreachable!("peeked worker completion event must match popped event")
         }
     };
@@ -232,7 +232,7 @@ pub(super) fn pop_ready_worker_ready<Events: EngineEventBatch>(
     Some((stage, worker_id))
 }
 
-pub(super) fn push_planner_tick<Events: EngineEventBatch>(
+pub(super) fn push_scaling_tick<Events: EngineEventBatch>(
     events: &mut BinaryHeap<SimulationEvent<Events>>,
     next_event_seq: &mut u64,
     at_ms: f64,
@@ -240,14 +240,14 @@ pub(super) fn push_planner_tick<Events: EngineEventBatch>(
     events.push(SimulationEvent {
         at_ms,
         seq_no: *next_event_seq,
-        kind: SimulationEventKind::PlannerTick,
+        kind: SimulationEventKind::ScalingTick,
     });
     *next_event_seq += 1;
 }
 
-/// Pop a `PlannerTick` scheduled for exactly `now_ms` (peek-and-pop-at-now, like the
+/// Pop a `ScalingTick` scheduled for exactly `now_ms` (peek-and-pop-at-now, like the
 /// other `pop_ready_*` helpers). Payload-free, so it returns whether one fired.
-pub(super) fn pop_ready_planner_tick<Events: EngineEventBatch>(
+pub(super) fn pop_ready_scaling_tick<Events: EngineEventBatch>(
     events: &mut BinaryHeap<SimulationEvent<Events>>,
     now_ms: f64,
 ) -> bool {
@@ -257,7 +257,7 @@ pub(super) fn pop_ready_planner_tick<Events: EngineEventBatch>(
     if event.at_ms != now_ms {
         return false;
     }
-    if !matches!(event.kind, SimulationEventKind::PlannerTick) {
+    if !matches!(event.kind, SimulationEventKind::ScalingTick) {
         return false;
     }
     events.pop().expect("event must exist after peek");
