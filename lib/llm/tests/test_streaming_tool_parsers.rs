@@ -2166,3 +2166,36 @@ async fn test_glm47_streaming_prose_plus_truncated_block_tail_already_emitted() 
         "truncated second call must appear exactly once (no duplicate); got: {texts:?}"
     );
 }
+
+// CJK chars are 3 bytes each in UTF-8. If a multi-byte char straddles the
+// keep_from boundary the drain() call would panic without the is_char_boundary
+// walk-back. This test verifies the walk-back prevents that panic on ordinary
+// CJK output that contains no <tool_call> marker.
+#[tokio::test]
+async fn test_glm47_streaming_cjk_content_no_marker_no_panic() {
+    // "你好世界" = 4 CJK chars = 12 bytes; the None arm computes
+    // keep_from = len - (START.len() - 1) = 12 - 10 = 2, which is NOT a
+    // char boundary. The walk-back must move it to 0 to avoid a panic.
+    let cjk = "你好世界更多的中文内容";
+    let chunks = vec![
+        make_glm47_chunk(Some(cjk), None),
+        make_glm47_chunk(None, Some(FinishReason::Stop)),
+    ];
+    // Must not panic.
+    let out = run_glm47_jail(chunks).await;
+    assert!(!out.is_empty());
+}
+
+// Same walk-back check with emoji (4-byte UTF-8) straddling the boundary.
+#[tokio::test]
+async fn test_glm47_streaming_emoji_content_no_marker_no_panic() {
+    // Each emoji is 4 bytes; "🎉🎊🎈" = 12 bytes; keep_from = 12 - 10 = 2,
+    // not a char boundary — walk-back must reach 0.
+    let emoji = "🎉🎊🎈🚀✨";
+    let chunks = vec![
+        make_glm47_chunk(Some(emoji), None),
+        make_glm47_chunk(None, Some(FinishReason::Stop)),
+    ];
+    let out = run_glm47_jail(chunks).await;
+    assert!(!out.is_empty());
+}
