@@ -70,7 +70,8 @@ ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:${LD_LIBRARY_PATH:-}
 # Install NATS and ETCD
 COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
 COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
-COPY --from=dynamo_base /bin/uv /bin/uvx /bin/
+COPY --from=dynamo_base /opt/uv/bin/uv /opt/uv/bin/uvx /opt/uv/bin/
+ENV PATH=/opt/uv/bin:${PATH}
 
 # Create dynamo user with group 0 for OpenShift compatibility.
 # Pin -u 1000 explicitly: the vllm/vllm-openai >=0.22 image ships a `vllm` user at
@@ -137,7 +138,7 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /o
 # v1.1.0 nixl-cu13 has in-built RPATH point to conflicting built-in libs with symbols unsupported in non-cuda builds.
 # we therefore avoid installing nixl-cu13
 
-RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     set -eu; \
     export UV_CACHE_DIR=/root/.cache/uv; \
     NIXL_VERSION="${NIXL_REF#v}"; \
@@ -150,7 +151,7 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
 # Install device-specific NIXL wheels for non-CUDA devices.
 # These are custom-built in wheel_builder and required for dev builds to link against NIXL libraries.
 {% if device != "cuda" %}
-RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \
     uv pip install {{ pip_target }} --no-deps /opt/dynamo/wheelhouse/nixl/nixl*.whl
 {% endif %}
@@ -162,7 +163,7 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
 
 # Install Dynamo runtime wheels and optional KVBM/GMS wheels.
 # Use --no-deps to prevent dependency conflicts (e.g., KVBM downgrading nixl).
-RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \
     uv pip install {{ pip_target }} --no-deps /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl && \
     uv pip install {{ pip_target }} --no-deps /opt/dynamo/wheelhouse/ai_dynamo*any.whl && \
@@ -193,7 +194,7 @@ RUN set -eux; \
 # constraining packages already solved in the upstream vLLM image.
 RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target=/tmp/vllm_omni_protected_packages.txt \
     --mount=type=bind,source=./container/deps/vllm/install_vllm_omni.sh,target=/tmp/install_vllm_omni.sh \
-    --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     set -eux; \
     export UV_CACHE_DIR=/root/.cache/uv; \
     export VLLM_OMNI_TARGET_DEVICE={{ device }}; \
@@ -210,7 +211,7 @@ RUN uv pip uninstall triton && \
 {% if context.vllm.enable_modelexpress == "true" %}
 # Install only the ModelExpress client package. --no-deps preserves the upstream
 # vLLM runtime dependency stack.
-RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     set -eux; \
     export UV_CACHE_DIR=/root/.cache/uv; \
     uv pip install {{ pip_target }} --no-deps \
@@ -294,7 +295,7 @@ ENV IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg
 # (set above) points imageio at the LGPL CLI copied from wheel_builder. The
 # --no-binary directive lives in the requirements file itself.
 RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/requirements.vllm.txt \
-    --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \
     uv pip install {{ pip_target }} --reinstall-package imageio-ffmpeg --no-deps \
         --requirement /tmp/requirements.vllm.txt

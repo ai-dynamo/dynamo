@@ -2584,6 +2584,7 @@ def run_mocker_trace_replay(
     sla_ttft_ms: Optional[float] = None,
     sla_itl_ms: Optional[float] = None,
     sla_e2e_ms: Optional[float] = None,
+    scaling_policy: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """Replay mocker trace files and return the simulation report.
 
@@ -2597,6 +2598,10 @@ def run_mocker_trace_replay(
     ``sla_ttft_ms`` / ``sla_itl_ms`` / ``sla_e2e_ms`` are the goodput SLA bounds
     (offline replay only). When any is set, the report carries ``goodput_*`` keys
     classifying SLA-satisfying requests; with none set, goodput is omitted.
+
+    ``scaling_policy`` is an optional offline callback implementing
+    ``initial_tick_ms() -> float`` and ``on_tick(snapshot) -> dict``. Passing a
+    policy in online mode raises ``ValueError``.
     """
     ...
 
@@ -2627,106 +2632,19 @@ def run_mocker_synthetic_trace_replay(
     sla_ttft_ms: Optional[float] = None,
     sla_itl_ms: Optional[float] = None,
     sla_e2e_ms: Optional[float] = None,
+    scaling_policy: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """Replay a synthetic mocker workload without requiring a trace file.
 
     ``sla_ttft_ms`` / ``sla_itl_ms`` / ``sla_e2e_ms`` are the goodput SLA bounds
     (offline replay only); when any is set the report carries ``goodput_*`` keys
     classifying SLA-satisfying requests.
+
+    ``scaling_policy`` is an optional offline callback implementing
+    ``initial_tick_ms() -> float`` and ``on_tick(snapshot) -> dict``. Passing a
+    policy in online mode raises ``ValueError``.
     """
     ...
-
-class PlannerReplayBridge:
-    """Drives an offline replay to completion with a Python planner. The Rust
-    simulation owns the drive loop and calls back into ``planner`` once per
-    ``PlannerTick`` via ``run(planner)`` (``planner`` exposes
-    ``initial_tick_ms() -> float`` and ``on_tick(metrics: dict) -> dict``)."""
-
-    def __init__(
-        self,
-        trace_file: str | os.PathLike[str],
-        extra_engine_args: MockEngineArgs,
-        num_workers: int,
-        router_mode: str = "round_robin",
-        router_config: Optional[KvRouterConfig] = None,
-        model_name: Optional[str] = None,
-        arrival_speedup_ratio: float = 1.0,
-        trace_block_size: int = 512,
-        sla_ttft_ms: Optional[float] = None,
-        sla_itl_ms: Optional[float] = None,
-        sla_e2e_ms: Optional[float] = None,
-        replay_concurrency: Optional[int] = None,
-    ) -> None: ...
-
-    @staticmethod
-    def create_disagg(
-        trace_file: str | os.PathLike[str],
-        prefill_engine_args: MockEngineArgs,
-        decode_engine_args: MockEngineArgs,
-        num_prefill_workers: int,
-        num_decode_workers: int,
-        router_mode: str = "round_robin",
-        router_config: Optional[KvRouterConfig] = None,
-        model_name: Optional[str] = None,
-        arrival_speedup_ratio: float = 1.0,
-        trace_block_size: int = 512,
-        sla_ttft_ms: Optional[float] = None,
-        sla_itl_ms: Optional[float] = None,
-        sla_e2e_ms: Optional[float] = None,
-        replay_concurrency: Optional[int] = None,
-    ) -> "PlannerReplayBridge": ...
-
-    @staticmethod
-    def from_synthetic(
-        input_tokens: int,
-        output_tokens: int,
-        request_count: int,
-        extra_engine_args: MockEngineArgs,
-        num_workers: int,
-        router_mode: str = "round_robin",
-        router_config: Optional[KvRouterConfig] = None,
-        model_name: Optional[str] = None,
-        replay_concurrency: Optional[int] = None,
-        arrival_speedup_ratio: float = 1.0,
-        request_rate: Optional[float] = None,
-        arrival_interval_ms: Optional[float] = None,
-        arrival_seed: int = 42,
-        turns_per_session: int = 1,
-        shared_prefix_ratio: float = 0.0,
-        num_prefix_groups: int = 0,
-        inter_turn_delay_ms: float = 0.0,
-        sla_ttft_ms: Optional[float] = None,
-        sla_itl_ms: Optional[float] = None,
-        sla_e2e_ms: Optional[float] = None,
-    ) -> "PlannerReplayBridge": ...
-
-    @staticmethod
-    def from_synthetic_disagg(
-        input_tokens: int,
-        output_tokens: int,
-        request_count: int,
-        prefill_engine_args: MockEngineArgs,
-        decode_engine_args: MockEngineArgs,
-        num_prefill_workers: int,
-        num_decode_workers: int,
-        router_mode: str = "round_robin",
-        router_config: Optional[KvRouterConfig] = None,
-        model_name: Optional[str] = None,
-        replay_concurrency: Optional[int] = None,
-        arrival_speedup_ratio: float = 1.0,
-        request_rate: Optional[float] = None,
-        arrival_interval_ms: Optional[float] = None,
-        arrival_seed: int = 42,
-        turns_per_session: int = 1,
-        shared_prefix_ratio: float = 0.0,
-        num_prefix_groups: int = 0,
-        inter_turn_delay_ms: float = 0.0,
-        sla_ttft_ms: Optional[float] = None,
-        sla_itl_ms: Optional[float] = None,
-        sla_e2e_ms: Optional[float] = None,
-    ) -> "PlannerReplayBridge": ...
-
-    def run(self, planner: Any) -> Dict[str, Any]: ...
 
 class Layer:
     """
