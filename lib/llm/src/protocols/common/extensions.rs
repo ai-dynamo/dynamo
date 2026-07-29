@@ -765,6 +765,7 @@ mod tests {
         assert_eq!(nv_ext.agent_hints, None);
         assert_eq!(nv_ext.request_timestamp_ms, None);
         assert_eq!(nv_ext.routing_constraints, None);
+        assert_eq!(nv_ext.do_not_queue, None);
     }
 
     #[test]
@@ -796,6 +797,21 @@ mod tests {
 
         assert!(err.to_string().contains("invalid nvext"));
         assert!(err.to_string().contains("unknown field"));
+    }
+
+    /// `preprocessor.rs` lifts `nvext.do_not_queue` straight into `RoutingHints`
+    /// with no transformation, so the only place this can actually break is
+    /// deserialization: a wrong `serde` attribute or field name would silently
+    /// drop the flag before it ever reaches the router.
+    #[test]
+    fn parse_nvext_carries_do_not_queue() {
+        let nv_ext = parse_nvext(Some(serde_json::json!({"do_not_queue": true})))
+            .unwrap()
+            .unwrap();
+        assert_eq!(nv_ext.do_not_queue, Some(true));
+
+        let nv_ext = parse_nvext(Some(serde_json::json!({}))).unwrap().unwrap();
+        assert_eq!(nv_ext.do_not_queue, None);
     }
 
     #[test]
