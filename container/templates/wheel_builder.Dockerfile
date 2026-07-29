@@ -352,7 +352,18 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     make install && \
     ldconfig && \
     cd /tmp && \
-    curl --retry 5 --retry-delay 10 --retry-connrefused --connect-timeout 30 -fLO https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz && \
+    # Retry the ffmpeg fetch in a shell loop: curl's own --retry does not cover
+    # SSL/connection-level failures (e.g. `curl: (35) SSL_ERROR_SYSCALL`) unless
+    # --retry-all-errors is used, which needs curl >= 7.71 (the manylinux build
+    # base ships 7.61). The loop retries on ANY failure and is version-agnostic.
+    for attempt in 1 2 3 4 5; do \
+        curl --retry 3 --retry-delay 5 --retry-connrefused --connect-timeout 30 -fL \
+            -o ffmpeg-${FFMPEG_VERSION}.tar.xz \
+            https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz && break; \
+        echo "ffmpeg download attempt ${attempt}/5 failed; retrying in 10s" >&2; \
+        sleep 10; \
+    done && \
+    test -s ffmpeg-${FFMPEG_VERSION}.tar.xz && \
     tar xf ffmpeg-${FFMPEG_VERSION}.tar.xz && \
     cd ffmpeg-${FFMPEG_VERSION} && \
     ./configure \
