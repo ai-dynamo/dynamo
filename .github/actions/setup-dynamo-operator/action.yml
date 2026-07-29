@@ -624,9 +624,13 @@ runs:
           local operator="$2"
           local output
           local origin_version
+          local retryable_errors
           local deadline=$((SECONDS + 120))
           local attempt=1
           shift 2
+
+          retryable_errors='no endpoints available|connection refused|connection reset by peer|TLS handshake timeout|service .* not found|unexpected EOF|^EOF$'
+          retryable_errors+='|i/o timeout|context deadline exceeded|request did not complete within requested timeout'
 
           while true; do
             if output=$("$@" 2>&1); then
@@ -656,9 +660,7 @@ runs:
               return 0
             fi
 
-            if ! grep -Eiq \
-              'no endpoints available|connection refused|connection reset by peer|TLS handshake timeout|service .* not found|unexpected EOF|^EOF$' \
-              <<<"${output}"; then
+            if ! grep -Eiq "${retryable_errors}" <<<"${output}"; then
               printf '%s\n' "${output}" >&2
               return 1
             fi
