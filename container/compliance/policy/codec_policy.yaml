@@ -85,3 +85,21 @@ exceptions:
       than gated here. The glob covers the whole vendored dir so the libsw*
       companions are waived too, not just libavcodec.
     owner: DALI
+  # PyNvVideoCodec (added for NVDEC hardware video decode) vendors libavutil and
+  # libavformat under its package dir to demux input containers before handing the
+  # elementary stream to NVDEC. It ships NO libavcodec (the scan would flag it) and
+  # no libx264/265/fdk-aac: no software video/audio codec implementation is present;
+  # the decode runs on NVDEC via libnvcuvid. Scoped to the two non-codec libs only,
+  # so a libavcodec bundled by a future version would still fail the build.
+  - glob: "**/PyNvVideoCodec/libavutil.so*"
+    reason: >-
+      PyNvVideoCodec bundles libavutil (utility routines, no codec) to support its
+      NVDEC container demux path; the package ships no libavcodec, so no software
+      codec implementation is present. Decode runs on NVDEC (libnvcuvid).
+    owner: PyNvVideoCodec
+  - glob: "**/PyNvVideoCodec/libavformat.so*"
+    reason: >-
+      PyNvVideoCodec bundles libavformat (container demuxers/muxers only, no codec)
+      to parse the input container before NVDEC decode; the package ships no
+      libavcodec. Companion waiver to the PyNvVideoCodec libavutil entry above.
+    owner: PyNvVideoCodec

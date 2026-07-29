@@ -64,6 +64,25 @@ def test_dali_bundled_ffmpeg_is_a_logged_exception(tmp_path: Path):
     assert all("DALI" in (e["detail"] or "") for e in exceptions)
 
 
+def test_pynvvideocodec_demux_libs_waived_but_codec_denied(tmp_path: Path):
+    # PyNvVideoCodec vendors libavutil + libavformat (container demux, no codec)
+    # for its NVDEC path — waived. The exception is scoped to those two libs, so a
+    # libavcodec bundled by a future version must STILL fail the gate.
+    pkg = "usr/local/lib/python3.12/dist-packages/PyNvVideoCodec"
+    for rel in (
+        f"{pkg}/libavutil.so.60.26.102",
+        f"{pkg}/libavutil.so",
+        f"{pkg}/libavformat.so.62",
+        f"{pkg}/libavformat.so",
+    ):
+        _touch(tmp_path, rel)
+    _touch(tmp_path, f"{pkg}/libavcodec.so.62")  # a real codec must NOT be waived
+    violations, exceptions, _allowed = scan_filesystem(tmp_path, _POLICY)
+    assert [v["path"] for v in violations] == [f"/{pkg}/libavcodec.so.62"]
+    assert len(exceptions) == 4
+    assert all("PyNvVideoCodec" in (e["detail"] or "") for e in exceptions)
+
+
 @pytest.mark.parametrize(
     "rel",
     [
