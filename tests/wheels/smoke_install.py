@@ -481,10 +481,11 @@ def install_core(
 def install_mocker_extra(wheelhouse: Path, python_spec: str) -> None:
     ai_dynamo = require_one_wheel(wheelhouse, "ai-dynamo")
     runtime = require_one_wheel(wheelhouse, "ai-dynamo-runtime")
-    aic_core = require_one_wheel(wheelhouse, "aiconfigurator-core")
 
     venv_python = create_venv(python_spec)
     try:
+        # The wheelhouse contains Dynamo-produced artifacts. Third-party optional
+        # dependencies such as aiconfigurator-core resolve from their package index.
         pip_install(
             venv_python,
             wheelhouse,
@@ -492,12 +493,6 @@ def install_mocker_extra(wheelhouse: Path, python_spec: str) -> None:
         )
         pip_check(venv_python)
         assert_dynamo_local_install(venv_python, wheelhouse, ai_dynamo, runtime)
-        assert_local_direct_url(
-            venv_python,
-            "aiconfigurator-core",
-            aic_core,
-            wheelhouse,
-        )
         run_mocker_aic_import_smoke(venv_python)
     finally:
         shutil.rmtree(venv_python.parent.parent, ignore_errors=True)
