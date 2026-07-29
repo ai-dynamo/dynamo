@@ -75,7 +75,56 @@ def offenders(text: str) -> list[str]:
     return found
 
 
+# The two cases this check exists for are the first two: a quoted specifier in a
+# comment must be caught, a backticked one must not. The rest pin the allowlist
+# and the import()/require() branches of SPECIFIER.
+CASES: list[tuple[str, str, list[str]]] = [
+    (
+        "quoted specifier in a comment",
+        ' *   import { Foo } from "@/components/Foo";',
+        ["@/components/Foo"],
+    ),
+    (
+        "backtick example in a comment",
+        " *   import { Foo } from `@/components/Foo`;",
+        [],
+    ),
+    ("relative import", 'import { Foo } from "./Foo";', []),
+    ("parent-relative import", 'import { Foo } from "../shared/Foo";', []),
+    ("allowlisted bare package", 'import { useState } from "react";', []),
+    ("allowlisted scoped package", 'import { X } from "@mdx-js/react";', []),
+    (
+        "non-allowlisted scoped package",
+        'import { X } from "@scope/pkg";',
+        ["@scope/pkg"],
+    ),
+    ("re-export", 'export { Foo } from "@/components/Foo";', ["@/components/Foo"]),
+    ("dynamic import", 'const m = await import("some-pkg");', ["some-pkg"]),
+    ("require", 'const m = require("some-pkg");', ["some-pkg"]),
+    (
+        "deduplicated",
+        'import "@scope/pkg";\nimport { X } from "@scope/pkg";',
+        ["@scope/pkg"],
+    ),
+]
+
+
+def run_tests() -> int:
+    failed = 0
+    for name, source, expected in CASES:
+        actual = offenders(source)
+        if actual == expected:
+            print(f"  PASS: {name}")
+        else:
+            print(f"  FAIL: {name}\n    expected: {expected}\n    actual:   {actual}")
+            failed += 1
+    print(f"\n{len(CASES) - failed}/{len(CASES)} passed")
+    return 1 if failed else 0
+
+
 def main() -> int:
+    if "--test" in sys.argv[1:]:
+        return run_tests()
     failures = 0
     for path in sorted(COMPONENTS.rglob("*")):
         if not path.is_file() or path.suffix not in SUFFIXES:
