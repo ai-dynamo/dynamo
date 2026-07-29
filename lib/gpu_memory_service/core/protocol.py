@@ -46,6 +46,10 @@ class CommitRequest(msgspec.Struct, tag="commit_request"):
     pass
 
 
+class AbortRequest(msgspec.Struct, tag="abort_request"):
+    pass
+
+
 class SuccessResponse(msgspec.Struct, tag="success_response"):
     pass
 
@@ -59,14 +63,22 @@ class ErrorResponse(msgspec.Struct, tag="error_response"):
     out_of_memory: bool = False
 
 
-Request: TypeAlias = AllocateRequest | ExportRequest | FreeRequest | CommitRequest
+Request: TypeAlias = (
+    AllocateRequest | ExportRequest | FreeRequest | CommitRequest | AbortRequest
+)
 Message: TypeAlias = (
     HandshakeRequest
     | HandshakeResponse
     | Request
     | (SuccessResponse | ExportResponse | ErrorResponse)
 )
-REQUEST_TYPES = (AllocateRequest, ExportRequest, FreeRequest, CommitRequest)
+REQUEST_TYPES = (
+    AllocateRequest,
+    ExportRequest,
+    FreeRequest,
+    CommitRequest,
+    AbortRequest,
+)
 
 _encoder = msgspec.msgpack.Encoder()
 _decoder = msgspec.msgpack.Decoder(Message)

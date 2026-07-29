@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import threading
-import time
 from contextlib import ExitStack
 
 import pytest
@@ -15,15 +14,6 @@ from gpu_memory_service.core.server.rpc import GMSRPCServer
 from gpu_memory_service.v1.memory_manager import GMSClientMemoryManager
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.integration, pytest.mark.gpu_0]
-
-
-def _wait_until(predicate) -> None:
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline:
-        if predicate():
-            return
-        time.sleep(0.005)
-    raise AssertionError("timed out waiting for GMS behavior")
 
 
 @pytest.mark.timeout(10)
@@ -72,7 +62,7 @@ def test_same_client_manager_preserves_weights_and_recreates_kv(
         weights.disconnect()
         kv_cache.unmap_all_vas()
         kv_cache.disconnect()
-        _wait_until(lambda: not vmms["kv_cache"].server_handles)
+        assert not vmms["kv_cache"].server_handles
         assert vmms["weights"].server_handles == weights_handles
         assert set(vmms["weights"].reservations) == {weights_va}
         assert set(vmms["kv_cache"].reservations) == {kv_va}
