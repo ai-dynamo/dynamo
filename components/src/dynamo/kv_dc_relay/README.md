@@ -42,7 +42,7 @@ adapter exercises the complete producer/consumer protocol today. Non-local gRPC 
 cross-DC request forwarding are separate global-router integration work.
 
 For the complete architecture, pool model, consistency contract, and recovery flow, see
-[Multi-DC KV Routing and the DC Relay](https://github.com/ai-dynamo/dynamo/blob/main/docs/components/router/multi-dc-kv-routing.md).
+[Multi-DC KV Routing and the DC Relay](../../../../docs/fern/components/router/multi-dc-kv-routing.md).
 
 ## Usage
 

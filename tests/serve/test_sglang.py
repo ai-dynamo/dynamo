@@ -32,6 +32,7 @@ from tests.utils.payload_builder import (
     embedding_payload,
     embedding_payload_default,
     guided_decoding_chat_payload_default,
+    image_token_metrics_payload,
     kv_events_metrics_payload,
     metric_payload_default,
     responses_payload_default,
@@ -450,6 +451,7 @@ sglang_configs = {
             # Rust frontend + NIXL RDMA transfer of decoded pixels — the
             # path that distinguishes FD from the plain URL path.
             make_image_payload_b64(["green"]),
+            image_token_metrics_payload(),
         ],
     ),
     "multimodal_agg_qwen": SGLangConfig(

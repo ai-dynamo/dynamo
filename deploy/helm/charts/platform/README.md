@@ -19,7 +19,7 @@ limitations under the License.
 
 A Helm chart for NVIDIA Dynamo Platform.
 
-![Version: 1.3.0](https://img.shields.io/badge/Version-1.3.0-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square)
+![Version: 1.4.0](https://img.shields.io/badge/Version-1.4.0-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square)
 
 ## 🚀 Overview
 
@@ -104,10 +104,10 @@ Kubernetes: `>=1.30.0-0`
 
 | Repository | Name | Version |
 |------------|------|---------|
-| file://components/operator | dynamo-operator | 1.3.0 |
+| file://components/operator | dynamo-operator | 1.4.0 |
 | https://charts.bitnami.com/bitnami | etcd | 12.0.18 |
 | https://nats-io.github.io/k8s/helm/charts/ | nats | 1.3.2 |
-| oci://ghcr.io/ai-dynamo/grove | grove(grove-charts) | v0.1.0-alpha.11 |
+| oci://ghcr.io/ai-dynamo/grove | grove(grove-charts) | v0.1.0-alpha.12-rc1 |
 | oci://ghcr.io/kai-scheduler/kai-scheduler | kai-scheduler | v0.13.4 |
 
 ## Values
@@ -168,6 +168,7 @@ Kubernetes: `>=1.30.0-0`
 | dynamo-operator.dynamo.serviceMesh.istio.caCertificates | string | `""` | Optional path (in the istio-proxy sidecar's filesystem) to CA certificates used to verify the EPP server certificate. Used only when tlsMode is "MUTUAL". |
 | dynamo-operator.dynamo.metrics.prometheusEndpoint | string | `""` | Endpoint that services can use to retrieve metrics. If set, dynamo operator will automatically inject the PROMETHEUS_ENDPOINT environment variable into services it manages. Users can override the value of the PROMETHEUS_ENDPOINT environment variable by modifying the corresponding deployment's environment variables |
 | dynamo-operator.dynamo.mpiRun.secretName | string | `"mpi-run-ssh-secret"` | Name of the secret containing the SSH key for MPI Run |
+| dynamo-operator.webhook.service.publishNotReadyAddresses | bool | `false` | Publish the webhook Service endpoint before the Pod Ready condition is true. Keep false for production; short-lived vCluster CI may enable this to tolerate stale host Pod readiness while admission smoke tests verify the webhook itself. |
 | dynamo-operator.webhook.certificateSecret.name | string | `"webhook-server-cert"` | Name of the Kubernetes secret containing webhook TLS certificates. The secret must contain three keys: tls.crt (server certificate), tls.key (server private key), and ca.crt (Certificate Authority certificate). |
 | dynamo-operator.webhook.certificateSecret.external | bool | `false` | Whether to manage the certificate secret externally. When false (default), the operator's built-in cert-controller generates and rotates certificates automatically. When true, you must create the secret manually before installing the chart. |
 | dynamo-operator.webhook.caBundle | string | `""` | CA bundle (base64 encoded) for webhook validation. Only used when certificateSecret.external=true. For automatic certificate generation or cert-manager integration, leave this empty as it will be injected automatically. |
@@ -246,7 +247,7 @@ For **production environments**, Kai Scheduler and Grove should be installed sep
 | 1.0.x           | >= v0.13.0    | >= v0.1.0-alpha.6 |
 | 1.1.x           | >= v0.13.4    | >= v0.1.0-alpha.8 |
 | 1.3.x           | >= v0.13.4    | >= v0.1.0-alpha.8, < v0.1.0-alpha.9 |
-| 1.4.x           | >= v0.13.4    | >= v0.1.0-alpha.11 |
+| 1.4.x           | >= v0.13.4    | >= v0.1.0-alpha.12-rc1 |
 
 Grove should be upgraded in lockstep with Dynamo while Grove APIs are not stable. Dynamo 1.3.x expects Grove's earlier `ClusterTopology` API and is incompatible with the newer `ClusterTopologyBinding` API; Dynamo 1.4.x expects `ClusterTopologyBinding`.
 
@@ -286,7 +287,7 @@ Note: `global.*.install` controls whether the bundled subcharts are deployed. Wh
 
 ## 📚 Additional Resources
 
-- [Dynamo Cloud Deployment Installation Guide](../../../../docs/kubernetes/installation-guide.md)
+- [Dynamo Cloud Deployment Installation Guide](../../../../docs/fern/kubernetes/installation-guide.md)
 - [NATS Documentation](https://docs.nats.io/)
 - [etcd Documentation](https://etcd.io/docs/)
 - [Kubernetes Operator Pattern](https://kubernetes.io/docs/concepts/extend-kubernetes/operator/)

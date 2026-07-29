@@ -105,9 +105,8 @@ spec:
             # --connector none is no longer needed in 1.0 (default is no connector).
             # In 0.9.1, you must add: --connector none
             #
-            # --is-decode-worker also automatically disables KV event publishing,
-            # which pairs with --no-kv-events on the frontend for approximate routing.
-            - --is-decode-worker
+            # Omit --kv-events-config to pair with --no-kv-events on the frontend
+            # for approximate routing.
             - --dyn-tool-call-parser
             - nemotron_nano
             # nemotron_nano reasoning parser handles both enable_thinking: true and false.
