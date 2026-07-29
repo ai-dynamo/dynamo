@@ -206,7 +206,7 @@ COPY --from=runtime_full / /
 {% if target in ("dev", "local-dev") %}
 ENV DYNAMO_HOME=/workspace \
     HOME=/home/dynamo \
-    PATH=/usr/local/bin/etcd:${PATH} \
+    PATH=/opt/uv/bin:/usr/local/bin/etcd:${PATH} \
     IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg \
     LD_PRELOAD=/opt/dynamo/libstdc++.so.6:/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so \
     NIXL_PLUGIN_DIR=/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/plugins \
@@ -215,7 +215,7 @@ ENV DYNAMO_HOME=/workspace \
 ENV DYNAMO_HOME=/workspace \
     HOME=/home/dynamo \
     VIRTUAL_ENV=/opt/dynamo/venv \
-    PATH=/opt/dynamo/venv/bin:/usr/local/bin/etcd:${PATH} \
+    PATH=/opt/dynamo/venv/bin:/opt/uv/bin:/usr/local/bin/etcd:${PATH} \
     IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg \
     LD_PRELOAD=/opt/dynamo/libstdc++.so.6:/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so \
     NIXL_PLUGIN_DIR=/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/plugins \
