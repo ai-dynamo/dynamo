@@ -12,19 +12,17 @@ spec:
   components:
     - name: frontend
       type: frontend
-      runtimeVersionOverride: "1.4.0"
       replicas: 1
       podTemplate:
         spec:
           containers:
             - name: main
-              image: registry.example/dynamo-frontend:test
+              image: registry.example/dynamo-frontend:1.4.0-test
     - name: decode
       type: decode
-      runtimeVersionOverride: "1.4.0"
       replicas: 2
       podTemplate:
         spec:
           containers:
             - name: main
-              image: registry.example/dynamo-worker:test
+              image: registry.example/dynamo-worker:1.4.0-test

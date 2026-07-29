@@ -17,7 +17,6 @@ spec:
               name: main
       replicas: 1
       type: frontend
-      runtimeVersionOverride: 1.4.0
     - minAvailable: 1
       name: decode
       podTemplate:
@@ -46,7 +45,6 @@ spec:
               workingDir: /workspace
       replicas: 1
       type: decode
-      runtimeVersionOverride: 1.4.0
     - minAvailable: 1
       name: prefill
       podTemplate:
@@ -75,7 +73,6 @@ spec:
               workingDir: /workspace
       replicas: 1
       type: prefill
-      runtimeVersionOverride: 1.4.0
 status:
   $ignore: true
 ---
