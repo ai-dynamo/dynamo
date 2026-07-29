@@ -102,3 +102,29 @@ class TestDiffusionParallelConfigCoverage:
         kwargs = _build_kwargs(config)
 
         assert kwargs["output_modalities"] == ["image"]
+
+
+def test_base_handler_recreates_stale_prometheus_multiproc_dir(monkeypatch, tmp_path):
+    stale_dir = tmp_path / "vllm_prometheus_stale"
+    monkeypatch.setenv("PROMETHEUS_MULTIPROC_DIR", str(stale_dir))
+
+    class FakeAsyncOmni:
+        def __init__(self, **_kwargs):
+            assert stale_dir.is_dir()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("dynamo.vllm.omni.base_handler.AsyncOmni", FakeAsyncOmni)
+    config = _make_config()
+    config.engine_args.max_model_len = 2048
+
+    handler = BaseOmniHandler(
+        runtime=None,
+        config=config,
+        default_sampling_params={},
+    )
+
+    assert handler._prometheus_temp_dir is None
+    handler.cleanup()
+    assert stale_dir.is_dir()

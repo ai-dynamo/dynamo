@@ -100,7 +100,11 @@ ARG MAX_JOBS={{ context.vllm.max_jobs }}
 # FlashInfer cubin/jit-cache version used by the vLLM installer.
 ARG FLASHINF_REF={{ context.vllm.flashinf_ref }}
 {% endif %}
-ARG VLLM_OMNI_REF={{ context.vllm.vllm_omni_ref }}
+{% if 'vllm_omni_ref' in context[framework][device_key] %}
+ARG VLLM_OMNI_REF={{ context[framework][device_key].vllm_omni_ref }}
+{% else %}
+ARG VLLM_OMNI_REF={{ context[framework].vllm_omni_ref }}
+{% endif %}
 
 {% if device == "cuda" -%}
 # If left blank, then we will fallback to vLLM defaults
