@@ -22,19 +22,6 @@ export interface DynamoEvent {
 
 export const UPCOMING_EVENTS: DynamoEvent[] = [
   {
-    "title": "Dynamo community meeting",
-    "start": "2026-07-29T17:30:00.000Z",
-    "month": "Jul",
-    "day": "29",
-    "year": "2026",
-    "dateLabel": "Wed, Jul 29, 2026",
-    "timeLabel": "10:30 AM",
-    "isPast": false,
-    "location": "Online",
-    "locationUrl": "https://meet.google.com/heb-demu-qok",
-    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=Dynamo+community+meeting&dates=20260729T173000Z%2F20260729T181500Z&location=https%3A%2F%2Fmeet.google.com%2Fheb-demu-qok"
-  },
-  {
     "title": "Dynamo Afterhours",
     "start": "2026-07-31T01:00:00.000Z",
     "month": "Jul",
@@ -50,6 +37,19 @@ export const UPCOMING_EVENTS: DynamoEvent[] = [
 ];
 
 export const PAST_EVENTS: DynamoEvent[] = [
+  {
+    "title": "Dynamo community meeting",
+    "start": "2026-07-29T17:30:00.000Z",
+    "month": "Jul",
+    "day": "29",
+    "year": "2026",
+    "dateLabel": "Wed, Jul 29, 2026",
+    "timeLabel": "10:30 AM",
+    "isPast": true,
+    "location": "Online",
+    "locationUrl": "https://meet.google.com/heb-demu-qok",
+    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=Dynamo+community+meeting&dates=20260729T173000Z%2F20260729T181500Z&location=https%3A%2F%2Fmeet.google.com%2Fheb-demu-qok"
+  },
   {
     "title": "AI Infra Builders Meetup with dstack, Crusoe, and SGLang",
     "start": "2026-07-24T00:30:00.000Z",
