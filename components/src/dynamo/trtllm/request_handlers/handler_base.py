@@ -722,7 +722,18 @@ class HandlerBase(BaseGenerativeHandler):
             and BYPASS_REMOTE_PREFILL_ANNOTATION in (request.get("annotations") or [])
         )
 
-        # Canary probes and conditional-disagg bypasses run a full
+        if (
+            use_request_disagg_params
+            and ep_disaggregated_params is not None
+            and BYPASS_REMOTE_PREFILL_ANNOTATION in (request.get("annotations") or [])
+        ):
+            disaggregated_params = DisaggregatedParamsCodec.decode(
+                ep_disaggregated_params
+            )
+            disaggregated_params.request_type = "context_and_generation"
+            return disaggregated_params, ep_disaggregated_params, {}
+
+        # Canary probes and text-only conditional-disagg bypasses run a full
         # context+generation request on a disagg-mode worker, so they use
         # the pre-built params and skip the normal prefill-result handoff.
         if use_request_disagg_params and request.get("disaggregated_params"):
