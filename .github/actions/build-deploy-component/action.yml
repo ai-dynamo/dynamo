@@ -11,6 +11,15 @@ inputs:
   image_tag:
     description: 'Image tag to apply to built images'
     required: true
+  artifact_tag:
+    description: >
+      Tag used to name the compliance artifact (compliance-<artifact_tag>)
+      and to resolve the OSRB diff baseline. Empty = image_tag. Lets a
+      suffixed image tag (e.g. <sha>-operator-nightly) keep the canonical
+      compliance-<sha>-operator artifact name that OSRB attach tokens and
+      baseline lookups key on.
+    required: false
+    default: ''
   target:
     description: 'Dockerfile target to build. Defaults to agent for snapshot and the default target for operator.'
     required: false
@@ -290,7 +299,7 @@ runs:
         DIFF_CURRENT_SHA: ${{ github.sha }}
         DIFF_REPO: ${{ github.repository }}
         DIFF_RUN_ID: ${{ github.run_id }}
-        IMAGE_TAG: ${{ inputs.image_tag }}
+        IMAGE_TAG: ${{ inputs.artifact_tag != '' && inputs.artifact_tag || inputs.image_tag }}
       run: |
         # The build checkout is shallow with no tags. Make the refs each baseline
         # rule needs reachable (all best-effort; a miss just yields an empty
@@ -474,9 +483,11 @@ runs:
       if: ${{ steps.settings.outputs.run_compliance == 'true' && always() }}
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
       with:
-        # compliance-<git-sha>-<component> (image_tag is already <github.sha>-<component>),
-        # matching the framework images' compliance-<git-sha>-<container> naming.
-        name: compliance-${{ inputs.image_tag }}
+        # compliance-<git-sha>-<component> (artifact_tag falls back to image_tag,
+        # which is already <github.sha>-<component>), matching the framework
+        # images' compliance-<git-sha>-<container> naming. artifact_tag lets a
+        # suffixed image tag (nightly) keep this canonical artifact name.
+        name: compliance-${{ inputs.artifact_tag != '' && inputs.artifact_tag || inputs.image_tag }}
         path: /tmp/compliance/
         retention-days: 90
 
@@ -484,6 +495,6 @@ runs:
       if: ${{ steps.settings.outputs.run_compliance == 'true' && inputs.archive_sources == 'true' }}
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
       with:
-        name: compliance-${{ inputs.image_tag }}-sources
+        name: compliance-${{ inputs.artifact_tag != '' && inputs.artifact_tag || inputs.image_tag }}-sources
         path: /tmp/sources/
         retention-days: 90
