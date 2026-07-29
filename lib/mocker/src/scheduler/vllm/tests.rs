@@ -78,6 +78,107 @@ fn router_args() -> MockEngineArgs {
         .unwrap()
 }
 
+#[test]
+fn flat_tokens_cover_every_native_g1_configuration() {
+    let args = |engine_type: EngineType,
+                backend: G1Backend,
+                prefix_caching: bool,
+                emit_token_ids: bool| {
+        MockEngineArgs::builder()
+            .engine_type(engine_type)
+            .g1_backend(backend)
+            .block_size(4)
+            .num_gpu_blocks(32)
+            .max_num_batched_tokens(Some(32))
+            .max_num_seqs(Some(4))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(prefix_caching)
+            .zmq_kv_events_port(emit_token_ids.then_some(12_345))
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap()
+    };
+    let mut next_uuid = 80_001_u128;
+
+    for engine_type in [EngineType::Vllm, EngineType::Trtllm] {
+        for prefix_caching in [false, true] {
+            for emit_token_ids in [false, true] {
+                let uuid = Uuid::from_u128(next_uuid);
+                next_uuid += 1;
+                let mut core = VllmCore::new(args(
+                    engine_type,
+                    G1Backend::Native,
+                    prefix_caching,
+                    emit_token_ids,
+                ));
+                core.receive(DirectRequest {
+                    tokens: (0..9).collect(),
+                    max_output_tokens: 2,
+                    uuid: Some(uuid),
+                    ..Default::default()
+                });
+                assert!(core.request_uses_flat_tokens(uuid));
+            }
+        }
+    }
+
+    let uuid = Uuid::from_u128(next_uuid);
+    let mut kvbm = VllmCore::new(args(EngineType::Vllm, G1Backend::Kvbm, true, false));
+    kvbm.receive(DirectRequest {
+        tokens: (0..9).collect(),
+        max_output_tokens: 2,
+        uuid: Some(uuid),
+        ..Default::default()
+    });
+    assert!(!kvbm.request_uses_flat_tokens(uuid));
+}
+
+#[test]
+fn flat_storage_capacity_is_bounded_by_realizable_output() {
+    const BLOCK_SIZE: usize = 4;
+    const MAX_OUTPUT_TOKENS: usize = 1_000_000;
+
+    for (prompt_len, expected_output_capacity) in [(10_usize, 2_usize), (17, 0)] {
+        let args = MockEngineArgs::builder()
+            .engine_type(EngineType::Vllm)
+            .g1_backend(G1Backend::Native)
+            .block_size(BLOCK_SIZE)
+            .num_gpu_blocks(4)
+            .max_model_len(Some(12))
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(4))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(true)
+            .zmq_kv_events_port(Some(12_345))
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new(args);
+        let uuid = Uuid::new_v4();
+        core.receive(DirectRequest {
+            tokens: (0..prompt_len as u32).collect(),
+            max_output_tokens: MAX_OUTPUT_TOKENS,
+            uuid: Some(uuid),
+            ..Default::default()
+        });
+
+        let sequence = &core.state().requests[&uuid].sequence;
+        assert_eq!(sequence.max_output_tokens(), MAX_OUTPUT_TOKENS);
+        let (token_capacity, unique_capacity, hash_capacity, lineage_capacity) = sequence
+            .flat_storage_capacities()
+            .expect("native G1 must use flat storage");
+        let bounded_blocks = (prompt_len + expected_output_capacity).div_ceil(BLOCK_SIZE);
+        let unbounded_blocks = (prompt_len + MAX_OUTPUT_TOKENS).div_ceil(BLOCK_SIZE);
+
+        assert!(token_capacity >= prompt_len + expected_output_capacity);
+        assert!(token_capacity < prompt_len + MAX_OUTPUT_TOKENS);
+        for capacity in [unique_capacity, hash_capacity, lineage_capacity] {
+            assert!(capacity >= bounded_blocks);
+            assert!(capacity < unbounded_blocks);
+        }
+    }
+}
+
 #[rstest]
 #[case(EngineType::Vllm)]
 #[case(EngineType::Trtllm)]
@@ -2986,6 +3087,22 @@ mod offload {
         engine.tick(0.0);
         engine.attach_runtime(runtime);
         core.kv_manager.attach_new_offload_engine(engine);
+    }
+
+    #[test]
+    #[should_panic(expected = "legacy kvbm-offload cannot be attached to native G1")]
+    fn native_g1_cannot_enter_kvbm_swap_in() {
+        let args = MockEngineArgs::builder()
+            .num_gpu_blocks(4)
+            .block_size(4)
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(1))
+            .g1_backend(G1Backend::Native)
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new(args);
+        assert!(!core.kv_manager.has_offload_engine());
+        attach_g1_offload_engine(&mut core);
     }
 
     #[test]
