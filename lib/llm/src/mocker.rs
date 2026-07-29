@@ -39,15 +39,15 @@ use dynamo_runtime::metrics::MetricsHierarchy;
 use dynamo_runtime::protocols::annotated::Annotated;
 use dynamo_runtime::{
     component::Endpoint,
-    engine::AsyncEngineContextProvider,
+    engine::{AsyncEngineContext, AsyncEngineContextProvider},
     pipeline::{AsyncEngine, Error, ManyOut, ResponseStream, SingleIn, async_trait},
     traits::DistributedRuntimeProvider,
 };
 use futures::StreamExt;
 use rand::Rng;
 use serde::Deserialize;
-use tokio::sync::{Notify, OnceCell, Semaphore, mpsc, oneshot};
-use tokio_stream::wrappers::UnboundedReceiverStream;
+use tokio::sync::{OnceCell, Semaphore, mpsc, oneshot, watch};
+use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use uuid::Uuid;
@@ -59,6 +59,7 @@ use self::handoff::{
 use self::metrics::NativeMockerMetrics;
 
 pub const MOCKER_COMPONENT: &str = "mocker";
+const RESPONSE_STREAM_CAPACITY: usize = 8;
 
 #[derive(Debug, Clone, Deserialize)]
 struct ResponseReplayTraceRow {
@@ -218,10 +219,26 @@ fn no_bootstrap_handoff_delay(
     Some(Duration::from_secs_f64(delay_ms.max(0.0) / 1000.0))
 }
 
+async fn send_response(
+    stream_tx: &mpsc::Sender<LLMEngineOutput>,
+    output: LLMEngineOutput,
+    context: &Arc<dyn AsyncEngineContext>,
+) -> bool {
+    tokio::select! {
+        biased;
+        _ = stream_tx.closed() => false,
+        _ = context.stopped() => {
+            let _ = stream_tx.try_send(LLMEngineOutput::cancelled());
+            false
+        }
+        result = stream_tx.send(output) => result.is_ok(),
+    }
+}
+
 struct MockerExecutionContext {
     engines: OnceCell<Vec<LiveEngine>>,
     handoff_session_permits: OnceCell<Vec<Arc<Semaphore>>>,
-    engines_ready: Notify,
+    startup_state: watch::Sender<StartupState>,
     engine_args: MockEngineArgs,
     response_replay_table: Option<ResponseReplayTable>,
     unset_dp_rank_counter: AtomicU32,
@@ -242,10 +259,36 @@ struct MockerExecutionContext {
 struct PreparedBootstrap {
     server: Arc<BootstrapServer>,
     max_sessions: usize,
+    cancel: Option<CancellationToken>,
+}
+
+impl PreparedBootstrap {
+    async fn shutdown(mut self) {
+        if let Some(cancel) = self.cancel.take() {
+            cancel.cancel();
+        }
+        self.server.wait_closed().await;
+    }
+}
+
+impl Drop for PreparedBootstrap {
+    fn drop(&mut self) {
+        if let Some(cancel) = self.cancel.take() {
+            cancel.cancel();
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+enum StartupState {
+    Starting,
+    Ready,
+    Failed(Arc<str>),
 }
 
 impl MockerExecutionContext {
     fn new(engine_args: MockEngineArgs) -> Self {
+        let (startup_state, _) = watch::channel(StartupState::Starting);
         let native_metrics = NativeMockerMetrics::new(engine_args.engine_type, engine_args.dp_size)
             .expect("mocker native metrics collectors should be valid");
         let response_replay_table = engine_args
@@ -268,7 +311,7 @@ impl MockerExecutionContext {
         Self {
             engines: OnceCell::new(),
             handoff_session_permits: OnceCell::new(),
-            engines_ready: Notify::new(),
+            startup_state,
             engine_args,
             response_replay_table,
             unset_dp_rank_counter: AtomicU32::new(0),
@@ -304,9 +347,10 @@ impl MockerExecutionContext {
             .effective_handoff_capacity()
             .checked_mul(self.engine_args.dp_size as usize)
             .expect("mocker handoff session limit overflow");
+        let cancel = self.handoff_shutdown.child_token();
         let server = BootstrapServer::start(
             port,
-            self.handoff_shutdown.clone(),
+            cancel.clone(),
             BootstrapServerConfig {
                 max_pending_connections: max_sessions,
                 ..BootstrapServerConfig::default()
@@ -316,14 +360,15 @@ impl MockerExecutionContext {
         Ok(Some(PreparedBootstrap {
             server,
             max_sessions,
+            cancel: Some(cancel),
         }))
     }
 
-    fn commit_bootstrap(&self, prepared: PreparedBootstrap) {
-        let PreparedBootstrap {
-            server,
-            max_sessions,
-        } = prepared;
+    fn commit_bootstrap(&self, mut prepared: PreparedBootstrap) {
+        prepared.cancel.take();
+        let server = Arc::clone(&prepared.server);
+        let max_sessions = prepared.max_sessions;
+        drop(prepared);
         let incoming_rx = server
             .take_incoming_receiver()
             .expect("new bootstrap server must own its incoming receiver");
@@ -348,6 +393,22 @@ impl MockerExecutionContext {
     }
 
     async fn start(self: Arc<Self>, endpoint: dynamo_runtime::component::Endpoint) -> Result<()> {
+        let result = Arc::clone(&self).start_inner(endpoint).await;
+        match &result {
+            Ok(()) => {
+                self.startup_state.send_replace(StartupState::Ready);
+            }
+            Err(error) => {
+                self.set_startup_failure(format!("{error:#}"));
+            }
+        }
+        result
+    }
+
+    async fn start_inner(
+        self: Arc<Self>,
+        endpoint: dynamo_runtime::component::Endpoint,
+    ) -> Result<()> {
         let component = endpoint.component().clone();
         // Use primary_token() instead of child_token() so the mocker continues running
         // during graceful shutdown (Phase 1/2) and only stops in Phase 3.
@@ -374,57 +435,79 @@ impl MockerExecutionContext {
         } else {
             None
         };
-        let prepared_bootstrap = self.prepare_bootstrap().await?;
+        let mut prepared_bootstrap = self.prepare_bootstrap().await?;
 
         // Create FPM publisher upfront and get per-dp-rank sink handles.
         let worker_id = component.drt().connection_id().to_string();
-        let fpm_sinks = match crate::fpm_publisher::FpmDirectPublisher::new(
+        let (fpm_publisher, fpm_sinks) = match crate::fpm_publisher::FpmDirectPublisher::new(
             endpoint.clone(),
             worker_id,
             self.engine_args.dp_size,
         )
         .await
         {
-            Ok((publisher, sinks)) => {
-                let _ = self._fpm_publisher.set(publisher);
-                sinks
-            }
+            Ok((publisher, sinks)) => (Some(publisher), sinks),
             Err(e) => {
                 tracing::error!("Failed to start FPM publisher: {e}");
-                (0..self.engine_args.dp_size)
-                    .map(|_| dynamo_mocker::common::protocols::FpmPublisher::default())
-                    .collect()
+                (
+                    None,
+                    (0..self.engine_args.dp_size)
+                        .map(|_| dynamo_mocker::common::protocols::FpmPublisher::default())
+                        .collect(),
+                )
             }
         };
 
         let (engines, relay_publishers, handoff_session_permits) =
-            self.start_engines(kv_endpoint, fpm_sinks).await?;
+            match self.start_engines(kv_endpoint, fpm_sinks).await {
+                Ok(started) => started,
+                Err(error) => {
+                    if let Some(prepared) = prepared_bootstrap.take() {
+                        prepared.shutdown().await;
+                    }
+                    return Err(error);
+                }
+            };
 
-        self.engines
-            .set(engines)
-            .map_err(|_| anyhow::anyhow!("live Mocker engines initialized more than once"))?;
-        self._relay_publishers
-            .set(relay_publishers)
-            .map_err(|_| anyhow::anyhow!("mocker relay publishers initialized more than once"))?;
-        self.handoff_session_permits
-            .set(handoff_session_permits)
-            .map_err(|_| anyhow::anyhow!("mocker handoff permits initialized more than once"))?;
-        self.engines_ready.notify_waiters();
-
-        if let Some(prepared) = prepared_bootstrap {
-            self.commit_bootstrap(prepared);
-        }
-
-        Self::start_metrics_publishing(
-            self.engines
-                .get()
-                .expect("live Mocker engines were initialized above"),
+        if let Err(error) = Self::start_metrics_publishing(
+            &engines,
             endpoint,
             self.native_metrics.clone(),
             self.metrics_shutdown.clone(),
             self.metrics_tasks.clone(),
         )
-        .await?;
+        .await
+        {
+            Self::shutdown_engines(&engines).await;
+            if let Some(prepared) = prepared_bootstrap.take() {
+                prepared.shutdown().await;
+            }
+            return Err(error);
+        }
+
+        assert!(
+            self.engines.set(engines).is_ok(),
+            "live Mocker engines initialized more than once"
+        );
+        assert!(
+            self._relay_publishers.set(relay_publishers).is_ok(),
+            "mocker relay publishers initialized more than once"
+        );
+        assert!(
+            self.handoff_session_permits
+                .set(handoff_session_permits)
+                .is_ok(),
+            "mocker handoff permits initialized more than once"
+        );
+        if let Some(publisher) = fpm_publisher {
+            assert!(
+                self._fpm_publisher.set(publisher).is_ok(),
+                "mocker FPM publisher initialized more than once"
+            );
+        }
+        if let Some(prepared) = prepared_bootstrap.take() {
+            self.commit_bootstrap(prepared);
+        }
 
         let shutdown = Arc::clone(&self);
         tokio::spawn(async move {
@@ -439,13 +522,7 @@ impl MockerExecutionContext {
             }
             shutdown.handoff_tasks.wait().await;
             if let Some(engines) = shutdown.engines.get() {
-                for result in
-                    futures::future::join_all(engines.iter().map(LiveEngine::shutdown)).await
-                {
-                    if let Err(error) = result {
-                        tracing::error!(%error, "failed to shut down live Mocker engine");
-                    }
-                }
+                Self::shutdown_engines(engines).await;
             }
             shutdown.metrics_shutdown.cancel();
             shutdown.metrics_tasks.close();
@@ -455,35 +532,62 @@ impl MockerExecutionContext {
         Ok(())
     }
 
-    async fn engine(&self, dp_rank: usize) -> LiveEngine {
-        if let Some(engines) = self.engines.get() {
-            return engines[dp_rank].clone();
+    async fn shutdown_engines(engines: &[LiveEngine]) {
+        for result in futures::future::join_all(engines.iter().map(LiveEngine::shutdown)).await {
+            if let Err(error) = result {
+                tracing::error!(%error, "failed to shut down live Mocker engine");
+            }
         }
-
-        let notified = self.engines_ready.notified();
-        if let Some(engines) = self.engines.get() {
-            return engines[dp_rank].clone();
-        }
-        notified.await;
-        self.engines
-            .get()
-            .expect("live Mocker engines must be initialized before notification")[dp_rank]
-            .clone()
     }
 
-    async fn handoff_session_permit(&self, dp_rank: usize) -> Arc<Semaphore> {
-        if let Some(permits) = self.handoff_session_permits.get() {
-            return permits[dp_rank].clone();
+    fn set_startup_failure(&self, error: impl Into<Arc<str>>) {
+        self.startup_state
+            .send_replace(StartupState::Failed(error.into()));
+    }
+
+    async fn wait_for_startup(&self) -> Result<()> {
+        let mut state = self.startup_state.subscribe();
+        loop {
+            let current = state.borrow().clone();
+            match current {
+                StartupState::Starting => {}
+                StartupState::Ready => return Ok(()),
+                StartupState::Failed(error) => {
+                    bail!("mocker startup failed: {error}");
+                }
+            }
+            state
+                .changed()
+                .await
+                .map_err(|_| anyhow::anyhow!("mocker startup state channel closed"))?;
         }
-        let notified = self.engines_ready.notified();
-        if let Some(permits) = self.handoff_session_permits.get() {
-            return permits[dp_rank].clone();
+    }
+
+    async fn engine(&self, dp_rank: usize) -> Result<LiveEngine> {
+        if let Some(engines) = self.engines.get() {
+            return Ok(engines[dp_rank].clone());
         }
-        notified.await;
-        self.handoff_session_permits
+
+        self.wait_for_startup().await?;
+        Ok(self
+            .engines
             .get()
-            .expect("handoff session permits must be initialized before notification")[dp_rank]
-            .clone()
+            .ok_or_else(|| anyhow::anyhow!("mocker reported ready without live engines"))?[dp_rank]
+            .clone())
+    }
+
+    async fn handoff_session_permit(&self, dp_rank: usize) -> Result<Arc<Semaphore>> {
+        if let Some(permits) = self.handoff_session_permits.get() {
+            return Ok(permits[dp_rank].clone());
+        }
+
+        self.wait_for_startup().await?;
+        Ok(self
+            .handoff_session_permits
+            .get()
+            .ok_or_else(|| anyhow::anyhow!("mocker reported ready without handoff permits"))?
+            [dp_rank]
+            .clone())
     }
 
     async fn start_engines(
@@ -689,7 +793,10 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 dp_rank, self.engine_args.dp_size
             )));
         }
-        let engine = self.engine(dp_rank as usize).await;
+        let engine = self
+            .engine(dp_rank as usize)
+            .await
+            .map_err(|error| Error::msg(error.to_string()))?;
 
         let request_uuid = ctx.id().parse().unwrap_or(Uuid::new_v4());
         let is_prefill = self.engine_args.is_prefill();
@@ -750,8 +857,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             ..Default::default()
         };
 
-        // Create a simple channel for the stream
-        let (stream_tx, stream_rx) = mpsc::unbounded_channel::<LLMEngineOutput>();
+        let (stream_tx, stream_rx) = mpsc::channel::<LLMEngineOutput>(RESPONSE_STREAM_CAPACITY);
 
         let handoff_id = request
             .bootstrap_info
@@ -791,6 +897,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             let session_permit = match self
                 .handoff_session_permit(dp_rank as usize)
                 .await
+                .map_err(|error| Error::msg(error.to_string()))?
                 .try_acquire_owned()
             {
                 Ok(permit) => permit,
@@ -919,13 +1026,23 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                         match source_completion {
                             Ok(Ok(())) => source_handoff_complete = true,
                             Ok(Err(error)) => {
-                                let _ = stream_tx.send(LLMEngineOutput::error(error));
+                                let _ = send_response(
+                                    &stream_tx,
+                                    LLMEngineOutput::error(error),
+                                    &async_context,
+                                )
+                                .await;
                                 break;
                             }
                             Err(_) => {
-                                let _ = stream_tx.send(LLMEngineOutput::error(
-                                    "source handoff session ended without completion".to_string(),
-                                ));
+                                let _ = send_response(
+                                    &stream_tx,
+                                    LLMEngineOutput::error(
+                                        "source handoff session ended without completion".to_string(),
+                                    ),
+                                    &async_context,
+                                )
+                                .await;
                                 break;
                             }
                         }
@@ -938,7 +1055,12 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                     }, if destination_error_rx.is_some() => {
                         match destination_error {
                             Some(error) => {
-                                let _ = stream_tx.send(LLMEngineOutput::error(error));
+                                let _ = send_response(
+                                    &stream_tx,
+                                    LLMEngineOutput::error(error),
+                                    &async_context,
+                                )
+                                .await;
                                 break;
                             }
                             None => destination_error_rx = None,
@@ -946,7 +1068,11 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                     }
                     maybe_signal = live_request.recv() => {
                         let Some(signal) = maybe_signal else {
-                            let _ = stream_tx.send(LLMEngineOutput::error("All output transmitters closed".to_string()));
+                            let _ = send_response(
+                                &stream_tx,
+                                LLMEngineOutput::error("All output transmitters closed".to_string()),
+                                &async_context,
+                            ).await;
                             break;
                         };
 
@@ -956,9 +1082,14 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                         // token/prefill bookkeeping.
                         if signal.rejected {
                             handoff_cancel.cancel();
-                            let _ = stream_tx.send(LLMEngineOutput::error(
-                                "request rejected: request exceeds worker admission limits".to_string(),
-                            ));
+                            let _ = send_response(
+                                &stream_tx,
+                                LLMEngineOutput::error(
+                                    "request rejected: request exceeds worker admission limits".to_string(),
+                                ),
+                                &async_context,
+                            )
+                            .await;
                             break;
                         }
 
@@ -981,51 +1112,89 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                         };
 
                         if signal.completed && token_count < effective_max_output_tokens {
-                            let _ = stream_tx.send(LLMEngineOutput::error("Completion signal received before max tokens reached".to_string()));
+                            let _ = send_response(
+                                &stream_tx,
+                                LLMEngineOutput::error(
+                                    "Completion signal received before max tokens reached".to_string(),
+                                ),
+                                &async_context,
+                            )
+                            .await;
                             break;
                         }
 
                         if signal.completed {
-                            if stream_tx.send(output).is_err() {
+                            if !send_response(&stream_tx, output, &async_context).await {
                                 tracing::error!("Output stream receiver closed.");
                                 break;
                             }
                             native_timing.record_tokens(1);
 
-                            wait_for_no_bootstrap_handoff_delay(
-                                is_prefill,
-                                has_handoff_session,
-                                signal.handoff_delay_ms,
-                            )
-                            .await;
+                            let delay_completed = tokio::select! {
+                                _ = wait_for_no_bootstrap_handoff_delay(
+                                    is_prefill,
+                                    has_handoff_session,
+                                    signal.handoff_delay_ms,
+                                ) => true,
+                                _ = stream_tx.closed() => false,
+                                _ = async_context.stopped() => {
+                                    handoff_cancel.cancel();
+                                    let _ = stream_tx.try_send(LLMEngineOutput::cancelled());
+                                    false
+                                }
+                            };
+                            if !delay_completed {
+                                break;
+                            }
 
                             if !source_handoff_complete
                                 && let Some(completion_rx) = source_completion_rx.take()
                             {
                                 let completion = tokio::select! {
                                     completion = completion_rx => completion,
+                                    _ = stream_tx.closed() => {
+                                        handoff_cancel.cancel();
+                                        break;
+                                    }
                                     _ = async_context.stopped() => {
                                         handoff_cancel.cancel();
-                                        let _ = stream_tx.send(LLMEngineOutput::cancelled());
+                                        let _ = stream_tx.try_send(LLMEngineOutput::cancelled());
                                         break;
                                     }
                                 };
                                 match completion {
                                     Ok(Ok(())) => {}
                                     Ok(Err(error)) => {
-                                        let _ = stream_tx.send(LLMEngineOutput::error(error));
+                                        let _ = send_response(
+                                            &stream_tx,
+                                            LLMEngineOutput::error(error),
+                                            &async_context,
+                                        )
+                                        .await;
                                         break;
                                     }
                                     Err(_) => {
-                                        let _ = stream_tx.send(LLMEngineOutput::error(
-                                            "source handoff session ended without completion".to_string(),
-                                        ));
+                                        let _ = send_response(
+                                            &stream_tx,
+                                            LLMEngineOutput::error(
+                                                "source handoff session ended without completion"
+                                                    .to_string(),
+                                            ),
+                                            &async_context,
+                                        )
+                                        .await;
                                         break;
                                     }
                                 }
                             }
 
-                            if stream_tx.send(LLMEngineOutput::length()).is_err() {
+                            if !send_response(
+                                &stream_tx,
+                                LLMEngineOutput::length(),
+                                &async_context,
+                            )
+                            .await
+                            {
                                 tracing::error!("Output stream receiver closed.");
                                 break;
                             }
@@ -1034,7 +1203,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                             break;
                         }
 
-                        if stream_tx.send(output).is_err() {
+                        if !send_response(&stream_tx, output, &async_context).await {
                             tracing::error!("Output stream receiver closed.");
                             break;
                         }
@@ -1043,7 +1212,12 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 
                     _ = async_context.stopped() => {
                         handoff_cancel.cancel();
-                        let _ = stream_tx.send(LLMEngineOutput::cancelled());
+                        let _ = stream_tx.try_send(LLMEngineOutput::cancelled());
+                        break;
+                    }
+
+                    _ = stream_tx.closed() => {
+                        handoff_cancel.cancel();
                         break;
                     }
                 }
@@ -1063,7 +1237,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             tokio::spawn(response_task);
         }
 
-        let stream = UnboundedReceiverStream::new(stream_rx).map(Annotated::from_data);
+        let stream = ReceiverStream::new(stream_rx).map(Annotated::from_data);
         Ok(ResponseStream::new(Box::pin(stream), ctx.context()))
     }
 }
@@ -1082,6 +1256,7 @@ pub async fn make_mocker_engine(
         let component = loop {
             if cancel_token.is_cancelled() {
                 tracing::debug!("Mocker engine startup cancelled");
+                startup_engine.set_startup_failure("mocker startup was cancelled");
                 return;
             }
 
@@ -1222,6 +1397,7 @@ mod tests {
         let args = MockEngineArgs::builder()
             .block_size(4)
             .num_gpu_blocks(64)
+            .max_num_seqs(Some(1))
             .max_num_batched_tokens(Some(64))
             .speedup_ratio(0.1)
             .build()
@@ -1229,6 +1405,18 @@ mod tests {
         let live = LiveEngine::start(args.clone(), 0).unwrap();
         let engine = MockerExecutionContext::new(args);
         assert!(engine.engines.set(vec![live.clone()]).is_ok());
+        let blocker_id = Uuid::from_u128(98);
+        let mut blocker = live
+            .submit(DirectRequest {
+                tokens: vec![1],
+                max_output_tokens: 10_000,
+                output_token_ids: Some(vec![7; 10_000]),
+                uuid: Some(blocker_id),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let blocker_drain = tokio::spawn(async move { while blocker.recv().await.is_some() {} });
         let request_id = Uuid::from_u128(99);
         let input = SingleIn::with_id_and_metadata(
             decode_request(1, 100),
@@ -1240,11 +1428,7 @@ mod tests {
 
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
-                let metrics = live.metrics_receiver().borrow().clone();
-                if live.active_request_count() == 0
-                    && metrics.running_requests == 0
-                    && metrics.waiting_requests == 0
-                {
+                if live.active_request_count() == 1 {
                     break;
                 }
                 tokio::task::yield_now().await;
@@ -1252,6 +1436,8 @@ mod tests {
         })
         .await
         .expect("dropped response must cancel its live request");
+        assert!(live.cancel(blocker_id).await.unwrap());
+        blocker_drain.await.unwrap();
 
         let input = SingleIn::with_id_and_metadata(
             decode_request(1, 1),
@@ -1283,7 +1469,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bootstrap_bind_failure_leaves_startup_state_retryable() {
+    async fn startup_failure_wakes_engine_waiters() {
+        let engine = Arc::new(MockerExecutionContext::new(
+            MockEngineArgs::builder().build().unwrap(),
+        ));
+        let waiting_engine = Arc::clone(&engine);
+        let waiter = tokio::spawn(async move { waiting_engine.engine(0).await });
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+
+        engine.set_startup_failure("rank initialization failed");
+        let error = tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("startup waiter should wake")
+            .unwrap()
+            .err()
+            .expect("startup waiter should return the initialization failure");
+        assert!(error.to_string().contains("rank initialization failed"));
+    }
+
+    #[tokio::test]
+    async fn prepared_bootstrap_shutdown_releases_the_listener() {
         let occupied = std::net::TcpListener::bind(("0.0.0.0", 0)).unwrap();
         let port = occupied.local_addr().unwrap().port();
         let args = MockEngineArgs::builder()
@@ -1303,8 +1509,13 @@ mod tests {
             .await
             .unwrap()
             .expect("released bootstrap port must be reusable");
-        engine.handoff_shutdown.cancel();
-        prepared.server.wait_closed().await;
+        prepared.shutdown().await;
+        let retry = engine
+            .prepare_bootstrap()
+            .await
+            .unwrap()
+            .expect("failed startup cleanup must release the bootstrap port");
+        retry.shutdown().await;
     }
 
     fn write_replay_trace(lines: &[serde_json::Value]) -> tempfile::NamedTempFile {
