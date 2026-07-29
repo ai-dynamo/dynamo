@@ -47,13 +47,17 @@ def test_stop_is_idempotent_and_allows_restart(monkeypatch):
     monkeypatch.setenv("DYN_FPM_GC_FREEZE_INTERVAL_S", "3600")
     thresholds = gc.get_threshold()
     gc_policy = _fresh_module(monkeypatch, "freeze")
-    assert gc_policy.start_gc_policy() is True
-    gc_policy.stop_gc_policy()
-    assert gc.get_threshold() == thresholds
-    gc_policy.stop_gc_policy()  # no-op when already stopped
-    assert gc.get_threshold() == thresholds
-    assert gc_policy.start_gc_policy() is True, "restart after stop"
-    gc_policy.stop_gc_policy()
+    try:
+        assert gc_policy.start_gc_policy() is True
+        gc_policy.stop_gc_policy()
+        assert gc.get_threshold() == thresholds
+        gc_policy.stop_gc_policy()  # no-op when already stopped
+        assert gc.get_threshold() == thresholds
+        assert gc_policy.start_gc_policy() is True, "restart after stop"
+    finally:
+        # An assertion failure above must not leak the daemon thread or the
+        # disabled gen2 threshold into subsequent tests.
+        gc_policy.stop_gc_policy()
     assert gc.get_threshold() == thresholds
 
 
@@ -105,3 +109,10 @@ def test_invalid_interval_falls_back(monkeypatch):
     monkeypatch.setenv("DYN_FPM_GC_FREEZE_INTERVAL_S", "not-a-number")
     gc_policy = _fresh_module(monkeypatch, None)
     assert gc_policy._interval_seconds() == 60.0
+
+
+def test_non_finite_interval_falls_back(monkeypatch):
+    gc_policy = _fresh_module(monkeypatch, None)
+    for raw in ("inf", "-inf", "nan"):
+        monkeypatch.setenv("DYN_FPM_GC_FREEZE_INTERVAL_S", raw)
+        assert gc_policy._interval_seconds() == 60.0
