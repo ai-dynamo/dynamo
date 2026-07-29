@@ -13,7 +13,7 @@ import tempfile
 import time
 from abc import ABC, abstractmethod
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import Awaitable, Mapping
 from contextlib import asynccontextmanager
 from typing import (
     Any,
@@ -110,6 +110,7 @@ _DELTA_REQUEST_OUTPUT_KIND = RequestOutputKind.DELTA
 _RL_INIT_WEIGHTS_TIMEOUT_ENV = "DYN_RL_INIT_WEIGHTS_TIMEOUT_S"
 _RL_INIT_WEIGHTS_TIMEOUT_DEFAULT_S = 30.0
 _LORA_LOCK_STRIPES = 64
+_POOLING_BATCH_CONCURRENCY_FALLBACK: Final = 256
 _DISTRIBUTED_WEIGHT_UPDATE_RESERVED_KEYS: Final = frozenset(
     {
         "allow_unpaused",
@@ -3652,6 +3653,48 @@ class EmbeddingWorkerHandler:
                 # Re-raise EngineShutdown if the monitor task raised it.
                 task.result()
 
+    async def _run_pooling_batch(
+        self,
+        prompts: list[Any],
+        encode_one: Callable[[int, Any], Awaitable[Any]],
+    ) -> list[Any]:
+        scheduler_config = getattr(
+            getattr(self.engine_client, "vllm_config", None),
+            "scheduler_config",
+            None,
+        )
+        max_num_seqs = getattr(scheduler_config, "max_num_seqs", None)
+        if (
+            not isinstance(max_num_seqs, int)
+            or isinstance(max_num_seqs, bool)
+            or max_num_seqs < 1
+        ):
+            max_num_seqs = _POOLING_BATCH_CONCURRENCY_FALLBACK
+
+        outputs: list[Any | None] = [None] * len(prompts)
+        indices = iter(range(len(prompts)))
+
+        async def _worker() -> None:
+            for idx in indices:
+                outputs[idx] = await encode_one(idx, prompts[idx])
+
+        tasks = [
+            asyncio.create_task(_worker())
+            for _ in range(min(len(prompts), max_num_seqs))
+        ]
+        try:
+            await asyncio.gather(*tasks)
+        finally:
+            pending = [task for task in tasks if not task.done()]
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+
+        if any(output is None for output in outputs):
+            raise RuntimeError("vLLM engine.encode did not return every batch item")
+        return cast(list[Any], outputs)
+
     async def generate(
         self, request: dict, context: Context
     ) -> AsyncIterator[Dict[str, Any]]:
@@ -3776,25 +3819,7 @@ class EmbeddingWorkerHandler:
                 )
             return final_output
 
-        # Submit every prompt to the engine in the same event-loop tick so
-        # vLLM's continuous-batching scheduler can coalesce them into a
-        # single forward pass instead of N sequential ones. ``asyncio.gather``
-        # returns results in input order, so ``outputs[k]`` matches ``prompts[k]``
-        # regardless of engine completion order.
-        #
-        # Use explicit tasks + a ``finally`` cancellation pass so that if one
-        # ``_encode_one`` raises, we cancel siblings still in flight instead
-        # of leaving them running -- otherwise vLLM keeps consuming engine
-        # capacity for output that this handler will discard.
-        tasks = [asyncio.create_task(_encode_one(i, p)) for i, p in enumerate(prompts)]
-        try:
-            outputs = await asyncio.gather(*tasks)
-        finally:
-            pending = [t for t in tasks if not t.done()]
-            for t in pending:
-                t.cancel()
-            if pending:
-                await asyncio.gather(*pending, return_exceptions=True)
+        outputs = await self._run_pooling_batch(prompts, _encode_one)
 
         embedding_objects: list[Dict[str, Any]] = []
         prompt_tokens = 0
@@ -3844,6 +3869,411 @@ class EmbeddingWorkerHandler:
                 "total_tokens": prompt_tokens,
             },
         }
+
+
+class ClassifyWorkerHandler(EmbeddingWorkerHandler):
+    """Standalone handler for ``/classify`` and ``/pooling`` requests on vLLM.
+
+    Sequence classification (cross-encoder / NLI / sentiment) is a pooling
+    task, so this shares all of ``EmbeddingWorkerHandler``'s engine plumbing
+    (pooling ``AsyncLLM``, abort monitor, engine-death monitor) and only
+    overrides ``generate`` to:
+
+      - run ``PoolingParams(task="classify")`` instead of ``task="embed"``, and
+      - shape the per-input probability vectors into the ``/classify``
+        response (``{index, label, probs, num_classes}``) instead of the
+        embedding response.
+
+    The ``label`` is resolved from the model's HF ``id2label`` map (argmax of
+    the probability vector), matching vLLM's own ``/classify`` server
+    (``vllm/entrypoints/pooling/classify/serving.py``). ``label`` is ``None``
+    when the model config exposes no ``id2label``.
+
+    The worker registers ``ModelType.Classify | ModelType.Pooling``, so the
+    frontend's classify and pooling engines both push to this endpoint.
+    ``generate`` dispatches on the presence of the ``encoding_format`` key:
+    the Rust ``NvCreatePoolingRequest`` always serializes it (it defaults to
+    ``"float"``), while the classify wire request never carries it. See
+    ``lib/llm/src/protocols/openai/pooling.rs``.
+    """
+
+    def __init__(
+        self,
+        runtime,
+        engine: Any,
+        config: Config,
+        model_config: "ModelConfig | None" = None,
+        shutdown_event: Optional[asyncio.Event] = None,
+    ) -> None:
+        super().__init__(
+            runtime=runtime,
+            engine=engine,
+            config=config,
+            shutdown_event=shutdown_event,
+        )
+        self.model_config = model_config
+        self._default_pooling_task: str | None = None
+        logger.info("Classify worker handler initialized")
+
+    def _id2label(self) -> dict[int, str]:
+        """Best-effort HF ``id2label`` lookup. Keys may arrive as str or int
+        depending on how the HF config was loaded; normalize to int."""
+        hf_config = getattr(self.model_config, "hf_config", None)
+        raw = getattr(hf_config, "id2label", None) or {}
+        normalized: dict[int, str] = {}
+        for k, v in raw.items():
+            try:
+                normalized[int(k)] = str(v)
+            except (TypeError, ValueError):
+                continue
+        return normalized
+
+    async def _resolve_pooling_task(self, requested_task: str | None) -> str:
+        if requested_task is not None:
+            return requested_task
+        if self._default_pooling_task is not None:
+            return self._default_pooling_task
+        if self.model_config is None:
+            raise RuntimeError("Model config is required to resolve the pooling task")
+
+        supported_tasks = await self.engine_client.get_supported_tasks()
+        pooling_task = self.model_config.get_pooling_task(supported_tasks)
+        if pooling_task is None:
+            raise ValueError(
+                f"No default pooling task is available; supported tasks: {supported_tasks}"
+            )
+        self._default_pooling_task = pooling_task
+        return pooling_task
+
+    async def generate(
+        self, request: dict, context: Context
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """Handle one ``/classify`` or ``/pooling`` request.
+
+        The Rust frontend forwards the request dict directly. Expected keys:
+        ``model: str``,
+        ``input: str | list[str] | list[int] | list[list[int]]``. Mirrors
+        vLLM 0.25.1's ``ClassificationRequest`` →
+        ``ClassificationResponse`` contract.
+
+        Pooling wire requests are distinguished by the always-serialized
+        ``encoding_format`` key (see class docstring) and delegated to
+        ``_generate_pooling``.
+        """
+        if "encoding_format" in request:
+            async for response in self._generate_pooling(request, context):
+                yield response
+            return
+
+        model_name = request.get("model") or self.config.served_model_name or ""
+        input_field = request.get("input")
+        if input_field is None:
+            raise ValueError("Classify request missing required 'input' field")
+
+        prompts: list[Any] = _classify_embedding_input(input_field)
+
+        # Sequence classification is a pooling pass with the model's configured
+        # classification pooler. ``use_activation`` is forwarded verbatim when
+        # the client sets it (mirroring vLLM's ClassifyRequestMixin); when
+        # omitted, the pooler default applies (vLLM's per-model sigmoid/softmax)
+        # so behaviour matches bare ``vllm serve``.
+        classify_pooling_kwargs: dict[str, Any] = {"task": "classify"}
+        use_activation = request.get("use_activation")
+        if use_activation is not None:
+            classify_pooling_kwargs["use_activation"] = use_activation
+        pooling_params = PoolingParams(**classify_pooling_kwargs)
+
+        # Forward supported tokenization options so classification matches
+        # vLLM's tokenization.
+        tokenization_kwargs = _build_tokenization_kwargs(request)
+        tokenize_params = _build_pooling_tokenize_params(
+            self.engine_client, tokenization_kwargs
+        )
+        tokenizer = getattr(self.engine_client.renderer, "tokenizer", None)
+
+        engine_request_id = context.id()
+        response_request_id = request.get("request_id") or engine_request_id
+        priority = request.get("priority", 0)
+
+        async def _encode_one(idx: int, prompt: Any):
+            request_id = f"{engine_request_id}-{idx}"
+            encode_arg = _prepare_pooling_prompt(
+                prompt,
+                request,
+                tokenize_params,
+                tokenizer,
+            )
+            final_output = None
+            async with self._abort_monitor(context, request_id):
+                encode_kwargs: dict[str, Any] = {
+                    "prompt": encode_arg,
+                    "pooling_params": pooling_params,
+                    "request_id": request_id,
+                }
+                if priority != 0:
+                    encode_kwargs["priority"] = priority
+                # Pre-tokenized prompts were processed with TokenizeParams
+                # before encode; raw text is tokenized inside AsyncLLM.
+                if tokenization_kwargs is not None and isinstance(prompt, str):
+                    encode_kwargs["tokenization_kwargs"] = tokenization_kwargs
+                async for out in self.engine_client.encode(**encode_kwargs):
+                    final_output = out
+            if final_output is None:
+                raise RuntimeError(
+                    f"vLLM engine.encode produced no output for input index {idx}"
+                )
+            return final_output
+
+        outputs = await self._run_pooling_batch(prompts, _encode_one)
+
+        id2label = self._id2label()
+        data: list[Dict[str, Any]] = []
+        prompt_tokens = 0
+        for idx, final_output in enumerate(outputs):
+            # ``final_output.outputs.data`` is the 1-D probability vector for a
+            # classification pooler (shape ``(num_classes,)``); flatten defensively.
+            probs = _pooling_output_to_list(final_output.outputs.data)
+            predicted_index = (
+                max(range(len(probs)), key=probs.__getitem__) if probs else 0
+            )
+            data.append(
+                {
+                    "index": idx,
+                    "label": id2label.get(predicted_index),
+                    "probs": probs,
+                    "num_classes": len(probs),
+                }
+            )
+            token_ids = getattr(final_output, "prompt_token_ids", None) or []
+            prompt_tokens += len(token_ids)
+
+        yield {
+            "id": f"classify-{response_request_id}",
+            "object": "list",
+            "created": int(time.time()),
+            "model": model_name,
+            "data": data,
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "total_tokens": prompt_tokens,
+            },
+        }
+
+    async def _generate_pooling(
+        self, request: dict, context: Context
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """Handle one ``/pooling`` request.
+
+        Mirrors vLLM's ``PoolingCompletionRequest`` → ``PoolingResponse``
+        contract (`vllm/entrypoints/pooling/pooling/`). Expected keys:
+        ``model: str``, ``input: str | list[str] | list[int] | list[list[int]]``,
+        optional ``task`` (``None`` resolves the model's configured default),
+        optional ``use_activation``, ``encoding_format`` (``"float"`` |
+        ``"base64"`` | ``"bytes"`` | ``"bytes_only"``), and
+        ``truncate_prompt_tokens``.
+
+        Per-item ``data`` preserves the pooler's output shape: a nested list
+        for token-level tasks (``(n_tokens, n_cols)``), a flat list for
+        sequence-level tasks, or a base64 string of packed tensor bytes on
+        Dynamo's internal wire for encoded responses. The Rust HTTP boundary
+        emits JSON base64 or native binary according to ``encoding_format``.
+        """
+        model_name = request.get("model") or self.config.served_model_name or ""
+        input_field = request.get("input")
+        if input_field is None:
+            raise ValueError("Pooling request missing required 'input' field")
+
+        prompts: list[Any] = _classify_embedding_input(input_field)
+
+        # The HTTP boundary rejects `dimensions` and unknown enum values; keep
+        # the worker defensive in case the wire request came from elsewhere.
+        if request.get("dimensions") is not None:
+            raise ValueError("dimensions is currently not supported")
+        encoding_format = request.get("encoding_format", "float")
+        if encoding_format not in ("float", "base64", "bytes", "bytes_only"):
+            raise ValueError(
+                f"Invalid 'encoding_format' value {encoding_format!r}; "
+                "expected 'float', 'base64', 'bytes', or 'bytes_only'"
+            )
+        raw_embed_dtype = request.get("embed_dtype", "float32")
+        if (
+            not isinstance(raw_embed_dtype, str)
+            or raw_embed_dtype not in _POOLING_EMBED_DTYPES
+        ):
+            raise ValueError(f"Invalid 'embed_dtype' value {raw_embed_dtype!r}")
+        embed_dtype = raw_embed_dtype
+        raw_endianness = request.get("endianness", "native")
+        if (
+            not isinstance(raw_endianness, str)
+            or raw_endianness not in _POOLING_ENDIANNESS
+        ):
+            raise ValueError(f"Invalid 'endianness' value {raw_endianness!r}")
+        endianness = raw_endianness
+
+        tokenization_kwargs = _build_tokenization_kwargs(request)
+        tokenize_params = _build_pooling_tokenize_params(
+            self.engine_client, tokenization_kwargs
+        )
+        tokenizer = getattr(self.engine_client.renderer, "tokenizer", None)
+
+        pooling_task = await self._resolve_pooling_task(request.get("task"))
+        pooling_kwargs: dict[str, Any] = {"task": pooling_task}
+        use_activation = request.get("use_activation")
+        if use_activation is not None:
+            pooling_kwargs["use_activation"] = use_activation
+        pooling_params = PoolingParams(**pooling_kwargs)
+
+        engine_request_id = context.id()
+        response_request_id = request.get("request_id") or engine_request_id
+        priority = request.get("priority", 0)
+
+        async def _encode_one(idx: int, prompt: Any):
+            request_id = f"{engine_request_id}-{idx}"
+            encode_arg = _prepare_pooling_prompt(
+                prompt,
+                request,
+                tokenize_params,
+                tokenizer,
+            )
+            final_output = None
+            async with self._abort_monitor(context, request_id):
+                encode_kwargs: dict[str, Any] = {
+                    "prompt": encode_arg,
+                    "pooling_params": pooling_params,
+                    "request_id": request_id,
+                }
+                if priority != 0:
+                    encode_kwargs["priority"] = priority
+                if tokenization_kwargs is not None and isinstance(prompt, str):
+                    encode_kwargs["tokenization_kwargs"] = tokenization_kwargs
+
+                async for out in self.engine_client.encode(**encode_kwargs):
+                    final_output = out
+            if final_output is None:
+                raise RuntimeError(
+                    f"vLLM engine.encode produced no output for input index {idx}"
+                )
+            return final_output
+
+        outputs = await self._run_pooling_batch(prompts, _encode_one)
+
+        data: list[Dict[str, Any]] = []
+        prompt_tokens = 0
+        for idx, final_output in enumerate(outputs):
+            item: Dict[str, Any] = {
+                "index": idx,
+                "object": "pooling",
+            }
+            if encoding_format == "float":
+                item["data"] = _pooling_output_to_nested(final_output.outputs.data)
+            else:
+                encoded, shape = _encode_pooling_output(
+                    final_output.outputs.data,
+                    embed_dtype,
+                    endianness,
+                )
+                item["data"] = encoded
+                if encoding_format == "bytes":
+                    item["shape"] = shape
+            data.append(item)
+            token_ids = getattr(final_output, "prompt_token_ids", None) or []
+            prompt_tokens += len(token_ids)
+
+        yield {
+            "id": f"pool-{response_request_id}",
+            "object": "list",
+            "created": int(time.time()),
+            "model": model_name,
+            "data": data,
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "total_tokens": prompt_tokens,
+                "completion_tokens": 0,
+            },
+        }
+
+
+def _build_pooling_tokenize_params(
+    engine_client: Any, tokenization_kwargs: dict[str, Any] | None
+) -> Any:
+    if tokenization_kwargs is None:
+        return None
+    return engine_client.renderer.default_cmpl_tok_params.with_kwargs(
+        **tokenization_kwargs
+    )
+
+
+def _prepare_pooling_prompt(
+    prompt: Any,
+    request: dict,
+    tokenize_params: Any,
+    tokenizer: Any,
+) -> Any:
+    mm_processor_kwargs = request.get("mm_processor_kwargs")
+    cache_salt = request.get("cache_salt")
+    if isinstance(prompt, str):
+        if mm_processor_kwargs is None and cache_salt is None:
+            return prompt
+        encode_arg: Any = TextPrompt(prompt=prompt)
+    else:
+        encode_arg = TokensPrompt(prompt_token_ids=prompt)
+
+    if mm_processor_kwargs is not None:
+        encode_arg["mm_processor_kwargs"] = mm_processor_kwargs
+    if cache_salt is not None:
+        encode_arg["cache_salt"] = cache_salt
+    # vLLM 0.25.1's AsyncLLM compatibility preprocessor does not forward
+    # tokenization kwargs to TokensPrompt. Apply the same TokenizeParams here.
+    if tokenize_params is not None and not isinstance(prompt, str):
+        encode_arg = tokenize_params.apply_post_tokenization(tokenizer, encode_arg)
+    return encode_arg
+
+
+def _build_tokenization_kwargs(request: dict) -> "dict[str, Any] | None":
+    """Collect the supported tokenization options into the dict vLLM's
+    ``encode`` forwards to the tokenizer (``tokenization_kwargs``).
+
+    Covers the completion-request fields that flow through that path:
+    ``truncate_prompt_tokens``, ``truncation_side``, and ``add_special_tokens``
+    (vLLM pops the latter from ``tokenization_kwargs``). Returns ``None`` when
+    the caller set no option.
+    """
+    kwargs: dict[str, Any] = {}
+
+    truncate_prompt_tokens = request.get("truncate_prompt_tokens")
+    if truncate_prompt_tokens is not None:
+        if not isinstance(truncate_prompt_tokens, int) or isinstance(
+            truncate_prompt_tokens, bool
+        ):
+            raise TypeError(
+                "Invalid 'truncate_prompt_tokens' type "
+                f"{type(truncate_prompt_tokens).__name__}; expected int"
+            )
+        if truncate_prompt_tokens < -1:
+            raise ValueError(
+                f"truncate_prompt_tokens must be >= -1, got {truncate_prompt_tokens}"
+            )
+        kwargs["truncate_prompt_tokens"] = truncate_prompt_tokens
+
+    truncation_side = request.get("truncation_side")
+    if truncation_side is not None:
+        if truncation_side not in ("left", "right"):
+            raise ValueError(
+                f"Invalid 'truncation_side' value {truncation_side!r}; "
+                "expected 'left' or 'right'"
+            )
+        kwargs["truncation_side"] = truncation_side
+
+    add_special_tokens = request.get("add_special_tokens")
+    if add_special_tokens is not None:
+        if not isinstance(add_special_tokens, bool):
+            raise TypeError(
+                "Invalid 'add_special_tokens' type "
+                f"{type(add_special_tokens).__name__}; expected bool"
+            )
+        kwargs["add_special_tokens"] = add_special_tokens
+
+    return kwargs or None
 
 
 def _is_token_id(x: Any) -> bool:
@@ -3940,6 +4370,55 @@ def _pooling_output_to_list(data: Any) -> list[float]:
         f"Unsupported PoolingOutput.data type {type(data).__name__}; "
         "expected torch.Tensor or list"
     )
+
+
+def _pooling_output_to_nested(data: Any) -> Any:
+    """Convert a vLLM PoolingOutput.data tensor (or list) to a JSON-ready
+    list, preserving its shape.
+
+    Unlike ``_pooling_output_to_list`` (which flattens for the OpenAI
+    embeddings response), the ``/pooling`` response keeps the pooler's
+    structure: sequence-level tasks (``embed`` / ``classify``) produce a flat
+    ``list[float]`` and token-level tasks (``token_embed`` /
+    ``token_classify``) a ``list[list[float]]`` — matching vLLM's
+    ``encode_pooling_output_float`` (``output.outputs.data.tolist()``).
+    """
+    if isinstance(data, torch.Tensor):
+        return data.detach().cpu().tolist()
+    if isinstance(data, (list, tuple)):
+        return [
+            _pooling_output_to_nested(x) if isinstance(x, (list, tuple)) else float(x)
+            for x in data
+        ]
+    raise TypeError(
+        f"Unsupported PoolingOutput.data type {type(data).__name__}; "
+        "expected torch.Tensor or list"
+    )
+
+
+_POOLING_EMBED_DTYPES = frozenset(
+    ("float32", "float16", "bfloat16", "fp8_e4m3", "fp8_e5m2")
+)
+_POOLING_ENDIANNESS = frozenset(("native", "big", "little"))
+
+
+def _encode_pooling_output(
+    data: Any, embed_dtype: str, endianness: str
+) -> tuple[str, list[int]]:
+    if isinstance(data, torch.Tensor):
+        tensor = data.detach().cpu()
+    elif isinstance(data, (list, tuple)):
+        tensor = torch.tensor(data)
+    else:
+        raise TypeError(
+            f"Unsupported PoolingOutput.data type {type(data).__name__}; "
+            "expected torch.Tensor or list"
+        )
+
+    # Keep this serialization-only vLLM dependency local to encoded pooling.
+    serial_utils = importlib.import_module("vllm.utils.serial_utils")
+    binary = serial_utils.tensor2binary(tensor, embed_dtype, endianness)
+    return base64.b64encode(binary).decode("ascii"), list(tensor.shape)
 
 
 def _encode_floats_to_base64(floats: list[float]) -> str:
