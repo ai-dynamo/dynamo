@@ -204,6 +204,85 @@ fn timestamp_us_from_ms(timestamp_ms: f64) -> u64 {
     (timestamp_ms * 1000.0) as u64
 }
 
+pub(in crate::replay) fn generate_trace_worker_artifacts_with_visibility(
+    args: MockEngineArgs,
+    trace: Trace,
+    router_event_visibility_override: Option<RouterEventVisibility>,
+) -> anyhow::Result<ReplayWorkerArtifacts> {
+    let args = args.normalized()?;
+    let engine_block_size = args.block_size;
+    let mut worker = ReplayWorkerCore::new_with_kv_capture(args, u64::default());
+    let mut driver = trace.into_trace_driver_with_block_size(engine_block_size)?;
+    let mut collector = TraceCollector::default();
+    let mut artifacts = ReplayWorkerArtifacts::default();
+    let mut current_time_ms = 0.0;
+
+    while !driver.is_drained() || !worker.is_empty() {
+        for ready_turn in driver.pop_ready(current_time_ms, usize::MAX) {
+            let replay_hashes = ready_turn
+                .replay_hashes
+                .ok_or_else(|| anyhow::anyhow!("offline artifacts require synthesized hashes"))?;
+            collector.on_arrival(
+                ready_turn.request_uuid,
+                ready_turn.scheduled_ready_at_ms,
+                ready_turn.request.tokens.len(),
+                ready_turn.request.max_output_tokens,
+            );
+            artifacts.requests.push(ReplayTimedRequest {
+                uuid: ready_turn.request_uuid,
+                timestamp_us: timestamp_us_from_ms(current_time_ms),
+                scheduled_ready_at_ms: ready_turn.scheduled_ready_at_ms,
+                input_length: ready_turn.request.tokens.len(),
+                output_length: ready_turn.request.max_output_tokens,
+                replay_hashes,
+            });
+            worker.receive(ready_turn.request);
+        }
+
+        if worker.is_empty() {
+            let Some(next_ready_ms) = driver.next_ready_time_ms() else {
+                break;
+            };
+            current_time_ms = next_ready_ms;
+            continue;
+        }
+
+        let pass_start_ms = current_time_ms;
+        let pass = worker.execute_pass(&mut collector, current_time_ms);
+        current_time_ms = pass.end_ms;
+
+        let router_event_visibility =
+            router_event_visibility_override.unwrap_or(pass.router_event_visibility);
+        let kv_event_timestamp_us = match router_event_visibility {
+            RouterEventVisibility::PassStart => timestamp_us_from_ms(pass_start_ms),
+            RouterEventVisibility::PassEnd => timestamp_us_from_ms(current_time_ms),
+        };
+        artifacts
+            .kv_events
+            .extend(pass.kv_events.into_iter().map(|event| ReplayTimedKvEvent {
+                storage_tier: event.storage_tier,
+                event: event.event,
+                timestamp_us: kv_event_timestamp_us,
+            }));
+
+        let output_timestamp_us = timestamp_us_from_ms(current_time_ms);
+        for signal in pass.output_signals {
+            if let Some(token_id) = signal.token_id {
+                driver.on_output_token(signal.uuid, token_id)?;
+            }
+            if signal.completed {
+                driver.on_terminal(signal.uuid, current_time_ms, signal.rejected)?;
+            }
+            artifacts.output_signals.push(ReplayTimedOutputSignal {
+                signal,
+                timestamp_us: output_timestamp_us,
+            });
+        }
+    }
+
+    Ok(artifacts)
+}
+
 #[cfg(test)]
 mod canonical_digest_tests {
     use dynamo_kv_router::protocols::{
@@ -376,83 +455,4 @@ mod canonical_digest_tests {
             assert_ne!(changed, baseline);
         }
     }
-}
-
-pub(in crate::replay) fn generate_trace_worker_artifacts_with_visibility(
-    args: MockEngineArgs,
-    trace: Trace,
-    router_event_visibility_override: Option<RouterEventVisibility>,
-) -> anyhow::Result<ReplayWorkerArtifacts> {
-    let args = args.normalized()?;
-    let engine_block_size = args.block_size;
-    let mut worker = ReplayWorkerCore::new_with_kv_capture(args, u64::default());
-    let mut driver = trace.into_trace_driver_with_block_size(engine_block_size)?;
-    let mut collector = TraceCollector::default();
-    let mut artifacts = ReplayWorkerArtifacts::default();
-    let mut current_time_ms = 0.0;
-
-    while !driver.is_drained() || !worker.is_empty() {
-        for ready_turn in driver.pop_ready(current_time_ms, usize::MAX) {
-            let replay_hashes = ready_turn
-                .replay_hashes
-                .ok_or_else(|| anyhow::anyhow!("offline artifacts require synthesized hashes"))?;
-            collector.on_arrival(
-                ready_turn.request_uuid,
-                ready_turn.scheduled_ready_at_ms,
-                ready_turn.request.tokens.len(),
-                ready_turn.request.max_output_tokens,
-            );
-            artifacts.requests.push(ReplayTimedRequest {
-                uuid: ready_turn.request_uuid,
-                timestamp_us: timestamp_us_from_ms(current_time_ms),
-                scheduled_ready_at_ms: ready_turn.scheduled_ready_at_ms,
-                input_length: ready_turn.request.tokens.len(),
-                output_length: ready_turn.request.max_output_tokens,
-                replay_hashes,
-            });
-            worker.receive(ready_turn.request);
-        }
-
-        if worker.is_empty() {
-            let Some(next_ready_ms) = driver.next_ready_time_ms() else {
-                break;
-            };
-            current_time_ms = next_ready_ms;
-            continue;
-        }
-
-        let pass_start_ms = current_time_ms;
-        let pass = worker.execute_pass(&mut collector, current_time_ms);
-        current_time_ms = pass.end_ms;
-
-        let router_event_visibility =
-            router_event_visibility_override.unwrap_or(pass.router_event_visibility);
-        let kv_event_timestamp_us = match router_event_visibility {
-            RouterEventVisibility::PassStart => timestamp_us_from_ms(pass_start_ms),
-            RouterEventVisibility::PassEnd => timestamp_us_from_ms(current_time_ms),
-        };
-        artifacts
-            .kv_events
-            .extend(pass.kv_events.into_iter().map(|event| ReplayTimedKvEvent {
-                storage_tier: event.storage_tier,
-                event: event.event,
-                timestamp_us: kv_event_timestamp_us,
-            }));
-
-        let output_timestamp_us = timestamp_us_from_ms(current_time_ms);
-        for signal in pass.output_signals {
-            if let Some(token_id) = signal.token_id {
-                driver.on_output_token(signal.uuid, token_id)?;
-            }
-            if signal.completed {
-                driver.on_terminal(signal.uuid, current_time_ms, signal.rejected)?;
-            }
-            artifacts.output_signals.push(ReplayTimedOutputSignal {
-                signal,
-                timestamp_us: output_timestamp_us,
-            });
-        }
-    }
-
-    Ok(artifacts)
 }

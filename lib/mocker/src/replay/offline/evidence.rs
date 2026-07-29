@@ -454,6 +454,7 @@ pub(crate) fn drain_origin(pool: WorkerPool, worker_id: usize) -> Option<u64> {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn record_lifecycle_operation(
     at_ms: f64,
     pool: WorkerPool,
