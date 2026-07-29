@@ -284,3 +284,34 @@ async def test_add_component_preserves_existing_desired_count(monkeypatch):
 
     coordinator.update_scaling_decision.assert_awaited_once_with(5, None)
     assert runtime.endpoint_calls == []
+
+
+@pytest.mark.asyncio
+async def test_get_actual_worker_counts_accepts_check_terminating_pods(monkeypatch):
+    """VirtualConnector must accept check_terminating_pods without raising.
+
+    The environment always passes the kwarg; VirtualConnector has no pod list
+    to call and ignores it, but a missing signature causes TypeError on every
+    stable refresh when enable_power_awareness=True.
+    """
+    connector, coordinator, _ = _make_connector(
+        monkeypatch,
+        instances_by_endpoint={
+            "test-ns.prefill.generate": ["p-1"],
+            "test-ns.backend.generate": ["d-1", "d-2"],
+        },
+        scaling_ready=True,
+    )
+    coordinator.read_state.return_value = SimpleNamespace(
+        num_prefill_workers=-1,
+        num_decode_workers=-1,
+        decision_id=1,
+    )
+
+    counts = await connector.get_actual_worker_counts(
+        prefill_component_name="prefill",
+        decode_component_name="decode",
+        check_terminating_pods=True,
+    )
+
+    assert counts == (1, 2, True)

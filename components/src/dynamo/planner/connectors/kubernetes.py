@@ -725,9 +725,20 @@ class KubernetesConnector(PlannerConnector):
         self,
         prefill_component_name: Optional[str] = None,
         decode_component_name: Optional[str] = None,
+        *,
+        check_terminating_pods: bool = False,
     ) -> tuple[int, int, bool]:
         """
         Get actual ready worker counts for prefill and decode from DGD status.
+
+        Args:
+            check_terminating_pods: When True, also call has_terminating_pods for
+                each stable component so that scale-downs whose Deployment status
+                already reads desired==available but still have lingering pods with
+                a deletionTimestamp are reported as not-yet-stable.  Must only be
+                True when enable_power_awareness is on: the pod list requires the
+                pods/list RBAC permission that power-disabled ServiceAccounts do
+                not carry.
 
         Returns:
             tuple[int, int, bool]: (prefill_count, decode_count, is_stable)
@@ -748,14 +759,10 @@ class KubernetesConnector(PlannerConnector):
             ready_replicas, is_stable = self.kube_api.get_service_replica_status(
                 deployment, service.name
             )
-            # Deployment status excludes terminating pods. Without this check a
-            # scale-down that reaches desired==updated==available while old pods
-            # still linger with a deletionTimestamp would look stable, letting
-            # the planner admit the opposing scale-up and transiently exceed the
-            # power ceiling. Check terminating pods only here (not in the base
-            # stability method) so non-power paths stay within their RBAC surface.
-            if is_stable and self.kube_api.has_terminating_pods(
-                deployment, service.name
+            if (
+                is_stable
+                and check_terminating_pods
+                and self.kube_api.has_terminating_pods(deployment, service.name)
             ):
                 is_stable = False
             if not is_stable:
@@ -771,8 +778,10 @@ class KubernetesConnector(PlannerConnector):
             ready_replicas, is_stable = self.kube_api.get_service_replica_status(
                 deployment, service.name
             )
-            if is_stable and self.kube_api.has_terminating_pods(
-                deployment, service.name
+            if (
+                is_stable
+                and check_terminating_pods
+                and self.kube_api.has_terminating_pods(deployment, service.name)
             ):
                 is_stable = False
             if not is_stable:

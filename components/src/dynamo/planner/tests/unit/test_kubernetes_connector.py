@@ -1264,6 +1264,60 @@ async def test_get_actual_worker_counts_no_components(
     assert is_stable is True
 
 
+@pytest.mark.asyncio
+async def test_get_actual_worker_counts_no_pod_list_when_power_disabled(
+    kubernetes_connector, mock_kube_api
+):
+    """When check_terminating_pods=False, has_terminating_pods must never be called.
+
+    Power-disabled planners do not hold pods/list RBAC. The connector must not
+    issue the pod list even when replica counts look stable.
+    """
+    mock_deployment = _deployment(
+        _component("prefill-component"),
+        _component("decode-component"),
+    )
+    mock_kube_api.get_graph_deployment.return_value = mock_deployment
+    mock_kube_api.get_service_replica_status.side_effect = [(2, True), (4, True)]
+
+    await kubernetes_connector.get_actual_worker_counts(
+        prefill_component_name="prefill-component",
+        decode_component_name="decode-component",
+        check_terminating_pods=False,
+    )
+
+    mock_kube_api.has_terminating_pods.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_get_actual_worker_counts_pod_list_when_power_enabled(
+    kubernetes_connector, mock_kube_api
+):
+    """When check_terminating_pods=True, has_terminating_pods is called for stable components."""
+    mock_deployment = _deployment(
+        _component("prefill-component"),
+        _component("decode-component"),
+    )
+    mock_kube_api.get_graph_deployment.return_value = mock_deployment
+    mock_kube_api.get_service_replica_status.side_effect = [(2, True), (4, True)]
+    mock_kube_api.has_terminating_pods.return_value = False
+
+    (
+        prefill_count,
+        decode_count,
+        is_stable,
+    ) = await kubernetes_connector.get_actual_worker_counts(
+        prefill_component_name="prefill-component",
+        decode_component_name="decode-component",
+        check_terminating_pods=True,
+    )
+
+    assert mock_kube_api.has_terminating_pods.call_count == 2
+    assert is_stable is True
+    assert prefill_count == 2
+    assert decode_count == 4
+
+
 # Tests for _resolve_dgd_service / get_worker_info component-filter.
 #
 # Regression: the filter that compares an MDC entry's ``component`` field

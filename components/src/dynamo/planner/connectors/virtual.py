@@ -194,6 +194,8 @@ class VirtualConnector(PlannerConnector):
         self,
         prefill_component_name: Optional[str] = None,
         decode_component_name: Optional[str] = None,
+        *,
+        check_terminating_pods: bool = False,
     ) -> tuple[int, int, bool]:
         """Read active workers from discovery and scaling status from the client ack.
 

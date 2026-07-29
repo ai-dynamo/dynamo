@@ -477,6 +477,7 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
         ) = await self.controller.get_actual_worker_counts(
             prefill_component_name=prefill_name,
             decode_component_name=decode_name,
+            check_terminating_pods=self.config.enable_power_awareness,
         )
         if self.require_prefill:
             self._state.prefill.replicas.active = prefill_count

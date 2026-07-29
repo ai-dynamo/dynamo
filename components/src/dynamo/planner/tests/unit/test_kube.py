@@ -14,7 +14,7 @@
 # limitations under the License.
 
 from typing import Any, Dict
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, sentinel
 
 import pytest
 from kubernetes import client
@@ -23,6 +23,8 @@ from dynamo.planner.connectors.clients.kubernetes_api import KubernetesAPI
 from dynamo.planner.errors import (
     DuplicateSubComponentError,
     DynamoGraphDeploymentNotFoundError,
+    PowerAnnotationMissingError,
+    RolloutFailedError,
     SubComponentNotFoundError,
 )
 
@@ -702,8 +704,6 @@ def test_worker_pods_settled_terminating_pod_stale_annotation_blocks(
     It still consumes GPU power and must block pod-annotation settlement until
     it disappears.
     """
-    from unittest.mock import sentinel
-
     dgd = _stable_worker_dgd(generation=2, observed_generation=2, decode_watts="300")
     terminating = _make_pod(
         "pod-old",
@@ -843,8 +843,6 @@ async def test_wait_missing_dgd_annotation_raises_immediately(k8s_api, mock_core
     It must raise PowerAnnotationMissingError immediately rather than timing
     out after 30 minutes — the pod list must not even be consulted.
     """
-    from dynamo.planner.errors import PowerAnnotationMissingError
-
     dgd = _stable_worker_dgd(generation=2, observed_generation=2, decode_watts="300")
     # Remove the annotation to simulate a misconfigured DGD.
     del dgd["spec"]["components"][0]["podTemplate"]["metadata"]["annotations"][
@@ -1202,8 +1200,6 @@ def test_has_terminating_pods_true_when_running_pod_has_deletion_timestamp(
     are fully gone.  get_service_replica_status stays pod-free intentionally so
     non-power paths do not acquire the pods/list RBAC surface.
     """
-    from unittest.mock import sentinel
-
     deployment: Dict[str, Any] = {
         "metadata": {"name": "my-dgd"},
         "spec": {"components": [{"name": "decode-worker", "replicas": 1}]},
@@ -1257,8 +1253,6 @@ def test_worker_pods_settled_terminating_pod_correct_annotation_blocks(
     the DGD snapshot was silently accepted, letting the planner admit a scale-up
     while the old pod was still Running and consuming power.
     """
-    from unittest.mock import sentinel
-
     dgd = _stable_worker_dgd(generation=2, observed_generation=2, decode_watts="300")
     terminating = _make_pod(
         "pod-old",
@@ -1279,8 +1273,6 @@ async def test_wait_failed_rollout_raises_immediately(k8s_api, mock_core_api):
     Failed is a terminal operator state (endTime is set). Retrying until the
     generic 30-minute timeout wastes time and hides the root cause.
     """
-    from dynamo.planner.errors import RolloutFailedError
-
     dgd = _stable_worker_dgd(generation=2, observed_generation=2, decode_watts="300")
     dgd["status"]["rollingUpdate"] = {
         "phase": "Failed",
@@ -1299,6 +1291,31 @@ async def test_wait_failed_rollout_raises_immediately(k8s_api, mock_core_api):
             )
     assert "test-deployment" in str(exc_info.value)
     assert "Failed" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_wait_legacy_failed_rollout_does_not_raise(k8s_api, mock_core_api):
+    """Power-disabled (require_backing_settled=False) must not raise on a Failed rollout.
+
+    The legacy replica-stability contract predates the rolling-update field; a
+    power-disabled planner whose replica counts are stable must start
+    successfully even when rollingUpdate.phase is Failed.
+    """
+    dgd = _stable_worker_dgd(generation=2, observed_generation=2, decode_watts="300")
+    dgd["status"]["rollingUpdate"] = {
+        "phase": "Failed",
+        "message": "pod CrashLoopBackOff",
+    }
+    with patch.object(k8s_api, "get_graph_deployment", return_value=dgd):
+        got = await k8s_api.wait_for_graph_deployment_ready(
+            "test-deployment",
+            include_planner=False,
+            require_backing_settled=False,
+            max_attempts=2,
+            delay_seconds=0.01,
+        )
+    assert got is dgd
+    mock_core_api.list_namespaced_pod.assert_not_called()
 
 
 @pytest.mark.asyncio

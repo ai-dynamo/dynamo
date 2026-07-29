@@ -43,8 +43,10 @@ DGDSA_PLURAL = "dynamographdeploymentscalingadapters"
 # progressing phases must block pod-annotation settlement.
 # Failed is terminal (the operator sets endTime) and must NOT be treated as a
 # retryable blocking phase — wait_for_graph_deployment_ready raises
-# RolloutFailedError immediately when it sees Failed so callers get an
-# actionable error rather than timing out after 30 minutes.
+# RolloutFailedError immediately when require_backing_settled=True (the power
+# settlement path) so callers get an actionable error rather than timing out.
+# The legacy replica-stability path (require_backing_settled=False) does not
+# raise on Failed because it predates the rolling-update contract.
 ROLLING_UPDATE_BLOCKING_PHASES = frozenset({"Pending", "InProgress"})
 JSON_PATCH_CONTENT_TYPE = "application/json-patch+json"
 # Stable labels the operator stamps on every worker Pod.
@@ -492,16 +494,6 @@ class KubernetesAPI:
 
             graph_deployment = self.get_graph_deployment(graph_deployment_name)
 
-            # Failed is a terminal rollout state; retrying until timeout (up to
-            # 30 min) serves no purpose. Raise immediately so the operator or
-            # user can investigate and recover.
-            rolling = graph_deployment.get("status", {}).get("rollingUpdate") or {}
-            if rolling.get("phase") == "Failed":
-                raise RolloutFailedError(
-                    deployment_name=graph_deployment_name,
-                    reason=rolling.get("message", ""),
-                )
-
             if include_planner:
                 conditions = graph_deployment.get("status", {}).get("conditions", [])
                 ready_condition = next(
@@ -529,6 +521,18 @@ class KubernetesAPI:
 
             if not require_backing_settled:
                 return graph_deployment
+
+            # Power settlement path only from here. Failed is a terminal rollout
+            # state; retrying until timeout (up to 30 min) serves no purpose.
+            # Raise immediately so the operator or user can investigate and
+            # recover. The legacy path above does not raise because it predates
+            # the rolling-update contract and may run without pods/list RBAC.
+            rolling = graph_deployment.get("status", {}).get("rollingUpdate") or {}
+            if rolling.get("phase") == "Failed":
+                raise RolloutFailedError(
+                    deployment_name=graph_deployment_name,
+                    reason=rolling.get("message", ""),
+                )
 
             # Power settlement: generation catch-up + resolved workers' backing.
             if not self.is_spec_generation_observed(graph_deployment):
